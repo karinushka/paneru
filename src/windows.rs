@@ -44,7 +44,6 @@ use crate::skylight::{
 };
 use crate::util::{
     AxuWrapperType, create_array, get_array_values, get_attribute, get_cfdict_value,
-    get_string_from_string,
 };
 
 const THRESHOLD: f64 = 10.0;
@@ -290,19 +289,19 @@ impl Window {
     fn title(&self) -> Option<String> {
         let axtitle = CFString::from_static_str(kAXTitleAttribute);
         let title = get_attribute::<CFString>(&self.inner().element_ref, axtitle)?;
-        Some(get_string_from_string(title.deref()))
+        Some(title.to_string())
     }
 
     fn role(&self) -> Option<String> {
         let axrole = CFString::from_static_str(kAXRoleAttribute);
         let role = get_attribute::<CFString>(&self.inner().element_ref, axrole)?;
-        Some(get_string_from_string(role.deref()))
+        Some(role.to_string())
     }
 
     fn subrole(&self) -> Option<String> {
         let axrole = CFString::from_static_str(kAXSubroleAttribute);
         let role = get_attribute::<CFString>(&self.inner().element_ref, axrole)?;
-        Some(get_string_from_string(role.deref()))
+        Some(role.to_string())
     }
 
     fn is_unknown(&self) -> bool {

@@ -1,13 +1,14 @@
-use log::{debug, warn};
+use log::{debug, error, warn};
 use objc2::rc::Retained;
 use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication};
+use objc2_core_foundation::CFString;
 use std::collections::HashMap;
+use std::ptr::NonNull;
 use std::thread;
 use std::time::Duration;
 
 use crate::app::Application;
 use crate::platform::{Pid, ProcessInfo, ProcessSerialNumber, get_process_info};
-use crate::util::get_string_from_string;
 use crate::windows::WindowManager;
 
 #[derive(Debug)]
@@ -156,7 +157,12 @@ impl ProcessManager {
         unsafe {
             get_process_info(psn, &mut pinfo);
         }
-        let name = get_string_from_string(pinfo.name);
+        let name = if let Some(name) = NonNull::new(pinfo.name as *mut CFString) {
+            unsafe { name.as_ref() }.to_string()
+        } else {
+            error!("process_add: nullptr 'name' passed.");
+            return None;
+        };
 
         let apps =
             unsafe { NSRunningApplication::runningApplicationWithProcessIdentifier(pinfo.pid) };

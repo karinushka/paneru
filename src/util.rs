@@ -2,9 +2,8 @@ use accessibility_sys::AXUIElementRef;
 use core::ptr::NonNull;
 use objc2_core_foundation::{
     CFArray, CFArrayCreate, CFArrayGetCount, CFArrayGetValueAtIndex, CFDictionary,
-    CFDictionaryGetValue, CFNumber, CFNumberCreate, CFNumberType, CFRetained, CFString,
-    CFStringGetCString, CFStringGetLength, CFStringGetMaximumSizeForEncoding, CFType, Type,
-    kCFTypeArrayCallBacks,
+    CFDictionaryGetValue, CFNumber, CFNumberCreate, CFNumberType, CFRetained, CFString, CFType,
+    Type, kCFTypeArrayCallBacks,
 };
 use std::ffi::c_void;
 use std::ops::Deref;
@@ -98,30 +97,6 @@ pub fn get_array_values<T>(array: &CFArray) -> impl Iterator<Item = NonNull<T>> 
     let count = unsafe { CFArrayGetCount(array) };
     (0..count)
         .flat_map(move |idx| NonNull::new(unsafe { CFArrayGetValueAtIndex(array, idx) as *mut T }))
-}
-
-pub fn get_string_from_string(nameptr: CFStringRef) -> String {
-    const ENCODING: u32 = 0x08000100; // kCFStringEncodingUTF8 = 0x08000100
-    NonNull::new(nameptr as *mut CFString)
-        .map(|nameptr| unsafe {
-            let name = CFRetained::retain(nameptr);
-            let len = CFStringGetLength(name.as_ref());
-            let size = CFStringGetMaximumSizeForEncoding(len, ENCODING) as usize;
-            let mut buf = Vec::<u8>::with_capacity(size);
-            if !CFStringGetCString(
-                name.as_ref(),
-                buf.as_mut_ptr() as *mut i8,
-                size as isize,
-                ENCODING,
-            ) {
-                return "".to_string();
-            }
-            buf.set_len(size);
-            String::from_utf8_lossy(&buf)
-                .trim_end_matches('\0')
-                .to_owned()
-        })
-        .unwrap_or("".to_string())
 }
 
 pub fn create_array<T>(values: Vec<T>, cftype: CFNumberType) -> Option<CFRetained<CFArray>> {

@@ -26,7 +26,7 @@ use std::sync::mpsc::Sender;
 
 use crate::events::Event;
 use crate::skylight::OSStatus;
-use crate::util::{AxuWrapperType, Cleanuper, get_string_from_string};
+use crate::util::{AxuWrapperType, Cleanuper};
 
 pub type Pid = i32;
 pub type CFStringRef = *const CFString;
@@ -628,14 +628,19 @@ impl MissionControlHandler {
         notification: CFStringRef,
         context: *mut c_void,
     ) {
-        let notification = get_string_from_string(notification);
+        let notification = if let Some(notification) = NonNull::new(notification as *mut CFString) {
+            unsafe { notification.as_ref() }.to_string()
+        } else {
+            error!("MissionControlHandler::callback: nullptr 'notification' passed.");
+            return;
+        };
         let result = unsafe {
             (context as *mut Self)
                 .as_ref()
                 .map(|this| this.mission_control_handler(observer, element, notification.as_ref()))
         };
         if result.is_none() {
-            error!("Zero passed to Application Handler.");
+            error!("MissionControlHandler::callback: nullptr passed as self.");
         }
     }
 }

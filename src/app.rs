@@ -25,7 +25,7 @@ use crate::platform::{
 };
 use crate::process::Process;
 use crate::skylight::{_SLPSGetFrontProcess, ConnID, SLSGetConnectionIDForPSN, WinID};
-use crate::util::{AxuWrapperType, get_attribute, get_string_from_string};
+use crate::util::{AxuWrapperType, get_attribute};
 use crate::windows::{InnerWindow, Window, ax_window_id};
 
 pub static AX_NOTIFICATIONS: LazyLock<Vec<&str>> = LazyLock::new(|| {
@@ -401,7 +401,12 @@ impl ApplicationHandler {
         notification: CFStringRef,
         context: *mut c_void,
     ) {
-        let notification = get_string_from_string(notification);
+        let notification = if let Some(notification) = NonNull::new(notification as *mut CFString) {
+            unsafe { notification.as_ref() }.to_string()
+        } else {
+            error!("ApplicationHandler::callback: nullptr 'notification' passed.");
+            return;
+        };
         let (this, window) = match notification.as_ref() {
             accessibility_sys::kAXWindowMiniaturizedNotification
             | accessibility_sys::kAXWindowDeminiaturizedNotification
@@ -421,7 +426,7 @@ impl ApplicationHandler {
             })
         };
         if result.is_none() {
-            error!("Zero passed to Application Handler.");
+            error!("ApplicationHandler::callback: nullptr passed as a self reference.");
         }
     }
 }

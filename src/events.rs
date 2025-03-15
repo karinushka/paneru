@@ -236,6 +236,8 @@ impl EventHandler {
                     index + 1
                 }
             }
+            "first" => 0,
+            "last" => panel.len() - 1,
             _ => index,
         };
 
@@ -262,9 +264,24 @@ impl EventHandler {
         let direction = argv.first().unwrap_or(&empty);
 
         EventHandler::get_panel_in_direction(direction, focus, panel).map(|(index, new_index)| {
-            let origin = panel[new_index].inner().frame.origin;
+            let origin = if new_index == 0 {
+                // If reached far left, snap the window to left.
+                CGPoint::new(0.0, 0.0)
+            } else if new_index == (panel.len() - 1) {
+                // If reached full right, snap the window to right.
+                CGPoint::new(SCREEN_WIDTH - panel[index].inner().frame.size.width, 0.0)
+            } else {
+                info!("index {index} new_index {new_index}");
+                panel[new_index].inner().frame.origin
+            };
             panel[index].reposition(origin.x, origin.y);
-            panel.swap(index, new_index);
+            if index < new_index {
+                (index..new_index).for_each(|idx| panel.swap(idx, idx + 1));
+            } else {
+                (new_index..index)
+                    .rev()
+                    .for_each(|idx| panel.swap(idx, idx + 1));
+            }
             new_index
         })
     }

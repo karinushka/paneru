@@ -47,8 +47,6 @@ use crate::util::{
 };
 
 const THRESHOLD: f64 = 10.0;
-pub const SCREEN_WIDTH: f64 = 3840.0; // TODO: Read screen width somewhere.
-pub const SCREEN_HEIGHT: f64 = 2160.0 - THRESHOLD;
 
 type WindowPane = Arc<RwLock<Vec<Window>>>;
 
@@ -56,9 +54,15 @@ pub struct Display {
     id: CGDirectDisplayID,
     // Map of workspaces, containing panels of windows.
     spaces: HashMap<u64, WindowPane>,
+    pub bounds: CGRect,
 }
 
 impl Display {
+    fn new(id: CGDirectDisplayID, spaces: HashMap<u64, WindowPane>) -> Self {
+        let bounds = unsafe { CGDisplayBounds(id) };
+        Self { id, spaces, bounds }
+    }
+
     fn uuid_from_id(id: CGDirectDisplayID) -> Option<CFRetained<CFString>> {
         unsafe {
             let uuid = CFRetained::from_raw(NonNull::new(CGDisplayCreateUUIDFromDisplayID(id))?);
@@ -151,7 +155,7 @@ impl Display {
                                 .map(|id| (id, Arc::new(RwLock::new(vec![]))))
                         })
                         .map(HashMap::from_iter)
-                        .map(|spaces| Display { id, spaces })
+                        .map(|spaces| Display::new(id, spaces))
                 })
             })
             .collect()
@@ -206,7 +210,7 @@ pub struct InnerWindow {
     pub minimized: bool,
     pub is_root: bool,
     pub observing: Vec<bool>,
-    pub sizes: Vec<f64>,
+    pub size_ratios: Vec<f64>,
 }
 
 impl Window {
@@ -221,13 +225,7 @@ impl Window {
                 is_root: false,
                 // handler: WindowHandler::new(app),
                 observing: vec![],
-                sizes: vec![
-                    SCREEN_WIDTH * 0.25,
-                    SCREEN_WIDTH * 0.33,
-                    SCREEN_WIDTH * 0.50,
-                    SCREEN_WIDTH * 0.66,
-                    SCREEN_WIDTH * 0.75,
-                ],
+                size_ratios: vec![0.25, 0.33, 0.50, 0.66, 0.75],
             })),
         };
         window.update_frame();
@@ -1097,16 +1095,23 @@ impl WindowManager {
         }
         let index = index.unwrap();
 
+        let display_bounds = if let Some(display) = self.active_display() {
+            display.bounds
+        } else {
+            error!("reshuffle_around: unable to get active display bounds.");
+            return;
+        };
+
         // Check if window needs to be fully exposed
         let mut frame = window.inner().frame;
-        debug!("focus original position {frame:?}");
+        trace!("focus original position {frame:?}");
         let mut moved = false;
-        if frame.origin.x + frame.size.width > SCREEN_WIDTH {
-            debug!("Bumped window {} to the left", focus_id);
-            frame.origin.x = SCREEN_WIDTH - frame.size.width;
+        if frame.origin.x + frame.size.width > display_bounds.size.width {
+            trace!("Bumped window {} to the left", focus_id);
+            frame.origin.x = display_bounds.size.width - frame.size.width;
             moved = true;
         } else if frame.origin.x < 0.0 {
-            debug!("Bumped window {} to the right", focus_id);
+            trace!("Bumped window {} to the right", focus_id);
             frame.origin.x = 0.0;
             moved = true;
         }
@@ -1121,8 +1126,8 @@ impl WindowManager {
             let frame = window.inner().frame;
             trace!("right: frame: {frame:?}");
             // Check for window getting off screen.
-            if upper_left > SCREEN_WIDTH - THRESHOLD {
-                upper_left = SCREEN_WIDTH - THRESHOLD;
+            if upper_left > display_bounds.size.width - THRESHOLD {
+                upper_left = display_bounds.size.width - THRESHOLD;
             }
             if frame.origin.x != upper_left {
                 window.reposition(upper_left, frame.origin.y);
@@ -1159,5 +1164,10 @@ impl WindowManager {
                 .and_then(|space_id| display.spaces.get(&space_id))
                 .cloned()
         })
+    }
+
+    pub fn active_display(&self) -> Option<&Display> {
+        Display::active_display_id(self.main_cid)
+            .and_then(|id| self.displays.iter().find(|display| display.id == id))
     }
 }

@@ -1,7 +1,7 @@
 use accessibility_sys::kAXRoleAttribute;
-use log::{debug, info, trace, warn};
+use log::{debug, error, info, trace, warn};
 use objc2_core_foundation::{
-    CFEqual, CFNumberGetValue, CFNumberType, CFRetained, CFString, CGPoint,
+    CFEqual, CFNumberGetValue, CFNumberType, CFRetained, CFString, CGPoint, CGRect,
 };
 use std::ffi::c_void;
 use std::ops::Deref;
@@ -17,7 +17,7 @@ use crate::skylight::{
     ConnID, SLSCopyAssociatedWindows, SLSFindWindowAndOwner, SLSMainConnectionID, WinID,
 };
 use crate::util::{AxuWrapperType, get_array_values, get_attribute};
-use crate::windows::{SCREEN_HEIGHT, SCREEN_WIDTH, Window, WindowManager};
+use crate::windows::{Window, WindowManager};
 
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -259,6 +259,7 @@ impl EventHandler {
         argv: &[String],
         focus: Option<&Window>,
         panel: &mut [Window],
+        bounds: &CGRect,
     ) -> Option<usize> {
         let empty = "".to_string();
         let direction = argv.first().unwrap_or(&empty);
@@ -269,7 +270,10 @@ impl EventHandler {
                 CGPoint::new(0.0, 0.0)
             } else if new_index == (panel.len() - 1) {
                 // If reached full right, snap the window to right.
-                CGPoint::new(SCREEN_WIDTH - panel[index].inner().frame.size.width, 0.0)
+                CGPoint::new(
+                    bounds.size.width - panel[index].inner().frame.size.width,
+                    0.0,
+                )
             } else {
                 info!("index {index} new_index {new_index}");
                 panel[new_index].inner().frame.origin
@@ -294,6 +298,13 @@ impl EventHandler {
             .and_then(|window_id| self.window_manager.find_window(window_id));
         let active_panel = self.window_manager.active_panel();
 
+        let display_bounds = if let Some(display) = self.window_manager.active_display() {
+            display.bounds
+        } else {
+            error!("reshuffle_around: unable to get active display bounds.");
+            return;
+        };
+
         match argv.first().unwrap_or(&empty).as_ref() {
             "focus" => {
                 if active_panel.is_none() {
@@ -316,6 +327,7 @@ impl EventHandler {
                         &argv[1..],
                         focus.as_ref(),
                         panel.as_mut_slice(),
+                        &display_bounds,
                     )
                     .map(|new_index| panel[new_index].clone())
                 });
@@ -327,7 +339,10 @@ impl EventHandler {
             "center" => {
                 if let Some(window) = focus {
                     let frame = window.inner().frame;
-                    window.reposition((SCREEN_WIDTH - frame.size.width) / 2.0, frame.origin.y);
+                    window.reposition(
+                        (display_bounds.size.width - frame.size.width) / 2.0,
+                        frame.origin.y,
+                    );
                     window.center_mouse(self.main_cid);
                     self.window_manager.reshuffle_around(&window);
                 }
@@ -335,12 +350,12 @@ impl EventHandler {
 
             "resize" => {
                 if let Some(window) = focus {
-                    window.inner.write().unwrap().sizes.rotate_left(1);
-                    let width = *window.inner().sizes.first().unwrap();
+                    window.inner.write().unwrap().size_ratios.rotate_left(1);
+                    let width_ratio = *window.inner().size_ratios.first().unwrap();
                     // let frame = window.inner().frame;
                     // window.reposition((SCREEN_WIDTH - width) / 2.0, frame.origin.y);
                     let frame = window.inner().frame;
-                    window.resize(width, frame.size.height); // TODO: screen height
+                    window.resize(width_ratio * display_bounds.size.width, frame.size.height);
                     self.window_manager.reshuffle_around(&window);
                 }
             }
@@ -363,7 +378,7 @@ impl EventHandler {
                         // Add newly managed window to the stack.
                         let frame = window.inner().frame;
                         window.reposition(frame.origin.x, 0.0);
-                        window.resize(frame.size.width, SCREEN_HEIGHT); // TODO: screen height
+                        window.resize(frame.size.width, display_bounds.size.height);
 
                         if let Some(panel) = active_panel {
                             panel.write().unwrap().push(window.clone());

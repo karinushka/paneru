@@ -244,15 +244,19 @@ impl EventHandler {
         (index != new_index).then_some((index, new_index))
     }
 
-    fn command_move_focus(argv: &[String], focus: Option<&Window>, panel: &[Window]) {
+    fn command_move_focus(
+        argv: &[String],
+        focus: Option<&Window>,
+        panel: &[Window],
+    ) -> Option<usize> {
         let empty = "".to_string();
         let direction = argv.first().unwrap_or(&empty);
 
-        if let Some(window) = EventHandler::get_panel_in_direction(direction, focus, panel)
-            .map(|(_, new_index)| &panel[new_index])
-        {
+        EventHandler::get_panel_in_direction(direction, focus, panel).map(|(_, new_index)| {
+            let window = &panel[new_index];
             window.focus_with_raise();
-        }
+            new_index
+        })
     }
 
     fn command_swap_focus(
@@ -305,63 +309,59 @@ impl EventHandler {
             return;
         };
 
-        match argv.first().unwrap_or(&empty).as_ref() {
+        let window = match argv.first().unwrap_or(&empty).as_ref() {
             "focus" => {
                 if active_panel.is_none() {
                     info!("No managed windows.");
                     return;
                 }
-                if let Some(panel) = active_panel {
-                    EventHandler::command_move_focus(
+                active_panel.and_then(|panel| {
+                    let index = EventHandler::command_move_focus(
                         &argv[1..],
                         focus.as_ref(),
                         panel.write().unwrap().as_slice(),
-                    )
-                }
+                    );
+                    index.and_then(|index| panel.read().unwrap().get(index).cloned())
+                })
             }
 
-            "swap" => {
-                let window = active_panel.and_then(|active_panel| {
-                    let mut panel = active_panel.write().unwrap();
-                    EventHandler::command_swap_focus(
-                        &argv[1..],
-                        focus.as_ref(),
-                        panel.as_mut_slice(),
-                        &display_bounds,
-                    )
-                    .map(|new_index| panel[new_index].clone())
-                });
-                if let Some(window) = &window {
-                    self.window_manager.reshuffle_around(window);
-                }
-            }
+            "swap" => active_panel.and_then(|active_panel| {
+                let mut panel = active_panel.write().unwrap();
+                EventHandler::command_swap_focus(
+                    &argv[1..],
+                    focus.as_ref(),
+                    panel.as_mut_slice(),
+                    &display_bounds,
+                )
+                .map(|new_index| panel[new_index].clone())
+            }),
 
-            "center" => {
-                if let Some(window) = focus {
+            "center" => focus
+                .as_ref()
+                .inspect(|window| {
                     let frame = window.inner().frame;
                     window.reposition(
                         (display_bounds.size.width - frame.size.width) / 2.0,
                         frame.origin.y,
                     );
                     window.center_mouse(self.main_cid);
-                    self.window_manager.reshuffle_around(&window);
-                }
-            }
+                })
+                .cloned(),
 
-            "resize" => {
-                if let Some(window) = focus {
+            "resize" => focus
+                .as_ref()
+                .inspect(|window| {
                     window.inner.write().unwrap().size_ratios.rotate_left(1);
                     let width_ratio = *window.inner().size_ratios.first().unwrap();
                     // let frame = window.inner().frame;
                     // window.reposition((SCREEN_WIDTH - width) / 2.0, frame.origin.y);
                     let frame = window.inner().frame;
                     window.resize(width_ratio * display_bounds.size.width, frame.size.height);
-                    self.window_manager.reshuffle_around(&window);
-                }
-            }
+                })
+                .cloned(),
 
             "manage" => {
-                if let Some(window) = focus {
+                focus.and_then(|window| {
                     let window_id = window.inner().id;
                     if let Some(index) = active_panel
                         .as_ref()
@@ -374,6 +374,7 @@ impl EventHandler {
                         if let Some(panel) = active_panel {
                             panel.write().unwrap().remove(index);
                         }
+                        None
                     } else {
                         // Add newly managed window to the stack.
                         let frame = window.inner().frame;
@@ -383,11 +384,14 @@ impl EventHandler {
                         if let Some(panel) = active_panel {
                             panel.write().unwrap().push(window.clone());
                         }
-                        self.window_manager.reshuffle_around(&window);
+                        Some(window)
                     }
-                }
+                })
             }
-            _ => (),
+            _ => None,
+        };
+        if let Some(window) = window {
+            self.window_manager.reshuffle_around(&window);
         }
     }
 

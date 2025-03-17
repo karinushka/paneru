@@ -508,6 +508,9 @@ impl EventHandler {
                 }
             }
 
+            //  Do not reshuffle windows due to moved mouse focus.
+            self.window_manager.skip_reshuffle = true;
+
             window.focus_without_raise(&self.window_manager);
             self.window_manager.ffm_window_id = Some(window_id);
         } else {

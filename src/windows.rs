@@ -266,7 +266,11 @@ impl Window {
         window_manager.focused_psn = self.inner().app.inner().psn.clone();
         window_manager.ffm_window_id = None;
 
-        window_manager.reshuffle_around(self);
+        if window_manager.skip_reshuffle {
+            window_manager.skip_reshuffle = false;
+        } else {
+            window_manager.reshuffle_around(self);
+        }
     }
 
     fn parent(main_conn: ConnID, window_id: WinID) -> Option<WinID> {
@@ -562,6 +566,7 @@ pub struct WindowManager {
     pub focused_psn: ProcessSerialNumber,
     pub ffm_window_id: Option<WinID>,
     pub mission_control_is_active: bool,
+    pub skip_reshuffle: bool,
     pub current_window: Option<Window>,
     pub down_location: CGPoint,
     pub displays: Vec<Display>,
@@ -584,6 +589,7 @@ impl WindowManager {
             focused_psn: ProcessSerialNumber::default(),
             ffm_window_id: None,
             mission_control_is_active: false,
+            skip_reshuffle: false,
             current_window: None,
             down_location: CGPoint::default(),
             displays,

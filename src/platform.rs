@@ -23,6 +23,7 @@ use std::ptr::null_mut;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
+use stdext::function_name;
 
 use crate::events::Event;
 use crate::skylight::OSStatus;
@@ -140,14 +141,17 @@ impl ProcessHandler {
     }
 
     fn start(&mut self) {
-        info!("Registering process_handler");
+        info!("{}: Registering process_handler", function_name!());
         let handler = unsafe {
             let me = self as *const Self;
             setup_process_handler(Self::callback, me as *mut c_void)
         };
 
         self.cleanup = Some(Cleanuper::new(Box::new(move || unsafe {
-            info!("Unregistering process_handler: {handler:?}");
+            info!(
+                "{}: Unregistering process_handler: {handler:?}",
+                function_name!()
+            );
             remove_process_handler(handler);
         })));
     }
@@ -182,7 +186,11 @@ impl ProcessHandler {
                 .send(Event::ApplicationFrontSwitched { psn })
                 .expect(err_message),
             _ => {
-                error!("Unknown process event: {}", event as u32);
+                error!(
+                    "{}: Unknown process event: {}",
+                    function_name!(),
+                    event as u32
+                );
             }
         }
     }
@@ -226,7 +234,7 @@ impl MouseHandler {
             CFRunLoopAddSource(&main_loop, Some(&run_loop_source), kCFRunLoopCommonModes);
 
             self.cleanup = Some(Cleanuper::new(Box::new(move || {
-                info!("Unregistering mouse_handler");
+                info!("{}: Unregistering mouse_handler", function_name!());
                 CFRunLoopRemoveSource(&main_loop, Some(&run_loop_source), kCFRunLoopCommonModes);
                 CFMachPortInvalidate(&port);
                 CGEventTapEnable(&port, false);
@@ -254,7 +262,7 @@ impl MouseHandler {
             CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
                 // CFMachPortRef handle = __atomic_load_n(&mouse_state->handle, __ATOMIC_RELAXED);
                 // if (handle) CGEventTapEnable(handle, true);
-                info!("Tap Disabled");
+                warn!("{}: Tap Disabled", function_name!());
             }
             CGEventType::LeftMouseDown | CGEventType::RightMouseDown => {
                 // uint8_t mod = mouse_mod_from_cgflags(CGEventGetFlags(event));
@@ -284,7 +292,10 @@ impl MouseHandler {
                     .expect("mouse handler: error sending event");
             }
             _ => {
-                info!("Unknown event type received: {event_type:?}");
+                info!(
+                    "{}: Unknown event type received: {event_type:?}",
+                    function_name!()
+                );
             }
         }
     }
@@ -419,7 +430,7 @@ impl WorkspaceObserver {
         let notification_center = unsafe { shared_ws.notificationCenter() };
 
         methods.iter().for_each(|(sel, name)| {
-            debug!("workspace_observer: registering {} with {name}", *sel);
+            debug!("{}: registering {} with {name}", function_name!(), *sel);
             let notification_type = NSString::from_str(name);
             unsafe {
                 notification_center.addObserver_selector_name_object(
@@ -441,7 +452,7 @@ impl WorkspaceObserver {
         let distributed_notification_center =
             unsafe { NSDistributedNotificationCenter::defaultCenter() };
         methods.iter().for_each(|(sel, name)| {
-            debug!("workspace_observer: registering {} with {name}", *sel);
+            debug!("{}: registering {} with {name}", function_name!(), *sel);
             let notification_type = NSString::from_str(name);
             unsafe {
                 distributed_notification_center.addObserver_selector_name_object(
@@ -459,7 +470,7 @@ impl WorkspaceObserver {
         )];
         let default_center = unsafe { NSNotificationCenter::defaultCenter() };
         methods.iter().for_each(|(sel, name)| {
-            debug!("workspace_observer: registering {} with {name}", *sel);
+            debug!("{}: registering {} with {name}", function_name!(), *sel);
             let notification_type = NSString::from_str(name);
             unsafe {
                 default_center.addObserver_selector_name_object(
@@ -475,7 +486,7 @@ impl WorkspaceObserver {
 
 impl Drop for WorkspaceObserver {
     fn drop(&mut self) {
-        info!("WorkspaceObserver: deregistering callbacks.");
+        info!("{}: deregistering callbacks.", function_name!());
         unsafe {
             NSWorkspace::sharedWorkspace()
                 .notificationCenter()
@@ -521,7 +532,10 @@ impl MissionControlHandler {
             "AXExposeShowDesktop" => Event::MissionControlShowDesktop,
             "AXExposeExit" => Event::MissionControlExit,
             _ => {
-                warn!("Unknown mission control event: {notification}");
+                warn!(
+                    "{}: Unknown mission control event: {notification}",
+                    function_name!()
+                );
                 return;
             }
         };
@@ -540,7 +554,10 @@ impl MissionControlHandler {
     fn observe(&mut self) {
         let pid = MissionControlHandler::dock_pid();
         if pid.is_none() {
-            error!("Can not register MissionControlHandler");
+            error!(
+                "{}: Can not register MissionControlHandler",
+                function_name!()
+            );
             return;
         }
         let pid = pid.unwrap();
@@ -556,7 +573,8 @@ impl MissionControlHandler {
         if let Some(observer) = &self.observer {
             Self::EVENTS.iter().for_each(|name| {
                 debug!(
-                    "mission control observe: {name:?} {:?}",
+                    "{}: {name:?} {:?}",
+                    function_name!(),
                     observer.as_ptr::<AXObserverRef>()
                 );
                 let notification = CFString::from_static_str(name);
@@ -571,7 +589,8 @@ impl MissionControlHandler {
                     accessibility_sys::kAXErrorSuccess
                     | accessibility_sys::kAXErrorNotificationAlreadyRegistered => (),
                     result => error!(
-                        "mission_control: error registering {name} for application {pid}: {result}"
+                        "{}: error registering {name} for application {pid}: {result}",
+                        function_name!(),
                     ),
                 }
             });
@@ -583,7 +602,8 @@ impl MissionControlHandler {
                         .cast(),
                 );
                 debug!(
-                    "mission_control: adding runloop source: {run_loop_source:?} {:?}",
+                    "{}: adding runloop source: {run_loop_source:?} {:?}",
+                    function_name!(),
                     observer.as_ptr::<AXObserverRef>()
                 );
                 CFRunLoopAddSource(&main_loop, Some(&run_loop_source), kCFRunLoopDefaultMode);
@@ -595,7 +615,8 @@ impl MissionControlHandler {
         if let Some(observer) = self.observer.take() {
             Self::EVENTS.iter().for_each(|name| {
                 debug!(
-                    "mission control unobserve: {name:?} {:?}",
+                    "{}: {name:?} {:?}",
+                    function_name!(),
                     observer.as_ptr::<AXObserverRef>()
                 );
                 let notification = CFString::from_static_str(name);
@@ -607,21 +628,22 @@ impl MissionControlHandler {
                     )
                 };
                 if result != kAXErrorSuccess && result != kAXErrorNotificationAlreadyRegistered {
-                    error!("mission_control: error unregistering {name}: {result}");
+                    error!("{}: error unregistering {name}: {result}", function_name!());
                 }
             });
             unsafe {
                 let run_loop_source =
                     AXObserverGetRunLoopSource(observer.as_ptr()) as *mut CFRunLoopSource;
                 debug!(
-                    "mission_control: removing runloop source: {run_loop_source:?} ref {:?}",
+                    "{}: removing runloop source: {run_loop_source:?} ref {:?}",
+                    function_name!(),
                     observer.as_ptr::<AXObserverRef>()
                 );
                 CFRunLoopSourceInvalidate(&*run_loop_source);
             }
             drop(observer)
         } else {
-            warn!("mission_control_handler: unobserving without observe");
+            warn!("{}: unobserving without observe", function_name!());
         }
     }
 
@@ -634,7 +656,7 @@ impl MissionControlHandler {
         let notification = if let Some(notification) = NonNull::new(notification as *mut CFString) {
             unsafe { notification.as_ref() }.to_string()
         } else {
-            error!("MissionControlHandler::callback: nullptr 'notification' passed.");
+            error!("{}: nullptr 'notification' passed.", function_name!());
             return;
         };
         let result = unsafe {
@@ -643,7 +665,7 @@ impl MissionControlHandler {
                 .map(|this| this.mission_control_handler(observer, element, notification.as_ref()))
         };
         if result.is_none() {
-            error!("MissionControlHandler::callback: nullptr passed as self.");
+            error!("{}: nullptr passed as self.", function_name!());
         }
     }
 }
@@ -683,7 +705,7 @@ impl PlatformCallbacks {
 
     // Does not return until 'quit' is signalled.
     pub fn run(&mut self, quit: Arc<AtomicBool>) {
-        info!("Starting run loop...");
+        info!("{}: Starting run loop...", function_name!());
         loop {
             if quit.load(std::sync::atomic::Ordering::Relaxed) {
                 break;
@@ -693,6 +715,6 @@ impl PlatformCallbacks {
             });
         }
         _ = self.tx.send(Event::Exit);
-        info!("Run loop finished.");
+        info!("{}: Run loop finished.", function_name!());
     }
 }

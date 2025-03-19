@@ -412,6 +412,10 @@ impl EventHandler {
         }
 
         if let Some(window) = self.find_window_at_point(point) {
+            if !window.fully_visible(&self.window_manager) {
+                self.window_manager.reshuffle_around(&window);
+            }
+
             self.window_manager.current_window = Some(window);
             self.window_manager.down_location = *point;
         }

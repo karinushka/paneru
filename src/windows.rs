@@ -523,6 +523,16 @@ impl Window {
         uuid.and_then(|uuid| Display::id_from_uuid(uuid.into()))
     }
 
+    pub fn fully_visible(&self, window_manager: &WindowManager) -> bool {
+        let frame = self.inner().frame;
+        let bounds = window_manager
+            .active_display()
+            .map(|display| display.bounds);
+        bounds.is_some_and(|bounds| {
+            frame.origin.x > 0.0 && frame.origin.x < bounds.size.width - frame.size.width
+        })
+    }
+
     pub fn center_mouse(&self, cid: ConnID) {
         // TODO: check for MouseFollowsFocus setting in WindowManager and also whether it's
         // overriden for individual window.

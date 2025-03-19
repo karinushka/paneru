@@ -4,6 +4,7 @@ use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::mpsc::{Sender, channel};
 use std::{fs, thread};
+use stdext::function_name;
 
 mod app;
 mod events;
@@ -31,7 +32,7 @@ impl CommandReader {
             .flat_map(|param| [param.as_bytes(), &[0]].concat())
             .collect::<Vec<_>>();
         let size: u32 = output.len().try_into().unwrap();
-        debug!("{:?} {output:?}", size.to_le_bytes());
+        debug!("{}: {:?} {output:?}", function_name!(), size.to_le_bytes());
 
         let mut stream = UnixStream::connect(CommandReader::SOCKET_PATH)?;
         stream.write_all(&size.to_le_bytes())?;
@@ -45,7 +46,7 @@ impl CommandReader {
     fn start(mut self) {
         thread::spawn(move || {
             if let Err(err) = self.runner() {
-                error!("{err}");
+                error!("{}: {err}", function_name!());
             }
         });
     }
@@ -56,7 +57,7 @@ impl CommandReader {
         for mut stream in listener.incoming().flatten() {
             let mut buffer = [0u8; 4];
             if 4 != stream.read(&mut buffer)? {
-                error!("Did not read size header.");
+                error!("{}: Did not read size header.", function_name!());
                 break;
             }
             let size = u32::from_le_bytes(buffer) as usize;
@@ -94,7 +95,10 @@ fn main() -> Result<(), Error> {
     }
 
     if !check_separate_spaces() {
-        error!("Option 'display has separate spaces' disabled.");
+        error!(
+            "{}: Option 'display has separate spaces' disabled.",
+            function_name!()
+        );
         return Err(Error::new(
             ErrorKind::Unsupported,
             "Option 'display has separate spaces' disabled.",

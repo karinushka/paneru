@@ -10,6 +10,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 use std::thread::JoinHandle;
+use stdext::function_name;
 
 use crate::platform::ProcessSerialNumber;
 use crate::process::ProcessManager;
@@ -87,7 +88,7 @@ pub struct EventHandler {
 impl EventHandler {
     pub fn new(tx: Sender<Event>, rx: Receiver<Event>) -> Self {
         let main_cid = unsafe { SLSMainConnectionID() };
-        info!("My connection id: {main_cid}");
+        info!("{}: My connection id: {main_cid}", function_name!());
 
         EventHandler {
             quit: AtomicBool::new(false).into(),
@@ -114,11 +115,14 @@ impl EventHandler {
                 break;
             }
             let e = e.unwrap();
-            trace!("Event {e:?}");
+            trace!("{}: Event {e:?}", function_name!());
             match e {
                 Event::Exit => break,
                 Event::ProcessesLoaded => {
-                    info!("=== Processes loaded - loading windows ===");
+                    info!(
+                        "{}: === Processes loaded - loading windows ===",
+                        function_name!()
+                    );
                     self.initial_scan = false;
                     self.window_manager.start(&mut self.process_manager);
                 }
@@ -130,11 +134,14 @@ impl EventHandler {
                 Event::MouseMoved { point } => self.mouse_moved(&point),
                 Event::MouseDragged { point } => self.mouse_dragged(&point),
 
-
                 Event::ApplicationLaunched { psn } => {
                     if let Some(process) = self.process_manager.process_add(&psn) {
                         if !self.initial_scan {
-                            debug!("ApplicationLaunched: {}", process.name);
+                            debug!(
+                                "{}: ApplicationLaunched: {}",
+                                function_name!(),
+                                process.name
+                            );
                             process.application_launched(&mut self.window_manager);
                         }
                     }
@@ -170,7 +177,7 @@ impl EventHandler {
                     }
                 }
                 Event::WindowTitleChanged { window_id } => {
-                    trace!("WindowTitleChanged: {window_id:?}");
+                    trace!("{}: WindowTitleChanged: {window_id:?}", function_name!());
                 }
 
                 Event::MissionControlShowAllWindows
@@ -184,15 +191,17 @@ impl EventHandler {
 
                 Event::Command { argv } => self.command(argv),
 
-                Event::MenuClosed { window_id } => trace!("MenuClosed event: {window_id:?}"),
+                Event::MenuClosed { window_id } => {
+                    trace!("{}: MenuClosed event: {window_id:?}", function_name!())
+                }
 
-                _ => info!("Unhandled event {e:?}"),
+                _ => info!("{}: Unhandled event {e:?}", function_name!()),
             }
         }
     }
 
     fn window_focused(&mut self, window_id: WinID) {
-        debug!("window_focused: {}", window_id);
+        debug!("{}: {}", function_name!(), window_id);
         if let Some(window) = self.window_manager.find_window(window_id) {
             if !window.inner().app.is_frontmost() {
                 return;
@@ -200,7 +209,10 @@ impl EventHandler {
 
             window.did_receive_focus(&mut self.window_manager);
         } else {
-            warn!("window_focused: window_manager_add_lost_focused_event");
+            warn!(
+                "{}: window_manager_add_lost_focused_event",
+                function_name!()
+            );
             // TODO:
             // window_manager_add_lost_focused_event(&g_window_manager, window_id);
         }
@@ -279,7 +291,6 @@ impl EventHandler {
                     0.0,
                 )
             } else {
-                info!("index {index} new_index {new_index}");
                 panel[new_index].inner().frame.origin
             };
             panel[index].reposition(origin.x, origin.y);
@@ -305,14 +316,14 @@ impl EventHandler {
         let display_bounds = if let Some(display) = self.window_manager.active_display() {
             display.bounds
         } else {
-            error!("reshuffle_around: unable to get active display bounds.");
+            error!("{}: unable to get active display bounds.", function_name!());
             return;
         };
 
         let window = match argv.first().unwrap_or(&empty).as_ref() {
             "focus" => {
                 if active_panel.is_none() {
-                    info!("No managed windows.");
+                    info!("{}: No managed windows.", function_name!());
                     return;
                 }
                 active_panel.and_then(|panel| {
@@ -400,13 +411,13 @@ impl EventHandler {
             match first.as_ref() {
                 "window" => self.command_windows(&argv[1..]),
                 "quit" => self.quit.store(true, std::sync::atomic::Ordering::Relaxed),
-                _ => warn!("Unhandled command: {argv:?}"),
+                _ => warn!("{}: Unhandled command: {argv:?}", function_name!()),
             }
         };
     }
 
     fn mouse_down(&mut self, point: &CGPoint) {
-        info!("mouse down: {point:?}");
+        info!("{}: {point:?}", function_name!());
         if self.window_manager.mission_control_is_active {
             return;
         }
@@ -422,11 +433,11 @@ impl EventHandler {
     }
 
     fn mouse_up(&mut self, point: &CGPoint) {
-        info!("mouse up: {point:?}");
+        info!("{}: {point:?}", function_name!());
     }
 
     fn mouse_dragged(&self, point: &CGPoint) {
-        info!("mouse dragged: {point:?}");
+        info!("{}: {point:?}", function_name!());
 
         if self.window_manager.mission_control_is_active {
             #[warn(clippy::needless_return)]
@@ -439,7 +450,7 @@ impl EventHandler {
             return;
         }
         if self.window_manager.ffm_window_id.is_some() {
-            trace!("mouse_moved: ffm_window_id > 0");
+            trace!("{}: ffm_window_id > 0", function_name!());
             return;
         }
 
@@ -451,11 +462,11 @@ impl EventHandler {
                 .focused_window
                 .is_some_and(|id| id == window_id)
             {
-                trace!("mouse_moved: allready focused {}", window_id);
+                trace!("{}: allready focused {}", function_name!(), window_id);
                 return;
             }
             if !window.is_eligible() {
-                trace!("mouse_moved: {} not eligible", window_id);
+                trace!("{}: {} not eligible", function_name!(), window_id);
                 return;
             }
 
@@ -474,19 +485,25 @@ impl EventHandler {
                         (&mut child_wid as *mut WinID) as *mut c_void,
                     ) {
                         warn!(
-                            "mouse_moved: Unable to find subwindows of window {}: {item:?}.",
+                            "{}: Unable to find subwindows of window {}: {item:?}.",
+                            function_name!(),
                             window_id
                         );
                         continue;
                     }
                 };
                 debug!(
-                    "mouse_moved: checking {}'s childen: {}",
-                    window_id, child_wid
+                    "{}: checking {}'s childen: {}",
+                    function_name!(),
+                    window_id,
+                    child_wid
                 );
                 let child_window = self.window_manager.find_window(child_wid);
                 if child_window.is_none() {
-                    warn!("mouse_moved: Unable to find child window {child_wid}.");
+                    warn!(
+                        "{}: Unable to find child window {child_wid}.",
+                        function_name!()
+                    );
                     continue;
                 }
 
@@ -495,7 +512,11 @@ impl EventHandler {
                     CFString::from_static_str(kAXRoleAttribute),
                 );
                 if role.is_none() {
-                    warn!("mouse_moved: Unable to find role for window {}.", window_id);
+                    warn!(
+                        "{}: Unable to find role for window {}.",
+                        function_name!(),
+                        window_id
+                    );
                     continue;
                 }
                 let role = role.unwrap();

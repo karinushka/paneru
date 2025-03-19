@@ -26,6 +26,7 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
+use stdext::function_name;
 
 use crate::app::{Application, ApplicationHandler};
 use crate::events::Event;
@@ -84,13 +85,14 @@ impl Display {
                 .map(|ptr| CFRetained::from_raw(ptr))?;
 
             for display in get_array_values(display_spaces.as_ref()) {
-                trace!("display_space_list: display {:?}", display.as_ref());
+                trace!("{}: display {:?}", function_name!(), display.as_ref());
                 let identifier = get_cfdict_value::<CFString>(
                     display.as_ref(),
                     CFString::from_static_str("Display Identifier").deref(),
                 )?;
                 debug!(
-                    "display_space_list: identifier {:?} uuid {:?}",
+                    "{}: identifier {:?} uuid {:?}",
+                    function_name!(),
                     identifier.as_ref(),
                     uuid
                 );
@@ -106,7 +108,7 @@ impl Display {
                     display.as_ref(),
                     CFString::from_static_str("Spaces").deref(),
                 )?;
-                debug!("display_space_list: spaces {spaces:?}");
+                debug!("{}: spaces {spaces:?}", function_name!());
 
                 let space_list = get_array_values(spaces.as_ref())
                     .map(|space| {
@@ -261,7 +263,7 @@ impl Window {
             window_manager.last_window = focused_id;
         }
 
-        debug!("did_receive_focus: {} getting focus", my_id);
+        debug!("{}: {} getting focus", function_name!(), my_id);
         window_manager.focused_window = Some(my_id);
         window_manager.focused_psn = self.inner().app.inner().psn.clone();
         window_manager.ffm_window_id = None;
@@ -412,7 +414,11 @@ impl Window {
                 );
             }
             if CGRectEqualToRect(frame, self.inner().frame) {
-                debug!("Debounced window resize: {}", self.inner().app.inner().name)
+                debug!(
+                    "{}: Debounced window resize: {}",
+                    function_name!(),
+                    self.inner().app.inner().name
+                )
             } else {
                 self.inner.write().unwrap().frame = frame;
             }
@@ -452,7 +458,7 @@ impl Window {
     pub fn focus_without_raise(&self, window_manager: &WindowManager) {
         let psn = self.inner().app.inner().psn.clone();
         let window_id = self.inner().id;
-        debug!("focus_window_without_raise: {window_id}");
+        debug!("{}: {window_id}", function_name!());
         if window_manager.focused_psn == psn && window_manager.focused_window.is_some() {
             let mut event_bytes = [0u8; 0xf8];
             event_bytes[0x04] = 0xf8;
@@ -540,7 +546,10 @@ impl Window {
         let frame = self.inner().frame;
         let mut cursor = CGPoint::default();
         if unsafe { CGError::Success != SLSGetCurrentCursorLocation(cid, &mut cursor) } {
-            warn!("center_mouse: Unable to get current cursor position.");
+            warn!(
+                "{}: Unable to get current cursor position.",
+                function_name!()
+            );
             return;
         }
         if unsafe { CGRectContainsPoint(frame, cursor) } {
@@ -586,7 +595,7 @@ impl WindowManager {
     pub fn new(tx: Sender<Event>, main_cid: ConnID) -> Self {
         let displays = Display::active_displays(main_cid);
         if displays.is_empty() {
-            error!("Can not find any displays?!");
+            error!("{}: Can not find any displays?!", function_name!());
         }
 
         WindowManager {
@@ -611,7 +620,11 @@ impl WindowManager {
             for process in process_manager.processes.values_mut() {
                 if process.is_observable() {
                     let app = Application::from_process(self.main_cid, process, self.tx.clone());
-                    debug!("wm start: Application {} is observable", app.inner().name);
+                    debug!(
+                        "{}: Application {} is observable",
+                        function_name!(),
+                        app.inner().name
+                    );
 
                     if app.observe() {
                         self.applications.insert(app.inner().pid, app.clone());
@@ -729,7 +742,7 @@ impl WindowManager {
             .iter()
             .flat_map(|display| display.spaces.keys().cloned().collect::<Vec<_>>())
             .collect();
-        debug!("existing_application_window_list: spaces {spaces:?}");
+        debug!("{}: spaces {spaces:?}", function_name!());
         if spaces.is_empty() {
             return None;
         }
@@ -738,7 +751,8 @@ impl WindowManager {
 
     fn bruteforce_windows(&mut self, app: &Application, window_list: &mut Vec<WinID>) {
         debug!(
-            "bruteforce_windows: App {} has unresolved window on other desktops, bruteforcing them.",
+            "{}: App {} has unresolved window on other desktops, bruteforcing them.",
+            function_name!(),
             app.inner().name
         );
         //
@@ -810,7 +824,7 @@ impl WindowManager {
                 //         CFRelease(element_ref);
                 //     }
                 if matched {
-                    debug!("bruteforce_windows: Found window {window_id:?}");
+                    debug!("{}: Found window {window_id:?}", function_name!());
                     self.create_and_add_window(
                         app,
                         element_ref.unwrap(),
@@ -831,14 +845,16 @@ impl WindowManager {
             .is_some_and(|list| list.is_empty())
         {
             warn!(
-                "add_existing_application_windows: No existing windows for app {}",
+                "{}: No existing windows for app {}",
+                function_name!(),
                 app.inner().name
             );
             return result;
         }
         let global_window_list = global_window_list.unwrap();
         info!(
-            "add_existing_application_windows: App {} has global windows: {global_window_list:?}",
+            "{}: App {} has global windows: {global_window_list:?}",
+            function_name!(),
             app.inner().name
         );
 
@@ -873,7 +889,8 @@ impl WindowManager {
                 if self.find_window(window_id).is_none() {
                     let window_ref = AxuWrapperType::retain(window_ref.as_ptr()).unwrap();
                     info!(
-                        "add_existing_application_windows: Add window: {} {window_id}",
+                        "{}: Add window: {} {window_id}",
+                        function_name!(),
                         app.inner().name
                     );
                     self.create_and_add_window(app, window_ref, window_id, false);
@@ -884,7 +901,8 @@ impl WindowManager {
         if global_window_list.len() as isize == (window_count - empty_count) {
             if refresh_index != -1 {
                 info!(
-                    "add_existing_application_windows: All windows for {} are now resolved",
+                    "{}: All windows for {} are now resolved",
+                    function_name!(),
                     app.inner().name
                 );
                 result = true;
@@ -898,7 +916,8 @@ impl WindowManager {
 
             if !app_window_list.is_empty() {
                 info!(
-                    "add_existing_application_windows: {} has windows that are not yet resolved",
+                    "{}: {} has windows that are not yet resolved",
+                    function_name!(),
                     app.inner().name
                 );
                 self.bruteforce_windows(app, &mut app_window_list);
@@ -943,14 +962,16 @@ impl WindowManager {
         let role = window.role()?;
         let subrole = window.subrole()?;
         info!(
-            "create_and_add_window: {} {} {title} {role} {subrole}",
+            "{}: {} {} {title} {role} {subrole}",
+            function_name!(),
             window.inner().id,
             app.inner().name,
         );
 
         if window.is_unknown() {
             warn!(
-                "create_and_add_window: Ignoring AXUnknown window {} {}",
+                "{}: Ignoring AXUnknown window {} {}",
+                function_name!(),
                 app.inner().name,
                 window.inner().id
             );
@@ -963,7 +984,8 @@ impl WindowManager {
 
         if !window.observe(app) {
             warn!(
-                "create_and_add_window: Could not observe window {} of {}",
+                "{}: Could not observe window {} of {}",
+                function_name!(),
                 window.inner().id,
                 app.inner().name
             );
@@ -998,12 +1020,15 @@ impl WindowManager {
     pub fn front_switched(&mut self, process: &mut Process) {
         let app = self.find_application(process.pid);
         if app.is_none() {
-            warn!("process_front_switch: window_manager_add_lost_front_switched_event");
+            warn!(
+                "{}: window_manager_add_lost_front_switched_event",
+                function_name!()
+            );
             // window_manager_add_lost_front_switched_event(&g_window_manager, process->pid);
             return;
         }
         let app = app.unwrap();
-        debug!("process_front_switch: {}", app.inner().name);
+        debug!("{}: {}", function_name!(), app.inner().name);
 
         let focused_id = app.focused_window_id();
         if focused_id.is_none() {
@@ -1012,21 +1037,24 @@ impl WindowManager {
                 .and_then(|window_id| self.find_window(window_id));
 
             if focused_window.is_none() {
-                warn!("window_manager_set_window_opacity");
+                warn!("{}: window_manager_set_window_opacity", function_name!());
             }
 
             self.last_window = self.focused_window;
             self.focused_window = None;
             self.focused_psn = app.inner().psn.clone();
             self.ffm_window_id = None;
-            warn!("process_front_switch: reset focused window");
+            warn!("{}: reset focused window", function_name!());
             return;
         }
 
         if let Some(window) = self.find_window(focused_id.unwrap()) {
             window.did_receive_focus(self);
         } else {
-            warn!("process_front_switch: window_manager_add_lost_focused_event");
+            warn!(
+                "{}: window_manager_add_lost_focused_event",
+                function_name!()
+            );
         }
     }
 
@@ -1039,7 +1067,7 @@ impl WindowManager {
         });
 
         if let Some(window) = window {
-            info!("window_created: {window:?}");
+            info!("{}: {window:?}", function_name!());
 
             if let Some(panel) = self.active_panel() {
                 let previous = panel.read().ok().and_then(|panel| {
@@ -1061,7 +1089,7 @@ impl WindowManager {
     }
 
     pub fn window_destroyed(&mut self, window_id: WinID) {
-        info!("window_destroyed: {window_id}");
+        info!("{}: {window_id}", function_name!());
 
         self.displays.iter().for_each(|display| {
             display.spaces.values().for_each(|windows| {
@@ -1097,7 +1125,7 @@ impl WindowManager {
             .as_ref()
             .is_none_or(|space| space.read().unwrap().is_empty())
         {
-            error!("No workspace found.");
+            error!("{}: No workspace found.", function_name!());
             return;
         }
         let active_space = active_space.unwrap();
@@ -1114,50 +1142,61 @@ impl WindowManager {
         let display_bounds = if let Some(display) = self.active_display() {
             display.bounds
         } else {
-            error!("reshuffle_around: unable to get active display bounds.");
+            error!("{}: unable to get active display bounds.", function_name!());
             return;
         };
 
         // Check if window needs to be fully exposed
         let mut frame = window.inner().frame;
-        trace!("focus original position {frame:?}");
+        trace!("{}: focus original position {frame:?}", function_name!());
         let mut moved = false;
         if frame.origin.x + frame.size.width > display_bounds.size.width {
-            trace!("Bumped window {} to the left", focus_id);
+            trace!(
+                "{}: Bumped window {} to the left",
+                function_name!(),
+                focus_id
+            );
             frame.origin.x = display_bounds.size.width - frame.size.width;
             moved = true;
         } else if frame.origin.x < 0.0 {
-            trace!("Bumped window {} to the right", focus_id);
+            trace!(
+                "{}: Bumped window {} to the right",
+                function_name!(),
+                focus_id
+            );
             frame.origin.x = 0.0;
             moved = true;
         }
         if moved {
             window.reposition(frame.origin.x, frame.origin.y);
-            trace!("focus resposition to {frame:?}");
+            trace!("{}: focus resposition to {frame:?}", function_name!());
         }
 
         // Shuffling windows to the right of the focus.
         let mut upper_left = frame.origin.x + frame.size.width;
         for window in &active_space[1 + index..] {
             let frame = window.inner().frame;
-            trace!("right: frame: {frame:?}");
+            trace!("{}: right: frame: {frame:?}", function_name!());
             // Check for window getting off screen.
             if upper_left > display_bounds.size.width - THRESHOLD {
                 upper_left = display_bounds.size.width - THRESHOLD;
             }
             if frame.origin.x != upper_left {
                 window.reposition(upper_left, frame.origin.y);
-                trace!("right side moved to upper_left {upper_left}");
+                trace!(
+                    "{}: right side moved to upper_left {upper_left}",
+                    function_name!()
+                );
             }
             upper_left += frame.size.width;
         }
 
         // Shuffling windows to the left of the focus.
         let mut upper_left = frame.origin.x;
-        trace!("focus upper_left {upper_left}");
+        trace!("{}: focus upper_left {upper_left}", function_name!());
         for window in active_space[0..index].iter().rev() {
             let frame = window.inner().frame;
-            trace!("left: frame: {frame:?}");
+            trace!("{}: left: frame: {frame:?}", function_name!());
             // Check for window getting off screen.
             if upper_left < THRESHOLD {
                 upper_left = THRESHOLD;
@@ -1166,7 +1205,10 @@ impl WindowManager {
 
             if frame.origin.x != upper_left {
                 window.reposition(upper_left, frame.origin.y);
-                trace!("left side moved to upper_left {upper_left}");
+                trace!(
+                    "{}: left side moved to upper_left {upper_left}",
+                    function_name!()
+                );
             }
         }
     }

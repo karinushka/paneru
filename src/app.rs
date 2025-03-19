@@ -17,6 +17,7 @@ use std::ops::Deref;
 use std::ptr::null_mut;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, LazyLock, RwLock};
+use stdext::function_name;
 
 use crate::events::Event;
 use crate::platform::{
@@ -153,7 +154,8 @@ impl ApplicationHandler {
     pub fn window_observe(&self, window: &Window) -> bool {
         if self.observer_ref.is_none() {
             warn!(
-                "window_observe: Can not observe window {} without application observer.",
+                "{}: Can not observe window {} without application observer.",
+                function_name!(),
                 window.inner().id
             );
             return false;
@@ -164,7 +166,8 @@ impl ApplicationHandler {
             .map(|name| unsafe {
                 let notification = CFString::from_static_str(name);
                 debug!(
-                    "window observe: {name} {:?} {:?}",
+                    "{}: {name} {:?} {:?}",
+                    function_name!(),
                     observer_ref.as_ptr::<AXObserverRef>(),
                     window.inner().element_ref.as_ptr::<AXUIElementRef>(),
                 );
@@ -178,7 +181,8 @@ impl ApplicationHandler {
                     | accessibility_sys::kAXErrorNotificationAlreadyRegistered => true,
                     result => {
                         error!(
-                            "window_observe: error registering {name} for window {}: {result}",
+                            "{}: error registering {name} for window {}: {result}",
+                            function_name!(),
                             window.inner().id
                         );
                         false
@@ -196,7 +200,8 @@ impl ApplicationHandler {
         let observer_ref = window.app.inner().handler.observer_ref.clone();
         if observer_ref.is_none() {
             error!(
-                "No application reference to unregister a window {}",
+                "{}: No application reference to unregister a window {}",
+                function_name!(),
                 window.id
             );
             return;
@@ -208,7 +213,8 @@ impl ApplicationHandler {
             .for_each(|(name, _)| {
                 let notification = CFString::from_static_str(name);
                 debug!(
-                    "window unobserve: {name} {:?} {:?}",
+                    "{}: {name} {:?} {:?}",
+                    function_name!(),
                     observer_ref.as_ref().unwrap().as_ptr::<AXObserverRef>(),
                     window.element_ref.as_ptr::<AXUIElementRef>(),
                 );
@@ -221,7 +227,8 @@ impl ApplicationHandler {
                 };
                 if result != kAXErrorSuccess {
                     warn!(
-                        "window_unobserve: error unregistering {name} for window {}: {result}",
+                        "{}: error unregistering {name} for window {}: {result}",
+                        function_name!(),
                         window.id
                     );
                 }
@@ -240,12 +247,17 @@ impl ApplicationHandler {
         if let Some(observer_ref) = observer_ref {
             let mut ax_retry = false;
             let observing = AX_NOTIFICATIONS
-                .iter().map(|name| unsafe {
-                    debug!("applicataion observe: {name:?} {:?}", observer_ref.as_ptr::<AXObserverRef>());
+                .iter()
+                .map(|name| unsafe {
+                    debug!(
+                        "{}: {name:?} {:?}",
+                        function_name!(),
+                        observer_ref.as_ptr::<AXObserverRef>()
+                    );
                     let notification = CFString::from_static_str(name);
                     match AXObserverAddNotification(
                         observer_ref.deref().as_ptr(),
-                            element.as_ptr(),
+                        element.as_ptr(),
                         notification.deref(),
                         self as *const Self as *mut c_void,
                     ) {
@@ -254,13 +266,17 @@ impl ApplicationHandler {
                         accessibility_sys::kAXErrorCannotComplete => {
                             ax_retry = true;
                             false
-                        },
+                        }
                         result => {
-                            error!("application_observe: error registering {name} for application {pid}: {result}");
+                            error!(
+                                "{}: error registering {name} for application {pid}: {result}",
+                                function_name!()
+                            );
                             false
-                        },
+                        }
                     }
-                }).collect();
+                })
+                .collect();
             unsafe {
                 let main_loop = CFRunLoopGetMain().expect("Unable to get the main run loop.");
                 let run_loop_source = CFRetained::from_raw(
@@ -268,7 +284,10 @@ impl ApplicationHandler {
                         .expect("Can not get AXObserver run loop source.")
                         .cast(),
                 );
-                debug!("observe: adding runloop source: {run_loop_source:?} {observer_ref:?}");
+                debug!(
+                    "{}: adding runloop source: {run_loop_source:?} {observer_ref:?}",
+                    function_name!()
+                );
                 CFRunLoopAddSource(&main_loop, Some(&run_loop_source), kCFRunLoopCommonModes);
 
                 self.ax_retry = ax_retry;
@@ -285,7 +304,8 @@ impl ApplicationHandler {
             return;
         }
         debug!(
-            "applicataion unobserve: {:?}",
+            "{}: {:?}",
+            function_name!(),
             self.observer_ref
                 .as_ref()
                 .unwrap()
@@ -297,7 +317,7 @@ impl ApplicationHandler {
                 .zip(&self.observing)
                 .filter(|(_, remove)| **remove)
                 .for_each(|(name, _)| {
-                    debug!("unobserve: name {name:?}");
+                    debug!("{}: name {name:?}", function_name!());
                     let element = self.element_ref.as_ref().unwrap();
                     let notification = CFString::from_static_str(name);
                     let result = unsafe {
@@ -309,7 +329,8 @@ impl ApplicationHandler {
                     };
                     if result != kAXErrorSuccess {
                         warn!(
-                            "application unobserve: error unregistering {:?}",
+                            "{}: error unregistering {:?}",
+                            function_name!(),
                             observer.as_ptr::<AXObserverRef>()
                         );
                     }
@@ -319,7 +340,8 @@ impl ApplicationHandler {
                 let run_loop_source =
                     AXObserverGetRunLoopSource(observer.as_ptr()) as *mut CFRunLoopSource;
                 debug!(
-                    "unobserve: removing runloop source: {run_loop_source:?} ref {:?}",
+                    "{}: removing runloop source: {run_loop_source:?} ref {:?}",
+                    function_name!(),
                     observer.as_ptr::<AXObserverRef>()
                 );
                 CFRunLoopSourceInvalidate(&*run_loop_source);
@@ -371,24 +393,37 @@ impl ApplicationHandler {
                 });
                 if let Some((window_id, element)) = window {
                     AX_WINDOW_NOTIFICATIONS.iter().for_each(|name| {
-                    let notification = CFString::from_static_str(name);
-                    let observer = self.observer_ref.as_ref().unwrap();
-                    debug!("application_handler: unobserve {window_id:?}:  {name} {:?} {:?}", observer.deref().as_ptr::<AXObserverRef>(), element.deref().as_ptr::<AXUIElementRef>());
-                    let result = unsafe {
-                        AXObserverRemoveNotification(observer.deref().as_ptr(), element.deref().as_ptr(), notification.deref())
-                    };
-                    if result != kAXErrorSuccess {
-                        error!("application_handler: error unregistering {name} for {window_id:?}: {result}");
-                    }
-                });
+                        let notification = CFString::from_static_str(name);
+                        let observer = self.observer_ref.as_ref().unwrap();
+                        debug!(
+                            "{}: unobserve {window_id:?}:  {name} {:?} {:?}",
+                            function_name!(),
+                            observer.deref().as_ptr::<AXObserverRef>(),
+                            element.deref().as_ptr::<AXUIElementRef>()
+                        );
+                        let result = unsafe {
+                            AXObserverRemoveNotification(
+                                observer.deref().as_ptr(),
+                                element.deref().as_ptr(),
+                                notification.deref(),
+                            )
+                        };
+                        if result != kAXErrorSuccess {
+                            error!(
+                                "{}: error unregistering {name} for {window_id:?}: {result}",
+                                function_name!()
+                            );
+                        }
+                    });
                 }
 
-                Event::WindowDestroyed {
-                    window_id,
-                }
+                Event::WindowDestroyed { window_id }
             }
             _ => {
-                error!("Unhandled application notification: {notification:?}");
+                error!(
+                    "{}: unhandled application notification: {notification:?}",
+                    function_name!()
+                );
                 return;
             }
         };
@@ -404,7 +439,7 @@ impl ApplicationHandler {
         let notification = if let Some(notification) = NonNull::new(notification as *mut CFString) {
             unsafe { notification.as_ref() }.to_string()
         } else {
-            error!("ApplicationHandler::callback: nullptr 'notification' passed.");
+            error!("{}: nullptr 'notification' passed.", function_name!());
             return;
         };
         let (this, window) = match notification.as_ref() {
@@ -426,7 +461,7 @@ impl ApplicationHandler {
             })
         };
         if result.is_none() {
-            error!("ApplicationHandler::callback: nullptr passed as a self reference.");
+            error!("{}: nullptr passed as a self reference.", function_name!());
         }
     }
 }

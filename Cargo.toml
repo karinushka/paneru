@@ -12,3 +12,4 @@ objc2-app-kit = "0.3.0"
 objc2-core-foundation = { version = "0.3.0", features = ["CFRunLoop"] }
 objc2-core-graphics = "0.3.0"
 objc2-foundation = { version = "0.3.0", features = ["NSNotification"] }
+stdext = "0.3.3"

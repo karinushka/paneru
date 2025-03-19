@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::ptr::NonNull;
 use std::thread;
 use std::time::Duration;
+use stdext::function_name;
 
 use crate::app::Application;
 use crate::platform::{Pid, ProcessInfo, ProcessSerialNumber, get_process_info};
@@ -25,14 +26,21 @@ pub struct Process {
 impl Process {
     pub fn application_launched(&mut self, window_manager: &mut WindowManager) {
         if self.terminated {
-            warn!("{} ({}) terminated during launch", self.name, self.pid);
+            warn!(
+                "{}: {} ({}) terminated during launch",
+                function_name!(),
+                self.name,
+                self.pid
+            );
             return;
         }
 
         if !self.finished_launching() {
             debug!(
-                "{} ({}) is not finished launching, subscribing to finishedLaunching changes",
-                self.name, self.pid
+                "{}: {} ({}) is not finished launching, subscribing to finishedLaunching changes",
+                function_name!(),
+                self.name,
+                self.pid
             );
 
             //
@@ -52,8 +60,10 @@ impl Process {
 
         if !self.is_observable() {
             debug!(
-                "{} ({}) is not observable, subscribing to activationPolicy changes",
-                self.name, self.pid
+                "{}: {} ({}) is not observable, subscribing to activationPolicy changes",
+                function_name!(),
+                self.name,
+                self.pid
             );
 
             //
@@ -81,7 +91,8 @@ impl Process {
 
         if let Some(app) = window_manager.find_application(self.pid) {
             warn!(
-                "application_launched: App {} already exists.",
+                "{}: App {} already exists.",
+                function_name!(),
                 app.inner().name
             );
             return;
@@ -92,14 +103,16 @@ impl Process {
 
         if !app.observe() {
             warn!(
-                "application_launched: failed to observe {}",
+                "{}: failed to observe {}",
+                function_name!(),
                 app.inner().name
             );
             return;
         }
 
         debug!(
-            "application_launched: Adding {} to list of apps.",
+            "{}: Adding {} to list of apps.",
+            function_name!(),
             app.inner().name
         );
         window_manager
@@ -108,7 +121,8 @@ impl Process {
 
         let windows = window_manager.add_application_windows(&app);
         debug!(
-            "application_launched: Added windows {} for {}.",
+            "{}: Added windows {} for {}.",
+            function_name!(),
             windows
                 .into_iter()
                 .map(|window| format!("{}", window.inner().id))
@@ -160,7 +174,7 @@ impl ProcessManager {
         let name = if let Some(name) = NonNull::new(pinfo.name as *mut CFString) {
             unsafe { name.as_ref() }.to_string()
         } else {
-            error!("process_add: nullptr 'name' passed.");
+            error!("{}: nullptr 'name' passed.", function_name!());
             return None;
         };
 

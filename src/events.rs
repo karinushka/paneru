@@ -313,11 +313,12 @@ impl EventHandler {
             .and_then(|window_id| self.window_manager.find_window(window_id));
         let active_panel = self.window_manager.active_panel();
 
-        let display_bounds = if let Some(display) = self.window_manager.active_display() {
-            display.bounds
-        } else {
-            error!("{}: unable to get active display bounds.", function_name!());
-            return;
+        let display_bounds = match self.window_manager.active_display() {
+            Some(display) => display.bounds,
+            None => {
+                error!("{}: unable to get active display bounds.", function_name!());
+                return;
+            }
         };
 
         let window = match argv.first().unwrap_or(&empty).as_ref() {

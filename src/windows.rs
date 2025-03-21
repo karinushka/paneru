@@ -859,10 +859,9 @@ impl WindowManager {
         );
 
         let window_list = app.window_list();
-        let window_count = if let Some(window_list) = &window_list {
-            unsafe { CFArrayGetCount(window_list) }
-        } else {
-            0
+        let window_count = match &window_list {
+            Some(window_list) => unsafe { CFArrayGetCount(window_list) },
+            None => 0,
         };
         let mut empty_count = 0;
         if let Some(window_list) = window_list {
@@ -1139,11 +1138,12 @@ impl WindowManager {
         }
         let index = index.unwrap();
 
-        let display_bounds = if let Some(display) = self.active_display() {
-            display.bounds
-        } else {
-            error!("{}: unable to get active display bounds.", function_name!());
-            return;
+        let display_bounds = match self.active_display() {
+            Some(display) => display.bounds,
+            None => {
+                error!("{}: unable to get active display bounds.", function_name!());
+                return;
+            }
         };
 
         // Check if window needs to be fully exposed

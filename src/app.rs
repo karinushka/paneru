@@ -436,11 +436,12 @@ impl ApplicationHandler {
         notification: CFStringRef,
         context: *mut c_void,
     ) {
-        let notification = if let Some(notification) = NonNull::new(notification as *mut CFString) {
-            unsafe { notification.as_ref() }.to_string()
-        } else {
-            error!("{}: nullptr 'notification' passed.", function_name!());
-            return;
+        let notification = match NonNull::new(notification as *mut CFString) {
+            Some(notification) => unsafe { notification.as_ref() }.to_string(),
+            None => {
+                error!("{}: nullptr 'notification' passed.", function_name!());
+                return;
+            }
         };
         let (this, window) = match notification.as_ref() {
             accessibility_sys::kAXWindowMiniaturizedNotification

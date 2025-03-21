@@ -171,11 +171,12 @@ impl ProcessManager {
         unsafe {
             get_process_info(psn, &mut pinfo);
         }
-        let name = if let Some(name) = NonNull::new(pinfo.name as *mut CFString) {
-            unsafe { name.as_ref() }.to_string()
-        } else {
-            error!("{}: nullptr 'name' passed.", function_name!());
-            return None;
+        let name = match NonNull::new(pinfo.name as *mut CFString) {
+            Some(name) => unsafe { name.as_ref() }.to_string(),
+            None => {
+                error!("{}: nullptr 'name' passed.", function_name!());
+                return None;
+            }
         };
 
         let apps =

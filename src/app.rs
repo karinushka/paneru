@@ -18,6 +18,7 @@ use std::ptr::null_mut;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, LazyLock, RwLock};
 use stdext::function_name;
+use stdext::prelude::RwLockExt;
 
 use crate::events::Event;
 use crate::platform::{
@@ -90,7 +91,7 @@ impl Application {
     }
 
     pub fn inner(&self) -> std::sync::RwLockReadGuard<'_, InnerApplication> {
-        self.inner.read().unwrap()
+        self.inner.force_read()
     }
 
     fn _main_window(&self) -> Option<WinID> {
@@ -113,7 +114,7 @@ impl Application {
     pub fn observe(&self) -> bool {
         let pid = self.inner().pid;
         let element = self.inner().element_ref.clone();
-        self.inner.write().unwrap().handler.observe(pid, element)
+        self.inner.force_write().handler.observe(pid, element)
     }
 
     pub fn is_frontmost(&self) -> bool {
@@ -192,7 +193,7 @@ impl ApplicationHandler {
             .collect::<Vec<_>>();
         let gotall = observing.iter().all(|status| *status);
 
-        window.inner.write().unwrap().observing = observing;
+        window.inner.force_write().observing = observing;
         gotall
     }
 
@@ -448,7 +449,7 @@ impl ApplicationHandler {
             | accessibility_sys::kAXWindowDeminiaturizedNotification
             | accessibility_sys::kAXUIElementDestroyedNotification => {
                 let lock = unsafe { &*(context as *const RwLock<InnerWindow>) };
-                let inner_window = lock.read().unwrap();
+                let inner_window = lock.force_read();
                 let app = inner_window.app.clone();
                 let this = &app.inner().handler as *const Self;
                 (this, Some(inner_window.id))

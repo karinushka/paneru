@@ -27,6 +27,7 @@ use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
 use stdext::function_name;
+use stdext::prelude::RwLockExt;
 
 use crate::app::{Application, ApplicationHandler};
 use crate::events::Event;
@@ -241,7 +242,7 @@ impl Window {
         .is_none()
             || window.is_root();
         {
-            let mut inner = window.inner.write().unwrap();
+            let mut inner = window.inner.force_write();
             inner.minimized = minimized;
             inner.is_root = is_root;
         }
@@ -249,7 +250,7 @@ impl Window {
     }
 
     pub fn inner(&self) -> std::sync::RwLockReadGuard<'_, InnerWindow> {
-        self.inner.read().unwrap()
+        self.inner.force_read()
     }
 
     pub fn did_receive_focus(&self, window_manager: &mut WindowManager) {
@@ -361,7 +362,7 @@ impl Window {
                 position.as_ref(),
             );
         }
-        self.inner.write().unwrap().frame.origin = point;
+        self.inner.force_write().frame.origin = point;
     }
 
     pub fn resize(&self, width: f64, height: f64) {
@@ -377,7 +378,7 @@ impl Window {
                 position.as_ref(),
             );
         }
-        self.inner.write().unwrap().frame.size = size;
+        self.inner.force_write().frame.size = size;
     }
 
     fn update_frame(&self) {
@@ -420,7 +421,7 @@ impl Window {
                     self.inner().app.inner().name
                 )
             } else {
-                self.inner.write().unwrap().frame = frame;
+                self.inner.force_write().frame = frame;
             }
         }
     }
@@ -644,7 +645,7 @@ impl WindowManager {
 
         for display in self.displays.iter() {
             for (space, windows) in display.spaces.iter() {
-                windows.write().unwrap().extend(
+                windows.force_write().extend(
                     self.space_window_list_for_connection(vec![*space], None, false)
                         .unwrap_or_default()
                         .into_iter()
@@ -1075,9 +1076,7 @@ impl WindowManager {
                         .and_then(|id| panel.iter().position(|window| window.inner().id == id))
                 });
                 let inserted = previous.map(|prev| {
-                    if let Ok(mut panel) = panel.write() {
-                        panel.insert(prev + 1, window.clone());
-                    }
+                    panel.force_write().insert(prev + 1, window.clone());
                 });
                 if inserted.is_some() {
                     self.reshuffle_around(&window);
@@ -1094,8 +1093,7 @@ impl WindowManager {
         self.displays.iter().for_each(|display| {
             display.spaces.values().for_each(|windows| {
                 windows
-                    .write()
-                    .unwrap()
+                    .force_write()
                     .retain(|window| window.inner().id != window_id);
             });
         });

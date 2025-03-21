@@ -860,10 +860,10 @@ impl WindowManager {
         );
 
         let window_list = app.window_list();
-        let window_count = match &window_list {
-            Some(window_list) => unsafe { CFArrayGetCount(window_list) },
-            None => 0,
-        };
+        let window_count = window_list
+            .as_ref()
+            .map(|window_list| unsafe { CFArrayGetCount(window_list) })
+            .unwrap_or(0);
 
         let mut empty_count = 0;
         if let Some(window_list) = window_list {
@@ -928,27 +928,22 @@ impl WindowManager {
         result
     }
 
-    pub fn add_application_windows(&mut self, app: &Application) -> Vec<Window> {
+    pub fn add_application_windows(&mut self, app: &Application) -> Option<Vec<Window>> {
         // TODO: maybe refactor this with add_existing_application_windows()
-        app.window_list()
-            .map(|window_list| {
-                get_array_values::<accessibility_sys::__AXUIElement>(window_list.as_ref())
-                    .flat_map(|element_ref| {
-                        AxuWrapperType::retain(element_ref.as_ptr()).map(|element| {
-                            ax_window_id(element.as_ptr()).and_then(|window_id| {
-                                match self.find_window(window_id) {
-                                    None => {
-                                        self.create_and_add_window(app, element, window_id, true)
-                                    }
-                                    _ => None,
-                                }
-                            })
-                        })
+        let array = app.window_list()?;
+        let windows = get_array_values::<accessibility_sys::__AXUIElement>(array.deref())
+            .flat_map(|element_ref| {
+                AxuWrapperType::retain(element_ref.as_ptr()).map(|element| {
+                    ax_window_id(element.as_ptr()).and_then(|window_id| {
+                        self.find_window(window_id).map_or_else(
+                            || self.create_and_add_window(app, element, window_id, true),
+                            |_| None,
+                        )
                     })
-                    .flatten()
-                    .collect()
+                })
             })
-            .unwrap_or_default()
+            .collect();
+        windows
     }
 
     fn create_and_add_window(
@@ -1117,33 +1112,29 @@ impl WindowManager {
         }
     }
 
-    pub fn reshuffle_around(&self, window: &Window) {
-        let active_space = self.active_panel();
-        if active_space
-            .as_ref()
-            .is_none_or(|space| space.read().unwrap().is_empty())
-        {
-            error!("{}: No workspace found.", function_name!());
-            return;
-        }
-        let active_space = active_space.unwrap();
-        let active_space = active_space.write().unwrap();
+    pub fn reshuffle_around(&self, window: &Window) -> Option<()> {
+        let active_space = self.active_panel()?;
+        let active_space = active_space.force_read();
         let focus_id = window.inner().id;
         let index = active_space
             .iter()
-            .position(|window| window.inner().id == focus_id);
-        if index.is_none() {
-            return;
-        }
-        let index = index.unwrap();
+            .position(|window| window.inner().id == focus_id)
+            .or_else(|| {
+                warn!(
+                    "{}: Can not find a window {} in the stack!",
+                    function_name!(),
+                    focus_id
+                );
+                None
+            })?;
 
-        let display_bounds = match self.active_display() {
-            Some(display) => display.bounds,
-            None => {
+        let display_bounds = self
+            .active_display()
+            .map(|display| display.bounds)
+            .or_else(|| {
                 error!("{}: unable to get active display bounds.", function_name!());
-                return;
-            }
-        };
+                None
+            })?;
 
         // Check if window needs to be fully exposed
         let mut frame = window.inner().frame;
@@ -1210,17 +1201,23 @@ impl WindowManager {
                 );
             }
         }
+        Some(())
     }
 
     pub fn active_panel(&self) -> Option<WindowPane> {
         let display = Display::active_display_id(self.main_cid)
             .and_then(|id| self.displays.iter().find(|display| display.id == id));
-        display.and_then(|display| {
-            let space_id = display.active_display_space(self.main_cid);
-            space_id
-                .and_then(|space_id| display.spaces.get(&space_id))
-                .cloned()
-        })
+        display
+            .and_then(|display| {
+                let space_id = display.active_display_space(self.main_cid);
+                space_id
+                    .and_then(|space_id| display.spaces.get(&space_id))
+                    .cloned()
+            })
+            .or_else(|| {
+                error!("{}: No workspace found.", function_name!());
+                None
+            })
     }
 
     pub fn active_display(&self) -> Option<&Display> {

@@ -139,21 +139,26 @@ impl Process {
             .applications
             .insert(app.inner().pid, app.clone());
 
-        let windows = window_manager.add_application_windows(&app);
-        debug!(
-            "{}: Added windows {} for {}.",
-            function_name!(),
-            windows
-                .iter()
-                .map(|window| format!("{}", window.inner().id))
-                .collect::<Vec<_>>()
-                .join(", "),
-            app.inner().name
-        );
+        // int window_count;
+        // struct window **window_list = window_manager_add_application_windows(
+        //     &g_space_manager, &g_window_manager, application, &window_count);
+        // uint32_t prev_window_id = g_window_manager.focused_window_id;
+        if let Some(windows) = window_manager.add_application_windows(&app) {
+            debug!(
+                "{}: Added windows {} for {}.",
+                function_name!(),
+                windows
+                    .iter()
+                    .map(|window| format!("{}", window.inner().id))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                app.inner().name
+            );
 
-        if let Some(active_panel) = window_manager.active_panel() {
-            active_panel.force_write().extend(windows.iter().cloned())
-        }
+            if let Some(active_panel) = window_manager.active_panel() {
+                active_panel.force_write().extend(windows.iter().cloned())
+            }
+        };
     }
 
     pub fn is_observable(&mut self) -> bool {

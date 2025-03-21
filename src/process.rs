@@ -41,7 +41,7 @@ impl Drop for Process {
 }
 
 impl Process {
-    pub fn application_launched(&mut self, window_manager: &mut WindowManager) {
+    pub fn application_launched(&mut self, window_manager: &mut WindowManager) -> Option<()> {
         if self.terminated {
             warn!(
                 "{}: {} ({}) terminated during launch",
@@ -49,7 +49,7 @@ impl Process {
                 self.name,
                 self.pid
             );
-            return;
+            return None;
         }
 
         if !self.finished_launching() {
@@ -68,7 +68,7 @@ impl Process {
             //
 
             if !self.finished_launching() {
-                return;
+                return None;
             }
             self.unobserve_finished_launching();
             warn!(
@@ -94,7 +94,7 @@ impl Process {
             //
 
             if !self.is_observable() {
-                return;
+                return None;
             }
             self.unobserve_activation_policy();
             warn!(
@@ -115,7 +115,7 @@ impl Process {
                 function_name!(),
                 app.inner().name
             );
-            return;
+            return None;
         }
         let app =
             Application::from_process(window_manager.main_cid, self, window_manager.tx.clone());
@@ -127,7 +127,7 @@ impl Process {
                 function_name!(),
                 app.inner().name
             );
-            return;
+            return None;
         }
 
         debug!(
@@ -143,22 +143,34 @@ impl Process {
         // struct window **window_list = window_manager_add_application_windows(
         //     &g_space_manager, &g_window_manager, application, &window_count);
         // uint32_t prev_window_id = g_window_manager.focused_window_id;
-        if let Some(windows) = window_manager.add_application_windows(&app) {
-            debug!(
-                "{}: Added windows {} for {}.",
-                function_name!(),
-                windows
-                    .iter()
-                    .map(|window| format!("{}", window.inner().id))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                app.inner().name
-            );
+        let windows = window_manager.add_application_windows(&app)?;
+        debug!(
+            "{}: Added windows {} for {}.",
+            function_name!(),
+            windows
+                .iter()
+                .map(|window| format!("{}", window.inner().id))
+                .collect::<Vec<_>>()
+                .join(", "),
+            app.inner().name
+        );
 
-            if let Some(active_panel) = window_manager.active_panel() {
-                active_panel.force_write().extend(windows.iter().cloned())
-            }
-        };
+        let active_panel = window_manager.active_panel()?;
+        let index = window_manager.focused_window.and_then(|focus_id| {
+            active_panel
+                .force_read()
+                .iter()
+                .position(|window| window.inner().id == focus_id)
+        })?;
+
+        windows
+            .iter()
+            .for_each(|window| active_panel.force_write().insert(index + 1, window.clone()));
+        if let Some(window) = windows.first() {
+            window_manager.reshuffle_around(window);
+        }
+
+        Some(())
     }
 
     pub fn is_observable(&mut self) -> bool {

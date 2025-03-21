@@ -150,21 +150,106 @@ impl Process {
             .applications
             .insert(app.inner().pid, app.clone());
 
-        let windows = window_manager.add_application_windows(&app);
-        debug!(
-            "{}: Added windows {} for {}.",
-            function_name!(),
-            windows
-                .iter()
-                .map(|window| format!("{}", window.inner().id))
-                .collect::<Vec<_>>()
-                .join(", "),
-            app.inner().name
-        );
+        // int window_count;
+        // struct window **window_list = window_manager_add_application_windows(
+        //     &g_space_manager, &g_window_manager, application, &window_count);
+        // uint32_t prev_window_id = g_window_manager.focused_window_id;
+        if let Some(windows) = window_manager.add_application_windows(&app) {
+            debug!(
+                "{}: Added windows {} for {}.",
+                function_name!(),
+                windows
+                    .iter()
+                    .map(|window| format!("{}", window.inner().id))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                app.inner().name
+            );
 
-        if let Some(active_panel) = window_manager.active_panel() {
-            active_panel.force_write().extend(windows.iter().cloned())
-        }
+            if let Some(active_panel) = window_manager.active_panel() {
+                active_panel.force_write().extend(windows.iter().cloned())
+            }
+        };
+
+        // uint64_t sid;
+        // bool default_origin =
+        //     g_window_manager.window_origin_mode == WINDOW_ORIGIN_DEFAULT;
+        //
+        // if (!default_origin) {
+        //   if (g_window_manager.window_origin_mode == WINDOW_ORIGIN_FOCUSED) {
+        //     sid = g_space_manager.current_space_id;
+        //   } else /* if (g_window_manager.window_origin_mode == WINDOW_ORIGIN_CURSOR)
+        //           */
+        //   {
+        //     sid = space_manager_cursor_space();
+        //   }
+        // }
+        //
+        // int view_count = 0;
+        // struct view **view_list = ts_alloc_list(struct view *, window_count);
+        //
+        // for (int i = 0; i < window_count; ++i) {
+        //   struct window *window = window_list[i];
+        //
+        //   if (window_manager_should_manage_window(window) &&
+        //       !window_manager_find_managed_window(&g_window_manager, window)) {
+        //     if (default_origin)
+        //       sid = window_space(window->id);
+        //
+        //     struct view *view = space_manager_find_view(&g_space_manager, sid);
+        //     if (view->layout != VIEW_FLOAT) {
+        //       //
+        //       // @cleanup
+        //       //
+        //       // :AXBatching
+        //       //
+        //       // NOTE(koekeishiya): Batch all operations and mark the view as dirty so
+        //       // that we can perform a single flush, making sure that each window is
+        //       // only moved and resized a single time, when the final layout has been
+        //       // computed. This is necessary to make sure that we do not call the AX
+        //       // API for each modification to the tree.
+        //       //
+        //
+        //       window_manager_adjust_layer(window, LAYER_BELOW);
+        //       view_add_window_node_with_insertion_point(view, window, prev_window_id);
+        //       window_manager_add_managed_window(&g_window_manager, window, view);
+        //
+        //       view_set_flag(view, VIEW_IS_DIRTY);
+        //       view_list[view_count++] = view;
+        //
+        //       prev_window_id = window->id;
+        //     }
+        //   }
+        //
+        //   if (window_manager_is_window_eligible(window)) {
+        //     event_signal_push(SIGNAL_WINDOW_CREATED, window);
+        //   }
+        // }
+        //
+        // //
+        // // @cleanup
+        // //
+        // // :AXBatching
+        // //
+        // // NOTE(koekeishiya): Flush previously batched operations if the view is
+        // // marked as dirty. This is necessary to make sure that we do not call the AX
+        // // API for each modification to the tree.
+        // //
+        //
+        // for (int i = 0; i < view_count; ++i) {
+        //   struct view *view = view_list[i];
+        //   if (!space_is_visible(view->sid))
+        //     continue;
+        //   if (!view_is_dirty(view))
+        //     continue;
+        //
+        //   window_node_flush(view->root);
+        //   view_clear_flag(view, VIEW_IS_DIRTY);
+        // }
+        //
+        // if (workspace_is_macos_sequoia()) {
+        //   update_window_notifications();
+        // }
     }
 
     pub fn is_observable(&mut self) -> bool {

@@ -6,7 +6,9 @@ use core::ptr::NonNull;
 use log::{debug, error, info, warn};
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::{AllocAnyThread, DefinedClass, define_class, msg_send, sel};
-use objc2_app_kit::{NSRunningApplication, NSWorkspace, NSWorkspaceApplicationKey};
+use objc2_app_kit::{
+    NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace, NSWorkspaceApplicationKey,
+};
 use objc2_core_foundation::{
     CFMachPortCreateRunLoopSource, CFMachPortInvalidate, CFRetained, CFRunLoopAddSource,
     CFRunLoopGetMain, CFRunLoopRemoveSource, CFRunLoopRunInMode, CFRunLoopSource,
@@ -16,7 +18,10 @@ use objc2_core_graphics::{
     CGEvent, CGEventGetLocation, CGEventTapCreate, CGEventTapEnable, CGEventTapLocation,
     CGEventTapOptions, CGEventTapPlacement, CGEventTapProxy, CGEventType,
 };
-use objc2_foundation::{NSDistributedNotificationCenter, NSNotificationCenter, NSObject, NSString};
+use objc2_foundation::{
+    NSDictionary, NSDistributedNotificationCenter, NSKeyValueChangeNewKey, NSNotificationCenter,
+    NSNumber, NSObject, NSString,
+};
 use std::ffi::c_void;
 use std::ops::Deref;
 use std::ptr::null_mut;
@@ -26,6 +31,7 @@ use std::sync::mpsc::Sender;
 use stdext::function_name;
 
 use crate::events::Event;
+use crate::process::Process;
 use crate::skylight::OSStatus;
 use crate::util::{AxuWrapperType, Cleanuper};
 
@@ -104,6 +110,7 @@ unsafe extern "C-unwind" {
 struct ProcessHandler {
     tx: Sender<Event>,
     cleanup: Option<Cleanuper>,
+    observer: Retained<WorkspaceObserver>,
 }
 
 #[repr(C)]
@@ -136,8 +143,12 @@ enum ProcessEventApp {
 }
 
 impl ProcessHandler {
-    fn new(tx: Sender<Event>) -> Self {
-        ProcessHandler { tx, cleanup: None }
+    fn new(tx: Sender<Event>, observer: Retained<WorkspaceObserver>) -> Self {
+        ProcessHandler {
+            tx,
+            cleanup: None,
+            observer,
+        }
     }
 
     fn start(&mut self) {
@@ -175,7 +186,10 @@ impl ProcessHandler {
         match event {
             ProcessEventApp::Launched => self
                 .tx
-                .send(Event::ApplicationLaunched { psn })
+                .send(Event::ApplicationLaunched {
+                    psn,
+                    observer: self.observer.clone(),
+                })
                 .expect(err_message),
             ProcessEventApp::Terminated => self
                 .tx
@@ -297,7 +311,7 @@ impl MouseHandler {
 }
 
 #[derive(Debug, Clone)]
-struct Ivars {
+pub struct Ivars {
     tx: Sender<Event>,
 }
 
@@ -312,7 +326,7 @@ define_class!(
     #[name = "Observer"]
     #[ivars = Ivars]
     #[derive(Debug)]
-    struct WorkspaceObserver;
+    pub struct WorkspaceObserver;
 
     impl WorkspaceObserver {
         #[unsafe(method(activeDisplayDidChange:))]
@@ -390,6 +404,60 @@ define_class!(
                 msg: format!("WorkspaceObserver: {:?}", notification),
             };
             self.ivars().tx.send(msg).expect("dock_pref_changed: Error sending event!");
+        }
+
+        #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
+        fn observe_value_for_keypath(
+            &self,
+            key_path: &NSString,
+            _object: &NSObject,
+            change: &NSDictionary,
+            context: *mut c_void,
+        ) {
+            let process = match NonNull::new(context) {
+                Some(process) => unsafe { process.cast::<Process>().as_mut() },
+                None => {
+                    warn!("{}: null pointer passed as context", function_name!());
+                    return;
+                },
+            };
+
+            let result = unsafe { change.objectForKey(NSKeyValueChangeNewKey) };
+            let policy = result.and_then(|result| result.downcast_ref::<NSNumber>().map(|result| result.intValue()));
+
+            match key_path.to_string().as_ref() {
+                "finishedLaunching" => {
+                    if policy.is_some_and(|value| value != 1) {
+                        return;
+                    }
+                    process.unobserve_finished_launching();
+                }
+                "activationPolicy" => {
+                    if policy.is_some_and(|value| value == process.policy.0 as i32) {
+                        return;
+                    }
+                    process.policy = NSApplicationActivationPolicy(policy.unwrap() as isize);
+                    process.unobserve_activation_policy();
+                }
+                err => {
+                    warn!("{}: unknown key path {err:?}", function_name!());
+                    return;
+                }
+            }
+
+            let msg = Event::ApplicationLaunched {
+                psn: process.psn.clone(),
+                observer: process.observer.clone(),
+            };
+            self.ivars()
+                .tx
+                .send(msg)
+                .expect("observe_value_for_keypath: Error sending event!");
+            debug!(
+                "{}: got {key_path:?} for {}",
+                function_name!(),
+                process.name
+            );
         }
     }
 
@@ -657,6 +725,7 @@ impl MissionControlHandler {
                 return;
             }
         };
+
         let result = unsafe {
             (context as *mut Self)
                 .as_ref()
@@ -684,10 +753,11 @@ pub struct PlatformCallbacks {
 
 impl PlatformCallbacks {
     pub fn new(tx: Sender<Event>) -> std::pin::Pin<Box<Self>> {
+        let workspace_observer = WorkspaceObserver::new(tx.clone());
         Box::pin(PlatformCallbacks {
-            process_handler: ProcessHandler::new(tx.clone()),
+            process_handler: ProcessHandler::new(tx.clone(), workspace_observer.clone()),
             mouse_handler: MouseHandler::new(tx.clone()),
-            workspace_observer: WorkspaceObserver::new(tx.clone()),
+            workspace_observer,
             mission_control_observer: MissionControlHandler::new(tx.clone()),
             tx,
         })

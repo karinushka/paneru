@@ -12,6 +12,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 use std::thread::JoinHandle;
 use stdext::function_name;
+use stdext::prelude::RwLockExt;
 
 use crate::platform::{ProcessSerialNumber, WorkspaceObserver};
 use crate::process::ProcessManager;
@@ -388,14 +389,14 @@ impl EventHandler {
                     let index = EventHandler::command_move_focus(
                         &argv[1..],
                         focus.as_ref(),
-                        panel.write().unwrap().as_slice(),
+                        panel.force_write().as_slice(),
                     );
-                    index.and_then(|index| panel.read().unwrap().get(index).cloned())
+                    index.and_then(|index| panel.force_read().get(index).cloned())
                 })
             }
 
             "swap" => active_panel.and_then(|active_panel| {
-                let mut panel = active_panel.write().unwrap();
+                let mut panel = active_panel.force_write();
                 EventHandler::command_swap_focus(
                     &argv[1..],
                     focus.as_ref(),
@@ -420,7 +421,7 @@ impl EventHandler {
             "resize" => focus
                 .as_ref()
                 .inspect(|window| {
-                    window.inner.write().unwrap().size_ratios.rotate_left(1);
+                    window.inner.force_write().size_ratios.rotate_left(1);
                     let width_ratio = *window.inner().size_ratios.first().unwrap();
                     // let frame = window.inner().frame;
                     // window.reposition((SCREEN_WIDTH - width) / 2.0, frame.origin.y);
@@ -441,7 +442,7 @@ impl EventHandler {
                     {
                         // Window already managed, remove it from the managed stack.
                         if let Some(panel) = active_panel {
-                            panel.write().unwrap().remove(index);
+                            panel.force_write().remove(index);
                         }
                         None
                     } else {
@@ -451,7 +452,7 @@ impl EventHandler {
                         window.resize(frame.size.width, display_bounds.size.height);
 
                         if let Some(panel) = active_panel {
-                            panel.write().unwrap().push(window.clone());
+                            panel.force_write().push(window.clone());
                         }
                         Some(window)
                     }

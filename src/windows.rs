@@ -863,6 +863,7 @@ impl WindowManager {
             Some(window_list) => unsafe { CFArrayGetCount(window_list) },
             None => 0,
         };
+
         let mut empty_count = 0;
         if let Some(window_list) = window_list {
             for window_ref in get_array_values(window_list.deref()) {

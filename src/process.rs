@@ -2,14 +2,20 @@ use log::{debug, error, warn};
 use objc2::rc::Retained;
 use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication};
 use objc2_core_foundation::CFString;
+use objc2_foundation::{
+    NSKeyValueObservingOptions, NSObjectNSKeyValueObserverRegistration, NSString,
+};
 use std::collections::HashMap;
+use std::ffi::c_void;
+use std::ops::Deref;
+use std::pin::Pin;
 use std::ptr::NonNull;
-use std::thread;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
 use stdext::function_name;
+use stdext::prelude::RwLockExt;
 
 use crate::app::Application;
-use crate::platform::{Pid, ProcessInfo, ProcessSerialNumber, get_process_info};
+use crate::platform::{Pid, ProcessInfo, ProcessSerialNumber, WorkspaceObserver, get_process_info};
 use crate::windows::WindowManager;
 
 #[derive(Debug)]
@@ -19,8 +25,19 @@ pub struct Process {
     pub pid: Pid,
     pub name: String,
     terminated: bool,
-    application: Option<Retained<NSRunningApplication>>,
-    policy: NSApplicationActivationPolicy,
+    pub application: Option<Retained<NSRunningApplication>>,
+    pub policy: NSApplicationActivationPolicy,
+
+    pub observer: Retained<WorkspaceObserver>,
+    observing_launched: AtomicBool,
+    observing_activated: AtomicBool,
+}
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        self.unobserve_finished_launching();
+        self.unobserve_activation_policy();
+    }
 }
 
 impl Process {
@@ -42,20 +59,23 @@ impl Process {
                 self.name,
                 self.pid
             );
+            self.observe_finished_launching();
 
             //
             // NOTE(koekeishiya): Do this again in case of race-conditions between the previous
             // check and key-value observation subscription. Not actually sure if this can happen
             // in practice..
             //
-        }
 
-        // FIXME: currently this polls for the application to be ready loaded.
-        for _ in 0..10 {
-            thread::sleep(Duration::from_millis(300));
-            if self.finished_launching() {
-                break;
+            if !self.finished_launching() {
+                return;
             }
+            self.unobserve_finished_launching();
+            warn!(
+                "{}: {} suddenly finished launching",
+                function_name!(),
+                self.name
+            );
         }
 
         if !self.is_observable() {
@@ -65,6 +85,7 @@ impl Process {
                 self.name,
                 self.pid
             );
+            self.observe_activation_policy();
 
             //
             // NOTE(koekeishiya): Do this again in case of race-conditions between the previous
@@ -72,16 +93,15 @@ impl Process {
             // in practice..
             //
 
-            if self.is_observable() {
-                // @try {
-                //     NSRunningApplication *application = __atomic_load_n(&process->ns_application, __ATOMIC_RELAXED);
-                //     if (application && [application observationInfo]) {
-                //         [application removeObserver:g_workspace_context forKeyPath:@"activationPolicy" context:process];
-                //     }
-                // } @catch (NSException * __unused exception) {}
-            } else {
+            if !self.is_observable() {
                 return;
             }
+            self.unobserve_activation_policy();
+            warn!(
+                "{}: {} suddenly became observable",
+                function_name!(),
+                self.name
+            );
         }
 
         //
@@ -124,12 +144,16 @@ impl Process {
             "{}: Added windows {} for {}.",
             function_name!(),
             windows
-                .into_iter()
+                .iter()
                 .map(|window| format!("{}", window.inner().id))
                 .collect::<Vec<_>>()
                 .join(", "),
             app.inner().name
         );
+
+        if let Some(active_panel) = window_manager.active_panel() {
+            active_panel.force_write().extend(windows.iter().cloned())
+        }
     }
 
     pub fn is_observable(&mut self) -> bool {
@@ -147,26 +171,91 @@ impl Process {
             .as_ref()
             .is_some_and(|app| unsafe { app.isFinishedLaunching() })
     }
+
+    pub fn observe_finished_launching(&self) {
+        self.observe("finishedLaunching");
+        self.observing_launched.store(true, Ordering::Relaxed);
+    }
+
+    pub fn unobserve_finished_launching(&self) {
+        if self.observing_launched.load(Ordering::Relaxed) {
+            self.unobserve("finishedLaunching");
+            self.observing_launched.store(false, Ordering::Relaxed);
+        }
+    }
+
+    pub fn observe_activation_policy(&self) {
+        self.observe("activationPolicy");
+        self.observing_activated.store(true, Ordering::Relaxed);
+    }
+
+    pub fn unobserve_activation_policy(&self) {
+        if self.observing_activated.load(Ordering::Relaxed) {
+            self.unobserve("activationPolicy");
+            self.observing_activated.store(false, Ordering::Relaxed);
+        }
+    }
+
+    fn observe(&self, flavor: &str) {
+        if let Some(app) = self.application.as_ref() {
+            unsafe {
+                let key_path = NSString::from_str(flavor);
+                let options = NSKeyValueObservingOptions::New | NSKeyValueObservingOptions::Initial;
+                let ptr = NonNull::from(self).as_ptr() as *mut c_void;
+                app.addObserver_forKeyPath_options_context(
+                    self.observer.deref(),
+                    key_path.as_ref(),
+                    options,
+                    ptr,
+                );
+            }
+            debug!(
+                "{}: observing {flavor} for {}",
+                function_name!(),
+                &self.name
+            );
+        }
+    }
+
+    fn unobserve(&self, flavor: &str) {
+        if let Some(app) = self.application.as_ref() {
+            unsafe {
+                let key_path = NSString::from_str(flavor);
+                let ptr = NonNull::from(self).as_ptr() as *mut c_void;
+                app.removeObserver_forKeyPath_context(
+                    self.observer.deref(),
+                    key_path.as_ref(),
+                    ptr,
+                );
+            }
+            debug!(
+                "{}: removed {flavor} observers for {}",
+                function_name!(),
+                &self.name
+            );
+        }
+    }
 }
 
 #[derive(Debug, Default)]
 pub struct ProcessManager {
-    pub processes: HashMap<ProcessSerialNumber, Process>,
+    pub processes: HashMap<ProcessSerialNumber, Pin<Box<Process>>>,
 }
 
 impl ProcessManager {
-    pub fn find_process(&mut self, psn: &ProcessSerialNumber) -> Option<&mut Process> {
+    pub fn find_process(&mut self, psn: &ProcessSerialNumber) -> Option<&mut Pin<Box<Process>>> {
         self.processes.get_mut(psn)
     }
 
-    pub fn process_add(&mut self, psn: &ProcessSerialNumber) -> Option<&mut Process> {
+    pub fn process_add(
+        &mut self,
+        psn: &ProcessSerialNumber,
+        observer: Retained<WorkspaceObserver>,
+    ) -> Option<&mut Pin<Box<Process>>> {
         if self.processes.contains_key(psn) {
-            // NOTE(koekeishiya): Some garbage applications (e.g Steam) are reported twice with the
-            // same PID and PSN for some hecking reason. It is by definition NOT possible for two
-            // processes to exist at the same time with the same PID and PSN. If we detect such a
-            // scenario we simply discard the dupe notification..
-            return None;
+            return self.find_process(psn);
         }
+
         let mut pinfo = ProcessInfo::default();
         unsafe {
             get_process_info(psn, &mut pinfo);
@@ -189,8 +278,11 @@ impl ProcessManager {
             terminated: pinfo.terminated,
             application: apps,
             policy: NSApplicationActivationPolicy::Prohibited,
+            observer,
+            observing_launched: AtomicBool::new(false),
+            observing_activated: AtomicBool::new(false),
         };
-        self.processes.insert(psn.clone(), process);
+        self.processes.insert(psn.clone(), Box::pin(process));
         self.find_process(psn)
     }
 

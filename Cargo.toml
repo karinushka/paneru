@@ -7,7 +7,7 @@ edition = "2024"
 accessibility-sys = "0.1.3"
 env_logger = "0.11.6"
 log = "0.4.25"
-objc2 = "0.6.0"
+objc2 = { version = "0.6.0", features = ["catch-all", "exception"] }
 objc2-app-kit = "0.3.0"
 objc2-core-foundation = { version = "0.3.0", features = ["CFRunLoop"] }
 objc2-core-graphics = "0.3.0"

@@ -1,5 +1,6 @@
 use accessibility_sys::kAXRoleAttribute;
 use log::{debug, error, info, trace, warn};
+use objc2::rc::Retained;
 use objc2_core_foundation::{
     CFEqual, CFNumberGetValue, CFNumberType, CFRetained, CFString, CGPoint, CGRect,
 };
@@ -12,7 +13,7 @@ use std::thread;
 use std::thread::JoinHandle;
 use stdext::function_name;
 
-use crate::platform::ProcessSerialNumber;
+use crate::platform::{ProcessSerialNumber, WorkspaceObserver};
 use crate::process::ProcessManager;
 use crate::skylight::{
     ConnID, SLSCopyAssociatedWindows, SLSFindWindowAndOwner, SLSMainConnectionID, WinID,
@@ -26,52 +27,108 @@ pub enum Event {
     Exit,
     ProcessesLoaded,
 
-    ApplicationLaunched { psn: ProcessSerialNumber },
-    ApplicationTerminated { psn: ProcessSerialNumber },
-    ApplicationFrontSwitched { psn: ProcessSerialNumber },
-    ApplicationActivated { msg: String },
+    ApplicationLaunched {
+        psn: ProcessSerialNumber,
+        observer: Retained<WorkspaceObserver>,
+    },
+
+    ApplicationTerminated {
+        psn: ProcessSerialNumber,
+    },
+    ApplicationFrontSwitched {
+        psn: ProcessSerialNumber,
+    },
+    ApplicationActivated {
+        msg: String,
+    },
     ApplicationDeactivated,
-    ApplicationVisible { msg: String },
-    ApplicationHidden { msg: String },
+    ApplicationVisible {
+        msg: String,
+    },
+    ApplicationHidden {
+        msg: String,
+    },
 
-    WindowCreated { element: CFRetained<AxuWrapperType> },
-    WindowDestroyed { window_id: Option<WinID> },
-    WindowFocused { window_id: Option<WinID> },
-    WindowMoved { window_id: Option<WinID> },
-    WindowResized { window_id: Option<WinID> },
-    WindowMinimized { window_id: Option<WinID> },
-    WindowDeminimized { window_id: Option<WinID> },
-    WindowTitleChanged { window_id: Option<WinID> },
+    WindowCreated {
+        element: CFRetained<AxuWrapperType>,
+    },
+    WindowDestroyed {
+        window_id: Option<WinID>,
+    },
+    WindowFocused {
+        window_id: Option<WinID>,
+    },
+    WindowMoved {
+        window_id: Option<WinID>,
+    },
+    WindowResized {
+        window_id: Option<WinID>,
+    },
+    WindowMinimized {
+        window_id: Option<WinID>,
+    },
+    WindowDeminimized {
+        window_id: Option<WinID>,
+    },
+    WindowTitleChanged {
+        window_id: Option<WinID>,
+    },
 
-    MouseDown { point: CGPoint },
-    MouseUp { point: CGPoint },
-    MouseDragged { point: CGPoint },
-    MouseMoved { point: CGPoint },
+    MouseDown {
+        point: CGPoint,
+    },
+    MouseUp {
+        point: CGPoint,
+    },
+    MouseDragged {
+        point: CGPoint,
+    },
+    MouseMoved {
+        point: CGPoint,
+    },
 
     SpaceCreated,
     SpaceDestroyed,
-    SpaceChanged { msg: String },
+    SpaceChanged {
+        msg: String,
+    },
 
     DisplayAdded,
     DisplayRemoved,
     DisplayMoved,
     DisplayResized,
-    DisplayChanged { msg: String },
+    DisplayChanged {
+        msg: String,
+    },
 
     MissionControlShowAllWindows,
     MissionControlShowFrontWindows,
     MissionControlShowDesktop,
     MissionControlExit,
 
-    DockDidChangePref { msg: String },
-    DockDidRestart { msg: String },
+    DockDidChangePref {
+        msg: String,
+    },
+    DockDidRestart {
+        msg: String,
+    },
 
-    MenuOpened { window_id: Option<WinID> },
-    MenuClosed { window_id: Option<WinID> },
-    MenuBarHiddenChanged { msg: String },
-    SystemWoke { msg: String },
+    MenuOpened {
+        window_id: Option<WinID>,
+    },
+    MenuClosed {
+        window_id: Option<WinID>,
+    },
+    MenuBarHiddenChanged {
+        msg: String,
+    },
+    SystemWoke {
+        msg: String,
+    },
 
-    Command { argv: Vec<String> },
+    Command {
+        argv: Vec<String>,
+    },
 
     TypeCount,
 }
@@ -134,8 +191,8 @@ impl EventHandler {
                 Event::MouseMoved { point } => self.mouse_moved(&point),
                 Event::MouseDragged { point } => self.mouse_dragged(&point),
 
-                Event::ApplicationLaunched { psn } => {
-                    if let Some(process) = self.process_manager.process_add(&psn) {
+                Event::ApplicationLaunched { psn, observer } => {
+                    if let Some(process) = self.process_manager.process_add(&psn, observer) {
                         if !self.initial_scan {
                             debug!(
                                 "{}: ApplicationLaunched: {}",

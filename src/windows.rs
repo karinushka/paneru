@@ -326,7 +326,7 @@ impl Window {
         Ok(title.to_string())
     }
 
-    fn role(&self) -> Result<String> {
+    pub fn role(&self) -> Result<String> {
         let axrole = CFString::from_static_str(kAXRoleAttribute);
         let role = get_attribute::<CFString>(&self.inner().element_ref, axrole)?;
         Ok(role.to_string())
@@ -685,7 +685,8 @@ impl WindowManager {
                     self.space_window_list_for_connection(vec![*space], None, false)
                         .unwrap_or_default()
                         .into_iter()
-                        .flat_map(|window_id| self.find_window(window_id)),
+                        .flat_map(|window_id| self.find_window(window_id))
+                        .filter(|window| window.is_eligible()),
                 )
             }
         }

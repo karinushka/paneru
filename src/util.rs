@@ -6,8 +6,10 @@ use objc2_core_foundation::{
     Type, kCFTypeArrayCallBacks,
 };
 use std::ffi::c_void;
+use std::io::{Error, ErrorKind, Result};
 use std::ops::Deref;
 use std::ptr::null_mut;
+use stdext::function_name;
 
 use crate::platform::CFStringRef;
 use crate::skylight::AXUIElementCopyAttributeValue;
@@ -72,7 +74,7 @@ impl std::fmt::Display for AxuWrapperType {
 pub fn get_attribute<T: Type>(
     element_ref: &CFRetained<AxuWrapperType>,
     name: CFRetained<CFString>,
-) -> Option<CFRetained<T>> {
+) -> Result<CFRetained<T>> {
     let mut attribute: *mut T = null_mut();
     if 0 != unsafe {
         AXUIElementCopyAttributeValue(
@@ -81,16 +83,29 @@ pub fn get_attribute<T: Type>(
             (&mut attribute as *mut *mut T) as *mut *mut CFType,
         )
     } {
-        return None;
+        return Err(Error::new(
+            ErrorKind::NotFound,
+            format!("{}: failed getting attribute {name}.", function_name!()),
+        ));
     }
-    let ptr = NonNull::new(attribute)?;
-    Some(unsafe { CFRetained::from_raw(ptr) })
+    NonNull::new(attribute)
+        .map(|ptr| unsafe { CFRetained::from_raw(ptr) })
+        .ok_or(Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "{}: nullptr while getting attribute {name}.",
+                function_name!()
+            ),
+        ))
 }
 
-pub fn get_cfdict_value<T>(dict: &CFDictionary, key: &CFString) -> Option<NonNull<T>> {
+pub fn get_cfdict_value<T>(dict: &CFDictionary, key: &CFString) -> Result<NonNull<T>> {
     let ptr =
         unsafe { CFDictionaryGetValue(dict, (key as CFStringRef) as *const c_void) as *mut T };
-    NonNull::new(ptr)
+    NonNull::new(ptr).ok_or(Error::new(
+        ErrorKind::InvalidData,
+        format!("{}: can not get data for key {key}", function_name!(),),
+    ))
 }
 
 pub fn get_array_values<T>(array: &CFArray) -> impl Iterator<Item = NonNull<T>> + use<'_, T> {

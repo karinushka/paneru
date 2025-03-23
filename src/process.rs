@@ -1,4 +1,4 @@
-use log::{debug, error, warn};
+use log::{debug, warn};
 use objc2::rc::Retained;
 use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication};
 use objc2_core_foundation::CFString;
@@ -7,6 +7,7 @@ use objc2_foundation::{
 };
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::io::{Error, ErrorKind, Result};
 use std::ops::Deref;
 use std::pin::Pin;
 use std::ptr::NonNull;
@@ -41,15 +42,17 @@ impl Drop for Process {
 }
 
 impl Process {
-    pub fn application_launched(&mut self, window_manager: &mut WindowManager) -> Option<()> {
+    pub fn application_launched(&mut self, window_manager: &mut WindowManager) -> Result<()> {
         if self.terminated {
-            warn!(
-                "{}: {} ({}) terminated during launch",
-                function_name!(),
-                self.name,
-                self.pid
-            );
-            return None;
+            return Err(Error::new(
+                ErrorKind::UnexpectedEof,
+                format!(
+                    "{}: {} ({}) terminated during launch",
+                    function_name!(),
+                    self.name,
+                    self.pid
+                ),
+            ));
         }
 
         if !self.finished_launching() {
@@ -68,7 +71,7 @@ impl Process {
             //
 
             if !self.finished_launching() {
-                return None;
+                return Ok(());
             }
             self.unobserve_finished_launching();
             warn!(
@@ -94,7 +97,7 @@ impl Process {
             //
 
             if !self.is_observable() {
-                return None;
+                return Ok(());
             }
             self.unobserve_activation_policy();
             warn!(
@@ -110,24 +113,28 @@ impl Process {
         //
 
         if let Some(app) = window_manager.find_application(self.pid) {
-            warn!(
-                "{}: App {} already exists.",
-                function_name!(),
-                app.inner().name
-            );
-            return None;
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "{}: App {} already exists.",
+                    function_name!(),
+                    app.inner().name
+                ),
+            ));
         }
         let app =
             Application::from_process(window_manager.main_cid, self, window_manager.tx.clone());
         // TODO: maybe refactor with WindowManager::start()
 
         if !app.observe() {
-            warn!(
-                "{}: failed to observe {}",
-                function_name!(),
-                app.inner().name
-            );
-            return None;
+            return Err(Error::new(
+                ErrorKind::PermissionDenied,
+                format!(
+                    "{}: failed to observe {}",
+                    function_name!(),
+                    app.inner().name
+                ),
+            ));
         }
 
         debug!(
@@ -156,12 +163,21 @@ impl Process {
         );
 
         let active_panel = window_manager.active_panel()?;
-        let index = window_manager.focused_window.and_then(|focus_id| {
-            active_panel
-                .force_read()
-                .iter()
-                .position(|window| window.inner().id == focus_id)
-        })?;
+        let index = window_manager
+            .focused_window
+            .and_then(|focus_id| {
+                active_panel
+                    .force_read()
+                    .iter()
+                    .position(|window| window.inner().id == focus_id)
+            })
+            .ok_or(Error::new(
+                ErrorKind::NotFound,
+                format!(
+                    "{}: can not find index of the current window.",
+                    function_name!()
+                ),
+            ))?;
 
         windows
             .iter()
@@ -170,7 +186,7 @@ impl Process {
             window_manager.reshuffle_around(window);
         }
 
-        Some(())
+        Ok(())
     }
 
     pub fn is_observable(&mut self) -> bool {
@@ -260,15 +276,18 @@ pub struct ProcessManager {
 }
 
 impl ProcessManager {
-    pub fn find_process(&mut self, psn: &ProcessSerialNumber) -> Option<&mut Pin<Box<Process>>> {
-        self.processes.get_mut(psn)
+    pub fn find_process(&mut self, psn: &ProcessSerialNumber) -> Result<&mut Pin<Box<Process>>> {
+        self.processes.get_mut(psn).ok_or(Error::new(
+            ErrorKind::NotFound,
+            format!("{}: Psn {:?} not found.", function_name!(), psn),
+        ))
     }
 
     pub fn process_add(
         &mut self,
         psn: &ProcessSerialNumber,
         observer: Retained<WorkspaceObserver>,
-    ) -> Option<&mut Pin<Box<Process>>> {
+    ) -> Result<&mut Pin<Box<Process>>> {
         if self.processes.contains_key(psn) {
             return self.find_process(psn);
         }
@@ -277,13 +296,15 @@ impl ProcessManager {
         unsafe {
             get_process_info(psn, &mut pinfo);
         }
-        let name = match NonNull::new(pinfo.name as *mut CFString) {
-            Some(name) => unsafe { name.as_ref() }.to_string(),
-            None => {
-                error!("{}: nullptr 'name' passed.", function_name!());
-                return None;
-            }
-        };
+        let name = NonNull::new(pinfo.name as *mut CFString).ok_or(Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "{}: Nullptr as name for process {:?}.",
+                function_name!(),
+                psn
+            ),
+        ))?;
+        let name = unsafe { name.as_ref() }.to_string();
 
         let apps =
             unsafe { NSRunningApplication::runningApplicationWithProcessIdentifier(pinfo.pid) };

@@ -13,6 +13,7 @@ use objc2_core_foundation::{
     CFRunLoopSourceInvalidate, CFString, kCFRunLoopCommonModes,
 };
 use std::ffi::c_void;
+use std::io::{Error, ErrorKind, Result};
 use std::ops::Deref;
 use std::ptr::null_mut;
 use std::sync::mpsc::Sender;
@@ -94,19 +95,33 @@ impl Application {
         self.inner.force_read()
     }
 
-    fn _main_window(&self) -> Option<WinID> {
+    fn _main_window(&self) -> Result<WinID> {
         let axmain = CFString::from_static_str(kAXMainWindowAttribute);
         let focused = get_attribute::<AxuWrapperType>(&self.inner().element_ref, axmain)?;
-        ax_window_id(focused.as_ptr())
+        ax_window_id(focused.as_ptr()).ok_or(Error::new(
+            ErrorKind::NotFound,
+            format!(
+                "{}: can not find main window for application {}.",
+                function_name!(),
+                self.inner().name
+            ),
+        ))
     }
 
-    pub fn focused_window_id(&self) -> Option<WinID> {
+    pub fn focused_window_id(&self) -> Result<WinID> {
         let axmain = CFString::from_static_str(kAXFocusedWindowAttribute);
         let focused = get_attribute::<AxuWrapperType>(&self.inner().element_ref, axmain)?;
-        ax_window_id(focused.as_ptr())
+        ax_window_id(focused.as_ptr()).ok_or(Error::new(
+            ErrorKind::NotFound,
+            format!(
+                "{}: can not find focused window for application {}.",
+                function_name!(),
+                self.inner().name
+            ),
+        ))
     }
 
-    pub fn window_list(&self) -> Option<CFRetained<CFArray>> {
+    pub fn window_list(&self) -> Result<CFRetained<CFArray>> {
         let axwindows = CFString::from_static_str(kAXWindowsAttribute);
         get_attribute::<CFArray>(&self.inner().element_ref, axwindows)
     }

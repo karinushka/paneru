@@ -1,9 +1,6 @@
-use accessibility_sys::kAXRoleAttribute;
 use log::{debug, error, info, trace, warn};
 use objc2::rc::Retained;
-use objc2_core_foundation::{
-    CFEqual, CFNumberGetValue, CFNumberType, CFRetained, CFString, CGPoint, CGRect,
-};
+use objc2_core_foundation::{CFNumberGetValue, CFNumberType, CFRetained, CGPoint, CGRect};
 use std::ffi::c_void;
 use std::io::{ErrorKind, Result};
 use std::ops::Deref;
@@ -20,7 +17,7 @@ use crate::process::ProcessManager;
 use crate::skylight::{
     ConnID, SLSCopyAssociatedWindows, SLSFindWindowAndOwner, SLSMainConnectionID, WinID,
 };
-use crate::util::{AxuWrapperType, get_array_values, get_attribute};
+use crate::util::{AxuWrapperType, get_array_values};
 use crate::windows::{Window, WindowManager};
 
 #[allow(dead_code)]
@@ -391,7 +388,9 @@ impl EventHandler {
         let focus = self
             .window_manager
             .focused_window
-            .and_then(|window_id| self.window_manager.find_window(window_id));
+            .and_then(|window_id| self.window_manager.find_window(window_id))
+            .filter(|window| window.is_eligible());
+
         let active_panel = self.window_manager.active_panel()?;
 
         let display_bounds = self.window_manager.active_display()?.bounds;
@@ -567,10 +566,7 @@ impl EventHandler {
                     continue;
                 }
 
-                let role = match get_attribute::<CFString>(
-                    &window.inner().element_ref,
-                    CFString::from_static_str(kAXRoleAttribute),
-                ) {
+                let role = match window.role() {
                     Ok(role) => role,
                     Err(err) => {
                         warn!("{}: finding role for {window_id}: {err}", function_name!(),);
@@ -581,8 +577,7 @@ impl EventHandler {
                 // bool valid = CFEqual(role, kAXSheetRole) || CFEqual(role, kAXDrawerRole);
                 let valid = ["AXSheet", "AXDrawer"]
                     .iter()
-                    .map(|string| CFString::from_static_str(string))
-                    .any(|axrole| CFEqual(Some(role.deref()), Some(axrole.deref())));
+                    .any(|axrole| axrole.eq(&role));
 
                 if valid {
                     window = child_window.unwrap().clone();

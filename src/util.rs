@@ -41,20 +41,23 @@ impl AxuWrapperType {
         NonNull::from(self).cast::<T>().as_ptr()
     }
 
-    pub fn from_ptr<T>(ptr: *mut T) -> Option<NonNull<Self>> {
-        NonNull::new(ptr).map(|ptr| ptr.cast())
+    pub fn from_ptr<T>(ptr: *mut T) -> Result<NonNull<Self>> {
+        NonNull::new(ptr).map(|ptr| ptr.cast()).ok_or(Error::new(
+            ErrorKind::InvalidInput,
+            format!("{}: nullptr passed.", function_name!()),
+        ))
     }
 
     // The pointer is already retained, so simply wrap it in the CFRetained.
-    pub fn from_retained<T>(ptr: *mut T) -> Option<CFRetained<Self>> {
+    pub fn from_retained<T>(ptr: *mut T) -> Result<CFRetained<Self>> {
         let ptr = Self::from_ptr(ptr)?;
-        Some(unsafe { CFRetained::from_raw(ptr) })
+        Ok(unsafe { CFRetained::from_raw(ptr) })
     }
 
     // The pointer is not retained, so retain it and wrap it in CFRetained.
-    pub fn retain<T>(ptr: *mut T) -> Option<CFRetained<Self>> {
+    pub fn retain<T>(ptr: *mut T) -> Result<CFRetained<Self>> {
         let ptr = Self::from_ptr(ptr)?;
-        Some(unsafe { CFRetained::retain(ptr) })
+        Ok(unsafe { CFRetained::retain(ptr) })
     }
 }
 
@@ -114,7 +117,7 @@ pub fn get_array_values<T>(array: &CFArray) -> impl Iterator<Item = NonNull<T>> 
         .flat_map(move |idx| NonNull::new(unsafe { CFArrayGetValueAtIndex(array, idx) as *mut T }))
 }
 
-pub fn create_array<T>(values: Vec<T>, cftype: CFNumberType) -> Option<CFRetained<CFArray>> {
+pub fn create_array<T>(values: Vec<T>, cftype: CFNumberType) -> Result<CFRetained<CFArray>> {
     let numbers = values
         .iter()
         .flat_map(|value: &T| unsafe {
@@ -135,4 +138,8 @@ pub fn create_array<T>(values: Vec<T>, cftype: CFNumberType) -> Option<CFRetaine
             &kCFTypeArrayCallBacks,
         )
     }
+    .ok_or(Error::new(
+        ErrorKind::InvalidData,
+        format!("{}: can not create an array.", function_name!()),
+    ))
 }

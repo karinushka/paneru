@@ -98,27 +98,31 @@ impl Application {
     fn _main_window(&self) -> Result<WinID> {
         let axmain = CFString::from_static_str(kAXMainWindowAttribute);
         let focused = get_attribute::<AxuWrapperType>(&self.inner().element_ref, axmain)?;
-        ax_window_id(focused.as_ptr()).ok_or(Error::new(
-            ErrorKind::NotFound,
-            format!(
-                "{}: can not find main window for application {}.",
-                function_name!(),
-                self.inner().name
-            ),
-        ))
+        ax_window_id(focused.as_ptr()).map_err(|err| {
+            Error::new(
+                ErrorKind::NotFound,
+                format!(
+                    "{}: can not find main window for application {}: {err}.",
+                    function_name!(),
+                    self.inner().name
+                ),
+            )
+        })
     }
 
     pub fn focused_window_id(&self) -> Result<WinID> {
         let axmain = CFString::from_static_str(kAXFocusedWindowAttribute);
         let focused = get_attribute::<AxuWrapperType>(&self.inner().element_ref, axmain)?;
-        ax_window_id(focused.as_ptr()).ok_or(Error::new(
-            ErrorKind::NotFound,
-            format!(
-                "{}: can not find focused window for application {}.",
-                function_name!(),
-                self.inner().name
-            ),
-        ))
+        ax_window_id(focused.as_ptr()).map_err(|err| {
+            Error::new(
+                ErrorKind::NotFound,
+                format!(
+                    "{}: can not find focused window for application {}: {err}.",
+                    function_name!(),
+                    self.inner().name
+                ),
+            )
+        })
     }
 
     pub fn window_list(&self) -> Result<CFRetained<CFArray>> {
@@ -126,7 +130,7 @@ impl Application {
         get_attribute::<CFArray>(&self.inner().element_ref, axwindows)
     }
 
-    pub fn observe(&self) -> bool {
+    pub fn observe(&self) -> Result<bool> {
         let pid = self.inner().pid;
         let element = self.inner().element_ref.clone();
         self.inner.force_write().handler.observe(pid, element)
@@ -251,68 +255,70 @@ impl ApplicationHandler {
             });
     }
 
-    fn observe(&mut self, pid: Pid, element: CFRetained<AxuWrapperType>) -> bool {
-        let observer_ref = unsafe {
+    fn observe(&mut self, pid: Pid, element: CFRetained<AxuWrapperType>) -> Result<bool> {
+        let observer = unsafe {
             let mut observer_ref: AXObserverRef = null_mut();
             if kAXErrorSuccess == AXObserverCreate(pid, Self::callback, &mut observer_ref) {
-                AxuWrapperType::from_retained(observer_ref as AXUIElementRef)
+                AxuWrapperType::from_retained(observer_ref)?
             } else {
-                None
+                return Err(Error::new(
+                    ErrorKind::PermissionDenied,
+                    format!("{}: error creating observer.", function_name!()),
+                ));
             }
         };
-        if let Some(observer_ref) = observer_ref {
-            let mut ax_retry = false;
-            let observing = AX_NOTIFICATIONS
-                .iter()
-                .map(|name| unsafe {
-                    debug!(
-                        "{}: {name:?} {:?}",
-                        function_name!(),
-                        observer_ref.as_ptr::<AXObserverRef>()
-                    );
-                    let notification = CFString::from_static_str(name);
-                    match AXObserverAddNotification(
-                        observer_ref.deref().as_ptr(),
-                        element.as_ptr(),
-                        notification.deref(),
-                        self as *const Self as *mut c_void,
-                    ) {
-                        accessibility_sys::kAXErrorSuccess
-                        | accessibility_sys::kAXErrorNotificationAlreadyRegistered => true,
-                        accessibility_sys::kAXErrorCannotComplete => {
-                            ax_retry = true;
-                            false
-                        }
-                        result => {
-                            error!(
-                                "{}: error registering {name} for application {pid}: {result}",
-                                function_name!()
-                            );
-                            false
-                        }
-                    }
-                })
-                .collect();
-            unsafe {
-                let main_loop = CFRunLoopGetMain().expect("Unable to get the main run loop.");
-                let run_loop_source = CFRetained::from_raw(
-                    NonNull::new(AXObserverGetRunLoopSource(observer_ref.deref().as_ptr()))
-                        .expect("Can not get AXObserver run loop source.")
-                        .cast(),
-                );
-                debug!(
-                    "{}: adding runloop source: {run_loop_source:?} {observer_ref:?}",
-                    function_name!()
-                );
-                CFRunLoopAddSource(&main_loop, Some(&run_loop_source), kCFRunLoopCommonModes);
 
-                self.ax_retry = ax_retry;
-                self.observing = observing;
-                self.element_ref = Some(element);
-                self.observer_ref = Some(observer_ref);
-            };
-        }
-        self.observing.iter().all(|ok| *ok)
+        let mut ax_retry = false;
+        let observing = AX_NOTIFICATIONS
+            .iter()
+            .map(|name| unsafe {
+                debug!(
+                    "{}: {name:?} {:?}",
+                    function_name!(),
+                    observer.as_ptr::<AXObserverRef>()
+                );
+                let notification = CFString::from_static_str(name);
+                match AXObserverAddNotification(
+                    observer.deref().as_ptr(),
+                    element.as_ptr(),
+                    notification.deref(),
+                    self as *const Self as *mut c_void,
+                ) {
+                    accessibility_sys::kAXErrorSuccess
+                    | accessibility_sys::kAXErrorNotificationAlreadyRegistered => true,
+                    accessibility_sys::kAXErrorCannotComplete => {
+                        ax_retry = true;
+                        false
+                    }
+                    result => {
+                        error!(
+                            "{}: error registering {name} for application {pid}: {result}",
+                            function_name!()
+                        );
+                        false
+                    }
+                }
+            })
+            .collect();
+        unsafe {
+            let main_loop = CFRunLoopGetMain().expect("Unable to get the main run loop.");
+            let run_loop_source = CFRetained::from_raw(
+                NonNull::new(AXObserverGetRunLoopSource(observer.deref().as_ptr()))
+                    .expect("Can not get AXObserver run loop source.")
+                    .cast(),
+            );
+            debug!(
+                "{}: adding runloop source: {run_loop_source:?} {observer:?}",
+                function_name!()
+            );
+            CFRunLoopAddSource(&main_loop, Some(&run_loop_source), kCFRunLoopCommonModes);
+
+            self.ax_retry = ax_retry;
+            self.observing = observing;
+            self.element_ref = Some(element);
+            self.observer_ref = Some(observer);
+        };
+        Ok(self.observing.iter().all(|ok| *ok))
     }
 
     fn unobserve(&mut self) {
@@ -373,27 +379,32 @@ impl ApplicationHandler {
         notification: &str,
         window_id: Option<WinID>,
     ) {
+        let get_window_id = |element| {
+            ax_window_id(element)
+                .inspect_err(|err| warn!("{}: invalid element: {err}.", function_name!()))
+                .ok()
+        };
         let event = match notification {
             accessibility_sys::kAXCreatedNotification => Event::WindowCreated {
                 element: AxuWrapperType::retain(element).unwrap(),
             },
             accessibility_sys::kAXFocusedWindowChangedNotification => Event::WindowFocused {
-                window_id: ax_window_id(element),
+                window_id: get_window_id(element),
             },
             accessibility_sys::kAXWindowMovedNotification => Event::WindowMoved {
-                window_id: ax_window_id(element),
+                window_id: get_window_id(element),
             },
             accessibility_sys::kAXWindowResizedNotification => Event::WindowResized {
-                window_id: ax_window_id(element),
+                window_id: get_window_id(element),
             },
             accessibility_sys::kAXTitleChangedNotification => Event::WindowTitleChanged {
-                window_id: ax_window_id(element),
+                window_id: get_window_id(element),
             },
             accessibility_sys::kAXMenuOpenedNotification => Event::MenuOpened {
-                window_id: ax_window_id(element),
+                window_id: get_window_id(element),
             },
             accessibility_sys::kAXMenuClosedNotification => Event::MenuClosed {
-                window_id: ax_window_id(element),
+                window_id: get_window_id(element),
             },
             accessibility_sys::kAXWindowMiniaturizedNotification => {
                 Event::WindowMinimized { window_id }

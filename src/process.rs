@@ -126,11 +126,11 @@ impl Process {
             Application::from_process(window_manager.main_cid, self, window_manager.tx.clone());
         // TODO: maybe refactor with WindowManager::start()
 
-        if !app.observe() {
+        if !app.observe()? {
             return Err(Error::new(
                 ErrorKind::PermissionDenied,
                 format!(
-                    "{}: failed to observe {}",
+                    "{}: failed to register all observers {}",
                     function_name!(),
                     app.inner().name
                 ),

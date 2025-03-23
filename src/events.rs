@@ -5,6 +5,7 @@ use objc2_core_foundation::{
     CFEqual, CFNumberGetValue, CFNumberType, CFRetained, CFString, CGPoint, CGRect,
 };
 use std::ffi::c_void;
+use std::io::{ErrorKind, Result};
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -172,90 +173,112 @@ impl EventHandler {
             if e.is_err() {
                 break;
             }
-            let e = e.unwrap();
-            trace!("{}: Event {e:?}", function_name!());
-            match e {
-                Event::Exit => break,
-                Event::ProcessesLoaded => {
-                    info!(
-                        "{}: === Processes loaded - loading windows ===",
-                        function_name!()
-                    );
-                    self.initial_scan = false;
-                    self.window_manager.start(&mut self.process_manager);
-                }
-                Event::MouseDown { point } => {
-                    self.mouse_down(&point);
-                }
+            let event = e.unwrap();
+            trace!("{}: Event {event:?}", function_name!());
 
-                Event::MouseUp { point } => self.mouse_up(&point),
-                Event::MouseMoved { point } => self.mouse_moved(&point),
-                Event::MouseDragged { point } => self.mouse_dragged(&point),
-
-                Event::ApplicationLaunched { psn, observer } => {
-                    if let Some(process) = self.process_manager.process_add(&psn, observer) {
-                        if !self.initial_scan {
-                            debug!(
-                                "{}: ApplicationLaunched: {}",
-                                function_name!(),
-                                process.name
-                            );
-                            process.application_launched(&mut self.window_manager);
-                        }
-                    }
-                }
-                Event::ApplicationTerminated { psn } => {
-                    self.process_manager.process_delete(&psn);
-                }
-                Event::ApplicationFrontSwitched { psn } => {
-                    if let Some(process) = self.process_manager.find_process(&psn) {
-                        self.window_manager.front_switched(process);
-                    }
-                }
-
-                Event::WindowCreated { element } => self.window_manager.window_created(element),
-                Event::WindowDestroyed { window_id } => {
-                    if let Some(window_id) = window_id {
-                        self.window_manager.window_destroyed(window_id)
-                    }
-                }
-                Event::WindowFocused { window_id } => {
-                    if let Some(window_id) = window_id {
-                        self.window_focused(window_id)
-                    }
-                }
-                Event::WindowMoved { window_id } => {
-                    if let Some(window_id) = window_id {
-                        self.window_manager.window_moved(window_id)
-                    }
-                }
-                Event::WindowResized { window_id } => {
-                    if let Some(window_id) = window_id {
-                        self.window_manager.window_resized(window_id)
-                    }
-                }
-                Event::WindowTitleChanged { window_id } => {
-                    trace!("{}: WindowTitleChanged: {window_id:?}", function_name!());
-                }
-
-                Event::MissionControlShowAllWindows
-                | Event::MissionControlShowFrontWindows
-                | Event::MissionControlShowDesktop => {
-                    self.window_manager.mission_control_is_active = true;
-                }
-                Event::MissionControlExit => {
-                    self.window_manager.mission_control_is_active = false;
-                }
-
-                Event::Command { argv } => self.command(argv),
-
-                Event::MenuClosed { window_id } => {
-                    trace!("{}: MenuClosed event: {window_id:?}", function_name!())
-                }
-
-                _ => info!("{}: Unhandled event {e:?}", function_name!()),
+            if matches!(event, Event::Exit) {
+                break;
             }
+
+            _ = self
+                .process_event(event)
+                .inspect_err(|err| match err.kind() {
+                    // TODO: for now we'll treat the Other return values as non-error ones.
+                    // This can be adjusted later with a custom error space.
+                    ErrorKind::Other => trace!("{err}"),
+                    kind => error!("ApplicationLaunched: {kind} {err}"),
+                });
         }
+    }
+
+    fn process_event(&mut self, event: Event) -> Result<()> {
+        match event {
+            Event::Exit => return Ok(()),
+            Event::ProcessesLoaded => {
+                info!(
+                    "{}: === Processes loaded - loading windows ===",
+                    function_name!()
+                );
+                self.initial_scan = false;
+                self.window_manager.start(&mut self.process_manager);
+            }
+            Event::MouseDown { point } => {
+                self.mouse_down(&point);
+            }
+
+            Event::MouseUp { point } => self.mouse_up(&point),
+            Event::MouseMoved { point } => self.mouse_moved(&point),
+            Event::MouseDragged { point } => self.mouse_dragged(&point),
+
+            // TODO: remove this handler. Used to test delivery of events.
+            Event::ApplicationActivated { msg } => {
+                trace!("Application activated: {msg}");
+            }
+
+            Event::ApplicationLaunched { psn, observer } => {
+                let process = self.process_manager.process_add(&psn, observer)?;
+                if !self.initial_scan {
+                    debug!(
+                        "{}: ApplicationLaunched: {}",
+                        function_name!(),
+                        process.name
+                    );
+                    return process.application_launched(&mut self.window_manager);
+                }
+            }
+            Event::ApplicationTerminated { psn } => {
+                self.process_manager.process_delete(&psn);
+            }
+            Event::ApplicationFrontSwitched { psn } => {
+                let process = self.process_manager.find_process(&psn)?;
+                self.window_manager.front_switched(process);
+            }
+
+            Event::WindowCreated { element } => {
+                return self.window_manager.window_created(element);
+            }
+            Event::WindowDestroyed { window_id } => {
+                if let Some(window_id) = window_id {
+                    self.window_manager.window_destroyed(window_id)
+                }
+            }
+            Event::WindowFocused { window_id } => {
+                if let Some(window_id) = window_id {
+                    self.window_focused(window_id)
+                }
+            }
+            Event::WindowMoved { window_id } => {
+                if let Some(window_id) = window_id {
+                    self.window_manager.window_moved(window_id)
+                }
+            }
+            Event::WindowResized { window_id } => {
+                if let Some(window_id) = window_id {
+                    self.window_manager.window_resized(window_id)
+                }
+            }
+            Event::WindowTitleChanged { window_id } => {
+                trace!("{}: WindowTitleChanged: {window_id:?}", function_name!());
+            }
+
+            Event::MissionControlShowAllWindows
+            | Event::MissionControlShowFrontWindows
+            | Event::MissionControlShowDesktop => {
+                self.window_manager.mission_control_is_active = true;
+            }
+            Event::MissionControlExit => {
+                self.window_manager.mission_control_is_active = false;
+            }
+
+            Event::Command { argv } => self.command(argv),
+
+            Event::MenuClosed { window_id } => {
+                trace!("{}: MenuClosed event: {window_id:?}", function_name!())
+            }
+
+            _ => info!("{}: Unhandled event {event:?}", function_name!()),
+        }
+        Ok(())
     }
 
     fn window_focused(&mut self, window_id: WinID) {
@@ -363,39 +386,27 @@ impl EventHandler {
         })
     }
 
-    fn command_windows(&mut self, argv: &[String]) {
+    fn command_windows(&mut self, argv: &[String]) -> Result<()> {
         let empty = "".to_string();
         let focus = self
             .window_manager
             .focused_window
             .and_then(|window_id| self.window_manager.find_window(window_id));
-        let active_panel = self.window_manager.active_panel();
+        let active_panel = self.window_manager.active_panel()?;
 
-        let display_bounds = match self.window_manager.active_display() {
-            Some(display) => display.bounds,
-            None => {
-                error!("{}: unable to get active display bounds.", function_name!());
-                return;
-            }
-        };
+        let display_bounds = self.window_manager.active_display()?.bounds;
 
         let window = match argv.first().unwrap_or(&empty).as_ref() {
             "focus" => {
-                if active_panel.is_none() {
-                    info!("{}: No managed windows.", function_name!());
-                    return;
-                }
-                active_panel.and_then(|panel| {
-                    let index = EventHandler::command_move_focus(
-                        &argv[1..],
-                        focus.as_ref(),
-                        panel.force_write().as_slice(),
-                    );
-                    index.and_then(|index| panel.force_read().get(index).cloned())
-                })
+                let index = EventHandler::command_move_focus(
+                    &argv[1..],
+                    focus.as_ref(),
+                    active_panel.force_write().as_slice(),
+                );
+                index.and_then(|index| active_panel.force_read().get(index).cloned())
             }
 
-            "swap" => active_panel.and_then(|active_panel| {
+            "swap" => {
                 let mut panel = active_panel.force_write();
                 EventHandler::command_swap_focus(
                     &argv[1..],
@@ -404,71 +415,61 @@ impl EventHandler {
                     &display_bounds,
                 )
                 .map(|new_index| panel[new_index].clone())
+            }
+
+            "center" => focus.inspect(|window| {
+                let frame = window.inner().frame;
+                window.reposition(
+                    (display_bounds.size.width - frame.size.width) / 2.0,
+                    frame.origin.y,
+                );
+                window.center_mouse(self.main_cid);
             }),
 
-            "center" => focus
-                .as_ref()
-                .inspect(|window| {
+            "resize" => focus.inspect(|window| {
+                window.inner.force_write().size_ratios.rotate_left(1);
+                let width_ratio = *window.inner().size_ratios.first().unwrap();
+                // let frame = window.inner().frame;
+                // window.reposition((SCREEN_WIDTH - width) / 2.0, frame.origin.y);
+                let frame = window.inner().frame;
+                window.resize(width_ratio * display_bounds.size.width, frame.size.height);
+            }),
+
+            "manage" => focus.inspect(|window| {
+                let window_id = window.inner().id;
+                let index = active_panel
+                    .force_read()
+                    .iter()
+                    .position(|item| item.inner().id == window_id);
+
+                if let Some(index) = index {
+                    // Window already managed, remove it from the managed stack.
+                    active_panel.force_write().remove(index);
+                } else {
+                    // Add newly managed window to the stack.
                     let frame = window.inner().frame;
-                    window.reposition(
-                        (display_bounds.size.width - frame.size.width) / 2.0,
-                        frame.origin.y,
-                    );
-                    window.center_mouse(self.main_cid);
-                })
-                .cloned(),
+                    window.reposition(frame.origin.x, 0.0);
+                    window.resize(frame.size.width, display_bounds.size.height);
+                    active_panel.force_write().push(window.clone());
+                }
+            }),
 
-            "resize" => focus
-                .as_ref()
-                .inspect(|window| {
-                    window.inner.force_write().size_ratios.rotate_left(1);
-                    let width_ratio = *window.inner().size_ratios.first().unwrap();
-                    // let frame = window.inner().frame;
-                    // window.reposition((SCREEN_WIDTH - width) / 2.0, frame.origin.y);
-                    let frame = window.inner().frame;
-                    window.resize(width_ratio * display_bounds.size.width, frame.size.height);
-                })
-                .cloned(),
-
-            "manage" => {
-                focus.and_then(|window| {
-                    let window_id = window.inner().id;
-                    if let Some(index) = active_panel
-                        .as_ref()
-                        .and_then(|active_panel| active_panel.read().ok())
-                        .and_then(|windows| {
-                            windows.iter().position(|item| item.inner().id == window_id)
-                        })
-                    {
-                        // Window already managed, remove it from the managed stack.
-                        if let Some(panel) = active_panel {
-                            panel.force_write().remove(index);
-                        }
-                        None
-                    } else {
-                        // Add newly managed window to the stack.
-                        let frame = window.inner().frame;
-                        window.reposition(frame.origin.x, 0.0);
-                        window.resize(frame.size.width, display_bounds.size.height);
-
-                        if let Some(panel) = active_panel {
-                            panel.force_write().push(window.clone());
-                        }
-                        Some(window)
-                    }
-                })
-            }
             _ => None,
         };
         if let Some(window) = window {
-            self.window_manager.reshuffle_around(&window);
+            self.window_manager.reshuffle_around(&window)
         }
+        Ok(())
     }
 
     fn command(&mut self, argv: Vec<String>) {
         if let Some(first) = argv.first() {
             match first.as_ref() {
-                "window" => self.command_windows(&argv[1..]),
+                "window" => {
+                    _ = self
+                        .command_windows(&argv[1..])
+                        .inspect_err(|err| warn!("{}: {err}", function_name!()))
+                }
                 "quit" => self.quit.store(true, std::sync::atomic::Ordering::Relaxed),
                 _ => warn!("{}: Unhandled command: {argv:?}", function_name!()),
             }
@@ -566,19 +567,16 @@ impl EventHandler {
                     continue;
                 }
 
-                let role = get_attribute::<CFString>(
+                let role = match get_attribute::<CFString>(
                     &window.inner().element_ref,
                     CFString::from_static_str(kAXRoleAttribute),
-                );
-                if role.is_none() {
-                    warn!(
-                        "{}: Unable to find role for window {}.",
-                        function_name!(),
-                        window_id
-                    );
-                    continue;
-                }
-                let role = role.unwrap();
+                ) {
+                    Ok(role) => role,
+                    Err(err) => {
+                        warn!("{}: finding role for {window_id}: {err}", function_name!(),);
+                        continue;
+                    }
+                };
 
                 // bool valid = CFEqual(role, kAXSheetRole) || CFEqual(role, kAXDrawerRole);
                 let valid = ["AXSheet", "AXDrawer"]

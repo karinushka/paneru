@@ -19,6 +19,7 @@ use objc2_core_graphics::{
 };
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::io::{Error, ErrorKind, Result};
 use std::ops::Deref;
 use std::ptr::null_mut;
 use std::slice::from_raw_parts_mut;
@@ -65,25 +66,43 @@ impl Display {
         Self { id, spaces, bounds }
     }
 
-    fn uuid_from_id(id: CGDirectDisplayID) -> Option<CFRetained<CFString>> {
+    fn uuid_from_id(id: CGDirectDisplayID) -> Result<CFRetained<CFString>> {
         unsafe {
-            let uuid = CFRetained::from_raw(NonNull::new(CGDisplayCreateUUIDFromDisplayID(id))?);
-            CFUUIDCreateString(None, Some(&uuid))
+            let uuid = NonNull::new(CGDisplayCreateUUIDFromDisplayID(id))
+                .map(|ptr| CFRetained::from_raw(ptr))
+                .ok_or(Error::new(
+                    ErrorKind::InvalidData,
+                    format!("{}: can not create uuid from {id}.", function_name!()),
+                ))?;
+            CFUUIDCreateString(None, Some(&uuid)).ok_or(Error::new(
+                ErrorKind::InvalidData,
+                format!("{}: can not create string from {uuid:?}.", function_name!()),
+            ))
         }
     }
 
-    fn id_from_uuid(uuid: CFRetained<CFString>) -> Option<u32> {
-        Some(unsafe {
-            let id = CFUUIDCreateFromString(None, Some(&uuid))?;
-            CGDisplayGetDisplayIDFromUUID(id.deref())
-        })
+    fn id_from_uuid(uuid: CFRetained<CFString>) -> Result<u32> {
+        unsafe {
+            let id = CFUUIDCreateFromString(None, Some(&uuid)).ok_or(Error::new(
+                ErrorKind::NotFound,
+                format!("{}: can not convert from {uuid}.", function_name!()),
+            ))?;
+            Ok(CGDisplayGetDisplayIDFromUUID(id.deref()))
+        }
     }
 
-    fn display_space_list(uuid: &CFString, cid: ConnID) -> Option<Vec<u64>> {
+    fn display_space_list(uuid: &CFString, cid: ConnID) -> Result<Vec<u64>> {
         // let uuid = DisplayManager::display_uuid(display)?;
         unsafe {
             let display_spaces = NonNull::new(SLSCopyManagedDisplaySpaces(cid))
-                .map(|ptr| CFRetained::from_raw(ptr))?;
+                .map(|ptr| CFRetained::from_raw(ptr))
+                .ok_or(Error::new(
+                    ErrorKind::PermissionDenied,
+                    format!(
+                        "{}: can not copy managed display spaces for {cid}.",
+                        function_name!()
+                    ),
+                ))?;
 
             for display in get_array_values(display_spaces.as_ref()) {
                 trace!("{}: display {:?}", function_name!(), display.as_ref());
@@ -128,10 +147,13 @@ impl Display {
                         id
                     })
                     .collect::<Vec<u64>>();
-                return Some(space_list);
+                return Ok(space_list);
             }
         }
-        None
+        Err(Error::new(
+            ErrorKind::NotFound,
+            format!("{}: could not get any displays for {cid}", function_name!(),),
+        ))
     }
 
     fn active_displays(cid: ConnID) -> Vec<Self> {
@@ -164,19 +186,26 @@ impl Display {
             .collect()
     }
 
-    fn active_display_uuid(cid: ConnID) -> Option<CFRetained<CFString>> {
+    fn active_display_uuid(cid: ConnID) -> Result<CFRetained<CFString>> {
         unsafe {
             let ptr = SLSCopyActiveMenuBarDisplayIdentifier(cid);
-            Some(CFRetained::from_raw(NonNull::new(ptr as *mut CFString)?))
+            let ptr = NonNull::new(ptr as *mut CFString).ok_or(Error::new(
+                ErrorKind::NotFound,
+                format!(
+                    "{}: can not find active display for connection {cid}.",
+                    function_name!(),
+                ),
+            ))?;
+            Ok(CFRetained::from_raw(ptr))
         }
     }
 
-    fn active_display_id(cid: ConnID) -> Option<u32> {
+    fn active_display_id(cid: ConnID) -> Result<u32> {
         let uuid = Display::active_display_uuid(cid)?;
         Display::id_from_uuid(uuid)
     }
 
-    fn active_display_space(&self, cid: ConnID) -> Option<u64> {
+    fn active_display_space(&self, cid: ConnID) -> Result<u64> {
         Display::uuid_from_id(self.id)
             .map(|uuid| unsafe { SLSManagedDisplayGetCurrentSpace(cid, uuid.deref()) })
     }
@@ -291,34 +320,34 @@ impl Window {
         None
     }
 
-    fn title(&self) -> Option<String> {
+    fn title(&self) -> Result<String> {
         let axtitle = CFString::from_static_str(kAXTitleAttribute);
         let title = get_attribute::<CFString>(&self.inner().element_ref, axtitle)?;
-        Some(title.to_string())
+        Ok(title.to_string())
     }
 
-    fn role(&self) -> Option<String> {
+    fn role(&self) -> Result<String> {
         let axrole = CFString::from_static_str(kAXRoleAttribute);
         let role = get_attribute::<CFString>(&self.inner().element_ref, axrole)?;
-        Some(role.to_string())
+        Ok(role.to_string())
     }
 
-    fn subrole(&self) -> Option<String> {
+    fn subrole(&self) -> Result<String> {
         let axrole = CFString::from_static_str(kAXSubroleAttribute);
         let role = get_attribute::<CFString>(&self.inner().element_ref, axrole)?;
-        Some(role.to_string())
+        Ok(role.to_string())
     }
 
     fn is_unknown(&self) -> bool {
         self.subrole()
-            .is_some_and(|subrole| subrole.eq(kAXUnknownSubrole))
+            .is_ok_and(|subrole| subrole.eq(kAXUnknownSubrole))
     }
 
     fn is_minimized(&self) -> bool {
         let axminimized = CFString::from_static_str(kAXMinimizedAttribute);
         get_attribute::<CFBoolean>(&self.inner().element_ref, axminimized)
             .map(|minimized| unsafe { CFBooleanGetValue(minimized.deref()) })
-            .is_some_and(|minimized| minimized || self.inner().minimized)
+            .is_ok_and(|minimized| minimized || self.inner().minimized)
     }
 
     fn is_root(&self) -> bool {
@@ -326,12 +355,12 @@ impl Window {
         let cftype = inner.element_ref.as_ref();
         let axparent = CFString::from_static_str(kAXParentAttribute);
         get_attribute::<CFType>(&self.inner().element_ref, axparent)
-            .is_some_and(|parent| !CFEqual(Some(parent.deref()), Some(cftype)))
+            .is_ok_and(|parent| !CFEqual(Some(parent.deref()), Some(cftype)))
     }
 
     fn is_real(&self) -> bool {
-        let role = self.role().is_some_and(|role| role.eq(kAXWindowRole));
-        role && self.subrole().is_some_and(|subrole| {
+        let role = self.role().is_ok_and(|role| role.eq(kAXWindowRole));
+        role && self.subrole().is_ok_and(|subrole| {
             [
                 kAXStandardWindowSubrole,
                 kAXFloatingWindowSubrole,
@@ -509,7 +538,7 @@ impl Window {
         app.inner().handler.window_observe(self)
     }
 
-    fn display_uuid(&self, cid: ConnID) -> Option<Retained<CFString>> {
+    fn display_uuid(&self, cid: ConnID) -> Result<Retained<CFString>> {
         let window_id = self.inner().id;
         let uuid = unsafe {
             NonNull::new(SLSCopyManagedDisplayForWindow(cid, window_id) as *mut CFString)
@@ -523,9 +552,16 @@ impl Window {
                     .and_then(|uuid| Retained::from_raw(uuid.as_ptr()))
             }
         })
+        .ok_or(Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "{}: can not get display uuid for window {window_id}.",
+                function_name!()
+            ),
+        ))
     }
 
-    fn display_id(&self, cid: ConnID) -> Option<u32> {
+    fn display_id(&self, cid: ConnID) -> Result<u32> {
         let uuid = self.display_uuid(cid);
         uuid.and_then(|uuid| Display::id_from_uuid(uuid.into()))
     }
@@ -535,7 +571,7 @@ impl Window {
         let bounds = window_manager
             .active_display()
             .map(|display| display.bounds);
-        bounds.is_some_and(|bounds| {
+        bounds.is_ok_and(|bounds| {
             frame.origin.x > 0.0 && frame.origin.x < bounds.size.width - frame.size.width
         })
     }
@@ -563,7 +599,7 @@ impl Window {
         );
         let display_id = self.display_id(cid);
         let bounds = display_id.map(|display_id| unsafe { CGDisplayBounds(display_id) });
-        if bounds.is_some_and(|bounds| unsafe { !CGRectContainsPoint(bounds, center) }) {
+        if bounds.is_ok_and(|bounds| unsafe { !CGRectContainsPoint(bounds, center) }) {
             return;
         }
         unsafe { CGWarpMouseCursorPosition(center) };
@@ -654,7 +690,7 @@ impl WindowManager {
             }
         }
 
-        if let Some(window) = self.focused_window() {
+        if let Ok(window) = self.focused_window() {
             self.last_window = Some(window.inner().id);
             self.focused_window = Some(window.inner().id);
             self.focused_psn = window.inner().app.inner().psn.clone();
@@ -826,12 +862,9 @@ impl WindowManager {
                 //     }
                 if matched {
                     debug!("{}: Found window {window_id:?}", function_name!());
-                    self.create_and_add_window(
-                        app,
-                        element_ref.unwrap(),
-                        window_id.unwrap(),
-                        false,
-                    );
+                    _ = self
+                        .create_and_add_window(app, element_ref.unwrap(), window_id.unwrap(), false)
+                        .inspect_err(|err| warn!("{}: {err}", function_name!()));
                 }
             }
         }
@@ -866,7 +899,7 @@ impl WindowManager {
             .unwrap_or(0);
 
         let mut empty_count = 0;
-        if let Some(window_list) = window_list {
+        if let Ok(window_list) = window_list {
             for window_ref in get_array_values(window_list.deref()) {
                 let window_id = ax_window_id(window_ref.as_ptr());
 
@@ -894,7 +927,9 @@ impl WindowManager {
                         function_name!(),
                         app.inner().name
                     );
-                    self.create_and_add_window(app, window_ref, window_id, false);
+                    _ = self
+                        .create_and_add_window(app, window_ref, window_id, false)
+                        .inspect_err(|err| debug!("{}: {err}", function_name!()));
                 }
             }
         }
@@ -928,22 +963,35 @@ impl WindowManager {
         result
     }
 
-    pub fn add_application_windows(&mut self, app: &Application) -> Option<Vec<Window>> {
+    pub fn add_application_windows(&mut self, app: &Application) -> Result<Vec<Window>> {
         // TODO: maybe refactor this with add_existing_application_windows()
         let array = app.window_list()?;
-        let windows = get_array_values::<accessibility_sys::__AXUIElement>(array.deref())
-            .flat_map(|element_ref| {
-                AxuWrapperType::retain(element_ref.as_ptr()).map(|element| {
-                    ax_window_id(element.as_ptr()).and_then(|window_id| {
-                        self.find_window(window_id).map_or_else(
-                            || self.create_and_add_window(app, element, window_id, true),
-                            |_| None,
-                        )
-                    })
+        let create_window = |element_ref: NonNull<_>| {
+            let element = AxuWrapperType::retain(element_ref.as_ptr());
+            element.map(|element| {
+                let window_id = ax_window_id(element.as_ptr());
+                window_id.and_then(|window_id| {
+                    self.find_window(window_id).map_or_else(
+                        // Window does not exist, create it.
+                        || {
+                            self.create_and_add_window(app, element, window_id, true)
+                                .inspect_err(|err| {
+                                    warn!("{}: error adding window: {err}.", function_name!());
+                                })
+                                .ok()
+                        },
+                        // Window already exists, skip it.
+                        |_| None,
+                    )
                 })
             })
-            .collect();
-        windows
+        };
+        let windows: Vec<Window> =
+            get_array_values::<accessibility_sys::__AXUIElement>(array.deref())
+                .flat_map(create_window)
+                .flatten()
+                .collect();
+        Ok(windows)
     }
 
     fn create_and_add_window(
@@ -952,8 +1000,20 @@ impl WindowManager {
         window_ref: CFRetained<AxuWrapperType>,
         window_id: WinID,
         _one_shot_rules: bool, // TODO: fix
-    ) -> Option<Window> {
+    ) -> Result<Window> {
         let window = Window::new(app, window_ref, window_id);
+        if window.is_unknown() {
+            return Err(Error::new(
+                ErrorKind::Other,
+                format!(
+                    "{}: Ignoring AXUnknown window {} {}",
+                    function_name!(),
+                    app.inner().name,
+                    window.inner().id
+                ),
+            ));
+        }
+
         let title = window.title()?;
         let role = window.role()?;
         let subrole = window.subrole()?;
@@ -964,28 +1024,20 @@ impl WindowManager {
             app.inner().name,
         );
 
-        if window.is_unknown() {
-            warn!(
-                "{}: Ignoring AXUnknown window {} {}",
-                function_name!(),
-                app.inner().name,
-                window.inner().id
-            );
-            return None;
-        }
-
         //
         // NOTE(koekeishiya): Attempt to track **all** windows.
         //
 
         if !window.observe(app) {
-            warn!(
-                "{}: Could not observe window {} of {}",
-                function_name!(),
-                window.inner().id,
-                app.inner().name
-            );
-            return None;
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                format!(
+                    "{}: Could not observe window {} of {}",
+                    function_name!(),
+                    window.inner().id,
+                    app.inner().name
+                ),
+            ));
         }
 
         // if (window_manager_find_lost_focused_event(wm, window->id)) {
@@ -994,23 +1046,35 @@ impl WindowManager {
         // }
 
         self.windows.insert(window_id, window.clone());
-        Some(window)
+        Ok(window)
     }
 
-    fn focused_application(&self) -> Option<Application> {
+    fn focused_application(&self) -> Result<Application> {
         let mut psn = ProcessSerialNumber::default();
         let mut pinfo = ProcessInfo::default();
         unsafe {
             _SLPSGetFrontProcess(&mut psn);
             get_process_info(&psn, &mut pinfo);
         }
-        self.find_application(pinfo.pid)
+        self.find_application(pinfo.pid).ok_or(Error::new(
+            ErrorKind::NotFound,
+            format!(
+                "{}: can not find currently focused application.",
+                function_name!()
+            ),
+        ))
     }
 
-    fn focused_window(&self) -> Option<Window> {
+    fn focused_window(&self) -> Result<Window> {
         let app = self.focused_application()?;
         let window_id = app.focused_window_id()?;
-        self.find_window(window_id)
+        self.find_window(window_id).ok_or(Error::new(
+            ErrorKind::NotFound,
+            format!(
+                "{}: can not find currently focused window {window_id}.",
+                function_name!()
+            ),
+        ))
     }
 
     pub fn front_switched(&mut self, process: &mut Process) {
@@ -1027,7 +1091,7 @@ impl WindowManager {
         debug!("{}: {}", function_name!(), app.inner().name);
 
         let focused_id = app.focused_window_id();
-        if focused_id.is_none() {
+        if focused_id.is_err() {
             let focused_window = self
                 .focused_window
                 .and_then(|window_id| self.find_window(window_id));
@@ -1054,32 +1118,36 @@ impl WindowManager {
         }
     }
 
-    pub fn window_created(&mut self, element_ref: CFRetained<AxuWrapperType>) {
-        let window = ax_window_id(element_ref.as_ptr()).and_then(|window_id| {
+    pub fn window_created(&mut self, element_ref: CFRetained<AxuWrapperType>) -> Result<()> {
+        let window_id = ax_window_id(element_ref.as_ptr());
+        let app = window_id.and_then(|window_id| {
             self.find_window(window_id).is_none().then_some(())?;
             let pid = ax_window_pid(&element_ref)?;
-            let app = self.find_application(pid)?;
-            self.create_and_add_window(&app, element_ref, window_id, true)
+            self.find_application(pid)
         });
+        let (app, window_id) = app.zip(window_id).ok_or(Error::new(
+            ErrorKind::NotFound,
+            format!("{}: can not find window.", function_name!()),
+        ))?;
 
-        if let Some(window) = window {
-            info!("{}: {window:?}", function_name!());
+        let window = self.create_and_add_window(&app, element_ref, window_id, true)?;
 
-            if let Some(panel) = self.active_panel() {
-                let previous = panel.read().ok().and_then(|panel| {
-                    self.focused_window
-                        .and_then(|id| panel.iter().position(|window| window.inner().id == id))
-                });
-                let inserted = previous.map(|prev| {
-                    panel.force_write().insert(prev + 1, window.clone());
-                });
-                if inserted.is_some() {
-                    self.reshuffle_around(&window);
-                }
-            }
+        info!("{}: created {:?}", function_name!(), window.inner().id);
 
-            window.did_receive_focus(self);
+        let panel = self.active_panel()?;
+        let previous = panel.read().ok().and_then(|panel| {
+            self.focused_window
+                .and_then(|id| panel.iter().position(|window| window.inner().id == id))
+        });
+        let inserted = previous.map(|prev| {
+            panel.force_write().insert(prev + 1, window.clone());
+        });
+        if inserted.is_some() {
+            self.reshuffle_around(&window);
         }
+
+        window.did_receive_focus(self);
+        Ok(())
     }
 
     pub fn window_destroyed(&mut self, window_id: WinID) {
@@ -1112,29 +1180,37 @@ impl WindowManager {
         }
     }
 
-    pub fn reshuffle_around(&self, window: &Window) -> Option<()> {
-        let active_space = self.active_panel()?;
+    pub fn reshuffle_around(&self, window: &Window) {
+        let active_space = match self.active_panel() {
+            Ok(active_space) => active_space,
+            Err(err) => {
+                warn!("{}: error getting active space: {err}", function_name!());
+                return;
+            }
+        };
+        let active_display = match self.active_display() {
+            Ok(display) => display,
+            Err(err) => {
+                warn!("{}: error getting active display: {err}", function_name!());
+                return;
+            }
+        };
+        let display_bounds = active_display.bounds;
         let active_space = active_space.force_read();
         let focus_id = window.inner().id;
-        let index = active_space
+        let index = match active_space
             .iter()
             .position(|window| window.inner().id == focus_id)
-            .or_else(|| {
-                warn!(
-                    "{}: Can not find a window {} in the stack!",
-                    function_name!(),
-                    focus_id
+        {
+            Some(index) => index,
+            None => {
+                debug!(
+                    "{}: Can not find a window {focus_id} in the stack!",
+                    function_name!()
                 );
-                None
-            })?;
-
-        let display_bounds = self
-            .active_display()
-            .map(|display| display.bounds)
-            .or_else(|| {
-                error!("{}: unable to get active display bounds.", function_name!());
-                None
-            })?;
+                return;
+            }
+        };
 
         // Check if window needs to be fully exposed
         let mut frame = window.inner().frame;
@@ -1201,27 +1277,36 @@ impl WindowManager {
                 );
             }
         }
-        Some(())
     }
 
-    pub fn active_panel(&self) -> Option<WindowPane> {
-        let display = Display::active_display_id(self.main_cid)
-            .and_then(|id| self.displays.iter().find(|display| display.id == id));
-        display
-            .and_then(|display| {
-                let space_id = display.active_display_space(self.main_cid);
-                space_id
-                    .and_then(|space_id| display.spaces.get(&space_id))
-                    .cloned()
-            })
-            .or_else(|| {
-                error!("{}: No workspace found.", function_name!());
-                None
-            })
+    pub fn active_panel(&self) -> Result<WindowPane> {
+        let id = Display::active_display_id(self.main_cid)?;
+        let display = self
+            .displays
+            .iter()
+            .find(|display| display.id == id)
+            .ok_or(Error::new(
+                ErrorKind::NotFound,
+                format!(
+                    "{}: can not find active panel for display {id}.",
+                    function_name!()
+                ),
+            ))?;
+        let space_id = display.active_display_space(self.main_cid)?;
+        display.spaces.get(&space_id).cloned().ok_or(Error::new(
+            ErrorKind::NotFound,
+            format!("{}: can not find space {space_id}.", function_name!()),
+        ))
     }
 
-    pub fn active_display(&self) -> Option<&Display> {
-        Display::active_display_id(self.main_cid)
-            .and_then(|id| self.displays.iter().find(|display| display.id == id))
+    pub fn active_display(&self) -> Result<&Display> {
+        let id = Display::active_display_id(self.main_cid)?;
+        self.displays
+            .iter()
+            .find(|display| display.id == id)
+            .ok_or(Error::new(
+                ErrorKind::NotFound,
+                format!("{}: can not find active display.", function_name!()),
+            ))
     }
 }

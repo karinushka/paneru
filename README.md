@@ -68,6 +68,12 @@ cmd - l : paneru window focus east
 # Swaps windows in chosen direction.
 alt - h : paneru window swap west
 alt - l : paneru window swap east
+# Jump to the left most or right most windows.
+cmd + shift - h : paneru window focus first
+cmd + shift - l : paneru window focus last
+# Move the current window into the left most or right most positions.
+alt + shift - h : paneru window swap first
+alt + shift - l : paneru window swap last
 # Centers the current window on screen.
 alt - c : paneru window center
 # Shuffles between predefined window sizes: 25%, 33%, 50%, 66% and 75%.
@@ -99,6 +105,21 @@ $ RUST_LOG=debug paneru
   and written to a pipe as an event the window manager can react to.
 - Scriptability. A nice feature would be to use Lua for configuration and simple scripting,
   like triggering and positioning specific windows or applications.
+
+
+## Architecture Overview
+
+The overall architecture is layered, with a platform interaction layer at the base.
+This bottom layer, primarily within `platform.rs`, interfaces directly with the macOS operating system via Objective-C and Core Graphics APIs.
+It runs the main RunLoop in the main thread, receiving OS-level events and acting as the bridge between the operating system and the application's logic.
+Events captured by this layer, such as window events, application state changes, and mouse events, are then pushed into a multiple-producer single-consumer (MPSC) queue.
+
+Higher layers of the application consume events from this queue.
+These layers include the `WindowManager`, `ProcessManager`, and various event handlers.
+The `WindowManager` is responsible for tracking and manipulating window states, while the `ProcessManager` handles the lifecycle of applications.
+Event handlers in modules like `events.rs` interpret the raw events and orchestrate the appropriate responses within the application.
+This design promotes a decoupled architecture, allowing modules to operate independently while reacting to system-level changes.
+
 
 
 ## Tile Scrollably Elsewhere

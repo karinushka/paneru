@@ -110,7 +110,7 @@ fn main() -> Result<(), Error> {
     CommandReader::new(tx.clone()).start();
 
     let mut platform_callbacks = PlatformCallbacks::new(tx.clone());
-    platform_callbacks.setup_handlers();
+    platform_callbacks.setup_handlers()?;
 
     let (quit, handle) = EventHandler::new(tx.clone(), rx).start();
 

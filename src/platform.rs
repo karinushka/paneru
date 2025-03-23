@@ -23,6 +23,7 @@ use objc2_foundation::{
     NSNumber, NSObject, NSString,
 };
 use std::ffi::c_void;
+use std::io::{Error, ErrorKind, Result};
 use std::ops::Deref;
 use std::ptr::null_mut;
 use std::sync::Arc;
@@ -220,7 +221,7 @@ impl MouseHandler {
         MouseHandler { tx, cleanup: None }
     }
 
-    fn start(&mut self) {
+    fn start(&mut self) -> Result<()> {
         let mouse_event_mask = (1 << CGEventType::MouseMoved.0)
             | (1 << CGEventType::LeftMouseDown.0)
             | (1 << CGEventType::LeftMouseUp.0)
@@ -239,7 +240,10 @@ impl MouseHandler {
                 Some(Self::callback),
                 this as *mut c_void,
             )
-            .expect("Unable to create EventTap.");
+            .ok_or(Error::new(
+                ErrorKind::PermissionDenied,
+                format!("{}: Can not create EventTap.", function_name!()),
+            ))?;
 
             let run_loop_source = CFMachPortCreateRunLoopSource(None, Some(&port), 0)
                 .expect("Unable to create Mach port.");
@@ -254,6 +258,7 @@ impl MouseHandler {
                 CGEventTapEnable(&port, false);
             })));
         }
+        Ok(())
     }
 
     extern "C-unwind" fn callback(
@@ -607,73 +612,75 @@ impl MissionControlHandler {
         _ = self.tx.send(event);
     }
 
-    fn dock_pid() -> Option<Pid> {
+    fn dock_pid() -> Result<Pid> {
         let dock = NSString::from_str("com.apple.dock");
         let array = unsafe { NSRunningApplication::runningApplicationsWithBundleIdentifier(&dock) };
         array
             .iter()
             .next()
             .map(|running| unsafe { running.processIdentifier() })
+            .ok_or(Error::new(
+                ErrorKind::NotFound,
+                format!("{}: can not find dock.", function_name!()),
+            ))
     }
 
-    fn observe(&mut self) {
-        let pid = MissionControlHandler::dock_pid();
-        if pid.is_none() {
-            error!(
-                "{}: Can not register MissionControlHandler",
-                function_name!()
-            );
-            return;
-        }
-        let pid = pid.unwrap();
+    fn observe(&mut self) -> Result<()> {
+        let pid = MissionControlHandler::dock_pid()?;
 
-        self.element = AxuWrapperType::from_retained(unsafe { AXUIElementCreateApplication(pid) });
-        self.observer = unsafe {
+        self.element =
+            AxuWrapperType::from_retained(unsafe { AXUIElementCreateApplication(pid) })?.into();
+        let observer = unsafe {
             let mut observer_ref: AXObserverRef = null_mut();
-            (kAXErrorSuccess == AXObserverCreate(pid, Self::callback, &mut observer_ref))
-                .then(|| AxuWrapperType::from_retained(observer_ref as AXUIElementRef))
-                .flatten()
+            if kAXErrorSuccess == AXObserverCreate(pid, Self::callback, &mut observer_ref) {
+                AxuWrapperType::from_retained(observer_ref)?
+            } else {
+                return Err(Error::new(
+                    ErrorKind::PermissionDenied,
+                    format!("{}: error creating observer.", function_name!()),
+                ));
+            }
         };
 
-        if let Some(observer) = &self.observer {
-            Self::EVENTS.iter().for_each(|name| {
-                debug!(
-                    "{}: {name:?} {:?}",
+        Self::EVENTS.iter().for_each(|name| {
+            debug!(
+                "{}: {name:?} {:?}",
+                function_name!(),
+                observer.as_ptr::<AXObserverRef>()
+            );
+            let notification = CFString::from_static_str(name);
+            match unsafe {
+                AXObserverAddNotification(
+                    observer.as_ptr(),
+                    self.element.as_ref().unwrap().as_ptr(),
+                    notification.deref(),
+                    self as *const Self as *mut c_void,
+                )
+            } {
+                accessibility_sys::kAXErrorSuccess
+                | accessibility_sys::kAXErrorNotificationAlreadyRegistered => (),
+                result => error!(
+                    "{}: error registering {name} for application {pid}: {result}",
                     function_name!(),
-                    observer.as_ptr::<AXObserverRef>()
-                );
-                let notification = CFString::from_static_str(name);
-                match unsafe {
-                    AXObserverAddNotification(
-                        observer.as_ptr(),
-                        self.element.as_ref().unwrap().as_ptr(),
-                        notification.deref(),
-                        self as *const Self as *mut c_void,
-                    )
-                } {
-                    accessibility_sys::kAXErrorSuccess
-                    | accessibility_sys::kAXErrorNotificationAlreadyRegistered => (),
-                    result => error!(
-                        "{}: error registering {name} for application {pid}: {result}",
-                        function_name!(),
-                    ),
-                }
-            });
-            unsafe {
-                let main_loop = CFRunLoopGetMain().expect("Unable to get the main run loop.");
-                let run_loop_source = CFRetained::from_raw(
-                    NonNull::new(AXObserverGetRunLoopSource(observer.as_ptr()))
-                        .expect("Can not get AXObserver run loop source.")
-                        .cast(),
-                );
-                debug!(
-                    "{}: adding runloop source: {run_loop_source:?} {:?}",
-                    function_name!(),
-                    observer.as_ptr::<AXObserverRef>()
-                );
-                CFRunLoopAddSource(&main_loop, Some(&run_loop_source), kCFRunLoopDefaultMode);
-            };
-        }
+                ),
+            }
+        });
+        unsafe {
+            let main_loop = CFRunLoopGetMain().expect("Unable to get the main run loop.");
+            let run_loop_source = CFRetained::from_raw(
+                NonNull::new(AXObserverGetRunLoopSource(observer.as_ptr()))
+                    .expect("Can not get AXObserver run loop source.")
+                    .cast(),
+            );
+            debug!(
+                "{}: adding runloop source: {run_loop_source:?} {:?}",
+                function_name!(),
+                observer.as_ptr::<AXObserverRef>()
+            );
+            CFRunLoopAddSource(&main_loop, Some(&run_loop_source), kCFRunLoopDefaultMode);
+        };
+        self.observer = observer.into();
+        Ok(())
     }
 
     fn unobserve(&mut self) {
@@ -763,12 +770,18 @@ impl PlatformCallbacks {
         })
     }
 
-    pub fn setup_handlers(&mut self) {
-        self.mouse_handler.start();
+    pub fn setup_handlers(&mut self) -> Result<()> {
+        self.mouse_handler.start()?;
         self.workspace_observer.start();
-        self.mission_control_observer.observe();
+        self.mission_control_observer.observe()?;
         self.process_handler.start();
-        self.tx.send(Event::ProcessesLoaded).unwrap();
+
+        self.tx.send(Event::ProcessesLoaded).map_err(|err| {
+            Error::new(
+                ErrorKind::InvalidData,
+                format!("{}: {err}", function_name!()),
+            )
+        })
     }
 
     // Does not return until 'quit' is signalled.

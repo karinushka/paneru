@@ -211,21 +211,37 @@ impl Display {
     }
 }
 
-pub fn ax_window_id(element_ref: AXUIElementRef) -> Option<WinID> {
-    NonNull::new(element_ref).and_then(|ptr| {
-        let mut window_id: WinID = 0;
-        unsafe { _AXUIElementGetWindow(ptr.as_ptr(), &mut window_id) };
-        (window_id != 0).then_some(window_id)
-    })
+pub fn ax_window_id(element_ref: AXUIElementRef) -> Result<WinID> {
+    let ptr = NonNull::new(element_ref).ok_or(Error::new(
+        ErrorKind::InvalidInput,
+        format!("{}: nullptr passed as element.", function_name!()),
+    ))?;
+    let mut window_id: WinID = 0;
+    if 0 != unsafe { _AXUIElementGetWindow(ptr.as_ptr(), &mut window_id) } || window_id == 0 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "{}: Unable to get window id from element {element_ref:?}.",
+                function_name!()
+            ),
+        ));
+    }
+    Ok(window_id)
 }
 
-fn ax_window_pid(element_ref: &CFRetained<AxuWrapperType>) -> Option<Pid> {
+fn ax_window_pid(element_ref: &CFRetained<AxuWrapperType>) -> Result<Pid> {
     let pid: Pid = unsafe {
         NonNull::new_unchecked(element_ref.as_ptr::<Pid>())
             .byte_add(0x10)
             .read()
     };
-    (pid != 0).then_some(pid)
+    (pid != 0).then_some(pid).ok_or(Error::new(
+        ErrorKind::InvalidData,
+        format!(
+            "{}: can not get pid from {element_ref:?}.",
+            function_name!()
+        ),
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -246,7 +262,11 @@ pub struct InnerWindow {
 }
 
 impl Window {
-    fn new(app: &Application, element_ref: CFRetained<AxuWrapperType>, window_id: WinID) -> Self {
+    fn new(
+        app: &Application,
+        element_ref: CFRetained<AxuWrapperType>,
+        window_id: WinID,
+    ) -> Result<Self> {
         let window = Window {
             inner: Arc::new(RwLock::new(InnerWindow {
                 id: window_id,
@@ -260,22 +280,21 @@ impl Window {
                 size_ratios: vec![0.25, 0.33, 0.50, 0.66, 0.75],
             })),
         };
-        window.update_frame();
+        window.update_frame()?;
 
+        let connection = app.inner().connection.ok_or(Error::new(
+            ErrorKind::InvalidData,
+            format!("{}: invalid connection for window.", function_name!()),
+        ))?;
         let minimized = window.is_minimized();
         // window->is_root = !window_parent(window->id) || window_is_root(window);
-        let is_root = Window::parent(
-            app.inner().connection.expect("No App connection found."),
-            window_id,
-        )
-        .is_none()
-            || window.is_root();
+        let is_root = Window::parent(connection, window_id).is_err() || window.is_root();
         {
             let mut inner = window.inner.force_write();
             inner.minimized = minimized;
             inner.is_root = is_root;
         }
-        window
+        Ok(window)
     }
 
     pub fn inner(&self) -> std::sync::RwLockReadGuard<'_, InnerWindow> {
@@ -305,7 +324,7 @@ impl Window {
         }
     }
 
-    fn parent(main_conn: ConnID, window_id: WinID) -> Option<WinID> {
+    fn parent(main_conn: ConnID, window_id: WinID) -> Result<WinID> {
         let windows = create_array(vec![window_id], CFNumberType::SInt32Type)?;
         unsafe {
             let query = CFRetained::from_raw(SLSWindowQueryWindows(main_conn, windows.deref(), 1));
@@ -314,10 +333,13 @@ impl Window {
             if 1 == SLSWindowIteratorGetCount(iterator.deref())
                 && SLSWindowIteratorAdvance(iterator.deref())
             {
-                return Some(SLSWindowIteratorGetParentID(iterator.deref()));
+                return Ok(SLSWindowIteratorGetParentID(iterator.deref()));
             }
         }
-        None
+        Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("{}: error creating an array.", function_name!()),
+        ))
     }
 
     fn title(&self) -> Result<String> {
@@ -410,7 +432,7 @@ impl Window {
         self.inner.force_write().frame.size = size;
     }
 
-    fn update_frame(&self) {
+    fn update_frame(&self) -> Result<()> {
         let mut frame = CGRect::default();
         let mut position_ref: *mut CFType = null_mut();
         let mut size_ref: *mut CFType = null_mut();
@@ -429,20 +451,18 @@ impl Window {
             );
         };
         unsafe {
-            if let Some(position) = AxuWrapperType::retain(position_ref) {
-                AXValueGetValue(
-                    position.as_ptr(),
-                    kAXValueTypeCGPoint,
-                    &mut frame.origin as *mut CGPoint as *mut c_void,
-                );
-            }
-            if let Some(size) = AxuWrapperType::retain(size_ref) {
-                AXValueGetValue(
-                    size.as_ptr(),
-                    kAXValueTypeCGSize,
-                    &mut frame.size as *mut CGSize as *mut c_void,
-                );
-            }
+            let position = AxuWrapperType::retain(position_ref)?;
+            AXValueGetValue(
+                position.as_ptr(),
+                kAXValueTypeCGPoint,
+                &mut frame.origin as *mut CGPoint as *mut c_void,
+            );
+            let size = AxuWrapperType::retain(size_ref)?;
+            AXValueGetValue(
+                size.as_ptr(),
+                kAXValueTypeCGSize,
+                &mut frame.size as *mut CGSize as *mut c_void,
+            );
             if CGRectEqualToRect(frame, self.inner().frame) {
                 debug!(
                     "{}: Debounced window resize: {}",
@@ -452,6 +472,7 @@ impl Window {
             } else {
                 self.inner.force_write().frame = frame;
             }
+            Ok(())
         }
     }
 
@@ -663,9 +684,11 @@ impl WindowManager {
                         app.inner().name
                     );
 
-                    if app.observe() {
+                    if app.observe().is_ok_and(|result| result) {
                         self.applications.insert(app.inner().pid, app.clone());
-                        self.add_existing_application_windows(&app, 0);
+                        _ = self
+                            .add_existing_application_windows(&app, 0)
+                            .inspect_err(|err| warn!("{}: {err}", function_name!()));
                     } else {
                         // app.unobserve() handled by the Drop.
                     }
@@ -711,26 +734,36 @@ impl WindowManager {
         spaces: Vec<u64>,
         cid: Option<ConnID>,
         also_minimized: bool,
-    ) -> Option<Vec<WinID>> {
+    ) -> Result<Vec<WinID>> {
         unsafe {
             let space_list_ref = create_array(spaces, CFNumberType::SInt64Type)?;
 
             let set_tags = 0i64;
             let clear_tags = 0i64;
             let options = if also_minimized { 0x7 } else { 0x2 };
-            let window_list_ref =
-                CFRetained::from_raw(NonNull::new(SLSCopyWindowsWithOptionsAndTags(
-                    self.main_cid,
-                    cid.unwrap_or(0),
-                    space_list_ref.deref(),
-                    options,
-                    &set_tags,
-                    &clear_tags,
-                ))?);
+            let ptr = NonNull::new(SLSCopyWindowsWithOptionsAndTags(
+                self.main_cid,
+                cid.unwrap_or(0),
+                space_list_ref.deref(),
+                options,
+                &set_tags,
+                &clear_tags,
+            ))
+            .ok_or(Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "{}: nullptr returned from SLSCopyWindowsWithOptionsAndTags.",
+                    function_name!()
+                ),
+            ))?;
+            let window_list_ref = CFRetained::from_raw(ptr);
 
             let count = CFArrayGetCount(window_list_ref.deref());
             if count == 0 {
-                return None;
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    format!("{}: zero windows returned", function_name!()),
+                ));
             }
 
             let query = CFRetained::from_raw(SLSWindowQueryWindows(
@@ -770,11 +803,11 @@ impl WindowManager {
                     }
                 }
             }
-            Some(window_list)
+            Ok(window_list)
         }
     }
 
-    fn existing_application_window_list(&self, app: &Application) -> Option<Vec<WinID>> {
+    fn existing_application_window_list(&self, app: &Application) -> Result<Vec<WinID>> {
         let spaces: Vec<u64> = self
             .displays
             .iter()
@@ -782,7 +815,10 @@ impl WindowManager {
             .collect();
         debug!("{}: spaces {spaces:?}", function_name!());
         if spaces.is_empty() {
-            return None;
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("{}: no spaces returned", function_name!()),
+            ));
         }
         self.space_window_list_for_connection(spaces, app.inner().connection, true)
     }
@@ -835,12 +871,17 @@ impl WindowManager {
                 //     bool matched = false;
                 let bytes = element_id.to_ne_bytes();
                 data[0xc..0xc + bytes.len()].copy_from_slice(&bytes);
-                let element_ref =
-                    AxuWrapperType::retain(_AXUIElementCreateWithRemoteToken(data_ref.as_ref()));
-                let window_id = element_ref
-                    .as_ref()
-                    .and_then(|element| ax_window_id(element.as_ptr()));
-                let mut matched = false;
+
+                let element_ref = match AxuWrapperType::retain(_AXUIElementCreateWithRemoteToken(
+                    data_ref.as_ref(),
+                )) {
+                    Ok(element_ref) => element_ref,
+                    _ => continue,
+                };
+                let window_id = match ax_window_id(element_ref.as_ptr()) {
+                    Ok(window_id) => window_id,
+                    _ => continue,
+                };
 
                 //     if (element_wid != 0) {
                 //         for (int i = 0; i < app_window_list_len; ++i) {
@@ -851,42 +892,41 @@ impl WindowManager {
                 //             }
                 //         }
                 //     }
-                if let Some(window_id) = window_id {
-                    let index = window_list.iter().position(|&id| id == window_id);
-                    matched = index.map(|idx| window_list.remove(idx)).is_some();
-                }
-
                 //     if (matched) {
                 //         window_manager_create_and_add_window(sm, wm, application, element_ref, element_wid, false);
                 //     } else {
                 //         CFRelease(element_ref);
                 //     }
-                if matched {
+
+                if let Some(index) = window_list.iter().position(|&id| id == window_id) {
+                    window_list.remove(index);
                     debug!("{}: Found window {window_id:?}", function_name!());
                     _ = self
-                        .create_and_add_window(app, element_ref.unwrap(), window_id.unwrap(), false)
+                        .create_and_add_window(app, element_ref, window_id, false)
                         .inspect_err(|err| warn!("{}: {err}", function_name!()));
                 }
             }
         }
     }
 
-    fn add_existing_application_windows(&mut self, app: &Application, refresh_index: i32) -> bool {
+    fn add_existing_application_windows(
+        &mut self,
+        app: &Application,
+        refresh_index: i32,
+    ) -> Result<bool> {
         let mut result = false;
 
-        let global_window_list = self.existing_application_window_list(app);
-        if global_window_list
-            .as_ref()
-            .is_some_and(|list| list.is_empty())
-        {
-            warn!(
-                "{}: No existing windows for app {}",
-                function_name!(),
-                app.inner().name
-            );
-            return result;
+        let global_window_list = self.existing_application_window_list(app)?;
+        if global_window_list.is_empty() {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "{}: No windows found for app {}",
+                    function_name!(),
+                    app.inner().name,
+                ),
+            ));
         }
-        let global_window_list = global_window_list.unwrap();
         info!(
             "{}: App {} has global windows: {global_window_list:?}",
             function_name!(),
@@ -915,7 +955,7 @@ impl WindowManager {
                 // attempt to do an equality check to see if we have correctly discovered the
                 // number of windows to track.
 
-                if window_id.is_none() {
+                if window_id.is_err() {
                     empty_count += 1;
                     continue;
                 }
@@ -961,7 +1001,7 @@ impl WindowManager {
             }
         }
 
-        result
+        Ok(result)
     }
 
     pub fn add_application_windows(&mut self, app: &Application) -> Result<Vec<Window>> {
@@ -970,21 +1010,21 @@ impl WindowManager {
         let create_window = |element_ref: NonNull<_>| {
             let element = AxuWrapperType::retain(element_ref.as_ptr());
             element.map(|element| {
-                let window_id = ax_window_id(element.as_ptr());
-                window_id.and_then(|window_id| {
-                    self.find_window(window_id).map_or_else(
-                        // Window does not exist, create it.
-                        || {
-                            self.create_and_add_window(app, element, window_id, true)
-                                .inspect_err(|err| {
-                                    warn!("{}: error adding window: {err}.", function_name!());
-                                })
-                                .ok()
-                        },
-                        // Window already exists, skip it.
-                        |_| None,
-                    )
-                })
+                let window_id = ax_window_id(element.as_ptr())
+                    .inspect_err(|err| warn!("{}: error adding window: {err}", function_name!()))
+                    .ok()?;
+                self.find_window(window_id).map_or_else(
+                    // Window does not exist, create it.
+                    || {
+                        self.create_and_add_window(app, element, window_id, true)
+                            .inspect_err(|err| {
+                                warn!("{}: error adding window: {err}.", function_name!());
+                            })
+                            .ok()
+                    },
+                    // Window already exists, skip it.
+                    |_| None,
+                )
             })
         };
         let windows: Vec<Window> =
@@ -1002,7 +1042,7 @@ impl WindowManager {
         window_id: WinID,
         _one_shot_rules: bool, // TODO: fix
     ) -> Result<Window> {
-        let window = Window::new(app, window_ref, window_id);
+        let window = Window::new(app, window_ref, window_id)?;
         if window.is_unknown() {
             return Err(Error::new(
                 ErrorKind::Other,
@@ -1120,19 +1160,24 @@ impl WindowManager {
     }
 
     pub fn window_created(&mut self, element_ref: CFRetained<AxuWrapperType>) -> Result<()> {
-        let window_id = ax_window_id(element_ref.as_ptr());
-        let app = window_id.and_then(|window_id| {
-            self.find_window(window_id).is_none().then_some(())?;
-            let pid = ax_window_pid(&element_ref)?;
-            self.find_application(pid)
-        });
-        let (app, window_id) = app.zip(window_id).ok_or(Error::new(
+        let window_id = ax_window_id(element_ref.as_ptr())?;
+        if self.find_window(window_id).is_some() {
+            return Err(Error::new(
+                ErrorKind::AlreadyExists,
+                format!("{}: window {window_id} already created.", function_name!()),
+            ));
+        }
+
+        let pid = ax_window_pid(&element_ref)?;
+        let app = self.find_application(pid).ok_or(Error::new(
             ErrorKind::NotFound,
-            format!("{}: can not find window.", function_name!()),
+            format!(
+                "{}: unable to find application with {pid}.",
+                function_name!()
+            ),
         ))?;
 
         let window = self.create_and_add_window(&app, element_ref, window_id, true)?;
-
         info!("{}: created {:?}", function_name!(), window.inner().id);
 
         let panel = self.active_panel()?;
@@ -1174,11 +1219,12 @@ impl WindowManager {
         // uint32_t window_id = (uint32_t)(intptr_t) context;
     }
 
-    pub fn window_resized(&self, window_id: WinID) {
+    pub fn window_resized(&self, window_id: WinID) -> Result<()> {
         if let Some(window) = self.find_window(window_id) {
-            window.update_frame();
+            window.update_frame()?;
             self.reshuffle_around(&window);
         }
+        Ok(())
     }
 
     pub fn reshuffle_around(&self, window: &Window) {

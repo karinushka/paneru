@@ -2,7 +2,7 @@ use log::{debug, error, info, trace, warn};
 use objc2::rc::Retained;
 use objc2_core_foundation::{CFNumberGetValue, CFNumberType, CFRetained, CGPoint, CGRect};
 use std::ffi::c_void;
-use std::io::{ErrorKind, Result};
+use std::io::{Error, ErrorKind, Result};
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -200,11 +200,11 @@ impl EventHandler {
                 self.window_manager.start(&mut self.process_manager);
             }
             Event::MouseDown { point } => {
-                self.mouse_down(&point);
+                return self.mouse_down(&point);
             }
 
             Event::MouseUp { point } => self.mouse_up(&point),
-            Event::MouseMoved { point } => self.mouse_moved(&point),
+            Event::MouseMoved { point } => return self.mouse_moved(&point),
             Event::MouseDragged { point } => self.mouse_dragged(&point),
 
             // TODO: remove this handler. Used to test delivery of events.
@@ -251,7 +251,7 @@ impl EventHandler {
             }
             Event::WindowResized { window_id } => {
                 if let Some(window_id) = window_id {
-                    self.window_manager.window_resized(window_id)
+                    return self.window_manager.window_resized(window_id);
                 }
             }
             Event::WindowTitleChanged { window_id } => {
@@ -475,20 +475,21 @@ impl EventHandler {
         };
     }
 
-    fn mouse_down(&mut self, point: &CGPoint) {
+    fn mouse_down(&mut self, point: &CGPoint) -> Result<()> {
         info!("{}: {point:?}", function_name!());
         if self.window_manager.mission_control_is_active {
-            return;
+            return Ok(());
         }
 
-        if let Some(window) = self.find_window_at_point(point) {
-            if !window.fully_visible(&self.window_manager) {
-                self.window_manager.reshuffle_around(&window);
-            }
-
-            self.window_manager.current_window = Some(window);
-            self.window_manager.down_location = *point;
+        let window = self.find_window_at_point(point)?;
+        if !window.fully_visible(&self.window_manager) {
+            self.window_manager.reshuffle_around(&window);
         }
+
+        self.window_manager.current_window = Some(window);
+        self.window_manager.down_location = *point;
+
+        Ok(())
     }
 
     fn mouse_up(&mut self, point: &CGPoint) {
@@ -504,105 +505,99 @@ impl EventHandler {
         }
     }
 
-    fn mouse_moved(&mut self, point: &CGPoint) {
+    fn mouse_moved(&mut self, point: &CGPoint) -> Result<()> {
         if self.window_manager.mission_control_is_active {
-            return;
+            return Ok(());
         }
         if self.window_manager.ffm_window_id.is_some() {
             trace!("{}: ffm_window_id > 0", function_name!());
-            return;
+            return Ok(());
         }
 
-        let window = self.find_window_at_point(point);
-        if let Some(window) = window {
-            let window_id = window.inner().id;
-            if self
-                .window_manager
-                .focused_window
-                .is_some_and(|id| id == window_id)
-            {
-                trace!("{}: allready focused {}", function_name!(), window_id);
-                return;
-            }
-            if !window.is_eligible() {
-                trace!("{}: {} not eligible", function_name!(), window_id);
-                return;
-            }
+        match self.find_window_at_point(point) {
+            Ok(window) => {
+                let window_id = window.inner().id;
+                if self
+                    .window_manager
+                    .focused_window
+                    .is_some_and(|id| id == window_id)
+                {
+                    trace!("{}: allready focused {}", function_name!(), window_id);
+                    return Ok(());
+                }
+                if !window.is_eligible() {
+                    trace!("{}: {} not eligible", function_name!(), window_id);
+                    return Ok(());
+                }
 
-            let window_list = unsafe {
-                let arr_ref = SLSCopyAssociatedWindows(self.main_cid, window_id);
-                CFRetained::retain(arr_ref)
-            };
+                let window_list = unsafe {
+                    let arr_ref = SLSCopyAssociatedWindows(self.main_cid, window_id);
+                    CFRetained::retain(arr_ref)
+                };
 
-            let mut window = window;
-            for item in get_array_values(window_list.deref()) {
-                let mut child_wid: WinID = 0;
-                unsafe {
-                    if !CFNumberGetValue(
-                        item.as_ref(),
-                        CFNumberType::SInt32Type,
-                        (&mut child_wid as *mut WinID) as *mut c_void,
-                    ) {
+                let mut window = window;
+                for item in get_array_values(window_list.deref()) {
+                    let mut child_wid: WinID = 0;
+                    unsafe {
+                        if !CFNumberGetValue(
+                            item.as_ref(),
+                            CFNumberType::SInt32Type,
+                            (&mut child_wid as *mut WinID) as *mut c_void,
+                        ) {
+                            warn!(
+                                "{}: Unable to find subwindows of window {}: {item:?}.",
+                                function_name!(),
+                                window_id
+                            );
+                            continue;
+                        }
+                    };
+                    debug!(
+                        "{}: checking {}'s childen: {}",
+                        function_name!(),
+                        window_id,
+                        child_wid
+                    );
+                    let child_window = self.window_manager.find_window(child_wid);
+                    if child_window.is_none() {
                         warn!(
-                            "{}: Unable to find subwindows of window {}: {item:?}.",
-                            function_name!(),
-                            window_id
+                            "{}: Unable to find child window {child_wid}.",
+                            function_name!()
                         );
                         continue;
                     }
-                };
-                debug!(
-                    "{}: checking {}'s childen: {}",
-                    function_name!(),
-                    window_id,
-                    child_wid
-                );
-                let child_window = self.window_manager.find_window(child_wid);
-                if child_window.is_none() {
-                    warn!(
-                        "{}: Unable to find child window {child_wid}.",
-                        function_name!()
-                    );
-                    continue;
-                }
 
-                let role = match window.role() {
-                    Ok(role) => role,
-                    Err(err) => {
-                        warn!("{}: finding role for {window_id}: {err}", function_name!(),);
-                        continue;
+                    let role = match window.role() {
+                        Ok(role) => role,
+                        Err(err) => {
+                            warn!("{}: finding role for {window_id}: {err}", function_name!(),);
+                            continue;
+                        }
+                    };
+
+                    // bool valid = CFEqual(role, kAXSheetRole) || CFEqual(role, kAXDrawerRole);
+                    let valid = ["AXSheet", "AXDrawer"]
+                        .iter()
+                        .any(|axrole| axrole.eq(&role));
+
+                    if valid {
+                        window = child_window.unwrap().clone();
+                        break;
                     }
-                };
-
-                // bool valid = CFEqual(role, kAXSheetRole) || CFEqual(role, kAXDrawerRole);
-                let valid = ["AXSheet", "AXDrawer"]
-                    .iter()
-                    .any(|axrole| axrole.eq(&role));
-
-                if valid {
-                    window = child_window.unwrap().clone();
-                    break;
                 }
+
+                //  Do not reshuffle windows due to moved mouse focus.
+                self.window_manager.skip_reshuffle = true;
+
+                window.focus_without_raise(&self.window_manager);
+                self.window_manager.ffm_window_id = Some(window_id);
+                Ok(())
             }
-
-            //  Do not reshuffle windows due to moved mouse focus.
-            self.window_manager.skip_reshuffle = true;
-
-            window.focus_without_raise(&self.window_manager);
-            self.window_manager.ffm_window_id = Some(window_id);
-        } else {
-            // uint32_t cursor_did = display_manager_point_display_id(point);
-            // if (g_display_manager.current_display_id == cursor_did) goto out;
-            //
-            // CGRect bounds = display_bounds_constrained(cursor_did, false);
-            // if (!cgrect_contains_point(bounds, point)) goto out;
-            //
-            // uint32_t wid = display_manager_focus_display_with_point(point, false);
-            // g_mouse_state.ffm_window_id = wid;
+            Err(err) => Err(err),
         }
     }
 
-    fn find_window_at_point(&self, point: &CGPoint) -> Option<Window> {
+    fn find_window_at_point(&self, point: &CGPoint) -> Result<Window> {
         let mut window_id: WinID = 0;
         let mut window_cid: ConnID = 0;
         let mut window_point = CGPoint { x: 0f64, y: 0f64 };
@@ -632,6 +627,9 @@ impl EventHandler {
                 )
             };
         }
-        self.window_manager.find_window(window_id)
+        self.window_manager.find_window(window_id).ok_or(Error::new(
+            ErrorKind::Other,
+            format!("{}: could not find a window at {point:?}", function_name!()),
+        ))
     }
 }

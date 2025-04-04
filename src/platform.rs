@@ -182,30 +182,24 @@ impl ProcessHandler {
 
     fn process_handler(&mut self, psn: &ProcessSerialNumber, event: ProcessEventApp) {
         let psn = psn.clone();
-        let err_message = "process handler: error sending event";
-        match event {
-            ProcessEventApp::Launched => self
-                .tx
-                .send(Event::ApplicationLaunched {
-                    psn,
-                    observer: self.observer.clone(),
-                })
-                .expect(err_message),
-            ProcessEventApp::Terminated => self
-                .tx
-                .send(Event::ApplicationTerminated { psn })
-                .expect(err_message),
-            ProcessEventApp::FrontSwitched => self
-                .tx
-                .send(Event::ApplicationFrontSwitched { psn })
-                .expect(err_message),
+        let result = match event {
+            ProcessEventApp::Launched => self.tx.send(Event::ApplicationLaunched {
+                psn,
+                observer: self.observer.clone(),
+            }),
+            ProcessEventApp::Terminated => self.tx.send(Event::ApplicationTerminated { psn }),
+            ProcessEventApp::FrontSwitched => self.tx.send(Event::ApplicationFrontSwitched { psn }),
             _ => {
                 error!(
                     "{}: Unknown process event: {}",
                     function_name!(),
                     event as u32
                 );
+                Ok(())
             }
+        };
+        if let Err(err) = result {
+            error!("{}: error sending event: {err}", function_name!());
         }
     }
 }
@@ -274,40 +268,37 @@ impl MouseHandler {
     }
 
     fn mouse_handler(&mut self, event_type: CGEventType, event: &CGEvent) {
-        match event_type {
+        let result = match event_type {
             CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
                 warn!("{}: Tap Disabled", function_name!());
+                Ok(())
             }
             CGEventType::LeftMouseDown | CGEventType::RightMouseDown => {
                 let point = unsafe { CGEventGetLocation(Some(event)) };
-                self.tx
-                    .send(Event::MouseDown { point })
-                    .expect("mouse handler: error sending event");
+                self.tx.send(Event::MouseDown { point })
             }
             CGEventType::LeftMouseUp | CGEventType::RightMouseUp => {
                 let point = unsafe { CGEventGetLocation(Some(event)) };
-                self.tx
-                    .send(Event::MouseUp { point })
-                    .expect("mouse handler: error sending event");
+                self.tx.send(Event::MouseUp { point })
             }
             CGEventType::LeftMouseDragged | CGEventType::RightMouseDragged => {
                 let point = unsafe { CGEventGetLocation(Some(event)) };
-                self.tx
-                    .send(Event::MouseDragged { point })
-                    .expect("mouse handler: error sending event");
+                self.tx.send(Event::MouseDragged { point })
             }
             CGEventType::MouseMoved => {
                 let point = unsafe { CGEventGetLocation(Some(event)) };
-                self.tx
-                    .send(Event::MouseMoved { point })
-                    .expect("mouse handler: error sending event");
+                self.tx.send(Event::MouseMoved { point })
             }
             _ => {
                 info!(
                     "{}: Unknown event type received: {event_type:?}",
                     function_name!()
                 );
+                Ok(())
             }
+        };
+        if let Err(err) = result {
+            error!("{}: error sending event: {err}", function_name!());
         }
     }
 }
@@ -336,7 +327,7 @@ define_class!(
             let msg = Event::DisplayChanged{
                 msg: format!("WorkspaceObserver: {:?}", notification),
             };
-            self.ivars().tx.send(msg).expect("display_changed: Error sending event!");
+            _ = self.ivars().tx.send(msg).inspect_err(|err| error!("{}: error sending event: {err}", function_name!()));
         }
 
         #[unsafe(method(activeSpaceDidChange:))]
@@ -344,7 +335,7 @@ define_class!(
             let msg = Event::SpaceChanged{
                 msg: format!("WorkspaceObserver: {:?}", notification),
             };
-            self.ivars().tx.send(msg).expect("space_changed: Error sending event!");
+            _ = self.ivars().tx.send(msg).inspect_err(|err| error!("{}: error sending event: {err}", function_name!()));
         }
 
         #[unsafe(method(didHideApplication:))]
@@ -359,7 +350,7 @@ define_class!(
             let msg = Event::ApplicationHidden{
                 msg: format!("WorkspaceObserver: {pid}"),
             };
-            self.ivars().tx.send(msg).expect("application_hidden: Error sending event!");
+            _ = self.ivars().tx.send(msg).inspect_err(|err| error!("{}: error sending event: {err}", function_name!()));
         }
 
         #[unsafe(method(didUnhideApplication:))]
@@ -373,7 +364,7 @@ define_class!(
             let msg = Event::ApplicationVisible{
                 msg: format!("WorkspaceObserver: {pid}"),
             };
-            self.ivars().tx.send(msg).expect("application_unhidden: Error sending event!");
+            _ = self.ivars().tx.send(msg).inspect_err(|err| error!("{}: error sending event: {err}", function_name!()));
         }
 
         #[unsafe(method(didWake:))]
@@ -381,7 +372,7 @@ define_class!(
             let msg = Event::SystemWoke{
                 msg: format!("WorkspaceObserver: {:?}", notification),
             };
-            self.ivars().tx.send(msg).expect("system_woke: Error sending event!");
+            _ = self.ivars().tx.send(msg).inspect_err(|err| error!("{}: error sending event: {err}", function_name!()));
         }
 
         #[unsafe(method(didChangeMenuBarHiding:))]
@@ -389,7 +380,7 @@ define_class!(
             let msg = Event::MenuBarHiddenChanged{
                 msg: format!("WorkspaceObserver: {:?}", notification),
             };
-            self.ivars().tx.send(msg).expect("menubar_hidden: Error sending event!");
+            _ = self.ivars().tx.send(msg).inspect_err(|err| error!("{}: error sending event: {err}", function_name!()));
         }
 
         #[unsafe(method(didRestartDock:))]
@@ -397,7 +388,7 @@ define_class!(
             let msg = Event::DockDidRestart{
                 msg: format!("WorkspaceObserver: {:?}", notification),
             };
-            self.ivars().tx.send(msg).expect("dock_restarted: Error sending event!");
+            _ = self.ivars().tx.send(msg).inspect_err(|err| error!("{}: error sending event: {err}", function_name!()));
         }
 
         #[unsafe(method(didChangeDockPref:))]
@@ -405,7 +396,7 @@ define_class!(
             let msg = Event::DockDidChangePref{
                 msg: format!("WorkspaceObserver: {:?}", notification),
             };
-            self.ivars().tx.send(msg).expect("dock_pref_changed: Error sending event!");
+            _ = self.ivars().tx.send(msg).inspect_err(|err| error!("{}: error sending event: {err}", function_name!()));
         }
 
         #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
@@ -606,7 +597,10 @@ impl MissionControlHandler {
                 return;
             }
         };
-        _ = self.tx.send(event);
+        _ = self
+            .tx
+            .send(event)
+            .inspect_err(|err| error!("{}: error sending event: {err}", function_name!()));
     }
 
     fn dock_pid() -> Result<Pid> {

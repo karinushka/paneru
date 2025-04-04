@@ -1,12 +1,13 @@
 use log::{debug, error, info, trace, warn};
 use objc2::rc::Retained;
 use objc2_core_foundation::{CFNumberGetValue, CFNumberType, CFRetained, CGPoint, CGRect};
+use objc2_core_graphics::CGDirectDisplayID;
 use std::ffi::c_void;
 use std::io::{Error, ErrorKind, Result};
 use std::ops::Deref;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Arc;
 use std::thread;
 use std::thread::JoinHandle;
 use stdext::function_name;
@@ -17,7 +18,7 @@ use crate::process::ProcessManager;
 use crate::skylight::{
     ConnID, SLSCopyAssociatedWindows, SLSFindWindowAndOwner, SLSMainConnectionID, WinID,
 };
-use crate::util::{AxuWrapperType, get_array_values};
+use crate::util::{get_array_values, AxuWrapperType};
 use crate::windows::{Window, WindowManager};
 
 #[allow(dead_code)]
@@ -92,10 +93,18 @@ pub enum Event {
         msg: String,
     },
 
-    DisplayAdded,
-    DisplayRemoved,
-    DisplayMoved,
-    DisplayResized,
+    DisplayAdded {
+        display_id: CGDirectDisplayID,
+    },
+    DisplayRemoved {
+        display_id: CGDirectDisplayID,
+    },
+    DisplayMoved {
+        display_id: CGDirectDisplayID,
+    },
+    DisplayResized {
+        display_id: CGDirectDisplayID,
+    },
     DisplayChanged {
         msg: String,
     },

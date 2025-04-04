@@ -15,8 +15,10 @@ use objc2_core_foundation::{
     CFRunLoopSourceInvalidate, CFString, kCFRunLoopCommonModes, kCFRunLoopDefaultMode,
 };
 use objc2_core_graphics::{
-    CGEvent, CGEventGetLocation, CGEventTapCreate, CGEventTapEnable, CGEventTapLocation,
-    CGEventTapOptions, CGEventTapPlacement, CGEventTapProxy, CGEventType,
+    CGDirectDisplayID, CGDisplayChangeSummaryFlags, CGDisplayRegisterReconfigurationCallback,
+    CGDisplayRemoveReconfigurationCallback, CGError, CGEvent, CGEventGetLocation, CGEventTapCreate,
+    CGEventTapEnable, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventTapProxy,
+    CGEventType,
 };
 use objc2_foundation::{
     NSDictionary, NSDistributedNotificationCenter, NSKeyValueChangeNewKey, NSNotificationCenter,
@@ -739,12 +741,81 @@ impl Drop for MissionControlHandler {
     }
 }
 
+struct DisplayHandler {
+    tx: Sender<Event>,
+    cleanup: Option<Cleanuper>,
+}
+
+impl DisplayHandler {
+    fn new(tx: Sender<Event>) -> Self {
+        Self { tx, cleanup: None }
+    }
+
+    fn start(&mut self) -> Result<()> {
+        info!("{}: Registering display handler", function_name!());
+        let me = self as *const Self;
+        let result = unsafe {
+            CGDisplayRegisterReconfigurationCallback(Some(Self::callback), me as *mut c_void)
+        };
+        if result != CGError::Success {
+            return Err(Error::new(
+                ErrorKind::PermissionDenied,
+                format!(
+                    "{}: registering display handler callback: {result:?}",
+                    function_name!()
+                ),
+            ));
+        }
+        self.cleanup = Some(Cleanuper::new(Box::new(move || unsafe {
+            info!("{}: Unregistering display handler", function_name!());
+            CGDisplayRemoveReconfigurationCallback(Some(Self::callback), me as *mut c_void);
+        })));
+        Ok(())
+    }
+
+    extern "C-unwind" fn callback(
+        display_id: CGDirectDisplayID,
+        flags: CGDisplayChangeSummaryFlags,
+        context: *mut c_void,
+    ) {
+        match NonNull::new(context).map(|this| unsafe { this.cast::<DisplayHandler>().as_mut() }) {
+            Some(this) => this.display_handler(display_id, flags),
+            None => error!("Zero passed to Display Handler."),
+        }
+    }
+
+    fn display_handler(
+        &mut self,
+        display_id: CGDirectDisplayID,
+        flags: CGDisplayChangeSummaryFlags,
+    ) {
+        info!("display_handler: display change {display_id:?}");
+        let event = if flags.contains(CGDisplayChangeSummaryFlags::AddFlag) {
+            Event::DisplayAdded { display_id }
+        } else if flags.contains(CGDisplayChangeSummaryFlags::RemoveFlag) {
+            Event::DisplayRemoved { display_id }
+        } else if flags.contains(CGDisplayChangeSummaryFlags::MovedFlag) {
+            Event::DisplayMoved { display_id }
+        } else if flags.contains(CGDisplayChangeSummaryFlags::DesktopShapeChangedFlag) {
+            Event::DisplayResized { display_id }
+        } else {
+            warn!("{}: unknown flag {flags:?}.", function_name!());
+            return;
+        };
+        _ = self
+            .tx
+            .send(event)
+            .inspect_err(|err| warn!("{}: error sending event: {err}", function_name!()));
+    }
+}
+
 pub struct PlatformCallbacks {
     tx: Sender<Event>,
     process_handler: ProcessHandler,
     mouse_handler: MouseHandler,
     workspace_observer: Retained<WorkspaceObserver>,
     mission_control_observer: MissionControlHandler,
+    display_handler: DisplayHandler,
 }
 
 impl PlatformCallbacks {
@@ -755,14 +826,16 @@ impl PlatformCallbacks {
             mouse_handler: MouseHandler::new(tx.clone()),
             workspace_observer,
             mission_control_observer: MissionControlHandler::new(tx.clone()),
+            display_handler: DisplayHandler::new(tx.clone()),
             tx,
         })
     }
 
     pub fn setup_handlers(&mut self) -> Result<()> {
         self.mouse_handler.start()?;
-        self.workspace_observer.start();
+        self.display_handler.start()?;
         self.mission_control_observer.observe()?;
+        self.workspace_observer.start();
         self.process_handler.start();
 
         self.tx.send(Event::ProcessesLoaded).map_err(|err| {

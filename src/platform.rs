@@ -173,11 +173,10 @@ impl ProcessHandler {
         psn: &ProcessSerialNumber,
         event: ProcessEventApp,
     ) -> OSStatus {
-        let mut this = NonNull::new(this)
-            .expect("Zero passed to Process Handler.")
-            .cast::<ProcessHandler>();
-        let this = unsafe { this.as_mut() };
-        this.process_handler(psn, event);
+        match NonNull::new(this).map(|this| unsafe { this.cast::<ProcessHandler>().as_mut() }) {
+            Some(this) => this.process_handler(psn, event),
+            None => error!("Zero passed to Process Handler."),
+        }
         0
     }
 
@@ -267,13 +266,11 @@ impl MouseHandler {
         mut event_ref: NonNull<CGEvent>,
         this: *mut c_void,
     ) -> *mut CGEvent {
-        unsafe {
-            let this = (this as *mut Self)
-                .as_mut()
-                .expect("Zero passed to Mouse Handler.");
-            this.mouse_handler(event_type, event_ref.as_ref());
-            event_ref.as_mut()
+        match NonNull::new(this).map(|this| unsafe { this.cast::<MouseHandler>().as_mut() }) {
+            Some(this) => this.mouse_handler(event_type, unsafe { event_ref.as_ref() }),
+            None => error!("Zero passed to Mouse Handler."),
         }
+        unsafe { event_ref.as_mut() }
     }
 
     fn mouse_handler(&mut self, event_type: CGEventType, event: &CGEvent) {
@@ -733,13 +730,11 @@ impl MissionControlHandler {
             }
         };
 
-        let result = unsafe {
-            (context as *mut Self)
-                .as_ref()
-                .map(|this| this.mission_control_handler(observer, element, notification.as_ref()))
-        };
-        if result.is_none() {
-            error!("{}: nullptr passed as self.", function_name!());
+        match NonNull::new(context)
+            .map(|this| unsafe { this.cast::<MissionControlHandler>().as_ref() })
+        {
+            Some(this) => this.mission_control_handler(observer, element, notification.as_ref()),
+            None => error!("Zero passed to MissionControlHandler."),
         }
     }
 }

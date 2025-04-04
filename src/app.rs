@@ -474,7 +474,13 @@ impl ApplicationHandler {
             accessibility_sys::kAXWindowMiniaturizedNotification
             | accessibility_sys::kAXWindowDeminiaturizedNotification
             | accessibility_sys::kAXUIElementDestroyedNotification => {
-                let lock = unsafe { &*(context as *const RwLock<InnerWindow>) };
+                let lock = match NonNull::new(context) {
+                    Some(ptr) => unsafe { ptr.cast::<RwLock<InnerWindow>>().as_ref() },
+                    None => {
+                        error!("{}: nullptr passed as 'context'.", function_name!());
+                        return;
+                    }
+                };
                 let inner_window = lock.force_read();
                 let app = inner_window.app.clone();
                 let this = &app.inner().handler as *const Self;

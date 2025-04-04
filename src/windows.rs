@@ -638,13 +638,13 @@ pub struct WindowManager {
     pub applications: HashMap<Pid, Application>,
     pub main_cid: ConnID,
     pub windows: HashMap<WinID, Window>,
-    pub last_window: Option<WinID>,
+    pub last_window: Option<WinID>, // TODO: use this for "goto last window bind"
     pub focused_window: Option<WinID>,
     pub focused_psn: ProcessSerialNumber,
     pub ffm_window_id: Option<WinID>,
     pub mission_control_is_active: bool,
     pub skip_reshuffle: bool,
-    pub current_window: Option<Window>,
+    pub mouse_down_window: Option<Window>,
     pub down_location: CGPoint,
     pub displays: Vec<Display>,
 }
@@ -667,7 +667,7 @@ impl WindowManager {
             ffm_window_id: None,
             mission_control_is_active: false,
             skip_reshuffle: false,
-            current_window: None,
+            mouse_down_window: None,
             down_location: CGPoint::default(),
             displays,
         }
@@ -1081,11 +1081,6 @@ impl WindowManager {
             ));
         }
 
-        // if (window_manager_find_lost_focused_event(wm, window->id)) {
-        //     event_loop_post(&g_event_loop, WINDOW_FOCUSED, (void *)(intptr_t) window->id, 0);
-        //     window_manager_remove_lost_focused_event(wm, window->id);
-        // }
-
         self.windows.insert(window_id, window.clone());
         Ok(window)
     }
@@ -1125,37 +1120,36 @@ impl WindowManager {
                 "{}: window_manager_add_lost_front_switched_event",
                 function_name!()
             );
-            // window_manager_add_lost_front_switched_event(&g_window_manager, process->pid);
             return;
         }
         let app = app.unwrap();
         debug!("{}: {}", function_name!(), app.inner().name);
 
-        let focused_id = app.focused_window_id();
-        if focused_id.is_err() {
-            let focused_window = self
-                .focused_window
-                .and_then(|window_id| self.find_window(window_id));
+        match app.focused_window_id() {
+            Err(_) => {
+                let focused_window = self
+                    .focused_window
+                    .and_then(|window_id| self.find_window(window_id));
+                if focused_window.is_none() {
+                    warn!("{}: window_manager_set_window_opacity", function_name!());
+                }
 
-            if focused_window.is_none() {
-                warn!("{}: window_manager_set_window_opacity", function_name!());
+                self.last_window = self.focused_window;
+                self.focused_window = None;
+                self.focused_psn = app.inner().psn.clone();
+                self.ffm_window_id = None;
+                warn!("{}: reset focused window", function_name!());
             }
-
-            self.last_window = self.focused_window;
-            self.focused_window = None;
-            self.focused_psn = app.inner().psn.clone();
-            self.ffm_window_id = None;
-            warn!("{}: reset focused window", function_name!());
-            return;
-        }
-
-        if let Some(window) = self.find_window(focused_id.unwrap()) {
-            window.did_receive_focus(self);
-        } else {
-            warn!(
-                "{}: window_manager_add_lost_focused_event",
-                function_name!()
-            );
+            Ok(focused_id) => {
+                if let Some(window) = self.find_window(focused_id) {
+                    window.did_receive_focus(self);
+                } else {
+                    warn!(
+                        "{}: window_manager_add_lost_focused_event",
+                        function_name!()
+                    );
+                }
+            }
         }
     }
 

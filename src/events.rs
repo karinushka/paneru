@@ -486,7 +486,7 @@ impl EventHandler {
             self.window_manager.reshuffle_around(&window);
         }
 
-        self.window_manager.current_window = Some(window);
+        self.window_manager.mouse_down_window = Some(window);
         self.window_manager.down_location = *point;
 
         Ok(())

@@ -162,7 +162,9 @@ impl Process {
             app.inner().name
         );
 
-        let active_panel = window_manager.active_panel()?;
+        let active_panel = window_manager
+            .active_display()?
+            .active_panel(window_manager.main_cid)?;
         let index = window_manager
             .focused_window
             .and_then(|focus_id| {
@@ -183,7 +185,7 @@ impl Process {
             .iter()
             .for_each(|window| active_panel.force_write().insert(index + 1, window.clone()));
         if let Some(window) = windows.first() {
-            window_manager.reshuffle_around(window);
+            window_manager.reshuffle_around(window)?;
         }
 
         Ok(())

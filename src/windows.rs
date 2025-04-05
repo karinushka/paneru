@@ -5,7 +5,7 @@ use accessibility_sys::{
     kAXTitleAttribute, kAXUnknownSubrole, kAXValueTypeCGPoint, kAXValueTypeCGSize, kAXWindowRole,
 };
 use core::ptr::NonNull;
-use log::{debug, error, info, trace, warn};
+use log::{debug, info, trace, warn};
 use objc2::rc::{Retained, autoreleasepool};
 use objc2_core_foundation::{
     CFArray, CFArrayGetCount, CFBoolean, CFBooleanGetValue, CFDataCreateMutable,
@@ -156,7 +156,7 @@ impl Display {
         ))
     }
 
-    fn active_displays(cid: ConnID) -> Vec<Self> {
+    fn present_displays(cid: ConnID) -> Vec<Self> {
         let mut count = 0u32;
         unsafe {
             CGGetActiveDisplayList(0, null_mut(), &mut count);
@@ -208,6 +208,14 @@ impl Display {
     fn active_display_space(&self, cid: ConnID) -> Result<u64> {
         Display::uuid_from_id(self.id)
             .map(|uuid| unsafe { SLSManagedDisplayGetCurrentSpace(cid, uuid.deref()) })
+    }
+
+    pub fn active_panel(&self, cid: ConnID) -> Result<WindowPane> {
+        let space_id = self.active_display_space(cid)?;
+        self.spaces.get(&space_id).cloned().ok_or(Error::new(
+            ErrorKind::NotFound,
+            format!("{}: can not find space {space_id}.", function_name!()),
+        ))
     }
 }
 
@@ -320,7 +328,7 @@ impl Window {
         if window_manager.skip_reshuffle {
             window_manager.skip_reshuffle = false;
         } else {
-            window_manager.reshuffle_around(self);
+            _ = window_manager.reshuffle_around(self);
         }
     }
 
@@ -650,13 +658,16 @@ pub struct WindowManager {
 }
 
 impl WindowManager {
-    pub fn new(tx: Sender<Event>, main_cid: ConnID) -> Self {
-        let displays = Display::active_displays(main_cid);
+    pub fn new(tx: Sender<Event>, main_cid: ConnID) -> Result<Self> {
+        let displays = Display::present_displays(main_cid);
         if displays.is_empty() {
-            error!("{}: Can not find any displays?!", function_name!());
+            return Err(Error::new(
+                ErrorKind::NotFound,
+                format!("{}: Can not find any displays?!", function_name!()),
+            ));
         }
 
-        WindowManager {
+        Ok(WindowManager {
             tx,
             applications: HashMap::new(),
             main_cid,
@@ -670,7 +681,7 @@ impl WindowManager {
             mouse_down_window: None,
             down_location: CGPoint::default(),
             displays,
-        }
+        })
     }
 
     pub fn start(&mut self, process_manager: &mut ProcessManager) {
@@ -1174,7 +1185,7 @@ impl WindowManager {
         let window = self.create_and_add_window(&app, element_ref, window_id, true)?;
         info!("{}: created {:?}", function_name!(), window.inner().id);
 
-        let panel = self.active_panel()?;
+        let panel = self.active_display()?.active_panel(self.main_cid)?;
         let previous = panel.read().ok().and_then(|panel| {
             self.focused_window
                 .and_then(|id| panel.iter().position(|window| window.inner().id == id))
@@ -1183,7 +1194,7 @@ impl WindowManager {
             panel.force_write().insert(prev + 1, window.clone());
         });
         if inserted.is_some() {
-            self.reshuffle_around(&window);
+            self.reshuffle_around(&window)?;
         }
 
         window.did_receive_focus(self);
@@ -1205,7 +1216,7 @@ impl WindowManager {
             .focused_window
             .and_then(|previous| self.find_window(previous));
         if let Some(window) = previous {
-            self.reshuffle_around(&window);
+            _ = self.reshuffle_around(&window);
         }
     }
 
@@ -1216,42 +1227,27 @@ impl WindowManager {
     pub fn window_resized(&self, window_id: WinID) -> Result<()> {
         if let Some(window) = self.find_window(window_id) {
             window.update_frame()?;
-            self.reshuffle_around(&window);
+            self.reshuffle_around(&window)?;
         }
         Ok(())
     }
 
-    pub fn reshuffle_around(&self, window: &Window) {
-        let active_space = match self.active_panel() {
-            Ok(active_space) => active_space,
-            Err(err) => {
-                warn!("{}: error getting active space: {err}", function_name!());
-                return;
-            }
-        };
-        let active_display = match self.active_display() {
-            Ok(display) => display,
-            Err(err) => {
-                warn!("{}: error getting active display: {err}", function_name!());
-                return;
-            }
-        };
+    pub fn reshuffle_around(&self, window: &Window) -> Result<()> {
+        let active_display = self.active_display()?;
+        let active_panel = active_display.active_panel(self.main_cid)?;
         let display_bounds = active_display.bounds;
-        let active_space = active_space.force_read();
+        let active_space = active_panel.force_read();
         let focus_id = window.inner().id;
-        let index = match active_space
+        let index = active_space
             .iter()
             .position(|window| window.inner().id == focus_id)
-        {
-            Some(index) => index,
-            None => {
-                debug!(
+            .ok_or(Error::new(
+                ErrorKind::NotFound,
+                format!(
                     "{}: Can not find a window {focus_id} in the stack!",
                     function_name!()
-                );
-                return;
-            }
-        };
+                ),
+            ))?;
 
         // Check if window needs to be fully exposed
         let mut frame = window.inner().frame;
@@ -1318,26 +1314,7 @@ impl WindowManager {
                 );
             }
         }
-    }
-
-    pub fn active_panel(&self) -> Result<WindowPane> {
-        let id = Display::active_display_id(self.main_cid)?;
-        let display = self
-            .displays
-            .iter()
-            .find(|display| display.id == id)
-            .ok_or(Error::new(
-                ErrorKind::NotFound,
-                format!(
-                    "{}: can not find active panel for display {id}.",
-                    function_name!()
-                ),
-            ))?;
-        let space_id = display.active_display_space(self.main_cid)?;
-        display.spaces.get(&space_id).cloned().ok_or(Error::new(
-            ErrorKind::NotFound,
-            format!("{}: can not find space {space_id}.", function_name!()),
-        ))
+        Ok(())
     }
 
     pub fn active_display(&self) -> Result<&Display> {

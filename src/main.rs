@@ -112,7 +112,7 @@ fn main() -> Result<(), Error> {
     let mut platform_callbacks = PlatformCallbacks::new(tx.clone());
     platform_callbacks.setup_handlers()?;
 
-    let (quit, handle) = EventHandler::new(tx.clone(), rx).start();
+    let (quit, handle) = EventHandler::new(tx.clone(), rx)?.start();
 
     platform_callbacks.run(quit);
 

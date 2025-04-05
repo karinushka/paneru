@@ -113,6 +113,10 @@ impl WindowPane {
         self.pane.force_read().len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.pane.force_read().is_empty()
+    }
+
     pub fn first(&self) -> Result<Window> {
         self.pane.force_read().first().cloned().ok_or(Error::new(
             ErrorKind::NotFound,
@@ -165,7 +169,8 @@ pub struct Display {
 }
 
 impl Display {
-    fn new(id: CGDirectDisplayID, spaces: HashMap<u64, WindowPane>) -> Self {
+    fn new(id: CGDirectDisplayID, spaces: Vec<u64>) -> Self {
+        let spaces = HashMap::from_iter(spaces.into_iter().map(|id| (id, WindowPane::default())));
         let bounds = unsafe { CGDisplayBounds(id) };
         Self { id, spaces, bounds }
     }
@@ -279,8 +284,6 @@ impl Display {
                 let uuid = Display::uuid_from_id(id);
                 uuid.and_then(|uuid| {
                     Display::display_space_list(uuid.as_ref(), cid)
-                        .map(|ids| ids.into_iter().map(|id| (id, WindowPane::default())))
-                        .map(HashMap::from_iter)
                         .map(|spaces| Display::new(id, spaces))
                 })
             })
@@ -317,6 +320,10 @@ impl Display {
             ErrorKind::NotFound,
             format!("{}: can not find space {space_id}.", function_name!()),
         ))
+    }
+
+    pub fn remove_window(&self, window_id: WinID) {
+        self.spaces.values().for_each(|pane| pane.remove(window_id));
     }
 }
 
@@ -385,7 +392,6 @@ impl Window {
                 frame: CGRect::default(),
                 minimized: false,
                 is_root: false,
-                // handler: WindowHandler::new(app),
                 observing: vec![],
                 size_ratios: vec![0.25, 0.33, 0.50, 0.66, 0.75],
                 managed: true,
@@ -936,13 +942,8 @@ impl WindowManager {
         });
 
         for display in self.displays.iter() {
-            for (space, windows) in display.spaces.iter() {
-                self.space_window_list_for_connection(vec![*space], None, false)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .flat_map(|window_id| self.find_window(window_id))
-                    .filter(|window| window.is_eligible())
-                    .for_each(|window| windows.append(window));
+            for (space_id, pane) in display.spaces.iter() {
+                self.refresh_windows_space(*space_id, pane);
             }
         }
 
@@ -951,6 +952,27 @@ impl WindowManager {
             self.focused_window = Some(window.id());
             self.focused_psn = window.app().psn();
         }
+    }
+
+    // Repopulates current window panel with window from the selected space.
+    fn refresh_windows_space(&self, space_id: u64, pane: &WindowPane) {
+        self.space_window_list_for_connection(vec![space_id], None, false)
+            .inspect_err(|err| {
+                warn!(
+                    "{}: getting windows for space {space_id}: {err}",
+                    function_name!()
+                )
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|window_id| self.find_window(window_id))
+            .filter(|window| window.is_eligible())
+            .for_each(|window| {
+                self.displays
+                    .iter()
+                    .for_each(|display| display.remove_window(window.inner().id));
+                pane.append(window)
+            });
     }
 
     pub fn find_application(&self, pid: Pid) -> Option<Application> {
@@ -1426,9 +1448,7 @@ impl WindowManager {
         info!("{}: {window_id}", function_name!());
 
         self.displays.iter().for_each(|display| {
-            display.spaces.values().for_each(|pane| {
-                pane.remove(window_id);
-            });
+            display.remove_window(window_id);
         });
 
         let previous = self
@@ -1537,5 +1557,40 @@ impl WindowManager {
                 ErrorKind::NotFound,
                 format!("{}: can not find active display.", function_name!()),
             ))
+    }
+
+    // Searches other inactive displays for windows which are currently on this display and
+    // relocates them.
+    pub fn add_detected_display(&mut self) -> Result<&Display> {
+        let id = Display::active_display_id(self.main_cid)?;
+        let uuid = Display::uuid_from_id(id)?;
+        info!("{}: detected new display {id} ({uuid}).", function_name!());
+        let spaces = Display::display_space_list(uuid.deref(), self.main_cid)?;
+        let display = Display::new(id, spaces);
+
+        for (space_id, pane) in display.spaces.iter() {
+            // Populate the display panes with its windows.
+            self.refresh_windows_space(*space_id, pane);
+            pane.access_right_of(&pane.first()?, |window| {
+                // Remove this window from any other displays.
+                self.displays
+                    .iter()
+                    .for_each(|display| display.remove_window(window.id()));
+                debug!(
+                    "{}: Moved window {} to new display.",
+                    function_name!(),
+                    window.id()
+                );
+                _ = window.update_frame();
+                true // continue through all windows.
+            })?;
+        }
+
+        // Remove displays without any active windows.
+        self.displays
+            .retain(|display| display.spaces.values().any(|pane| !pane.is_empty()));
+
+        self.displays.push(display);
+        Ok(self.displays.last().unwrap())
     }
 }

@@ -364,6 +364,7 @@ pub struct InnerWindow {
     pub is_root: bool,
     pub observing: Vec<bool>,
     pub size_ratios: Vec<f64>,
+    pub managed: bool,
 }
 
 impl Window {
@@ -383,6 +384,7 @@ impl Window {
                 // handler: WindowHandler::new(app),
                 observing: vec![],
                 size_ratios: vec![0.25, 0.33, 0.50, 0.66, 0.75],
+                managed: true,
             })),
         };
         window.update_frame()?;
@@ -1328,6 +1330,10 @@ impl WindowManager {
     }
 
     pub fn reshuffle_around(&self, window: &Window) -> Result<()> {
+        if !window.inner().managed {
+            return Ok(());
+        }
+
         let active_display = self.active_display()?;
         let active_panel = active_display.active_panel(self.main_cid)?;
         let display_bounds = active_display.bounds;

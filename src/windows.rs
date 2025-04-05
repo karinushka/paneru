@@ -709,6 +709,39 @@ impl Window {
         }
         unsafe { CGWarpMouseCursorPosition(center) };
     }
+
+    // Fully expose the window if parts of it are off-screen.
+    fn expose_window(&self, active_display: &Display) -> CGRect {
+        // Check if window needs to be fully exposed
+        let window_id = self.inner().id;
+        let display_bounds = active_display.bounds;
+        let mut frame = self.inner().frame;
+        trace!("{}: focus original position {frame:?}", function_name!());
+        let moved = if frame.origin.x + frame.size.width > display_bounds.size.width {
+            trace!(
+                "{}: Bumped window {} to the left",
+                function_name!(),
+                window_id
+            );
+            frame.origin.x = display_bounds.size.width - frame.size.width;
+            true
+        } else if frame.origin.x < 0.0 {
+            trace!(
+                "{}: Bumped window {} to the right",
+                function_name!(),
+                window_id
+            );
+            frame.origin.x = 0.0;
+            true
+        } else {
+            false
+        };
+        if moved {
+            self.reposition(frame.origin.x, frame.origin.y);
+            trace!("{}: focus resposition to {frame:?}", function_name!());
+        }
+        frame
+    }
 }
 
 impl Drop for InnerWindow {
@@ -1335,35 +1368,9 @@ impl WindowManager {
         }
 
         let active_display = self.active_display()?;
+        let frame = window.expose_window(active_display);
         let active_panel = active_display.active_panel(self.main_cid)?;
         let display_bounds = active_display.bounds;
-        let focus_id = window.inner().id;
-
-        // Check if window needs to be fully exposed
-        let mut frame = window.inner().frame;
-        trace!("{}: focus original position {frame:?}", function_name!());
-        let mut moved = false;
-        if frame.origin.x + frame.size.width > display_bounds.size.width {
-            trace!(
-                "{}: Bumped window {} to the left",
-                function_name!(),
-                focus_id
-            );
-            frame.origin.x = display_bounds.size.width - frame.size.width;
-            moved = true;
-        } else if frame.origin.x < 0.0 {
-            trace!(
-                "{}: Bumped window {} to the right",
-                function_name!(),
-                focus_id
-            );
-            frame.origin.x = 0.0;
-            moved = true;
-        }
-        if moved {
-            window.reposition(frame.origin.x, frame.origin.y);
-            trace!("{}: focus resposition to {frame:?}", function_name!());
-        }
 
         // Shuffling windows to the right of the focus.
         let mut upper_left = frame.origin.x + frame.size.width;

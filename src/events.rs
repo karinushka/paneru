@@ -400,7 +400,12 @@ impl EventHandler {
             }
         };
 
-        let active_display = self.window_manager.active_display()?;
+        // If unable to detect current display, a new one must have been added, so move teh current
+        // windows to it.
+        let active_display = match self.window_manager.active_display() {
+            Ok(display) => display,
+            _ => self.window_manager.add_detected_display()?,
+        };
         let display_bounds = active_display.bounds;
         let active_panel = active_display.active_panel(self.main_cid)?;
 

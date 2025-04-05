@@ -441,15 +441,17 @@ impl EventHandler {
             }
 
             "manage" => {
-                if active_panel.index_of(&window).is_ok() {
+                if window.inner().managed {
                     // Window already managed, remove it from the managed stack.
                     active_panel.remove(window.inner().id);
+                    window.inner.force_write().managed = false;
                 } else {
                     // Add newly managed window to the stack.
                     let frame = window.inner().frame;
                     window.reposition(frame.origin.x, 0.0);
                     window.resize(frame.size.width, display_bounds.size.height);
                     active_panel.append(window.clone());
+                    window.inner.force_write().managed = true;
                 };
             }
 

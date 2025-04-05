@@ -19,7 +19,7 @@ use crate::skylight::{
     ConnID, SLSCopyAssociatedWindows, SLSFindWindowAndOwner, SLSMainConnectionID, WinID,
 };
 use crate::util::{AxuWrapperType, get_array_values};
-use crate::windows::{Window, WindowManager};
+use crate::windows::{Window, WindowManager, WindowPane};
 
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -305,172 +305,157 @@ impl EventHandler {
         }
     }
 
-    fn get_focused_index(focus: Option<&Window>, panel: &[Window]) -> Option<usize> {
-        focus.and_then(|window| {
-            let focused_id = window.inner().id;
-            panel
-                .iter()
-                .position(|window| window.inner().id == focused_id)
-        })
-    }
-
-    fn get_panel_in_direction(
+    fn get_window_in_direction(
         direction: &str,
-        focus: Option<&Window>,
-        panel: &[Window],
-    ) -> Option<(usize, usize)> {
-        let index = EventHandler::get_focused_index(focus, panel)?;
-        let new_index = match direction {
-            "west" => {
-                if index > 0 {
-                    index - 1
-                } else {
-                    index
-                }
+        current_window: &Window,
+        panel: &WindowPane,
+    ) -> Option<Window> {
+        let mut found: Option<Window> = None;
+        let accessor = |window: &Window| {
+            if window.inner().id == current_window.inner().id {
+                // If it's the same window, continue
+                true
+            } else {
+                found = Some(window.clone());
+                false
             }
-            "east" => {
-                if index >= panel.len() - 1 {
-                    panel.len() - 1
-                } else {
-                    index + 1
-                }
-            }
-            "first" => 0,
-            "last" => panel.len() - 1,
-            _ => index,
         };
+        _ = match direction {
+            "west" => panel.access_left_of(current_window, accessor),
+            "east" => panel.access_right_of(current_window, accessor),
+            "first" => {
+                found = panel.first().ok();
+                Ok(())
+            }
+            "last" => {
+                found = panel.last().ok();
+                Ok(())
+            }
+            dir => {
+                error!("{}: Unhandled direction {dir}", function_name!());
+                Ok(())
+            }
+        }
+        .inspect_err(|err| debug!("{}: panel operation: {err}", function_name!()));
 
-        (index != new_index).then_some((index, new_index))
+        found
     }
 
     fn command_move_focus(
         argv: &[String],
-        focus: Option<&Window>,
-        panel: &[Window],
-    ) -> Option<usize> {
+        current_window: &Window,
+        panel: &WindowPane,
+    ) -> Option<Window> {
         let empty = "".to_string();
         let direction = argv.first().unwrap_or(&empty);
 
-        EventHandler::get_panel_in_direction(direction, focus, panel).map(|(_, new_index)| {
-            let window = &panel[new_index];
+        EventHandler::get_window_in_direction(direction, current_window, panel).inspect(|window| {
             window.focus_with_raise();
-            new_index
         })
     }
 
     fn command_swap_focus(
         argv: &[String],
-        focus: Option<&Window>,
-        panel: &mut [Window],
+        current_window: &Window,
+        panel: &WindowPane,
         bounds: &CGRect,
-    ) -> Option<usize> {
+    ) -> Option<Window> {
         let empty = "".to_string();
         let direction = argv.first().unwrap_or(&empty);
+        let index = panel.index_of(current_window).unwrap();
+        let window = EventHandler::get_window_in_direction(direction, current_window, panel)?;
+        let new_index = panel.index_of(&window).unwrap();
 
-        EventHandler::get_panel_in_direction(direction, focus, panel).map(|(index, new_index)| {
-            let origin = if new_index == 0 {
-                // If reached far left, snap the window to left.
-                CGPoint::new(0.0, 0.0)
-            } else if new_index == (panel.len() - 1) {
-                // If reached full right, snap the window to right.
-                CGPoint::new(
-                    bounds.size.width - panel[index].inner().frame.size.width,
-                    0.0,
-                )
-            } else {
-                panel[new_index].inner().frame.origin
-            };
-            panel[index].reposition(origin.x, origin.y);
-            if index < new_index {
-                (index..new_index).for_each(|idx| panel.swap(idx, idx + 1));
-            } else {
-                (new_index..index)
-                    .rev()
-                    .for_each(|idx| panel.swap(idx, idx + 1));
-            }
-            new_index
-        })
+        let origin = if new_index == 0 {
+            // If reached far left, snap the window to left.
+            CGPoint::new(0.0, 0.0)
+        } else if new_index == (panel.len() - 1) {
+            // If reached full right, snap the window to right.
+            CGPoint::new(
+                bounds.size.width - current_window.inner().frame.size.width,
+                0.0,
+            )
+        } else {
+            panel.get(new_index).unwrap().inner().frame.origin
+        };
+        current_window.reposition(origin.x, origin.y);
+        if index < new_index {
+            (index..new_index).for_each(|idx| panel.swap(idx, idx + 1));
+        } else {
+            (new_index..index)
+                .rev()
+                .for_each(|idx| panel.swap(idx, idx + 1));
+        }
+        Some(window)
     }
 
     fn command_windows(&mut self, argv: &[String]) -> Result<()> {
         let empty = "".to_string();
-        let focus = self
+        let window = match self
             .window_manager
             .focused_window
             .and_then(|window_id| self.window_manager.find_window(window_id))
-            .filter(|window| window.is_eligible());
+            .filter(|window| window.is_eligible())
+        {
+            Some(window) => window,
+            None => {
+                warn!("{}: No window focused.", function_name!());
+                return Ok(());
+            }
+        };
 
-        let active_panel = self
-            .window_manager
-            .active_display()?
-            .active_panel(self.main_cid)?;
+        let active_display = self.window_manager.active_display()?;
+        let display_bounds = active_display.bounds;
+        let active_panel = active_display.active_panel(self.main_cid)?;
 
-        let display_bounds = self.window_manager.active_display()?.bounds;
-
-        let window = match argv.first().unwrap_or(&empty).as_ref() {
+        match argv.first().unwrap_or(&empty).as_ref() {
             "focus" => {
-                let index = EventHandler::command_move_focus(
-                    &argv[1..],
-                    focus.as_ref(),
-                    active_panel.force_write().as_slice(),
-                );
-                index.and_then(|index| active_panel.force_read().get(index).cloned())
+                EventHandler::command_move_focus(&argv[1..], &window, &active_panel);
             }
 
             "swap" => {
-                let mut panel = active_panel.force_write();
                 EventHandler::command_swap_focus(
                     &argv[1..],
-                    focus.as_ref(),
-                    panel.as_mut_slice(),
+                    &window,
+                    &active_panel,
                     &display_bounds,
-                )
-                .map(|new_index| panel[new_index].clone())
+                );
             }
 
-            "center" => focus.inspect(|window| {
+            "center" => {
                 let frame = window.inner().frame;
                 window.reposition(
                     (display_bounds.size.width - frame.size.width) / 2.0,
                     frame.origin.y,
                 );
                 window.center_mouse(self.main_cid);
-            }),
+            }
 
-            "resize" => focus.inspect(|window| {
+            "resize" => {
                 window.inner.force_write().size_ratios.rotate_left(1);
                 let width_ratio = *window.inner().size_ratios.first().unwrap();
                 // let frame = window.inner().frame;
                 // window.reposition((SCREEN_WIDTH - width) / 2.0, frame.origin.y);
                 let frame = window.inner().frame;
                 window.resize(width_ratio * display_bounds.size.width, frame.size.height);
-            }),
+            }
 
-            "manage" => focus.inspect(|window| {
-                let window_id = window.inner().id;
-                let index = active_panel
-                    .force_read()
-                    .iter()
-                    .position(|item| item.inner().id == window_id);
-
-                if let Some(index) = index {
+            "manage" => {
+                if active_panel.index_of(&window).is_ok() {
                     // Window already managed, remove it from the managed stack.
-                    active_panel.force_write().remove(index);
+                    active_panel.remove(window.inner().id);
                 } else {
                     // Add newly managed window to the stack.
                     let frame = window.inner().frame;
                     window.reposition(frame.origin.x, 0.0);
                     window.resize(frame.size.width, display_bounds.size.height);
-                    active_panel.force_write().push(window.clone());
-                }
-            }),
+                    active_panel.append(window.clone());
+                };
+            }
 
-            _ => None,
+            _ => (),
         };
-        if let Some(window) = window {
-            self.window_manager.reshuffle_around(&window)?;
-        }
-        Ok(())
+        self.window_manager.reshuffle_around(&window)
     }
 
     fn command(&mut self, argv: Vec<String>) {

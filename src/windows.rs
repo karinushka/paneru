@@ -51,7 +51,107 @@ use crate::util::{
 
 const THRESHOLD: f64 = 10.0;
 
-type WindowPane = Arc<RwLock<Vec<Window>>>;
+#[derive(Clone, Default)]
+pub struct WindowPane {
+    pane: Arc<RwLock<Vec<Window>>>,
+}
+
+impl WindowPane {
+    pub fn index_of(&self, window: &Window) -> Result<usize> {
+        let focused_id = window.inner().id;
+        self.pane
+            .force_read()
+            .iter()
+            .position(|window| window.inner().id == focused_id)
+            .ok_or(Error::new(
+                ErrorKind::NotFound,
+                format!(
+                    "{}: can not find window {focused_id} in the current pane.",
+                    function_name!()
+                ),
+            ))
+    }
+
+    pub fn insert_at(&self, after: usize, window: Window) -> Result<usize> {
+        let index = after + 1;
+        if index > self.len() {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("{}: index {after} out of bounds.", function_name!()),
+            ));
+        }
+        self.pane.force_write().insert(index, window);
+        Ok(index)
+    }
+
+    pub fn append(&self, window: Window) {
+        self.pane.force_write().push(window);
+    }
+
+    pub fn remove(&self, window_id: WinID) {
+        self.pane
+            .force_write()
+            .retain(|window| window.inner().id != window_id);
+    }
+
+    pub fn get(&self, at: usize) -> Result<Window> {
+        self.pane.force_read().get(at).cloned().ok_or(Error::new(
+            ErrorKind::InvalidInput,
+            format!("{}: {at} out of bounds", function_name!()),
+        ))
+    }
+
+    pub fn swap(&self, left: usize, right: usize) {
+        self.pane.force_write().swap(left, right);
+    }
+
+    pub fn len(&self) -> usize {
+        self.pane.force_read().len()
+    }
+
+    pub fn first(&self) -> Result<Window> {
+        self.pane.force_read().first().cloned().ok_or(Error::new(
+            ErrorKind::NotFound,
+            format!("{}: can not find first element.", function_name!()),
+        ))
+    }
+
+    pub fn last(&self) -> Result<Window> {
+        self.pane.force_read().last().cloned().ok_or(Error::new(
+            ErrorKind::NotFound,
+            format!("{}: can not find last element.", function_name!()),
+        ))
+    }
+
+    pub fn access_right_of(
+        &self,
+        window: &Window,
+        mut accessor: impl FnMut(&Window) -> bool,
+    ) -> Result<()> {
+        let index = self.index_of(window)?;
+        for window in self.pane.force_read()[1 + index..].iter() {
+            if !accessor(window) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn access_left_of(
+        &self,
+        window: &Window,
+        mut accessor: impl FnMut(&Window) -> bool,
+    ) -> Result<()> {
+        let index = self.index_of(window)?;
+        for window in self.pane.force_read()[0..index].iter().rev() {
+            // NOTE: left side iterates backwards.
+            if !accessor(window) {
+                break;
+            }
+        }
+        Ok(())
+    }
+}
 
 pub struct Display {
     id: CGDirectDisplayID,
@@ -175,10 +275,7 @@ impl Display {
                 let uuid = Display::uuid_from_id(id);
                 uuid.and_then(|uuid| {
                     Display::display_space_list(uuid.as_ref(), cid)
-                        .map(|ids| {
-                            ids.into_iter()
-                                .map(|id| (id, Arc::new(RwLock::new(vec![]))))
-                        })
+                        .map(|ids| ids.into_iter().map(|id| (id, WindowPane::default())))
                         .map(HashMap::from_iter)
                         .map(|spaces| Display::new(id, spaces))
                 })
@@ -692,13 +789,12 @@ impl WindowManager {
 
         for display in self.displays.iter() {
             for (space, windows) in display.spaces.iter() {
-                windows.force_write().extend(
-                    self.space_window_list_for_connection(vec![*space], None, false)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .flat_map(|window_id| self.find_window(window_id))
-                        .filter(|window| window.is_eligible()),
-                )
+                self.space_window_list_for_connection(vec![*space], None, false)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .flat_map(|window_id| self.find_window(window_id))
+                    .filter(|window| window.is_eligible())
+                    .for_each(|window| windows.append(window));
             }
         }
 
@@ -1163,16 +1259,16 @@ impl WindowManager {
         info!("{}: created {:?}", function_name!(), window.inner().id);
 
         let panel = self.active_display()?.active_panel(self.main_cid)?;
-        let previous = panel.read().ok().and_then(|panel| {
-            self.focused_window
-                .and_then(|id| panel.iter().position(|window| window.inner().id == id))
-        });
-        let inserted = previous.map(|prev| {
-            panel.force_write().insert(prev + 1, window.clone());
-        });
-        if inserted.is_some() {
-            self.reshuffle_around(&window)?;
-        }
+        let insert_at = self
+            .focused_window
+            .and_then(|window_id| self.find_window(window_id))
+            .and_then(|window| panel.index_of(&window).ok());
+        match insert_at {
+            Some(after) => {
+                panel.insert_at(after, window.clone())?;
+            }
+            None => panel.append(window.clone()),
+        };
 
         self.window_focused(window);
         Ok(())
@@ -1182,10 +1278,8 @@ impl WindowManager {
         info!("{}: {window_id}", function_name!());
 
         self.displays.iter().for_each(|display| {
-            display.spaces.values().for_each(|windows| {
-                windows
-                    .force_write()
-                    .retain(|window| window.inner().id != window_id);
+            display.spaces.values().for_each(|pane| {
+                pane.remove(window_id);
             });
         });
 
@@ -1237,18 +1331,7 @@ impl WindowManager {
         let active_display = self.active_display()?;
         let active_panel = active_display.active_panel(self.main_cid)?;
         let display_bounds = active_display.bounds;
-        let active_space = active_panel.force_read();
         let focus_id = window.inner().id;
-        let index = active_space
-            .iter()
-            .position(|window| window.inner().id == focus_id)
-            .ok_or(Error::new(
-                ErrorKind::NotFound,
-                format!(
-                    "{}: Can not find a window {focus_id} in the stack!",
-                    function_name!()
-                ),
-            ))?;
 
         // Check if window needs to be fully exposed
         let mut frame = window.inner().frame;
@@ -1278,7 +1361,7 @@ impl WindowManager {
 
         // Shuffling windows to the right of the focus.
         let mut upper_left = frame.origin.x + frame.size.width;
-        for window in &active_space[1 + index..] {
+        active_panel.access_right_of(window, |window| {
             let frame = window.inner().frame;
             trace!("{}: right: frame: {frame:?}", function_name!());
             // Check for window getting off screen.
@@ -1293,12 +1376,13 @@ impl WindowManager {
                 );
             }
             upper_left += frame.size.width;
-        }
+            true // continue through all windows
+        })?;
 
         // Shuffling windows to the left of the focus.
         let mut upper_left = frame.origin.x;
         trace!("{}: focus upper_left {upper_left}", function_name!());
-        for window in active_space[0..index].iter().rev() {
+        active_panel.access_left_of(window, |window| {
             let frame = window.inner().frame;
             trace!("{}: left: frame: {frame:?}", function_name!());
             // Check for window getting off screen.
@@ -1314,8 +1398,8 @@ impl WindowManager {
                     function_name!()
                 );
             }
-        }
-        Ok(())
+            true // continue through all windows
+        })
     }
 
     pub fn active_display(&self) -> Result<&Display> {

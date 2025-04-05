@@ -13,7 +13,6 @@ use std::pin::Pin;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use stdext::function_name;
-use stdext::prelude::RwLockExt;
 
 use crate::app::Application;
 use crate::platform::{Pid, ProcessInfo, ProcessSerialNumber, WorkspaceObserver, get_process_info};
@@ -165,25 +164,21 @@ impl Process {
         let active_panel = window_manager
             .active_display()?
             .active_panel(window_manager.main_cid)?;
-        let index = window_manager
+        let insert_at = window_manager
             .focused_window
-            .and_then(|focus_id| {
-                active_panel
-                    .force_read()
-                    .iter()
-                    .position(|window| window.inner().id == focus_id)
-            })
-            .ok_or(Error::new(
-                ErrorKind::NotFound,
-                format!(
-                    "{}: can not find index of the current window.",
-                    function_name!()
-                ),
-            ))?;
+            .and_then(|id| window_manager.find_window(id))
+            .and_then(|window| active_panel.index_of(&window).ok());
+        match insert_at {
+            Some(mut after) => {
+                for window in &windows {
+                    after = active_panel.insert_at(after, window.clone())?;
+                }
+            }
+            None => windows.iter().for_each(|window| {
+                active_panel.append(window.clone());
+            }),
+        };
 
-        windows
-            .iter()
-            .for_each(|window| active_panel.force_write().insert(index + 1, window.clone()));
         if let Some(window) = windows.first() {
             window_manager.reshuffle_around(window)?;
         }

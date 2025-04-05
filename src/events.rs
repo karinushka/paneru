@@ -294,7 +294,7 @@ impl EventHandler {
                 return;
             }
 
-            window.did_receive_focus(&mut self.window_manager);
+            self.window_manager.window_focused(window);
         } else {
             warn!(
                 "{}: window_manager_add_lost_focused_event",

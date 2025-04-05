@@ -309,29 +309,6 @@ impl Window {
         self.inner.force_read()
     }
 
-    pub fn did_receive_focus(&self, window_manager: &mut WindowManager) {
-        let focused_id = window_manager.focused_window;
-
-        let my_id = self.inner().id;
-        if focused_id.is_none_or(|id| id != my_id) {
-            if window_manager.ffm_window_id.is_none_or(|id| id != my_id) {
-                self.center_mouse(window_manager.main_cid);
-            }
-            window_manager.last_window = focused_id;
-        }
-
-        debug!("{}: {} getting focus", function_name!(), my_id);
-        window_manager.focused_window = Some(my_id);
-        window_manager.focused_psn = self.inner().app.inner().psn.clone();
-        window_manager.ffm_window_id = None;
-
-        if window_manager.skip_reshuffle {
-            window_manager.skip_reshuffle = false;
-        } else {
-            _ = window_manager.reshuffle_around(self);
-        }
-    }
-
     fn parent(main_conn: ConnID, window_id: WinID) -> Result<WinID> {
         let windows = create_array(vec![window_id], CFNumberType::SInt32Type)?;
         unsafe {
@@ -1153,7 +1130,7 @@ impl WindowManager {
             }
             Ok(focused_id) => {
                 if let Some(window) = self.find_window(focused_id) {
-                    window.did_receive_focus(self);
+                    self.window_focused(window);
                 } else {
                     warn!(
                         "{}: window_manager_add_lost_focused_event",
@@ -1197,7 +1174,7 @@ impl WindowManager {
             self.reshuffle_around(&window)?;
         }
 
-        window.did_receive_focus(self);
+        self.window_focused(window);
         Ok(())
     }
 
@@ -1230,6 +1207,30 @@ impl WindowManager {
             self.reshuffle_around(&window)?;
         }
         Ok(())
+    }
+
+    pub fn window_focused(&mut self, window: Window) {
+        let focused_id = self.focused_window;
+        let my_id = window.inner().id;
+        if focused_id.is_none_or(|id| id != my_id) {
+            if self.ffm_window_id.is_none_or(|id| id != my_id) {
+                // window_manager_center_mouse(wm, window);
+                window.center_mouse(self.main_cid);
+            }
+            self.last_window = focused_id;
+        }
+
+        debug!("{}: {} getting focus", function_name!(), my_id);
+        debug!("did_receive_focus: {} getting focus", my_id);
+        self.focused_window = Some(my_id);
+        self.focused_psn = window.inner().app.inner().psn.clone();
+        self.ffm_window_id = None;
+
+        if self.skip_reshuffle {
+            self.skip_reshuffle = false;
+        } else {
+            _ = self.reshuffle_around(&window);
+        }
     }
 
     pub fn reshuffle_around(&self, window: &Window) -> Result<()> {

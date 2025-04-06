@@ -53,17 +53,17 @@ pub static AX_WINDOW_NOTIFICATIONS: LazyLock<Vec<&str>> = LazyLock::new(|| {
 
 #[derive(Clone, Debug)]
 pub struct Application {
-    pub inner: Arc<RwLock<InnerApplication>>,
+    inner: Arc<RwLock<InnerApplication>>,
 }
 
 #[derive(Debug)]
-pub struct InnerApplication {
-    pub element_ref: CFRetained<AxuWrapperType>,
-    pub psn: ProcessSerialNumber,
-    pub pid: Pid,
-    pub name: String,
-    pub connection: Option<ConnID>,
-    pub handler: ApplicationHandler,
+struct InnerApplication {
+    element_ref: CFRetained<AxuWrapperType>,
+    psn: ProcessSerialNumber,
+    pid: Pid,
+    name: String,
+    connection: Option<ConnID>,
+    handler: ApplicationHandler,
 }
 
 impl Application {
@@ -91,8 +91,24 @@ impl Application {
         // app.inner.write().unwrap().handler = Some(ApplicationHandler::new(app.clone(), tx));
     }
 
-    pub fn inner(&self) -> std::sync::RwLockReadGuard<'_, InnerApplication> {
+    fn inner(&self) -> std::sync::RwLockReadGuard<'_, InnerApplication> {
         self.inner.force_read()
+    }
+
+    pub fn name(&self) -> String {
+        self.inner().name.clone()
+    }
+
+    pub fn pid(&self) -> Pid {
+        self.inner().pid
+    }
+
+    pub fn psn(&self) -> ProcessSerialNumber {
+        self.inner().psn.clone()
+    }
+
+    pub fn connection(&self) -> Option<ConnID> {
+        self.inner().connection
     }
 
     pub fn observer_ref(&self) -> Option<CFRetained<AxuWrapperType>> {

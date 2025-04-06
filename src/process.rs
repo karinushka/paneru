@@ -114,11 +114,7 @@ impl Process {
         if let Some(app) = window_manager.find_application(self.pid) {
             return Err(Error::new(
                 ErrorKind::InvalidData,
-                format!(
-                    "{}: App {} already exists.",
-                    function_name!(),
-                    app.inner().name
-                ),
+                format!("{}: App {} already exists.", function_name!(), app.name()),
             ));
         }
         let app =
@@ -131,7 +127,7 @@ impl Process {
                 format!(
                     "{}: failed to register all observers {}",
                     function_name!(),
-                    app.inner().name
+                    app.name()
                 ),
             ));
         }
@@ -139,11 +135,9 @@ impl Process {
         debug!(
             "{}: Adding {} to list of apps.",
             function_name!(),
-            app.inner().name
+            app.name()
         );
-        window_manager
-            .applications
-            .insert(app.inner().pid, app.clone());
+        window_manager.applications.insert(app.pid(), app.clone());
 
         // int window_count;
         // struct window **window_list = window_manager_add_application_windows(
@@ -155,10 +149,10 @@ impl Process {
             function_name!(),
             windows
                 .iter()
-                .map(|window| format!("{}", window.inner().id))
+                .map(|window| format!("{}", window.id()))
                 .collect::<Vec<_>>()
                 .join(", "),
-            app.inner().name
+            app.name()
         );
 
         let active_panel = window_manager

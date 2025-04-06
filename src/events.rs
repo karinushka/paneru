@@ -11,7 +11,6 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 use std::thread::JoinHandle;
 use stdext::function_name;
-use stdext::prelude::RwLockExt;
 
 use crate::platform::{ProcessSerialNumber, WorkspaceObserver};
 use crate::process::ProcessManager;
@@ -290,7 +289,7 @@ impl EventHandler {
     fn window_focused(&mut self, window_id: WinID) {
         debug!("{}: {}", function_name!(), window_id);
         if let Some(window) = self.window_manager.find_window(window_id) {
-            if !window.inner().app.is_frontmost() {
+            if !window.app().is_frontmost() {
                 return;
             }
 
@@ -312,7 +311,7 @@ impl EventHandler {
     ) -> Option<Window> {
         let mut found: Option<Window> = None;
         let accessor = |window: &Window| {
-            if window.inner().id == current_window.inner().id {
+            if window.id() == current_window.id() {
                 // If it's the same window, continue
                 true
             } else {
@@ -371,12 +370,9 @@ impl EventHandler {
             CGPoint::new(0.0, 0.0)
         } else if new_index == (panel.len() - 1) {
             // If reached full right, snap the window to right.
-            CGPoint::new(
-                bounds.size.width - current_window.inner().frame.size.width,
-                0.0,
-            )
+            CGPoint::new(bounds.size.width - current_window.frame().size.width, 0.0)
         } else {
-            panel.get(new_index).unwrap().inner().frame.origin
+            panel.get(new_index).unwrap().frame().origin
         };
         current_window.reposition(origin.x, origin.y);
         if index < new_index {
@@ -423,7 +419,7 @@ impl EventHandler {
             }
 
             "center" => {
-                let frame = window.inner().frame;
+                let frame = window.frame();
                 window.reposition(
                     (display_bounds.size.width - frame.size.width) / 2.0,
                     frame.origin.y,
@@ -432,26 +428,27 @@ impl EventHandler {
             }
 
             "resize" => {
-                window.inner.force_write().size_ratios.rotate_left(1);
-                let width_ratio = *window.inner().size_ratios.first().unwrap();
+                let width_ratio = window.next_size_ratio();
                 // let frame = window.inner().frame;
                 // window.reposition((SCREEN_WIDTH - width) / 2.0, frame.origin.y);
-                let frame = window.inner().frame;
-                window.resize(width_ratio * display_bounds.size.width, frame.size.height);
+                window.resize(
+                    width_ratio * display_bounds.size.width,
+                    window.frame().size.height,
+                );
             }
 
             "manage" => {
-                if window.inner().managed {
+                if window.managed() {
                     // Window already managed, remove it from the managed stack.
-                    active_panel.remove(window.inner().id);
-                    window.inner.force_write().managed = false;
+                    active_panel.remove(window.id());
+                    window.manage(false);
                 } else {
                     // Add newly managed window to the stack.
-                    let frame = window.inner().frame;
+                    let frame = window.frame();
                     window.reposition(frame.origin.x, 0.0);
                     window.resize(frame.size.width, display_bounds.size.height);
                     active_panel.append(window.clone());
-                    window.inner.force_write().managed = true;
+                    window.manage(true);
                 };
             }
 
@@ -515,7 +512,7 @@ impl EventHandler {
 
         match self.find_window_at_point(point) {
             Ok(window) => {
-                let window_id = window.inner().id;
+                let window_id = window.id();
                 if self
                     .window_manager
                     .focused_window

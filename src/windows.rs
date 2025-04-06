@@ -62,11 +62,11 @@ pub struct WindowPane {
 
 impl WindowPane {
     pub fn index_of(&self, window: &Window) -> Result<usize> {
-        let focused_id = window.inner().id;
+        let focused_id = window.id();
         self.pane
             .force_read()
             .iter()
-            .position(|window| window.inner().id == focused_id)
+            .position(|window| window.id() == focused_id)
             .ok_or(Error::new(
                 ErrorKind::NotFound,
                 format!(
@@ -95,7 +95,7 @@ impl WindowPane {
     pub fn remove(&self, window_id: WinID) {
         self.pane
             .force_write()
-            .retain(|window| window.inner().id != window_id);
+            .retain(|window| window.id() != window_id);
     }
 
     pub fn get(&self, at: usize) -> Result<Window> {
@@ -355,20 +355,20 @@ fn ax_window_pid(element_ref: &CFRetained<AxuWrapperType>) -> Result<Pid> {
 
 #[derive(Debug, Clone)]
 pub struct Window {
-    pub inner: Arc<RwLock<InnerWindow>>,
+    inner: Arc<RwLock<InnerWindow>>,
 }
 
 #[derive(Debug)]
 pub struct InnerWindow {
     pub id: WinID,
     pub app: Application,
-    pub element_ref: CFRetained<AxuWrapperType>,
-    pub frame: CGRect,
-    pub minimized: bool,
-    pub is_root: bool,
-    pub observing: Vec<bool>,
-    pub size_ratios: Vec<f64>,
-    pub managed: bool,
+    element_ref: CFRetained<AxuWrapperType>,
+    frame: CGRect,
+    minimized: bool,
+    is_root: bool,
+    observing: Vec<bool>,
+    size_ratios: Vec<f64>,
+    managed: bool,
 }
 
 impl Window {
@@ -393,7 +393,7 @@ impl Window {
         };
         window.update_frame()?;
 
-        let connection = app.inner().connection.ok_or(Error::new(
+        let connection = app.connection().ok_or(Error::new(
             ErrorKind::InvalidData,
             format!("{}: invalid connection for window.", function_name!()),
         ))?;
@@ -408,7 +408,32 @@ impl Window {
         Ok(window)
     }
 
-    pub fn inner(&self) -> std::sync::RwLockReadGuard<'_, InnerWindow> {
+    pub fn id(&self) -> WinID {
+        self.inner().id
+    }
+
+    pub fn app(&self) -> Application {
+        self.inner().app.clone()
+    }
+
+    pub fn frame(&self) -> CGRect {
+        self.inner().frame
+    }
+
+    pub fn next_size_ratio(&self) -> f64 {
+        self.inner.force_write().size_ratios.rotate_left(1);
+        self.inner().size_ratios[0]
+    }
+
+    pub fn managed(&self) -> bool {
+        self.inner().managed
+    }
+
+    pub fn manage(&self, manage: bool) {
+        self.inner.force_write().managed = manage;
+    }
+
+    fn inner(&self) -> std::sync::RwLockReadGuard<'_, InnerWindow> {
         self.inner.force_read()
     }
 
@@ -555,7 +580,7 @@ impl Window {
                 debug!(
                     "{}: Debounced window resize: {}",
                     function_name!(),
-                    self.inner().app.inner().name
+                    self.app().name()
                 )
             } else {
                 self.inner.force_write().frame = frame;
@@ -565,8 +590,8 @@ impl Window {
     }
 
     fn make_key_window(&self) {
-        let psn = self.inner().app.inner().psn.clone();
-        let window_id = self.inner().id;
+        let psn = self.app().psn();
+        let window_id = self.id();
         //
         // :SynthesizedEvent
         //
@@ -595,8 +620,8 @@ impl Window {
     // const CPS_NO_WINDOWS: u32 = 0x400;
 
     pub fn focus_without_raise(&self, window_manager: &WindowManager) {
-        let psn = self.inner().app.inner().psn.clone();
-        let window_id = self.inner().id;
+        let psn = self.app().psn();
+        let window_id = self.id();
         debug!("{}: {window_id}", function_name!());
         if window_manager.focused_psn == psn && window_manager.focused_window.is_some() {
             let mut event_bytes = [0u8; 0xf8];
@@ -632,8 +657,8 @@ impl Window {
     }
 
     pub fn focus_with_raise(&self) {
-        let psn = self.inner().app.inner().psn.clone();
-        let window_id = self.inner().id;
+        let psn = self.app().psn();
+        let window_id = self.id();
         unsafe {
             _SLPSSetFrontProcessWithOptions(&psn, window_id, Self::CPS_USER_GENERATED);
         }
@@ -644,12 +669,12 @@ impl Window {
     }
 
     fn observe(&self) -> bool {
-        let observer_ref = match self.inner().app.observer_ref() {
+        let observer_ref = match self.app().observer_ref() {
             None => {
                 warn!(
                     "{}: can not observe window {} without application observer.",
                     function_name!(),
-                    self.inner().id,
+                    self.id(),
                 );
                 return false;
             }
@@ -677,7 +702,7 @@ impl Window {
                         error!(
                             "{}: error registering {name} for window {}: {result}",
                             function_name!(),
-                            self.inner().id
+                            self.id()
                         );
                         false
                     }
@@ -691,7 +716,7 @@ impl Window {
     }
 
     fn display_uuid(&self, cid: ConnID) -> Result<Retained<CFString>> {
-        let window_id = self.inner().id;
+        let window_id = self.id();
         let uuid = unsafe {
             NonNull::new(SLSCopyManagedDisplayForWindow(cid, window_id) as *mut CFString)
                 .and_then(|uuid| Retained::from_raw(uuid.as_ptr()))
@@ -760,7 +785,7 @@ impl Window {
     // Fully expose the window if parts of it are off-screen.
     fn expose_window(&self, active_display: &Display) -> CGRect {
         // Check if window needs to be fully exposed
-        let window_id = self.inner().id;
+        let window_id = self.id();
         let display_bounds = active_display.bounds;
         let mut frame = self.inner().frame;
         trace!("{}: focus original position {frame:?}", function_name!());
@@ -842,16 +867,16 @@ pub struct WindowManager {
     pub tx: Sender<Event>,
     pub applications: HashMap<Pid, Application>,
     pub main_cid: ConnID,
-    pub windows: HashMap<WinID, Window>,
-    pub last_window: Option<WinID>, // TODO: use this for "goto last window bind"
+    windows: HashMap<WinID, Window>,
+    last_window: Option<WinID>, // TODO: use this for "goto last window bind"
     pub focused_window: Option<WinID>,
-    pub focused_psn: ProcessSerialNumber,
+    focused_psn: ProcessSerialNumber,
     pub ffm_window_id: Option<WinID>,
     pub mission_control_is_active: bool,
     pub skip_reshuffle: bool,
     pub mouse_down_window: Option<Window>,
     pub down_location: CGPoint,
-    pub displays: Vec<Display>,
+    displays: Vec<Display>,
 }
 
 impl WindowManager {
@@ -889,11 +914,11 @@ impl WindowManager {
                     debug!(
                         "{}: Application {} is observable",
                         function_name!(),
-                        app.inner().name
+                        app.name()
                     );
 
                     if app.observe().is_ok_and(|result| result) {
-                        self.applications.insert(app.inner().pid, app.clone());
+                        self.applications.insert(app.pid(), app.clone());
                         _ = self
                             .add_existing_application_windows(&app, 0)
                             .inspect_err(|err| warn!("{}: {err}", function_name!()));
@@ -922,9 +947,9 @@ impl WindowManager {
         }
 
         if let Ok(window) = self.focused_window() {
-            self.last_window = Some(window.inner().id);
-            self.focused_window = Some(window.inner().id);
-            self.focused_psn = window.inner().app.inner().psn.clone();
+            self.last_window = Some(window.id());
+            self.focused_window = Some(window.id());
+            self.focused_psn = window.app().psn();
         }
     }
 
@@ -991,7 +1016,7 @@ impl WindowManager {
                 match self.find_window(wid) {
                     Some(window) => {
                         if also_minimized || !window.is_minimized() {
-                            window_list.push(window.inner().id);
+                            window_list.push(window.id());
                         }
                     }
                     None => {
@@ -1027,14 +1052,14 @@ impl WindowManager {
                 format!("{}: no spaces returned", function_name!()),
             ));
         }
-        self.space_window_list_for_connection(spaces, app.inner().connection, true)
+        self.space_window_list_for_connection(spaces, app.connection(), true)
     }
 
     fn bruteforce_windows(&mut self, app: &Application, window_list: &mut Vec<WinID>) {
         debug!(
             "{}: App {} has unresolved window on other desktops, bruteforcing them.",
             function_name!(),
-            app.inner().name
+            app.name()
         );
         //
         // NOTE(koekeishiya): MacOS API does not return AXUIElementRef of windows on inactive spaces.
@@ -1058,7 +1083,7 @@ impl WindowManager {
                 CFDataGetMutableBytePtr(data_ref.deref().into()),
                 BUFSIZE as usize,
             );
-            let bytes = app.inner().pid.to_ne_bytes();
+            let bytes = app.pid().to_ne_bytes();
             data[0x0..bytes.len()].copy_from_slice(&bytes);
             let bytes = MAGIC.to_ne_bytes();
             data[0x8..0x8 + bytes.len()].copy_from_slice(&bytes);
@@ -1130,14 +1155,14 @@ impl WindowManager {
                 format!(
                     "{}: No windows found for app {}",
                     function_name!(),
-                    app.inner().name,
+                    app.name(),
                 ),
             ));
         }
         info!(
             "{}: App {} has global windows: {global_window_list:?}",
             function_name!(),
-            app.inner().name
+            app.name()
         );
 
         let window_list = app.window_list();
@@ -1173,7 +1198,7 @@ impl WindowManager {
                     info!(
                         "{}: Add window: {} {window_id}",
                         function_name!(),
-                        app.inner().name
+                        app.name()
                     );
                     _ = self
                         .create_and_add_window(app, window_ref, window_id, false)
@@ -1187,7 +1212,7 @@ impl WindowManager {
                 info!(
                     "{}: All windows for {} are now resolved",
                     function_name!(),
-                    app.inner().name
+                    app.name()
                 );
                 result = true;
             }
@@ -1202,7 +1227,7 @@ impl WindowManager {
                 info!(
                     "{}: {} has windows that are not yet resolved",
                     function_name!(),
-                    app.inner().name
+                    app.name()
                 );
                 self.bruteforce_windows(app, &mut app_window_list);
             }
@@ -1256,8 +1281,8 @@ impl WindowManager {
                 format!(
                     "{}: Ignoring AXUnknown window {} {}",
                     function_name!(),
-                    app.inner().name,
-                    window.inner().id
+                    app.name(),
+                    window.id()
                 ),
             ));
         }
@@ -1268,8 +1293,8 @@ impl WindowManager {
         info!(
             "{}: {} {} {title} {role} {subrole}",
             function_name!(),
-            window.inner().id,
-            app.inner().name,
+            window.id(),
+            app.name(),
         );
 
         //
@@ -1282,8 +1307,8 @@ impl WindowManager {
                 format!(
                     "{}: Could not observe window {} of {}",
                     function_name!(),
-                    window.inner().id,
-                    app.inner().name
+                    window.id(),
+                    app.name()
                 ),
             ));
         }
@@ -1330,7 +1355,7 @@ impl WindowManager {
             return;
         }
         let app = app.unwrap();
-        debug!("{}: {}", function_name!(), app.inner().name);
+        debug!("{}: {}", function_name!(), app.name());
 
         match app.focused_window_id() {
             Err(_) => {
@@ -1343,7 +1368,7 @@ impl WindowManager {
 
                 self.last_window = self.focused_window;
                 self.focused_window = None;
-                self.focused_psn = app.inner().psn.clone();
+                self.focused_psn = app.psn();
                 self.ffm_window_id = None;
                 warn!("{}: reset focused window", function_name!());
             }
@@ -1379,7 +1404,7 @@ impl WindowManager {
         ))?;
 
         let window = self.create_and_add_window(&app, element_ref, window_id, true)?;
-        info!("{}: created {:?}", function_name!(), window.inner().id);
+        info!("{}: created {:?}", function_name!(), window.id());
 
         let panel = self.active_display()?.active_panel(self.main_cid)?;
         let insert_at = self
@@ -1428,7 +1453,7 @@ impl WindowManager {
 
     pub fn window_focused(&mut self, window: Window) {
         let focused_id = self.focused_window;
-        let my_id = window.inner().id;
+        let my_id = window.id();
         if focused_id.is_none_or(|id| id != my_id) {
             if self.ffm_window_id.is_none_or(|id| id != my_id) {
                 // window_manager_center_mouse(wm, window);
@@ -1440,7 +1465,7 @@ impl WindowManager {
         debug!("{}: {} getting focus", function_name!(), my_id);
         debug!("did_receive_focus: {} getting focus", my_id);
         self.focused_window = Some(my_id);
-        self.focused_psn = window.inner().app.inner().psn.clone();
+        self.focused_psn = window.app().psn();
         self.ffm_window_id = None;
 
         if self.skip_reshuffle {

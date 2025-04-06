@@ -29,7 +29,7 @@ use crate::platform::{
 use crate::process::Process;
 use crate::skylight::{_SLPSGetFrontProcess, ConnID, SLSGetConnectionIDForPSN, WinID};
 use crate::util::{AxuWrapperType, get_attribute};
-use crate::windows::{InnerWindow, Window, ax_window_id};
+use crate::windows::{InnerWindow, ax_window_id};
 
 pub static AX_NOTIFICATIONS: LazyLock<Vec<&str>> = LazyLock::new(|| {
     vec![
@@ -93,6 +93,10 @@ impl Application {
 
     pub fn inner(&self) -> std::sync::RwLockReadGuard<'_, InnerApplication> {
         self.inner.force_read()
+    }
+
+    pub fn observer_ref(&self) -> Option<CFRetained<AxuWrapperType>> {
+        self.inner().handler.observer_ref.clone()
     }
 
     fn _main_window(&self) -> Result<WinID> {
@@ -169,90 +173,6 @@ impl ApplicationHandler {
             observer_ref: None,
             observing_windows: vec![],
         }
-    }
-
-    pub fn window_observe(&self, window: &Window) -> bool {
-        if self.observer_ref.is_none() {
-            warn!(
-                "{}: Can not observe window {} without application observer.",
-                function_name!(),
-                window.inner().id
-            );
-            return false;
-        }
-        let observer_ref = self.observer_ref.as_ref().unwrap();
-        let observing = AX_WINDOW_NOTIFICATIONS
-            .iter()
-            .map(|name| unsafe {
-                let notification = CFString::from_static_str(name);
-                debug!(
-                    "{}: {name} {:?} {:?}",
-                    function_name!(),
-                    observer_ref.as_ptr::<AXObserverRef>(),
-                    window.inner().element_ref.as_ptr::<AXUIElementRef>(),
-                );
-                match AXObserverAddNotification(
-                    observer_ref.as_ptr(),
-                    window.inner().element_ref.as_ptr(),
-                    notification.deref(),
-                    window.inner.deref() as *const RwLock<InnerWindow> as *mut c_void,
-                ) {
-                    accessibility_sys::kAXErrorSuccess
-                    | accessibility_sys::kAXErrorNotificationAlreadyRegistered => true,
-                    result => {
-                        error!(
-                            "{}: error registering {name} for window {}: {result}",
-                            function_name!(),
-                            window.inner().id
-                        );
-                        false
-                    }
-                }
-            })
-            .collect::<Vec<_>>();
-        let gotall = observing.iter().all(|status| *status);
-
-        window.inner.force_write().observing = observing;
-        gotall
-    }
-
-    pub fn window_unobserve(window: &mut InnerWindow) {
-        let observer_ref = window.app.inner().handler.observer_ref.clone();
-        if observer_ref.is_none() {
-            error!(
-                "{}: No application reference to unregister a window {}",
-                function_name!(),
-                window.id
-            );
-            return;
-        }
-        AX_WINDOW_NOTIFICATIONS
-            .iter()
-            .zip(&window.observing)
-            .filter(|(_, remove)| **remove)
-            .for_each(|(name, _)| {
-                let notification = CFString::from_static_str(name);
-                debug!(
-                    "{}: {name} {:?} {:?}",
-                    function_name!(),
-                    observer_ref.as_ref().unwrap().as_ptr::<AXObserverRef>(),
-                    window.element_ref.as_ptr::<AXUIElementRef>(),
-                );
-                let result = unsafe {
-                    AXObserverRemoveNotification(
-                        observer_ref.as_ref().unwrap().as_ptr(),
-                        window.element_ref.as_ptr(),
-                        notification.deref(),
-                    )
-                };
-                if result != kAXErrorSuccess {
-                    warn!(
-                        "{}: error unregistering {name} for window {}: {result}",
-                        function_name!(),
-                        window.id
-                    );
-                }
-            });
     }
 
     fn observe(&mut self, pid: Pid, element: CFRetained<AxuWrapperType>) -> Result<bool> {

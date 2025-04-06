@@ -1,11 +1,12 @@
 use accessibility_sys::{
-    AXUIElementRef, AXValueCreate, AXValueGetValue, kAXDialogSubrole, kAXFloatingWindowSubrole,
-    kAXMinimizedAttribute, kAXParentAttribute, kAXPositionAttribute, kAXRaiseAction,
-    kAXRoleAttribute, kAXSizeAttribute, kAXStandardWindowSubrole, kAXSubroleAttribute,
-    kAXTitleAttribute, kAXUnknownSubrole, kAXValueTypeCGPoint, kAXValueTypeCGSize, kAXWindowRole,
+    AXObserverRef, AXUIElementRef, AXValueCreate, AXValueGetValue, kAXDialogSubrole,
+    kAXErrorSuccess, kAXFloatingWindowSubrole, kAXMinimizedAttribute, kAXParentAttribute,
+    kAXPositionAttribute, kAXRaiseAction, kAXRoleAttribute, kAXSizeAttribute,
+    kAXStandardWindowSubrole, kAXSubroleAttribute, kAXTitleAttribute, kAXUnknownSubrole,
+    kAXValueTypeCGPoint, kAXValueTypeCGSize, kAXWindowRole,
 };
 use core::ptr::NonNull;
-use log::{debug, info, trace, warn};
+use log::{debug, error, info, trace, warn};
 use objc2::rc::{Retained, autoreleasepool};
 use objc2_core_foundation::{
     CFArray, CFArrayGetCount, CFBoolean, CFBooleanGetValue, CFDataCreateMutable,
@@ -30,9 +31,12 @@ use std::time::Duration;
 use stdext::function_name;
 use stdext::prelude::RwLockExt;
 
-use crate::app::{Application, ApplicationHandler};
+use crate::app::Application;
 use crate::events::Event;
-use crate::platform::{Pid, ProcessInfo, ProcessSerialNumber, get_process_info};
+use crate::platform::{
+    AXObserverAddNotification, AXObserverRemoveNotification, Pid, ProcessInfo, ProcessSerialNumber,
+    get_process_info,
+};
 use crate::process::{Process, ProcessManager};
 use crate::skylight::{
     _AXUIElementCreateWithRemoteToken, _AXUIElementGetWindow, _SLPSGetFrontProcess,
@@ -639,8 +643,51 @@ impl Window {
         unsafe { AXUIElementPerformAction(element_ref, &action) };
     }
 
-    fn observe(&self, app: &Application) -> bool {
-        app.inner().handler.window_observe(self)
+    fn observe(&self) -> bool {
+        let observer_ref = match self.inner().app.observer_ref() {
+            None => {
+                warn!(
+                    "{}: can not observe window {} without application observer.",
+                    function_name!(),
+                    self.inner().id,
+                );
+                return false;
+            }
+            Some(observer_ref) => observer_ref,
+        };
+        let observing = crate::app::AX_WINDOW_NOTIFICATIONS
+            .iter()
+            .map(|name| unsafe {
+                let notification = CFString::from_static_str(name);
+                debug!(
+                    "{}: {name} {:?} {:?}",
+                    function_name!(),
+                    observer_ref.as_ptr::<AXObserverRef>(),
+                    self.inner().element_ref.as_ptr::<AXUIElementRef>(),
+                );
+                match AXObserverAddNotification(
+                    observer_ref.as_ptr(),
+                    self.inner().element_ref.as_ptr(),
+                    notification.deref(),
+                    self.inner.deref() as *const RwLock<InnerWindow> as *mut c_void,
+                ) {
+                    accessibility_sys::kAXErrorSuccess
+                    | accessibility_sys::kAXErrorNotificationAlreadyRegistered => true,
+                    result => {
+                        error!(
+                            "{}: error registering {name} for window {}: {result}",
+                            function_name!(),
+                            self.inner().id
+                        );
+                        false
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+        let gotall = observing.iter().all(|status| *status);
+
+        self.inner.force_write().observing = observing;
+        gotall
     }
 
     fn display_uuid(&self, cid: ConnID) -> Result<Retained<CFString>> {
@@ -744,9 +791,50 @@ impl Window {
     }
 }
 
+impl InnerWindow {
+    fn unobserve(&mut self) {
+        let observer_ref = self.app.observer_ref();
+        if observer_ref.is_none() {
+            error!(
+                "{}: No application reference to unregister a window {}",
+                function_name!(),
+                self.id
+            );
+            return;
+        }
+        crate::app::AX_WINDOW_NOTIFICATIONS
+            .iter()
+            .zip(&self.observing)
+            .filter(|(_, remove)| **remove)
+            .for_each(|(name, _)| {
+                let notification = CFString::from_static_str(name);
+                debug!(
+                    "{}: {name} {:?} {:?}",
+                    function_name!(),
+                    observer_ref.as_ref().unwrap().as_ptr::<AXObserverRef>(),
+                    self.element_ref.as_ptr::<AXUIElementRef>(),
+                );
+                let result = unsafe {
+                    AXObserverRemoveNotification(
+                        observer_ref.as_ref().unwrap().as_ptr(),
+                        self.element_ref.as_ptr(),
+                        notification.deref(),
+                    )
+                };
+                if result != kAXErrorSuccess {
+                    warn!(
+                        "{}: error unregistering {name} for window {}: {result}",
+                        function_name!(),
+                        self.id
+                    );
+                }
+            });
+    }
+}
+
 impl Drop for InnerWindow {
     fn drop(&mut self) {
-        ApplicationHandler::window_unobserve(self);
+        self.unobserve();
     }
 }
 
@@ -1188,7 +1276,7 @@ impl WindowManager {
         // NOTE(koekeishiya): Attempt to track **all** windows.
         //
 
-        if !window.observe(app) {
+        if !window.observe() {
             return Err(Error::new(
                 ErrorKind::Unsupported,
                 format!(

@@ -123,8 +123,8 @@ impl Application {
         self.inner().windows.get(&window_id).cloned()
     }
 
-    pub fn remove_window(&self, window_id: WinID) {
-        self.inner.force_write().windows.remove(&window_id);
+    pub fn remove_window(&self, window_id: WinID) -> Option<Window> {
+        self.inner.force_write().windows.remove(&window_id)
     }
 
     pub fn add_window(&self, window: &Window) {

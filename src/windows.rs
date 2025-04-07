@@ -1,9 +1,9 @@
 use accessibility_sys::{
-    AXObserverRef, AXUIElementRef, AXValueCreate, AXValueGetValue, kAXDialogSubrole,
-    kAXErrorSuccess, kAXFloatingWindowSubrole, kAXMinimizedAttribute, kAXParentAttribute,
-    kAXPositionAttribute, kAXRaiseAction, kAXRoleAttribute, kAXSizeAttribute,
-    kAXStandardWindowSubrole, kAXSubroleAttribute, kAXTitleAttribute, kAXUnknownSubrole,
-    kAXValueTypeCGPoint, kAXValueTypeCGSize, kAXWindowRole,
+    AXObserverRef, AXUIElementRef, AXValueCreate, AXValueGetValue, kAXErrorSuccess,
+    kAXFloatingWindowSubrole, kAXMinimizedAttribute, kAXParentAttribute, kAXPositionAttribute,
+    kAXRaiseAction, kAXRoleAttribute, kAXSizeAttribute, kAXStandardWindowSubrole,
+    kAXSubroleAttribute, kAXTitleAttribute, kAXUnknownSubrole, kAXValueTypeCGPoint,
+    kAXValueTypeCGSize, kAXWindowRole,
 };
 use core::ptr::NonNull;
 use log::{debug, error, info, trace, warn};
@@ -505,7 +505,7 @@ impl Window {
             [
                 kAXStandardWindowSubrole,
                 kAXFloatingWindowSubrole,
-                kAXDialogSubrole,
+                // kAXDialogSubrole,
             ]
             .iter()
             .any(|s| subrole.eq(*s))
@@ -1301,7 +1301,7 @@ impl WindowManager {
             return Err(Error::new(
                 ErrorKind::Other,
                 format!(
-                    "{}: Ignoring AXUnknown window {} {}",
+                    "{}: Ignoring AXUnknown window, app: {} id: {}",
                     function_name!(),
                     app.name(),
                     window.id()
@@ -1309,14 +1309,26 @@ impl WindowManager {
             ));
         }
 
-        let title = window.title()?;
-        let role = window.role()?;
-        let subrole = window.subrole()?;
+        if !window.is_real() {
+            return Err(Error::new(
+                ErrorKind::Other,
+                format!(
+                    "{}: Ignoring non-real window, app: {} id: {}",
+                    function_name!(),
+                    app.name(),
+                    window.id()
+                ),
+            ));
+        }
+
         info!(
-            "{}: {} {} {title} {role} {subrole}",
+            "{}: created {} app: {} title: {} role: {} subrole: {}",
             function_name!(),
             window.id(),
             app.name(),
+            window.title().unwrap_or_default(),
+            window.role().unwrap_or_default(),
+            window.subrole().unwrap_or_default(),
         );
 
         //
@@ -1426,7 +1438,15 @@ impl WindowManager {
         ))?;
 
         let window = self.create_and_add_window(&app, element_ref, window_id, true)?;
-        info!("{}: created {:?}", function_name!(), window.id());
+        info!(
+            "{}: created {} app: {} title: {} role: {} subrole: {}",
+            function_name!(),
+            window.id(),
+            app.name(),
+            window.title().unwrap_or_default(),
+            window.role().unwrap_or_default(),
+            window.subrole().unwrap_or_default(),
+        );
 
         let panel = self.active_display()?.active_panel(self.main_cid)?;
         let insert_at = self
@@ -1445,14 +1465,17 @@ impl WindowManager {
     }
 
     pub fn window_destroyed(&mut self, window_id: WinID) {
-        info!("{}: {window_id}", function_name!());
-
         self.displays.iter().for_each(|display| {
             display.remove_window(window_id);
         });
-        self.applications.values().for_each(|app| {
-            app.remove_window(window_id);
-        });
+
+        let app = self.find_window(window_id).map(|window| window.app());
+        if let Some(window) = app.and_then(|app| app.remove_window(window_id)) {
+            // Make sure window lives past the lock above, because its Drop tries to lock the
+            // application.
+            info!("{}: {window_id}", function_name!());
+            drop(window)
+        }
 
         let previous = self
             .focused_window

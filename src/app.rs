@@ -15,6 +15,7 @@ use objc2_core_foundation::{
 use std::ffi::c_void;
 use std::io::{Error, ErrorKind, Result};
 use std::ops::Deref;
+use std::pin::Pin;
 use std::ptr::null_mut;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, LazyLock, RwLock};
@@ -63,7 +64,7 @@ struct InnerApplication {
     pid: Pid,
     name: String,
     connection: Option<ConnID>,
-    handler: ApplicationHandler,
+    handler: Pin<Box<ApplicationHandler>>,
 }
 
 impl Application {
@@ -85,7 +86,7 @@ impl Application {
                         Some(connection)
                     }
                 },
-                handler: ApplicationHandler::new(tx),
+                handler: Box::pin(ApplicationHandler::new(tx)),
             })),
         }
         // app.inner.write().unwrap().handler = Some(ApplicationHandler::new(app.clone(), tx));
@@ -419,7 +420,7 @@ impl ApplicationHandler {
                 };
                 let inner_window = lock.force_read();
                 let app = inner_window.app.clone();
-                let this = &app.inner().handler as *const Self;
+                let this = app.inner().handler.deref() as *const Self;
                 (this, Some(inner_window.id))
             }
             _ => ((context as *const Self), None),

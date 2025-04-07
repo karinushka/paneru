@@ -232,6 +232,14 @@ impl EventHandler {
                 }
             }
             Event::ApplicationTerminated { psn } => {
+                let pid = self
+                    .process_manager
+                    .processes
+                    .get(&psn)
+                    .map(|process| process.pid);
+                if let Some(pid) = pid {
+                    self.window_manager.delete_application(pid);
+                }
                 self.process_manager.process_delete(&psn);
             }
             Event::ApplicationFrontSwitched { psn } => {

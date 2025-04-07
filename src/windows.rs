@@ -873,7 +873,6 @@ pub struct WindowManager {
     pub tx: Sender<Event>,
     pub applications: HashMap<Pid, Application>,
     pub main_cid: ConnID,
-    windows: HashMap<WinID, Window>,
     last_window: Option<WinID>, // TODO: use this for "goto last window bind"
     pub focused_window: Option<WinID>,
     focused_psn: ProcessSerialNumber,
@@ -899,7 +898,6 @@ impl WindowManager {
             tx,
             applications: HashMap::new(),
             main_cid,
-            windows: HashMap::new(),
             last_window: None,
             focused_window: None,
             focused_psn: ProcessSerialNumber::default(),
@@ -980,7 +978,9 @@ impl WindowManager {
     }
 
     pub fn find_window(&self, window_id: WinID) -> Option<Window> {
-        self.windows.get(&window_id).cloned()
+        self.applications
+            .values()
+            .find_map(|app| app.find_window(window_id))
     }
 
     fn space_window_list_for_connection(
@@ -1335,7 +1335,7 @@ impl WindowManager {
             ));
         }
 
-        self.windows.insert(window_id, window.clone());
+        app.add_window(&window);
         Ok(window)
     }
 
@@ -1449,6 +1449,9 @@ impl WindowManager {
 
         self.displays.iter().for_each(|display| {
             display.remove_window(window_id);
+        });
+        self.applications.values().for_each(|app| {
+            app.remove_window(window_id);
         });
 
         let previous = self
@@ -1592,5 +1595,15 @@ impl WindowManager {
 
         self.displays.push(display);
         Ok(self.displays.last().unwrap())
+    }
+
+    pub fn delete_application(&mut self, pid: Pid) {
+        if let Some(app) = self.applications.remove(&pid) {
+            app.foreach_window(|window| {
+                self.displays.iter().for_each(|display| {
+                    display.remove_window(window.id());
+                })
+            });
+        }
     }
 }

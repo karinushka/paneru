@@ -12,6 +12,7 @@ use objc2_core_foundation::{
     CFArray, CFRetained, CFRunLoopAddSource, CFRunLoopGetMain, CFRunLoopSource,
     CFRunLoopSourceInvalidate, CFString, kCFRunLoopCommonModes,
 };
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::io::{Error, ErrorKind, Result};
 use std::ops::Deref;
@@ -30,7 +31,7 @@ use crate::platform::{
 use crate::process::Process;
 use crate::skylight::{_SLPSGetFrontProcess, ConnID, SLSGetConnectionIDForPSN, WinID};
 use crate::util::{AxuWrapperType, get_attribute};
-use crate::windows::{InnerWindow, ax_window_id};
+use crate::windows::{InnerWindow, Window, ax_window_id};
 
 pub static AX_NOTIFICATIONS: LazyLock<Vec<&str>> = LazyLock::new(|| {
     vec![
@@ -65,6 +66,7 @@ struct InnerApplication {
     name: String,
     connection: Option<ConnID>,
     handler: Pin<Box<ApplicationHandler>>,
+    windows: HashMap<WinID, Window>,
 }
 
 impl Application {
@@ -87,6 +89,7 @@ impl Application {
                     }
                 },
                 handler: Box::pin(ApplicationHandler::new(tx)),
+                windows: HashMap::new(),
             })),
         }
         // app.inner.write().unwrap().handler = Some(ApplicationHandler::new(app.clone(), tx));
@@ -114,6 +117,25 @@ impl Application {
 
     pub fn observer_ref(&self) -> Option<CFRetained<AxuWrapperType>> {
         self.inner().handler.observer_ref.clone()
+    }
+
+    pub fn find_window(&self, window_id: WinID) -> Option<Window> {
+        self.inner().windows.get(&window_id).cloned()
+    }
+
+    pub fn remove_window(&self, window_id: WinID) {
+        self.inner.force_write().windows.remove(&window_id);
+    }
+
+    pub fn add_window(&self, window: &Window) {
+        self.inner
+            .force_write()
+            .windows
+            .insert(window.id(), window.clone());
+    }
+
+    pub fn foreach_window(&self, accessor: impl FnMut(&Window)) {
+        self.inner().windows.values().for_each(accessor);
     }
 
     fn _main_window(&self) -> Result<WinID> {

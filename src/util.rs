@@ -1,8 +1,10 @@
-use accessibility_sys::AXUIElementRef;
+use accessibility_sys::{AXObserverGetRunLoopSource, AXUIElementRef};
 use core::ptr::NonNull;
+use log::debug;
 use objc2_core_foundation::{
     CFArray, CFArrayCreate, CFArrayGetCount, CFArrayGetValueAtIndex, CFDictionary,
-    CFDictionaryGetValue, CFNumber, CFNumberCreate, CFNumberType, CFRetained, CFString, CFType,
+    CFDictionaryGetValue, CFNumber, CFNumberCreate, CFNumberType, CFRetained, CFRunLoopAddSource,
+    CFRunLoopGetMain, CFRunLoopMode, CFRunLoopSource, CFRunLoopSourceInvalidate, CFString, CFType,
     Type, kCFTypeArrayCallBacks,
 };
 use std::ffi::c_void;
@@ -142,4 +144,44 @@ pub fn create_array<T>(values: Vec<T>, cftype: CFNumberType) -> Result<CFRetaine
         ErrorKind::InvalidData,
         format!("{}: can not create an array.", function_name!()),
     ))
+}
+
+fn run_loop_source(observer: &AxuWrapperType) -> Option<&CFRunLoopSource> {
+    let ptr = NonNull::new(unsafe { AXObserverGetRunLoopSource(observer.as_ptr()) })?;
+    Some(unsafe { ptr.cast::<CFRunLoopSource>().as_ref() })
+}
+
+pub fn add_run_loop(observer: &AxuWrapperType, mode: Option<&CFRunLoopMode>) -> Result<()> {
+    let run_loop = run_loop_source(observer);
+
+    match unsafe { CFRunLoopGetMain() } {
+        Some(main_loop) if run_loop.is_some() => {
+            debug!(
+                "{}: add runloop: {run_loop:?} observer {:?}",
+                function_name!(),
+                observer.as_ptr::<CFRunLoopSource>(),
+            );
+            unsafe { CFRunLoopAddSource(main_loop.deref(), run_loop, mode) };
+            Ok(())
+        }
+        _ => Err(Error::new(
+            ErrorKind::PermissionDenied,
+            format!(
+                "{}: Unable to register run loop source for observer {:?} ",
+                function_name!(),
+                observer.as_ptr::<CFRunLoopSource>(),
+            ),
+        )),
+    }
+}
+
+pub fn remove_run_loop(observer: &AxuWrapperType) {
+    if let Some(run_loop_source) = run_loop_source(observer) {
+        debug!(
+            "{}: removing runloop: {run_loop_source:?} observer {:?}",
+            function_name!(),
+            observer.as_ptr::<CFRunLoopSource>(),
+        );
+        unsafe { CFRunLoopSourceInvalidate(run_loop_source) };
+    }
 }

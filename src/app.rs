@@ -1,17 +1,14 @@
 use accessibility_sys::{
-    AXObserverGetRunLoopSource, AXObserverRef, AXUIElementCreateApplication, AXUIElementRef,
-    kAXCreatedNotification, kAXErrorSuccess, kAXFocusedWindowAttribute,
-    kAXFocusedWindowChangedNotification, kAXMainWindowAttribute, kAXMenuClosedNotification,
-    kAXMenuOpenedNotification, kAXTitleChangedNotification, kAXUIElementDestroyedNotification,
+    AXObserverRef, AXUIElementCreateApplication, AXUIElementRef, kAXCreatedNotification,
+    kAXErrorSuccess, kAXFocusedWindowAttribute, kAXFocusedWindowChangedNotification,
+    kAXMainWindowAttribute, kAXMenuClosedNotification, kAXMenuOpenedNotification,
+    kAXTitleChangedNotification, kAXUIElementDestroyedNotification,
     kAXWindowDeminiaturizedNotification, kAXWindowMiniaturizedNotification,
     kAXWindowMovedNotification, kAXWindowResizedNotification, kAXWindowsAttribute,
 };
 use core::ptr::NonNull;
 use log::{debug, error, warn};
-use objc2_core_foundation::{
-    CFArray, CFRetained, CFRunLoopAddSource, CFRunLoopGetMain, CFRunLoopSource,
-    CFRunLoopSourceInvalidate, CFString, kCFRunLoopCommonModes,
-};
+use objc2_core_foundation::{CFArray, CFRetained, CFString, kCFRunLoopCommonModes};
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::io::{Error, ErrorKind, Result};
@@ -30,7 +27,7 @@ use crate::platform::{
 };
 use crate::process::Process;
 use crate::skylight::{_SLPSGetFrontProcess, ConnID, SLSGetConnectionIDForPSN, WinID};
-use crate::util::{AxuWrapperType, get_attribute};
+use crate::util::{AxuWrapperType, add_run_loop, get_attribute, remove_run_loop};
 use crate::windows::{InnerWindow, Window, ax_window_id};
 
 pub static AX_NOTIFICATIONS: LazyLock<Vec<&str>> = LazyLock::new(|| {
@@ -259,24 +256,12 @@ impl ApplicationHandler {
                 }
             })
             .collect();
-        unsafe {
-            let main_loop = CFRunLoopGetMain().expect("Unable to get the main run loop.");
-            let run_loop_source = CFRetained::from_raw(
-                NonNull::new(AXObserverGetRunLoopSource(observer.deref().as_ptr()))
-                    .expect("Can not get AXObserver run loop source.")
-                    .cast(),
-            );
-            debug!(
-                "{}: adding runloop source: {run_loop_source:?} {observer:?}",
-                function_name!()
-            );
-            CFRunLoopAddSource(&main_loop, Some(&run_loop_source), kCFRunLoopCommonModes);
+        unsafe { add_run_loop(observer.deref(), kCFRunLoopCommonModes)? };
 
-            self.ax_retry = ax_retry;
-            self.observing = observing;
-            self.element_ref = Some(element);
-            self.observer_ref = Some(observer);
-        };
+        self.ax_retry = ax_retry;
+        self.observing = observing;
+        self.element_ref = Some(element);
+        self.observer_ref = Some(observer);
         Ok(self.observing.iter().all(|ok| *ok))
     }
 
@@ -317,16 +302,7 @@ impl ApplicationHandler {
                     }
                 });
 
-            unsafe {
-                let run_loop_source =
-                    AXObserverGetRunLoopSource(observer.as_ptr()) as *mut CFRunLoopSource;
-                debug!(
-                    "{}: removing runloop source: {run_loop_source:?} ref {:?}",
-                    function_name!(),
-                    observer.as_ptr::<AXObserverRef>()
-                );
-                CFRunLoopSourceInvalidate(&*run_loop_source);
-            }
+            remove_run_loop(observer.deref());
             drop(observer)
         }
     }

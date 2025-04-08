@@ -1,6 +1,6 @@
 use accessibility_sys::{
-    AXError, AXObserverGetRunLoopSource, AXObserverRef, AXUIElementCreateApplication,
-    AXUIElementRef, kAXErrorNotificationAlreadyRegistered, kAXErrorSuccess,
+    AXError, AXObserverRef, AXUIElementCreateApplication, AXUIElementRef,
+    kAXErrorNotificationAlreadyRegistered, kAXErrorSuccess,
 };
 use core::ptr::NonNull;
 use log::{debug, error, info, warn};
@@ -11,8 +11,8 @@ use objc2_app_kit::{
 };
 use objc2_core_foundation::{
     CFMachPortCreateRunLoopSource, CFMachPortInvalidate, CFRetained, CFRunLoopAddSource,
-    CFRunLoopGetMain, CFRunLoopRemoveSource, CFRunLoopRunInMode, CFRunLoopSource,
-    CFRunLoopSourceInvalidate, CFString, kCFRunLoopCommonModes, kCFRunLoopDefaultMode,
+    CFRunLoopGetMain, CFRunLoopRemoveSource, CFRunLoopRunInMode, CFString, kCFRunLoopCommonModes,
+    kCFRunLoopDefaultMode,
 };
 use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayChangeSummaryFlags, CGDisplayRegisterReconfigurationCallback,
@@ -36,7 +36,7 @@ use stdext::function_name;
 use crate::events::Event;
 use crate::process::Process;
 use crate::skylight::OSStatus;
-use crate::util::{AxuWrapperType, Cleanuper};
+use crate::util::{AxuWrapperType, Cleanuper, add_run_loop, remove_run_loop};
 
 pub type Pid = i32;
 pub type CFStringRef = *const CFString;
@@ -658,20 +658,7 @@ impl MissionControlHandler {
                 ),
             }
         });
-        unsafe {
-            let main_loop = CFRunLoopGetMain().expect("Unable to get the main run loop.");
-            let run_loop_source = CFRetained::from_raw(
-                NonNull::new(AXObserverGetRunLoopSource(observer.as_ptr()))
-                    .expect("Can not get AXObserver run loop source.")
-                    .cast(),
-            );
-            debug!(
-                "{}: adding runloop source: {run_loop_source:?} {:?}",
-                function_name!(),
-                observer.as_ptr::<AXObserverRef>()
-            );
-            CFRunLoopAddSource(&main_loop, Some(&run_loop_source), kCFRunLoopDefaultMode);
-        };
+        unsafe { add_run_loop(observer.deref(), kCFRunLoopDefaultMode)? };
         self.observer = observer.into();
         Ok(())
     }
@@ -696,16 +683,7 @@ impl MissionControlHandler {
                     error!("{}: error unregistering {name}: {result}", function_name!());
                 }
             });
-            unsafe {
-                let run_loop_source =
-                    AXObserverGetRunLoopSource(observer.as_ptr()) as *mut CFRunLoopSource;
-                debug!(
-                    "{}: removing runloop source: {run_loop_source:?} ref {:?}",
-                    function_name!(),
-                    observer.as_ptr::<AXObserverRef>()
-                );
-                CFRunLoopSourceInvalidate(&*run_loop_source);
-            }
+            remove_run_loop(observer.deref());
             drop(observer)
         } else {
             warn!("{}: unobserving without observe", function_name!());

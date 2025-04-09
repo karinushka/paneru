@@ -238,7 +238,7 @@ impl ApplicationHandler {
                     observer.deref().as_ptr(),
                     element.as_ptr(),
                     notification.deref(),
-                    self as *const Self as *mut c_void,
+                    NonNull::new_unchecked(self).as_ptr().cast(),
                 ) {
                     accessibility_sys::kAXErrorSuccess
                     | accessibility_sys::kAXErrorNotificationAlreadyRegistered => true,
@@ -398,39 +398,32 @@ impl ApplicationHandler {
         notification: CFStringRef,
         context: *mut c_void,
     ) {
-        let notification = match NonNull::new(notification as *mut CFString) {
-            Some(notification) => unsafe { notification.as_ref() }.to_string(),
-            None => {
-                error!("{}: nullptr 'notification' passed.", function_name!());
-                return;
-            }
-        };
-        let (this, window) = match notification.as_ref() {
+        let (notification, context) =
+            match NonNull::new(notification.cast_mut()).zip(NonNull::new(context)) {
+                Some((notification, context)) => {
+                    (unsafe { notification.as_ref() }.to_string(), context)
+                }
+                None => {
+                    error!("{}: nullptr passed!", function_name!());
+                    return;
+                }
+            };
+
+        let (handler, window) = match notification.as_ref() {
             accessibility_sys::kAXWindowMiniaturizedNotification
             | accessibility_sys::kAXWindowDeminiaturizedNotification
             | accessibility_sys::kAXUIElementDestroyedNotification => {
-                let lock = match NonNull::new(context) {
-                    Some(ptr) => unsafe { ptr.cast::<RwLock<InnerWindow>>().as_ref() },
-                    None => {
-                        error!("{}: nullptr passed as 'context'.", function_name!());
-                        return;
-                    }
-                };
-                let inner_window = lock.force_read();
+                let inner_window =
+                    unsafe { context.cast::<RwLock<InnerWindow>>().as_ref() }.force_read();
                 let app = inner_window.app.clone();
-                let this = app.inner().handler.deref() as *const Self;
+                let this = unsafe { NonNull::from(app.inner().handler.deref()).as_ref() };
                 (this, Some(inner_window.id))
             }
-            _ => ((context as *const Self), None),
+            _ => (
+                unsafe { context.cast::<ApplicationHandler>().as_ref() },
+                None,
+            ),
         };
-
-        let result = unsafe {
-            (this as *mut Self).as_ref().map(|this| {
-                this.application_handler(observer, element, notification.as_ref(), window)
-            })
-        };
-        if result.is_none() {
-            error!("{}: nullptr passed as a self reference.", function_name!());
-        }
+        handler.application_handler(observer, element, notification.as_ref(), window);
     }
 }

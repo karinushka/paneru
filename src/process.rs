@@ -1,12 +1,10 @@
 use log::{debug, warn};
 use objc2::rc::Retained;
 use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication};
-use objc2_core_foundation::CFString;
 use objc2_foundation::{
     NSKeyValueObservingOptions, NSObjectNSKeyValueObserverRegistration, NSString,
 };
 use std::collections::HashMap;
-use std::ffi::c_void;
 use std::io::{Error, ErrorKind, Result};
 use std::ops::Deref;
 use std::pin::Pin;
@@ -225,12 +223,11 @@ impl Process {
             unsafe {
                 let key_path = NSString::from_str(flavor);
                 let options = NSKeyValueObservingOptions::New | NSKeyValueObservingOptions::Initial;
-                let ptr = NonNull::from(self).as_ptr() as *mut c_void;
                 app.addObserver_forKeyPath_options_context(
                     self.observer.deref(),
                     key_path.as_ref(),
                     options,
-                    ptr,
+                    NonNull::from(self).as_ptr().cast(),
                 );
             }
             debug!(
@@ -245,11 +242,10 @@ impl Process {
         if let Some(app) = self.application.as_ref() {
             unsafe {
                 let key_path = NSString::from_str(flavor);
-                let ptr = NonNull::from(self).as_ptr() as *mut c_void;
                 app.removeObserver_forKeyPath_context(
                     self.observer.deref(),
                     key_path.as_ref(),
-                    ptr,
+                    NonNull::from(self).as_ptr().cast(),
                 );
             }
             debug!(
@@ -287,7 +283,7 @@ impl ProcessManager {
         unsafe {
             get_process_info(psn, &mut pinfo);
         }
-        let name = NonNull::new(pinfo.name as *mut CFString).ok_or(Error::new(
+        let name = NonNull::new(pinfo.name.cast_mut()).ok_or(Error::new(
             ErrorKind::InvalidInput,
             format!(
                 "{}: Nullptr as name for process {:?}.",

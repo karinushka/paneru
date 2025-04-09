@@ -102,7 +102,7 @@ unsafe extern "C" {
     pub fn AXUIElementCopyAttributeValue(
         element: AXUIElementRef,
         attribute: &CFString,
-        value: *mut *mut CFType,
+        value: &mut *mut CFType,
     ) -> i32;
 
     pub fn AXUIElementSetAttributeValue(

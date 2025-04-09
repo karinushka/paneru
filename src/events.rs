@@ -2,9 +2,9 @@ use log::{debug, error, info, trace, warn};
 use objc2::rc::Retained;
 use objc2_core_foundation::{CFNumberGetValue, CFNumberType, CFRetained, CGPoint, CGRect};
 use objc2_core_graphics::CGDirectDisplayID;
-use std::ffi::c_void;
 use std::io::{Error, ErrorKind, Result};
 use std::ops::Deref;
+use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, Sender};
@@ -551,7 +551,7 @@ impl EventHandler {
                         if !CFNumberGetValue(
                             item.as_ref(),
                             CFNumberType::SInt32Type,
-                            (&mut child_wid as *mut WinID) as *mut c_void,
+                            NonNull::from(&mut child_wid).as_ptr().cast(),
                         ) {
                             warn!(
                                 "{}: Unable to find subwindows of window {}: {item:?}.",

@@ -157,8 +157,8 @@ impl ProcessHandler {
     fn start(&mut self) {
         info!("{}: Registering process_handler", function_name!());
         let handler = unsafe {
-            let me = self as *const Self;
-            setup_process_handler(Self::callback, me as *mut c_void)
+            let me = NonNull::new_unchecked(self).as_ptr();
+            setup_process_handler(Self::callback, me.cast())
         };
 
         self.cleanup = Some(Cleanuper::new(Box::new(move || unsafe {
@@ -226,14 +226,14 @@ impl MouseHandler {
             | (1 << CGEventType::RightMouseDragged.0);
 
         unsafe {
-            let this: *mut MouseHandler = &mut *self;
+            let this = NonNull::new_unchecked(self).as_ptr();
             let port = CGEventTapCreate(
                 CGEventTapLocation::HIDEventTap,
                 CGEventTapPlacement::HeadInsertEventTap,
                 CGEventTapOptions::Default,
                 mouse_event_mask,
                 Some(Self::callback),
-                this as *mut c_void,
+                this.cast(),
             )
             .ok_or(Error::new(
                 ErrorKind::PermissionDenied,
@@ -647,7 +647,7 @@ impl MissionControlHandler {
                     observer.as_ptr(),
                     self.element.as_ref().unwrap().as_ptr(),
                     notification.deref(),
-                    self as *const Self as *mut c_void,
+                    NonNull::new_unchecked(self).as_ptr().cast(),
                 )
             } {
                 accessibility_sys::kAXErrorSuccess
@@ -696,7 +696,7 @@ impl MissionControlHandler {
         notification: CFStringRef,
         context: *mut c_void,
     ) {
-        let notification = match NonNull::new(notification as *mut CFString) {
+        let notification = match NonNull::new(notification.cast_mut()) {
             Some(notification) => unsafe { notification.as_ref() }.to_string(),
             None => {
                 error!("{}: nullptr 'notification' passed.", function_name!());
@@ -731,10 +731,9 @@ impl DisplayHandler {
 
     fn start(&mut self) -> Result<()> {
         info!("{}: Registering display handler", function_name!());
-        let me = self as *const Self;
-        let result = unsafe {
-            CGDisplayRegisterReconfigurationCallback(Some(Self::callback), me as *mut c_void)
-        };
+        let this = unsafe { NonNull::new_unchecked(self).as_ptr() };
+        let result =
+            unsafe { CGDisplayRegisterReconfigurationCallback(Some(Self::callback), this.cast()) };
         if result != CGError::Success {
             return Err(Error::new(
                 ErrorKind::PermissionDenied,
@@ -746,7 +745,7 @@ impl DisplayHandler {
         }
         self.cleanup = Some(Cleanuper::new(Box::new(move || unsafe {
             info!("{}: Unregistering display handler", function_name!());
-            CGDisplayRemoveReconfigurationCallback(Some(Self::callback), me as *mut c_void);
+            CGDisplayRemoveReconfigurationCallback(Some(Self::callback), this.cast());
         })));
         Ok(())
     }

@@ -19,7 +19,6 @@ use objc2_core_graphics::{
     CGRectEqualToRect, CGWarpMouseCursorPosition,
 };
 use std::collections::HashMap;
-use std::ffi::c_void;
 use std::io::{Error, ErrorKind, Result};
 use std::ops::Deref;
 use std::ptr::null_mut;
@@ -247,11 +246,11 @@ impl Display {
                         )
                         .unwrap();
 
-                        let id = 0u64;
+                        let mut id = 0u64;
                         CFNumberGetValue(
                             num.as_ref(),
                             CFNumberGetType(num.as_ref()),
-                            (&id as *const u64) as *mut c_void,
+                            NonNull::from(&mut id).as_ptr().cast(),
                         );
                         id
                     })
@@ -293,7 +292,7 @@ impl Display {
     fn active_display_uuid(cid: ConnID) -> Result<CFRetained<CFString>> {
         unsafe {
             let ptr = SLSCopyActiveMenuBarDisplayIdentifier(cid);
-            let ptr = NonNull::new(ptr as *mut CFString).ok_or(Error::new(
+            let ptr = NonNull::new(ptr.cast_mut()).ok_or(Error::new(
                 ErrorKind::NotFound,
                 format!(
                     "{}: can not find active display for connection {cid}.",
@@ -518,11 +517,11 @@ impl Window {
     }
 
     pub fn reposition(&self, x: f64, y: f64) {
-        let point = CGPoint::new(x, y);
+        let mut point = CGPoint::new(x, y);
         unsafe {
             let position_ref = AXValueCreate(
                 kAXValueTypeCGPoint,
-                &point as *const CGPoint as *const c_void,
+                NonNull::from(&mut point).as_ptr().cast(),
             );
             let position =
                 AxuWrapperType::retain(position_ref).expect("Can't get positon from window!");
@@ -536,10 +535,10 @@ impl Window {
     }
 
     pub fn resize(&self, width: f64, height: f64) {
-        let size = CGSize::new(width, height);
+        let mut size = CGSize::new(width, height);
         unsafe {
             let size_ref =
-                AXValueCreate(kAXValueTypeCGSize, &size as *const CGSize as *const c_void);
+                AXValueCreate(kAXValueTypeCGSize, NonNull::from(&mut size).as_ptr().cast());
             let position =
                 AxuWrapperType::retain(size_ref).expect("Can't get positon from window!");
             AXUIElementSetAttributeValue(
@@ -561,12 +560,12 @@ impl Window {
             AXUIElementCopyAttributeValue(
                 window_ref,
                 CFString::from_static_str(kAXPositionAttribute).as_ref(),
-                &mut position_ref as *mut *mut CFType,
+                &mut position_ref,
             );
             AXUIElementCopyAttributeValue(
                 window_ref,
                 CFString::from_static_str(kAXSizeAttribute).as_ref(),
-                &mut size_ref as *mut *mut CFType,
+                &mut size_ref,
             );
         };
         unsafe {
@@ -574,13 +573,13 @@ impl Window {
             AXValueGetValue(
                 position.as_ptr(),
                 kAXValueTypeCGPoint,
-                &mut frame.origin as *mut CGPoint as *mut c_void,
+                NonNull::from(&mut frame.origin).as_ptr().cast(),
             );
             let size = AxuWrapperType::retain(size_ref)?;
             AXValueGetValue(
                 size.as_ptr(),
                 kAXValueTypeCGSize,
-                &mut frame.size as *mut CGSize as *mut c_void,
+                NonNull::from(&mut frame.size).as_ptr().cast(),
             );
             if CGRectEqualToRect(frame, self.inner().frame) {
                 debug!(
@@ -615,10 +614,10 @@ impl Window {
             .for_each(|b| *b = 0xff);
 
         event_bytes[0x08] = 0x01;
-        unsafe { SLPSPostEventRecordTo(&psn, event_bytes.as_ptr() as *const c_void) };
+        unsafe { SLPSPostEventRecordTo(&psn, event_bytes.as_ptr().cast()) };
 
         event_bytes[0x08] = 0x02;
-        unsafe { SLPSPostEventRecordTo(&psn, event_bytes.as_ptr() as *const c_void) };
+        unsafe { SLPSPostEventRecordTo(&psn, event_bytes.as_ptr().cast()) };
     }
 
     // const CPS_ALL_WINDOWS: u32 = 0x100;
@@ -638,10 +637,7 @@ impl Window {
             let wid = window_manager.focused_window.unwrap().to_ne_bytes();
             event_bytes[0x3c..(0x3c + wid.len())].copy_from_slice(&wid);
             unsafe {
-                SLPSPostEventRecordTo(
-                    &window_manager.focused_psn,
-                    event_bytes.as_ptr() as *const c_void,
-                );
+                SLPSPostEventRecordTo(&window_manager.focused_psn, event_bytes.as_ptr().cast());
             }
             // @hack
             // Artificially delay the activation by 1ms. This is necessary because some
@@ -652,7 +648,7 @@ impl Window {
             let wid = &window_id.to_ne_bytes();
             event_bytes[0x3c..(0x3c + wid.len())].copy_from_slice(wid);
             unsafe {
-                SLPSPostEventRecordTo(&psn, event_bytes.as_ptr() as *const c_void);
+                SLPSPostEventRecordTo(&psn, event_bytes.as_ptr().cast());
             }
         }
 
@@ -700,7 +696,7 @@ impl Window {
                     observer_ref.as_ptr(),
                     self.inner().element_ref.as_ptr(),
                     notification.deref(),
-                    self.inner.deref() as *const RwLock<InnerWindow> as *mut c_void,
+                    NonNull::from(self.inner.deref()).as_ptr().cast(),
                 ) {
                     accessibility_sys::kAXErrorSuccess
                     | accessibility_sys::kAXErrorNotificationAlreadyRegistered => true,
@@ -724,14 +720,14 @@ impl Window {
     fn display_uuid(&self, cid: ConnID) -> Result<Retained<CFString>> {
         let window_id = self.id();
         let uuid = unsafe {
-            NonNull::new(SLSCopyManagedDisplayForWindow(cid, window_id) as *mut CFString)
+            NonNull::new(SLSCopyManagedDisplayForWindow(cid, window_id).cast_mut())
                 .and_then(|uuid| Retained::from_raw(uuid.as_ptr()))
         };
         uuid.or_else(|| {
             let mut frame = CGRect::default();
             unsafe {
                 SLSGetWindowBounds(cid, window_id, &mut frame);
-                NonNull::new(SLSCopyBestManagedDisplayForRect(cid, frame) as *mut CFString)
+                NonNull::new(SLSCopyBestManagedDisplayForRect(cid, frame).cast_mut())
                     .and_then(|uuid| Retained::from_raw(uuid.as_ptr()))
             }
         })

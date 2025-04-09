@@ -3,7 +3,7 @@ use core::ptr::NonNull;
 use log::debug;
 use objc2_core_foundation::{
     CFArray, CFArrayCreate, CFArrayGetCount, CFArrayGetValueAtIndex, CFDictionary,
-    CFDictionaryGetValue, CFNumber, CFNumberCreate, CFNumberType, CFRetained, CFRunLoopAddSource,
+    CFDictionaryGetValue, CFNumberCreate, CFNumberType, CFRetained, CFRunLoopAddSource,
     CFRunLoopGetMain, CFRunLoopMode, CFRunLoopSource, CFRunLoopSourceInvalidate, CFString, CFType,
     Type, kCFTypeArrayCallBacks,
 };
@@ -13,7 +13,6 @@ use std::ops::Deref;
 use std::ptr::null_mut;
 use stdext::function_name;
 
-use crate::platform::CFStringRef;
 use crate::skylight::AXUIElementCopyAttributeValue;
 
 pub struct Cleanuper {
@@ -80,56 +79,56 @@ pub fn get_attribute<T: Type>(
     element_ref: &CFRetained<AxuWrapperType>,
     name: CFRetained<CFString>,
 ) -> Result<CFRetained<T>> {
-    let mut attribute: *mut T = null_mut();
+    let mut attribute: *mut CFType = null_mut();
     if 0 != unsafe {
-        AXUIElementCopyAttributeValue(
-            element_ref.as_ptr(),
-            name.deref(),
-            (&mut attribute as *mut *mut T) as *mut *mut CFType,
-        )
+        AXUIElementCopyAttributeValue(element_ref.as_ptr(), name.deref(), &mut attribute)
     } {
-        return Err(Error::new(
+        Err(Error::new(
             ErrorKind::NotFound,
             format!("{}: failed getting attribute {name}.", function_name!()),
-        ));
-    }
-    NonNull::new(attribute)
-        .map(|ptr| unsafe { CFRetained::from_raw(ptr) })
-        .ok_or(Error::new(
-            ErrorKind::InvalidData,
-            format!(
-                "{}: nullptr while getting attribute {name}.",
-                function_name!()
-            ),
         ))
+    } else {
+        NonNull::new(attribute)
+            .map(|ptr| unsafe { CFRetained::from_raw(ptr.cast()) })
+            .ok_or(Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "{}: nullptr while getting attribute {name}.",
+                    function_name!()
+                ),
+            ))
+    }
 }
 
 pub fn get_cfdict_value<T>(dict: &CFDictionary, key: &CFString) -> Result<NonNull<T>> {
-    let ptr =
-        unsafe { CFDictionaryGetValue(dict, (key as CFStringRef) as *const c_void) as *mut T };
-    NonNull::new(ptr).ok_or(Error::new(
-        ErrorKind::InvalidData,
-        format!("{}: can not get data for key {key}", function_name!(),),
-    ))
+    let ptr = unsafe { CFDictionaryGetValue(dict, NonNull::from(key).as_ptr().cast()) };
+    NonNull::new(ptr.cast_mut())
+        .map(|ptr| ptr.cast::<T>())
+        .ok_or(Error::new(
+            ErrorKind::InvalidData,
+            format!("{}: can not get data for key {key}", function_name!(),),
+        ))
 }
 
 pub fn get_array_values<T>(array: &CFArray) -> impl Iterator<Item = NonNull<T>> + use<'_, T> {
     let count = unsafe { CFArrayGetCount(array) };
-    (0..count)
-        .flat_map(move |idx| NonNull::new(unsafe { CFArrayGetValueAtIndex(array, idx) as *mut T }))
+    (0..count).flat_map(move |idx| {
+        NonNull::new(unsafe { CFArrayGetValueAtIndex(array, idx).cast_mut() })
+            .map(|ptr| ptr.cast::<T>())
+    })
 }
 
 pub fn create_array<T>(values: Vec<T>, cftype: CFNumberType) -> Result<CFRetained<CFArray>> {
     let numbers = values
         .iter()
         .flat_map(|value: &T| unsafe {
-            CFNumberCreate(None, cftype, value as *const T as *const c_void)
+            CFNumberCreate(None, cftype, NonNull::from(value).as_ptr().cast())
         })
         .collect::<Vec<_>>();
 
     let mut ptrs = numbers
         .iter()
-        .map(|num| num.deref() as *const CFNumber as *const c_void)
+        .map(|num| NonNull::from(num.deref()).as_ptr() as *const c_void)
         .collect::<Vec<_>>();
 
     unsafe {

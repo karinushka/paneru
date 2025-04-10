@@ -239,12 +239,12 @@ impl Display {
                 debug!("{}: spaces {spaces:?}", function_name!());
 
                 let space_list = get_array_values(spaces.as_ref())
-                    .map(|space| {
+                    .flat_map(|space| {
                         let num = get_cfdict_value::<CFNumber>(
                             space.as_ref(),
                             CFString::from_static_str("id64").deref(),
                         )
-                        .unwrap();
+                        .ok()?;
 
                         let mut id = 0u64;
                         CFNumberGetValue(
@@ -252,7 +252,7 @@ impl Display {
                             CFNumberGetType(num.as_ref()),
                             NonNull::from(&mut id).as_ptr().cast(),
                         );
-                        id
+                        Some(id)
                     })
                     .collect::<Vec<u64>>();
                 return Ok(space_list);
@@ -518,36 +518,38 @@ impl Window {
 
     pub fn reposition(&self, x: f64, y: f64) {
         let mut point = CGPoint::new(x, y);
-        unsafe {
-            let position_ref = AXValueCreate(
+        let position_ref = unsafe {
+            AXValueCreate(
                 kAXValueTypeCGPoint,
                 NonNull::from(&mut point).as_ptr().cast(),
-            );
-            let position =
-                AxuWrapperType::retain(position_ref).expect("Can't get positon from window!");
-            AXUIElementSetAttributeValue(
-                self.inner().element_ref.as_ptr(),
-                CFString::from_static_str(kAXPositionAttribute).as_ref(),
-                position.as_ref(),
-            );
+            )
+        };
+        if let Ok(position) = AxuWrapperType::retain(position_ref) {
+            unsafe {
+                AXUIElementSetAttributeValue(
+                    self.inner().element_ref.as_ptr(),
+                    CFString::from_static_str(kAXPositionAttribute).as_ref(),
+                    position.as_ref(),
+                )
+            };
+            self.inner.force_write().frame.origin = point;
         }
-        self.inner.force_write().frame.origin = point;
     }
 
     pub fn resize(&self, width: f64, height: f64) {
         let mut size = CGSize::new(width, height);
-        unsafe {
-            let size_ref =
-                AXValueCreate(kAXValueTypeCGSize, NonNull::from(&mut size).as_ptr().cast());
-            let position =
-                AxuWrapperType::retain(size_ref).expect("Can't get positon from window!");
-            AXUIElementSetAttributeValue(
-                self.inner().element_ref.as_ptr(),
-                CFString::from_static_str(kAXSizeAttribute).as_ref(),
-                position.as_ref(),
-            );
+        let size_ref =
+            unsafe { AXValueCreate(kAXValueTypeCGSize, NonNull::from(&mut size).as_ptr().cast()) };
+        if let Ok(position) = AxuWrapperType::retain(size_ref) {
+            unsafe {
+                AXUIElementSetAttributeValue(
+                    self.inner().element_ref.as_ptr(),
+                    CFString::from_static_str(kAXSizeAttribute).as_ref(),
+                    position.as_ref(),
+                )
+            };
+            self.inner.force_write().frame.size = size;
         }
-        self.inner.force_write().frame.size = size;
     }
 
     fn update_frame(&self) -> Result<()> {
@@ -820,15 +822,17 @@ impl Window {
 
 impl InnerWindow {
     fn unobserve(&mut self) {
-        let observer_ref = self.app.observer_ref();
-        if observer_ref.is_none() {
-            error!(
-                "{}: No application reference to unregister a window {}",
-                function_name!(),
-                self.id
-            );
-            return;
-        }
+        let observer: AXObserverRef = match self.app.observer_ref() {
+            Some(observer) => observer.as_ptr(),
+            None => {
+                error!(
+                    "{}: No application reference to unregister a window {}",
+                    function_name!(),
+                    self.id
+                );
+                return;
+            }
+        };
         crate::app::AX_WINDOW_NOTIFICATIONS
             .iter()
             .zip(&self.observing)
@@ -838,12 +842,12 @@ impl InnerWindow {
                 debug!(
                     "{}: {name} {:?} {:?}",
                     function_name!(),
-                    observer_ref.as_ref().unwrap().as_ptr::<AXObserverRef>(),
+                    observer,
                     self.element_ref.as_ptr::<AXUIElementRef>(),
                 );
                 let result = unsafe {
                     AXObserverRemoveNotification(
-                        observer_ref.as_ref().unwrap().as_ptr(),
+                        observer,
                         self.element_ref.as_ptr(),
                         notification.deref(),
                     )
@@ -910,7 +914,14 @@ impl WindowManager {
         autoreleasepool(|_| {
             for process in process_manager.processes.values_mut() {
                 if process.is_observable() {
-                    let app = Application::from_process(self.main_cid, process, self.tx.clone());
+                    let app =
+                        match Application::from_process(self.main_cid, process, self.tx.clone()) {
+                            Ok(app) => app,
+                            Err(err) => {
+                                error!("{}: error creating applicatoin: {err}", function_name!());
+                                return;
+                            }
+                        };
                     debug!(
                         "{}: Application {} is observable",
                         function_name!(),
@@ -1089,8 +1100,13 @@ impl WindowManager {
         //
         unsafe {
             const BUFSIZE: isize = 0x14;
-            let data_ref =
-                CFDataCreateMutable(None, BUFSIZE).expect("Unable to create mutable data.");
+            let data_ref = match CFDataCreateMutable(None, BUFSIZE) {
+                Some(data) => data,
+                None => {
+                    error!("{}: error creating mutable data", function_name!());
+                    return;
+                }
+            };
             CFDataIncreaseLength(data_ref.deref().into(), BUFSIZE);
 
             // uint8_t *data = CFDataGetMutableBytePtr(data_ref);
@@ -1192,27 +1208,22 @@ impl WindowManager {
         let mut empty_count = 0;
         if let Ok(window_list) = window_list {
             for window_ref in get_array_values(window_list.deref()) {
-                let window_id = ax_window_id(window_ref.as_ptr());
+                let window_id = match ax_window_id(window_ref.as_ptr()) {
+                    Ok(window_id) => window_id,
+                    Err(_) => {
+                        empty_count += 1;
+                        continue;
+                    }
+                };
 
-                //
-                // @cleanup
-                //
-                // :Workaround
-                //
-                // NOTE(koekeishiya): The AX API appears to always include a single element for
-                // Finder that returns an empty window id. This is likely the desktop window. Other
-                // similar cases should be handled the same way; simply ignore the window when we
-                // attempt to do an equality check to see if we have correctly discovered the
-                // number of windows to track.
-
-                if window_id.is_err() {
-                    empty_count += 1;
-                    continue;
-                }
-                let window_id = window_id.unwrap();
+                // FIXME: The AX API appears to always include a single element for Finder that
+                // returns an empty window id. This is likely the desktop window. Other similar
+                // cases should be handled the same way; simply ignore the window when we attempt
+                // to do an equality check to see if we have correctly discovered the number of
+                // windows to track.
 
                 if self.find_window(window_id).is_none() {
-                    let window_ref = AxuWrapperType::retain(window_ref.as_ptr()).unwrap();
+                    let window_ref = AxuWrapperType::retain(window_ref.as_ptr())?;
                     info!(
                         "{}: Add window: {} {window_id}",
                         function_name!(),
@@ -1376,15 +1387,16 @@ impl WindowManager {
     }
 
     pub fn front_switched(&mut self, process: &mut Process) {
-        let app = self.find_application(process.pid);
-        if app.is_none() {
-            warn!(
-                "{}: window_manager_add_lost_front_switched_event",
-                function_name!()
-            );
-            return;
-        }
-        let app = app.unwrap();
+        let app = match self.find_application(process.pid) {
+            Some(app) => app,
+            None => {
+                warn!(
+                    "{}: window_manager_add_lost_front_switched_event",
+                    function_name!()
+                );
+                return;
+            }
+        };
         debug!("{}: {}", function_name!(), app.name());
 
         match app.focused_window_id() {
@@ -1613,7 +1625,10 @@ impl WindowManager {
             .retain(|display| display.spaces.values().any(|pane| !pane.is_empty()));
 
         self.displays.push(display);
-        Ok(self.displays.last().unwrap())
+        self.displays.last().ok_or(Error::new(
+            ErrorKind::NotFound,
+            format!("{}: could not find a display", function_name!()),
+        ))
     }
 
     pub fn delete_application(&mut self, pid: Pid) {

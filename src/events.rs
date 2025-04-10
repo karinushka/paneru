@@ -174,11 +174,10 @@ impl EventHandler {
 
     fn run(&mut self) {
         loop {
-            let e = self.rx.recv();
-            if e.is_err() {
-                break;
-            }
-            let event = e.unwrap();
+            let event = match self.rx.recv() {
+                Err(_) => break,
+                Ok(event) => event,
+            };
             trace!("{}: Event {event:?}", function_name!());
 
             if matches!(event, Event::Exit) {
@@ -353,8 +352,7 @@ impl EventHandler {
         current_window: &Window,
         panel: &WindowPane,
     ) -> Option<Window> {
-        let empty = "".to_string();
-        let direction = argv.first().unwrap_or(&empty);
+        let direction = argv.first()?;
 
         EventHandler::get_window_in_direction(direction, current_window, panel).inspect(|window| {
             window.focus_with_raise();
@@ -367,11 +365,10 @@ impl EventHandler {
         panel: &WindowPane,
         bounds: &CGRect,
     ) -> Option<Window> {
-        let empty = "".to_string();
-        let direction = argv.first().unwrap_or(&empty);
-        let index = panel.index_of(current_window).unwrap();
+        let direction = argv.first()?;
+        let index = panel.index_of(current_window).ok()?;
         let window = EventHandler::get_window_in_direction(direction, current_window, panel)?;
-        let new_index = panel.index_of(&window).unwrap();
+        let new_index = panel.index_of(&window).ok()?;
 
         let origin = if new_index == 0 {
             // If reached far left, snap the window to left.
@@ -380,7 +377,7 @@ impl EventHandler {
             // If reached full right, snap the window to right.
             CGPoint::new(bounds.size.width - current_window.frame().size.width, 0.0)
         } else {
-            panel.get(new_index).unwrap().frame().origin
+            panel.get(new_index).ok()?.frame().origin
         };
         current_window.reposition(origin.x, origin.y);
         if index < new_index {
@@ -567,14 +564,16 @@ impl EventHandler {
                         window_id,
                         child_wid
                     );
-                    let child_window = self.window_manager.find_window(child_wid);
-                    if child_window.is_none() {
-                        warn!(
-                            "{}: Unable to find child window {child_wid}.",
-                            function_name!()
-                        );
-                        continue;
-                    }
+                    let child_window = match self.window_manager.find_window(child_wid) {
+                        None => {
+                            warn!(
+                                "{}: Unable to find child window {child_wid}.",
+                                function_name!()
+                            );
+                            continue;
+                        }
+                        Some(window) => window,
+                    };
 
                     let role = match window.role() {
                         Ok(role) => role,
@@ -590,7 +589,7 @@ impl EventHandler {
                         .any(|axrole| axrole.eq(&role));
 
                     if valid {
-                        window = child_window.unwrap().clone();
+                        window = child_window.clone();
                         break;
                     }
                 }

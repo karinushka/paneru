@@ -1,5 +1,5 @@
 use log::{debug, error};
-use std::io::{Error, ErrorKind};
+use std::io::{Error, ErrorKind, Result};
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::mpsc::{Sender, channel};
@@ -25,7 +25,7 @@ struct CommandReader {
 impl CommandReader {
     const SOCKET_PATH: &str = "/tmp/paneru.socket";
 
-    fn send_command(mut params: std::env::Args) -> Result<(), Error> {
+    fn send_command(mut params: std::env::Args) -> Result<()> {
         params.next();
 
         let output = params
@@ -51,7 +51,7 @@ impl CommandReader {
         });
     }
 
-    fn runner(&mut self) -> std::io::Result<()> {
+    fn runner(&mut self) -> Result<()> {
         _ = fs::remove_file(CommandReader::SOCKET_PATH);
         let listener = UnixListener::bind(CommandReader::SOCKET_PATH)?;
         for mut stream in listener.incoming().flatten() {
@@ -86,7 +86,7 @@ fn check_separate_spaces() -> bool {
     }
 }
 
-fn main() -> Result<(), Error> {
+fn main() -> Result<()> {
     // Set up logging (default level is INFO)
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 

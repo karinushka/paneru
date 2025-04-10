@@ -1,7 +1,7 @@
 use log::{debug, error, info, trace, warn};
 use objc2::rc::Retained;
 use objc2_core_foundation::{CFNumberGetValue, CFNumberType, CFRetained, CGPoint, CGRect};
-use objc2_core_graphics::CGDirectDisplayID;
+use objc2_core_graphics::{CGDirectDisplayID, CGEventFlags};
 use std::io::{Error, ErrorKind, Result};
 use std::ops::Deref;
 use std::ptr::NonNull;
@@ -12,6 +12,7 @@ use std::thread;
 use std::thread::JoinHandle;
 use stdext::function_name;
 
+use crate::config::Config;
 use crate::platform::{ProcessSerialNumber, WorkspaceObserver};
 use crate::process::ProcessManager;
 use crate::skylight::{
@@ -25,6 +26,9 @@ use crate::windows::{Window, WindowManager, WindowPane};
 pub enum Event {
     Exit,
     ProcessesLoaded,
+    ConfigRefresh {
+        config: Config,
+    },
 
     ApplicationLaunched {
         psn: ProcessSerialNumber,
@@ -84,6 +88,10 @@ pub enum Event {
     },
     MouseMoved {
         point: CGPoint,
+    },
+    KeyDown {
+        key: i64,
+        modifier: CGEventFlags,
     },
 
     SpaceCreated,
@@ -198,6 +206,12 @@ impl EventHandler {
     fn process_event(&mut self, event: Event) -> Result<()> {
         match event {
             Event::Exit => return Ok(()),
+
+            Event::ConfigRefresh { config } => {
+                // TODO: update config params here.
+                debug!("{}: Got fresh config: {config:?}", function_name!());
+            }
+
             Event::ProcessesLoaded => {
                 info!(
                     "{}: === Processes loaded - loading windows ===",
@@ -288,9 +302,35 @@ impl EventHandler {
                 trace!("{}: MenuClosed event: {window_id:?}", function_name!())
             }
 
+            Event::KeyDown { key, modifier } => {
+                self.key_pressed(key, modifier);
+            }
+
             _ => info!("{}: Unhandled event {event:?}", function_name!()),
         }
         Ok(())
+    }
+
+    fn key_pressed(&self, key: i64, eventflags: CGEventFlags) {
+        // Normal key, left, right.
+        const MASK_ALT: [u64; 3] = [0x00080000, 0x00000020, 0x00000040];
+        const MASK_SHIFT: [u64; 3] = [0x00020000, 0x00000002, 0x00000004];
+        const MASK_CMD: [u64; 3] = [0x00100000, 0x00000008, 0x00000010];
+        const MASK_CTRL: [u64; 3] = [0x00040000, 0x00000001, 0x00002000];
+
+        let modifier = if MASK_ALT.iter().any(|mask| *mask == (eventflags.0 & mask)) {
+            "alt"
+        } else if MASK_SHIFT.iter().any(|mask| *mask == (eventflags.0 & mask)) {
+            "shift"
+        } else if MASK_CMD.iter().any(|mask| *mask == (eventflags.0 & mask)) {
+            "cmd"
+        } else if MASK_CTRL.iter().any(|mask| *mask == (eventflags.0 & mask)) {
+            "ctrl"
+        } else {
+            ""
+        };
+
+        info!("KeyDown: {modifier} {key}");
     }
 
     fn window_focused(&mut self, window_id: WinID) {

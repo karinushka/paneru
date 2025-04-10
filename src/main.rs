@@ -7,6 +7,7 @@ use std::{fs, thread};
 use stdext::function_name;
 
 mod app;
+mod config;
 mod events;
 mod platform;
 mod process;
@@ -109,7 +110,7 @@ fn main() -> Result<()> {
 
     CommandReader::new(tx.clone()).start();
 
-    let mut platform_callbacks = PlatformCallbacks::new(tx.clone());
+    let mut platform_callbacks = PlatformCallbacks::new(tx.clone())?;
     platform_callbacks.setup_handlers()?;
 
     let (quit, handle) = EventHandler::new(tx.clone(), rx)?.start();

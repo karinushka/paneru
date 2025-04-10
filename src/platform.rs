@@ -16,7 +16,8 @@ use objc2_core_foundation::{
 };
 use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayChangeSummaryFlags, CGDisplayRegisterReconfigurationCallback,
-    CGDisplayRemoveReconfigurationCallback, CGError, CGEvent, CGEventGetLocation, CGEventTapCreate,
+    CGDisplayRemoveReconfigurationCallback, CGError, CGEvent, CGEventField, CGEventFlags,
+    CGEventGetFlags, CGEventGetIntegerValueField, CGEventGetLocation, CGEventTapCreate,
     CGEventTapEnable, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventTapProxy,
     CGEventType,
 };
@@ -33,6 +34,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
 use stdext::function_name;
 
+use crate::config::Config;
 use crate::events::Event;
 use crate::process::Process;
 use crate::skylight::OSStatus;
@@ -206,14 +208,19 @@ impl ProcessHandler {
     }
 }
 
-struct MouseHandler {
+struct InputHandler {
     tx: Sender<Event>,
+    config: Config,
     cleanup: Option<Cleanuper>,
 }
 
-impl MouseHandler {
-    fn new(tx: Sender<Event>) -> Self {
-        MouseHandler { tx, cleanup: None }
+impl InputHandler {
+    fn new(tx: Sender<Event>, config: Config) -> Self {
+        InputHandler {
+            tx,
+            config,
+            cleanup: None,
+        }
     }
 
     fn start(&mut self) -> Result<()> {
@@ -223,7 +230,8 @@ impl MouseHandler {
             | (1 << CGEventType::LeftMouseDragged.0)
             | (1 << CGEventType::RightMouseDown.0)
             | (1 << CGEventType::RightMouseUp.0)
-            | (1 << CGEventType::RightMouseDragged.0);
+            | (1 << CGEventType::RightMouseDragged.0)
+            | (1 << CGEventType::KeyDown.0);
 
         unsafe {
             let this = NonNull::new_unchecked(self).as_ptr();
@@ -249,7 +257,7 @@ impl MouseHandler {
             CFRunLoopAddSource(&main_loop, Some(&run_loop_source), kCFRunLoopCommonModes);
 
             self.cleanup = Some(Cleanuper::new(Box::new(move || {
-                info!("{}: Unregistering mouse_handler", function_name!());
+                info!("{}: Unregistering event_handler", function_name!());
                 CFRunLoopRemoveSource(&main_loop, Some(&run_loop_source), kCFRunLoopCommonModes);
                 CFMachPortInvalidate(&port);
                 CGEventTapEnable(&port, false);
@@ -264,14 +272,19 @@ impl MouseHandler {
         mut event_ref: NonNull<CGEvent>,
         this: *mut c_void,
     ) -> *mut CGEvent {
-        match NonNull::new(this).map(|this| unsafe { this.cast::<MouseHandler>().as_mut() }) {
-            Some(this) => this.mouse_handler(event_type, unsafe { event_ref.as_ref() }),
-            None => error!("Zero passed to Mouse Handler."),
+        match NonNull::new(this).map(|this| unsafe { this.cast::<InputHandler>().as_mut() }) {
+            Some(this) => {
+                let intercept = this.input_handler(event_type, unsafe { event_ref.as_ref() });
+                if intercept {
+                    return null_mut();
+                }
+            }
+            None => error!("Zero passed to Event Handler."),
         }
         unsafe { event_ref.as_mut() }
     }
 
-    fn mouse_handler(&mut self, event_type: CGEventType, event: &CGEvent) {
+    fn input_handler(&mut self, event_type: CGEventType, event: &CGEvent) -> bool {
         let result = match event_type {
             CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
                 warn!("{}: Tap Disabled", function_name!());
@@ -293,6 +306,14 @@ impl MouseHandler {
                 let point = unsafe { CGEventGetLocation(Some(event)) };
                 self.tx.send(Event::MouseMoved { point })
             }
+            CGEventType::KeyDown => {
+                let keycode = unsafe {
+                    CGEventGetIntegerValueField(Some(event), CGEventField::KeyboardEventKeycode)
+                };
+                let eventflags = unsafe { CGEventGetFlags(Some(event)) };
+                // handle_keypress can intercept the event, so it may return true.
+                return self.handle_keypress(keycode, eventflags);
+            }
             _ => {
                 info!(
                     "{}: Unknown event type received: {event_type:?}",
@@ -304,6 +325,47 @@ impl MouseHandler {
         if let Err(err) = result {
             error!("{}: error sending event: {err}", function_name!());
         }
+        // Do not intercept this event, let it fall through.
+        false
+    }
+
+    fn handle_keypress(&self, keycode: i64, eventflags: CGEventFlags) -> bool {
+        const MODIFIER_MASKS: [[u64; 3]; 4] = [
+            // Normal key, left, right.
+            [0x00080000, 0x00000020, 0x00000040], // Alt
+            [0x00020000, 0x00000002, 0x00000004], // Shift
+            [0x00100000, 0x00000008, 0x00000010], // Command
+            [0x00040000, 0x00000001, 0x00002000], // Control
+        ];
+        let mask = MODIFIER_MASKS
+            .iter()
+            .enumerate()
+            .flat_map(|(bitshift, modifier)| {
+                modifier
+                    .iter()
+                    .any(|mask| *mask == (eventflags.0 & mask))
+                    .then_some(1 << bitshift)
+            })
+            .reduce(|acc, mask| acc + mask)
+            .unwrap_or(0);
+
+        let bind = self
+            .config
+            .bindings()
+            .values()
+            .find(|bind| bind.code as i64 == keycode && bind.modifiers == mask);
+        bind.and_then(|bind| {
+            let command = bind
+                .command
+                .split("_")
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>();
+            self.tx
+                .send(Event::Command { argv: command })
+                .inspect_err(|err| error!("{}: Error sending command: {err}", function_name!()))
+                .ok()
+        })
+        .is_some()
     }
 }
 
@@ -790,33 +852,53 @@ impl DisplayHandler {
 }
 
 pub struct PlatformCallbacks {
+    config: Config,
     tx: Sender<Event>,
     process_handler: ProcessHandler,
-    mouse_handler: MouseHandler,
+    event_handler: InputHandler,
     workspace_observer: Retained<WorkspaceObserver>,
     mission_control_observer: MissionControlHandler,
     display_handler: DisplayHandler,
 }
 
 impl PlatformCallbacks {
-    pub fn new(tx: Sender<Event>) -> std::pin::Pin<Box<Self>> {
+    pub fn new(tx: Sender<Event>) -> Result<std::pin::Pin<Box<Self>>> {
+        let config = Config::new().map_err(|err| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                format!("{}: failed loading config {err}", function_name!()),
+            )
+        })?;
+
         let workspace_observer = WorkspaceObserver::new(tx.clone());
-        Box::pin(PlatformCallbacks {
+        Ok(Box::pin(PlatformCallbacks {
+            config: config.clone(),
             process_handler: ProcessHandler::new(tx.clone(), workspace_observer.clone()),
-            mouse_handler: MouseHandler::new(tx.clone()),
+            event_handler: InputHandler::new(tx.clone(), config),
             workspace_observer,
             mission_control_observer: MissionControlHandler::new(tx.clone()),
             display_handler: DisplayHandler::new(tx.clone()),
             tx,
-        })
+        }))
     }
 
     pub fn setup_handlers(&mut self) -> Result<()> {
-        self.mouse_handler.start()?;
+        self.event_handler.start()?;
         self.display_handler.start()?;
         self.mission_control_observer.observe()?;
         self.workspace_observer.start();
         self.process_handler.start();
+
+        self.tx
+            .send(Event::ConfigRefresh {
+                config: self.config.clone(),
+            })
+            .map_err(|err| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    format!("{}: {err}", function_name!()),
+                )
+            })?;
 
         self.tx.send(Event::ProcessesLoaded).map_err(|err| {
             Error::new(

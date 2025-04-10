@@ -67,12 +67,12 @@ struct InnerApplication {
 }
 
 impl Application {
-    pub fn from_process(main_cid: ConnID, process: &Process, tx: Sender<Event>) -> Self {
+    pub fn from_process(main_cid: ConnID, process: &Process, tx: Sender<Event>) -> Result<Self> {
         let refer = unsafe {
             let ptr = AXUIElementCreateApplication(process.pid);
-            AxuWrapperType::retain(ptr).expect("Error fetching element from application!")
+            AxuWrapperType::retain(ptr)?
         };
-        Application {
+        Ok(Application {
             inner: Arc::new(RwLock::new(InnerApplication {
                 element_ref: refer,
                 psn: process.psn.clone(),
@@ -88,7 +88,7 @@ impl Application {
                 handler: Box::pin(ApplicationHandler::new(tx)),
                 windows: HashMap::new(),
             })),
-        }
+        })
         // app.inner.write().unwrap().handler = Some(ApplicationHandler::new(app.clone(), tx));
     }
 
@@ -269,22 +269,18 @@ impl ApplicationHandler {
         if self.observer_ref.is_none() || self.observing.iter().all(|registered| !registered) {
             return;
         }
-        debug!(
-            "{}: {:?}",
-            function_name!(),
-            self.observer_ref
-                .as_ref()
-                .unwrap()
-                .as_ptr::<AXObserverRef>()
-        );
-        if let Some(observer) = self.observer_ref.take() {
+        if let Some((observer, element)) = self.observer_ref.take().zip(self.element_ref.as_ref()) {
+            debug!(
+                "{}: {:?}",
+                function_name!(),
+                observer.as_ptr::<AXObserverRef>()
+            );
             AX_NOTIFICATIONS
                 .iter()
                 .zip(&self.observing)
                 .filter(|(_, remove)| **remove)
                 .for_each(|(name, _)| {
                     debug!("{}: name {name:?}", function_name!());
-                    let element = self.element_ref.as_ref().unwrap();
                     let notification = CFString::from_static_str(name);
                     let result = unsafe {
                         AXObserverRemoveNotification(
@@ -320,8 +316,12 @@ impl ApplicationHandler {
                 .ok()
         };
         let event = match notification {
-            accessibility_sys::kAXCreatedNotification => Event::WindowCreated {
-                element: AxuWrapperType::retain(element).unwrap(),
+            accessibility_sys::kAXCreatedNotification => match AxuWrapperType::retain(element) {
+                Ok(element) => Event::WindowCreated { element },
+                Err(err) => {
+                    error!("{}: invalid element {element:?}: {err}", function_name!());
+                    return;
+                }
             },
             accessibility_sys::kAXFocusedWindowChangedNotification => Event::WindowFocused {
                 window_id: get_window_id(element),
@@ -353,10 +353,11 @@ impl ApplicationHandler {
                         .iter()
                         .find(|(id, _)| window_id == *id)
                 });
-                if let Some((window_id, element)) = window {
+                if let Some(((window_id, element), observer)) =
+                    window.zip(self.observer_ref.as_ref())
+                {
                     AX_WINDOW_NOTIFICATIONS.iter().for_each(|name| {
                         let notification = CFString::from_static_str(name);
-                        let observer = self.observer_ref.as_ref().unwrap();
                         debug!(
                             "{}: unobserve {window_id:?}:  {name} {:?} {:?}",
                             function_name!(),

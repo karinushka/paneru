@@ -240,10 +240,12 @@ impl MouseHandler {
                 format!("{}: Can not create EventTap.", function_name!()),
             ))?;
 
-            let run_loop_source = CFMachPortCreateRunLoopSource(None, Some(&port), 0)
-                .expect("Unable to create Mach port.");
-            let main_loop = CFRunLoopGetMain().expect("Unable to get the main run loop.");
-
+            let (run_loop_source, main_loop) = CFMachPortCreateRunLoopSource(None, Some(&port), 0)
+                .zip(CFRunLoopGetMain())
+                .ok_or(Error::new(
+                    ErrorKind::PermissionDenied,
+                    format!("{}: Unable to create run loop source", function_name!()),
+                ))?;
             CFRunLoopAddSource(&main_loop, Some(&run_loop_source), kCFRunLoopCommonModes);
 
             self.cleanup = Some(Cleanuper::new(Box::new(move || {
@@ -444,10 +446,9 @@ define_class!(
                 psn: process.psn.clone(),
                 observer: process.observer.clone(),
             };
-            self.ivars()
+            _= self.ivars()
                 .tx
-                .send(msg)
-                .expect("observe_value_for_keypath: Error sending event!");
+                .send(msg).inspect_err(|err| error!("observe_value_for_keypath: Error sending event: {err}"));
             debug!(
                 "{}: got {key_path:?} for {}",
                 function_name!(),
@@ -620,9 +621,7 @@ impl MissionControlHandler {
 
     fn observe(&mut self) -> Result<()> {
         let pid = MissionControlHandler::dock_pid()?;
-
-        self.element =
-            AxuWrapperType::from_retained(unsafe { AXUIElementCreateApplication(pid) })?.into();
+        let element = AxuWrapperType::from_retained(unsafe { AXUIElementCreateApplication(pid) })?;
         let observer = unsafe {
             let mut observer_ref: AXObserverRef = null_mut();
             if kAXErrorSuccess == AXObserverCreate(pid, Self::callback, &mut observer_ref) {
@@ -645,7 +644,7 @@ impl MissionControlHandler {
             match unsafe {
                 AXObserverAddNotification(
                     observer.as_ptr(),
-                    self.element.as_ref().unwrap().as_ptr(),
+                    element.as_ptr(),
                     notification.deref(),
                     NonNull::new_unchecked(self).as_ptr().cast(),
                 )
@@ -660,11 +659,12 @@ impl MissionControlHandler {
         });
         unsafe { add_run_loop(observer.deref(), kCFRunLoopDefaultMode)? };
         self.observer = observer.into();
+        self.element = element.into();
         Ok(())
     }
 
     fn unobserve(&mut self) {
-        if let Some(observer) = self.observer.take() {
+        if let Some((observer, element)) = self.observer.take().zip(self.element.as_ref()) {
             Self::EVENTS.iter().for_each(|name| {
                 debug!(
                     "{}: {name:?} {:?}",
@@ -675,7 +675,7 @@ impl MissionControlHandler {
                 let result = unsafe {
                     AXObserverRemoveNotification(
                         observer.as_ptr(),
-                        self.element.as_ref().unwrap().as_ptr(),
+                        element.as_ptr(),
                         notification.deref(),
                     )
                 };
@@ -686,7 +686,10 @@ impl MissionControlHandler {
             remove_run_loop(observer.deref());
             drop(observer)
         } else {
-            warn!("{}: unobserving without observe", function_name!());
+            warn!(
+                "{}: unobserving without observe or element",
+                function_name!()
+            );
         }
     }
 

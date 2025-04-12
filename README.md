@@ -2,7 +2,6 @@
 
 A sliding, tiling window manager for MacOS.
 
-
 ## About
 
 Windows are arranged on an infinite strip going to the right.
@@ -10,7 +9,6 @@ Opening a new window never causes existing windows to resize.
 
 Every monitor has its own separate window strip.
 Windows can never "overflow" onto an adjacent monitor.
-
 
 ## Why
 
@@ -22,15 +20,13 @@ Windows can never "overflow" onto an adjacent monitor.
 - Learn stuff about MacOS API and Objective C.
 - Good way to practice Rust.
 
-
 ## Inspiration
 
 The code is heavily inspired by another excellent MacOS window manager - [Yabai].
 Reading its source allows for a deep understanding on how to manage windows on MacOS,
 especially the undocumented functions!
 
-The managing of windows on a sliding strip  is inspired by [Niri] and [PaperWM.spoon].
-
+The managing of windows on a sliding strip is inspired by [Niri] and [PaperWM.spoon].
 
 ## Installation
 
@@ -50,62 +46,68 @@ $ cargo build --target release
 $ cp target/release/paneru ~/bin/
 ```
 
-
 ### Configuration
 
-Currently the window manager lacks a configuration file. For keyboard bindings it listens on a socket
-(`/tmp/paneru.socket`) for commands.
-These are provided by an external helper - [simple hotkey daemon]. The `skhd` is easy to configure and
-it hot reloads the configuration.
+Drop following configuration lines into your `~/.paneru` file:
 
 ```
-# Example configuration for Paneru.
-# Binary 'paneru' should be in your PATH, or provide a full path.
+# syntax=toml
 #
+# Example configuration for Paneru.
+#
+[options]
+# Enables focus follows mouse
+mouse_focus = true
+
+[bindings]
 # Moves the focus between windows.
-cmd - h : paneru window focus west
-cmd - l : paneru window focus east
+window_focus_west = "cmd - h"
+window_focus_east = "cmd - l"
+
 # Swaps windows in chosen direction.
-alt - h : paneru window swap west
-alt - l : paneru window swap east
+window_swap_west = "alt - h"
+window_swap_east = "alt - l"
+
 # Jump to the left most or right most windows.
-cmd + shift - h : paneru window focus first
-cmd + shift - l : paneru window focus last
+window_focus_first = "cmd + shift - h"
+window_focus_last = "cmd + shift - l"
+
 # Move the current window into the left most or right most positions.
-alt + shift - h : paneru window swap first
-alt + shift - l : paneru window swap last
+window_swap_first = "alt + shift - h"
+window_swap_last = "alt + shift - l"
+
 # Centers the current window on screen.
-alt - c : paneru window center
+window_center = "alt - c"
+
 # Shuffles between predefined window sizes: 25%, 33%, 50%, 66% and 75%.
-alt - r : paneru window resize
+window_resize = "alt - r"
+
 # Toggles the window for management. If unmanaged, the window will be "floating".
-ctrl + alt - t : paneru window manage
+window_manage = "ctrl + alt - t"
+
 # Quits the window manager.
-ctrl + alt - q : paneru quit
+quit = "ctrl + alt - q"
 ```
 
-###
+Start the main binary without any parameters:
 
-Run the `skhd` daemon after confguring it and then start the main binary without any parameters:
 ```shell
-$ paneru
+$ cargo run paneru
 ```
 
 You can change the default `info` log level to more verbose levels (`debug`, `trace`) with:
 
 ```shell
-$ RUST_LOG=debug paneru
+$ RUST_LOG=debug cargo run paneru
 ```
-
 
 ## TODO
 
-- Configuration file.
-- Reading keyboard events directly. Currently they keys are grabbed by a [simple hotkey daemon]
-  and written to a pipe as an event the window manager can react to.
+- Hot reload of configuration.
+- More commands for manipulating windows: fullscreen, finegrained size adjustments, etc.
+- Multiple windows stacked into the same column.
 - Scriptability. A nice feature would be to use Lua for configuration and simple scripting,
   like triggering and positioning specific windows or applications.
-
 
 ## Architecture Overview
 
@@ -120,12 +122,9 @@ The `WindowManager` is responsible for tracking and manipulating window states, 
 Event handlers in modules like `events.rs` interpret the raw events and orchestrate the appropriate responses within the application.
 This design promotes a decoupled architecture, allowing modules to operate independently while reacting to system-level changes.
 
-
-
 ## Tile Scrollably Elsewhere
 
 Here are some other projects which implement a similar workflow:
-
 
 - [Niri]: a scrollable tiling Wayland compositor.
 - [PaperWM]: scrollable tiling on top of GNOME Shell.
@@ -134,7 +133,6 @@ Here are some other projects which implement a similar workflow:
 - [hyprscroller] and [hyprslidr]: scrollable tiling on top of Hyprland.
 - [PaperWM.spoon]: scrollable tiling on top of MacOS.
 
-[simple hotkey daemon]: https://github.com/koekeishiya/skhd
 [Yabai]: https://github.com/koekeishiya/yabai
 [Niri]: https://github.com/YaLTeR/niri
 [PaperWM]: https://github.com/paperwm/PaperWM

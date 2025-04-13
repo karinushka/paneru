@@ -846,6 +846,7 @@ pub struct WindowManager {
     pub mouse_down_window: Option<Window>,
     pub down_location: CGPoint,
     displays: Vec<Display>,
+    pub focus_follows_mouse: bool,
 }
 
 impl WindowManager {
@@ -871,6 +872,7 @@ impl WindowManager {
             mouse_down_window: None,
             down_location: CGPoint::default(),
             displays,
+            focus_follows_mouse: true,
         })
     }
 

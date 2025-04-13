@@ -57,7 +57,7 @@ Drop following configuration lines into your `~/.paneru` file:
 #
 [options]
 # Enables focus follows mouse
-mouse_focus = true
+focus_follows_mouse = true
 
 [bindings]
 # Moves the focus between windows.
@@ -89,6 +89,9 @@ window_manage = "ctrl + alt - t"
 quit = "ctrl + alt - q"
 ```
 
+The settings can be changed while Paneru is running - they will be automatically reloaded.
+Very useful for tweaking keyboard bindings.
+
 Start the main binary without any parameters:
 
 ```shell
@@ -103,7 +106,6 @@ $ RUST_LOG=debug cargo run paneru
 
 ## TODO
 
-- Hot reload of configuration.
 - More commands for manipulating windows: fullscreen, finegrained size adjustments, etc.
 - Multiple windows stacked into the same column.
 - Scriptability. A nice feature would be to use Lua for configuration and simple scripting,

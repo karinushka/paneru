@@ -208,8 +208,8 @@ impl EventHandler {
             Event::Exit => return Ok(()),
 
             Event::ConfigRefresh { config } => {
-                // TODO: update config params here.
                 debug!("{}: Got fresh config: {config:?}", function_name!());
+                self.reload_config(&config);
             }
 
             Event::ProcessesLoaded => {
@@ -309,6 +309,10 @@ impl EventHandler {
             _ => info!("{}: Unhandled event {event:?}", function_name!()),
         }
         Ok(())
+    }
+
+    fn reload_config(&mut self, config: &Config) {
+        self.window_manager.focus_follows_mouse = config.options().focus_follows_mouse;
     }
 
     fn key_pressed(&self, key: i64, eventflags: CGEventFlags) {
@@ -564,6 +568,9 @@ impl EventHandler {
     }
 
     fn mouse_moved(&mut self, point: &CGPoint) -> Result<()> {
+        if !self.window_manager.focus_follows_mouse {
+            return Ok(());
+        }
         if self.window_manager.mission_control_is_active {
             return Ok(());
         }

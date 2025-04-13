@@ -1,41 +1,61 @@
 use log::error;
+use notify::EventHandler;
 use objc2_core_foundation::{CFData, CFDataGetBytePtr, CFStringCreateWithCharacters};
 use serde::{Deserialize, Deserializer, de};
 use std::{
     collections::HashMap,
-    env,
     ffi::c_void,
-    path::PathBuf,
+    path::Path,
     ptr::NonNull,
-    sync::{Arc, LazyLock},
+    sync::{Arc, LazyLock, RwLock},
 };
 use stdext::function_name;
+use stdext::prelude::RwLockExt;
 
 use crate::{platform::CFStringRef, skylight::OSStatus, util::AxuWrapperType};
 
 #[derive(Clone, Debug)]
 pub struct Config {
-    inner: Arc<InnerConfig>,
+    inner: Arc<RwLock<InnerConfig>>,
 }
 
 impl Config {
-    pub fn new() -> Result<Self, String> {
-        let homedir = PathBuf::from(
-            env::var("HOME")
-                .map_err(|err| format!("{}: missing HOME env - {err}", function_name!()))?,
-        );
-        let config_file = homedir.join(".paneru");
-        let input = std::fs::read_to_string(config_file)
-            .map_err(|err| format!("{}: missing HOME env - {err}", function_name!()))?;
-        parse_config(&input)
+    pub fn new(path: &Path) -> Result<Self, String> {
+        Ok(Config {
+            inner: RwLock::new(InnerConfig::new(path)?).into(),
+        })
     }
 
-    pub fn options(&self) -> &MainOptions {
-        &self.inner.options
+    pub fn reload_config(&mut self, path: &Path) -> Result<(), String> {
+        let new = InnerConfig::new(path)?;
+        let mut old = self.inner.force_write();
+        old.options = new.options;
+        old.bindings = new.bindings;
+        Ok(())
     }
 
-    pub fn bindings(&self) -> &HashMap<String, Keybinding> {
-        &self.inner.bindings
+    fn inner(&self) -> std::sync::RwLockReadGuard<'_, InnerConfig> {
+        self.inner.force_read()
+    }
+
+    pub fn options(&self) -> MainOptions {
+        self.inner().options.clone()
+    }
+
+    pub fn find_keybind(&self, keycode: u8, mask: u8) -> Option<Keybinding> {
+        let lock = self.inner();
+        lock.bindings
+            .values()
+            .find(|bind| bind.code == keycode && bind.modifiers == mask)
+            .cloned()
+    }
+}
+
+impl EventHandler for Config {
+    fn handle_event(&mut self, event: notify::Result<notify::Event>) {
+        if let Ok(event) = event {
+            println!("Event: {:?}", event);
+        }
     }
 }
 
@@ -45,12 +65,45 @@ struct InnerConfig {
     bindings: HashMap<String, Keybinding>,
 }
 
-#[derive(Deserialize, Clone, Debug)]
-pub struct MainOptions {
-    pub mouse_focus: bool,
+impl InnerConfig {
+    fn new(path: &Path) -> Result<InnerConfig, String> {
+        let input = std::fs::read_to_string(path)
+            .map_err(|err| format!("{}: missing HOME env - {err}", function_name!()))?;
+        InnerConfig::parse_config(&input)
+    }
+
+    fn parse_config(input: &str) -> Result<InnerConfig, String> {
+        let virtual_keys = generate_virtual_keymap();
+        let mut config: InnerConfig = toml::from_str(input)
+            .map_err(|err| format!("{}: error loading config: {err}", function_name!()))?;
+
+        config.bindings.iter_mut().for_each(|(command, binding)| {
+            binding.command = command.clone();
+            let code = virtual_keys
+                .iter()
+                .find(|(key, _)| key == &binding.key)
+                .map(|(_, code)| *code)
+                .or_else(|| {
+                    literal_keycode()
+                        .find(|(key, _)| key == &binding.key)
+                        .map(|(_, code)| *code)
+                });
+            if let Some(code) = code {
+                binding.code = code;
+            }
+            println!("bind: {binding:?}");
+        });
+
+        Ok(config)
+    }
 }
 
-#[derive(Debug)]
+#[derive(Deserialize, Clone, Debug)]
+pub struct MainOptions {
+    pub focus_follows_mouse: bool,
+}
+
+#[derive(Clone, Debug)]
 pub struct Keybinding {
     pub key: String,
     pub code: u8,
@@ -104,33 +157,6 @@ fn parse_modifiers(input: &str) -> Result<u8, String> {
         }
     }
     Ok(out)
-}
-
-fn parse_config(input: &str) -> Result<Config, String> {
-    let virtual_keys = generate_virtual_keymap();
-    let mut config: InnerConfig = toml::from_str(input)
-        .map_err(|err| format!("{}: error loading config: {err}", function_name!()))?;
-
-    config.bindings.iter_mut().for_each(|(command, binding)| {
-        binding.command = command.clone();
-        let code = virtual_keys
-            .iter()
-            .find(|(key, _)| key == &binding.key)
-            .map(|(_, code)| *code)
-            .or_else(|| {
-                literal_keycode()
-                    .find(|(key, _)| key == &binding.key)
-                    .map(|(_, code)| *code)
-            });
-        if let Some(code) = code {
-            binding.code = code;
-        }
-        println!("bind: {binding:?}");
-    });
-
-    Ok(Config {
-        inner: config.into(),
-    })
 }
 
 #[link(name = "Carbon", kind = "framework")]
@@ -380,9 +406,9 @@ simple = "alt-s"
 quit = "ctrl + alt - q"
 manage = "ctrl + alt - t"
 "#;
-    let config: Config = parse_config(input)
+    let config = InnerConfig::parse_config(input)
         .inspect_err(|err| println!("Error: {err}"))
         .unwrap();
 
-    assert_eq!(format!("{:?}", config.bindings()), "");
+    assert_eq!(format!("{:?}", config.bindings), "");
 }

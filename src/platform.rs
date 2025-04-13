@@ -4,6 +4,8 @@ use accessibility_sys::{
 };
 use core::ptr::NonNull;
 use log::{debug, error, info, warn};
+use notify::event::{DataChange, ModifyKind};
+use notify::{EventKind, FsEventWatcher, RecommendedWatcher, RecursiveMode, Watcher};
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::{AllocAnyThread, DefinedClass, define_class, msg_send, sel};
 use objc2_app_kit::{
@@ -25,13 +27,16 @@ use objc2_foundation::{
     NSDictionary, NSDistributedNotificationCenter, NSKeyValueChangeNewKey, NSNotificationCenter,
     NSNumber, NSObject, NSString,
 };
+use std::env;
 use std::ffi::c_void;
 use std::io::{Error, ErrorKind, Result};
 use std::ops::Deref;
+use std::path::PathBuf;
 use std::ptr::null_mut;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 use stdext::function_name;
 
 use crate::config::Config;
@@ -349,11 +354,8 @@ impl InputHandler {
             .reduce(|acc, mask| acc + mask)
             .unwrap_or(0);
 
-        let bind = self
-            .config
-            .bindings()
-            .values()
-            .find(|bind| bind.code as i64 == keycode && bind.modifiers == mask);
+        let keycode = keycode.try_into().ok();
+        let bind = keycode.and_then(|keycode| self.config.find_keybind(keycode, mask));
         bind.and_then(|bind| {
             let command = bind
                 .command
@@ -851,44 +853,13 @@ impl DisplayHandler {
     }
 }
 
-pub struct PlatformCallbacks {
-    config: Config,
+struct ConfigHandler {
     tx: Sender<Event>,
-    process_handler: ProcessHandler,
-    event_handler: InputHandler,
-    workspace_observer: Retained<WorkspaceObserver>,
-    mission_control_observer: MissionControlHandler,
-    display_handler: DisplayHandler,
+    config: Config,
 }
 
-impl PlatformCallbacks {
-    pub fn new(tx: Sender<Event>) -> Result<std::pin::Pin<Box<Self>>> {
-        let config = Config::new().map_err(|err| {
-            Error::new(
-                ErrorKind::InvalidInput,
-                format!("{}: failed loading config {err}", function_name!()),
-            )
-        })?;
-
-        let workspace_observer = WorkspaceObserver::new(tx.clone());
-        Ok(Box::pin(PlatformCallbacks {
-            config: config.clone(),
-            process_handler: ProcessHandler::new(tx.clone(), workspace_observer.clone()),
-            event_handler: InputHandler::new(tx.clone(), config),
-            workspace_observer,
-            mission_control_observer: MissionControlHandler::new(tx.clone()),
-            display_handler: DisplayHandler::new(tx.clone()),
-            tx,
-        }))
-    }
-
-    pub fn setup_handlers(&mut self) -> Result<()> {
-        self.event_handler.start()?;
-        self.display_handler.start()?;
-        self.mission_control_observer.observe()?;
-        self.workspace_observer.start();
-        self.process_handler.start();
-
+impl ConfigHandler {
+    fn announce_fresh_config(&self) -> Result<()> {
         self.tx
             .send(Event::ConfigRefresh {
                 config: self.config.clone(),
@@ -899,6 +870,89 @@ impl PlatformCallbacks {
                     format!("{}: {err}", function_name!()),
                 )
             })?;
+        Ok(())
+    }
+}
+
+impl notify::EventHandler for ConfigHandler {
+    fn handle_event(&mut self, event: notify::Result<notify::Event>) {
+        if let Ok(notify::Event {
+            kind: EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            paths: _,
+            attrs: _,
+        }) = event
+        {
+            info!("Reloading configuration file...");
+            _ = self
+                .config
+                .reload_config(CONFIGURATION_FILE.as_path())
+                .inspect_err(|err| {
+                    error!("{}: error reloading config: {err}", function_name!());
+                });
+        }
+    }
+}
+
+fn setup_config_watcher(tx: Sender<Event>, config: Config) -> Result<FsEventWatcher> {
+    let setup = notify::Config::default().with_poll_interval(Duration::from_secs(3));
+    let config_handler = ConfigHandler { tx, config };
+    config_handler.announce_fresh_config()?;
+    let watcher = RecommendedWatcher::new(config_handler, setup);
+    watcher
+        .and_then(|mut watcher| {
+            watcher.watch(CONFIGURATION_FILE.as_path(), RecursiveMode::NonRecursive)?;
+            Ok(watcher)
+        })
+        .map_err(|err| {
+            Error::new(
+                ErrorKind::PermissionDenied,
+                format!("{}: {err}", function_name!()),
+            )
+        })
+}
+
+pub static CONFIGURATION_FILE: LazyLock<PathBuf> = LazyLock::new(|| {
+    let homedir = PathBuf::from(env::var("HOME").expect("Missing $HOME environment variable."));
+    homedir.join(".paneru")
+});
+
+pub struct PlatformCallbacks {
+    tx: Sender<Event>,
+    process_handler: ProcessHandler,
+    event_handler: InputHandler,
+    workspace_observer: Retained<WorkspaceObserver>,
+    mission_control_observer: MissionControlHandler,
+    display_handler: DisplayHandler,
+    _config_watcher: FsEventWatcher,
+}
+
+impl PlatformCallbacks {
+    pub fn new(tx: Sender<Event>) -> Result<std::pin::Pin<Box<Self>>> {
+        let config = Config::new(CONFIGURATION_FILE.as_path()).map_err(|err| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                format!("{}: failed loading config {err}", function_name!()),
+            )
+        })?;
+
+        let workspace_observer = WorkspaceObserver::new(tx.clone());
+        Ok(Box::pin(PlatformCallbacks {
+            process_handler: ProcessHandler::new(tx.clone(), workspace_observer.clone()),
+            event_handler: InputHandler::new(tx.clone(), config.clone()),
+            workspace_observer,
+            mission_control_observer: MissionControlHandler::new(tx.clone()),
+            display_handler: DisplayHandler::new(tx.clone()),
+            _config_watcher: setup_config_watcher(tx.clone(), config)?,
+            tx,
+        }))
+    }
+
+    pub fn setup_handlers(&mut self) -> Result<()> {
+        self.event_handler.start()?;
+        self.display_handler.start()?;
+        self.mission_control_observer.observe()?;
+        self.workspace_observer.start();
+        self.process_handler.start();
 
         self.tx.send(Event::ProcessesLoaded).map_err(|err| {
             Error::new(

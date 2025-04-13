@@ -158,16 +158,15 @@ impl Process {
             .active_panel(window_manager.main_cid)?;
         let insert_at = window_manager
             .focused_window
-            .and_then(|id| window_manager.find_window(id))
-            .and_then(|window| active_panel.index_of(&window).ok());
+            .and_then(|window_id| active_panel.index_of(window_id).ok());
         match insert_at {
             Some(mut after) => {
                 for window in &windows {
-                    after = active_panel.insert_at(after, window.clone())?;
+                    after = active_panel.insert_at(after, window.id())?;
                 }
             }
             None => windows.iter().for_each(|window| {
-                active_panel.append(window.clone());
+                active_panel.append(window.id());
             }),
         };
 

@@ -353,22 +353,22 @@ impl EventHandler {
 
     fn get_window_in_direction(
         direction: &str,
-        current_window: &Window,
+        current_window_id: WinID,
         panel: &WindowPane,
-    ) -> Option<Window> {
-        let mut found: Option<Window> = None;
-        let accessor = |window: &Window| {
-            if window.id() == current_window.id() {
+    ) -> Option<WinID> {
+        let mut found: Option<WinID> = None;
+        let accessor = |window_id: WinID| {
+            if window_id == current_window_id {
                 // If it's the same window, continue
                 true
             } else {
-                found = Some(window.clone());
+                found = Some(window_id);
                 false
             }
         };
         _ = match direction {
-            "west" => panel.access_left_of(current_window, accessor),
-            "east" => panel.access_right_of(current_window, accessor),
+            "west" => panel.access_left_of(current_window_id, accessor),
+            "east" => panel.access_right_of(current_window_id, accessor),
             "first" => {
                 found = panel.first().ok();
                 Ok(())
@@ -388,27 +388,34 @@ impl EventHandler {
     }
 
     fn command_move_focus(
+        &self,
         argv: &[String],
         current_window: &Window,
         panel: &WindowPane,
-    ) -> Option<Window> {
+    ) -> Option<WinID> {
         let direction = argv.first()?;
 
-        EventHandler::get_window_in_direction(direction, current_window, panel).inspect(|window| {
-            window.focus_with_raise();
-        })
+        EventHandler::get_window_in_direction(direction, current_window.id(), panel).inspect(
+            |window_id| {
+                if let Some(window) = self.window_manager.find_window(*window_id) {
+                    window.focus_with_raise();
+                }
+            },
+        )
     }
 
     fn command_swap_focus(
+        &self,
         argv: &[String],
         current_window: &Window,
         panel: &WindowPane,
         bounds: &CGRect,
     ) -> Option<Window> {
         let direction = argv.first()?;
-        let index = panel.index_of(current_window).ok()?;
-        let window = EventHandler::get_window_in_direction(direction, current_window, panel)?;
-        let new_index = panel.index_of(&window).ok()?;
+        let index = panel.index_of(current_window.id()).ok()?;
+        let window = EventHandler::get_window_in_direction(direction, current_window.id(), panel)
+            .and_then(|window_id| self.window_manager.find_window(window_id))?;
+        let new_index = panel.index_of(window.id()).ok()?;
 
         let origin = if new_index == 0 {
             // If reached far left, snap the window to left.
@@ -417,7 +424,12 @@ impl EventHandler {
             // If reached full right, snap the window to right.
             CGPoint::new(bounds.size.width - current_window.frame().size.width, 0.0)
         } else {
-            panel.get(new_index).ok()?.frame().origin
+            panel
+                .get(new_index)
+                .ok()
+                .and_then(|window_id| self.window_manager.find_window(window_id))?
+                .frame()
+                .origin
         };
         current_window.reposition(origin.x, origin.y);
         if index < new_index {
@@ -456,16 +468,11 @@ impl EventHandler {
 
         match argv.first().unwrap_or(&empty).as_ref() {
             "focus" => {
-                EventHandler::command_move_focus(&argv[1..], &window, &active_panel);
+                self.command_move_focus(&argv[1..], &window, &active_panel);
             }
 
             "swap" => {
-                EventHandler::command_swap_focus(
-                    &argv[1..],
-                    &window,
-                    &active_panel,
-                    &display_bounds,
-                );
+                self.command_swap_focus(&argv[1..], &window, &active_panel, &display_bounds);
             }
 
             "center" => {
@@ -502,7 +509,7 @@ impl EventHandler {
                         display_bounds.size.height,
                         &display_bounds,
                     );
-                    active_panel.append(window.clone());
+                    active_panel.append(window.id());
                     window.manage(true);
                 };
             }

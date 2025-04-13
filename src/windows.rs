@@ -56,26 +56,25 @@ const THRESHOLD: f64 = 10.0;
 
 #[derive(Clone, Default)]
 pub struct WindowPane {
-    pane: Arc<RwLock<Vec<Window>>>,
+    pane: Arc<RwLock<Vec<WinID>>>,
 }
 
 impl WindowPane {
-    pub fn index_of(&self, window: &Window) -> Result<usize> {
-        let focused_id = window.id();
+    pub fn index_of(&self, window_id: WinID) -> Result<usize> {
         self.pane
             .force_read()
             .iter()
-            .position(|window| window.id() == focused_id)
+            .position(|id| *id == window_id)
             .ok_or(Error::new(
                 ErrorKind::NotFound,
                 format!(
-                    "{}: can not find window {focused_id} in the current pane.",
+                    "{}: can not find window {window_id} in the current pane.",
                     function_name!()
                 ),
             ))
     }
 
-    pub fn insert_at(&self, after: usize, window: Window) -> Result<usize> {
+    pub fn insert_at(&self, after: usize, window_id: WinID) -> Result<usize> {
         let index = after + 1;
         if index > self.len() {
             return Err(Error::new(
@@ -83,21 +82,19 @@ impl WindowPane {
                 format!("{}: index {after} out of bounds.", function_name!()),
             ));
         }
-        self.pane.force_write().insert(index, window);
+        self.pane.force_write().insert(index, window_id);
         Ok(index)
     }
 
-    pub fn append(&self, window: Window) {
-        self.pane.force_write().push(window);
+    pub fn append(&self, window_id: WinID) {
+        self.pane.force_write().push(window_id);
     }
 
     pub fn remove(&self, window_id: WinID) {
-        self.pane
-            .force_write()
-            .retain(|window| window.id() != window_id);
+        self.pane.force_write().retain(|id| *id != window_id);
     }
 
-    pub fn get(&self, at: usize) -> Result<Window> {
+    pub fn get(&self, at: usize) -> Result<WinID> {
         self.pane.force_read().get(at).cloned().ok_or(Error::new(
             ErrorKind::InvalidInput,
             format!("{}: {at} out of bounds", function_name!()),
@@ -116,14 +113,14 @@ impl WindowPane {
         self.pane.force_read().is_empty()
     }
 
-    pub fn first(&self) -> Result<Window> {
+    pub fn first(&self) -> Result<WinID> {
         self.pane.force_read().first().cloned().ok_or(Error::new(
             ErrorKind::NotFound,
             format!("{}: can not find first element.", function_name!()),
         ))
     }
 
-    pub fn last(&self) -> Result<Window> {
+    pub fn last(&self) -> Result<WinID> {
         self.pane.force_read().last().cloned().ok_or(Error::new(
             ErrorKind::NotFound,
             format!("{}: can not find last element.", function_name!()),
@@ -132,12 +129,12 @@ impl WindowPane {
 
     pub fn access_right_of(
         &self,
-        window: &Window,
-        mut accessor: impl FnMut(&Window) -> bool,
+        window_id: WinID,
+        mut accessor: impl FnMut(WinID) -> bool,
     ) -> Result<()> {
-        let index = self.index_of(window)?;
-        for window in self.pane.force_read()[1 + index..].iter() {
-            if !accessor(window) {
+        let index = self.index_of(window_id)?;
+        for id in self.pane.force_read()[1 + index..].iter() {
+            if !accessor(*id) {
                 break;
             }
         }
@@ -146,13 +143,13 @@ impl WindowPane {
 
     pub fn access_left_of(
         &self,
-        window: &Window,
-        mut accessor: impl FnMut(&Window) -> bool,
+        window_id: WinID,
+        mut accessor: impl FnMut(WinID) -> bool,
     ) -> Result<()> {
-        let index = self.index_of(window)?;
-        for window in self.pane.force_read()[0..index].iter().rev() {
+        let index = self.index_of(window_id)?;
+        for id in self.pane.force_read()[0..index].iter().rev() {
             // NOTE: left side iterates backwards.
-            if !accessor(window) {
+            if !accessor(*id) {
                 break;
             }
         }
@@ -943,7 +940,7 @@ impl WindowManager {
                 self.displays
                     .iter()
                     .for_each(|display| display.remove_window(window.inner().id));
-                pane.append(window)
+                pane.append(window.id())
             });
     }
 
@@ -1462,13 +1459,12 @@ impl WindowManager {
         let panel = self.active_display()?.active_panel(self.main_cid)?;
         let insert_at = self
             .focused_window
-            .and_then(|window_id| self.find_window(window_id))
-            .and_then(|window| panel.index_of(&window).ok());
+            .and_then(|window_id| panel.index_of(window_id).ok());
         match insert_at {
             Some(after) => {
-                panel.insert_at(after, window.clone())?;
+                panel.insert_at(after, window.id())?;
             }
-            None => panel.append(window.clone()),
+            None => panel.append(window.id()),
         };
 
         self.window_focused(window);
@@ -1544,7 +1540,11 @@ impl WindowManager {
 
         // Shuffling windows to the right of the focus.
         let mut upper_left = frame.origin.x + frame.size.width;
-        active_panel.access_right_of(window, |window| {
+        active_panel.access_right_of(window.id(), |window_id| {
+            let window = match self.find_window(window_id) {
+                Some(window) => window,
+                None => return true,
+            };
             let frame = window.inner().frame;
             trace!("{}: right: frame: {frame:?}", function_name!());
             // Check for window getting off screen.
@@ -1565,7 +1565,11 @@ impl WindowManager {
         // Shuffling windows to the left of the focus.
         let mut upper_left = frame.origin.x;
         trace!("{}: focus upper_left {upper_left}", function_name!());
-        active_panel.access_left_of(window, |window| {
+        active_panel.access_left_of(window.id(), |window_id| {
+            let window = match self.find_window(window_id) {
+                Some(window) => window,
+                None => return true,
+            };
             let frame = window.inner().frame;
             trace!("{}: left: frame: {frame:?}", function_name!());
             // Check for window getting off screen.
@@ -1609,22 +1613,24 @@ impl WindowManager {
         for (space_id, pane) in display.spaces.iter() {
             // Populate the display panes with its windows.
             self.refresh_windows_space(*space_id, pane);
-            pane.access_right_of(&pane.first()?, |window| {
+            pane.access_right_of(pane.first()?, |window_id| {
                 // Remove this window from any other displays.
                 self.displays
                     .iter()
-                    .for_each(|display| display.remove_window(window.id()));
+                    .for_each(|display| display.remove_window(window_id));
                 debug!(
                     "{}: Moved window {} to new display.",
                     function_name!(),
-                    window.id()
+                    window_id
                 );
-                window.resize(
-                    display_bounds.size.width * window.inner().width_ratio,
-                    display_bounds.size.height,
-                    &display_bounds,
-                );
-                _ = window.update_frame(&display_bounds);
+                if let Some(window) = self.find_window(window_id) {
+                    window.resize(
+                        display_bounds.size.width * window.inner().width_ratio,
+                        display_bounds.size.height,
+                        &display_bounds,
+                    );
+                    _ = window.update_frame(&display_bounds);
+                }
                 true // continue through all windows.
             })?;
         }

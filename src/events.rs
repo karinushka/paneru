@@ -55,25 +55,25 @@ pub enum Event {
         element: CFRetained<AxuWrapperType>,
     },
     WindowDestroyed {
-        window_id: Option<WinID>,
+        window_id: WinID,
     },
     WindowFocused {
-        window_id: Option<WinID>,
+        window_id: WinID,
     },
     WindowMoved {
-        window_id: Option<WinID>,
+        window_id: WinID,
     },
     WindowResized {
-        window_id: Option<WinID>,
+        window_id: WinID,
     },
     WindowMinimized {
-        window_id: Option<WinID>,
+        window_id: WinID,
     },
     WindowDeminimized {
-        window_id: Option<WinID>,
+        window_id: WinID,
     },
     WindowTitleChanged {
-        window_id: Option<WinID>,
+        window_id: WinID,
     },
 
     MouseDown {
@@ -128,10 +128,10 @@ pub enum Event {
     },
 
     MenuOpened {
-        window_id: Option<WinID>,
+        window_id: WinID,
     },
     MenuClosed {
-        window_id: Option<WinID>,
+        window_id: WinID,
     },
     MenuBarHiddenChanged {
         msg: String,
@@ -280,25 +280,11 @@ impl EventHandler {
             Event::WindowCreated { element } => {
                 return self.window_manager.window_created(element);
             }
-            Event::WindowDestroyed { window_id } => {
-                if let Some(window_id) = window_id {
-                    self.window_manager.window_destroyed(window_id)
-                }
-            }
-            Event::WindowFocused { window_id } => {
-                if let Some(window_id) = window_id {
-                    self.window_focused(window_id)
-                }
-            }
-            Event::WindowMoved { window_id } => {
-                if let Some(window_id) = window_id {
-                    self.window_manager.window_moved(window_id)
-                }
-            }
+            Event::WindowDestroyed { window_id } => self.window_manager.window_destroyed(window_id),
+            Event::WindowFocused { window_id } => self.window_focused(window_id),
+            Event::WindowMoved { window_id } => self.window_manager.window_moved(window_id),
             Event::WindowResized { window_id } => {
-                if let Some(window_id) = window_id {
-                    return self.window_manager.window_resized(window_id);
-                }
+                return self.window_manager.window_resized(window_id);
             }
             Event::WindowTitleChanged { window_id } => {
                 trace!("{}: WindowTitleChanged: {window_id:?}", function_name!());

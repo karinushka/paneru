@@ -1,9 +1,8 @@
 use accessibility_sys::{
-    AXObserverRef, AXUIElementRef, AXValueCreate, AXValueGetValue, kAXErrorSuccess,
-    kAXFloatingWindowSubrole, kAXMinimizedAttribute, kAXParentAttribute, kAXPositionAttribute,
-    kAXRaiseAction, kAXRoleAttribute, kAXSizeAttribute, kAXStandardWindowSubrole,
-    kAXSubroleAttribute, kAXTitleAttribute, kAXUnknownSubrole, kAXValueTypeCGPoint,
-    kAXValueTypeCGSize, kAXWindowRole,
+    AXUIElementRef, AXValueCreate, AXValueGetValue, kAXFloatingWindowSubrole,
+    kAXMinimizedAttribute, kAXParentAttribute, kAXPositionAttribute, kAXRaiseAction,
+    kAXRoleAttribute, kAXSizeAttribute, kAXStandardWindowSubrole, kAXSubroleAttribute,
+    kAXTitleAttribute, kAXUnknownSubrole, kAXValueTypeCGPoint, kAXValueTypeCGSize, kAXWindowRole,
 };
 use core::ptr::NonNull;
 use log::{debug, error, info, trace, warn};
@@ -32,10 +31,7 @@ use stdext::prelude::RwLockExt;
 
 use crate::app::Application;
 use crate::events::EventSender;
-use crate::platform::{
-    AXObserverAddNotification, AXObserverRemoveNotification, Pid, ProcessInfo, ProcessSerialNumber,
-    WorkspaceObserver, get_process_info,
-};
+use crate::platform::{Pid, ProcessInfo, ProcessSerialNumber, WorkspaceObserver, get_process_info};
 use crate::process::Process;
 use crate::skylight::{
     _AXUIElementCreateWithRemoteToken, _AXUIElementGetWindow, _SLPSGetFrontProcess,
@@ -356,20 +352,18 @@ fn ax_window_pid(element_ref: &CFRetained<AxuWrapperType>) -> Result<Pid> {
     ))
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Window {
     inner: Arc<RwLock<InnerWindow>>,
 }
 
-#[derive(Debug)]
 pub struct InnerWindow {
     pub id: WinID,
     pub app: Application,
-    element_ref: CFRetained<AxuWrapperType>,
+    ax_element: CFRetained<AxuWrapperType>,
     frame: CGRect,
     minimized: bool,
     is_root: bool,
-    observing: Vec<bool>,
     size_ratios: Vec<f64>,
     width_ratio: f64,
     managed: bool,
@@ -407,8 +401,13 @@ impl Window {
         self.inner.force_write().managed = manage;
     }
 
-    fn inner(&self) -> std::sync::RwLockReadGuard<'_, InnerWindow> {
+    pub fn inner(&self) -> std::sync::RwLockReadGuard<'_, InnerWindow> {
         self.inner.force_read()
+    }
+
+    pub fn element(&self) -> AXUIElementRef {
+        // unsafe { NonNull::new_unchecked(self.inner().ax_element.as_ptr::<c_void>()).addr() }
+        self.inner().ax_element.deref().as_ptr()
     }
 
     fn parent(main_conn: ConnID, window_id: WinID) -> Result<WinID> {
@@ -431,19 +430,19 @@ impl Window {
 
     fn title(&self) -> Result<String> {
         let axtitle = CFString::from_static_str(kAXTitleAttribute);
-        let title = get_attribute::<CFString>(&self.inner().element_ref, axtitle)?;
+        let title = get_attribute::<CFString>(&self.inner().ax_element, axtitle)?;
         Ok(title.to_string())
     }
 
     pub fn role(&self) -> Result<String> {
         let axrole = CFString::from_static_str(kAXRoleAttribute);
-        let role = get_attribute::<CFString>(&self.inner().element_ref, axrole)?;
+        let role = get_attribute::<CFString>(&self.inner().ax_element, axrole)?;
         Ok(role.to_string())
     }
 
     fn subrole(&self) -> Result<String> {
         let axrole = CFString::from_static_str(kAXSubroleAttribute);
-        let role = get_attribute::<CFString>(&self.inner().element_ref, axrole)?;
+        let role = get_attribute::<CFString>(&self.inner().ax_element, axrole)?;
         Ok(role.to_string())
     }
 
@@ -454,16 +453,16 @@ impl Window {
 
     fn is_minimized(&self) -> bool {
         let axminimized = CFString::from_static_str(kAXMinimizedAttribute);
-        get_attribute::<CFBoolean>(&self.inner().element_ref, axminimized)
+        get_attribute::<CFBoolean>(&self.inner().ax_element, axminimized)
             .map(|minimized| unsafe { CFBooleanGetValue(minimized.deref()) })
             .is_ok_and(|minimized| minimized || self.inner().minimized)
     }
 
     fn is_root(&self) -> bool {
         let inner = self.inner();
-        let cftype = inner.element_ref.as_ref();
+        let cftype = inner.ax_element.as_ref();
         let axparent = CFString::from_static_str(kAXParentAttribute);
-        get_attribute::<CFType>(&self.inner().element_ref, axparent)
+        get_attribute::<CFType>(&self.inner().ax_element, axparent)
             .is_ok_and(|parent| !CFEqual(Some(parent.deref()), Some(cftype)))
     }
 
@@ -496,7 +495,7 @@ impl Window {
         if let Ok(position) = AxuWrapperType::retain(position_ref) {
             unsafe {
                 AXUIElementSetAttributeValue(
-                    self.inner().element_ref.as_ptr(),
+                    self.inner().ax_element.as_ptr(),
                     CFString::from_static_str(kAXPositionAttribute).as_ref(),
                     position.as_ref(),
                 )
@@ -512,7 +511,7 @@ impl Window {
         if let Ok(position) = AxuWrapperType::retain(size_ref) {
             unsafe {
                 AXUIElementSetAttributeValue(
-                    self.inner().element_ref.as_ptr(),
+                    self.inner().ax_element.as_ptr(),
                     CFString::from_static_str(kAXSizeAttribute).as_ref(),
                     position.as_ref(),
                 )
@@ -524,7 +523,7 @@ impl Window {
     }
 
     fn update_frame(&self, display_bounds: &CGRect) -> Result<()> {
-        let window_ref = self.inner().element_ref.as_ptr();
+        let window_ref = self.inner().ax_element.as_ptr();
 
         let position = unsafe {
             let mut position_ref: *mut CFType = null_mut();
@@ -637,56 +636,9 @@ impl Window {
             _SLPSSetFrontProcessWithOptions(&psn, window_id, Self::CPS_USER_GENERATED);
         }
         self.make_key_window();
-        let element_ref = self.inner().element_ref.as_ptr();
+        let element_ref = self.inner().ax_element.as_ptr();
         let action = CFString::from_static_str(kAXRaiseAction);
         unsafe { AXUIElementPerformAction(element_ref, &action) };
-    }
-
-    fn observe(&self) -> bool {
-        let observer_ref = match self.app().observer_ref() {
-            None => {
-                warn!(
-                    "{}: can not observe window {} without application observer.",
-                    function_name!(),
-                    self.id(),
-                );
-                return false;
-            }
-            Some(observer_ref) => observer_ref,
-        };
-        let observing = crate::app::AX_WINDOW_NOTIFICATIONS
-            .iter()
-            .map(|name| unsafe {
-                let notification = CFString::from_static_str(name);
-                debug!(
-                    "{}: {name} {:?} {:?}",
-                    function_name!(),
-                    observer_ref.as_ptr::<AXObserverRef>(),
-                    self.inner().element_ref.as_ptr::<AXUIElementRef>(),
-                );
-                match AXObserverAddNotification(
-                    observer_ref.as_ptr(),
-                    self.inner().element_ref.as_ptr(),
-                    notification.deref(),
-                    NonNull::from(self.inner.deref()).as_ptr().cast(),
-                ) {
-                    accessibility_sys::kAXErrorSuccess
-                    | accessibility_sys::kAXErrorNotificationAlreadyRegistered => true,
-                    result => {
-                        error!(
-                            "{}: error registering {name} for window {}: {result}",
-                            function_name!(),
-                            self.id()
-                        );
-                        false
-                    }
-                }
-            })
-            .collect::<Vec<_>>();
-        let gotall = observing.iter().all(|status| *status);
-
-        self.inner.force_write().observing = observing;
-        gotall
     }
 
     fn display_uuid(&self, cid: ConnID) -> Result<Retained<CFString>> {
@@ -781,55 +733,6 @@ impl Window {
             trace!("{}: focus resposition to {frame:?}", function_name!());
         }
         frame
-    }
-}
-
-impl InnerWindow {
-    fn unobserve(&mut self) {
-        let observer: AXObserverRef = match self.app.observer_ref() {
-            Some(observer) => observer.as_ptr(),
-            None => {
-                error!(
-                    "{}: No application reference to unregister a window {}",
-                    function_name!(),
-                    self.id
-                );
-                return;
-            }
-        };
-        crate::app::AX_WINDOW_NOTIFICATIONS
-            .iter()
-            .zip(&self.observing)
-            .filter(|(_, remove)| **remove)
-            .for_each(|(name, _)| {
-                let notification = CFString::from_static_str(name);
-                debug!(
-                    "{}: {name} {:?} {:?}",
-                    function_name!(),
-                    observer,
-                    self.element_ref.as_ptr::<AXUIElementRef>(),
-                );
-                let result = unsafe {
-                    AXObserverRemoveNotification(
-                        observer,
-                        self.element_ref.as_ptr(),
-                        notification.deref(),
-                    )
-                };
-                if result != kAXErrorSuccess {
-                    warn!(
-                        "{}: error unregistering {name} for window {}: {result}",
-                        function_name!(),
-                        self.id
-                    );
-                }
-            });
-    }
-}
-
-impl Drop for InnerWindow {
-    fn drop(&mut self) {
-        self.unobserve();
     }
 }
 
@@ -1243,11 +1146,10 @@ impl WindowManager {
             inner: Arc::new(RwLock::new(InnerWindow {
                 id: window_id,
                 app: app.clone(),
-                element_ref,
+                ax_element: element_ref,
                 frame: CGRect::default(),
                 minimized: false,
                 is_root: false,
-                observing: vec![],
                 size_ratios: vec![0.25, 0.33, 0.50, 0.66, 0.75],
                 width_ratio: 0.33,
                 managed: true,
@@ -1315,17 +1217,7 @@ impl WindowManager {
         // NOTE(koekeishiya): Attempt to track **all** windows.
         //
 
-        if !window.observe() {
-            return Err(Error::new(
-                ErrorKind::Unsupported,
-                format!(
-                    "{}: Could not observe window {} of {}",
-                    function_name!(),
-                    window.id(),
-                    app.name()
-                ),
-            ));
-        }
+        app.observe_window(window.element(), &window)?;
 
         app.add_window(&window);
         Ok(window)
@@ -1405,8 +1297,8 @@ impl WindowManager {
         Ok(())
     }
 
-    pub fn window_created(&mut self, element_ref: CFRetained<AxuWrapperType>) -> Result<()> {
-        let window_id = ax_window_id(element_ref.as_ptr())?;
+    pub fn window_created(&mut self, ax_element: CFRetained<AxuWrapperType>) -> Result<()> {
+        let window_id = ax_window_id(ax_element.as_ptr())?;
         if self.find_window(window_id).is_some() {
             return Err(Error::new(
                 ErrorKind::AlreadyExists,
@@ -1414,7 +1306,7 @@ impl WindowManager {
             ));
         }
 
-        let pid = ax_window_pid(&element_ref)?;
+        let pid = ax_window_pid(&ax_element)?;
         let app = self.find_application(pid).ok_or(Error::new(
             ErrorKind::NotFound,
             format!(
@@ -1423,15 +1315,16 @@ impl WindowManager {
             ),
         ))?;
 
-        let window = self.create_and_add_window(&app, element_ref, window_id, true)?;
+        let window = self.create_and_add_window(&app, ax_element, window_id, true)?;
         info!(
-            "{}: created {} app: {} title: {} role: {} subrole: {}",
+            "{}: created {} app: {} title: {} role: {} subrole: {} element: {:x?}",
             function_name!(),
             window.id(),
             app.name(),
             window.title().unwrap_or_default(),
             window.role().unwrap_or_default(),
             window.subrole().unwrap_or_default(),
+            window.element(),
         );
 
         let panel = self.active_display()?.active_panel(self.main_cid)?;
@@ -1455,7 +1348,10 @@ impl WindowManager {
         });
 
         let app = self.find_window(window_id).map(|window| window.app());
-        if let Some(window) = app.and_then(|app| app.remove_window(window_id)) {
+        if let Some(window) = app.and_then(|app| {
+            app.remove_window(window_id)
+                .inspect(|window| app.unobserve_window(window.element()))
+        }) {
             // Make sure window lives past the lock above, because its Drop tries to lock the
             // application.
             info!("{}: {window_id}", function_name!());

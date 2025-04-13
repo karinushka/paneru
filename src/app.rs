@@ -49,20 +49,27 @@ pub static AX_WINDOW_NOTIFICATIONS: LazyLock<Vec<&str>> = LazyLock::new(|| {
     ]
 });
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Application {
     inner: Arc<RwLock<InnerApplication>>,
 }
 
-#[derive(Debug)]
 struct InnerApplication {
     element_ref: CFRetained<AxuWrapperType>,
     psn: ProcessSerialNumber,
     pid: Pid,
     name: String,
     connection: Option<ConnID>,
-    handler: Pin<Box<ApplicationHandler>>,
+    handler: Pin<Box<AxObserverHandler>>,
     windows: HashMap<WinID, Window>,
+}
+
+impl Drop for InnerApplication {
+    fn drop(&mut self) {
+        let element = self.element_ref.as_ptr::<c_void>();
+        self.handler
+            .remove_observer(element.cast(), &AX_NOTIFICATIONS);
+    }
 }
 
 impl Application {
@@ -84,7 +91,7 @@ impl Application {
                         Some(connection)
                     }
                 },
-                handler: Box::pin(ApplicationHandler::new(events)),
+                handler: AxObserverHandler::new(process.pid, events)?,
                 windows: HashMap::new(),
             })),
         })
@@ -109,10 +116,6 @@ impl Application {
 
     pub fn connection(&self) -> Option<ConnID> {
         self.inner().connection
-    }
-
-    pub fn observer_ref(&self) -> Option<CFRetained<AxuWrapperType>> {
-        self.inner().handler.observer_ref.clone()
     }
 
     pub fn find_window(&self, window_id: WinID) -> Option<Window> {
@@ -170,9 +173,29 @@ impl Application {
     }
 
     pub fn observe(&self) -> Result<bool> {
-        let pid = self.inner().pid;
-        let element = self.inner().element_ref.clone();
-        self.inner.force_write().handler.observe(pid, element)
+        let element = self.inner().element_ref.as_ptr::<c_void>();
+        let context = NonNull::from(self.inner().handler.deref());
+        self.inner
+            .force_write()
+            .handler
+            .add_observer(element.cast(), &AX_NOTIFICATIONS, context.cast())
+            .map(|retry| retry.is_empty())
+    }
+
+    pub fn observe_window(&self, element: AXUIElementRef, window: &Window) -> Result<bool> {
+        let context = NonNull::from(window.inner().deref());
+        self.inner
+            .force_write()
+            .handler
+            .add_observer(element, &AX_WINDOW_NOTIFICATIONS, context.cast())
+            .map(|retry| retry.is_empty())
+    }
+
+    pub fn unobserve_window(&self, element: AXUIElementRef) {
+        self.inner
+            .force_write()
+            .handler
+            .remove_observer(element, &AX_WINDOW_NOTIFICATIONS);
     }
 
     pub fn is_frontmost(&self) -> bool {
@@ -182,35 +205,19 @@ impl Application {
     }
 }
 
-impl Drop for InnerApplication {
-    fn drop(&mut self) {
-        self.handler.unobserve()
-    }
-}
-
-#[derive(Debug)]
-pub struct ApplicationHandler {
+struct AxObserverHandler {
+    observer: CFRetained<AxuWrapperType>,
     events: EventSender,
-    ax_retry: bool,
-    observing: Vec<bool>,
-    element_ref: Option<CFRetained<AxuWrapperType>>,
-    observer_ref: Option<CFRetained<AxuWrapperType>>,
-    observing_windows: Vec<(WinID, CFRetained<AxuWrapperType>)>,
 }
 
-impl ApplicationHandler {
-    fn new(events: EventSender) -> Self {
-        Self {
-            events,
-            ax_retry: false,
-            observing: vec![],
-            element_ref: None,
-            observer_ref: None,
-            observing_windows: vec![],
-        }
+impl Drop for AxObserverHandler {
+    fn drop(&mut self) {
+        remove_run_loop(self.observer.deref());
     }
+}
 
-    fn observe(&mut self, pid: Pid, element: CFRetained<AxuWrapperType>) -> Result<bool> {
+impl AxObserverHandler {
+    fn new(pid: Pid, events: EventSender) -> Result<Pin<Box<Self>>> {
         let observer = unsafe {
             let mut observer_ref: AXObserverRef = null_mut();
             if kAXErrorSuccess == AXObserverCreate(pid, Self::callback, &mut observer_ref) {
@@ -223,123 +230,137 @@ impl ApplicationHandler {
             }
         };
 
-        let mut ax_retry = false;
-        let observing = AX_NOTIFICATIONS
+        unsafe { add_run_loop(observer.deref(), kCFRunLoopCommonModes)? };
+        Ok(Box::pin(Self {
+            observer,
+            events,
+            // handlers: Vec::new(),
+        }))
+    }
+
+    pub fn add_observer(
+        &mut self,
+        element: AXUIElementRef,
+        notifications: &[&'static str],
+        context: NonNull<c_void>,
+    ) -> Result<Vec<&str>> {
+        let observer: AXObserverRef = self.observer.as_ptr();
+
+        // TODO: retry re-registering these.
+        let mut retry = vec![];
+        let added = notifications
             .iter()
-            .map(|name| unsafe {
+            .flat_map(|name| {
                 debug!(
-                    "{}: {name:?} {:?}",
-                    function_name!(),
-                    observer.as_ptr::<AXObserverRef>()
+                    "{}: adding {name} {element:x?} {observer:?}",
+                    function_name!()
                 );
                 let notification = CFString::from_static_str(name);
-                match AXObserverAddNotification(
-                    observer.deref().as_ptr(),
-                    element.as_ptr(),
-                    notification.deref(),
-                    NonNull::new_unchecked(self).as_ptr().cast(),
-                ) {
+                match unsafe {
+                    AXObserverAddNotification(
+                        observer,
+                        element,
+                        notification.deref(),
+                        context.as_ptr(),
+                    )
+                } {
                     accessibility_sys::kAXErrorSuccess
-                    | accessibility_sys::kAXErrorNotificationAlreadyRegistered => true,
+                    | accessibility_sys::kAXErrorNotificationAlreadyRegistered => Some(*name),
                     accessibility_sys::kAXErrorCannotComplete => {
-                        ax_retry = true;
-                        false
+                        retry.push(*name);
+                        None
                     }
                     result => {
                         error!(
-                            "{}: error registering {name} for application {pid}: {result}",
+                            "{}: error adding {name} {element:x?} {observer:?}: {result}",
                             function_name!()
                         );
-                        false
+                        None
                     }
                 }
             })
-            .collect();
-        unsafe { add_run_loop(observer.deref(), kCFRunLoopCommonModes)? };
-
-        self.ax_retry = ax_retry;
-        self.observing = observing;
-        self.element_ref = Some(element);
-        self.observer_ref = Some(observer);
-        Ok(self.observing.iter().all(|ok| *ok))
-    }
-
-    fn unobserve(&mut self) {
-        if self.observer_ref.is_none() || self.observing.iter().all(|registered| !registered) {
-            return;
-        }
-        if let Some((observer, element)) = self.observer_ref.take().zip(self.element_ref.as_ref()) {
-            debug!(
-                "{}: {:?}",
-                function_name!(),
-                observer.as_ptr::<AXObserverRef>()
-            );
-            AX_NOTIFICATIONS
-                .iter()
-                .zip(&self.observing)
-                .filter(|(_, remove)| **remove)
-                .for_each(|(name, _)| {
-                    debug!("{}: name {name:?}", function_name!());
-                    let notification = CFString::from_static_str(name);
-                    let result = unsafe {
-                        AXObserverRemoveNotification(
-                            observer.as_ptr(),
-                            element.as_ptr(),
-                            notification.deref(),
-                        )
-                    };
-                    if result != kAXErrorSuccess {
-                        warn!(
-                            "{}: error unregistering {:?}",
-                            function_name!(),
-                            observer.as_ptr::<AXObserverRef>()
-                        );
-                    }
-                });
-
-            remove_run_loop(observer.deref());
-            drop(observer)
+            .collect::<Vec<_>>();
+        if added.is_empty() {
+            Err(Error::new(
+                ErrorKind::PermissionDenied,
+                format!("{}: unable to register any observers!", function_name!()),
+            ))
+        } else {
+            Ok(retry)
         }
     }
 
-    fn application_handler(
-        &self,
-        _observer: AXObserverRef,
-        element: AXUIElementRef,
-        notification: &str,
-        window_id: Option<WinID>,
-    ) {
-        let get_window_id = |element| {
-            ax_window_id(element)
-                .inspect_err(|err| warn!("{}: invalid element: {err}.", function_name!()))
-                .ok()
-        };
-        let event = match notification {
-            accessibility_sys::kAXCreatedNotification => match AxuWrapperType::retain(element) {
+    pub fn remove_observer(&mut self, element: AXUIElementRef, notifications: &[&'static str]) {
+        for name in notifications {
+            let observer: AXObserverRef = self.observer.deref().as_ptr();
+            let notification = CFString::from_static_str(name);
+            let ptr = NonNull::new(element);
+            if let Some(element) = ptr {
+                debug!(
+                    "{}: removing {name} {element:x?} {observer:?}",
+                    function_name!()
+                );
+                let result = unsafe {
+                    AXObserverRemoveNotification(
+                        observer,
+                        element.as_ptr().cast(),
+                        notification.deref(),
+                    )
+                };
+                if result != kAXErrorSuccess {
+                    warn!(
+                        "{}: error removing {name} {element:x?} {observer:?}: {result}",
+                        function_name!(),
+                    );
+                }
+            }
+        }
+    }
+
+    fn notify_app(&self, notification: String, element: AXUIElementRef) {
+        let event = if accessibility_sys::kAXCreatedNotification == notification {
+            match AxuWrapperType::retain(element) {
                 Ok(element) => Event::WindowCreated { element },
                 Err(err) => {
                     error!("{}: invalid element {element:?}: {err}", function_name!());
                     return;
                 }
-            },
-            accessibility_sys::kAXFocusedWindowChangedNotification => Event::WindowFocused {
-                window_id: get_window_id(element),
-            },
-            accessibility_sys::kAXWindowMovedNotification => Event::WindowMoved {
-                window_id: get_window_id(element),
-            },
-            accessibility_sys::kAXWindowResizedNotification => Event::WindowResized {
-                window_id: get_window_id(element),
-            },
-            accessibility_sys::kAXTitleChangedNotification => Event::WindowTitleChanged {
-                window_id: get_window_id(element),
-            },
-            accessibility_sys::kAXMenuOpenedNotification => Event::MenuOpened {
-                window_id: get_window_id(element),
-            },
-            accessibility_sys::kAXMenuClosedNotification => Event::MenuClosed {
-                window_id: get_window_id(element),
-            },
+            }
+        } else {
+            let window_id = match ax_window_id(element) {
+                Ok(window_id) => window_id,
+                Err(err) => {
+                    warn!("{}: invalid element: {err}.", function_name!());
+                    return;
+                }
+            };
+            match notification.as_str() {
+                accessibility_sys::kAXFocusedWindowChangedNotification => {
+                    Event::WindowFocused { window_id }
+                }
+                accessibility_sys::kAXWindowMovedNotification => Event::WindowMoved { window_id },
+                accessibility_sys::kAXWindowResizedNotification => {
+                    Event::WindowResized { window_id }
+                }
+                accessibility_sys::kAXTitleChangedNotification => {
+                    Event::WindowTitleChanged { window_id }
+                }
+                accessibility_sys::kAXMenuOpenedNotification => Event::MenuOpened { window_id },
+                accessibility_sys::kAXMenuClosedNotification => Event::MenuClosed { window_id },
+                _ => {
+                    error!(
+                        "{}: unhandled application notification: {notification:?}",
+                        function_name!()
+                    );
+                    return;
+                }
+            }
+        };
+        _ = self.events.send(event);
+    }
+
+    fn notify_window(&self, notification: String, window_id: WinID) {
+        let event = match notification.as_str() {
             accessibility_sys::kAXWindowMiniaturizedNotification => {
                 Event::WindowMinimized { window_id }
             }
@@ -347,43 +368,12 @@ impl ApplicationHandler {
                 Event::WindowDeminimized { window_id }
             }
             accessibility_sys::kAXUIElementDestroyedNotification => {
-                let window = window_id.and_then(|window_id| {
-                    self.observing_windows
-                        .iter()
-                        .find(|(id, _)| window_id == *id)
-                });
-                if let Some(((window_id, element), observer)) =
-                    window.zip(self.observer_ref.as_ref())
-                {
-                    AX_WINDOW_NOTIFICATIONS.iter().for_each(|name| {
-                        let notification = CFString::from_static_str(name);
-                        debug!(
-                            "{}: unobserve {window_id:?}:  {name} {:?} {:?}",
-                            function_name!(),
-                            observer.deref().as_ptr::<AXObserverRef>(),
-                            element.deref().as_ptr::<AXUIElementRef>()
-                        );
-                        let result = unsafe {
-                            AXObserverRemoveNotification(
-                                observer.deref().as_ptr(),
-                                element.deref().as_ptr(),
-                                notification.deref(),
-                            )
-                        };
-                        if result != kAXErrorSuccess {
-                            error!(
-                                "{}: error unregistering {name} for {window_id:?}: {result}",
-                                function_name!()
-                            );
-                        }
-                    });
-                }
-
                 Event::WindowDestroyed { window_id }
             }
+
             _ => {
                 error!(
-                    "{}: unhandled application notification: {notification:?}",
+                    "{}: unhandled window notification: {notification:?}",
                     function_name!()
                 );
                 return;
@@ -393,37 +383,43 @@ impl ApplicationHandler {
     }
 
     extern "C" fn callback(
-        observer: AXObserverRef,
+        _: AXObserverRef,
         element: AXUIElementRef,
         notification: CFStringRef,
         context: *mut c_void,
     ) {
-        let (notification, context) =
-            match NonNull::new(notification.cast_mut()).zip(NonNull::new(context)) {
-                Some((notification, context)) => {
-                    (unsafe { notification.as_ref() }.to_string(), context)
-                }
-                None => {
-                    error!("{}: nullptr passed!", function_name!());
-                    return;
-                }
-            };
-
-        let (handler, window) = match notification.as_ref() {
-            accessibility_sys::kAXWindowMiniaturizedNotification
-            | accessibility_sys::kAXWindowDeminiaturizedNotification
-            | accessibility_sys::kAXUIElementDestroyedNotification => {
-                let inner_window =
-                    unsafe { context.cast::<RwLock<InnerWindow>>().as_ref() }.force_read();
-                let app = inner_window.app.clone();
-                let this = unsafe { NonNull::from(app.inner().handler.deref()).as_ref() };
-                (this, Some(inner_window.id))
+        let notification = match NonNull::new(notification as *mut CFString)
+            .map(|ptr| unsafe { ptr.as_ref() })
+            .map(CFString::to_string)
+        {
+            Some(n) => n,
+            None => {
+                //
+                return;
             }
-            _ => (
-                unsafe { context.cast::<ApplicationHandler>().as_ref() },
-                None,
-            ),
         };
-        handler.application_handler(observer, element, notification.as_ref(), window);
+
+        if AX_NOTIFICATIONS.iter().any(|n| *n == notification) {
+            let handler = NonNull::new(context)
+                .map(|handler| unsafe { handler.cast::<AxObserverHandler>().as_ref() });
+            if let Some(handler) = handler {
+                handler.notify_app(notification, element);
+            }
+        } else if AX_WINDOW_NOTIFICATIONS.iter().any(|n| *n == notification) {
+            let inner = NonNull::new(context)
+                .map(|handler| unsafe { handler.cast::<InnerWindow>().as_ref() })
+                .map(|inner| (inner.app.inner(), inner.id));
+            if let Some((handler, window_id)) = inner {
+                handler
+                    .deref()
+                    .handler
+                    .notify_window(notification, window_id);
+            }
+        } else {
+            warn!(
+                "{}: received unknown notification '{notification}'",
+                function_name!()
+            );
+        };
     }
 }

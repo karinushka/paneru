@@ -283,15 +283,9 @@ impl ProcessManager {
         unsafe {
             get_process_info(psn, &mut pinfo);
         }
-        let name = NonNull::new(pinfo.name.cast_mut()).ok_or(Error::new(
-            ErrorKind::InvalidInput,
-            format!(
-                "{}: Nullptr as name for process {:?}.",
-                function_name!(),
-                psn
-            ),
-        ))?;
-        let name = unsafe { name.as_ref() }.to_string();
+        let name = NonNull::new(pinfo.name.cast_mut())
+            .map(|s| unsafe { s.as_ref() }.to_string())
+            .unwrap_or_default();
 
         let apps =
             unsafe { NSRunningApplication::runningApplicationWithProcessIdentifier(pinfo.pid) };

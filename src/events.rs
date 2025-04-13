@@ -451,8 +451,8 @@ impl EventHandler {
             Ok(display) => display,
             _ => self.window_manager.add_detected_display()?,
         };
-        let display_bounds = active_display.bounds;
         let active_panel = active_display.active_panel(self.main_cid)?;
+        let display_bounds = self.window_manager.current_display_bounds()?;
 
         match argv.first().unwrap_or(&empty).as_ref() {
             "focus" => {
@@ -484,6 +484,7 @@ impl EventHandler {
                 window.resize(
                     width_ratio * display_bounds.size.width,
                     window.frame().size.height,
+                    &display_bounds,
                 );
             }
 
@@ -496,7 +497,11 @@ impl EventHandler {
                     // Add newly managed window to the stack.
                     let frame = window.frame();
                     window.reposition(frame.origin.x, 0.0);
-                    window.resize(frame.size.width, display_bounds.size.height);
+                    window.resize(
+                        frame.size.width,
+                        display_bounds.size.height,
+                        &display_bounds,
+                    );
                     active_panel.append(window.clone());
                     window.manage(true);
                 };
@@ -528,7 +533,7 @@ impl EventHandler {
         }
 
         let window = self.find_window_at_point(point)?;
-        if !window.fully_visible(&self.window_manager) {
+        if !window.fully_visible(&self.window_manager.current_display_bounds()?) {
             self.window_manager.reshuffle_around(&window)?;
         }
 

@@ -164,7 +164,7 @@ pub struct Display {
     id: CGDirectDisplayID,
     // Map of workspaces, containing panels of windows.
     spaces: HashMap<u64, WindowPane>,
-    pub bounds: CGRect,
+    bounds: CGRect,
 }
 
 impl Display {
@@ -374,45 +374,11 @@ pub struct InnerWindow {
     is_root: bool,
     observing: Vec<bool>,
     size_ratios: Vec<f64>,
+    width_ratio: f64,
     managed: bool,
 }
 
 impl Window {
-    fn new(
-        app: &Application,
-        element_ref: CFRetained<AxuWrapperType>,
-        window_id: WinID,
-    ) -> Result<Self> {
-        let window = Window {
-            inner: Arc::new(RwLock::new(InnerWindow {
-                id: window_id,
-                app: app.clone(),
-                element_ref,
-                frame: CGRect::default(),
-                minimized: false,
-                is_root: false,
-                observing: vec![],
-                size_ratios: vec![0.25, 0.33, 0.50, 0.66, 0.75],
-                managed: true,
-            })),
-        };
-        window.update_frame()?;
-
-        let connection = app.connection().ok_or(Error::new(
-            ErrorKind::InvalidData,
-            format!("{}: invalid connection for window.", function_name!()),
-        ))?;
-        let minimized = window.is_minimized();
-        // window->is_root = !window_parent(window->id) || window_is_root(window);
-        let is_root = Window::parent(connection, window_id).is_err() || window.is_root();
-        {
-            let mut inner = window.inner.force_write();
-            inner.minimized = minimized;
-            inner.is_root = is_root;
-        }
-        Ok(window)
-    }
-
     pub fn id(&self) -> WinID {
         self.inner().id
     }
@@ -426,8 +392,14 @@ impl Window {
     }
 
     pub fn next_size_ratio(&self) -> f64 {
-        self.inner.force_write().size_ratios.rotate_left(1);
-        self.inner().size_ratios[0]
+        let small = *self.inner().size_ratios.first().unwrap();
+        let current = self.inner().width_ratio;
+        self.inner()
+            .size_ratios
+            .iter()
+            .find(|r| **r > current + 0.05)
+            .cloned()
+            .unwrap_or(small)
     }
 
     pub fn managed(&self) -> bool {
@@ -536,7 +508,7 @@ impl Window {
         }
     }
 
-    pub fn resize(&self, width: f64, height: f64) {
+    pub fn resize(&self, width: f64, height: f64, display_bounds: &CGRect) {
         let mut size = CGSize::new(width, height);
         let size_ref =
             unsafe { AXValueCreate(kAXValueTypeCGSize, NonNull::from(&mut size).as_ptr().cast()) };
@@ -548,52 +520,53 @@ impl Window {
                     position.as_ref(),
                 )
             };
-            self.inner.force_write().frame.size = size;
+            let mut inner = self.inner.force_write();
+            inner.frame.size = size;
+            inner.width_ratio = size.width / display_bounds.size.width;
         }
     }
 
-    fn update_frame(&self) -> Result<()> {
-        let mut frame = CGRect::default();
-        let mut position_ref: *mut CFType = null_mut();
-        let mut size_ref: *mut CFType = null_mut();
+    fn update_frame(&self, display_bounds: &CGRect) -> Result<()> {
         let window_ref = self.inner().element_ref.as_ptr();
 
-        unsafe {
+        let position = unsafe {
+            let mut position_ref: *mut CFType = null_mut();
             AXUIElementCopyAttributeValue(
                 window_ref,
                 CFString::from_static_str(kAXPositionAttribute).as_ref(),
                 &mut position_ref,
             );
+            AxuWrapperType::retain(position_ref)?
+        };
+        let size = unsafe {
+            let mut size_ref: *mut CFType = null_mut();
             AXUIElementCopyAttributeValue(
                 window_ref,
                 CFString::from_static_str(kAXSizeAttribute).as_ref(),
                 &mut size_ref,
             );
+            AxuWrapperType::retain(size_ref)?
         };
+
+        let mut frame = CGRect::default();
         unsafe {
-            let position = AxuWrapperType::retain(position_ref)?;
             AXValueGetValue(
                 position.as_ptr(),
                 kAXValueTypeCGPoint,
                 NonNull::from(&mut frame.origin).as_ptr().cast(),
             );
-            let size = AxuWrapperType::retain(size_ref)?;
             AXValueGetValue(
                 size.as_ptr(),
                 kAXValueTypeCGSize,
                 NonNull::from(&mut frame.size).as_ptr().cast(),
             );
-            if CGRectEqualToRect(frame, self.inner().frame) {
-                debug!(
-                    "{}: Debounced window resize: {}",
-                    function_name!(),
-                    self.app().name()
-                )
-            } else {
-                self.inner.force_write().frame = frame;
-            }
-            Ok(())
         }
+        if unsafe { !CGRectEqualToRect(frame, self.inner().frame) } {
+            let mut inner = self.inner.force_write();
+            inner.frame = frame;
+            inner.width_ratio = frame.size.width / display_bounds.size.width;
+        }
+        Ok(())
     }
 
     fn make_key_window(&self) {
@@ -747,14 +720,9 @@ impl Window {
         uuid.and_then(|uuid| Display::id_from_uuid(uuid.into()))
     }
 
-    pub fn fully_visible(&self, window_manager: &WindowManager) -> bool {
+    pub fn fully_visible(&self, display_bounds: &CGRect) -> bool {
         let frame = self.inner().frame;
-        let bounds = window_manager
-            .active_display()
-            .map(|display| display.bounds);
-        bounds.is_ok_and(|bounds| {
-            frame.origin.x > 0.0 && frame.origin.x < bounds.size.width - frame.size.width
-        })
+        frame.origin.x > 0.0 && frame.origin.x < display_bounds.size.width - frame.size.width
     }
 
     pub fn center_mouse(&self, cid: ConnID) {
@@ -787,10 +755,9 @@ impl Window {
     }
 
     // Fully expose the window if parts of it are off-screen.
-    fn expose_window(&self, active_display: &Display) -> CGRect {
+    fn expose_window(&self, display_bounds: &CGRect) -> CGRect {
         // Check if window needs to be fully exposed
         let window_id = self.id();
-        let display_bounds = active_display.bounds;
         let mut frame = self.inner().frame;
         trace!("{}: focus original position {frame:?}", function_name!());
         let moved = if frame.origin.x + frame.size.width > display_bounds.size.width {
@@ -1296,6 +1263,42 @@ impl WindowManager {
         Ok(windows)
     }
 
+    fn new_window(
+        &self,
+        app: &Application,
+        element_ref: CFRetained<AxuWrapperType>,
+        window_id: WinID,
+    ) -> Result<Window> {
+        let window = Window {
+            inner: Arc::new(RwLock::new(InnerWindow {
+                id: window_id,
+                app: app.clone(),
+                element_ref,
+                frame: CGRect::default(),
+                minimized: false,
+                is_root: false,
+                observing: vec![],
+                size_ratios: vec![0.25, 0.33, 0.50, 0.66, 0.75],
+                width_ratio: 0.33,
+                managed: true,
+            })),
+        };
+        window.update_frame(&self.current_display_bounds()?)?;
+
+        let connection = app.connection().ok_or(Error::new(
+            ErrorKind::InvalidData,
+            format!("{}: invalid connection for window.", function_name!()),
+        ))?;
+        let minimized = window.is_minimized();
+        // window->is_root = !window_parent(window->id) || window_is_root(window);
+        let is_root = Window::parent(connection, window_id).is_err() || window.is_root();
+        {
+            let mut inner = window.inner.force_write();
+            inner.minimized = minimized;
+            inner.is_root = is_root;
+        }
+        Ok(window)
+    }
     fn create_and_add_window(
         &mut self,
         app: &Application,
@@ -1303,7 +1306,7 @@ impl WindowManager {
         window_id: WinID,
         _one_shot_rules: bool, // TODO: fix
     ) -> Result<Window> {
-        let window = Window::new(app, window_ref, window_id)?;
+        let window = self.new_window(app, window_ref, window_id)?;
         if window.is_unknown() {
             return Err(Error::new(
                 ErrorKind::Other,
@@ -1499,7 +1502,7 @@ impl WindowManager {
 
     pub fn window_resized(&self, window_id: WinID) -> Result<()> {
         if let Some(window) = self.find_window(window_id) {
-            window.update_frame()?;
+            window.update_frame(&self.current_display_bounds()?)?;
             self.reshuffle_around(&window)?;
         }
         Ok(())
@@ -1535,9 +1538,9 @@ impl WindowManager {
         }
 
         let active_display = self.active_display()?;
-        let frame = window.expose_window(active_display);
         let active_panel = active_display.active_panel(self.main_cid)?;
-        let display_bounds = active_display.bounds;
+        let display_bounds = self.current_display_bounds()?;
+        let frame = window.expose_window(&display_bounds);
 
         // Shuffling windows to the right of the focus.
         let mut upper_left = frame.origin.x + frame.size.width;
@@ -1601,6 +1604,7 @@ impl WindowManager {
         info!("{}: detected new display {id} ({uuid}).", function_name!());
         let spaces = Display::display_space_list(uuid.deref(), self.main_cid)?;
         let display = Display::new(id, spaces);
+        let display_bounds = self.current_display_bounds()?;
 
         for (space_id, pane) in display.spaces.iter() {
             // Populate the display panes with its windows.
@@ -1615,7 +1619,12 @@ impl WindowManager {
                     function_name!(),
                     window.id()
                 );
-                _ = window.update_frame();
+                window.resize(
+                    display_bounds.size.width * window.inner().width_ratio,
+                    display_bounds.size.height,
+                    &display_bounds,
+                );
+                _ = window.update_frame(&display_bounds);
                 true // continue through all windows.
             })?;
         }
@@ -1639,5 +1648,9 @@ impl WindowManager {
                 })
             });
         }
+    }
+
+    pub fn current_display_bounds(&self) -> Result<CGRect> {
+        self.active_display().map(|display| display.bounds)
     }
 }

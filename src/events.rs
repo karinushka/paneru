@@ -7,7 +7,7 @@ use std::ops::Deref;
 use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 use std::thread::JoinHandle;
 use stdext::function_name;
@@ -148,8 +148,32 @@ pub enum Event {
     TypeCount,
 }
 
+#[derive(Clone, Debug)]
+pub struct EventSender {
+    tx: Sender<Event>,
+}
+
+impl EventSender {
+    fn new(tx: Sender<Event>) -> Self {
+        Self { tx }
+    }
+
+    pub fn send(&self, event: Event) -> Result<()> {
+        self.tx
+            .send(event)
+            .map_err(|err| {
+                Error::new(
+                    ErrorKind::ConnectionAborted,
+                    format!("{}: sending event: {err}", function_name!()),
+                )
+            })
+            .inspect_err(|err| error!("{err}"))
+    }
+}
+
 pub struct EventHandler {
     quit: Arc<AtomicBool>,
+    tx: EventSender,
     rx: Receiver<Event>,
     main_cid: ConnID,
     process_manager: ProcessManager,
@@ -158,18 +182,25 @@ pub struct EventHandler {
 }
 
 impl EventHandler {
-    pub fn new(tx: Sender<Event>, rx: Receiver<Event>) -> Result<Self> {
+    pub fn new() -> Result<Self> {
         let main_cid = unsafe { SLSMainConnectionID() };
         info!("{}: My connection id: {main_cid}", function_name!());
 
+        let (tx, rx) = channel::<Event>();
+        let sender = EventSender::new(tx);
         Ok(EventHandler {
             quit: AtomicBool::new(false).into(),
+            tx: sender.clone(),
             rx,
             main_cid,
             process_manager: ProcessManager::default(),
-            window_manager: WindowManager::new(tx, main_cid)?,
+            window_manager: WindowManager::new(sender, main_cid)?,
             initial_scan: true,
         })
+    }
+
+    pub fn sender(&self) -> EventSender {
+        self.tx.clone()
     }
 
     pub fn start(mut self) -> (Arc<AtomicBool>, JoinHandle<()>) {

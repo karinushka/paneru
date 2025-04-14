@@ -2,7 +2,6 @@ use log::{debug, error};
 use std::io::{Error, ErrorKind, Result};
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::sync::mpsc::{Sender, channel};
 use std::{fs, thread};
 use stdext::function_name;
 
@@ -15,12 +14,12 @@ mod skylight;
 mod util;
 mod windows;
 
-use events::{Event, EventHandler};
+use events::{Event, EventHandler, EventSender};
 use platform::PlatformCallbacks;
 use skylight::{SLSGetSpaceManagementMode, SLSMainConnectionID};
 
 struct CommandReader {
-    tx: Sender<Event>,
+    events: EventSender,
 }
 
 impl CommandReader {
@@ -40,8 +39,8 @@ impl CommandReader {
         stream.write_all(&output)
     }
 
-    fn new(tx: Sender<Event>) -> Self {
-        CommandReader { tx }
+    fn new(events: EventSender) -> Self {
+        CommandReader { events }
     }
 
     fn start(mut self) {
@@ -71,9 +70,7 @@ impl CommandReader {
                     .split(|c| *c == 0)
                     .flat_map(|s| (!s.is_empty()).then(|| String::from_utf8_lossy(s).to_string()))
                     .collect::<Vec<_>>();
-                self.tx
-                    .send(Event::Command { argv })
-                    .expect("command reader: error sending event");
+                self.events.send(Event::Command { argv })?
             }
         }
         Ok(())
@@ -106,14 +103,14 @@ fn main() -> Result<()> {
         ));
     }
 
-    let (tx, rx) = channel::<Event>();
+    let event_handler = EventHandler::new()?;
 
-    CommandReader::new(tx.clone()).start();
+    CommandReader::new(event_handler.sender()).start();
 
-    let mut platform_callbacks = PlatformCallbacks::new(tx.clone())?;
+    let mut platform_callbacks = PlatformCallbacks::new(event_handler.sender())?;
     platform_callbacks.setup_handlers()?;
 
-    let (quit, handle) = EventHandler::new(tx.clone(), rx)?.start();
+    let (quit, handle) = event_handler.start();
 
     platform_callbacks.run(quit);
 

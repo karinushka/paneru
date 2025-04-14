@@ -23,7 +23,6 @@ use std::io::{Error, ErrorKind, Result};
 use std::ops::Deref;
 use std::ptr::null_mut;
 use std::slice::from_raw_parts_mut;
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
@@ -31,7 +30,7 @@ use stdext::function_name;
 use stdext::prelude::RwLockExt;
 
 use crate::app::Application;
-use crate::events::Event;
+use crate::events::EventSender;
 use crate::platform::{
     AXObserverAddNotification, AXObserverRemoveNotification, Pid, ProcessInfo, ProcessSerialNumber,
     get_process_info,
@@ -834,7 +833,7 @@ impl Drop for InnerWindow {
 }
 
 pub struct WindowManager {
-    pub tx: Sender<Event>,
+    pub events: EventSender,
     pub applications: HashMap<Pid, Application>,
     pub main_cid: ConnID,
     last_window: Option<WinID>, // TODO: use this for "goto last window bind"
@@ -850,7 +849,7 @@ pub struct WindowManager {
 }
 
 impl WindowManager {
-    pub fn new(tx: Sender<Event>, main_cid: ConnID) -> Result<Self> {
+    pub fn new(events: EventSender, main_cid: ConnID) -> Result<Self> {
         let displays = Display::present_displays(main_cid);
         if displays.is_empty() {
             return Err(Error::new(
@@ -860,7 +859,7 @@ impl WindowManager {
         }
 
         Ok(WindowManager {
-            tx,
+            events,
             applications: HashMap::new(),
             main_cid,
             last_window: None,
@@ -880,14 +879,17 @@ impl WindowManager {
         autoreleasepool(|_| {
             for process in process_manager.processes.values_mut() {
                 if process.is_observable() {
-                    let app =
-                        match Application::from_process(self.main_cid, process, self.tx.clone()) {
-                            Ok(app) => app,
-                            Err(err) => {
-                                error!("{}: error creating applicatoin: {err}", function_name!());
-                                return;
-                            }
-                        };
+                    let app = match Application::from_process(
+                        self.main_cid,
+                        process,
+                        self.events.clone(),
+                    ) {
+                        Ok(app) => app,
+                        Err(err) => {
+                            error!("{}: error creating applicatoin: {err}", function_name!());
+                            return;
+                        }
+                    };
                     debug!(
                         "{}: Application {} is observable",
                         function_name!(),

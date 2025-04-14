@@ -116,7 +116,7 @@ impl Process {
             ));
         }
         let app =
-            Application::from_process(window_manager.main_cid, self, window_manager.tx.clone())?;
+            Application::from_process(window_manager.main_cid, self, window_manager.events.clone())?;
         // TODO: maybe refactor with WindowManager::start()
 
         if !app.observe()? {

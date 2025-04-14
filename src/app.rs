@@ -15,12 +15,11 @@ use std::io::{Error, ErrorKind, Result};
 use std::ops::Deref;
 use std::pin::Pin;
 use std::ptr::null_mut;
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, LazyLock, RwLock};
 use stdext::function_name;
 use stdext::prelude::RwLockExt;
 
-use crate::events::Event;
+use crate::events::{Event, EventSender};
 use crate::platform::{
     AXObserverAddNotification, AXObserverCreate, AXObserverRemoveNotification, CFStringRef, Pid,
     ProcessSerialNumber,
@@ -67,7 +66,7 @@ struct InnerApplication {
 }
 
 impl Application {
-    pub fn from_process(main_cid: ConnID, process: &Process, tx: Sender<Event>) -> Result<Self> {
+    pub fn from_process(main_cid: ConnID, process: &Process, events: EventSender) -> Result<Self> {
         let refer = unsafe {
             let ptr = AXUIElementCreateApplication(process.pid);
             AxuWrapperType::retain(ptr)?
@@ -85,7 +84,7 @@ impl Application {
                         Some(connection)
                     }
                 },
-                handler: Box::pin(ApplicationHandler::new(tx)),
+                handler: Box::pin(ApplicationHandler::new(events)),
                 windows: HashMap::new(),
             })),
         })
@@ -191,7 +190,7 @@ impl Drop for InnerApplication {
 
 #[derive(Debug)]
 pub struct ApplicationHandler {
-    tx: Sender<Event>,
+    events: EventSender,
     ax_retry: bool,
     observing: Vec<bool>,
     element_ref: Option<CFRetained<AxuWrapperType>>,
@@ -200,9 +199,9 @@ pub struct ApplicationHandler {
 }
 
 impl ApplicationHandler {
-    fn new(tx: Sender<Event>) -> Self {
+    fn new(events: EventSender) -> Self {
         Self {
-            tx,
+            events,
             ax_retry: false,
             observing: vec![],
             element_ref: None,
@@ -390,7 +389,7 @@ impl ApplicationHandler {
                 return;
             }
         };
-        _ = self.tx.send(event);
+        _ = self.events.send(event);
     }
 
     extern "C" fn callback(

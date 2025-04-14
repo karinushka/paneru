@@ -34,13 +34,12 @@ use std::ops::Deref;
 use std::path::PathBuf;
 use std::ptr::null_mut;
 use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use stdext::function_name;
 
 use crate::config::Config;
-use crate::events::Event;
+use crate::events::{Event, EventSender};
 use crate::process::Process;
 use crate::skylight::OSStatus;
 use crate::util::{AxuWrapperType, Cleanuper, add_run_loop, remove_run_loop};
@@ -118,7 +117,7 @@ unsafe extern "C-unwind" {
 
 #[repr(C)]
 struct ProcessHandler {
-    tx: Sender<Event>,
+    events: EventSender,
     cleanup: Option<Cleanuper>,
     observer: Retained<WorkspaceObserver>,
 }
@@ -153,9 +152,9 @@ enum ProcessEventApp {
 }
 
 impl ProcessHandler {
-    fn new(tx: Sender<Event>, observer: Retained<WorkspaceObserver>) -> Self {
+    fn new(events: EventSender, observer: Retained<WorkspaceObserver>) -> Self {
         ProcessHandler {
-            tx,
+            events,
             cleanup: None,
             observer,
         }
@@ -191,13 +190,15 @@ impl ProcessHandler {
 
     fn process_handler(&mut self, psn: &ProcessSerialNumber, event: ProcessEventApp) {
         let psn = psn.clone();
-        let result = match event {
-            ProcessEventApp::Launched => self.tx.send(Event::ApplicationLaunched {
+        let _ = match event {
+            ProcessEventApp::Launched => self.events.send(Event::ApplicationLaunched {
                 psn,
                 observer: self.observer.clone(),
             }),
-            ProcessEventApp::Terminated => self.tx.send(Event::ApplicationTerminated { psn }),
-            ProcessEventApp::FrontSwitched => self.tx.send(Event::ApplicationFrontSwitched { psn }),
+            ProcessEventApp::Terminated => self.events.send(Event::ApplicationTerminated { psn }),
+            ProcessEventApp::FrontSwitched => {
+                self.events.send(Event::ApplicationFrontSwitched { psn })
+            }
             _ => {
                 error!(
                     "{}: Unknown process event: {}",
@@ -206,23 +207,21 @@ impl ProcessHandler {
                 );
                 Ok(())
             }
-        };
-        if let Err(err) = result {
-            error!("{}: error sending event: {err}", function_name!());
         }
+        .inspect_err(|err| error!("{}: error sending event: {err}", function_name!()));
     }
 }
 
 struct InputHandler {
-    tx: Sender<Event>,
+    events: EventSender,
     config: Config,
     cleanup: Option<Cleanuper>,
 }
 
 impl InputHandler {
-    fn new(tx: Sender<Event>, config: Config) -> Self {
+    fn new(events: EventSender, config: Config) -> Self {
         InputHandler {
-            tx,
+            events,
             config,
             cleanup: None,
         }
@@ -297,19 +296,19 @@ impl InputHandler {
             }
             CGEventType::LeftMouseDown | CGEventType::RightMouseDown => {
                 let point = unsafe { CGEventGetLocation(Some(event)) };
-                self.tx.send(Event::MouseDown { point })
+                self.events.send(Event::MouseDown { point })
             }
             CGEventType::LeftMouseUp | CGEventType::RightMouseUp => {
                 let point = unsafe { CGEventGetLocation(Some(event)) };
-                self.tx.send(Event::MouseUp { point })
+                self.events.send(Event::MouseUp { point })
             }
             CGEventType::LeftMouseDragged | CGEventType::RightMouseDragged => {
                 let point = unsafe { CGEventGetLocation(Some(event)) };
-                self.tx.send(Event::MouseDragged { point })
+                self.events.send(Event::MouseDragged { point })
             }
             CGEventType::MouseMoved => {
                 let point = unsafe { CGEventGetLocation(Some(event)) };
-                self.tx.send(Event::MouseMoved { point })
+                self.events.send(Event::MouseMoved { point })
             }
             CGEventType::KeyDown => {
                 let keycode = unsafe {
@@ -362,7 +361,7 @@ impl InputHandler {
                 .split("_")
                 .map(|s| s.to_string())
                 .collect::<Vec<_>>();
-            self.tx
+            self.events
                 .send(Event::Command { argv: command })
                 .inspect_err(|err| error!("{}: Error sending command: {err}", function_name!()))
                 .ok()
@@ -373,7 +372,7 @@ impl InputHandler {
 
 #[derive(Debug, Clone)]
 pub struct Ivars {
-    tx: Sender<Event>,
+    events: EventSender,
 }
 
 define_class!(
@@ -395,7 +394,7 @@ define_class!(
             let msg = Event::DisplayChanged{
                 msg: format!("WorkspaceObserver: {:?}", notification),
             };
-            _ = self.ivars().tx.send(msg).inspect_err(|err| error!("{}: error sending event: {err}", function_name!()));
+            _ = self.ivars().events.send(msg);
         }
 
         #[unsafe(method(activeSpaceDidChange:))]
@@ -403,7 +402,7 @@ define_class!(
             let msg = Event::SpaceChanged{
                 msg: format!("WorkspaceObserver: {:?}", notification),
             };
-            _ = self.ivars().tx.send(msg).inspect_err(|err| error!("{}: error sending event: {err}", function_name!()));
+            _ = self.ivars().events.send(msg);
         }
 
         #[unsafe(method(didHideApplication:))]
@@ -418,7 +417,7 @@ define_class!(
             let msg = Event::ApplicationHidden{
                 msg: format!("WorkspaceObserver: {pid}"),
             };
-            _ = self.ivars().tx.send(msg).inspect_err(|err| error!("{}: error sending event: {err}", function_name!()));
+            _ = self.ivars().events.send(msg);
         }
 
         #[unsafe(method(didUnhideApplication:))]
@@ -432,7 +431,7 @@ define_class!(
             let msg = Event::ApplicationVisible{
                 msg: format!("WorkspaceObserver: {pid}"),
             };
-            _ = self.ivars().tx.send(msg).inspect_err(|err| error!("{}: error sending event: {err}", function_name!()));
+            _ = self.ivars().events.send(msg);
         }
 
         #[unsafe(method(didWake:))]
@@ -440,7 +439,7 @@ define_class!(
             let msg = Event::SystemWoke{
                 msg: format!("WorkspaceObserver: {:?}", notification),
             };
-            _ = self.ivars().tx.send(msg).inspect_err(|err| error!("{}: error sending event: {err}", function_name!()));
+            _ = self.ivars().events.send(msg);
         }
 
         #[unsafe(method(didChangeMenuBarHiding:))]
@@ -448,7 +447,7 @@ define_class!(
             let msg = Event::MenuBarHiddenChanged{
                 msg: format!("WorkspaceObserver: {:?}", notification),
             };
-            _ = self.ivars().tx.send(msg).inspect_err(|err| error!("{}: error sending event: {err}", function_name!()));
+            _ = self.ivars().events.send(msg);
         }
 
         #[unsafe(method(didRestartDock:))]
@@ -456,7 +455,7 @@ define_class!(
             let msg = Event::DockDidRestart{
                 msg: format!("WorkspaceObserver: {:?}", notification),
             };
-            _ = self.ivars().tx.send(msg).inspect_err(|err| error!("{}: error sending event: {err}", function_name!()));
+            _ = self.ivars().events.send(msg);
         }
 
         #[unsafe(method(didChangeDockPref:))]
@@ -464,7 +463,7 @@ define_class!(
             let msg = Event::DockDidChangePref{
                 msg: format!("WorkspaceObserver: {:?}", notification),
             };
-            _ = self.ivars().tx.send(msg).inspect_err(|err| error!("{}: error sending event: {err}", function_name!()));
+            _ = self.ivars().events.send(msg);
         }
 
         #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
@@ -510,9 +509,7 @@ define_class!(
                 psn: process.psn.clone(),
                 observer: process.observer.clone(),
             };
-            _= self.ivars()
-                .tx
-                .send(msg).inspect_err(|err| error!("observe_value_for_keypath: Error sending event: {err}"));
+            _= self.ivars().events.send(msg);
             debug!(
                 "{}: got {key_path:?} for {}",
                 function_name!(),
@@ -524,9 +521,9 @@ define_class!(
 );
 
 impl WorkspaceObserver {
-    fn new(tx: Sender<Event>) -> Retained<Self> {
+    fn new(events: EventSender) -> Retained<Self> {
         // Initialize instance variables.
-        let this = Self::alloc().set_ivars(Ivars { tx });
+        let this = Self::alloc().set_ivars(Ivars { events });
         // Call `NSObject`'s `init` method.
         unsafe { msg_send![super(this), init] }
     }
@@ -624,15 +621,15 @@ impl Drop for WorkspaceObserver {
 
 #[derive(Debug)]
 struct MissionControlHandler {
-    tx: Sender<Event>,
+    events: EventSender,
     element: Option<CFRetained<AxuWrapperType>>,
     observer: Option<CFRetained<AxuWrapperType>>,
 }
 
 impl MissionControlHandler {
-    fn new(tx: Sender<Event>) -> Self {
+    fn new(events: EventSender) -> Self {
         Self {
-            tx,
+            events,
             element: None,
             observer: None,
         }
@@ -665,7 +662,7 @@ impl MissionControlHandler {
             }
         };
         _ = self
-            .tx
+            .events
             .send(event)
             .inspect_err(|err| error!("{}: error sending event: {err}", function_name!()));
     }
@@ -787,13 +784,16 @@ impl Drop for MissionControlHandler {
 }
 
 struct DisplayHandler {
-    tx: Sender<Event>,
+    events: EventSender,
     cleanup: Option<Cleanuper>,
 }
 
 impl DisplayHandler {
-    fn new(tx: Sender<Event>) -> Self {
-        Self { tx, cleanup: None }
+    fn new(events: EventSender) -> Self {
+        Self {
+            events,
+            cleanup: None,
+        }
     }
 
     fn start(&mut self) -> Result<()> {
@@ -847,29 +847,22 @@ impl DisplayHandler {
             return;
         };
         _ = self
-            .tx
+            .events
             .send(event)
             .inspect_err(|err| warn!("{}: error sending event: {err}", function_name!()));
     }
 }
 
 struct ConfigHandler {
-    tx: Sender<Event>,
+    events: EventSender,
     config: Config,
 }
 
 impl ConfigHandler {
     fn announce_fresh_config(&self) -> Result<()> {
-        self.tx
-            .send(Event::ConfigRefresh {
-                config: self.config.clone(),
-            })
-            .map_err(|err| {
-                Error::new(
-                    ErrorKind::InvalidData,
-                    format!("{}: {err}", function_name!()),
-                )
-            })?;
+        self.events.send(Event::ConfigRefresh {
+            config: self.config.clone(),
+        })?;
         Ok(())
     }
 }
@@ -893,9 +886,9 @@ impl notify::EventHandler for ConfigHandler {
     }
 }
 
-fn setup_config_watcher(tx: Sender<Event>, config: Config) -> Result<FsEventWatcher> {
+fn setup_config_watcher(events: EventSender, config: Config) -> Result<FsEventWatcher> {
     let setup = notify::Config::default().with_poll_interval(Duration::from_secs(3));
-    let config_handler = ConfigHandler { tx, config };
+    let config_handler = ConfigHandler { events, config };
     config_handler.announce_fresh_config()?;
     let watcher = RecommendedWatcher::new(config_handler, setup);
     watcher
@@ -917,7 +910,7 @@ pub static CONFIGURATION_FILE: LazyLock<PathBuf> = LazyLock::new(|| {
 });
 
 pub struct PlatformCallbacks {
-    tx: Sender<Event>,
+    events: EventSender,
     process_handler: ProcessHandler,
     event_handler: InputHandler,
     workspace_observer: Retained<WorkspaceObserver>,
@@ -927,7 +920,7 @@ pub struct PlatformCallbacks {
 }
 
 impl PlatformCallbacks {
-    pub fn new(tx: Sender<Event>) -> Result<std::pin::Pin<Box<Self>>> {
+    pub fn new(events: EventSender) -> Result<std::pin::Pin<Box<Self>>> {
         let config = Config::new(CONFIGURATION_FILE.as_path()).map_err(|err| {
             Error::new(
                 ErrorKind::InvalidInput,
@@ -935,15 +928,15 @@ impl PlatformCallbacks {
             )
         })?;
 
-        let workspace_observer = WorkspaceObserver::new(tx.clone());
+        let workspace_observer = WorkspaceObserver::new(events.clone());
         Ok(Box::pin(PlatformCallbacks {
-            process_handler: ProcessHandler::new(tx.clone(), workspace_observer.clone()),
-            event_handler: InputHandler::new(tx.clone(), config.clone()),
+            process_handler: ProcessHandler::new(events.clone(), workspace_observer.clone()),
+            event_handler: InputHandler::new(events.clone(), config.clone()),
             workspace_observer,
-            mission_control_observer: MissionControlHandler::new(tx.clone()),
-            display_handler: DisplayHandler::new(tx.clone()),
-            _config_watcher: setup_config_watcher(tx.clone(), config)?,
-            tx,
+            mission_control_observer: MissionControlHandler::new(events.clone()),
+            display_handler: DisplayHandler::new(events.clone()),
+            _config_watcher: setup_config_watcher(events.clone(), config)?,
+            events,
         }))
     }
 
@@ -954,12 +947,7 @@ impl PlatformCallbacks {
         self.workspace_observer.start();
         self.process_handler.start();
 
-        self.tx.send(Event::ProcessesLoaded).map_err(|err| {
-            Error::new(
-                ErrorKind::InvalidData,
-                format!("{}: {err}", function_name!()),
-            )
-        })
+        self.events.send(Event::ProcessesLoaded)
     }
 
     // Does not return until 'quit' is signalled.
@@ -973,7 +961,7 @@ impl PlatformCallbacks {
                 CFRunLoopRunInMode(kCFRunLoopDefaultMode, 3.0, false);
             });
         }
-        _ = self.tx.send(Event::Exit);
+        _ = self.events.send(Event::Exit);
         info!("{}: Run loop finished.", function_name!());
     }
 }

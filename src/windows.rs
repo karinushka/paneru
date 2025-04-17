@@ -105,10 +105,6 @@ impl WindowPane {
         self.pane.force_read().len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.pane.force_read().is_empty()
-    }
-
     pub fn first(&self) -> Result<WinID> {
         self.pane.force_read().first().cloned().ok_or(Error::new(
             ErrorKind::NotFound,
@@ -753,16 +749,8 @@ pub struct WindowManager {
 }
 
 impl WindowManager {
-    pub fn new(events: EventSender, main_cid: ConnID) -> Result<Self> {
-        let displays = Display::present_displays(main_cid);
-        if displays.is_empty() {
-            return Err(Error::new(
-                ErrorKind::NotFound,
-                format!("{}: Can not find any displays?!", function_name!()),
-            ));
-        }
-
-        Ok(WindowManager {
+    pub fn new(events: EventSender, main_cid: ConnID) -> Self {
+        WindowManager {
             events,
             processes: HashMap::new(),
             main_cid,
@@ -774,23 +762,46 @@ impl WindowManager {
             skip_reshuffle: false,
             mouse_down_window: None,
             down_location: CGPoint::default(),
-            displays,
+            displays: Display::present_displays(main_cid),
             focus_follows_mouse: true,
-        })
+        }
     }
 
-    pub fn start(&mut self) {
+    pub fn refresh_displays(&mut self) -> Result<()> {
+        self.displays = Display::present_displays(self.main_cid);
+        if self.displays.is_empty() {
+            return Err(Error::new(
+                ErrorKind::NotFound,
+                format!("{}: Can not find any displays?!", function_name!()),
+            ));
+        }
+
+        let display_bounds = self.current_display_bounds()?;
         for display in self.displays.iter() {
             for (space_id, pane) in display.spaces.iter() {
                 self.refresh_windows_space(*space_id, pane);
+
+                // Adjust window sizes to the current display.
+                pane.access_right_of(pane.first()?, |window_id| {
+                    if let Some(window) = self.find_window(window_id) {
+                        let ratio = window.inner().width_ratio;
+                        window.resize(
+                            display_bounds.size.width * ratio,
+                            display_bounds.size.height,
+                            &display_bounds,
+                        );
+                    }
+                    true // continue through all windows.
+                })?;
             }
         }
 
         if let Ok(window) = self.focused_window() {
             self.last_window = Some(window.id());
             self.focused_window = Some(window.id());
-            self.focused_psn = window.app().psn().unwrap();
+            self.focused_psn = window.app().psn()?;
         }
+        Ok(())
     }
 
     // Repopulates current window panel with window from the selected space.
@@ -1465,52 +1476,6 @@ impl WindowManager {
                 ErrorKind::NotFound,
                 format!("{}: can not find active display.", function_name!()),
             ))
-    }
-
-    // Searches other inactive displays for windows which are currently on this display and
-    // relocates them.
-    pub fn add_detected_display(&mut self) -> Result<&Display> {
-        let id = Display::active_display_id(self.main_cid)?;
-        let uuid = Display::uuid_from_id(id)?;
-        info!("{}: detected new display {id} ({uuid}).", function_name!());
-        let spaces = Display::display_space_list(uuid.deref(), self.main_cid)?;
-        let display = Display::new(id, spaces);
-        let display_bounds = self.current_display_bounds()?;
-
-        for (space_id, pane) in display.spaces.iter() {
-            // Populate the display panes with its windows.
-            self.refresh_windows_space(*space_id, pane);
-            pane.access_right_of(pane.first()?, |window_id| {
-                // Remove this window from any other displays.
-                self.displays
-                    .iter()
-                    .for_each(|display| display.remove_window(window_id));
-                debug!(
-                    "{}: Moved window {} to new display.",
-                    function_name!(),
-                    window_id
-                );
-                if let Some(window) = self.find_window(window_id) {
-                    window.resize(
-                        display_bounds.size.width * window.inner().width_ratio,
-                        display_bounds.size.height,
-                        &display_bounds,
-                    );
-                    _ = window.update_frame(&display_bounds);
-                }
-                true // continue through all windows.
-            })?;
-        }
-
-        // Remove displays without any active windows.
-        self.displays
-            .retain(|display| display.spaces.values().any(|pane| !pane.is_empty()));
-
-        self.displays.push(display);
-        self.displays.last().ok_or(Error::new(
-            ErrorKind::NotFound,
-            format!("{}: could not find a display", function_name!()),
-        ))
     }
 
     pub fn delete_application(&mut self, psn: &ProcessSerialNumber) {

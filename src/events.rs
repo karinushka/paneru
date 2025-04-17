@@ -191,7 +191,7 @@ impl EventHandler {
             tx: sender.clone(),
             rx,
             main_cid,
-            window_manager: WindowManager::new(sender, main_cid)?,
+            window_manager: WindowManager::new(sender, main_cid),
             initial_scan: true,
         })
     }
@@ -246,7 +246,7 @@ impl EventHandler {
                     function_name!()
                 );
                 self.initial_scan = false;
-                self.window_manager.start();
+                return self.window_manager.refresh_displays();
             }
             Event::MouseDown { point } => {
                 return self.mouse_down(&point);
@@ -464,11 +464,14 @@ impl EventHandler {
             }
         };
 
-        // If unable to detect current display, a new one must have been added, so move teh current
-        // windows to it.
+        // If unable to detect current display, a new one must have been added, so refresh the
+        // current displays and reshuffle the windows.
         let active_display = match self.window_manager.active_display() {
             Ok(display) => display,
-            _ => self.window_manager.add_detected_display()?,
+            _ => {
+                self.window_manager.refresh_displays()?;
+                self.window_manager.active_display()?
+            }
         };
         let active_panel = active_display.active_panel(self.main_cid)?;
         let display_bounds = self.window_manager.current_display_bounds()?;

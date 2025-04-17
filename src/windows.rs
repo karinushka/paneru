@@ -31,7 +31,7 @@ use stdext::prelude::RwLockExt;
 
 use crate::app::Application;
 use crate::events::EventSender;
-use crate::platform::{Pid, ProcessInfo, ProcessSerialNumber, WorkspaceObserver, get_process_info};
+use crate::platform::{Pid, ProcessSerialNumber, WorkspaceObserver};
 use crate::process::Process;
 use crate::skylight::{
     _AXUIElementCreateWithRemoteToken, _AXUIElementGetWindow, _SLPSGetFrontProcess,
@@ -1229,18 +1229,20 @@ impl WindowManager {
 
     fn focused_application(&self) -> Result<Application> {
         let mut psn = ProcessSerialNumber::default();
-        let mut pinfo = ProcessInfo::default();
+        // let mut pinfo = ProcessInfo::default();
         unsafe {
             _SLPSGetFrontProcess(&mut psn);
-            get_process_info(&psn, &mut pinfo);
+            // get_process_info(&psn, &mut pinfo);
         }
-        self.find_application(pinfo.pid).ok_or(Error::new(
-            ErrorKind::NotFound,
-            format!(
-                "{}: can not find currently focused application.",
-                function_name!()
-            ),
-        ))
+        self.find_process(&psn)
+            .and_then(|process| process.get_app())
+            .ok_or(Error::new(
+                ErrorKind::NotFound,
+                format!(
+                    "{}: can not find currently focused application.",
+                    function_name!()
+                ),
+            ))
     }
 
     fn focused_window(&self) -> Result<Window> {
@@ -1260,16 +1262,24 @@ impl WindowManager {
             ErrorKind::NotFound,
             format!("{}: Psn {:?} not found.", function_name!(), psn),
         ))?;
-        let app = match self.find_application(process.pid) {
-            Some(app) => app,
-            None => {
-                warn!(
-                    "{}: window_manager_add_lost_front_switched_event",
-                    function_name!()
-                );
-                return Ok(());
-            }
-        };
+        let app = process.get_app().ok_or(std::io::Error::new(
+            ErrorKind::NotFound,
+            format!(
+                "{}: No application for process {}.",
+                function_name!(),
+                process.name
+            ),
+        ))?;
+        // let app = match self.find_application(process.pid) {
+        //     Some(app) => app,
+        //     None => {
+        //         warn!(
+        //             "{}: window_manager_add_lost_front_switched_event",
+        //             function_name!()
+        //         );
+        //         return Ok(());
+        //     }
+        // };
         debug!("{}: {}", function_name!(), app.name()?);
 
         match app.focused_window_id() {

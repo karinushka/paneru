@@ -7,7 +7,7 @@ use accessibility_sys::{
 };
 use core::ptr::NonNull;
 use log::{debug, error, info, trace, warn};
-use objc2::rc::{Retained, autoreleasepool};
+use objc2::rc::Retained;
 use objc2_core_foundation::{
     CFArray, CFArrayGetCount, CFBoolean, CFBooleanGetValue, CFDataCreateMutable,
     CFDataGetMutableBytePtr, CFDataIncreaseLength, CFEqual, CFNumber, CFNumberGetType,
@@ -21,6 +21,7 @@ use objc2_core_graphics::{
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result};
 use std::ops::Deref;
+use std::pin::Pin;
 use std::ptr::null_mut;
 use std::slice::from_raw_parts_mut;
 use std::sync::{Arc, RwLock};
@@ -33,9 +34,9 @@ use crate::app::Application;
 use crate::events::EventSender;
 use crate::platform::{
     AXObserverAddNotification, AXObserverRemoveNotification, Pid, ProcessInfo, ProcessSerialNumber,
-    get_process_info,
+    WorkspaceObserver, get_process_info,
 };
-use crate::process::{Process, ProcessManager};
+use crate::process::Process;
 use crate::skylight::{
     _AXUIElementCreateWithRemoteToken, _AXUIElementGetWindow, _SLPSGetFrontProcess,
     _SLPSSetFrontProcessWithOptions, AXUIElementCopyAttributeValue, AXUIElementPerformAction,
@@ -834,6 +835,7 @@ impl Drop for InnerWindow {
 
 pub struct WindowManager {
     pub events: EventSender,
+    pub processes: HashMap<ProcessSerialNumber, Pin<Box<Process>>>,
     pub applications: HashMap<Pid, Application>,
     pub main_cid: ConnID,
     last_window: Option<WinID>, // TODO: use this for "goto last window bind"
@@ -860,6 +862,7 @@ impl WindowManager {
 
         Ok(WindowManager {
             events,
+            processes: HashMap::new(),
             applications: HashMap::new(),
             main_cid,
             last_window: None,
@@ -875,45 +878,7 @@ impl WindowManager {
         })
     }
 
-    pub fn start(&mut self, process_manager: &mut ProcessManager) {
-        autoreleasepool(|_| {
-            for process in process_manager.processes.values_mut() {
-                if process.is_observable() {
-                    let app = match Application::from_process(
-                        self.main_cid,
-                        process,
-                        self.events.clone(),
-                    ) {
-                        Ok(app) => app,
-                        Err(err) => {
-                            error!("{}: error creating applicatoin: {err}", function_name!());
-                            return;
-                        }
-                    };
-                    debug!(
-                        "{}: Application {} is observable",
-                        function_name!(),
-                        app.name()
-                    );
-
-                    if app.observe().is_ok_and(|result| result) {
-                        self.applications.insert(app.pid(), app.clone());
-                        _ = self
-                            .add_existing_application_windows(&app, 0)
-                            .inspect_err(|err| warn!("{}: {err}", function_name!()));
-                    } else {
-                        // app.unobserve() handled by the Drop.
-                    }
-                } else {
-                    // println!(
-                    //     "{} ({}) is not observable, subscribing to activationPolicy changes",
-                    //     process.name, process.pid
-                    // );
-                    // workspace_application_observe_activation_policy(g_workspace_context, process);
-                }
-            }
-        });
-
+    pub fn start(&mut self) {
         for display in self.displays.iter() {
             for (space_id, pane) in display.spaces.iter() {
                 self.refresh_windows_space(*space_id, pane);
@@ -946,6 +911,10 @@ impl WindowManager {
                     .for_each(|display| display.remove_window(window.inner().id));
                 pane.append(window.id())
             });
+    }
+
+    pub fn find_process(&self, psn: &ProcessSerialNumber) -> Option<&Process> {
+        self.processes.get(psn).map(|process| process.deref())
     }
 
     pub fn find_application(&self, pid: Pid) -> Option<Application> {
@@ -1390,7 +1359,11 @@ impl WindowManager {
         ))
     }
 
-    pub fn front_switched(&mut self, process: &mut Process) {
+    pub fn front_switched(&mut self, psn: &ProcessSerialNumber) -> Result<()> {
+        let process = self.find_process(psn).ok_or(std::io::Error::new(
+            ErrorKind::NotFound,
+            format!("{}: Psn {:?} not found.", function_name!(), psn),
+        ))?;
         let app = match self.find_application(process.pid) {
             Some(app) => app,
             None => {
@@ -1398,7 +1371,7 @@ impl WindowManager {
                     "{}: window_manager_add_lost_front_switched_event",
                     function_name!()
                 );
-                return;
+                return Ok(());
             }
         };
         debug!("{}: {}", function_name!(), app.name());
@@ -1429,6 +1402,7 @@ impl WindowManager {
                 }
             }
         }
+        Ok(())
     }
 
     pub fn window_created(&mut self, element_ref: CFRetained<AxuWrapperType>) -> Result<()> {
@@ -1650,8 +1624,13 @@ impl WindowManager {
         ))
     }
 
-    pub fn delete_application(&mut self, pid: Pid) {
-        if let Some(app) = self.applications.remove(&pid) {
+    pub fn delete_application(&mut self, psn: &ProcessSerialNumber) {
+        let app = self
+            .processes
+            .remove(psn)
+            .map(|process| process.pid)
+            .and_then(|pid| self.applications.remove(&pid));
+        if let Some(app) = app {
             app.foreach_window(|window| {
                 self.displays.iter().for_each(|display| {
                     display.remove_window(window.id());
@@ -1662,5 +1641,184 @@ impl WindowManager {
 
     pub fn current_display_bounds(&self) -> Result<CGRect> {
         self.active_display().map(|display| display.bounds)
+    }
+
+    // Add the process without waiting for it to be fully launched, because it is already running -
+    // we are calling this at the start fo the window manager.
+    pub fn add_existing_process(
+        &mut self,
+        psn: &ProcessSerialNumber,
+        observer: Retained<WorkspaceObserver>,
+    ) {
+        let cid = self.main_cid;
+        let events = self.events.clone();
+        let mut process = Process::new(psn, observer);
+
+        if process.is_observable() {
+            self.processes.insert(psn.clone(), process);
+            let process = self
+                .processes
+                .get(psn)
+                .expect("Unable to create new process");
+
+            let app = match Application::new(cid, process, events) {
+                Ok(app) => app,
+                Err(err) => {
+                    error!("{}: error creating applicatoin: {err}", function_name!());
+                    return;
+                }
+            };
+            debug!(
+                "{}: Application {} is observable",
+                function_name!(),
+                app.name()
+            );
+
+            if app.observe().is_ok_and(|result| result) {
+                self.applications.insert(app.pid(), app.clone());
+                _ = self
+                    .add_existing_application_windows(&app, 0)
+                    .inspect_err(|err| warn!("{}: {err}", function_name!()));
+            }
+        } else {
+            debug!(
+                "{}: Existing application {} is not observable, ignoring it.",
+                function_name!(),
+                process.name,
+            );
+        }
+    }
+
+    pub fn application_launched(
+        &mut self,
+        psn: &ProcessSerialNumber,
+        observer: Retained<WorkspaceObserver>,
+    ) -> Result<()> {
+        let process = Process::new(psn, observer);
+        if process.terminated {
+            return Err(Error::new(
+                ErrorKind::UnexpectedEof,
+                format!(
+                    "{}: {} ({}) terminated during launch",
+                    function_name!(),
+                    process.name,
+                    process.pid
+                ),
+            ));
+        }
+        self.processes.insert(psn.clone(), process);
+        let process = self.processes.get_mut(psn).ok_or(Error::new(
+            ErrorKind::OutOfMemory,
+            format!("{}: unable to find created process.", function_name!()),
+        ))?;
+
+        if !process.finished_launching() {
+            debug!(
+                "{}: {} ({}) is not finished launching, subscribing to finishedLaunching changes",
+                function_name!(),
+                process.name,
+                process.pid
+            );
+            process.observe_finished_launching();
+
+            // NOTE: Do this again in case of race-conditions between the previous check and
+            // key-value observation subscription. Not actually sure if this can happen in
+            // practice..
+
+            if !process.finished_launching() {
+                return Ok(());
+            }
+            process.unobserve_finished_launching();
+            warn!(
+                "{}: {} suddenly finished launching",
+                function_name!(),
+                process.name
+            );
+        }
+
+        if !process.is_observable() {
+            debug!(
+                "{}: {} ({}) is not observable, subscribing to activationPolicy changes",
+                function_name!(),
+                process.name,
+                process.pid
+            );
+            process.observe_activation_policy();
+
+            // NOTE: Do this again in case of race-conditions between the previous check and
+            // key-value observation subscription. Not actually sure if this can happen in
+            // practice..
+
+            if !process.is_observable() {
+                return Ok(());
+            }
+            process.unobserve_activation_policy();
+            warn!(
+                "{}: {} suddenly became observable",
+                function_name!(),
+                process.name
+            );
+        }
+
+        // NOTE: If we somehow receive a duplicate launched event due to the
+        // subscription-timing-mess above, simply ignore the event..
+
+        if self.applications.contains_key(&process.pid) {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("{}: App {} already exists.", function_name!(), process.name),
+            ));
+        }
+        let app = Application::new(self.main_cid, process, self.events.clone())?;
+        if !app.observe()? {
+            return Err(Error::new(
+                ErrorKind::PermissionDenied,
+                format!(
+                    "{}: failed to register some observers {}",
+                    function_name!(),
+                    app.name()
+                ),
+            ));
+        }
+
+        debug!(
+            "{}: Adding {} to list of apps.",
+            function_name!(),
+            app.name()
+        );
+        self.applications.insert(app.pid(), app.clone());
+
+        let windows = self.add_application_windows(&app)?;
+        debug!(
+            "{}: Added windows {} for {}.",
+            function_name!(),
+            windows
+                .iter()
+                .map(|window| format!("{}", window.id()))
+                .collect::<Vec<_>>()
+                .join(", "),
+            app.name()
+        );
+
+        let active_panel = self.active_display()?.active_panel(self.main_cid)?;
+        let insert_at = self
+            .focused_window
+            .and_then(|window_id| active_panel.index_of(window_id).ok());
+        match insert_at {
+            Some(mut after) => {
+                for window in &windows {
+                    after = active_panel.insert_at(after, window.id())?;
+                }
+            }
+            None => windows.iter().for_each(|window| {
+                active_panel.append(window.id());
+            }),
+        };
+
+        if let Some(window) = windows.first() {
+            self.reshuffle_around(window)?;
+        }
+
+        Ok(())
     }
 }

@@ -66,7 +66,7 @@ struct InnerApplication {
 }
 
 impl Application {
-    pub fn from_process(main_cid: ConnID, process: &Process, events: EventSender) -> Result<Self> {
+    pub fn new(main_cid: ConnID, process: &Process, events: EventSender) -> Result<Self> {
         let refer = unsafe {
             let ptr = AXUIElementCreateApplication(process.pid);
             AxuWrapperType::retain(ptr)?

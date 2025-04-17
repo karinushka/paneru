@@ -14,7 +14,6 @@ use stdext::function_name;
 
 use crate::config::Config;
 use crate::platform::{ProcessSerialNumber, WorkspaceObserver};
-use crate::process::ProcessManager;
 use crate::skylight::{
     ConnID, SLSCopyAssociatedWindows, SLSFindWindowAndOwner, SLSMainConnectionID, WinID,
 };
@@ -176,7 +175,6 @@ pub struct EventHandler {
     tx: EventSender,
     rx: Receiver<Event>,
     main_cid: ConnID,
-    process_manager: ProcessManager,
     window_manager: WindowManager,
     initial_scan: bool,
 }
@@ -193,7 +191,6 @@ impl EventHandler {
             tx: sender.clone(),
             rx,
             main_cid,
-            process_manager: ProcessManager::default(),
             window_manager: WindowManager::new(sender, main_cid)?,
             initial_scan: true,
         })
@@ -249,7 +246,7 @@ impl EventHandler {
                     function_name!()
                 );
                 self.initial_scan = false;
-                self.window_manager.start(&mut self.process_manager);
+                self.window_manager.start();
             }
             Event::MouseDown { point } => {
                 return self.mouse_down(&point);
@@ -265,30 +262,19 @@ impl EventHandler {
             }
 
             Event::ApplicationLaunched { psn, observer } => {
-                let process = self.process_manager.process_add(&psn, observer)?;
-                if !self.initial_scan {
-                    debug!(
-                        "{}: ApplicationLaunched: {}",
-                        function_name!(),
-                        process.name
-                    );
-                    return process.application_launched(&mut self.window_manager);
+                if self.initial_scan {
+                    self.window_manager.add_existing_process(&psn, observer);
+                } else {
+                    debug!("{}: ApplicationLaunched: {psn:?}", function_name!(),);
+                    return self.window_manager.application_launched(&psn, observer);
                 }
             }
             Event::ApplicationTerminated { psn } => {
-                let pid = self
-                    .process_manager
-                    .processes
-                    .get(&psn)
-                    .map(|process| process.pid);
-                if let Some(pid) = pid {
-                    self.window_manager.delete_application(pid);
-                }
-                self.process_manager.process_delete(&psn);
+                debug!("{}: ApplicationTerminated: {psn:?}", function_name!(),);
+                self.window_manager.delete_application(&psn)
             }
             Event::ApplicationFrontSwitched { psn } => {
-                let process = self.process_manager.find_process(&psn)?;
-                self.window_manager.front_switched(process);
+                return self.window_manager.front_switched(&psn);
             }
 
             Event::WindowCreated { element } => {

@@ -566,7 +566,7 @@ impl Window {
     }
 
     fn make_key_window(&self) {
-        let psn = self.app().psn();
+        let psn = self.app().psn().unwrap();
         let window_id = self.id();
         //
         // :SynthesizedEvent
@@ -596,7 +596,7 @@ impl Window {
     // const CPS_NO_WINDOWS: u32 = 0x400;
 
     pub fn focus_without_raise(&self, window_manager: &WindowManager) {
-        let psn = self.app().psn();
+        let psn = self.app().psn().unwrap();
         let window_id = self.id();
         debug!("{}: {window_id}", function_name!());
         if window_manager.focused_psn == psn && window_manager.focused_window.is_some() {
@@ -630,7 +630,7 @@ impl Window {
     }
 
     pub fn focus_with_raise(&self) {
-        let psn = self.app().psn();
+        let psn = self.app().psn().unwrap();
         let window_id = self.id();
         unsafe {
             _SLPSSetFrontProcessWithOptions(&psn, window_id, Self::CPS_USER_GENERATED);
@@ -739,7 +739,6 @@ impl Window {
 pub struct WindowManager {
     pub events: EventSender,
     pub processes: HashMap<ProcessSerialNumber, Pin<Box<Process>>>,
-    pub applications: HashMap<Pid, Application>,
     pub main_cid: ConnID,
     last_window: Option<WinID>, // TODO: use this for "goto last window bind"
     pub focused_window: Option<WinID>,
@@ -766,7 +765,6 @@ impl WindowManager {
         Ok(WindowManager {
             events,
             processes: HashMap::new(),
-            applications: HashMap::new(),
             main_cid,
             last_window: None,
             focused_window: None,
@@ -791,7 +789,7 @@ impl WindowManager {
         if let Ok(window) = self.focused_window() {
             self.last_window = Some(window.id());
             self.focused_window = Some(window.id());
-            self.focused_psn = window.app().psn();
+            self.focused_psn = window.app().psn().unwrap();
         }
     }
 
@@ -821,13 +819,18 @@ impl WindowManager {
     }
 
     pub fn find_application(&self, pid: Pid) -> Option<Application> {
-        self.applications.get(&pid).cloned()
+        // self.applications.get(&pid).cloned()
+        self.processes
+            .values()
+            .find(|process| process.pid == pid)
+            .and_then(|process| process.get_app())
     }
 
     pub fn find_window(&self, window_id: WinID) -> Option<Window> {
-        self.applications
+        self.processes
             .values()
-            .find_map(|app| app.find_window(window_id))
+            .flat_map(|process| process.get_app().and_then(|app| app.find_window(window_id)))
+            .next()
     }
 
     fn space_window_list_for_connection(
@@ -921,14 +924,14 @@ impl WindowManager {
                 format!("{}: no spaces returned", function_name!()),
             ));
         }
-        self.space_window_list_for_connection(spaces, app.connection(), true)
+        self.space_window_list_for_connection(spaces, app.connection().ok(), true)
     }
 
     fn bruteforce_windows(&mut self, app: &Application, window_list: &mut Vec<WinID>) {
         debug!(
             "{}: App {} has unresolved window on other desktops, bruteforcing them.",
             function_name!(),
-            app.name()
+            app.name().unwrap()
         );
         //
         // NOTE(koekeishiya): MacOS API does not return AXUIElementRef of windows on inactive spaces.
@@ -957,7 +960,7 @@ impl WindowManager {
                 CFDataGetMutableBytePtr(data_ref.deref().into()),
                 BUFSIZE as usize,
             );
-            let bytes = app.pid().to_ne_bytes();
+            let bytes = app.pid().unwrap().to_ne_bytes();
             data[0x0..bytes.len()].copy_from_slice(&bytes);
             let bytes = MAGIC.to_ne_bytes();
             data[0x8..0x8 + bytes.len()].copy_from_slice(&bytes);
@@ -1021,22 +1024,19 @@ impl WindowManager {
         refresh_index: i32,
     ) -> Result<bool> {
         let mut result = false;
+        let name = app.name()?;
 
         let global_window_list = self.existing_application_window_list(app)?;
         if global_window_list.is_empty() {
             return Err(Error::new(
                 ErrorKind::InvalidData,
-                format!(
-                    "{}: No windows found for app {}",
-                    function_name!(),
-                    app.name(),
-                ),
+                format!("{}: No windows found for app {}", function_name!(), name,),
             ));
         }
         info!(
             "{}: App {} has global windows: {global_window_list:?}",
             function_name!(),
-            app.name()
+            name
         );
 
         let window_list = app.window_list();
@@ -1064,11 +1064,7 @@ impl WindowManager {
 
                 if self.find_window(window_id).is_none() {
                     let window_ref = AxuWrapperType::retain(window_ref.as_ptr())?;
-                    info!(
-                        "{}: Add window: {} {window_id}",
-                        function_name!(),
-                        app.name()
-                    );
+                    info!("{}: Add window: {} {window_id}", function_name!(), name);
                     _ = self
                         .create_and_add_window(app, window_ref, window_id, false)
                         .inspect_err(|err| debug!("{}: {err}", function_name!()));
@@ -1081,7 +1077,7 @@ impl WindowManager {
                 info!(
                     "{}: All windows for {} are now resolved",
                     function_name!(),
-                    app.name()
+                    name
                 );
                 result = true;
             }
@@ -1096,7 +1092,7 @@ impl WindowManager {
                 info!(
                     "{}: {} has windows that are not yet resolved",
                     function_name!(),
-                    app.name()
+                    name
                 );
                 self.bruteforce_windows(app, &mut app_window_list);
             }
@@ -1157,13 +1153,9 @@ impl WindowManager {
         };
         window.update_frame(&self.current_display_bounds()?)?;
 
-        let connection = app.connection().ok_or(Error::new(
-            ErrorKind::InvalidData,
-            format!("{}: invalid connection for window.", function_name!()),
-        ))?;
         let minimized = window.is_minimized();
         // window->is_root = !window_parent(window->id) || window_is_root(window);
-        let is_root = Window::parent(connection, window_id).is_err() || window.is_root();
+        let is_root = Window::parent(app.connection()?, window_id).is_err() || window.is_root();
         {
             let mut inner = window.inner.force_write();
             inner.minimized = minimized;
@@ -1178,6 +1170,7 @@ impl WindowManager {
         window_id: WinID,
         _one_shot_rules: bool, // TODO: fix
     ) -> Result<Window> {
+        let name = app.name()?;
         let window = self.new_window(app, window_ref, window_id)?;
         if window.is_unknown() {
             return Err(Error::new(
@@ -1185,7 +1178,7 @@ impl WindowManager {
                 format!(
                     "{}: Ignoring AXUnknown window, app: {} id: {}",
                     function_name!(),
-                    app.name(),
+                    name,
                     window.id()
                 ),
             ));
@@ -1197,7 +1190,7 @@ impl WindowManager {
                 format!(
                     "{}: Ignoring non-real window, app: {} id: {}",
                     function_name!(),
-                    app.name(),
+                    name,
                     window.id()
                 ),
             ));
@@ -1207,7 +1200,7 @@ impl WindowManager {
             "{}: created {} app: {} title: {} role: {} subrole: {}",
             function_name!(),
             window.id(),
-            app.name(),
+            name,
             window.title().unwrap_or_default(),
             window.role().unwrap_or_default(),
             window.subrole().unwrap_or_default(),
@@ -1266,7 +1259,7 @@ impl WindowManager {
                 return Ok(());
             }
         };
-        debug!("{}: {}", function_name!(), app.name());
+        debug!("{}: {}", function_name!(), app.name()?);
 
         match app.focused_window_id() {
             Err(_) => {
@@ -1279,7 +1272,7 @@ impl WindowManager {
 
                 self.last_window = self.focused_window;
                 self.focused_window = None;
-                self.focused_psn = app.psn();
+                self.focused_psn = app.psn()?;
                 self.ffm_window_id = None;
                 warn!("{}: reset focused window", function_name!());
             }
@@ -1320,7 +1313,7 @@ impl WindowManager {
             "{}: created {} app: {} title: {} role: {} subrole: {} element: {:x?}",
             function_name!(),
             window.id(),
-            app.name(),
+            app.name()?,
             window.title().unwrap_or_default(),
             window.role().unwrap_or_default(),
             window.subrole().unwrap_or_default(),
@@ -1392,7 +1385,7 @@ impl WindowManager {
         debug!("{}: {} getting focus", function_name!(), my_id);
         debug!("did_receive_focus: {} getting focus", my_id);
         self.focused_window = Some(my_id);
-        self.focused_psn = window.app().psn();
+        self.focused_psn = window.app().psn().unwrap();
         self.ffm_window_id = None;
 
         if self.skip_reshuffle {
@@ -1521,12 +1514,11 @@ impl WindowManager {
     }
 
     pub fn delete_application(&mut self, psn: &ProcessSerialNumber) {
-        let app = self
+        if let Some(app) = self
             .processes
             .remove(psn)
-            .map(|process| process.pid)
-            .and_then(|pid| self.applications.remove(&pid));
-        if let Some(app) = app {
+            .and_then(|process| process.get_app())
+        {
             app.foreach_window(|window| {
                 self.displays.iter().for_each(|display| {
                     display.remove_window(window.id());
@@ -1554,24 +1546,16 @@ impl WindowManager {
             self.processes.insert(psn.clone(), process);
             let process = self
                 .processes
-                .get(psn)
-                .expect("Unable to create new process");
-
-            let app = match Application::new(cid, process, events) {
-                Ok(app) => app,
-                Err(err) => {
-                    error!("{}: error creating applicatoin: {err}", function_name!());
-                    return;
-                }
-            };
+                .get_mut(psn)
+                .expect("Unable to find created process");
+            let app = process.create_application(cid, events).unwrap();
             debug!(
                 "{}: Application {} is observable",
                 function_name!(),
-                app.name()
+                app.name().unwrap()
             );
 
             if app.observe().is_ok_and(|result| result) {
-                self.applications.insert(app.pid(), app.clone());
                 _ = self
                     .add_existing_application_windows(&app, 0)
                     .inspect_err(|err| warn!("{}: {err}", function_name!()));
@@ -1590,99 +1574,64 @@ impl WindowManager {
         psn: &ProcessSerialNumber,
         observer: Retained<WorkspaceObserver>,
     ) -> Result<()> {
-        let process = Process::new(psn, observer);
-        if process.terminated {
-            return Err(Error::new(
-                ErrorKind::UnexpectedEof,
-                format!(
-                    "{}: {} ({}) terminated during launch",
-                    function_name!(),
-                    process.name,
-                    process.pid
-                ),
-            ));
-        }
-        self.processes.insert(psn.clone(), process);
-        let process = self.processes.get_mut(psn).ok_or(Error::new(
-            ErrorKind::OutOfMemory,
-            format!("{}: unable to find created process.", function_name!()),
-        ))?;
-
-        if !process.finished_launching() {
-            debug!(
-                "{}: {} ({}) is not finished launching, subscribing to finishedLaunching changes",
-                function_name!(),
-                process.name,
-                process.pid
-            );
-            process.observe_finished_launching();
-
-            // NOTE: Do this again in case of race-conditions between the previous check and
-            // key-value observation subscription. Not actually sure if this can happen in
-            // practice..
-
-            if !process.finished_launching() {
-                return Ok(());
-            }
-            process.unobserve_finished_launching();
-            warn!(
-                "{}: {} suddenly finished launching",
-                function_name!(),
-                process.name
-            );
+        if self.find_process(psn).is_none() {
+            let process = Process::new(psn, observer);
+            self.processes.insert(psn.clone(), process);
         }
 
-        if !process.is_observable() {
-            debug!(
-                "{}: {} ({}) is not observable, subscribing to activationPolicy changes",
-                function_name!(),
-                process.name,
-                process.pid
-            );
-            process.observe_activation_policy();
+        {
+            let process = self.processes.get_mut(psn).ok_or(Error::new(
+                ErrorKind::OutOfMemory,
+                format!("{}: unable to find created process.", function_name!()),
+            ))?;
+            if process.terminated {
+                return Err(Error::new(
+                    ErrorKind::UnexpectedEof,
+                    format!(
+                        "{}: {} ({}) terminated during launch",
+                        function_name!(),
+                        process.name,
+                        process.pid
+                    ),
+                ));
+            }
 
-            // NOTE: Do this again in case of race-conditions between the previous check and
-            // key-value observation subscription. Not actually sure if this can happen in
-            // practice..
-
-            if !process.is_observable() {
+            if !process.ready() {
                 return Ok(());
             }
-            process.unobserve_activation_policy();
-            warn!(
-                "{}: {} suddenly became observable",
-                function_name!(),
-                process.name
-            );
         }
 
         // NOTE: If we somehow receive a duplicate launched event due to the
         // subscription-timing-mess above, simply ignore the event..
 
-        if self.applications.contains_key(&process.pid) {
+        if self
+            .find_process(psn)
+            .is_some_and(|process| process.get_app().is_some())
+        {
             return Err(Error::new(
                 ErrorKind::InvalidData,
-                format!("{}: App {} already exists.", function_name!(), process.name),
+                format!("{}: App {psn:?} already exists.", function_name!()),
             ));
         }
-        let app = Application::new(self.main_cid, process, self.events.clone())?;
+
+        let process = self.processes.get_mut(psn).unwrap();
+        let app = process.create_application(self.main_cid, self.events.clone())?;
+        debug!(
+            "{}: Added {} to list of apps.",
+            function_name!(),
+            app.name()?
+        );
+
         if !app.observe()? {
             return Err(Error::new(
                 ErrorKind::PermissionDenied,
                 format!(
                     "{}: failed to register some observers {}",
                     function_name!(),
-                    app.name()
+                    app.name()?
                 ),
             ));
         }
-
-        debug!(
-            "{}: Adding {} to list of apps.",
-            function_name!(),
-            app.name()
-        );
-        self.applications.insert(app.pid(), app.clone());
 
         let windows = self.add_application_windows(&app)?;
         debug!(
@@ -1693,7 +1642,7 @@ impl WindowManager {
                 .map(|window| format!("{}", window.id()))
                 .collect::<Vec<_>>()
                 .join(", "),
-            app.name()
+            app.name()?
         );
 
         let active_panel = self.active_display()?.active_panel(self.main_cid)?;

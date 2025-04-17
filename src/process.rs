@@ -1,20 +1,25 @@
-use log::debug;
+use log::{debug, warn};
 use objc2::rc::Retained;
 use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication};
 use objc2_foundation::{
     NSKeyValueObservingOptions, NSObjectNSKeyValueObserverRegistration, NSString,
 };
+use std::io::{Error, ErrorKind, Result};
 use std::ops::Deref;
 use std::pin::Pin;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 use stdext::function_name;
 
+use crate::app::{Application, InnerApplication};
+use crate::events::EventSender;
 use crate::platform::{Pid, ProcessInfo, ProcessSerialNumber, WorkspaceObserver, get_process_info};
+use crate::skylight::ConnID;
 
-#[derive(Debug)]
 #[repr(C)]
 pub struct Process {
+    pub app: Option<Arc<RwLock<InnerApplication>>>,
     pub psn: ProcessSerialNumber,
     pub pid: Pid,
     pub name: String,
@@ -49,6 +54,7 @@ impl Process {
             unsafe { NSRunningApplication::runningApplicationWithProcessIdentifier(pinfo.pid) };
 
         Box::pin(Process {
+            app: None,
             psn: psn.clone(),
             name,
             pid: pinfo.pid,
@@ -58,6 +64,12 @@ impl Process {
             observer,
             observing_launched: AtomicBool::new(false),
             observing_activated: AtomicBool::new(false),
+        })
+    }
+
+    pub fn get_app(&self) -> Option<Application> {
+        self.app.as_ref().map(|app| Application {
+            inner: Arc::downgrade(app),
         })
     }
 
@@ -137,5 +149,65 @@ impl Process {
                 &self.name
             );
         }
+    }
+
+    pub fn ready(&mut self) -> bool {
+        if !self.finished_launching() {
+            debug!(
+                "{}: {} ({}) is not finished launching, subscribing to finishedLaunching changes",
+                function_name!(),
+                self.name,
+                self.pid
+            );
+            self.observe_finished_launching();
+
+            // NOTE: Do this again in case of race-conditions between the previous check and
+            // key-value observation subscription. Not actually sure if this can happen in
+            // practice..
+
+            if !self.finished_launching() {
+                return false;
+            }
+            self.unobserve_finished_launching();
+            warn!(
+                "{}: {} suddenly finished launching",
+                function_name!(),
+                self.name
+            );
+        }
+
+        if !self.is_observable() {
+            debug!(
+                "{}: {} ({}) is not observable, subscribing to activationPolicy changes",
+                function_name!(),
+                self.name,
+                self.pid
+            );
+            self.observe_activation_policy();
+
+            // NOTE: Do this again in case of race-conditions between the previous check and
+            // key-value observation subscription. Not actually sure if this can happen in
+            // practice..
+
+            if !self.is_observable() {
+                return false;
+            }
+            self.unobserve_activation_policy();
+            warn!(
+                "{}: {} suddenly became observable",
+                function_name!(),
+                self.name
+            );
+        }
+        true
+    }
+
+    pub fn create_application(&mut self, cid: ConnID, events: EventSender) -> Result<Application> {
+        let app = Arc::new(RwLock::new(InnerApplication::new(cid, self, events)?));
+        self.app = Some(app);
+        self.get_app().ok_or(Error::new(
+            ErrorKind::NotFound,
+            format!("{}: unable to find added application.", function_name!(),),
+        ))
     }
 }

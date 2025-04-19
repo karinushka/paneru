@@ -853,16 +853,16 @@ impl WindowManager {
         unsafe {
             let space_list_ref = create_array(spaces, CFNumberType::SInt64Type)?;
 
-            let set_tags = 0i64;
-            let clear_tags = 0i64;
+            let mut set_tags = 0i64;
+            let mut clear_tags = 0i64;
             let options = if also_minimized { 0x7 } else { 0x2 };
             let ptr = NonNull::new(SLSCopyWindowsWithOptionsAndTags(
                 self.main_cid,
                 cid.unwrap_or(0),
                 space_list_ref.deref(),
                 options,
-                &set_tags,
-                &clear_tags,
+                &mut set_tags,
+                &mut clear_tags,
             ))
             .ok_or(Error::new(
                 ErrorKind::InvalidInput,
@@ -896,6 +896,10 @@ impl WindowManager {
                 let parent_wid: WinID = SLSWindowIteratorGetParentID(iterator.deref());
                 let wid: WinID = SLSWindowIteratorGetWindowID(iterator.deref());
 
+                trace!(
+                    "{}: id: {wid} parent: {parent_wid} tags: 0x{tags:x} attributes: 0x{attributes:x}",
+                    function_name!()
+                );
                 match self.find_window(wid) {
                     Some(window) => {
                         if also_minimized || !window.is_minimized() {
@@ -903,16 +907,7 @@ impl WindowManager {
                         }
                     }
                     None => {
-                        if parent_wid == 0
-                            && ((0 != (attributes & 0x2) || 0 != (tags & 0x400000000000000))
-                                && (0 != (tags & 0x1)
-                                    || (0 != (tags & 0x2) && 0 != (tags & 0x80000000))))
-                            || ((attributes == 0x0 || attributes == 0x1)
-                                && (0 != (tags & 0x1000000000000000)
-                                    || 0 != (tags & 0x300000000000000))
-                                && (0 != (tags & 0x1)
-                                    || (0 != (tags & 0x2) && 0 != (tags & 0x80000000))))
-                        {
+                        if WindowManager::found_valid_window(parent_wid, attributes, tags) {
                             window_list.push(wid);
                         }
                     }
@@ -920,6 +915,15 @@ impl WindowManager {
             }
             Ok(window_list)
         }
+    }
+
+    fn found_valid_window(parent_wid: WinID, attributes: i64, tags: i64) -> bool {
+        parent_wid == 0
+            && ((0 != (attributes & 0x2) || 0 != (tags & 0x400000000000000))
+                && (0 != (tags & 0x1) || (0 != (tags & 0x2) && 0 != (tags & 0x80000000))))
+            || ((attributes == 0x0 || attributes == 0x1)
+                && (0 != (tags & 0x1000000000000000) || 0 != (tags & 0x300000000000000))
+                && (0 != (tags & 0x1) || (0 != (tags & 0x2) && 0 != (tags & 0x80000000))))
     }
 
     fn existing_application_window_list(&self, app: &Application) -> Result<Vec<WinID>> {

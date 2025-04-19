@@ -37,8 +37,8 @@ unsafe extern "C" {
         owner: ConnID,
         spaces: *const CFArray,
         options: i32,
-        set_tags: &i64,
-        clear_tags: &i64,
+        set_tags: &mut i64,
+        clear_tags: &mut i64,
     ) -> *mut CFArray;
     // extern int SLSGetSpaceManagementMode(int cid);
     pub fn SLSGetSpaceManagementMode(cid: ConnID) -> i32;

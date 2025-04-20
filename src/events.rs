@@ -178,6 +178,8 @@ pub struct EventHandler {
     main_cid: ConnID,
     window_manager: WindowManager,
     initial_scan: bool,
+    mouse_down_window: Option<Window>,
+    down_location: CGPoint,
 }
 
 impl EventHandler {
@@ -194,6 +196,8 @@ impl EventHandler {
             main_cid,
             window_manager: WindowManager::new(sender, main_cid),
             initial_scan: true,
+            mouse_down_window: None,
+            down_location: CGPoint::default(),
         })
     }
 
@@ -236,11 +240,6 @@ impl EventHandler {
         match event {
             Event::Exit => return Ok(()),
 
-            Event::ConfigRefresh { config } => {
-                debug!("{}: Got fresh config: {config:?}", function_name!());
-                self.reload_config(&config);
-            }
-
             Event::ProcessesLoaded => {
                 info!(
                     "{}: === Processes loaded - loading windows ===",
@@ -270,46 +269,9 @@ impl EventHandler {
                     return self.window_manager.application_launched(&psn, observer);
                 }
             }
-            Event::ApplicationTerminated { psn } => {
-                debug!("{}: ApplicationTerminated: {psn:?}", function_name!(),);
-                self.window_manager.delete_application(&psn)
-            }
-            Event::ApplicationFrontSwitched { psn } => {
-                return self.window_manager.front_switched(&psn);
-            }
-
-            Event::WindowCreated { element } => {
-                return self.window_manager.window_created(element);
-            }
-            Event::WindowDestroyed { window_id } => self.window_manager.window_destroyed(window_id),
             Event::WindowFocused { window_id } => self.window_focused(window_id),
-            Event::WindowMoved { window_id } => self.window_manager.window_moved(window_id),
-            Event::WindowResized { window_id } => {
-                return self.window_manager.window_resized(window_id);
-            }
             Event::WindowTitleChanged { window_id } => {
                 trace!("{}: WindowTitleChanged: {window_id:?}", function_name!());
-            }
-
-            Event::MissionControlShowAllWindows
-            | Event::MissionControlShowFrontWindows
-            | Event::MissionControlShowDesktop => {
-                self.window_manager.mission_control_is_active = true;
-            }
-            Event::MissionControlExit => {
-                self.window_manager.mission_control_is_active = false;
-            }
-
-            Event::WindowMinimized { window_id } => {
-                self.window_manager
-                    .active_display()?
-                    .remove_window(window_id);
-            }
-            Event::WindowDeminimized { window_id } => {
-                self.window_manager
-                    .active_display()?
-                    .active_panel(self.main_cid)?
-                    .append(window_id);
             }
 
             Event::Command { argv } => self.command(argv),
@@ -322,13 +284,9 @@ impl EventHandler {
                 self.key_pressed(key, modifier);
             }
 
-            _ => info!("{}: Unhandled event {event:?}", function_name!()),
+            _ => self.window_manager.process_event(event)?,
         }
         Ok(())
-    }
-
-    fn reload_config(&mut self, config: &Config) {
-        self.window_manager.focus_follows_mouse = config.options().focus_follows_mouse;
     }
 
     fn key_pressed(&self, key: i64, eventflags: CGEventFlags) {
@@ -558,7 +516,7 @@ impl EventHandler {
 
     fn mouse_down(&mut self, point: &CGPoint) -> Result<()> {
         info!("{}: {point:?}", function_name!());
-        if self.window_manager.mission_control_is_active {
+        if self.window_manager.mission_control_is_active() {
             return Ok(());
         }
 
@@ -567,8 +525,8 @@ impl EventHandler {
             self.window_manager.reshuffle_around(&window)?;
         }
 
-        self.window_manager.mouse_down_window = Some(window);
-        self.window_manager.down_location = *point;
+        self.mouse_down_window = Some(window);
+        self.down_location = *point;
 
         Ok(())
     }
@@ -580,17 +538,17 @@ impl EventHandler {
     fn mouse_dragged(&self, point: &CGPoint) {
         info!("{}: {point:?}", function_name!());
 
-        if self.window_manager.mission_control_is_active {
+        if self.window_manager.mission_control_is_active() {
             #[warn(clippy::needless_return)]
             return;
         }
     }
 
     fn mouse_moved(&mut self, point: &CGPoint) -> Result<()> {
-        if !self.window_manager.focus_follows_mouse {
+        if !self.window_manager.focus_follows_mouse() {
             return Ok(());
         }
-        if self.window_manager.mission_control_is_active {
+        if self.window_manager.mission_control_is_active() {
             return Ok(());
         }
         if self.window_manager.ffm_window_id.is_some() {

@@ -3,7 +3,7 @@ use log::{debug, error, info, trace, warn};
 use objc2::rc::Retained;
 use objc2_core_foundation::{
     CFArrayGetCount, CFDataCreateMutable, CFDataGetMutableBytePtr, CFDataIncreaseLength,
-    CFNumberType, CFRetained, CGPoint, CGRect,
+    CFNumberType, CFRetained, CGRect,
 };
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result};
@@ -13,7 +13,8 @@ use std::slice::from_raw_parts_mut;
 use stdext::function_name;
 
 use crate::app::Application;
-use crate::events::EventSender;
+use crate::config::Config;
+use crate::events::{Event, EventSender};
 use crate::platform::{Pid, ProcessSerialNumber, WorkspaceObserver};
 use crate::process::Process;
 use crate::skylight::{
@@ -28,19 +29,17 @@ use crate::windows::{Display, Window, WindowPane, ax_window_id, ax_window_pid};
 const THRESHOLD: f64 = 10.0;
 
 pub struct WindowManager {
-    pub events: EventSender,
-    pub processes: HashMap<ProcessSerialNumber, Pin<Box<Process>>>,
-    pub main_cid: ConnID,
+    events: EventSender,
+    processes: HashMap<ProcessSerialNumber, Pin<Box<Process>>>,
+    main_cid: ConnID,
     last_window: Option<WinID>, // TODO: use this for "goto last window bind"
     pub focused_window: Option<WinID>,
     pub focused_psn: ProcessSerialNumber,
     pub ffm_window_id: Option<WinID>,
-    pub mission_control_is_active: bool,
+    mission_control_is_active: bool,
     pub skip_reshuffle: bool,
-    pub mouse_down_window: Option<Window>,
-    pub down_location: CGPoint,
     displays: Vec<Display>,
-    pub focus_follows_mouse: bool,
+    focus_follows_mouse: bool,
 }
 
 impl WindowManager {
@@ -55,11 +54,56 @@ impl WindowManager {
             ffm_window_id: None,
             mission_control_is_active: false,
             skip_reshuffle: false,
-            mouse_down_window: None,
-            down_location: CGPoint::default(),
             displays: Display::present_displays(main_cid),
             focus_follows_mouse: true,
         }
+    }
+
+    pub fn process_event(&mut self, event: Event) -> Result<()> {
+        match event {
+            Event::ApplicationTerminated { psn } => self.delete_application(&psn),
+            Event::ApplicationFrontSwitched { psn } => self.front_switched(&psn)?,
+
+            Event::WindowCreated { element } => self.window_created(element)?,
+            Event::WindowDestroyed { window_id } => self.window_destroyed(window_id),
+            Event::WindowMoved { window_id } => self.window_moved(window_id),
+            Event::WindowResized { window_id } => self.window_resized(window_id)?,
+
+            Event::MissionControlShowAllWindows
+            | Event::MissionControlShowFrontWindows
+            | Event::MissionControlShowDesktop => {
+                self.mission_control_is_active = true;
+            }
+            Event::MissionControlExit => {
+                self.mission_control_is_active = false;
+            }
+
+            Event::WindowMinimized { window_id } => {
+                self.active_display()?.remove_window(window_id);
+            }
+            Event::WindowDeminimized { window_id } => {
+                self.active_display()?
+                    .active_panel(self.main_cid)?
+                    .append(window_id);
+            }
+
+            Event::ConfigRefresh { config } => {
+                self.reload_config(config);
+            }
+
+            _ => {
+                return Err(Error::new(
+                    ErrorKind::NotFound,
+                    format!("Unhandled event {event:?}"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn reload_config(&mut self, config: Config) {
+        debug!("{}: Got fresh config: {config:?}", function_name!());
+        self.focus_follows_mouse = config.options().focus_follows_mouse;
     }
 
     pub fn refresh_displays(&mut self) -> Result<()> {
@@ -120,11 +164,11 @@ impl WindowManager {
             });
     }
 
-    pub fn find_process(&self, psn: &ProcessSerialNumber) -> Option<&Process> {
+    fn find_process(&self, psn: &ProcessSerialNumber) -> Option<&Process> {
         self.processes.get(psn).map(|process| process.deref())
     }
 
-    pub fn find_application(&self, pid: Pid) -> Option<Application> {
+    fn find_application(&self, pid: Pid) -> Option<Application> {
         self.processes
             .values()
             .find(|process| process.pid == pid)
@@ -136,6 +180,10 @@ impl WindowManager {
             .values()
             .flat_map(|process| process.get_app().and_then(|app| app.find_window(window_id)))
             .next()
+    }
+
+    pub fn mission_control_is_active(&self) -> bool {
+        self.mission_control_is_active
     }
 
     fn space_window_list_for_connection(
@@ -388,7 +436,7 @@ impl WindowManager {
         Ok(result)
     }
 
-    pub fn add_application_windows(&mut self, app: &Application) -> Result<Vec<Window>> {
+    fn add_application_windows(&mut self, app: &Application) -> Result<Vec<Window>> {
         // TODO: maybe refactor this with add_existing_application_windows()
         let array = app.window_list()?;
         let create_window = |element_ref: NonNull<_>| {
@@ -491,7 +539,7 @@ impl WindowManager {
         ))
     }
 
-    pub fn front_switched(&mut self, psn: &ProcessSerialNumber) -> Result<()> {
+    fn front_switched(&mut self, psn: &ProcessSerialNumber) -> Result<()> {
         let process = self.find_process(psn).ok_or(std::io::Error::new(
             ErrorKind::NotFound,
             format!("{}: Psn {:?} not found.", function_name!(), psn),
@@ -535,7 +583,7 @@ impl WindowManager {
         Ok(())
     }
 
-    pub fn window_created(&mut self, ax_element: CFRetained<AxuWrapperType>) -> Result<()> {
+    fn window_created(&mut self, ax_element: CFRetained<AxuWrapperType>) -> Result<()> {
         let window_id = ax_window_id(ax_element.as_ptr())?;
         if self.find_window(window_id).is_some() {
             return Err(Error::new(
@@ -580,7 +628,7 @@ impl WindowManager {
         Ok(())
     }
 
-    pub fn window_destroyed(&mut self, window_id: WinID) {
+    fn window_destroyed(&mut self, window_id: WinID) {
         self.displays.iter().for_each(|display| {
             display.remove_window(window_id);
         });
@@ -604,11 +652,11 @@ impl WindowManager {
         }
     }
 
-    pub fn window_moved(&self, _window_id: WinID) {
+    fn window_moved(&self, _window_id: WinID) {
         //
     }
 
-    pub fn window_resized(&self, window_id: WinID) -> Result<()> {
+    fn window_resized(&self, window_id: WinID) -> Result<()> {
         if let Some(window) = self.find_window(window_id) {
             window.update_frame(&self.current_display_bounds()?)?;
             self.reshuffle_around(&window)?;
@@ -717,7 +765,8 @@ impl WindowManager {
             ))
     }
 
-    pub fn delete_application(&mut self, psn: &ProcessSerialNumber) {
+    fn delete_application(&mut self, psn: &ProcessSerialNumber) {
+        debug!("{}: {psn:?}", function_name!(),);
         if let Some(app) = self
             .processes
             .remove(psn)
@@ -871,5 +920,9 @@ impl WindowManager {
         }
 
         Ok(())
+    }
+
+    pub fn focus_follows_mouse(&self) -> bool {
+        self.focus_follows_mouse
     }
 }

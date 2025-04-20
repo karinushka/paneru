@@ -300,6 +300,18 @@ impl EventHandler {
                 self.window_manager.mission_control_is_active = false;
             }
 
+            Event::WindowMinimized { window_id } => {
+                self.window_manager
+                    .active_display()?
+                    .remove_window(window_id);
+            }
+            Event::WindowDeminimized { window_id } => {
+                self.window_manager
+                    .active_display()?
+                    .active_panel(self.main_cid)?
+                    .append(window_id);
+            }
+
             Event::Command { argv } => self.command(argv),
 
             Event::MenuClosed { window_id } => {

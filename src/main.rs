@@ -8,6 +8,7 @@ use stdext::function_name;
 mod app;
 mod config;
 mod events;
+mod manager;
 mod platform;
 mod process;
 mod skylight;

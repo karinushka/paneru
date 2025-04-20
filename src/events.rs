@@ -13,12 +13,13 @@ use std::thread::JoinHandle;
 use stdext::function_name;
 
 use crate::config::Config;
+use crate::manager::WindowManager;
 use crate::platform::{ProcessSerialNumber, WorkspaceObserver};
 use crate::skylight::{
     ConnID, SLSCopyAssociatedWindows, SLSFindWindowAndOwner, SLSMainConnectionID, WinID,
 };
 use crate::util::{AxuWrapperType, get_array_values};
-use crate::windows::{Window, WindowManager, WindowPane};
+use crate::windows::{Window, WindowPane};
 
 #[allow(dead_code)]
 #[derive(Debug)]

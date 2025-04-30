@@ -107,12 +107,32 @@ impl WindowManager {
     }
 
     pub fn refresh_displays(&mut self) -> Result<()> {
+        let old_displays = std::mem::take(&mut self.displays);
         self.displays = Display::present_displays(self.main_cid);
         if self.displays.is_empty() {
             return Err(Error::new(
                 ErrorKind::NotFound,
                 format!("{}: Can not find any displays?!", function_name!()),
             ));
+        }
+
+        for old_display in old_displays {
+            if self
+                .displays
+                .iter()
+                .all(|display| old_display.id != display.id)
+            {
+                let id = Display::active_display_id(self.main_cid)?;
+                if let Some(current) = self.displays.iter_mut().find(|display| display.id == id) {
+                    current.spaces = old_display.spaces;
+                } else {
+                    let id = Display::active_display_id(self.main_cid)?;
+                    if let Some(current) = self.displays.iter_mut().find(|display| display.id == id)
+                    {
+                        current.spaces = old_display.spaces;
+                    }
+                }
+            }
         }
 
         let display_bounds = self.current_display_bounds()?;
@@ -123,23 +143,16 @@ impl WindowManager {
                 // Adjust window sizes to the current display.
                 pane.access_right_of(pane.first()?, |window_id| {
                     if let Some(window) = self.find_window(window_id) {
-                        let ratio = window.inner().width_ratio;
-                        window.resize(
-                            display_bounds.size.width * ratio,
-                            display_bounds.size.height,
-                            &display_bounds,
-                        );
+                        _ = window.update_frame(&display_bounds);
                     }
                     true // continue through all windows.
                 })?;
+                if let Some(window) = self.find_window(pane.first()?) {
+                    _ = window.update_frame(&display_bounds);
+                }
             }
         }
 
-        if let Ok(window) = self.focused_window() {
-            self.last_window = Some(window.id());
-            self.focused_window = Some(window.id());
-            self.focused_psn = window.app().psn()?;
-        }
         Ok(())
     }
 
@@ -537,6 +550,16 @@ impl WindowManager {
                 function_name!()
             ),
         ))
+    }
+
+    pub fn set_focused_window(&mut self) -> Result<()> {
+        if let Ok(window) = self.focused_window() {
+            self.last_window = Some(window.id());
+            self.focused_window = Some(window.id());
+            self.focused_psn = window.app().psn()?;
+            self.reshuffle_around(&window)?;
+        }
+        Ok(())
     }
 
     fn front_switched(&mut self, psn: &ProcessSerialNumber) -> Result<()> {

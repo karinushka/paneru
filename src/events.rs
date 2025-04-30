@@ -246,7 +246,8 @@ impl EventHandler {
                     function_name!()
                 );
                 self.initial_scan = false;
-                return self.window_manager.refresh_displays();
+                self.window_manager.refresh_displays()?;
+                return self.window_manager.set_focused_window();
             }
             Event::MouseDown { point } => {
                 return self.mouse_down(&point);

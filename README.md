@@ -4,51 +4,58 @@ A sliding, tiling window manager for MacOS.
 
 ## About
 
-Windows are arranged on an infinite strip going to the right.
-Opening a new window never causes existing windows to resize.
+Paneru is a MacOS window manager that arranges windows on an infinite strip,
+extending to the right. A core principle is that opening a new window will
+**never** cause existing windows to resize, maintaining your layout stability.
 
-Every monitor has its own separate window strip.
-Windows can never "overflow" onto an adjacent monitor.
+Each monitor operates with its own independent window strip, ensuring that
+windows remain confined to their respective displays and do not "overflow" onto
+adjacent monitors.
 
-## Why
+## Why Paneru?
 
-- Standard tiling window managers are sub-optimal for large displays.
-  You are either looking at huge maximised windows or a bunch of very small windows.
-- They are also bad for small displays (e.g. a laptop).
-  One ends up maximising all of the windows, becausing tiling them makes the windows too small to be usable.
-- Wanted to emulate [Niri] behavior on MacOS.
-- Learn stuff about MacOS API and Objective C.
-- Good way to practice Rust.
+- **Optimal for Large Displays:** Standard tiling window managers can be
+  suboptimal for large displays, often resulting in either huge maximized
+  windows or numerous tiny, unusable windows. Paneru addresses this by
+  providing a more flexible and practical arrangement.
+- **Improved Small Display Usability:** On smaller displays (like laptops),
+  traditional tiling can make windows too small to be productive, forcing users
+  to constantly maximize. Paneru's sliding strip approach aims to provide a
+  better experience without this compromise.
+- **Niri-like Behavior on MacOS:** Inspired by the user experience of [Niri],
+  Paneru aims to bring a similar scrollable tiling workflow to MacOS.
+- **Learning Opportunity:** This project serves as a hands-on opportunity to
+  delve into the MacOS API and Objective-C, as well as to deepen understanding
+  and practice Rust programming.
 
 ## Inspiration
 
-The code is heavily inspired by another excellent MacOS window manager - [Yabai].
-Reading its source allows for a deep understanding on how to manage windows on MacOS,
-especially the undocumented functions!
+The fundamental architecture and window management techniques are heavily
+inspired by [Yabai], another excellent MacOS window manager. Studying its
+source code has provided invaluable insights into managing windows on MacOS,
+particularly regarding undocumented functions.
 
-The managing of windows on a sliding strip is inspired by [Niri] and [PaperWM.spoon].
+The innovative concept of managing windows on a sliding strip is directly
+inspired by [Niri] and [PaperWM.spoon].
 
 ## Installation
 
-The window manager is working in a basic state.
+Paneru is currently in a basic, working state.
 
 ### Building
 
-Due to pecularity of some MacOS internal libraries, standard Rust linker is unable to
-link to some of them - it gets a message saying "you are not allowed to link to this library".
-To avoid this a simple Zig wrapper is made around the Private Frameworks, which is then linked into Rust.
-
-The first step builds the Zig wrapper and the second builds the Rust binary itself:
+Paneru is built using Rust's `cargo`.
 
 ```shell
-$ zig build
 $ cargo build --target release
 $ cp target/release/paneru ~/bin/
 ```
 
 ### Configuration
 
-Drop following configuration lines into your `~/.paneru` file:
+To configure Paneru, create a configuration file named .paneru in your home
+directory (`~/.paneru`). You can use the following example configuration as a
+starting point:
 
 ```
 # syntax=toml
@@ -68,11 +75,11 @@ window_focus_east = "cmd - l"
 window_swap_west = "alt - h"
 window_swap_east = "alt - l"
 
-# Jump to the left most or right most windows.
+# Jump to the left-most or right-most windows.
 window_focus_first = "cmd + shift - h"
 window_focus_last = "cmd + shift - l"
 
-# Move the current window into the left most or right most positions.
+# Move the current window into the left-most or right-most positions.
 window_swap_first = "alt + shift - h"
 window_swap_last = "alt + shift - l"
 
@@ -89,8 +96,15 @@ window_manage = "ctrl + alt - t"
 quit = "ctrl + alt - q"
 ```
 
-The settings can be changed while Paneru is running - they will be automatically reloaded.
+**Live Reloading:** Configuration changes made to your `~/.paneru` file are
+automatically reloaded while Paneru is running. This is extremely useful for
+tweaking keyboard bindings and other settings without restarting the
+application. The settings can be changed while Paneru is running - they will
+be automatically reloaded.
+
 Very useful for tweaking keyboard bindings.
+
+### Running
 
 Start the main binary without any parameters:
 
@@ -104,7 +118,7 @@ You can change the default `info` log level to more verbose levels (`debug`, `tr
 $ RUST_LOG=debug cargo run paneru
 ```
 
-## TODO
+## Future Enhancements
 
 - More commands for manipulating windows: fullscreen, finegrained size adjustments, etc.
 - Multiple windows stacked into the same column.
@@ -114,7 +128,7 @@ $ RUST_LOG=debug cargo run paneru
 ## Architecture Overview
 
 The overall architecture is layered, with a platform interaction layer at the base.
-This bottom layer, primarily within `platform.rs`, interfaces directly with the macOS operating system via Objective-C and Core Graphics APIs.
+This bottom layer, primarily within `platform.rs`, interfaces directly with the MacOS operating system via Objective-C and Core Graphics APIs.
 It runs the main RunLoop in the main thread, receiving OS-level events and acting as the bridge between the operating system and the application's logic.
 Events captured by this layer, such as window events, application state changes, and mouse events, are then pushed into a multiple-producer single-consumer (MPSC) queue.
 

@@ -1,6 +1,7 @@
 use log::{debug, warn};
 use objc2::rc::Retained;
 use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication};
+use objc2_core_foundation::{CFRetained, CFString};
 use objc2_foundation::{
     NSKeyValueObservingOptions, NSObjectNSKeyValueObserverRegistration, NSString,
 };
@@ -14,8 +15,63 @@ use stdext::function_name;
 
 use crate::app::{Application, InnerApplication};
 use crate::events::EventSender;
-use crate::platform::{Pid, ProcessInfo, ProcessSerialNumber, WorkspaceObserver, get_process_info};
-use crate::skylight::ConnID;
+use crate::platform::{Pid, ProcessSerialNumber, WorkspaceObserver};
+use crate::skylight::{ConnID, OSStatus};
+
+unsafe extern "C" {
+    /// Get a copy of the name of a process.
+    ///
+    /// # Deprecated
+    /// Use the `localizedName` property of the appropriate `NSRunningApplication` object.
+    ///
+    /// # Discussion
+    /// Use this call to get the name of a process as a `CFString`. The name returned is a copy,
+    /// so the caller must `CFRelease` the name when finished with it. The difference between
+    /// this call and the `processName` field filled in by `GetProcessInformation` is that
+    /// the name here is a `CFString`, and thus is capable of representing a multi-lingual name,
+    /// whereas previously only a mac-encoded string was possible.
+    ///
+    /// # Mac OS X threading
+    /// Thread safe since version 10.3
+    ///
+    /// # Arguments
+    ///
+    /// * `psn` - Serial number of the target process.
+    /// * `name` - `CFString` representing the name of the process (must be released by caller with `CFRelease`).
+    ///
+    /// # Returns
+    ///
+    /// An `OSStatus` indicating success or failure.
+    ///
+    /// # Original signature:
+    /// OSStatus CopyProcessName(const ProcessSerialNumber *psn, CFStringRef *name);
+    fn CopyProcessName(psn: *const ProcessSerialNumber, name: *mut *const CFString) -> OSStatus;
+
+    /// Get the UNIX process ID corresponding to a process.
+    ///
+    /// # Deprecated
+    /// Use the `processIdentifier` property of the appropriate `NSRunningApplication` object.
+    ///
+    /// # Discussion
+    /// Given a Process serial number, this call will get the UNIX process ID for that process.
+    /// Note that this call does not make sense for Classic apps, since they all share a single
+    /// UNIX process ID.
+    ///
+    /// # Mac OS X threading
+    /// Thread safe since version 10.3
+    ///
+    /// # Arguments
+    ///
+    /// * `psn` - Serial number of the target process.
+    /// * `pid` - UNIX process ID of the process.
+    ///
+    /// # Returns
+    ///
+    /// An `OSStatus` indicating success or failure.
+    /// # Original signature:
+    /// OSStatus GetProcessPID(const ProcessSerialNumber *psn, pid_t *pid);
+    fn GetProcessPID(psn: *const ProcessSerialNumber, pid: *mut Pid) -> OSStatus;
+}
 
 #[repr(C)]
 pub struct Process {
@@ -52,24 +108,25 @@ impl Process {
     ///
     /// A `Pin<Box<Self>>` containing the new `Process` instance.
     pub fn new(psn: &ProcessSerialNumber, observer: Retained<WorkspaceObserver>) -> Pin<Box<Self>> {
-        let mut pinfo = ProcessInfo::default();
-        unsafe {
-            get_process_info(psn, &mut pinfo);
-        }
-        let name = NonNull::new(pinfo.name.cast_mut())
-            .map(|s| unsafe { s.as_ref() }.to_string())
+        let mut pid: Pid = 0;
+        unsafe { GetProcessPID(psn, NonNull::from(&mut pid).as_ptr()) };
+
+        let mut nameref: *const CFString = std::ptr::null();
+        unsafe { CopyProcessName(psn, &mut nameref) };
+        let name = NonNull::new(nameref.cast_mut())
+            .map(|ptr| unsafe { CFRetained::from_raw(ptr) })
+            .map(|name| name.to_string())
             .unwrap_or_default();
 
         // [[NSRunningApplication runningApplicationWithProcessIdentifier:process->pid] retain];
-        let apps =
-            unsafe { NSRunningApplication::runningApplicationWithProcessIdentifier(pinfo.pid) };
+        let apps = unsafe { NSRunningApplication::runningApplicationWithProcessIdentifier(pid) };
 
         Box::pin(Process {
             app: None,
             psn: psn.clone(),
             name,
-            pid: pinfo.pid,
-            terminated: pinfo.terminated,
+            pid,
+            terminated: false,
             application: apps,
             policy: NSApplicationActivationPolicy::Prohibited,
             observer,

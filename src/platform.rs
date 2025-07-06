@@ -116,50 +116,185 @@ pub struct ProcessSerialNumber {
     pub low: u32,
 }
 
-#[derive(Debug)]
-#[repr(C)]
-pub struct ProcessInfo {
-    pub pid: Pid,
-    pub name: CFStringRef,
-    ns_application: *const c_void,
-    policy: i32,
-    pub terminated: bool,
-}
-
-impl Default for ProcessInfo {
-    fn default() -> Self {
-        ProcessInfo {
-            pid: 0,
-            name: std::ptr::null(),
-            ns_application: std::ptr::null(),
-            policy: 0,
-            terminated: false,
-        }
-    }
-}
-
 type ProcessCallbackFn = extern "C-unwind" fn(
     this: *mut c_void,
-    psn: &ProcessSerialNumber,
-    event: ProcessEventApp,
+    event: *const ProcessEvent,
+    context: *const c_void,
 ) -> OSStatus;
 
-#[link(name = "private")]
-unsafe extern "C-unwind" {
-    fn setup_process_handler(callback: ProcessCallbackFn, this: *mut c_void) -> *const c_void;
-    fn remove_process_handler(handler: *const c_void) -> c_void;
-    /// Retrieves information about a process given its `ProcessSerialNumber`.
-    /// This function is declared as `extern "C-unwind"` because it interacts with C code that might unwind.
+unsafe extern "C" {
+    /// Retrieves the application event target.
+    ///
+    /// # Returns
+    ///
+    /// A raw pointer to an `EventTargetRef` for the application.
+    ///
+    /// # Original signature
+    /// extern EventTargetRef GetApplicationEventTarget(void)
+    fn GetApplicationEventTarget() -> *const ProcessEventTarget;
+
+    /// Installs an event handler for a specific event target and event types.
     ///
     /// # Arguments
     ///
-    /// * `psn` - A reference to the `ProcessSerialNumber` of the process.
-    /// * `pi` - A mutable reference to a `ProcessInfo` struct where the process information will be stored.
+    /// * `target` - The `EventTargetRef` to install the handler on.
+    /// * `handler` - The `ProcessCallbackFn` to be called when events match.
+    /// * `event_len` - The number of event types in `events`.
+    /// * `events` - A raw pointer to an array of `EventTypeSpec` defining the events to handle.
+    /// * `user_data` - A raw pointer to user-defined data to pass to the handler.
+    /// * `handler_ref` - A mutable raw pointer to an `EventHandlerRef` where the installed handler
+    ///   reference will be stored.
     ///
     /// # Returns
     ///
     /// An `OSStatus` indicating success or failure.
-    pub fn get_process_info(psn: &ProcessSerialNumber, pi: &mut ProcessInfo) -> OSStatus;
+    ///
+    /// # Original signature
+    /// extern OSStatus
+    /// InstallEventHandler(
+    ///   EventTargetRef         inTarget,
+    ///   EventHandlerUPP        inHandler,
+    ///   ItemCount              inNumTypes,
+    ///   const EventTypeSpec *  inList,
+    ///   void *                 inUserData,
+    ///   EventHandlerRef *      outRef)
+    fn InstallEventHandler(
+        target: *const ProcessEventTarget,
+        handler: ProcessCallbackFn,
+        event_len: u32,
+        events: *const EventTypeSpec,
+        user_data: *const c_void,
+        handler_ref: *mut *const ProcessEventHandler,
+    ) -> OSStatus;
+
+    /// Removes a previously installed event handler.
+    ///
+    /// # Arguments
+    ///
+    /// * `handler_ref` - A raw pointer to the `EventHandlerRef` to remove.
+    ///
+    /// # Returns
+    ///
+    /// An `OSStatus` indicating success or failure.
+    ///
+    /// # Original signature
+    fn RemoveEventHandler(handler_ref: *const ProcessEventHandler) -> OSStatus;
+
+    /// Gets a piece of data from the given event, if it exists.
+    ///
+    /// # Discussion
+    /// The Carbon Event Manager will automatically use AppleEvent coercion handlers to convert
+    /// the data in the event into the desired type, if possible. You may also pass `typeWildCard`
+    /// to request that the data be returned in its original format.
+    ///
+    /// # Mac OS X threading
+    /// Not thread safe.
+    ///
+    /// # Arguments
+    ///
+    /// * `inEvent` - The event to get the parameter from.
+    /// * `inName` - The symbolic name of the parameter.
+    /// * `inDesiredType` - The desired type of the parameter.
+    /// * `outActualType` - The actual type of the parameter, or `NULL`.
+    /// * `inBufferSize` - The size of the output buffer specified by `outData`. Pass zero and
+    ///   `NULL` for `outData` if data is not desired. * `outActualSize` - The actual size of the
+    ///   data, or `NULL`.
+    /// * `outData` - The pointer to the buffer which will receive the parameter data, or `NULL`.
+    ///
+    /// # Returns
+    ///
+    /// An operating system result code (`OSStatus`).
+    ///
+    /// # Original signature
+    /// extern OSStatus
+    /// GetEventParameter(
+    ///   EventRef          inEvent,
+    ///   EventParamName    inName,
+    ///   EventParamType    inDesiredType,
+    ///   EventParamType *  outActualType,       /* can be NULL */
+    ///   ByteCount         inBufferSize,
+    ///   ByteCount *       outActualSize,       /* can be NULL */
+    ///   void *            outData)             /* can be NULL */
+    fn GetEventParameter(
+        event: *const ProcessEvent,
+        param_name: u32,
+        param_type: u32,
+        actual_type: *mut u32,
+        size: u32,
+        actual_size: *mut u32,
+        data: *mut c_void,
+    ) -> OSStatus;
+
+    /// Returns the kind of the given event (e.g., mousedown).
+    ///
+    /// # Discussion
+    /// Event kinds overlap between event classes (e.g., `kEventMouseDown` and `kEventAppActivated`
+    /// have the same value). The combination of class and kind determines an event signature.
+    ///
+    /// # Mac OS X threading
+    /// Thread safe.
+    ///
+    /// # Arguments
+    ///
+    /// * `inEvent` - The event in question.
+    ///
+    /// # Returns
+    ///
+    /// The kind of the event (`UInt32`).
+    ///
+    /// # Original signature
+    /// extern UInt32 GetEventKind(EventRef inEvent)
+    fn GetEventKind(event: *const ProcessEvent) -> u32;
+
+    /// Retrieves the next available process's serial number.
+    ///
+    /// # Arguments
+    ///
+    /// * `psn` - A mutable pointer to a `ProcessSerialNumber` structure. On the first call, pass a
+    ///   PSN with `kNoProcess` for `highLongOfPSN` and `lowLongOfPSN`. On subsequent calls, pass
+    ///   the PSN returned by the previous call.
+    ///
+    /// # Returns
+    ///
+    /// An `OSStatus` code. `noErr` (0) if a process was found, otherwise an error code.
+    ///
+    /// # Original signature
+    /// GetNextProcess(ProcessSerialNumber * pPSN)
+    fn GetNextProcess(psn: *mut ProcessSerialNumber) -> OSStatus;
+}
+
+/*
+ *  EventTypeSpec
+ *
+ *  Discussion:
+ *    This structure is used to specify an event. Typically, a static
+ *    array of EventTypeSpecs are passed into functions such as
+ *    InstallEventHandler, as well as routines such as
+ *    FlushEventsMatchingListFromQueue.
+ */
+// struct EventTypeSpec {
+//   OSType              eventClass;
+//   UInt32              eventKind;
+// };
+#[repr(C)]
+struct EventTypeSpec {
+    event_class: u32,
+    event_kind: u32,
+}
+
+#[repr(C)]
+struct ProcessEventHandler {
+    _opaque: [u8; 0],
+}
+
+#[repr(C)]
+struct ProcessEventTarget {
+    _opaque: [u8; 0],
+}
+
+#[repr(C)]
+struct ProcessEvent {
+    _opaque: [u8; 0],
 }
 
 #[repr(C)]
@@ -219,18 +354,57 @@ impl ProcessHandler {
 
     /// Starts the process handler by registering a C-callback with the underlying private API.
     fn start(&mut self) {
+        const APPL_CLASS: &str = "appl";
+        const PROCESS_EVENT_LAUNCHED: u32 = 5;
+        const PROCESS_EVENT_TERMINATED: u32 = 6;
+        const PROCESS_EVENT_FRONTSWITCHED: u32 = 7;
+
         info!("{}: Registering process_handler", function_name!());
-        let handler = unsafe {
-            let me = NonNull::new_unchecked(self).as_ptr();
-            setup_process_handler(Self::callback, me.cast())
+
+        // Fake launch the existing processes.
+        let mut psn = ProcessSerialNumber::default();
+        while 0 == unsafe { GetNextProcess(&mut psn as *mut ProcessSerialNumber) } {
+            self.process_handler(&psn, ProcessEventApp::Launched);
+        }
+
+        let target = unsafe { GetApplicationEventTarget() };
+        let event_class = u32::from_be_bytes(APPL_CLASS.as_bytes().try_into().unwrap());
+        let events = [
+            EventTypeSpec {
+                event_class,
+                event_kind: PROCESS_EVENT_LAUNCHED,
+            },
+            EventTypeSpec {
+                event_class,
+                event_kind: PROCESS_EVENT_TERMINATED,
+            },
+            EventTypeSpec {
+                event_class,
+                event_kind: PROCESS_EVENT_FRONTSWITCHED,
+            },
+        ];
+        let mut handler: *const ProcessEventHandler = std::ptr::null();
+        let result = unsafe {
+            InstallEventHandler(
+                target,
+                Self::callback,
+                3,
+                events.as_ptr(),
+                NonNull::new_unchecked(self).as_ptr().cast(),
+                &mut handler,
+            )
         };
+        debug!(
+            "{}: Registered process_handler (result = {result}): {handler:x?}",
+            function_name!()
+        );
 
         self.cleanup = Some(Cleanuper::new(Box::new(move || unsafe {
             info!(
                 "{}: Unregistering process_handler: {handler:?}",
                 function_name!()
             );
-            remove_process_handler(handler);
+            RemoveEventHandler(handler);
         })));
     }
 
@@ -247,12 +421,39 @@ impl ProcessHandler {
     ///
     /// An `OSStatus`.
     extern "C-unwind" fn callback(
-        this: *mut c_void,
-        psn: &ProcessSerialNumber,
-        event: ProcessEventApp,
+        _: *mut c_void,
+        event: *const ProcessEvent,
+        this: *const c_void,
     ) -> OSStatus {
-        match NonNull::new(this).map(|this| unsafe { this.cast::<ProcessHandler>().as_mut() }) {
-            Some(this) => this.process_handler(psn, event),
+        match NonNull::new(this.cast_mut())
+            .map(|this| unsafe { this.cast::<ProcessHandler>().as_mut() })
+        {
+            Some(this) => {
+                const PARAM: &str = "psn "; // kEventParamProcessID and typeProcessSerialNumber
+                let param_name = u32::from_be_bytes(PARAM.as_bytes().try_into().unwrap());
+                let param_type = param_name; // Uses the same FourCharCode as param_name
+
+                let mut psn = ProcessSerialNumber::default();
+
+                let res = unsafe {
+                    GetEventParameter(
+                        event,
+                        param_name,
+                        param_type,
+                        std::ptr::null_mut(),
+                        std::mem::size_of::<ProcessSerialNumber>()
+                            .try_into()
+                            .unwrap(),
+                        std::ptr::null_mut(),
+                        NonNull::from(&mut psn).as_ptr().cast(),
+                    )
+                };
+                if res == 0 {
+                    let decoded: ProcessEventApp =
+                        unsafe { std::mem::transmute(GetEventKind(event)) };
+                    this.process_handler(&psn, decoded);
+                }
+            }
             None => error!("Zero passed to Process Handler."),
         }
         0

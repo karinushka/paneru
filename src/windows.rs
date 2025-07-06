@@ -49,6 +49,15 @@ pub struct WindowPane {
 }
 
 impl WindowPane {
+    /// Finds the index of a window within the pane.
+    ///
+    /// # Arguments
+    ///
+    /// * `window_id` - The ID of the window to find.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(usize)` with the index if found, otherwise `Err(Error)`.
     pub fn index_of(&self, window_id: WinID) -> Result<usize> {
         self.pane
             .force_read()
@@ -63,6 +72,16 @@ impl WindowPane {
             ))
     }
 
+    /// Inserts a window ID into the pane at a specified position.
+    ///
+    /// # Arguments
+    ///
+    /// * `after` - The index after which to insert the window.
+    /// * `window_id` - The ID of the window to insert.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(usize)` with the new index of the inserted window, otherwise `Err(Error)` if the index is out of bounds.
     pub fn insert_at(&self, after: usize, window_id: WinID) -> Result<usize> {
         let index = after + 1;
         if index > self.len() {
@@ -75,14 +94,33 @@ impl WindowPane {
         Ok(index)
     }
 
+    /// Appends a window ID to the end of the pane.
+    ///
+    /// # Arguments
+    ///
+    /// * `window_id` - The ID of the window to append.
     pub fn append(&self, window_id: WinID) {
         self.pane.force_write().push(window_id);
     }
 
+    /// Removes a window ID from the pane.
+    ///
+    /// # Arguments
+    ///
+    /// * `window_id` - The ID of the window to remove.
     pub fn remove(&self, window_id: WinID) {
         self.pane.force_write().retain(|id| *id != window_id);
     }
 
+    /// Retrieves the window ID at a specified index in the pane.
+    ///
+    /// # Arguments
+    ///
+    /// * `at` - The index from which to retrieve the window ID.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(WinID)` with the window ID if the index is valid, otherwise `Err(Error)`.
     pub fn get(&self, at: usize) -> Result<WinID> {
         self.pane.force_read().get(at).cloned().ok_or(Error::new(
             ErrorKind::InvalidInput,
@@ -90,14 +128,30 @@ impl WindowPane {
         ))
     }
 
+    /// Swaps the positions of two windows within the pane.
+    ///
+    /// # Arguments
+    ///
+    /// * `left` - The index of the first window.
+    /// * `right` - The index of the second window.
     pub fn swap(&self, left: usize, right: usize) {
         self.pane.force_write().swap(left, right);
     }
 
+    /// Returns the number of windows in the pane.
+    ///
+    /// # Returns
+    ///
+    /// The number of windows as `usize`.
     pub fn len(&self) -> usize {
         self.pane.force_read().len()
     }
 
+    /// Returns the ID of the first window in the pane.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(WinID)` with the first window's ID, otherwise `Err(Error)` if the pane is empty.
     pub fn first(&self) -> Result<WinID> {
         self.pane.force_read().first().cloned().ok_or(Error::new(
             ErrorKind::NotFound,
@@ -105,6 +159,11 @@ impl WindowPane {
         ))
     }
 
+    /// Returns the ID of the last window in the pane.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(WinID)` with the last window's ID, otherwise `Err(Error)` if the pane is empty.
     pub fn last(&self) -> Result<WinID> {
         self.pane.force_read().last().cloned().ok_or(Error::new(
             ErrorKind::NotFound,
@@ -112,6 +171,17 @@ impl WindowPane {
         ))
     }
 
+    /// Iterates over windows to the right of a given window, applying an accessor function to each.
+    /// Iteration stops if the accessor returns `false`.
+    ///
+    /// # Arguments
+    ///
+    /// * `window_id` - The ID of the starting window.
+    /// * `accessor` - A closure that takes a `WinID` and returns `true` to continue iteration, `false` to stop.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if successful, otherwise `Err(Error)` if the starting window is not found.
     pub fn access_right_of(
         &self,
         window_id: WinID,
@@ -126,6 +196,17 @@ impl WindowPane {
         Ok(())
     }
 
+    /// Iterates over windows to the left of a given window (in reverse order), applying an accessor function to each.
+    /// Iteration stops if the accessor returns `false`.
+    ///
+    /// # Arguments
+    ///
+    /// * `window_id` - The ID of the starting window.
+    /// * `accessor` - A closure that takes a `WinID` and returns `true` to continue iteration, `false` to stop.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if successful, otherwise `Err(Error)` if the starting window is not found.
     pub fn access_left_of(
         &self,
         window_id: WinID,
@@ -150,12 +231,31 @@ pub struct Display {
 }
 
 impl Display {
+    /// Creates a new `Display` instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The `CGDirectDisplayID` of the display.
+    /// * `spaces` - A vector of space IDs associated with this display.
+    ///
+    /// # Returns
+    ///
+    /// A new `Display` instance.
     fn new(id: CGDirectDisplayID, spaces: Vec<u64>) -> Self {
         let spaces = HashMap::from_iter(spaces.into_iter().map(|id| (id, WindowPane::default())));
         let bounds = unsafe { CGDisplayBounds(id) };
         Self { id, spaces, bounds }
     }
 
+    /// Converts a `CGDirectDisplayID` to a `CFUUID` string.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The `CGDirectDisplayID` to convert.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(CFRetained<CFString>)` with the UUID string if successful, otherwise `Err(Error)`.
     fn uuid_from_id(id: CGDirectDisplayID) -> Result<CFRetained<CFString>> {
         unsafe {
             let uuid = NonNull::new(CGDisplayCreateUUIDFromDisplayID(id))
@@ -171,6 +271,15 @@ impl Display {
         }
     }
 
+    /// Converts a `CFUUID` string to a `CGDirectDisplayID`.
+    ///
+    /// # Arguments
+    ///
+    /// * `uuid` - The `CFRetained<CFString>` representing the UUID.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(u32)` with the `CGDirectDisplayID` if successful, otherwise `Err(Error)`.
     fn id_from_uuid(uuid: CFRetained<CFString>) -> Result<u32> {
         unsafe {
             let id = CFUUIDCreateFromString(None, Some(&uuid)).ok_or(Error::new(
@@ -181,6 +290,16 @@ impl Display {
         }
     }
 
+    /// Retrieves a list of space IDs for a given display UUID and connection ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `uuid` - A reference to the `CFString` representing the display's UUID.
+    /// * `cid` - The connection ID.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Vec<u64>)` with the list of space IDs if successful, otherwise `Err(Error)`.
     fn display_space_list(uuid: &CFString, cid: ConnID) -> Result<Vec<u64>> {
         // let uuid = DisplayManager::display_uuid(display)?;
         unsafe {
@@ -246,6 +365,15 @@ impl Display {
         ))
     }
 
+    /// Retrieves a list of all currently present displays, along with their associated spaces.
+    ///
+    /// # Arguments
+    ///
+    /// * `cid` - The connection ID.
+    ///
+    /// # Returns
+    ///
+    /// A `Vec<Self>` containing `Display` objects for all present displays.
     pub fn present_displays(cid: ConnID) -> Vec<Self> {
         let mut count = 0u32;
         unsafe {
@@ -271,6 +399,15 @@ impl Display {
             .collect()
     }
 
+    /// Retrieves the UUID of the active menu bar display.
+    ///
+    /// # Arguments
+    ///
+    /// * `cid` - The connection ID.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(CFRetained<CFString>)` with the UUID if successful, otherwise `Err(Error)`.
     fn active_display_uuid(cid: ConnID) -> Result<CFRetained<CFString>> {
         unsafe {
             let ptr = SLSCopyActiveMenuBarDisplayIdentifier(cid);
@@ -285,16 +422,43 @@ impl Display {
         }
     }
 
+    /// Retrieves the `CGDirectDisplayID` of the active menu bar display.
+    ///
+    /// # Arguments
+    ///
+    /// * `cid` - The connection ID.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(u32)` with the display ID if successful, otherwise `Err(Error)`.
     pub fn active_display_id(cid: ConnID) -> Result<u32> {
         let uuid = Display::active_display_uuid(cid)?;
         Display::id_from_uuid(uuid)
     }
 
+    /// Retrieves the ID of the current active space on this display.
+    ///
+    /// # Arguments
+    ///
+    /// * `cid` - The connection ID.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(u64)` with the space ID if successful, otherwise `Err(Error)`.
     fn active_display_space(&self, cid: ConnID) -> Result<u64> {
         Display::uuid_from_id(self.id)
             .map(|uuid| unsafe { SLSManagedDisplayGetCurrentSpace(cid, uuid.deref()) })
     }
 
+    /// Retrieves the `WindowPane` corresponding to the active space on this display.
+    ///
+    /// # Arguments
+    ///
+    /// * `cid` - The connection ID.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(WindowPane)` if the active panel is found, otherwise `Err(Error)`.
     pub fn active_panel(&self, cid: ConnID) -> Result<WindowPane> {
         let space_id = self.active_display_space(cid)?;
         self.spaces.get(&space_id).cloned().ok_or(Error::new(
@@ -303,11 +467,25 @@ impl Display {
         ))
     }
 
+    /// Removes a window from all panes across all spaces on this display.
+    ///
+    /// # Arguments
+    ///
+    /// * `window_id` - The ID of the window to remove.
     pub fn remove_window(&self, window_id: WinID) {
         self.spaces.values().for_each(|pane| pane.remove(window_id));
     }
 }
 
+/// Retrieves the window ID (WinID) from an `AXUIElementRef`.
+///
+/// # Arguments
+///
+/// * `element_ref` - The `AXUIElementRef` to extract the window ID from.
+///
+/// # Returns
+///
+/// `Ok(WinID)` with the window ID if successful, otherwise `Err(Error)`.
 pub fn ax_window_id(element_ref: AXUIElementRef) -> Result<WinID> {
     let ptr = NonNull::new(element_ref).ok_or(Error::new(
         ErrorKind::InvalidInput,
@@ -326,6 +504,15 @@ pub fn ax_window_id(element_ref: AXUIElementRef) -> Result<WinID> {
     Ok(window_id)
 }
 
+/// Retrieves the process ID (Pid) from an `AxuWrapperType` representing an Accessibility UI element.
+///
+/// # Arguments
+///
+/// * `element_ref` - A reference to the `CFRetained<AxuWrapperType>` element.
+///
+/// # Returns
+///
+/// `Ok(Pid)` with the process ID if successful, otherwise `Err(Error)`.
 pub fn ax_window_pid(element_ref: &CFRetained<AxuWrapperType>) -> Result<Pid> {
     let pid: Pid = unsafe {
         NonNull::new_unchecked(element_ref.as_ptr::<Pid>())
@@ -359,6 +546,17 @@ pub struct InnerWindow {
 }
 
 impl Window {
+    /// Creates a new `Window` instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `window_id` - The ID of the window.
+    /// * `app` - A reference to the `Application` that owns this window.
+    /// * `element_ref` - A `CFRetained<AxuWrapperType>` reference to the Accessibility UI element.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Window)` if the window is created successfully, otherwise `Err(Error)`.
     pub fn new(
         window_id: WinID,
         app: &Application,
@@ -409,18 +607,39 @@ impl Window {
         Ok(window)
     }
 
+    /// Returns the ID of the window.
+    ///
+    /// # Returns
+    ///
+    /// The window ID as `WinID`.
     pub fn id(&self) -> WinID {
         self.inner().id
     }
 
+    /// Returns a clone of the `Application` object that owns this window.
+    ///
+    /// # Returns
+    ///
+    /// A cloned `Application` object.
     pub fn app(&self) -> Application {
         self.inner().app.clone()
     }
 
+    /// Returns the current frame (CGRect) of the window.
+    ///
+    /// # Returns
+    ///
+    /// The window's frame as `CGRect`.
     pub fn frame(&self) -> CGRect {
         self.inner().frame
     }
 
+    /// Calculates the next preferred size ratio for resizing the window.
+    /// It cycles through a predefined set of ratios.
+    ///
+    /// # Returns
+    ///
+    /// The next size ratio as `f64`.
     pub fn next_size_ratio(&self) -> f64 {
         let small = *self.inner().size_ratios.first().unwrap();
         let current = self.inner().width_ratio;
@@ -432,23 +651,53 @@ impl Window {
             .unwrap_or(small)
     }
 
+    /// Checks if the window is currently managed by the window manager.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the window is managed, `false` otherwise.
     pub fn managed(&self) -> bool {
         self.inner().managed
     }
 
+    /// Sets the managed status of the window.
+    ///
+    /// # Arguments
+    ///
+    /// * `manage` - A boolean indicating whether to manage the window.
     pub fn manage(&self, manage: bool) {
         self.inner.force_write().managed = manage;
     }
 
+    /// Returns a read guard to the inner `InnerWindow` for read-only access.
+    ///
+    /// # Returns
+    ///
+    /// A `std::sync::RwLockReadGuard` allowing read access to `InnerWindow`.
     pub fn inner(&self) -> std::sync::RwLockReadGuard<'_, InnerWindow> {
         self.inner.force_read()
     }
 
+    /// Returns the raw `AXUIElementRef` of the window's accessibility element.
+    ///
+    /// # Returns
+    ///
+    /// The `AXUIElementRef` as `AXUIElementRef`.
     pub fn element(&self) -> AXUIElementRef {
         // unsafe { NonNull::new_unchecked(self.inner().ax_element.as_ptr::<c_void>()).addr() }
         self.inner().ax_element.deref().as_ptr()
     }
 
+    /// Retrieves the parent window ID for a given window.
+    ///
+    /// # Arguments
+    ///
+    /// * `main_conn` - The main connection ID.
+    /// * `window_id` - The ID of the window whose parent is sought.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(WinID)` with the parent window ID if successful, otherwise `Err(Error)`.
     pub fn parent(main_conn: ConnID, window_id: WinID) -> Result<WinID> {
         let windows = create_array(vec![window_id], CFNumberType::SInt32Type)?;
         unsafe {
@@ -467,29 +716,54 @@ impl Window {
         ))
     }
 
+    /// Retrieves the title of the window.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(String)` with the window title if successful, otherwise `Err(Error)`.
     pub fn title(&self) -> Result<String> {
         let axtitle = CFString::from_static_str(kAXTitleAttribute);
         let title = get_attribute::<CFString>(&self.inner().ax_element, axtitle)?;
         Ok(title.to_string())
     }
 
+    /// Retrieves the role of the window (e.g., "AXWindow").
+    ///
+    /// # Returns
+    ///
+    /// `Ok(String)` with the window role if successful, otherwise `Err(Error)`.
     pub fn role(&self) -> Result<String> {
         let axrole = CFString::from_static_str(kAXRoleAttribute);
         let role = get_attribute::<CFString>(&self.inner().ax_element, axrole)?;
         Ok(role.to_string())
     }
 
+    /// Retrieves the subrole of the window (e.g., "AXStandardWindow").
+    ///
+    /// # Returns
+    ///
+    /// `Ok(String)` with the window subrole if successful, otherwise `Err(Error)`.
     pub fn subrole(&self) -> Result<String> {
         let axrole = CFString::from_static_str(kAXSubroleAttribute);
         let role = get_attribute::<CFString>(&self.inner().ax_element, axrole)?;
         Ok(role.to_string())
     }
 
+    /// Checks if the window's subrole is "AXUnknownSubrole".
+    ///
+    /// # Returns
+    ///
+    /// `true` if the subrole is unknown, `false` otherwise.
     pub fn is_unknown(&self) -> bool {
         self.subrole()
             .is_ok_and(|subrole| subrole.eq(kAXUnknownSubrole))
     }
 
+    /// Checks if the window is minimized.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the window is minimized, `false` otherwise.
     pub fn is_minimized(&self) -> bool {
         let axminimized = CFString::from_static_str(kAXMinimizedAttribute);
         get_attribute::<CFBoolean>(&self.inner().ax_element, axminimized)
@@ -497,6 +771,11 @@ impl Window {
             .is_ok_and(|minimized| minimized || self.inner().minimized)
     }
 
+    /// Checks if the window is a root window (i.e., not a child of another window).
+    ///
+    /// # Returns
+    ///
+    /// `true` if the window is a root window, `false` otherwise.
     pub fn is_root(&self) -> bool {
         let inner = self.inner();
         let cftype = inner.ax_element.as_ref();
@@ -505,6 +784,12 @@ impl Window {
             .is_ok_and(|parent| !CFEqual(Some(parent.deref()), Some(cftype)))
     }
 
+    /// Checks if the window is a "real" window based on its role and subrole.
+    /// It considers standard and floating window subroles as real.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the window is real, `false` otherwise.
     pub fn is_real(&self) -> bool {
         let role = self.role().is_ok_and(|role| role.eq(kAXWindowRole));
         role && self.subrole().is_ok_and(|subrole| {
@@ -518,11 +803,22 @@ impl Window {
         })
     }
 
+    /// Checks if the window is eligible for management (i.e., it is a root and a real window).
+    ///
+    /// # Returns
+    ///
+    /// `true` if the window is eligible, `false` otherwise.
     pub fn is_eligible(&self) -> bool {
         let me = self.inner();
         me.is_root && self.is_real() // TODO: check for WINDOW_RULE_MANAGED
     }
 
+    /// Repositions the window to the specified x and y coordinates.
+    ///
+    /// # Arguments
+    ///
+    /// * `x` - The new x-coordinate for the window's origin.
+    /// * `y` - The new y-coordinate for the window's origin.
     pub fn reposition(&self, x: f64, y: f64) {
         let mut point = CGPoint::new(x, y);
         let position_ref = unsafe {
@@ -543,6 +839,13 @@ impl Window {
         }
     }
 
+    /// Resizes the window to the specified width and height. It also updates the `width_ratio`.
+    ///
+    /// # Arguments
+    ///
+    /// * `width` - The new width of the window.
+    /// * `height` - The new height of the window.
+    /// * `display_bounds` - The `CGRect` representing the bounds of the display the window is on.
     pub fn resize(&self, width: f64, height: f64, display_bounds: &CGRect) {
         let mut size = CGSize::new(width, height);
         let size_ref =
@@ -561,6 +864,16 @@ impl Window {
         }
     }
 
+    /// Updates the internal `frame` of the window by querying its current position and size from the Accessibility API.
+    /// It also updates the `width_ratio`.
+    ///
+    /// # Arguments
+    ///
+    /// * `display_bounds` - The `CGRect` representing the bounds of the display the window is on.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the frame is updated successfully, otherwise `Err(Error)`.
     pub fn update_frame(&self, display_bounds: &CGRect) -> Result<()> {
         let window_ref = self.inner().ax_element.as_ptr();
 
@@ -604,6 +917,7 @@ impl Window {
         Ok(())
     }
 
+    /// Makes the window the key window for its application by sending synthesized events.
     fn make_key_window(&self) {
         let psn = self.app().psn().unwrap();
         let window_id = self.id();
@@ -634,6 +948,11 @@ impl Window {
     const CPS_USER_GENERATED: u32 = 0x200;
     // const CPS_NO_WINDOWS: u32 = 0x400;
 
+    /// Focuses the window without raising it. This involves sending specific events to the process.
+    ///
+    /// # Arguments
+    ///
+    /// * `window_manager` - A reference to the `WindowManager` to access focused window information.
     pub fn focus_without_raise(&self, window_manager: &WindowManager) {
         let psn = self.app().psn().unwrap();
         let window_id = self.id();
@@ -668,6 +987,7 @@ impl Window {
         self.make_key_window();
     }
 
+    /// Focuses the window and raises it to the front.
     pub fn focus_with_raise(&self) {
         let psn = self.app().psn().unwrap();
         let window_id = self.id();
@@ -680,6 +1000,16 @@ impl Window {
         unsafe { AXUIElementPerformAction(element_ref, &action) };
     }
 
+    /// Retrieves the UUID of the display the window is currently on.
+    /// It first tries `SLSCopyManagedDisplayForWindow` and then falls back to `SLSCopyBestManagedDisplayForRect`.
+    ///
+    /// # Arguments
+    ///
+    /// * `cid` - The connection ID.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Retained<CFString>)` with the display UUID if successful, otherwise `Err(Error)`.
     fn display_uuid(&self, cid: ConnID) -> Result<Retained<CFString>> {
         let window_id = self.id();
         let uuid = unsafe {
@@ -703,16 +1033,39 @@ impl Window {
         ))
     }
 
+    /// Retrieves the `CGDirectDisplayID` of the display the window is currently on.
+    ///
+    /// # Arguments
+    ///
+    /// * `cid` - The connection ID.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(u32)` with the display ID if successful, otherwise `Err(Error)`.
     fn display_id(&self, cid: ConnID) -> Result<u32> {
         let uuid = self.display_uuid(cid);
         uuid.and_then(|uuid| Display::id_from_uuid(uuid.into()))
     }
 
+    /// Checks if the window is fully visible within the given display bounds.
+    ///
+    /// # Arguments
+    ///
+    /// * `display_bounds` - The `CGRect` representing the bounds of the display.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the window is fully visible, `false` otherwise.
     pub fn fully_visible(&self, display_bounds: &CGRect) -> bool {
         let frame = self.inner().frame;
         frame.origin.x > 0.0 && frame.origin.x < display_bounds.size.width - frame.size.width
     }
 
+    /// Centers the mouse cursor on the window if it's not already within the window's bounds.
+    ///
+    /// # Arguments
+    ///
+    /// * `cid` - The connection ID.
     pub fn center_mouse(&self, cid: ConnID) {
         // TODO: check for MouseFollowsFocus setting in WindowManager and also whether it's
         // overriden for individual window.
@@ -742,7 +1095,15 @@ impl Window {
         unsafe { CGWarpMouseCursorPosition(center) };
     }
 
-    // Fully expose the window if parts of it are off-screen.
+    /// Adjusts the window's position to ensure it is fully exposed (visible on screen) within the display bounds.
+    ///
+    /// # Arguments
+    ///
+    /// * `display_bounds` - The `CGRect` representing the bounds of the display.
+    ///
+    /// # Returns
+    ///
+    /// The adjusted `CGRect` of the window after exposure.
     pub fn expose_window(&self, display_bounds: &CGRect) -> CGRect {
         // Check if window needs to be fully exposed
         let window_id = self.id();

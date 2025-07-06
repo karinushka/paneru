@@ -20,12 +20,30 @@ pub struct Config {
 }
 
 impl Config {
+    /// Creates a new `Config` instance by loading the configuration from the specified path.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - A reference to the path of the configuration file.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Self)` if the configuration is loaded successfully, otherwise `Err(String)` with an error message.
     pub fn new(path: &Path) -> Result<Self, String> {
         Ok(Config {
             inner: RwLock::new(InnerConfig::new(path)?).into(),
         })
     }
 
+    /// Reloads the configuration from the specified path, updating the internal options and keybindings.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - A reference to the path of the new configuration file.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the configuration is reloaded successfully, otherwise `Err(String)` with an error message.
     pub fn reload_config(&mut self, path: &Path) -> Result<(), String> {
         let new = InnerConfig::new(path)?;
         let mut old = self.inner.force_write();
@@ -34,14 +52,34 @@ impl Config {
         Ok(())
     }
 
+    /// Returns a read guard to the inner `InnerConfig` for read-only access.
+    ///
+    /// # Returns
+    ///
+    /// A `std::sync::RwLockReadGuard` allowing read access to `InnerConfig`.
     fn inner(&self) -> std::sync::RwLockReadGuard<'_, InnerConfig> {
         self.inner.force_read()
     }
 
+    /// Returns a clone of the `MainOptions` from the current configuration.
+    ///
+    /// # Returns
+    ///
+    /// A `MainOptions` struct containing the main configuration options.
     pub fn options(&self) -> MainOptions {
         self.inner().options.clone()
     }
 
+    /// Finds a keybinding matching the given keycode and modifier mask.
+    ///
+    /// # Arguments
+    ///
+    /// * `keycode` - The key code of the keybinding to find.
+    /// * `mask` - The modifier mask (e.g., Alt, Shift, Cmd, Ctrl) of the keybinding.
+    ///
+    /// # Returns
+    ///
+    /// `Some(Keybinding)` if a matching keybinding is found, otherwise `None`.
     pub fn find_keybind(&self, keycode: u8, mask: u8) -> Option<Keybinding> {
         let lock = self.inner();
         lock.bindings
@@ -52,6 +90,11 @@ impl Config {
 }
 
 impl EventHandler for Config {
+    /// Handles file system events, specifically used for reloading the configuration file.
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - The result of a file system event.
     fn handle_event(&mut self, event: notify::Result<notify::Event>) {
         if let Ok(event) = event {
             println!("Event: {:?}", event);
@@ -66,12 +109,31 @@ struct InnerConfig {
 }
 
 impl InnerConfig {
+    /// Creates a new `InnerConfig` by reading and parsing the configuration file from the specified path.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - A reference to the path of the configuration file.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(InnerConfig)` if the configuration is parsed successfully, otherwise `Err(String)` with an error message.
     fn new(path: &Path) -> Result<InnerConfig, String> {
         let input = std::fs::read_to_string(path)
             .map_err(|err| format!("{}: missing HOME env - {err}", function_name!()))?;
         InnerConfig::parse_config(&input)
     }
 
+    /// Parses the configuration from a string input.
+    /// It populates the `code` and `command` fields of `Keybinding` by looking up virtual keys and literal keycodes.
+    ///
+    /// # Arguments
+    ///
+    /// * `input` - The string content of the configuration file.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(InnerConfig)` if the parsing is successful, otherwise `Err(String)` with an error message.
     fn parse_config(input: &str) -> Result<InnerConfig, String> {
         let virtual_keys = generate_virtual_keymap();
         let mut config: InnerConfig = toml::from_str(input)
@@ -112,6 +174,15 @@ pub struct Keybinding {
 }
 
 impl<'de> Deserialize<'de> for Keybinding {
+    /// Deserializes a `Keybinding` from a string input. The input string is expected to be in a format like "modifier-key" or "key".
+    ///
+    /// # Arguments
+    ///
+    /// * `deserializer` - The deserializer used to parse the input.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Self)` if the deserialization is successful, otherwise `Err(D::Error)` with a custom error message.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -138,6 +209,15 @@ impl<'de> Deserialize<'de> for Keybinding {
     }
 }
 
+/// Parses a string containing modifier names (e.g., "alt", "shift", "cmd", "ctrl") separated by "+", and returns their combined bitmask.
+///
+/// # Arguments
+///
+/// * `input` - The string containing modifier names.
+///
+/// # Returns
+///
+/// `Ok(u8)` with the combined modifier bitmask if parsing is successful, otherwise `Err(String)` with an error message for an invalid modifier.
 fn parse_modifiers(input: &str) -> Result<u8, String> {
     static MOD_NAMES: [&str; 4] = ["alt", "shift", "cmd", "ctrl"];
     let mut out = 0;
@@ -184,6 +264,12 @@ unsafe extern "C" {
 
 }
 
+/// Returns an iterator over static tuples of virtual key names and their corresponding keycodes.
+/// These keycodes identify physical keys on an ANSI-standard US keyboard layout.
+///
+/// # Returns
+///
+/// An iterator yielding references to `(&'static str, u8)` tuples.
 fn virtual_keycode() -> impl Iterator<Item = &'static (&'static str, u8)> {
     /*
      *  Summary:
@@ -273,6 +359,12 @@ fn virtual_keycode() -> impl Iterator<Item = &'static (&'static str, u8)> {
     VIRTUAL_KEYCODE.iter()
 }
 
+/// Returns an iterator over static tuples of literal key names and their corresponding keycodes.
+/// These keycodes are for keys that are independent of the keyboard layout (e.g., Return, Tab, Space).
+///
+/// # Returns
+///
+/// An iterator yielding references to `(&'static str, u8)` tuples.
 fn literal_keycode() -> impl Iterator<Item = &'static (&'static str, u8)> {
     /* keycodes for keys that are independent of keyboard layout*/
     static LITERAL_KEYCODE: LazyLock<Vec<(&'static str, u8)>> = LazyLock::new(|| {
@@ -340,6 +432,12 @@ enum UCKeyAction {
               */
 }
 
+/// Generates a vector of (key_name, keycode) tuples for virtual keys based on the current ASCII-capable keyboard layout.
+/// This involves using macOS Carbon API functions to translate virtual keycodes to Unicode characters.
+///
+/// # Returns
+///
+/// A `Vec<(String, u8)>` containing the translated key names and their keycodes. Returns an empty vector if an error occurs during keyboard layout fetching.
 fn generate_virtual_keymap() -> Vec<(String, u8)> {
     let keyboard = AxuWrapperType::from_retained(unsafe {
         TISCopyCurrentASCIICapableKeyboardLayoutInputSource()

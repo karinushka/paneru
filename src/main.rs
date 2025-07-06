@@ -26,6 +26,15 @@ struct CommandReader {
 impl CommandReader {
     const SOCKET_PATH: &str = "/tmp/paneru.socket";
 
+    /// Sends a command and its arguments to the running `paneru` application via a Unix socket.
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - An iterator over command-line arguments, where the first element is expected to be the program name.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the command is sent successfully, otherwise `Err(Error)`.
     fn send_command(mut params: std::env::Args) -> Result<()> {
         params.next();
 
@@ -40,10 +49,20 @@ impl CommandReader {
         stream.write_all(&output)
     }
 
+    /// Creates a new `CommandReader` instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `events` - An `EventSender` to dispatch received commands as `Event::Command`.
+    ///
+    /// # Returns
+    ///
+    /// A new `CommandReader`.
     fn new(events: EventSender) -> Self {
         CommandReader { events }
     }
 
+    /// Starts the `CommandReader` in a new thread, listening for incoming commands on a Unix socket.
     fn start(mut self) {
         thread::spawn(move || {
             if let Err(err) = self.runner() {
@@ -52,6 +71,12 @@ impl CommandReader {
         });
     }
 
+    /// The main runner function for the `CommandReader` thread. It binds to a Unix socket,
+    /// listens for incoming connections, reads command size and data, and dispatches them as events.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the runner completes successfully, otherwise `Err(Error)`.
     fn runner(&mut self) -> Result<()> {
         _ = fs::remove_file(CommandReader::SOCKET_PATH);
         let listener = UnixListener::bind(CommandReader::SOCKET_PATH)?;
@@ -78,6 +103,12 @@ impl CommandReader {
     }
 }
 
+/// Checks if the macOS "Displays have separate Spaces" option is enabled.
+/// This is crucial for the window manager's functionality.
+///
+/// # Returns
+///
+/// `true` if separate spaces are enabled, `false` otherwise.
 fn check_separate_spaces() -> bool {
     unsafe {
         let cid = SLSMainConnectionID();
@@ -85,6 +116,14 @@ fn check_separate_spaces() -> bool {
     }
 }
 
+/// The main entry point of the `paneru` application.
+/// It sets up logging, handles command-line arguments for sending commands,
+/// checks for separate spaces, initializes event handling and platform callbacks,
+/// and runs the main event loop.
+///
+/// # Returns
+///
+/// `Ok(())` if the application runs successfully, otherwise `Err(Error)`.
 fn main() -> Result<()> {
     // Set up logging (default level is INFO)
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();

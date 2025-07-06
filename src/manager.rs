@@ -43,6 +43,16 @@ pub struct WindowManager {
 }
 
 impl WindowManager {
+    /// Creates a new `WindowManager` instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `events` - An `EventSender` to send events to the event handler.
+    /// * `main_cid` - The main connection ID for the SkyLight API.
+    ///
+    /// # Returns
+    ///
+    /// A new `WindowManager` instance.
     pub fn new(events: EventSender, main_cid: ConnID) -> Self {
         WindowManager {
             events,
@@ -59,6 +69,15 @@ impl WindowManager {
         }
     }
 
+    /// Processes an incoming event, dispatching it to the appropriate handler method.
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - The `Event` to be processed.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the event is processed successfully, otherwise `Err(Error)` if the event is unhandled or an error occurs.
     pub fn process_event(&mut self, event: Event) -> Result<()> {
         match event {
             Event::ApplicationTerminated { psn } => self.delete_application(&psn),
@@ -101,11 +120,22 @@ impl WindowManager {
         Ok(())
     }
 
+    /// Reloads the manager's configuration based on the provided `Config` object.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - The new `Config` object to load.
     fn reload_config(&mut self, config: Config) {
         debug!("{}: Got fresh config: {config:?}", function_name!());
         self.focus_follows_mouse = config.options().focus_follows_mouse;
     }
 
+    /// Refreshes the list of active displays and reorganizes windows across them.
+    /// It preserves spaces from old displays if they still exist.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the displays are refreshed successfully, otherwise `Err(Error)`.
     pub fn refresh_displays(&mut self) -> Result<()> {
         let old_displays = std::mem::take(&mut self.displays);
         self.displays = Display::present_displays(self.main_cid);
@@ -156,7 +186,12 @@ impl WindowManager {
         Ok(())
     }
 
-    // Repopulates current window panel with window from the selected space.
+    /// Repopulates the current window panel with eligible windows from a specified space.
+    ///
+    /// # Arguments
+    ///
+    /// * `space_id` - The ID of the space to refresh windows from.
+    /// * `pane` - A reference to the `WindowPane` to which windows will be appended.
     fn refresh_windows_space(&self, space_id: u64, pane: &WindowPane) {
         self.space_window_list_for_connection(vec![space_id], None, false)
             .inspect_err(|err| {
@@ -177,10 +212,28 @@ impl WindowManager {
             });
     }
 
+    /// Finds a process by its `ProcessSerialNumber`.
+    ///
+    /// # Arguments
+    ///
+    /// * `psn` - A reference to the `ProcessSerialNumber` of the process to find.
+    ///
+    /// # Returns
+    ///
+    /// `Some(&Process)` if the process is found, otherwise `None`.
     fn find_process(&self, psn: &ProcessSerialNumber) -> Option<&Process> {
         self.processes.get(psn).map(|process| process.deref())
     }
 
+    /// Finds an `Application` by its process ID (Pid).
+    ///
+    /// # Arguments
+    ///
+    /// * `pid` - The process ID of the application to find.
+    ///
+    /// # Returns
+    ///
+    /// `Some(Application)` if the application is found, otherwise `None`.
     fn find_application(&self, pid: Pid) -> Option<Application> {
         self.processes
             .values()
@@ -188,6 +241,15 @@ impl WindowManager {
             .and_then(|process| process.get_app())
     }
 
+    /// Finds a `Window` by its window ID across all managed processes.
+    ///
+    /// # Arguments
+    ///
+    /// * `window_id` - The ID of the window to find.
+    ///
+    /// # Returns
+    ///
+    /// `Some(Window)` if the window is found, otherwise `None`.
     pub fn find_window(&self, window_id: WinID) -> Option<Window> {
         self.processes
             .values()
@@ -195,10 +257,27 @@ impl WindowManager {
             .next()
     }
 
+    /// Checks if Mission Control is currently active.
+    ///
+    /// # Returns
+    ///
+    /// `true` if Mission Control is active, `false` otherwise.
     pub fn mission_control_is_active(&self) -> bool {
         self.mission_control_is_active
     }
 
+    /// Retrieves a list of window IDs for specified spaces and connection, with an option to include minimized windows.
+    /// This function uses SkyLight API calls.
+    ///
+    /// # Arguments
+    ///
+    /// * `spaces` - A vector of space IDs to query windows from.
+    /// * `cid` - An optional connection ID. If `None`, the main connection ID is used.
+    /// * `also_minimized` - A boolean indicating whether to include minimized windows in the result.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Vec<WinID>)` containing the list of window IDs if successful, otherwise `Err(Error)`.
     fn space_window_list_for_connection(
         &self,
         spaces: Vec<u64>,
@@ -272,6 +351,18 @@ impl WindowManager {
         }
     }
 
+    /// Determines if a window is valid based on its parent ID, attributes, and tags.
+    /// This function implements complex logic to filter out irrelevant or invalid windows.
+    ///
+    /// # Arguments
+    ///
+    /// * `parent_wid` - The parent window ID.
+    /// * `attributes` - The attributes of the window.
+    /// * `tags` - The tags associated with the window.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the window is considered valid, `false` otherwise.
     fn found_valid_window(parent_wid: WinID, attributes: i64, tags: i64) -> bool {
         parent_wid == 0
             && ((0 != (attributes & 0x2) || 0 != (tags & 0x400000000000000))
@@ -281,6 +372,16 @@ impl WindowManager {
                 && (0 != (tags & 0x1) || (0 != (tags & 0x2) && 0 != (tags & 0x80000000))))
     }
 
+    /// Retrieves a list of existing application window IDs for a given application.
+    /// It queries windows across all active displays and spaces associated with the application's connection.
+    ///
+    /// # Arguments
+    ///
+    /// * `app` - A reference to the `Application` for which to retrieve window IDs.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Vec<WinID>)` containing the list of window IDs if successful, otherwise `Err(Error)`.
     fn existing_application_window_list(&self, app: &Application) -> Result<Vec<WinID>> {
         let spaces: Vec<u64> = self
             .displays
@@ -299,6 +400,13 @@ impl WindowManager {
         self.space_window_list_for_connection(spaces, app.connection().ok(), true)
     }
 
+    /// Attempts to find and add unresolved windows for a given application by brute-forcing `element_id` values.
+    /// This is a workaround for macOS API limitations that do not return `AXUIElementRef` for windows on inactive spaces.
+    ///
+    /// # Arguments
+    ///
+    /// * `app` - A reference to the `Application` whose windows are to be brute-forced.
+    /// * `window_list` - A mutable vector of `WinID`s representing the expected global window list; found windows are removed from this list.
     fn bruteforce_windows(&mut self, app: &Application, window_list: &mut Vec<WinID>) {
         debug!(
             "{}: App {} has unresolved window on other desktops, bruteforcing them.",
@@ -364,6 +472,17 @@ impl WindowManager {
         }
     }
 
+    /// Adds existing windows for a given application, attempting to resolve any that are not yet found.
+    /// It compares the application's reported window list with the global window list and uses brute-forcing if necessary.
+    ///
+    /// # Arguments
+    ///
+    /// * `app` - A reference to the `Application` whose windows are to be added.
+    /// * `refresh_index` - An integer indicating the refresh index, used to determine if all windows are resolved.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(bool)` where `true` indicates all windows were resolved, otherwise `Err(Error)`.
     fn add_existing_application_windows(
         &mut self,
         app: &Application,
@@ -449,6 +568,16 @@ impl WindowManager {
         Ok(result)
     }
 
+    /// Adds new application windows by querying the application's window list.
+    /// It filters out existing windows and creates new `Window` objects for unseen ones.
+    ///
+    /// # Arguments
+    ///
+    /// * `app` - A reference to the `Application` whose windows are to be added.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Vec<Window>)` containing the newly added `Window` objects if successful, otherwise `Err(Error)`.
     fn add_application_windows(&mut self, app: &Application) -> Result<Vec<Window>> {
         // TODO: maybe refactor this with add_existing_application_windows()
         let array = app.window_list()?;
@@ -480,6 +609,19 @@ impl WindowManager {
         Ok(windows)
     }
 
+    /// Creates a new `Window` object and adds it to the application's managed windows.
+    /// It performs checks for unknown or non-real windows and observes the window for events.
+    ///
+    /// # Arguments
+    ///
+    /// * `app` - A reference to the `Application` that owns the window.
+    /// * `window_ref` - A `CFRetained<AxuWrapperType>` reference to the Accessibility UI element of the window.
+    /// * `window_id` - The ID of the window.
+    /// * `_one_shot_rules` - A boolean flag (currently unused, TODO: fix).
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Window)` if the window is created and added successfully, otherwise `Err(Error)`.
     fn create_and_add_window(
         &mut self,
         app: &Application,
@@ -524,6 +666,11 @@ impl WindowManager {
         Ok(window)
     }
 
+    /// Retrieves the currently focused application.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Application)` if a focused application is found, otherwise `Err(Error)`.
     fn focused_application(&self) -> Result<Application> {
         let mut psn = ProcessSerialNumber::default();
         unsafe {
@@ -540,6 +687,11 @@ impl WindowManager {
             ))
     }
 
+    /// Retrieves the currently focused window.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Window)` if a focused window is found, otherwise `Err(Error)`.
     fn focused_window(&self) -> Result<Window> {
         let app = self.focused_application()?;
         let window_id = app.focused_window_id()?;
@@ -552,6 +704,11 @@ impl WindowManager {
         ))
     }
 
+    /// Sets the currently focused window and reshuffles windows around it.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the focused window is set successfully, otherwise `Err(Error)`.
     pub fn set_focused_window(&mut self) -> Result<()> {
         if let Ok(window) = self.focused_window() {
             self.last_window = Some(window.id());
@@ -562,6 +719,15 @@ impl WindowManager {
         Ok(())
     }
 
+    /// Handles the event when an application switches to the front. It updates the focused window and PSN.
+    ///
+    /// # Arguments
+    ///
+    /// * `psn` - A reference to the `ProcessSerialNumber` of the application that switched to front.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the front switch is processed successfully, otherwise `Err(Error)`.
     fn front_switched(&mut self, psn: &ProcessSerialNumber) -> Result<()> {
         let process = self.find_process(psn).ok_or(std::io::Error::new(
             ErrorKind::NotFound,
@@ -606,6 +772,15 @@ impl WindowManager {
         Ok(())
     }
 
+    /// Handles the event when a new window is created. It adds the window to the manager and sets focus.
+    ///
+    /// # Arguments
+    ///
+    /// * `ax_element` - A `CFRetained<AxuWrapperType>` reference to the Accessibility UI element of the new window.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the window is created successfully, otherwise `Err(Error)`.
     fn window_created(&mut self, ax_element: CFRetained<AxuWrapperType>) -> Result<()> {
         let window_id = ax_window_id(ax_element.as_ptr())?;
         if self.find_window(window_id).is_some() {
@@ -651,6 +826,11 @@ impl WindowManager {
         Ok(())
     }
 
+    /// Handles the event when a window is destroyed. It removes the window from all displays and the owning application.
+    ///
+    /// # Arguments
+    ///
+    /// * `window_id` - The ID of the window that was destroyed.
     fn window_destroyed(&mut self, window_id: WinID) {
         self.displays.iter().for_each(|display| {
             display.remove_window(window_id);
@@ -675,10 +855,24 @@ impl WindowManager {
         }
     }
 
+    /// Handles the event when a window is moved. Currently, this function does nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `_window_id` - The ID of the window that was moved.
     fn window_moved(&self, _window_id: WinID) {
         //
     }
 
+    /// Handles the event when a window is resized. It updates the window's frame and reshuffles windows.
+    ///
+    /// # Arguments
+    ///
+    /// * `window_id` - The ID of the window that was resized.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the window is resized successfully, otherwise `Err(Error)`.
     fn window_resized(&self, window_id: WinID) -> Result<()> {
         if let Some(window) = self.find_window(window_id) {
             window.update_frame(&self.current_display_bounds()?)?;
@@ -687,6 +881,12 @@ impl WindowManager {
         Ok(())
     }
 
+    /// Handles the event when a window gains focus. It updates the focused window, PSN, and reshuffles windows.
+    /// It also centers the mouse on the focused window if focus-follows-mouse is enabled.
+    ///
+    /// # Arguments
+    ///
+    /// * `window` - The `Window` object that gained focus.
     pub fn window_focused(&mut self, window: Window) {
         let focused_id = self.focused_window;
         // TODO: fix
@@ -714,6 +914,16 @@ impl WindowManager {
         }
     }
 
+    /// Reshuffles windows around the given `window` within the active panel to ensure visibility.
+    /// Windows to the right and left of the focused window are repositioned.
+    ///
+    /// # Arguments
+    ///
+    /// * `window` - A reference to the `Window` around which to reshuffle.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if reshuffling is successful, otherwise `Err(Error)`.
     pub fn reshuffle_around(&self, window: &Window) -> Result<()> {
         if !window.inner().managed {
             return Ok(());
@@ -777,6 +987,11 @@ impl WindowManager {
         })
     }
 
+    /// Retrieves the currently active display.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(&Display)` if an active display is found, otherwise `Err(Error)`.
     pub fn active_display(&self) -> Result<&Display> {
         let id = Display::active_display_id(self.main_cid)?;
         self.displays
@@ -788,6 +1003,11 @@ impl WindowManager {
             ))
     }
 
+    /// Deletes an application and all its associated windows from the manager.
+    ///
+    /// # Arguments
+    ///
+    /// * `psn` - A reference to the `ProcessSerialNumber` of the application to delete.
     fn delete_application(&mut self, psn: &ProcessSerialNumber) {
         debug!("{}: {psn:?}", function_name!(),);
         if let Some(app) = self
@@ -803,12 +1023,22 @@ impl WindowManager {
         }
     }
 
+    /// Retrieves the bounds (CGRect) of the current active display.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(CGRect)` if the display bounds are successfully retrieved, otherwise `Err(Error)`.
     pub fn current_display_bounds(&self) -> Result<CGRect> {
         self.active_display().map(|display| display.bounds)
     }
 
-    // Add the process without waiting for it to be fully launched, because it is already running -
-    // we are calling this at the start fo the window manager.
+    /// Adds an existing process to the window manager. This is used during initial setup for already running applications.
+    /// It attempts to create and observe the application and its windows.
+    ///
+    /// # Arguments
+    ///
+    /// * `psn` - A reference to the `ProcessSerialNumber` of the existing process.
+    /// * `observer` - A `Retained<WorkspaceObserver>` to observe workspace events.
     pub fn add_existing_process(
         &mut self,
         psn: &ProcessSerialNumber,
@@ -845,6 +1075,17 @@ impl WindowManager {
         }
     }
 
+    /// Handles the event when a new application is launched. It creates a `Process` and `Application` object,
+    /// observes the application for events, and adds its windows to the manager.
+    ///
+    /// # Arguments
+    ///
+    /// * `psn` - A reference to the `ProcessSerialNumber` of the launched application.
+    /// * `observer` - A `Retained<WorkspaceObserver>` to observe workspace events.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the application is launched and processed successfully, otherwise `Err(Error)`.
     pub fn application_launched(
         &mut self,
         psn: &ProcessSerialNumber,
@@ -945,6 +1186,11 @@ impl WindowManager {
         Ok(())
     }
 
+    /// Checks if the "focus follows mouse" feature is enabled.
+    ///
+    /// # Returns
+    ///
+    /// `true` if focus follows mouse is enabled, `false` otherwise.
     pub fn focus_follows_mouse(&self) -> bool {
         self.focus_follows_mouse
     }

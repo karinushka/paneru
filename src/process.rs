@@ -33,6 +33,7 @@ pub struct Process {
 }
 
 impl Drop for Process {
+    /// Cleans up observers when the `Process` object is dropped.
     fn drop(&mut self) {
         self.unobserve_finished_launching();
         self.unobserve_activation_policy();
@@ -40,6 +41,16 @@ impl Drop for Process {
 }
 
 impl Process {
+    /// Creates a new `Process` instance. It retrieves process information and attempts to get an `NSRunningApplication` instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `psn` - A reference to the `ProcessSerialNumber` of the process.
+    /// * `observer` - A `Retained<WorkspaceObserver>` for observing workspace events.
+    ///
+    /// # Returns
+    ///
+    /// A `Pin<Box<Self>>` containing the new `Process` instance.
     pub fn new(psn: &ProcessSerialNumber, observer: Retained<WorkspaceObserver>) -> Pin<Box<Self>> {
         let mut pinfo = ProcessInfo::default();
         unsafe {
@@ -67,12 +78,23 @@ impl Process {
         })
     }
 
+    /// Returns an `Application` wrapper for the inner application, if it exists.
+    ///
+    /// # Returns
+    ///
+    /// `Some(Application)` if the application is available, otherwise `None`.
     pub fn get_app(&self) -> Option<Application> {
         self.app.as_ref().map(|app| Application {
             inner: Arc::downgrade(app),
         })
     }
 
+    /// Checks if the application associated with this process is observable (i.e., has a regular activation policy).
+    /// It updates the internal `policy` field.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the application is observable, `false` otherwise.
     pub fn is_observable(&mut self) -> bool {
         if let Some(app) = &self.application {
             self.policy = unsafe { app.activationPolicy() };
@@ -83,17 +105,24 @@ impl Process {
         }
     }
 
+    /// Checks if the application associated with this process has finished launching.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the application has finished launching, `false` otherwise.
     pub fn finished_launching(&self) -> bool {
         self.application
             .as_ref()
             .is_some_and(|app| unsafe { app.isFinishedLaunching() })
     }
 
+    /// Subscribes to "finishedLaunching" key-value observations for the associated `NSRunningApplication`.
     pub fn observe_finished_launching(&self) {
         self.observe("finishedLaunching");
         self.observing_launched.store(true, Ordering::Relaxed);
     }
 
+    /// Unsubscribes from "finishedLaunching" key-value observations.
     pub fn unobserve_finished_launching(&self) {
         if self.observing_launched.load(Ordering::Relaxed) {
             self.unobserve("finishedLaunching");
@@ -101,11 +130,13 @@ impl Process {
         }
     }
 
+    /// Subscribes to "activationPolicy" key-value observations for the associated `NSRunningApplication`.
     pub fn observe_activation_policy(&self) {
         self.observe("activationPolicy");
         self.observing_activated.store(true, Ordering::Relaxed);
     }
 
+    /// Unsubscribes from "activationPolicy" key-value observations.
     pub fn unobserve_activation_policy(&self) {
         if self.observing_activated.load(Ordering::Relaxed) {
             self.unobserve("activationPolicy");
@@ -113,6 +144,11 @@ impl Process {
         }
     }
 
+    /// Helper function to add a key-value observer for a specified `flavor` (key path).
+    ///
+    /// # Arguments
+    ///
+    /// * `flavor` - The key path string to observe (e.g., "finishedLaunching", "activationPolicy").
     fn observe(&self, flavor: &str) {
         if let Some(app) = self.application.as_ref() {
             unsafe {
@@ -133,6 +169,11 @@ impl Process {
         }
     }
 
+    /// Helper function to remove a key-value observer for a specified `flavor` (key path).
+    ///
+    /// # Arguments
+    ///
+    /// * `flavor` - The key path string to unobserve.
     fn unobserve(&self, flavor: &str) {
         if let Some(app) = self.application.as_ref() {
             unsafe {
@@ -151,6 +192,12 @@ impl Process {
         }
     }
 
+    /// Checks if the process is ready for window management (finished launching and is observable).
+    /// It subscribes to and unsubscribes from observers as needed to ensure the ready state.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the process is ready, `false` otherwise.
     pub fn ready(&mut self) -> bool {
         if !self.finished_launching() {
             debug!(
@@ -202,6 +249,16 @@ impl Process {
         true
     }
 
+    /// Creates an `Application` instance from this process.
+    ///
+    /// # Arguments
+    ///
+    /// * `cid` - The main connection ID.
+    /// * `events` - An `EventSender` to send events.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Application)` if the application is created successfully, otherwise `Err(Error)`.
     pub fn create_application(&mut self, cid: ConnID, events: EventSender) -> Result<Application> {
         let app = Arc::new(RwLock::new(InnerApplication::new(cid, self, events)?));
         self.app = Some(app);

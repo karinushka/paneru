@@ -65,6 +65,7 @@ pub struct InnerApplication {
 }
 
 impl Drop for InnerApplication {
+    /// Cleans up the AXObserver by removing all registered notifications when the `InnerApplication` is dropped.
     fn drop(&mut self) {
         let element = self.element_ref.as_ptr::<c_void>();
         self.handler
@@ -73,6 +74,18 @@ impl Drop for InnerApplication {
 }
 
 impl InnerApplication {
+    /// Creates a new `InnerApplication` instance for a given process.
+    /// It obtains the Accessibility UI element for the application and its connection ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `main_cid` - The main connection ID for the SkyLight API.
+    /// * `process` - A reference to the `Process` associated with this application.
+    /// * `events` - An `EventSender` to send events from the AXObserver.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Self)` if the `InnerApplication` is created successfully, otherwise `Err(Error)`.
     pub fn new(main_cid: ConnID, process: &Process, events: EventSender) -> Result<Self> {
         let refer = unsafe {
             let ptr = AXUIElementCreateApplication(process.pid);
@@ -97,6 +110,15 @@ impl InnerApplication {
 }
 
 impl Application {
+    /// Creates an `Error` indicating that the application has shut down, used for weak reference failures.
+    ///
+    /// # Arguments
+    ///
+    /// * `place` - A string indicating where the error occurred (e.g., function name).
+    ///
+    /// # Returns
+    ///
+    /// An `Error` of `ErrorKind::NotFound`.
     fn weak_error(&self, place: &str) -> Error {
         Error::new(
             ErrorKind::NotFound,
@@ -104,6 +126,11 @@ impl Application {
         )
     }
 
+    /// Retrieves the name of the application.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(String)` with the application name if successful, otherwise `Err(Error)` if the application has shut down.
     pub fn name(&self) -> Result<String> {
         self.inner
             .upgrade()
@@ -111,6 +138,11 @@ impl Application {
             .ok_or(self.weak_error(function_name!()))
     }
 
+    /// Retrieves the process ID (Pid) of the application.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Pid)` with the process ID if successful, otherwise `Err(Error)` if the application has shut down.
     pub fn pid(&self) -> Result<Pid> {
         self.inner
             .upgrade()
@@ -118,6 +150,11 @@ impl Application {
             .ok_or(self.weak_error(function_name!()))
     }
 
+    /// Retrieves the `ProcessSerialNumber` of the application.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(ProcessSerialNumber)` with the PSN if successful, otherwise `Err(Error)` if the application has shut down.
     pub fn psn(&self) -> Result<ProcessSerialNumber> {
         self.inner
             .upgrade()
@@ -125,6 +162,11 @@ impl Application {
             .ok_or(self.weak_error(function_name!()))
     }
 
+    /// Retrieves the connection ID (ConnID) of the application.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(ConnID)` with the connection ID if successful, otherwise `Err(Error)` if the application has shut down.
     pub fn connection(&self) -> Result<ConnID> {
         self.inner
             .upgrade()
@@ -132,6 +174,11 @@ impl Application {
             .ok_or(self.weak_error(function_name!()))
     }
 
+    /// Retrieves the `CFRetained<AxuWrapperType>` representing the Accessibility UI element of the application.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(CFRetained<AxuWrapperType>)` if successful, otherwise `Err(Error)` if the application has shut down.
     pub fn element(&self) -> Result<CFRetained<AxuWrapperType>> {
         self.inner
             .upgrade()
@@ -139,18 +186,41 @@ impl Application {
             .ok_or(self.weak_error(function_name!()))
     }
 
+    /// Finds a `Window` associated with this application by its window ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `window_id` - The ID of the window to find.
+    ///
+    /// # Returns
+    ///
+    /// `Some(Window)` if the window is found, otherwise `None`.
     pub fn find_window(&self, window_id: WinID) -> Option<Window> {
         self.inner
             .upgrade()
             .and_then(|inner| inner.force_read().windows.get(&window_id).cloned())
     }
 
+    /// Removes a window from the application's internal map of windows.
+    ///
+    /// # Arguments
+    ///
+    /// * `window_id` - The ID of the window to remove.
+    ///
+    /// # Returns
+    ///
+    /// `Some(Window)` if the window was removed, otherwise `None`.
     pub fn remove_window(&self, window_id: WinID) -> Option<Window> {
         self.inner
             .upgrade()
             .and_then(|inner| inner.force_write().windows.remove(&window_id))
     }
 
+    /// Adds a window to the application's internal map of windows.
+    ///
+    /// # Arguments
+    ///
+    /// * `window` - A reference to the `Window` to add.
     pub fn add_window(&self, window: &Window) {
         if let Some(inner) = self.inner.upgrade() {
             inner
@@ -165,12 +235,22 @@ impl Application {
         }
     }
 
+    /// Iterates over each window managed by this application, applying an accessor function.
+    ///
+    /// # Arguments
+    ///
+    /// * `accessor` - A closure that takes a reference to a `Window`.
     pub fn foreach_window(&self, accessor: impl FnMut(&Window)) {
         if let Some(inner) = self.inner.upgrade() {
             inner.force_read().windows.values().for_each(accessor);
         }
     }
 
+    /// Retrieves the main window ID of the application.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(WinID)` with the main window ID if successful, otherwise `Err(Error)`.
     fn _main_window(&self) -> Result<WinID> {
         let axmain = CFString::from_static_str(kAXMainWindowAttribute);
         let focused = get_attribute::<AxuWrapperType>(&self.element()?, axmain)?;
@@ -186,6 +266,11 @@ impl Application {
         })
     }
 
+    /// Retrieves the focused window ID of the application.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(WinID)` with the focused window ID if successful, otherwise `Err(Error)`.
     pub fn focused_window_id(&self) -> Result<WinID> {
         let axmain = CFString::from_static_str(kAXFocusedWindowAttribute);
         let element = self.element()?;
@@ -193,12 +278,22 @@ impl Application {
         ax_window_id(focused.as_ptr())
     }
 
+    /// Retrieves a list of all windows associated with the application.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(CFRetained<CFArray>)` containing the list of window elements if successful, otherwise `Err(Error)`.
     pub fn window_list(&self) -> Result<CFRetained<CFArray>> {
         let axwindows = CFString::from_static_str(kAXWindowsAttribute);
         let element = self.element()?;
         get_attribute::<CFArray>(&element, axwindows)
     }
 
+    /// Registers observers for general application-level accessibility notifications (e.g., `kAXCreatedNotification`).
+    ///
+    /// # Returns
+    ///
+    /// `Ok(bool)` where `true` means all observers were successfully registered and `retry` list is empty, otherwise `Err(Error)`.
     pub fn observe(&self) -> Result<bool> {
         let error = || {
             Error::new(
@@ -223,6 +318,16 @@ impl Application {
             .map(|retry| retry.is_empty())
     }
 
+    /// Registers observers for specific window-level accessibility notifications (e.g., `kAXUIElementDestroyedNotification`).
+    ///
+    /// # Arguments
+    ///
+    /// * `element` - The `AXUIElementRef` of the window to observe.
+    /// * `window` - A reference to the `Window` object.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(bool)` where `true` means all observers were successfully registered and `retry` list is empty, otherwise `Err(Error)`.
     pub fn observe_window(&self, element: AXUIElementRef, window: &Window) -> Result<bool> {
         let context = NonNull::from(window.inner().deref());
         self.inner
@@ -237,6 +342,11 @@ impl Application {
             .map(|retry| retry.is_empty())
     }
 
+    /// Unregisters observers for a specific window's accessibility notifications.
+    ///
+    /// # Arguments
+    ///
+    /// * `element` - The `AXUIElementRef` of the window to unobserve.
     pub fn unobserve_window(&self, element: AXUIElementRef) {
         if let Some(inner) = self.inner.upgrade() {
             inner
@@ -246,6 +356,11 @@ impl Application {
         }
     }
 
+    /// Checks if the application is currently the frontmost application.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the application is frontmost, `false` otherwise.
     pub fn is_frontmost(&self) -> bool {
         let mut psn = ProcessSerialNumber::default();
         unsafe { _SLPSGetFrontProcess(&mut psn) };
@@ -259,12 +374,24 @@ struct AxObserverHandler {
 }
 
 impl Drop for AxObserverHandler {
+    /// Invalidates the run loop source associated with the AXObserver when the `AxObserverHandler` is dropped.
     fn drop(&mut self) {
         remove_run_loop(self.observer.deref());
     }
 }
 
 impl AxObserverHandler {
+    /// Creates a new `AxObserverHandler` instance for a given process ID.
+    /// It creates an `AXObserver` and adds its run loop source to the main run loop.
+    ///
+    /// # Arguments
+    ///
+    /// * `pid` - The process ID to create the observer for.
+    /// * `events` - An `EventSender` to send events generated by the observer.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Pin<Box<Self>>)` if the handler is created successfully, otherwise `Err(Error)`.
     fn new(pid: Pid, events: EventSender) -> Result<Pin<Box<Self>>> {
         let observer = unsafe {
             let mut observer_ref: AXObserverRef = null_mut();
@@ -286,6 +413,17 @@ impl AxObserverHandler {
         }))
     }
 
+    /// Adds accessibility notifications to be observed for a given UI element.
+    ///
+    /// # Arguments
+    ///
+    /// * `element` - The `AXUIElementRef` to observe.
+    /// * `notifications` - A slice of static strings representing the notification names to add.
+    /// * `context` - A raw pointer to user-defined context data that will be passed to the callback.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Vec<&str>)` containing a list of notifications that could not be registered (retries), otherwise `Err(Error)`.
     pub fn add_observer(
         &mut self,
         element: AXUIElementRef,
@@ -338,6 +476,12 @@ impl AxObserverHandler {
         }
     }
 
+    /// Removes accessibility notifications from being observed for a given UI element.
+    ///
+    /// # Arguments
+    ///
+    /// * `element` - The `AXUIElementRef` from which to remove notifications.
+    /// * `notifications` - A slice of static strings representing the notification names to remove.
     pub fn remove_observer(&mut self, element: AXUIElementRef, notifications: &[&'static str]) {
         for name in notifications {
             let observer: AXObserverRef = self.observer.deref().as_ptr();
@@ -365,6 +509,13 @@ impl AxObserverHandler {
         }
     }
 
+    /// Notifies the event sender about an application-level accessibility event.
+    /// It translates the notification string and element into a corresponding `Event`.
+    ///
+    /// # Arguments
+    ///
+    /// * `notification` - The name of the accessibility notification as a `String`.
+    /// * `element` - The `AXUIElementRef` associated with the notification.
     fn notify_app(&self, notification: String, element: AXUIElementRef) {
         let event = if accessibility_sys::kAXCreatedNotification == notification {
             match AxuWrapperType::retain(element) {
@@ -407,6 +558,13 @@ impl AxObserverHandler {
         _ = self.events.send(event);
     }
 
+    /// Notifies the event sender about a window-level accessibility event.
+    /// It translates the notification string and window ID into a corresponding `Event`.
+    ///
+    /// # Arguments
+    ///
+    /// * `notification` - The name of the accessibility notification as a `String`.
+    /// * `window_id` - The ID of the window associated with the notification.
     fn notify_window(&self, notification: String, window_id: WinID) {
         let event = match notification.as_str() {
             accessibility_sys::kAXWindowMiniaturizedNotification => {
@@ -430,6 +588,15 @@ impl AxObserverHandler {
         _ = self.events.send(event);
     }
 
+    /// The static callback function for `AXObserver`. This function is called by the macOS Accessibility API
+    /// when an observed accessibility event occurs. It dispatches the event to the appropriate `notify_app` or `notify_window` handler.
+    ///
+    /// # Arguments
+    ///
+    /// * `_` - The `AXObserverRef` (unused).
+    /// * `element` - The `AXUIElementRef` associated with the notification.
+    /// * `notification` - The raw `CFStringRef` representing the notification name.
+    /// * `context` - A raw pointer to the user-defined context (either `AxObserverHandler` or `InnerWindow`).
     extern "C" fn callback(
         _: AXObserverRef,
         element: AXUIElementRef,

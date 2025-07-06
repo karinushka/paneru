@@ -154,10 +154,28 @@ pub struct EventSender {
 }
 
 impl EventSender {
+    /// Creates a new `EventSender` instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `tx` - The sending half of an MPSC channel.
+    ///
+    /// # Returns
+    ///
+    /// A new `EventSender`.
     fn new(tx: Sender<Event>) -> Self {
         Self { tx }
     }
 
+    /// Sends an `Event` through the internal MPSC channel.
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - The `Event` to send.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the event is sent successfully, otherwise `Err(Error)`.
     pub fn send(&self, event: Event) -> Result<()> {
         self.tx
             .send(event)
@@ -183,6 +201,11 @@ pub struct EventHandler {
 }
 
 impl EventHandler {
+    /// Creates a new `EventHandler` instance. It initializes the main connection ID and `WindowManager`.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Self)` if the `EventHandler` is created successfully, otherwise `Err(Error)`.
     pub fn new() -> Result<Self> {
         let main_cid = unsafe { SLSMainConnectionID() };
         info!("{}: My connection id: {main_cid}", function_name!());
@@ -201,10 +224,22 @@ impl EventHandler {
         })
     }
 
+    /// Returns a clone of the `EventSender` for sending events to this handler.
+    ///
+    /// # Returns
+    ///
+    /// A cloned `EventSender`.
     pub fn sender(&self) -> EventSender {
         self.tx.clone()
     }
 
+    /// Starts the event handler in a new thread.
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing:
+    /// * An `Arc<AtomicBool>` used to signal the handler to quit.
+    /// * A `JoinHandle` for the spawned thread.
     pub fn start(mut self) -> (Arc<AtomicBool>, JoinHandle<()>) {
         let quit = self.quit.clone();
         let handle = thread::spawn(move || {
@@ -213,6 +248,7 @@ impl EventHandler {
         (quit, handle)
     }
 
+    /// The main run loop for the event handler. It continuously receives and processes events until an `Exit` event or channel disconnection.
     fn run(&mut self) {
         loop {
             let event = match self.rx.recv() {
@@ -236,6 +272,15 @@ impl EventHandler {
         }
     }
 
+    /// Processes a single incoming `Event`. It dispatches various event types to the `WindowManager` or other internal handlers.
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - The `Event` to process.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the event is processed successfully, otherwise `Err(Error)`.
     fn process_event(&mut self, event: Event) -> Result<()> {
         match event {
             Event::Exit => return Ok(()),
@@ -290,6 +335,12 @@ impl EventHandler {
         Ok(())
     }
 
+    /// Handles a key press event. It determines the modifier mask and logs the key and modifier.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key code of the pressed key.
+    /// * `eventflags` - The `CGEventFlags` representing active modifiers.
     fn key_pressed(&self, key: i64, eventflags: CGEventFlags) {
         // Normal key, left, right.
         const MASK_ALT: [u64; 3] = [0x00080000, 0x00000020, 0x00000040];
@@ -312,6 +363,12 @@ impl EventHandler {
         info!("KeyDown: {modifier} {key}");
     }
 
+    /// Handles the event when a window gains focus. It checks if the owning application is frontmost
+    /// and then delegates to the `WindowManager` to process the focus change.
+    ///
+    /// # Arguments
+    ///
+    /// * `window_id` - The ID of the window that gained focus.
     fn window_focused(&mut self, window_id: WinID) {
         debug!("{}: {}", function_name!(), window_id);
         if let Some(window) = self.window_manager.find_window(window_id) {
@@ -330,6 +387,17 @@ impl EventHandler {
         }
     }
 
+    /// Retrieves a window ID in a specified direction relative to a `current_window_id` within a `WindowPane`.
+    ///
+    /// # Arguments
+    ///
+    /// * `direction` - The direction (e.g., "west", "east", "first", "last").
+    /// * `current_window_id` - The ID of the current window.
+    /// * `panel` - A reference to the `WindowPane` to search within.
+    ///
+    /// # Returns
+    ///
+    /// `Some(WinID)` with the found window's ID, otherwise `None`.
     fn get_window_in_direction(
         direction: &str,
         current_window_id: WinID,
@@ -366,6 +434,17 @@ impl EventHandler {
         found
     }
 
+    /// Handles the "focus" command, moving focus to a window in a specified direction.
+    ///
+    /// # Arguments
+    ///
+    /// * `argv` - A slice of strings representing the command arguments (e.g., ["east"]).
+    /// * `current_window` - A reference to the currently focused `Window`.
+    /// * `panel` - A reference to the active `WindowPane`.
+    ///
+    /// # Returns
+    ///
+    /// `Some(WinID)` with the ID of the newly focused window, otherwise `None`.
     fn command_move_focus(
         &self,
         argv: &[String],
@@ -383,6 +462,18 @@ impl EventHandler {
         )
     }
 
+    /// Handles the "swap" command, swapping the positions of the current window with another window in a specified direction.
+    ///
+    /// # Arguments
+    ///
+    /// * `argv` - A slice of strings representing the command arguments (e.g., ["west"]).
+    /// * `current_window` - A reference to the currently focused `Window`.
+    /// * `panel` - A reference to the active `WindowPane`.
+    /// * `bounds` - The `CGRect` representing the bounds of the display.
+    ///
+    /// # Returns
+    ///
+    /// `Some(Window)` with the window that was swapped with, otherwise `None`.
     fn command_swap_focus(
         &self,
         argv: &[String],
@@ -421,6 +512,15 @@ impl EventHandler {
         Some(window)
     }
 
+    /// Handles various "window" commands, such as focus, swap, center, resize, and manage.
+    ///
+    /// # Arguments
+    ///
+    /// * `argv` - A slice of strings representing the command arguments.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the command is processed successfully, otherwise `Err(Error)`.
     fn command_windows(&mut self, argv: &[String]) -> Result<()> {
         let empty = "".to_string();
         let window = match self
@@ -501,6 +601,11 @@ impl EventHandler {
         self.window_manager.reshuffle_around(&window)
     }
 
+    /// Dispatches a command based on the first argument (e.g., "window", "quit").
+    ///
+    /// # Arguments
+    ///
+    /// * `argv` - A vector of strings representing the command and its arguments.
     fn command(&mut self, argv: Vec<String>) {
         if let Some(first) = argv.first() {
             match first.as_ref() {
@@ -515,6 +620,16 @@ impl EventHandler {
         };
     }
 
+    /// Handles a mouse down event. It finds the window at the click point, reshuffles if necessary,
+    /// and stores the clicked window and location.
+    ///
+    /// # Arguments
+    ///
+    /// * `point` - A reference to the `CGPoint` where the mouse down occurred.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the event is handled successfully, otherwise `Err(Error)`.
     fn mouse_down(&mut self, point: &CGPoint) -> Result<()> {
         info!("{}: {point:?}", function_name!());
         if self.window_manager.mission_control_is_active() {
@@ -532,10 +647,20 @@ impl EventHandler {
         Ok(())
     }
 
+    /// Handles a mouse up event. Currently, this function does nothing except logging.
+    ///
+    /// # Arguments
+    ///
+    /// * `point` - A reference to the `CGPoint` where the mouse up occurred.
     fn mouse_up(&mut self, point: &CGPoint) {
         info!("{}: {point:?}", function_name!());
     }
 
+    /// Handles a mouse dragged event. Currently, this function does nothing except logging.
+    ///
+    /// # Arguments
+    ///
+    /// * `point` - A reference to the `CGPoint` where the mouse was dragged.
     fn mouse_dragged(&self, point: &CGPoint) {
         info!("{}: {point:?}", function_name!());
 
@@ -545,6 +670,16 @@ impl EventHandler {
         }
     }
 
+    /// Handles a mouse moved event. If focus-follows-mouse is enabled, it attempts to focus the window under the cursor.
+    /// It also handles child windows like sheets and drawers.
+    ///
+    /// # Arguments
+    ///
+    /// * `point` - A reference to the `CGPoint` where the mouse moved to.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the event is handled successfully or if focus-follows-mouse is disabled, otherwise `Err(Error)`.
     fn mouse_moved(&mut self, point: &CGPoint) -> Result<()> {
         if !self.window_manager.focus_follows_mouse() {
             return Ok(());
@@ -642,6 +777,15 @@ impl EventHandler {
         }
     }
 
+    /// Finds a window at a given screen point using SkyLight API.
+    ///
+    /// # Arguments
+    ///
+    /// * `point` - A reference to the `CGPoint` representing the screen coordinate.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Window)` with the found window if successful, otherwise `Err(Error)`.
     fn find_window_at_point(&self, point: &CGPoint) -> Result<Window> {
         let mut window_id: WinID = 0;
         let mut window_cid: ConnID = 0;

@@ -55,17 +55,53 @@ type AXObserverCallback = unsafe extern "C" fn(
 );
 
 unsafe extern "C" {
+    /// Creates an `AXObserver` for a given application process ID and a callback function.
+    ///
+    /// # Arguments
+    ///
+    /// * `application` - The process ID (Pid) of the application to observe.
+    /// * `callback` - The `AXObserverCallback` function to be invoked when notifications occur.
+    /// * `out_observer` - A mutable reference to an `AXObserverRef` where the created observer will be stored.
+    ///
+    /// # Returns
+    ///
+    /// An `AXError` indicating success or failure.
     pub fn AXObserverCreate(
         application: Pid,
         callback: AXObserverCallback,
         out_observer: &mut AXObserverRef,
     ) -> AXError;
+
+    /// Adds a notification to an `AXObserver` for a specific UI element.
+    ///
+    /// # Arguments
+    ///
+    /// * `observer` - The `AXObserverRef`.
+    /// * `element` - The `AXUIElementRef` to observe.
+    /// * `notification` - A reference to a `CFString` representing the notification name.
+    /// * `refcon` - A raw pointer to user-defined context data.
+    ///
+    /// # Returns
+    ///
+    /// An `AXError` indicating success or failure, including `kAXErrorNotificationAlreadyRegistered`.
     pub fn AXObserverAddNotification(
         observer: AXObserverRef,
         element: AXUIElementRef,
         notification: &CFString,
         refcon: *mut c_void,
     ) -> AXError;
+
+    /// Removes a notification from an `AXObserver` for a specific UI element.
+    ///
+    /// # Arguments
+    ///
+    /// * `observer` - The `AXObserverRef`.
+    /// * `element` - The `AXUIElementRef` from which to remove the notification.
+    /// * `notification` - A reference to a `CFString` representing the notification name.
+    ///
+    /// # Returns
+    ///
+    /// An `AXError` indicating success or failure.
     pub fn AXObserverRemoveNotification(
         observer: AXObserverRef,
         element: AXUIElementRef,
@@ -112,6 +148,17 @@ type ProcessCallbackFn = extern "C-unwind" fn(
 unsafe extern "C-unwind" {
     fn setup_process_handler(callback: ProcessCallbackFn, this: *mut c_void) -> *const c_void;
     fn remove_process_handler(handler: *const c_void) -> c_void;
+    /// Retrieves information about a process given its `ProcessSerialNumber`.
+    /// This function is declared as `extern "C-unwind"` because it interacts with C code that might unwind.
+    ///
+    /// # Arguments
+    ///
+    /// * `psn` - A reference to the `ProcessSerialNumber` of the process.
+    /// * `pi` - A mutable reference to a `ProcessInfo` struct where the process information will be stored.
+    ///
+    /// # Returns
+    ///
+    /// An `OSStatus` indicating success or failure.
     pub fn get_process_info(psn: &ProcessSerialNumber, pi: &mut ProcessInfo) -> OSStatus;
 }
 
@@ -152,6 +199,16 @@ enum ProcessEventApp {
 }
 
 impl ProcessHandler {
+    /// Creates a new `ProcessHandler` instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `events` - An `EventSender` to send process-related events.
+    /// * `observer` - A `Retained<WorkspaceObserver>` to pass to `ApplicationLaunched` events.
+    ///
+    /// # Returns
+    ///
+    /// A new `ProcessHandler`.
     fn new(events: EventSender, observer: Retained<WorkspaceObserver>) -> Self {
         ProcessHandler {
             events,
@@ -160,6 +217,7 @@ impl ProcessHandler {
         }
     }
 
+    /// Starts the process handler by registering a C-callback with the underlying private API.
     fn start(&mut self) {
         info!("{}: Registering process_handler", function_name!());
         let handler = unsafe {
@@ -176,6 +234,18 @@ impl ProcessHandler {
         })));
     }
 
+    /// The C-callback function invoked by the private process handling API. It dispatches to the `process_handler` method.
+    /// This function is declared as `extern "C-unwind"`.
+    ///
+    /// # Arguments
+    ///
+    /// * `this` - A raw pointer to the `ProcessHandler` instance.
+    /// * `psn` - A reference to the `ProcessSerialNumber` of the process.
+    /// * `event` - The `ProcessEventApp` indicating the type of process event.
+    ///
+    /// # Returns
+    ///
+    /// An `OSStatus`.
     extern "C-unwind" fn callback(
         this: *mut c_void,
         psn: &ProcessSerialNumber,
@@ -188,6 +258,12 @@ impl ProcessHandler {
         0
     }
 
+    /// Handles various process events received from the C callback. It sends corresponding `Event`s via `events`.
+    ///
+    /// # Arguments
+    ///
+    /// * `psn` - A reference to the `ProcessSerialNumber` of the process involved in the event.
+    /// * `event` - The `ProcessEventApp` indicating the type of event.
     fn process_handler(&mut self, psn: &ProcessSerialNumber, event: ProcessEventApp) {
         let psn = psn.clone();
         let _ = match event {
@@ -219,6 +295,16 @@ struct InputHandler {
 }
 
 impl InputHandler {
+    /// Creates a new `InputHandler` instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `events` - An `EventSender` to send input-related events.
+    /// * `config` - The `Config` object for looking up keybindings.
+    ///
+    /// # Returns
+    ///
+    /// A new `InputHandler`.
     fn new(events: EventSender, config: Config) -> Self {
         InputHandler {
             events,
@@ -227,6 +313,11 @@ impl InputHandler {
         }
     }
 
+    /// Starts the input handler by creating and enabling a `CGEventTap`. It also sets up a cleanup hook.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the event tap is created and started successfully, otherwise `Err(Error)`.
     fn start(&mut self) -> Result<()> {
         let mouse_event_mask = (1 << CGEventType::MouseMoved.0)
             | (1 << CGEventType::LeftMouseDown.0)
@@ -270,6 +361,19 @@ impl InputHandler {
         Ok(())
     }
 
+    /// The C-callback function for the `CGEventTap`. It dispatches to the `input_handler` method.
+    /// This function is declared as `extern "C-unwind"`.
+    ///
+    /// # Arguments
+    ///
+    /// * `_` - The `CGEventTapProxy` (unused).
+    /// * `event_type` - The `CGEventType` of the event.
+    /// * `event_ref` - A mutable `NonNull` pointer to the `CGEvent`.
+    /// * `this` - A raw pointer to the `InputHandler` instance.
+    ///
+    /// # Returns
+    ///
+    /// A raw mutable pointer to `CGEvent`. Returns `null_mut()` if the event is intercepted.
     extern "C-unwind" fn callback(
         _: CGEventTapProxy,
         event_type: CGEventType,
@@ -288,6 +392,16 @@ impl InputHandler {
         unsafe { event_ref.as_mut() }
     }
 
+    /// Handles various input events received from the `CGEventTap` callback. It sends corresponding `Event`s.
+    ///
+    /// # Arguments
+    ///
+    /// * `event_type` - The `CGEventType` of the event.
+    /// * `event` - A reference to the `CGEvent`.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the event should be intercepted (not passed further), `false` otherwise.
     fn input_handler(&mut self, event_type: CGEventType, event: &CGEvent) -> bool {
         let result = match event_type {
             CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
@@ -333,6 +447,17 @@ impl InputHandler {
         false
     }
 
+    /// Handles key press events. It determines the modifier mask and attempts to find a matching keybinding in the configuration.
+    /// If a binding is found, it sends a `Command` event and intercepts the key press.
+    ///
+    /// # Arguments
+    ///
+    /// * `keycode` - The key code of the pressed key.
+    /// * `eventflags` - The `CGEventFlags` representing active modifiers.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the key press was handled and should be intercepted, `false` otherwise.
     fn handle_keypress(&self, keycode: i64, eventflags: CGEventFlags) -> bool {
         const MODIFIER_MASKS: [[u64; 3]; 4] = [
             // Normal key, left, right.
@@ -521,6 +646,15 @@ define_class!(
 );
 
 impl WorkspaceObserver {
+    /// Creates a new `WorkspaceObserver` instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `events` - An `EventSender` to send workspace-related events.
+    ///
+    /// # Returns
+    ///
+    /// A `Retained<Self>` containing the new `WorkspaceObserver` instance.
     fn new(events: EventSender) -> Retained<Self> {
         // Initialize instance variables.
         let this = Self::alloc().set_ivars(Ivars { events });
@@ -528,6 +662,7 @@ impl WorkspaceObserver {
         unsafe { msg_send![super(this), init] }
     }
 
+    /// Starts observing workspace notifications by registering selectors with `NSWorkspace` and `NSDistributedNotificationCenter`.
     fn start(&self) {
         let methods = [
             (
@@ -607,6 +742,7 @@ impl WorkspaceObserver {
 }
 
 impl Drop for WorkspaceObserver {
+    /// Deregisters all previously registered notification callbacks when the `WorkspaceObserver` is dropped.
     fn drop(&mut self) {
         info!("{}: deregistering callbacks.", function_name!());
         unsafe {
@@ -627,6 +763,15 @@ struct MissionControlHandler {
 }
 
 impl MissionControlHandler {
+    /// Creates a new `MissionControlHandler` instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `events` - An `EventSender` to send Mission Control related events.
+    ///
+    /// # Returns
+    ///
+    /// A new `MissionControlHandler`.
     fn new(events: EventSender) -> Self {
         Self {
             events,
@@ -642,6 +787,13 @@ impl MissionControlHandler {
         "AXExposeExit",
     ];
 
+    /// Handles Mission Control accessibility notifications. It translates the notification string into a corresponding `Event`.
+    ///
+    /// # Arguments
+    ///
+    /// * `_observer` - The `AXObserverRef` (unused).
+    /// * `_element` - The `AXUIElementRef` (unused).
+    /// * `notification` - The name of the Mission Control notification as a string.
     fn mission_control_handler(
         &self,
         _observer: AXObserverRef,
@@ -667,6 +819,11 @@ impl MissionControlHandler {
             .inspect_err(|err| error!("{}: error sending event: {err}", function_name!()));
     }
 
+    /// Retrieves the process ID (Pid) of the Dock application.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Pid)` with the Dock's process ID if found, otherwise `Err(Error)`.
     fn dock_pid() -> Result<Pid> {
         let dock = NSString::from_str("com.apple.dock");
         let array = unsafe { NSRunningApplication::runningApplicationsWithBundleIdentifier(&dock) };
@@ -680,6 +837,12 @@ impl MissionControlHandler {
             ))
     }
 
+    /// Starts observing Mission Control accessibility notifications from the Dock process.
+    /// It creates an `AXObserver` and adds it to the run loop.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if observation is started successfully, otherwise `Err(Error)`.
     fn observe(&mut self) -> Result<()> {
         let pid = MissionControlHandler::dock_pid()?;
         let element = AxuWrapperType::from_retained(unsafe { AXUIElementCreateApplication(pid) })?;
@@ -724,6 +887,7 @@ impl MissionControlHandler {
         Ok(())
     }
 
+    /// Stops observing Mission Control accessibility notifications and cleans up resources.
     fn unobserve(&mut self) {
         if let Some((observer, element)) = self.observer.take().zip(self.element.as_ref()) {
             Self::EVENTS.iter().for_each(|name| {
@@ -754,6 +918,14 @@ impl MissionControlHandler {
         }
     }
 
+    /// The static callback function for the Mission Control `AXObserver`. It dispatches to the `mission_control_handler` method.
+    ///
+    /// # Arguments
+    ///
+    /// * `observer` - The `AXObserverRef`.
+    /// * `element` - The `AXUIElementRef`.
+    /// * `notification` - The raw `CFStringRef` representing the notification name.
+    /// * `context` - A raw pointer to the `MissionControlHandler` instance.
     extern "C" fn callback(
         observer: AXObserverRef,
         element: AXUIElementRef,
@@ -778,6 +950,7 @@ impl MissionControlHandler {
 }
 
 impl Drop for MissionControlHandler {
+    /// Unobserves Mission Control notifications when the `MissionControlHandler` is dropped.
     fn drop(&mut self) {
         self.unobserve();
     }
@@ -789,6 +962,15 @@ struct DisplayHandler {
 }
 
 impl DisplayHandler {
+    /// Creates a new `DisplayHandler` instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `events` - An `EventSender` to send display-related events.
+    ///
+    /// # Returns
+    ///
+    /// A new `DisplayHandler`.
     fn new(events: EventSender) -> Self {
         Self {
             events,
@@ -796,6 +978,11 @@ impl DisplayHandler {
         }
     }
 
+    /// Starts the display handler by registering a callback for display reconfiguration events.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the callback is registered successfully, otherwise `Err(Error)`.
     fn start(&mut self) -> Result<()> {
         info!("{}: Registering display handler", function_name!());
         let this = unsafe { NonNull::new_unchecked(self).as_ptr() };
@@ -817,6 +1004,14 @@ impl DisplayHandler {
         Ok(())
     }
 
+    /// The C-callback function for `CGDisplayReconfigurationCallback`. It dispatches to the `display_handler` method.
+    /// This function is declared as `extern "C-unwind"`.
+    ///
+    /// # Arguments
+    ///
+    /// * `display_id` - The `CGDirectDisplayID` of the display that changed.
+    /// * `flags` - The `CGDisplayChangeSummaryFlags` indicating the type of change.
+    /// * `context` - A raw pointer to the `DisplayHandler` instance.
     extern "C-unwind" fn callback(
         display_id: CGDirectDisplayID,
         flags: CGDisplayChangeSummaryFlags,
@@ -828,6 +1023,12 @@ impl DisplayHandler {
         }
     }
 
+    /// Handles display change events and sends corresponding `Event`s (e.g., `DisplayAdded`, `DisplayRemoved`).
+    ///
+    /// # Arguments
+    ///
+    /// * `display_id` - The `CGDirectDisplayID` of the display that changed.
+    /// * `flags` - The `CGDisplayChangeSummaryFlags` indicating the type of change.
     fn display_handler(
         &mut self,
         display_id: CGDirectDisplayID,
@@ -859,6 +1060,11 @@ struct ConfigHandler {
 }
 
 impl ConfigHandler {
+    /// Sends a `ConfigRefresh` event with the current configuration to the event handler.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the event is sent successfully, otherwise `Err(Error)`.
     fn announce_fresh_config(&self) -> Result<()> {
         self.events.send(Event::ConfigRefresh {
             config: self.config.clone(),
@@ -868,6 +1074,11 @@ impl ConfigHandler {
 }
 
 impl notify::EventHandler for ConfigHandler {
+    /// Handles file system events for the configuration file. When the content changes, it reloads the configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - The result of a file system event.
     fn handle_event(&mut self, event: notify::Result<notify::Event>) {
         if let Ok(notify::Event {
             kind: EventKind::Modify(ModifyKind::Data(DataChange::Content)),
@@ -886,6 +1097,16 @@ impl notify::EventHandler for ConfigHandler {
     }
 }
 
+/// Sets up a file system watcher for the configuration file.
+///
+/// # Arguments
+///
+/// * `events` - An `EventSender` to send `ConfigRefresh` events.
+/// * `config` - The initial `Config` object.
+///
+/// # Returns
+///
+/// `Ok(FsEventWatcher)` if the watcher is set up successfully, otherwise `Err(Error)`.
 fn setup_config_watcher(events: EventSender, config: Config) -> Result<FsEventWatcher> {
     let setup = notify::Config::default().with_poll_interval(Duration::from_secs(3));
     let config_handler = ConfigHandler { events, config };
@@ -920,6 +1141,15 @@ pub struct PlatformCallbacks {
 }
 
 impl PlatformCallbacks {
+    /// Creates a new `PlatformCallbacks` instance, initializing various handlers and watchers.
+    ///
+    /// # Arguments
+    ///
+    /// * `events` - An `EventSender` to be used by all platform callbacks.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(std::pin::Pin<Box<Self>>)` if the instance is created successfully, otherwise `Err(Error)`.
     pub fn new(events: EventSender) -> Result<std::pin::Pin<Box<Self>>> {
         let config = Config::new(CONFIGURATION_FILE.as_path()).map_err(|err| {
             Error::new(
@@ -940,6 +1170,12 @@ impl PlatformCallbacks {
         }))
     }
 
+    /// Sets up and starts all platform-specific handlers, including input, display, Mission Control, workspace, and process handlers.
+    /// It also sends a `ProcessesLoaded` event.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if all handlers are set up successfully, otherwise `Err(Error)`.
     pub fn setup_handlers(&mut self) -> Result<()> {
         self.event_handler.start()?;
         self.display_handler.start()?;
@@ -950,7 +1186,11 @@ impl PlatformCallbacks {
         self.events.send(Event::ProcessesLoaded)
     }
 
-    // Does not return until 'quit' is signalled.
+    /// Runs the main event loop for platform callbacks. It continuously processes events until the `quit` signal is set.
+    ///
+    /// # Arguments
+    ///
+    /// * `quit` - An `Arc<AtomicBool>` used to signal the run loop to exit.
     pub fn run(&mut self, quit: Arc<AtomicBool>) {
         info!("{}: Starting run loop...", function_name!());
         loop {

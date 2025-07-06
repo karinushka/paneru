@@ -816,9 +816,11 @@ impl EventHandler {
                 )
             };
         }
-        self.window_manager.find_window(window_id).ok_or(Error::new(
-            ErrorKind::Other,
-            format!("{}: could not find a window at {point:?}", function_name!()),
-        ))
+        self.window_manager
+            .find_window(window_id)
+            .ok_or(Error::other(format!(
+                "{}: could not find a window at {point:?}",
+                function_name!()
+            )))
     }
 }

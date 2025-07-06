@@ -548,6 +548,22 @@ impl EventHandler {
         let active_panel = active_display.active_panel(self.main_cid)?;
         let display_bounds = self.window_manager.current_display_bounds()?;
 
+        let window_id = window.id();
+        if window.managed() && active_panel.index_of(window_id).is_err() {
+            // Current window is not present in the current pane. This is probably due to it being
+            // moved to a different desktop. Re-insert it into a correct pane.
+            debug!(
+                "{}: Window {} moved between panes.",
+                function_name!(),
+                window_id
+            );
+            // First remove it from all the panes.
+            active_display.remove_window(window_id);
+
+            // .. and then re-insert it into the current one.
+            active_panel.append(window_id);
+        }
+
         match argv.first().unwrap_or(&empty).as_ref() {
             "focus" => {
                 self.command_move_focus(&argv[1..], &window, &active_panel);

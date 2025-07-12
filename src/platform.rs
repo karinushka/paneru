@@ -9,7 +9,8 @@ use notify::{EventKind, FsEventWatcher, RecommendedWatcher, RecursiveMode, Watch
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::{AllocAnyThread, DefinedClass, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace, NSWorkspaceApplicationKey,
+    NSApplicationActivationPolicy, NSEvent, NSEventType, NSRunningApplication, NSTouch,
+    NSTouchPhase, NSWorkspace, NSWorkspaceApplicationKey,
 };
 use objc2_core_foundation::{
     CFMachPortCreateRunLoopSource, CFMachPortInvalidate, CFRetained, CFRunLoopAddSource,
@@ -25,7 +26,7 @@ use objc2_core_graphics::{
 };
 use objc2_foundation::{
     NSDictionary, NSDistributedNotificationCenter, NSKeyValueChangeNewKey, NSNotificationCenter,
-    NSNumber, NSObject, NSString,
+    NSNumber, NSObject, NSSet, NSString,
 };
 use std::env;
 use std::ffi::c_void;
@@ -493,6 +494,7 @@ struct InputHandler {
     events: EventSender,
     config: Config,
     cleanup: Option<Cleanuper>,
+    finger_position: Option<Retained<NSSet<NSTouch>>>,
 }
 
 impl InputHandler {
@@ -511,6 +513,7 @@ impl InputHandler {
             events,
             config,
             cleanup: None,
+            finger_position: None,
         }
     }
 
@@ -527,6 +530,7 @@ impl InputHandler {
             | (1 << CGEventType::RightMouseDown.0)
             | (1 << CGEventType::RightMouseUp.0)
             | (1 << CGEventType::RightMouseDragged.0)
+            | (1 << NSEventType::Gesture.0)
             | (1 << CGEventType::KeyDown.0);
 
         unsafe {
@@ -633,19 +637,62 @@ impl InputHandler {
                 // handle_keypress can intercept the event, so it may return true.
                 return self.handle_keypress(keycode, eventflags);
             }
-            _ => {
-                info!(
-                    "{}: Unknown event type received: {event_type:?}",
-                    function_name!()
-                );
-                Ok(())
-            }
+            _ => self.handle_swipe(event).map(|handled| {
+                if !handled {
+                    info!(
+                        "{}: Unknown event type received: {event_type:?}",
+                        function_name!()
+                    );
+                }
+            }),
         };
         if let Err(err) = result {
             error!("{}: error sending event: {err}", function_name!());
         }
         // Do not intercept this event, let it fall through.
         false
+    }
+
+    fn handle_swipe(&mut self, event: &CGEvent) -> Result<bool> {
+        let ns_event = match unsafe { NSEvent::eventWithCGEvent(event) } {
+            Some(e) => e,
+            None => {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "{}: Unable to convert {event:?} to NSEvent.",
+                        function_name!()
+                    ),
+                ));
+            }
+        };
+        if unsafe { ns_event.r#type() } != NSEventType::Gesture {
+            return Ok(false);
+        }
+
+        const SWIPE_THRESHOLD: f64 = 0.01;
+        let fingers = unsafe { ns_event.allTouches() };
+        if fingers.len() != 3 {
+            return Ok(true);
+        }
+
+        if fingers
+            .iter()
+            .all(|f| unsafe { f.phase() } != NSTouchPhase::Began)
+        {
+            if let Some(prev) = &self.finger_position {
+                let delta_x = prev
+                    .iter()
+                    .zip(&fingers)
+                    .map(|(p, c)| unsafe { p.normalizedPosition().x - c.normalizedPosition().x })
+                    .sum::<f64>();
+                if delta_x.abs() > SWIPE_THRESHOLD {
+                    _ = self.events.send(Event::Swipe { delta_x });
+                }
+            }
+        }
+        self.finger_position = Some(fingers);
+        Ok(true)
     }
 
     /// Handles key press events. It determines the modifier mask and attempts to find a matching keybinding in the configuration.

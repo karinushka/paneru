@@ -94,6 +94,10 @@ pub enum Event {
         modifier: CGEventFlags,
     },
 
+    Swipe {
+        delta_x: f64,
+    },
+
     SpaceCreated,
     SpaceDestroyed,
     SpaceChanged {

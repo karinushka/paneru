@@ -24,6 +24,10 @@ adjacent monitors.
   better experience without this compromise.
 - **Niri-like Behavior on MacOS:** Inspired by the user experience of [Niri],
   Paneru aims to bring a similar scrollable tiling workflow to MacOS.
+- **Focus follows mouse on MacOS:** Very useful for people who would like to
+  avoid an extra click.
+- **Sliding windows with touchpad:** Using a touchpad is quite natural for
+  navigation of the window pane.
 - **Learning Opportunity:** This project serves as a hands-on opportunity to
   delve into the MacOS API and Objective-C, as well as to deepen understanding
   and practice Rust programming.

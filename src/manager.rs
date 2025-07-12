@@ -88,6 +88,32 @@ impl WindowManager {
             Event::WindowMoved { window_id } => self.window_moved(window_id),
             Event::WindowResized { window_id } => self.window_resized(window_id)?,
 
+            Event::Swipe { delta_x } => {
+                debug!("Swipe {delta_x}");
+
+                let display_bounds = self.current_display_bounds()?;
+                let window = match self
+                    .focused_window
+                    .and_then(|window_id| self.find_window(window_id))
+                    .filter(|window| window.is_eligible())
+                {
+                    Some(window) => window,
+                    None => {
+                        warn!("{}: No window focused.", function_name!());
+                        return Ok(());
+                    }
+                };
+                let frame = window.frame();
+                window.reposition(
+                    // Delta is relative to the touchpad size, so to avoid too fast movement we
+                    // scale it down by half.
+                    frame.origin.x - (display_bounds.size.width / 2.0 * delta_x),
+                    frame.origin.y,
+                );
+                window.center_mouse(self.main_cid);
+                self.reshuffle_around(&window)?;
+            }
+
             Event::MissionControlShowAllWindows
             | Event::MissionControlShowFrontWindows
             | Event::MissionControlShowDesktop => {

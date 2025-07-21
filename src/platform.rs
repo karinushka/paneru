@@ -9,8 +9,8 @@ use notify::{EventKind, FsEventWatcher, RecommendedWatcher, RecursiveMode, Watch
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::{AllocAnyThread, DefinedClass, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplicationActivationPolicy, NSEvent, NSEventType, NSRunningApplication, NSTouch,
-    NSTouchPhase, NSWorkspace, NSWorkspaceApplicationKey,
+    NSApplicationActivationPolicy, NSApplicationLoad, NSEvent, NSEventType, NSRunningApplication,
+    NSTouch, NSTouchPhase, NSWorkspace, NSWorkspaceApplicationKey,
 };
 use objc2_core_foundation::{
     CFMachPortCreateRunLoopSource, CFMachPortInvalidate, CFRetained, CFRunLoopAddSource,
@@ -765,7 +765,7 @@ define_class!(
         #[unsafe(method(activeDisplayDidChange:))]
         fn display_changed(&self, notification: &NSObject) {
             let msg = Event::DisplayChanged{
-                msg: format!("WorkspaceObserver: {:?}", notification),
+                msg: format!("WorkspaceObserver: {notification:?}"),
             };
             _ = self.ivars().events.send(msg);
         }
@@ -773,7 +773,7 @@ define_class!(
         #[unsafe(method(activeSpaceDidChange:))]
         fn space_changed(&self, notification: &NSObject) {
             let msg = Event::SpaceChanged{
-                msg: format!("WorkspaceObserver: {:?}", notification),
+                msg: format!("WorkspaceObserver: {notification:?}"),
             };
             _ = self.ivars().events.send(msg);
         }
@@ -810,7 +810,7 @@ define_class!(
         #[unsafe(method(didWake:))]
         fn system_woke(&self, notification: &NSObject) {
             let msg = Event::SystemWoke{
-                msg: format!("WorkspaceObserver: {:?}", notification),
+                msg: format!("WorkspaceObserver: {notification:?}"),
             };
             _ = self.ivars().events.send(msg);
         }
@@ -818,7 +818,7 @@ define_class!(
         #[unsafe(method(didChangeMenuBarHiding:))]
         fn menubar_hidden(&self, notification: &NSObject) {
             let msg = Event::MenuBarHiddenChanged{
-                msg: format!("WorkspaceObserver: {:?}", notification),
+                msg: format!("WorkspaceObserver: {notification:?}"),
             };
             _ = self.ivars().events.send(msg);
         }
@@ -826,7 +826,7 @@ define_class!(
         #[unsafe(method(didRestartDock:))]
         fn dock_restarted(&self, notification: &NSObject) {
             let msg = Event::DockDidRestart{
-                msg: format!("WorkspaceObserver: {:?}", notification),
+                msg: format!("WorkspaceObserver: {notification:?}"),
             };
             _ = self.ivars().events.send(msg);
         }
@@ -834,7 +834,7 @@ define_class!(
         #[unsafe(method(didChangeDockPref:))]
         fn dock_pref_changed(&self, notification: &NSObject) {
             let msg = Event::DockDidChangePref{
-                msg: format!("WorkspaceObserver: {:?}", notification),
+                msg: format!("WorkspaceObserver: {notification:?}"),
             };
             _ = self.ivars().events.send(msg);
         }
@@ -1425,6 +1425,20 @@ impl PlatformCallbacks {
     ///
     /// `Ok(())` if all handlers are set up successfully, otherwise `Err(Error)`.
     pub fn setup_handlers(&mut self) -> Result<()> {
+        // This is required to receive some Cocoa notifications into Carbon code, like
+        // NSWorkspaceActiveSpaceDidChangeNotification and
+        // NSWorkspaceActiveDisplayDidChangeNotification
+        // Found on: https://stackoverflow.com/questions/68893386/unable-to-receive-nsworkspaceactivespacedidchangenotification-specifically-but
+        if !unsafe { NSApplicationLoad() } {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                format!(
+                    "{}: Can not startup Cocoa runloop from Carbon code.",
+                    function_name!()
+                ),
+            ));
+        }
+
         self.event_handler.start()?;
         self.display_handler.start()?;
         self.mission_control_observer.observe()?;

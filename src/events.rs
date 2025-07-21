@@ -334,6 +334,16 @@ impl EventHandler {
                 self.key_pressed(key, modifier);
             }
 
+            Event::DisplayChanged { msg } => {
+                debug!("{}: display changed: {msg:?}", function_name!())
+            }
+            Event::SpaceChanged { msg } => {
+                debug!("{}: space changed: {msg:?}", function_name!())
+            }
+            Event::SystemWoke { msg } => {
+                debug!("{}: system woke: {msg:?}", function_name!())
+            }
+
             _ => self.window_manager.process_event(event)?,
         }
         Ok(())

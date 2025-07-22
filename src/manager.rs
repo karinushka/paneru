@@ -5,6 +5,7 @@ use objc2_core_foundation::{
     CFArrayGetCount, CFDataCreateMutable, CFDataGetMutableBytePtr, CFDataIncreaseLength,
     CFNumberType, CFRetained, CGRect,
 };
+use objc2_core_graphics::CGDirectDisplayID;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result};
 use std::ops::Deref;
@@ -40,6 +41,7 @@ pub struct WindowManager {
     pub skip_reshuffle: bool,
     displays: Vec<Display>,
     focus_follows_mouse: bool,
+    orphaned_spaces: HashMap<u64, WindowPane>,
 }
 
 impl WindowManager {
@@ -66,6 +68,7 @@ impl WindowManager {
             skip_reshuffle: false,
             displays: Display::present_displays(main_cid),
             focus_follows_mouse: true,
+            orphaned_spaces: HashMap::new(),
         }
     }
 
@@ -156,6 +159,77 @@ impl WindowManager {
         self.focus_follows_mouse = config.options().focus_follows_mouse;
     }
 
+    fn find_orphaned_spaces(&mut self) {
+        let mut relocated_windows = vec![];
+
+        for display in self.displays.iter_mut() {
+            let spaces = display
+                .spaces
+                .iter()
+                // Only consider spaces which have no registered windows.
+                .filter_map(|(space_id, window_pane)| (window_pane.len() == 0).then_some(*space_id))
+                .collect::<Vec<_>>();
+            debug!(
+                "{}: Attempting to relocate into empty spaces: {spaces:?}",
+                function_name!()
+            );
+
+            for space_id in spaces {
+                if let Some(space) = self.orphaned_spaces.remove(&space_id) {
+                    debug!(
+                        "{}: Reinserted orphand space {space_id} into display {}",
+                        function_name!(),
+                        display.id
+                    );
+                    for window_id in space.all_windows() {
+                        relocated_windows.push((window_id, display.bounds));
+                    }
+                    display.spaces.insert(space_id, space);
+                }
+            }
+        }
+
+        relocated_windows
+            .iter()
+            .flat_map(|(window_id, bounds)| self.find_window(*window_id).zip(Some(bounds)))
+            .for_each(|(window, bounds)| {
+                let ratio = window.inner().width_ratio;
+                debug!(
+                    "{}: Resizing relocated window {} to ratio {ratio:.02}",
+                    function_name!(),
+                    window.id()
+                );
+                window.resize(bounds.size.width * ratio, bounds.size.height, bounds);
+            });
+    }
+
+    pub fn display_remove(&mut self, display_id: CGDirectDisplayID) {
+        let removed_index = self
+            .displays
+            .iter()
+            .enumerate()
+            .find(|(_, display)| display.id == display_id)
+            .map(|(index, _)| index);
+        if let Some(index) = removed_index {
+            let display = self.displays.remove(index);
+
+            for (space_id, pane) in display.spaces {
+                self.orphaned_spaces.insert(space_id, pane);
+            }
+        }
+        self.find_orphaned_spaces();
+    }
+
+    pub fn display_add(&mut self, display_id: CGDirectDisplayID) {
+        let display = Display::present_displays(self.main_cid)
+            .into_iter()
+            .find(|display| display.id == display_id);
+        if let Some(display) = display {
+            self.displays.push(display);
+            self.find_orphaned_spaces();
+        }
+    }
+
     /// Refreshes the list of active displays and reorganizes windows across them.
     /// It preserves spaces from old displays if they still exist.
     ///
@@ -163,7 +237,6 @@ impl WindowManager {
     ///
     /// `Ok(())` if the displays are refreshed successfully, otherwise `Err(Error)`.
     pub fn refresh_displays(&mut self) -> Result<()> {
-        let old_displays = std::mem::take(&mut self.displays);
         self.displays = Display::present_displays(self.main_cid);
         if self.displays.is_empty() {
             return Err(Error::new(
@@ -172,44 +245,16 @@ impl WindowManager {
             ));
         }
 
-        for old_display in old_displays {
-            if self
-                .displays
-                .iter()
-                .all(|display| old_display.id != display.id)
-            {
-                let id = Display::active_display_id(self.main_cid)?;
-                if let Some(current) = self.displays.iter_mut().find(|display| display.id == id) {
-                    current.spaces = old_display.spaces;
-                } else {
-                    let id = Display::active_display_id(self.main_cid)?;
-                    if let Some(current) = self.displays.iter_mut().find(|display| display.id == id)
-                    {
-                        current.spaces = old_display.spaces;
-                    }
-                }
-            }
-        }
-
-        let display_bounds = self.current_display_bounds()?;
         for display in self.displays.iter() {
-            for (space_id, column) in display.spaces.iter() {
-                self.refresh_windows_space(*space_id, column);
-
-                // Adjust window sizes to the current display.
-                let current_window_id = column.first()?.top().unwrap();
-                column.access_right_of(current_window_id, |panel| {
-                    let window_id = panel
-                        .top()
-                        .and_then(|window_id| self.find_window(window_id));
-                    if let Some(window) = window_id {
+            let display_bounds = display.bounds;
+            for (space_id, pane) in display.spaces.iter() {
+                self.refresh_windows_space(*space_id, pane);
+                pane.all_windows()
+                    .iter()
+                    .flat_map(|window_id| self.find_window(*window_id))
+                    .for_each(|window| {
                         _ = window.update_frame(&display_bounds);
-                    }
-                    true // continue through all windows.
-                })?;
-                if let Some(window) = self.find_window(current_window_id) {
-                    _ = window.update_frame(&display_bounds);
-                }
+                    });
             }
         }
 

@@ -100,9 +100,7 @@ pub enum Event {
 
     SpaceCreated,
     SpaceDestroyed,
-    SpaceChanged {
-        msg: String,
-    },
+    SpaceChanged,
 
     DisplayAdded {
         display_id: CGDirectDisplayID,
@@ -116,9 +114,10 @@ pub enum Event {
     DisplayResized {
         display_id: CGDirectDisplayID,
     },
-    DisplayChanged {
-        msg: String,
+    DisplayConfigured {
+        display_id: CGDirectDisplayID,
     },
+    DisplayChanged,
 
     MissionControlShowAllWindows,
     MissionControlShowFrontWindows,
@@ -334,11 +333,29 @@ impl EventHandler {
                 self.key_pressed(key, modifier);
             }
 
-            Event::DisplayChanged { msg } => {
-                debug!("{}: display changed: {msg:?}", function_name!())
+            Event::DisplayAdded { display_id } => {
+                debug!("{}: Display Added: {display_id:?}", function_name!());
+                self.window_manager.display_add(display_id);
             }
-            Event::SpaceChanged { msg } => {
-                debug!("{}: space changed: {msg:?}", function_name!())
+            Event::DisplayRemoved { display_id } => {
+                debug!("{}: Display Removed: {display_id:?}", function_name!());
+                self.window_manager.display_remove(display_id);
+            }
+            Event::DisplayMoved { display_id } => {
+                debug!("{}: Display Moved: {display_id:?}", function_name!())
+            }
+            Event::DisplayResized { display_id } => {
+                debug!("{}: Display Resized: {display_id:?}", function_name!())
+            }
+            Event::DisplayConfigured { display_id } => {
+                debug!("{}: Display Configured: {display_id:?}", function_name!())
+            }
+            Event::DisplayChanged => {
+                debug!("{}: Display Changed", function_name!());
+            }
+
+            Event::SpaceChanged => {
+                debug!("{}: space changed", function_name!())
             }
             Event::SystemWoke { msg } => {
                 debug!("{}: system woke: {msg:?}", function_name!())
@@ -562,15 +579,7 @@ impl EventHandler {
             }
         };
 
-        // If unable to detect current display, a new one must have been added, so refresh the
-        // current displays and reshuffle the windows.
-        let active_display = match self.window_manager.active_display() {
-            Ok(display) => display,
-            _ => {
-                self.window_manager.refresh_displays()?;
-                self.window_manager.active_display()?
-            }
-        };
+        let active_display = self.window_manager.active_display()?;
         let active_panel = active_display.active_panel(self.main_cid)?;
         let display_bounds = self.window_manager.current_display_bounds()?;
 

@@ -43,7 +43,7 @@ use crate::util::{
     AxuWrapperType, create_array, get_array_values, get_attribute, get_cfdict_value,
 };
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Panel {
     Single(WinID),
     Stack(Vec<WinID>),
@@ -59,7 +59,7 @@ impl Panel {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct WindowPane {
     pane: Arc<RwLock<Vec<Panel>>>,
 }
@@ -314,6 +314,17 @@ impl WindowPane {
         self.pane.force_write().insert(index, newstack);
 
         Ok(())
+    }
+
+    pub fn all_windows(&self) -> Vec<WinID> {
+        self.pane
+            .force_read()
+            .iter()
+            .flat_map(|panel| match panel {
+                Panel::Single(window_id) => vec![*window_id],
+                Panel::Stack(ids) => ids.clone(),
+            })
+            .collect()
     }
 }
 

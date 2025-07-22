@@ -25,8 +25,8 @@ use objc2_core_graphics::{
     CGEventType,
 };
 use objc2_foundation::{
-    NSDictionary, NSDistributedNotificationCenter, NSKeyValueChangeNewKey, NSNotificationCenter,
-    NSNumber, NSObject, NSSet, NSString,
+    NSDictionary, NSDistributedNotificationCenter, NSKeyValueChangeNewKey, NSNotification,
+    NSNotificationCenter, NSNumber, NSObject, NSSet, NSString,
 };
 use std::env;
 use std::ffi::c_void;
@@ -763,19 +763,13 @@ define_class!(
 
     impl WorkspaceObserver {
         #[unsafe(method(activeDisplayDidChange:))]
-        fn display_changed(&self, notification: &NSObject) {
-            let msg = Event::DisplayChanged{
-                msg: format!("WorkspaceObserver: {notification:?}"),
-            };
-            _ = self.ivars().events.send(msg);
+        fn display_changed(&self, _: &NSNotification) {
+            _ = self.ivars().events.send(Event::DisplayChanged);
         }
 
         #[unsafe(method(activeSpaceDidChange:))]
-        fn space_changed(&self, notification: &NSObject) {
-            let msg = Event::SpaceChanged{
-                msg: format!("WorkspaceObserver: {notification:?}"),
-            };
-            _ = self.ivars().events.send(msg);
+        fn space_changed(&self, _: &NSNotification) {
+            _ = self.ivars().events.send(Event::SpaceChanged);
         }
 
         #[unsafe(method(didHideApplication:))]
@@ -1291,6 +1285,8 @@ impl DisplayHandler {
             Event::DisplayMoved { display_id }
         } else if flags.contains(CGDisplayChangeSummaryFlags::DesktopShapeChangedFlag) {
             Event::DisplayResized { display_id }
+        } else if flags.contains(CGDisplayChangeSummaryFlags::BeginConfigurationFlag) {
+            Event::DisplayConfigured { display_id }
         } else {
             warn!("{}: unknown flag {flags:?}.", function_name!());
             return;

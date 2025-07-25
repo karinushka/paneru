@@ -122,7 +122,7 @@ impl Application {
     fn weak_error(&self, place: &str) -> Error {
         Error::new(
             ErrorKind::NotFound,
-            format!("{}: application shut down.", place),
+            format!("{place}: application shut down."),
         )
     }
 

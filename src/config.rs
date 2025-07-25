@@ -97,7 +97,7 @@ impl EventHandler for Config {
     /// * `event` - The result of a file system event.
     fn handle_event(&mut self, event: notify::Result<notify::Event>) {
         if let Ok(event) = event {
-            println!("Event: {:?}", event);
+            println!("Event: {event:?}");
         }
     }
 }

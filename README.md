@@ -74,6 +74,8 @@ focus_follows_mouse = true
 # Moves the focus between windows.
 window_focus_west = "cmd - h"
 window_focus_east = "cmd - l"
+window_focus_north = "cmd - k"
+window_focus_south = "cmd - j"
 
 # Swaps windows in chosen direction.
 window_swap_west = "alt - h"
@@ -95,6 +97,10 @@ window_resize = "alt - r"
 
 # Toggles the window for management. If unmanaged, the window will be "floating".
 window_manage = "ctrl + alt - t"
+
+# Stacks and unstacks a window into the left column. Each window gets a 1/N of the height.
+window_stack = "alt - ]"
+window_unstack = "alt + shift - ]"
 
 # Quits the window manager.
 quit = "ctrl + alt - q"

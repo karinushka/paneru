@@ -19,7 +19,7 @@ use crate::skylight::{
     ConnID, SLSCopyAssociatedWindows, SLSFindWindowAndOwner, SLSMainConnectionID, WinID,
 };
 use crate::util::{AxuWrapperType, get_array_values};
-use crate::windows::{Window, WindowPane};
+use crate::windows::{Panel, Window, WindowPane};
 
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -415,37 +415,47 @@ impl EventHandler {
     fn get_window_in_direction(
         direction: &str,
         current_window_id: WinID,
-        panel: &WindowPane,
+        strip: &WindowPane,
     ) -> Option<WinID> {
-        let mut found: Option<WinID> = None;
-        let accessor = |window_id: WinID| {
-            if window_id == current_window_id {
-                // If it's the same window, continue
-                true
-            } else {
-                found = Some(window_id);
-                false
-            }
-        };
-        _ = match direction {
-            "west" => panel.access_left_of(current_window_id, accessor),
-            "east" => panel.access_right_of(current_window_id, accessor),
-            "first" => {
-                found = panel.first().ok();
-                Ok(())
-            }
-            "last" => {
-                found = panel.last().ok();
-                Ok(())
-            }
+        let index = strip.index_of(current_window_id).ok()?;
+        match direction {
+            "west" => (index > 0)
+                .then(|| strip.get(index - 1).ok())
+                .flatten()
+                .and_then(|panel| panel.top()),
+            "east" => (index < strip.len() - 1)
+                .then(|| strip.get(index + 1).ok())
+                .flatten()
+                .and_then(|panel| panel.top()),
+            "first" => strip.first().ok().and_then(|panel| panel.top()),
+            "last" => strip.last().ok().and_then(|panel| panel.top()),
+            "north" => match strip.get(index).ok()? {
+                Panel::Single(window_id) => Some(window_id),
+                Panel::Stack(stack) => stack
+                    .iter()
+                    .enumerate()
+                    .find(|(_, window_id)| current_window_id == **window_id)
+                    .and_then(|(index, _)| (index > 0).then(|| stack.get(index - 1)).flatten())
+                    .cloned(),
+            },
+            "south" => match strip.get(index).ok()? {
+                Panel::Single(window_id) => Some(window_id),
+                Panel::Stack(stack) => stack
+                    .iter()
+                    .enumerate()
+                    .find(|(_, window_id)| current_window_id == **window_id)
+                    .and_then(|(index, _)| {
+                        (index < stack.len() - 1)
+                            .then(|| stack.get(index + 1))
+                            .flatten()
+                    })
+                    .cloned(),
+            },
             dir => {
                 error!("{}: Unhandled direction {dir}", function_name!());
-                Ok(())
+                None
             }
         }
-        .inspect_err(|err| debug!("{}: panel operation: {err}", function_name!()));
-
-        found
     }
 
     /// Handles the "focus" command, moving focus to a window in a specified direction.
@@ -463,13 +473,14 @@ impl EventHandler {
         &self,
         argv: &[String],
         current_window: &Window,
-        panel: &WindowPane,
+        strip: &WindowPane,
     ) -> Option<WinID> {
         let direction = argv.first()?;
 
-        EventHandler::get_window_in_direction(direction, current_window.id(), panel).inspect(
+        EventHandler::get_window_in_direction(direction, current_window.id(), strip).inspect(
             |window_id| {
-                if let Some(window) = self.window_manager.find_window(*window_id) {
+                let window = self.window_manager.find_window(*window_id);
+                if let Some(window) = window {
                     window.focus_with_raise();
                 }
             },
@@ -511,6 +522,7 @@ impl EventHandler {
             panel
                 .get(new_index)
                 .ok()
+                .and_then(|panel| panel.top())
                 .and_then(|window_id| self.window_manager.find_window(window_id))?
                 .frame()
                 .origin
@@ -624,6 +636,20 @@ impl EventHandler {
                     active_panel.append(window.id());
                     window.manage(true);
                 };
+            }
+
+            "stack" => {
+                if !window.managed() {
+                    return Ok(());
+                }
+                active_panel.stack(window.id())?
+            }
+
+            "unstack" => {
+                if !window.managed() {
+                    return Ok(());
+                }
+                active_panel.unstack(window.id())?
             }
 
             _ => (),

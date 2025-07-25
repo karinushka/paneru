@@ -24,7 +24,7 @@ use crate::skylight::{
     SLSWindowQueryResultCopyWindows, SLSWindowQueryWindows, WinID,
 };
 use crate::util::{AxuWrapperType, create_array, get_array_values};
-use crate::windows::{Display, Window, WindowPane, ax_window_id, ax_window_pid};
+use crate::windows::{Display, Panel, Window, WindowPane, ax_window_id, ax_window_pid};
 
 const THRESHOLD: f64 = 10.0;
 
@@ -193,17 +193,21 @@ impl WindowManager {
 
         let display_bounds = self.current_display_bounds()?;
         for display in self.displays.iter() {
-            for (space_id, pane) in display.spaces.iter() {
-                self.refresh_windows_space(*space_id, pane);
+            for (space_id, column) in display.spaces.iter() {
+                self.refresh_windows_space(*space_id, column);
 
                 // Adjust window sizes to the current display.
-                pane.access_right_of(pane.first()?, |window_id| {
-                    if let Some(window) = self.find_window(window_id) {
+                let current_window_id = column.first()?.top().unwrap();
+                column.access_right_of(current_window_id, |panel| {
+                    let window_id = panel
+                        .top()
+                        .and_then(|window_id| self.find_window(window_id));
+                    if let Some(window) = window_id {
                         _ = window.update_frame(&display_bounds);
                     }
                     true // continue through all windows.
                 })?;
-                if let Some(window) = self.find_window(pane.first()?) {
+                if let Some(window) = self.find_window(current_window_id) {
                     _ = window.update_frame(&display_bounds);
                 }
             }
@@ -960,9 +964,14 @@ impl WindowManager {
         let display_bounds = self.current_display_bounds()?;
         let frame = window.expose_window(&display_bounds);
 
+        let index = active_panel.index_of(window.id())?;
+        let panel = active_panel.get(index)?;
+        self.reposition_stack(frame.origin.x, &panel, frame.size.width, &display_bounds);
+
         // Shuffling windows to the right of the focus.
         let mut upper_left = frame.origin.x + frame.size.width;
-        active_panel.access_right_of(window.id(), |window_id| {
+        active_panel.access_right_of(window.id(), |panel| {
+            let window_id = panel.top().unwrap();
             let window = match self.find_window(window_id) {
                 Some(window) => window,
                 None => return true,
@@ -974,12 +983,9 @@ impl WindowManager {
             if upper_left > display_bounds.size.width - THRESHOLD {
                 upper_left = display_bounds.size.width - THRESHOLD;
             }
+
             if frame.origin.x != upper_left {
-                window.reposition(upper_left, frame.origin.y);
-                trace!(
-                    "{}: right side moved to upper_left {upper_left}",
-                    function_name!()
-                );
+                self.reposition_stack(upper_left, panel, frame.size.width, &display_bounds);
             }
             upper_left += frame.size.width;
             true // continue through all windows
@@ -987,8 +993,8 @@ impl WindowManager {
 
         // Shuffling windows to the left of the focus.
         let mut upper_left = frame.origin.x;
-        trace!("{}: focus upper_left {upper_left}", function_name!());
-        active_panel.access_left_of(window.id(), |window_id| {
+        active_panel.access_left_of(window.id(), |panel| {
+            let window_id = panel.top().unwrap();
             let window = match self.find_window(window_id) {
                 Some(window) => window,
                 None => return true,
@@ -1003,14 +1009,33 @@ impl WindowManager {
             upper_left -= frame.size.width;
 
             if frame.origin.x != upper_left {
-                window.reposition(upper_left, frame.origin.y);
-                trace!(
-                    "{}: left side moved to upper_left {upper_left}",
-                    function_name!()
-                );
+                self.reposition_stack(upper_left, panel, frame.size.width, &display_bounds);
             }
             true // continue through all windows
         })
+    }
+
+    fn reposition_stack(
+        &self,
+        upper_left: f64,
+        panel: &Panel,
+        width: f64,
+        display_bounds: &CGRect,
+    ) {
+        let windows = match panel {
+            Panel::Single(window_id) => vec![*window_id],
+            Panel::Stack(stack) => stack.to_vec(),
+        }
+        .iter()
+        .flat_map(|window_id| self.find_window(*window_id))
+        .collect::<Vec<_>>();
+        let mut y_pos = 0f64;
+        let height = display_bounds.size.height / windows.len() as f64;
+        for window in windows {
+            window.reposition(upper_left, y_pos);
+            window.resize(width, height, display_bounds);
+            y_pos += height;
+        }
     }
 
     /// Retrieves the currently active display.

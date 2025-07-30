@@ -13,9 +13,9 @@ use objc2_app_kit::{
     NSTouch, NSTouchPhase, NSWorkspace, NSWorkspaceApplicationKey,
 };
 use objc2_core_foundation::{
-    CFMachPortCreateRunLoopSource, CFMachPortInvalidate, CFRetained, CFRunLoopAddSource,
-    CFRunLoopGetMain, CFRunLoopRemoveSource, CFRunLoopRunInMode, CFString, kCFRunLoopCommonModes,
-    kCFRunLoopDefaultMode,
+    CFMachPort, CFMachPortCreateRunLoopSource, CFMachPortInvalidate, CFRetained,
+    CFRunLoopAddSource, CFRunLoopGetMain, CFRunLoopRemoveSource, CFRunLoopRunInMode, CFString,
+    kCFRunLoopCommonModes, kCFRunLoopDefaultMode,
 };
 use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayChangeSummaryFlags, CGDisplayRegisterReconfigurationCallback,
@@ -495,6 +495,7 @@ struct InputHandler {
     config: Config,
     cleanup: Option<Cleanuper>,
     finger_position: Option<Retained<NSSet<NSTouch>>>,
+    tap_port: Option<CFRetained<CFMachPort>>,
 }
 
 impl InputHandler {
@@ -514,6 +515,7 @@ impl InputHandler {
             config,
             cleanup: None,
             finger_position: None,
+            tap_port: None,
         }
     }
 
@@ -535,27 +537,31 @@ impl InputHandler {
 
         unsafe {
             let this = NonNull::new_unchecked(self).as_ptr();
-            let port = CGEventTapCreate(
+            self.tap_port = CGEventTapCreate(
                 CGEventTapLocation::HIDEventTap,
                 CGEventTapPlacement::HeadInsertEventTap,
                 CGEventTapOptions::Default,
                 mouse_event_mask,
                 Some(Self::callback),
                 this.cast(),
-            )
-            .ok_or(Error::new(
-                ErrorKind::PermissionDenied,
-                format!("{}: Can not create EventTap.", function_name!()),
-            ))?;
-
-            let (run_loop_source, main_loop) = CFMachPortCreateRunLoopSource(None, Some(&port), 0)
-                .zip(CFRunLoopGetMain())
-                .ok_or(Error::new(
+            );
+            if self.tap_port.is_none() {
+                return Err(Error::new(
                     ErrorKind::PermissionDenied,
-                    format!("{}: Unable to create run loop source", function_name!()),
-                ))?;
+                    format!("{}: Can not create EventTap.", function_name!()),
+                ));
+            }
+
+            let (run_loop_source, main_loop) =
+                CFMachPortCreateRunLoopSource(None, self.tap_port.as_deref(), 0)
+                    .zip(CFRunLoopGetMain())
+                    .ok_or(Error::new(
+                        ErrorKind::PermissionDenied,
+                        format!("{}: Unable to create run loop source", function_name!()),
+                    ))?;
             CFRunLoopAddSource(&main_loop, Some(&run_loop_source), kCFRunLoopCommonModes);
 
+            let port = self.tap_port.clone().unwrap();
             self.cleanup = Some(Cleanuper::new(Box::new(move || {
                 info!("{}: Unregistering event_handler", function_name!());
                 CFRunLoopRemoveSource(&main_loop, Some(&run_loop_source), kCFRunLoopCommonModes);
@@ -610,7 +616,10 @@ impl InputHandler {
     fn input_handler(&mut self, event_type: CGEventType, event: &CGEvent) -> bool {
         let result = match event_type {
             CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
-                warn!("{}: Tap Disabled", function_name!());
+                info!("{}: Tap Disabled", function_name!());
+                if let Some(port) = &self.tap_port {
+                    unsafe { CGEventTapEnable(port, true) };
+                }
                 Ok(())
             }
             CGEventType::LeftMouseDown | CGEventType::RightMouseDown => {

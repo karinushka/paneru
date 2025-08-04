@@ -486,7 +486,7 @@ impl WindowManager {
         debug!(
             "{}: App {} has unresolved window on other desktops, bruteforcing them.",
             function_name!(),
-            app.name().unwrap()
+            app.name().unwrap_or_default()
         );
 
         //
@@ -1016,45 +1016,45 @@ impl WindowManager {
         // Shuffling windows to the right of the focus.
         let mut upper_left = frame.origin.x + frame.size.width;
         active_panel.access_right_of(window.id(), |panel| {
-            let window_id = panel.top().unwrap();
-            let window = match self.find_window(window_id) {
-                Some(window) => window,
-                None => return true,
-            };
-            let frame = window.inner().frame;
-            trace!("{}: right: frame: {frame:?}", function_name!());
+            let frame = panel
+                .top()
+                .and_then(|window_id| self.find_window(window_id))
+                .map(|window| window.inner().frame);
+            if let Some(frame) = frame {
+                trace!("{}: right: frame: {frame:?}", function_name!());
 
-            // Check for window getting off screen.
-            if upper_left > display_bounds.size.width - THRESHOLD {
-                upper_left = display_bounds.size.width - THRESHOLD;
-            }
+                // Check for window getting off screen.
+                if upper_left > display_bounds.size.width - THRESHOLD {
+                    upper_left = display_bounds.size.width - THRESHOLD;
+                }
 
-            if frame.origin.x != upper_left {
-                self.reposition_stack(upper_left, panel, frame.size.width, &display_bounds);
+                if frame.origin.x != upper_left {
+                    self.reposition_stack(upper_left, panel, frame.size.width, &display_bounds);
+                }
+                upper_left += frame.size.width;
             }
-            upper_left += frame.size.width;
             true // continue through all windows
         })?;
 
         // Shuffling windows to the left of the focus.
         let mut upper_left = frame.origin.x;
         active_panel.access_left_of(window.id(), |panel| {
-            let window_id = panel.top().unwrap();
-            let window = match self.find_window(window_id) {
-                Some(window) => window,
-                None => return true,
-            };
-            let frame = window.inner().frame;
-            trace!("{}: left: frame: {frame:?}", function_name!());
+            let frame = panel
+                .top()
+                .and_then(|window_id| self.find_window(window_id))
+                .map(|window| window.inner().frame);
+            if let Some(frame) = frame {
+                trace!("{}: left: frame: {frame:?}", function_name!());
 
-            // Check for window getting off screen.
-            if upper_left < THRESHOLD {
-                upper_left = THRESHOLD;
-            }
-            upper_left -= frame.size.width;
+                // Check for window getting off screen.
+                if upper_left < THRESHOLD {
+                    upper_left = THRESHOLD;
+                }
+                upper_left -= frame.size.width;
 
-            if frame.origin.x != upper_left {
-                self.reposition_stack(upper_left, panel, frame.size.width, &display_bounds);
+                if frame.origin.x != upper_left {
+                    self.reposition_stack(upper_left, panel, frame.size.width, &display_bounds);
+                }
             }
             true // continue through all windows
         })
@@ -1154,7 +1154,7 @@ impl WindowManager {
             debug!(
                 "{}: Application {} is observable",
                 function_name!(),
-                app.name().unwrap()
+                app.name().unwrap_or_default()
             );
 
             if app.observe().is_ok_and(|result| result) {
@@ -1229,7 +1229,10 @@ impl WindowManager {
             ));
         }
 
-        let process = self.processes.get_mut(psn).unwrap();
+        let process = self.processes.get_mut(psn).ok_or(Error::new(
+            ErrorKind::PermissionDenied,
+            format!("{}: Unable to lock process box.", function_name!()),
+        ))?;
         let app = process.create_application(self.main_cid, self.events.clone())?;
         debug!(
             "{}: Added {} to list of apps.",

@@ -12,6 +12,8 @@ Each monitor operates with its own independent window strip, ensuring that
 windows remain confined to their respective displays and do not "overflow" onto
 adjacent monitors.
 
+![Screencap of Paneru in action](images/screenshot.gif)
+
 ## Why Paneru?
 
 - **Optimal for Large Displays:** Standard tiling window managers can be
@@ -112,8 +114,6 @@ tweaking keyboard bindings and other settings without restarting the
 application. The settings can be changed while Paneru is running - they will
 be automatically reloaded.
 
-Very useful for tweaking keyboard bindings.
-
 ### Running
 
 Start the main binary without any parameters:
@@ -131,7 +131,6 @@ $ RUST_LOG=debug cargo run paneru
 ## Future Enhancements
 
 - More commands for manipulating windows: fullscreen, finegrained size adjustments, etc.
-- Multiple windows stacked into the same column.
 - Scriptability. A nice feature would be to use Lua for configuration and simple scripting,
   like triggering and positioning specific windows or applications.
 

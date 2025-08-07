@@ -16,7 +16,7 @@ use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayBounds, CGError, CGGetActiveDisplayList, CGRectContainsPoint,
     CGRectEqualToRect, CGWarpMouseCursorPosition,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Error, ErrorKind, Result};
 use std::ops::Deref;
 use std::ptr::null_mut;
@@ -61,7 +61,7 @@ impl Panel {
 
 #[derive(Clone, Debug, Default)]
 pub struct WindowPane {
-    pane: Arc<RwLock<Vec<Panel>>>,
+    pane: Arc<RwLock<VecDeque<Panel>>>,
 }
 
 impl WindowPane {
@@ -121,7 +121,7 @@ impl WindowPane {
     ///
     /// * `window_id` - The ID of the window to append.
     pub fn append(&self, window_id: WinID) {
-        self.pane.force_write().push(Panel::Single(window_id));
+        self.pane.force_write().push_back(Panel::Single(window_id));
     }
 
     /// Removes a window ID from the pane.
@@ -130,24 +130,21 @@ impl WindowPane {
     ///
     /// * `window_id` - The ID of the window to remove.
     pub fn remove(&self, window_id: WinID) {
-        let replacement = self
-            .pane
-            .force_write()
-            .iter()
-            .flat_map(|panel| match panel {
-                Panel::Single(id) => (*id != window_id).then_some(Panel::Single(*id)),
-                Panel::Stack(stack) => {
-                    let out = stack
-                        .iter()
-                        .filter(|id| **id != window_id)
-                        .cloned()
-                        .collect();
-                    (!stack.is_empty()).then_some(Panel::Stack(out))
-                }
-            })
-            .collect::<Vec<_>>();
-        self.pane.force_write().truncate(0);
-        self.pane.force_write().extend(replacement);
+        let removed = self
+            .index_of(window_id)
+            .ok()
+            .and_then(|index| self.pane.force_write().remove(index).zip(Some(index)));
+
+        if let Some((Panel::Stack(mut stack), index)) = removed {
+            stack.retain(|id| *id != window_id);
+            if stack.len() > 1 {
+                self.pane.force_write().insert(index, Panel::Stack(stack));
+            } else {
+                self.pane
+                    .force_write()
+                    .insert(index, Panel::Single(stack[0]));
+            }
+        }
     }
 
     /// Retrieves the window ID at a specified index in the pane.
@@ -191,7 +188,7 @@ impl WindowPane {
     ///
     /// `Ok(WinID)` with the first window's ID, otherwise `Err(Error)` if the pane is empty.
     pub fn first(&self) -> Result<Panel> {
-        self.pane.force_read().first().cloned().ok_or(Error::new(
+        self.pane.force_read().front().cloned().ok_or(Error::new(
             ErrorKind::NotFound,
             format!("{}: can not find first element.", function_name!()),
         ))
@@ -203,7 +200,7 @@ impl WindowPane {
     ///
     /// `Ok(WinID)` with the last window's ID, otherwise `Err(Error)` if the pane is empty.
     pub fn last(&self) -> Result<Panel> {
-        self.pane.force_read().last().cloned().ok_or(Error::new(
+        self.pane.force_read().back().cloned().ok_or(Error::new(
             ErrorKind::NotFound,
             format!("{}: can not find last element.", function_name!()),
         ))
@@ -226,7 +223,7 @@ impl WindowPane {
         mut accessor: impl FnMut(&Panel) -> bool,
     ) -> Result<()> {
         let index = self.index_of(window_id)?;
-        for panel in self.pane.force_read()[1 + index..].iter() {
+        for panel in self.pane.force_read().range(1 + index..) {
             if !accessor(panel) {
                 break;
             }
@@ -251,7 +248,7 @@ impl WindowPane {
         mut accessor: impl FnMut(&Panel) -> bool,
     ) -> Result<()> {
         let index = self.index_of(window_id)?;
-        for panel in self.pane.force_read()[0..index].iter().rev() {
+        for panel in self.pane.force_read().range(0..index).rev() {
             // NOTE: left side iterates backwards.
             if !accessor(panel) {
                 break;
@@ -271,19 +268,20 @@ impl WindowPane {
         }
 
         self.pane.force_write().remove(index);
-        let panel = self.pane.force_write().remove(index - 1);
-        let newstack = match panel {
-            Panel::Stack(mut stack) => {
-                stack.push(window_id);
-                stack
-            }
-            Panel::Single(id) => vec![id, window_id],
-        };
+        if let Some(panel) = self.pane.force_write().remove(index - 1) {
+            let newstack = match panel {
+                Panel::Stack(mut stack) => {
+                    stack.push(window_id);
+                    stack
+                }
+                Panel::Single(id) => vec![id, window_id],
+            };
 
-        debug!("Stacked windows: {:#?}", newstack);
-        self.pane
-            .force_write()
-            .insert(index - 1, Panel::Stack(newstack));
+            debug!("Stacked windows: {:#?}", newstack);
+            self.pane
+                .force_write()
+                .insert(index - 1, Panel::Stack(newstack));
+        }
 
         Ok(())
     }
@@ -295,23 +293,23 @@ impl WindowPane {
             return Ok(());
         }
 
-        let panel = self.pane.force_write().remove(index);
-        let newstack = match panel {
-            Panel::Stack(mut stack) => {
-                stack.retain(|id| *id != window_id);
-                if stack.len() == 1 {
-                    Panel::Single(stack[0])
-                } else {
-                    Panel::Stack(stack)
+        if let Some(panel) = self.pane.force_write().remove(index) {
+            let newstack = match panel {
+                Panel::Stack(mut stack) => {
+                    stack.retain(|id| *id != window_id);
+                    if stack.len() == 1 {
+                        Panel::Single(stack[0])
+                    } else {
+                        Panel::Stack(stack)
+                    }
                 }
-            }
-            Panel::Single(_) => unreachable!("Is checked at the start of the function"),
-        };
-
-        self.pane
-            .force_write()
-            .insert(index, Panel::Single(window_id));
-        self.pane.force_write().insert(index, newstack);
+                Panel::Single(_) => unreachable!("Is checked at the start of the function"),
+            };
+            self.pane
+                .force_write()
+                .insert(index, Panel::Single(window_id));
+            self.pane.force_write().insert(index, newstack);
+        }
 
         Ok(())
     }

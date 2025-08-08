@@ -646,14 +646,10 @@ impl InputHandler {
                 // handle_keypress can intercept the event, so it may return true.
                 return self.handle_keypress(keycode, eventflags);
             }
-            _ => self.handle_swipe(event).map(|handled| {
-                if !handled {
-                    info!(
-                        "{}: Unknown event type received: {event_type:?}",
-                        function_name!()
-                    );
-                }
-            }),
+            _ => match self.handle_swipe(event) {
+                Ok(handled) => return handled,
+                err => err.map(|_| ()),
+            },
         };
         if let Err(err) = result {
             error!("{}: error sending event: {err}", function_name!());

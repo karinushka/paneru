@@ -684,16 +684,15 @@ impl InputHandler {
         if fingers
             .iter()
             .all(|f| unsafe { f.phase() } != NSTouchPhase::Began)
+            && let Some(prev) = &self.finger_position
         {
-            if let Some(prev) = &self.finger_position {
-                let delta_x = prev
-                    .iter()
-                    .zip(&fingers)
-                    .map(|(p, c)| unsafe { p.normalizedPosition().x - c.normalizedPosition().x })
-                    .sum::<f64>();
-                if delta_x.abs() > SWIPE_THRESHOLD {
-                    _ = self.events.send(Event::Swipe { delta_x });
-                }
+            let delta_x = prev
+                .iter()
+                .zip(&fingers)
+                .map(|(p, c)| unsafe { p.normalizedPosition().x - c.normalizedPosition().x })
+                .sum::<f64>();
+            if delta_x.abs() > SWIPE_THRESHOLD {
+                _ = self.events.send(Event::Swipe { delta_x });
             }
         }
         self.finger_position = Some(fingers);

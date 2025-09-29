@@ -517,42 +517,36 @@ impl AxObserverHandler {
     /// * `notification` - The name of the accessibility notification as a `String`.
     /// * `element` - The `AXUIElementRef` associated with the notification.
     fn notify_app(&self, notification: String, element: AXUIElementRef) {
-        let event = if accessibility_sys::kAXCreatedNotification == notification {
-            match AxuWrapperType::retain(element) {
-                Ok(element) => Event::WindowCreated { element },
-                Err(err) => {
-                    error!("{}: invalid element {element:?}: {err}", function_name!());
-                    return;
-                }
-            }
-        } else {
-            let window_id = match ax_window_id(element) {
-                Ok(window_id) => window_id,
-                Err(err) => {
-                    warn!("{}: invalid element: {err}.", function_name!());
-                    return;
-                }
+        if notification == accessibility_sys::kAXCreatedNotification {
+            let Ok(element) = AxuWrapperType::retain(element) else {
+                error!("{}: invalid element {element:?}", function_name!());
+                return;
             };
-            match notification.as_str() {
-                accessibility_sys::kAXFocusedWindowChangedNotification => {
-                    Event::WindowFocused { window_id }
-                }
-                accessibility_sys::kAXWindowMovedNotification => Event::WindowMoved { window_id },
-                accessibility_sys::kAXWindowResizedNotification => {
-                    Event::WindowResized { window_id }
-                }
-                accessibility_sys::kAXTitleChangedNotification => {
-                    Event::WindowTitleChanged { window_id }
-                }
-                accessibility_sys::kAXMenuOpenedNotification => Event::MenuOpened { window_id },
-                accessibility_sys::kAXMenuClosedNotification => Event::MenuClosed { window_id },
-                _ => {
-                    error!(
-                        "{}: unhandled application notification: {notification:?}",
-                        function_name!()
-                    );
-                    return;
-                }
+            _ = self.events.send(Event::WindowCreated { element });
+            return;
+        }
+
+        let Ok(window_id) = ax_window_id(element) else {
+            error!("{}: invalid window_id {element:?}", function_name!());
+            return;
+        };
+        let event = match notification.as_str() {
+            accessibility_sys::kAXFocusedWindowChangedNotification => {
+                Event::WindowFocused { window_id }
+            }
+            accessibility_sys::kAXWindowMovedNotification => Event::WindowMoved { window_id },
+            accessibility_sys::kAXWindowResizedNotification => Event::WindowResized { window_id },
+            accessibility_sys::kAXTitleChangedNotification => {
+                Event::WindowTitleChanged { window_id }
+            }
+            accessibility_sys::kAXMenuOpenedNotification => Event::MenuOpened { window_id },
+            accessibility_sys::kAXMenuClosedNotification => Event::MenuClosed { window_id },
+            _ => {
+                error!(
+                    "{}: unhandled application notification: {notification:?}",
+                    function_name!()
+                );
+                return;
             }
         };
         _ = self.events.send(event);

@@ -254,9 +254,8 @@ impl EventHandler {
     /// The main run loop for the event handler. It continuously receives and processes events until an `Exit` event or channel disconnection.
     fn run(&mut self) {
         loop {
-            let event = match self.rx.recv() {
-                Err(_) => break,
-                Ok(event) => event,
+            let Ok(event) = self.rx.recv() else {
+                break;
             };
             trace!("{}: Event {event:?}", function_name!());
 
@@ -566,17 +565,14 @@ impl EventHandler {
     /// `Ok(())` if the command is processed successfully, otherwise `Err(Error)`.
     fn command_windows(&mut self, argv: &[String]) -> Result<()> {
         let empty = "".to_string();
-        let window = match self
+        let Some(window) = self
             .window_manager
             .focused_window
             .and_then(|window_id| self.window_manager.find_window(window_id))
             .filter(|window| window.is_eligible())
-        {
-            Some(window) => window,
-            None => {
-                warn!("{}: No window focused.", function_name!());
-                return Ok(());
-            }
+        else {
+            warn!("{}: No window focused.", function_name!());
+            return Ok(());
         };
 
         let active_display = self.window_manager.active_display()?;
@@ -801,23 +797,17 @@ impl EventHandler {
                         window_id,
                         child_wid
                     );
-                    let child_window = match self.window_manager.find_window(child_wid) {
-                        None => {
-                            warn!(
-                                "{}: Unable to find child window {child_wid}.",
-                                function_name!()
-                            );
-                            continue;
-                        }
-                        Some(window) => window,
+                    let Some(child_window) = self.window_manager.find_window(child_wid) else {
+                        warn!(
+                            "{}: Unable to find child window {child_wid}.",
+                            function_name!()
+                        );
+                        continue;
                     };
 
-                    let role = match window.role() {
-                        Ok(role) => role,
-                        Err(err) => {
-                            warn!("{}: finding role for {window_id}: {err}", function_name!(),);
-                            continue;
-                        }
+                    let Ok(role) = window.role() else {
+                        warn!("{}: finding role for {window_id}", function_name!(),);
+                        continue;
                     };
 
                     // bool valid = CFEqual(role, kAXSheetRole) || CFEqual(role, kAXDrawerRole);

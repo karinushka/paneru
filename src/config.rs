@@ -453,15 +453,12 @@ fn generate_virtual_keymap() -> Vec<(String, u8)> {
             })
         })
         .and_then(|uchr| NonNull::new(unsafe { CFDataGetBytePtr(uchr.as_ref()) as *mut u8 }));
-    let keyboard_layout = match keyboard_layout {
-        Some(layout) => layout,
-        None => {
-            error!(
-                "{}: problem fetching current virtual keyboard layout.",
-                function_name!()
-            );
-            return vec![];
-        }
+    let Some(keyboard_layout) = keyboard_layout else {
+        error!(
+            "{}: problem fetching current virtual keyboard layout.",
+            function_name!()
+        );
+        return vec![];
     };
 
     let mut state = 0u32;

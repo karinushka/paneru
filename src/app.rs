@@ -597,15 +597,11 @@ impl AxObserverHandler {
         notification: CFStringRef,
         context: *mut c_void,
     ) {
-        let notification = match NonNull::new(notification as *mut CFString)
+        let Some(notification) = NonNull::new(notification as *mut CFString)
             .map(|ptr| unsafe { ptr.as_ref() })
             .map(CFString::to_string)
-        {
-            Some(n) => n,
-            None => {
-                //
-                return;
-            }
+        else {
+            return;
         };
 
         if AX_NOTIFICATIONS.iter().any(|n| *n == notification) {

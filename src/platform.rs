@@ -659,17 +659,14 @@ impl InputHandler {
     }
 
     fn handle_swipe(&mut self, event: &CGEvent) -> Result<bool> {
-        let ns_event = match unsafe { NSEvent::eventWithCGEvent(event) } {
-            Some(e) => e,
-            None => {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    format!(
-                        "{}: Unable to convert {event:?} to NSEvent.",
-                        function_name!()
-                    ),
-                ));
-            }
+        let Some(ns_event) = (unsafe { NSEvent::eventWithCGEvent(event) }) else {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "{}: Unable to convert {event:?} to NSEvent.",
+                    function_name!()
+                ),
+            ));
         };
         if unsafe { ns_event.r#type() } != NSEventType::Gesture {
             return Ok(false);
@@ -845,12 +842,9 @@ define_class!(
             change: &NSDictionary,
             context: *mut c_void,
         ) {
-            let process = match NonNull::new(context) {
-                Some(process) => unsafe { process.cast::<Process>().as_mut() },
-                None => {
-                    warn!("{}: null pointer passed as context", function_name!());
-                    return;
-                },
+            let Some(process) = NonNull::new(context).map(|ptr| unsafe { ptr.cast::<Process>().as_mut() }) else {
+                warn!("{}: null pointer passed as context", function_name!());
+                return;
             };
 
             let result = unsafe { change.objectForKey(NSKeyValueChangeNewKey) };
@@ -1178,18 +1172,18 @@ impl MissionControlHandler {
         notification: CFStringRef,
         context: *mut c_void,
     ) {
-        let notification = match NonNull::new(notification.cast_mut()) {
-            Some(notification) => unsafe { notification.as_ref() }.to_string(),
-            None => {
-                error!("{}: nullptr 'notification' passed.", function_name!());
-                return;
-            }
+        let Some(notification) = NonNull::new(notification.cast_mut()) else {
+            error!("{}: nullptr 'notification' passed.", function_name!());
+            return;
         };
 
         match NonNull::new(context)
             .map(|this| unsafe { this.cast::<MissionControlHandler>().as_ref() })
         {
-            Some(this) => this.mission_control_handler(observer, element, notification.as_ref()),
+            Some(this) => {
+                let notification = unsafe { notification.as_ref() }.to_string();
+                this.mission_control_handler(observer, element, &notification)
+            }
             None => error!("Zero passed to MissionControlHandler."),
         }
     }

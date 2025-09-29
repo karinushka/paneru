@@ -95,16 +95,13 @@ impl WindowManager {
                 debug!("Swipe {delta_x}");
 
                 let display_bounds = self.current_display_bounds()?;
-                let window = match self
+                let Some(window) = self
                     .focused_window
                     .and_then(|window_id| self.find_window(window_id))
                     .filter(|window| window.is_eligible())
-                {
-                    Some(window) => window,
-                    None => {
-                        warn!("{}: No window focused.", function_name!());
-                        return Ok(());
-                    }
+                else {
+                    warn!("{}: No window focused.", function_name!());
+                    return Ok(());
                 };
                 let frame = window.frame();
                 window.reposition(
@@ -498,12 +495,9 @@ impl WindowManager {
 
         unsafe {
             const BUFSIZE: isize = 0x14;
-            let data_ref = match CFDataCreateMutable(None, BUFSIZE) {
-                Some(data) => data,
-                None => {
-                    error!("{}: error creating mutable data", function_name!());
-                    return;
-                }
+            let Some(data_ref) = CFDataCreateMutable(None, BUFSIZE) else {
+                error!("{}: error creating mutable data", function_name!());
+                return;
             };
             CFDataIncreaseLength(data_ref.deref().into(), BUFSIZE);
 
@@ -525,15 +519,13 @@ impl WindowManager {
                 let bytes = element_id.to_ne_bytes();
                 data[0xc..0xc + bytes.len()].copy_from_slice(&bytes);
 
-                let element_ref = match AxuWrapperType::retain(_AXUIElementCreateWithRemoteToken(
-                    data_ref.as_ref(),
-                )) {
-                    Ok(element_ref) => element_ref,
-                    _ => continue,
+                let Ok(element_ref) =
+                    AxuWrapperType::retain(_AXUIElementCreateWithRemoteToken(data_ref.as_ref()))
+                else {
+                    continue;
                 };
-                let window_id = match ax_window_id(element_ref.as_ptr()) {
-                    Ok(window_id) => window_id,
-                    _ => continue,
+                let Ok(window_id) = ax_window_id(element_ref.as_ptr()) else {
+                    continue;
                 };
 
                 if let Some(index) = window_list.iter().position(|&id| id == window_id) {
@@ -588,12 +580,9 @@ impl WindowManager {
         let mut empty_count = 0;
         if let Ok(window_list) = window_list {
             for window_ref in get_array_values(window_list.deref()) {
-                let window_id = match ax_window_id(window_ref.as_ptr()) {
-                    Ok(window_id) => window_id,
-                    Err(_) => {
-                        empty_count += 1;
-                        continue;
-                    }
+                let Ok(window_id) = ax_window_id(window_ref.as_ptr()) else {
+                    empty_count += 1;
+                    continue;
                 };
 
                 //

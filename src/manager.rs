@@ -1,10 +1,7 @@
 use core::ptr::NonNull;
 use log::{debug, error, info, trace, warn};
 use objc2::rc::Retained;
-use objc2_core_foundation::{
-    CFArrayGetCount, CFDataCreateMutable, CFDataGetMutableBytePtr, CFDataIncreaseLength,
-    CFNumberType, CFRetained, CGRect,
-};
+use objc2_core_foundation::{CFArray, CFMutableData, CFNumberType, CFRetained, CGRect};
 use objc2_core_graphics::CGDirectDisplayID;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result};
@@ -379,7 +376,7 @@ impl WindowManager {
             ))?;
             let window_list_ref = CFRetained::from_raw(ptr);
 
-            let count = CFArrayGetCount(window_list_ref.deref());
+            let count = CFArray::count(window_list_ref.deref());
             if count == 0 {
                 return Err(Error::new(
                     ErrorKind::InvalidData,
@@ -495,15 +492,15 @@ impl WindowManager {
 
         unsafe {
             const BUFSIZE: isize = 0x14;
-            let Some(data_ref) = CFDataCreateMutable(None, BUFSIZE) else {
+            let Some(data_ref) = CFMutableData::new(None, BUFSIZE) else {
                 error!("{}: error creating mutable data", function_name!());
                 return;
             };
-            CFDataIncreaseLength(data_ref.deref().into(), BUFSIZE);
+            CFMutableData::increase_length(data_ref.deref().into(), BUFSIZE);
 
             const MAGIC: u32 = 0x636f636f;
             let data = from_raw_parts_mut(
-                CFDataGetMutableBytePtr(data_ref.deref().into()),
+                CFMutableData::mutable_byte_ptr(data_ref.deref().into()),
                 BUFSIZE as usize,
             );
             let bytes = app.pid().unwrap().to_ne_bytes();
@@ -574,7 +571,7 @@ impl WindowManager {
         let window_list = app.window_list();
         let window_count = window_list
             .as_ref()
-            .map(|window_list| unsafe { CFArrayGetCount(window_list) })
+            .map(|window_list| CFArray::count(window_list))
             .unwrap_or(0);
 
         let mut empty_count = 0;
@@ -966,7 +963,7 @@ impl WindowManager {
         }
 
         debug!("{}: {} getting focus", function_name!(), my_id);
-        debug!("did_receive_focus: {} getting focus", my_id);
+        debug!("did_receive_focus: {my_id} getting focus");
         self.focused_window = Some(my_id);
         self.focused_psn = window.app().psn().unwrap();
         self.ffm_window_id = None;

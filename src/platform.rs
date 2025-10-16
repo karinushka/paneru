@@ -9,20 +9,16 @@ use notify::{EventKind, FsEventWatcher, RecommendedWatcher, RecursiveMode, Watch
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::{AllocAnyThread, DefinedClass, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplicationActivationPolicy, NSApplicationLoad, NSEvent, NSEventType, NSRunningApplication,
+    NSApplication, NSApplicationActivationPolicy, NSEvent, NSEventType, NSRunningApplication,
     NSTouch, NSTouchPhase, NSWorkspace, NSWorkspaceApplicationKey,
 };
 use objc2_core_foundation::{
-    CFMachPort, CFMachPortCreateRunLoopSource, CFMachPortInvalidate, CFRetained,
-    CFRunLoopAddSource, CFRunLoopGetMain, CFRunLoopRemoveSource, CFRunLoopRunInMode, CFString,
-    kCFRunLoopCommonModes, kCFRunLoopDefaultMode,
+    CFMachPort, CFRetained, CFRunLoop, CFString, kCFRunLoopCommonModes, kCFRunLoopDefaultMode,
 };
 use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayChangeSummaryFlags, CGDisplayRegisterReconfigurationCallback,
     CGDisplayRemoveReconfigurationCallback, CGError, CGEvent, CGEventField, CGEventFlags,
-    CGEventGetFlags, CGEventGetIntegerValueField, CGEventGetLocation, CGEventTapCreate,
-    CGEventTapEnable, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventTapProxy,
-    CGEventType,
+    CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventTapProxy, CGEventType,
 };
 use objc2_foundation::{
     NSDictionary, NSDistributedNotificationCenter, NSKeyValueChangeNewKey, NSNotification,
@@ -537,7 +533,7 @@ impl InputHandler {
 
         unsafe {
             let this = NonNull::new_unchecked(self).as_ptr();
-            self.tap_port = CGEventTapCreate(
+            self.tap_port = CGEvent::tap_create(
                 CGEventTapLocation::HIDEventTap,
                 CGEventTapPlacement::HeadInsertEventTap,
                 CGEventTapOptions::Default,
@@ -553,20 +549,20 @@ impl InputHandler {
             }
 
             let (run_loop_source, main_loop) =
-                CFMachPortCreateRunLoopSource(None, self.tap_port.as_deref(), 0)
-                    .zip(CFRunLoopGetMain())
+                CFMachPort::new_run_loop_source(None, self.tap_port.as_deref(), 0)
+                    .zip(CFRunLoop::main())
                     .ok_or(Error::new(
                         ErrorKind::PermissionDenied,
                         format!("{}: Unable to create run loop source", function_name!()),
                     ))?;
-            CFRunLoopAddSource(&main_loop, Some(&run_loop_source), kCFRunLoopCommonModes);
+            CFRunLoop::add_source(&main_loop, Some(&run_loop_source), kCFRunLoopCommonModes);
 
             let port = self.tap_port.clone().unwrap();
             self.cleanup = Some(Cleanuper::new(Box::new(move || {
                 info!("{}: Unregistering event_handler", function_name!());
-                CFRunLoopRemoveSource(&main_loop, Some(&run_loop_source), kCFRunLoopCommonModes);
-                CFMachPortInvalidate(&port);
-                CGEventTapEnable(&port, false);
+                CFRunLoop::remove_source(&main_loop, Some(&run_loop_source), kCFRunLoopCommonModes);
+                CFMachPort::invalidate(&port);
+                CGEvent::tap_enable(&port, false);
             })));
         }
         Ok(())
@@ -618,31 +614,30 @@ impl InputHandler {
             CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
                 info!("{}: Tap Disabled", function_name!());
                 if let Some(port) = &self.tap_port {
-                    unsafe { CGEventTapEnable(port, true) };
+                    CGEvent::tap_enable(port, true);
                 }
                 Ok(())
             }
             CGEventType::LeftMouseDown | CGEventType::RightMouseDown => {
-                let point = unsafe { CGEventGetLocation(Some(event)) };
+                let point = CGEvent::location(Some(event));
                 self.events.send(Event::MouseDown { point })
             }
             CGEventType::LeftMouseUp | CGEventType::RightMouseUp => {
-                let point = unsafe { CGEventGetLocation(Some(event)) };
+                let point = CGEvent::location(Some(event));
                 self.events.send(Event::MouseUp { point })
             }
             CGEventType::LeftMouseDragged | CGEventType::RightMouseDragged => {
-                let point = unsafe { CGEventGetLocation(Some(event)) };
+                let point = CGEvent::location(Some(event));
                 self.events.send(Event::MouseDragged { point })
             }
             CGEventType::MouseMoved => {
-                let point = unsafe { CGEventGetLocation(Some(event)) };
+                let point = CGEvent::location(Some(event));
                 self.events.send(Event::MouseMoved { point })
             }
             CGEventType::KeyDown => {
-                let keycode = unsafe {
-                    CGEventGetIntegerValueField(Some(event), CGEventField::KeyboardEventKeycode)
-                };
-                let eventflags = unsafe { CGEventGetFlags(Some(event)) };
+                let keycode =
+                    CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode);
+                let eventflags = CGEvent::flags(Some(event));
                 // handle_keypress can intercept the event, so it may return true.
                 return self.handle_keypress(keycode, eventflags);
             }
@@ -659,7 +654,7 @@ impl InputHandler {
     }
 
     fn handle_swipe(&mut self, event: &CGEvent) -> Result<bool> {
-        let Some(ns_event) = (unsafe { NSEvent::eventWithCGEvent(event) }) else {
+        let Some(ns_event) = NSEvent::eventWithCGEvent(event) else {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
                 format!(
@@ -668,25 +663,23 @@ impl InputHandler {
                 ),
             ));
         };
-        if unsafe { ns_event.r#type() } != NSEventType::Gesture {
+        if ns_event.r#type() != NSEventType::Gesture {
             return Ok(false);
         }
 
         const SWIPE_THRESHOLD: f64 = 0.01;
-        let fingers = unsafe { ns_event.allTouches() };
+        let fingers = ns_event.allTouches();
         if fingers.len() != 3 {
             return Ok(true);
         }
 
-        if fingers
-            .iter()
-            .all(|f| unsafe { f.phase() } != NSTouchPhase::Began)
+        if fingers.iter().all(|f| f.phase() != NSTouchPhase::Began)
             && let Some(prev) = &self.finger_position
         {
             let delta_x = prev
                 .iter()
                 .zip(&fingers)
-                .map(|(p, c)| unsafe { p.normalizedPosition().x - c.normalizedPosition().x })
+                .map(|(p, c)| p.normalizedPosition().x - c.normalizedPosition().x)
                 .sum::<f64>();
             if delta_x.abs() > SWIPE_THRESHOLD {
                 _ = self.events.send(Event::Swipe { delta_x });
@@ -923,8 +916,8 @@ impl WorkspaceObserver {
             ),
             (sel!(didWake:), "NSWorkspaceDidWakeNotification"),
         ];
-        let shared_ws = unsafe { NSWorkspace::sharedWorkspace() };
-        let notification_center = unsafe { shared_ws.notificationCenter() };
+        let shared_ws = NSWorkspace::sharedWorkspace();
+        let notification_center = shared_ws.notificationCenter();
 
         methods.iter().for_each(|(sel, name)| {
             debug!("{}: registering {} with {name}", function_name!(), *sel);
@@ -946,8 +939,7 @@ impl WorkspaceObserver {
             ),
             (sel!(didChangeDockPref:), "com.apple.dock.prefchanged"),
         ];
-        let distributed_notification_center =
-            unsafe { NSDistributedNotificationCenter::defaultCenter() };
+        let distributed_notification_center = NSDistributedNotificationCenter::defaultCenter();
         methods.iter().for_each(|(sel, name)| {
             debug!("{}: registering {} with {name}", function_name!(), *sel);
             let notification_type = NSString::from_str(name);
@@ -965,7 +957,7 @@ impl WorkspaceObserver {
             sel!(didRestartDock:),
             "NSApplicationDockDidRestartNotification",
         )];
-        let default_center = unsafe { NSNotificationCenter::defaultCenter() };
+        let default_center = NSNotificationCenter::defaultCenter();
         methods.iter().for_each(|(sel, name)| {
             debug!("{}: registering {} with {name}", function_name!(), *sel);
             let notification_type = NSString::from_str(name);
@@ -1066,11 +1058,11 @@ impl MissionControlHandler {
     /// `Ok(Pid)` with the Dock's process ID if found, otherwise `Err(Error)`.
     fn dock_pid() -> Result<Pid> {
         let dock = NSString::from_str("com.apple.dock");
-        let array = unsafe { NSRunningApplication::runningApplicationsWithBundleIdentifier(&dock) };
+        let array = NSRunningApplication::runningApplicationsWithBundleIdentifier(&dock);
         array
             .iter()
             .next()
-            .map(|running| unsafe { running.processIdentifier() })
+            .map(|running| running.processIdentifier())
             .ok_or(Error::new(
                 ErrorKind::NotFound,
                 format!("{}: can not find dock.", function_name!()),
@@ -1423,7 +1415,7 @@ impl PlatformCallbacks {
         // NSWorkspaceActiveSpaceDidChangeNotification and
         // NSWorkspaceActiveDisplayDidChangeNotification
         // Found on: https://stackoverflow.com/questions/68893386/unable-to-receive-nsworkspaceactivespacedidchangenotification-specifically-but
-        if !unsafe { NSApplicationLoad() } {
+        if !NSApplication::load() {
             return Err(Error::new(
                 ErrorKind::Unsupported,
                 format!(
@@ -1454,7 +1446,7 @@ impl PlatformCallbacks {
                 break;
             }
             autoreleasepool(|_| unsafe {
-                CFRunLoopRunInMode(kCFRunLoopDefaultMode, 3.0, false);
+                CFRunLoop::run_in_mode(kCFRunLoopDefaultMode, 3.0, false);
             });
         }
         _ = self.events.send(Event::Exit);

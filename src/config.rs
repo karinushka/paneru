@@ -1,6 +1,6 @@
 use log::error;
 use notify::EventHandler;
-use objc2_core_foundation::{CFData, CFDataGetBytePtr, CFStringCreateWithCharacters};
+use objc2_core_foundation::{CFData, CFString};
 use serde::{Deserialize, Deserializer, de};
 use std::{
     collections::HashMap,
@@ -452,7 +452,7 @@ fn generate_virtual_keymap() -> Vec<(String, u8)> {
                 )
             })
         })
-        .and_then(|uchr| NonNull::new(unsafe { CFDataGetBytePtr(uchr.as_ref()) as *mut u8 }));
+        .and_then(|uchr| NonNull::new(unsafe { CFData::byte_ptr(uchr.as_ref()) as *mut u8 }));
     let Some(keyboard_layout) = keyboard_layout else {
         error!(
             "{}: problem fetching current virtual keyboard layout.",
@@ -479,7 +479,7 @@ fn generate_virtual_keymap() -> Vec<(String, u8)> {
                 chars.as_mut_ptr(),
             ))
             .then(|| {
-                let name = CFStringCreateWithCharacters(None, chars.as_ptr(), got)
+                let name = CFString::with_characters(None, chars.as_ptr(), got)
                     .map(|chars| chars.to_string());
                 name.zip(Some(*keycode))
             })

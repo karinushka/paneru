@@ -119,7 +119,7 @@ impl Process {
             .unwrap_or_default();
 
         // [[NSRunningApplication runningApplicationWithProcessIdentifier:process->pid] retain];
-        let apps = unsafe { NSRunningApplication::runningApplicationWithProcessIdentifier(pid) };
+        let apps = NSRunningApplication::runningApplicationWithProcessIdentifier(pid);
 
         Box::pin(Process {
             app: None,
@@ -154,7 +154,7 @@ impl Process {
     /// `true` if the application is observable, `false` otherwise.
     pub fn is_observable(&mut self) -> bool {
         if let Some(app) = &self.application {
-            self.policy = unsafe { app.activationPolicy() };
+            self.policy = app.activationPolicy();
             self.policy == NSApplicationActivationPolicy::Regular
         } else {
             self.policy = NSApplicationActivationPolicy::Prohibited;
@@ -170,7 +170,7 @@ impl Process {
     pub fn finished_launching(&self) -> bool {
         self.application
             .as_ref()
-            .is_some_and(|app| unsafe { app.isFinishedLaunching() })
+            .is_some_and(|app| app.isFinishedLaunching())
     }
 
     /// Subscribes to "finishedLaunching" key-value observations for the associated `NSRunningApplication`.

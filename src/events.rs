@@ -1,6 +1,6 @@
 use log::{debug, error, info, trace, warn};
 use objc2::rc::Retained;
-use objc2_core_foundation::{CFNumberGetValue, CFNumberType, CFRetained, CGPoint, CGRect};
+use objc2_core_foundation::{CFNumber, CFNumberType, CFRetained, CGPoint, CGRect};
 use objc2_core_graphics::{CGDirectDisplayID, CGEventFlags};
 use std::io::{Error, ErrorKind, Result};
 use std::ops::Deref;
@@ -778,7 +778,7 @@ impl EventHandler {
                 for item in get_array_values(window_list.deref()) {
                     let mut child_wid: WinID = 0;
                     unsafe {
-                        if !CFNumberGetValue(
+                        if !CFNumber::value(
                             item.as_ref(),
                             CFNumberType::SInt32Type,
                             NonNull::from(&mut child_wid).as_ptr().cast(),

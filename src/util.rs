@@ -2,10 +2,8 @@ use accessibility_sys::{AXObserverGetRunLoopSource, AXUIElementRef};
 use core::ptr::NonNull;
 use log::debug;
 use objc2_core_foundation::{
-    CFArray, CFArrayCreate, CFArrayGetCount, CFArrayGetValueAtIndex, CFDictionary,
-    CFDictionaryGetValue, CFNumberCreate, CFNumberType, CFRetained, CFRunLoopAddSource,
-    CFRunLoopGetMain, CFRunLoopMode, CFRunLoopSource, CFRunLoopSourceInvalidate, CFString, CFType,
-    Type, kCFTypeArrayCallBacks,
+    CFArray, CFDictionary, CFNumber, CFNumberType, CFRetained, CFRunLoop, CFRunLoopMode,
+    CFRunLoopSource, CFString, CFType, Type, kCFTypeArrayCallBacks,
 };
 use std::ffi::c_void;
 use std::io::{Error, ErrorKind, Result};
@@ -200,7 +198,7 @@ pub fn get_attribute<T: Type>(
 ///
 /// `Ok(NonNull<T>)` with a non-null pointer to the value if found, otherwise `Err(Error)`.
 pub fn get_cfdict_value<T>(dict: &CFDictionary, key: &CFString) -> Result<NonNull<T>> {
-    let ptr = unsafe { CFDictionaryGetValue(dict, NonNull::from(key).as_ptr().cast()) };
+    let ptr = unsafe { CFDictionary::value(dict, NonNull::from(key).as_ptr().cast()) };
     NonNull::new(ptr.cast_mut())
         .map(|ptr| ptr.cast::<T>())
         .ok_or(Error::new(
@@ -223,9 +221,9 @@ pub fn get_cfdict_value<T>(dict: &CFDictionary, key: &CFString) -> Result<NonNul
 ///
 /// An iterator yielding `NonNull<T>` for each element in the array.
 pub fn get_array_values<T>(array: &CFArray) -> impl Iterator<Item = NonNull<T>> + use<'_, T> {
-    let count = unsafe { CFArrayGetCount(array) };
+    let count = CFArray::count(array);
     (0..count).flat_map(move |idx| {
-        NonNull::new(unsafe { CFArrayGetValueAtIndex(array, idx).cast_mut() })
+        NonNull::new(unsafe { CFArray::value_at_index(array, idx).cast_mut() })
             .map(|ptr| ptr.cast::<T>())
     })
 }
@@ -248,7 +246,7 @@ pub fn create_array<T>(values: Vec<T>, cftype: CFNumberType) -> Result<CFRetaine
     let numbers = values
         .iter()
         .flat_map(|value: &T| unsafe {
-            CFNumberCreate(None, cftype, NonNull::from(value).as_ptr().cast())
+            CFNumber::new(None, cftype, NonNull::from(value).as_ptr().cast())
         })
         .collect::<Vec<_>>();
 
@@ -258,7 +256,7 @@ pub fn create_array<T>(values: Vec<T>, cftype: CFNumberType) -> Result<CFRetaine
         .collect::<Vec<_>>();
 
     unsafe {
-        CFArrayCreate(
+        CFArray::new(
             None,
             ptrs.as_mut_ptr(),
             numbers.len().try_into().unwrap(),
@@ -298,14 +296,14 @@ fn run_loop_source(observer: &AxuWrapperType) -> Option<&CFRunLoopSource> {
 pub fn add_run_loop(observer: &AxuWrapperType, mode: Option<&CFRunLoopMode>) -> Result<()> {
     let run_loop = run_loop_source(observer);
 
-    match unsafe { CFRunLoopGetMain() } {
+    match CFRunLoop::main() {
         Some(main_loop) if run_loop.is_some() => {
             debug!(
                 "{}: add runloop: {run_loop:?} observer {:?}",
                 function_name!(),
                 observer.as_ptr::<CFRunLoopSource>(),
             );
-            unsafe { CFRunLoopAddSource(main_loop.deref(), run_loop, mode) };
+            CFRunLoop::add_source(main_loop.deref(), run_loop, mode);
             Ok(())
         }
         _ => Err(Error::new(
@@ -331,6 +329,6 @@ pub fn remove_run_loop(observer: &AxuWrapperType) {
             function_name!(),
             observer.as_ptr::<CFRunLoopSource>(),
         );
-        unsafe { CFRunLoopSourceInvalidate(run_loop_source) };
+        CFRunLoopSource::invalidate(run_loop_source);
     }
 }

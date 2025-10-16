@@ -53,7 +53,7 @@ Paneru is currently in a basic, working state.
 Paneru is built using Rust's `cargo`.
 
 ```shell
-$ cargo build --target release
+$ cargo build --release
 $ cp target/release/paneru ~/bin/
 ```
 

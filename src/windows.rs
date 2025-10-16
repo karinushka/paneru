@@ -8,8 +8,7 @@ use core::ptr::NonNull;
 use log::{debug, trace, warn};
 use objc2::rc::Retained;
 use objc2_core_foundation::{
-    CFArray, CFBoolean, CFBooleanGetValue, CFEqual, CFNumber, CFNumberGetType, CFNumberGetValue,
-    CFNumberType, CFRetained, CFString, CFType, CFUUIDCreateFromString, CFUUIDCreateString,
+    CFArray, CFBoolean, CFEqual, CFNumber, CFNumberType, CFRetained, CFString, CFType, CFUUID,
     CGPoint, CGRect, CGSize,
 };
 use objc2_core_graphics::{
@@ -277,7 +276,7 @@ impl WindowPane {
                 Panel::Single(id) => vec![id, window_id],
             };
 
-            debug!("Stacked windows: {:#?}", newstack);
+            debug!("Stacked windows: {newstack:#?}");
             self.pane
                 .force_write()
                 .insert(index - 1, Panel::Stack(newstack));
@@ -346,7 +345,7 @@ impl Display {
     /// A new `Display` instance.
     fn new(id: CGDirectDisplayID, spaces: Vec<u64>) -> Self {
         let spaces = HashMap::from_iter(spaces.into_iter().map(|id| (id, WindowPane::default())));
-        let bounds = unsafe { CGDisplayBounds(id) };
+        let bounds = CGDisplayBounds(id);
         Self { id, spaces, bounds }
     }
 
@@ -367,7 +366,7 @@ impl Display {
                     ErrorKind::InvalidData,
                     format!("{}: can not create uuid from {id}.", function_name!()),
                 ))?;
-            CFUUIDCreateString(None, Some(&uuid)).ok_or(Error::new(
+            CFUUID::new_string(None, Some(&uuid)).ok_or(Error::new(
                 ErrorKind::InvalidData,
                 format!("{}: can not create string from {uuid:?}.", function_name!()),
             ))
@@ -385,7 +384,7 @@ impl Display {
     /// `Ok(u32)` with the `CGDirectDisplayID` if successful, otherwise `Err(Error)`.
     fn id_from_uuid(uuid: CFRetained<CFString>) -> Result<u32> {
         unsafe {
-            let id = CFUUIDCreateFromString(None, Some(&uuid)).ok_or(Error::new(
+            let id = CFUUID::from_string(None, Some(&uuid)).ok_or(Error::new(
                 ErrorKind::NotFound,
                 format!("{}: can not convert from {uuid}.", function_name!()),
             ))?;
@@ -451,9 +450,9 @@ impl Display {
                         .ok()?;
 
                         let mut id = 0u64;
-                        CFNumberGetValue(
+                        CFNumber::value(
                             num.as_ref(),
-                            CFNumberGetType(num.as_ref()),
+                            CFNumber::r#type(num.as_ref()),
                             NonNull::from(&mut id).as_ptr().cast(),
                         );
                         Some(id)
@@ -870,7 +869,7 @@ impl Window {
     pub fn is_minimized(&self) -> bool {
         let axminimized = CFString::from_static_str(kAXMinimizedAttribute);
         get_attribute::<CFBoolean>(&self.inner().ax_element, axminimized)
-            .map(|minimized| unsafe { CFBooleanGetValue(minimized.deref()) })
+            .map(|minimized| CFBoolean::value(minimized.deref()))
             .is_ok_and(|minimized| minimized || self.inner().minimized)
     }
 
@@ -1012,7 +1011,7 @@ impl Window {
                 NonNull::from(&mut frame.size).as_ptr().cast(),
             );
         }
-        if unsafe { !CGRectEqualToRect(frame, self.inner().frame) } {
+        if !CGRectEqualToRect(frame, self.inner().frame) {
             let mut inner = self.inner.force_write();
             inner.frame = frame;
             inner.width_ratio = frame.size.width / display_bounds.size.width;
@@ -1182,7 +1181,7 @@ impl Window {
             );
             return;
         }
-        if unsafe { CGRectContainsPoint(frame, cursor) } {
+        if CGRectContainsPoint(frame, cursor) {
             return;
         }
 
@@ -1191,11 +1190,11 @@ impl Window {
             frame.origin.y + frame.size.height / 2.0,
         );
         let display_id = self.display_id(cid);
-        let bounds = display_id.map(|display_id| unsafe { CGDisplayBounds(display_id) });
-        if bounds.is_ok_and(|bounds| unsafe { !CGRectContainsPoint(bounds, center) }) {
+        let bounds = display_id.map(|display_id| CGDisplayBounds(display_id));
+        if bounds.is_ok_and(|bounds| !CGRectContainsPoint(bounds, center)) {
             return;
         }
-        unsafe { CGWarpMouseCursorPosition(center) };
+        CGWarpMouseCursorPosition(center);
     }
 
     /// Adjusts the window's position to ensure it is fully exposed (visible on screen) within the display bounds.

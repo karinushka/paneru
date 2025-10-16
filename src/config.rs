@@ -119,8 +119,12 @@ impl InnerConfig {
     ///
     /// `Ok(InnerConfig)` if the configuration is parsed successfully, otherwise `Err(String)` with an error message.
     fn new(path: &Path) -> Result<InnerConfig, String> {
-        let input = std::fs::read_to_string(path)
-            .map_err(|err| format!("{}: missing HOME env - {err}", function_name!()))?;
+        let input = std::fs::read_to_string(path).map_err(|err| {
+            format!(
+                "{}: can't open configuration in ~/.paneru - {err}",
+                function_name!()
+            )
+        })?;
         InnerConfig::parse_config(&input)
     }
 

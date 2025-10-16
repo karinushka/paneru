@@ -46,16 +46,15 @@ inspired by [Niri] and [PaperWM.spoon].
 
 ## Installation
 
-Paneru is currently in a basic, working state.
-
-### Building
-
 Paneru is built using Rust's `cargo`.
 
 ```shell
 $ cargo build --release
-$ cp target/release/paneru ~/bin/
+$ cargo install --path .
 ```
+
+It can run directly from the command line or as a service.
+Note, that you will need to grant acessibility priviledge to the binary.
 
 ### Configuration
 
@@ -124,19 +123,19 @@ tweaking keyboard bindings and other settings without restarting the
 application. The settings can be changed while Paneru is running - they will
 be automatically reloaded.
 
-### Running
-
-Start the main binary without any parameters:
+### Running as a service
 
 ```shell
-$ cargo run paneru
+$ paneru install
+$ paneru start
 ```
 
-You can change the default `info` log level to more verbose levels (`debug`, `trace`) with:
+### Running in the foreground
 
 ```shell
-$ RUST_LOG=debug cargo run paneru
+$ paneru
 ```
+
 
 ## Recommended System Options
 
@@ -156,6 +155,10 @@ Alternatively change the `if fingers.len() != 3` in the code to 4 and recompile.
 - More commands for manipulating windows: fullscreen, finegrained size adjustments, etc.
 - Scriptability. A nice feature would be to use Lua for configuration and simple scripting,
   like triggering and positioning specific windows or applications.
+
+## Communication
+
+There is a public Matrix room [`#paneru:matrix.org`](https://matrix.to/#/%23paneru%3Amatrix.org). Join and ask any questions.
 
 ## Architecture Overview
 

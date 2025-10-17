@@ -121,8 +121,9 @@ impl InnerConfig {
     fn new(path: &Path) -> Result<InnerConfig, String> {
         let input = std::fs::read_to_string(path).map_err(|err| {
             format!(
-                "{}: can't open configuration in ~/.paneru - {err}",
-                function_name!()
+                "{}: can't open configuration in {} - {err}",
+                function_name!(),
+                path.display(),
             )
         })?;
         InnerConfig::parse_config(&input)

@@ -140,7 +140,7 @@ $ RUST_LOG=debug cargo run paneru
 
 ## Recommended System Options
 
-Paneru window manager requires accesibility access (ust like all the other third party window managers for MacOS).
+Paneru window manager requires accessibility access (just like all the other third party window managers for MacOS).
 Once it runs you may get a dialog window asking for permissions.
 
 Check your system settings for "Displays have separate spaces". It should be

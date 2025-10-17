@@ -451,7 +451,7 @@ impl ProcessHandler {
                     this.process_handler(&psn, decoded);
                 }
             }
-            None => error!("Zero passed to Process Handler."),
+            _ => error!("Zero passed to Process Handler."),
         }
         0
     }
@@ -594,7 +594,7 @@ impl InputHandler {
                     return null_mut();
                 }
             }
-            None => error!("Zero passed to Event Handler."),
+            _ => error!("Zero passed to Event Handler."),
         }
         unsafe { event_ref.as_mut() }
     }
@@ -1176,7 +1176,7 @@ impl MissionControlHandler {
                 let notification = unsafe { notification.as_ref() }.to_string();
                 this.mission_control_handler(observer, element, &notification)
             }
-            None => error!("Zero passed to MissionControlHandler."),
+            _ => error!("Zero passed to MissionControlHandler."),
         }
     }
 }
@@ -1251,7 +1251,7 @@ impl DisplayHandler {
     ) {
         match NonNull::new(context).map(|this| unsafe { this.cast::<DisplayHandler>().as_mut() }) {
             Some(this) => this.display_handler(display_id, flags),
-            None => error!("Zero passed to Display Handler."),
+            _ => error!("Zero passed to Display Handler."),
         }
     }
 
@@ -1360,8 +1360,36 @@ fn setup_config_watcher(events: EventSender, config: Config) -> Result<FsEventWa
 }
 
 pub static CONFIGURATION_FILE: LazyLock<PathBuf> = LazyLock::new(|| {
-    let homedir = PathBuf::from(env::var("HOME").expect("Missing $HOME environment variable."));
-    homedir.join(".paneru")
+    if let Ok(path_str) = env::var("PANERU_CONFIG") {
+        let path = PathBuf::from(path_str);
+        if path.exists() {
+            return path;
+        }
+        warn!(
+            "{}: $PANERU_CONFIG is set to {:?}, but the file does not exist. Falling back to default locations.",
+            function_name!(),
+            path
+        );
+    }
+
+    let standard_paths = [
+        env::var("HOME").ok().map(|h| PathBuf::from(h).join(".paneru")),
+        env::var("HOME").ok().map(|h| PathBuf::from(h).join(".paneru.toml")),
+        env::var("XDG_CONFIG_HOME")
+            .ok()
+            .map(|x| PathBuf::from(x).join("paneru/paneru.toml")),
+    ];
+
+    standard_paths
+        .into_iter()
+        .flatten()
+        .find(|path| path.exists())
+        .unwrap_or_else(|| {
+            panic!(
+                "{}: Configuration file not found. Tried: $PANERU_CONFIG, $HOME/.paneru, $HOME/.paneru.toml, $XDG_CONFIG_HOME/paneru/paneru.toml",
+                function_name!()
+            )
+        })
 });
 
 pub struct PlatformCallbacks {

@@ -1,4 +1,4 @@
-use log::error;
+use log::{error, info};
 use notify::EventHandler;
 use objc2_core_foundation::{CFData, CFString};
 use serde::{Deserialize, Deserializer, de};
@@ -97,7 +97,7 @@ impl EventHandler for Config {
     /// * `event` - The result of a file system event.
     fn handle_event(&mut self, event: notify::Result<notify::Event>) {
         if let Ok(event) = event {
-            println!("Event: {event:?}");
+            info!("Event: {event:?}");
         }
     }
 }
@@ -158,7 +158,7 @@ impl InnerConfig {
             if let Some(code) = code {
                 binding.code = code;
             }
-            println!("bind: {binding:?}");
+            info!("bind: {binding:?}");
         });
 
         Ok(config)

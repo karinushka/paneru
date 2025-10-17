@@ -1,5 +1,5 @@
 use core::ptr::NonNull;
-use log::{debug, error, info, trace, warn};
+use log::{debug, error, trace, warn};
 use objc2::rc::Retained;
 use objc2_core_foundation::{CFArray, CFMutableData, CFNumberType, CFRetained, CGRect};
 use objc2_core_graphics::CGDirectDisplayID;
@@ -562,7 +562,7 @@ impl WindowManager {
                 format!("{}: No windows found for app {}", function_name!(), name,),
             ));
         }
-        info!(
+        debug!(
             "{}: App {} has global windows: {global_window_list:?}",
             function_name!(),
             name
@@ -592,7 +592,7 @@ impl WindowManager {
 
                 if self.find_window(window_id).is_none() {
                     let window_ref = AxuWrapperType::retain(window_ref.as_ptr())?;
-                    info!("{}: Add window: {} {window_id}", function_name!(), name);
+                    debug!("{}: Add window: {} {window_id}", function_name!(), name);
                     _ = self
                         .create_and_add_window(app, window_ref, window_id, false)
                         .inspect_err(|err| debug!("{}: {err}", function_name!()));
@@ -602,7 +602,7 @@ impl WindowManager {
 
         if global_window_list.len() as isize == (window_count - empty_count) {
             if refresh_index != -1 {
-                info!(
+                debug!(
                     "{}: All windows for {} are now resolved",
                     function_name!(),
                     name
@@ -617,7 +617,7 @@ impl WindowManager {
                 .collect();
 
             if !app_window_list.is_empty() {
-                info!(
+                debug!(
                     "{}: {} has windows that are not yet resolved",
                     function_name!(),
                     name
@@ -710,7 +710,7 @@ impl WindowManager {
             )));
         }
 
-        info!(
+        debug!(
             "{}: created {} app: {} title: {} role: {} subrole: {}",
             function_name!(),
             window.id(),
@@ -861,7 +861,7 @@ impl WindowManager {
         ))?;
 
         let window = self.create_and_add_window(&app, ax_element, window_id, true)?;
-        info!(
+        debug!(
             "{}: created {} app: {} title: {} role: {} subrole: {} element: {:x?}",
             function_name!(),
             window.id(),
@@ -904,7 +904,7 @@ impl WindowManager {
         }) {
             // Make sure window lives past the lock above, because its Drop tries to lock the
             // application.
-            info!("{}: {window_id}", function_name!());
+            debug!("{}: {window_id}", function_name!());
             drop(window)
         }
 

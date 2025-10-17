@@ -1266,7 +1266,7 @@ impl DisplayHandler {
         display_id: CGDirectDisplayID,
         flags: CGDisplayChangeSummaryFlags,
     ) {
-        info!("display_handler: display change {display_id:?}");
+        debug!("display_handler: display change {display_id:?}");
         let event = if flags.contains(CGDisplayChangeSummaryFlags::AddFlag) {
             Event::DisplayAdded { display_id }
         } else if flags.contains(CGDisplayChangeSummaryFlags::RemoveFlag) {
@@ -1373,8 +1373,12 @@ pub static CONFIGURATION_FILE: LazyLock<PathBuf> = LazyLock::new(|| {
     }
 
     let standard_paths = [
-        env::var("HOME").ok().map(|h| PathBuf::from(h).join(".paneru")),
-        env::var("HOME").ok().map(|h| PathBuf::from(h).join(".paneru.toml")),
+        env::var("HOME")
+            .ok()
+            .map(|h| PathBuf::from(h).join(".paneru")),
+        env::var("HOME")
+            .ok()
+            .map(|h| PathBuf::from(h).join(".paneru.toml")),
         env::var("XDG_CONFIG_HOME")
             .ok()
             .map(|x| PathBuf::from(x).join("paneru/paneru.toml")),

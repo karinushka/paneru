@@ -211,7 +211,7 @@ impl EventHandler {
     /// `Ok(Self)` if the `EventHandler` is created successfully, otherwise `Err(Error)`.
     pub fn new() -> Result<Self> {
         let main_cid = unsafe { SLSMainConnectionID() };
-        info!("{}: My connection id: {main_cid}", function_name!());
+        debug!("{}: My connection id: {main_cid}", function_name!());
 
         let (tx, rx) = channel::<Event>();
         let sender = EventSender::new(tx);
@@ -390,7 +390,7 @@ impl EventHandler {
             ""
         };
 
-        info!("KeyDown: {modifier} {key}");
+        debug!("KeyDown: {modifier} {key}");
     }
 
     /// Handles the event when a window gains focus. It checks if the owning application is frontmost
@@ -692,7 +692,7 @@ impl EventHandler {
     ///
     /// `Ok(())` if the event is handled successfully, otherwise `Err(Error)`.
     fn mouse_down(&mut self, point: &CGPoint) -> Result<()> {
-        info!("{}: {point:?}", function_name!());
+        debug!("{}: {point:?}", function_name!());
         if self.window_manager.mission_control_is_active() {
             return Ok(());
         }
@@ -714,7 +714,7 @@ impl EventHandler {
     ///
     /// * `point` - A reference to the `CGPoint` where the mouse up occurred.
     fn mouse_up(&mut self, point: &CGPoint) {
-        info!("{}: {point:?}", function_name!());
+        debug!("{}: {point:?}", function_name!());
     }
 
     /// Handles a mouse dragged event. Currently, this function does nothing except logging.
@@ -723,7 +723,7 @@ impl EventHandler {
     ///
     /// * `point` - A reference to the `CGPoint` where the mouse was dragged.
     fn mouse_dragged(&self, point: &CGPoint) {
-        info!("{}: {point:?}", function_name!());
+        debug!("{}: {point:?}", function_name!());
 
         if self.window_manager.mission_control_is_active() {
             #[warn(clippy::needless_return)]

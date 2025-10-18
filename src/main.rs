@@ -1,4 +1,5 @@
 use chrono::Local;
+use clap::{Parser, Subcommand};
 use log::{LevelFilter, debug, error};
 use std::io::{Error, ErrorKind, Result};
 use std::io::{Read, Write};
@@ -34,15 +35,14 @@ impl CommandReader {
     ///
     /// # Arguments
     ///
-    /// * `params` - An iterator over command-line arguments, where the first element is expected to be the program name.
+    /// * `params` - An iterator over command-line arguments, where the first element (usually the program name) is omitted.
     ///
     /// # Returns
     ///
     /// `Ok(())` if the command is sent successfully, otherwise `Err(Error)`.
-    fn send_command(mut params: std::env::Args) -> Result<()> {
-        params.next();
-
+    fn send_command(params: impl IntoIterator<Item = String>) -> Result<()> {
         let output = params
+            .into_iter()
             .flat_map(|param| [param.as_bytes(), &[0]].concat())
             .collect::<Vec<_>>();
         let size: u32 = output.len().try_into().unwrap();
@@ -120,10 +120,53 @@ fn check_separate_spaces() -> bool {
     }
 }
 
+/// The command line options to be collected.
+#[derive(Clone, Debug, Default, Parser)]
+#[command(
+    version = clap::crate_version!(),
+    author = clap::crate_authors!(),
+    about = clap::crate_description!(),
+)]
+pub struct Paneru {
+    /// Launch the daemon directly in the console.
+    #[clap(subcommand)]
+    subcmd: Option<SubCmd>,
+}
+
+#[derive(Clone, Debug, Default, Subcommand)]
+pub enum SubCmd {
+    /// Launch the daemon directly in the console.
+    #[default]
+    Launch,
+
+    /// Install the service.
+    Install,
+
+    /// Uninstall the service.
+    Uninstall,
+
+    /// Reinstall the service.
+    Reinstall,
+
+    /// Start the service.
+    Start,
+
+    /// Stop the service.
+    Stop,
+
+    /// Restart the service.
+    Restart,
+
+    /// Send a command via socket to the running daemon.
+    #[clap(hide = true)]
+    SendCmd {
+        #[arg(trailing_var_arg = true)]
+        cmd: Vec<String>,
+    },
+}
+
 /// The main entry point of the `paneru` application.
-/// It sets up logging, handles command-line arguments for sending commands,
-/// checks for separate spaces, initializes event handling and platform callbacks,
-/// and runs the main event loop.
+/// It sets up logging and dispatches commands accordingly.
 ///
 /// # Returns
 ///
@@ -146,10 +189,26 @@ fn main() -> Result<()> {
         })
         .init();
 
-    if std::env::args().len() > 1 {
-        return CommandReader::send_command(std::env::args());
-    }
+    let service = || service::Service::try_new(service::ID);
 
+    match Paneru::parse().subcmd.unwrap_or_default() {
+        SubCmd::Launch => launch()?,
+        SubCmd::Install => service()?.install()?,
+        SubCmd::Uninstall => service()?.uninstall()?,
+        SubCmd::Reinstall => service()?.reinstall()?,
+        SubCmd::Start => service()?.start()?,
+        SubCmd::Stop => service()?.stop()?,
+        SubCmd::Restart => service()?.restart()?,
+        SubCmd::SendCmd { cmd } => CommandReader::send_command(cmd)?,
+    };
+    Ok(())
+}
+
+/// Launches the window manager.
+///
+/// This function first checks for separate spaces,
+/// then initializes event handling and platform callbacks and runs the main event loop.
+fn launch() -> Result<()> {
     if !check_separate_spaces() {
         error!(
             "{}: Option 'display has separate spaces' disabled.",

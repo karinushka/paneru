@@ -267,7 +267,8 @@ impl WindowPane {
         }
 
         self.pane.force_write().remove(index);
-        if let Some(panel) = self.pane.force_write().remove(index - 1) {
+        let panel = self.pane.force_write().remove(index - 1);
+        if let Some(panel) = panel {
             let newstack = match panel {
                 Panel::Stack(mut stack) => {
                     stack.push(window_id);
@@ -292,7 +293,8 @@ impl WindowPane {
             return Ok(());
         }
 
-        if let Some(panel) = self.pane.force_write().remove(index) {
+        let panel = self.pane.force_write().remove(index);
+        if let Some(panel) = panel {
             let newstack = match panel {
                 Panel::Stack(mut stack) => {
                     stack.retain(|id| *id != window_id);

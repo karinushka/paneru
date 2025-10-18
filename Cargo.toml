@@ -7,7 +7,10 @@ rust-version = "1.88.0"
 [dependencies]
 accessibility-sys = "0.1.3"
 chrono = "0.4.42"
+embed_plist = "1.2.2"
 env_logger = "0.11.6"
+launchctl = "0.3.2"
+libc = "0.2.177"
 log = "0.4.25"
 notify = { version = "8.0.0", features = ["macos_fsevent"] }
 objc2 = { version = "0.6.0", features = ["catch-all", "exception"] }

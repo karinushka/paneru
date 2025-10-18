@@ -1,9 +1,13 @@
-use accessibility_sys::{AXObserverGetRunLoopSource, AXUIElementRef};
+use accessibility_sys::{
+    AXIsProcessTrustedWithOptions, AXObserverGetRunLoopSource, AXUIElementRef,
+    kAXTrustedCheckOptionPrompt,
+};
 use core::ptr::NonNull;
 use log::debug;
 use objc2_core_foundation::{
     CFArray, CFDictionary, CFNumber, CFNumberType, CFRetained, CFRunLoop, CFRunLoopMode,
-    CFRunLoopSource, CFString, CFType, Type, kCFTypeArrayCallBacks,
+    CFRunLoopSource, CFString, CFType, Type, kCFBooleanTrue, kCFCopyStringDictionaryKeyCallBacks,
+    kCFTypeArrayCallBacks, kCFTypeDictionaryValueCallBacks,
 };
 use std::{
     ffi::{CStr, OsStr, c_int, c_void},
@@ -351,4 +355,23 @@ pub fn exe_path() -> Option<PathBuf> {
     let path = unsafe { _NSGetExecutablePath(path_buf.as_mut_ptr(), &raw mut path_buf_size) == 0 }
         .then(|| CStr::from_bytes_until_nul(&path_buf).ok())??;
     Some(OsStr::from_bytes(path.to_bytes()).into())
+}
+
+pub fn check_ax_privilege() -> bool {
+    unsafe {
+        let mut keys = vec![kAXTrustedCheckOptionPrompt as *const c_void];
+        let mut values = vec![NonNull::from(kCFBooleanTrue.unwrap()).as_ptr() as *const c_void];
+
+        CFDictionary::new(
+            None,
+            keys.as_mut_ptr(),
+            values.as_mut_ptr(),
+            keys.len() as isize,
+            &kCFCopyStringDictionaryKeyCallBacks,
+            &kCFTypeDictionaryValueCallBacks,
+        )
+        .map(|options| NonNull::from_ref(options.deref()).as_ptr())
+        .map(|options| AXIsProcessTrustedWithOptions(options.cast()))
+        .is_some_and(|supported| supported)
+    }
 }

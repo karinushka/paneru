@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>KeepAlive</key>
+    <dict>
+      <key>Crashed</key>
+      <true />
+      <key>SuccessfulExit</key>
+      <false />
+    </dict>
+    <key>Label</key>
+    <string>{name}</string>
+    <key>Nice</key>
+    <integer>-20</integer>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>Program</key>
+    <string>{bin_path}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>NO_COLOR</key>
+      <string>1</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true />
+    <key>StandardErrorPath</key>
+    <string>{out_log_path}</string>
+    <key>StandardOutPath</key>
+    <string>{error_log_path}</string>
+  </dict>
+</plist>

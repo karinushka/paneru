@@ -13,9 +13,12 @@ mod events;
 mod manager;
 mod platform;
 mod process;
+mod service;
 mod skylight;
 mod util;
 mod windows;
+
+embed_plist::embed_info_plist!("../assets/Info.plist");
 
 use events::{Event, EventHandler, EventSender};
 use platform::PlatformCallbacks;

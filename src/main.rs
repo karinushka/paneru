@@ -1,8 +1,7 @@
-use log::{debug, error, LevelFilter};
+use chrono::Local;
+use log::{LevelFilter, debug, error};
 use std::io::{Error, ErrorKind, Result};
 use std::io::{Read, Write};
-use std::fs::File;
-use chrono::Local;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::{fs, thread};
 use stdext::function_name;
@@ -131,11 +130,8 @@ fn check_separate_spaces() -> bool {
 /// `Ok(())` if the application runs successfully, otherwise `Err(Error)`.
 fn main() -> Result<()> {
     // Set up logging (default level is INFO)
-    // Log piping credit: https://github.com/rust-cli/env_logger/issues/125
-    let target = Box::new(File::create("/tmp/paneru-log.txt").expect("Can't create file"));
-
     env_logger::Builder::new()
-        .target(env_logger::Target::Pipe(target))
+        .target(env_logger::Target::Stderr)
         .filter(None, LevelFilter::Info)
         .format(|buf, record| {
             writeln!(

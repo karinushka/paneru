@@ -785,9 +785,9 @@ impl Window {
     /// # Returns
     ///
     /// The `AXUIElementRef` as `AXUIElementRef`.
-    pub fn element(&self) -> AXUIElementRef {
+    pub fn element(&self) -> CFRetained<AxuWrapperType> {
         // unsafe { NonNull::new_unchecked(self.inner().ax_element.as_ptr::<c_void>()).addr() }
-        self.inner().ax_element.deref().as_ptr()
+        self.inner().ax_element.clone()
     }
 
     /// Retrieves the parent window ID for a given window.

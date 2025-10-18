@@ -7,7 +7,7 @@ use accessibility_sys::{
     kAXWindowMovedNotification, kAXWindowResizedNotification, kAXWindowsAttribute,
 };
 use core::ptr::NonNull;
-use log::{debug, error, warn};
+use log::{debug, error};
 use objc2_core_foundation::{CFArray, CFRetained, CFString, kCFRunLoopCommonModes};
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -27,7 +27,7 @@ use crate::platform::{
 use crate::process::Process;
 use crate::skylight::{_SLPSGetFrontProcess, ConnID, SLSGetConnectionIDForPSN, WinID};
 use crate::util::{AxuWrapperType, add_run_loop, get_attribute, remove_run_loop};
-use crate::windows::{InnerWindow, Window, ax_window_id};
+use crate::windows::{Window, ax_window_id};
 
 pub static AX_NOTIFICATIONS: LazyLock<Vec<&str>> = LazyLock::new(|| {
     vec![
@@ -55,21 +55,23 @@ pub struct Application {
 }
 
 pub struct InnerApplication {
-    element_ref: CFRetained<AxuWrapperType>,
+    element: CFRetained<AxuWrapperType>,
     psn: ProcessSerialNumber,
     pid: Pid,
     name: String,
     connection: Option<ConnID>,
-    handler: Pin<Box<AxObserverHandler>>,
+    handler: AxObserverHandler,
     windows: HashMap<WinID, Window>,
 }
 
 impl Drop for InnerApplication {
     /// Cleans up the AXObserver by removing all registered notifications when the `InnerApplication` is dropped.
     fn drop(&mut self) {
-        let element = self.element_ref.as_ptr::<c_void>();
-        self.handler
-            .remove_observer(element.cast(), &AX_NOTIFICATIONS);
+        self.handler.remove_observer(
+            ObserverType::Application,
+            self.element.deref(),
+            &AX_NOTIFICATIONS,
+        );
     }
 }
 
@@ -92,7 +94,7 @@ impl InnerApplication {
             AxuWrapperType::retain(ptr)?
         };
         Ok(InnerApplication {
-            element_ref: refer,
+            element: refer,
             psn: process.psn.clone(),
             pid: process.pid,
             name: process.name.clone(),
@@ -182,7 +184,7 @@ impl Application {
     pub fn element(&self) -> Result<CFRetained<AxuWrapperType>> {
         self.inner
             .upgrade()
-            .map(|inner| inner.force_read().element_ref.clone())
+            .map(|inner| inner.force_read().element.clone())
             .ok_or(self.weak_error(function_name!()))
     }
 
@@ -301,20 +303,17 @@ impl Application {
                 format!("{}: application not found", function_name!(),),
             )
         };
-        let element = self
-            .element()
-            .map(|element| NonNull::from(element.deref()).as_ptr())?;
-        let context = self
-            .inner
-            .upgrade()
-            .map(|inner| NonNull::from(inner.force_read().handler.deref()))
-            .ok_or(error())?;
+        let element = self.element()?;
         self.inner
             .upgrade()
             .ok_or(error())?
             .force_write()
             .handler
-            .add_observer(element.cast(), &AX_NOTIFICATIONS, context.cast())
+            .add_observer(
+                element.deref(),
+                &AX_NOTIFICATIONS,
+                ObserverType::Application,
+            )
             .map(|retry| retry.is_empty())
     }
 
@@ -328,8 +327,7 @@ impl Application {
     /// # Returns
     ///
     /// `Ok(bool)` where `true` means all observers were successfully registered and `retry` list is empty, otherwise `Err(Error)`.
-    pub fn observe_window(&self, element: AXUIElementRef, window: &Window) -> Result<bool> {
-        let context = NonNull::from(window.inner().deref());
+    pub fn observe_window(&self, window: &Window) -> Result<bool> {
         self.inner
             .upgrade()
             .ok_or(Error::new(
@@ -338,7 +336,11 @@ impl Application {
             ))?
             .force_write()
             .handler
-            .add_observer(element, &AX_WINDOW_NOTIFICATIONS, context.cast())
+            .add_observer(
+                window.element().deref(),
+                &AX_WINDOW_NOTIFICATIONS,
+                ObserverType::Window(window.id()),
+            )
             .map(|retry| retry.is_empty())
     }
 
@@ -347,12 +349,13 @@ impl Application {
     /// # Arguments
     ///
     /// * `element` - The `AXUIElementRef` of the window to unobserve.
-    pub fn unobserve_window(&self, element: AXUIElementRef) {
+    pub fn unobserve_window(&self, window: &Window) {
         if let Some(inner) = self.inner.upgrade() {
-            inner
-                .force_write()
-                .handler
-                .remove_observer(element, &AX_WINDOW_NOTIFICATIONS);
+            inner.force_write().handler.remove_observer(
+                ObserverType::Window(window.id()),
+                window.element().deref(),
+                &AX_WINDOW_NOTIFICATIONS,
+            );
         }
     }
 
@@ -368,144 +371,27 @@ impl Application {
     }
 }
 
-struct AxObserverHandler {
-    observer: CFRetained<AxuWrapperType>,
+enum ObserverType {
+    Application,
+    Window(WinID),
+}
+
+struct ObserverContext {
     events: EventSender,
+    which: ObserverType,
 }
 
-impl Drop for AxObserverHandler {
-    /// Invalidates the run loop source associated with the AXObserver when the `AxObserverHandler` is dropped.
-    fn drop(&mut self) {
-        remove_run_loop(self.observer.deref());
-    }
-}
-
-impl AxObserverHandler {
-    /// Creates a new `AxObserverHandler` instance for a given process ID.
-    /// It creates an `AXObserver` and adds its run loop source to the main run loop.
+impl ObserverContext {
+    /// Notifies the event sender about an accessibility event.
     ///
     /// # Arguments
     ///
-    /// * `pid` - The process ID to create the observer for.
-    /// * `events` - An `EventSender` to send events generated by the observer.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(Pin<Box<Self>>)` if the handler is created successfully, otherwise `Err(Error)`.
-    fn new(pid: Pid, events: EventSender) -> Result<Pin<Box<Self>>> {
-        let observer = unsafe {
-            let mut observer_ref: AXObserverRef = null_mut();
-            if kAXErrorSuccess == AXObserverCreate(pid, Self::callback, &mut observer_ref) {
-                AxuWrapperType::from_retained(observer_ref)?
-            } else {
-                return Err(Error::new(
-                    ErrorKind::PermissionDenied,
-                    format!("{}: error creating observer.", function_name!()),
-                ));
-            }
-        };
-
-        unsafe { add_run_loop(observer.deref(), kCFRunLoopCommonModes)? };
-        Ok(Box::pin(Self {
-            observer,
-            events,
-            // handlers: Vec::new(),
-        }))
-    }
-
-    /// Adds accessibility notifications to be observed for a given UI element.
-    ///
-    /// # Arguments
-    ///
-    /// * `element` - The `AXUIElementRef` to observe.
-    /// * `notifications` - A slice of static strings representing the notification names to add.
-    /// * `context` - A raw pointer to user-defined context data that will be passed to the callback.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(Vec<&str>)` containing a list of notifications that could not be registered (retries), otherwise `Err(Error)`.
-    pub fn add_observer(
-        &mut self,
-        element: AXUIElementRef,
-        notifications: &[&'static str],
-        context: NonNull<c_void>,
-    ) -> Result<Vec<&str>> {
-        let observer: AXObserverRef = self.observer.as_ptr();
-
-        // TODO: retry re-registering these.
-        let mut retry = vec![];
-        let added = notifications
-            .iter()
-            .flat_map(|name| {
-                debug!(
-                    "{}: adding {name} {element:x?} {observer:?}",
-                    function_name!()
-                );
-                let notification = CFString::from_static_str(name);
-                match unsafe {
-                    AXObserverAddNotification(
-                        observer,
-                        element,
-                        notification.deref(),
-                        context.as_ptr(),
-                    )
-                } {
-                    accessibility_sys::kAXErrorSuccess
-                    | accessibility_sys::kAXErrorNotificationAlreadyRegistered => Some(*name),
-                    accessibility_sys::kAXErrorCannotComplete => {
-                        retry.push(*name);
-                        None
-                    }
-                    result => {
-                        error!(
-                            "{}: error adding {name} {element:x?} {observer:?}: {result}",
-                            function_name!()
-                        );
-                        None
-                    }
-                }
-            })
-            .collect::<Vec<_>>();
-        if added.is_empty() {
-            Err(Error::new(
-                ErrorKind::PermissionDenied,
-                format!("{}: unable to register any observers!", function_name!()),
-            ))
-        } else {
-            Ok(retry)
-        }
-    }
-
-    /// Removes accessibility notifications from being observed for a given UI element.
-    ///
-    /// # Arguments
-    ///
-    /// * `element` - The `AXUIElementRef` from which to remove notifications.
-    /// * `notifications` - A slice of static strings representing the notification names to remove.
-    pub fn remove_observer(&mut self, element: AXUIElementRef, notifications: &[&'static str]) {
-        for name in notifications {
-            let observer: AXObserverRef = self.observer.deref().as_ptr();
-            let notification = CFString::from_static_str(name);
-            let ptr = NonNull::new(element);
-            if let Some(element) = ptr {
-                debug!(
-                    "{}: removing {name} {element:x?} {observer:?}",
-                    function_name!()
-                );
-                let result = unsafe {
-                    AXObserverRemoveNotification(
-                        observer,
-                        element.as_ptr().cast(),
-                        notification.deref(),
-                    )
-                };
-                if result != kAXErrorSuccess {
-                    warn!(
-                        "{}: error removing {name} {element:x?} {observer:?}: {result}",
-                        function_name!(),
-                    );
-                }
-            }
+    /// * `notification` - The name of the accessibility notification as a `String`.
+    /// * `element` - The `AXUIElementRef` associated with the notification.
+    fn notify(&self, notification: String, element: AXUIElementRef) {
+        match self.which {
+            ObserverType::Application => self.notify_app(notification, element),
+            ObserverType::Window(id) => self.notify_window(notification, id),
         }
     }
 
@@ -581,6 +467,159 @@ impl AxObserverHandler {
         };
         _ = self.events.send(event);
     }
+}
+
+struct AxObserverHandler {
+    observer: CFRetained<AxuWrapperType>,
+    events: EventSender,
+    contexts: Vec<Pin<Box<ObserverContext>>>,
+}
+
+impl Drop for AxObserverHandler {
+    /// Invalidates the run loop source associated with the AXObserver when the `AxObserverHandler` is dropped.
+    fn drop(&mut self) {
+        remove_run_loop(self.observer.deref());
+    }
+}
+
+impl AxObserverHandler {
+    /// Creates a new `AxObserverHandler` instance for a given process ID.
+    /// It creates an `AXObserver` and adds its run loop source to the main run loop.
+    ///
+    /// # Arguments
+    ///
+    /// * `pid` - The process ID to create the observer for.
+    /// * `events` - An `EventSender` to send events generated by the observer.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Pin<Box<Self>>)` if the handler is created successfully, otherwise `Err(Error)`.
+    fn new(pid: Pid, events: EventSender) -> Result<Self> {
+        let observer = unsafe {
+            let mut observer_ref: AXObserverRef = null_mut();
+            if kAXErrorSuccess == AXObserverCreate(pid, Self::callback, &mut observer_ref) {
+                AxuWrapperType::from_retained(observer_ref)?
+            } else {
+                return Err(Error::new(
+                    ErrorKind::PermissionDenied,
+                    format!("{}: error creating observer.", function_name!()),
+                ));
+            }
+        };
+
+        unsafe { add_run_loop(observer.deref(), kCFRunLoopCommonModes)? };
+        Ok(Self {
+            observer,
+            events,
+            contexts: Vec::new(),
+        })
+    }
+
+    /// Adds accessibility notifications to be observed for a given UI element.
+    ///
+    /// # Arguments
+    ///
+    /// * `element` - The `AxuWrapperType` to observe.
+    /// * `notifications` - A slice of static strings representing the notification names to add.
+    /// * `which` - Adds event type to callback context. I.e. an application or window specific.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Vec<&str>)` containing a list of notifications that could not be registered (retries), otherwise `Err(Error)`.
+    pub fn add_observer(
+        &mut self,
+        element: &AxuWrapperType,
+        notifications: &[&'static str],
+        which: ObserverType,
+    ) -> Result<Vec<&str>> {
+        let observer: AXObserverRef = self.observer.as_ptr();
+        let context = Box::pin(ObserverContext {
+            events: self.events.clone(),
+            which,
+        });
+        let context_ptr = NonNull::from_ref(context.deref()).as_ptr();
+        self.contexts.push(context);
+
+        // TODO: retry re-registering these.
+        let mut retry = vec![];
+        let added = notifications
+            .iter()
+            .flat_map(|name| {
+                debug!(
+                    "{}: adding {name} {element:x?} {observer:?}",
+                    function_name!()
+                );
+                let notification = CFString::from_static_str(name);
+                match unsafe {
+                    AXObserverAddNotification(
+                        observer,
+                        element.as_ptr(),
+                        notification.deref(),
+                        context_ptr.cast(),
+                    )
+                } {
+                    accessibility_sys::kAXErrorSuccess
+                    | accessibility_sys::kAXErrorNotificationAlreadyRegistered => Some(*name),
+                    accessibility_sys::kAXErrorCannotComplete => {
+                        retry.push(*name);
+                        None
+                    }
+                    result => {
+                        error!(
+                            "{}: error adding {name} {element:x?} {observer:?}: {result}",
+                            function_name!()
+                        );
+                        None
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+        if added.is_empty() {
+            Err(Error::new(
+                ErrorKind::PermissionDenied,
+                format!("{}: unable to register any observers!", function_name!()),
+            ))
+        } else {
+            Ok(retry)
+        }
+    }
+
+    /// Removes accessibility notifications from being observed for a given UI element.
+    ///
+    /// # Arguments
+    ///
+    /// * `which` - Adds event type to callback context. I.e. an application or window specific.
+    /// * `element` - The `AXUIElementRef` from which to remove notifications.
+    /// * `notifications` - A slice of static strings representing the notification names to remove.
+    pub fn remove_observer(
+        &mut self,
+        which: ObserverType,
+        element: &AxuWrapperType,
+        notifications: &[&'static str],
+    ) {
+        for name in notifications {
+            let observer: AXObserverRef = self.observer.deref().as_ptr();
+            let notification = CFString::from_static_str(name);
+            debug!(
+                "{}: removing {name} {element:x?} {observer:?}",
+                function_name!()
+            );
+            let result = unsafe {
+                AXObserverRemoveNotification(observer, element.as_ptr(), notification.deref())
+            };
+            if result != kAXErrorSuccess {
+                debug!(
+                    "{}: error removing {name} {element:x?} {observer:?}: {result}",
+                    function_name!(),
+                );
+            }
+        }
+        if let ObserverType::Window(removed) = which {
+            self.contexts.retain(
+                    |context| !matches!(context.which, ObserverType::Window(window_id) if window_id == removed),
+                );
+        }
+    }
 
     /// The static callback function for `AXObserver`. This function is called by the macOS Accessibility API
     /// when an observed accessibility event occurs. It dispatches the event to the appropriate `notify_app` or `notify_window` handler.
@@ -590,44 +629,22 @@ impl AxObserverHandler {
     /// * `_` - The `AXObserverRef` (unused).
     /// * `element` - The `AXUIElementRef` associated with the notification.
     /// * `notification` - The raw `CFStringRef` representing the notification name.
-    /// * `context` - A raw pointer to the user-defined context (either `AxObserverHandler` or `InnerWindow`).
+    /// * `context` - A raw pointer to the user-defined context `ObserverContext`.
     extern "C" fn callback(
         _: AXObserverRef,
         element: AXUIElementRef,
         notification: CFStringRef,
         context: *mut c_void,
     ) {
-        let Some(notification) = NonNull::new(notification as *mut CFString)
+        let notification = NonNull::new(notification as *mut CFString)
             .map(|ptr| unsafe { ptr.as_ref() })
-            .map(CFString::to_string)
-        else {
+            .map(CFString::to_string);
+        let context =
+            NonNull::new(context as *mut ObserverContext).map(|ptr| unsafe { ptr.as_ref() });
+        let Some((notification, context)) = notification.zip(context) else {
             return;
         };
 
-        if AX_NOTIFICATIONS.iter().any(|n| *n == notification) {
-            let handler = NonNull::new(context)
-                .map(|handler| unsafe { handler.cast::<AxObserverHandler>().as_ref() });
-            if let Some(handler) = handler {
-                handler.notify_app(notification, element);
-            }
-        } else if AX_WINDOW_NOTIFICATIONS.iter().any(|n| *n == notification) {
-            let inner = NonNull::new(context)
-                .map(|handler| unsafe { handler.cast::<InnerWindow>().as_ref() })
-                .and_then(|inner| {
-                    let handler = inner.app.inner.upgrade();
-                    handler.zip(Some(inner.id))
-                });
-            if let Some((handler, window_id)) = inner {
-                handler
-                    .force_read()
-                    .handler
-                    .notify_window(notification, window_id);
-            }
-        } else {
-            warn!(
-                "{}: received unknown notification '{notification}'",
-                function_name!()
-            );
-        };
+        context.notify(notification, element);
     }
 }

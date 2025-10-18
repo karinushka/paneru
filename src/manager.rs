@@ -720,7 +720,7 @@ impl WindowManager {
             window.subrole().unwrap_or_default(),
         );
 
-        app.observe_window(window.element(), &window)?;
+        app.observe_window(&window)?;
 
         app.add_window(&window);
         window.update_frame(&self.current_display_bounds()?)?;
@@ -900,7 +900,7 @@ impl WindowManager {
         let app = self.find_window(window_id).map(|window| window.app());
         if let Some(window) = app.and_then(|app| {
             app.remove_window(window_id)
-                .inspect(|window| app.unobserve_window(window.element()))
+                .inspect(|window| app.unobserve_window(window))
         }) {
             // Make sure window lives past the lock above, because its Drop tries to lock the
             // application.

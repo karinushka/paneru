@@ -231,6 +231,6 @@ fn launch() -> Result<()> {
 
     platform_callbacks.run(quit);
 
-    handle.join().expect("Can not joing threads at the end.");
+    handle.join().expect("Cannot join threads at the end.");
     Ok(())
 }

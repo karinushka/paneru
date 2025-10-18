@@ -7,6 +7,7 @@ rust-version = "1.88.0"
 [dependencies]
 accessibility-sys = "0.1.3"
 chrono = "0.4.42"
+clap = { version = "4.5.49", features = ["cargo", "derive"] }
 embed_plist = "1.2.2"
 env_logger = "0.11.6"
 launchctl = "0.3.2"

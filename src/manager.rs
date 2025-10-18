@@ -89,27 +89,7 @@ impl WindowManager {
             Event::WindowResized { window_id } => self.window_resized(window_id)?,
 
             Event::Swipe { delta_x } => {
-                debug!("Swipe {delta_x}");
-
-                let display_bounds = self.current_display_bounds()?;
-                let Some(window) = self
-                    .focused_window
-                    .and_then(|window_id| self.find_window(window_id))
-                    .filter(|window| window.is_eligible())
-                else {
-                    warn!("{}: No window focused.", function_name!());
-                    return Ok(());
-                };
-                let frame = window.frame();
-                window.reposition(
-                    // Delta is relative to the touchpad size, so to avoid too fast movement we
-                    // scale it down by half.
-                    frame.origin.x - (display_bounds.size.width / 2.0 * delta_x),
-                    frame.origin.y,
-                    &display_bounds,
-                );
-                window.center_mouse(self.main_cid);
-                self.reshuffle_around(&window)?;
+                _ = self.slide_window(delta_x);
             }
 
             Event::MissionControlShowAllWindows
@@ -1305,6 +1285,31 @@ impl WindowManager {
             // .. and then re-insert it into the current one.
             panel.append(window_id);
         }
+        Ok(())
+    }
+
+    fn slide_window(&self, delta_x: f64) -> Result<()> {
+        trace!("Swipe {delta_x}");
+        let display_bounds = self.current_display_bounds()?;
+        let Some(window) = self
+            .focused_window
+            .and_then(|window_id| self.find_window(window_id))
+            .filter(|window| window.is_eligible())
+        else {
+            warn!("{}: No window focused.", function_name!());
+            return Ok(());
+        };
+        let frame = window.frame();
+        // Delta is relative to the touchpad size, so to avoid too fast movement we
+        // scale it down by half.
+        let x = frame.origin.x - (display_bounds.size.width / 2.0 * delta_x);
+        window.reposition(
+            x.min(display_bounds.size.width - frame.size.width).max(0.0),
+            frame.origin.y,
+            &display_bounds,
+        );
+        window.center_mouse(self.main_cid);
+        self.reshuffle_around(&window)?;
         Ok(())
     }
 }

@@ -1280,4 +1280,31 @@ impl WindowManager {
     pub fn focus_follows_mouse(&self) -> bool {
         self.focus_follows_mouse
     }
+
+    /// Checks if the currently focused window is in the active panel.
+    /// If not, the window has been moved to a different display or workspace - so the window
+    /// manager needs to reorient itself and re-insert the window into correct location.
+    pub fn reorient_focus(&self) -> Result<()> {
+        let display = self.active_display()?;
+        let window = self.focused_window()?;
+        let window_id = window.id();
+        let panel = display.active_panel(self.main_cid)?;
+        if window.managed() && panel.index_of(window_id).is_err() {
+            // Current window is not present in the current pane. This is probably due to it being
+            // moved to a different desktop. Re-insert it into a correct pane.
+            debug!(
+                "{}: Window {} moved between displays or workspaces.",
+                function_name!(),
+                window_id
+            );
+            // First remove it from all the displays.
+            self.displays.iter().for_each(|display| {
+                display.remove_window(window_id);
+            });
+
+            // .. and then re-insert it into the current one.
+            panel.append(window_id);
+        }
+        Ok(())
+    }
 }

@@ -351,10 +351,12 @@ impl EventHandler {
             }
             Event::DisplayChanged => {
                 debug!("{}: Display Changed", function_name!());
+                _ = self.window_manager.reorient_focus();
             }
 
             Event::SpaceChanged => {
-                debug!("{}: space changed", function_name!())
+                debug!("{}: Space Changed", function_name!());
+                _ = self.window_manager.reorient_focus();
             }
             Event::SystemWoke { msg } => {
                 debug!("{}: system woke: {msg:?}", function_name!())
@@ -584,18 +586,7 @@ impl EventHandler {
 
         let window_id = window.id();
         if window.managed() && active_panel.index_of(window_id).is_err() {
-            // Current window is not present in the current pane. This is probably due to it being
-            // moved to a different desktop. Re-insert it into a correct pane.
-            debug!(
-                "{}: Window {} moved between panes.",
-                function_name!(),
-                window_id
-            );
-            // First remove it from all the panes.
-            active_display.remove_window(window_id);
-
-            // .. and then re-insert it into the current one.
-            active_panel.append(window_id);
+            self.window_manager.reorient_focus()?;
         }
 
         match argv.first().unwrap_or(&empty).as_ref() {

@@ -106,6 +106,7 @@ impl WindowManager {
                     // scale it down by half.
                     frame.origin.x - (display_bounds.size.width / 2.0 * delta_x),
                     frame.origin.y,
+                    &display_bounds,
                 );
                 window.center_mouse(self.main_cid);
                 self.reshuffle_around(&window)?;
@@ -1063,7 +1064,7 @@ impl WindowManager {
         let mut y_pos = 0f64;
         let height = display_bounds.size.height / windows.len() as f64;
         for window in windows {
-            window.reposition(upper_left, y_pos);
+            window.reposition(upper_left, y_pos, display_bounds);
             window.resize(width, height, display_bounds);
             y_pos += height;
         }

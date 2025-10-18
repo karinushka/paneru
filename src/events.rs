@@ -520,7 +520,7 @@ impl EventHandler {
         argv: &[String],
         current_window: &Window,
         panel: &WindowPane,
-        bounds: &CGRect,
+        display_bounds: &CGRect,
     ) -> Option<Window> {
         let direction = argv.first()?;
         let index = panel.index_of(current_window.id()).ok()?;
@@ -533,7 +533,10 @@ impl EventHandler {
             CGPoint::new(0.0, 0.0)
         } else if new_index == (panel.len() - 1) {
             // If reached full right, snap the window to right.
-            CGPoint::new(bounds.size.width - current_window.frame().size.width, 0.0)
+            CGPoint::new(
+                display_bounds.size.width - current_window.frame().size.width,
+                0.0,
+            )
         } else {
             panel
                 .get(new_index)
@@ -543,7 +546,7 @@ impl EventHandler {
                 .frame()
                 .origin
         };
-        current_window.reposition(origin.x, origin.y);
+        current_window.reposition(origin.x, origin.y, display_bounds);
         if index < new_index {
             (index..new_index).for_each(|idx| panel.swap(idx, idx + 1));
         } else {
@@ -609,6 +612,7 @@ impl EventHandler {
                 window.reposition(
                     (display_bounds.size.width - frame.size.width) / 2.0,
                     frame.origin.y,
+                    &display_bounds,
                 );
                 window.center_mouse(self.main_cid);
             }
@@ -632,7 +636,7 @@ impl EventHandler {
                 } else {
                     // Add newly managed window to the stack.
                     let frame = window.frame();
-                    window.reposition(frame.origin.x, 0.0);
+                    window.reposition(frame.origin.x, 0.0, &display_bounds);
                     window.resize(
                         frame.size.width,
                         display_bounds.size.height,

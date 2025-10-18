@@ -923,8 +923,8 @@ impl Window {
     ///
     /// * `x` - The new x-coordinate for the window's origin.
     /// * `y` - The new y-coordinate for the window's origin.
-    pub fn reposition(&self, x: f64, y: f64) {
-        let mut point = CGPoint::new(x, y);
+    pub fn reposition(&self, x: f64, y: f64, display_bounds: &CGRect) {
+        let mut point = CGPoint::new(x + display_bounds.origin.x, y + display_bounds.origin.y);
         let position_ref = unsafe {
             AXValueCreate(
                 kAXValueTypeCGPoint,
@@ -939,7 +939,8 @@ impl Window {
                     position.as_ref(),
                 )
             };
-            self.inner.force_write().frame.origin = point;
+            self.inner.force_write().frame.origin.x = x;
+            self.inner.force_write().frame.origin.y = y;
         }
     }
 
@@ -1233,7 +1234,7 @@ impl Window {
             false
         };
         if moved {
-            self.reposition(frame.origin.x, frame.origin.y);
+            self.reposition(frame.origin.x, frame.origin.y, display_bounds);
             trace!("{}: focus resposition to {frame:?}", function_name!());
         }
         frame

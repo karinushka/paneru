@@ -470,7 +470,7 @@ fn generate_virtual_keymap() -> Vec<(String, u8)> {
     let mut chars = vec![0u16; 256];
     let mut got: isize = 0;
     virtual_keycode()
-        .flat_map(|(_, keycode)| unsafe {
+        .filter_map(|(_, keycode)| unsafe {
             (0 == UCKeyTranslate(
                 keyboard_layout.as_ptr(),
                 (*keycode).into(),

@@ -544,7 +544,7 @@ impl AxObserverHandler {
         let mut retry = vec![];
         let added = notifications
             .iter()
-            .flat_map(|name| {
+            .filter_map(|name| {
                 debug!(
                     "{}: adding {name} {element:x?} {observer:?}",
                     function_name!()

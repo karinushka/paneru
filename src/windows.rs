@@ -443,7 +443,7 @@ impl Display {
                 debug!("{}: spaces {spaces:?}", function_name!());
 
                 let space_list = get_array_values(spaces.as_ref())
-                    .flat_map(|space| {
+                    .filter_map(|space| {
                         let num = get_cfdict_value::<CFNumber>(
                             space.as_ref(),
                             CFString::from_static_str("id64").deref(),

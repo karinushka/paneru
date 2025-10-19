@@ -711,7 +711,7 @@ impl InputHandler {
         let mask = MODIFIER_MASKS
             .iter()
             .enumerate()
-            .flat_map(|(bitshift, modifier)| {
+            .filter_map(|(bitshift, modifier)| {
                 modifier
                     .iter()
                     .any(|mask| *mask == (eventflags.0 & mask))

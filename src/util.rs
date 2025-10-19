@@ -230,7 +230,7 @@ pub fn get_cfdict_value<T>(dict: &CFDictionary, key: &CFString) -> Result<NonNul
 /// An iterator yielding `NonNull<T>` for each element in the array.
 pub fn get_array_values<T>(array: &CFArray) -> impl Iterator<Item = NonNull<T>> + use<'_, T> {
     let count = CFArray::count(array);
-    (0..count).flat_map(move |idx| {
+    (0..count).filter_map(move |idx| {
         NonNull::new(unsafe { CFArray::value_at_index(array, idx).cast_mut() })
             .map(|ptr| ptr.cast::<T>())
     })
@@ -253,7 +253,7 @@ pub fn get_array_values<T>(array: &CFArray) -> impl Iterator<Item = NonNull<T>> 
 pub fn create_array<T>(values: Vec<T>, cftype: CFNumberType) -> Result<CFRetained<CFArray>> {
     let numbers = values
         .iter()
-        .flat_map(|value: &T| unsafe {
+        .filter_map(|value: &T| unsafe {
             CFNumber::new(None, cftype, NonNull::from(value).as_ptr().cast())
         })
         .collect::<Vec<_>>();

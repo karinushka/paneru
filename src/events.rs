@@ -574,7 +574,7 @@ impl EventHandler {
             .window_manager
             .focused_window
             .and_then(|window_id| self.window_manager.find_window(window_id))
-            .filter(|window| window.is_eligible())
+            .filter(Window::is_eligible)
         else {
             warn!("{}: No window focused.", function_name!());
             return Ok(());

@@ -99,7 +99,8 @@ impl CommandReader {
                 }
                 let argv = buffer
                     .split(|c| *c == 0)
-                    .flat_map(|s| (!s.is_empty()).then(|| String::from_utf8_lossy(s).to_string()))
+                    .filter(|s| !s.is_empty())
+                    .map(|s| String::from_utf8_lossy(s).to_string())
                     .collect::<Vec<_>>();
                 self.events.send(Event::Command { argv })?
             }

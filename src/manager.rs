@@ -166,7 +166,7 @@ impl WindowManager {
 
         relocated_windows
             .iter()
-            .flat_map(|(window_id, bounds)| self.find_window(*window_id).zip(Some(bounds)))
+            .filter_map(|(window_id, bounds)| self.find_window(*window_id).zip(Some(bounds)))
             .for_each(|(window, bounds)| {
                 let ratio = window.inner().width_ratio;
                 debug!(
@@ -226,7 +226,7 @@ impl WindowManager {
                 self.refresh_windows_space(*space_id, pane);
                 pane.all_windows()
                     .iter()
-                    .flat_map(|window_id| self.find_window(*window_id))
+                    .filter_map(|window_id| self.find_window(*window_id))
                     .for_each(|window| {
                         _ = window.update_frame(&display_bounds);
                     });
@@ -252,8 +252,8 @@ impl WindowManager {
             })
             .unwrap_or_default()
             .into_iter()
-            .flat_map(|window_id| self.find_window(window_id))
-            .filter(|window| window.is_eligible())
+            .filter_map(|window_id| self.find_window(window_id))
+            .filter(Window::is_eligible)
             .for_each(|window| {
                 self.displays
                     .iter()
@@ -303,8 +303,7 @@ impl WindowManager {
     pub fn find_window(&self, window_id: WinID) -> Option<Window> {
         self.processes
             .values()
-            .flat_map(|process| process.get_app().and_then(|app| app.find_window(window_id)))
-            .next()
+            .find_map(|process| process.get_app().and_then(|app| app.find_window(window_id)))
     }
 
     /// Checks if Mission Control is currently active.
@@ -436,7 +435,7 @@ impl WindowManager {
         let spaces: Vec<u64> = self
             .displays
             .iter()
-            .flat_map(|display| display.spaces.keys().cloned().collect::<Vec<_>>())
+            .flat_map(|display| display.spaces.keys().copied().collect::<Vec<_>>())
             .collect();
         debug!("{}: spaces {spaces:?}", function_name!());
         // return space_list ? space_window_list_for_connection(
@@ -1039,7 +1038,7 @@ impl WindowManager {
             Panel::Stack(stack) => stack.to_vec(),
         }
         .iter()
-        .flat_map(|window_id| self.find_window(*window_id))
+        .filter_map(|window_id| self.find_window(*window_id))
         .collect::<Vec<_>>();
         let mut y_pos = 0f64;
         let height = display_bounds.size.height / windows.len() as f64;
@@ -1294,7 +1293,7 @@ impl WindowManager {
         let Some(window) = self
             .focused_window
             .and_then(|window_id| self.find_window(window_id))
-            .filter(|window| window.is_eligible())
+            .filter(Window::is_eligible)
         else {
             warn!("{}: No window focused.", function_name!());
             return Ok(());

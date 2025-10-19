@@ -145,7 +145,7 @@ impl InnerConfig {
             .map_err(|err| format!("{}: error loading config: {err}", function_name!()))?;
 
         config.bindings.iter_mut().for_each(|(command, binding)| {
-            binding.command = command.clone();
+            binding.command.clone_from(command);
             let code = virtual_keys
                 .iter()
                 .find(|(key, _)| key == &binding.key)
@@ -193,7 +193,7 @@ impl<'de> Deserialize<'de> for Keybinding {
         D: Deserializer<'de>,
     {
         let input = String::deserialize(deserializer)?;
-        let mut parts = input.split("-").map(|s| s.trim()).collect::<Vec<_>>();
+        let mut parts = input.split('-').map(str::trim).collect::<Vec<_>>();
         let key = parts.pop();
 
         if parts.len() > 1 || key.is_none() {
@@ -209,7 +209,7 @@ impl<'de> Deserialize<'de> for Keybinding {
             key: key.unwrap().to_string(),
             code: 0,
             modifiers,
-            command: "".to_string(),
+            command: String::new(),
         })
     }
 }
@@ -227,8 +227,8 @@ fn parse_modifiers(input: &str) -> Result<u8, String> {
     static MOD_NAMES: [&str; 4] = ["alt", "shift", "cmd", "ctrl"];
     let mut out = 0;
 
-    let modifiers = input.split("+").map(|s| s.trim()).collect::<Vec<_>>();
-    for modifier in modifiers.iter() {
+    let modifiers = input.split('+').map(str::trim).collect::<Vec<_>>();
+    for modifier in &modifiers {
         if !MOD_NAMES.iter().any(|name| name == modifier) {
             return Err(format!("Invalid modifier: {modifier}"));
         }
@@ -457,7 +457,7 @@ fn generate_virtual_keymap() -> Vec<(String, u8)> {
                 )
             })
         })
-        .and_then(|uchr| NonNull::new(unsafe { CFData::byte_ptr(uchr.as_ref()) as *mut u8 }));
+        .and_then(|uchr| NonNull::new(unsafe { CFData::byte_ptr(uchr.as_ref()).cast_mut() }));
     let Some(keyboard_layout) = keyboard_layout else {
         error!(
             "{}: problem fetching current virtual keyboard layout.",

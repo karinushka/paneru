@@ -67,11 +67,8 @@ pub struct InnerApplication {
 impl Drop for InnerApplication {
     /// Cleans up the `AXObserver` by removing all registered notifications when the `InnerApplication` is dropped.
     fn drop(&mut self) {
-        self.handler.remove_observer(
-            ObserverType::Application,
-            self.element.deref(),
-            &AX_NOTIFICATIONS,
-        );
+        self.handler
+            .remove_observer(&ObserverType::Application, &self.element, &AX_NOTIFICATIONS);
     }
 }
 
@@ -121,7 +118,7 @@ impl Application {
     /// # Returns
     ///
     /// An `Error` of `ErrorKind::NotFound`.
-    fn weak_error(&self, place: &str) -> Error {
+    fn weak_error(place: &str) -> Error {
         Error::new(
             ErrorKind::NotFound,
             format!("{place}: application shut down."),
@@ -137,7 +134,7 @@ impl Application {
         self.inner
             .upgrade()
             .map(|inner| inner.force_read().name.clone())
-            .ok_or(self.weak_error(function_name!()))
+            .ok_or(Application::weak_error(function_name!()))
     }
 
     /// Retrieves the process ID (Pid) of the application.
@@ -149,7 +146,7 @@ impl Application {
         self.inner
             .upgrade()
             .map(|inner| inner.force_read().pid)
-            .ok_or(self.weak_error(function_name!()))
+            .ok_or(Application::weak_error(function_name!()))
     }
 
     /// Retrieves the `ProcessSerialNumber` of the application.
@@ -161,7 +158,7 @@ impl Application {
         self.inner
             .upgrade()
             .map(|inner| inner.force_read().psn.clone())
-            .ok_or(self.weak_error(function_name!()))
+            .ok_or(Application::weak_error(function_name!()))
     }
 
     /// Retrieves the connection ID (`ConnID`) of the application.
@@ -173,7 +170,7 @@ impl Application {
         self.inner
             .upgrade()
             .and_then(|inner| inner.force_read().connection)
-            .ok_or(self.weak_error(function_name!()))
+            .ok_or(Application::weak_error(function_name!()))
     }
 
     /// Retrieves the `CFRetained<AxuWrapperType>` representing the Accessibility UI element of the application.
@@ -185,7 +182,7 @@ impl Application {
         self.inner
             .upgrade()
             .map(|inner| inner.force_read().element.clone())
-            .ok_or(self.weak_error(function_name!()))
+            .ok_or(Application::weak_error(function_name!()))
     }
 
     /// Finds a `Window` associated with this application by its window ID.
@@ -233,7 +230,7 @@ impl Application {
             error!(
                 "{}: adding window to non-existing application.",
                 function_name!()
-            )
+            );
         }
     }
 
@@ -255,7 +252,7 @@ impl Application {
     /// `Ok(WinID)` with the main window ID if successful, otherwise `Err(Error)`.
     fn _main_window(&self) -> Result<WinID> {
         let axmain = CFString::from_static_str(kAXMainWindowAttribute);
-        let focused = get_attribute::<AxuWrapperType>(&self.element()?, axmain)?;
+        let focused = get_attribute::<AxuWrapperType>(&self.element()?, &axmain)?;
         ax_window_id(focused.as_ptr()).map_err(|err| {
             Error::new(
                 ErrorKind::NotFound,
@@ -276,7 +273,7 @@ impl Application {
     pub fn focused_window_id(&self) -> Result<WinID> {
         let axmain = CFString::from_static_str(kAXFocusedWindowAttribute);
         let element = self.element()?;
-        let focused = get_attribute::<AxuWrapperType>(&element, axmain)?;
+        let focused = get_attribute::<AxuWrapperType>(&element, &axmain)?;
         ax_window_id(focused.as_ptr())
     }
 
@@ -288,7 +285,7 @@ impl Application {
     pub fn window_list(&self) -> Result<CFRetained<CFArray>> {
         let axwindows = CFString::from_static_str(kAXWindowsAttribute);
         let element = self.element()?;
-        get_attribute::<CFArray>(&element, axwindows)
+        get_attribute::<CFArray>(&element, &axwindows)
     }
 
     /// Registers observers for general application-level accessibility notifications (e.g., `kAXCreatedNotification`).
@@ -309,11 +306,7 @@ impl Application {
             .ok_or(error())?
             .force_write()
             .handler
-            .add_observer(
-                element.deref(),
-                &AX_NOTIFICATIONS,
-                ObserverType::Application,
-            )
+            .add_observer(&element, &AX_NOTIFICATIONS, ObserverType::Application)
             .map(|retry| retry.is_empty())
     }
 
@@ -352,7 +345,7 @@ impl Application {
     pub fn unobserve_window(&self, window: &Window) {
         if let Some(inner) = self.inner.upgrade() {
             inner.force_write().handler.remove_observer(
-                ObserverType::Window(window.id()),
+                &ObserverType::Window(window.id()),
                 window.element().deref(),
                 &AX_WINDOW_NOTIFICATIONS,
             );
@@ -388,7 +381,7 @@ impl ObserverContext {
     ///
     /// * `notification` - The name of the accessibility notification as a `String`.
     /// * `element` - The `AXUIElementRef` associated with the notification.
-    fn notify(&self, notification: String, element: AXUIElementRef) {
+    fn notify(&self, notification: &str, element: AXUIElementRef) {
         match self.which {
             ObserverType::Application => self.notify_app(notification, element),
             ObserverType::Window(id) => self.notify_window(notification, id),
@@ -402,7 +395,7 @@ impl ObserverContext {
     ///
     /// * `notification` - The name of the accessibility notification as a `String`.
     /// * `element` - The `AXUIElementRef` associated with the notification.
-    fn notify_app(&self, notification: String, element: AXUIElementRef) {
+    fn notify_app(&self, notification: &str, element: AXUIElementRef) {
         if notification == accessibility_sys::kAXCreatedNotification {
             let Ok(element) = AxuWrapperType::retain(element) else {
                 error!("{}: invalid element {element:?}", function_name!());
@@ -416,7 +409,7 @@ impl ObserverContext {
             error!("{}: invalid window_id {element:?}", function_name!());
             return;
         };
-        let event = match notification.as_str() {
+        let event = match notification {
             accessibility_sys::kAXFocusedWindowChangedNotification => {
                 Event::WindowFocused { window_id }
             }
@@ -445,8 +438,8 @@ impl ObserverContext {
     ///
     /// * `notification` - The name of the accessibility notification as a `String`.
     /// * `window_id` - The ID of the window associated with the notification.
-    fn notify_window(&self, notification: String, window_id: WinID) {
-        let event = match notification.as_str() {
+    fn notify_window(&self, notification: &str, window_id: WinID) {
+        let event = match notification {
             accessibility_sys::kAXWindowMiniaturizedNotification => {
                 Event::WindowMinimized { window_id }
             }
@@ -478,7 +471,7 @@ struct AxObserverHandler {
 impl Drop for AxObserverHandler {
     /// Invalidates the run loop source associated with the `AXObserver` when the `AxObserverHandler` is dropped.
     fn drop(&mut self) {
-        remove_run_loop(self.observer.deref());
+        remove_run_loop(&self.observer);
     }
 }
 
@@ -507,7 +500,7 @@ impl AxObserverHandler {
             }
         };
 
-        unsafe { add_run_loop(observer.deref(), kCFRunLoopCommonModes)? };
+        unsafe { add_run_loop(&observer, kCFRunLoopCommonModes)? };
         Ok(Self {
             observer,
             events,
@@ -537,7 +530,7 @@ impl AxObserverHandler {
             events: self.events.clone(),
             which,
         });
-        let context_ptr = NonNull::from_ref(context.deref()).as_ptr();
+        let context_ptr = NonNull::from_ref(&*context).as_ptr();
         self.contexts.push(context);
 
         // TODO: retry re-registering these.
@@ -554,7 +547,7 @@ impl AxObserverHandler {
                     AXObserverAddNotification(
                         observer,
                         element.as_ptr(),
-                        notification.deref(),
+                        &notification,
                         context_ptr.cast(),
                     )
                 } {
@@ -593,7 +586,7 @@ impl AxObserverHandler {
     /// * `notifications` - A slice of static strings representing the notification names to remove.
     pub fn remove_observer(
         &mut self,
-        which: ObserverType,
+        which: &ObserverType,
         element: &AxuWrapperType,
         notifications: &[&'static str],
     ) {
@@ -604,9 +597,8 @@ impl AxObserverHandler {
                 "{}: removing {name} {element:x?} {observer:?}",
                 function_name!()
             );
-            let result = unsafe {
-                AXObserverRemoveNotification(observer, element.as_ptr(), notification.deref())
-            };
+            let result =
+                unsafe { AXObserverRemoveNotification(observer, element.as_ptr(), &notification) };
             if result != kAXErrorSuccess {
                 debug!(
                     "{}: error removing {name} {element:x?} {observer:?}: {result}",
@@ -616,7 +608,7 @@ impl AxObserverHandler {
         }
         if let ObserverType::Window(removed) = which {
             self.contexts.retain(
-                    |context| !matches!(context.which, ObserverType::Window(window_id) if window_id == removed),
+                    |context| !matches!(context.which, ObserverType::Window(window_id) if window_id == *removed),
                 );
         }
     }
@@ -636,15 +628,15 @@ impl AxObserverHandler {
         notification: CFStringRef,
         context: *mut c_void,
     ) {
-        let notification = NonNull::new(notification as *mut CFString)
+        let notification = NonNull::new(notification.cast_mut())
             .map(|ptr| unsafe { ptr.as_ref() })
             .map(CFString::to_string);
         let context =
-            NonNull::new(context as *mut ObserverContext).map(|ptr| unsafe { ptr.as_ref() });
+            NonNull::new(context.cast::<ObserverContext>()).map(|ptr| unsafe { ptr.as_ref() });
         let Some((notification, context)) = notification.zip(context) else {
             return;
         };
 
-        context.notify(notification, element);
+        context.notify(&notification, element);
     }
 }

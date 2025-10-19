@@ -6,7 +6,6 @@ use objc2_foundation::{
     NSKeyValueObservingOptions, NSObjectNSKeyValueObserverRegistration, NSString,
 };
 use std::io::{Error, ErrorKind, Result};
-use std::ops::Deref;
 use std::pin::Pin;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -112,7 +111,7 @@ impl Process {
         unsafe { GetProcessPID(psn, NonNull::from(&mut pid).as_ptr()) };
 
         let mut nameref: *const CFString = std::ptr::null();
-        unsafe { CopyProcessName(psn, &mut nameref) };
+        unsafe { CopyProcessName(psn, &raw mut nameref) };
         let name = NonNull::new(nameref.cast_mut())
             .map(|ptr| unsafe { CFRetained::from_raw(ptr) })
             .map(|name| name.to_string())
@@ -212,7 +211,7 @@ impl Process {
                 let key_path = NSString::from_str(flavor);
                 let options = NSKeyValueObservingOptions::New | NSKeyValueObservingOptions::Initial;
                 app.addObserver_forKeyPath_options_context(
-                    self.observer.deref(),
+                    &self.observer,
                     key_path.as_ref(),
                     options,
                     NonNull::from(self).as_ptr().cast(),
@@ -236,7 +235,7 @@ impl Process {
             unsafe {
                 let key_path = NSString::from_str(flavor);
                 app.removeObserver_forKeyPath_context(
-                    self.observer.deref(),
+                    &self.observer,
                     key_path.as_ref(),
                     NonNull::from(self).as_ptr().cast(),
                 );

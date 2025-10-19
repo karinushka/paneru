@@ -3,7 +3,6 @@ use objc2::rc::Retained;
 use objc2_core_foundation::{CFNumber, CFNumberType, CFRetained, CGPoint, CGRect};
 use objc2_core_graphics::{CGDirectDisplayID, CGEventFlags};
 use std::io::{Error, ErrorKind, Result};
-use std::ops::Deref;
 use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -209,13 +208,13 @@ impl EventHandler {
     /// # Returns
     ///
     /// `Ok(Self)` if the `EventHandler` is created successfully, otherwise `Err(Error)`.
-    pub fn new() -> Result<Self> {
+    pub fn new() -> Self {
         let main_cid = unsafe { SLSMainConnectionID() };
         debug!("{}: My connection id: {main_cid}", function_name!());
 
         let (tx, rx) = channel::<Event>();
         let sender = EventSender::new(tx);
-        Ok(EventHandler {
+        EventHandler {
             quit: AtomicBool::new(false).into(),
             tx: sender.clone(),
             rx,
@@ -224,7 +223,7 @@ impl EventHandler {
             initial_scan: true,
             mouse_down_window: None,
             down_location: CGPoint::default(),
-        })
+        }
     }
 
     /// Returns a clone of the `EventSender` for sending events to this handler.
@@ -322,14 +321,14 @@ impl EventHandler {
                 trace!("{}: WindowTitleChanged: {window_id:?}", function_name!());
             }
 
-            Event::Command { argv } => self.command(argv),
+            Event::Command { argv } => self.command(&argv),
 
             Event::MenuClosed { window_id } => {
-                trace!("{}: MenuClosed event: {window_id:?}", function_name!())
+                trace!("{}: MenuClosed event: {window_id:?}", function_name!());
             }
 
             Event::KeyDown { key, modifier } => {
-                self.key_pressed(key, modifier);
+                EventHandler::key_pressed(key, modifier);
             }
 
             Event::DisplayAdded { display_id } => {
@@ -341,13 +340,13 @@ impl EventHandler {
                 self.window_manager.display_remove(display_id);
             }
             Event::DisplayMoved { display_id } => {
-                debug!("{}: Display Moved: {display_id:?}", function_name!())
+                debug!("{}: Display Moved: {display_id:?}", function_name!());
             }
             Event::DisplayResized { display_id } => {
-                debug!("{}: Display Resized: {display_id:?}", function_name!())
+                debug!("{}: Display Resized: {display_id:?}", function_name!());
             }
             Event::DisplayConfigured { display_id } => {
-                debug!("{}: Display Configured: {display_id:?}", function_name!())
+                debug!("{}: Display Configured: {display_id:?}", function_name!());
             }
             Event::DisplayChanged => {
                 debug!("{}: Display Changed", function_name!());
@@ -359,7 +358,7 @@ impl EventHandler {
                 _ = self.window_manager.reorient_focus();
             }
             Event::SystemWoke { msg } => {
-                debug!("{}: system woke: {msg:?}", function_name!())
+                debug!("{}: system woke: {msg:?}", function_name!());
             }
 
             _ => self.window_manager.process_event(event)?,
@@ -373,12 +372,12 @@ impl EventHandler {
     ///
     /// * `key` - The key code of the pressed key.
     /// * `eventflags` - The `CGEventFlags` representing active modifiers.
-    fn key_pressed(&self, key: i64, eventflags: CGEventFlags) {
+    fn key_pressed(key: i64, eventflags: CGEventFlags) {
         // Normal key, left, right.
-        const MASK_ALT: [u64; 3] = [0x00080000, 0x00000020, 0x00000040];
-        const MASK_SHIFT: [u64; 3] = [0x00020000, 0x00000002, 0x00000004];
-        const MASK_CMD: [u64; 3] = [0x00100000, 0x00000008, 0x00000010];
-        const MASK_CTRL: [u64; 3] = [0x00040000, 0x00000001, 0x00002000];
+        const MASK_ALT: [u64; 3] = [0x0008_0000, 0x0000_0020, 0x0000_0040];
+        const MASK_SHIFT: [u64; 3] = [0x0002_0000, 0x0000_0002, 0x0000_0004];
+        const MASK_CMD: [u64; 3] = [0x0010_0000, 0x0000_0008, 0x0000_0010];
+        const MASK_CTRL: [u64; 3] = [0x0004_0000, 0x0000_0001, 0x0000_2000];
 
         let modifier = if MASK_ALT.iter().any(|mask| *mask == (eventflags.0 & mask)) {
             "alt"
@@ -408,7 +407,7 @@ impl EventHandler {
                 return;
             }
 
-            self.window_manager.window_focused(window);
+            self.window_manager.window_focused(&window);
         } else {
             warn!(
                 "{}: window_manager_add_lost_focused_event",
@@ -454,7 +453,7 @@ impl EventHandler {
                     .enumerate()
                     .find(|(_, window_id)| current_window_id == **window_id)
                     .and_then(|(index, _)| (index > 0).then(|| stack.get(index - 1)).flatten())
-                    .cloned(),
+                    .copied(),
             },
             "south" => match strip.get(index).ok()? {
                 Panel::Single(window_id) => Some(window_id),
@@ -467,7 +466,7 @@ impl EventHandler {
                             .then(|| stack.get(index + 1))
                             .flatten()
                     })
-                    .cloned(),
+                    .copied(),
             },
             dir => {
                 error!("{}: Unhandled direction {dir}", function_name!());
@@ -569,7 +568,7 @@ impl EventHandler {
     ///
     /// `Ok(())` if the command is processed successfully, otherwise `Err(Error)`.
     fn command_windows(&mut self, argv: &[String]) -> Result<()> {
-        let empty = "".to_string();
+        let empty = String::new();
         let Some(window) = self
             .window_manager
             .focused_window
@@ -635,25 +634,25 @@ impl EventHandler {
                     );
                     active_panel.append(window.id());
                     window.manage(true);
-                };
+                }
             }
 
             "stack" => {
                 if !window.managed() {
                     return Ok(());
                 }
-                active_panel.stack(window.id())?
+                active_panel.stack(window.id())?;
             }
 
             "unstack" => {
                 if !window.managed() {
                     return Ok(());
                 }
-                active_panel.unstack(window.id())?
+                active_panel.unstack(window.id())?;
             }
 
             _ => (),
-        };
+        }
         self.window_manager.reshuffle_around(&window)
     }
 
@@ -662,18 +661,18 @@ impl EventHandler {
     /// # Arguments
     ///
     /// * `argv` - A vector of strings representing the command and its arguments.
-    fn command(&mut self, argv: Vec<String>) {
+    fn command(&mut self, argv: &[String]) {
         if let Some(first) = argv.first() {
             match first.as_ref() {
                 "window" => {
                     _ = self
                         .command_windows(&argv[1..])
-                        .inspect_err(|err| warn!("{}: {err}", function_name!()))
+                        .inspect_err(|err| warn!("{}: {err}", function_name!()));
                 }
                 "quit" => self.quit.store(true, std::sync::atomic::Ordering::Relaxed),
                 _ => warn!("{}: Unhandled command: {argv:?}", function_name!()),
             }
-        };
+        }
     }
 
     /// Handles a mouse down event. It finds the window at the click point, reshuffles if necessary,
@@ -770,7 +769,7 @@ impl EventHandler {
                 };
 
                 let mut window = window;
-                for item in get_array_values(window_list.deref()) {
+                for item in get_array_values(&window_list) {
                     let mut child_wid: WinID = 0;
                     unsafe {
                         if !CFNumber::value(
@@ -838,7 +837,7 @@ impl EventHandler {
     /// `Ok(Window)` with the found window if successful, otherwise `Err(Error)`.
     fn find_window_at_point(&self, point: &CGPoint) -> Result<Window> {
         let mut window_id: WinID = 0;
-        let mut window_cid: ConnID = 0;
+        let mut window_conn_id: ConnID = 0;
         let mut window_point = CGPoint { x: 0f64, y: 0f64 };
         unsafe {
             SLSFindWindowAndOwner(
@@ -849,10 +848,10 @@ impl EventHandler {
                 point,
                 &mut window_point,
                 &mut window_id,
-                &mut window_cid,
+                &mut window_conn_id,
             )
         };
-        if self.main_cid == window_cid {
+        if self.main_cid == window_conn_id {
             unsafe {
                 SLSFindWindowAndOwner(
                     self.main_cid,
@@ -862,7 +861,7 @@ impl EventHandler {
                     point,
                     &mut window_point,
                     &mut window_id,
-                    &mut window_cid,
+                    &mut window_conn_id,
                 )
             };
         }

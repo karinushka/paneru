@@ -102,7 +102,7 @@ impl CommandReader {
                     .filter(|s| !s.is_empty())
                     .map(|s| String::from_utf8_lossy(s).to_string())
                     .collect::<Vec<_>>();
-                self.events.send(Event::Command { argv })?
+                self.events.send(Event::Command { argv })?;
             }
         }
         Ok(())
@@ -202,7 +202,7 @@ fn main() -> Result<()> {
         SubCmd::Stop => service()?.stop()?,
         SubCmd::Restart => service()?.restart()?,
         SubCmd::SendCmd { cmd } => CommandReader::send_command(cmd)?,
-    };
+    }
     Ok(())
 }
 
@@ -229,7 +229,7 @@ fn launch() -> Result<()> {
         ));
     }
 
-    let event_handler = EventHandler::new()?;
+    let event_handler = EventHandler::new();
 
     CommandReader::new(event_handler.sender()).start();
 
@@ -238,7 +238,7 @@ fn launch() -> Result<()> {
 
     let (quit, handle) = event_handler.start();
 
-    platform_callbacks.run(quit);
+    platform_callbacks.run(&quit);
 
     handle.join().expect("Cannot join threads at the end.");
     Ok(())

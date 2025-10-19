@@ -12,7 +12,6 @@ use objc2_core_foundation::{
 use std::{
     ffi::{CStr, OsStr, c_int, c_void},
     io::{Error, ErrorKind, Result},
-    ops::Deref,
     os::unix::ffi::OsStrExt,
     path::PathBuf,
     ptr::null_mut,
@@ -80,10 +79,12 @@ impl AxuWrapperType {
     ///
     /// `Ok(NonNull<Self>)` if the pointer is not null, otherwise `Err(Error)`.
     pub fn from_ptr<T>(ptr: *mut T) -> Result<NonNull<Self>> {
-        NonNull::new(ptr).map(|ptr| ptr.cast()).ok_or(Error::new(
-            ErrorKind::InvalidInput,
-            format!("{}: nullptr passed.", function_name!()),
-        ))
+        NonNull::new(ptr)
+            .map(std::ptr::NonNull::cast)
+            .ok_or(Error::new(
+                ErrorKind::InvalidInput,
+                format!("{}: nullptr passed.", function_name!()),
+            ))
     }
 
     /// Wraps an already retained raw pointer of type `T` into a `CFRetained<Self>`.
@@ -168,17 +169,10 @@ impl std::fmt::Display for AxuWrapperType {
 /// `Ok(CFRetained<T>)` with the attribute value if successful, otherwise `Err(Error)`.
 pub fn get_attribute<T: Type>(
     element_ref: &CFRetained<AxuWrapperType>,
-    name: CFRetained<CFString>,
+    name: &CFRetained<CFString>,
 ) -> Result<CFRetained<T>> {
     let mut attribute: *mut CFType = null_mut();
-    if 0 != unsafe {
-        AXUIElementCopyAttributeValue(element_ref.as_ptr(), name.deref(), &mut attribute)
-    } {
-        Err(Error::new(
-            ErrorKind::NotFound,
-            format!("{}: failed getting attribute {name}.", function_name!()),
-        ))
-    } else {
+    if 0 == unsafe { AXUIElementCopyAttributeValue(element_ref.as_ptr(), name, &mut attribute) } {
         NonNull::new(attribute)
             .map(|ptr| unsafe { CFRetained::from_raw(ptr.cast()) })
             .ok_or(Error::new(
@@ -188,6 +182,11 @@ pub fn get_attribute<T: Type>(
                     function_name!()
                 ),
             ))
+    } else {
+        Err(Error::new(
+            ErrorKind::NotFound,
+            format!("{}: failed getting attribute {name}.", function_name!()),
+        ))
     }
 }
 
@@ -208,7 +207,7 @@ pub fn get_attribute<T: Type>(
 pub fn get_cfdict_value<T>(dict: &CFDictionary, key: &CFString) -> Result<NonNull<T>> {
     let ptr = unsafe { CFDictionary::value(dict, NonNull::from(key).as_ptr().cast()) };
     NonNull::new(ptr.cast_mut())
-        .map(|ptr| ptr.cast::<T>())
+        .map(std::ptr::NonNull::cast::<T>)
         .ok_or(Error::new(
             ErrorKind::InvalidData,
             format!("{}: can not get data for key {key}", function_name!(),),
@@ -232,7 +231,7 @@ pub fn get_array_values<T>(array: &CFArray) -> impl Iterator<Item = NonNull<T>> 
     let count = CFArray::count(array);
     (0..count).filter_map(move |idx| {
         NonNull::new(unsafe { CFArray::value_at_index(array, idx).cast_mut() })
-            .map(|ptr| ptr.cast::<T>())
+            .map(std::ptr::NonNull::cast::<T>)
     })
 }
 
@@ -250,7 +249,7 @@ pub fn get_array_values<T>(array: &CFArray) -> impl Iterator<Item = NonNull<T>> 
 /// # Returns
 ///
 /// `Ok(CFRetained<CFArray>)` with the created array if successful, otherwise `Err(Error)`.
-pub fn create_array<T>(values: Vec<T>, cftype: CFNumberType) -> Result<CFRetained<CFArray>> {
+pub fn create_array<T>(values: &[T], cftype: CFNumberType) -> Result<CFRetained<CFArray>> {
     let numbers = values
         .iter()
         .filter_map(|value: &T| unsafe {
@@ -260,7 +259,7 @@ pub fn create_array<T>(values: Vec<T>, cftype: CFNumberType) -> Result<CFRetaine
 
     let mut ptrs = numbers
         .iter()
-        .map(|num| NonNull::from(num.deref()).as_ptr() as *const c_void)
+        .map(|num| NonNull::from(&**num).as_ptr() as *const c_void)
         .collect::<Vec<_>>();
 
     unsafe {
@@ -268,7 +267,7 @@ pub fn create_array<T>(values: Vec<T>, cftype: CFNumberType) -> Result<CFRetaine
             None,
             ptrs.as_mut_ptr(),
             numbers.len().try_into().unwrap(),
-            &kCFTypeArrayCallBacks,
+            &raw const kCFTypeArrayCallBacks,
         )
     }
     .ok_or(Error::new(
@@ -311,7 +310,7 @@ pub fn add_run_loop(observer: &AxuWrapperType, mode: Option<&CFRunLoopMode>) -> 
                 function_name!(),
                 observer.as_ptr::<CFRunLoopSource>(),
             );
-            CFRunLoop::add_source(main_loop.deref(), run_loop, mode);
+            CFRunLoop::add_source(&main_loop, run_loop, mode);
             Ok(())
         }
         _ => Err(Error::new(
@@ -351,7 +350,7 @@ pub fn exe_path() -> Option<PathBuf> {
 
     let mut path_buf = [0_u8; 4096];
 
-    let mut path_buf_size = path_buf.len() as u32;
+    let mut path_buf_size = u32::try_from(path_buf.len()).unwrap();
     let path = unsafe { _NSGetExecutablePath(path_buf.as_mut_ptr(), &raw mut path_buf_size) == 0 }
         .then(|| CStr::from_bytes_until_nul(&path_buf).ok())??;
     Some(OsStr::from_bytes(path.to_bytes()).into())
@@ -359,18 +358,18 @@ pub fn exe_path() -> Option<PathBuf> {
 
 pub fn check_ax_privilege() -> bool {
     unsafe {
-        let mut keys = vec![kAXTrustedCheckOptionPrompt as *const c_void];
+        let mut keys = vec![kAXTrustedCheckOptionPrompt.cast::<c_void>()];
         let mut values = vec![NonNull::from(kCFBooleanTrue.unwrap()).as_ptr() as *const c_void];
 
         CFDictionary::new(
             None,
             keys.as_mut_ptr(),
             values.as_mut_ptr(),
-            keys.len() as isize,
-            &kCFCopyStringDictionaryKeyCallBacks,
-            &kCFTypeDictionaryValueCallBacks,
+            isize::try_from(keys.len()).unwrap(),
+            &raw const kCFCopyStringDictionaryKeyCallBacks,
+            &raw const kCFTypeDictionaryValueCallBacks,
         )
-        .map(|options| NonNull::from_ref(options.deref()).as_ptr())
+        .map(|options| NonNull::from_ref(&*options).as_ptr())
         .map(|options| AXIsProcessTrustedWithOptions(options.cast()))
         .is_some_and(|supported| supported)
     }

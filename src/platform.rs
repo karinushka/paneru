@@ -27,7 +27,6 @@ use objc2_foundation::{
 use std::env;
 use std::ffi::c_void;
 use std::io::{Error, ErrorKind, Result};
-use std::ops::Deref;
 use std::path::PathBuf;
 use std::ptr::null_mut;
 use std::sync::atomic::AtomicBool;
@@ -360,7 +359,7 @@ impl ProcessHandler {
 
         // Fake launch the existing processes.
         let mut psn = ProcessSerialNumber::default();
-        while 0 == unsafe { GetNextProcess(&mut psn as *mut ProcessSerialNumber) } {
+        while 0 == unsafe { GetNextProcess(&raw mut psn) } {
             self.process_handler(&psn, ProcessEventApp::Launched);
         }
 
@@ -388,7 +387,7 @@ impl ProcessHandler {
                 3,
                 events.as_ptr(),
                 NonNull::new_unchecked(self).as_ptr().cast(),
-                &mut handler,
+                &raw mut handler,
             )
         };
         debug!(
@@ -654,6 +653,7 @@ impl InputHandler {
     }
 
     fn handle_swipe(&mut self, event: &CGEvent) -> Result<bool> {
+        const SWIPE_THRESHOLD: f64 = 0.01;
         let Some(ns_event) = NSEvent::eventWithCGEvent(event) else {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
@@ -667,7 +667,6 @@ impl InputHandler {
             return Ok(false);
         }
 
-        const SWIPE_THRESHOLD: f64 = 0.01;
         let fingers = ns_event.allTouches();
         if fingers.len() != 3 {
             return Ok(true);
@@ -703,10 +702,10 @@ impl InputHandler {
     fn handle_keypress(&self, keycode: i64, eventflags: CGEventFlags) -> bool {
         const MODIFIER_MASKS: [[u64; 3]; 4] = [
             // Normal key, left, right.
-            [0x00080000, 0x00000020, 0x00000040], // Alt
-            [0x00020000, 0x00000002, 0x00000004], // Shift
-            [0x00100000, 0x00000008, 0x00000010], // Command
-            [0x00040000, 0x00000001, 0x00002000], // Control
+            [0x0008_0000, 0x0000_0020, 0x0000_0040], // Alt
+            [0x0002_0000, 0x0000_0002, 0x0000_0004], // Shift
+            [0x0010_0000, 0x0000_0008, 0x0000_0010], // Command
+            [0x0004_0000, 0x0000_0001, 0x0000_2000], // Control
         ];
         let mask = MODIFIER_MASKS
             .iter()
@@ -725,8 +724,8 @@ impl InputHandler {
         bind.and_then(|bind| {
             let command = bind
                 .command
-                .split("_")
-                .map(|s| s.to_string())
+                .split('_')
+                .map(std::string::ToString::to_string)
                 .collect::<Vec<_>>();
             self.events
                 .send(Event::Command { argv: command })
@@ -841,7 +840,7 @@ define_class!(
             };
 
             let result = unsafe { change.objectForKey(NSKeyValueChangeNewKey) };
-            let policy = result.and_then(|result| result.downcast_ref::<NSNumber>().map(|result| result.intValue()));
+            let policy = result.and_then(|result| result.downcast_ref::<NSNumber>().map(NSNumber::intValue));
 
             match key_path.to_string().as_ref() {
                 "finishedLaunching" => {
@@ -851,7 +850,7 @@ define_class!(
                     process.unobserve_finished_launching();
                 }
                 "activationPolicy" => {
-                    if policy.is_some_and(|value| value == process.policy.0 as i32) {
+                    if policy.is_some_and(|value| i32::try_from(process.policy.0).is_ok_and(|policy| value == policy)) {
                         return;
                     }
                     process.policy = NSApplicationActivationPolicy(policy.unwrap() as isize);
@@ -919,7 +918,7 @@ impl WorkspaceObserver {
         let shared_ws = NSWorkspace::sharedWorkspace();
         let notification_center = shared_ws.notificationCenter();
 
-        methods.iter().for_each(|(sel, name)| {
+        for (sel, name) in &methods {
             debug!("{}: registering {} with {name}", function_name!(), *sel);
             let notification_type = NSString::from_str(name);
             unsafe {
@@ -928,9 +927,9 @@ impl WorkspaceObserver {
                     *sel,
                     Some(&notification_type),
                     None,
-                )
+                );
             };
-        });
+        }
 
         let methods = [
             (
@@ -940,7 +939,7 @@ impl WorkspaceObserver {
             (sel!(didChangeDockPref:), "com.apple.dock.prefchanged"),
         ];
         let distributed_notification_center = NSDistributedNotificationCenter::defaultCenter();
-        methods.iter().for_each(|(sel, name)| {
+        for (sel, name) in &methods {
             debug!("{}: registering {} with {name}", function_name!(), *sel);
             let notification_type = NSString::from_str(name);
             unsafe {
@@ -949,16 +948,16 @@ impl WorkspaceObserver {
                     *sel,
                     Some(&notification_type),
                     None,
-                )
+                );
             };
-        });
+        }
 
         let methods = [(
             sel!(didRestartDock:),
             "NSApplicationDockDidRestartNotification",
         )];
         let default_center = NSNotificationCenter::defaultCenter();
-        methods.iter().for_each(|(sel, name)| {
+        for (sel, name) in &methods {
             debug!("{}: registering {} with {name}", function_name!(), *sel);
             let notification_type = NSString::from_str(name);
             unsafe {
@@ -967,9 +966,9 @@ impl WorkspaceObserver {
                     *sel,
                     Some(&notification_type),
                     None,
-                )
+                );
             };
-        });
+        }
     }
 }
 
@@ -1090,7 +1089,7 @@ impl MissionControlHandler {
             }
         };
 
-        Self::EVENTS.iter().for_each(|name| {
+        for name in &Self::EVENTS {
             debug!(
                 "{}: {name:?} {:?}",
                 function_name!(),
@@ -1101,7 +1100,7 @@ impl MissionControlHandler {
                 AXObserverAddNotification(
                     observer.as_ptr(),
                     element.as_ptr(),
-                    notification.deref(),
+                    &notification,
                     NonNull::new_unchecked(self).as_ptr().cast(),
                 )
             } {
@@ -1112,8 +1111,8 @@ impl MissionControlHandler {
                     function_name!(),
                 ),
             }
-        });
-        unsafe { add_run_loop(observer.deref(), kCFRunLoopDefaultMode)? };
+        }
+        unsafe { add_run_loop(&observer, kCFRunLoopDefaultMode)? };
         self.observer = observer.into();
         self.element = element.into();
         Ok(())
@@ -1122,7 +1121,7 @@ impl MissionControlHandler {
     /// Stops observing Mission Control accessibility notifications and cleans up resources.
     fn unobserve(&mut self) {
         if let Some((observer, element)) = self.observer.take().zip(self.element.as_ref()) {
-            Self::EVENTS.iter().for_each(|name| {
+            for name in &Self::EVENTS {
                 debug!(
                     "{}: {name:?} {:?}",
                     function_name!(),
@@ -1130,18 +1129,14 @@ impl MissionControlHandler {
                 );
                 let notification = CFString::from_static_str(name);
                 let result = unsafe {
-                    AXObserverRemoveNotification(
-                        observer.as_ptr(),
-                        element.as_ptr(),
-                        notification.deref(),
-                    )
+                    AXObserverRemoveNotification(observer.as_ptr(), element.as_ptr(), &notification)
                 };
                 if result != kAXErrorSuccess && result != kAXErrorNotificationAlreadyRegistered {
                     error!("{}: error unregistering {name}: {result}", function_name!());
                 }
-            });
-            remove_run_loop(observer.deref());
-            drop(observer)
+            }
+            remove_run_loop(&observer);
+            drop(observer);
         } else {
             warn!(
                 "{}: unobserving without observe or element",
@@ -1174,7 +1169,7 @@ impl MissionControlHandler {
         {
             Some(this) => {
                 let notification = unsafe { notification.as_ref() }.to_string();
-                this.mission_control_handler(observer, element, &notification)
+                this.mission_control_handler(observer, element, &notification);
             }
             _ => error!("Zero passed to MissionControlHandler."),
         }
@@ -1366,9 +1361,9 @@ pub static CONFIGURATION_FILE: LazyLock<PathBuf> = LazyLock::new(|| {
             return path;
         }
         warn!(
-            "{}: $PANERU_CONFIG is set to {:?}, but the file does not exist. Falling back to default locations.",
+            "{}: $PANERU_CONFIG is set to {}, but the file does not exist. Falling back to default locations.",
             function_name!(),
-            path
+            path.display()
         );
     }
 
@@ -1471,7 +1466,7 @@ impl PlatformCallbacks {
     /// # Arguments
     ///
     /// * `quit` - An `Arc<AtomicBool>` used to signal the run loop to exit.
-    pub fn run(&mut self, quit: Arc<AtomicBool>) {
+    pub fn run(&mut self, quit: &Arc<AtomicBool>) {
         info!("{}: Starting run loop...", function_name!());
         loop {
             if quit.load(std::sync::atomic::Ordering::Relaxed) {

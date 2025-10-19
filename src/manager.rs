@@ -111,7 +111,7 @@ impl WindowManager {
             }
 
             Event::ConfigRefresh { config } => {
-                self.reload_config(config);
+                self.reload_config(&config);
             }
 
             _ => {
@@ -129,7 +129,7 @@ impl WindowManager {
     /// # Arguments
     ///
     /// * `config` - The new `Config` object to load.
-    fn reload_config(&mut self, config: Config) {
+    fn reload_config(&mut self, config: &Config) {
         debug!("{}: Got fresh config: {config:?}", function_name!());
         self.focus_follows_mouse = config.options().focus_follows_mouse;
     }
@@ -137,7 +137,7 @@ impl WindowManager {
     fn find_orphaned_spaces(&mut self) {
         let mut relocated_windows = vec![];
 
-        for display in self.displays.iter_mut() {
+        for display in &mut self.displays {
             let spaces = display
                 .spaces
                 .iter()
@@ -220,9 +220,9 @@ impl WindowManager {
             ));
         }
 
-        for display in self.displays.iter() {
+        for display in &self.displays {
             let display_bounds = display.bounds;
-            for (space_id, pane) in display.spaces.iter() {
+            for (space_id, pane) in &display.spaces {
                 self.refresh_windows_space(*space_id, pane);
                 pane.all_windows()
                     .iter()
@@ -243,12 +243,12 @@ impl WindowManager {
     /// * `space_id` - The ID of the space to refresh windows from.
     /// * `pane` - A reference to the `WindowPane` to which windows will be appended.
     fn refresh_windows_space(&self, space_id: u64, pane: &WindowPane) {
-        self.space_window_list_for_connection(vec![space_id], None, false)
+        self.space_window_list_for_connection(&[space_id], None, false)
             .inspect_err(|err| {
                 warn!(
                     "{}: getting windows for space {space_id}: {err}",
                     function_name!()
-                )
+                );
             })
             .unwrap_or_default()
             .into_iter()
@@ -258,7 +258,7 @@ impl WindowManager {
                 self.displays
                     .iter()
                     .for_each(|display| display.remove_window(window.inner().id));
-                pane.append(window.id())
+                pane.append(window.id());
             });
     }
 
@@ -272,7 +272,7 @@ impl WindowManager {
     ///
     /// `Some(&Process)` if the process is found, otherwise `None`.
     fn find_process(&self, psn: &ProcessSerialNumber) -> Option<&Process> {
-        self.processes.get(psn).map(|process| process.deref())
+        self.processes.get(psn).map(Deref::deref)
     }
 
     /// Finds an `Application` by its process ID (Pid).
@@ -316,7 +316,7 @@ impl WindowManager {
     }
 
     /// Retrieves a list of window IDs for specified spaces and connection, with an option to include minimized windows.
-    /// This function uses SkyLight API calls.
+    /// This function uses `SkyLight` API calls.
     ///
     /// # Arguments
     ///
@@ -329,7 +329,7 @@ impl WindowManager {
     /// `Ok(Vec<WinID>)` containing the list of window IDs if successful, otherwise `Err(Error)`.
     fn space_window_list_for_connection(
         &self,
-        spaces: Vec<u64>,
+        spaces: &[u64],
         cid: Option<ConnID>,
         also_minimized: bool,
     ) -> Result<Vec<WinID>> {
@@ -342,7 +342,7 @@ impl WindowManager {
             let ptr = NonNull::new(SLSCopyWindowsWithOptionsAndTags(
                 self.main_cid,
                 cid.unwrap_or(0),
-                space_list_ref.deref(),
+                &raw const *space_list_ref,
                 options,
                 &mut set_tags,
                 &mut clear_tags,
@@ -356,7 +356,7 @@ impl WindowManager {
             ))?;
             let window_list_ref = CFRetained::from_raw(ptr);
 
-            let count = CFArray::count(window_list_ref.deref());
+            let count = window_list_ref.count();
             if count == 0 {
                 return Err(Error::new(
                     ErrorKind::InvalidData,
@@ -366,18 +366,18 @@ impl WindowManager {
 
             let query = CFRetained::from_raw(SLSWindowQueryWindows(
                 self.main_cid,
-                window_list_ref.deref(),
+                &raw const *window_list_ref,
                 count,
             ));
             let iterator =
                 CFRetained::from_raw(SLSWindowQueryResultCopyWindows(query.deref().into()));
 
             let mut window_list = Vec::with_capacity(count.try_into().unwrap());
-            while SLSWindowIteratorAdvance(iterator.deref()) {
-                let tags = SLSWindowIteratorGetTags(iterator.deref());
-                let attributes = SLSWindowIteratorGetAttributes(iterator.deref());
-                let parent_wid: WinID = SLSWindowIteratorGetParentID(iterator.deref());
-                let wid: WinID = SLSWindowIteratorGetWindowID(iterator.deref());
+            while SLSWindowIteratorAdvance(&raw const *iterator) {
+                let tags = SLSWindowIteratorGetTags(&raw const *iterator);
+                let attributes = SLSWindowIteratorGetAttributes(&raw const *iterator);
+                let parent_wid: WinID = SLSWindowIteratorGetParentID(&raw const *iterator);
+                let wid: WinID = SLSWindowIteratorGetWindowID(&raw const *iterator);
 
                 trace!(
                     "{}: id: {wid} parent: {parent_wid} tags: 0x{tags:x} attributes: 0x{attributes:x}",
@@ -414,11 +414,11 @@ impl WindowManager {
     /// `true` if the window is considered valid, `false` otherwise.
     fn found_valid_window(parent_wid: WinID, attributes: i64, tags: i64) -> bool {
         parent_wid == 0
-            && ((0 != (attributes & 0x2) || 0 != (tags & 0x400000000000000))
-                && (0 != (tags & 0x1) || (0 != (tags & 0x2) && 0 != (tags & 0x80000000))))
+            && ((0 != (attributes & 0x2) || 0 != (tags & 0x0400_0000_0000_0000))
+                && (0 != (tags & 0x1) || (0 != (tags & 0x2) && 0 != (tags & 0x8000_0000))))
             || ((attributes == 0x0 || attributes == 0x1)
-                && (0 != (tags & 0x1000000000000000) || 0 != (tags & 0x300000000000000))
-                && (0 != (tags & 0x1) || (0 != (tags & 0x2) && 0 != (tags & 0x80000000))))
+                && (0 != (tags & 0x1000_0000_0000_0000) || 0 != (tags & 0x0300_0000_0000_0000))
+                && (0 != (tags & 0x1) || (0 != (tags & 0x2) && 0 != (tags & 0x8000_0000))))
     }
 
     /// Retrieves a list of existing application window IDs for a given application.
@@ -446,7 +446,7 @@ impl WindowManager {
                 format!("{}: no spaces returned", function_name!()),
             ));
         }
-        self.space_window_list_for_connection(spaces, app.connection().ok(), true)
+        self.space_window_list_for_connection(&spaces, app.connection().ok(), true)
     }
 
     /// Attempts to find and add unresolved windows for a given application by brute-forcing `element_id` values.
@@ -457,6 +457,7 @@ impl WindowManager {
     /// * `app` - A reference to the `Application` whose windows are to be brute-forced.
     /// * `window_list` - A mutable vector of `WinID`s representing the expected global window list; found windows are removed from this list.
     fn bruteforce_windows(&mut self, app: &Application, window_list: &mut Vec<WinID>) {
+        const MAGIC: u32 = 0x636f_636f;
         debug!(
             "{}: App {} has unresolved window on other desktops, bruteforcing them.",
             function_name!(),
@@ -478,7 +479,6 @@ impl WindowManager {
             };
             CFMutableData::increase_length(data_ref.deref().into(), BUFSIZE);
 
-            const MAGIC: u32 = 0x636f636f;
             let data = from_raw_parts_mut(
                 CFMutableData::mutable_byte_ptr(data_ref.deref().into()),
                 BUFSIZE as usize,
@@ -556,7 +556,7 @@ impl WindowManager {
 
         let mut empty_count = 0;
         if let Ok(window_list) = window_list {
-            for window_ref in get_array_values(window_list.deref()) {
+            for window_ref in get_array_values(&window_list) {
                 let Ok(window_id) = ax_window_id(window_ref.as_ptr()) else {
                     empty_count += 1;
                     continue;
@@ -580,7 +580,9 @@ impl WindowManager {
             }
         }
 
-        if global_window_list.len() as isize == (window_count - empty_count) {
+        if isize::try_from(global_window_list.len())
+            .is_ok_and(|length| length == (window_count - empty_count))
+        {
             if refresh_index != -1 {
                 debug!(
                     "{}: All windows for {} are now resolved",
@@ -592,8 +594,8 @@ impl WindowManager {
         } else {
             let mut app_window_list: Vec<WinID> = global_window_list
                 .iter()
-                .flat_map(|window_id| self.find_window(*window_id).is_none().then_some(window_id))
-                .cloned()
+                .filter(|window_id| self.find_window(**window_id).is_none())
+                .copied()
                 .collect();
 
             if !app_window_list.is_empty() {
@@ -642,11 +644,10 @@ impl WindowManager {
                 )
             })
         };
-        let windows: Vec<Window> =
-            get_array_values::<accessibility_sys::__AXUIElement>(array.deref())
-                .flat_map(create_window)
-                .flatten()
-                .collect();
+        let windows: Vec<Window> = get_array_values::<accessibility_sys::__AXUIElement>(&array)
+            .flat_map(create_window)
+            .flatten()
+            .collect();
         Ok(windows)
     }
 
@@ -718,7 +719,7 @@ impl WindowManager {
             _SLPSGetFrontProcess(&mut psn);
         }
         self.find_process(&psn)
-            .and_then(|process| process.get_app())
+            .and_then(Process::get_app)
             .ok_or(Error::new(
                 ErrorKind::NotFound,
                 format!(
@@ -801,7 +802,7 @@ impl WindowManager {
             }
             Ok(focused_id) => {
                 if let Some(window) = self.find_window(focused_id) {
-                    self.window_focused(window);
+                    self.window_focused(&window);
                 } else {
                     warn!(
                         "{}: window_manager_add_lost_focused_event",
@@ -861,9 +862,9 @@ impl WindowManager {
                 panel.insert_at(after, window.id())?;
             }
             None => panel.append(window.id()),
-        };
+        }
 
-        self.window_focused(window);
+        self.window_focused(&window);
         Ok(())
     }
 
@@ -885,7 +886,7 @@ impl WindowManager {
             // Make sure window lives past the lock above, because its Drop tries to lock the
             // application.
             debug!("{}: {window_id}", function_name!());
-            drop(window)
+            drop(window);
         }
 
         let previous = self
@@ -928,7 +929,7 @@ impl WindowManager {
     /// # Arguments
     ///
     /// * `window` - The `Window` object that gained focus.
-    pub fn window_focused(&mut self, window: Window) {
+    pub fn window_focused(&mut self, window: &Window) {
         let focused_id = self.focused_window;
         // TODO: fix
         // let _focused_window = self.find_window(focused_id);
@@ -951,7 +952,7 @@ impl WindowManager {
         if self.skip_reshuffle {
             self.skip_reshuffle = false;
         } else {
-            _ = self.reshuffle_around(&window);
+            _ = self.reshuffle_around(window);
         }
     }
 
@@ -994,7 +995,7 @@ impl WindowManager {
                     upper_left = display_bounds.size.width - THRESHOLD;
                 }
 
-                if frame.origin.x != upper_left {
+                if (frame.origin.x - upper_left).abs() > 0.1 {
                     self.reposition_stack(upper_left, panel, frame.size.width, &display_bounds);
                 }
                 upper_left += frame.size.width;
@@ -1018,7 +1019,7 @@ impl WindowManager {
                 }
                 upper_left -= frame.size.width;
 
-                if frame.origin.x != upper_left {
+                if (frame.origin.x - upper_left).abs() > 0.1 {
                     self.reposition_stack(upper_left, panel, frame.size.width, &display_bounds);
                 }
             }
@@ -1035,7 +1036,7 @@ impl WindowManager {
     ) {
         let windows = match panel {
             Panel::Single(window_id) => vec![*window_id],
-            Panel::Stack(stack) => stack.to_vec(),
+            Panel::Stack(stack) => stack.clone(),
         }
         .iter()
         .filter_map(|window_id| self.find_window(*window_id))
@@ -1080,7 +1081,7 @@ impl WindowManager {
             app.foreach_window(|window| {
                 self.displays.iter().for_each(|display| {
                     display.remove_window(window.id());
-                })
+                });
             });
         }
     }
@@ -1242,7 +1243,7 @@ impl WindowManager {
             None => windows.iter().for_each(|window| {
                 active_panel.append(window.id());
             }),
-        };
+        }
 
         if let Some(window) = windows.first() {
             self.reshuffle_around(window)?;

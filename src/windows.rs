@@ -53,7 +53,7 @@ impl Panel {
             Panel::Single(id) => Some(id),
             Panel::Stack(stack) => stack.first(),
         }
-        .cloned()
+        .copied()
     }
 }
 
@@ -345,7 +345,10 @@ impl Display {
     ///
     /// A new `Display` instance.
     fn new(id: CGDirectDisplayID, spaces: Vec<u64>) -> Self {
-        let spaces = HashMap::from_iter(spaces.into_iter().map(|id| (id, WindowPane::default())));
+        let spaces = spaces
+            .into_iter()
+            .map(|id| (id, WindowPane::default()))
+            .collect::<HashMap<_, _>>();
         let bounds = CGDisplayBounds(id);
         Self { id, spaces, bounds }
     }
@@ -383,13 +386,13 @@ impl Display {
     /// # Returns
     ///
     /// `Ok(u32)` with the `CGDirectDisplayID` if successful, otherwise `Err(Error)`.
-    fn id_from_uuid(uuid: CFRetained<CFString>) -> Result<u32> {
+    fn id_from_uuid(uuid: &CFRetained<CFString>) -> Result<u32> {
         unsafe {
-            let id = CFUUID::from_string(None, Some(&uuid)).ok_or(Error::new(
+            let id = CFUUID::from_string(None, Some(uuid)).ok_or(Error::new(
                 ErrorKind::NotFound,
                 format!("{}: can not convert from {uuid}.", function_name!()),
             ))?;
-            Ok(CGDisplayGetDisplayIDFromUUID(id.deref()))
+            Ok(CGDisplayGetDisplayIDFromUUID(&id))
         }
     }
 
@@ -420,7 +423,7 @@ impl Display {
                 trace!("{}: display {:?}", function_name!(), display.as_ref());
                 let identifier = get_cfdict_value::<CFString>(
                     display.as_ref(),
-                    CFString::from_static_str("Display Identifier").deref(),
+                    &CFString::from_static_str("Display Identifier"),
                 )?;
                 debug!(
                     "{}: identifier {:?} uuid {:?}",
@@ -438,7 +441,7 @@ impl Display {
 
                 let spaces = get_cfdict_value::<CFArray>(
                     display.as_ref(),
-                    CFString::from_static_str("Spaces").deref(),
+                    &CFString::from_static_str("Spaces"),
                 )?;
                 debug!("{}: spaces {spaces:?}", function_name!());
 
@@ -446,7 +449,7 @@ impl Display {
                     .filter_map(|space| {
                         let num = get_cfdict_value::<CFNumber>(
                             space.as_ref(),
-                            CFString::from_static_str("id64").deref(),
+                            &CFString::from_static_str("id64"),
                         )
                         .ok()?;
 
@@ -480,14 +483,14 @@ impl Display {
     pub fn present_displays(cid: ConnID) -> Vec<Self> {
         let mut count = 0u32;
         unsafe {
-            CGGetActiveDisplayList(0, null_mut(), &mut count);
+            CGGetActiveDisplayList(0, null_mut(), &raw mut count);
         }
         if count < 1 {
             return vec![];
         }
         let mut displays = Vec::with_capacity(count.try_into().unwrap());
         unsafe {
-            CGGetActiveDisplayList(count, displays.as_mut_ptr(), &mut count);
+            CGGetActiveDisplayList(count, displays.as_mut_ptr(), &raw mut count);
             displays.set_len(count.try_into().unwrap());
         }
         displays
@@ -536,7 +539,7 @@ impl Display {
     /// `Ok(u32)` with the display ID if successful, otherwise `Err(Error)`.
     pub fn active_display_id(cid: ConnID) -> Result<u32> {
         let uuid = Display::active_display_uuid(cid)?;
-        Display::id_from_uuid(uuid)
+        Display::id_from_uuid(&uuid)
     }
 
     /// Retrieves the ID of the current active space on this display.
@@ -550,7 +553,7 @@ impl Display {
     /// `Ok(u64)` with the space ID if successful, otherwise `Err(Error)`.
     fn active_display_space(&self, cid: ConnID) -> Result<u64> {
         Display::uuid_from_id(self.id)
-            .map(|uuid| unsafe { SLSManagedDisplayGetCurrentSpace(cid, uuid.deref()) })
+            .map(|uuid| unsafe { SLSManagedDisplayGetCurrentSpace(cid, &raw const *uuid) })
     }
 
     /// Retrieves the `WindowPane` corresponding to the active space on this display.
@@ -750,7 +753,7 @@ impl Window {
             .size_ratios
             .iter()
             .find(|r| **r > current + 0.05)
-            .cloned()
+            .copied()
             .unwrap_or(small)
     }
 
@@ -802,15 +805,15 @@ impl Window {
     ///
     /// `Ok(WinID)` with the parent window ID if successful, otherwise `Err(Error)`.
     pub fn parent(main_conn: ConnID, window_id: WinID) -> Result<WinID> {
-        let windows = create_array(vec![window_id], CFNumberType::SInt32Type)?;
+        let windows = create_array(&[window_id], CFNumberType::SInt32Type)?;
         unsafe {
-            let query = CFRetained::from_raw(SLSWindowQueryWindows(main_conn, windows.deref(), 1));
-            let iterator =
-                CFRetained::from_raw(SLSWindowQueryResultCopyWindows(query.deref().into()));
-            if 1 == SLSWindowIteratorGetCount(iterator.deref())
-                && SLSWindowIteratorAdvance(iterator.deref())
-            {
-                return Ok(SLSWindowIteratorGetParentID(iterator.deref()));
+            let query =
+                CFRetained::from_raw(SLSWindowQueryWindows(main_conn, &raw const *windows, 1));
+            let iterator = &raw const *CFRetained::from_raw(SLSWindowQueryResultCopyWindows(
+                query.deref().into(),
+            ));
+            if 1 == SLSWindowIteratorGetCount(iterator) && SLSWindowIteratorAdvance(iterator) {
+                return Ok(SLSWindowIteratorGetParentID(iterator));
             }
         }
         Err(Error::new(
@@ -826,7 +829,7 @@ impl Window {
     /// `Ok(String)` with the window title if successful, otherwise `Err(Error)`.
     pub fn title(&self) -> Result<String> {
         let axtitle = CFString::from_static_str(kAXTitleAttribute);
-        let title = get_attribute::<CFString>(&self.inner().ax_element, axtitle)?;
+        let title = get_attribute::<CFString>(&self.inner().ax_element, &axtitle)?;
         Ok(title.to_string())
     }
 
@@ -837,7 +840,7 @@ impl Window {
     /// `Ok(String)` with the window role if successful, otherwise `Err(Error)`.
     pub fn role(&self) -> Result<String> {
         let axrole = CFString::from_static_str(kAXRoleAttribute);
-        let role = get_attribute::<CFString>(&self.inner().ax_element, axrole)?;
+        let role = get_attribute::<CFString>(&self.inner().ax_element, &axrole)?;
         Ok(role.to_string())
     }
 
@@ -848,7 +851,7 @@ impl Window {
     /// `Ok(String)` with the window subrole if successful, otherwise `Err(Error)`.
     pub fn subrole(&self) -> Result<String> {
         let axrole = CFString::from_static_str(kAXSubroleAttribute);
-        let role = get_attribute::<CFString>(&self.inner().ax_element, axrole)?;
+        let role = get_attribute::<CFString>(&self.inner().ax_element, &axrole)?;
         Ok(role.to_string())
     }
 
@@ -869,8 +872,8 @@ impl Window {
     /// `true` if the window is minimized, `false` otherwise.
     pub fn is_minimized(&self) -> bool {
         let axminimized = CFString::from_static_str(kAXMinimizedAttribute);
-        get_attribute::<CFBoolean>(&self.inner().ax_element, axminimized)
-            .map(|minimized| CFBoolean::value(minimized.deref()))
+        get_attribute::<CFBoolean>(&self.inner().ax_element, &axminimized)
+            .map(|minimized| CFBoolean::value(&minimized))
             .is_ok_and(|minimized| minimized || self.inner().minimized)
     }
 
@@ -883,8 +886,8 @@ impl Window {
         let inner = self.inner();
         let cftype = inner.ax_element.as_ref();
         let axparent = CFString::from_static_str(kAXParentAttribute);
-        get_attribute::<CFType>(&self.inner().ax_element, axparent)
-            .is_ok_and(|parent| !CFEqual(Some(parent.deref()), Some(cftype)))
+        get_attribute::<CFType>(&self.inner().ax_element, &axparent)
+            .is_ok_and(|parent| !CFEqual(Some(&*parent), Some(cftype)))
     }
 
     /// Checks if the window is a "real" window based on its role and subrole.
@@ -1144,7 +1147,7 @@ impl Window {
     /// `Ok(u32)` with the display ID if successful, otherwise `Err(Error)`.
     fn display_id(&self, cid: ConnID) -> Result<u32> {
         let uuid = self.display_uuid(cid);
-        uuid.and_then(|uuid| Display::id_from_uuid(uuid.into()))
+        uuid.and_then(|uuid| Display::id_from_uuid(&uuid))
     }
 
     /// Checks if the window is fully visible within the given display bounds.

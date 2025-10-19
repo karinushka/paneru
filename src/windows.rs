@@ -1036,11 +1036,8 @@ impl Window {
         let mut event_bytes = [0u8; 0xf8];
         event_bytes[0x04] = 0xf8;
         event_bytes[0x3a] = 0x10;
-        let wid = window_id.to_ne_bytes();
-        event_bytes[0x3c..(0x3c + wid.len())].copy_from_slice(&wid);
-        event_bytes[0x20..(0x20 + 0x10)]
-            .iter_mut()
-            .for_each(|b| *b = 0xff);
+        event_bytes[0x3c..0x40].copy_from_slice(&window_id.to_ne_bytes());
+        event_bytes[0x20..0x30].fill(0xff);
 
         event_bytes[0x08] = 0x01;
         unsafe { SLPSPostEventRecordTo(&psn, event_bytes.as_ptr().cast()) };
@@ -1068,8 +1065,8 @@ impl Window {
             event_bytes[0x08] = 0x0d;
 
             event_bytes[0x8a] = 0x02;
-            let wid = window_manager.focused_window.unwrap().to_ne_bytes();
-            event_bytes[0x3c..(0x3c + wid.len())].copy_from_slice(&wid);
+            event_bytes[0x3c..0x40]
+                .copy_from_slice(&window_manager.focused_window.unwrap().to_ne_bytes());
             unsafe {
                 SLPSPostEventRecordTo(&window_manager.focused_psn, event_bytes.as_ptr().cast());
             }
@@ -1079,8 +1076,7 @@ impl Window {
             thread::sleep(Duration::from_millis(20));
 
             event_bytes[0x8a] = 0x01;
-            let wid = &window_id.to_ne_bytes();
-            event_bytes[0x3c..(0x3c + wid.len())].copy_from_slice(wid);
+            event_bytes[0x3c..0x40].copy_from_slice(&window_id.to_ne_bytes());
             unsafe {
                 SLPSPostEventRecordTo(&psn, event_bytes.as_ptr().cast());
             }

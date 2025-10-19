@@ -437,7 +437,7 @@ enum UCKeyAction {
               */
 }
 
-/// Generates a vector of (key_name, keycode) tuples for virtual keys based on the current ASCII-capable keyboard layout.
+/// Generates a vector of (`key_name`, keycode) tuples for virtual keys based on the current ASCII-capable keyboard layout.
 /// This involves using macOS Carbon API functions to translate virtual keycodes to Unicode characters.
 ///
 /// # Returns

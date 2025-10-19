@@ -47,7 +47,7 @@ impl WindowManager {
     /// # Arguments
     ///
     /// * `events` - An `EventSender` to send events to the event handler.
-    /// * `main_cid` - The main connection ID for the SkyLight API.
+    /// * `main_cid` - The main connection ID for the `SkyLight` API.
     ///
     /// # Returns
     ///
@@ -1086,7 +1086,7 @@ impl WindowManager {
         }
     }
 
-    /// Retrieves the bounds (CGRect) of the current active display.
+    /// Retrieves the bounds (`CGRect`) of the current active display.
     ///
     /// # Returns
     ///

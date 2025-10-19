@@ -580,7 +580,7 @@ impl Display {
     }
 }
 
-/// Retrieves the window ID (WinID) from an `AXUIElementRef`.
+/// Retrieves the window ID (`WinID`) from an `AXUIElementRef`.
 ///
 /// # Arguments
 ///
@@ -728,7 +728,7 @@ impl Window {
         self.inner().app.clone()
     }
 
-    /// Returns the current frame (CGRect) of the window.
+    /// Returns the current frame (`CGRect`) of the window.
     ///
     /// # Returns
     ///
@@ -830,7 +830,7 @@ impl Window {
         Ok(title.to_string())
     }
 
-    /// Retrieves the role of the window (e.g., "AXWindow").
+    /// Retrieves the role of the window (e.g., "`AXWindow`").
     ///
     /// # Returns
     ///
@@ -841,7 +841,7 @@ impl Window {
         Ok(role.to_string())
     }
 
-    /// Retrieves the subrole of the window (e.g., "AXStandardWindow").
+    /// Retrieves the subrole of the window (e.g., "`AXStandardWindow`").
     ///
     /// # Returns
     ///
@@ -852,7 +852,7 @@ impl Window {
         Ok(role.to_string())
     }
 
-    /// Checks if the window's subrole is "AXUnknownSubrole".
+    /// Checks if the window's subrole is "`AXUnknownSubrole`".
     ///
     /// # Returns
     ///
@@ -1188,6 +1188,7 @@ impl Window {
             frame.origin.y + frame.size.height / 2.0,
         );
         let display_id = self.display_id(cid);
+        #[allow(clippy::redundant_closure)]
         let bounds = display_id.map(|display_id| CGDisplayBounds(display_id));
         if bounds.is_ok_and(|bounds| !CGRectContainsPoint(bounds, center)) {
             return;

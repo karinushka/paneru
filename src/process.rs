@@ -44,7 +44,7 @@ unsafe extern "C" {
     /// An `OSStatus` indicating success or failure.
     ///
     /// # Original signature:
-    /// OSStatus CopyProcessName(const ProcessSerialNumber *psn, CFStringRef *name);
+    /// `OSStatus` CopyProcessName(const `ProcessSerialNumber` *psn, `CFStringRef` *name);
     fn CopyProcessName(psn: *const ProcessSerialNumber, name: *mut *const CFString) -> OSStatus;
 
     /// Get the UNIX process ID corresponding to a process.
@@ -69,7 +69,7 @@ unsafe extern "C" {
     ///
     /// An `OSStatus` indicating success or failure.
     /// # Original signature:
-    /// OSStatus GetProcessPID(const ProcessSerialNumber *psn, pid_t *pid);
+    /// `OSStatus` GetProcessPID(const `ProcessSerialNumber` *psn, `pid_t` *pid);
     fn GetProcessPID(psn: *const ProcessSerialNumber, pid: *mut Pid) -> OSStatus;
 }
 

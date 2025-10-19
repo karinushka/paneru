@@ -65,7 +65,7 @@ pub struct InnerApplication {
 }
 
 impl Drop for InnerApplication {
-    /// Cleans up the AXObserver by removing all registered notifications when the `InnerApplication` is dropped.
+    /// Cleans up the `AXObserver` by removing all registered notifications when the `InnerApplication` is dropped.
     fn drop(&mut self) {
         self.handler.remove_observer(
             ObserverType::Application,
@@ -81,9 +81,9 @@ impl InnerApplication {
     ///
     /// # Arguments
     ///
-    /// * `main_cid` - The main connection ID for the SkyLight API.
+    /// * `main_cid` - The main connection ID for the `SkyLight` API.
     /// * `process` - A reference to the `Process` associated with this application.
-    /// * `events` - An `EventSender` to send events from the AXObserver.
+    /// * `events` - An `EventSender` to send events from the `AXObserver`.
     ///
     /// # Returns
     ///
@@ -164,7 +164,7 @@ impl Application {
             .ok_or(self.weak_error(function_name!()))
     }
 
-    /// Retrieves the connection ID (ConnID) of the application.
+    /// Retrieves the connection ID (`ConnID`) of the application.
     ///
     /// # Returns
     ///
@@ -476,7 +476,7 @@ struct AxObserverHandler {
 }
 
 impl Drop for AxObserverHandler {
-    /// Invalidates the run loop source associated with the AXObserver when the `AxObserverHandler` is dropped.
+    /// Invalidates the run loop source associated with the `AXObserver` when the `AxObserverHandler` is dropped.
     fn drop(&mut self) {
         remove_run_loop(self.observer.deref());
     }

@@ -127,7 +127,7 @@ unsafe extern "C" {
     /// A raw pointer to an `EventTargetRef` for the application.
     ///
     /// # Original signature
-    /// extern EventTargetRef GetApplicationEventTarget(void)
+    /// extern `EventTargetRef` GetApplicationEventTarget(void)
     fn GetApplicationEventTarget() -> *const ProcessEventTarget;
 
     /// Installs an event handler for a specific event target and event types.
@@ -147,14 +147,14 @@ unsafe extern "C" {
     /// An `OSStatus` indicating success or failure.
     ///
     /// # Original signature
-    /// extern OSStatus
-    /// InstallEventHandler(
-    ///   EventTargetRef         inTarget,
-    ///   EventHandlerUPP        inHandler,
-    ///   ItemCount              inNumTypes,
-    ///   const EventTypeSpec *  inList,
+    /// extern `OSStatus`
+    /// `InstallEventHandler`(
+    ///   `EventTargetRef`         inTarget,
+    ///   `EventHandlerUPP`        inHandler,
+    ///   `ItemCount`              inNumTypes,
+    ///   const `EventTypeSpec` *  inList,
     ///   void *                 inUserData,
-    ///   EventHandlerRef *      outRef)
+    ///   `EventHandlerRef` *      outRef)
     fn InstallEventHandler(
         target: *const ProcessEventTarget,
         handler: ProcessCallbackFn,
@@ -180,7 +180,7 @@ unsafe extern "C" {
     /// Gets a piece of data from the given event, if it exists.
     ///
     /// # Discussion
-    /// The Carbon Event Manager will automatically use AppleEvent coercion handlers to convert
+    /// The Carbon Event Manager will automatically use `AppleEvent` coercion handlers to convert
     /// the data in the event into the desired type, if possible. You may also pass `typeWildCard`
     /// to request that the data be returned in its original format.
     ///
@@ -203,14 +203,14 @@ unsafe extern "C" {
     /// An operating system result code (`OSStatus`).
     ///
     /// # Original signature
-    /// extern OSStatus
-    /// GetEventParameter(
-    ///   EventRef          inEvent,
-    ///   EventParamName    inName,
-    ///   EventParamType    inDesiredType,
-    ///   EventParamType *  outActualType,       /* can be NULL */
-    ///   ByteCount         inBufferSize,
-    ///   ByteCount *       outActualSize,       /* can be NULL */
+    /// extern `OSStatus`
+    /// `GetEventParameter`(
+    ///   `EventRef`          inEvent,
+    ///   `EventParamName`    inName,
+    ///   `EventParamType`    inDesiredType,
+    ///   `EventParamType` *  outActualType,       /* can be NULL */
+    ///   `ByteCount`         inBufferSize,
+    ///   `ByteCount` *       outActualSize,       /* can be NULL */
     ///   void *            outData)             /* can be NULL */
     fn GetEventParameter(
         event: *const ProcessEvent,
@@ -240,7 +240,7 @@ unsafe extern "C" {
     /// The kind of the event (`UInt32`).
     ///
     /// # Original signature
-    /// extern UInt32 GetEventKind(EventRef inEvent)
+    /// extern `UInt32` GetEventKind(EventRef inEvent)
     fn GetEventKind(event: *const ProcessEvent) -> u32;
 
     /// Retrieves the next available process's serial number.

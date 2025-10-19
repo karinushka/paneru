@@ -13,7 +13,7 @@ pub type ConnID = i64;
 #[link(name = "SkyLight", kind = "framework")]
 unsafe extern "C" {
 
-    /// Retrieves the window ID (WinID) associated with an Accessibility UI element.
+    /// Retrieves the window ID (`WinID`) associated with an Accessibility UI element.
     ///
     /// # Arguments
     ///
@@ -25,10 +25,10 @@ unsafe extern "C" {
     /// An `OSStatus` indicating success or failure.
     ///
     /// # Original signature
-    /// extern AXError _AXUIElementGetWindow(AXUIElementRef ref, uint32_t *wid);
+    /// extern `AXError` _AXUIElementGetWindow(AXUIElementRef ref, `uint32_t` *wid);
     pub fn _AXUIElementGetWindow(element: AXUIElementRef, wid: &mut WinID) -> OSStatus;
 
-    /// Retrieves the main connection ID for the SkyLight API.
+    /// Retrieves the main connection ID for the `SkyLight` API.
     ///
     /// # Returns
     ///
@@ -38,7 +38,7 @@ unsafe extern "C" {
     /// extern int SLSMainConnectionID(void);
     pub fn SLSMainConnectionID() -> ConnID;
 
-    /// Retrieves the bounding rectangle (CGRect) of a window.
+    /// Retrieves the bounding rectangle (`CGRect`) of a window.
     ///
     /// # Arguments
     ///
@@ -51,7 +51,7 @@ unsafe extern "C" {
     /// A `CGError` indicating success or failure.
     ///
     /// # Original signature
-    /// extern CGError SLSGetWindowBounds(int cid, uint32_t wid, CGRect *frame);
+    /// extern `CGError` SLSGetWindowBounds(int cid, `uint32_t` wid, `CGRect` *frame);
     pub fn SLSGetWindowBounds(cid: ConnID, window_id: WinID, frame: &mut CGRect) -> CGError;
 
     /// Copies the managed display identifier for a given window.
@@ -66,7 +66,7 @@ unsafe extern "C" {
     /// A `CFStringRef` representing the display identifier.
     ///
     /// # Original signature
-    /// extern CFStringRef SLSCopyManagedDisplayForWindow(int cid, uint32_t wid);
+    /// extern `CFStringRef` SLSCopyManagedDisplayForWindow(int cid, `uint32_t` wid);
     pub fn SLSCopyManagedDisplayForWindow(cid: ConnID, window_id: WinID) -> CFStringRef;
 
     /// Copies the best managed display identifier for a given rectangle.
@@ -81,7 +81,7 @@ unsafe extern "C" {
     /// A `CFStringRef` representing the best display identifier.
     ///
     /// # Original signature
-    /// extern CFStringRef SLSCopyBestManagedDisplayForRect(int cid, CGRect rect);
+    /// extern `CFStringRef` SLSCopyBestManagedDisplayForRect(int cid, `CGRect` rect);
     pub fn SLSCopyBestManagedDisplayForRect(cid: ConnID, frame: CGRect) -> CFStringRef;
 
     /// Creates a `CFUUIDRef` from a `CGDirectDisplayID`.
@@ -95,7 +95,7 @@ unsafe extern "C" {
     /// A raw pointer to a `CFUUID` if successful.
     ///
     /// # Original signature
-    /// extern CFUUIDRef CGDisplayCreateUUIDFromDisplayID(uint32_t did);
+    /// extern `CFUUIDRef` `CGDisplayCreateUUIDFromDisplayID`(`uint32_t` did);
     pub fn CGDisplayCreateUUIDFromDisplayID(display: CGDirectDisplayID) -> *mut CFUUID;
 
     /// Retrieves the `CGDirectDisplayID` from a `CFUUID`.
@@ -121,7 +121,7 @@ unsafe extern "C" {
     /// A `u64` representing the current space ID.
     ///
     /// # Original signature
-    /// extern uint64_t SLSManagedDisplayGetCurrentSpace(int cid, CFStringRef uuid);
+    /// extern `uint64_t` SLSManagedDisplayGetCurrentSpace(int cid, `CFStringRef` uuid);
     pub fn SLSManagedDisplayGetCurrentSpace(cid: ConnID, uuid: CFStringRef) -> u64;
 
     /// Copies the active menu bar display identifier.
@@ -135,7 +135,7 @@ unsafe extern "C" {
     /// A `CFStringRef` representing the active menu bar display identifier.
     ///
     /// # Original signature
-    /// extern CFStringRef SLSCopyActiveMenuBarDisplayIdentifier(int cid);
+    /// extern `CFStringRef` SLSCopyActiveMenuBarDisplayIdentifier(int cid);
     pub fn SLSCopyActiveMenuBarDisplayIdentifier(cid: ConnID) -> CFStringRef;
 
     /// Copies a list of windows with specified options and tags.
@@ -154,7 +154,7 @@ unsafe extern "C" {
     /// A raw pointer to a `CFArray` of window information.
     ///
     /// # Original signature
-    /// extern CFArrayRef SLSCopyWindowsWithOptionsAndTags(int cid, uint32_t owner, CFArrayRef spaces, uint32_t options, uint64_t *set_tags, uint64_t *clear_tags);
+    /// extern `CFArrayRef` SLSCopyWindowsWithOptionsAndTags(int cid, `uint32_t` owner, `CFArrayRef` spaces, `uint32_t` options, `uint64_t` *`set_tags`, `uint64_t` *`clear_tags`);
     pub fn SLSCopyWindowsWithOptionsAndTags(
         cid: ConnID,
         owner: ConnID,
@@ -189,7 +189,7 @@ unsafe extern "C" {
     /// A raw pointer to a `CFArray` of managed display spaces.
     ///
     /// # Original signature
-    /// extern CFArrayRef SLSCopyManagedDisplaySpaces(int cid);
+    /// extern `CFArrayRef` SLSCopyManagedDisplaySpaces(int cid);
     pub fn SLSCopyManagedDisplaySpaces(cid: ConnID) -> *mut CFArray;
 
     /// Copies a list of associated windows for a given window ID.
@@ -204,7 +204,7 @@ unsafe extern "C" {
     /// A `NonNull<CFArray>` containing associated windows.
     ///
     /// # Original signature
-    /// extern CFArrayRef SLSCopyAssociatedWindows(int cid, uint32_t wid);
+    /// extern `CFArrayRef` SLSCopyAssociatedWindows(int cid, `uint32_t` wid);
     pub fn SLSCopyAssociatedWindows(cid: ConnID, window_id: WinID) -> NonNull<CFArray>;
 
     /// Queries windows based on a provided `CFArray` of window IDs.
@@ -220,7 +220,7 @@ unsafe extern "C" {
     /// A `NonNull<CFType>` representing the window query result.
     ///
     /// # Original signature
-    /// extern CFTypeRef SLSWindowQueryWindows(int cid, CFArrayRef windows, int count);
+    /// extern `CFTypeRef` SLSWindowQueryWindows(int cid, `CFArrayRef` windows, int count);
     pub fn SLSWindowQueryWindows(
         cid: ConnID,
         windows: *const CFArray,
@@ -238,7 +238,7 @@ unsafe extern "C" {
     /// A `NonNull<CFType>` representing an iterator for the windows.
     ///
     /// # Original signature
-    /// extern CFTypeRef SLSWindowQueryResultCopyWindows(CFTypeRef window_query);
+    /// extern `CFTypeRef` SLSWindowQueryResultCopyWindows(CFTypeRef `window_query`);
     pub fn SLSWindowQueryResultCopyWindows(type_ref: NonNull<CFType>) -> NonNull<CFType>;
 
     /// Retrieves the count of windows in a window iterator.
@@ -280,7 +280,7 @@ unsafe extern "C" {
     /// An `i32` representing the parent window ID.
     ///
     /// # Original signature
-    /// extern uint32_t SLSWindowIteratorGetParentID(CFTypeRef iterator);
+    /// extern `uint32_t` SLSWindowIteratorGetParentID(CFTypeRef iterator);
     pub fn SLSWindowIteratorGetParentID(iterator: *const CFType) -> i32;
 
     /// Retrieves the window ID from a window iterator.
@@ -294,7 +294,7 @@ unsafe extern "C" {
     /// An `i32` representing the window ID.
     ///
     /// # Original signature
-    /// extern uint32_t SLSWindowIteratorGetWindowID(CFTypeRef iterator);
+    /// extern `uint32_t` SLSWindowIteratorGetWindowID(CFTypeRef iterator);
     pub fn SLSWindowIteratorGetWindowID(iterator: *const CFType) -> i32;
 
     /// Retrieves the tags from a window iterator.
@@ -308,7 +308,7 @@ unsafe extern "C" {
     /// An `i64` representing the tags.
     ///
     /// # Original signature
-    /// extern uint64_t SLSWindowIteratorGetTags(CFTypeRef iterator);
+    /// extern `uint64_t` SLSWindowIteratorGetTags(CFTypeRef iterator);
     pub fn SLSWindowIteratorGetTags(iterator: *const CFType) -> i64;
 
     /// Retrieves the attributes from a window iterator.
@@ -322,7 +322,7 @@ unsafe extern "C" {
     /// An `i64` representing the attributes.
     ///
     /// # Original signature
-    /// extern uint64_t SLSWindowIteratorGetAttributes(CFTypeRef iterator);
+    /// extern `uint64_t` SLSWindowIteratorGetAttributes(CFTypeRef iterator);
     pub fn SLSWindowIteratorGetAttributes(iterator: *const CFType) -> i64;
 
     // extern int SLSWindowIteratorGetLevel(CFTypeRef iterator, int32_t index);
@@ -339,7 +339,7 @@ unsafe extern "C" {
     /// An `OSStatus` indicating success or failure.
     ///
     /// # Original signature
-    /// extern OSStatus _SLPSGetFrontProcess(ProcessSerialNumber *psn);
+    /// extern `OSStatus` _SLPSGetFrontProcess(ProcessSerialNumber *psn);
     pub fn _SLPSGetFrontProcess(psn: &mut ProcessSerialNumber) -> OSStatus;
 
     /// Retrieves the connection ID for a given `ProcessSerialNumber`.
@@ -355,7 +355,7 @@ unsafe extern "C" {
     /// A `CGError` indicating success or failure.
     ///
     /// # Original signature
-    /// extern CGError SLSGetConnectionIDForPSN(int cid, ProcessSerialNumber *psn, int *psn_cid);
+    /// extern `CGError` SLSGetConnectionIDForPSN(int cid, `ProcessSerialNumber` *psn, int *`psn_cid`);
     pub fn SLSGetConnectionIDForPSN(
         cid: ConnID,
         psn: &ProcessSerialNumber,
@@ -375,7 +375,7 @@ unsafe extern "C" {
     /// A `CGError` indicating success or failure.
     ///
     /// # Original signature
-    /// extern CGError _SLPSSetFrontProcessWithOptions(ProcessSerialNumber *psn, uint32_t wid, uint32_t mode);
+    /// extern `CGError` _SLPSSetFrontProcessWithOptions(ProcessSerialNumber *psn, `uint32_t` wid, `uint32_t` mode);
     pub fn _SLPSSetFrontProcessWithOptions(
         psn: &ProcessSerialNumber,
         window_id: WinID,
@@ -394,7 +394,7 @@ unsafe extern "C" {
     /// A `CGError` indicating success or failure.
     ///
     /// # Original signature
-    /// extern CGError SLPSPostEventRecordTo(ProcessSerialNumber *psn, uint8_t *bytes);
+    /// extern `CGError` SLPSPostEventRecordTo(ProcessSerialNumber *psn, `uint8_t` *bytes);
     pub fn SLPSPostEventRecordTo(psn: &ProcessSerialNumber, event: *const c_void) -> CGError;
 
     /// Finds a window and its owner at a specified screen point.
@@ -414,7 +414,7 @@ unsafe extern "C" {
     /// An `OSStatus` indicating success or failure.
     ///
     /// # Original signature
-    /// extern OSStatus SLSFindWindowAndOwner(int cid, int zero, int one, int zero_again, CGPoint *screen_point, CGPoint *window_point, uint32_t *wid, int *wcid);
+    /// extern `OSStatus` SLSFindWindowAndOwner(int cid, int zero, int one, int `zero_again`, `CGPoint` *`screen_point`, `CGPoint` *`window_point`, `uint32_t` *wid, int *wcid);
     pub fn SLSFindWindowAndOwner(
         cid: ConnID,
         filter_window_id: WinID,
@@ -438,7 +438,7 @@ unsafe extern "C" {
     /// A `CGError` indicating success or failure.
     ///
     /// # Original signature
-    /// extern CGError SLSGetCurrentCursorLocation(int cid, CGPoint *point);
+    /// extern `CGError` SLSGetCurrentCursorLocation(int cid, `CGPoint` *point);
     pub fn SLSGetCurrentCursorLocation(cid: ConnID, cursor: &mut CGPoint) -> CGError;
 
     /// Copies the value of an accessibility attribute from a UI element.
@@ -487,8 +487,8 @@ unsafe extern "C" {
     /// An `i32` indicating success or failure.
     pub fn AXUIElementPerformAction(element: AXUIElementRef, action: &CFString) -> i32;
 
-    /// Creates an `AXUIElementRef` from a remote token (CFDataRef).
-    /// This is often used to get an AXUIElementRef for windows on inactive spaces.
+    /// Creates an `AXUIElementRef` from a remote token (`CFDataRef`).
+    /// This is often used to get an `AXUIElementRef` for windows on inactive spaces.
     ///
     /// # Arguments
     ///
@@ -499,6 +499,6 @@ unsafe extern "C" {
     /// An `AXUIElementRef` if successful.
     ///
     /// # Original signature
-    /// extern AXUIElementRef _AXUIElementCreateWithRemoteToken(CFDataRef data);
+    /// extern `AXUIElementRef` _AXUIElementCreateWithRemoteToken(CFDataRef data);
     pub fn _AXUIElementCreateWithRemoteToken(data: &CFMutableData) -> AXUIElementRef;
 }

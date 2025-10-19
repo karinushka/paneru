@@ -480,7 +480,7 @@ impl EventHandler {
     ///
     /// # Arguments
     ///
-    /// * `argv` - A slice of strings representing the command arguments (e.g., ["east"]).
+    /// * `argv` - A slice of strings representing the command arguments (e.g., [`east`]).
     /// * `current_window` - A reference to the currently focused `Window`.
     /// * `panel` - A reference to the active `WindowPane`.
     ///
@@ -509,7 +509,7 @@ impl EventHandler {
     ///
     /// # Arguments
     ///
-    /// * `argv` - A slice of strings representing the command arguments (e.g., ["west"]).
+    /// * `argv` - A slice of strings representing the command arguments (e.g., [`west`]).
     /// * `current_window` - A reference to the currently focused `Window`.
     /// * `panel` - A reference to the active `WindowPane`.
     /// * `bounds` - The `CGRect` representing the bounds of the display.
@@ -827,7 +827,7 @@ impl EventHandler {
         }
     }
 
-    /// Finds a window at a given screen point using SkyLight API.
+    /// Finds a window at a given screen point using `SkyLight` API.
     ///
     /// # Arguments
     ///

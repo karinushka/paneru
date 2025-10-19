@@ -46,9 +46,20 @@ inspired by [Niri] and [PaperWM.spoon].
 
 ## Installation
 
-Paneru is built using Rust's `cargo`.
+Paneru is built using Rust's `cargo`. It can be installed directly from
+`crates.io` or if you need the latest version, by fetching the source from Github.
+
+### Installing from Crates.io
 
 ```shell
+$ cargo install paneru
+```
+
+### Installing from Github
+
+```shell
+$ git clone https://github.com/karinushka/paneru.git 
+$ cd paneru
 $ cargo build --release
 $ cargo install --path .
 ```

@@ -3,6 +3,13 @@ name = "paneru"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.89.0"
+description = "A sliding, tiling window manager for MacOS."
+homepage = "https://github.com/karinushka/paneru"
+repository = "https://github.com/karinushka/paneru"
+readme = "README.md"
+license = "MIT"
+categories = ["os::macos-apis"]
+keywords = ["macos", "windowmanager", "window", "manager"]
 
 [lints.clippy]
 pedantic = "warn"

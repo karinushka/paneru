@@ -6,7 +6,6 @@ use accessibility_sys::{
 };
 use core::ptr::NonNull;
 use log::{debug, trace, warn};
-use objc2::rc::Retained;
 use objc2_core_foundation::{
     CFArray, CFBoolean, CFEqual, CFNumber, CFNumberType, CFRetained, CFString, CFType, CFUUID,
     CGPoint, CGRect, CGSize,
@@ -1111,18 +1110,18 @@ impl Window {
     /// # Returns
     ///
     /// `Ok(Retained<CFString>)` with the display UUID if successful, otherwise `Err(Error)`.
-    fn display_uuid(&self, cid: ConnID) -> Result<Retained<CFString>> {
+    fn display_uuid(&self, cid: ConnID) -> Result<CFRetained<CFString>> {
         let window_id = self.id();
         let uuid = unsafe {
             NonNull::new(SLSCopyManagedDisplayForWindow(cid, window_id).cast_mut())
-                .and_then(|uuid| Retained::from_raw(uuid.as_ptr()))
+                .map(|uuid| CFRetained::from_raw(uuid))
         };
         uuid.or_else(|| {
             let mut frame = CGRect::default();
             unsafe {
                 SLSGetWindowBounds(cid, window_id, &mut frame);
                 NonNull::new(SLSCopyBestManagedDisplayForRect(cid, frame).cast_mut())
-                    .and_then(|uuid| Retained::from_raw(uuid.as_ptr()))
+                    .map(|uuid| CFRetained::from_raw(uuid))
             }
         })
         .ok_or(Error::new(

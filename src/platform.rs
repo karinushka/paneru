@@ -640,10 +640,7 @@ impl InputHandler {
                 // handle_keypress can intercept the event, so it may return true.
                 return self.handle_keypress(keycode, eventflags);
             }
-            _ => match self.handle_swipe(event) {
-                Ok(handled) => return handled,
-                err => err.map(|_| ()),
-            },
+            _ => self.handle_swipe(event),
         };
         if let Err(err) = result {
             error!("{}: error sending event: {err}", function_name!());
@@ -652,8 +649,8 @@ impl InputHandler {
         false
     }
 
-    fn handle_swipe(&mut self, event: &CGEvent) -> Result<bool> {
-        const SWIPE_THRESHOLD: f64 = 0.01;
+    fn handle_swipe(&mut self, event: &CGEvent) -> Result<()> {
+        const GESTURE_MINIMAL_FINGERS: usize = 3;
         let Some(ns_event) = NSEvent::eventWithCGEvent(event) else {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
@@ -664,28 +661,25 @@ impl InputHandler {
             ));
         };
         if ns_event.r#type() != NSEventType::Gesture {
-            return Ok(false);
+            return Ok(());
         }
-
         let fingers = ns_event.allTouches();
-        if fingers.len() != 3 {
-            return Ok(true);
+        if fingers.len() < GESTURE_MINIMAL_FINGERS {
+            return Ok(());
         }
 
         if fingers.iter().all(|f| f.phase() != NSTouchPhase::Began)
             && let Some(prev) = &self.finger_position
         {
-            let delta_x = prev
+            let deltas = prev
                 .iter()
                 .zip(&fingers)
                 .map(|(p, c)| p.normalizedPosition().x - c.normalizedPosition().x)
-                .sum::<f64>();
-            if delta_x.abs() > SWIPE_THRESHOLD {
-                _ = self.events.send(Event::Swipe { delta_x });
-            }
+                .collect::<Vec<_>>();
+            _ = self.events.send(Event::Swipe { deltas });
         }
         self.finger_position = Some(fingers);
-        Ok(true)
+        Ok(())
     }
 
     /// Handles key press events. It determines the modifier mask and attempts to find a matching keybinding in the configuration.

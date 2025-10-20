@@ -94,7 +94,7 @@ pub enum Event {
     },
 
     Swipe {
-        delta_x: f64,
+        deltas: Vec<f64>,
     },
 
     SpaceCreated,

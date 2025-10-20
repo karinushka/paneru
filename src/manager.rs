@@ -88,8 +88,14 @@ impl WindowManager {
             Event::WindowMoved { window_id } => self.window_moved(window_id),
             Event::WindowResized { window_id } => self.window_resized(window_id)?,
 
-            Event::Swipe { delta_x } => {
-                _ = self.slide_window(delta_x);
+            Event::Swipe { deltas } => {
+                const SWIPE_THRESHOLD: f64 = 0.01;
+                if deltas.len() == 3 {
+                    let delta_x = deltas.into_iter().sum::<f64>();
+                    if delta_x.abs() > SWIPE_THRESHOLD {
+                        _ = self.slide_window(delta_x);
+                    }
+                }
             }
 
             Event::MissionControlShowAllWindows
@@ -1289,7 +1295,7 @@ impl WindowManager {
     }
 
     fn slide_window(&self, delta_x: f64) -> Result<()> {
-        trace!("Swipe {delta_x}");
+        trace!("{}: Windows slide {delta_x}.", function_name!());
         let display_bounds = self.current_display_bounds()?;
         let Some(window) = self
             .focused_window

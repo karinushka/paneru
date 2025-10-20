@@ -81,6 +81,7 @@ starting point:
 [options]
 # Enables focus follows mouse
 focus_follows_mouse = true
+swipe_enabled = true
 
 [bindings]
 # Moves the focus between windows.

@@ -165,12 +165,19 @@ impl InnerConfig {
     }
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 pub struct MainOptions {
     pub focus_follows_mouse: bool,
+    swipe_enabled: Option<bool>,
 }
 
-#[derive(Clone, Debug)]
+impl MainOptions {
+    pub fn is_swipe_enabled(&self) -> bool {
+        self.swipe_enabled.unwrap_or(true)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Keybinding {
     pub key: String,
     pub code: u8,
@@ -498,7 +505,8 @@ fn test_config() {
     let input = r#"
 # syntax
 [options]
-mouse_focus = true
+focus_follows_mouse = true
+swipe_enabled = true
 
 [bindings]
 single = "s"
@@ -510,5 +518,51 @@ manage = "ctrl + alt - t"
         .inspect_err(|err| println!("Error: {err}"))
         .unwrap();
 
-    assert_eq!(format!("{:?}", config.bindings), "");
+    let mut bindings: Vec<_> = config
+        .bindings
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    bindings.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let expected = vec![
+        (
+            "manage".to_string(),
+            Keybinding {
+                key: "t".to_string(),
+                code: 17,
+                modifiers: 9,
+                command: "manage".to_string(),
+            },
+        ),
+        (
+            "quit".to_string(),
+            Keybinding {
+                key: "q".to_string(),
+                code: 12,
+                modifiers: 9,
+                command: "quit".to_string(),
+            },
+        ),
+        (
+            "simple".to_string(),
+            Keybinding {
+                key: "s".to_string(),
+                code: 1,
+                modifiers: 1,
+                command: "simple".to_string(),
+            },
+        ),
+        (
+            "single".to_string(),
+            Keybinding {
+                key: "s".to_string(),
+                code: 1,
+                modifiers: 0,
+                command: "single".to_string(),
+            },
+        ),
+    ];
+
+    assert_eq!(format!("{:?}", bindings), format!("{:?}", expected));
 }

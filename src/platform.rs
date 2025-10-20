@@ -653,6 +653,9 @@ impl InputHandler {
     }
 
     fn handle_swipe(&mut self, event: &CGEvent) -> Result<bool> {
+        if !self.config.options().is_swipe_enabled() {
+            return Ok(false);
+        }
         const SWIPE_THRESHOLD: f64 = 0.01;
         let Some(ns_event) = NSEvent::eventWithCGEvent(event) else {
             return Err(Error::new(

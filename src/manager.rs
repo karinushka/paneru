@@ -38,6 +38,7 @@ pub struct WindowManager {
     pub skip_reshuffle: bool,
     displays: Vec<Display>,
     focus_follows_mouse: bool,
+    swipe_gesture_fingers: Option<usize>,
     orphaned_spaces: HashMap<u64, WindowPane>,
 }
 
@@ -65,6 +66,7 @@ impl WindowManager {
             skip_reshuffle: false,
             displays: Display::present_displays(main_cid),
             focus_follows_mouse: true,
+            swipe_gesture_fingers: None,
             orphaned_spaces: HashMap::new(),
         }
     }
@@ -90,10 +92,13 @@ impl WindowManager {
 
             Event::Swipe { deltas } => {
                 const SWIPE_THRESHOLD: f64 = 0.01;
-                if deltas.len() == 3 {
-                    let delta_x = deltas.into_iter().sum::<f64>();
-                    if delta_x.abs() > SWIPE_THRESHOLD {
-                        _ = self.slide_window(delta_x);
+                if self
+                    .swipe_gesture_fingers
+                    .is_some_and(|fingers| deltas.len() == fingers)
+                {
+                    let delta = deltas.into_iter().sum::<f64>();
+                    if delta.abs() > SWIPE_THRESHOLD {
+                        _ = self.slide_window(delta);
                     }
                 }
             }
@@ -137,7 +142,11 @@ impl WindowManager {
     /// * `config` - The new `Config` object to load.
     fn reload_config(&mut self, config: &Config) {
         debug!("{}: Got fresh config: {config:?}", function_name!());
-        self.focus_follows_mouse = config.options().focus_follows_mouse;
+        self.focus_follows_mouse = config
+            .options()
+            .focus_follows_mouse
+            .is_some_and(|focus| focus);
+        self.swipe_gesture_fingers = config.options().swipe_gesture_fingers;
     }
 
     fn find_orphaned_spaces(&mut self) {

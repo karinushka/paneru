@@ -79,8 +79,16 @@ starting point:
 # Example configuration for Paneru.
 #
 [options]
-# Enables focus follows mouse
+# Enables focus follows mouse. Set to false or remove the line to disable.
 focus_follows_mouse = true
+
+# How many fingers to use for moving windows left and right.
+# Make sure that it doesn't clash with OS setting for workspace switching.
+# Values lower than 3 will be ignored.
+# Remove the line to disable the gesture feature.
+# Apple touchpads support gestures with more than five fingers (!),
+# but it is probably not that useful to use two hands :)
+swipe_gesture_fingers = 4
 
 [bindings]
 # Moves the focus between windows.
@@ -203,4 +211,3 @@ Here are some other projects which implement a similar workflow:
 [hyprscroller]: https://github.com/dawsers/hyprscroller
 [hyprslidr]: https://gitlab.com/magus/hyprslidr
 [PaperWM.spoon]: https://github.com/mogenson/PaperWM.spoon
-[The future is Niri]: https://ersei.net/en/blog/niri

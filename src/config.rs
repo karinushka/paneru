@@ -167,7 +167,8 @@ impl InnerConfig {
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct MainOptions {
-    pub focus_follows_mouse: bool,
+    pub focus_follows_mouse: Option<bool>,
+    pub swipe_gesture_fingers: Option<usize>,
 }
 
 #[derive(Clone, Debug)]

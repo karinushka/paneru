@@ -1322,6 +1322,9 @@ impl notify::EventHandler for ConfigHandler {
                 .inspect_err(|err| {
                     error!("{}: error reloading config: {err}", function_name!());
                 });
+            _ = self.announce_fresh_config().inspect_err(|err| {
+                error!("{}: error announcing fresh config: {err}", function_name!());
+            });
         }
     }
 }

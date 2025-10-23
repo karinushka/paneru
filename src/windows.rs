@@ -4,6 +4,7 @@ use accessibility_sys::{
     kAXRoleAttribute, kAXSizeAttribute, kAXStandardWindowSubrole, kAXSubroleAttribute,
     kAXTitleAttribute, kAXUnknownSubrole, kAXValueTypeCGPoint, kAXValueTypeCGSize, kAXWindowRole,
 };
+use bevy::ecs::component::Component;
 use core::ptr::NonNull;
 use log::{debug, trace, warn};
 use objc2_core_foundation::{
@@ -24,9 +25,8 @@ use std::time::Duration;
 use stdext::function_name;
 use stdext::prelude::RwLockExt;
 
-use crate::app::Application;
 use crate::manager::WindowManager;
-use crate::platform::Pid;
+use crate::platform::{Pid, ProcessSerialNumber};
 use crate::skylight::{
     _AXUIElementGetWindow, _SLPSSetFrontProcessWithOptions, AXUIElementCopyAttributeValue,
     AXUIElementPerformAction, AXUIElementSetAttributeValue, CGDisplayCreateUUIDFromDisplayID,
@@ -324,8 +324,13 @@ impl WindowPane {
             })
             .collect()
     }
+
+    pub fn clear(&self) {
+        self.pane.force_write().clear();
+    }
 }
 
+#[derive(Component)]
 pub struct Display {
     pub id: CGDirectDisplayID,
     // Map of workspaces, containing panels of windows.
@@ -634,18 +639,19 @@ pub fn ax_window_pid(element_ref: &CFRetained<AxuWrapperType>) -> Result<Pid> {
     ))
 }
 
-#[derive(Clone)]
+#[derive(Clone, Component)]
 pub struct Window {
-    inner: Arc<RwLock<InnerWindow>>,
+    pub inner: Arc<RwLock<InnerWindow>>,
 }
 
 pub struct InnerWindow {
     pub id: WinID,
-    pub app: Application,
+    // pub app: Application,
+    pub psn: Option<ProcessSerialNumber>,
     ax_element: CFRetained<AxuWrapperType>,
     pub frame: CGRect,
-    minimized: bool,
-    is_root: bool,
+    pub minimized: bool,
+    pub is_root: bool,
     size_ratios: Vec<f64>,
     pub width_ratio: f64,
     pub managed: bool,
@@ -663,16 +669,13 @@ impl Window {
     /// # Returns
     ///
     /// `Ok(Window)` if the window is created successfully, otherwise `Err(Error)`.
-    pub fn new(
-        window_id: WinID,
-        app: &Application,
-        element_ref: CFRetained<AxuWrapperType>,
-    ) -> Result<Window> {
-        let window = Window {
+    pub fn new(element: &CFRetained<AxuWrapperType>) -> Result<Window> {
+        let id = ax_window_id(element.as_ptr())?;
+        Ok(Self {
             inner: Arc::new(RwLock::new(InnerWindow {
-                id: window_id,
-                app: app.clone(),
-                ax_element: element_ref,
+                id,
+                psn: None,
+                ax_element: element.clone(),
                 frame: CGRect::default(),
                 minimized: false,
                 is_root: false,
@@ -680,17 +683,7 @@ impl Window {
                 width_ratio: 0.33,
                 managed: true,
             })),
-        };
-
-        let minimized = window.is_minimized();
-        // window->is_root = !window_parent(window->id) || window_is_root(window);
-        let is_root = Window::parent(app.connection()?, window_id).is_err() || window.is_root();
-        {
-            let mut inner = window.inner.force_write();
-            inner.minimized = minimized;
-            inner.is_root = is_root;
-        }
-        Ok(window)
+        })
     }
 
     /// Returns the ID of the window.
@@ -702,14 +695,14 @@ impl Window {
         self.inner().id
     }
 
-    /// Returns a clone of the `Application` object that owns this window.
-    ///
-    /// # Returns
-    ///
-    /// A cloned `Application` object.
-    pub fn app(&self) -> Application {
-        self.inner().app.clone()
-    }
+    // /// Returns a clone of the `Application` object that owns this window.
+    // ///
+    // /// # Returns
+    // ///
+    // /// A cloned `Application` object.
+    // pub fn app(&self) -> Application {
+    //     self.inner().app.clone()
+    // }
 
     /// Returns the current frame (`CGRect`) of the window.
     ///
@@ -960,7 +953,23 @@ impl Window {
     /// # Returns
     ///
     /// `Ok(())` if the frame is updated successfully, otherwise `Err(Error)`.
-    pub fn update_frame(&self, display_bounds: &CGRect) -> Result<()> {
+    pub fn update_frame(&self, display_bounds: Option<&CGRect>) -> Result<()> {
+        // CGRect frame = {0};
+        // CFTypeRef position_ref = NULL;
+        // CFTypeRef size_ref = NULL;
+        //
+        // AXUIElementCopyAttributeValue(window->ref, kAXPositionAttribute, &position_ref);
+        // AXUIElementCopyAttributeValue(window->ref, kAXSizeAttribute, &size_ref);
+        //
+        // if (position_ref) {
+        //     AXValueGetValue(position_ref, kAXValueTypeCGPoint, &frame.origin);
+        //     CFRelease(position_ref);
+        // }
+        //
+        // if (size_ref) {
+        //     AXValueGetValue(size_ref, kAXValueTypeCGSize, &frame.size);
+        //     CFRelease(size_ref);
+        // }
         let window_ref = self.inner().ax_element.as_ptr();
 
         let position = unsafe {
@@ -998,14 +1007,17 @@ impl Window {
         if !CGRectEqualToRect(frame, self.inner().frame) {
             let mut inner = self.inner.force_write();
             inner.frame = frame;
-            inner.width_ratio = frame.size.width / display_bounds.size.width;
+            inner.width_ratio = if let Some(display_bounds) = display_bounds {
+                frame.size.width / display_bounds.size.width
+            } else {
+                0.5
+            };
         }
         Ok(())
     }
 
     /// Makes the window the key window for its application by sending synthesized events.
-    fn make_key_window(&self) {
-        let psn = self.app().psn().unwrap();
+    fn make_key_window(&self, psn: &ProcessSerialNumber) {
         let window_id = self.id();
         //
         // :SynthesizedEvent
@@ -1037,10 +1049,12 @@ impl Window {
     ///
     /// * `window_manager` - A reference to the `WindowManager` to access focused window information.
     pub fn focus_without_raise(&self, window_manager: &WindowManager) {
-        let psn = self.app().psn().unwrap();
+        let Some(ref psn) = self.inner.force_read().psn else {
+            return;
+        };
         let window_id = self.id();
         debug!("{}: {window_id}", function_name!());
-        if window_manager.focused_psn == psn && window_manager.focused_window.is_some() {
+        if &window_manager.focused_psn == psn && window_manager.focused_window.is_some() {
             let mut event_bytes = [0u8; 0xf8];
             event_bytes[0x04] = 0xf8;
             event_bytes[0x08] = 0x0d;
@@ -1066,17 +1080,19 @@ impl Window {
         unsafe {
             _SLPSSetFrontProcessWithOptions(&psn, window_id, Self::CPS_USER_GENERATED);
         }
-        self.make_key_window();
+        self.make_key_window(&psn);
     }
 
     /// Focuses the window and raises it to the front.
     pub fn focus_with_raise(&self) {
-        let psn = self.app().psn().unwrap();
+        let Some(psn) = self.inner().psn.clone() else {
+            return;
+        };
         let window_id = self.id();
         unsafe {
             _SLPSSetFrontProcessWithOptions(&psn, window_id, Self::CPS_USER_GENERATED);
         }
-        self.make_key_window();
+        self.make_key_window(&psn);
         let element_ref = self.inner().ax_element.as_ptr();
         let action = CFString::from_static_str(kAXRaiseAction);
         unsafe { AXUIElementPerformAction(element_ref, &action) };

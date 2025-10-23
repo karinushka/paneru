@@ -1,3 +1,4 @@
+use bevy::time::Timer;
 use log::{debug, warn};
 use objc2::rc::Retained;
 use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication};
@@ -5,17 +6,13 @@ use objc2_core_foundation::{CFRetained, CFString};
 use objc2_foundation::{
     NSKeyValueObservingOptions, NSObjectNSKeyValueObserverRegistration, NSString,
 };
-use std::io::{Error, ErrorKind, Result};
 use std::pin::Pin;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
 use stdext::function_name;
 
-use crate::app::{Application, InnerApplication};
-use crate::events::EventSender;
 use crate::platform::{Pid, ProcessSerialNumber, WorkspaceObserver};
-use crate::skylight::{ConnID, OSStatus};
+use crate::skylight::OSStatus;
 
 unsafe extern "C" {
     /// Get a copy of the name of a process.
@@ -72,15 +69,17 @@ unsafe extern "C" {
     fn GetProcessPID(psn: *const ProcessSerialNumber, pid: *mut Pid) -> OSStatus;
 }
 
+pub type ProcessRef = Pin<Box<Process>>;
+
 #[repr(C)]
 pub struct Process {
-    pub app: Option<Arc<RwLock<InnerApplication>>>,
     pub psn: ProcessSerialNumber,
     pub pid: Pid,
     pub name: String,
     pub terminated: bool,
     pub application: Option<Retained<NSRunningApplication>>,
     pub policy: NSApplicationActivationPolicy,
+    pub ready_timer: Timer,
 
     pub observer: Retained<WorkspaceObserver>,
     pub observing_launched: AtomicBool,
@@ -107,6 +106,7 @@ impl Process {
     ///
     /// A `Pin<Box<Self>>` containing the new `Process` instance.
     pub fn new(psn: &ProcessSerialNumber, observer: Retained<WorkspaceObserver>) -> Pin<Box<Self>> {
+        const READY_TIMEOUT_SEC: u8 = 3;
         let mut pid: Pid = 0;
         unsafe { GetProcessPID(psn, NonNull::from(&mut pid).as_ptr()) };
 
@@ -121,27 +121,16 @@ impl Process {
         let apps = NSRunningApplication::runningApplicationWithProcessIdentifier(pid);
 
         Box::pin(Process {
-            app: None,
             psn: psn.clone(),
             name,
             pid,
             terminated: false,
             application: apps,
             policy: NSApplicationActivationPolicy::Prohibited,
+            ready_timer: Timer::from_seconds(READY_TIMEOUT_SEC.into(), bevy::time::TimerMode::Once),
             observer,
             observing_launched: AtomicBool::new(false),
             observing_activated: AtomicBool::new(false),
-        })
-    }
-
-    /// Returns an `Application` wrapper for the inner application, if it exists.
-    ///
-    /// # Returns
-    ///
-    /// `Some(Application)` if the application is available, otherwise `None`.
-    pub fn get_app(&self) -> Option<Application> {
-        self.app.as_ref().map(|app| Application {
-            inner: Arc::downgrade(app),
         })
     }
 
@@ -303,24 +292,5 @@ impl Process {
             );
         }
         true
-    }
-
-    /// Creates an `Application` instance from this process.
-    ///
-    /// # Arguments
-    ///
-    /// * `cid` - The main connection ID.
-    /// * `events` - An `EventSender` to send events.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(Application)` if the application is created successfully, otherwise `Err(Error)`.
-    pub fn create_application(&mut self, cid: ConnID, events: EventSender) -> Result<Application> {
-        let app = Arc::new(RwLock::new(InnerApplication::new(cid, self, events)?));
-        self.app = Some(app);
-        self.get_app().ok_or(Error::new(
-            ErrorKind::NotFound,
-            format!("{}: unable to find added application.", function_name!(),),
-        ))
     }
 }

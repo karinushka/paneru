@@ -1,13 +1,17 @@
+use bevy::ecs::observer::On;
+use bevy::ecs::query::With;
+use bevy::ecs::system::{Query, Res};
 use log::{error, warn};
 use objc2_core_foundation::{CGPoint, CGRect};
 use std::io::Result;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use stdext::function_name;
 
+use crate::events::{
+    CommandTrigger, Event, FocusedMarker, MainConnection, SenderSocket, WindowManagerResource,
+};
 use crate::manager::WindowManager;
 use crate::skylight::{ConnID, WinID};
-use crate::windows::{Panel, Window, WindowPane};
+use crate::windows::{Display, Panel, Window, WindowPane};
 
 /// Retrieves a window ID in a specified direction relative to a `current_window_id` within a `WindowPane`.
 ///
@@ -77,16 +81,17 @@ fn get_window_in_direction(
 /// # Returns
 ///
 /// `Some(WinID)` with the ID of the newly focused window, otherwise `None`.
-fn command_move_focus(
+fn command_move_focus<F: Fn(WinID) -> Option<Window>>(
     window_manager: &WindowManager,
     argv: &[String],
     current_window: &Window,
     strip: &WindowPane,
+    find_window: &F,
 ) -> Option<WinID> {
     let direction = argv.first()?;
 
     get_window_in_direction(direction, current_window.id(), strip).inspect(|window_id| {
-        let window = window_manager.find_window(*window_id);
+        let window = find_window(*window_id);
         if let Some(window) = window {
             window.focus_with_raise();
         }
@@ -105,17 +110,17 @@ fn command_move_focus(
 /// # Returns
 ///
 /// `Some(Window)` with the window that was swapped with, otherwise `None`.
-fn command_swap_focus(
-    window_manager: &WindowManager,
+fn command_swap_focus<F: Fn(WinID) -> Option<Window>>(
     argv: &[String],
     current_window: &Window,
     panel: &WindowPane,
     display_bounds: &CGRect,
+    find_window: &F,
 ) -> Option<Window> {
     let direction = argv.first()?;
     let index = panel.index_of(current_window.id()).ok()?;
-    let window = get_window_in_direction(direction, current_window.id(), panel)
-        .and_then(|window_id| window_manager.find_window(window_id))?;
+    let window =
+        get_window_in_direction(direction, current_window.id(), panel).and_then(&find_window)?;
     let new_index = panel.index_of(window.id()).ok()?;
 
     let origin = if new_index == 0 {
@@ -132,7 +137,7 @@ fn command_swap_focus(
             .get(new_index)
             .ok()
             .and_then(|panel| panel.top())
-            .and_then(|window_id| window_manager.find_window(window_id))?
+            .and_then(&find_window)?
             .frame()
             .origin
     };
@@ -156,51 +161,58 @@ fn command_swap_focus(
 /// # Returns
 ///
 /// `Ok(())` if the command is processed successfully, otherwise `Err(Error)`.
-fn command_windows(
+fn command_windows<F: Fn(WinID) -> Option<Window>>(
     window_manager: &WindowManager,
     argv: &[String],
     main_cid: ConnID,
+    active_display: &Display,
+    find_window: &F,
 ) -> Result<()> {
     let empty = String::new();
     let Some(window) = window_manager
         .focused_window
-        .and_then(|window_id| window_manager.find_window(window_id))
+        .and_then(&find_window)
         .filter(Window::is_eligible)
     else {
         warn!("{}: No window focused.", function_name!());
         return Ok(());
     };
 
-    let active_display = window_manager.active_display()?;
     let active_panel = active_display.active_panel(main_cid)?;
-    let display_bounds = window_manager.current_display_bounds()?;
 
-    let window_id = window.id();
-    if window.managed() && active_panel.index_of(window_id).is_err() {
-        window_manager.reorient_focus()?;
-    }
+    // FIXME:
+    // let window_id = window.id();
+    // if window.managed() && active_panel.index_of(window_id).is_err() {
+    //     window_manager.reorient_focus()?;
+    // }
 
     match argv.first().unwrap_or(&empty).as_ref() {
         "focus" => {
-            command_move_focus(window_manager, &argv[1..], &window, &active_panel);
-        }
-
-        "swap" => {
-            command_swap_focus(
+            command_move_focus(
                 window_manager,
                 &argv[1..],
                 &window,
                 &active_panel,
-                &display_bounds,
+                find_window,
+            );
+        }
+
+        "swap" => {
+            command_swap_focus(
+                &argv[1..],
+                &window,
+                &active_panel,
+                &active_display.bounds,
+                &find_window,
             );
         }
 
         "center" => {
             let frame = window.frame();
             window.reposition(
-                (display_bounds.size.width - frame.size.width) / 2.0,
+                (active_display.bounds.size.width - frame.size.width) / 2.0,
                 frame.origin.y,
-                &display_bounds,
+                &active_display.bounds,
             );
             window.center_mouse(main_cid);
         }
@@ -208,9 +220,9 @@ fn command_windows(
         "resize" => {
             let width_ratio = window.next_size_ratio();
             window.resize(
-                width_ratio * display_bounds.size.width,
+                width_ratio * active_display.bounds.size.width,
                 window.frame().size.height,
-                &display_bounds,
+                &active_display.bounds,
             );
         }
 
@@ -222,11 +234,11 @@ fn command_windows(
             } else {
                 // Add newly managed window to the stack.
                 let frame = window.frame();
-                window.reposition(frame.origin.x, 0.0, &display_bounds);
+                window.reposition(frame.origin.x, 0.0, &active_display.bounds);
                 window.resize(
                     frame.size.width,
-                    display_bounds.size.height,
-                    &display_bounds,
+                    active_display.bounds.size.height,
+                    &active_display.bounds,
                 );
                 active_panel.append(window.id());
                 window.manage(true);
@@ -249,7 +261,7 @@ fn command_windows(
 
         _ => (),
     }
-    window_manager.reshuffle_around(&window)
+    window_manager.reshuffle_around(&window, active_display, find_window)
 }
 
 /// Dispatches a command based on the first argument (e.g., "window", "quit").
@@ -257,19 +269,39 @@ fn command_windows(
 /// # Arguments
 ///
 /// * `argv` - A vector of strings representing the command and its arguments.
-pub fn process_command(
-    window_manager: &WindowManager,
-    argv: &[String],
-    quit: &Arc<AtomicBool>,
-    main_cid: ConnID,
+#[allow(clippy::needless_pass_by_value)]
+pub fn process_command_trigger(
+    trigger: On<CommandTrigger>,
+    window_manager: Res<WindowManagerResource>,
+    sender: Res<SenderSocket>,
+    main_cid: Res<MainConnection>,
+    windows: Query<&Window>,
+    displays: Query<&Display, With<FocusedMarker>>,
 ) {
+    let Ok(active_display) = displays.single() else {
+        warn!("{}: Unable to get current display.", function_name!());
+        return;
+    };
+    let find_window = |window_id| {
+        windows
+            .iter()
+            .find(|window| window.id() == window_id)
+            .cloned()
+    };
+    let argv = &trigger.event().0;
     if let Some(first) = argv.first() {
         match first.as_ref() {
             "window" => {
-                _ = command_windows(window_manager, &argv[1..], main_cid)
-                    .inspect_err(|err| warn!("{}: {err}", function_name!()));
+                _ = command_windows(
+                    &window_manager.0,
+                    &argv[1..],
+                    main_cid.0,
+                    active_display,
+                    &find_window,
+                )
+                .inspect_err(|err| warn!("{}: {err}", function_name!()));
             }
-            "quit" => quit.store(true, std::sync::atomic::Ordering::Relaxed),
+            "quit" => sender.0.send(Event::Exit).unwrap(),
             _ => warn!("{}: Unhandled command: {argv:?}", function_name!()),
         }
     }

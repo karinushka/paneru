@@ -1,9 +1,17 @@
-use bevy::app::{App as BevyApp, AppExit};
-use bevy::ecs::observer::On;
+use bevy::app::{App as BevyApp, AppExit, Startup, Update};
+use bevy::ecs::component::Component;
+use bevy::ecs::entity::Entity;
+use bevy::ecs::hierarchy::Children;
+use bevy::ecs::message::{Message, MessageReader, Messages};
+use bevy::ecs::query::With;
 use bevy::ecs::resource::Resource;
-use bevy::ecs::system::ResMut;
+use bevy::ecs::schedule::IntoScheduleConfigs;
+use bevy::ecs::schedule::common_conditions::any_with_component;
+use bevy::ecs::system::{Commands, Query, Res};
+use bevy::ecs::world::World;
 use bevy::prelude::Event as BevyEvent;
-use log::{debug, error, info, trace};
+use bevy::time::{Time, Virtual};
+use log::{debug, error, info, trace, warn};
 use objc2::rc::Retained;
 use objc2_core_foundation::{CFRetained, CGPoint};
 use objc2_core_graphics::CGDirectDisplayID;
@@ -16,15 +24,18 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use stdext::function_name;
 
-use crate::commands::process_command;
+use crate::app::Application;
+use crate::commands::process_command_trigger;
 use crate::config::Config;
 use crate::manager::WindowManager;
 use crate::platform::{ProcessSerialNumber, WorkspaceObserver};
+use crate::process::{Process, ProcessRef};
 use crate::skylight::{ConnID, SLSMainConnectionID, WinID};
 use crate::util::AxuWrapperType;
+use crate::windows::{Display, Window};
 
 #[allow(dead_code)]
-#[derive(BevyEvent, Clone, Debug)]
+#[derive(Clone, Debug, Message)]
 pub enum Event {
     Exit,
     ProcessesLoaded,
@@ -76,6 +87,8 @@ pub enum Event {
     WindowTitleChanged {
         window_id: WinID,
     },
+
+    CurrentlyFocused,
 
     MouseDown {
         point: CGPoint,
@@ -153,28 +166,11 @@ pub struct EventSender {
 }
 
 impl EventSender {
-    /// Creates a new `EventSender` instance.
-    ///
-    /// # Arguments
-    ///
-    /// * `tx` - The sending half of an MPSC channel.
-    ///
-    /// # Returns
-    ///
-    /// A new `EventSender`.
-    fn new(tx: Sender<Event>) -> Self {
-        Self { tx }
+    fn new() -> (Self, Receiver<Event>) {
+        let (tx, rx) = channel::<Event>();
+        (Self { tx }, rx)
     }
 
-    /// Sends an `Event` through the internal MPSC channel.
-    ///
-    /// # Arguments
-    ///
-    /// * `event` - The `Event` to send.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` if the event is sent successfully, otherwise `Err(Error)`.
     pub fn send(&self, event: Event) -> Result<()> {
         self.tx
             .send(event)
@@ -188,18 +184,53 @@ impl EventSender {
     }
 }
 
+#[derive(Component)]
+pub struct InitializingMarker;
+
+#[derive(Component)]
+pub struct FocusedMarker;
+
+#[derive(Component)]
+pub struct FrontSwitchedMarker;
+
+#[derive(Component)]
+pub struct FreshMarker;
+
+#[derive(Component)]
+pub struct ExistingMarker;
+
+#[derive(Component)]
+pub struct BProcess(pub ProcessRef);
+
 #[derive(Resource)]
-pub struct EventHandler {
-    quit: Arc<AtomicBool>,
-    main_cid: ConnID,
-    window_manager: WindowManager,
-    initial_scan: bool,
-}
+pub struct MainConnection(pub ConnID);
+
+#[derive(Resource)]
+pub struct SenderSocket(pub EventSender);
+
+#[derive(Resource)]
+pub struct WindowManagerResource(pub WindowManager);
+
+#[derive(BevyEvent)]
+pub struct CommandTrigger(pub Vec<String>);
+
+#[derive(BevyEvent)]
+pub struct ApplicationTrigger(pub Event);
+
+#[derive(BevyEvent)]
+pub struct MouseTrigger(pub Event);
+
+#[derive(BevyEvent)]
+pub struct DisplayChangeTrigger(pub Event);
+
+#[derive(BevyEvent)]
+pub struct DisplayAddRemoveTrigger;
+
+pub struct EventHandler;
 
 impl EventHandler {
     pub fn run() -> (EventSender, Arc<AtomicBool>, JoinHandle<()>) {
-        let (tx, rx) = channel::<Event>();
-        let sender = EventSender::new(tx);
+        let (sender, receiver) = EventSender::new();
         let quit = Arc::new(AtomicBool::new(false));
 
         (
@@ -208,58 +239,79 @@ impl EventHandler {
             thread::spawn(move || {
                 let main_cid = unsafe { SLSMainConnectionID() };
                 debug!("{}: My connection id: {main_cid}", function_name!());
-                let state = EventHandler {
-                    quit: quit.clone(),
-                    main_cid,
-                    window_manager: WindowManager::new(sender, main_cid),
-                    initial_scan: true,
+
+                let mut existing_processes =
+                    EventHandler::gather_initial_processes(&receiver, &sender);
+                let process_setup = move |world: &mut World| {
+                    EventHandler::initial_setup(world, &mut existing_processes);
                 };
 
                 BevyApp::new()
-                    .set_runner(move |app| EventHandler::custom_loop(app, &rx, &quit))
-                    .add_observer(EventHandler::process_event_observer)
-                    .insert_resource(state)
+                    .set_runner(move |app| EventHandler::custom_loop(app, &receiver, &quit))
+                    .insert_resource(Time::<Virtual>::from_max_delta(Duration::from_secs(10)))
+                    .init_resource::<Messages<Event>>()
+                    .insert_resource(MainConnection(main_cid))
+                    .insert_resource(WindowManagerResource(WindowManager::new(main_cid)))
+                    .insert_resource(SenderSocket(sender))
+                    .add_observer(process_command_trigger)
+                    .add_observer(WindowManager::application_trigger)
+                    .add_observer(WindowManager::mouse_trigger)
+                    .add_observer(WindowManager::display_change_trigger)
+                    .add_observer(WindowManager::display_add_remove_trigger)
+                    .add_systems(Startup, EventHandler::gather_displays)
+                    .add_systems(Startup, process_setup.after(EventHandler::gather_displays))
+                    .add_systems(
+                        Update,
+                        (
+                            EventHandler::dispatch_main_messages,
+                            WindowManager::add_existing_process
+                                .run_if(any_with_component::<InitializingMarker>),
+                            WindowManager::add_existing_application
+                                .run_if(any_with_component::<InitializingMarker>),
+                            EventHandler::finish_setup
+                                .run_if(any_with_component::<InitializingMarker>),
+                            WindowManager::add_launched_process,
+                            WindowManager::add_launched_application,
+                            WindowManager::window_create,
+                            WindowManager::front_switched,
+                            WindowManager::window_focused,
+                        ),
+                    )
                     .run();
             }),
         )
     }
 
     fn custom_loop(mut app: BevyApp, rx: &Receiver<Event>, quit: &Arc<AtomicBool>) -> AppExit {
+        const LOOP_MAX_TIMEOUT_MS: u64 = 5000;
+        const LOOP_TIMEOUT_STEP: u64 = 5;
         app.finish();
         app.cleanup();
 
+        let mut timeout = LOOP_TIMEOUT_STEP;
         loop {
-            match rx.recv_timeout(Duration::from_millis(500)) {
+            match rx.recv_timeout(Duration::from_millis(timeout)) {
                 Ok(Event::Exit) => {
                     quit.store(true, std::sync::atomic::Ordering::Relaxed);
                     break;
                 }
                 Ok(event) => {
-                    trace!("{}: Event {event:?}", function_name!());
-                    app.world_mut().trigger(event);
+                    app.world_mut().write_message::<Event>(event);
+                    timeout = LOOP_TIMEOUT_STEP;
                 }
-                Err(RecvTimeoutError::Timeout) => (),
+                Err(RecvTimeoutError::Timeout) => {
+                    timeout = timeout.min(LOOP_MAX_TIMEOUT_MS) + LOOP_TIMEOUT_STEP;
+                }
                 _ => break,
             }
 
             app.update();
             if let Some(exit) = app.should_exit() {
+                quit.store(true, std::sync::atomic::Ordering::Relaxed);
                 return exit;
             }
         }
         AppExit::Success
-    }
-
-    #[allow(clippy::needless_pass_by_value)]
-    fn process_event_observer(trigger: On<Event>, mut event_handler: ResMut<EventHandler>) {
-        let event = trigger.event().clone();
-        match event_handler.process_event(&event) {
-            // TODO: for now we'll treat the Other return values as non-error ones.
-            // This can be adjusted later with a custom error space.
-            Err(ref err) if err.kind() == ErrorKind::Other => trace!("{err}"),
-            Err(err) => error!("{} {err}", function_name!()),
-            _ => (),
-        }
     }
 
     /// Processes a single incoming `Event`. It dispatches various event types to the `WindowManager` or other internal handlers.
@@ -271,73 +323,189 @@ impl EventHandler {
     /// # Returns
     ///
     /// `Ok(())` if the event is processed successfully, otherwise `Err(Error)`.
-    fn process_event(&mut self, event: &Event) -> Result<()> {
-        match event {
-            Event::ProcessesLoaded => {
-                info!(
-                    "{}: === Processes loaded - loading windows ===",
-                    function_name!()
-                );
-                self.initial_scan = false;
-                self.window_manager.refresh_displays()?;
-                return self.window_manager.set_focused_window();
-            }
+    #[allow(clippy::needless_pass_by_value)]
+    fn dispatch_main_messages(mut messages: MessageReader<Event>, mut commands: Commands) {
+        for event in messages.read() {
+            match event {
+                Event::Command { argv } => commands.trigger(CommandTrigger(argv.clone())),
 
-            Event::ApplicationLaunched { psn, observer } => {
-                if self.initial_scan {
-                    self.window_manager
-                        .add_existing_process(psn, observer.clone());
-                } else {
-                    debug!("{}: ApplicationLaunched: {psn:?}", function_name!(),);
-                    return self
-                        .window_manager
-                        .application_launched(psn, observer.clone());
+                Event::MouseDown { point: _ }
+                | Event::MouseUp { point: _ }
+                | Event::MouseMoved { point: _ }
+                | Event::MouseDragged { point: _ } => {
+                    commands.trigger(MouseTrigger(event.clone()));
+                }
+
+                Event::DisplayChanged | Event::SpaceChanged => {
+                    commands.trigger(DisplayChangeTrigger(event.clone()));
+                }
+                Event::DisplayAdded { display_id: _ } | Event::DisplayRemoved { display_id: _ } => {
+                    commands.trigger(DisplayAddRemoveTrigger);
+                }
+
+                // Event::ProcessesLoaded => {
+                //     info!("{}: === Existing windows loaded ===", function_name!());
+                //
+                //     // Signal that everything is ready.
+                //     commands.write_message::<Event>(Event::ProcessesLoaded);
+                //     commands.write_message::<Event>(Event::CurrentlyFocused);
+                //     // self.initial_scan = false;
+                //     // window_manager.refresh_displays()?;
+                //     // return window_manager.set_focused_window();
+                // }
+
+                // Event::ApplicationLaunched { psn, observer } => {
+                //     if self.initial_scan {
+                //         window_manager.add_existing_process(psn, observer.clone());
+                //     } else {
+                //         debug!("{}: ApplicationLaunched: {psn:?}", function_name!(),);
+                //         return window_manager.application_launched(psn, observer.clone());
+                //     }
+                // }
+                Event::WindowTitleChanged { window_id } => {
+                    trace!("{}: WindowTitleChanged: {window_id:?}", function_name!());
+                }
+
+                Event::MenuClosed { window_id } => {
+                    trace!("{}: MenuClosed event: {window_id:?}", function_name!());
+                }
+
+                Event::DisplayMoved { display_id } => {
+                    debug!("{}: Display Moved: {display_id:?}", function_name!());
+                }
+                Event::DisplayResized { display_id } => {
+                    debug!("{}: Display Resized: {display_id:?}", function_name!());
+                }
+                Event::DisplayConfigured { display_id } => {
+                    debug!("{}: Display Configured: {display_id:?}", function_name!());
+                }
+                Event::SystemWoke { msg } => {
+                    debug!("{}: system woke: {msg:?}", function_name!());
+                }
+
+                _ => commands.trigger(ApplicationTrigger(event.clone())),
+                // _ => match EventHandler::process_event(event, &mut window_manager.0) {
+                //     // TODO: for now we'll treat the Other return values as non-error ones.
+                //     // This can be adjusted later with a custom error space.
+                //     Err(ref err) if err.kind() == ErrorKind::Other => trace!("{err}"),
+                //     Err(err) => error!("{} {err}", function_name!()),
+                //     _ => (),
+                // },
+            }
+        }
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn gather_displays(cid: Res<MainConnection>, mut commands: Commands) {
+        let Ok(active_display) = Display::active_display_id(cid.0) else {
+            error!("{}: Unable to get active display id!", function_name!());
+            return;
+        };
+        for display in Display::present_displays(cid.0) {
+            if display.id == active_display {
+                commands.spawn((display, FocusedMarker));
+            } else {
+                commands.spawn(display);
+            }
+        }
+    }
+
+    fn gather_initial_processes(
+        receiver: &Receiver<Event>,
+        sender: &EventSender,
+    ) -> Vec<ProcessRef> {
+        let mut out = Vec::new();
+        let mut initial_config = None;
+        loop {
+            match receiver.recv() {
+                Ok(Event::ProcessesLoaded | Event::Exit) => break,
+                Ok(Event::ApplicationLaunched { psn, observer }) => {
+                    out.push(Process::new(&psn, observer.clone()));
+                }
+                Ok(Event::ConfigRefresh { config }) => {
+                    initial_config = Some(config);
+                }
+                Ok(event) => warn!(
+                    "{}: Stray event during initial process gathering: {event:?}",
+                    function_name!()
+                ),
+                Err(err) => {
+                    warn!(
+                        "{}: Error reading initial processes: {err}",
+                        function_name!()
+                    );
+                    break;
                 }
             }
-            Event::WindowTitleChanged { window_id } => {
-                trace!("{}: WindowTitleChanged: {window_id:?}", function_name!());
-            }
-
-            Event::Command { argv } => {
-                process_command(&self.window_manager, argv, &self.quit, self.main_cid);
-            }
-
-            Event::MenuClosed { window_id } => {
-                trace!("{}: MenuClosed event: {window_id:?}", function_name!());
-            }
-
-            Event::DisplayAdded { display_id } => {
-                debug!("{}: Display Added: {display_id:?}", function_name!());
-                self.window_manager.display_add(*display_id);
-            }
-            Event::DisplayRemoved { display_id } => {
-                debug!("{}: Display Removed: {display_id:?}", function_name!());
-                self.window_manager.display_remove(*display_id);
-            }
-            Event::DisplayMoved { display_id } => {
-                debug!("{}: Display Moved: {display_id:?}", function_name!());
-            }
-            Event::DisplayResized { display_id } => {
-                debug!("{}: Display Resized: {display_id:?}", function_name!());
-            }
-            Event::DisplayConfigured { display_id } => {
-                debug!("{}: Display Configured: {display_id:?}", function_name!());
-            }
-            Event::DisplayChanged => {
-                debug!("{}: Display Changed", function_name!());
-                _ = self.window_manager.reorient_focus();
-            }
-
-            Event::SpaceChanged => {
-                debug!("{}: Space Changed", function_name!());
-                _ = self.window_manager.reorient_focus();
-            }
-            Event::SystemWoke { msg } => {
-                debug!("{}: system woke: {msg:?}", function_name!());
-            }
-
-            _ => self.window_manager.process_event(event)?,
         }
-        Ok(())
+
+        if let Some(config) = initial_config {
+            sender.send(Event::ConfigRefresh { config });
+        }
+        out
+    }
+
+    fn initial_setup(world: &mut World, existing_processes: &mut Vec<ProcessRef>) {
+        loop {
+            let Some(mut process) = existing_processes.pop() else {
+                break;
+            };
+            if !process.is_observable() {
+                debug!(
+                    "{}: Existing application {} is not observable, ignoring it.",
+                    function_name!(),
+                    process.name,
+                );
+                continue;
+            }
+            debug!(
+                "{}: Adding existing process {}",
+                function_name!(),
+                process.name
+            );
+            world.spawn((ExistingMarker, BProcess(process)));
+        }
+        world.spawn(InitializingMarker);
+    }
+
+    fn finish_setup(
+        windows: Query<&Window>,
+        fresh_windows: Query<&Window, With<FreshMarker>>,
+        initializing: Query<(Entity, &InitializingMarker)>,
+        displays: Query<&mut Display>,
+        main_cid: Res<MainConnection>,
+        mut commands: Commands,
+    ) {
+        if windows.iter().len() > 0
+            && fresh_windows.iter().len() < 1
+            && let Ok((entity, _)) = initializing.single()
+        {
+            commands.entity(entity).despawn();
+            info!(
+                "{}: Finished Initialization: found {} windows.",
+                function_name!(),
+                windows.iter().len()
+            );
+            let find_window = |window_id| {
+                windows
+                    .iter()
+                    .find(|window| window.id() == window_id)
+                    .cloned()
+            };
+            let mut displays = displays.iter().collect::<Vec<_>>();
+            WindowManager::refresh_displays(main_cid.0, &mut displays, &find_window);
+            commands.write_message(Event::CurrentlyFocused);
+        }
+    }
+
+    fn print_windows(apps: Query<(&Application, &Children)>, windows: Query<&Window>) {
+        for (app, children) in apps {
+            println!("Application {}:", app.name().unwrap());
+            let windows = children.iter().flat_map(|entity| windows.get(*entity));
+            for window in windows {
+                println!("\tWindow: {}", window.title().unwrap_or_default());
+            }
+        }
+        println!("done");
     }
 }

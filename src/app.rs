@@ -6,6 +6,8 @@ use accessibility_sys::{
     kAXWindowDeminiaturizedNotification, kAXWindowMiniaturizedNotification,
     kAXWindowMovedNotification, kAXWindowResizedNotification, kAXWindowsAttribute,
 };
+use bevy::ecs::component::Component;
+use bevy::ecs::entity::Entity;
 use core::ptr::NonNull;
 use log::{debug, error};
 use objc2_core_foundation::{CFArray, CFRetained, CFString, kCFRunLoopCommonModes};
@@ -15,7 +17,7 @@ use std::io::{Error, ErrorKind, Result};
 use std::ops::Deref;
 use std::pin::Pin;
 use std::ptr::null_mut;
-use std::sync::{LazyLock, RwLock, Weak};
+use std::sync::{Arc, LazyLock, RwLock};
 use stdext::function_name;
 use stdext::prelude::RwLockExt;
 
@@ -49,12 +51,13 @@ pub static AX_WINDOW_NOTIFICATIONS: LazyLock<Vec<&str>> = LazyLock::new(|| {
     ]
 });
 
-#[derive(Clone)]
+#[derive(Clone, Component)]
 pub struct Application {
-    pub inner: Weak<RwLock<InnerApplication>>,
+    pub inner: Arc<RwLock<InnerApplication>>,
 }
 
 pub struct InnerApplication {
+    entity: Option<Entity>,
     element: CFRetained<AxuWrapperType>,
     psn: ProcessSerialNumber,
     pid: Pid,
@@ -85,12 +88,13 @@ impl InnerApplication {
     /// # Returns
     ///
     /// `Ok(Self)` if the `InnerApplication` is created successfully, otherwise `Err(Error)`.
-    pub fn new(main_cid: ConnID, process: &Process, events: EventSender) -> Result<Self> {
+    pub fn new(main_cid: ConnID, process: &Process, events: &EventSender) -> Result<Self> {
         let refer = unsafe {
             let ptr = AXUIElementCreateApplication(process.pid);
             AxuWrapperType::retain(ptr)?
         };
         Ok(InnerApplication {
+            entity: None,
             element: refer,
             psn: process.psn.clone(),
             pid: process.pid,
@@ -102,13 +106,21 @@ impl InnerApplication {
                     Some(connection)
                 }
             },
-            handler: AxObserverHandler::new(process.pid, events)?,
+            handler: AxObserverHandler::new(process.pid, events.clone())?,
             windows: HashMap::new(),
         })
     }
 }
 
 impl Application {
+    pub fn new(main_cid: ConnID, process: &Process, events: &EventSender) -> Result<Self> {
+        Ok(Self {
+            inner: Arc::new(RwLock::new(InnerApplication::new(
+                main_cid, process, events,
+            )?)),
+        })
+    }
+
     /// Creates an `Error` indicating that the application has shut down, used for weak reference failures.
     ///
     /// # Arguments
@@ -125,16 +137,17 @@ impl Application {
         )
     }
 
+    pub fn entity(&self) -> Option<Entity> {
+        self.inner.force_read().entity
+    }
+
     /// Retrieves the name of the application.
     ///
     /// # Returns
     ///
     /// `Ok(String)` with the application name if successful, otherwise `Err(Error)` if the application has shut down.
     pub fn name(&self) -> Result<String> {
-        self.inner
-            .upgrade()
-            .map(|inner| inner.force_read().name.clone())
-            .ok_or(Application::weak_error(function_name!()))
+        Ok(self.inner.force_read().name.clone())
     }
 
     /// Retrieves the process ID (Pid) of the application.
@@ -143,10 +156,7 @@ impl Application {
     ///
     /// `Ok(Pid)` with the process ID if successful, otherwise `Err(Error)` if the application has shut down.
     pub fn pid(&self) -> Result<Pid> {
-        self.inner
-            .upgrade()
-            .map(|inner| inner.force_read().pid)
-            .ok_or(Application::weak_error(function_name!()))
+        Ok(self.inner.force_read().pid)
     }
 
     /// Retrieves the `ProcessSerialNumber` of the application.
@@ -155,10 +165,7 @@ impl Application {
     ///
     /// `Ok(ProcessSerialNumber)` with the PSN if successful, otherwise `Err(Error)` if the application has shut down.
     pub fn psn(&self) -> Result<ProcessSerialNumber> {
-        self.inner
-            .upgrade()
-            .map(|inner| inner.force_read().psn.clone())
-            .ok_or(Application::weak_error(function_name!()))
+        Ok(self.inner.force_read().psn.clone())
     }
 
     /// Retrieves the connection ID (`ConnID`) of the application.
@@ -166,11 +173,8 @@ impl Application {
     /// # Returns
     ///
     /// `Ok(ConnID)` with the connection ID if successful, otherwise `Err(Error)` if the application has shut down.
-    pub fn connection(&self) -> Result<ConnID> {
-        self.inner
-            .upgrade()
-            .and_then(|inner| inner.force_read().connection)
-            .ok_or(Application::weak_error(function_name!()))
+    pub fn connection(&self) -> Option<ConnID> {
+        self.inner.force_read().connection
     }
 
     /// Retrieves the `CFRetained<AxuWrapperType>` representing the Accessibility UI element of the application.
@@ -179,10 +183,7 @@ impl Application {
     ///
     /// `Ok(CFRetained<AxuWrapperType>)` if successful, otherwise `Err(Error)` if the application has shut down.
     pub fn element(&self) -> Result<CFRetained<AxuWrapperType>> {
-        self.inner
-            .upgrade()
-            .map(|inner| inner.force_read().element.clone())
-            .ok_or(Application::weak_error(function_name!()))
+        Ok(self.inner.force_read().element.clone())
     }
 
     /// Finds a `Window` associated with this application by its window ID.
@@ -195,9 +196,7 @@ impl Application {
     ///
     /// `Some(Window)` if the window is found, otherwise `None`.
     pub fn find_window(&self, window_id: WinID) -> Option<Window> {
-        self.inner
-            .upgrade()
-            .and_then(|inner| inner.force_read().windows.get(&window_id).cloned())
+        self.inner.force_read().windows.get(&window_id).cloned()
     }
 
     /// Removes a window from the application's internal map of windows.
@@ -210,9 +209,7 @@ impl Application {
     ///
     /// `Some(Window)` if the window was removed, otherwise `None`.
     pub fn remove_window(&self, window_id: WinID) -> Option<Window> {
-        self.inner
-            .upgrade()
-            .and_then(|inner| inner.force_write().windows.remove(&window_id))
+        self.inner.force_write().windows.remove(&window_id)
     }
 
     /// Adds a window to the application's internal map of windows.
@@ -221,17 +218,10 @@ impl Application {
     ///
     /// * `window` - A reference to the `Window` to add.
     pub fn add_window(&self, window: &Window) {
-        if let Some(inner) = self.inner.upgrade() {
-            inner
-                .force_write()
-                .windows
-                .insert(window.id(), window.clone());
-        } else {
-            error!(
-                "{}: adding window to non-existing application.",
-                function_name!()
-            );
-        }
+        self.inner
+            .force_write()
+            .windows
+            .insert(window.id(), window.clone());
     }
 
     /// Iterates over each window managed by this application, applying an accessor function.
@@ -240,9 +230,7 @@ impl Application {
     ///
     /// * `accessor` - A closure that takes a reference to a `Window`.
     pub fn foreach_window(&self, accessor: impl FnMut(&Window)) {
-        if let Some(inner) = self.inner.upgrade() {
-            inner.force_read().windows.values().for_each(accessor);
-        }
+        self.inner.force_read().windows.values().for_each(accessor);
     }
 
     /// Retrieves the main window ID of the application.
@@ -294,16 +282,8 @@ impl Application {
     ///
     /// `Ok(bool)` where `true` means all observers were successfully registered and `retry` list is empty, otherwise `Err(Error)`.
     pub fn observe(&self) -> Result<bool> {
-        let error = || {
-            Error::new(
-                ErrorKind::NotFound,
-                format!("{}: application not found", function_name!(),),
-            )
-        };
         let element = self.element()?;
         self.inner
-            .upgrade()
-            .ok_or(error())?
             .force_write()
             .handler
             .add_observer(&element, &AX_NOTIFICATIONS, ObserverType::Application)
@@ -322,11 +302,6 @@ impl Application {
     /// `Ok(bool)` where `true` means all observers were successfully registered and `retry` list is empty, otherwise `Err(Error)`.
     pub fn observe_window(&self, window: &Window) -> Result<bool> {
         self.inner
-            .upgrade()
-            .ok_or(Error::new(
-                ErrorKind::NotFound,
-                format!("{}: applicaton not found!", function_name!()),
-            ))?
             .force_write()
             .handler
             .add_observer(
@@ -343,13 +318,11 @@ impl Application {
     ///
     /// * `element` - The `AXUIElementRef` of the window to unobserve.
     pub fn unobserve_window(&self, window: &Window) {
-        if let Some(inner) = self.inner.upgrade() {
-            inner.force_write().handler.remove_observer(
-                &ObserverType::Window(window.id()),
-                window.element().deref(),
-                &AX_WINDOW_NOTIFICATIONS,
-            );
-        }
+        self.inner.force_write().handler.remove_observer(
+            &ObserverType::Window(window.id()),
+            window.element().deref(),
+            &AX_WINDOW_NOTIFICATIONS,
+        );
     }
 
     /// Checks if the application is currently the frontmost application.

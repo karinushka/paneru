@@ -222,14 +222,12 @@ fn launch() -> Result<()> {
         ));
     }
 
-    let event_handler = EventHandler::new();
+    let (sender, quit, handle) = EventHandler::run();
 
-    CommandReader::new(event_handler.sender()).start();
+    CommandReader::new(sender.clone()).start();
 
-    let mut platform_callbacks = PlatformCallbacks::new(event_handler.sender())?;
+    let mut platform_callbacks = PlatformCallbacks::new(sender)?;
     platform_callbacks.setup_handlers()?;
-
-    let (quit, handle) = event_handler.start();
 
     platform_callbacks.run(&quit);
 

@@ -1,3 +1,8 @@
+use bevy::app::{App as BevyApp, AppExit};
+use bevy::ecs::observer::On;
+use bevy::ecs::resource::Resource;
+use bevy::ecs::system::ResMut;
+use bevy::prelude::Event as BevyEvent;
 use log::{debug, error, info, trace};
 use objc2::rc::Retained;
 use objc2_core_foundation::{CFRetained, CGPoint};
@@ -5,9 +10,10 @@ use objc2_core_graphics::CGDirectDisplayID;
 use std::io::{Error, ErrorKind, Result};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::thread;
 use std::thread::JoinHandle;
+use std::time::Duration;
 use stdext::function_name;
 
 use crate::commands::process_command;
@@ -18,7 +24,7 @@ use crate::skylight::{ConnID, SLSMainConnectionID, WinID};
 use crate::util::AxuWrapperType;
 
 #[allow(dead_code)]
-#[derive(Debug)]
+#[derive(BevyEvent, Clone, Debug)]
 pub enum Event {
     Exit,
     ProcessesLoaded,
@@ -182,81 +188,77 @@ impl EventSender {
     }
 }
 
+#[derive(Resource)]
 pub struct EventHandler {
     quit: Arc<AtomicBool>,
-    tx: EventSender,
-    rx: Receiver<Event>,
     main_cid: ConnID,
     window_manager: WindowManager,
     initial_scan: bool,
 }
 
 impl EventHandler {
-    /// Creates a new `EventHandler` instance. It initializes the main connection ID and `WindowManager`.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(Self)` if the `EventHandler` is created successfully, otherwise `Err(Error)`.
-    pub fn new() -> Self {
-        let main_cid = unsafe { SLSMainConnectionID() };
-        debug!("{}: My connection id: {main_cid}", function_name!());
-
+    pub fn run() -> (EventSender, Arc<AtomicBool>, JoinHandle<()>) {
         let (tx, rx) = channel::<Event>();
         let sender = EventSender::new(tx);
-        EventHandler {
-            quit: AtomicBool::new(false).into(),
-            tx: sender.clone(),
-            rx,
-            main_cid,
-            window_manager: WindowManager::new(sender, main_cid),
-            initial_scan: true,
-        }
+        let quit = Arc::new(AtomicBool::new(false));
+
+        (
+            sender.clone(),
+            quit.clone(),
+            thread::spawn(move || {
+                let main_cid = unsafe { SLSMainConnectionID() };
+                debug!("{}: My connection id: {main_cid}", function_name!());
+                let state = EventHandler {
+                    quit: quit.clone(),
+                    main_cid,
+                    window_manager: WindowManager::new(sender, main_cid),
+                    initial_scan: true,
+                };
+
+                BevyApp::new()
+                    .set_runner(move |app| EventHandler::custom_loop(app, &rx, &quit))
+                    .add_observer(EventHandler::process_event_observer)
+                    .insert_resource(state)
+                    .run();
+            }),
+        )
     }
 
-    /// Returns a clone of the `EventSender` for sending events to this handler.
-    ///
-    /// # Returns
-    ///
-    /// A cloned `EventSender`.
-    pub fn sender(&self) -> EventSender {
-        self.tx.clone()
-    }
+    fn custom_loop(mut app: BevyApp, rx: &Receiver<Event>, quit: &Arc<AtomicBool>) -> AppExit {
+        app.finish();
+        app.cleanup();
 
-    /// Starts the event handler in a new thread.
-    ///
-    /// # Returns
-    ///
-    /// A tuple containing:
-    /// * An `Arc<AtomicBool>` used to signal the handler to quit.
-    /// * A `JoinHandle` for the spawned thread.
-    pub fn start(mut self) -> (Arc<AtomicBool>, JoinHandle<()>) {
-        let quit = self.quit.clone();
-        let handle = thread::spawn(move || {
-            self.run();
-        });
-        (quit, handle)
-    }
-
-    /// The main run loop for the event handler. It continuously receives and processes events until an `Exit` event or channel disconnection.
-    fn run(&mut self) {
         loop {
-            let Ok(event) = self.rx.recv() else {
-                break;
-            };
-            trace!("{}: Event {event:?}", function_name!());
-
-            if matches!(event, Event::Exit) {
-                break;
+            match rx.recv_timeout(Duration::from_millis(500)) {
+                Ok(Event::Exit) => {
+                    quit.store(true, std::sync::atomic::Ordering::Relaxed);
+                    break;
+                }
+                Ok(event) => {
+                    trace!("{}: Event {event:?}", function_name!());
+                    app.world_mut().trigger(event);
+                }
+                Err(RecvTimeoutError::Timeout) => (),
+                _ => break,
             }
 
-            _ = self
-                .process_event(&event)
-                .inspect_err(|err| match err.kind() {
-                    // TODO: for now we'll treat the Other return values as non-error ones.
-                    // This can be adjusted later with a custom error space.
-                    ErrorKind::Other => trace!("{err}"),
-                    kind => error!("ApplicationLaunched: {kind} {err}"),
-                });
+            app.update();
+            if let Some(exit) = app.should_exit() {
+                return exit;
+            }
+        }
+        AppExit::Success
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn process_event_observer(trigger: On<Event>, mut event_handler: ResMut<EventHandler>) {
+        let event = trigger.event().clone();
+        match event_handler.process_event(&event) {
+            // TODO: for now we'll treat the Other return values as non-error ones.
+            // This can be adjusted later with a custom error space.
+            Err(ref err) if err.kind() == ErrorKind::Other => trace!("{err}"),
+            Err(err) => error!("{} {err}", function_name!()),
+            _ => (),
         }
     }
 
@@ -271,8 +273,6 @@ impl EventHandler {
     /// `Ok(())` if the event is processed successfully, otherwise `Err(Error)`.
     fn process_event(&mut self, event: &Event) -> Result<()> {
         match event {
-            Event::Exit => return Ok(()),
-
             Event::ProcessesLoaded => {
                 info!(
                     "{}: === Processes loaded - loading windows ===",

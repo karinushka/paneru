@@ -8,6 +8,7 @@ use std::{fs, thread};
 use stdext::function_name;
 
 mod app;
+mod commands;
 mod config;
 mod events;
 mod manager;

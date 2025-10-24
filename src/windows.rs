@@ -668,26 +668,6 @@ impl Window {
         app: &Application,
         element_ref: CFRetained<AxuWrapperType>,
     ) -> Result<Window> {
-        // window->application = application;
-        // window->ref = window_ref;
-        // window->id = window_id;
-        // window->id_ptr = &window->id;
-        // window->frame = window_ax_frame(window);
-        // window->is_root = !window_parent(window->id) || window_is_root(window);
-        // if (window_shadow(window->id)) window_set_flag(window, WINDOW_SHADOW);
-        //
-        // if (window_is_minimized(window)) {
-        //     window_set_flag(window, WINDOW_MINIMIZE);
-        // }
-        //
-        // if ((window_is_fullscreen(window)) ||
-        //     (space_is_fullscreen(window_space(window->id)))) {
-        //     window_set_flag(window, WINDOW_FULLSCREEN);
-        // }
-        //
-        // if (window_is_sticky(window->id)) {
-        //     window_set_flag(window, WINDOW_STICKY);
-        // }
         let window = Window {
             inner: Arc::new(RwLock::new(InnerWindow {
                 id: window_id,
@@ -790,7 +770,6 @@ impl Window {
     ///
     /// The `AXUIElementRef` as `AXUIElementRef`.
     pub fn element(&self) -> CFRetained<AxuWrapperType> {
-        // unsafe { NonNull::new_unchecked(self.inner().ax_element.as_ptr::<c_void>()).addr() }
         self.inner().ax_element.clone()
     }
 

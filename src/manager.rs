@@ -1,7 +1,9 @@
 use core::ptr::NonNull;
 use log::{debug, error, trace, warn};
 use objc2::rc::Retained;
-use objc2_core_foundation::{CFArray, CFMutableData, CFNumberType, CFRetained, CGRect};
+use objc2_core_foundation::{
+    CFArray, CFMutableData, CFNumber, CFNumberType, CFRetained, CGPoint, CGRect,
+};
 use objc2_core_graphics::CGDirectDisplayID;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result};
@@ -16,10 +18,10 @@ use crate::events::{Event, EventSender};
 use crate::platform::{Pid, ProcessSerialNumber, WorkspaceObserver};
 use crate::process::Process;
 use crate::skylight::{
-    _AXUIElementCreateWithRemoteToken, _SLPSGetFrontProcess, ConnID,
-    SLSCopyWindowsWithOptionsAndTags, SLSWindowIteratorAdvance, SLSWindowIteratorGetAttributes,
-    SLSWindowIteratorGetParentID, SLSWindowIteratorGetTags, SLSWindowIteratorGetWindowID,
-    SLSWindowQueryResultCopyWindows, SLSWindowQueryWindows, WinID,
+    _AXUIElementCreateWithRemoteToken, _SLPSGetFrontProcess, ConnID, SLSCopyAssociatedWindows,
+    SLSCopyWindowsWithOptionsAndTags, SLSFindWindowAndOwner, SLSWindowIteratorAdvance,
+    SLSWindowIteratorGetAttributes, SLSWindowIteratorGetParentID, SLSWindowIteratorGetTags,
+    SLSWindowIteratorGetWindowID, SLSWindowQueryResultCopyWindows, SLSWindowQueryWindows, WinID,
 };
 use crate::util::{AxuWrapperType, create_array, get_array_values};
 use crate::windows::{Display, Panel, Window, WindowPane, ax_window_id, ax_window_pid};
@@ -40,6 +42,8 @@ pub struct WindowManager {
     focus_follows_mouse: bool,
     swipe_gesture_fingers: Option<usize>,
     orphaned_spaces: HashMap<u64, WindowPane>,
+    mouse_down_window: Option<Window>,
+    down_location: CGPoint,
 }
 
 impl WindowManager {
@@ -68,6 +72,8 @@ impl WindowManager {
             focus_follows_mouse: true,
             swipe_gesture_fingers: None,
             orphaned_spaces: HashMap::new(),
+            mouse_down_window: None,
+            down_location: CGPoint::default(),
         }
     }
 
@@ -80,15 +86,15 @@ impl WindowManager {
     /// # Returns
     ///
     /// `Ok(())` if the event is processed successfully, otherwise `Err(Error)` if the event is unhandled or an error occurs.
-    pub fn process_event(&mut self, event: Event) -> Result<()> {
+    pub fn process_event(&mut self, event: &Event) -> Result<()> {
         match event {
-            Event::ApplicationTerminated { psn } => self.delete_application(&psn),
-            Event::ApplicationFrontSwitched { psn } => self.front_switched(&psn)?,
+            Event::ApplicationTerminated { psn } => self.delete_application(psn),
+            Event::ApplicationFrontSwitched { psn } => self.front_switched(psn)?,
 
-            Event::WindowCreated { element } => self.window_created(element)?,
-            Event::WindowDestroyed { window_id } => self.window_destroyed(window_id),
-            Event::WindowMoved { window_id } => self.window_moved(window_id),
-            Event::WindowResized { window_id } => self.window_resized(window_id)?,
+            Event::WindowCreated { element } => self.window_created(element.clone())?,
+            Event::WindowDestroyed { window_id } => self.window_destroyed(*window_id),
+            Event::WindowMoved { window_id } => self.window_moved(*window_id),
+            Event::WindowResized { window_id } => self.window_resized(*window_id)?,
 
             Event::Swipe { deltas } => {
                 const SWIPE_THRESHOLD: f64 = 0.01;
@@ -96,12 +102,17 @@ impl WindowManager {
                     .swipe_gesture_fingers
                     .is_some_and(|fingers| deltas.len() == fingers)
                 {
-                    let delta = deltas.into_iter().sum::<f64>();
+                    let delta = deltas.iter().sum::<f64>();
                     if delta.abs() > SWIPE_THRESHOLD {
                         _ = self.slide_window(delta);
                     }
                 }
             }
+
+            Event::MouseDown { point } => return self.mouse_down(point),
+            Event::MouseUp { point } => self.mouse_up(point),
+            Event::MouseMoved { point } => return self.mouse_moved(point),
+            Event::MouseDragged { point } => self.mouse_dragged(point),
 
             Event::MissionControlShowAllWindows
             | Event::MissionControlShowFrontWindows
@@ -112,17 +123,18 @@ impl WindowManager {
                 self.mission_control_is_active = false;
             }
 
+            Event::WindowFocused { window_id } => self.window_focused(*window_id),
             Event::WindowMinimized { window_id } => {
-                self.active_display()?.remove_window(window_id);
+                self.active_display()?.remove_window(*window_id);
             }
             Event::WindowDeminimized { window_id } => {
                 self.active_display()?
                     .active_panel(self.main_cid)?
-                    .append(window_id);
+                    .append(*window_id);
             }
 
             Event::ConfigRefresh { config } => {
-                self.reload_config(&config);
+                self.reload_config(config);
             }
 
             _ => {
@@ -815,16 +827,7 @@ impl WindowManager {
                 self.ffm_window_id = None;
                 warn!("{}: reset focused window", function_name!());
             }
-            Ok(focused_id) => {
-                if let Some(window) = self.find_window(focused_id) {
-                    self.window_focused(&window);
-                } else {
-                    warn!(
-                        "{}: window_manager_add_lost_focused_event",
-                        function_name!()
-                    );
-                }
-            }
+            Ok(focused_id) => self.window_focused(focused_id),
         }
         Ok(())
     }
@@ -879,7 +882,7 @@ impl WindowManager {
             None => panel.append(window.id()),
         }
 
-        self.window_focused(&window);
+        self.window_focused(window.id());
         Ok(())
     }
 
@@ -944,7 +947,22 @@ impl WindowManager {
     /// # Arguments
     ///
     /// * `window` - The `Window` object that gained focus.
-    pub fn window_focused(&mut self, window: &Window) {
+    pub fn window_focused(&mut self, window_id: WinID) {
+        debug!("{}: {}", function_name!(), window_id);
+        let Some(window) = self.find_window(window_id) else {
+            warn!(
+                "{}: window_manager_add_lost_focused_event",
+                function_name!()
+            );
+            // TODO:
+            // window_manager_add_lost_focused_event(&g_window_manager, window_id);
+            return;
+        };
+
+        if !window.app().is_frontmost() {
+            return;
+        }
+
         let focused_id = self.focused_window;
         // TODO: fix
         // let _focused_window = self.find_window(focused_id);
@@ -967,7 +985,7 @@ impl WindowManager {
         if self.skip_reshuffle {
             self.skip_reshuffle = false;
         } else {
-            _ = self.reshuffle_around(window);
+            _ = self.reshuffle_around(&window);
         }
     }
 
@@ -1326,5 +1344,197 @@ impl WindowManager {
         window.center_mouse(self.main_cid);
         self.reshuffle_around(&window)?;
         Ok(())
+    }
+
+    /// Finds a window at a given screen point using `SkyLight` API.
+    ///
+    /// # Arguments
+    ///
+    /// * `point` - A reference to the `CGPoint` representing the screen coordinate.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Window)` with the found window if successful, otherwise `Err(Error)`.
+    fn find_window_at_point(&self, point: &CGPoint) -> Result<Window> {
+        let mut window_id: WinID = 0;
+        let mut window_conn_id: ConnID = 0;
+        let mut window_point = CGPoint { x: 0f64, y: 0f64 };
+        unsafe {
+            SLSFindWindowAndOwner(
+                self.main_cid,
+                0, // filter window id
+                1,
+                0,
+                point,
+                &mut window_point,
+                &mut window_id,
+                &mut window_conn_id,
+            )
+        };
+        if self.main_cid == window_conn_id {
+            unsafe {
+                SLSFindWindowAndOwner(
+                    self.main_cid,
+                    window_id,
+                    -1,
+                    0,
+                    point,
+                    &mut window_point,
+                    &mut window_id,
+                    &mut window_conn_id,
+                )
+            };
+        }
+        self.find_window(window_id).ok_or(Error::other(format!(
+            "{}: could not find a window at {point:?}",
+            function_name!()
+        )))
+    }
+
+    /// Handles a mouse moved event. If focus-follows-mouse is enabled, it attempts to focus the window under the cursor.
+    /// It also handles child windows like sheets and drawers.
+    ///
+    /// # Arguments
+    ///
+    /// * `point` - A reference to the `CGPoint` where the mouse moved to.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the event is handled successfully or if focus-follows-mouse is disabled, otherwise `Err(Error)`.
+    pub fn mouse_moved(&mut self, point: &CGPoint) -> Result<()> {
+        if !self.focus_follows_mouse() {
+            return Ok(());
+        }
+        if self.mission_control_is_active() {
+            return Ok(());
+        }
+        if self.ffm_window_id.is_some() {
+            trace!("{}: ffm_window_id > 0", function_name!());
+            return Ok(());
+        }
+
+        match self.find_window_at_point(point) {
+            Ok(window) => {
+                let window_id = window.id();
+                if self.focused_window.is_some_and(|id| id == window_id) {
+                    trace!("{}: allready focused {}", function_name!(), window_id);
+                    return Ok(());
+                }
+                if !window.is_eligible() {
+                    trace!("{}: {} not eligible", function_name!(), window_id);
+                    return Ok(());
+                }
+
+                let window_list = unsafe {
+                    let arr_ref = SLSCopyAssociatedWindows(self.main_cid, window_id);
+                    CFRetained::retain(arr_ref)
+                };
+
+                let mut window = window;
+                for item in get_array_values(&window_list) {
+                    let mut child_wid: WinID = 0;
+                    unsafe {
+                        if !CFNumber::value(
+                            item.as_ref(),
+                            CFNumberType::SInt32Type,
+                            NonNull::from(&mut child_wid).as_ptr().cast(),
+                        ) {
+                            warn!(
+                                "{}: Unable to find subwindows of window {}: {item:?}.",
+                                function_name!(),
+                                window_id
+                            );
+                            continue;
+                        }
+                    };
+                    debug!(
+                        "{}: checking {}'s childen: {}",
+                        function_name!(),
+                        window_id,
+                        child_wid
+                    );
+                    let Some(child_window) = self.find_window(child_wid) else {
+                        warn!(
+                            "{}: Unable to find child window {child_wid}.",
+                            function_name!()
+                        );
+                        continue;
+                    };
+
+                    let Ok(role) = window.role() else {
+                        warn!("{}: finding role for {window_id}", function_name!(),);
+                        continue;
+                    };
+
+                    // bool valid = CFEqual(role, kAXSheetRole) || CFEqual(role, kAXDrawerRole);
+                    let valid = ["AXSheet", "AXDrawer"]
+                        .iter()
+                        .any(|axrole| axrole.eq(&role));
+
+                    if valid {
+                        window = child_window.clone();
+                        break;
+                    }
+                }
+
+                //  Do not reshuffle windows due to moved mouse focus.
+                self.skip_reshuffle = true;
+
+                window.focus_without_raise(self);
+                self.ffm_window_id = Some(window_id);
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Handles a mouse down event. It finds the window at the click point, reshuffles if necessary,
+    /// and stores the clicked window and location.
+    ///
+    /// # Arguments
+    ///
+    /// * `point` - A reference to the `CGPoint` where the mouse down occurred.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the event is handled successfully, otherwise `Err(Error)`.
+    fn mouse_down(&mut self, point: &CGPoint) -> Result<()> {
+        debug!("{}: {point:?}", function_name!());
+        if self.mission_control_is_active() {
+            return Ok(());
+        }
+
+        let window = self.find_window_at_point(point)?;
+        if !window.fully_visible(&self.current_display_bounds()?) {
+            self.reshuffle_around(&window)?;
+        }
+
+        self.mouse_down_window = Some(window);
+        self.down_location = *point;
+
+        Ok(())
+    }
+
+    /// Handles a mouse up event. Currently, this function does nothing except logging.
+    ///
+    /// # Arguments
+    ///
+    /// * `point` - A reference to the `CGPoint` where the mouse up occurred.
+    fn mouse_up(&mut self, point: &CGPoint) {
+        debug!("{}: {point:?}", function_name!());
+    }
+
+    /// Handles a mouse dragged event. Currently, this function does nothing except logging.
+    ///
+    /// # Arguments
+    ///
+    /// * `point` - A reference to the `CGPoint` where the mouse was dragged.
+    fn mouse_dragged(&self, point: &CGPoint) {
+        debug!("{}: {point:?}", function_name!());
+
+        if self.mission_control_is_active() {
+            #[warn(clippy::needless_return)]
+            return;
+        }
     }
 }

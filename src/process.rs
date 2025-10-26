@@ -174,29 +174,29 @@ impl Process {
 
     /// Subscribes to "finishedLaunching" key-value observations for the associated `NSRunningApplication`.
     pub fn observe_finished_launching(&self) {
-        self.observe("finishedLaunching");
-        self.observing_launched.store(true, Ordering::Relaxed);
+        if !self.observing_launched.swap(true, Ordering::Relaxed) {
+            self.observe("finishedLaunching");
+        }
     }
 
     /// Unsubscribes from "finishedLaunching" key-value observations.
     pub fn unobserve_finished_launching(&self) {
-        if self.observing_launched.load(Ordering::Relaxed) {
+        if self.observing_launched.swap(false, Ordering::Relaxed) {
             self.unobserve("finishedLaunching");
-            self.observing_launched.store(false, Ordering::Relaxed);
         }
     }
 
     /// Subscribes to "activationPolicy" key-value observations for the associated `NSRunningApplication`.
     pub fn observe_activation_policy(&self) {
-        self.observe("activationPolicy");
-        self.observing_activated.store(true, Ordering::Relaxed);
+        if !self.observing_activated.swap(true, Ordering::Relaxed) {
+            self.observe("activationPolicy");
+        }
     }
 
     /// Unsubscribes from "activationPolicy" key-value observations.
     pub fn unobserve_activation_policy(&self) {
-        if self.observing_activated.load(Ordering::Relaxed) {
+        if self.observing_activated.swap(false, Ordering::Relaxed) {
             self.unobserve("activationPolicy");
-            self.observing_activated.store(false, Ordering::Relaxed);
         }
     }
 

@@ -1,7 +1,6 @@
 use bevy::app::{App as BevyApp, AppExit, Startup, Update};
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
-use bevy::ecs::hierarchy::Children;
 use bevy::ecs::message::{Message, MessageReader, Messages};
 use bevy::ecs::query::With;
 use bevy::ecs::resource::Resource;
@@ -24,7 +23,6 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use stdext::function_name;
 
-use crate::app::Application;
 use crate::commands::process_command_trigger;
 use crate::config::Config;
 use crate::manager::WindowManager;
@@ -184,18 +182,19 @@ impl EventSender {
     }
 }
 
+// While this marker exists in the world, the system is gathering existing windows.
 #[derive(Component)]
 pub struct InitializingMarker;
 
+// Used to signify currently active display and focused window.
 #[derive(Component)]
 pub struct FocusedMarker;
 
-#[derive(Component)]
-pub struct FrontSwitchedMarker;
-
+// Signifies freshly created Process, Application or Window.
 #[derive(Component)]
 pub struct FreshMarker;
 
+// Used to gather existing processes and windows.
 #[derive(Component)]
 pub struct ExistingMarker;
 
@@ -221,10 +220,16 @@ pub struct ApplicationTrigger(pub Event);
 pub struct MouseTrigger(pub Event);
 
 #[derive(BevyEvent)]
-pub struct DisplayChangeTrigger(pub Event);
+pub struct DisplayChangeTrigger;
 
 #[derive(BevyEvent)]
-pub struct DisplayAddRemoveTrigger;
+pub struct DisplayAddRemoveTrigger(pub Event);
+
+#[derive(BevyEvent)]
+pub struct WindowFocusedTrigger(pub WinID);
+
+#[derive(BevyEvent)]
+pub struct FrontSwitchedTrigger(pub ProcessSerialNumber);
 
 pub struct EventHandler;
 
@@ -258,6 +263,8 @@ impl EventHandler {
                     .add_observer(WindowManager::mouse_trigger)
                     .add_observer(WindowManager::display_change_trigger)
                     .add_observer(WindowManager::display_add_remove_trigger)
+                    .add_observer(WindowManager::front_switched_trigger)
+                    .add_observer(WindowManager::window_focused_trigger)
                     .add_systems(Startup, EventHandler::gather_displays)
                     .add_systems(Startup, process_setup.after(EventHandler::gather_displays))
                     .add_systems(
@@ -273,8 +280,6 @@ impl EventHandler {
                             WindowManager::add_launched_process,
                             WindowManager::add_launched_application,
                             WindowManager::window_create,
-                            WindowManager::front_switched,
-                            WindowManager::window_focused,
                         ),
                     )
                     .run();
@@ -345,11 +350,19 @@ impl EventHandler {
                     commands.trigger(MouseTrigger(event.clone()));
                 }
 
-                Event::DisplayChanged | Event::SpaceChanged => {
-                    commands.trigger(DisplayChangeTrigger(event.clone()));
+                Event::WindowFocused { window_id } => {
+                    commands.trigger(WindowFocusedTrigger(*window_id));
+                }
+                Event::ApplicationFrontSwitched { psn } => {
+                    commands.trigger(FrontSwitchedTrigger(psn.clone()));
+                }
+
+                // Event::DisplayChanged | Event::SpaceChanged => {
+                Event::DisplayChanged => {
+                    commands.trigger(DisplayChangeTrigger);
                 }
                 Event::DisplayAdded { display_id: _ } | Event::DisplayRemoved { display_id: _ } => {
-                    commands.trigger(DisplayAddRemoveTrigger);
+                    commands.trigger(DisplayAddRemoveTrigger(event.clone()));
                 }
 
                 // Event::ProcessesLoaded => {
@@ -449,7 +462,7 @@ impl EventHandler {
         }
 
         if let Some(config) = initial_config {
-            sender.send(Event::ConfigRefresh { config });
+            _ = sender.send(Event::ConfigRefresh { config });
         }
         out
     }
@@ -477,6 +490,7 @@ impl EventHandler {
         world.spawn(InitializingMarker);
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn finish_setup(
         windows: Query<&Window>,
         fresh_windows: Query<&Window, With<FreshMarker>>,
@@ -505,16 +519,5 @@ impl EventHandler {
             WindowManager::refresh_displays(main_cid.0, &mut displays, &find_window);
             commands.write_message(Event::CurrentlyFocused);
         }
-    }
-
-    fn print_windows(apps: Query<(&Application, &Children)>, windows: Query<&Window>) {
-        for (app, children) in apps {
-            println!("Application {}:", app.name().unwrap());
-            let windows = children.iter().flat_map(|entity| windows.get(*entity));
-            for window in windows {
-                println!("\tWindow: {}", window.title().unwrap_or_default());
-            }
-        }
-        println!("done");
     }
 }

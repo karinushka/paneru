@@ -25,7 +25,6 @@ use std::time::Duration;
 use stdext::function_name;
 use stdext::prelude::RwLockExt;
 
-use crate::manager::WindowManager;
 use crate::platform::{Pid, ProcessSerialNumber};
 use crate::skylight::{
     _AXUIElementGetWindow, _SLPSSetFrontProcessWithOptions, AXUIElementCopyAttributeValue,
@@ -327,6 +326,18 @@ impl WindowPane {
 
     pub fn clear(&self) {
         self.pane.force_write().clear();
+    }
+}
+
+impl std::fmt::Display for WindowPane {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let out = self
+            .pane
+            .force_read()
+            .iter()
+            .map(|panel| format!("{panel:?}"))
+            .collect::<Vec<_>>();
+        write!(f, "[{}]", out.join(", "))
     }
 }
 
@@ -1074,22 +1085,25 @@ impl Window {
     /// # Arguments
     ///
     /// * `window_manager` - A reference to the `WindowManager` to access focused window information.
-    pub fn focus_without_raise(&self, window_manager: &WindowManager) {
+    pub fn focus_without_raise(
+        &self,
+        current_focus_id: WinID,
+        current_focus_psn: &ProcessSerialNumber,
+    ) {
         let Some(ref psn) = self.inner.force_read().psn else {
             return;
         };
         let window_id = self.id();
         debug!("{}: {window_id}", function_name!());
-        if &window_manager.focused_psn == psn && window_manager.focused_window.is_some() {
+        if current_focus_psn == psn {
             let mut event_bytes = [0u8; 0xf8];
             event_bytes[0x04] = 0xf8;
             event_bytes[0x08] = 0x0d;
 
             event_bytes[0x8a] = 0x02;
-            event_bytes[0x3c..0x40]
-                .copy_from_slice(&window_manager.focused_window.unwrap().to_ne_bytes());
+            event_bytes[0x3c..0x40].copy_from_slice(&current_focus_id.to_ne_bytes());
             unsafe {
-                SLPSPostEventRecordTo(&window_manager.focused_psn, event_bytes.as_ptr().cast());
+                SLPSPostEventRecordTo(current_focus_psn, event_bytes.as_ptr().cast());
             }
             // @hack
             // Artificially delay the activation by 1ms. This is necessary because some

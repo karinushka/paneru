@@ -1,13 +1,14 @@
 use bevy::ecs::observer::On;
 use bevy::ecs::query::With;
-use bevy::ecs::system::{Query, Res};
+use bevy::ecs::system::{Commands, Query, Res};
 use log::{error, warn};
 use objc2_core_foundation::{CGPoint, CGRect};
 use std::io::Result;
 use stdext::function_name;
 
 use crate::events::{
-    CommandTrigger, Event, FocusedMarker, MainConnection, SenderSocket, WindowManagerResource,
+    CommandTrigger, DisplayChangeTrigger, Event, FocusedMarker, MainConnection, SenderSocket,
+    WindowManagerResource,
 };
 use crate::manager::WindowManager;
 use crate::skylight::{ConnID, WinID};
@@ -165,35 +166,29 @@ fn command_windows<F: Fn(WinID) -> Option<Window>>(
     argv: &[String],
     main_cid: ConnID,
     active_display: &Display,
+    focused_window: &Query<&Window, With<FocusedMarker>>,
     find_window: &F,
 ) -> Result<()> {
     let empty = String::new();
-    let Some(window) = window_manager
-        .focused_window
-        .and_then(&find_window)
-        .filter(Window::is_eligible)
-    else {
+    let Ok(window) = focused_window.single() else {
         warn!("{}: No window focused.", function_name!());
         return Ok(());
     };
+    if !window.is_eligible() {
+        return Ok(());
+    }
 
     let active_panel = active_display.active_panel(main_cid)?;
 
-    // FIXME:
-    // let window_id = window.id();
-    // if window.managed() && active_panel.index_of(window_id).is_err() {
-    //     window_manager.reorient_focus()?;
-    // }
-
     match argv.first().unwrap_or(&empty).as_ref() {
         "focus" => {
-            command_move_focus(&argv[1..], &window, &active_panel, find_window);
+            command_move_focus(&argv[1..], window, &active_panel, find_window);
         }
 
         "swap" => {
             command_swap_focus(
                 &argv[1..],
-                &window,
+                window,
                 &active_panel,
                 &active_display.bounds,
                 &find_window,
@@ -254,7 +249,7 @@ fn command_windows<F: Fn(WinID) -> Option<Window>>(
 
         _ => (),
     }
-    window_manager.reshuffle_around(&window, active_display, find_window)
+    window_manager.reshuffle_around(window, active_display, find_window)
 }
 
 /// Dispatches a command based on the first argument (e.g., "window", "quit").
@@ -269,18 +264,35 @@ pub fn process_command_trigger(
     sender: Res<SenderSocket>,
     main_cid: Res<MainConnection>,
     windows: Query<&Window>,
-    displays: Query<&Display, With<FocusedMarker>>,
+    focused_window: Query<&Window, With<FocusedMarker>>,
+    display: Query<&Display, With<FocusedMarker>>,
+    mut commands: Commands,
 ) {
-    let Ok(active_display) = displays.single() else {
+    let Ok(active_display) = display.single() else {
         warn!("{}: Unable to get current display.", function_name!());
         return;
     };
+    let Ok(active_window) = focused_window.single() else {
+        warn!("{}: Unable to get focused window.", function_name!());
+        return;
+    };
+    let main_cid = main_cid.0;
+    if active_window.managed()
+        && active_display
+            .active_panel(main_cid)
+            .and_then(|panel| panel.index_of(active_window.id()))
+            .is_err()
+    {
+        commands.trigger(DisplayChangeTrigger);
+    }
+
     let find_window = |window_id| {
         windows
             .iter()
             .find(|window| window.id() == window_id)
             .cloned()
     };
+
     let argv = &trigger.event().0;
     if let Some(first) = argv.first() {
         match first.as_ref() {
@@ -288,8 +300,9 @@ pub fn process_command_trigger(
                 _ = command_windows(
                     &window_manager.0,
                     &argv[1..],
-                    main_cid.0,
+                    main_cid,
                     active_display,
+                    &focused_window,
                     &find_window,
                 )
                 .inspect_err(|err| warn!("{}: {err}", function_name!()));

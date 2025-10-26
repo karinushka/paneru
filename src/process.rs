@@ -9,7 +9,6 @@ use objc2_foundation::{
 use std::pin::Pin;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 use stdext::function_name;
 
 use crate::platform::{Pid, ProcessSerialNumber, WorkspaceObserver};

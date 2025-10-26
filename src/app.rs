@@ -1,17 +1,15 @@
 use accessibility_sys::{
     AXObserverRef, AXUIElementCreateApplication, AXUIElementRef, kAXCreatedNotification,
     kAXErrorSuccess, kAXFocusedWindowAttribute, kAXFocusedWindowChangedNotification,
-    kAXMainWindowAttribute, kAXMenuClosedNotification, kAXMenuOpenedNotification,
-    kAXTitleChangedNotification, kAXUIElementDestroyedNotification,
-    kAXWindowDeminiaturizedNotification, kAXWindowMiniaturizedNotification,
-    kAXWindowMovedNotification, kAXWindowResizedNotification, kAXWindowsAttribute,
+    kAXMenuClosedNotification, kAXMenuOpenedNotification, kAXTitleChangedNotification,
+    kAXUIElementDestroyedNotification, kAXWindowDeminiaturizedNotification,
+    kAXWindowMiniaturizedNotification, kAXWindowMovedNotification, kAXWindowResizedNotification,
+    kAXWindowsAttribute,
 };
 use bevy::ecs::component::Component;
-use bevy::ecs::entity::Entity;
 use core::ptr::NonNull;
 use log::{debug, error};
 use objc2_core_foundation::{CFArray, CFRetained, CFString, kCFRunLoopCommonModes};
-use std::collections::HashMap;
 use std::ffi::c_void;
 use std::io::{Error, ErrorKind, Result};
 use std::ops::Deref;
@@ -57,14 +55,11 @@ pub struct Application {
 }
 
 pub struct InnerApplication {
-    entity: Option<Entity>,
     element: CFRetained<AxuWrapperType>,
     psn: ProcessSerialNumber,
     pid: Pid,
-    name: String,
     connection: Option<ConnID>,
     handler: AxObserverHandler,
-    windows: HashMap<WinID, Window>,
 }
 
 impl Drop for InnerApplication {
@@ -94,11 +89,9 @@ impl InnerApplication {
             AxuWrapperType::retain(ptr)?
         };
         Ok(InnerApplication {
-            entity: None,
             element: refer,
             psn: process.psn.clone(),
             pid: process.pid,
-            name: process.name.clone(),
             connection: {
                 unsafe {
                     let mut connection: ConnID = 0;
@@ -107,7 +100,6 @@ impl InnerApplication {
                 }
             },
             handler: AxObserverHandler::new(process.pid, events.clone())?,
-            windows: HashMap::new(),
         })
     }
 }
@@ -135,19 +127,6 @@ impl Application {
             ErrorKind::NotFound,
             format!("{place}: application shut down."),
         )
-    }
-
-    pub fn entity(&self) -> Option<Entity> {
-        self.inner.force_read().entity
-    }
-
-    /// Retrieves the name of the application.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(String)` with the application name if successful, otherwise `Err(Error)` if the application has shut down.
-    pub fn name(&self) -> Result<String> {
-        Ok(self.inner.force_read().name.clone())
     }
 
     /// Retrieves the process ID (Pid) of the application.
@@ -184,73 +163,6 @@ impl Application {
     /// `Ok(CFRetained<AxuWrapperType>)` if successful, otherwise `Err(Error)` if the application has shut down.
     pub fn element(&self) -> Result<CFRetained<AxuWrapperType>> {
         Ok(self.inner.force_read().element.clone())
-    }
-
-    /// Finds a `Window` associated with this application by its window ID.
-    ///
-    /// # Arguments
-    ///
-    /// * `window_id` - The ID of the window to find.
-    ///
-    /// # Returns
-    ///
-    /// `Some(Window)` if the window is found, otherwise `None`.
-    pub fn find_window(&self, window_id: WinID) -> Option<Window> {
-        self.inner.force_read().windows.get(&window_id).cloned()
-    }
-
-    /// Removes a window from the application's internal map of windows.
-    ///
-    /// # Arguments
-    ///
-    /// * `window_id` - The ID of the window to remove.
-    ///
-    /// # Returns
-    ///
-    /// `Some(Window)` if the window was removed, otherwise `None`.
-    pub fn remove_window(&self, window_id: WinID) -> Option<Window> {
-        self.inner.force_write().windows.remove(&window_id)
-    }
-
-    /// Adds a window to the application's internal map of windows.
-    ///
-    /// # Arguments
-    ///
-    /// * `window` - A reference to the `Window` to add.
-    pub fn add_window(&self, window: &Window) {
-        self.inner
-            .force_write()
-            .windows
-            .insert(window.id(), window.clone());
-    }
-
-    /// Iterates over each window managed by this application, applying an accessor function.
-    ///
-    /// # Arguments
-    ///
-    /// * `accessor` - A closure that takes a reference to a `Window`.
-    pub fn foreach_window(&self, accessor: impl FnMut(&Window)) {
-        self.inner.force_read().windows.values().for_each(accessor);
-    }
-
-    /// Retrieves the main window ID of the application.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(WinID)` with the main window ID if successful, otherwise `Err(Error)`.
-    fn _main_window(&self) -> Result<WinID> {
-        let axmain = CFString::from_static_str(kAXMainWindowAttribute);
-        let focused = get_attribute::<AxuWrapperType>(&self.element()?, &axmain)?;
-        ax_window_id(focused.as_ptr()).map_err(|err| {
-            Error::new(
-                ErrorKind::NotFound,
-                format!(
-                    "{}: can not find main window for application {}: {err}.",
-                    function_name!(),
-                    self.name().unwrap_or_default()
-                ),
-            )
-        })
     }
 
     /// Retrieves the focused window ID of the application.

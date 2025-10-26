@@ -15,9 +15,8 @@ use std::io::{Error, ErrorKind, Result};
 use std::ops::Deref;
 use std::pin::Pin;
 use std::ptr::null_mut;
-use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::LazyLock;
 use stdext::function_name;
-use stdext::prelude::RwLockExt;
 
 use crate::events::{Event, EventSender};
 use crate::platform::{
@@ -49,12 +48,8 @@ pub static AX_WINDOW_NOTIFICATIONS: LazyLock<Vec<&str>> = LazyLock::new(|| {
     ]
 });
 
-#[derive(Clone, Component)]
+#[derive(Component)]
 pub struct Application {
-    pub inner: Arc<RwLock<InnerApplication>>,
-}
-
-pub struct InnerApplication {
     element: CFRetained<AxuWrapperType>,
     psn: ProcessSerialNumber,
     pid: Pid,
@@ -62,7 +57,7 @@ pub struct InnerApplication {
     handler: AxObserverHandler,
 }
 
-impl Drop for InnerApplication {
+impl Drop for Application {
     /// Cleans up the `AXObserver` by removing all registered notifications when the `InnerApplication` is dropped.
     fn drop(&mut self) {
         self.handler
@@ -70,7 +65,7 @@ impl Drop for InnerApplication {
     }
 }
 
-impl InnerApplication {
+impl Application {
     /// Creates a new `InnerApplication` instance for a given process.
     /// It obtains the Accessibility UI element for the application and its connection ID.
     ///
@@ -88,7 +83,7 @@ impl InnerApplication {
             let ptr = AXUIElementCreateApplication(process.pid);
             AxuWrapperType::retain(ptr)?
         };
-        Ok(InnerApplication {
+        Ok(Self {
             element: refer,
             psn: process.psn.clone(),
             pid: process.pid,
@@ -102,40 +97,14 @@ impl InnerApplication {
             handler: AxObserverHandler::new(process.pid, events.clone())?,
         })
     }
-}
-
-impl Application {
-    pub fn new(main_cid: ConnID, process: &Process, events: &EventSender) -> Result<Self> {
-        Ok(Self {
-            inner: Arc::new(RwLock::new(InnerApplication::new(
-                main_cid, process, events,
-            )?)),
-        })
-    }
-
-    /// Creates an `Error` indicating that the application has shut down, used for weak reference failures.
-    ///
-    /// # Arguments
-    ///
-    /// * `place` - A string indicating where the error occurred (e.g., function name).
-    ///
-    /// # Returns
-    ///
-    /// An `Error` of `ErrorKind::NotFound`.
-    fn weak_error(place: &str) -> Error {
-        Error::new(
-            ErrorKind::NotFound,
-            format!("{place}: application shut down."),
-        )
-    }
 
     /// Retrieves the process ID (Pid) of the application.
     ///
     /// # Returns
     ///
     /// `Ok(Pid)` with the process ID if successful, otherwise `Err(Error)` if the application has shut down.
-    pub fn pid(&self) -> Result<Pid> {
-        Ok(self.inner.force_read().pid)
+    pub fn pid(&self) -> Pid {
+        self.pid
     }
 
     /// Retrieves the `ProcessSerialNumber` of the application.
@@ -143,8 +112,8 @@ impl Application {
     /// # Returns
     ///
     /// `Ok(ProcessSerialNumber)` with the PSN if successful, otherwise `Err(Error)` if the application has shut down.
-    pub fn psn(&self) -> Result<ProcessSerialNumber> {
-        Ok(self.inner.force_read().psn.clone())
+    pub fn psn(&self) -> ProcessSerialNumber {
+        self.psn.clone()
     }
 
     /// Retrieves the connection ID (`ConnID`) of the application.
@@ -153,16 +122,7 @@ impl Application {
     ///
     /// `Ok(ConnID)` with the connection ID if successful, otherwise `Err(Error)` if the application has shut down.
     pub fn connection(&self) -> Option<ConnID> {
-        self.inner.force_read().connection
-    }
-
-    /// Retrieves the `CFRetained<AxuWrapperType>` representing the Accessibility UI element of the application.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(CFRetained<AxuWrapperType>)` if successful, otherwise `Err(Error)` if the application has shut down.
-    pub fn element(&self) -> Result<CFRetained<AxuWrapperType>> {
-        Ok(self.inner.force_read().element.clone())
+        self.connection
     }
 
     /// Retrieves the focused window ID of the application.
@@ -172,8 +132,7 @@ impl Application {
     /// `Ok(WinID)` with the focused window ID if successful, otherwise `Err(Error)`.
     pub fn focused_window_id(&self) -> Result<WinID> {
         let axmain = CFString::from_static_str(kAXFocusedWindowAttribute);
-        let element = self.element()?;
-        let focused = get_attribute::<AxuWrapperType>(&element, &axmain)?;
+        let focused = get_attribute::<AxuWrapperType>(&self.element, &axmain)?;
         ax_window_id(focused.as_ptr())
     }
 
@@ -184,8 +143,7 @@ impl Application {
     /// `Ok(CFRetained<CFArray>)` containing the list of window elements if successful, otherwise `Err(Error)`.
     pub fn window_list(&self) -> Result<CFRetained<CFArray>> {
         let axwindows = CFString::from_static_str(kAXWindowsAttribute);
-        let element = self.element()?;
-        get_attribute::<CFArray>(&element, &axwindows)
+        get_attribute::<CFArray>(&self.element, &axwindows)
     }
 
     /// Registers observers for general application-level accessibility notifications (e.g., `kAXCreatedNotification`).
@@ -193,12 +151,9 @@ impl Application {
     /// # Returns
     ///
     /// `Ok(bool)` where `true` means all observers were successfully registered and `retry` list is empty, otherwise `Err(Error)`.
-    pub fn observe(&self) -> Result<bool> {
-        let element = self.element()?;
-        self.inner
-            .force_write()
-            .handler
-            .add_observer(&element, &AX_NOTIFICATIONS, ObserverType::Application)
+    pub fn observe(&mut self) -> Result<bool> {
+        self.handler
+            .add_observer(&self.element, &AX_NOTIFICATIONS, ObserverType::Application)
             .map(|retry| retry.is_empty())
     }
 
@@ -212,10 +167,8 @@ impl Application {
     /// # Returns
     ///
     /// `Ok(bool)` where `true` means all observers were successfully registered and `retry` list is empty, otherwise `Err(Error)`.
-    pub fn observe_window(&self, window: &Window) -> Result<bool> {
-        self.inner
-            .force_write()
-            .handler
+    pub fn observe_window(&mut self, window: &Window) -> Result<bool> {
+        self.handler
             .add_observer(
                 window.element().deref(),
                 &AX_WINDOW_NOTIFICATIONS,
@@ -229,8 +182,8 @@ impl Application {
     /// # Arguments
     ///
     /// * `element` - The `AXUIElementRef` of the window to unobserve.
-    pub fn unobserve_window(&self, window: &Window) {
-        self.inner.force_write().handler.remove_observer(
+    pub fn unobserve_window(&mut self, window: &Window) {
+        self.handler.remove_observer(
             &ObserverType::Window(window.id()),
             window.element().deref(),
             &AX_WINDOW_NOTIFICATIONS,
@@ -245,7 +198,7 @@ impl Application {
     pub fn is_frontmost(&self) -> bool {
         let mut psn = ProcessSerialNumber::default();
         unsafe { _SLPSGetFrontProcess(&mut psn) };
-        self.psn().is_ok_and(|serial| serial == psn)
+        self.psn == psn
     }
 }
 

@@ -22,7 +22,7 @@ use crate::config::Config;
 use crate::events::{
     ApplicationTrigger, BProcess, DisplayAddRemoveTrigger, DisplayChangeTrigger, Event,
     ExistingMarker, FocusedMarker, FreshMarker, FrontSwitchedTrigger, MainConnection, MouseTrigger,
-    SenderSocket, WindowFocusedTrigger, WindowManagerResource,
+    ProcessChangeTrigger, SenderSocket, WindowFocusedTrigger, WindowManagerResource,
 };
 use crate::platform::ProcessSerialNumber;
 use crate::process::Process;
@@ -40,7 +40,6 @@ const THRESHOLD: f64 = 10.0;
 pub struct WindowManager {
     main_cid: ConnID,
     last_window: Option<WinID>, // TODO: use this for "goto last window bind"
-    // pub focused_window: Option<WinID>,
     pub focused_psn: ProcessSerialNumber,
     pub ffm_window_id: Option<WinID>,
     mission_control_is_active: bool,
@@ -67,7 +66,6 @@ impl WindowManager {
         WindowManager {
             main_cid,
             last_window: None,
-            // focused_window: None,
             focused_psn: ProcessSerialNumber::default(),
             ffm_window_id: None,
             mission_control_is_active: false,
@@ -81,28 +79,15 @@ impl WindowManager {
     }
 
     #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
-    pub fn application_trigger(
-        trigger: On<ApplicationTrigger>,
+    pub fn process_change_trigger(
+        trigger: On<ProcessChangeTrigger>,
         processes: Query<(&BProcess, Entity)>,
-        apps: Query<(&Application, &Children)>,
-        windows: Query<(&Window, Entity)>,
-        focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
-        displays: Query<&mut Display, With<FocusedMarker>>,
-        mut window_manager: ResMut<WindowManagerResource>,
         mut commands: Commands,
     ) {
-        let window_manager = &mut window_manager.0;
         let find_process = |psn| {
             processes
                 .iter()
                 .find(|(BProcess(process), _)| &process.psn == psn)
-        };
-        let find_entity = |window_id| windows.iter().find(|(window, _)| window.id() == window_id);
-        let find_window = |window_id| find_entity(window_id).map(|(window, _)| window).cloned();
-
-        let Ok(active_display) = displays.single() else {
-            warn!("{}: Unable to get current display.", function_name!());
-            return;
         };
 
         match &trigger.event().0 {
@@ -119,6 +104,36 @@ impl WindowManager {
                 }
             }
 
+            event => {
+                debug!("{}: Unhandled event {event:?}", function_name!());
+            }
+        }
+    }
+
+    #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
+    pub fn application_trigger(
+        trigger: On<ApplicationTrigger>,
+        mut apps: Query<(&mut Application, &Children)>,
+        windows: Query<(&Window, Entity)>,
+        focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
+        displays: Query<&mut Display, With<FocusedMarker>>,
+        mut window_manager: ResMut<WindowManagerResource>,
+        mut commands: Commands,
+    ) {
+        let window_manager = &mut window_manager.0;
+        let find_window = |window_id| {
+            windows
+                .iter()
+                .find_map(|(window, _)| (window.id() == window_id).then_some(window))
+                .cloned()
+        };
+
+        let Ok(active_display) = displays.single() else {
+            warn!("{}: Unable to get current display.", function_name!());
+            return;
+        };
+
+        match &trigger.event().0 {
             Event::WindowCreated { element } => match Window::new(element) {
                 Ok(window) => {
                     commands.spawn((FreshMarker, window));
@@ -132,7 +147,7 @@ impl WindowManager {
             Event::WindowDestroyed { window_id } => {
                 window_manager.window_destroyed(
                     *window_id,
-                    &apps,
+                    &mut apps,
                     &windows,
                     &focused_window,
                     &displays,
@@ -148,7 +163,7 @@ impl WindowManager {
                 );
             }
 
-            Event::WindowMoved { window_id } => window_manager.window_moved(*window_id),
+            Event::WindowMoved { window_id: _ } => (),
             Event::WindowResized { window_id } => {
                 let Some(window) = find_window(*window_id) else {
                     return;
@@ -198,7 +213,7 @@ impl WindowManager {
             }
 
             event => {
-                debug!("Unhandled event {event:?}");
+                debug!("{}: Unhandled event {event:?}", function_name!());
             }
         }
     }
@@ -393,7 +408,7 @@ impl WindowManager {
                 .find_map(|window| (window.0.id() == window_id).then_some(window.0))
                 .cloned()
         };
-        _ = self.reshuffle_around(window, active_display, &find_window);
+        _ = WindowManager::reshuffle_around(self.main_cid, window, active_display, &find_window);
     }
 
     /// Checks if Mission Control is currently active.
@@ -578,7 +593,7 @@ impl WindowManager {
                 CFMutableData::mutable_byte_ptr(data_ref.deref().into()),
                 BUFSIZE as usize,
             );
-            let bytes = app.pid().unwrap().to_ne_bytes();
+            let bytes = app.pid().to_ne_bytes();
             data[0x0..bytes.len()].copy_from_slice(&bytes);
             let bytes = MAGIC.to_ne_bytes();
             data[0x8..0x8 + bytes.len()].copy_from_slice(&bytes);
@@ -720,51 +735,6 @@ impl WindowManager {
         Ok(found_windows)
     }
 
-    /// Creates a new `Window` object and adds it to the application's managed windows.
-    /// It performs checks for unknown or non-real windows and observes the window for events.
-    ///
-    /// # Arguments
-    ///
-    /// * `app` - A reference to the `Application` that owns the window.
-    /// * `window_ref` - A `CFRetained<AxuWrapperType>` reference to the Accessibility UI element of the window.
-    /// * `window_id` - The ID of the window.
-    /// * `_one_shot_rules` - A boolean flag (currently unused, TODO: fix).
-    ///
-    /// # Returns
-    ///
-    /// `Ok(Window)` if the window is created and added successfully, otherwise `Err(Error)`.
-    // struct window *window_manager_create_and_add_window(
-    // struct space_manager *sm, struct window_manager *wm, struct application *application,
-    // AXUIElementRef window_ref, uint32_t window_id, bool one_shot_rules)
-    fn create_managed_window(window_ref: &CFRetained<AxuWrapperType>) -> Result<Window> {
-        let window = Window::new(window_ref)?;
-        if window.is_unknown() {
-            return Err(Error::other(format!(
-                "{}: Ignoring AXUnknown window, id: {}",
-                function_name!(),
-                window.id()
-            )));
-        }
-
-        if !window.is_real() {
-            return Err(Error::other(format!(
-                "{}: Ignoring non-real window, id: {}",
-                function_name!(),
-                window.id()
-            )));
-        }
-
-        debug!(
-            "{}: created {} title: {} role: {} subrole: {}",
-            function_name!(),
-            window.id(),
-            window.title().unwrap_or_default(),
-            window.role().unwrap_or_default(),
-            window.subrole().unwrap_or_default(),
-        );
-        Ok(window)
-    }
-
     /// Handles the event when an application switches to the front. It updates the focused window and PSN.
     ///
     /// # Arguments
@@ -845,7 +815,7 @@ impl WindowManager {
     pub fn window_create(
         windows: Query<(Entity, &mut Window), With<FreshMarker>>,
         focused_window: Query<&Window, (With<FocusedMarker>, Without<FreshMarker>)>,
-        apps: Query<(Entity, &mut Application)>,
+        mut apps: Query<(Entity, &mut Application)>,
         active_display: Query<&Display, With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
         mut commands: Commands,
@@ -873,7 +843,7 @@ impl WindowManager {
                 );
                 return;
             };
-            let Some((app_entity, app)) = apps.iter().find(|(_, app)| app.pid().unwrap() == pid)
+            let Some((app_entity, mut app)) = apps.iter_mut().find(|(_, app)| app.pid() == pid)
             else {
                 warn!(
                     "{}: unable to find application with {pid}.",
@@ -897,7 +867,7 @@ impl WindowManager {
                 warn!("{}: Error observing window {window_id}.", function_name!());
             }
 
-            window.inner.force_write().psn = Some(app.psn().unwrap());
+            window.inner.force_write().psn = Some(app.psn());
             let minimized = window.is_minimized();
             let is_root = Window::parent(app.connection().unwrap_or_default(), window.id())
                 .is_err()
@@ -944,7 +914,7 @@ impl WindowManager {
     fn window_destroyed(
         &mut self,
         window_id: WinID,
-        apps: &Query<(&Application, &Children)>,
+        apps: &mut Query<(&mut Application, &Children)>,
         windows: &Query<(&Window, Entity)>,
         focused_window: &Query<(&Window, Entity), With<FocusedMarker>>,
         displays: &Query<&mut Display, With<FocusedMarker>>,
@@ -960,8 +930,8 @@ impl WindowManager {
                 .iter()
                 .for_each(|display| display.remove_window(window_id));
 
-            if let Some((app, _)) = apps
-                .iter()
+            if let Some((mut app, _)) = apps
+                .iter_mut()
                 .find(|(_, children)| children.iter().any(|child_entity| child_entity == &entity))
             {
                 app.unobserve_window(window);
@@ -975,18 +945,14 @@ impl WindowManager {
                         .find_map(|(window, _)| (window.id() == window_id).then_some(window))
                         .cloned()
                 };
-                _ = self.reshuffle_around(window, active_display, &find_window);
+                _ = WindowManager::reshuffle_around(
+                    self.main_cid,
+                    window,
+                    active_display,
+                    &find_window,
+                );
             }
         }
-    }
-
-    /// Handles the event when a window is moved. Currently, this function does nothing.
-    ///
-    /// # Arguments
-    ///
-    /// * `_window_id` - The ID of the window that was moved.
-    fn window_moved(&self, _window_id: WinID) {
-        //
     }
 
     /// Handles the event when a window is resized. It updates the window's frame and reshuffles windows.
@@ -1005,7 +971,7 @@ impl WindowManager {
         find_window: &F,
     ) -> Result<()> {
         window.update_frame(Some(&active_display.bounds))?;
-        self.reshuffle_around(window, active_display, find_window)?;
+        WindowManager::reshuffle_around(self.main_cid, window, active_display, find_window)?;
         Ok(())
     }
 
@@ -1072,7 +1038,7 @@ impl WindowManager {
         }
 
         commands.entity(entity).insert(FocusedMarker);
-        window_manager.focused_psn = app.psn().unwrap();
+        window_manager.focused_psn = app.psn();
         window_manager.ffm_window_id = None;
 
         if window_manager.skip_reshuffle {
@@ -1088,7 +1054,12 @@ impl WindowManager {
                 warn!("{}: Unable to get current display.", function_name!());
                 return;
             };
-            _ = window_manager.reshuffle_around(window, active_display, &find_window);
+            _ = WindowManager::reshuffle_around(
+                window_manager.main_cid,
+                window,
+                active_display,
+                &find_window,
+            );
         }
     }
 
@@ -1103,7 +1074,7 @@ impl WindowManager {
     ///
     /// `Ok(())` if reshuffling is successful, otherwise `Err(Error)`.
     pub fn reshuffle_around<F: Fn(WinID) -> Option<Window>>(
-        &self,
+        main_cid: ConnID,
         window: &Window,
         active_display: &Display,
         find_window: &F,
@@ -1112,7 +1083,7 @@ impl WindowManager {
             return Ok(());
         }
 
-        let active_panel = active_display.active_panel(self.main_cid)?;
+        let active_panel = active_display.active_panel(main_cid)?;
         let display_bounds = &active_display.bounds;
         let frame = window.expose_window(display_bounds);
 
@@ -1206,20 +1177,6 @@ impl WindowManager {
             window.resize(width, height, display_bounds);
             y_pos += height;
         }
-    }
-
-    /// Retrieves the currently active display.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(&Display)` if an active display is found, otherwise `Err(Error)`.
-    pub fn active_display<'a>(displays: &'a Query<&'a Display>) -> Result<&'a Display> {
-        displays.single().map_err(|err| {
-            Error::new(
-                ErrorKind::NotFound,
-                format!("{}: active dislay not found: {err}", function_name!()),
-            )
-        })
     }
 
     /// Adds an existing process to the window manager. This is used during initial setup for already running applications.
@@ -1330,7 +1287,7 @@ impl WindowManager {
                 continue;
             }
 
-            let app = Application::new(cid.0, &process.0, &events.0).unwrap();
+            let mut app = Application::new(cid.0, &process.0, &events.0).unwrap();
 
             if app.observe().is_ok_and(|good| good) {
                 commands
@@ -1472,11 +1429,9 @@ impl WindowManager {
         // active_display: Query<&Display, With<FocusedMarker>>,
         displays: Query<(&Display, Entity, Option<&FocusedMarker>)>,
         main_cid: Res<MainConnection>,
-        mut window_manager: ResMut<WindowManagerResource>,
         mut commands: Commands,
     ) {
         let main_cid = main_cid.0;
-        let window_manager = &mut window_manager.0;
         let Ok(active_id) = Display::active_display_id(main_cid) else {
             error!("{}: Unable to get active display id!", function_name!());
             return;
@@ -1530,7 +1485,7 @@ impl WindowManager {
                     .find(|window| window.id() == window_id)
                     .cloned()
             };
-            _ = window_manager.reshuffle_around(window, active_display, &find_window);
+            _ = WindowManager::reshuffle_around(main_cid, window, active_display, &find_window);
         }
     }
 
@@ -1557,7 +1512,7 @@ impl WindowManager {
             &active_display.bounds,
         );
         window.center_mouse(self.main_cid);
-        self.reshuffle_around(window, active_display, find_window)?;
+        WindowManager::reshuffle_around(self.main_cid, window, active_display, find_window)?;
         Ok(())
     }
 
@@ -1741,22 +1696,13 @@ impl WindowManager {
 
         let window = WindowManager::find_window_at_point(main_cid, point, find_window)?;
         if !window.fully_visible(&active_display.bounds) {
-            self.reshuffle_around(&window, active_display, find_window)?;
+            WindowManager::reshuffle_around(main_cid, &window, active_display, find_window)?;
         }
 
         self.mouse_down_window = Some(window);
         self.down_location = *point;
 
         Ok(())
-    }
-
-    /// Handles a mouse up event. Currently, this function does nothing except logging.
-    ///
-    /// # Arguments
-    ///
-    /// * `point` - A reference to the `CGPoint` where the mouse up occurred.
-    fn mouse_up(&mut self, point: &CGPoint) {
-        debug!("{}: {point:?}", function_name!());
     }
 
     /// Handles a mouse dragged event. Currently, this function does nothing except logging.
@@ -1798,7 +1744,7 @@ impl WindowManager {
             Event::MouseDown { point } => {
                 _ = window_manager.mouse_down(main_cid, point, active_display, &find_window);
             }
-            Event::MouseUp { point } => window_manager.mouse_up(point),
+            // Event::MouseUp { point: _ } => (),
             Event::MouseMoved { point } => {
                 _ = window_manager.mouse_moved(main_cid, &focused_window, point, &find_window);
             }

@@ -214,6 +214,9 @@ pub struct WindowManagerResource(pub WindowManager);
 pub struct CommandTrigger(pub Vec<String>);
 
 #[derive(BevyEvent)]
+pub struct ProcessChangeTrigger(pub Event);
+
+#[derive(BevyEvent)]
 pub struct ApplicationTrigger(pub Event);
 
 #[derive(BevyEvent)]
@@ -259,6 +262,7 @@ impl EventHandler {
                     .insert_resource(WindowManagerResource(WindowManager::new(main_cid)))
                     .insert_resource(SenderSocket(sender))
                     .add_observer(process_command_trigger)
+                    .add_observer(WindowManager::process_change_trigger)
                     .add_observer(WindowManager::application_trigger)
                     .add_observer(WindowManager::mouse_trigger)
                     .add_observer(WindowManager::display_change_trigger)
@@ -365,6 +369,13 @@ impl EventHandler {
                     commands.trigger(DisplayAddRemoveTrigger(event.clone()));
                 }
 
+                Event::ApplicationLaunched {
+                    psn: _,
+                    observer: _,
+                }
+                | Event::ApplicationTerminated { psn: _ } => {
+                    commands.trigger(ProcessChangeTrigger(event.clone()));
+                }
                 // Event::ProcessesLoaded => {
                 //     info!("{}: === Existing windows loaded ===", function_name!());
                 //

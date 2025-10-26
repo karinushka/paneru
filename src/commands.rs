@@ -8,7 +8,6 @@ use stdext::function_name;
 
 use crate::events::{
     CommandTrigger, DisplayChangeTrigger, Event, FocusedMarker, MainConnection, SenderSocket,
-    WindowManagerResource,
 };
 use crate::manager::WindowManager;
 use crate::skylight::{ConnID, WinID};
@@ -162,7 +161,6 @@ fn command_swap_focus<F: Fn(WinID) -> Option<Window>>(
 ///
 /// `Ok(())` if the command is processed successfully, otherwise `Err(Error)`.
 fn command_windows<F: Fn(WinID) -> Option<Window>>(
-    window_manager: &WindowManager,
     argv: &[String],
     main_cid: ConnID,
     active_display: &Display,
@@ -249,7 +247,7 @@ fn command_windows<F: Fn(WinID) -> Option<Window>>(
 
         _ => (),
     }
-    window_manager.reshuffle_around(window, active_display, find_window)
+    WindowManager::reshuffle_around(main_cid, window, active_display, find_window)
 }
 
 /// Dispatches a command based on the first argument (e.g., "window", "quit").
@@ -260,7 +258,6 @@ fn command_windows<F: Fn(WinID) -> Option<Window>>(
 #[allow(clippy::needless_pass_by_value)]
 pub fn process_command_trigger(
     trigger: On<CommandTrigger>,
-    window_manager: Res<WindowManagerResource>,
     sender: Res<SenderSocket>,
     main_cid: Res<MainConnection>,
     windows: Query<&Window>,
@@ -298,7 +295,6 @@ pub fn process_command_trigger(
         match first.as_ref() {
             "window" => {
                 _ = command_windows(
-                    &window_manager.0,
                     &argv[1..],
                     main_cid,
                     active_display,

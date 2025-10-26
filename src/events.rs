@@ -21,7 +21,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::thread;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use stdext::function_name;
 
 use crate::app::Application;
@@ -289,6 +289,7 @@ impl EventHandler {
         app.cleanup();
 
         let mut timeout = LOOP_TIMEOUT_STEP;
+        let mut last_update = Instant::now();
         loop {
             match rx.recv_timeout(Duration::from_millis(timeout)) {
                 Ok(Event::Exit) => {
@@ -304,6 +305,14 @@ impl EventHandler {
                 }
                 _ => break,
             }
+
+            // Manually get and update the Time resource.
+            let now = Instant::now();
+            let delta = now - last_update;
+            last_update = now;
+            app.world_mut()
+                .resource_mut::<Time<Virtual>>()
+                .advance_by(delta);
 
             app.update();
             if let Some(exit) = app.should_exit() {

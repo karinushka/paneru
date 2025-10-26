@@ -671,7 +671,7 @@ impl Window {
     /// `Ok(Window)` if the window is created successfully, otherwise `Err(Error)`.
     pub fn new(element: &CFRetained<AxuWrapperType>) -> Result<Window> {
         let id = ax_window_id(element.as_ptr())?;
-        Ok(Self {
+        let window = Self {
             inner: Arc::new(RwLock::new(InnerWindow {
                 id,
                 psn: None,
@@ -683,7 +683,33 @@ impl Window {
                 width_ratio: 0.33,
                 managed: true,
             })),
-        })
+        };
+
+        if window.is_unknown() {
+            return Err(Error::other(format!(
+                "{}: Ignoring AXUnknown window, id: {}",
+                function_name!(),
+                window.id()
+            )));
+        }
+
+        if !window.is_real() {
+            return Err(Error::other(format!(
+                "{}: Ignoring non-real window, id: {}",
+                function_name!(),
+                window.id()
+            )));
+        }
+
+        debug!(
+            "{}: created {} title: {} role: {} subrole: {}",
+            function_name!(),
+            window.id(),
+            window.title().unwrap_or_default(),
+            window.role().unwrap_or_default(),
+            window.subrole().unwrap_or_default(),
+        );
+        Ok(window)
     }
 
     /// Returns the ID of the window.
@@ -1033,10 +1059,10 @@ impl Window {
         event_bytes[0x20..0x30].fill(0xff);
 
         event_bytes[0x08] = 0x01;
-        unsafe { SLPSPostEventRecordTo(&psn, event_bytes.as_ptr().cast()) };
+        unsafe { SLPSPostEventRecordTo(psn, event_bytes.as_ptr().cast()) };
 
         event_bytes[0x08] = 0x02;
-        unsafe { SLPSPostEventRecordTo(&psn, event_bytes.as_ptr().cast()) };
+        unsafe { SLPSPostEventRecordTo(psn, event_bytes.as_ptr().cast()) };
     }
 
     // const CPS_ALL_WINDOWS: u32 = 0x100;
@@ -1073,14 +1099,14 @@ impl Window {
             event_bytes[0x8a] = 0x01;
             event_bytes[0x3c..0x40].copy_from_slice(&window_id.to_ne_bytes());
             unsafe {
-                SLPSPostEventRecordTo(&psn, event_bytes.as_ptr().cast());
+                SLPSPostEventRecordTo(psn, event_bytes.as_ptr().cast());
             }
         }
 
         unsafe {
-            _SLPSSetFrontProcessWithOptions(&psn, window_id, Self::CPS_USER_GENERATED);
+            _SLPSSetFrontProcessWithOptions(psn, window_id, Self::CPS_USER_GENERATED);
         }
-        self.make_key_window(&psn);
+        self.make_key_window(psn);
     }
 
     /// Focuses the window and raises it to the front.

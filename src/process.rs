@@ -9,6 +9,7 @@ use objc2_foundation::{
 use std::pin::Pin;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use stdext::function_name;
 
 use crate::platform::{Pid, ProcessSerialNumber, WorkspaceObserver};
@@ -106,7 +107,7 @@ impl Process {
     ///
     /// A `Pin<Box<Self>>` containing the new `Process` instance.
     pub fn new(psn: &ProcessSerialNumber, observer: Retained<WorkspaceObserver>) -> Pin<Box<Self>> {
-        const READY_TIMEOUT_SEC: u8 = 3;
+        const READY_TIMEOUT_SEC: f32 = 2.0;
         let mut pid: Pid = 0;
         unsafe { GetProcessPID(psn, NonNull::from(&mut pid).as_ptr()) };
 
@@ -127,7 +128,7 @@ impl Process {
             terminated: false,
             application: apps,
             policy: NSApplicationActivationPolicy::Prohibited,
-            ready_timer: Timer::from_seconds(READY_TIMEOUT_SEC.into(), bevy::time::TimerMode::Once),
+            ready_timer: Timer::from_seconds(READY_TIMEOUT_SEC, bevy::time::TimerMode::Once),
             observer,
             observing_launched: AtomicBool::new(false),
             observing_activated: AtomicBool::new(false),

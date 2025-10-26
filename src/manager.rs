@@ -122,18 +122,16 @@ impl WindowManager {
                 }
             }
 
-            Event::WindowCreated { element } => {
-                match WindowManager::create_managed_window(element) {
-                    Ok(window) => {
-                        commands.spawn((FreshMarker, window));
-                    }
-                    Err(err) => debug!(
-                        "{}: not adding window {element:?}: {}",
-                        function_name!(),
-                        err
-                    ),
+            Event::WindowCreated { element } => match Window::new(element) {
+                Ok(window) => {
+                    commands.spawn((FreshMarker, window));
                 }
-            }
+                Err(err) => debug!(
+                    "{}: not adding window {element:?}: {}",
+                    function_name!(),
+                    err
+                ),
+            },
             Event::WindowDestroyed { window_id } => {
                 if let Some((_, entity)) = find_entity(*window_id) {
                     displays
@@ -594,7 +592,7 @@ impl WindowManager {
                 if let Some(index) = window_list.iter().position(|&id| id == window_id) {
                     window_list.remove(index);
                     debug!("{}: Found window {window_id:?}", function_name!());
-                    if let Ok(window) = WindowManager::create_managed_window(&element_ref)
+                    if let Ok(window) = Window::new(&element_ref)
                         .inspect_err(|err| warn!("{}: {err}", function_name!()))
                     {
                         found_windows.push(window);
@@ -670,7 +668,7 @@ impl WindowManager {
                         function_name!(),
                         app.psn()
                     );
-                    if let Ok(window) = WindowManager::create_managed_window(&window_ref)
+                    if let Ok(window) = Window::new(&window_ref)
                         .inspect_err(|err| debug!("{}: {err}", function_name!()))
                     {
                         found_windows.push(window);
@@ -1257,6 +1255,11 @@ impl WindowManager {
                 continue;
             }
             if !process.0.ready() {
+                trace!(
+                    "{}: Timer {}",
+                    function_name!(),
+                    process.0.ready_timer.elapsed().as_secs_f32()
+                );
                 if process.0.ready_timer.is_finished() {
                     debug!(
                         "{}: app {} is still not observable. Removing",
@@ -1322,7 +1325,7 @@ impl WindowManager {
                     find_window(window_id).map_or_else(
                         // Window does not exist, create it.
                         || {
-                            WindowManager::create_managed_window(&element)
+                            Window::new(&element)
                                 .inspect_err(|err| {
                                     warn!("{}: error adding window: {err}.", function_name!());
                                 })

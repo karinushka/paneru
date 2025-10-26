@@ -82,7 +82,6 @@ fn get_window_in_direction(
 ///
 /// `Some(WinID)` with the ID of the newly focused window, otherwise `None`.
 fn command_move_focus<F: Fn(WinID) -> Option<Window>>(
-    window_manager: &WindowManager,
     argv: &[String],
     current_window: &Window,
     strip: &WindowPane,
@@ -188,13 +187,7 @@ fn command_windows<F: Fn(WinID) -> Option<Window>>(
 
     match argv.first().unwrap_or(&empty).as_ref() {
         "focus" => {
-            command_move_focus(
-                window_manager,
-                &argv[1..],
-                &window,
-                &active_panel,
-                find_window,
-            );
+            command_move_focus(&argv[1..], &window, &active_panel, find_window);
         }
 
         "swap" => {

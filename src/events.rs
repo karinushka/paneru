@@ -209,9 +209,6 @@ pub struct MainConnection(pub ConnID);
 pub struct SenderSocket(pub EventSender);
 
 #[derive(Resource)]
-pub struct WindowManagerResource(pub WindowManager);
-
-#[derive(Resource)]
 pub struct OrphanedSpaces(pub HashMap<u64, WindowPane>);
 
 #[derive(BevyEvent)]
@@ -222,6 +219,9 @@ pub struct ProcessChangeTrigger(pub Event);
 
 #[derive(BevyEvent)]
 pub struct ApplicationTrigger(pub Event);
+
+#[derive(BevyEvent)]
+pub struct ManagerStateTrigger(pub Event);
 
 #[derive(BevyEvent)]
 pub struct MouseTrigger(pub Event);
@@ -263,12 +263,13 @@ impl EventHandler {
                     .insert_resource(Time::<Virtual>::from_max_delta(Duration::from_secs(10)))
                     .init_resource::<Messages<Event>>()
                     .insert_resource(MainConnection(main_cid))
-                    .insert_resource(WindowManagerResource(WindowManager::new(main_cid)))
+                    .insert_resource(WindowManager::default())
                     .insert_resource(SenderSocket(sender))
                     .insert_resource(OrphanedSpaces(HashMap::new()))
                     .add_observer(process_command_trigger)
                     .add_observer(WindowManager::process_change_trigger)
                     .add_observer(WindowManager::application_trigger)
+                    .add_observer(WindowManager::manager_state_trigger)
                     .add_observer(WindowManager::mouse_trigger)
                     .add_observer(WindowManager::display_change_trigger)
                     .add_observer(WindowManager::display_add_remove_trigger)
@@ -376,6 +377,17 @@ impl EventHandler {
                 | Event::ApplicationTerminated { psn: _ } => {
                     commands.trigger(ProcessChangeTrigger(event.clone()));
                 }
+
+                Event::CurrentlyFocused
+                | Event::Swipe { deltas: _ }
+                | Event::MissionControlShowAllWindows
+                | Event::MissionControlShowFrontWindows
+                | Event::MissionControlShowDesktop
+                | Event::MissionControlExit
+                | Event::ConfigRefresh { config: _ } => {
+                    commands.trigger(ManagerStateTrigger(event.clone()));
+                }
+
                 // Event::ProcessesLoaded => {
                 //     info!("{}: === Existing windows loaded ===", function_name!());
                 //

@@ -170,6 +170,7 @@ impl InnerConfig {
 pub struct MainOptions {
     pub focus_follows_mouse: Option<bool>,
     pub swipe_gesture_fingers: Option<usize>,
+    pub animation_speed: Option<f64>,
 }
 
 #[derive(Clone, Debug)]
@@ -505,8 +506,7 @@ focus_follows_mouse = true
 quit = "ctrl+alt-q"
 manage = "ctrl+alt-t"
 "#;
-    let config = InnerConfig::parse_config(input)
-        .expect("Failed to parse config");
+    let config = InnerConfig::parse_config(input).expect("Failed to parse config");
 
     assert_eq!(config.options.focus_follows_mouse, Some(true));
 
@@ -516,7 +516,10 @@ manage = "ctrl+alt-t"
     assert_eq!(quit_binding.modifiers, (1 << 0) | (1 << 3));
     assert_eq!(quit_binding.command, "quit");
 
-    let manage_binding = config.bindings.get("manage").expect("Manage binding not found");
+    let manage_binding = config
+        .bindings
+        .get("manage")
+        .expect("Manage binding not found");
     assert_eq!(manage_binding.key, "t");
     assert_eq!(manage_binding.modifiers, (1 << 0) | (1 << 3));
     assert_eq!(manage_binding.command, "manage");

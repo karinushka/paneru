@@ -6,6 +6,7 @@ use accessibility_sys::{
 };
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
+use bevy::ecs::system::Commands;
 use core::ptr::NonNull;
 use log::{debug, trace, warn};
 use objc2_core_foundation::{
@@ -24,6 +25,7 @@ use std::thread;
 use std::time::Duration;
 use stdext::function_name;
 
+use crate::events::RepositionMarker;
 use crate::platform::{Pid, ProcessSerialNumber};
 use crate::skylight::{
     _AXUIElementGetWindow, _SLPSSetFrontProcessWithOptions, AXUIElementCopyAttributeValue,
@@ -1210,10 +1212,22 @@ impl Window {
     /// # Returns
     ///
     /// The adjusted `CGRect` of the window after exposure.
-    pub fn expose_window(&mut self, display_bounds: &CGRect) -> CGRect {
+    pub fn expose_window(
+        &self,
+        display_bounds: &CGRect,
+        moving: Option<&RepositionMarker>,
+        entity: Entity,
+        commands: &mut Commands,
+    ) -> CGRect {
         // Check if window needs to be fully exposed
         let window_id = self.id();
-        let mut frame = self.frame;
+        let mut frame = if let Some(RepositionMarker { origin }) = moving {
+            let mut frame = self.frame;
+            frame.origin = *origin;
+            frame
+        } else {
+            self.frame
+        };
         trace!("{}: focus original position {frame:?}", function_name!());
         let moved = if frame.origin.x + frame.size.width > display_bounds.size.width {
             trace!(
@@ -1235,7 +1249,9 @@ impl Window {
             false
         };
         if moved {
-            self.reposition(frame.origin.x, frame.origin.y, display_bounds);
+            commands.entity(entity).insert(RepositionMarker {
+                origin: frame.origin,
+            });
             trace!("{}: focus resposition to {frame:?}", function_name!());
         }
         frame

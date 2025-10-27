@@ -9,8 +9,8 @@ use stdext::function_name;
 
 use crate::config::{Config, preset_column_widths};
 use crate::events::{
-    CommandTrigger, Event, FocusedMarker, MainConnection, ReshuffleAroundTrigger, SenderSocket,
-    WMEventTrigger,
+    CommandTrigger, Event, FocusedMarker, MainConnection, RepositionMarker, ReshuffleAroundTrigger,
+    SenderSocket, WMEventTrigger,
 };
 use crate::skylight::ConnID;
 use crate::windows::{Display, Panel, Window, WindowPane};
@@ -118,6 +118,7 @@ fn command_swap_focus(
     panel: &mut WindowPane,
     display_bounds: &CGRect,
     windows: &mut Query<&mut Window>,
+    commands: &mut Commands,
 ) -> Option<Entity> {
     let direction = argv.first()?;
     let index = panel.index_of(current).ok()?;
@@ -140,10 +141,12 @@ fn command_swap_focus(
             .frame()
             .origin
     };
-    windows
-        .get_mut(current)
-        .ok()?
-        .reposition(origin.x, origin.y, display_bounds);
+    commands.entity(current).insert(RepositionMarker {
+        origin: CGPoint {
+            x: origin.x,
+            y: origin.y,
+        },
+    });
     if index < new_index {
         (index..new_index).for_each(|idx| panel.swap(idx, idx + 1));
     } else {
@@ -195,17 +198,25 @@ fn command_windows(
         }
 
         "swap" => {
-            command_swap_focus(&argv[1..], focused_entity, active_panel, &bounds, windows);
+            command_swap_focus(
+                &argv[1..],
+                focused_entity,
+                active_panel,
+                &bounds,
+                windows,
+                commands,
+            );
         }
 
         "center" => {
-            let mut window = windows.get_mut(focused_entity).map_err(error_msg)?;
+            let window = windows.get_mut(focused_entity).map_err(error_msg)?;
             let frame = window.frame();
-            window.reposition(
-                (active_display.bounds.size.width - frame.size.width) / 2.0,
-                frame.origin.y,
-                &active_display.bounds,
-            );
+            commands.entity(focused_entity).insert(RepositionMarker {
+                origin: CGPoint {
+                    x: (active_display.bounds.size.width - frame.size.width) / 2.0,
+                    y: frame.origin.y,
+                },
+            });
             window.center_mouse(main_cid);
         }
 
@@ -230,7 +241,12 @@ fn command_windows(
             } else {
                 // Add newly managed window to the stack.
                 let frame = window.frame();
-                window.reposition(frame.origin.x, 0.0, &bounds);
+                commands.entity(focused_entity).insert(RepositionMarker {
+                    origin: CGPoint {
+                        x: frame.origin.x,
+                        y: 0.0,
+                    },
+                });
                 window.resize(frame.size.width, bounds.size.height, &bounds);
                 active_panel.append(focused_entity);
                 window.manage(true);

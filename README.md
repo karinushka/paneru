@@ -114,6 +114,10 @@ preset_column_widths = [ 0.25, 0.33, 0.50, 0.66, 0.75 ]
 # but it is probably not that useful to use two hands :)
 swipe_gesture_fingers = 4
 
+# Window movement speed in pixels/second.
+# To disable animations, leave this unset or set to a very large value.
+animation_speed = 4000
+
 [bindings]
 # Moves the focus between windows.
 window_focus_west = "cmd - h"

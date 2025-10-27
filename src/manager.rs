@@ -21,8 +21,8 @@ use crate::app::Application;
 use crate::config::Config;
 use crate::events::{
     BProcess, DestroyedMarker, Event, ExistingMarker, FocusFollowsMouse, FocusedMarker,
-    FreshMarker, MainConnection, MissionControlActive, OrphanedSpaces, ReshuffleAroundTrigger,
-    SenderSocket, SkipReshuffle, WMEventTrigger,
+    FreshMarker, MainConnection, MissionControlActive, OrphanedSpaces, RepositionMarker,
+    ReshuffleAroundTrigger, SenderSocket, SkipReshuffle, WMEventTrigger,
 };
 use crate::platform::ProcessSerialNumber;
 use crate::process::Process;
@@ -1031,51 +1031,40 @@ impl WindowManager {
     /// * `active_display` - A query for the active display.
     /// * `windows` - A query for all windows.
     #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
-    pub fn reshuffle_around_trigger(
-        trigger: On<ReshuffleAroundTrigger>,
-        main_cid: Res<MainConnection>,
-        mut active_display: Query<&mut Display, With<FocusedMarker>>,
-        mut windows: Query<(&mut Window, Entity)>,
-    ) {
-        let find_window = |window_id| windows.iter().find(|(window, _)| window.id() == window_id);
-        let Some((window, entity)) = find_window(trigger.event().0) else {
-            // TODO: not found
-            return;
-        };
-        if !window.managed() {
-            return;
-        }
-
-        let main_cid = main_cid.0;
-        let Ok(mut active_display) = active_display.single_mut() else {
-            // TODO: not found
-            return;
-        };
+    pub fn reshuffle_around(
+        main_cid: ConnID,
+        active_display: &mut Query<&mut Display, With<FocusedMarker>>,
+        entity: Entity,
+        windows: &mut Query<(&mut Window, Entity, Option<&RepositionMarker>)>,
+        commands: &mut Commands,
+    ) -> Result<()> {
+        let mut active_display = active_display.single_mut().map_err(|err| {
+            Error::new(
+                ErrorKind::NotFound,
+                format!("{}: active display not found: {err}", function_name!()),
+            )
+        })?;
         let display_bounds = active_display.bounds;
-        let Ok(active_panel) = active_display.active_panel(main_cid) else {
-            // TODO: not found
-            return;
-        };
+        let active_panel = active_display.active_panel(main_cid)?;
 
-        let Ok((mut window, _)) = windows.get_mut(entity) else {
-            return;
-        };
-        let frame = window.expose_window(&display_bounds);
-
-        let Ok(panel) = active_panel
+        let (window, _, moving) = windows.get_mut(entity).map_err(|err| {
+            Error::new(
+                ErrorKind::NotFound,
+                format!("{}: window not found: {err}", function_name!()),
+            )
+        })?;
+        let frame = window.expose_window(&display_bounds, moving, entity, commands);
+        let panel = active_panel
             .index_of(entity)
-            .and_then(|index| active_panel.get(index))
-        else {
-            // TODO: not found
-            return;
-        };
+            .and_then(|index| active_panel.get(index))?;
 
         WindowManager::reposition_stack(
             frame.origin.x,
             &panel,
             frame.size.width,
             &display_bounds,
-            &mut windows,
+            windows,
+            commands,
         );
 
         // Shuffling windows to the right of the focus.
@@ -1084,7 +1073,7 @@ impl WindowManager {
             let frame = panel
                 .top()
                 .and_then(|entity| windows.get(entity).ok())
-                .map(|(window, _)| window.frame);
+                .map(|(window, _, _)| window.frame);
             if let Some(frame) = frame {
                 trace!("{}: right: frame: {frame:?}", function_name!());
 
@@ -1099,7 +1088,8 @@ impl WindowManager {
                         panel,
                         frame.size.width,
                         &display_bounds,
-                        &mut windows,
+                        windows,
+                        commands,
                     );
                 }
                 upper_left += frame.size.width;
@@ -1113,7 +1103,7 @@ impl WindowManager {
             let frame = panel
                 .top()
                 .and_then(|entity| windows.get(entity).ok())
-                .map(|(window, _)| window.frame);
+                .map(|(window, _, _)| window.frame);
             if let Some(frame) = frame {
                 trace!("{}: left: frame: {frame:?}", function_name!());
 
@@ -1129,12 +1119,42 @@ impl WindowManager {
                         panel,
                         frame.size.width,
                         &display_bounds,
-                        &mut windows,
+                        windows,
+                        commands,
                     );
                 }
             }
             true // continue through all windows
         });
+        Ok(())
+    }
+
+    #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
+    pub fn reshuffle_around_trigger(
+        trigger: On<ReshuffleAroundTrigger>,
+        main_cid: Res<MainConnection>,
+        mut active_display: Query<&mut Display, With<FocusedMarker>>,
+        mut windows: Query<(&mut Window, Entity, Option<&RepositionMarker>)>,
+        mut commands: Commands,
+    ) {
+        let Some((window, entity, _)) = windows
+            .iter()
+            .find(|(window, _, _)| window.id() == trigger.event().0)
+        else {
+            return;
+        };
+        if window.managed() {
+            _ = WindowManager::reshuffle_around(
+                main_cid.0,
+                &mut active_display,
+                entity,
+                &mut windows,
+                &mut commands,
+            )
+            .inspect_err(|err| {
+                error!("{}: failed with: {err}", function_name!());
+            });
+        }
     }
 
     /// Repositions all windows within a given panel stack.
@@ -1151,7 +1171,8 @@ impl WindowManager {
         panel: &Panel,
         width: f64,
         display_bounds: &CGRect,
-        windows: &mut Query<(&mut Window, Entity)>,
+        windows: &mut Query<(&mut Window, Entity, Option<&RepositionMarker>)>,
+        commands: &mut Commands,
     ) {
         let entities = match panel {
             Panel::Single(window_id) => vec![*window_id],
@@ -1161,8 +1182,16 @@ impl WindowManager {
         let count: f64 = u32::try_from(entities.len()).unwrap().into();
         let height = display_bounds.size.height / count;
         for entity in entities {
-            if let Ok((mut window, _)) = windows.get_mut(entity) {
-                window.reposition(upper_left, y_pos, display_bounds);
+            if let Ok((mut window, _, repos)) = windows.get_mut(entity) {
+                if repos.is_some() {
+                    continue;
+                }
+                commands.entity(entity).insert(RepositionMarker {
+                    origin: CGPoint {
+                        x: upper_left,
+                        y: y_pos,
+                    },
+                });
                 window.resize(width, height, display_bounds);
                 y_pos += height;
             }

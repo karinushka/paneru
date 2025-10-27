@@ -2,6 +2,7 @@ use bevy::app::{App as BevyApp, AppExit, Startup, Update};
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::message::{Message, MessageReader, Messages};
+use bevy::ecs::query::With;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs;
 use bevy::ecs::schedule::common_conditions::any_with_component;
@@ -216,6 +217,11 @@ pub struct ExistingMarker;
 pub struct DestroyedMarker;
 
 #[derive(Component)]
+pub struct RepositionMarker {
+    pub origin: CGPoint,
+}
+
+#[derive(Component)]
 pub struct BProcess(pub ProcessRef);
 
 #[derive(Resource)]
@@ -301,6 +307,7 @@ impl EventHandler {
                         Update,
                         (
                             EventHandler::dispatch_toplevel_triggers,
+                            EventHandler::animate_windows,
                             WindowManager::add_existing_process
                                 .run_if(any_with_component::<InitializingMarker>),
                             WindowManager::add_existing_application
@@ -540,6 +547,55 @@ impl EventHandler {
                 WindowManager::refresh_display(main_cid.0, &mut display, &mut lens.query());
             }
             commands.trigger(WMEventTrigger(Event::CurrentlyFocused));
+        }
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn animate_windows(
+        windows: Query<(&mut Window, Entity, &RepositionMarker)>,
+        displays: Query<&Display, With<FocusedMarker>>,
+        time: Res<Time<Virtual>>,
+        config: Option<Res<Config>>,
+        mut commands: Commands,
+    ) {
+        let Ok(active_display) = displays.single() else {
+            return;
+        };
+        let move_speed = config
+            .and_then(|config| config.options().animation_speed)
+            // If unset, set it to something high, so the move happens immediately,
+            // effectively disabling animation.
+            .unwrap_or(1_000_000.0)
+            .max(500.0);
+        let move_delta = move_speed * time.delta_secs_f64();
+
+        for (mut window, entity, RepositionMarker { origin }) in windows {
+            let current = window.frame();
+            let mut delta_x = (origin.x - current.origin.x).abs().min(move_delta);
+            let mut delta_y = (origin.y - current.origin.y).abs().min(move_delta);
+            if delta_x < move_delta && delta_y < move_delta {
+                commands.entity(entity).remove::<RepositionMarker>();
+                window.reposition(origin.x, origin.y, &active_display.bounds);
+                continue;
+            }
+
+            if origin.x < current.origin.x {
+                delta_x = -delta_x;
+            }
+            if origin.y < current.origin.y {
+                delta_y = -delta_y;
+            }
+            trace!(
+                "{}: delta {move_delta:.0} moving to {:.0}:{:.0}",
+                function_name!(),
+                current.origin.x + delta_x,
+                current.origin.y + delta_y,
+            );
+            window.reposition(
+                current.origin.x + delta_x,
+                current.origin.y + delta_y,
+                &active_display.bounds,
+            );
         }
     }
 }

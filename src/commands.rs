@@ -7,9 +7,9 @@ use std::io::Result;
 use stdext::function_name;
 
 use crate::events::{
-    CommandTrigger, Event, FocusedMarker, MainConnection, SenderSocket, WorkspaceChangeTrigger,
+    CommandTrigger, Event, FocusedMarker, MainConnection, ReshuffleAroundTrigger, SenderSocket,
+    WorkspaceChangeTrigger,
 };
-use crate::manager::WindowManager;
 use crate::skylight::{ConnID, WinID};
 use crate::windows::{Display, Panel, Window, WindowPane};
 
@@ -166,6 +166,7 @@ fn command_windows<F: Fn(WinID) -> Option<Window>>(
     active_display: &Display,
     focused_window: &Query<&Window, With<FocusedMarker>>,
     find_window: &F,
+    commands: &mut Commands,
 ) -> Result<()> {
     let empty = String::new();
     let Ok(window) = focused_window.single() else {
@@ -247,7 +248,8 @@ fn command_windows<F: Fn(WinID) -> Option<Window>>(
 
         _ => (),
     }
-    WindowManager::reshuffle_around(main_cid, window, active_display, find_window)
+    commands.trigger(ReshuffleAroundTrigger(window.id()));
+    Ok(())
 }
 
 /// Dispatches a command based on the first argument (e.g., "window", "quit").
@@ -300,6 +302,7 @@ pub fn process_command_trigger(
                     active_display,
                     &focused_window,
                     &find_window,
+                    &mut commands,
                 )
                 .inspect_err(|err| warn!("{}: {err}", function_name!()));
             }

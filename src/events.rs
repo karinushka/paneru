@@ -229,6 +229,9 @@ pub struct WindowFocusedTrigger(pub WinID);
 #[derive(BevyEvent)]
 pub struct FrontSwitchedTrigger(pub ProcessSerialNumber);
 
+#[derive(BevyEvent)]
+pub struct ReshuffleAroundTrigger(pub WinID);
+
 pub struct EventHandler;
 
 impl EventHandler {
@@ -263,6 +266,7 @@ impl EventHandler {
                     .add_observer(WindowManager::display_add_remove_trigger)
                     .add_observer(WindowManager::front_switched_trigger)
                     .add_observer(WindowManager::window_focused_trigger)
+                    .add_observer(WindowManager::reshuffle_around_trigger)
                     .add_systems(Startup, EventHandler::gather_displays)
                     .add_systems(Startup, process_setup.after(EventHandler::gather_displays))
                     .add_systems(

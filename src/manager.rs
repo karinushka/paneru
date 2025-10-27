@@ -24,8 +24,8 @@ use crate::app::Application;
 use crate::config::Config;
 use crate::events::{
     BProcess, DisplayAddRemoveTrigger, Event, ExistingMarker, FocusedMarker, FreshMarker,
-    FrontSwitchedTrigger, MainConnection, MouseTrigger, OrphanedSpaces, SenderSocket,
-    WindowFocusedTrigger, WorkspaceChangeTrigger,
+    FrontSwitchedTrigger, MainConnection, MouseTrigger, OrphanedSpaces, ReshuffleAroundTrigger,
+    SenderSocket, WindowFocusedTrigger, WorkspaceChangeTrigger,
 };
 use crate::platform::ProcessSerialNumber;
 use crate::process::Process;
@@ -116,7 +116,6 @@ impl WindowManager {
                 },
                 Event::WindowDestroyed { window_id } => {
                     WindowManager::window_destroyed(
-                        main_cid,
                         *window_id,
                         &mut apps,
                         &windows,
@@ -129,21 +128,10 @@ impl WindowManager {
                     let Some(window) = find_window(*window_id) else {
                         return;
                     };
-                    _ = WindowManager::window_resized(
-                        main_cid,
-                        &window,
-                        active_display,
-                        &find_window,
-                    );
+                    _ = WindowManager::window_resized(&window, active_display, &mut commands);
                 }
                 Event::CurrentlyFocused => {
-                    WindowManager::currently_focused(
-                        main_cid,
-                        active_display,
-                        &windows,
-                        &focused_window,
-                        &mut commands,
-                    );
+                    WindowManager::currently_focused(&windows, &focused_window, &mut commands);
                 }
                 Event::WindowMinimized { window_id } => {
                     active_display.remove_window(*window_id);
@@ -162,19 +150,13 @@ impl WindowManager {
     #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
     pub fn dispatch_manager_messages(
         mut messages: MessageReader<Event>,
-        windows: Query<(&Window, Entity)>,
         focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
         displays: Query<&mut Display, With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
         mut window_manager: ResMut<WindowManager>,
+        mut commands: Commands,
     ) {
         let main_cid = main_cid.0;
-        let find_window = |window_id| {
-            windows
-                .iter()
-                .find_map(|(window, _)| (window.id() == window_id).then_some(window))
-                .cloned()
-        };
         let Ok(active_display) = displays.single() else {
             warn!("{}: Unable to get current display.", function_name!());
             return;
@@ -188,7 +170,7 @@ impl WindowManager {
                         main_cid,
                         active_display,
                         &focused_window,
-                        &find_window,
+                        &mut commands,
                     );
                 }
                 Event::MissionControlShowAllWindows
@@ -221,13 +203,13 @@ impl WindowManager {
     //     self.swipe_gesture_fingers = config.options().swipe_gesture_fingers;
     // }
 
-    fn swipe_gesture<F: Fn(WinID) -> Option<Window>>(
+    fn swipe_gesture(
         &self,
         deltas: &[f64],
         main_cid: ConnID,
         active_display: &Display,
         focused_window: &Query<(&Window, Entity), With<FocusedMarker>>,
-        find_window: &F,
+        commands: &mut Commands,
     ) {
         const SWIPE_THRESHOLD: f64 = 0.01;
         if self
@@ -243,7 +225,7 @@ impl WindowManager {
                     focused_window,
                     active_display,
                     delta,
-                    &find_window,
+                    commands,
                 );
             }
         }
@@ -368,8 +350,6 @@ impl WindowManager {
     }
 
     pub fn currently_focused(
-        main_cid: ConnID,
-        active_display: &Display,
         windows: &Query<(&Window, Entity)>,
         focused_window: &Query<(&Window, Entity), With<FocusedMarker>>,
         commands: &mut Commands,
@@ -397,14 +377,7 @@ impl WindowManager {
             commands.entity(prev_entity).remove::<FocusedMarker>();
         }
         commands.entity(entity).insert(FocusedMarker);
-
-        let find_window = |window_id| {
-            windows
-                .iter()
-                .find_map(|window| (window.0.id() == window_id).then_some(window.0))
-                .cloned()
-        };
-        _ = WindowManager::reshuffle_around(main_cid, window, active_display, &find_window);
+        commands.trigger(ReshuffleAroundTrigger(window.id()));
     }
 
     /// Checks if Mission Control is currently active.
@@ -905,7 +878,6 @@ impl WindowManager {
     }
 
     fn window_destroyed(
-        main_cid: ConnID,
         window_id: WinID,
         apps: &mut Query<(&mut Application, &Children)>,
         windows: &Query<(&Window, Entity)>,
@@ -913,10 +885,6 @@ impl WindowManager {
         displays: &Query<&mut Display, With<FocusedMarker>>,
         commands: &mut Commands,
     ) {
-        let Ok(active_display) = displays.single() else {
-            warn!("{}: Unable to get current display.", function_name!());
-            return;
-        };
         if let Some((window, entity)) = windows.iter().find(|(window, _)| window.id() == window_id)
         {
             displays
@@ -931,15 +899,11 @@ impl WindowManager {
             }
 
             commands.entity(entity).despawn();
-            if let Ok((window, _)) = focused_window.single() {
-                let find_window = |window_id| {
-                    windows
-                        .iter()
-                        .find_map(|(window, _)| (window.id() == window_id).then_some(window))
-                        .cloned()
-                };
-                _ = WindowManager::reshuffle_around(main_cid, window, active_display, &find_window);
-            }
+            let Ok((window, _)) = focused_window.single() else {
+                return;
+            };
+            // _ = WindowManager::reshuffle_around(main_cid, window, active_display, &find_window);
+            commands.trigger(ReshuffleAroundTrigger(window.id()));
         }
     }
 
@@ -952,14 +916,13 @@ impl WindowManager {
     /// # Returns
     ///
     /// `Ok(())` if the window is resized successfully, otherwise `Err(Error)`.
-    fn window_resized<F: Fn(WinID) -> Option<Window>>(
-        main_cid: ConnID,
+    fn window_resized(
         window: &Window,
         active_display: &Display,
-        find_window: &F,
+        commands: &mut Commands,
     ) -> Result<()> {
         window.update_frame(Some(&active_display.bounds))?;
-        WindowManager::reshuffle_around(main_cid, window, active_display, find_window)?;
+        commands.trigger(ReshuffleAroundTrigger(window.id()));
         Ok(())
     }
 
@@ -975,7 +938,6 @@ impl WindowManager {
         applications: Query<&Application>,
         windows: Query<(&Window, Entity, &ChildOf, Option<&FocusedMarker>)>,
         current_focus: Query<(&Window, Entity), With<FocusedMarker>>,
-        displays: Query<&Display, With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
         mut window_manager: ResMut<WindowManager>,
         mut commands: Commands,
@@ -1030,17 +992,7 @@ impl WindowManager {
         if window_manager.skip_reshuffle {
             window_manager.skip_reshuffle = false;
         } else {
-            let find_window = |window_id| {
-                windows
-                    .iter()
-                    .find_map(|window| (window.0.id() == window_id).then_some(window.0))
-                    .cloned()
-            };
-            let Some(active_display) = displays.single().ok() else {
-                warn!("{}: Unable to get current display.", function_name!());
-                return;
-            };
-            _ = WindowManager::reshuffle_around(main_cid, window, active_display, &find_window);
+            commands.trigger(ReshuffleAroundTrigger(window.id()));
         }
     }
 
@@ -1054,33 +1006,57 @@ impl WindowManager {
     /// # Returns
     ///
     /// `Ok(())` if reshuffling is successful, otherwise `Err(Error)`.
-    pub fn reshuffle_around<F: Fn(WinID) -> Option<Window>>(
-        main_cid: ConnID,
-        window: &Window,
-        active_display: &Display,
-        find_window: &F,
-    ) -> Result<()> {
+    #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
+    pub fn reshuffle_around_trigger(
+        trigger: On<ReshuffleAroundTrigger>,
+        main_cid: Res<MainConnection>,
+        active_display: Query<&Display, With<FocusedMarker>>,
+        windows: Query<(&Window, Entity)>,
+    ) {
+        let find_window = |window_id| {
+            windows
+                .iter()
+                .find_map(|(window, _)| (window.id() == window_id).then_some(window))
+                .cloned()
+        };
+        let Some(window) = find_window(trigger.event().0) else {
+            // TODO: not found
+            return;
+        };
         if !window.inner().managed {
-            return Ok(());
+            return;
         }
 
-        let active_panel = active_display.active_panel(main_cid)?;
+        let main_cid = main_cid.0;
+        let Ok(active_display) = active_display.single() else {
+            // TODO: not found
+            return;
+        };
+        let Ok(active_panel) = active_display.active_panel(main_cid) else {
+            // TODO: not found
+            return;
+        };
         let display_bounds = &active_display.bounds;
         let frame = window.expose_window(display_bounds);
 
-        let index = active_panel.index_of(window.id())?;
-        let panel = active_panel.get(index)?;
+        let Ok(panel) = active_panel
+            .index_of(window.id())
+            .and_then(|index| active_panel.get(index))
+        else {
+            // TODO: not found
+            return;
+        };
         WindowManager::reposition_stack(
             frame.origin.x,
             &panel,
             frame.size.width,
             display_bounds,
-            find_window,
+            &find_window,
         );
 
         // Shuffling windows to the right of the focus.
         let mut upper_left = frame.origin.x + frame.size.width;
-        active_panel.access_right_of(window.id(), |panel| {
+        _ = active_panel.access_right_of(window.id(), |panel| {
             let frame = panel
                 .top()
                 .and_then(find_window)
@@ -1099,17 +1075,17 @@ impl WindowManager {
                         panel,
                         frame.size.width,
                         display_bounds,
-                        find_window,
+                        &find_window,
                     );
                 }
                 upper_left += frame.size.width;
             }
             true // continue through all windows
-        })?;
+        });
 
         // Shuffling windows to the left of the focus.
         let mut upper_left = frame.origin.x;
-        active_panel.access_left_of(window.id(), |panel| {
+        _ = active_panel.access_left_of(window.id(), |panel| {
             let frame = panel
                 .top()
                 .and_then(find_window)
@@ -1129,12 +1105,12 @@ impl WindowManager {
                         panel,
                         frame.size.width,
                         display_bounds,
-                        find_window,
+                        &find_window,
                     );
                 }
             }
             true // continue through all windows
-        })
+        });
     }
 
     fn reposition_stack<F: Fn(WinID) -> Option<Window>>(
@@ -1413,7 +1389,6 @@ impl WindowManager {
     #[allow(clippy::needless_pass_by_value)]
     pub fn display_change_trigger(
         _: On<WorkspaceChangeTrigger>,
-        windows: Query<&Window>,
         focused_window: Query<&Window, With<FocusedMarker>>,
         displays: Query<(&Display, Entity, Option<&FocusedMarker>)>,
         main_cid: Res<MainConnection>,
@@ -1467,27 +1442,21 @@ impl WindowManager {
 
             // .. and then re-insert it into the current one.
             panel.append(window_id);
-            let find_window = |window_id| {
-                windows
-                    .iter()
-                    .find(|window| window.id() == window_id)
-                    .cloned()
-            };
-            _ = WindowManager::reshuffle_around(main_cid, window, active_display, &find_window);
+            commands.trigger(ReshuffleAroundTrigger(window.id()));
         }
     }
 
-    fn slide_window<F: Fn(WinID) -> Option<Window>>(
+    fn slide_window(
         main_cid: ConnID,
         focused_window: &Query<(&Window, Entity), With<FocusedMarker>>,
         active_display: &Display,
         delta_x: f64,
-        find_window: &F,
-    ) -> Result<()> {
+        commands: &mut Commands,
+    ) {
         trace!("{}: Windows slide {delta_x}.", function_name!());
         let Ok((window, _)) = focused_window.single() else {
             warn!("{}: No window focused.", function_name!());
-            return Ok(());
+            return;
         };
         let frame = window.frame();
         // Delta is relative to the touchpad size, so to avoid too fast movement we
@@ -1500,8 +1469,7 @@ impl WindowManager {
             &active_display.bounds,
         );
         window.center_mouse(main_cid);
-        WindowManager::reshuffle_around(main_cid, window, active_display, find_window)?;
-        Ok(())
+        commands.trigger(ReshuffleAroundTrigger(window.id()));
     }
 
     /// Finds a window at a given screen point using `SkyLight` API.
@@ -1671,6 +1639,7 @@ impl WindowManager {
         point: &CGPoint,
         active_display: &Display,
         find_window: &F,
+        commands: &mut Commands,
     ) -> Result<()> {
         debug!("{}: {point:?}", function_name!());
         if self.mission_control_is_active() {
@@ -1679,7 +1648,8 @@ impl WindowManager {
 
         let window = WindowManager::find_window_at_point(main_cid, point, find_window)?;
         if !window.fully_visible(&active_display.bounds) {
-            WindowManager::reshuffle_around(main_cid, &window, active_display, find_window)?;
+            // WindowManager::reshuffle_around(main_cid, &window, active_display, find_window)?;
+            commands.trigger(ReshuffleAroundTrigger(window.id()));
         }
         Ok(())
     }
@@ -1706,6 +1676,7 @@ impl WindowManager {
         active_display: Query<&Display, With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
         mut window_manager: ResMut<WindowManager>,
+        mut commands: Commands,
     ) {
         let find_window = |window_id| {
             windows
@@ -1720,7 +1691,13 @@ impl WindowManager {
         };
         match &trigger.event().0 {
             Event::MouseDown { point } => {
-                _ = window_manager.mouse_down(main_cid, point, active_display, &find_window);
+                _ = window_manager.mouse_down(
+                    main_cid,
+                    point,
+                    active_display,
+                    &find_window,
+                    &mut commands,
+                );
             }
             // Event::MouseUp { point: _ } => (),
             Event::MouseMoved { point } => {

@@ -3,7 +3,6 @@ use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{With, Without};
-use bevy::ecs::resource::Resource;
 use bevy::ecs::system::{Commands, Query, Res, ResMut};
 use bevy::time::{Time, Virtual};
 use bevy::transform::commands::BuildChildrenTransformExt;
@@ -23,10 +22,10 @@ use stdext::prelude::RwLockExt;
 use crate::app::Application;
 use crate::config::Config;
 use crate::events::{
-    BProcess, DestroyedMarker, DisplayAddRemoveTrigger, Event, ExistingMarker, FocusedMarker,
-    FreshMarker, FrontSwitchedTrigger, MainConnection, MouseTrigger, OrphanedSpaces,
-    ReshuffleAroundTrigger, SenderSocket, SwipeGestureTrigger, WindowFocusedTrigger,
-    WorkspaceChangeTrigger,
+    BProcess, DestroyedMarker, DisplayAddRemoveTrigger, Event, ExistingMarker, FocusFollowsMouse,
+    FocusedMarker, FreshMarker, FrontSwitchedTrigger, MainConnection, MissionControlActive,
+    MissionControlTrigger, MouseTrigger, OrphanedSpaces, ReshuffleAroundTrigger, SenderSocket,
+    SkipReshuffle, SwipeGestureTrigger, WindowFocusedTrigger, WorkspaceChangeTrigger,
 };
 use crate::platform::ProcessSerialNumber;
 use crate::process::Process;
@@ -41,12 +40,8 @@ use crate::windows::{Display, Panel, Window, WindowPane, ax_window_id, ax_window
 
 const THRESHOLD: f64 = 10.0;
 
-#[derive(Default, Resource)]
-pub struct WindowManager {
-    ffm_window_id: Option<WinID>,
-    mission_control_is_active: bool,
-    skip_reshuffle: bool,
-}
+#[derive(Default)]
+pub struct WindowManager;
 
 impl WindowManager {
     pub fn dispatch_process_messages(
@@ -142,39 +137,23 @@ impl WindowManager {
         }
     }
 
-    #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
-    pub fn dispatch_manager_messages(
-        mut messages: MessageReader<Event>,
-        mut window_manager: ResMut<WindowManager>,
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn mission_control_trigger(
+        trigger: On<MissionControlTrigger>,
+        mut mission_control_active: ResMut<MissionControlActive>,
     ) {
-        for event in messages.read() {
-            match event {
-                Event::MissionControlShowAllWindows
-                | Event::MissionControlShowFrontWindows
-                | Event::MissionControlShowDesktop => {
-                    window_manager.mission_control_is_active = true;
-                }
-                Event::MissionControlExit => {
-                    window_manager.mission_control_is_active = false;
-                }
-                _ => (),
+        match trigger.event().0 {
+            Event::MissionControlShowAllWindows
+            | Event::MissionControlShowFrontWindows
+            | Event::MissionControlShowDesktop => {
+                mission_control_active.as_mut().0 = true;
             }
+            Event::MissionControlExit => {
+                mission_control_active.as_mut().0 = false;
+            }
+            _ => (),
         }
     }
-
-    // /// Reloads the manager's configuration based on the provided `Config` object.
-    // ///
-    // /// # Arguments
-    // ///
-    // /// * `config` - The new `Config` object to load.
-    // fn reload_config(&mut self, config: &Config) {
-    //     debug!("{}: Got fresh config: {config:?}", function_name!());
-    //     self.focus_follows_mouse = config
-    //         .options()
-    //         .focus_follows_mouse
-    //         .is_some_and(|focus| focus);
-    //     self.swipe_gesture_fingers = config.options().swipe_gesture_fingers;
-    // }
 
     #[allow(clippy::needless_pass_by_value)]
     pub fn swipe_gesture_trigger(
@@ -355,15 +334,6 @@ impl WindowManager {
         }
         commands.entity(entity).insert(FocusedMarker);
         commands.trigger(ReshuffleAroundTrigger(window.id()));
-    }
-
-    /// Checks if Mission Control is currently active.
-    ///
-    /// # Returns
-    ///
-    /// `true` if Mission Control is active, `false` otherwise.
-    pub fn mission_control_is_active(&self) -> bool {
-        self.mission_control_is_active
     }
 
     /// Retrieves a list of window IDs for specified spaces and connection, with an option to include minimized windows.
@@ -696,7 +666,7 @@ impl WindowManager {
         processes: Query<(&BProcess, &Children)>,
         applications: Query<&Application>,
         focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
-        mut window_manager: ResMut<WindowManager>,
+        mut focus_follows_mouse_id: ResMut<FocusFollowsMouse>,
         mut commands: Commands,
     ) {
         let psn = &trigger.event().0;
@@ -737,7 +707,7 @@ impl WindowManager {
                     return;
                 };
 
-                window_manager.ffm_window_id = None;
+                focus_follows_mouse_id.as_mut().0 = None;
                 commands.entity(focused_entity).remove::<FocusedMarker>();
                 warn!("{}: reset focused window", function_name!());
             }
@@ -908,14 +878,15 @@ impl WindowManager {
     /// # Arguments
     ///
     /// * `window` - The `Window` object that gained focus.
-    #[allow(clippy::needless_pass_by_value)]
+    #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
     pub fn window_focused_trigger(
         trigger: On<WindowFocusedTrigger>,
         applications: Query<&Application>,
         windows: Query<(&Window, Entity, &ChildOf, Option<&FocusedMarker>)>,
         current_focus: Query<(&Window, Entity), With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
-        mut window_manager: ResMut<WindowManager>,
+        mut focus_follows_mouse_id: ResMut<FocusFollowsMouse>,
+        mut skip_reshuffle: ResMut<SkipReshuffle>,
         mut commands: Commands,
     ) {
         let main_cid = main_cid.0;
@@ -955,18 +926,16 @@ impl WindowManager {
             commands.entity(previous_entity).remove::<FocusedMarker>();
         }
         if previous_focus.is_none_or(|(previous, _)| previous.id() != window_id)
-            && window_manager
-                .ffm_window_id
-                .is_none_or(|id| id != window_id)
+            && focus_follows_mouse_id.0.is_none_or(|id| id != window_id)
         {
             window.center_mouse(main_cid);
         }
 
         commands.entity(entity).insert(FocusedMarker);
-        window_manager.ffm_window_id = None;
+        focus_follows_mouse_id.as_mut().0 = None;
 
-        if window_manager.skip_reshuffle {
-            window_manager.skip_reshuffle = false;
+        if skip_reshuffle.0 {
+            skip_reshuffle.as_mut().0 = false;
         } else {
             commands.trigger(ReshuffleAroundTrigger(window.id()));
         }
@@ -1507,14 +1476,16 @@ impl WindowManager {
     /// # Returns
     ///
     /// `Ok(())` if the event is handled successfully or if focus-follows-mouse is disabled, otherwise `Err(Error)`.
-    #[allow(clippy::needless_pass_by_value)]
+    #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
     pub fn mouse_moved_trigger(
         trigger: On<MouseTrigger>,
         windows: Query<&Window>,
         focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
         config: Option<Res<Config>>,
-        mut window_manager: ResMut<WindowManager>,
+        mission_control_active: Res<MissionControlActive>,
+        mut focus_follows_mouse_id: ResMut<FocusFollowsMouse>,
+        mut skip_reshuffle: ResMut<SkipReshuffle>,
     ) {
         let Event::MouseMoved { point } = trigger.event().0 else {
             return;
@@ -1530,10 +1501,10 @@ impl WindowManager {
         if !WindowManager::focus_follows_mouse(config.as_ref()) {
             return;
         }
-        if window_manager.mission_control_is_active() {
+        if mission_control_active.0 {
             return;
         }
-        if window_manager.ffm_window_id.is_some() {
+        if focus_follows_mouse_id.0.is_some() {
             trace!("{}: ffm_window_id > 0", function_name!());
             return;
         }
@@ -1607,10 +1578,10 @@ impl WindowManager {
         }
 
         //  Do not reshuffle windows due to moved mouse focus.
-        window_manager.skip_reshuffle = true;
+        skip_reshuffle.as_mut().0 = true;
 
         window.focus_without_raise(focused_window);
-        window_manager.ffm_window_id = Some(window_id);
+        focus_follows_mouse_id.as_mut().0 = Some(window_id);
     }
 
     /// Handles a mouse down event. It finds the window at the click point, reshuffles if necessary,
@@ -1629,14 +1600,14 @@ impl WindowManager {
         windows: Query<&Window>,
         active_display: Query<&Display, With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
-        window_manager: ResMut<WindowManager>,
+        mission_control_active: Res<MissionControlActive>,
         mut commands: Commands,
     ) {
         let Event::MouseDown { point } = trigger.event().0 else {
             return;
         };
         debug!("{}: {point:?}", function_name!());
-        if window_manager.mission_control_is_active() {
+        if mission_control_active.0 {
             return;
         }
         let main_cid = main_cid.0;
@@ -1666,13 +1637,16 @@ impl WindowManager {
     ///
     /// * `point` - A reference to the `CGPoint` where the mouse was dragged.
     #[allow(clippy::needless_pass_by_value)]
-    pub fn mouse_dragged_trigger(trigger: On<MouseTrigger>, window_manager: ResMut<WindowManager>) {
+    pub fn mouse_dragged_trigger(
+        trigger: On<MouseTrigger>,
+        mission_control_active: Res<MissionControlActive>,
+    ) {
         let Event::MouseDragged { point } = trigger.event().0 else {
             return;
         };
         trace!("{}: {point:?}", function_name!());
 
-        if window_manager.mission_control_is_active() {
+        if mission_control_active.0 {
             #[warn(clippy::needless_return)]
             return;
         }

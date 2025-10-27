@@ -25,7 +25,8 @@ use crate::config::Config;
 use crate::events::{
     BProcess, DestroyedMarker, DisplayAddRemoveTrigger, Event, ExistingMarker, FocusedMarker,
     FreshMarker, FrontSwitchedTrigger, MainConnection, MouseTrigger, OrphanedSpaces,
-    ReshuffleAroundTrigger, SenderSocket, WindowFocusedTrigger, WorkspaceChangeTrigger,
+    ReshuffleAroundTrigger, SenderSocket, SwipeGestureTrigger, WindowFocusedTrigger,
+    WorkspaceChangeTrigger,
 };
 use crate::platform::ProcessSerialNumber;
 use crate::process::Process;
@@ -45,7 +46,6 @@ pub struct WindowManager {
     ffm_window_id: Option<WinID>,
     mission_control_is_active: bool,
     skip_reshuffle: bool,
-    config: Option<Config>,
 }
 
 impl WindowManager {
@@ -145,29 +145,10 @@ impl WindowManager {
     #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
     pub fn dispatch_manager_messages(
         mut messages: MessageReader<Event>,
-        focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
-        displays: Query<&mut Display, With<FocusedMarker>>,
-        main_cid: Res<MainConnection>,
         mut window_manager: ResMut<WindowManager>,
-        mut commands: Commands,
     ) {
-        let main_cid = main_cid.0;
-        let Ok(active_display) = displays.single() else {
-            warn!("{}: Unable to get current display.", function_name!());
-            return;
-        };
-
         for event in messages.read() {
             match event {
-                Event::Swipe { deltas } => {
-                    window_manager.swipe_gesture(
-                        deltas,
-                        main_cid,
-                        active_display,
-                        &focused_window,
-                        &mut commands,
-                    );
-                }
                 Event::MissionControlShowAllWindows
                 | Event::MissionControlShowFrontWindows
                 | Event::MissionControlShowDesktop => {
@@ -175,9 +156,6 @@ impl WindowManager {
                 }
                 Event::MissionControlExit => {
                     window_manager.mission_control_is_active = false;
-                }
-                Event::ConfigRefresh { config } => {
-                    window_manager.config = Some(config.clone());
                 }
                 _ => (),
             }
@@ -198,29 +176,33 @@ impl WindowManager {
     //     self.swipe_gesture_fingers = config.options().swipe_gesture_fingers;
     // }
 
-    fn swipe_gesture(
-        &self,
-        deltas: &[f64],
-        main_cid: ConnID,
-        active_display: &Display,
-        focused_window: &Query<(&Window, Entity), With<FocusedMarker>>,
-        commands: &mut Commands,
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn swipe_gesture_trigger(
+        trigger: On<SwipeGestureTrigger>,
+        active_display: Query<&Display, With<FocusedMarker>>,
+        focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
+        main_cid: Res<MainConnection>,
+        config: Option<Res<Config>>,
+        mut commands: Commands,
     ) {
         const SWIPE_THRESHOLD: f64 = 0.01;
-        if self
-            .config
-            .as_ref()
+        let deltas = &trigger.event().0;
+        if config
             .and_then(|config| config.options().swipe_gesture_fingers)
             .is_some_and(|fingers| deltas.len() == fingers)
         {
+            let Ok(active_display) = active_display.single() else {
+                warn!("{}: Unable to get current display.", function_name!());
+                return;
+            };
             let delta = deltas.iter().sum::<f64>();
             if delta.abs() > SWIPE_THRESHOLD {
                 WindowManager::slide_window(
-                    main_cid,
-                    focused_window,
+                    main_cid.0,
+                    &focused_window,
                     active_display,
                     delta,
-                    commands,
+                    &mut commands,
                 );
             }
         }
@@ -1313,9 +1295,8 @@ impl WindowManager {
     /// # Returns
     ///
     /// `true` if focus follows mouse is enabled, `false` otherwise.
-    pub fn focus_follows_mouse(&self) -> bool {
-        self.config
-            .as_ref()
+    pub fn focus_follows_mouse(config: Option<&Res<Config>>) -> bool {
+        config
             .and_then(|config| config.options().focus_follows_mouse)
             .is_some_and(|ffm| ffm)
     }
@@ -1526,37 +1507,52 @@ impl WindowManager {
     /// # Returns
     ///
     /// `Ok(())` if the event is handled successfully or if focus-follows-mouse is disabled, otherwise `Err(Error)`.
-    pub fn mouse_moved<F: Fn(WinID) -> Option<Window>>(
-        &mut self,
-        main_cid: ConnID,
-        focused_window: &Query<(&Window, Entity), With<FocusedMarker>>,
-        point: &CGPoint,
-        find_window: &F,
-    ) -> Result<()> {
-        if !self.focus_follows_mouse() {
-            return Ok(());
-        }
-        if self.mission_control_is_active() {
-            return Ok(());
-        }
-        if self.ffm_window_id.is_some() {
-            trace!("{}: ffm_window_id > 0", function_name!());
-            return Ok(());
-        }
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn mouse_moved_trigger(
+        trigger: On<MouseTrigger>,
+        windows: Query<&Window>,
+        focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
+        main_cid: Res<MainConnection>,
+        config: Option<Res<Config>>,
+        mut window_manager: ResMut<WindowManager>,
+    ) {
+        let Event::MouseMoved { point } = trigger.event().0 else {
+            return;
+        };
+        let find_window = |window_id| {
+            windows
+                .iter()
+                .find(|window| window.id() == window_id)
+                .cloned()
+        };
+        let main_cid = main_cid.0;
 
-        let window = WindowManager::find_window_at_point(main_cid, point, find_window)?;
+        if !WindowManager::focus_follows_mouse(config.as_ref()) {
+            return;
+        }
+        if window_manager.mission_control_is_active() {
+            return;
+        }
+        if window_manager.ffm_window_id.is_some() {
+            trace!("{}: ffm_window_id > 0", function_name!());
+            return;
+        }
+        let Ok(window) = WindowManager::find_window_at_point(main_cid, &point, &find_window) else {
+            // TODO: notfound
+            return;
+        };
         let window_id = window.id();
         let Ok((focused_window, _)) = focused_window.single() else {
             // TODO: notfound
-            return Ok(());
+            return;
         };
         if focused_window.id() == window_id {
             trace!("{}: allready focused {}", function_name!(), window_id);
-            return Ok(());
+            return;
         }
         if !window.is_eligible() {
             trace!("{}: {} not eligible", function_name!(), window_id);
-            return Ok(());
+            return;
         }
 
         let window_list = unsafe {
@@ -1611,11 +1607,10 @@ impl WindowManager {
         }
 
         //  Do not reshuffle windows due to moved mouse focus.
-        self.skip_reshuffle = true;
+        window_manager.skip_reshuffle = true;
 
         window.focus_without_raise(focused_window);
-        self.ffm_window_id = Some(window_id);
-        Ok(())
+        window_manager.ffm_window_id = Some(window_id);
     }
 
     /// Handles a mouse down event. It finds the window at the click point, reshuffles if necessary,
@@ -1628,25 +1623,41 @@ impl WindowManager {
     /// # Returns
     ///
     /// `Ok(())` if the event is handled successfully, otherwise `Err(Error)`.
-    fn mouse_down<F: Fn(WinID) -> Option<Window>>(
-        &mut self,
-        main_cid: ConnID,
-        point: &CGPoint,
-        active_display: &Display,
-        find_window: &F,
-        commands: &mut Commands,
-    ) -> Result<()> {
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn mouse_down_trigger(
+        trigger: On<MouseTrigger>,
+        windows: Query<&Window>,
+        active_display: Query<&Display, With<FocusedMarker>>,
+        main_cid: Res<MainConnection>,
+        window_manager: ResMut<WindowManager>,
+        mut commands: Commands,
+    ) {
+        let Event::MouseDown { point } = trigger.event().0 else {
+            return;
+        };
         debug!("{}: {point:?}", function_name!());
-        if self.mission_control_is_active() {
-            return Ok(());
+        if window_manager.mission_control_is_active() {
+            return;
         }
+        let main_cid = main_cid.0;
+        let Ok(active_display) = active_display.single() else {
+            warn!("{}: Unable to get current display.", function_name!());
+            return;
+        };
 
-        let window = WindowManager::find_window_at_point(main_cid, point, find_window)?;
+        let find_window = |window_id| {
+            windows
+                .iter()
+                .find(|window| window.id() == window_id)
+                .cloned()
+        };
+        let Ok(window) = WindowManager::find_window_at_point(main_cid, &point, &find_window) else {
+            return;
+        };
         if !window.fully_visible(&active_display.bounds) {
             // WindowManager::reshuffle_around(main_cid, &window, active_display, find_window)?;
             commands.trigger(ReshuffleAroundTrigger(window.id()));
         }
-        Ok(())
     }
 
     /// Handles a mouse dragged event. Currently, this function does nothing except logging.
@@ -1654,52 +1665,16 @@ impl WindowManager {
     /// # Arguments
     ///
     /// * `point` - A reference to the `CGPoint` where the mouse was dragged.
-    fn mouse_dragged(&self, point: &CGPoint) {
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn mouse_dragged_trigger(trigger: On<MouseTrigger>, window_manager: ResMut<WindowManager>) {
+        let Event::MouseDragged { point } = trigger.event().0 else {
+            return;
+        };
         trace!("{}: {point:?}", function_name!());
 
-        if self.mission_control_is_active() {
+        if window_manager.mission_control_is_active() {
             #[warn(clippy::needless_return)]
             return;
-        }
-    }
-
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn mouse_trigger(
-        trigger: On<MouseTrigger>,
-        windows: Query<&Window>,
-        focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
-        active_display: Query<&Display, With<FocusedMarker>>,
-        main_cid: Res<MainConnection>,
-        mut window_manager: ResMut<WindowManager>,
-        mut commands: Commands,
-    ) {
-        let find_window = |window_id| {
-            windows
-                .iter()
-                .find(|window| window.id() == window_id)
-                .cloned()
-        };
-        let main_cid = main_cid.0;
-        let Ok(active_display) = active_display.single() else {
-            warn!("{}: Unable to get current display.", function_name!());
-            return;
-        };
-        match &trigger.event().0 {
-            Event::MouseDown { point } => {
-                _ = window_manager.mouse_down(
-                    main_cid,
-                    point,
-                    active_display,
-                    &find_window,
-                    &mut commands,
-                );
-            }
-            // Event::MouseUp { point: _ } => (),
-            Event::MouseMoved { point } => {
-                _ = window_manager.mouse_moved(main_cid, &focused_window, point, &find_window);
-            }
-            Event::MouseDragged { point } => window_manager.mouse_dragged(point),
-            _ => (),
         }
     }
 }

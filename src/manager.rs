@@ -22,10 +22,9 @@ use stdext::prelude::RwLockExt;
 use crate::app::Application;
 use crate::config::Config;
 use crate::events::{
-    BProcess, DestroyedMarker, DisplayAddRemoveTrigger, Event, ExistingMarker, FocusFollowsMouse,
-    FocusedMarker, FreshMarker, FrontSwitchedTrigger, MainConnection, MissionControlActive,
-    MissionControlTrigger, MouseTrigger, OrphanedSpaces, ReshuffleAroundTrigger, SenderSocket,
-    SkipReshuffle, SwipeGestureTrigger, WindowFocusedTrigger, WorkspaceChangeTrigger,
+    BProcess, DestroyedMarker, Event, ExistingMarker, FocusFollowsMouse, FocusedMarker,
+    FreshMarker, MainConnection, MissionControlActive, OrphanedSpaces, ReshuffleAroundTrigger,
+    SenderSocket, SkipReshuffle, WMEventTrigger,
 };
 use crate::platform::ProcessSerialNumber;
 use crate::process::Process;
@@ -139,7 +138,7 @@ impl WindowManager {
 
     #[allow(clippy::needless_pass_by_value)]
     pub fn mission_control_trigger(
-        trigger: On<MissionControlTrigger>,
+        trigger: On<WMEventTrigger>,
         mut mission_control_active: ResMut<MissionControlActive>,
     ) {
         match trigger.event().0 {
@@ -157,7 +156,7 @@ impl WindowManager {
 
     #[allow(clippy::needless_pass_by_value)]
     pub fn swipe_gesture_trigger(
-        trigger: On<SwipeGestureTrigger>,
+        trigger: On<WMEventTrigger>,
         active_display: Query<&Display, With<FocusedMarker>>,
         focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
@@ -165,7 +164,9 @@ impl WindowManager {
         mut commands: Commands,
     ) {
         const SWIPE_THRESHOLD: f64 = 0.01;
-        let deltas = &trigger.event().0;
+        let Event::Swipe { ref deltas } = trigger.event().0 else {
+            return;
+        };
         if config
             .and_then(|config| config.options().swipe_gesture_fingers)
             .is_some_and(|fingers| deltas.len() == fingers)
@@ -662,14 +663,16 @@ impl WindowManager {
     /// `Ok(())` if the front switch is processed successfully, otherwise `Err(Error)`.
     #[allow(clippy::needless_pass_by_value)]
     pub fn front_switched_trigger(
-        trigger: On<FrontSwitchedTrigger>,
+        trigger: On<WMEventTrigger>,
         processes: Query<(&BProcess, &Children)>,
         applications: Query<&Application>,
         focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
         mut focus_follows_mouse_id: ResMut<FocusFollowsMouse>,
         mut commands: Commands,
     ) {
-        let psn = &trigger.event().0;
+        let Event::ApplicationFrontSwitched { ref psn } = trigger.event().0 else {
+            return;
+        };
         let Some((BProcess(process), children)) =
             processes.iter().find(|process| &process.0.0.psn == psn)
         else {
@@ -711,7 +714,9 @@ impl WindowManager {
                 commands.entity(focused_entity).remove::<FocusedMarker>();
                 warn!("{}: reset focused window", function_name!());
             }
-            Ok(focused_id) => commands.trigger(WindowFocusedTrigger(focused_id)),
+            Ok(focused_id) => commands.trigger(WMEventTrigger(Event::WindowFocused {
+                window_id: focused_id,
+            })),
         }
     }
 
@@ -820,7 +825,9 @@ impl WindowManager {
                 }
                 None => panel.append(window.id()),
             }
-            commands.trigger(WindowFocusedTrigger(window.id()));
+            commands.trigger(WMEventTrigger(Event::WindowFocused {
+                window_id: window.id(),
+            }));
         }
     }
 
@@ -880,7 +887,7 @@ impl WindowManager {
     /// * `window` - The `Window` object that gained focus.
     #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
     pub fn window_focused_trigger(
-        trigger: On<WindowFocusedTrigger>,
+        trigger: On<WMEventTrigger>,
         applications: Query<&Application>,
         windows: Query<(&Window, Entity, &ChildOf, Option<&FocusedMarker>)>,
         current_focus: Query<(&Window, Entity), With<FocusedMarker>>,
@@ -889,8 +896,10 @@ impl WindowManager {
         mut skip_reshuffle: ResMut<SkipReshuffle>,
         mut commands: Commands,
     ) {
+        let Event::WindowFocused { window_id } = trigger.event().0 else {
+            return;
+        };
         let main_cid = main_cid.0;
-        let window_id = trigger.event().0;
         let Some((window, entity, child)) =
             windows.iter().find_map(|(window, entity, child, _)| {
                 (window.id() == window_id).then_some((window, entity, child))
@@ -1275,7 +1284,7 @@ impl WindowManager {
     /// manager needs to reorient itself and re-insert the window into correct location.
     #[allow(clippy::needless_pass_by_value)]
     pub fn display_add_remove_trigger(
-        trigger: On<DisplayAddRemoveTrigger>,
+        trigger: On<WMEventTrigger>,
         mut displays: Query<(&mut Display, Entity)>,
         windows: Query<&Window>,
         main_cid: Res<MainConnection>,
@@ -1299,8 +1308,7 @@ impl WindowManager {
                 for (id, pane) in &display.spaces {
                     debug!("{}: Space {id} - {pane}", function_name!());
                 }
-                commands.spawn(display);
-                commands.trigger(WorkspaceChangeTrigger);
+                commands.trigger(WMEventTrigger(Event::DisplayChanged));
             }
 
             Event::DisplayRemoved { display_id } => {
@@ -1324,7 +1332,7 @@ impl WindowManager {
                     WindowManager::find_orphaned_spaces(orphaned_spaces, &mut display, &windows);
                 }
                 commands.entity(entity).despawn();
-                commands.trigger(WorkspaceChangeTrigger);
+                commands.trigger(WMEventTrigger(Event::DisplayChanged));
             }
 
             _ => (),
@@ -1333,12 +1341,17 @@ impl WindowManager {
 
     #[allow(clippy::needless_pass_by_value)]
     pub fn display_change_trigger(
-        _: On<WorkspaceChangeTrigger>,
+        trigger: On<WMEventTrigger>,
         focused_window: Query<&Window, With<FocusedMarker>>,
         displays: Query<(&Display, Entity, Option<&FocusedMarker>)>,
         main_cid: Res<MainConnection>,
         mut commands: Commands,
     ) {
+        if !matches!(trigger.event().0, Event::DisplayChanged) {
+            // Maybe also react to Event::SpaceChanged.
+            return;
+        }
+
         let main_cid = main_cid.0;
         let Ok(active_id) = Display::active_display_id(main_cid) else {
             error!("{}: Unable to get active display id!", function_name!());
@@ -1478,7 +1491,7 @@ impl WindowManager {
     /// `Ok(())` if the event is handled successfully or if focus-follows-mouse is disabled, otherwise `Err(Error)`.
     #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
     pub fn mouse_moved_trigger(
-        trigger: On<MouseTrigger>,
+        trigger: On<WMEventTrigger>,
         windows: Query<&Window>,
         focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
@@ -1579,7 +1592,6 @@ impl WindowManager {
 
         //  Do not reshuffle windows due to moved mouse focus.
         skip_reshuffle.as_mut().0 = true;
-
         window.focus_without_raise(focused_window);
         focus_follows_mouse_id.as_mut().0 = Some(window_id);
     }
@@ -1596,7 +1608,7 @@ impl WindowManager {
     /// `Ok(())` if the event is handled successfully, otherwise `Err(Error)`.
     #[allow(clippy::needless_pass_by_value)]
     pub fn mouse_down_trigger(
-        trigger: On<MouseTrigger>,
+        trigger: On<WMEventTrigger>,
         windows: Query<&Window>,
         active_display: Query<&Display, With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
@@ -1638,7 +1650,7 @@ impl WindowManager {
     /// * `point` - A reference to the `CGPoint` where the mouse was dragged.
     #[allow(clippy::needless_pass_by_value)]
     pub fn mouse_dragged_trigger(
-        trigger: On<MouseTrigger>,
+        trigger: On<WMEventTrigger>,
         mission_control_active: Res<MissionControlActive>,
     ) {
         let Event::MouseDragged { point } = trigger.event().0 else {

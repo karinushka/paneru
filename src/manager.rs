@@ -12,6 +12,7 @@ use objc2_core_foundation::{
 };
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result};
+use std::mem::take;
 use std::ops::Deref;
 use std::slice::from_raw_parts_mut;
 use stdext::function_name;
@@ -20,9 +21,10 @@ use stdext::prelude::RwLockExt;
 use crate::app::Application;
 use crate::config::Config;
 use crate::events::{
-    ApplicationTrigger, BProcess, DisplayAddRemoveTrigger, DisplayChangeTrigger, Event,
-    ExistingMarker, FocusedMarker, FreshMarker, FrontSwitchedTrigger, MainConnection, MouseTrigger,
+    ApplicationTrigger, BProcess, DisplayAddRemoveTrigger, Event, ExistingMarker, FocusedMarker,
+    FreshMarker, FrontSwitchedTrigger, MainConnection, MouseTrigger, OrphanedSpaces,
     ProcessChangeTrigger, SenderSocket, WindowFocusedTrigger, WindowManagerResource,
+    WorkspaceChangeTrigger,
 };
 use crate::platform::ProcessSerialNumber;
 use crate::process::Process;
@@ -46,7 +48,6 @@ pub struct WindowManager {
     pub skip_reshuffle: bool,
     focus_follows_mouse: bool,
     swipe_gesture_fingers: Option<usize>,
-    orphaned_spaces: HashMap<u64, WindowPane>,
     mouse_down_window: Option<Window>,
     down_location: CGPoint,
 }
@@ -72,7 +73,6 @@ impl WindowManager {
             skip_reshuffle: false,
             focus_follows_mouse: true,
             swipe_gesture_fingers: None,
-            orphaned_spaces: HashMap::new(),
             mouse_down_window: None,
             down_location: CGPoint::default(),
         }
@@ -232,40 +232,38 @@ impl WindowManager {
         self.swipe_gesture_fingers = config.options().swipe_gesture_fingers;
     }
 
-    fn find_orphaned_spaces<F: Fn(WinID) -> Option<Window>>(
-        &mut self,
-        displays: Vec<&mut Display>,
-        find_window: &F,
+    fn find_orphaned_spaces(
+        orphaned_spaces: &mut HashMap<u64, WindowPane>,
+        display: &mut Display,
+        windows: &Query<&Window>,
     ) {
         let mut relocated_windows = vec![];
-
-        for display in displays {
-            let spaces = display
-                .spaces
-                .iter()
-                // Only consider spaces which have no registered windows.
-                .filter_map(|(space_id, window_pane)| (window_pane.len() == 0).then_some(*space_id))
-                .collect::<Vec<_>>();
+        for (space_id, pane) in &display.spaces {
             debug!(
-                "{}: Attempting to relocate into empty spaces: {spaces:?}",
+                "{}: Checking space {space_id} for orphans: {pane}",
                 function_name!()
             );
-
-            for space_id in spaces {
-                if let Some(space) = self.orphaned_spaces.remove(&space_id) {
-                    debug!(
-                        "{}: Reinserted orphand space {space_id} into display {}",
-                        function_name!(),
-                        display.id
-                    );
-                    for window_id in space.all_windows() {
-                        relocated_windows.push((window_id, display.bounds));
-                    }
-                    display.spaces.insert(space_id, space);
+            if let Some(space) = orphaned_spaces.remove(space_id) {
+                debug!(
+                    "{}: Reinserting orphaned space {space_id} into display {}",
+                    function_name!(),
+                    display.id
+                );
+                for window_id in space.all_windows() {
+                    // TODO: check for clashing windows.
+                    pane.append(window_id);
+                    relocated_windows.push((window_id, display.bounds));
                 }
             }
         }
+        // }
 
+        let find_window = |window_id| {
+            windows
+                .iter()
+                .find(|window| window.id() == window_id)
+                .cloned()
+        };
         relocated_windows
             .iter()
             .filter_map(|(window_id, bounds)| find_window(*window_id).zip(Some(bounds)))
@@ -291,14 +289,6 @@ impl WindowManager {
         displays: &mut Vec<&Display>,
         find_window: &F,
     ) {
-        // let displays = Display::present_displays(main_cid);
-        // if displays.is_empty() {
-        //     return Err(Error::new(
-        //         ErrorKind::NotFound,
-        //         format!("{}: Can not find any displays?!", function_name!()),
-        //     ));
-        // }
-
         for display in displays {
             let display_bounds = display.bounds;
             for (space_id, pane) in &display.spaces {
@@ -314,12 +304,6 @@ impl WindowManager {
                     );
                 }
 
-                // .for_each(|window| {
-                //     displays
-                //         .iter()
-                //         .for_each(|display| display.remove_window(window.inner().id));
-                //     pane.append(window.id());
-                // });
                 windows
                     .iter()
                     .map(super::windows::Window::id)
@@ -1371,50 +1355,55 @@ impl WindowManager {
     #[allow(clippy::needless_pass_by_value)]
     pub fn display_add_remove_trigger(
         trigger: On<DisplayAddRemoveTrigger>,
-        // windows: Query<&Window>,
-        displays: Query<(&Display, Entity)>,
+        mut displays: Query<(&mut Display, Entity)>,
+        windows: Query<&Window>,
         main_cid: Res<MainConnection>,
-        mut window_manager: ResMut<WindowManagerResource>,
+        mut orphaned_spaces: ResMut<OrphanedSpaces>,
         mut commands: Commands,
     ) {
         let main_cid = main_cid.0;
-        let window_manager = &mut window_manager.0;
-
+        let orphaned_spaces = &mut orphaned_spaces.0;
         match trigger.event().0 {
             Event::DisplayAdded { display_id } => {
                 debug!("{}: Display Added: {display_id:?}", function_name!());
-                // display_id: CGDirectDisplayID,
-                // find_window: &F,
-                // commands: &mut Commands,
-                let display = Display::present_displays(main_cid)
+                let Some(mut display) = Display::present_displays(main_cid)
                     .into_iter()
-                    .find(|display| display.id == display_id);
-                if let Some(display) = display {
-                    // FIXME:
-                    // other_displays.push(display);
-                    // window_manager.find_orphaned_spaces(other_displays, &find_window);
-                    commands.spawn(display);
+                    .find(|display| display.id == display_id)
+                else {
+                    error!("{}: Unable to find added display!", function_name!());
+                    return;
+                };
+                WindowManager::find_orphaned_spaces(orphaned_spaces, &mut display, &windows);
+
+                for (id, pane) in &display.spaces {
+                    debug!("{}: Space {id} - {pane}", function_name!());
                 }
+                commands.spawn(display);
+                commands.trigger(WorkspaceChangeTrigger);
             }
 
             Event::DisplayRemoved { display_id } => {
                 debug!("{}: Display Removed: {display_id:?}", function_name!());
-                if let Some((display, entity)) = displays
-                    .iter()
-                    .find_map(|(display, entity)| (display.id == display_id).then_some(entity))
-                    .and_then(|entity| displays.get(entity).ok())
+                let Some((mut display, entity)) = displays
+                    .iter_mut()
+                    .find(|(display, _)| display.id == display_id)
+                else {
+                    error!("{}: Unable to find removed display!", function_name!());
+                    return;
+                };
+                for (space_id, pane) in take(&mut display.spaces)
+                    .into_iter()
+                    .filter(|(_, pane)| pane.len() > 0)
                 {
-                    commands.entity(entity).despawn();
-                    for (space_id, pane) in &display.spaces {
-                        window_manager
-                            .orphaned_spaces
-                            .insert(*space_id, pane.clone());
-                    }
-                    // FIXME:
-                    // other_displays.retain(|display| display.id != display_id);
+                    debug!("{}: adding {pane} to orphaned list.", function_name!(),);
+                    orphaned_spaces.insert(space_id, pane);
                 }
-                // FIXME:
-                // window_manager.find_orphaned_spaces(other_displays, &find_window);
+
+                for (mut display, _) in displays {
+                    WindowManager::find_orphaned_spaces(orphaned_spaces, &mut display, &windows);
+                }
+                commands.entity(entity).despawn();
+                commands.trigger(WorkspaceChangeTrigger);
             }
 
             _ => (),
@@ -1423,10 +1412,9 @@ impl WindowManager {
 
     #[allow(clippy::needless_pass_by_value)]
     pub fn display_change_trigger(
-        _: On<DisplayChangeTrigger>,
+        _: On<WorkspaceChangeTrigger>,
         windows: Query<&Window>,
         focused_window: Query<&Window, With<FocusedMarker>>,
-        // active_display: Query<&Display, With<FocusedMarker>>,
         displays: Query<(&Display, Entity, Option<&FocusedMarker>)>,
         main_cid: Res<MainConnection>,
         mut commands: Commands,
@@ -1739,7 +1727,6 @@ impl WindowManager {
             warn!("{}: Unable to get current display.", function_name!());
             return;
         };
-        debug!("ACTIVE DISPLAY {}", active_display.id);
         match &trigger.event().0 {
             Event::MouseDown { point } => {
                 _ = window_manager.mouse_down(main_cid, point, active_display, &find_window);

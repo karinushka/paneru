@@ -14,6 +14,7 @@ use log::{debug, error, info, trace, warn};
 use objc2::rc::Retained;
 use objc2_core_foundation::{CFRetained, CGPoint};
 use objc2_core_graphics::CGDirectDisplayID;
+use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -30,7 +31,7 @@ use crate::platform::{ProcessSerialNumber, WorkspaceObserver};
 use crate::process::{Process, ProcessRef};
 use crate::skylight::{ConnID, SLSMainConnectionID, WinID};
 use crate::util::AxuWrapperType;
-use crate::windows::{Display, Window};
+use crate::windows::{Display, Window, WindowPane};
 
 #[allow(dead_code)]
 #[derive(Clone, Debug, Message)]
@@ -210,6 +211,9 @@ pub struct SenderSocket(pub EventSender);
 #[derive(Resource)]
 pub struct WindowManagerResource(pub WindowManager);
 
+#[derive(Resource)]
+pub struct OrphanedSpaces(pub HashMap<u64, WindowPane>);
+
 #[derive(BevyEvent)]
 pub struct CommandTrigger(pub Vec<String>);
 
@@ -223,7 +227,7 @@ pub struct ApplicationTrigger(pub Event);
 pub struct MouseTrigger(pub Event);
 
 #[derive(BevyEvent)]
-pub struct DisplayChangeTrigger;
+pub struct WorkspaceChangeTrigger;
 
 #[derive(BevyEvent)]
 pub struct DisplayAddRemoveTrigger(pub Event);
@@ -255,12 +259,13 @@ impl EventHandler {
                 };
 
                 BevyApp::new()
-                    .set_runner(move |app| EventHandler::custom_loop(app, &receiver, &quit))
+                    .set_runner(move |app| EventHandler::custom_loop(app, &receiver))
                     .insert_resource(Time::<Virtual>::from_max_delta(Duration::from_secs(10)))
                     .init_resource::<Messages<Event>>()
                     .insert_resource(MainConnection(main_cid))
                     .insert_resource(WindowManagerResource(WindowManager::new(main_cid)))
                     .insert_resource(SenderSocket(sender))
+                    .insert_resource(OrphanedSpaces(HashMap::new()))
                     .add_observer(process_command_trigger)
                     .add_observer(WindowManager::process_change_trigger)
                     .add_observer(WindowManager::application_trigger)
@@ -287,11 +292,12 @@ impl EventHandler {
                         ),
                     )
                     .run();
+                quit.store(true, std::sync::atomic::Ordering::Relaxed);
             }),
         )
     }
 
-    fn custom_loop(mut app: BevyApp, rx: &Receiver<Event>, quit: &Arc<AtomicBool>) -> AppExit {
+    fn custom_loop(mut app: BevyApp, rx: &Receiver<Event>) -> AppExit {
         const LOOP_MAX_TIMEOUT_MS: u64 = 5000;
         const LOOP_TIMEOUT_STEP: u64 = 5;
         app.finish();
@@ -299,11 +305,11 @@ impl EventHandler {
 
         let mut timeout = LOOP_TIMEOUT_STEP;
         let mut last_update = Instant::now();
-        loop {
+        while app.should_exit().is_none() {
+            app.update();
             match rx.recv_timeout(Duration::from_millis(timeout)) {
                 Ok(Event::Exit) => {
-                    quit.store(true, std::sync::atomic::Ordering::Relaxed);
-                    break;
+                    app.world_mut().write_message::<AppExit>(AppExit::Success);
                 }
                 Ok(event) => {
                     app.world_mut().write_message::<Event>(event);
@@ -312,7 +318,7 @@ impl EventHandler {
                 Err(RecvTimeoutError::Timeout) => {
                     timeout = timeout.min(LOOP_MAX_TIMEOUT_MS) + LOOP_TIMEOUT_STEP;
                 }
-                _ => break,
+                _ => todo!(),
             }
 
             // Manually get and update the Time resource.
@@ -322,12 +328,6 @@ impl EventHandler {
             app.world_mut()
                 .resource_mut::<Time<Virtual>>()
                 .advance_by(delta);
-
-            app.update();
-            if let Some(exit) = app.should_exit() {
-                quit.store(true, std::sync::atomic::Ordering::Relaxed);
-                return exit;
-            }
         }
         AppExit::Success
     }
@@ -363,7 +363,7 @@ impl EventHandler {
 
                 // Event::DisplayChanged | Event::SpaceChanged => {
                 Event::DisplayChanged => {
-                    commands.trigger(DisplayChangeTrigger);
+                    commands.trigger(WorkspaceChangeTrigger);
                 }
                 Event::DisplayAdded { display_id: _ } | Event::DisplayRemoved { display_id: _ } => {
                     commands.trigger(DisplayAddRemoveTrigger(event.clone()));

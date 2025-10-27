@@ -212,7 +212,19 @@ pub struct MainConnection(pub ConnID);
 pub struct SenderSocket(pub EventSender);
 
 #[derive(Resource)]
+pub struct SkipReshuffle(pub bool);
+
+#[derive(Resource)]
+pub struct MissionControlActive(pub bool);
+
+#[derive(Resource)]
+pub struct FocusFollowsMouse(pub Option<WinID>);
+
+#[derive(Resource)]
 pub struct OrphanedSpaces(pub HashMap<u64, WindowPane>);
+
+#[derive(BevyEvent)]
+pub struct MissionControlTrigger(pub Event);
 
 #[derive(BevyEvent)]
 pub struct CommandTrigger(pub Vec<String>);
@@ -263,8 +275,10 @@ impl EventHandler {
                     .init_resource::<Messages<Event>>()
                     .insert_resource(Time::<Virtual>::from_max_delta(Duration::from_secs(10)))
                     .insert_resource(MainConnection(main_cid))
-                    .insert_resource(WindowManager::default())
                     .insert_resource(SenderSocket(sender))
+                    .insert_resource(SkipReshuffle(false))
+                    .insert_resource(MissionControlActive(false))
+                    .insert_resource(FocusFollowsMouse(None))
                     .insert_resource(OrphanedSpaces(HashMap::new()))
                     .add_observer(process_command_trigger)
                     .add_observer(WindowManager::mouse_moved_trigger)
@@ -276,6 +290,7 @@ impl EventHandler {
                     .add_observer(WindowManager::window_focused_trigger)
                     .add_observer(WindowManager::reshuffle_around_trigger)
                     .add_observer(WindowManager::swipe_gesture_trigger)
+                    .add_observer(WindowManager::mission_control_trigger)
                     .add_systems(Startup, EventHandler::gather_displays)
                     .add_systems(Startup, process_setup.after(EventHandler::gather_displays))
                     .add_systems(
@@ -390,6 +405,13 @@ impl EventHandler {
 
                 Event::ConfigRefresh { config } => {
                     commands.insert_resource(config.clone());
+                }
+
+                Event::MissionControlShowAllWindows
+                | Event::MissionControlShowFrontWindows
+                | Event::MissionControlShowDesktop
+                | Event::MissionControlExit => {
+                    commands.trigger(MissionControlTrigger(event.clone()));
                 }
 
                 Event::WindowTitleChanged { window_id } => {

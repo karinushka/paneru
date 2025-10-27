@@ -658,7 +658,6 @@ pub struct Window {
 #[derive(Debug)]
 pub struct InnerWindow {
     pub id: WinID,
-    // pub app: Application,
     pub psn: Option<ProcessSerialNumber>,
     ax_element: CFRetained<AxuWrapperType>,
     pub frame: CGRect,
@@ -733,14 +732,9 @@ impl Window {
         self.inner().id
     }
 
-    // /// Returns a clone of the `Application` object that owns this window.
-    // ///
-    // /// # Returns
-    // ///
-    // /// A cloned `Application` object.
-    // pub fn app(&self) -> Application {
-    //     self.inner().app.clone()
-    // }
+    pub fn psn(&self) -> Option<ProcessSerialNumber> {
+        self.inner().psn.clone()
+    }
 
     /// Returns the current frame (`CGRect`) of the window.
     ///
@@ -1086,25 +1080,21 @@ impl Window {
     /// # Arguments
     ///
     /// * `window_manager` - A reference to the `WindowManager` to access focused window information.
-    pub fn focus_without_raise(
-        &self,
-        current_focus_id: WinID,
-        current_focus_psn: &ProcessSerialNumber,
-    ) {
-        let Some(ref psn) = self.inner.force_read().psn else {
+    pub fn focus_without_raise(&self, currently_focused: &Window) {
+        let Some((psn, focused_psn)) = self.psn().zip(currently_focused.psn()) else {
             return;
         };
         let window_id = self.id();
         debug!("{}: {window_id}", function_name!());
-        if current_focus_psn == psn {
+        if focused_psn == psn {
             let mut event_bytes = [0u8; 0xf8];
             event_bytes[0x04] = 0xf8;
             event_bytes[0x08] = 0x0d;
 
             event_bytes[0x8a] = 0x02;
-            event_bytes[0x3c..0x40].copy_from_slice(&current_focus_id.to_ne_bytes());
+            event_bytes[0x3c..0x40].copy_from_slice(&currently_focused.id().to_ne_bytes());
             unsafe {
-                SLPSPostEventRecordTo(current_focus_psn, event_bytes.as_ptr().cast());
+                SLPSPostEventRecordTo(&focused_psn, event_bytes.as_ptr().cast());
             }
             // @hack
             // Artificially delay the activation by 1ms. This is necessary because some
@@ -1114,14 +1104,14 @@ impl Window {
             event_bytes[0x8a] = 0x01;
             event_bytes[0x3c..0x40].copy_from_slice(&window_id.to_ne_bytes());
             unsafe {
-                SLPSPostEventRecordTo(psn, event_bytes.as_ptr().cast());
+                SLPSPostEventRecordTo(&psn, event_bytes.as_ptr().cast());
             }
         }
 
         unsafe {
-            _SLPSSetFrontProcessWithOptions(psn, window_id, Self::CPS_USER_GENERATED);
+            _SLPSSetFrontProcessWithOptions(&psn, window_id, Self::CPS_USER_GENERATED);
         }
-        self.make_key_window(psn);
+        self.make_key_window(&psn);
     }
 
     /// Focuses the window and raises it to the front.

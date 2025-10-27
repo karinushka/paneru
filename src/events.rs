@@ -215,15 +215,6 @@ pub struct OrphanedSpaces(pub HashMap<u64, WindowPane>);
 pub struct CommandTrigger(pub Vec<String>);
 
 #[derive(BevyEvent)]
-pub struct ProcessChangeTrigger(pub Event);
-
-#[derive(BevyEvent)]
-pub struct ApplicationTrigger(pub Event);
-
-#[derive(BevyEvent)]
-pub struct ManagerStateTrigger(pub Event);
-
-#[derive(BevyEvent)]
 pub struct MouseTrigger(pub Event);
 
 #[derive(BevyEvent)]
@@ -260,16 +251,13 @@ impl EventHandler {
 
                 BevyApp::new()
                     .set_runner(move |app| EventHandler::custom_loop(app, &receiver))
-                    .insert_resource(Time::<Virtual>::from_max_delta(Duration::from_secs(10)))
                     .init_resource::<Messages<Event>>()
+                    .insert_resource(Time::<Virtual>::from_max_delta(Duration::from_secs(10)))
                     .insert_resource(MainConnection(main_cid))
                     .insert_resource(WindowManager::default())
                     .insert_resource(SenderSocket(sender))
                     .insert_resource(OrphanedSpaces(HashMap::new()))
                     .add_observer(process_command_trigger)
-                    .add_observer(WindowManager::process_change_trigger)
-                    .add_observer(WindowManager::application_trigger)
-                    .add_observer(WindowManager::manager_state_trigger)
                     .add_observer(WindowManager::mouse_trigger)
                     .add_observer(WindowManager::display_change_trigger)
                     .add_observer(WindowManager::display_add_remove_trigger)
@@ -280,7 +268,14 @@ impl EventHandler {
                     .add_systems(
                         Update,
                         (
-                            EventHandler::dispatch_main_messages,
+                            WindowManager::dispatch_process_messages,
+                            WindowManager::dispatch_application_messages,
+                        ),
+                    )
+                    .add_systems(
+                        Update,
+                        (
+                            EventHandler::dispatch_toplevel_triggers,
                             WindowManager::add_existing_process
                                 .run_if(any_with_component::<InitializingMarker>),
                             WindowManager::add_existing_application
@@ -343,7 +338,7 @@ impl EventHandler {
     ///
     /// `Ok(())` if the event is processed successfully, otherwise `Err(Error)`.
     #[allow(clippy::needless_pass_by_value)]
-    fn dispatch_main_messages(mut messages: MessageReader<Event>, mut commands: Commands) {
+    fn dispatch_toplevel_triggers(mut messages: MessageReader<Event>, mut commands: Commands) {
         for event in messages.read() {
             match event {
                 Event::Command { argv } => commands.trigger(CommandTrigger(argv.clone())),
@@ -368,24 +363,6 @@ impl EventHandler {
                 }
                 Event::DisplayAdded { display_id: _ } | Event::DisplayRemoved { display_id: _ } => {
                     commands.trigger(DisplayAddRemoveTrigger(event.clone()));
-                }
-
-                Event::ApplicationLaunched {
-                    psn: _,
-                    observer: _,
-                }
-                | Event::ApplicationTerminated { psn: _ } => {
-                    commands.trigger(ProcessChangeTrigger(event.clone()));
-                }
-
-                Event::CurrentlyFocused
-                | Event::Swipe { deltas: _ }
-                | Event::MissionControlShowAllWindows
-                | Event::MissionControlShowFrontWindows
-                | Event::MissionControlShowDesktop
-                | Event::MissionControlExit
-                | Event::ConfigRefresh { config: _ } => {
-                    commands.trigger(ManagerStateTrigger(event.clone()));
                 }
 
                 // Event::ProcessesLoaded => {
@@ -428,7 +405,8 @@ impl EventHandler {
                     debug!("{}: system woke: {msg:?}", function_name!());
                 }
 
-                _ => commands.trigger(ApplicationTrigger(event.clone())),
+                // commands.trigger(ApplicationTrigger(event.clone())),
+                _ => (),
                 // _ => match EventHandler::process_event(event, &mut window_manager.0) {
                 //     // TODO: for now we'll treat the Other return values as non-error ones.
                 //     // This can be adjusted later with a custom error space.

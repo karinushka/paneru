@@ -200,6 +200,9 @@ pub struct FreshMarker;
 pub struct ExistingMarker;
 
 #[derive(Component)]
+pub struct DestroyedMarker;
+
+#[derive(Component)]
 pub struct BProcess(pub ProcessRef);
 
 #[derive(Resource)]
@@ -288,7 +291,13 @@ impl EventHandler {
                                 .run_if(any_with_component::<InitializingMarker>),
                             WindowManager::add_launched_process,
                             WindowManager::add_launched_application,
+                        ),
+                    )
+                    .add_systems(
+                        Update,
+                        (
                             WindowManager::window_create,
+                            WindowManager::window_destroyed,
                         ),
                     )
                     .run();

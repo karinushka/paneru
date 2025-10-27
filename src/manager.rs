@@ -23,9 +23,9 @@ use stdext::prelude::RwLockExt;
 use crate::app::Application;
 use crate::config::Config;
 use crate::events::{
-    BProcess, DisplayAddRemoveTrigger, Event, ExistingMarker, FocusedMarker, FreshMarker,
-    FrontSwitchedTrigger, MainConnection, MouseTrigger, OrphanedSpaces, ReshuffleAroundTrigger,
-    SenderSocket, WindowFocusedTrigger, WorkspaceChangeTrigger,
+    BProcess, DestroyedMarker, DisplayAddRemoveTrigger, Event, ExistingMarker, FocusedMarker,
+    FreshMarker, FrontSwitchedTrigger, MainConnection, MouseTrigger, OrphanedSpaces,
+    ReshuffleAroundTrigger, SenderSocket, WindowFocusedTrigger, WorkspaceChangeTrigger,
 };
 use crate::platform::ProcessSerialNumber;
 use crate::process::Process;
@@ -79,10 +79,9 @@ impl WindowManager {
         }
     }
 
-    #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
+    #[allow(clippy::needless_pass_by_value)]
     pub fn dispatch_application_messages(
         mut messages: MessageReader<Event>,
-        mut apps: Query<(&mut Application, &Children)>,
         windows: Query<(&Window, Entity)>,
         focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
         displays: Query<&mut Display, With<FocusedMarker>>,
@@ -115,20 +114,16 @@ impl WindowManager {
                     ),
                 },
                 Event::WindowDestroyed { window_id } => {
-                    WindowManager::window_destroyed(
-                        *window_id,
-                        &mut apps,
-                        &windows,
-                        &focused_window,
-                        &displays,
-                        &mut commands,
-                    );
+                    if let Some((_, entity)) =
+                        windows.iter().find(|(window, _)| &window.id() == window_id)
+                    {
+                        commands.entity(entity).insert(DestroyedMarker);
+                    }
                 }
                 Event::WindowResized { window_id } => {
-                    let Some(window) = find_window(*window_id) else {
-                        return;
-                    };
-                    _ = WindowManager::window_resized(&window, active_display, &mut commands);
+                    if let Some(window) = find_window(*window_id) {
+                        _ = WindowManager::window_resized(&window, active_display, &mut commands);
+                    }
                 }
                 Event::CurrentlyFocused => {
                     WindowManager::currently_focused(&windows, &focused_window, &mut commands);
@@ -220,7 +215,7 @@ impl WindowManager {
         {
             let delta = deltas.iter().sum::<f64>();
             if delta.abs() > SWIPE_THRESHOLD {
-                _ = WindowManager::slide_window(
+                WindowManager::slide_window(
                     main_cid,
                     focused_window,
                     active_display,
@@ -877,33 +872,32 @@ impl WindowManager {
         }
     }
 
-    fn window_destroyed(
-        window_id: WinID,
-        apps: &mut Query<(&mut Application, &Children)>,
-        windows: &Query<(&Window, Entity)>,
-        focused_window: &Query<(&Window, Entity), With<FocusedMarker>>,
-        displays: &Query<&mut Display, With<FocusedMarker>>,
-        commands: &mut Commands,
+    #[allow(clippy::type_complexity)]
+    pub fn window_destroyed(
+        windows: Query<(&Window, Entity, &ChildOf), With<DestroyedMarker>>,
+        focused_window: Query<(&Window, Entity), (With<FocusedMarker>, Without<DestroyedMarker>)>,
+        mut apps: Query<&mut Application>,
+        displays: Query<&Display>,
+        mut commands: Commands,
     ) {
-        if let Some((window, entity)) = windows.iter().find(|(window, _)| window.id() == window_id)
-        {
+        for (window, entity, child) in windows {
             displays
                 .iter()
-                .for_each(|display| display.remove_window(window_id));
+                .for_each(|display| display.remove_window(window.id()));
 
-            if let Some((mut app, _)) = apps
-                .iter_mut()
-                .find(|(_, children)| children.iter().any(|child_entity| child_entity == &entity))
-            {
-                app.unobserve_window(window);
-            }
-
-            commands.entity(entity).despawn();
-            let Ok((window, _)) = focused_window.single() else {
-                return;
+            let Ok(mut app) = apps.get_mut(child.parent()) else {
+                error!(
+                    "{}: Window {} has no parent!",
+                    function_name!(),
+                    window.id()
+                );
+                continue;
             };
-            // _ = WindowManager::reshuffle_around(main_cid, window, active_display, &find_window);
-            commands.trigger(ReshuffleAroundTrigger(window.id()));
+            app.unobserve_window(window);
+            commands.entity(entity).despawn();
+            if let Ok((window, _)) = focused_window.single() {
+                commands.trigger(ReshuffleAroundTrigger(window.id()));
+            }
         }
     }
 
@@ -1128,7 +1122,8 @@ impl WindowManager {
         .filter_map(|window_id| find_window(*window_id))
         .collect::<Vec<_>>();
         let mut y_pos = 0f64;
-        let height = display_bounds.size.height / windows.len() as f64;
+        let count: f64 = u32::try_from(windows.len()).unwrap().into();
+        let height = display_bounds.size.height / count;
         for window in windows {
             window.reposition(upper_left, y_pos, display_bounds);
             window.resize(width, height, display_bounds);

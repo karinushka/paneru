@@ -235,6 +235,9 @@ pub struct FrontSwitchedTrigger(pub ProcessSerialNumber);
 #[derive(BevyEvent)]
 pub struct ReshuffleAroundTrigger(pub WinID);
 
+#[derive(BevyEvent)]
+pub struct SwipeGestureTrigger(pub Vec<f64>);
+
 pub struct EventHandler;
 
 impl EventHandler {
@@ -264,12 +267,15 @@ impl EventHandler {
                     .insert_resource(SenderSocket(sender))
                     .insert_resource(OrphanedSpaces(HashMap::new()))
                     .add_observer(process_command_trigger)
-                    .add_observer(WindowManager::mouse_trigger)
+                    .add_observer(WindowManager::mouse_moved_trigger)
+                    .add_observer(WindowManager::mouse_down_trigger)
+                    .add_observer(WindowManager::mouse_dragged_trigger)
                     .add_observer(WindowManager::display_change_trigger)
                     .add_observer(WindowManager::display_add_remove_trigger)
                     .add_observer(WindowManager::front_switched_trigger)
                     .add_observer(WindowManager::window_focused_trigger)
                     .add_observer(WindowManager::reshuffle_around_trigger)
+                    .add_observer(WindowManager::swipe_gesture_trigger)
                     .add_systems(Startup, EventHandler::gather_displays)
                     .add_systems(Startup, process_setup.after(EventHandler::gather_displays))
                     .add_systems(
@@ -363,6 +369,10 @@ impl EventHandler {
                     commands.trigger(MouseTrigger(event.clone()));
                 }
 
+                Event::Swipe { deltas } => {
+                    commands.trigger(SwipeGestureTrigger(deltas.clone()));
+                }
+
                 Event::WindowFocused { window_id } => {
                     commands.trigger(WindowFocusedTrigger(*window_id));
                 }
@@ -370,33 +380,18 @@ impl EventHandler {
                     commands.trigger(FrontSwitchedTrigger(psn.clone()));
                 }
 
-                // Event::DisplayChanged | Event::SpaceChanged => {
                 Event::DisplayChanged => {
+                    // Maybe also react to Event::SpaceChanged.
                     commands.trigger(WorkspaceChangeTrigger);
                 }
                 Event::DisplayAdded { display_id: _ } | Event::DisplayRemoved { display_id: _ } => {
                     commands.trigger(DisplayAddRemoveTrigger(event.clone()));
                 }
 
-                // Event::ProcessesLoaded => {
-                //     info!("{}: === Existing windows loaded ===", function_name!());
-                //
-                //     // Signal that everything is ready.
-                //     commands.write_message::<Event>(Event::ProcessesLoaded);
-                //     commands.write_message::<Event>(Event::CurrentlyFocused);
-                //     // self.initial_scan = false;
-                //     // window_manager.refresh_displays()?;
-                //     // return window_manager.set_focused_window();
-                // }
+                Event::ConfigRefresh { config } => {
+                    commands.insert_resource(config.clone());
+                }
 
-                // Event::ApplicationLaunched { psn, observer } => {
-                //     if self.initial_scan {
-                //         window_manager.add_existing_process(psn, observer.clone());
-                //     } else {
-                //         debug!("{}: ApplicationLaunched: {psn:?}", function_name!(),);
-                //         return window_manager.application_launched(psn, observer.clone());
-                //     }
-                // }
                 Event::WindowTitleChanged { window_id } => {
                     trace!("{}: WindowTitleChanged: {window_id:?}", function_name!());
                 }
@@ -418,15 +413,7 @@ impl EventHandler {
                     debug!("{}: system woke: {msg:?}", function_name!());
                 }
 
-                // commands.trigger(ApplicationTrigger(event.clone())),
                 _ => (),
-                // _ => match EventHandler::process_event(event, &mut window_manager.0) {
-                //     // TODO: for now we'll treat the Other return values as non-error ones.
-                //     // This can be adjusted later with a custom error space.
-                //     Err(ref err) if err.kind() == ErrorKind::Other => trace!("{err}"),
-                //     Err(err) => error!("{} {err}", function_name!()),
-                //     _ => (),
-                // },
             }
         }
     }

@@ -1,3 +1,4 @@
+use bevy::ecs::resource::Resource;
 use log::{error, info};
 use notify::EventHandler;
 use objc2_core_foundation::{CFData, CFString};
@@ -14,7 +15,7 @@ use stdext::prelude::RwLockExt;
 
 use crate::{platform::CFStringRef, skylight::OSStatus, util::AxuWrapperType};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Resource)]
 pub struct Config {
     inner: Arc<RwLock<InnerConfig>>,
 }

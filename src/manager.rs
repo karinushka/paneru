@@ -42,15 +42,10 @@ const THRESHOLD: f64 = 10.0;
 
 #[derive(Default, Resource)]
 pub struct WindowManager {
-    last_window: Option<WinID>, // TODO: use this for "goto last window bind"
-    pub focused_psn: ProcessSerialNumber,
-    pub ffm_window_id: Option<WinID>,
+    ffm_window_id: Option<WinID>,
     mission_control_is_active: bool,
-    pub skip_reshuffle: bool,
-    focus_follows_mouse: bool,
-    swipe_gesture_fingers: Option<usize>,
-    mouse_down_window: Option<Window>,
-    down_location: CGPoint,
+    skip_reshuffle: bool,
+    config: Option<Config>,
 }
 
 impl WindowManager {
@@ -141,6 +136,15 @@ impl WindowManager {
                         &find_window,
                     );
                 }
+                Event::CurrentlyFocused => {
+                    WindowManager::currently_focused(
+                        main_cid,
+                        active_display,
+                        &windows,
+                        &focused_window,
+                        &mut commands,
+                    );
+                }
                 Event::WindowMinimized { window_id } => {
                     active_display.remove_window(*window_id);
                 }
@@ -163,7 +167,6 @@ impl WindowManager {
         displays: Query<&mut Display, With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
         mut window_manager: ResMut<WindowManager>,
-        mut commands: Commands,
     ) {
         let main_cid = main_cid.0;
         let find_window = |window_id| {
@@ -179,32 +182,14 @@ impl WindowManager {
 
         for event in messages.read() {
             match event {
-                Event::CurrentlyFocused => {
-                    window_manager.currently_focused(
+                Event::Swipe { deltas } => {
+                    window_manager.swipe_gesture(
+                        deltas,
                         main_cid,
                         active_display,
-                        &windows,
                         &focused_window,
-                        &mut commands,
+                        &find_window,
                     );
-                }
-                Event::Swipe { deltas } => {
-                    const SWIPE_THRESHOLD: f64 = 0.01;
-                    if window_manager
-                        .swipe_gesture_fingers
-                        .is_some_and(|fingers| deltas.len() == fingers)
-                    {
-                        let delta = deltas.iter().sum::<f64>();
-                        if delta.abs() > SWIPE_THRESHOLD {
-                            _ = WindowManager::slide_window(
-                                main_cid,
-                                &focused_window,
-                                active_display,
-                                delta,
-                                &find_window,
-                            );
-                        }
-                    }
                 }
                 Event::MissionControlShowAllWindows
                 | Event::MissionControlShowFrontWindows
@@ -215,25 +200,53 @@ impl WindowManager {
                     window_manager.mission_control_is_active = false;
                 }
                 Event::ConfigRefresh { config } => {
-                    window_manager.reload_config(config);
+                    window_manager.config = Some(config.clone());
                 }
                 _ => (),
             }
         }
     }
 
-    /// Reloads the manager's configuration based on the provided `Config` object.
-    ///
-    /// # Arguments
-    ///
-    /// * `config` - The new `Config` object to load.
-    fn reload_config(&mut self, config: &Config) {
-        debug!("{}: Got fresh config: {config:?}", function_name!());
-        self.focus_follows_mouse = config
-            .options()
-            .focus_follows_mouse
-            .is_some_and(|focus| focus);
-        self.swipe_gesture_fingers = config.options().swipe_gesture_fingers;
+    // /// Reloads the manager's configuration based on the provided `Config` object.
+    // ///
+    // /// # Arguments
+    // ///
+    // /// * `config` - The new `Config` object to load.
+    // fn reload_config(&mut self, config: &Config) {
+    //     debug!("{}: Got fresh config: {config:?}", function_name!());
+    //     self.focus_follows_mouse = config
+    //         .options()
+    //         .focus_follows_mouse
+    //         .is_some_and(|focus| focus);
+    //     self.swipe_gesture_fingers = config.options().swipe_gesture_fingers;
+    // }
+
+    fn swipe_gesture<F: Fn(WinID) -> Option<Window>>(
+        &self,
+        deltas: &[f64],
+        main_cid: ConnID,
+        active_display: &Display,
+        focused_window: &Query<(&Window, Entity), With<FocusedMarker>>,
+        find_window: &F,
+    ) {
+        const SWIPE_THRESHOLD: f64 = 0.01;
+        if self
+            .config
+            .as_ref()
+            .and_then(|config| config.options().swipe_gesture_fingers)
+            .is_some_and(|fingers| deltas.len() == fingers)
+        {
+            let delta = deltas.iter().sum::<f64>();
+            if delta.abs() > SWIPE_THRESHOLD {
+                _ = WindowManager::slide_window(
+                    main_cid,
+                    focused_window,
+                    active_display,
+                    delta,
+                    &find_window,
+                );
+            }
+        }
     }
 
     fn find_orphaned_spaces(
@@ -355,7 +368,6 @@ impl WindowManager {
     }
 
     pub fn currently_focused(
-        &mut self,
         main_cid: ConnID,
         active_display: &Display,
         windows: &Query<(&Window, Entity)>,
@@ -367,13 +379,10 @@ impl WindowManager {
         unsafe {
             _SLPSGetFrontProcess(&mut focused_psn);
         }
-        let Some((window, entity)) = windows.iter().find(|(window, _)| {
-            window
-                .inner()
-                .psn
-                .as_ref()
-                .is_some_and(|psn| &focused_psn == psn)
-        }) else {
+        let Some((window, entity)) = windows
+            .iter()
+            .find(|(window, _)| window.psn().as_ref().is_some_and(|psn| &focused_psn == psn))
+        else {
             warn!(
                 "{}: Unable to set currently focused window.",
                 function_name!()
@@ -388,8 +397,6 @@ impl WindowManager {
             commands.entity(prev_entity).remove::<FocusedMarker>();
         }
         commands.entity(entity).insert(FocusedMarker);
-        self.last_window = Some(window.id());
-        self.focused_psn = focused_psn;
 
         let find_window = |window_id| {
             windows
@@ -775,13 +782,11 @@ impl WindowManager {
 
         match app.focused_window_id() {
             Err(_) => {
-                let Ok((focused_window, focused_entity)) = focused_window.single() else {
+                let Ok((_, focused_entity)) = focused_window.single() else {
                     warn!("{}: window_manager_set_window_opacity", function_name!());
                     return;
                 };
 
-                window_manager.last_window = Some(focused_window.id());
-                window_manager.focused_psn = process.psn.clone();
                 window_manager.ffm_window_id = None;
                 commands.entity(focused_entity).remove::<FocusedMarker>();
                 warn!("{}: reset focused window", function_name!());
@@ -1011,18 +1016,15 @@ impl WindowManager {
         if let Some((_, previous_entity)) = previous_focus {
             commands.entity(previous_entity).remove::<FocusedMarker>();
         }
-        if previous_focus.is_none_or(|(previous, _)| previous.id() != window_id) {
-            if window_manager
+        if previous_focus.is_none_or(|(previous, _)| previous.id() != window_id)
+            && window_manager
                 .ffm_window_id
                 .is_none_or(|id| id != window_id)
-            {
-                window.center_mouse(main_cid);
-            }
-            window_manager.last_window = previous_focus.map(|window| window.0.id());
+        {
+            window.center_mouse(main_cid);
         }
 
         commands.entity(entity).insert(FocusedMarker);
-        window_manager.focused_psn = app.psn();
         window_manager.ffm_window_id = None;
 
         if window_manager.skip_reshuffle {
@@ -1341,7 +1343,10 @@ impl WindowManager {
     ///
     /// `true` if focus follows mouse is enabled, `false` otherwise.
     pub fn focus_follows_mouse(&self) -> bool {
-        self.focus_follows_mouse
+        self.config
+            .as_ref()
+            .and_then(|config| config.options().focus_follows_mouse)
+            .is_some_and(|ffm| ffm)
     }
 
     /// Checks if the currently focused window is in the active panel.
@@ -1576,83 +1581,78 @@ impl WindowManager {
             return Ok(());
         }
 
-        match WindowManager::find_window_at_point(main_cid, point, find_window) {
-            Ok(window) => {
-                let window_id = window.id();
-                let Ok((focused_window, _)) = focused_window.single() else {
-                    // TODO: notfound
-                    return Ok(());
-                };
-                if focused_window.id() == window_id {
-                    trace!("{}: allready focused {}", function_name!(), window_id);
-                    return Ok(());
-                }
-                if !window.is_eligible() {
-                    trace!("{}: {} not eligible", function_name!(), window_id);
-                    return Ok(());
-                }
-
-                let window_list = unsafe {
-                    let arr_ref = SLSCopyAssociatedWindows(main_cid, window_id);
-                    CFRetained::retain(arr_ref)
-                };
-
-                let mut window = window;
-                for item in get_array_values(&window_list) {
-                    let mut child_wid: WinID = 0;
-                    unsafe {
-                        if !CFNumber::value(
-                            item.as_ref(),
-                            CFNumberType::SInt32Type,
-                            NonNull::from(&mut child_wid).as_ptr().cast(),
-                        ) {
-                            warn!(
-                                "{}: Unable to find subwindows of window {}: {item:?}.",
-                                function_name!(),
-                                window_id
-                            );
-                            continue;
-                        }
-                    };
-                    debug!(
-                        "{}: checking {}'s childen: {}",
-                        function_name!(),
-                        window_id,
-                        child_wid
-                    );
-                    let Some(child_window) = find_window(child_wid) else {
-                        warn!(
-                            "{}: Unable to find child window {child_wid}.",
-                            function_name!()
-                        );
-                        continue;
-                    };
-
-                    let Ok(role) = window.role() else {
-                        warn!("{}: finding role for {window_id}", function_name!(),);
-                        continue;
-                    };
-
-                    // bool valid = CFEqual(role, kAXSheetRole) || CFEqual(role, kAXDrawerRole);
-                    let valid = ["AXSheet", "AXDrawer"]
-                        .iter()
-                        .any(|axrole| axrole.eq(&role));
-
-                    if valid {
-                        window = child_window.clone();
-                        break;
-                    }
-                }
-
-                //  Do not reshuffle windows due to moved mouse focus.
-                self.skip_reshuffle = true;
-
-                window.focus_without_raise(focused_window.id(), &self.focused_psn);
-                self.ffm_window_id = Some(window_id);
-                Ok(())
-            }
-            Err(err) => Err(err),
+        let window = WindowManager::find_window_at_point(main_cid, point, find_window)?;
+        let window_id = window.id();
+        let Ok((focused_window, _)) = focused_window.single() else {
+            // TODO: notfound
+            return Ok(());
+        };
+        if focused_window.id() == window_id {
+            trace!("{}: allready focused {}", function_name!(), window_id);
+            return Ok(());
         }
+        if !window.is_eligible() {
+            trace!("{}: {} not eligible", function_name!(), window_id);
+            return Ok(());
+        }
+
+        let window_list = unsafe {
+            let arr_ref = SLSCopyAssociatedWindows(main_cid, window_id);
+            CFRetained::retain(arr_ref)
+        };
+
+        let mut window = window;
+        for item in get_array_values(&window_list) {
+            let mut child_wid: WinID = 0;
+            unsafe {
+                if !CFNumber::value(
+                    item.as_ref(),
+                    CFNumberType::SInt32Type,
+                    NonNull::from(&mut child_wid).as_ptr().cast(),
+                ) {
+                    warn!(
+                        "{}: Unable to find subwindows of window {}: {item:?}.",
+                        function_name!(),
+                        window_id
+                    );
+                    continue;
+                }
+            };
+            debug!(
+                "{}: checking {}'s childen: {}",
+                function_name!(),
+                window_id,
+                child_wid
+            );
+            let Some(child_window) = find_window(child_wid) else {
+                warn!(
+                    "{}: Unable to find child window {child_wid}.",
+                    function_name!()
+                );
+                continue;
+            };
+
+            let Ok(role) = window.role() else {
+                warn!("{}: finding role for {window_id}", function_name!(),);
+                continue;
+            };
+
+            let valid = ["AXSheet", "AXDrawer"]
+                .iter()
+                .any(|axrole| axrole.eq(&role));
+
+            if valid {
+                window = child_window.clone();
+                break;
+            }
+        }
+
+        //  Do not reshuffle windows due to moved mouse focus.
+        self.skip_reshuffle = true;
+
+        window.focus_without_raise(focused_window);
+        self.ffm_window_id = Some(window_id);
+        Ok(())
     }
 
     /// Handles a mouse down event. It finds the window at the click point, reshuffles if necessary,
@@ -1681,10 +1681,6 @@ impl WindowManager {
         if !window.fully_visible(&active_display.bounds) {
             WindowManager::reshuffle_around(main_cid, &window, active_display, find_window)?;
         }
-
-        self.mouse_down_window = Some(window);
-        self.down_location = *point;
-
         Ok(())
     }
 

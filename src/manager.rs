@@ -1,5 +1,6 @@
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
+use bevy::ecs::message::MessageReader;
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{With, Without};
 use bevy::ecs::resource::Resource;
@@ -22,10 +23,9 @@ use stdext::prelude::RwLockExt;
 use crate::app::Application;
 use crate::config::Config;
 use crate::events::{
-    ApplicationTrigger, BProcess, DisplayAddRemoveTrigger, Event, ExistingMarker, FocusedMarker,
-    FreshMarker, FrontSwitchedTrigger, MainConnection, ManagerStateTrigger, MouseTrigger,
-    OrphanedSpaces, ProcessChangeTrigger, SenderSocket, WindowFocusedTrigger,
-    WorkspaceChangeTrigger,
+    BProcess, DisplayAddRemoveTrigger, Event, ExistingMarker, FocusedMarker, FreshMarker,
+    FrontSwitchedTrigger, MainConnection, MouseTrigger, OrphanedSpaces, SenderSocket,
+    WindowFocusedTrigger, WorkspaceChangeTrigger,
 };
 use crate::platform::ProcessSerialNumber;
 use crate::process::Process;
@@ -42,7 +42,6 @@ const THRESHOLD: f64 = 10.0;
 
 #[derive(Default, Resource)]
 pub struct WindowManager {
-    // main_cid: ConnID,
     last_window: Option<WinID>, // TODO: use this for "goto last window bind"
     pub focused_psn: ProcessSerialNumber,
     pub ffm_window_id: Option<WinID>,
@@ -55,9 +54,8 @@ pub struct WindowManager {
 }
 
 impl WindowManager {
-    #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
-    pub fn process_change_trigger(
-        trigger: On<ProcessChangeTrigger>,
+    pub fn dispatch_process_messages(
+        mut messages: MessageReader<Event>,
         processes: Query<(&BProcess, Entity)>,
         mut commands: Commands,
     ) {
@@ -67,29 +65,28 @@ impl WindowManager {
                 .find(|(BProcess(process), _)| &process.psn == psn)
         };
 
-        match &trigger.event().0 {
-            Event::ApplicationLaunched { psn, observer } => {
-                if find_process(psn).is_none() {
-                    let process = Process::new(psn, observer.clone());
-                    commands.spawn((FreshMarker, BProcess(process)));
+        for event in messages.read() {
+            match event {
+                Event::ApplicationLaunched { psn, observer } => {
+                    if find_process(psn).is_none() {
+                        let process = Process::new(psn, observer.clone());
+                        commands.spawn((FreshMarker, BProcess(process)));
+                    }
                 }
-            }
 
-            Event::ApplicationTerminated { psn } => {
-                if let Some((_, entity)) = find_process(psn) {
-                    commands.entity(entity).despawn();
+                Event::ApplicationTerminated { psn } => {
+                    if let Some((_, entity)) = find_process(psn) {
+                        commands.entity(entity).despawn();
+                    }
                 }
-            }
-
-            event => {
-                debug!("{}: Unhandled event {event:?}", function_name!());
+                _ => (),
             }
         }
     }
 
     #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
-    pub fn application_trigger(
-        trigger: On<ApplicationTrigger>,
+    pub fn dispatch_application_messages(
+        mut messages: MessageReader<Event>,
         mut apps: Query<(&mut Application, &Children)>,
         windows: Query<(&Window, Entity)>,
         focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
@@ -110,54 +107,57 @@ impl WindowManager {
             return;
         };
 
-        match &trigger.event().0 {
-            Event::WindowCreated { element } => match Window::new(element) {
-                Ok(window) => {
-                    commands.spawn((FreshMarker, window));
+        for event in messages.read() {
+            match event {
+                Event::WindowCreated { element } => match Window::new(element) {
+                    Ok(window) => {
+                        commands.spawn((FreshMarker, window));
+                    }
+                    Err(err) => debug!(
+                        "{}: not adding window {element:?}: {}",
+                        function_name!(),
+                        err
+                    ),
+                },
+                Event::WindowDestroyed { window_id } => {
+                    WindowManager::window_destroyed(
+                        main_cid,
+                        *window_id,
+                        &mut apps,
+                        &windows,
+                        &focused_window,
+                        &displays,
+                        &mut commands,
+                    );
                 }
-                Err(err) => debug!(
-                    "{}: not adding window {element:?}: {}",
-                    function_name!(),
-                    err
-                ),
-            },
-            Event::WindowDestroyed { window_id } => {
-                WindowManager::window_destroyed(
-                    main_cid,
-                    *window_id,
-                    &mut apps,
-                    &windows,
-                    &focused_window,
-                    &displays,
-                    &mut commands,
-                );
-            }
-            Event::WindowMoved { window_id: _ } => (),
-            Event::WindowResized { window_id } => {
-                let Some(window) = find_window(*window_id) else {
-                    return;
-                };
-                _ = WindowManager::window_resized(main_cid, &window, active_display, &find_window);
-            }
-            Event::WindowMinimized { window_id } => {
-                active_display.remove_window(*window_id);
-            }
-            Event::WindowDeminimized { window_id } => {
-                let Ok(pane) = active_display.active_panel(main_cid) else {
-                    return;
-                };
-                pane.append(*window_id);
-            }
-
-            event => {
-                debug!("{}: Unhandled event {event:?}", function_name!());
+                Event::WindowResized { window_id } => {
+                    let Some(window) = find_window(*window_id) else {
+                        return;
+                    };
+                    _ = WindowManager::window_resized(
+                        main_cid,
+                        &window,
+                        active_display,
+                        &find_window,
+                    );
+                }
+                Event::WindowMinimized { window_id } => {
+                    active_display.remove_window(*window_id);
+                }
+                Event::WindowDeminimized { window_id } => {
+                    let Ok(pane) = active_display.active_panel(main_cid) else {
+                        return;
+                    };
+                    pane.append(*window_id);
+                }
+                _ => (),
             }
         }
     }
 
     #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
-    pub fn manager_state_trigger(
-        trigger: On<ManagerStateTrigger>,
+    pub fn dispatch_manager_messages(
+        mut messages: MessageReader<Event>,
         windows: Query<(&Window, Entity)>,
         focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
         displays: Query<&mut Display, With<FocusedMarker>>,
@@ -172,54 +172,52 @@ impl WindowManager {
                 .find_map(|(window, _)| (window.id() == window_id).then_some(window))
                 .cloned()
         };
-
         let Ok(active_display) = displays.single() else {
             warn!("{}: Unable to get current display.", function_name!());
             return;
         };
 
-        match &trigger.event().0 {
-            Event::CurrentlyFocused => {
-                window_manager.currently_focused(
-                    main_cid,
-                    active_display,
-                    &windows,
-                    &focused_window,
-                    &mut commands,
-                );
-            }
-            Event::Swipe { deltas } => {
-                const SWIPE_THRESHOLD: f64 = 0.01;
-                if window_manager
-                    .swipe_gesture_fingers
-                    .is_some_and(|fingers| deltas.len() == fingers)
-                {
-                    let delta = deltas.iter().sum::<f64>();
-                    if delta.abs() > SWIPE_THRESHOLD {
-                        _ = window_manager.slide_window(
-                            main_cid,
-                            &focused_window,
-                            active_display,
-                            delta,
-                            &find_window,
-                        );
+        for event in messages.read() {
+            match event {
+                Event::CurrentlyFocused => {
+                    window_manager.currently_focused(
+                        main_cid,
+                        active_display,
+                        &windows,
+                        &focused_window,
+                        &mut commands,
+                    );
+                }
+                Event::Swipe { deltas } => {
+                    const SWIPE_THRESHOLD: f64 = 0.01;
+                    if window_manager
+                        .swipe_gesture_fingers
+                        .is_some_and(|fingers| deltas.len() == fingers)
+                    {
+                        let delta = deltas.iter().sum::<f64>();
+                        if delta.abs() > SWIPE_THRESHOLD {
+                            _ = WindowManager::slide_window(
+                                main_cid,
+                                &focused_window,
+                                active_display,
+                                delta,
+                                &find_window,
+                            );
+                        }
                     }
                 }
-            }
-            Event::MissionControlShowAllWindows
-            | Event::MissionControlShowFrontWindows
-            | Event::MissionControlShowDesktop => {
-                window_manager.mission_control_is_active = true;
-            }
-            Event::MissionControlExit => {
-                window_manager.mission_control_is_active = false;
-            }
-            Event::ConfigRefresh { config } => {
-                window_manager.reload_config(config);
-            }
-
-            event => {
-                debug!("{}: Unhandled event {event:?}", function_name!());
+                Event::MissionControlShowAllWindows
+                | Event::MissionControlShowFrontWindows
+                | Event::MissionControlShowDesktop => {
+                    window_manager.mission_control_is_active = true;
+                }
+                Event::MissionControlExit => {
+                    window_manager.mission_control_is_active = false;
+                }
+                Event::ConfigRefresh { config } => {
+                    window_manager.reload_config(config);
+                }
+                _ => (),
             }
         }
     }
@@ -1475,7 +1473,6 @@ impl WindowManager {
     }
 
     fn slide_window<F: Fn(WinID) -> Option<Window>>(
-        &self,
         main_cid: ConnID,
         focused_window: &Query<(&Window, Entity), With<FocusedMarker>>,
         active_display: &Display,

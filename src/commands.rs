@@ -8,7 +8,7 @@ use stdext::function_name;
 
 use crate::events::{
     CommandTrigger, Event, FocusedMarker, MainConnection, ReshuffleAroundTrigger, SenderSocket,
-    WorkspaceChangeTrigger,
+    WMEventTrigger,
 };
 use crate::skylight::{ConnID, WinID};
 use crate::windows::{Display, Panel, Window, WindowPane};
@@ -282,7 +282,7 @@ pub fn process_command_trigger(
             .and_then(|panel| panel.index_of(active_window.id()))
             .is_err()
     {
-        commands.trigger(WorkspaceChangeTrigger);
+        commands.trigger(WMEventTrigger(Event::DisplayChanged));
     }
 
     let find_window = |window_id| {

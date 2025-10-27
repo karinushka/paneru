@@ -224,31 +224,13 @@ pub struct FocusFollowsMouse(pub Option<WinID>);
 pub struct OrphanedSpaces(pub HashMap<u64, WindowPane>);
 
 #[derive(BevyEvent)]
-pub struct MissionControlTrigger(pub Event);
+pub struct WMEventTrigger(pub Event);
 
 #[derive(BevyEvent)]
 pub struct CommandTrigger(pub Vec<String>);
 
 #[derive(BevyEvent)]
-pub struct MouseTrigger(pub Event);
-
-#[derive(BevyEvent)]
-pub struct WorkspaceChangeTrigger;
-
-#[derive(BevyEvent)]
-pub struct DisplayAddRemoveTrigger(pub Event);
-
-#[derive(BevyEvent)]
-pub struct WindowFocusedTrigger(pub WinID);
-
-#[derive(BevyEvent)]
-pub struct FrontSwitchedTrigger(pub ProcessSerialNumber);
-
-#[derive(BevyEvent)]
 pub struct ReshuffleAroundTrigger(pub WinID);
-
-#[derive(BevyEvent)]
-pub struct SwipeGestureTrigger(pub Vec<f64>);
 
 pub struct EventHandler;
 
@@ -377,51 +359,17 @@ impl EventHandler {
             match event {
                 Event::Command { argv } => commands.trigger(CommandTrigger(argv.clone())),
 
-                Event::MouseDown { point: _ }
-                | Event::MouseUp { point: _ }
-                | Event::MouseMoved { point: _ }
-                | Event::MouseDragged { point: _ } => {
-                    commands.trigger(MouseTrigger(event.clone()));
-                }
-
-                Event::Swipe { deltas } => {
-                    commands.trigger(SwipeGestureTrigger(deltas.clone()));
-                }
-
-                Event::WindowFocused { window_id } => {
-                    commands.trigger(WindowFocusedTrigger(*window_id));
-                }
-                Event::ApplicationFrontSwitched { psn } => {
-                    commands.trigger(FrontSwitchedTrigger(psn.clone()));
-                }
-
-                Event::DisplayChanged => {
-                    // Maybe also react to Event::SpaceChanged.
-                    commands.trigger(WorkspaceChangeTrigger);
-                }
-                Event::DisplayAdded { display_id: _ } | Event::DisplayRemoved { display_id: _ } => {
-                    commands.trigger(DisplayAddRemoveTrigger(event.clone()));
-                }
-
                 Event::ConfigRefresh { config } => {
+                    info!("{}: Configuration changed.", function_name!());
                     commands.insert_resource(config.clone());
-                }
-
-                Event::MissionControlShowAllWindows
-                | Event::MissionControlShowFrontWindows
-                | Event::MissionControlShowDesktop
-                | Event::MissionControlExit => {
-                    commands.trigger(MissionControlTrigger(event.clone()));
                 }
 
                 Event::WindowTitleChanged { window_id } => {
                     trace!("{}: WindowTitleChanged: {window_id:?}", function_name!());
                 }
-
                 Event::MenuClosed { window_id } => {
                     trace!("{}: MenuClosed event: {window_id:?}", function_name!());
                 }
-
                 Event::DisplayMoved { display_id } => {
                     debug!("{}: Display Moved: {display_id:?}", function_name!());
                 }
@@ -435,7 +383,7 @@ impl EventHandler {
                     debug!("{}: system woke: {msg:?}", function_name!());
                 }
 
-                _ => (),
+                _ => commands.trigger(WMEventTrigger(event.clone())),
             }
         }
     }

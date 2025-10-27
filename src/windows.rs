@@ -650,11 +650,12 @@ pub fn ax_window_pid(element_ref: &CFRetained<AxuWrapperType>) -> Result<Pid> {
     ))
 }
 
-#[derive(Clone, Component)]
+#[derive(Clone, Component, Debug)]
 pub struct Window {
     pub inner: Arc<RwLock<InnerWindow>>,
 }
 
+#[derive(Debug)]
 pub struct InnerWindow {
     pub id: WinID,
     // pub app: Application,

@@ -47,6 +47,7 @@ pub enum Panel {
 }
 
 impl Panel {
+    /// Returns the top window ID in the panel.
     pub fn top(&self) -> Option<WinID> {
         match self {
             Panel::Single(id) => Some(id),
@@ -254,6 +255,11 @@ impl WindowPane {
         Ok(())
     }
 
+    /// Stacks the window with the given ID onto the panel to its left.
+    ///
+    /// # Arguments
+    ///
+    /// * `window_id` - The ID of the window to stack.
     pub fn stack(&self, window_id: WinID) -> Result<()> {
         let index = self.index_of(window_id)?;
         if index == 0 {
@@ -284,6 +290,11 @@ impl WindowPane {
         Ok(())
     }
 
+    /// Unstacks the window with the given ID from its current stack.
+    ///
+    /// # Arguments
+    ///
+    /// * `window_id` - The ID of the window to unstack.
     pub fn unstack(&self, window_id: WinID) -> Result<()> {
         let index = self.index_of(window_id)?;
         if let Panel::Single(_) = self.pane.force_read()[index] {
@@ -313,6 +324,7 @@ impl WindowPane {
         Ok(())
     }
 
+    /// Returns a vector of all window IDs in the pane.
     pub fn all_windows(&self) -> Vec<WinID> {
         self.pane
             .force_read()
@@ -324,6 +336,7 @@ impl WindowPane {
             .collect()
     }
 
+    /// Clears all windows from the pane.
     pub fn clear(&self) {
         self.pane.force_write().clear();
     }
@@ -673,9 +686,7 @@ impl Window {
     ///
     /// # Arguments
     ///
-    /// * `window_id` - The ID of the window.
-    /// * `app` - A reference to the `Application` that owns this window.
-    /// * `element_ref` - A `CFRetained<AxuWrapperType>` reference to the Accessibility UI element.
+    /// * `element` - A `CFRetained<AxuWrapperType>` reference to the Accessibility UI element.
     ///
     /// # Returns
     ///
@@ -732,6 +743,7 @@ impl Window {
         self.inner().id
     }
 
+    /// Returns the process serial number of the window.
     pub fn psn(&self) -> Option<ProcessSerialNumber> {
         self.inner().psn.clone()
     }
@@ -1049,6 +1061,10 @@ impl Window {
     }
 
     /// Makes the window the key window for its application by sending synthesized events.
+    ///
+    /// # Arguments
+    ///
+    /// * `psn` - The process serial number of the application.
     fn make_key_window(&self, psn: &ProcessSerialNumber) {
         let window_id = self.id();
         //
@@ -1079,7 +1095,7 @@ impl Window {
     ///
     /// # Arguments
     ///
-    /// * `window_manager` - A reference to the `WindowManager` to access focused window information.
+    /// * `currently_focused` - A reference to the currently focused window.
     pub fn focus_without_raise(&self, currently_focused: &Window) {
         let Some((psn, focused_psn)) = self.psn().zip(currently_focused.psn()) else {
             return;

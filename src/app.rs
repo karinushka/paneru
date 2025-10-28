@@ -161,12 +161,10 @@ impl Application {
     ///
     /// # Arguments
     ///
-    /// * `element` - The `AXUIElementRef` of the window to observe.
-    /// * `window` - A reference to the `Window` object.
+    /// * `window` - A reference to the `Window` object to observe.
     ///
     /// # Returns
     ///
-    /// `Ok(bool)` where `true` means all observers were successfully registered and `retry` list is empty, otherwise `Err(Error)`.
     pub fn observe_window(&mut self, window: &Window) -> Result<bool> {
         self.handler
             .add_observer(
@@ -181,7 +179,7 @@ impl Application {
     ///
     /// # Arguments
     ///
-    /// * `element` - The `AXUIElementRef` of the window to unobserve.
+    /// * `window` - A reference to the `Window` object to unobserve.
     pub fn unobserve_window(&mut self, window: &Window) {
         self.handler.remove_observer(
             &ObserverType::Window(window.id()),

@@ -43,6 +43,13 @@ const THRESHOLD: f64 = 10.0;
 pub struct WindowManager;
 
 impl WindowManager {
+    /// Dispatches process-related messages, such as application launch and termination.
+    ///
+    /// # Arguments
+    ///
+    /// * `messages` - A `MessageReader` for incoming `Event` messages.
+    /// * `processes` - A query for all processes.
+    /// * `commands` - Bevy commands to spawn or despawn entities.
     pub fn dispatch_process_messages(
         mut messages: MessageReader<Event>,
         processes: Query<(&BProcess, Entity)>,
@@ -73,6 +80,16 @@ impl WindowManager {
         }
     }
 
+    /// Dispatches application-related messages, such as window creation, destruction, and resizing.
+    ///
+    /// # Arguments
+    ///
+    /// * `messages` - A `MessageReader` for incoming `Event` messages.
+    /// * `windows` - A query for all windows.
+    /// * `focused_window` - A query for the focused window.
+    /// * `displays` - A query for all displays.
+    /// * `main_cid` - The main connection ID resource.
+    /// * `commands` - Bevy commands to spawn or despawn entities.
     #[allow(clippy::needless_pass_by_value)]
     pub fn dispatch_application_messages(
         mut messages: MessageReader<Event>,
@@ -136,6 +153,12 @@ impl WindowManager {
         }
     }
 
+    /// Handles Mission Control events, updating the `MissionControlActive` resource.
+    ///
+    /// # Arguments
+    ///
+    /// * `trigger` - The Bevy event trigger containing the Mission Control event.
+    /// * `mission_control_active` - The `MissionControlActive` resource.
     #[allow(clippy::needless_pass_by_value)]
     pub fn mission_control_trigger(
         trigger: On<WMEventTrigger>,
@@ -154,6 +177,16 @@ impl WindowManager {
         }
     }
 
+    /// Handles swipe gesture events, potentially triggering window sliding.
+    ///
+    /// # Arguments
+    ///
+    /// * `trigger` - The Bevy event trigger containing the swipe event.
+    /// * `active_display` - A query for the active display.
+    /// * `focused_window` - A query for the focused window.
+    /// * `main_cid` - The main connection ID resource.
+    /// * `config` - The optional configuration resource.
+    /// * `commands` - Bevy commands to trigger events.
     #[allow(clippy::needless_pass_by_value)]
     pub fn swipe_gesture_trigger(
         trigger: On<WMEventTrigger>,
@@ -188,6 +221,13 @@ impl WindowManager {
         }
     }
 
+    /// Finds and re-inserts orphaned spaces into displays that have empty spaces.
+    ///
+    /// # Arguments
+    ///
+    /// * `orphaned_spaces` - A map of space IDs to `WindowPane`s that are currently orphaned.
+    /// * `displays` - A query for all displays.
+    /// * `windows` - A query for all windows.
     fn find_orphaned_spaces(
         orphaned_spaces: &mut HashMap<u64, WindowPane>,
         display: &mut Display,
@@ -237,9 +277,11 @@ impl WindowManager {
     /// Refreshes the list of active displays and reorganizes windows across them.
     /// It preserves spaces from old displays if they still exist.
     ///
-    /// # Returns
+    /// # Arguments
     ///
-    /// `Ok(())` if the displays are refreshed successfully, otherwise `Err(Error)`.
+    /// * `main_cid` - The main connection ID.
+    /// * `displays` - A mutable vector of references to the current displays.
+    /// * `find_window` - A closure to find a window by its ID.
     pub fn refresh_displays<F: Fn(WinID) -> Option<Window>>(
         main_cid: ConnID,
         displays: &mut Vec<&Display>,
@@ -279,8 +321,9 @@ impl WindowManager {
     ///
     /// # Arguments
     ///
+    /// * `main_cid` - The main connection ID.
     /// * `space_id` - The ID of the space to refresh windows from.
-    /// * `pane` - A reference to the `WindowPane` to which windows will be appended.
+    /// * `find_window` - A closure to find a window by its ID.
     fn refresh_windows_space<F: Fn(WinID) -> Option<Window>>(
         main_cid: ConnID,
         space_id: u64,
@@ -306,6 +349,13 @@ impl WindowManager {
         .collect()
     }
 
+    /// Sets the currently focused window based on the frontmost application.
+    ///
+    /// # Arguments
+    ///
+    /// * `windows` - A query for all windows.
+    /// * `focused_window` - A query for the currently focused window.
+    /// * `commands` - Bevy commands to trigger events and manage components.
     pub fn currently_focused(
         windows: &Query<(&Window, Entity)>,
         focused_window: &Query<(&Window, Entity), With<FocusedMarker>>,
@@ -342,9 +392,11 @@ impl WindowManager {
     ///
     /// # Arguments
     ///
-    /// * `spaces` - A vector of space IDs to query windows from.
+    /// * `main_cid` - The main connection ID.
+    /// * `spaces` - A slice of space IDs to query windows from.
     /// * `cid` - An optional connection ID. If `None`, the main connection ID is used.
     /// * `also_minimized` - A boolean indicating whether to include minimized windows in the result.
+    /// * `find_window` - A closure to find a window by its ID.
     ///
     /// # Returns
     ///
@@ -449,7 +501,10 @@ impl WindowManager {
     ///
     /// # Arguments
     ///
+    /// * `cid` - The connection ID.
     /// * `app` - A reference to the `Application` for which to retrieve window IDs.
+    /// * `spaces` - A slice of space IDs to query.
+    /// * `find_window` - A closure to find a window by its ID.
     ///
     /// # Returns
     ///
@@ -551,12 +606,14 @@ impl WindowManager {
     ///
     /// # Arguments
     ///
-    /// * `app` - A reference to the `Application` whose windows are to be added.
+    /// * `cid` - The connection ID.
+    /// * `app` - A mutable reference to the `Application` whose windows are to be added.
+    /// * `spaces` - A slice of space IDs to query.
     /// * `refresh_index` - An integer indicating the refresh index, used to determine if all windows are resolved.
     ///
     /// # Returns
     ///
-    /// `Ok(bool)` where `true` indicates all windows were resolved, otherwise `Err(Error)`.
+    /// `Ok(Vec<Window>)` containing the found windows, otherwise `Err(Error)`.
     fn add_existing_application_windows(
         cid: ConnID,
         app: &mut Application,
@@ -656,11 +713,12 @@ impl WindowManager {
     ///
     /// # Arguments
     ///
-    /// * `psn` - A reference to the `ProcessSerialNumber` of the application that switched to front.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` if the front switch is processed successfully, otherwise `Err(Error)`.
+    /// * `trigger` - The Bevy event trigger containing the application front switched event.
+    /// * `processes` - A query for all processes with their children.
+    /// * `applications` - A query for all applications.
+    /// * `focused_window` - A query for the focused window.
+    /// * `focus_follows_mouse_id` - The resource to track focus follows mouse window ID.
+    /// * `commands` - Bevy commands to trigger events and manage components.
     #[allow(clippy::needless_pass_by_value)]
     pub fn front_switched_trigger(
         trigger: On<WMEventTrigger>,
@@ -724,11 +782,12 @@ impl WindowManager {
     ///
     /// # Arguments
     ///
-    /// * `ax_element` - A `CFRetained<AxuWrapperType>` reference to the Accessibility UI element of the new window.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` if the window is created successfully, otherwise `Err(Error)`.
+    /// * `windows` - A query for newly created windows marked with `FreshMarker`.
+    /// * `focused_window` - A query for the currently focused window.
+    /// * `apps` - A query for all applications.
+    /// * `active_display` - A query for the active display.
+    /// * `main_cid` - The main connection ID resource.
+    /// * `commands` - Bevy commands to manage components and trigger events.
     #[allow(clippy::needless_pass_by_value)]
     pub fn window_create(
         windows: Query<(Entity, &mut Window), With<FreshMarker>>,
@@ -831,6 +890,15 @@ impl WindowManager {
         }
     }
 
+    /// Handles the event when a window is destroyed. It removes the window from the ECS world and relevant displays.
+    ///
+    /// # Arguments
+    ///
+    /// * `windows` - A query for windows marked with `DestroyedMarker`.
+    /// * `focused_window` - A query for the currently focused window.
+    /// * `apps` - A query for all applications.
+    /// * `displays` - A query for all displays.
+    /// * `commands` - Bevy commands to despawn entities and trigger events.
     #[allow(clippy::type_complexity)]
     pub fn window_destroyed(
         windows: Query<(&Window, Entity, &ChildOf), With<DestroyedMarker>>,
@@ -864,7 +932,9 @@ impl WindowManager {
     ///
     /// # Arguments
     ///
-    /// * `window_id` - The ID of the window that was resized.
+    /// * `window` - The window that was resized.
+    /// * `active_display` - The currently active display.
+    /// * `commands` - Bevy commands to trigger events.
     ///
     /// # Returns
     ///
@@ -884,7 +954,14 @@ impl WindowManager {
     ///
     /// # Arguments
     ///
-    /// * `window` - The `Window` object that gained focus.
+    /// * `trigger` - The Bevy event trigger containing the window focused event.
+    /// * `applications` - A query for all applications.
+    /// * `windows` - A query for all windows with their parent and focus state.
+    /// * `current_focus` - A query for the currently focused window.
+    /// * `main_cid` - The main connection ID resource.
+    /// * `focus_follows_mouse_id` - The resource to track focus follows mouse window ID.
+    /// * `skip_reshuffle` - The resource to indicate if reshuffling should be skipped.
+    /// * `commands` - Bevy commands to manage components and trigger events.
     #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
     pub fn window_focused_trigger(
         trigger: On<WMEventTrigger>,
@@ -955,11 +1032,10 @@ impl WindowManager {
     ///
     /// # Arguments
     ///
-    /// * `window` - A reference to the `Window` around which to reshuffle.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` if reshuffling is successful, otherwise `Err(Error)`.
+    /// * `trigger` - The Bevy event trigger containing the ID of the window to reshuffle around.
+    /// * `main_cid` - The main connection ID resource.
+    /// * `active_display` - A query for the active display.
+    /// * `windows` - A query for all windows.
     #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
     pub fn reshuffle_around_trigger(
         trigger: On<ReshuffleAroundTrigger>,
@@ -1067,6 +1143,15 @@ impl WindowManager {
         });
     }
 
+    /// Repositions all windows within a given panel stack.
+    ///
+    /// # Arguments
+    ///
+    /// * `upper_left` - The x-coordinate of the upper-left corner of the stack.
+    /// * `panel` - The panel containing the windows to reposition.
+    /// * `width` - The width of each window in the stack.
+    /// * `display_bounds` - The bounds of the display.
+    /// * `find_window` - A closure to find a window by its ID.
     fn reposition_stack<F: Fn(WinID) -> Option<Window>>(
         upper_left: f64,
         panel: &Panel,
@@ -1096,8 +1181,10 @@ impl WindowManager {
     ///
     /// # Arguments
     ///
-    /// * `psn` - A reference to the `ProcessSerialNumber` of the existing process.
-    /// * `observer` - A `Retained<WorkspaceObserver>` to observe workspace events.
+    /// * `cid` - The main connection ID resource.
+    /// * `events` - The event sender socket resource.
+    /// * `process_query` - A query for existing processes marked with `ExistingMarker`.
+    /// * `commands` - Bevy commands to spawn entities and manage components.
     #[allow(clippy::needless_pass_by_value)]
     pub fn add_existing_process(
         cid: Res<MainConnection>,
@@ -1114,6 +1201,15 @@ impl WindowManager {
         }
     }
 
+    /// Adds an existing application to the window manager. This is used during initial setup.
+    /// It observes the application and adds its windows.
+    ///
+    /// # Arguments
+    ///
+    /// * `cid` - The main connection ID resource.
+    /// * `displays` - A query for all displays.
+    /// * `app_query` - A query for existing applications marked with `ExistingMarker`.
+    /// * `commands` - Bevy commands to spawn entities and manage components.
     #[allow(clippy::needless_pass_by_value)]
     pub fn add_existing_application(
         cid: Res<MainConnection>,
@@ -1152,12 +1248,11 @@ impl WindowManager {
     ///
     /// # Arguments
     ///
-    /// * `psn` - A reference to the `ProcessSerialNumber` of the launched application.
-    /// * `observer` - A `Retained<WorkspaceObserver>` to observe workspace events.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` if the application is launched and processed successfully, otherwise `Err(Error)`.
+    /// * `cid` - The main connection ID resource.
+    /// * `events` - The event sender socket resource.
+    /// * `process_query` - A query for newly launched processes marked with `FreshMarker`.
+    /// * `time` - The Bevy time resource.
+    /// * `commands` - Bevy commands to spawn entities and manage components.
     #[allow(clippy::needless_pass_by_value)]
     pub fn add_launched_process(
         cid: Res<MainConnection>,
@@ -1223,6 +1318,13 @@ impl WindowManager {
         }
     }
 
+    /// Adds windows for a newly launched application.
+    ///
+    /// # Arguments
+    ///
+    /// * `app_query` - A query for newly launched applications marked with `FreshMarker`.
+    /// * `windows` - A query for all windows.
+    /// * `commands` - Bevy commands to spawn entities and manage components.
     pub fn add_launched_application(
         app_query: Query<(&mut Application, Entity), With<FreshMarker>>,
         windows: Query<&Window>,
@@ -1279,9 +1381,16 @@ impl WindowManager {
             .is_some_and(|ffm| ffm)
     }
 
-    /// Checks if the currently focused window is in the active panel.
-    /// If not, the window has been moved to a different display or workspace - so the window
-    /// manager needs to reorient itself and re-insert the window into correct location.
+    /// Handles display added or removed events.
+    /// It updates the list of displays and re-evaluates orphaned spaces.
+    ///
+    /// # Arguments
+    ///
+    /// * `trigger` - The Bevy event trigger containing the display event.
+    /// * `displays` - A query for all displays.
+    /// * `windows` - A query for all windows.
+    /// * `main_cid` - The main connection ID resource.
+    /// * `commands` - Bevy commands to spawn/despawn entities and trigger events.
     #[allow(clippy::needless_pass_by_value)]
     pub fn display_add_remove_trigger(
         trigger: On<WMEventTrigger>,

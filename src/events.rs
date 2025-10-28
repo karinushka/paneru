@@ -546,8 +546,10 @@ impl EventHandler {
                     .find(|window| window.id() == window_id)
                     .cloned()
             };
-            let mut displays = displays.iter().collect::<Vec<_>>();
-            WindowManager::refresh_displays(main_cid.0, &mut displays, &find_window);
+
+            for mut display in displays {
+                WindowManager::refresh_display(main_cid.0, &mut display, &find_window);
+            }
             commands.write_message(Event::CurrentlyFocused);
         }
     }

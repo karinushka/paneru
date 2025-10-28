@@ -335,11 +335,6 @@ impl WindowPane {
             })
             .collect()
     }
-
-    /// Clears all windows from the pane.
-    pub fn clear(&self) {
-        self.pane.force_write().clear();
-    }
 }
 
 impl std::fmt::Display for WindowPane {

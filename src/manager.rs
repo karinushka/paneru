@@ -282,38 +282,38 @@ impl WindowManager {
     /// * `main_cid` - The main connection ID.
     /// * `displays` - A mutable vector of references to the current displays.
     /// * `find_window` - A closure to find a window by its ID.
-    pub fn refresh_displays<F: Fn(WinID) -> Option<Window>>(
+    pub fn refresh_display<F: Fn(WinID) -> Option<Window>>(
         main_cid: ConnID,
-        displays: &mut Vec<&Display>,
+        display: &mut Display,
         find_window: &F,
     ) {
-        for display in displays {
-            let display_bounds = display.bounds;
-            for (space_id, pane) in &display.spaces {
-                pane.clear();
-                let windows =
-                    WindowManager::refresh_windows_space(main_cid, *space_id, find_window);
-                debug!("{}: space {space_id}:", function_name!());
-                for window in &windows {
-                    debug!(
-                        "{}: window {}:",
-                        function_name!(),
-                        window.title().unwrap_or_default()
-                    );
+        debug!(
+            "{}: Refreshing windows on display {}",
+            function_name!(),
+            display.id
+        );
+
+        let display_bounds = display.bounds;
+        for (space_id, pane) in &display.spaces {
+            let new_windows =
+                WindowManager::refresh_windows_space(main_cid, *space_id, find_window);
+
+            // Preserve the order - do not flush existing windows.
+            for window_id in pane.all_windows() {
+                if !new_windows.iter().any(|window| window.id() == window_id) {
+                    pane.remove(window_id);
                 }
-
-                windows
-                    .iter()
-                    .map(super::windows::Window::id)
-                    .for_each(|window_id| pane.append(window_id));
-
-                pane.all_windows()
-                    .iter()
-                    .filter_map(|window_id| find_window(*window_id))
-                    .for_each(|window| {
-                        _ = window.update_frame(Some(&display_bounds));
-                    });
             }
+            for window in new_windows {
+                if pane.index_of(window.id()).is_err() {
+                    pane.append(window.id());
+                    _ = window.update_frame(Some(&display_bounds));
+                }
+            }
+            debug!(
+                "{}: space {space_id}: after refresh {pane}",
+                function_name!()
+            );
         }
     }
 

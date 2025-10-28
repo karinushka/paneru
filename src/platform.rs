@@ -349,6 +349,7 @@ impl ProcessHandler {
     }
 
     /// Starts the process handler by registering a C-callback with the underlying private API.
+    /// It also sends initial `ApplicationLaunched` events for already running processes.
     fn start(&mut self) {
         const APPL_CLASS: &str = "appl";
         const PROCESS_EVENT_LAUNCHED: u32 = 5;
@@ -409,9 +410,9 @@ impl ProcessHandler {
     ///
     /// # Arguments
     ///
+    /// * `_` - Unused callback info parameter.
+    /// * `event` - A raw pointer to the `ProcessEvent`.
     /// * `this` - A raw pointer to the `ProcessHandler` instance.
-    /// * `psn` - A reference to the `ProcessSerialNumber` of the process.
-    /// * `event` - The `ProcessEventApp` indicating the type of process event.
     ///
     /// # Returns
     ///
@@ -649,6 +650,16 @@ impl InputHandler {
         false
     }
 
+    /// Handles swipe gesture events.
+    /// It calculates the delta of the swipe and sends a `Swipe` event.
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - A reference to the `CGEvent`.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the event is processed successfully, otherwise `Err(Error)`.
     fn handle_swipe(&mut self, event: &CGEvent) -> Result<()> {
         const GESTURE_MINIMAL_FINGERS: usize = 3;
         let Some(ns_event) = NSEvent::eventWithCGEvent(event) else {
@@ -749,16 +760,31 @@ define_class!(
     pub struct WorkspaceObserver;
 
     impl WorkspaceObserver {
+        /// Called when the active display changes.
+        ///
+        /// # Arguments
+        ///
+        /// * `_` - The notification object (unused).
         #[unsafe(method(activeDisplayDidChange:))]
         fn display_changed(&self, _: &NSNotification) {
             _ = self.ivars().events.send(Event::DisplayChanged);
         }
 
+        /// Called when the active space changes.
+        ///
+        /// # Arguments
+        ///
+        /// * `_` - The notification object (unused).
         #[unsafe(method(activeSpaceDidChange:))]
         fn space_changed(&self, _: &NSNotification) {
             _ = self.ivars().events.send(Event::SpaceChanged);
         }
 
+        /// Called when an application is hidden.
+        ///
+        /// # Arguments
+        ///
+        /// * `notification` - The notification object containing application info.
         #[unsafe(method(didHideApplication:))]
         fn application_hidden(&self, notification: &NSObject) {
             // pid_t pid = [[notification.userInfo objectForKey:NSWorkspaceApplicationKey] processIdentifier];
@@ -774,6 +800,11 @@ define_class!(
             _ = self.ivars().events.send(msg);
         }
 
+        /// Called when an application is unhidden.
+        ///
+        /// # Arguments
+        ///
+        /// * `notification` - The notification object containing application info.
         #[unsafe(method(didUnhideApplication:))]
         fn application_unhidden(&self, notification: &NSObject) {
             // pid_t pid = [[notification.userInfo objectForKey:NSWorkspaceApplicationKey] processIdentifier];
@@ -788,6 +819,11 @@ define_class!(
             _ = self.ivars().events.send(msg);
         }
 
+        /// Called when the system wakes from sleep.
+        ///
+        /// # Arguments
+        ///
+        /// * `notification` - The notification object.
         #[unsafe(method(didWake:))]
         fn system_woke(&self, notification: &NSObject) {
             let msg = Event::SystemWoke{
@@ -796,6 +832,11 @@ define_class!(
             _ = self.ivars().events.send(msg);
         }
 
+        /// Called when the menu bar hiding state changes.
+        ///
+        /// # Arguments
+        ///
+        /// * `notification` - The notification object.
         #[unsafe(method(didChangeMenuBarHiding:))]
         fn menubar_hidden(&self, notification: &NSObject) {
             let msg = Event::MenuBarHiddenChanged{
@@ -804,6 +845,11 @@ define_class!(
             _ = self.ivars().events.send(msg);
         }
 
+        /// Called when the Dock restarts.
+        ///
+        /// # Arguments
+        ///
+        /// * `notification` - The notification object.
         #[unsafe(method(didRestartDock:))]
         fn dock_restarted(&self, notification: &NSObject) {
             let msg = Event::DockDidRestart{
@@ -812,6 +858,11 @@ define_class!(
             _ = self.ivars().events.send(msg);
         }
 
+        /// Called when Dock preferences change.
+        ///
+        /// # Arguments
+        ///
+        /// * `notification` - The notification object.
         #[unsafe(method(didChangeDockPref:))]
         fn dock_pref_changed(&self, notification: &NSObject) {
             let msg = Event::DockDidChangePref{
@@ -820,6 +871,14 @@ define_class!(
             _ = self.ivars().events.send(msg);
         }
 
+        /// Called when a key-value observed property changes for a process.
+        ///
+        /// # Arguments
+        ///
+        /// * `key_path` - The key path of the changed property.
+        /// * `_object` - The object being observed (unused).
+        /// * `change` - A dictionary containing details of the change.
+        /// * `context` - The context pointer, expected to be a `*mut Process`.
         #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
         fn observe_value_for_keypath(
             &self,

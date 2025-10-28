@@ -19,7 +19,7 @@ use crate::windows::{Display, Panel, Window, WindowPane};
 ///
 /// * `direction` - The direction (e.g., "west", "east", "first", "last").
 /// * `current_window_id` - The ID of the current window.
-/// * `panel` - A reference to the `WindowPane` to search within.
+/// * `strip` - A reference to the `WindowPane` to search within.
 ///
 /// # Returns
 ///
@@ -76,7 +76,8 @@ fn get_window_in_direction(
 ///
 /// * `argv` - A slice of strings representing the command arguments (e.g., [`east`]).
 /// * `current_window` - A reference to the currently focused `Window`.
-/// * `panel` - A reference to the active `WindowPane`.
+/// * `strip` - A reference to the active `WindowPane`.
+/// * `find_window` - A closure to find a window by its ID.
 ///
 /// # Returns
 ///
@@ -104,7 +105,8 @@ fn command_move_focus<F: Fn(WinID) -> Option<Window>>(
 /// * `argv` - A slice of strings representing the command arguments (e.g., [`west`]).
 /// * `current_window` - A reference to the currently focused `Window`.
 /// * `panel` - A reference to the active `WindowPane`.
-/// * `bounds` - The `CGRect` representing the bounds of the display.
+/// * `display_bounds` - The `CGRect` representing the bounds of the display.
+/// * `find_window` - A closure to find a window by its ID.
 ///
 /// # Returns
 ///
@@ -156,6 +158,11 @@ fn command_swap_focus<F: Fn(WinID) -> Option<Window>>(
 /// # Arguments
 ///
 /// * `argv` - A slice of strings representing the command arguments.
+/// * `main_cid` - The main connection ID.
+/// * `active_display` - The currently active display.
+/// * `focused_window` - A query for the currently focused window.
+/// * `find_window` - A closure to find a window by its ID.
+/// * `commands` - Bevy commands to trigger events.
 ///
 /// # Returns
 ///
@@ -256,7 +263,13 @@ fn command_windows<F: Fn(WinID) -> Option<Window>>(
 ///
 /// # Arguments
 ///
-/// * `argv` - A vector of strings representing the command and its arguments.
+/// * `trigger` - The Bevy event trigger containing the command arguments.
+/// * `sender` - The event sender socket.
+/// * `main_cid` - The main connection ID resource.
+/// * `windows` - A query for all windows.
+/// * `focused_window` - A query for the focused window.
+/// * `display` - A query for the active display.
+/// * `commands` - Bevy commands to trigger events.
 #[allow(clippy::needless_pass_by_value)]
 pub fn process_command_trigger(
     trigger: On<CommandTrigger>,

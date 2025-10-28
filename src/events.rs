@@ -165,11 +165,25 @@ pub struct EventSender {
 }
 
 impl EventSender {
+    /// Creates a new `EventSender` and its corresponding `Receiver`.
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing the `EventSender` and `Receiver`.
     fn new() -> (Self, Receiver<Event>) {
         let (tx, rx) = channel::<Event>();
         (Self { tx }, rx)
     }
 
+    /// Sends an `Event` through the channel.
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - The `Event` to send.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the event is sent successfully, otherwise `Err(Error)`.
     pub fn send(&self, event: Event) -> Result<()> {
         self.tx
             .send(event)
@@ -235,6 +249,11 @@ pub struct ReshuffleAroundTrigger(pub WinID);
 pub struct EventHandler;
 
 impl EventHandler {
+    /// Runs the main event loop in a new thread.
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing the `EventSender`, an `Arc<AtomicBool>` for quitting, and the `JoinHandle` for the thread.
     pub fn run() -> (EventSender, Arc<AtomicBool>, JoinHandle<()>) {
         let (sender, receiver) = EventSender::new();
         let quit = Arc::new(AtomicBool::new(false));
@@ -309,6 +328,16 @@ impl EventHandler {
         )
     }
 
+    /// The custom Bevy application loop, handling events from the receiver.
+    ///
+    /// # Arguments
+    ///
+    /// * `app` - The Bevy application instance.
+    /// * `rx` - The `Receiver` for incoming events.
+    ///
+    /// # Returns
+    ///
+    /// An `AppExit` code.
     fn custom_loop(mut app: BevyApp, rx: &Receiver<Event>) -> AppExit {
         const LOOP_MAX_TIMEOUT_MS: u64 = 5000;
         const LOOP_TIMEOUT_STEP: u64 = 5;
@@ -348,11 +377,8 @@ impl EventHandler {
     ///
     /// # Arguments
     ///
-    /// * `event` - The `Event` to process.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` if the event is processed successfully, otherwise `Err(Error)`.
+    /// * `messages` - A `MessageReader` for incoming `Event` messages.
+    /// * `commands` - Bevy commands to trigger events or insert resources.
     #[allow(clippy::needless_pass_by_value)]
     fn dispatch_toplevel_triggers(mut messages: MessageReader<Event>, mut commands: Commands) {
         for event in messages.read() {
@@ -388,6 +414,13 @@ impl EventHandler {
         }
     }
 
+    /// Gathers all present displays and spawns them as entities in the Bevy world.
+    /// The active display is marked with `FocusedMarker`.
+    ///
+    /// # Arguments
+    ///
+    /// * `cid` - The main connection ID resource.
+    /// * `commands` - Bevy commands to spawn entities.
     #[allow(clippy::needless_pass_by_value)]
     fn gather_displays(cid: Res<MainConnection>, mut commands: Commands) {
         let Ok(active_display) = Display::active_display_id(cid.0) else {
@@ -403,6 +436,16 @@ impl EventHandler {
         }
     }
 
+    /// Gathers initial processes and configuration before the main loop starts.
+    ///
+    /// # Arguments
+    ///
+    /// * `receiver` - The `Receiver` for incoming events.
+    /// * `sender` - The `EventSender` to send events.
+    ///
+    /// # Returns
+    ///
+    /// A vector of `ProcessRef` for the processes launched before the window manager started.
     fn gather_initial_processes(
         receiver: &Receiver<Event>,
         sender: &EventSender,
@@ -438,6 +481,12 @@ impl EventHandler {
         out
     }
 
+    /// Sets up the initial state of the Bevy world, spawning existing processes.
+    ///
+    /// # Arguments
+    ///
+    /// * `world` - The Bevy world.
+    /// * `existing_processes` - A mutable vector of `ProcessRef` for processes to add.
     fn initial_setup(world: &mut World, existing_processes: &mut Vec<ProcessRef>) {
         loop {
             let Some(mut process) = existing_processes.pop() else {
@@ -461,6 +510,17 @@ impl EventHandler {
         world.spawn(InitializingMarker);
     }
 
+    /// Finishes the initialization process once all initial windows are loaded.
+    /// Removes the `InitializingMarker` and triggers a focus check.
+    ///
+    /// # Arguments
+    ///
+    /// * `windows` - A query for all windows.
+    /// * `fresh_windows` - A query for windows still marked as fresh.
+    /// * `initializing` - A query for the initializing marker entity.
+    /// * `displays` - A query for all displays.
+    /// * `main_cid` - The main connection ID resource.
+    /// * `commands` - Bevy commands to despawn entities and send messages.
     #[allow(clippy::needless_pass_by_value)]
     fn finish_setup(
         windows: Query<&Window>,

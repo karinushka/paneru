@@ -235,15 +235,15 @@ pub fn get_array_values<T>(array: &CFArray) -> impl Iterator<Item = NonNull<T>> 
     })
 }
 
-/// Creates a new `CFArray` from a vector of values and a specified `CFNumberType`.
+/// Creates a new `CFArray` from a slice of values and a specified `CFNumberType`.
 ///
 /// # Type Parameters
 ///
-/// * `T` - The type of the values in the input vector.
+/// * `T` - The type of the values in the input slice.
 ///
 /// # Arguments
 ///
-/// * `values` - A `Vec<T>` containing the values to be added to the array.
+/// * `values` - A slice containing the values to be added to the array.
 /// * `cftype` - The `CFNumberType` representing the type of numbers in the array.
 ///
 /// # Returns
@@ -356,6 +356,12 @@ pub fn exe_path() -> Option<PathBuf> {
     Some(OsStr::from_bytes(path.to_bytes()).into())
 }
 
+/// Checks if the application has Accessibility privileges.
+/// It will prompt the user to grant permission if not already granted.
+///
+/// # Returns
+///
+/// `true` if Accessibility privileges are granted, `false` otherwise.
 pub fn check_ax_privilege() -> bool {
     unsafe {
         let mut keys = vec![kAXTrustedCheckOptionPrompt.cast::<c_void>()];

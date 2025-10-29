@@ -24,7 +24,6 @@ embed_plist::embed_info_plist!("../assets/Info.plist");
 use events::{Event, EventHandler, EventSender};
 use platform::PlatformCallbacks;
 use skylight::{SLSGetSpaceManagementMode, SLSMainConnectionID};
-use util::check_ax_privilege;
 
 struct CommandReader {
     events: EventSender,
@@ -220,13 +219,6 @@ fn launch() -> Result<()> {
         return Err(Error::new(
             ErrorKind::Unsupported,
             "Option 'display has separate spaces' disabled.",
-        ));
-    }
-    if !check_ax_privilege() {
-        error!("{}: Accessibility privilege is disabled.", function_name!());
-        return Err(Error::new(
-            ErrorKind::Unsupported,
-            "Accessibility privilege is disabled. Enable it in Settings -> Privacy & Security -> Accessibility.",
         ));
     }
 

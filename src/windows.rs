@@ -5,6 +5,7 @@ use accessibility_sys::{
     kAXTitleAttribute, kAXUnknownSubrole, kAXValueTypeCGPoint, kAXValueTypeCGSize, kAXWindowRole,
 };
 use bevy::ecs::component::Component;
+use bevy::ecs::entity::Entity;
 use core::ptr::NonNull;
 use log::{debug, trace, warn};
 use objc2_core_foundation::{
@@ -42,13 +43,13 @@ use crate::util::{
 
 #[derive(Clone, Debug)]
 pub enum Panel {
-    Single(WinID),
-    Stack(Vec<WinID>),
+    Single(Entity),
+    Stack(Vec<Entity>),
 }
 
 impl Panel {
     /// Returns the top window ID in the panel.
-    pub fn top(&self) -> Option<WinID> {
+    pub fn top(&self) -> Option<Entity> {
         match self {
             Panel::Single(id) => Some(id),
             Panel::Stack(stack) => stack.first(),
@@ -72,7 +73,7 @@ impl WindowPane {
     /// # Returns
     ///
     /// `Ok(usize)` with the index if found, otherwise `Err(Error)`.
-    pub fn index_of(&self, window_id: WinID) -> Result<usize> {
+    pub fn index_of(&self, window_id: Entity) -> Result<usize> {
         self.pane
             .force_read()
             .iter()
@@ -99,7 +100,7 @@ impl WindowPane {
     /// # Returns
     ///
     /// `Ok(usize)` with the new index of the inserted window, otherwise `Err(Error)` if the index is out of bounds.
-    pub fn insert_at(&self, after: usize, window_id: WinID) -> Result<usize> {
+    pub fn insert_at(&self, after: usize, window_id: Entity) -> Result<usize> {
         let index = after + 1;
         if index > self.len() {
             return Err(Error::new(
@@ -118,7 +119,7 @@ impl WindowPane {
     /// # Arguments
     ///
     /// * `window_id` - The ID of the window to append.
-    pub fn append(&self, window_id: WinID) {
+    pub fn append(&self, window_id: Entity) {
         self.pane.force_write().push_back(Panel::Single(window_id));
     }
 
@@ -127,7 +128,7 @@ impl WindowPane {
     /// # Arguments
     ///
     /// * `window_id` - The ID of the window to remove.
-    pub fn remove(&self, window_id: WinID) {
+    pub fn remove(&self, window_id: Entity) {
         let removed = self
             .index_of(window_id)
             .ok()
@@ -217,7 +218,7 @@ impl WindowPane {
     /// `Ok(())` if successful, otherwise `Err(Error)` if the starting window is not found.
     pub fn access_right_of(
         &self,
-        window_id: WinID,
+        window_id: Entity,
         mut accessor: impl FnMut(&Panel) -> bool,
     ) -> Result<()> {
         let index = self.index_of(window_id)?;
@@ -242,7 +243,7 @@ impl WindowPane {
     /// `Ok(())` if successful, otherwise `Err(Error)` if the starting window is not found.
     pub fn access_left_of(
         &self,
-        window_id: WinID,
+        window_id: Entity,
         mut accessor: impl FnMut(&Panel) -> bool,
     ) -> Result<()> {
         let index = self.index_of(window_id)?;
@@ -260,7 +261,7 @@ impl WindowPane {
     /// # Arguments
     ///
     /// * `window_id` - The ID of the window to stack.
-    pub fn stack(&self, window_id: WinID) -> Result<()> {
+    pub fn stack(&self, window_id: Entity) -> Result<()> {
         let index = self.index_of(window_id)?;
         if index == 0 {
             // Can not stack to the left if left most window already.
@@ -295,7 +296,7 @@ impl WindowPane {
     /// # Arguments
     ///
     /// * `window_id` - The ID of the window to unstack.
-    pub fn unstack(&self, window_id: WinID) -> Result<()> {
+    pub fn unstack(&self, window_id: Entity) -> Result<()> {
         let index = self.index_of(window_id)?;
         if let Panel::Single(_) = self.pane.force_read()[index] {
             // Can not unstack a single pane
@@ -325,7 +326,7 @@ impl WindowPane {
     }
 
     /// Returns a vector of all window IDs in the pane.
-    pub fn all_windows(&self) -> Vec<WinID> {
+    pub fn all_windows(&self) -> Vec<Entity> {
         self.pane
             .force_read()
             .iter()
@@ -602,7 +603,7 @@ impl Display {
     /// # Arguments
     ///
     /// * `window_id` - The ID of the window to remove.
-    pub fn remove_window(&self, window_id: WinID) {
+    pub fn remove_window(&self, window_id: Entity) {
         self.spaces.values().for_each(|pane| pane.remove(window_id));
     }
 }

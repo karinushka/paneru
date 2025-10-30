@@ -520,7 +520,7 @@ impl EventHandler {
     /// * `commands` - Bevy commands to despawn entities and send messages.
     #[allow(clippy::needless_pass_by_value)]
     fn finish_setup(
-        windows: Query<&Window>,
+        windows: Query<(&Window, Entity)>,
         fresh_windows: Query<&Window, With<FreshMarker>>,
         initializing: Query<(Entity, &InitializingMarker)>,
         displays: Query<&mut Display>,
@@ -537,15 +537,8 @@ impl EventHandler {
                 function_name!(),
                 windows.iter().len()
             );
-            let find_window = |window_id| {
-                windows
-                    .iter()
-                    .find(|window| window.id() == window_id)
-                    .cloned()
-            };
-
             for mut display in displays {
-                WindowManager::refresh_display(main_cid.0, &mut display, &find_window);
+                WindowManager::refresh_display(main_cid.0, &mut display, &windows);
             }
             commands.write_message(Event::CurrentlyFocused);
         }

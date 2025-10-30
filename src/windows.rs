@@ -659,21 +659,16 @@ pub fn ax_window_pid(element_ref: &CFRetained<AxuWrapperType>) -> Result<Pid> {
     ))
 }
 
-#[derive(Clone, Component, Debug)]
+#[derive(Component, Debug)]
 pub struct Window {
-    pub inner: Arc<RwLock<InnerWindow>>,
-}
-
-#[derive(Debug)]
-pub struct InnerWindow {
-    pub id: WinID,
+    id: WinID,
     pub psn: Option<ProcessSerialNumber>,
     ax_element: CFRetained<AxuWrapperType>,
     pub frame: CGRect,
     pub minimized: bool,
     pub is_root: bool,
     pub width_ratio: f64,
-    pub managed: bool,
+    managed: bool,
 }
 
 impl Window {
@@ -689,16 +684,14 @@ impl Window {
     pub fn new(element: &CFRetained<AxuWrapperType>) -> Result<Window> {
         let id = ax_window_id(element.as_ptr())?;
         let window = Self {
-            inner: Arc::new(RwLock::new(InnerWindow {
-                id,
-                psn: None,
-                ax_element: element.clone(),
-                frame: CGRect::default(),
-                minimized: false,
-                is_root: false,
-                width_ratio: 0.33,
-                managed: true,
-            })),
+            id,
+            psn: None,
+            ax_element: element.clone(),
+            frame: CGRect::default(),
+            minimized: false,
+            is_root: false,
+            width_ratio: 0.33,
+            managed: true,
         };
 
         if window.is_unknown() {
@@ -734,12 +727,12 @@ impl Window {
     ///
     /// The window ID as `WinID`.
     pub fn id(&self) -> WinID {
-        self.inner().id
+        self.id
     }
 
     /// Returns the process serial number of the window.
     pub fn psn(&self) -> Option<ProcessSerialNumber> {
-        self.inner().psn.clone()
+        self.psn.clone()
     }
 
     /// Returns the current frame (`CGRect`) of the window.
@@ -748,7 +741,7 @@ impl Window {
     ///
     /// The window's frame as `CGRect`.
     pub fn frame(&self) -> CGRect {
-        self.inner().frame
+        self.frame
     }
 
     /// Calculates the next preferred size ratio for resizing the window.
@@ -758,7 +751,7 @@ impl Window {
     ///
     /// The next size ratio as `f64`.
     pub fn next_size_ratio(&self, size_ratios: Vec<f64>) -> f64 {
-        let current = self.inner().width_ratio;
+        let current = self.width_ratio;
         size_ratios
             .iter()
             .find(|r| **r > current + 0.05)
@@ -772,7 +765,7 @@ impl Window {
     ///
     /// `true` if the window is managed, `false` otherwise.
     pub fn managed(&self) -> bool {
-        self.inner().managed
+        self.managed
     }
 
     /// Sets the managed status of the window.
@@ -780,17 +773,8 @@ impl Window {
     /// # Arguments
     ///
     /// * `manage` - A boolean indicating whether to manage the window.
-    pub fn manage(&self, manage: bool) {
-        self.inner.force_write().managed = manage;
-    }
-
-    /// Returns a read guard to the inner `InnerWindow` for read-only access.
-    ///
-    /// # Returns
-    ///
-    /// A `std::sync::RwLockReadGuard` allowing read access to `InnerWindow`.
-    pub fn inner(&self) -> std::sync::RwLockReadGuard<'_, InnerWindow> {
-        self.inner.force_read()
+    pub fn manage(&mut self, manage: bool) {
+        self.managed = manage;
     }
 
     /// Returns the raw `AXUIElementRef` of the window's accessibility element.
@@ -799,7 +783,7 @@ impl Window {
     ///
     /// The `AXUIElementRef` as `AXUIElementRef`.
     pub fn element(&self) -> CFRetained<AxuWrapperType> {
-        self.inner().ax_element.clone()
+        self.ax_element.clone()
     }
 
     /// Retrieves the parent window ID for a given window.
@@ -837,7 +821,7 @@ impl Window {
     /// `Ok(String)` with the window title if successful, otherwise `Err(Error)`.
     pub fn title(&self) -> Result<String> {
         let axtitle = CFString::from_static_str(kAXTitleAttribute);
-        let title = get_attribute::<CFString>(&self.inner().ax_element, &axtitle)?;
+        let title = get_attribute::<CFString>(&self.ax_element, &axtitle)?;
         Ok(title.to_string())
     }
 
@@ -848,7 +832,7 @@ impl Window {
     /// `Ok(String)` with the window role if successful, otherwise `Err(Error)`.
     pub fn role(&self) -> Result<String> {
         let axrole = CFString::from_static_str(kAXRoleAttribute);
-        let role = get_attribute::<CFString>(&self.inner().ax_element, &axrole)?;
+        let role = get_attribute::<CFString>(&self.ax_element, &axrole)?;
         Ok(role.to_string())
     }
 
@@ -859,7 +843,7 @@ impl Window {
     /// `Ok(String)` with the window subrole if successful, otherwise `Err(Error)`.
     pub fn subrole(&self) -> Result<String> {
         let axrole = CFString::from_static_str(kAXSubroleAttribute);
-        let role = get_attribute::<CFString>(&self.inner().ax_element, &axrole)?;
+        let role = get_attribute::<CFString>(&self.ax_element, &axrole)?;
         Ok(role.to_string())
     }
 
@@ -880,9 +864,9 @@ impl Window {
     /// `true` if the window is minimized, `false` otherwise.
     pub fn is_minimized(&self) -> bool {
         let axminimized = CFString::from_static_str(kAXMinimizedAttribute);
-        get_attribute::<CFBoolean>(&self.inner().ax_element, &axminimized)
+        get_attribute::<CFBoolean>(&self.ax_element, &axminimized)
             .map(|minimized| CFBoolean::value(&minimized))
-            .is_ok_and(|minimized| minimized || self.inner().minimized)
+            .is_ok_and(|minimized| minimized || self.minimized)
     }
 
     /// Checks if the window is a root window (i.e., not a child of another window).
@@ -891,10 +875,9 @@ impl Window {
     ///
     /// `true` if the window is a root window, `false` otherwise.
     pub fn is_root(&self) -> bool {
-        let inner = self.inner();
-        let cftype = inner.ax_element.as_ref();
+        let cftype = self.ax_element.as_ref();
         let axparent = CFString::from_static_str(kAXParentAttribute);
-        get_attribute::<CFType>(&self.inner().ax_element, &axparent)
+        get_attribute::<CFType>(&self.ax_element, &axparent)
             .is_ok_and(|parent| !CFEqual(Some(&*parent), Some(cftype)))
     }
 
@@ -923,8 +906,7 @@ impl Window {
     ///
     /// `true` if the window is eligible, `false` otherwise.
     pub fn is_eligible(&self) -> bool {
-        let me = self.inner();
-        me.is_root && self.is_real() // TODO: check for WINDOW_RULE_MANAGED
+        self.is_root && self.is_real() // TODO: check for WINDOW_RULE_MANAGED
     }
 
     /// Repositions the window to the specified x and y coordinates.
@@ -933,7 +915,7 @@ impl Window {
     ///
     /// * `x` - The new x-coordinate for the window's origin.
     /// * `y` - The new y-coordinate for the window's origin.
-    pub fn reposition(&self, x: f64, y: f64, display_bounds: &CGRect) {
+    pub fn reposition(&mut self, x: f64, y: f64, display_bounds: &CGRect) {
         let mut point = CGPoint::new(x + display_bounds.origin.x, y + display_bounds.origin.y);
         let position_ref = unsafe {
             AXValueCreate(
@@ -944,13 +926,13 @@ impl Window {
         if let Ok(position) = AxuWrapperType::retain(position_ref) {
             unsafe {
                 AXUIElementSetAttributeValue(
-                    self.inner().ax_element.as_ptr(),
+                    self.ax_element.as_ptr(),
                     CFString::from_static_str(kAXPositionAttribute).as_ref(),
                     position.as_ref(),
                 )
             };
-            self.inner.force_write().frame.origin.x = x;
-            self.inner.force_write().frame.origin.y = y;
+            self.frame.origin.x = x;
+            self.frame.origin.y = y;
         }
     }
 
@@ -961,21 +943,20 @@ impl Window {
     /// * `width` - The new width of the window.
     /// * `height` - The new height of the window.
     /// * `display_bounds` - The `CGRect` representing the bounds of the display the window is on.
-    pub fn resize(&self, width: f64, height: f64, display_bounds: &CGRect) {
+    pub fn resize(&mut self, width: f64, height: f64, display_bounds: &CGRect) {
         let mut size = CGSize::new(width, height);
         let size_ref =
             unsafe { AXValueCreate(kAXValueTypeCGSize, NonNull::from(&mut size).as_ptr().cast()) };
         if let Ok(position) = AxuWrapperType::retain(size_ref) {
             unsafe {
                 AXUIElementSetAttributeValue(
-                    self.inner().ax_element.as_ptr(),
+                    self.ax_element.as_ptr(),
                     CFString::from_static_str(kAXSizeAttribute).as_ref(),
                     position.as_ref(),
                 )
             };
-            let mut inner = self.inner.force_write();
-            inner.frame.size = size;
-            inner.width_ratio = size.width / display_bounds.size.width;
+            self.frame.size = size;
+            self.width_ratio = size.width / display_bounds.size.width;
         }
     }
 
@@ -989,7 +970,7 @@ impl Window {
     /// # Returns
     ///
     /// `Ok(())` if the frame is updated successfully, otherwise `Err(Error)`.
-    pub fn update_frame(&self, display_bounds: Option<&CGRect>) -> Result<()> {
+    pub fn update_frame(&mut self, display_bounds: Option<&CGRect>) -> Result<()> {
         // CGRect frame = {0};
         // CFTypeRef position_ref = NULL;
         // CFTypeRef size_ref = NULL;
@@ -1006,7 +987,7 @@ impl Window {
         //     AXValueGetValue(size_ref, kAXValueTypeCGSize, &frame.size);
         //     CFRelease(size_ref);
         // }
-        let window_ref = self.inner().ax_element.as_ptr();
+        let window_ref = self.ax_element.as_ptr();
 
         let position = unsafe {
             let mut position_ref: *mut CFType = null_mut();
@@ -1040,10 +1021,9 @@ impl Window {
                 NonNull::from(&mut frame.size).as_ptr().cast(),
             );
         }
-        if !CGRectEqualToRect(frame, self.inner().frame) {
-            let mut inner = self.inner.force_write();
-            inner.frame = frame;
-            inner.width_ratio = if let Some(display_bounds) = display_bounds {
+        if !CGRectEqualToRect(frame, self.frame) {
+            self.frame = frame;
+            self.width_ratio = if let Some(display_bounds) = display_bounds {
                 frame.size.width / display_bounds.size.width
             } else {
                 0.5
@@ -1124,7 +1104,7 @@ impl Window {
 
     /// Focuses the window and raises it to the front.
     pub fn focus_with_raise(&self) {
-        let Some(psn) = self.inner().psn.clone() else {
+        let Some(psn) = self.psn.clone() else {
             return;
         };
         let window_id = self.id();
@@ -1132,7 +1112,7 @@ impl Window {
             _SLPSSetFrontProcessWithOptions(&psn, window_id, Self::CPS_USER_GENERATED);
         }
         self.make_key_window(&psn);
-        let element_ref = self.inner().ax_element.as_ptr();
+        let element_ref = self.ax_element.as_ptr();
         let action = CFString::from_static_str(kAXRaiseAction);
         unsafe { AXUIElementPerformAction(element_ref, &action) };
     }
@@ -1194,8 +1174,8 @@ impl Window {
     ///
     /// `true` if the window is fully visible, `false` otherwise.
     pub fn fully_visible(&self, display_bounds: &CGRect) -> bool {
-        let frame = self.inner().frame;
-        frame.origin.x > 0.0 && frame.origin.x < display_bounds.size.width - frame.size.width
+        self.frame.origin.x > 0.0
+            && self.frame.origin.x < display_bounds.size.width - self.frame.size.width
     }
 
     /// Centers the mouse cursor on the window if it's not already within the window's bounds.
@@ -1207,7 +1187,6 @@ impl Window {
         // TODO: check for MouseFollowsFocus setting in WindowManager and also whether it's
         // overriden for individual window.
 
-        let frame = self.inner().frame;
         let mut cursor = CGPoint::default();
         if unsafe { CGError::Success != SLSGetCurrentCursorLocation(cid, &mut cursor) } {
             warn!(
@@ -1216,13 +1195,13 @@ impl Window {
             );
             return;
         }
-        if CGRectContainsPoint(frame, cursor) {
+        if CGRectContainsPoint(self.frame, cursor) {
             return;
         }
 
         let center = CGPoint::new(
-            frame.origin.x + frame.size.width / 2.0,
-            frame.origin.y + frame.size.height / 2.0,
+            self.frame.origin.x + self.frame.size.width / 2.0,
+            self.frame.origin.y + self.frame.size.height / 2.0,
         );
         let display_id = self.display_id(cid);
         #[allow(clippy::redundant_closure)]
@@ -1242,10 +1221,10 @@ impl Window {
     /// # Returns
     ///
     /// The adjusted `CGRect` of the window after exposure.
-    pub fn expose_window(&self, display_bounds: &CGRect) -> CGRect {
+    pub fn expose_window(&mut self, display_bounds: &CGRect) -> CGRect {
         // Check if window needs to be fully exposed
         let window_id = self.id();
-        let mut frame = self.inner().frame;
+        let mut frame = self.frame;
         trace!("{}: focus original position {frame:?}", function_name!());
         let moved = if frame.origin.x + frame.size.width > display_bounds.size.width {
             trace!(

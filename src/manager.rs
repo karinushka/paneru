@@ -16,7 +16,6 @@ use std::mem::take;
 use std::ops::Deref;
 use std::slice::from_raw_parts_mut;
 use stdext::function_name;
-use stdext::prelude::RwLockExt;
 
 use crate::app::Application;
 use crate::config::Config;
@@ -174,7 +173,7 @@ impl WindowManager {
     pub fn swipe_gesture_trigger(
         trigger: On<WMEventTrigger>,
         active_display: Query<&Display, With<FocusedMarker>>,
-        focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
+        mut focused_window: Query<(&mut Window, Entity), With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
         config: Option<Res<Config>>,
         mut commands: Commands,
@@ -195,7 +194,7 @@ impl WindowManager {
             if delta.abs() > SWIPE_THRESHOLD {
                 WindowManager::slide_window(
                     main_cid.0,
-                    &focused_window,
+                    &mut focused_window,
                     active_display,
                     delta,
                     &mut commands,
@@ -214,7 +213,7 @@ impl WindowManager {
     fn find_orphaned_spaces(
         orphaned_spaces: &mut HashMap<u64, WindowPane>,
         display: &mut Display,
-        windows: &Query<&Window>,
+        windows: &mut Query<&mut Window>,
     ) {
         let mut relocated_windows = vec![];
         for (space_id, pane) in &display.spaces {
@@ -236,17 +235,17 @@ impl WindowManager {
             }
         }
 
-        for (window, bounds) in relocated_windows
-            .iter()
-            .filter_map(|(entity, bounds)| windows.get(*entity).ok().zip(Some(bounds)))
-        {
-            let ratio = window.inner().width_ratio;
+        for (entity, bounds) in relocated_windows {
+            let Ok(mut window) = windows.get_mut(entity) else {
+                continue;
+            };
+            let ratio = window.width_ratio;
             debug!(
                 "{}: Resizing relocated window {} to ratio {ratio:.02}",
                 function_name!(),
                 window.id()
             );
-            window.resize(bounds.size.width * ratio, bounds.size.height, bounds);
+            window.resize(bounds.size.width * ratio, bounds.size.height, &bounds);
         }
     }
 
@@ -261,7 +260,7 @@ impl WindowManager {
     pub fn refresh_display(
         main_cid: ConnID,
         display: &mut Display,
-        windows: &Query<(&Window, Entity)>,
+        windows: &mut Query<(&mut Window, Entity)>,
     ) {
         debug!(
             "{}: Refreshing windows on display {}",
@@ -271,7 +270,9 @@ impl WindowManager {
 
         let display_bounds = display.bounds;
         for (space_id, pane) in &display.spaces {
-            let new_windows = WindowManager::refresh_windows_space(main_cid, *space_id, windows);
+            let mut lens = windows.transmute_lens::<(&Window, Entity)>();
+            let new_windows =
+                WindowManager::refresh_windows_space(main_cid, *space_id, &lens.query());
 
             // Preserve the order - do not flush existing windows.
             for window_entity in pane.all_windows() {
@@ -282,7 +283,7 @@ impl WindowManager {
             for window_entity in new_windows {
                 if pane.index_of(window_entity).is_err() {
                     pane.append(window_entity);
-                    if let Ok((window, _)) = windows.get(window_entity) {
+                    if let Ok((mut window, _)) = windows.get_mut(window_entity) {
                         _ = window.update_frame(Some(&display_bounds));
                     }
                 }
@@ -337,6 +338,7 @@ impl WindowManager {
         if !matches!(trigger.event().0, Event::CurrentlyFocused) {
             return;
         }
+
         debug!("{}: {} windows.", function_name!(), windows.iter().len());
         let mut focused_psn = ProcessSerialNumber::default();
         unsafe {
@@ -774,7 +776,7 @@ impl WindowManager {
         main_cid: Res<MainConnection>,
         mut commands: Commands,
     ) {
-        for (entity, window) in windows {
+        for (entity, mut window) in windows {
             commands.entity(entity).remove::<FreshMarker>();
             debug!(
                 "{}: window {} entity {}",
@@ -821,15 +823,14 @@ impl WindowManager {
                 warn!("{}: Error observing window {window_id}.", function_name!());
             }
 
-            window.inner.force_write().psn = Some(app.psn());
+            window.psn = Some(app.psn());
             let minimized = window.is_minimized();
             let is_root = Window::parent(app.connection().unwrap_or_default(), window.id())
                 .is_err()
                 || window.is_root();
             {
-                let mut inner = window.inner.force_write();
-                inner.minimized = minimized;
-                inner.is_root = is_root;
+                window.minimized = minimized;
+                window.is_root = is_root;
             }
             debug!(
                 "{}: window {} isroot {} eligible {}",
@@ -919,7 +920,7 @@ impl WindowManager {
     #[allow(clippy::needless_pass_by_value)]
     pub fn window_resized_trigger(
         trigger: On<WMEventTrigger>,
-        windows: Query<(&Window, Entity)>,
+        mut windows: Query<(&mut Window, Entity)>,
         displays: Query<&mut Display, With<FocusedMarker>>,
         mut commands: Commands,
     ) {
@@ -930,7 +931,10 @@ impl WindowManager {
             warn!("{}: Unable to get current display.", function_name!());
             return;
         };
-        let Some((window, _)) = windows.iter().find(|(window, _)| window.id() == window_id) else {
+        let Some((mut window, _)) = windows
+            .iter_mut()
+            .find(|(window, _)| window.id() == window_id)
+        else {
             return;
         };
         _ = window.update_frame(Some(&active_display.bounds));
@@ -1029,7 +1033,7 @@ impl WindowManager {
         trigger: On<ReshuffleAroundTrigger>,
         main_cid: Res<MainConnection>,
         active_display: Query<&Display, With<FocusedMarker>>,
-        windows: Query<(&Window, Entity)>,
+        mut windows: Query<(&mut Window, Entity)>,
     ) {
         let find_window = |window_id| windows.iter().find(|(window, _)| window.id() == window_id);
         let Some((window, entity)) = find_window(trigger.event().0) else {
@@ -1050,6 +1054,10 @@ impl WindowManager {
             return;
         };
         let display_bounds = &active_display.bounds;
+
+        let Ok((mut window, _)) = windows.get_mut(entity) else {
+            return;
+        };
         let frame = window.expose_window(display_bounds);
 
         let Ok(panel) = active_panel
@@ -1059,12 +1067,13 @@ impl WindowManager {
             // TODO: not found
             return;
         };
+
         WindowManager::reposition_stack(
             frame.origin.x,
             &panel,
             frame.size.width,
             display_bounds,
-            &windows,
+            &mut windows,
         );
 
         // Shuffling windows to the right of the focus.
@@ -1073,7 +1082,7 @@ impl WindowManager {
             let frame = panel
                 .top()
                 .and_then(|entity| windows.get(entity).ok())
-                .map(|(window, _)| window.inner().frame);
+                .map(|(window, _)| window.frame);
             if let Some(frame) = frame {
                 trace!("{}: right: frame: {frame:?}", function_name!());
 
@@ -1088,7 +1097,7 @@ impl WindowManager {
                         panel,
                         frame.size.width,
                         display_bounds,
-                        &windows,
+                        &mut windows,
                     );
                 }
                 upper_left += frame.size.width;
@@ -1102,7 +1111,7 @@ impl WindowManager {
             let frame = panel
                 .top()
                 .and_then(|entity| windows.get(entity).ok())
-                .map(|(window, _)| window.inner().frame);
+                .map(|(window, _)| window.frame);
             if let Some(frame) = frame {
                 trace!("{}: left: frame: {frame:?}", function_name!());
 
@@ -1118,7 +1127,7 @@ impl WindowManager {
                         panel,
                         frame.size.width,
                         display_bounds,
-                        &windows,
+                        &mut windows,
                     );
                 }
             }
@@ -1140,22 +1149,21 @@ impl WindowManager {
         panel: &Panel,
         width: f64,
         display_bounds: &CGRect,
-        windows: &Query<(&Window, Entity)>,
+        windows: &mut Query<(&mut Window, Entity)>,
     ) {
-        let windows = match panel {
+        let entities = match panel {
             Panel::Single(window_id) => vec![*window_id],
             Panel::Stack(stack) => stack.clone(),
-        }
-        .iter()
-        .filter_map(|entity| windows.get(*entity).ok())
-        .collect::<Vec<_>>();
+        };
         let mut y_pos = 0f64;
-        let count: f64 = u32::try_from(windows.len()).unwrap().into();
+        let count: f64 = u32::try_from(entities.len()).unwrap().into();
         let height = display_bounds.size.height / count;
-        for (window, _) in windows {
-            window.reposition(upper_left, y_pos, display_bounds);
-            window.resize(width, height, display_bounds);
-            y_pos += height;
+        for entity in entities {
+            if let Ok((mut window, _)) = windows.get_mut(entity) {
+                window.reposition(upper_left, y_pos, display_bounds);
+                window.resize(width, height, display_bounds);
+                y_pos += height;
+            }
         }
     }
 
@@ -1380,7 +1388,7 @@ impl WindowManager {
     pub fn display_add_remove_trigger(
         trigger: On<WMEventTrigger>,
         mut displays: Query<(&mut Display, Entity)>,
-        windows: Query<&Window>,
+        mut windows: Query<&mut Window>,
         main_cid: Res<MainConnection>,
         mut orphaned_spaces: ResMut<OrphanedSpaces>,
         mut commands: Commands,
@@ -1397,7 +1405,7 @@ impl WindowManager {
                     error!("{}: Unable to find added display!", function_name!());
                     return;
                 };
-                WindowManager::find_orphaned_spaces(orphaned_spaces, &mut display, &windows);
+                WindowManager::find_orphaned_spaces(orphaned_spaces, &mut display, &mut windows);
 
                 for (id, pane) in &display.spaces {
                     debug!("{}: Space {id} - {pane}", function_name!());
@@ -1423,7 +1431,11 @@ impl WindowManager {
                 }
 
                 for (mut display, _) in displays {
-                    WindowManager::find_orphaned_spaces(orphaned_spaces, &mut display, &windows);
+                    WindowManager::find_orphaned_spaces(
+                        orphaned_spaces,
+                        &mut display,
+                        &mut windows,
+                    );
                 }
                 commands.entity(entity).despawn();
                 commands.trigger(WMEventTrigger(Event::DisplayChanged));
@@ -1499,13 +1511,13 @@ impl WindowManager {
 
     fn slide_window(
         main_cid: ConnID,
-        focused_window: &Query<(&Window, Entity), With<FocusedMarker>>,
+        focused_window: &mut Query<(&mut Window, Entity), With<FocusedMarker>>,
         active_display: &Display,
         delta_x: f64,
         commands: &mut Commands,
     ) {
         trace!("{}: Windows slide {delta_x}.", function_name!());
-        let Ok((window, _)) = focused_window.single() else {
+        let Ok((mut window, _)) = focused_window.single_mut() else {
             warn!("{}: No window focused.", function_name!());
             return;
         };
@@ -1532,11 +1544,7 @@ impl WindowManager {
     /// # Returns
     ///
     /// `Ok(Window)` with the found window if successful, otherwise `Err(Error)`.
-    fn find_window_at_point<F: Fn(WinID) -> Option<Window>>(
-        main_cid: ConnID,
-        point: &CGPoint,
-        find_window: &F,
-    ) -> Result<Window> {
+    fn find_window_at_point(main_cid: ConnID, point: &CGPoint) -> Result<WinID> {
         let mut window_id: WinID = 0;
         let mut window_conn_id: ConnID = 0;
         let mut window_point = CGPoint { x: 0f64, y: 0f64 };
@@ -1566,10 +1574,14 @@ impl WindowManager {
                 )
             };
         }
-        find_window(window_id).ok_or(Error::other(format!(
-            "{}: could not find a window at {point:?}",
-            function_name!()
-        )))
+        if window_id == 0 {
+            Err(Error::other(format!(
+                "{}: could not find a window at {point:?}",
+                function_name!()
+            )))
+        } else {
+            Ok(window_id)
+        }
     }
 
     /// Handles a mouse moved event. If focus-follows-mouse is enabled, it attempts to focus the window under the cursor.
@@ -1596,12 +1608,6 @@ impl WindowManager {
         let Event::MouseMoved { point } = trigger.event().0 else {
             return;
         };
-        let find_window = |window_id| {
-            windows
-                .iter()
-                .find(|window| window.id() == window_id)
-                .cloned()
-        };
         let main_cid = main_cid.0;
 
         if !WindowManager::focus_follows_mouse(config.as_ref()) {
@@ -1614,11 +1620,10 @@ impl WindowManager {
             trace!("{}: ffm_window_id > 0", function_name!());
             return;
         }
-        let Ok(window) = WindowManager::find_window_at_point(main_cid, &point, &find_window) else {
+        let Ok(window_id) = WindowManager::find_window_at_point(main_cid, &point) else {
             // TODO: notfound
             return;
         };
-        let window_id = window.id();
         let Ok((focused_window, _)) = focused_window.single() else {
             // TODO: notfound
             return;
@@ -1627,6 +1632,14 @@ impl WindowManager {
             trace!("{}: allready focused {}", function_name!(), window_id);
             return;
         }
+        let Some(window) = windows.iter().find(|window| window.id() == window_id) else {
+            trace!(
+                "{}: can not find focused window: {}",
+                function_name!(),
+                window_id
+            );
+            return;
+        };
         if !window.is_eligible() {
             trace!("{}: {} not eligible", function_name!(), window_id);
             return;
@@ -1660,7 +1673,7 @@ impl WindowManager {
                 window_id,
                 child_wid
             );
-            let Some(child_window) = find_window(child_wid) else {
+            let Some(child_window) = windows.iter().find(|window| window.id() == child_wid) else {
                 warn!(
                     "{}: Unable to find child window {child_wid}.",
                     function_name!()
@@ -1678,7 +1691,7 @@ impl WindowManager {
                 .any(|axrole| axrole.eq(&role));
 
             if valid {
-                window = child_window.clone();
+                window = child_window;
                 break;
             }
         }
@@ -1721,13 +1734,10 @@ impl WindowManager {
             return;
         };
 
-        let find_window = |window_id| {
-            windows
-                .iter()
-                .find(|window| window.id() == window_id)
-                .cloned()
-        };
-        let Ok(window) = WindowManager::find_window_at_point(main_cid, &point, &find_window) else {
+        let Some(window) = WindowManager::find_window_at_point(main_cid, &point)
+            .ok()
+            .and_then(|window_id| windows.iter().find(|window| window.id() == window_id))
+        else {
             return;
         };
         if !window.fully_visible(&active_display.bounds) {

@@ -4,7 +4,7 @@ use bevy::ecs::query::With;
 use bevy::ecs::system::{Commands, Query, Res};
 use log::{error, warn};
 use objc2_core_foundation::{CGPoint, CGRect};
-use std::io::Result;
+use std::io::{ErrorKind, Result};
 use stdext::function_name;
 
 use crate::config::{Config, preset_column_widths};
@@ -117,23 +117,20 @@ fn command_swap_focus(
     current: Entity,
     panel: &WindowPane,
     display_bounds: &CGRect,
-    windows: &Query<&Window>,
+    windows: &mut Query<&mut Window>,
 ) -> Option<Entity> {
     let direction = argv.first()?;
     let index = panel.index_of(current).ok()?;
     let other_window = get_window_in_direction(direction, current, panel)?;
     let new_index = panel.index_of(other_window).ok()?;
-    let current_window = windows.get(current).ok()?;
+    let current_frame = windows.get(current).ok()?.frame();
 
     let origin = if new_index == 0 {
         // If reached far left, snap the window to left.
         CGPoint::new(0.0, 0.0)
     } else if new_index == (panel.len() - 1) {
         // If reached full right, snap the window to right.
-        CGPoint::new(
-            display_bounds.size.width - current_window.frame().size.width,
-            0.0,
-        )
+        CGPoint::new(display_bounds.size.width - current_frame.size.width, 0.0)
     } else {
         panel
             .get(new_index)
@@ -143,7 +140,10 @@ fn command_swap_focus(
             .frame()
             .origin
     };
-    current_window.reposition(origin.x, origin.y, display_bounds);
+    windows
+        .get_mut(current)
+        .ok()?
+        .reposition(origin.x, origin.y, display_bounds);
     if index < new_index {
         (index..new_index).for_each(|idx| panel.swap(idx, idx + 1));
     } else {
@@ -173,31 +173,30 @@ fn command_windows(
     argv: &[String],
     main_cid: ConnID,
     active_display: &Display,
-    focused_window: &Query<(&Window, Entity), With<FocusedMarker>>,
-    windows: &Query<&Window>,
+    focused_entity: Entity,
+    windows: &mut Query<&mut Window>,
     commands: &mut Commands,
     config: Option<Res<Config>>,
 ) -> Result<()> {
-    let empty = String::new();
-    let Ok((window, entity)) = focused_window.single() else {
-        warn!("{}: No window focused.", function_name!());
-        return Ok(());
-    };
-    if !window.is_eligible() {
+    if !windows.get(focused_entity).is_ok_and(Window::is_eligible) {
         return Ok(());
     }
 
+    let empty = String::new();
     let active_panel = active_display.active_panel(main_cid)?;
+    let error_msg =
+        |err| std::io::Error::new(ErrorKind::NotFound, format!("{}: {err}", function_name!()));
 
     match argv.first().unwrap_or(&empty).as_ref() {
         "focus" => {
-            command_move_focus(&argv[1..], entity, &active_panel, windows);
+            let mut lens = windows.transmute_lens::<&Window>();
+            command_move_focus(&argv[1..], focused_entity, &active_panel, &lens.query());
         }
 
         "swap" => {
             command_swap_focus(
                 &argv[1..],
-                entity,
+                focused_entity,
                 &active_panel,
                 &active_display.bounds,
                 windows,
@@ -205,6 +204,7 @@ fn command_windows(
         }
 
         "center" => {
+            let mut window = windows.get_mut(focused_entity).map_err(error_msg)?;
             let frame = window.frame();
             window.reposition(
                 (active_display.bounds.size.width - frame.size.width) / 2.0,
@@ -215,19 +215,22 @@ fn command_windows(
         }
 
         "resize" => {
+            let mut window = windows.get_mut(focused_entity).map_err(error_msg)?;
             let width_ratios = preset_column_widths(config.as_ref());
             let width_ratio = window.next_size_ratio(width_ratios);
+            let height = window.frame().size.height;
             window.resize(
                 width_ratio * active_display.bounds.size.width,
-                window.frame().size.height,
+                height,
                 &active_display.bounds,
             );
         }
 
         "manage" => {
+            let mut window = windows.get_mut(focused_entity).map_err(error_msg)?;
             if window.managed() {
                 // Window already managed, remove it from the managed stack.
-                active_panel.remove(entity);
+                active_panel.remove(focused_entity);
                 window.manage(false);
             } else {
                 // Add newly managed window to the stack.
@@ -238,27 +241,30 @@ fn command_windows(
                     active_display.bounds.size.height,
                     &active_display.bounds,
                 );
-                active_panel.append(entity);
+                active_panel.append(focused_entity);
                 window.manage(true);
             }
         }
 
         "stack" => {
+            let window = windows.get(focused_entity).map_err(error_msg)?;
             if !window.managed() {
                 return Ok(());
             }
-            active_panel.stack(entity)?;
+            active_panel.stack(focused_entity)?;
         }
 
         "unstack" => {
+            let window = windows.get(focused_entity).map_err(error_msg)?;
             if !window.managed() {
                 return Ok(());
             }
-            active_panel.unstack(entity)?;
+            active_panel.unstack(focused_entity)?;
         }
 
         _ => (),
     }
+    let window = windows.get(focused_entity).map_err(error_msg)?;
     commands.trigger(ReshuffleAroundTrigger(window.id()));
     Ok(())
 }
@@ -280,8 +286,7 @@ pub fn process_command_trigger(
     trigger: On<CommandTrigger>,
     sender: Res<SenderSocket>,
     main_cid: Res<MainConnection>,
-    windows: Query<&Window>,
-    focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
+    mut windows: Query<(&mut Window, Entity, Option<&FocusedMarker>)>,
     display: Query<&Display, With<FocusedMarker>>,
     mut commands: Commands,
     config: Option<Res<Config>>,
@@ -290,20 +295,23 @@ pub fn process_command_trigger(
         warn!("{}: Unable to get current display.", function_name!());
         return;
     };
-    let Ok((active_window, entity)) = focused_window.single() else {
+    let Some((focused_window, focused_entity, _)) =
+        windows.iter().find(|(_, _, focus)| focus.is_some())
+    else {
         warn!("{}: Unable to get focused window.", function_name!());
         return;
     };
     let main_cid = main_cid.0;
-    if active_window.managed()
+    if focused_window.managed()
         && active_display
             .active_panel(main_cid)
-            .and_then(|panel| panel.index_of(entity))
+            .and_then(|panel| panel.index_of(focused_entity))
             .is_err()
     {
         commands.trigger(WMEventTrigger(Event::DisplayChanged));
     }
 
+    let mut lens = windows.transmute_lens::<&mut Window>();
     let argv = &trigger.event().0;
     if let Some(first) = argv.first() {
         match first.as_ref() {
@@ -312,8 +320,8 @@ pub fn process_command_trigger(
                     &argv[1..],
                     main_cid,
                     active_display,
-                    &focused_window,
-                    &windows,
+                    focused_entity,
+                    &mut lens.query(),
                     &mut commands,
                     config,
                 )

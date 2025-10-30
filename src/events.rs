@@ -2,7 +2,6 @@ use bevy::app::{App as BevyApp, AppExit, Startup, Update};
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::message::{Message, MessageReader, Messages};
-use bevy::ecs::query::With;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs;
 use bevy::ecs::schedule::common_conditions::any_with_component;
@@ -520,15 +519,14 @@ impl EventHandler {
     /// * `commands` - Bevy commands to despawn entities and send messages.
     #[allow(clippy::needless_pass_by_value)]
     fn finish_setup(
-        windows: Query<(&Window, Entity)>,
-        fresh_windows: Query<&Window, With<FreshMarker>>,
+        mut windows: Query<(&mut Window, Entity, Option<&FreshMarker>)>,
         initializing: Query<(Entity, &InitializingMarker)>,
         displays: Query<&mut Display>,
         main_cid: Res<MainConnection>,
         mut commands: Commands,
     ) {
         if windows.iter().len() > 0
-            && fresh_windows.iter().len() < 1
+            && !windows.iter().any(|(_, _, fresh)| fresh.is_some())
             && let Ok((entity, _)) = initializing.single()
         {
             commands.entity(entity).despawn();
@@ -537,10 +535,11 @@ impl EventHandler {
                 function_name!(),
                 windows.iter().len()
             );
+            let mut lens = windows.transmute_lens::<(&mut Window, Entity)>();
             for mut display in displays {
-                WindowManager::refresh_display(main_cid.0, &mut display, &windows);
+                WindowManager::refresh_display(main_cid.0, &mut display, &mut lens.query());
             }
-            commands.write_message(Event::CurrentlyFocused);
+            commands.trigger(WMEventTrigger(Event::CurrentlyFocused));
         }
     }
 }

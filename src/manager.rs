@@ -1,6 +1,5 @@
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
-use bevy::ecs::message::MessageReader;
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{With, Without};
 use bevy::ecs::system::{Commands, Query, Res, ResMut};
@@ -47,11 +46,11 @@ impl WindowManager {
     ///
     /// # Arguments
     ///
-    /// * `messages` - A `MessageReader` for incoming `Event` messages.
     /// * `processes` - A query for all processes.
     /// * `commands` - Bevy commands to spawn or despawn entities.
-    pub fn dispatch_process_messages(
-        mut messages: MessageReader<Event>,
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn application_event_trigger(
+        trigger: On<WMEventTrigger>,
         processes: Query<(&BProcess, Entity)>,
         mut commands: Commands,
     ) {
@@ -61,22 +60,20 @@ impl WindowManager {
                 .find(|(BProcess(process), _)| &process.psn == psn)
         };
 
-        for event in messages.read() {
-            match event {
-                Event::ApplicationLaunched { psn, observer } => {
-                    if find_process(psn).is_none() {
-                        let process = Process::new(psn, observer.clone());
-                        commands.spawn((FreshMarker, BProcess(process)));
-                    }
+        match &trigger.event().0 {
+            Event::ApplicationLaunched { psn, observer } => {
+                if find_process(psn).is_none() {
+                    let process = Process::new(psn, observer.clone());
+                    commands.spawn((FreshMarker, BProcess(process)));
                 }
-
-                Event::ApplicationTerminated { psn } => {
-                    if let Some((_, entity)) = find_process(psn) {
-                        commands.entity(entity).despawn();
-                    }
-                }
-                _ => (),
             }
+
+            Event::ApplicationTerminated { psn } => {
+                if let Some((_, entity)) = find_process(psn) {
+                    commands.entity(entity).despawn();
+                }
+            }
+            _ => (),
         }
     }
 
@@ -84,7 +81,6 @@ impl WindowManager {
     ///
     /// # Arguments
     ///
-    /// * `messages` - A `MessageReader` for incoming `Event` messages.
     /// * `windows` - A query for all windows.
     /// * `focused_window` - A query for the focused window.
     /// * `displays` - A query for all displays.
@@ -92,64 +88,48 @@ impl WindowManager {
     /// * `commands` - Bevy commands to spawn or despawn entities.
     #[allow(clippy::needless_pass_by_value)]
     pub fn dispatch_application_messages(
-        mut messages: MessageReader<Event>,
+        trigger: On<WMEventTrigger>,
         windows: Query<(&Window, Entity)>,
-        focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
         displays: Query<&mut Display, With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
         mut commands: Commands,
     ) {
         let main_cid = main_cid.0;
-        let find_window = |window_id| {
-            windows
-                .iter()
-                .find_map(|(window, _)| (window.id() == window_id).then_some(window))
-                .cloned()
-        };
 
         let Ok(active_display) = displays.single() else {
             warn!("{}: Unable to get current display.", function_name!());
             return;
         };
 
-        for event in messages.read() {
-            match event {
-                Event::WindowCreated { element } => match Window::new(element) {
-                    Ok(window) => {
-                        commands.spawn((FreshMarker, window));
-                    }
-                    Err(err) => debug!(
+        match &trigger.event().0 {
+            Event::WindowCreated { element } => {
+                if let Ok(window) = Window::new(element).inspect_err(|err| {
+                    debug!(
                         "{}: not adding window {element:?}: {}",
                         function_name!(),
                         err
-                    ),
-                },
-                Event::WindowDestroyed { window_id } => {
-                    if let Some((_, entity)) =
-                        windows.iter().find(|(window, _)| &window.id() == window_id)
-                    {
-                        commands.entity(entity).insert(DestroyedMarker);
-                    }
+                    );
+                }) {
+                    commands.spawn((FreshMarker, window));
                 }
-                Event::WindowResized { window_id } => {
-                    if let Some(window) = find_window(*window_id) {
-                        _ = WindowManager::window_resized(&window, active_display, &mut commands);
-                    }
-                }
-                Event::CurrentlyFocused => {
-                    WindowManager::currently_focused(&windows, &focused_window, &mut commands);
-                }
-                Event::WindowMinimized { window_id } => {
-                    active_display.remove_window(*window_id);
-                }
-                Event::WindowDeminimized { window_id } => {
-                    let Ok(pane) = active_display.active_panel(main_cid) else {
-                        return;
-                    };
-                    pane.append(*window_id);
-                }
-                _ => (),
             }
+            Event::WindowDestroyed { window_id } => {
+                if let Some((_, entity)) =
+                    windows.iter().find(|(window, _)| &window.id() == window_id)
+                {
+                    commands.entity(entity).insert(DestroyedMarker);
+                }
+            }
+            Event::WindowMinimized { window_id } => {
+                active_display.remove_window(*window_id);
+            }
+            Event::WindowDeminimized { window_id } => {
+                let Ok(pane) = active_display.active_panel(main_cid) else {
+                    return;
+                };
+                pane.append(*window_id);
+            }
+            _ => (),
         }
     }
 
@@ -356,11 +336,16 @@ impl WindowManager {
     /// * `windows` - A query for all windows.
     /// * `focused_window` - A query for the currently focused window.
     /// * `commands` - Bevy commands to trigger events and manage components.
-    pub fn currently_focused(
-        windows: &Query<(&Window, Entity)>,
-        focused_window: &Query<(&Window, Entity), With<FocusedMarker>>,
-        commands: &mut Commands,
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn currently_focused_trigger(
+        trigger: On<WMEventTrigger>,
+        windows: Query<(&Window, Entity)>,
+        focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
+        mut commands: Commands,
     ) {
+        if !matches!(trigger.event().0, Event::CurrentlyFocused) {
+            return;
+        }
         debug!("{}: {} windows.", function_name!(), windows.iter().len());
         let mut focused_psn = ProcessSerialNumber::default();
         unsafe {
@@ -939,14 +924,25 @@ impl WindowManager {
     /// # Returns
     ///
     /// `Ok(())` if the window is resized successfully, otherwise `Err(Error)`.
-    fn window_resized(
-        window: &Window,
-        active_display: &Display,
-        commands: &mut Commands,
-    ) -> Result<()> {
-        window.update_frame(Some(&active_display.bounds))?;
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn window_resized_trigger(
+        trigger: On<WMEventTrigger>,
+        windows: Query<(&Window, Entity)>,
+        displays: Query<&mut Display, With<FocusedMarker>>,
+        mut commands: Commands,
+    ) {
+        let Event::WindowResized { window_id } = trigger.event().0 else {
+            return;
+        };
+        let Ok(active_display) = displays.single() else {
+            warn!("{}: Unable to get current display.", function_name!());
+            return;
+        };
+        let Some((window, _)) = windows.iter().find(|(window, _)| window.id() == window_id) else {
+            return;
+        };
+        _ = window.update_frame(Some(&active_display.bounds));
         commands.trigger(ReshuffleAroundTrigger(window.id()));
-        Ok(())
     }
 
     /// Handles the event when a window gains focus. It updates the focused window, PSN, and reshuffles windows.

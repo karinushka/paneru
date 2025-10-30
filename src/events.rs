@@ -292,15 +292,12 @@ impl EventHandler {
                     .add_observer(WindowManager::reshuffle_around_trigger)
                     .add_observer(WindowManager::swipe_gesture_trigger)
                     .add_observer(WindowManager::mission_control_trigger)
+                    .add_observer(WindowManager::application_event_trigger)
+                    .add_observer(WindowManager::dispatch_application_messages)
+                    .add_observer(WindowManager::currently_focused_trigger)
+                    .add_observer(WindowManager::window_resized_trigger)
                     .add_systems(Startup, EventHandler::gather_displays)
                     .add_systems(Startup, process_setup.after(EventHandler::gather_displays))
-                    .add_systems(
-                        Update,
-                        (
-                            WindowManager::dispatch_process_messages,
-                            WindowManager::dispatch_application_messages,
-                        ),
-                    )
                     .add_systems(
                         Update,
                         (

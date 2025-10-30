@@ -1,3 +1,4 @@
+use bevy::ecs::entity::Entity;
 use bevy::ecs::observer::On;
 use bevy::ecs::query::With;
 use bevy::ecs::system::{Commands, Query, Res};
@@ -11,7 +12,7 @@ use crate::events::{
     CommandTrigger, Event, FocusedMarker, MainConnection, ReshuffleAroundTrigger, SenderSocket,
     WMEventTrigger,
 };
-use crate::skylight::{ConnID, WinID};
+use crate::skylight::ConnID;
 use crate::windows::{Display, Panel, Window, WindowPane};
 
 /// Retrieves a window ID in a specified direction relative to a `current_window_id` within a `WindowPane`.
@@ -27,9 +28,9 @@ use crate::windows::{Display, Panel, Window, WindowPane};
 /// `Some(WinID)` with the found window's ID, otherwise `None`.
 fn get_window_in_direction(
     direction: &str,
-    current_window_id: WinID,
+    current_window_id: Entity,
     strip: &WindowPane,
-) -> Option<WinID> {
+) -> Option<Entity> {
     let index = strip.index_of(current_window_id).ok()?;
     match direction {
         "west" => (index > 0)
@@ -83,17 +84,16 @@ fn get_window_in_direction(
 /// # Returns
 ///
 /// `Some(WinID)` with the ID of the newly focused window, otherwise `None`.
-fn command_move_focus<F: Fn(WinID) -> Option<Window>>(
+fn command_move_focus(
     argv: &[String],
-    current_window: &Window,
+    current_window: Entity,
     strip: &WindowPane,
-    find_window: &F,
-) -> Option<WinID> {
+    windows: &Query<&Window>,
+) -> Option<Entity> {
     let direction = argv.first()?;
 
-    get_window_in_direction(direction, current_window.id(), strip).inspect(|window_id| {
-        let window = find_window(*window_id);
-        if let Some(window) = window {
+    get_window_in_direction(direction, current_window, strip).inspect(|entity| {
+        if let Ok(window) = windows.get(*entity) {
             window.focus_with_raise();
         }
     })
@@ -112,18 +112,18 @@ fn command_move_focus<F: Fn(WinID) -> Option<Window>>(
 /// # Returns
 ///
 /// `Some(Window)` with the window that was swapped with, otherwise `None`.
-fn command_swap_focus<F: Fn(WinID) -> Option<Window>>(
+fn command_swap_focus(
     argv: &[String],
-    current_window: &Window,
+    current: Entity,
     panel: &WindowPane,
     display_bounds: &CGRect,
-    find_window: &F,
-) -> Option<Window> {
+    windows: &Query<&Window>,
+) -> Option<Entity> {
     let direction = argv.first()?;
-    let index = panel.index_of(current_window.id()).ok()?;
-    let window =
-        get_window_in_direction(direction, current_window.id(), panel).and_then(&find_window)?;
-    let new_index = panel.index_of(window.id()).ok()?;
+    let index = panel.index_of(current).ok()?;
+    let other_window = get_window_in_direction(direction, current, panel)?;
+    let new_index = panel.index_of(other_window).ok()?;
+    let current_window = windows.get(current).ok()?;
 
     let origin = if new_index == 0 {
         // If reached far left, snap the window to left.
@@ -139,7 +139,7 @@ fn command_swap_focus<F: Fn(WinID) -> Option<Window>>(
             .get(new_index)
             .ok()
             .and_then(|panel| panel.top())
-            .and_then(&find_window)?
+            .and_then(|entity| windows.get(entity).ok())?
             .frame()
             .origin
     };
@@ -151,7 +151,7 @@ fn command_swap_focus<F: Fn(WinID) -> Option<Window>>(
             .rev()
             .for_each(|idx| panel.swap(idx, idx + 1));
     }
-    Some(window)
+    Some(other_window)
 }
 
 /// Handles various "window" commands, such as focus, swap, center, resize, and manage.
@@ -169,17 +169,17 @@ fn command_swap_focus<F: Fn(WinID) -> Option<Window>>(
 /// # Returns
 ///
 /// `Ok(())` if the command is processed successfully, otherwise `Err(Error)`.
-fn command_windows<F: Fn(WinID) -> Option<Window>>(
+fn command_windows(
     argv: &[String],
     main_cid: ConnID,
     active_display: &Display,
-    focused_window: &Query<&Window, With<FocusedMarker>>,
-    find_window: &F,
+    focused_window: &Query<(&Window, Entity), With<FocusedMarker>>,
+    windows: &Query<&Window>,
     commands: &mut Commands,
     config: Option<Res<Config>>,
 ) -> Result<()> {
     let empty = String::new();
-    let Ok(window) = focused_window.single() else {
+    let Ok((window, entity)) = focused_window.single() else {
         warn!("{}: No window focused.", function_name!());
         return Ok(());
     };
@@ -191,16 +191,16 @@ fn command_windows<F: Fn(WinID) -> Option<Window>>(
 
     match argv.first().unwrap_or(&empty).as_ref() {
         "focus" => {
-            command_move_focus(&argv[1..], window, &active_panel, find_window);
+            command_move_focus(&argv[1..], entity, &active_panel, windows);
         }
 
         "swap" => {
             command_swap_focus(
                 &argv[1..],
-                window,
+                entity,
                 &active_panel,
                 &active_display.bounds,
-                &find_window,
+                windows,
             );
         }
 
@@ -227,7 +227,7 @@ fn command_windows<F: Fn(WinID) -> Option<Window>>(
         "manage" => {
             if window.managed() {
                 // Window already managed, remove it from the managed stack.
-                active_panel.remove(window.id());
+                active_panel.remove(entity);
                 window.manage(false);
             } else {
                 // Add newly managed window to the stack.
@@ -238,7 +238,7 @@ fn command_windows<F: Fn(WinID) -> Option<Window>>(
                     active_display.bounds.size.height,
                     &active_display.bounds,
                 );
-                active_panel.append(window.id());
+                active_panel.append(entity);
                 window.manage(true);
             }
         }
@@ -247,14 +247,14 @@ fn command_windows<F: Fn(WinID) -> Option<Window>>(
             if !window.managed() {
                 return Ok(());
             }
-            active_panel.stack(window.id())?;
+            active_panel.stack(entity)?;
         }
 
         "unstack" => {
             if !window.managed() {
                 return Ok(());
             }
-            active_panel.unstack(window.id())?;
+            active_panel.unstack(entity)?;
         }
 
         _ => (),
@@ -281,7 +281,7 @@ pub fn process_command_trigger(
     sender: Res<SenderSocket>,
     main_cid: Res<MainConnection>,
     windows: Query<&Window>,
-    focused_window: Query<&Window, With<FocusedMarker>>,
+    focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
     display: Query<&Display, With<FocusedMarker>>,
     mut commands: Commands,
     config: Option<Res<Config>>,
@@ -290,7 +290,7 @@ pub fn process_command_trigger(
         warn!("{}: Unable to get current display.", function_name!());
         return;
     };
-    let Ok(active_window) = focused_window.single() else {
+    let Ok((active_window, entity)) = focused_window.single() else {
         warn!("{}: Unable to get focused window.", function_name!());
         return;
     };
@@ -298,18 +298,11 @@ pub fn process_command_trigger(
     if active_window.managed()
         && active_display
             .active_panel(main_cid)
-            .and_then(|panel| panel.index_of(active_window.id()))
+            .and_then(|panel| panel.index_of(entity))
             .is_err()
     {
         commands.trigger(WMEventTrigger(Event::DisplayChanged));
     }
-
-    let find_window = |window_id| {
-        windows
-            .iter()
-            .find(|window| window.id() == window_id)
-            .cloned()
-    };
 
     let argv = &trigger.event().0;
     if let Some(first) = argv.first() {
@@ -320,7 +313,7 @@ pub fn process_command_trigger(
                     main_cid,
                     active_display,
                     &focused_window,
-                    &find_window,
+                    &windows,
                     &mut commands,
                     config,
                 )

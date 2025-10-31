@@ -1306,4 +1306,3 @@ mod tests {
         assert_eq!(pane.index_of(entities[2]).unwrap(), 2);
     }
 }
-

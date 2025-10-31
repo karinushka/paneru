@@ -78,7 +78,7 @@ fn get_window_in_direction(
 /// * `argv` - A slice of strings representing the command arguments (e.g., [`east`]).
 /// * `current_window` - A reference to the currently focused `Window`.
 /// * `strip` - A reference to the active `WindowPane`.
-/// * `find_window` - A closure to find a window by its ID.
+/// * `windows` - A query for all `Window` components.
 ///
 /// # Returns
 ///
@@ -106,7 +106,7 @@ fn command_move_focus(
 /// * `current_window` - A reference to the currently focused `Window`.
 /// * `panel` - A reference to the active `WindowPane`.
 /// * `display_bounds` - The `CGRect` representing the bounds of the display.
-/// * `find_window` - A closure to find a window by its ID.
+/// * `windows` - A mutable query for all `Window` components.
 ///
 /// # Returns
 ///
@@ -161,7 +161,7 @@ fn command_swap_focus(
 /// * `main_cid` - The main connection ID.
 /// * `active_display` - The currently active display.
 /// * `focused_window` - A query for the currently focused window.
-/// * `find_window` - A closure to find a window by its ID.
+/// * `windows` - A mutable query for all `Window` components.
 /// * `commands` - Bevy commands to trigger events.
 ///
 /// # Returns

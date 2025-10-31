@@ -37,6 +37,9 @@ use crate::windows::{Display, Panel, Window, WindowPane, ax_window_id, ax_window
 
 const THRESHOLD: f64 = 10.0;
 
+/// The main window manager logic.
+///
+/// This struct contains the Bevy systems that respond to events and manage windows.
 #[derive(Default)]
 pub struct WindowManager;
 
@@ -45,6 +48,7 @@ impl WindowManager {
     ///
     /// # Arguments
     ///
+    /// * `trigger` - The Bevy event trigger containing the application event.
     /// * `processes` - A query for all processes.
     /// * `commands` - Bevy commands to spawn or despawn entities.
     #[allow(clippy::needless_pass_by_value)]
@@ -80,8 +84,8 @@ impl WindowManager {
     ///
     /// # Arguments
     ///
+    /// * `trigger` - The Bevy event trigger containing the window event.
     /// * `windows` - A query for all windows.
-    /// * `focused_window` - A query for the focused window.
     /// * `displays` - A query for all displays.
     /// * `main_cid` - The main connection ID resource.
     /// * `commands` - Bevy commands to spawn or despawn entities.
@@ -255,8 +259,8 @@ impl WindowManager {
     /// # Arguments
     ///
     /// * `main_cid` - The main connection ID.
-    /// * `displays` - A mutable vector of references to the current displays.
-    /// * `find_window` - A closure to find a window by its ID.
+    /// * `display` - The display to refresh.
+    /// * `windows` - A mutable query for all `Window` components.
     pub fn refresh_display(
         main_cid: ConnID,
         display: &mut Display,
@@ -325,6 +329,7 @@ impl WindowManager {
     ///
     /// # Arguments
     ///
+    /// * `trigger` - The Bevy event trigger for the focus check.
     /// * `windows` - A query for all windows.
     /// * `focused_window` - A query for the currently focused window.
     /// * `commands` - Bevy commands to trigger events and manage components.
@@ -910,13 +915,10 @@ impl WindowManager {
     ///
     /// # Arguments
     ///
-    /// * `window` - The window that was resized.
-    /// * `active_display` - The currently active display.
+    /// * `trigger` - The Bevy event trigger containing the window resized event.
+    /// * `windows` - A mutable query for all `Window` components.
+    /// * `displays` - A query for the active display.
     /// * `commands` - Bevy commands to trigger events.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` if the window is resized successfully, otherwise `Err(Error)`.
     #[allow(clippy::needless_pass_by_value)]
     pub fn window_resized_trigger(
         trigger: On<WMEventTrigger>,
@@ -1200,6 +1202,7 @@ impl WindowManager {
     /// * `cid` - The main connection ID resource.
     /// * `displays` - A query for all displays.
     /// * `app_query` - A query for existing applications marked with `ExistingMarker`.
+    /// * `windows` - A query for all `Window` components.
     /// * `commands` - Bevy commands to spawn entities and manage components.
     #[allow(clippy::needless_pass_by_value)]
     pub fn add_existing_application(
@@ -1365,6 +1368,10 @@ impl WindowManager {
 
     /// Checks if the "focus follows mouse" feature is enabled.
     ///
+    /// # Arguments
+    ///
+    /// * `config` - An optional reference to the `Config` resource.
+    ///
     /// # Returns
     ///
     /// `true` if focus follows mouse is enabled, `false` otherwise.
@@ -1445,6 +1452,20 @@ impl WindowManager {
         }
     }
 
+    /// Handles display change events.
+    ///
+    /// When the active display or space changes, this function ensures that the window manager's
+    /// internal state is updated. It marks the new active display with `FocusedMarker` and moves
+    /// the focused window to the correct `WindowPane` if it has been moved to a different display
+    /// or workspace.
+    ///
+    /// # Arguments
+    ///
+    /// * `trigger` - The Bevy event trigger containing the display change event.
+    /// * `focused_window` - A query for the currently focused window.
+    /// * `displays` - A query for all displays, with their focus state.
+    /// * `main_cid` - The main connection ID resource.
+    /// * `commands` - Bevy commands to manage components and trigger events.
     #[allow(clippy::needless_pass_by_value)]
     pub fn display_change_trigger(
         trigger: On<WMEventTrigger>,
@@ -1523,6 +1544,15 @@ impl WindowManager {
         commands.trigger(ReshuffleAroundTrigger(window_id));
     }
 
+    /// Slides a window horizontally based on a swipe gesture.
+    ///
+    /// # Arguments
+    ///
+    /// * `main_cid` - The main connection ID.
+    /// * `focused_window` - A query for the currently focused window.
+    /// * `active_display` - A reference to the active display.
+    /// * `delta_x` - The horizontal delta of the swipe gesture.
+    /// * `commands` - Bevy commands to trigger a reshuffle.
     fn slide_window(
         main_cid: ConnID,
         focused_window: &mut Query<(&mut Window, Entity), With<FocusedMarker>>,
@@ -1553,11 +1583,12 @@ impl WindowManager {
     ///
     /// # Arguments
     ///
+    /// * `main_cid` - The main connection ID.
     /// * `point` - A reference to the `CGPoint` representing the screen coordinate.
     ///
     /// # Returns
     ///
-    /// `Ok(Window)` with the found window if successful, otherwise `Err(Error)`.
+    /// `Ok(WinID)` with the found window's ID if successful, otherwise `Err(Error)`.
     fn find_window_at_point(main_cid: ConnID, point: &CGPoint) -> Result<WinID> {
         let mut window_id: WinID = 0;
         let mut window_conn_id: ConnID = 0;
@@ -1598,16 +1629,22 @@ impl WindowManager {
         }
     }
 
-    /// Handles a mouse moved event. If focus-follows-mouse is enabled, it attempts to focus the window under the cursor.
-    /// It also handles child windows like sheets and drawers.
+    /// Handles mouse moved events.
+    ///
+    /// If "focus follows mouse" is enabled, this function finds the window under the cursor and
+    /// focuses it. It also handles child windows like sheets and drawers to ensure the correct
+    /// window receives focus.
     ///
     /// # Arguments
     ///
-    /// * `point` - A reference to the `CGPoint` where the mouse moved to.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` if the event is handled successfully or if focus-follows-mouse is disabled, otherwise `Err(Error)`.
+    /// * `trigger` - The Bevy event trigger containing the mouse moved event.
+    /// * `windows` - A query for all windows.
+    /// * `focused_window` - A query for the currently focused window.
+    /// * `main_cid` - The main connection ID resource.
+    /// * `config` - The optional configuration resource.
+    /// * `mission_control_active` - A resource indicating if Mission Control is active.
+    /// * `focus_follows_mouse_id` - A resource to track the window ID for focus-follows-mouse.
+    /// * `skip_reshuffle` - A resource to indicate if reshuffling should be skipped.
     #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
     pub fn mouse_moved_trigger(
         trigger: On<WMEventTrigger>,
@@ -1716,16 +1753,19 @@ impl WindowManager {
         focus_follows_mouse_id.as_mut().0 = Some(window_id);
     }
 
-    /// Handles a mouse down event. It finds the window at the click point, reshuffles if necessary,
-    /// and stores the clicked window and location.
+    /// Handles mouse down events.
+    ///
+    /// This function finds the window at the click point. If the window is not fully visible,
+    /// it triggers a reshuffle to expose it.
     ///
     /// # Arguments
     ///
-    /// * `point` - A reference to the `CGPoint` where the mouse down occurred.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` if the event is handled successfully, otherwise `Err(Error)`.
+    /// * `trigger` - The Bevy event trigger containing the mouse down event.
+    /// * `windows` - A query for all windows.
+    /// * `active_display` - A query for the active display.
+    /// * `main_cid` - The main connection ID resource.
+    /// * `mission_control_active` - A resource indicating if Mission Control is active.
+    /// * `commands` - Bevy commands to trigger a reshuffle.
     #[allow(clippy::needless_pass_by_value)]
     pub fn mouse_down_trigger(
         trigger: On<WMEventTrigger>,
@@ -1760,11 +1800,14 @@ impl WindowManager {
         }
     }
 
-    /// Handles a mouse dragged event. Currently, this function does nothing except logging.
+    /// Handles mouse dragged events.
+    ///
+    /// This function is currently a placeholder and only logs the drag event.
     ///
     /// # Arguments
     ///
-    /// * `point` - A reference to the `CGPoint` where the mouse was dragged.
+    /// * `trigger` - The Bevy event trigger containing the mouse dragged event.
+    /// * `mission_control_active` - A resource indicating if Mission Control is active.
     #[allow(clippy::needless_pass_by_value)]
     pub fn mouse_dragged_trigger(
         trigger: On<WMEventTrigger>,

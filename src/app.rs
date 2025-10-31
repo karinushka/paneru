@@ -329,7 +329,7 @@ impl AxObserverHandler {
     ///
     /// # Returns
     ///
-    /// `Ok(Pin<Box<Self>>)` if the handler is created successfully, otherwise `Err(Error)`.
+    /// `Ok(Self)` if the handler is created successfully, otherwise `Err(Error)`.
     fn new(pid: Pid, events: EventSender) -> Result<Self> {
         let observer = unsafe {
             let mut observer_ref: AXObserverRef = null_mut();

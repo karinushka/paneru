@@ -85,7 +85,7 @@ impl Application {
         };
         Ok(Self {
             element: refer,
-            psn: process.psn.clone(),
+            psn: process.psn,
             pid: process.pid,
             connection: {
                 unsafe {
@@ -113,7 +113,7 @@ impl Application {
     ///
     /// `Ok(ProcessSerialNumber)` with the PSN if successful, otherwise `Err(Error)` if the application has shut down.
     pub fn psn(&self) -> ProcessSerialNumber {
-        self.psn.clone()
+        self.psn
     }
 
     /// Retrieves the connection ID (`ConnID`) of the application.

@@ -105,7 +105,7 @@ unsafe extern "C" {
     ) -> AXError;
 }
 
-#[derive(Clone, Debug, Default, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq)]
 #[repr(C)]
 pub struct ProcessSerialNumber {
     pub high: u32,
@@ -361,7 +361,7 @@ impl ProcessHandler {
         // Fake launch the existing processes.
         let mut psn = ProcessSerialNumber::default();
         while 0 == unsafe { GetNextProcess(&raw mut psn) } {
-            self.process_handler(&psn, ProcessEventApp::Launched);
+            self.process_handler(psn, ProcessEventApp::Launched);
         }
 
         let target = unsafe { GetApplicationEventTarget() };
@@ -448,7 +448,7 @@ impl ProcessHandler {
                 if res == 0 {
                     let decoded: ProcessEventApp =
                         unsafe { std::mem::transmute(GetEventKind(event)) };
-                    this.process_handler(&psn, decoded);
+                    this.process_handler(psn, decoded);
                 }
             }
             _ => error!("Zero passed to Process Handler."),
@@ -462,8 +462,7 @@ impl ProcessHandler {
     ///
     /// * `psn` - A reference to the `ProcessSerialNumber` of the process involved in the event.
     /// * `event` - The `ProcessEventApp` indicating the type of event.
-    fn process_handler(&mut self, psn: &ProcessSerialNumber, event: ProcessEventApp) {
-        let psn = psn.clone();
+    fn process_handler(&mut self, psn: ProcessSerialNumber, event: ProcessEventApp) {
         let _ = match event {
             ProcessEventApp::Launched => self.events.send(Event::ApplicationLaunched {
                 psn,
@@ -916,7 +915,7 @@ define_class!(
             }
 
             let msg = Event::ApplicationLaunched {
-                psn: process.psn.clone(),
+                psn: process.psn,
                 observer: process.observer.clone(),
             };
             _= self.ivars().events.send(msg);

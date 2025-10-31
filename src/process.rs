@@ -121,7 +121,7 @@ impl Process {
         let apps = NSRunningApplication::runningApplicationWithProcessIdentifier(pid);
 
         Box::pin(Process {
-            psn: psn.clone(),
+            psn: *psn,
             name,
             pid,
             terminated: false,

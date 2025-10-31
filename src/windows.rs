@@ -723,7 +723,7 @@ impl Window {
 
     /// Returns the process serial number of the window.
     pub fn psn(&self) -> Option<ProcessSerialNumber> {
-        self.psn.clone()
+        self.psn
     }
 
     /// Returns the current frame (`CGRect`) of the window.
@@ -1096,7 +1096,7 @@ impl Window {
 
     /// Focuses the window and raises it to the front.
     pub fn focus_with_raise(&self) {
-        let Some(psn) = self.psn.clone() else {
+        let Some(psn) = self.psn else {
             return;
         };
         let window_id = self.id();

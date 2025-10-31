@@ -89,13 +89,13 @@ impl WindowManager {
     pub fn dispatch_application_messages(
         trigger: On<WMEventTrigger>,
         windows: Query<(&Window, Entity)>,
-        displays: Query<&mut Display, With<FocusedMarker>>,
+        mut displays: Query<&mut Display, With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
         mut commands: Commands,
     ) {
         let main_cid = main_cid.0;
         let find_window = |window_id| windows.iter().find(|(window, _)| window.id() == window_id);
-        let Ok(active_display) = displays.single() else {
+        let Ok(mut active_display) = displays.single_mut() else {
             warn!("{}: Unable to get current display.", function_name!());
             return;
         };
@@ -216,7 +216,7 @@ impl WindowManager {
         windows: &mut Query<&mut Window>,
     ) {
         let mut relocated_windows = vec![];
-        for (space_id, pane) in &display.spaces {
+        for (space_id, pane) in &mut display.spaces {
             debug!(
                 "{}: Checking space {space_id} for orphans: {pane}",
                 function_name!()
@@ -269,7 +269,7 @@ impl WindowManager {
         );
 
         let display_bounds = display.bounds;
-        for (space_id, pane) in &display.spaces {
+        for (space_id, pane) in &mut display.spaces {
             let mut lens = windows.transmute_lens::<(&Window, Entity)>();
             let new_windows =
                 WindowManager::refresh_windows_space(main_cid, *space_id, &lens.query());
@@ -772,7 +772,7 @@ impl WindowManager {
         windows: Query<(Entity, &mut Window), With<FreshMarker>>,
         focused_window: Query<(&Window, Entity), (With<FocusedMarker>, Without<FreshMarker>)>,
         mut apps: Query<(Entity, &mut Application)>,
-        active_display: Query<&Display, With<FocusedMarker>>,
+        mut active_display: Query<&mut Display, With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
         mut commands: Commands,
     ) {
@@ -840,7 +840,7 @@ impl WindowManager {
                 window.is_eligible(),
             );
 
-            let Ok(active_display) = active_display.single() else {
+            let Ok(mut active_display) = active_display.single_mut() else {
                 return;
             };
             debug!("Active display {}", active_display.id);
@@ -882,13 +882,13 @@ impl WindowManager {
         windows: Query<(&Window, Entity, &ChildOf), With<DestroyedMarker>>,
         focused_window: Query<(&Window, Entity), (With<FocusedMarker>, Without<DestroyedMarker>)>,
         mut apps: Query<&mut Application>,
-        displays: Query<&Display>,
+        mut displays: Query<&mut Display>,
         mut commands: Commands,
     ) {
         for (window, entity, child) in windows {
             displays
-                .iter()
-                .for_each(|display| display.remove_window(entity));
+                .iter_mut()
+                .for_each(|mut display| display.remove_window(entity));
 
             let Ok(mut app) = apps.get_mut(child.parent()) else {
                 error!(
@@ -1032,7 +1032,7 @@ impl WindowManager {
     pub fn reshuffle_around_trigger(
         trigger: On<ReshuffleAroundTrigger>,
         main_cid: Res<MainConnection>,
-        active_display: Query<&Display, With<FocusedMarker>>,
+        mut active_display: Query<&mut Display, With<FocusedMarker>>,
         mut windows: Query<(&mut Window, Entity)>,
     ) {
         let find_window = |window_id| windows.iter().find(|(window, _)| window.id() == window_id);
@@ -1045,20 +1045,20 @@ impl WindowManager {
         }
 
         let main_cid = main_cid.0;
-        let Ok(active_display) = active_display.single() else {
+        let Ok(mut active_display) = active_display.single_mut() else {
             // TODO: not found
             return;
         };
+        let display_bounds = active_display.bounds;
         let Ok(active_panel) = active_display.active_panel(main_cid) else {
             // TODO: not found
             return;
         };
-        let display_bounds = &active_display.bounds;
 
         let Ok((mut window, _)) = windows.get_mut(entity) else {
             return;
         };
-        let frame = window.expose_window(display_bounds);
+        let frame = window.expose_window(&display_bounds);
 
         let Ok(panel) = active_panel
             .index_of(entity)
@@ -1072,7 +1072,7 @@ impl WindowManager {
             frame.origin.x,
             &panel,
             frame.size.width,
-            display_bounds,
+            &display_bounds,
             &mut windows,
         );
 
@@ -1096,7 +1096,7 @@ impl WindowManager {
                         upper_left,
                         panel,
                         frame.size.width,
-                        display_bounds,
+                        &display_bounds,
                         &mut windows,
                     );
                 }
@@ -1126,7 +1126,7 @@ impl WindowManager {
                         upper_left,
                         panel,
                         frame.size.width,
-                        display_bounds,
+                        &display_bounds,
                         &mut windows,
                     );
                 }
@@ -1449,7 +1449,7 @@ impl WindowManager {
     pub fn display_change_trigger(
         trigger: On<WMEventTrigger>,
         focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
-        displays: Query<(&Display, Entity, Option<&FocusedMarker>)>,
+        mut displays: Query<(&mut Display, Entity, Option<&FocusedMarker>)>,
         main_cid: Res<MainConnection>,
         mut commands: Commands,
     ) {
@@ -1464,33 +1464,38 @@ impl WindowManager {
             return;
         };
 
-        if let Some((_, previous_entity, _)) =
-            displays.iter().find(|(_, _, focused)| focused.is_some())
-        {
-            commands.entity(previous_entity).remove::<FocusedMarker>();
-        }
+        let (window_id, entity) = {
+            if let Some((_, previous_entity, _)) =
+                displays.iter().find(|(_, _, focused)| focused.is_some())
+            {
+                commands.entity(previous_entity).remove::<FocusedMarker>();
+            }
 
-        let Some((active_display, entity, _)) = displays
-            .iter()
-            .find(|(display, _, _)| display.id == active_id)
-        else {
-            return;
-        };
-        commands.entity(entity).insert(FocusedMarker);
-        debug!(
-            "{}: Display ({active_id}) or Workspace changed, reorienting windows.",
-            function_name!(),
-        );
+            let Some((mut active_display, entity, _)) = displays
+                .iter_mut()
+                .find(|(display, _, _)| display.id == active_id)
+            else {
+                return;
+            };
 
-        let Ok((window, entity)) = focused_window.single() else {
-            return;
-        };
-        let Some(panel) = active_display.active_panel(main_cid).ok() else {
-            return;
-        };
-        debug!("{}: Active panel {panel}", function_name!());
+            commands.entity(entity).insert(FocusedMarker);
+            debug!(
+                "{}: Display ({active_id}) or Workspace changed, reorienting windows.",
+                function_name!(),
+            );
 
-        if window.managed() && panel.index_of(entity).is_err() {
+            let Ok((window, entity)) = focused_window.single() else {
+                return;
+            };
+            let Some(panel) = active_display.active_panel(main_cid).ok() else {
+                return;
+            };
+            debug!("{}: Active panel {panel}", function_name!());
+
+            if !window.managed() || panel.index_of(entity).is_ok() {
+                return;
+            }
+
             // Current window is not present in the current pane. This is probably due to it being
             // moved to a different desktop. Re-insert it into a correct pane.
             debug!(
@@ -1498,15 +1503,24 @@ impl WindowManager {
                 function_name!(),
                 window.id(),
             );
-            // First remove it from all the displays.
-            for (display, _, _) in displays {
-                display.remove_window(entity);
-            }
 
-            // .. and then re-insert it into the current one.
-            panel.append(entity);
-            commands.trigger(ReshuffleAroundTrigger(window.id()));
+            (window.id(), entity)
+        };
+
+        for (mut display, _, _) in &mut displays {
+            // First remove it from all the displays.
+            display.remove_window(entity);
+
+            if display.id == active_id {
+                // .. and then re-insert it into the current one.
+                if let Ok(panel) = display.active_panel(main_cid) {
+                    panel.append(entity);
+                }
+            }
         }
+
+        // _ = WindowManager::reshuffle_around(main_cid, window, active_display, &find_window);
+        commands.trigger(ReshuffleAroundTrigger(window_id));
     }
 
     fn slide_window(

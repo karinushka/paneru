@@ -323,3 +323,62 @@ pub fn process_command_trigger(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::windows::WindowPane;
+    use bevy::prelude::*;
+
+    fn setup_world_with_layout() -> (World, WindowPane, Vec<Entity>) {
+        let mut world = World::new();
+        // e0, e1 are stacked, e2 is single, e3 is single
+        let entities = world
+            .spawn_batch(vec![(), (), (), ()])
+            .collect::<Vec<Entity>>();
+
+        let mut pane = WindowPane::default();
+        pane.append(entities[0]); // This will become a stack
+        pane.append(entities[1]);
+        pane.append(entities[2]);
+        pane.append(entities[3]);
+        pane.stack(entities[1]).unwrap(); // Stack e1 onto e0
+
+        (world, pane, entities)
+    }
+
+    #[test]
+    fn test_get_window_in_direction_simple() {
+        let (_world, pane, entities) = setup_world_with_layout();
+        let e0 = entities[0];
+        let e2 = entities[2];
+        let e3 = entities[3];
+
+        // From e2, east should be e3, west should be e0 (top of stack)
+        assert_eq!(get_window_in_direction("east", e2, &pane), Some(e3));
+        assert_eq!(get_window_in_direction("west", e2, &pane), Some(e0));
+
+        // From e3, west is e2, east is None
+        assert_eq!(get_window_in_direction("west", e3, &pane), Some(e2));
+        assert_eq!(get_window_in_direction("east", e3, &pane), None);
+
+        // From e0, east is e2, west is None
+        assert_eq!(get_window_in_direction("east", e0, &pane), Some(e2));
+        assert_eq!(get_window_in_direction("west", e0, &pane), None);
+    }
+
+    #[test]
+    fn test_get_window_in_direction_stacked() {
+        let (_world, pane, entities) = setup_world_with_layout();
+        let e0 = entities[0];
+        let e1 = entities[1];
+
+        // From e0 (top of stack), south should be e1, north is None
+        assert_eq!(get_window_in_direction("south", e0, &pane), Some(e1));
+        assert_eq!(get_window_in_direction("north", e0, &pane), None);
+
+        // From e1 (bottom of stack), north should be e0, south is None
+        assert_eq!(get_window_in_direction("north", e1, &pane), Some(e0));
+        assert_eq!(get_window_in_direction("south", e1, &pane), None);
+    }
+}

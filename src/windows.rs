@@ -1241,3 +1241,66 @@ impl Window {
         frame
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::prelude::*;
+
+    fn setup_world_and_pane() -> (World, WindowPane, Vec<Entity>) {
+        let mut world = World::new();
+        let entities = world.spawn_batch(vec![(), (), ()]).collect::<Vec<Entity>>();
+
+        let mut pane = WindowPane::default();
+        pane.append(entities[0]);
+        pane.append(entities[1]);
+        pane.append(entities[2]);
+
+        (world, pane, entities)
+    }
+
+    #[test]
+    fn test_window_pane_index_of() {
+        let (_world, pane, entities) = setup_world_and_pane();
+        assert_eq!(pane.index_of(entities[0]).unwrap(), 0);
+        assert_eq!(pane.index_of(entities[1]).unwrap(), 1);
+        assert_eq!(pane.index_of(entities[2]).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_window_pane_swap() {
+        let (_world, mut pane, entities) = setup_world_and_pane();
+        pane.swap(0, 2);
+        assert_eq!(pane.index_of(entities[2]).unwrap(), 0);
+        assert_eq!(pane.index_of(entities[0]).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_window_pane_stack_and_unstack() {
+        let (_world, mut pane, entities) = setup_world_and_pane();
+
+        // Stack [1] onto [0]
+        pane.stack(entities[1]).unwrap();
+        assert_eq!(pane.len(), 2);
+        assert_eq!(pane.index_of(entities[0]).unwrap(), 0);
+        assert_eq!(pane.index_of(entities[1]).unwrap(), 0); // Both in the same panel
+
+        // Check internal structure
+        match pane.get(0).unwrap() {
+            Panel::Stack(stack) => {
+                assert_eq!(stack.len(), 2);
+                assert_eq!(stack[0], entities[0]);
+                assert_eq!(stack[1], entities[1]);
+            }
+            Panel::Single(_) => panic!("Expected a stack"),
+        }
+
+        // Unstack [0]
+        pane.unstack(entities[0]).unwrap();
+        assert_eq!(pane.len(), 3);
+        assert_eq!(pane.index_of(entities[1]).unwrap(), 0);
+        assert_eq!(pane.index_of(entities[0]).unwrap(), 1);
+        assert_eq!(pane.index_of(entities[2]).unwrap(), 2);
+    }
+}
+

@@ -509,21 +509,28 @@ fn generate_virtual_keymap() -> Vec<(String, u8)> {
 }
 
 #[test]
-fn test_config() {
+fn test_config_parsing() {
     let input = r#"
-# syntax
 [options]
-mouse_focus = true
+focus_follows_mouse = true
 
 [bindings]
-single = "s"
-simple = "alt-s"
-quit = "ctrl + alt - q"
-manage = "ctrl + alt - t"
+quit = "ctrl+alt-q"
+manage = "ctrl+alt-t"
 "#;
     let config = InnerConfig::parse_config(input)
-        .inspect_err(|err| println!("Error: {err}"))
-        .unwrap();
+        .expect("Failed to parse config");
 
-    assert_eq!(format!("{:?}", config.bindings), "");
+    assert_eq!(config.options.focus_follows_mouse, Some(true));
+
+    let quit_binding = config.bindings.get("quit").expect("Quit binding not found");
+    assert_eq!(quit_binding.key, "q");
+    // Modifiers: alt = 1<<0, ctrl = 1<<3.
+    assert_eq!(quit_binding.modifiers, (1 << 0) | (1 << 3));
+    assert_eq!(quit_binding.command, "quit");
+
+    let manage_binding = config.bindings.get("manage").expect("Manage binding not found");
+    assert_eq!(manage_binding.key, "t");
+    assert_eq!(manage_binding.modifiers, (1 << 0) | (1 << 3));
+    assert_eq!(manage_binding.command, "manage");
 }

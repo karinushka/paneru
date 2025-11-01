@@ -1174,26 +1174,53 @@ impl WindowManager {
         windows: &mut Query<(&mut Window, Entity, Option<&RepositionMarker>)>,
         commands: &mut Commands,
     ) {
+        const REMAINING_THERSHOLD: f64 = 200.0;
+        let display_height = display_bounds.size.height;
         let entities = match panel {
-            Panel::Single(window_id) => vec![*window_id],
+            Panel::Single(entity) => vec![*entity],
             Panel::Stack(stack) => stack.clone(),
         };
-        let mut y_pos = 0f64;
         let count: f64 = u32::try_from(entities.len()).unwrap().into();
-        let height = display_bounds.size.height / count;
-        for entity in entities {
-            if let Ok((mut window, _, repos)) = windows.get_mut(entity) {
-                if repos.is_some() {
-                    continue;
+        let mut fits = 0f64;
+        let mut height = 0f64;
+        let mut remaining = display_height;
+        for entity in &entities[0..entities.len() - 1] {
+            remaining = display_height - height;
+            if let Ok((window, _, _)) = windows.get(*entity) {
+                if window.frame().size.height > remaining - REMAINING_THERSHOLD {
+                    trace!(
+                        "{}: height {height}, remaining {remaining}",
+                        function_name!()
+                    );
+                    break;
                 }
+                height += window.frame().size.height;
+                fits += 1.0;
+            }
+        }
+        let avg_height = remaining / (count - fits);
+        trace!(
+            "{}: fits {fits:.0} avg_height {avg_height:.0}",
+            function_name!()
+        );
+
+        let mut y_pos = 0f64;
+        for entity in entities {
+            if let Ok((mut window, entity, _)) = windows.get_mut(entity) {
+                let window_height = window.frame().size.height;
                 commands.entity(entity).insert(RepositionMarker {
                     origin: CGPoint {
                         x: upper_left,
                         y: y_pos,
                     },
                 });
-                window.resize(width, height, display_bounds);
-                y_pos += height;
+                if fits > 0.0 {
+                    y_pos += window_height;
+                    fits -= 1.0;
+                } else {
+                    window.resize(width, avg_height, display_bounds);
+                    y_pos += avg_height;
+                }
             }
         }
     }

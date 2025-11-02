@@ -671,7 +671,6 @@ pub struct InnerWindow {
     pub frame: CGRect,
     pub minimized: bool,
     pub is_root: bool,
-    size_ratios: Vec<f64>,
     pub width_ratio: f64,
     pub managed: bool,
 }
@@ -696,7 +695,6 @@ impl Window {
                 frame: CGRect::default(),
                 minimized: false,
                 is_root: false,
-                size_ratios: vec![0.25, 0.33, 0.50, 0.66, 0.75],
                 width_ratio: 0.33,
                 managed: true,
             })),
@@ -758,15 +756,13 @@ impl Window {
     /// # Returns
     ///
     /// The next size ratio as `f64`.
-    pub fn next_size_ratio(&self) -> f64 {
-        let small = *self.inner().size_ratios.first().unwrap();
+    pub fn next_size_ratio(&self, size_ratios: Vec<f64>) -> f64 {
         let current = self.inner().width_ratio;
-        self.inner()
-            .size_ratios
+        size_ratios
             .iter()
             .find(|r| **r > current + 0.05)
             .copied()
-            .unwrap_or(small)
+            .unwrap_or_else(|| *size_ratios.first().unwrap())
     }
 
     /// Checks if the window is currently managed by the window manager.

@@ -1,4 +1,4 @@
-use bevy::ecs::resource::Resource;
+use bevy::ecs::{resource::Resource, system::Res};
 use log::{error, info};
 use notify::EventHandler;
 use objc2_core_foundation::{CFData, CFString};
@@ -170,6 +170,19 @@ impl InnerConfig {
 pub struct MainOptions {
     pub focus_follows_mouse: Option<bool>,
     pub swipe_gesture_fingers: Option<usize>,
+    #[serde(default = "default_preset_column_widths")]
+    pub preset_column_widths: Vec<f64>,
+}
+
+pub fn default_preset_column_widths() -> Vec<f64> {
+    return vec![0.25, 0.33333, 0.50, 0.66667, 0.75];
+}
+
+pub fn preset_column_widths(config: Option<&Res<Config>>) -> Vec<f64> {
+    match config {
+        Some(config) => config.options().preset_column_widths,
+        None => default_preset_column_widths(),
+    }
 }
 
 #[derive(Clone, Debug)]

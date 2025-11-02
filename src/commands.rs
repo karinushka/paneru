@@ -6,6 +6,7 @@ use objc2_core_foundation::{CGPoint, CGRect};
 use std::io::Result;
 use stdext::function_name;
 
+use crate::config::{Config, preset_column_widths};
 use crate::events::{
     CommandTrigger, Event, FocusedMarker, MainConnection, ReshuffleAroundTrigger, SenderSocket,
     WMEventTrigger,
@@ -163,6 +164,7 @@ fn command_swap_focus<F: Fn(WinID) -> Option<Window>>(
 /// * `focused_window` - A query for the currently focused window.
 /// * `find_window` - A closure to find a window by its ID.
 /// * `commands` - Bevy commands to trigger events.
+/// * `config` - The optional configuration resource.
 ///
 /// # Returns
 ///
@@ -174,6 +176,7 @@ fn command_windows<F: Fn(WinID) -> Option<Window>>(
     focused_window: &Query<&Window, With<FocusedMarker>>,
     find_window: &F,
     commands: &mut Commands,
+    config: Option<Res<Config>>,
 ) -> Result<()> {
     let empty = String::new();
     let Ok(window) = focused_window.single() else {
@@ -212,7 +215,8 @@ fn command_windows<F: Fn(WinID) -> Option<Window>>(
         }
 
         "resize" => {
-            let width_ratio = window.next_size_ratio();
+            let width_ratios = preset_column_widths(config.as_ref());
+            let width_ratio = window.next_size_ratio(width_ratios);
             window.resize(
                 width_ratio * active_display.bounds.size.width,
                 window.frame().size.height,
@@ -270,6 +274,7 @@ fn command_windows<F: Fn(WinID) -> Option<Window>>(
 /// * `focused_window` - A query for the focused window.
 /// * `display` - A query for the active display.
 /// * `commands` - Bevy commands to trigger events.
+/// * `config` - The optional configuration resource.
 #[allow(clippy::needless_pass_by_value)]
 pub fn process_command_trigger(
     trigger: On<CommandTrigger>,
@@ -279,6 +284,7 @@ pub fn process_command_trigger(
     focused_window: Query<&Window, With<FocusedMarker>>,
     display: Query<&Display, With<FocusedMarker>>,
     mut commands: Commands,
+    config: Option<Res<Config>>,
 ) {
     let Ok(active_display) = display.single() else {
         warn!("{}: Unable to get current display.", function_name!());
@@ -316,6 +322,7 @@ pub fn process_command_trigger(
                     &focused_window,
                     &find_window,
                     &mut commands,
+                    config,
                 )
                 .inspect_err(|err| warn!("{}: {err}", function_name!()));
             }

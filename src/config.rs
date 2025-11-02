@@ -13,7 +13,7 @@ use std::{
 use stdext::function_name;
 use stdext::prelude::RwLockExt;
 
-use crate::{platform::CFStringRef, skylight::OSStatus, util::AxuWrapperType};
+use crate::{platform::CFStringRef, skylight::OSStatus, util::AXUIWrapper};
 
 #[derive(Clone, Debug, Resource)]
 pub struct Config {
@@ -176,7 +176,7 @@ pub struct MainOptions {
 }
 
 pub fn default_preset_column_widths() -> Vec<f64> {
-    return vec![0.25, 0.33333, 0.50, 0.66667, 0.75];
+    vec![0.25, 0.33333, 0.50, 0.66667, 0.75]
 }
 
 pub fn preset_column_widths(config: Option<&Res<Config>>) -> Vec<f64> {
@@ -460,7 +460,7 @@ enum UCKeyAction {
 ///
 /// A `Vec<(String, u8)>` containing the translated key names and their keycodes. Returns an empty vector if an error occurs during keyboard layout fetching.
 fn generate_virtual_keymap() -> Vec<(String, u8)> {
-    let keyboard = AxuWrapperType::from_retained(unsafe {
+    let keyboard = AXUIWrapper::from_retained(unsafe {
         TISCopyCurrentASCIICapableKeyboardLayoutInputSource()
     })
     .ok();

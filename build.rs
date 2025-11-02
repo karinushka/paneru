@@ -3,6 +3,7 @@ use std::path::Path;
 
 const DEFAULT_SDK: &str = "MacOSX.sdk";
 
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
 fn main() {
     let sdk_dir = "/Library/Developer/CommandLineTools/SDKs";
 

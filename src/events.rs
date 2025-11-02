@@ -30,7 +30,7 @@ use crate::manager::WindowManager;
 use crate::platform::{ProcessSerialNumber, WorkspaceObserver};
 use crate::process::{Process, ProcessRef};
 use crate::skylight::{ConnID, SLSMainConnectionID, WinID};
-use crate::util::AxuWrapperType;
+use crate::util::AXUIWrapper;
 use crate::windows::{Display, Window, WindowPane};
 
 #[allow(dead_code)]
@@ -63,7 +63,7 @@ pub enum Event {
     },
 
     WindowCreated {
-        element: CFRetained<AxuWrapperType>,
+        element: CFRetained<AXUIWrapper>,
     },
     WindowDestroyed {
         window_id: WinID,

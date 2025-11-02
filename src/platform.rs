@@ -38,7 +38,7 @@ use crate::config::Config;
 use crate::events::{Event, EventSender};
 use crate::process::Process;
 use crate::skylight::OSStatus;
-use crate::util::{AxuWrapperType, Cleanuper, add_run_loop, remove_run_loop};
+use crate::util::{AXUIWrapper, Cleanuper, add_run_loop, remove_run_loop};
 
 pub type Pid = i32;
 pub type CFStringRef = *const CFString;
@@ -1041,8 +1041,8 @@ impl Drop for WorkspaceObserver {
 #[derive(Debug)]
 struct MissionControlHandler {
     events: EventSender,
-    element: Option<CFRetained<AxuWrapperType>>,
-    observer: Option<CFRetained<AxuWrapperType>>,
+    element: Option<CFRetained<AXUIWrapper>>,
+    observer: Option<CFRetained<AXUIWrapper>>,
 }
 
 impl MissionControlHandler {
@@ -1128,11 +1128,11 @@ impl MissionControlHandler {
     /// `Ok(())` if observation is started successfully, otherwise `Err(Error)`.
     fn observe(&mut self) -> Result<()> {
         let pid = MissionControlHandler::dock_pid()?;
-        let element = AxuWrapperType::from_retained(unsafe { AXUIElementCreateApplication(pid) })?;
+        let element = AXUIWrapper::from_retained(unsafe { AXUIElementCreateApplication(pid) })?;
         let observer = unsafe {
             let mut observer_ref: AXObserverRef = null_mut();
             if kAXErrorSuccess == AXObserverCreate(pid, Self::callback, &mut observer_ref) {
-                AxuWrapperType::from_retained(observer_ref)?
+                AXUIWrapper::from_retained(observer_ref)?
             } else {
                 return Err(Error::new(
                     ErrorKind::PermissionDenied,

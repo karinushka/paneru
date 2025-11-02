@@ -48,10 +48,10 @@ impl Cleanuper {
 }
 
 #[derive(Debug)]
-pub struct AxuWrapperType;
-unsafe impl objc2_core_foundation::Type for AxuWrapperType {}
+pub struct AXUIWrapper;
+unsafe impl objc2_core_foundation::Type for AXUIWrapper {}
 
-impl AxuWrapperType {
+impl AXUIWrapper {
     /// Converts `self` into a raw mutable pointer of type `T`.
     ///
     /// # Type Parameters
@@ -122,11 +122,11 @@ impl AxuWrapperType {
     /// `Ok(CFRetained<Self>)` if the pointer is valid, otherwise `Err(Error)`.
     pub fn retain<T>(ptr: *mut T) -> Result<CFRetained<Self>> {
         let ptr = Self::from_ptr(ptr)?;
-        Ok(unsafe { CFRetained::retain(ptr) })
+        Ok(unsafe { ptr.as_ref() }.retain())
     }
 }
 
-impl<T> std::convert::AsRef<T> for AxuWrapperType {
+impl<T> std::convert::AsRef<T> for AXUIWrapper {
     /// Provides a shared reference to the inner data as type `T`.
     ///
     /// # Returns
@@ -138,7 +138,7 @@ impl<T> std::convert::AsRef<T> for AxuWrapperType {
     }
 }
 
-impl std::fmt::Display for AxuWrapperType {
+impl std::fmt::Display for AXUIWrapper {
     /// Formats the `AxuWrapperType` for display, showing the raw pointer value.
     ///
     /// # Arguments
@@ -168,7 +168,7 @@ impl std::fmt::Display for AxuWrapperType {
 ///
 /// `Ok(CFRetained<T>)` with the attribute value if successful, otherwise `Err(Error)`.
 pub fn get_attribute<T: Type>(
-    element_ref: &CFRetained<AxuWrapperType>,
+    element_ref: &CFRetained<AXUIWrapper>,
     name: &CFRetained<CFString>,
 ) -> Result<CFRetained<T>> {
     let mut attribute: *mut CFType = null_mut();
@@ -285,7 +285,7 @@ pub fn create_array<T>(values: &[T], cftype: CFNumberType) -> Result<CFRetained<
 /// # Returns
 ///
 /// `Some(&CFRunLoopSource)` if a run loop source is found, otherwise `None`.
-fn run_loop_source(observer: &AxuWrapperType) -> Option<&CFRunLoopSource> {
+fn run_loop_source(observer: &AXUIWrapper) -> Option<&CFRunLoopSource> {
     let ptr = NonNull::new(unsafe { AXObserverGetRunLoopSource(observer.as_ptr()) })?;
     Some(unsafe { ptr.cast::<CFRunLoopSource>().as_ref() })
 }
@@ -300,7 +300,7 @@ fn run_loop_source(observer: &AxuWrapperType) -> Option<&CFRunLoopSource> {
 /// # Returns
 ///
 /// `Ok(())` if the run loop source is added successfully, otherwise `Err(Error)`.
-pub fn add_run_loop(observer: &AxuWrapperType, mode: Option<&CFRunLoopMode>) -> Result<()> {
+pub fn add_run_loop(observer: &AXUIWrapper, mode: Option<&CFRunLoopMode>) -> Result<()> {
     let run_loop = run_loop_source(observer);
 
     match CFRunLoop::main() {
@@ -329,7 +329,7 @@ pub fn add_run_loop(observer: &AxuWrapperType, mode: Option<&CFRunLoopMode>) -> 
 /// # Arguments
 ///
 /// * `observer` - A reference to the `AxuWrapperType` wrapping the `AXObserverRef`.
-pub fn remove_run_loop(observer: &AxuWrapperType) {
+pub fn remove_run_loop(observer: &AXUIWrapper) {
     if let Some(run_loop_source) = run_loop_source(observer) {
         debug!(
             "{}: removing runloop: {run_loop_source:?} observer {:?}",

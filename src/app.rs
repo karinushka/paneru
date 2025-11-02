@@ -25,7 +25,7 @@ use crate::platform::{
 };
 use crate::process::Process;
 use crate::skylight::{_SLPSGetFrontProcess, ConnID, SLSGetConnectionIDForPSN, WinID};
-use crate::util::{AxuWrapperType, add_run_loop, get_attribute, remove_run_loop};
+use crate::util::{AXUIWrapper, add_run_loop, get_attribute, remove_run_loop};
 use crate::windows::{Window, ax_window_id};
 
 pub static AX_NOTIFICATIONS: LazyLock<Vec<&str>> = LazyLock::new(|| {
@@ -50,7 +50,7 @@ pub static AX_WINDOW_NOTIFICATIONS: LazyLock<Vec<&str>> = LazyLock::new(|| {
 
 #[derive(Component)]
 pub struct Application {
-    element: CFRetained<AxuWrapperType>,
+    element: CFRetained<AXUIWrapper>,
     psn: ProcessSerialNumber,
     pid: Pid,
     connection: Option<ConnID>,
@@ -81,7 +81,7 @@ impl Application {
     pub fn new(main_cid: ConnID, process: &Process, events: &EventSender) -> Result<Self> {
         let refer = unsafe {
             let ptr = AXUIElementCreateApplication(process.pid);
-            AxuWrapperType::retain(ptr)?
+            AXUIWrapper::retain(ptr)?
         };
         Ok(Self {
             element: refer,
@@ -132,7 +132,7 @@ impl Application {
     /// `Ok(WinID)` with the focused window ID if successful, otherwise `Err(Error)`.
     pub fn focused_window_id(&self) -> Result<WinID> {
         let axmain = CFString::from_static_str(kAXFocusedWindowAttribute);
-        let focused = get_attribute::<AxuWrapperType>(&self.element, &axmain)?;
+        let focused = get_attribute::<AXUIWrapper>(&self.element, &axmain)?;
         ax_window_id(focused.as_ptr())
     }
 
@@ -238,7 +238,7 @@ impl ObserverContext {
                 return;
             }
             accessibility_sys::kAXCreatedNotification => {
-                let Ok(element) = AxuWrapperType::retain(element) else {
+                let Ok(element) = AXUIWrapper::retain(element) else {
                     error!("{}: invalid element {element:?}", function_name!());
                     return;
                 };
@@ -306,7 +306,7 @@ impl ObserverContext {
 }
 
 struct AxObserverHandler {
-    observer: CFRetained<AxuWrapperType>,
+    observer: CFRetained<AXUIWrapper>,
     events: EventSender,
     contexts: Vec<Pin<Box<ObserverContext>>>,
 }
@@ -334,7 +334,7 @@ impl AxObserverHandler {
         let observer = unsafe {
             let mut observer_ref: AXObserverRef = null_mut();
             if kAXErrorSuccess == AXObserverCreate(pid, Self::callback, &mut observer_ref) {
-                AxuWrapperType::from_retained(observer_ref)?
+                AXUIWrapper::from_retained(observer_ref)?
             } else {
                 return Err(Error::new(
                     ErrorKind::PermissionDenied,
@@ -364,7 +364,7 @@ impl AxObserverHandler {
     /// `Ok(Vec<&str>)` containing a list of notifications that could not be registered (retries), otherwise `Err(Error)`.
     pub fn add_observer(
         &mut self,
-        element: &AxuWrapperType,
+        element: &AXUIWrapper,
         notifications: &[&'static str],
         which: ObserverType,
     ) -> Result<Vec<&str>> {
@@ -430,7 +430,7 @@ impl AxObserverHandler {
     pub fn remove_observer(
         &mut self,
         which: &ObserverType,
-        element: &AxuWrapperType,
+        element: &AXUIWrapper,
         notifications: &[&'static str],
     ) {
         for name in notifications {

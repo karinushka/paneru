@@ -37,9 +37,7 @@ use crate::skylight::{
     SLSWindowIteratorGetCount, SLSWindowIteratorGetParentID, SLSWindowQueryResultCopyWindows,
     SLSWindowQueryWindows, WinID,
 };
-use crate::util::{
-    AxuWrapperType, create_array, get_array_values, get_attribute, get_cfdict_value,
-};
+use crate::util::{AXUIWrapper, create_array, get_array_values, get_attribute, get_cfdict_value};
 
 #[derive(Clone, Debug)]
 pub enum Panel {
@@ -635,7 +633,7 @@ pub fn ax_window_id(element_ref: AXUIElementRef) -> Result<WinID> {
 /// # Returns
 ///
 /// `Ok(Pid)` with the process ID if successful, otherwise `Err(Error)`.
-pub fn ax_window_pid(element_ref: &CFRetained<AxuWrapperType>) -> Result<Pid> {
+pub fn ax_window_pid(element_ref: &CFRetained<AXUIWrapper>) -> Result<Pid> {
     let pid: Pid = unsafe {
         NonNull::new_unchecked(element_ref.as_ptr::<Pid>())
             .byte_add(0x10)
@@ -654,7 +652,7 @@ pub fn ax_window_pid(element_ref: &CFRetained<AxuWrapperType>) -> Result<Pid> {
 pub struct Window {
     id: WinID,
     pub psn: Option<ProcessSerialNumber>,
-    ax_element: CFRetained<AxuWrapperType>,
+    ax_element: CFRetained<AXUIWrapper>,
     pub frame: CGRect,
     pub minimized: bool,
     pub is_root: bool,
@@ -672,7 +670,7 @@ impl Window {
     /// # Returns
     ///
     /// `Ok(Window)` if the window is created successfully, otherwise `Err(Error)`.
-    pub fn new(element: &CFRetained<AxuWrapperType>) -> Result<Window> {
+    pub fn new(element: &CFRetained<AXUIWrapper>) -> Result<Window> {
         let id = ax_window_id(element.as_ptr())?;
         let window = Self {
             id,
@@ -741,7 +739,7 @@ impl Window {
     /// # Returns
     ///
     /// The next size ratio as `f64`.
-    pub fn next_size_ratio(&self, size_ratios: Vec<f64>) -> f64 {
+    pub fn next_size_ratio(&self, size_ratios: &[f64]) -> f64 {
         let current = self.width_ratio;
         size_ratios
             .iter()
@@ -773,7 +771,7 @@ impl Window {
     /// # Returns
     ///
     /// The `AXUIElementRef` as `AXUIElementRef`.
-    pub fn element(&self) -> CFRetained<AxuWrapperType> {
+    pub fn element(&self) -> CFRetained<AXUIWrapper> {
         self.ax_element.clone()
     }
 
@@ -914,7 +912,7 @@ impl Window {
                 NonNull::from(&mut point).as_ptr().cast(),
             )
         };
-        if let Ok(position) = AxuWrapperType::retain(position_ref) {
+        if let Ok(position) = AXUIWrapper::retain(position_ref) {
             unsafe {
                 AXUIElementSetAttributeValue(
                     self.ax_element.as_ptr(),
@@ -938,7 +936,7 @@ impl Window {
         let mut size = CGSize::new(width, height);
         let size_ref =
             unsafe { AXValueCreate(kAXValueTypeCGSize, NonNull::from(&mut size).as_ptr().cast()) };
-        if let Ok(position) = AxuWrapperType::retain(size_ref) {
+        if let Ok(position) = AXUIWrapper::retain(size_ref) {
             unsafe {
                 AXUIElementSetAttributeValue(
                     self.ax_element.as_ptr(),
@@ -987,7 +985,7 @@ impl Window {
                 CFString::from_static_str(kAXPositionAttribute).as_ref(),
                 &mut position_ref,
             );
-            AxuWrapperType::retain(position_ref)?
+            AXUIWrapper::retain(position_ref)?
         };
         let size = unsafe {
             let mut size_ref: *mut CFType = null_mut();
@@ -996,7 +994,7 @@ impl Window {
                 CFString::from_static_str(kAXSizeAttribute).as_ref(),
                 &mut size_ref,
             );
-            AxuWrapperType::retain(size_ref)?
+            AXUIWrapper::retain(size_ref)?
         };
 
         let mut frame = CGRect::default();

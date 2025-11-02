@@ -32,7 +32,7 @@ use crate::skylight::{
     SLSWindowIteratorGetAttributes, SLSWindowIteratorGetParentID, SLSWindowIteratorGetTags,
     SLSWindowIteratorGetWindowID, SLSWindowQueryResultCopyWindows, SLSWindowQueryWindows, WinID,
 };
-use crate::util::{AxuWrapperType, create_array, get_array_values};
+use crate::util::{AXUIWrapper, create_array, get_array_values};
 use crate::windows::{Display, Panel, Window, WindowPane, ax_window_id, ax_window_pid};
 
 const THRESHOLD: f64 = 10.0;
@@ -562,7 +562,7 @@ impl WindowManager {
                 data[0xc..0xc + bytes.len()].copy_from_slice(&bytes);
 
                 let Ok(element_ref) =
-                    AxuWrapperType::retain(_AXUIElementCreateWithRemoteToken(data_ref.as_ref()))
+                    AXUIWrapper::retain(_AXUIElementCreateWithRemoteToken(data_ref.as_ref()))
                 else {
                     continue;
                 };
@@ -646,7 +646,7 @@ impl WindowManager {
                 //
 
                 if !found_windows.iter().any(|window| window.id() == window_id) {
-                    let window_ref = AxuWrapperType::retain(window_ref.as_ptr())?;
+                    let window_ref = AXUIWrapper::retain(window_ref.as_ptr())?;
                     debug!(
                         "{}: Add window: {:?} {window_id}",
                         function_name!(),
@@ -789,18 +789,11 @@ impl WindowManager {
                 window.id(),
                 entity
             );
-            let element = window.element();
-            let Ok(window_id) = ax_window_id(element.as_ptr()) else {
+            let Ok(pid) = ax_window_pid(&window.element()) else {
                 warn!(
-                    "{}: Unable to get window id for {element:?}",
-                    function_name!()
-                );
-                return;
-            };
-            let Ok(pid) = ax_window_pid(&element) else {
-                warn!(
-                    "{}: Unable to get window pid for {window_id}",
-                    function_name!()
+                    "{}: Unable to get window pid for {}",
+                    function_name!(),
+                    window.id()
                 );
                 return;
             };
@@ -814,7 +807,7 @@ impl WindowManager {
             };
 
             debug!(
-                "{}: created {} title: {} role: {} subrole: {} element: {:x?}",
+                "{}: created {} title: {} role: {} subrole: {} element: {}",
                 function_name!(),
                 window.id(),
                 window.title().unwrap_or_default(),
@@ -825,7 +818,11 @@ impl WindowManager {
             commands.entity(entity).set_parent_in_place(app_entity);
 
             if app.observe_window(&window).is_err() {
-                warn!("{}: Error observing window {window_id}.", function_name!());
+                warn!(
+                    "{}: Error observing window {}.",
+                    function_name!(),
+                    window.id()
+                );
             }
 
             window.psn = Some(app.psn());
@@ -1030,7 +1027,7 @@ impl WindowManager {
     /// * `main_cid` - The main connection ID resource.
     /// * `active_display` - A query for the active display.
     /// * `windows` - A query for all windows.
-    #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
+    #[allow(clippy::needless_pass_by_value)]
     pub fn reshuffle_around(
         main_cid: ConnID,
         active_display: &mut Query<&mut Display, With<FocusedMarker>>,
@@ -1129,7 +1126,7 @@ impl WindowManager {
         Ok(())
     }
 
-    #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
+    #[allow(clippy::needless_pass_by_value)]
     pub fn reshuffle_around_trigger(
         trigger: On<ReshuffleAroundTrigger>,
         main_cid: Res<MainConnection>,
@@ -1388,7 +1385,7 @@ impl WindowManager {
         for (app, entity) in app_query {
             let array = app.window_list().unwrap();
             let create_window = |element_ref: NonNull<_>| {
-                let element = AxuWrapperType::retain(element_ref.as_ptr());
+                let element = AXUIWrapper::retain(element_ref.as_ptr());
                 element.map(|element| {
                     let window_id = ax_window_id(element.as_ptr())
                         .inspect_err(|err| {

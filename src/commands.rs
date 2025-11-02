@@ -172,6 +172,7 @@ fn command_swap_focus(
 /// # Returns
 ///
 /// `Ok(())` if the command is processed successfully, otherwise `Err(Error)`.
+#[allow(clippy::needless_pass_by_value)]
 fn command_windows(
     argv: &[String],
     main_cid: ConnID,
@@ -223,7 +224,7 @@ fn command_windows(
         "resize" => {
             let mut window = windows.get_mut(focused_entity).map_err(error_msg)?;
             let width_ratios = preset_column_widths(config.as_ref());
-            let width_ratio = window.next_size_ratio(width_ratios);
+            let width_ratio = window.next_size_ratio(&width_ratios);
             let height = window.frame().size.height;
             window.resize(
                 width_ratio * active_display.bounds.size.width,

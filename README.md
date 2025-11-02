@@ -81,6 +81,9 @@ starting point:
 [options]
 # Enables focus follows mouse. Set to false or remove the line to disable.
 focus_follows_mouse = true
+# Array of widths used by the `window_resize` action to cycle between.
+# Defaults to 25%, 33%, 50%, 66% and 75%.
+preset_column_widths = [ 0.25, 0.33, 0.50, 0.66, 0.75 ]
 
 # How many fingers to use for moving windows left and right.
 # Make sure that it doesn't clash with OS setting for workspace switching.
@@ -112,7 +115,7 @@ window_swap_last = "alt + shift - l"
 # Centers the current window on screen.
 window_center = "alt - c"
 
-# Shuffles between predefined window sizes: 25%, 33%, 50%, 66% and 75%.
+# Cycles between the window sizes defined in the `preset_column_widths` option.
 window_resize = "alt - r"
 
 # Toggles the window for management. If unmanaged, the window will be "floating".

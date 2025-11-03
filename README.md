@@ -46,10 +46,31 @@ inspired by [Niri] and [PaperWM.spoon].
 
 ## Installation
 
-Paneru is built using Rust's `cargo`. It can be installed directly from
-`crates.io` or if you need the latest version, by fetching the source from Github.
+### Recommended System Options
+
+- Like all non-native window managers for MacOS, Paneru requires accessibility
+  access to move windows. Once it runs you may get a dialog window asking for
+  permissions. Otherwise check the setting in System Settings under "Privacy &
+  Security -> Accessibility".
+
+- Check your System Settings for "Displays have separate spaces" option. It
+  should be enabled - this allows Paneru to manage the workspaces independently.
+
+- **Multiple displays**. Paneru is moving the windows off-screen, hiding them
+  to the left or right. If you have multiple displays, for example your laptop
+  open when docked to an external monitor you may experience weird behavior.
+  The issue is that when MacOS notices a window being moved too far off-screen
+  it will relocate it to a different display - which confuses Paneru! The
+  solution is to change the spatial arrangement of your additional display -
+  instead of having it to the left or right, move it above or below your main
+  display.
+  A [similar situation](https://nikitabobko.github.io/AeroSpace/guide#proper-monitor-arrangement)
+  exists with Aerospace window manager.
 
 ### Installing from Crates.io
+
+Paneru is built using Rust's `cargo`. It can be installed directly from
+`crates.io` or if you need the latest version, by fetching the source from Github.
 
 ```shell
 $ cargo install paneru
@@ -158,19 +179,6 @@ $ paneru start
 $ paneru
 ```
 
-
-## Recommended System Options
-
-Paneru window manager requires accessibility access (just like all the other third party window managers for MacOS).
-Once it runs you may get a dialog window asking for permissions.
-
-Check your system settings for "Displays have separate spaces". It should be
-enabled - this allows Paneru to manage the spaces independently.
-
-Paneru is by default using a "three finger" swipe gesture to slide the windows left or right.
-If you have the same gesture configured to swipe workspaces, change it in the
-system settings to a "four fingers" gesture. Otherwise you will trigger both at the same time, resulting in a weird sliding effect.
-Alternatively change the `if fingers.len() != 3` in the code to 4 and recompile.
 
 ## Future Enhancements
 

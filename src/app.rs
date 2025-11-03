@@ -232,17 +232,27 @@ impl ObserverContext {
     /// * `notification` - The name of the accessibility notification as a `String`.
     /// * `element` - The `AXUIElementRef` associated with the notification.
     fn notify_app(&self, notification: &str, element: AXUIElementRef) {
-        if notification == accessibility_sys::kAXCreatedNotification {
-            let Ok(element) = AxuWrapperType::retain(element) else {
-                error!("{}: invalid element {element:?}", function_name!());
+        match notification {
+            accessibility_sys::kAXTitleChangedNotification => {
+                // TODO: WindowTitleChanged does not have a valid window as its element reference.
                 return;
-            };
-            _ = self.events.send(Event::WindowCreated { element });
-            return;
+            }
+            accessibility_sys::kAXCreatedNotification => {
+                let Ok(element) = AxuWrapperType::retain(element) else {
+                    error!("{}: invalid element {element:?}", function_name!());
+                    return;
+                };
+                _ = self.events.send(Event::WindowCreated { element });
+                return;
+            }
+            _ => (),
         }
 
         let Ok(window_id) = ax_window_id(element) else {
-            error!("{}: invalid window_id {element:?}", function_name!());
+            error!(
+                "{}: notification {notification} invalid window_id {element:?}",
+                function_name!(),
+            );
             return;
         };
         let event = match notification {
@@ -251,9 +261,6 @@ impl ObserverContext {
             }
             accessibility_sys::kAXWindowMovedNotification => Event::WindowMoved { window_id },
             accessibility_sys::kAXWindowResizedNotification => Event::WindowResized { window_id },
-            accessibility_sys::kAXTitleChangedNotification => {
-                Event::WindowTitleChanged { window_id }
-            }
             accessibility_sys::kAXMenuOpenedNotification => Event::MenuOpened { window_id },
             accessibility_sys::kAXMenuClosedNotification => Event::MenuClosed { window_id },
             _ => {

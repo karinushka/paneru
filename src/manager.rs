@@ -1502,6 +1502,30 @@ impl WindowManager {
                 commands.trigger(WMEventTrigger(Event::DisplayChanged));
             }
 
+            Event::DisplayMoved { display_id } => {
+                debug!("{}: Display Moved: {display_id:?}", function_name!());
+                let Some((mut display, _)) = displays
+                    .iter_mut()
+                    .find(|(display, _)| display.id == display_id)
+                else {
+                    error!("{}: Unable to find moved display!", function_name!());
+                    return;
+                };
+                let Some(moved_display) = Display::present_displays(main_cid)
+                    .into_iter()
+                    .find(|display| display.id == display_id)
+                else {
+                    return;
+                };
+                *display = moved_display;
+                WindowManager::find_orphaned_spaces(orphaned_spaces, &mut display, &mut windows);
+
+                for (id, pane) in &display.spaces {
+                    debug!("{}: Space {id} - {pane}", function_name!());
+                }
+                commands.trigger(WMEventTrigger(Event::DisplayChanged));
+            }
+
             _ => (),
         }
     }

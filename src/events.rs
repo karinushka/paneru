@@ -399,9 +399,6 @@ impl EventHandler {
                 Event::MenuClosed { window_id } => {
                     trace!("{}: MenuClosed event: {window_id:?}", function_name!());
                 }
-                Event::DisplayMoved { display_id } => {
-                    debug!("{}: Display Moved: {display_id:?}", function_name!());
-                }
                 Event::DisplayResized { display_id } => {
                     debug!("{}: Display Resized: {display_id:?}", function_name!());
                 }

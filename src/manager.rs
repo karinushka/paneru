@@ -1596,50 +1596,66 @@ impl WindowManager {
             return;
         };
 
-        let (window_id, entity) = {
-            if let Some((_, previous_entity, _)) =
-                displays.iter().find(|(_, _, focused)| focused.is_some())
-            {
-                commands.entity(previous_entity).remove::<FocusedMarker>();
-            }
-
-            let Some((mut active_display, entity, _)) = displays
-                .iter_mut()
-                .find(|(display, _, _)| display.id == active_id)
-            else {
-                return;
-            };
-
-            commands.entity(entity).insert(FocusedMarker);
-            debug!(
-                "{}: Display ({active_id}) or Workspace changed, reorienting windows.",
-                function_name!(),
-            );
-
-            let Ok((window, entity)) = focused_window.single() else {
-                return;
-            };
-            let Some(panel) = active_display.active_panel(main_cid).ok() else {
-                return;
-            };
-            debug!("{}: Active panel {panel}", function_name!());
-
-            if !window.managed() || panel.index_of(entity).is_ok() {
+        if let Some((previous_display, previous_entity, _)) =
+            displays.iter().find(|(_, _, focused)| focused.is_some())
+        {
+            if previous_display.id == active_id {
                 return;
             }
+            commands.entity(previous_entity).remove::<FocusedMarker>();
+        }
 
-            // Current window is not present in the current pane. This is probably due to it being
-            // moved to a different desktop. Re-insert it into a correct pane.
-            debug!(
-                "{}: Window {} moved between displays or workspaces.",
-                function_name!(),
-                window.id(),
-            );
+        _ = WindowManager::display_change(
+            active_id,
+            main_cid,
+            &mut displays,
+            &focused_window,
+            &mut commands,
+        )
+        .inspect_err(|err| warn!("{}: {err}", function_name!()));
+    }
 
-            (window.id(), entity)
-        };
+    fn display_change(
+        active_id: u32,
+        main_cid: ConnID,
+        displays: &mut Query<(&mut Display, Entity, Option<&FocusedMarker>)>,
+        focused_window: &Query<(&Window, Entity), With<FocusedMarker>>,
+        commands: &mut Commands,
+    ) -> Result<()> {
+        let (mut active_display, entity, _) = displays
+            .iter_mut()
+            .find(|(display, _, _)| display.id == active_id)
+            .ok_or(Error::new(
+                ErrorKind::NotFound,
+                "Can not find active display {display_id}.",
+            ))?;
+        commands.entity(entity).insert(FocusedMarker);
+        debug!(
+            "{}: Display ({active_id}) or Workspace changed, reorienting windows.",
+            function_name!(),
+        );
 
-        for (mut display, _, _) in &mut displays {
+        let (window, entity) = focused_window.single().map_err(|err| {
+            Error::new(
+                ErrorKind::NotFound,
+                format!("Can not find active windows: {err}."),
+            )
+        })?;
+        let panel = active_display.active_panel(main_cid)?;
+        debug!("{}: Active panel {panel}", function_name!());
+
+        if !window.managed() || panel.index_of(entity).is_ok() {
+            return Ok(());
+        }
+        debug!(
+            "{}: Window {} moved between displays or workspaces.",
+            function_name!(),
+            window.id(),
+        );
+
+        // Current window is not present in the current pane. This is probably due to it being
+        // moved to a different desktop. Re-insert it into a correct pane.
+        for (mut display, _, _) in displays {
             // First remove it from all the displays.
             display.remove_window(entity);
 
@@ -1651,8 +1667,8 @@ impl WindowManager {
             }
         }
 
-        // _ = WindowManager::reshuffle_around(main_cid, window, active_display, &find_window);
-        commands.trigger(ReshuffleAroundTrigger(window_id));
+        commands.trigger(ReshuffleAroundTrigger(window.id()));
+        Ok(())
     }
 
     /// Slides a window horizontally based on a swipe gesture.

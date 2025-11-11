@@ -1,6 +1,6 @@
 use chrono::Local;
 use clap::{Parser, Subcommand};
-use log::{LevelFilter, debug, error};
+use log::{debug, error};
 use std::io::{Error, ErrorKind, Result};
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -175,9 +175,8 @@ pub enum SubCmd {
 /// `Ok(())` if the application runs successfully, otherwise `Err(Error)`.
 fn main() -> Result<()> {
     // Set up logging (default level is INFO)
-    env_logger::Builder::new()
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .target(env_logger::Target::Stderr)
-        .filter(None, LevelFilter::Info)
         .format(|buf, record| {
             writeln!(
                 buf,

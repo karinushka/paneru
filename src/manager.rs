@@ -1478,7 +1478,72 @@ impl WindowManager {
     /// * `main_cid` - The main connection ID resource.
     /// * `commands` - Bevy commands to spawn/despawn entities and trigger events.
     #[allow(clippy::needless_pass_by_value)]
-    pub fn display_add_remove_trigger(
+    pub fn display_add_trigger(
+        trigger: On<WMEventTrigger>,
+        mut windows: Query<&mut Window>,
+        main_cid: Res<MainConnection>,
+        mut orphaned_spaces: ResMut<OrphanedSpaces>,
+        mut commands: Commands,
+    ) {
+        let Event::DisplayAdded { display_id } = trigger.event().0 else {
+            return;
+        };
+        let main_cid = main_cid.0;
+        debug!("{}: Display Added: {display_id:?}", function_name!());
+        let Some(mut display) = Display::present_displays(main_cid)
+            .into_iter()
+            .find(|display| display.id == display_id)
+        else {
+            error!("{}: Unable to find added display!", function_name!());
+            return;
+        };
+        WindowManager::find_orphaned_spaces(&mut orphaned_spaces.0, &mut display, &mut windows);
+
+        for (id, pane) in &display.spaces {
+            debug!("{}: Space {id} - {pane}", function_name!());
+        }
+        commands.spawn(display);
+        commands.trigger(WMEventTrigger(Event::DisplayChanged));
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn display_remove_trigger(
+        trigger: On<WMEventTrigger>,
+        mut displays: Query<(&mut Display, Entity)>,
+        mut windows: Query<&mut Window>,
+        mut orphaned_spaces: ResMut<OrphanedSpaces>,
+        mut commands: Commands,
+    ) {
+        let Event::DisplayRemoved { display_id } = trigger.event().0 else {
+            return;
+        };
+        debug!("{}: Display Removed: {display_id:?}", function_name!());
+        let Some((mut display, entity)) = displays
+            .iter_mut()
+            .find(|(display, _)| display.id == display_id)
+        else {
+            error!("{}: Unable to find removed display!", function_name!());
+            return;
+        };
+
+        let orphaned_spaces = &mut orphaned_spaces.0;
+        for (space_id, pane) in take(&mut display.spaces)
+            .into_iter()
+            .filter(|(_, pane)| pane.len() > 0)
+        {
+            debug!("{}: adding {pane} to orphaned list.", function_name!(),);
+            orphaned_spaces.insert(space_id, pane);
+        }
+
+        for (mut display, _) in displays {
+            WindowManager::find_orphaned_spaces(orphaned_spaces, &mut display, &mut windows);
+        }
+        commands.entity(entity).despawn();
+        commands.trigger(WMEventTrigger(Event::DisplayChanged));
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn display_moved_trigger(
         trigger: On<WMEventTrigger>,
         mut displays: Query<(&mut Display, Entity)>,
         mut windows: Query<&mut Window>,
@@ -1486,81 +1551,31 @@ impl WindowManager {
         mut orphaned_spaces: ResMut<OrphanedSpaces>,
         mut commands: Commands,
     ) {
+        let Event::DisplayMoved { display_id } = trigger.event().0 else {
+            return;
+        };
         let main_cid = main_cid.0;
-        let orphaned_spaces = &mut orphaned_spaces.0;
-        match trigger.event().0 {
-            Event::DisplayAdded { display_id } => {
-                debug!("{}: Display Added: {display_id:?}", function_name!());
-                let Some(mut display) = Display::present_displays(main_cid)
-                    .into_iter()
-                    .find(|display| display.id == display_id)
-                else {
-                    error!("{}: Unable to find added display!", function_name!());
-                    return;
-                };
-                WindowManager::find_orphaned_spaces(orphaned_spaces, &mut display, &mut windows);
+        debug!("{}: Display Moved: {display_id:?}", function_name!());
+        let Some((mut display, _)) = displays
+            .iter_mut()
+            .find(|(display, _)| display.id == display_id)
+        else {
+            error!("{}: Unable to find moved display!", function_name!());
+            return;
+        };
+        let Some(moved_display) = Display::present_displays(main_cid)
+            .into_iter()
+            .find(|display| display.id == display_id)
+        else {
+            return;
+        };
+        *display = moved_display;
+        WindowManager::find_orphaned_spaces(&mut orphaned_spaces.0, &mut display, &mut windows);
 
-                for (id, pane) in &display.spaces {
-                    debug!("{}: Space {id} - {pane}", function_name!());
-                }
-                commands.spawn(display);
-                commands.trigger(WMEventTrigger(Event::DisplayChanged));
-            }
-
-            Event::DisplayRemoved { display_id } => {
-                debug!("{}: Display Removed: {display_id:?}", function_name!());
-                let Some((mut display, entity)) = displays
-                    .iter_mut()
-                    .find(|(display, _)| display.id == display_id)
-                else {
-                    error!("{}: Unable to find removed display!", function_name!());
-                    return;
-                };
-                for (space_id, pane) in take(&mut display.spaces)
-                    .into_iter()
-                    .filter(|(_, pane)| pane.len() > 0)
-                {
-                    debug!("{}: adding {pane} to orphaned list.", function_name!(),);
-                    orphaned_spaces.insert(space_id, pane);
-                }
-
-                for (mut display, _) in displays {
-                    WindowManager::find_orphaned_spaces(
-                        orphaned_spaces,
-                        &mut display,
-                        &mut windows,
-                    );
-                }
-                commands.entity(entity).despawn();
-                commands.trigger(WMEventTrigger(Event::DisplayChanged));
-            }
-
-            Event::DisplayMoved { display_id } => {
-                debug!("{}: Display Moved: {display_id:?}", function_name!());
-                let Some((mut display, _)) = displays
-                    .iter_mut()
-                    .find(|(display, _)| display.id == display_id)
-                else {
-                    error!("{}: Unable to find moved display!", function_name!());
-                    return;
-                };
-                let Some(moved_display) = Display::present_displays(main_cid)
-                    .into_iter()
-                    .find(|display| display.id == display_id)
-                else {
-                    return;
-                };
-                *display = moved_display;
-                WindowManager::find_orphaned_spaces(orphaned_spaces, &mut display, &mut windows);
-
-                for (id, pane) in &display.spaces {
-                    debug!("{}: Space {id} - {pane}", function_name!());
-                }
-                commands.trigger(WMEventTrigger(Event::DisplayChanged));
-            }
-
-            _ => (),
+        for (id, pane) in &display.spaces {
+            debug!("{}: Space {id} - {pane}", function_name!());
         }
+        commands.trigger(WMEventTrigger(Event::DisplayChanged));
     }
 
     /// Handles display change events.

@@ -214,9 +214,6 @@ pub struct FreshMarker;
 pub struct ExistingMarker;
 
 #[derive(Component)]
-pub struct DestroyedMarker;
-
-#[derive(Component)]
 pub struct RepositionMarker {
     pub origin: CGPoint,
 }
@@ -301,6 +298,7 @@ impl EventHandler {
                     .add_observer(WindowManager::dispatch_application_messages)
                     .add_observer(WindowManager::currently_focused_trigger)
                     .add_observer(WindowManager::window_resized_trigger)
+                    .add_observer(WindowManager::window_destroyed_trigger)
                     .add_systems(Startup, EventHandler::gather_displays)
                     .add_systems(Startup, process_setup.after(EventHandler::gather_displays))
                     .add_systems(
@@ -318,13 +316,7 @@ impl EventHandler {
                             WindowManager::add_launched_application,
                         ),
                     )
-                    .add_systems(
-                        Update,
-                        (
-                            WindowManager::window_create,
-                            WindowManager::window_destroyed,
-                        ),
-                    )
+                    .add_systems(Update, WindowManager::window_create)
                     .run();
                 quit.store(true, std::sync::atomic::Ordering::Relaxed);
             }),

@@ -20,9 +20,9 @@ use stdext::function_name;
 use crate::app::Application;
 use crate::config::Config;
 use crate::events::{
-    BProcess, DestroyedMarker, Event, ExistingMarker, FocusFollowsMouse, FocusedMarker,
-    FreshMarker, MainConnection, MissionControlActive, OrphanedSpaces, RepositionMarker,
-    ReshuffleAroundTrigger, SenderSocket, SkipReshuffle, WMEventTrigger,
+    BProcess, Event, ExistingMarker, FocusFollowsMouse, FocusedMarker, FreshMarker, MainConnection,
+    MissionControlActive, OrphanedSpaces, RepositionMarker, ReshuffleAroundTrigger, SenderSocket,
+    SkipReshuffle, WMEventTrigger,
 };
 use crate::platform::ProcessSerialNumber;
 use crate::process::Process;
@@ -115,13 +115,6 @@ impl WindowManager {
                     err
                 ),
             },
-            Event::WindowDestroyed { window_id } => {
-                if let Some((_, entity)) =
-                    windows.iter().find(|(window, _)| &window.id() == window_id)
-                {
-                    commands.entity(entity).insert(DestroyedMarker);
-                }
-            }
             Event::WindowMinimized { window_id } => {
                 if let Some((_, entity)) = find_window(*window_id) {
                     active_display.remove_window(entity);
@@ -879,31 +872,55 @@ impl WindowManager {
     /// * `apps` - A query for all applications.
     /// * `displays` - A query for all displays.
     /// * `commands` - Bevy commands to despawn entities and trigger events.
-    #[allow(clippy::type_complexity)]
-    pub fn window_destroyed(
-        windows: Query<(&Window, Entity, &ChildOf), With<DestroyedMarker>>,
-        focused_window: Query<(&Window, Entity), (With<FocusedMarker>, Without<DestroyedMarker>)>,
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn window_destroyed_trigger(
+        trigger: On<WMEventTrigger>,
+        windows: Query<(&Window, Entity, &ChildOf)>,
         mut apps: Query<&mut Application>,
         mut displays: Query<&mut Display>,
+        main_cid: Res<MainConnection>,
         mut commands: Commands,
     ) {
-        for (window, entity, child) in windows {
-            displays
-                .iter_mut()
-                .for_each(|mut display| display.remove_window(entity));
+        let Event::WindowDestroyed { window_id } = trigger.event().0 else {
+            return;
+        };
+        let Some((window, entity, child)) = windows
+            .iter()
+            .find(|(window, _, _)| window.id() == window_id)
+        else {
+            error!(
+                "{}: Trying to destroy non-existing window {window_id}.",
+                function_name!()
+            );
+            return;
+        };
 
-            let Ok(mut app) = apps.get_mut(child.parent()) else {
-                error!(
-                    "{}: Window {} has no parent!",
-                    function_name!(),
-                    window.id()
-                );
+        let Ok(mut app) = apps.get_mut(child.parent()) else {
+            error!(
+                "{}: Window {} has no parent!",
+                function_name!(),
+                window.id()
+            );
+            return;
+        };
+        app.unobserve_window(window);
+        commands.entity(entity).despawn();
+
+        for mut display in &mut displays {
+            let Ok(panel) = display.active_panel(main_cid.0) else {
                 continue;
             };
-            app.unobserve_window(window);
-            commands.entity(entity).despawn();
-            if let Ok((window, _)) = focused_window.single() {
-                commands.trigger(ReshuffleAroundTrigger(window.id()));
+            let mut previous_id = None;
+            _ = panel.access_left_of(entity, |panel| {
+                previous_id = panel
+                    .top()
+                    .and_then(|entity| windows.get(entity).ok())
+                    .map(|tuple| tuple.0.id());
+                false
+            });
+            display.remove_window(entity);
+            if let Some(previous_id) = previous_id {
+                commands.trigger(ReshuffleAroundTrigger(previous_id));
             }
         }
     }

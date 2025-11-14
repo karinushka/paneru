@@ -775,7 +775,7 @@ impl WindowManager {
     #[allow(clippy::needless_pass_by_value)]
     pub fn window_create(
         windows: Query<(Entity, &mut Window), With<FreshMarker>>,
-        focused_window: Query<(&Window, Entity), (With<FocusedMarker>, Without<FreshMarker>)>,
+        focused_window: Query<(Entity, &Window), (With<FocusedMarker>, Without<FreshMarker>)>,
         mut apps: Query<(Entity, &mut Application)>,
         mut active_display: Query<&mut Display, With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
@@ -855,7 +855,7 @@ impl WindowManager {
             let insert_at = focused_window
                 .single()
                 .ok()
-                .and_then(|(_, entity)| panel.index_of(entity).ok());
+                .and_then(|(entity, _)| panel.index_of(entity).ok());
             debug!("New window adding at {panel}");
             match insert_at {
                 Some(after) => {
@@ -1055,6 +1055,12 @@ impl WindowManager {
             )
         })?;
         let frame = window.expose_window(&display_bounds, moving, entity, commands);
+        trace!(
+            "{}: Moving window {} to {:?}",
+            function_name!(),
+            window.id(),
+            frame.origin
+        );
         let panel = active_panel
             .index_of(entity)
             .and_then(|index| active_panel.get(index))?;
@@ -1074,9 +1080,12 @@ impl WindowManager {
             let frame = panel
                 .top()
                 .and_then(|entity| windows.get(entity).ok())
-                .map(|(window, _, _)| window.frame);
-            if let Some(frame) = frame {
-                trace!("{}: right: frame: {frame:?}", function_name!());
+                .map(|(window, _, _)| (window.id(), window.frame));
+            if let Some((window_id, frame)) = frame {
+                trace!(
+                    "{}: window {window_id} right: frame: {frame:?}",
+                    function_name!()
+                );
 
                 // Check for window getting off screen.
                 if upper_left > display_bounds.size.width - THRESHOLD {
@@ -1104,9 +1113,12 @@ impl WindowManager {
             let frame = panel
                 .top()
                 .and_then(|entity| windows.get(entity).ok())
-                .map(|(window, _, _)| window.frame);
-            if let Some(frame) = frame {
-                trace!("{}: left: frame: {frame:?}", function_name!());
+                .map(|(window, _, _)| (window.id(), window.frame));
+            if let Some((window_id, frame)) = frame {
+                trace!(
+                    "{}: window {window_id} left: frame: {frame:?}",
+                    function_name!()
+                );
 
                 // Check for window getting off screen.
                 if upper_left < THRESHOLD {

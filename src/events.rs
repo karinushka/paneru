@@ -583,8 +583,10 @@ impl EventHandler {
                 delta_y = -delta_y;
             }
             trace!(
-                "{}: delta {move_delta:.0} moving to {:.0}:{:.0}",
+                "{}: window {} dest {:?} delta {move_delta:.0} moving to {:.0}:{:.0}",
                 function_name!(),
+                window.id(),
+                origin,
                 current.origin.x + delta_x,
                 current.origin.y + delta_y,
             );

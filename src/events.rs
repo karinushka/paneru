@@ -29,7 +29,7 @@ use crate::config::Config;
 use crate::manager::WindowManager;
 use crate::platform::{ProcessSerialNumber, WorkspaceObserver};
 use crate::process::{Process, ProcessRef};
-use crate::skylight::{ConnID, SLSMainConnectionID, WinID};
+use crate::skylight::{_SLPSGetFrontProcess, ConnID, SLSMainConnectionID, WinID};
 use crate::util::AXUIWrapper;
 use crate::windows::{Display, Window, WindowPane};
 
@@ -298,7 +298,6 @@ impl EventHandler {
                     .add_observer(WindowManager::mission_control_trigger)
                     .add_observer(WindowManager::application_event_trigger)
                     .add_observer(WindowManager::dispatch_application_messages)
-                    .add_observer(WindowManager::currently_focused_trigger)
                     .add_observer(WindowManager::window_resized_trigger)
                     .add_observer(WindowManager::window_destroyed_trigger)
                     .add_systems(Startup, EventHandler::gather_displays)
@@ -537,8 +536,29 @@ impl EventHandler {
             for mut display in displays {
                 WindowManager::refresh_display(main_cid.0, &mut display, &mut lens.query());
             }
-            commands.trigger(WMEventTrigger(Event::CurrentlyFocused));
+            EventHandler::set_current_focus(&windows, &mut commands);
         }
+    }
+
+    fn set_current_focus(
+        windows: &Query<(&mut Window, Entity, Option<&FreshMarker>)>,
+        commands: &mut Commands,
+    ) {
+        let mut focused_psn = ProcessSerialNumber::default();
+        unsafe {
+            _SLPSGetFrontProcess(&mut focused_psn);
+        }
+        let Some((_, entity, _)) = windows
+            .iter()
+            .find(|(window, _, _)| window.psn().as_ref().is_some_and(|psn| &focused_psn == psn))
+        else {
+            warn!(
+                "{}: Unable to set currently focused window.",
+                function_name!()
+            );
+            return;
+        };
+        commands.entity(entity).insert(FocusedMarker);
     }
 
     #[allow(clippy::needless_pass_by_value)]

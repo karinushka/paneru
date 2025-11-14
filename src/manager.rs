@@ -24,10 +24,9 @@ use crate::events::{
     MissionControlActive, OrphanedSpaces, RepositionMarker, ReshuffleAroundTrigger, SenderSocket,
     SkipReshuffle, WMEventTrigger,
 };
-use crate::platform::ProcessSerialNumber;
 use crate::process::Process;
 use crate::skylight::{
-    _AXUIElementCreateWithRemoteToken, _SLPSGetFrontProcess, ConnID, SLSCopyAssociatedWindows,
+    _AXUIElementCreateWithRemoteToken, ConnID, SLSCopyAssociatedWindows,
     SLSCopyWindowsWithOptionsAndTags, SLSFindWindowAndOwner, SLSWindowIteratorAdvance,
     SLSWindowIteratorGetAttributes, SLSWindowIteratorGetParentID, SLSWindowIteratorGetTags,
     SLSWindowIteratorGetWindowID, SLSWindowQueryResultCopyWindows, SLSWindowQueryWindows, WinID,
@@ -316,51 +315,6 @@ impl WindowManager {
             .filter_map(|window_id| windows.iter().find(|(window, _)| window.id() == window_id))
             .filter_map(|(window, entity)| window.is_eligible().then_some(entity))
             .collect()
-    }
-
-    /// Sets the currently focused window based on the frontmost application.
-    ///
-    /// # Arguments
-    ///
-    /// * `trigger` - The Bevy event trigger for the focus check.
-    /// * `windows` - A query for all windows.
-    /// * `focused_window` - A query for the currently focused window.
-    /// * `commands` - Bevy commands to trigger events and manage components.
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn currently_focused_trigger(
-        trigger: On<WMEventTrigger>,
-        windows: Query<(&Window, Entity)>,
-        focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
-        mut commands: Commands,
-    ) {
-        if !matches!(trigger.event().0, Event::CurrentlyFocused) {
-            return;
-        }
-
-        debug!("{}: {} windows.", function_name!(), windows.iter().len());
-        let mut focused_psn = ProcessSerialNumber::default();
-        unsafe {
-            _SLPSGetFrontProcess(&mut focused_psn);
-        }
-        let Some((window, entity)) = windows
-            .iter()
-            .find(|(window, _)| window.psn().as_ref().is_some_and(|psn| &focused_psn == psn))
-        else {
-            warn!(
-                "{}: Unable to set currently focused window.",
-                function_name!()
-            );
-            return;
-        };
-
-        if let Ok((previous, prev_entity)) = focused_window.single() {
-            if previous.id() == window.id() {
-                return;
-            }
-            commands.entity(prev_entity).remove::<FocusedMarker>();
-        }
-        commands.entity(entity).insert(FocusedMarker);
-        commands.trigger(ReshuffleAroundTrigger(window.id()));
     }
 
     /// Retrieves a list of window IDs for specified spaces and connection, with an option to include minimized windows.

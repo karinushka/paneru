@@ -1473,6 +1473,7 @@ impl WindowManager {
                 for (id, pane) in &display.spaces {
                     debug!("{}: Space {id} - {pane}", function_name!());
                 }
+                commands.spawn(display);
                 commands.trigger(WMEventTrigger(Event::DisplayChanged));
             }
 

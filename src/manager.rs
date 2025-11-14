@@ -959,6 +959,7 @@ impl WindowManager {
         applications: Query<&Application>,
         windows: Query<(&Window, Entity, &ChildOf, Option<&FocusedMarker>)>,
         current_focus: Query<(&Window, Entity), With<FocusedMarker>>,
+        initializing: Query<&InitializingMarker>,
         main_cid: Res<MainConnection>,
         mut focus_follows_mouse_id: ResMut<FocusFollowsMouse>,
         mut skip_reshuffle: ResMut<SkipReshuffle>,
@@ -967,6 +968,9 @@ impl WindowManager {
         let Event::WindowFocused { window_id } = trigger.event().0 else {
             return;
         };
+        if initializing.single().is_ok() {
+            return;
+        }
         let main_cid = main_cid.0;
         let Some((window, entity, child)) =
             windows.iter().find_map(|(window, entity, child, _)| {

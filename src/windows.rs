@@ -877,16 +877,12 @@ impl Window {
     ///
     /// `true` if the window is real, `false` otherwise.
     pub fn is_real(&self) -> bool {
-        let role = self.role().is_ok_and(|role| role.eq(kAXWindowRole));
-        role && self.subrole().is_ok_and(|subrole| {
-            [
-                kAXStandardWindowSubrole,
-                kAXFloatingWindowSubrole,
-                // kAXDialogSubrole,
-            ]
-            .iter()
-            .any(|s| subrole.eq(*s))
-        })
+        let role = self.role().ok();
+        let subrole = self.subrole().ok();
+
+        subrole.as_deref() == Some(kAXStandardWindowSubrole)
+            || (role.as_deref() == Some(kAXWindowRole)
+                && subrole.as_deref() == Some(kAXFloatingWindowSubrole))
     }
 
     /// Checks if the window is eligible for management (i.e., it is a root and a real window).

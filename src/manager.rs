@@ -20,9 +20,9 @@ use stdext::function_name;
 use crate::app::Application;
 use crate::config::Config;
 use crate::events::{
-    BProcess, Event, ExistingMarker, FocusFollowsMouse, FocusedMarker, FreshMarker, MainConnection,
-    MissionControlActive, OrphanedSpaces, RepositionMarker, ReshuffleAroundTrigger, SenderSocket,
-    SkipReshuffle, WMEventTrigger,
+    BProcess, Event, ExistingMarker, FocusFollowsMouse, FocusedMarker, FreshMarker,
+    InitializingMarker, MainConnection, MissionControlActive, OrphanedSpaces, RepositionMarker,
+    ReshuffleAroundTrigger, SenderSocket, SkipReshuffle, WMEventTrigger,
 };
 use crate::process::Process;
 use crate::skylight::{
@@ -861,21 +861,20 @@ impl WindowManager {
         commands.entity(entity).despawn();
 
         for mut display in &mut displays {
-            let Ok(panel) = display.active_panel(main_cid.0) else {
-                continue;
-            };
-            let mut previous_id = None;
-            _ = panel.access_left_of(entity, |panel| {
-                previous_id = panel
-                    .top()
-                    .and_then(|entity| windows.get(entity).ok())
-                    .map(|tuple| tuple.0.id());
-                false
-            });
-            display.remove_window(entity);
-            if let Some(previous_id) = previous_id {
-                commands.trigger(ReshuffleAroundTrigger(previous_id));
+            if let Ok(panel) = display.active_panel(main_cid.0) {
+                let mut previous_id = None;
+                _ = panel.access_left_of(entity, |panel| {
+                    previous_id = panel
+                        .top()
+                        .and_then(|entity| windows.get(entity).ok())
+                        .map(|tuple| tuple.0.id());
+                    false
+                });
+                if let Some(previous_id) = previous_id {
+                    commands.trigger(ReshuffleAroundTrigger(previous_id));
+                }
             }
+            display.remove_window(entity);
         }
     }
 

@@ -12,7 +12,7 @@ use bevy::prelude::Event as BevyEvent;
 use bevy::time::{Time, Virtual};
 use log::{debug, error, info, trace, warn};
 use objc2::rc::Retained;
-use objc2_core_foundation::{CFRetained, CGPoint};
+use objc2_core_foundation::{CFRetained, CGPoint, CGSize};
 use objc2_core_graphics::CGDirectDisplayID;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result};
@@ -219,6 +219,11 @@ pub struct RepositionMarker {
 }
 
 #[derive(Component)]
+pub struct ResizeMarker {
+    pub size: CGSize,
+}
+
+#[derive(Component)]
 pub struct BProcess(pub ProcessRef);
 
 #[derive(Resource)]
@@ -307,6 +312,7 @@ impl EventHandler {
                         (
                             EventHandler::dispatch_toplevel_triggers,
                             EventHandler::animate_windows,
+                            EventHandler::animate_resize_windows,
                             WindowManager::add_existing_process
                                 .run_if(any_with_component::<InitializingMarker>),
                             WindowManager::add_existing_application
@@ -581,19 +587,19 @@ impl EventHandler {
         let move_delta = move_speed * time.delta_secs_f64();
 
         for (mut window, entity, RepositionMarker { origin }) in windows {
-            let current = window.frame();
-            let mut delta_x = (origin.x - current.origin.x).abs().min(move_delta);
-            let mut delta_y = (origin.y - current.origin.y).abs().min(move_delta);
+            let current = window.frame().origin;
+            let mut delta_x = (origin.x - current.x).abs().min(move_delta);
+            let mut delta_y = (origin.y - current.y).abs().min(move_delta);
             if delta_x < move_delta && delta_y < move_delta {
                 commands.entity(entity).remove::<RepositionMarker>();
                 window.reposition(origin.x, origin.y, &active_display.bounds);
                 continue;
             }
 
-            if origin.x < current.origin.x {
+            if origin.x < current.x {
                 delta_x = -delta_x;
             }
-            if origin.y < current.origin.y {
+            if origin.y < current.y {
                 delta_y = -delta_y;
             }
             trace!(
@@ -601,14 +607,43 @@ impl EventHandler {
                 function_name!(),
                 window.id(),
                 origin,
-                current.origin.x + delta_x,
-                current.origin.y + delta_y,
+                current.x + delta_x,
+                current.y + delta_y,
             );
             window.reposition(
-                current.origin.x + delta_x,
-                current.origin.y + delta_y,
+                current.x + delta_x,
+                current.y + delta_y,
                 &active_display.bounds,
             );
+        }
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn animate_resize_windows(
+        windows: Query<(&mut Window, Entity, &ResizeMarker)>,
+        displays: Query<&Display, With<FocusedMarker>>,
+        mut commands: Commands,
+    ) {
+        let Ok(active_display) = displays.single() else {
+            return;
+        };
+
+        for (mut window, entity, ResizeMarker { size }) in windows {
+            let origin = window.frame().origin;
+            let width = if origin.x + size.width < active_display.bounds.size.width + 0.4 {
+                commands.entity(entity).remove::<ResizeMarker>();
+                size.width
+            } else {
+                active_display.bounds.size.width - origin.x
+            };
+            debug!(
+                "{}: window {} resize {}:{}",
+                function_name!(),
+                window.id(),
+                width,
+                size.height,
+            );
+            window.resize(width, size.height, &active_display.bounds);
         }
     }
 }

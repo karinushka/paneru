@@ -3,14 +3,14 @@ use bevy::ecs::observer::On;
 use bevy::ecs::query::With;
 use bevy::ecs::system::{Commands, Query, Res};
 use log::{error, warn};
-use objc2_core_foundation::{CGPoint, CGRect};
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use std::io::{ErrorKind, Result};
 use stdext::function_name;
 
 use crate::config::{Config, preset_column_widths};
 use crate::events::{
     CommandTrigger, Event, FocusedMarker, MainConnection, RepositionMarker, ReshuffleAroundTrigger,
-    SenderSocket, WMEventTrigger,
+    ResizeMarker, SenderSocket, WMEventTrigger,
 };
 use crate::skylight::ConnID;
 use crate::windows::{Display, Panel, Window, WindowPane};
@@ -222,15 +222,22 @@ fn command_windows(
         }
 
         "resize" => {
-            let mut window = windows.get_mut(focused_entity).map_err(error_msg)?;
+            let display_width = active_display.bounds.size.width;
+            let window = windows.get_mut(focused_entity).map_err(error_msg)?;
             let width_ratios = preset_column_widths(config.as_ref());
             let width_ratio = window.next_size_ratio(&width_ratios);
+
+            let width = width_ratio * display_width;
             let height = window.frame().size.height;
-            window.resize(
-                width_ratio * active_display.bounds.size.width,
-                height,
-                &active_display.bounds,
-            );
+            let x = (display_width - width).min(window.frame().origin.x);
+            let y = window.frame().origin.y;
+
+            commands.entity(focused_entity).insert(RepositionMarker {
+                origin: CGPoint { x, y },
+            });
+            commands.entity(focused_entity).insert(ResizeMarker {
+                size: CGSize { width, height },
+            });
         }
 
         "manage" => {

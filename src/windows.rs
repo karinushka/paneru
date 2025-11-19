@@ -901,6 +901,10 @@ impl Window {
     /// * `x` - The new x-coordinate for the window's origin.
     /// * `y` - The new y-coordinate for the window's origin.
     pub fn reposition(&mut self, x: f64, y: f64, display_bounds: &CGRect) {
+        if (self.frame.origin.x - x).abs() < 0.1 && (self.frame.origin.y - y).abs() < 0.1 {
+            trace!("{}: already in position.", function_name!());
+            return;
+        }
         let mut point = CGPoint::new(x + display_bounds.origin.x, y + display_bounds.origin.y);
         let position_ref = unsafe {
             AXValueCreate(
@@ -929,6 +933,12 @@ impl Window {
     /// * `height` - The new height of the window.
     /// * `display_bounds` - The `CGRect` representing the bounds of the display the window is on.
     pub fn resize(&mut self, width: f64, height: f64, display_bounds: &CGRect) {
+        if (self.frame.size.width - width).abs() < 0.1
+            && (self.frame.size.height - height).abs() < 0.1
+        {
+            trace!("{}: already correct size.", function_name!());
+            return;
+        }
         let mut size = CGSize::new(width, height);
         let size_ref =
             unsafe { AXValueCreate(kAXValueTypeCGSize, NonNull::from(&mut size).as_ptr().cast()) };

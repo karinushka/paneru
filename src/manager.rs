@@ -719,7 +719,7 @@ impl WindowManager {
     /// * `active_display` - A query for the active display.
     /// * `main_cid` - The main connection ID resource.
     /// * `commands` - Bevy commands to manage components and trigger events.
-    #[allow(clippy::needless_pass_by_value)]
+    #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
     pub fn window_create(
         windows: Query<(Entity, &mut Window), With<FreshMarker>>,
         focused_window: Query<(Entity, &Window), (With<FocusedMarker>, Without<FreshMarker>)>,

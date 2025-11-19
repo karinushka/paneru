@@ -362,6 +362,7 @@ pub fn exe_path() -> Option<PathBuf> {
 /// # Returns
 ///
 /// `true` if Accessibility privileges are granted, `false` otherwise.
+#[allow(dead_code)]
 pub fn check_ax_privilege() -> bool {
     unsafe {
         let mut keys = vec![kAXTrustedCheckOptionPrompt.cast::<c_void>()];

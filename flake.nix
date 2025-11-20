@@ -27,7 +27,17 @@
         in
         {
           options.services.paneru = {
-            enable = lib.mkEnableOption "Paneru window manager";
+            enable = lib.mkEnableOption ''
+              Install paneru and configure the launchd agent.
+
+              The first time this is enabled, macOS will prompt you to allow this background
+              item in System Settings.
+
+              You can verify the service is running correctly from your terminal.
+              Run: `launchctl list | grep paneru`
+
+              In case of failure, check the logs with `cat /tmp/paneru.err.log`.
+            '';
 
             package = lib.mkOption {
               type = lib.types.package;
@@ -70,29 +80,11 @@
                 };
               };
             };
-
-            launchd = {
-              enable = lib.mkOption {
-                type = lib.types.bool;
-                default = false;
-                description = ''
-                  Configure the launchd agent to manage the Paneru process.
-
-                  The first time this is enabled, macOS will prompt you to allow this background
-                  item in System Settings.
-
-                  You can verify the service is running correctly from your terminal.
-                  Run: `launchctl list | grep paneru`
-
-                  In case of failure, check the logs with `cat /tmp/paneru.err.log`.
-                '';
-              };
-            };
           };
 
           config = lib.mkIf cfg.enable {
             assertions = [ (lib.hm.assertions.assertPlatform "services.paneru" pkgs lib.platforms.darwin) ];
-            launchd.agents.paneru = lib.mkIf cfg.launchd.enable {
+            launchd.agents.paneru = {
               enable = true;
               config = {
                 KeepAlive = {

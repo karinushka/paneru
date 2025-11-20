@@ -88,6 +88,88 @@ $ cargo install --path .
 It can run directly from the command line or as a service.
 Note, that you will need to grant acessibility priviledge to the binary.
 
+### Installing with Nix
+
+Add the paneru flake to your inputs.
+
+```
+# flake.nix
+inputs.paneru = {
+  url = "github:karinushka/paneru";
+  inputs.nixpkgs.follows = "nixpkgs";
+}
+```
+
+#### Home Manager
+
+Paneru provides a home manager module to install and configure paneru.
+
+> [!NOTE]
+> You still need to enable accessibility permissions in the macOS settings
+> the first time paneru is launched or any time it is updated.
+
+```nix
+# home.nix
+{ inputs }:
+
+{
+  imports = [
+    inputs.paneru.homeModules.paneru
+  ];
+
+  services.paneru = {
+    enable = true;
+    # Equivalent to what you would put into `~/.paneru` (See Configuration options below).
+    settings = {
+      options = {
+        focus_follows_mouse = true;
+        preset_column_widths = [
+          0.25
+          0.33
+          0.5
+          0.66
+          0.75
+        ];
+        swipe_gesture_fingers = 4;
+        animation_speed = 4000;
+      };
+      bindings = {
+        window_focus_west = "cmd - h";
+        window_focus_east = "cmd - l";
+        window_focus_north = "cmd - k";
+        window_focus_south = "cmd - j";
+        window_swap_west = "alt - h";
+        window_swap_east = "alt - l";
+        window_swap_first = "alt + shift - h";
+        window_swap_last = "alt + shift - l";
+        window_center = "alt - c";
+        window_resize = "alt - r";
+        window_manage = "ctrl + alt - t";
+        window_stack = "alt - ]";
+        window_unstack = "alt + shift - ]";
+        quit = "ctrl + alt - q";
+      };
+    };
+  };
+}
+```
+
+#### Standalone Package
+
+Although we strongly recommend using home manager, the paneru flake also exposes a standalone package.
+
+```nix
+{ inputs }:
+
+{
+  # nix-darwin configuration (configuration.nix)
+  # system-wide
+  environment.systemPackages = [ inputs.paneru.packages.paneru ]
+  # or per-user
+  users.users.<name>.packages = [ inputs.paneru.packages.paneru ]
+}
+```
+
 ### Configuration
 
 To configure Paneru, create a configuration file named `.paneru` in your home

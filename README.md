@@ -110,7 +110,7 @@ Paneru provides a home manager module to install and configure paneru.
 
 ```nix
 # home.nix
-{ inputs }:
+{ inputs, ... }:
 
 {
   imports = [
@@ -159,7 +159,7 @@ Paneru provides a home manager module to install and configure paneru.
 Although we strongly recommend using home manager, the paneru flake also exposes a standalone package.
 
 ```nix
-{ inputs }:
+{ inputs, ... }:
 
 {
   # nix-darwin configuration (configuration.nix)

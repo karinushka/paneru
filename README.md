@@ -92,7 +92,7 @@ Note, that you will need to grant acessibility priviledge to the binary.
 
 Add the paneru flake to your inputs.
 
-```
+```nix
 # flake.nix
 inputs.paneru = {
   url = "github:karinushka/paneru";
@@ -166,7 +166,7 @@ Although we strongly recommend using home manager, the paneru flake also exposes
   # system-wide
   environment.systemPackages = [ inputs.paneru.packages.paneru ]
   # or per-user
-  users.users.<name>.packages = [ inputs.paneru.packages.paneru ]
+  users.users."<name>".packages = [ inputs.paneru.packages.paneru ]
 }
 ```
 

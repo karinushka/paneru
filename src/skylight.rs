@@ -138,6 +138,8 @@ unsafe extern "C" {
     /// extern `CFStringRef` SLSCopyActiveMenuBarDisplayIdentifier(int cid);
     pub fn SLSCopyActiveMenuBarDisplayIdentifier(cid: ConnID) -> CFStringRef;
 
+    pub fn SLSGetDisplayMenubarHeight(did: CGDirectDisplayID, height: *mut u32) -> CGError;
+
     /// Copies a list of windows with specified options and tags.
     ///
     /// # Arguments

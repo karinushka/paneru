@@ -1016,6 +1016,7 @@ impl WindowManager {
             )
         })?;
         let display_bounds = active_display.bounds;
+        let menubar_height = active_display.menubar_height;
         let active_panel = active_display.active_panel(main_cid)?;
 
         let (window, _, moving) = windows.get_mut(entity).map_err(|err| {
@@ -1040,6 +1041,7 @@ impl WindowManager {
             &panel,
             frame.size.width,
             &display_bounds,
+            menubar_height,
             windows,
             commands,
         );
@@ -1068,6 +1070,7 @@ impl WindowManager {
                         panel,
                         frame.size.width,
                         &display_bounds,
+                        menubar_height,
                         windows,
                         commands,
                     );
@@ -1102,6 +1105,7 @@ impl WindowManager {
                         panel,
                         frame.size.width,
                         &display_bounds,
+                        menubar_height,
                         windows,
                         commands,
                     );
@@ -1154,18 +1158,19 @@ impl WindowManager {
         panel: &Panel,
         width: f64,
         display_bounds: &CGRect,
+        menubar_height: f64,
         windows: &mut Query<(&mut Window, Entity, Option<&RepositionMarker>)>,
         commands: &mut Commands,
     ) {
         const REMAINING_THERSHOLD: f64 = 200.0;
-        let display_height = display_bounds.size.height;
+        let display_height = display_bounds.size.height - menubar_height;
         let entities = match panel {
             Panel::Single(entity) => vec![*entity],
             Panel::Stack(stack) => stack.clone(),
         };
         let count: f64 = u32::try_from(entities.len()).unwrap().into();
         let mut fits = 0f64;
-        let mut height = 0f64;
+        let mut height = menubar_height;
         let mut remaining = display_height;
         for entity in &entities[0..entities.len() - 1] {
             remaining = display_height - height;

@@ -33,9 +33,9 @@ use crate::skylight::{
     CGDisplayGetDisplayIDFromUUID, ConnID, SLPSPostEventRecordTo,
     SLSCopyActiveMenuBarDisplayIdentifier, SLSCopyBestManagedDisplayForRect,
     SLSCopyManagedDisplayForWindow, SLSCopyManagedDisplaySpaces, SLSGetCurrentCursorLocation,
-    SLSGetWindowBounds, SLSManagedDisplayGetCurrentSpace, SLSWindowIteratorAdvance,
-    SLSWindowIteratorGetCount, SLSWindowIteratorGetParentID, SLSWindowQueryResultCopyWindows,
-    SLSWindowQueryWindows, WinID,
+    SLSGetDisplayMenubarHeight, SLSGetWindowBounds, SLSManagedDisplayGetCurrentSpace,
+    SLSWindowIteratorAdvance, SLSWindowIteratorGetCount, SLSWindowIteratorGetParentID,
+    SLSWindowQueryResultCopyWindows, SLSWindowQueryWindows, WinID,
 };
 use crate::util::{AXUIWrapper, create_array, get_array_values, get_attribute, get_cfdict_value};
 
@@ -343,6 +343,7 @@ pub struct Display {
     // Map of workspaces, containing panels of windows.
     pub spaces: HashMap<u64, WindowPane>,
     pub bounds: CGRect,
+    pub menubar_height: f64,
 }
 
 impl Display {
@@ -362,7 +363,16 @@ impl Display {
             .map(|id| (id, WindowPane::default()))
             .collect::<HashMap<_, _>>();
         let bounds = CGDisplayBounds(id);
-        Self { id, spaces, bounds }
+        let mut menubar_height: u32 = 0;
+        unsafe { SLSGetDisplayMenubarHeight(id, &raw mut menubar_height) };
+        debug!("{}: menubar height: {menubar_height}", function_name!());
+
+        Self {
+            id,
+            spaces,
+            bounds,
+            menubar_height: menubar_height.into(),
+        }
     }
 
     /// Converts a `CGDirectDisplayID` to a `CFUUID` string.

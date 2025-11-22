@@ -592,7 +592,11 @@ impl EventHandler {
             let mut delta_y = (origin.y - current.y).abs().min(move_delta);
             if delta_x < move_delta && delta_y < move_delta {
                 commands.entity(entity).remove::<RepositionMarker>();
-                window.reposition(origin.x, origin.y, &active_display.bounds);
+                window.reposition(
+                    origin.x,
+                    origin.y.max(active_display.menubar_height),
+                    &active_display.bounds,
+                );
                 continue;
             }
 
@@ -612,7 +616,7 @@ impl EventHandler {
             );
             window.reposition(
                 current.x + delta_x,
-                current.y + delta_y,
+                (current.y + delta_y).max(active_display.menubar_height),
                 &active_display.bounds,
             );
         }

@@ -729,18 +729,19 @@ impl WindowManager {
         mut commands: Commands,
     ) {
         for (entity, mut window) in windows {
+            let window_id = window.id();
             commands.entity(entity).remove::<FreshMarker>();
             debug!(
                 "{}: window {} entity {}",
                 function_name!(),
-                window.id(),
+                window_id,
                 entity
             );
             let Ok(pid) = ax_window_pid(&window.element()) else {
                 warn!(
                     "{}: Unable to get window pid for {}",
                     function_name!(),
-                    window.id()
+                    window_id
                 );
                 return;
             };
@@ -756,7 +757,7 @@ impl WindowManager {
             debug!(
                 "{}: created {} title: {} role: {} subrole: {} element: {}",
                 function_name!(),
-                window.id(),
+                window_id,
                 window.title().unwrap_or_default(),
                 window.role().unwrap_or_default(),
                 window.subrole().unwrap_or_default(),
@@ -768,14 +769,13 @@ impl WindowManager {
                 warn!(
                     "{}: Error observing window {}.",
                     function_name!(),
-                    window.id()
+                    window_id
                 );
             }
 
             window.psn = Some(app.psn());
             let minimized = window.is_minimized();
-            let is_root = Window::parent(app.connection().unwrap_or_default(), window.id())
-                .is_err()
+            let is_root = Window::parent(app.connection().unwrap_or_default(), window_id).is_err()
                 || window.is_root();
             {
                 window.minimized = minimized;
@@ -784,7 +784,7 @@ impl WindowManager {
             debug!(
                 "{}: window {} isroot {} eligible {}",
                 function_name!(),
-                window.id(),
+                window_id,
                 window.is_root(),
                 window.is_eligible(),
             );
@@ -811,9 +811,7 @@ impl WindowManager {
                 }
                 None => panel.append(entity),
             }
-            commands.trigger(WMEventTrigger(Event::WindowFocused {
-                window_id: window.id(),
-            }));
+            commands.trigger(ReshuffleAroundTrigger(window_id));
         }
     }
 

@@ -29,7 +29,7 @@ use crate::config::Config;
 use crate::manager::WindowManager;
 use crate::platform::{ProcessSerialNumber, WorkspaceObserver};
 use crate::process::{Process, ProcessRef};
-use crate::skylight::{_SLPSGetFrontProcess, ConnID, SLSMainConnectionID, WinID};
+use crate::skylight::{ConnID, SLSMainConnectionID, WinID};
 use crate::util::AXUIWrapper;
 use crate::windows::{Display, Window, WindowPane};
 
@@ -524,7 +524,7 @@ impl EventHandler {
     fn finish_setup(
         mut windows: Query<(&mut Window, Entity, Option<&FreshMarker>)>,
         initializing: Query<(Entity, &InitializingMarker)>,
-        displays: Query<&mut Display>,
+        displays: Query<(&mut Display, Option<&FocusedMarker>)>,
         main_cid: Res<MainConnection>,
         mut commands: Commands,
     ) {
@@ -539,32 +539,22 @@ impl EventHandler {
                 windows.iter().len()
             );
             let mut lens = windows.transmute_lens::<(&mut Window, Entity)>();
-            for mut display in displays {
+            for (mut display, active) in displays {
                 WindowManager::refresh_display(main_cid.0, &mut display, &mut lens.query());
-            }
-            EventHandler::set_current_focus(&windows, &mut commands);
-        }
-    }
 
-    fn set_current_focus(
-        windows: &Query<(&mut Window, Entity, Option<&FreshMarker>)>,
-        commands: &mut Commands,
-    ) {
-        let mut focused_psn = ProcessSerialNumber::default();
-        unsafe {
-            _SLPSGetFrontProcess(&mut focused_psn);
+                if active.is_some() {
+                    let first_window = display
+                        .active_panel(main_cid.0)
+                        .ok()
+                        .and_then(|panel| panel.first().ok())
+                        .and_then(|panel| panel.top());
+                    if let Some(entity) = first_window {
+                        debug!("{}: focusing {entity}", function_name!());
+                        commands.entity(entity).insert(FocusedMarker);
+                    }
+                }
+            }
         }
-        let Some((_, entity, _)) = windows
-            .iter()
-            .find(|(window, _, _)| window.psn().as_ref().is_some_and(|psn| &focused_psn == psn))
-        else {
-            warn!(
-                "{}: Unable to set currently focused window.",
-                function_name!()
-            );
-            return;
-        };
-        commands.entity(entity).insert(FocusedMarker);
     }
 
     #[allow(clippy::needless_pass_by_value)]

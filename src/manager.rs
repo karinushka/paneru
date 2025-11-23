@@ -1,7 +1,7 @@
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::observer::On;
-use bevy::ecs::query::{With, Without};
+use bevy::ecs::query::With;
 use bevy::ecs::system::{Commands, Query, Res, ResMut};
 use bevy::time::{Time, Virtual};
 use bevy::transform::commands::BuildChildrenTransformExt;
@@ -22,7 +22,7 @@ use crate::config::Config;
 use crate::events::{
     BProcess, Event, ExistingMarker, FocusFollowsMouse, FocusedMarker, FreshMarker,
     InitializingMarker, MainConnection, MissionControlActive, OrphanedSpaces, RepositionMarker,
-    ReshuffleAroundTrigger, SenderSocket, SkipReshuffle, WMEventTrigger,
+    ReshuffleAroundTrigger, SenderSocket, SkipReshuffle, SpawnWindowTrigger, WMEventTrigger,
 };
 use crate::process::Process;
 use crate::skylight::{
@@ -106,7 +106,7 @@ impl WindowManager {
         match &trigger.event().0 {
             Event::WindowCreated { element } => match Window::new(element) {
                 Ok(window) => {
-                    commands.spawn((FreshMarker, window));
+                    commands.trigger(SpawnWindowTrigger(vec![window]));
                 }
                 Err(err) => debug!(
                     "{}: not adding window {element:?}: {}",
@@ -719,29 +719,25 @@ impl WindowManager {
     /// * `active_display` - A query for the active display.
     /// * `main_cid` - The main connection ID resource.
     /// * `commands` - Bevy commands to manage components and trigger events.
-    #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
-    pub fn window_create(
-        windows: Query<(Entity, &mut Window), With<FreshMarker>>,
-        focused_window: Query<(Entity, &Window), (With<FocusedMarker>, Without<FreshMarker>)>,
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn spawn_window_trigger(
+        mut trigger: On<SpawnWindowTrigger>,
+        focused_window: Query<(Entity, &Window), With<FocusedMarker>>,
         mut apps: Query<(Entity, &mut Application)>,
         mut active_display: Query<&mut Display, With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
         mut commands: Commands,
     ) {
-        for (entity, mut window) in windows {
+        let windows = &mut trigger.event_mut().0;
+
+        while let Some(mut window) = windows.pop() {
             let window_id = window.id();
-            commands.entity(entity).remove::<FreshMarker>();
-            debug!(
-                "{}: window {} entity {}",
-                function_name!(),
-                window_id,
-                entity
-            );
+            debug!("{}: window {}", function_name!(), window_id);
             let Ok(pid) = ax_window_pid(&window.element()) else {
                 warn!(
                     "{}: Unable to get window pid for {}",
                     function_name!(),
-                    window_id
+                    window_id,
                 );
                 return;
             };
@@ -763,7 +759,6 @@ impl WindowManager {
                 window.subrole().unwrap_or_default(),
                 window.element(),
             );
-            commands.entity(entity).set_parent_in_place(app_entity);
 
             if app.observe_window(&window).is_err() {
                 warn!(
@@ -798,6 +793,9 @@ impl WindowManager {
             let Ok(panel) = active_display.active_panel(main_cid.0) else {
                 return;
             };
+
+            let entity = commands.spawn(window).id();
+            commands.entity(entity).set_parent_in_place(app_entity);
 
             let insert_at = focused_window
                 .single()
@@ -1266,16 +1264,7 @@ impl WindowManager {
                 )
                 .inspect_err(|err| warn!("{}: {err}", function_name!()))
             {
-                for window in windows {
-                    debug!(
-                        "adding found windows: {} {}",
-                        window.id(),
-                        window.title().unwrap_or_default()
-                    );
-                    commands
-                        .spawn((window, FreshMarker))
-                        .set_parent_in_place(entity);
-                }
+                commands.trigger(SpawnWindowTrigger(windows));
             }
             commands.entity(entity).remove::<ExistingMarker>();
         }
@@ -1374,36 +1363,29 @@ impl WindowManager {
         for (app, entity) in app_query {
             let array = app.window_list().unwrap();
             let create_window = |element_ref: NonNull<_>| {
-                let element = AXUIWrapper::retain(element_ref.as_ptr());
-                element.map(|element| {
+                let element = AXUIWrapper::retain(element_ref.as_ptr()).ok();
+                element.and_then(|element| {
                     let window_id = ax_window_id(element.as_ptr())
                         .inspect_err(|err| {
                             warn!("{}: error adding window: {err}", function_name!());
                         })
                         .ok()?;
-                    find_window(window_id).map_or_else(
+                    if find_window(window_id).is_none() {
                         // Window does not exist, create it.
-                        || {
-                            Window::new(&element)
-                                .inspect_err(|err| {
-                                    warn!("{}: error adding window: {err}.", function_name!());
-                                })
-                                .ok()
-                        },
+                        Some(Window::new(&element).inspect_err(|err| {
+                            warn!("{}: error adding window: {err}.", function_name!());
+                        }))
+                    } else {
                         // Window already exists, skip it.
-                        |_| None,
-                    )
+                        None
+                    }
                 })
             };
             let windows = get_array_values::<accessibility_sys::__AXUIElement>(&array)
-                .flat_map(create_window)
+                .filter_map(create_window)
                 .flatten()
                 .collect::<Vec<_>>();
-            for window in windows {
-                commands
-                    .spawn((window, FreshMarker))
-                    .set_parent_in_place(entity);
-            }
+            commands.trigger(SpawnWindowTrigger(windows));
             commands.entity(entity).remove::<FreshMarker>();
         }
     }

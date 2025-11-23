@@ -24,6 +24,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use stdext::function_name;
 
+use crate::app::Application;
 use crate::commands::process_command_trigger;
 use crate::config::Config;
 use crate::manager::WindowManager;
@@ -253,6 +254,9 @@ pub struct CommandTrigger(pub Vec<String>);
 #[derive(BevyEvent)]
 pub struct ReshuffleAroundTrigger(pub WinID);
 
+#[derive(BevyEvent)]
+pub struct SpawnWindowTrigger(pub Vec<Window>);
+
 pub struct EventHandler;
 
 impl EventHandler {
@@ -305,6 +309,7 @@ impl EventHandler {
                     .add_observer(WindowManager::dispatch_application_messages)
                     .add_observer(WindowManager::window_resized_trigger)
                     .add_observer(WindowManager::window_destroyed_trigger)
+                    .add_observer(WindowManager::spawn_window_trigger)
                     .add_systems(Startup, EventHandler::gather_displays)
                     .add_systems(Startup, process_setup.after(EventHandler::gather_displays))
                     .add_systems(
@@ -323,7 +328,6 @@ impl EventHandler {
                             WindowManager::add_launched_application,
                         ),
                     )
-                    .add_systems(Update, WindowManager::window_create)
                     .run();
                 quit.store(true, std::sync::atomic::Ordering::Relaxed);
             }),
@@ -522,14 +526,15 @@ impl EventHandler {
     /// * `commands` - Bevy commands to despawn entities and send messages.
     #[allow(clippy::needless_pass_by_value)]
     fn finish_setup(
-        mut windows: Query<(&mut Window, Entity, Option<&FreshMarker>)>,
+        apps: Query<(&Application, Entity, Option<&FreshMarker>)>,
+        mut windows: Query<(&mut Window, Entity)>,
         initializing: Query<(Entity, &InitializingMarker)>,
         displays: Query<(&mut Display, Option<&FocusedMarker>)>,
         main_cid: Res<MainConnection>,
         mut commands: Commands,
     ) {
-        if windows.iter().len() > 0
-            && !windows.iter().any(|(_, _, fresh)| fresh.is_some())
+        if !windows.is_empty()
+            && apps.iter().all(|(_, _, fresh)| fresh.is_none())
             && let Ok((entity, _)) = initializing.single()
         {
             commands.entity(entity).despawn();
@@ -538,9 +543,9 @@ impl EventHandler {
                 function_name!(),
                 windows.iter().len()
             );
-            let mut lens = windows.transmute_lens::<(&mut Window, Entity)>();
+
             for (mut display, active) in displays {
-                WindowManager::refresh_display(main_cid.0, &mut display, &mut lens.query());
+                WindowManager::refresh_display(main_cid.0, &mut display, &mut windows);
 
                 if active.is_some() {
                     let first_window = display

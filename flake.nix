@@ -13,7 +13,15 @@
         pname = "paneru";
         version = "0.2.0";
         src = pkgs.lib.cleanSource ./.;
+        postPatch = ''
+          substituteInPlace build.rs --replace-fail \
+            'let sdk_dir = "/Library/Developer/CommandLineTools/SDKs";' \
+            'let sdk_dir = "${pkgs.apple-sdk}/Platforms/MacOSX.platform/Developer/SDKs";'
+        '';
         cargoLock.lockFile = ./Cargo.lock;
+        buildInputs = [
+          pkgs.apple-sdk.privateFrameworksHook
+        ];
       };
     in
     {

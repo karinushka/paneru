@@ -235,13 +235,13 @@ impl WindowManager {
             let Ok(mut window) = windows.get_mut(entity) else {
                 continue;
             };
-            let ratio = window.width_ratio;
+            _ = window.update_frame(Some(&bounds));
             debug!(
-                "{}: Resizing relocated window {} to ratio {ratio:.02}",
+                "{}: Relocated window {} has ratio {:.02}",
                 function_name!(),
-                window.id()
+                window.id(),
+                window.width_ratio,
             );
-            window.resize(bounds.size.width * ratio, bounds.size.height, &bounds);
         }
     }
 

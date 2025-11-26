@@ -1558,11 +1558,9 @@ impl WindowManager {
         };
 
         if let Some((previous_display, previous_entity, _)) =
-            displays.iter().find(|(_, _, focused)| focused.is_some())
+            displays.iter().find(|(_, _, active)| active.is_some())
+            && previous_display.id != active_id
         {
-            if previous_display.id == active_id {
-                return;
-            }
             commands.entity(previous_entity).remove::<FocusedMarker>();
         }
 

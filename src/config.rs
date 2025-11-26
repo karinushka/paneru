@@ -175,10 +175,20 @@ pub struct MainOptions {
     pub animation_speed: Option<f64>,
 }
 
+/// Returns a default set of column widths.
 pub fn default_preset_column_widths() -> Vec<f64> {
     vec![0.25, 0.33333, 0.50, 0.66667, 0.75]
 }
 
+/// Retrieves the preset column widths from the configuration.
+///
+/// # Arguments
+///
+/// * `config` - An optional `Config` resource.
+///
+/// # Returns
+///
+/// A `Vec<f64>` of preset column widths, or the default values if the config is not present.
 pub fn preset_column_widths(config: Option<&Res<Config>>) -> Vec<f64> {
     match config {
         Some(config) => config.options().preset_column_widths,
@@ -262,10 +272,39 @@ fn parse_modifiers(input: &str) -> Result<u8, String> {
 
 #[link(name = "Carbon", kind = "framework")]
 unsafe extern "C" {
+    /// Returns a reference to the currently selected keyboard layout input source that is ASCII-capable.
     fn TISCopyCurrentASCIICapableKeyboardLayoutInputSource() -> *mut c_void;
 
+    /// Retrieves a specified property of an input source.
+    ///
+    /// # Arguments
+    ///
+    /// * `keyboard` - The input source.
+    /// * `property` - The property to retrieve.
+    ///
+    /// # Returns
+    ///
+    /// A `CFData` reference containing the property value.
     fn TISGetInputSourceProperty(keyboard: *const c_void, property: CFStringRef) -> *mut CFData;
 
+    /// Translates a virtual key code to a Unicode string according to the specified keyboard layout.
+    ///
+    /// # Arguments
+    ///
+    /// * `keyLayoutPtr` - A pointer to the keyboard layout data.
+    /// * `virtualKeyCode` - The virtual key code to translate.
+    /// * `keyAction` - The key action (e.g., key down, key up).
+    /// * `modifierKeyState` - The state of the modifier keys.
+    /// * `keyboardType` - The type of keyboard.
+    /// * `keyTranslateOptions` - Options for the translation process.
+    /// * `deadKeyState` - A pointer to the dead key state.
+    /// * `maxStringLength` - The maximum length of the output string.
+    /// * `actualStringLength` - A pointer to store the actual length of the output string.
+    /// * `unicodeString` - A pointer to the buffer to store the resulting Unicode string.
+    ///
+    /// # Returns
+    ///
+    /// An `OSStatus` indicating success or failure.
     fn UCKeyTranslate(
         keyLayoutPtr: *mut u8,
         virtualKeyCode: u16,
@@ -279,8 +318,10 @@ unsafe extern "C" {
         unicodeString: *mut u16,
     ) -> OSStatus;
 
+    /// Returns the keyboard type for the system.
     fn LMGetKbdType() -> u8;
 
+    /// A key for accessing the Unicode keyboard layout data from an input source's properties.
     static kTISPropertyUnicodeKeyLayoutData: CFStringRef;
 
 }

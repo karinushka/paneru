@@ -85,7 +85,7 @@ impl WindowManager {
     ///
     /// * `trigger` - The Bevy event trigger containing the window event.
     /// * `windows` - A query for all windows.
-    /// * `displays` - A query for all displays.
+    /// * `displays` - A query for the active display.
     /// * `main_cid` - The main connection ID resource.
     /// * `commands` - Bevy commands to spawn or despawn entities.
     #[allow(clippy::needless_pass_by_value)]
@@ -204,7 +204,7 @@ impl WindowManager {
     /// # Arguments
     ///
     /// * `orphaned_spaces` - A map of space IDs to `WindowPane`s that are currently orphaned.
-    /// * `displays` - A query for all displays.
+    /// * `display` - A mutable reference to a `Display`.
     /// * `windows` - A query for all windows.
     fn find_orphaned_spaces(
         orphaned_spaces: &mut HashMap<u64, WindowPane>,
@@ -297,7 +297,7 @@ impl WindowManager {
     ///
     /// * `main_cid` - The main connection ID.
     /// * `space_id` - The ID of the space to refresh windows from.
-    /// * `find_window` - A closure to find a window by its ID.
+    /// * `windows` - A query for all windows.
     fn refresh_windows_space(
         main_cid: ConnID,
         space_id: u64,
@@ -326,7 +326,7 @@ impl WindowManager {
     /// * `spaces` - A slice of space IDs to query windows from.
     /// * `cid` - An optional connection ID. If `None`, the main connection ID is used.
     /// * `also_minimized` - A boolean indicating whether to include minimized windows in the result.
-    /// * `find_window` - A closure to find a window by its ID.
+    /// * `windows` - A query for all windows.
     ///
     /// # Returns
     ///
@@ -434,7 +434,7 @@ impl WindowManager {
     /// * `cid` - The connection ID.
     /// * `app` - A reference to the `Application` for which to retrieve window IDs.
     /// * `spaces` - A slice of space IDs to query.
-    /// * `find_window` - A closure to find a window by its ID.
+    /// * `windows` - A query for all windows.
     ///
     /// # Returns
     ///
@@ -540,6 +540,7 @@ impl WindowManager {
     /// * `app` - A mutable reference to the `Application` whose windows are to be added.
     /// * `spaces` - A slice of space IDs to query.
     /// * `refresh_index` - An integer indicating the refresh index, used to determine if all windows are resolved.
+    /// * `windows` - A query for all windows.
     ///
     /// # Returns
     ///
@@ -713,8 +714,8 @@ impl WindowManager {
     ///
     /// # Arguments
     ///
-    /// * `windows` - A query for newly created windows marked with `FreshMarker`.
-    /// * `focused_window` - A query for the currently focused window.
+    /// * `trigger` - The Bevy event trigger containing the new windows.
+    /// * `windows` - A query for all windows.
     /// * `apps` - A query for all applications.
     /// * `active_display` - A query for the active display.
     /// * `main_cid` - The main connection ID resource.
@@ -825,8 +826,8 @@ impl WindowManager {
     ///
     /// # Arguments
     ///
-    /// * `windows` - A query for windows marked with `DestroyedMarker`.
-    /// * `focused_window` - A query for the currently focused window.
+    /// * `trigger` - The Bevy event trigger containing the ID of the destroyed window.
+    /// * `windows` - A query for all windows with their parent.
     /// * `apps` - A query for all applications.
     /// * `displays` - A query for all displays.
     /// * `commands` - Bevy commands to despawn entities and trigger events.
@@ -996,15 +997,16 @@ impl WindowManager {
         }
     }
 
-    /// Reshuffles windows around the given `window` within the active panel to ensure visibility.
+    /// Reshuffles windows around a given window entity within the active panel to ensure visibility.
     /// Windows to the right and left of the focused window are repositioned.
     ///
     /// # Arguments
     ///
-    /// * `trigger` - The Bevy event trigger containing the ID of the window to reshuffle around.
-    /// * `main_cid` - The main connection ID resource.
+    /// * `main_cid` - The main connection ID.
     /// * `active_display` - A query for the active display.
+    /// * `entity` - The `Entity` of the window to reshuffle around.
     /// * `windows` - A query for all windows.
+    /// * `commands` - Bevy commands to trigger events.
     #[allow(clippy::needless_pass_by_value)]
     pub fn reshuffle_around(
         main_cid: ConnID,
@@ -1120,6 +1122,15 @@ impl WindowManager {
         Ok(())
     }
 
+    /// A Bevy system that triggers the `reshuffle_around` logic in response to a `ReshuffleAroundTrigger` event.
+    ///
+    /// # Arguments
+    ///
+    /// * `trigger` - The Bevy event trigger containing the ID of the window to reshuffle around.
+    /// * `main_cid` - The main connection ID resource.
+    /// * `active_display` - A query for the active display.
+    /// * `windows` - A query for all windows.
+    /// * `commands` - Bevy commands to trigger events.
     #[allow(clippy::needless_pass_by_value)]
     pub fn reshuffle_around_trigger(
         trigger: On<ReshuffleAroundTrigger>,
@@ -1156,7 +1167,9 @@ impl WindowManager {
     /// * `panel` - The panel containing the windows to reposition.
     /// * `width` - The width of each window in the stack.
     /// * `display_bounds` - The bounds of the display.
-    /// * `find_window` - A closure to find a window by its ID.
+    /// * `menubar_height` - The height of the menu bar.
+    /// * `windows` - A query for all windows.
+    /// * `commands` - Bevy commands to trigger events.
     fn reposition_stack(
         upper_left: f64,
         panel: &Panel,
@@ -1413,15 +1426,15 @@ impl WindowManager {
             .is_some_and(|ffm| ffm)
     }
 
-    /// Handles display added or removed events.
+    /// Handles display added events.
     /// It updates the list of displays and re-evaluates orphaned spaces.
     ///
     /// # Arguments
     ///
     /// * `trigger` - The Bevy event trigger containing the display event.
-    /// * `displays` - A query for all displays.
     /// * `windows` - A query for all windows.
     /// * `main_cid` - The main connection ID resource.
+    /// * `orphaned_spaces` - The resource for orphaned spaces.
     /// * `commands` - Bevy commands to spawn/despawn entities and trigger events.
     #[allow(clippy::needless_pass_by_value)]
     pub fn display_add_trigger(
@@ -1452,6 +1465,16 @@ impl WindowManager {
         commands.trigger(WMEventTrigger(Event::DisplayChanged));
     }
 
+    /// Handles display removed events.
+    /// It identifies orphaned spaces from the removed display and moves them to other displays.
+    ///
+    /// # Arguments
+    ///
+    /// * `trigger` - The Bevy event trigger containing the display event.
+    /// * `displays` - A query for all displays.
+    /// * `windows` - A query for all windows.
+    /// * `orphaned_spaces` - The resource for orphaned spaces.
+    /// * `commands` - Bevy commands to despawn entities and trigger events.
     #[allow(clippy::needless_pass_by_value)]
     pub fn display_remove_trigger(
         trigger: On<WMEventTrigger>,
@@ -1488,6 +1511,17 @@ impl WindowManager {
         commands.trigger(WMEventTrigger(Event::DisplayChanged));
     }
 
+    /// Handles display moved events.
+    /// It updates the display's information and re-evaluates orphaned spaces.
+    ///
+    /// # Arguments
+    ///
+    /// * `trigger` - The Bevy event trigger containing the display event.
+    /// * `displays` - A query for all displays.
+    /// * `windows` - A query for all windows.
+    /// * `main_cid` - The main connection ID resource.
+    /// * `orphaned_spaces` - The resource for orphaned spaces.
+    /// * `commands` - Bevy commands to trigger events.
     #[allow(clippy::needless_pass_by_value)]
     pub fn display_moved_trigger(
         trigger: On<WMEventTrigger>,
@@ -1574,6 +1608,15 @@ impl WindowManager {
         .inspect_err(|err| warn!("{}: {err}", function_name!()));
     }
 
+    /// Handles display change events by updating the active display and reorienting windows.
+    ///
+    /// # Arguments
+    ///
+    /// * `active_id` - The ID of the active display.
+    /// * `main_cid` - The main connection ID.
+    /// * `displays` - A query for all displays.
+    /// * `focused_window` - A query for the focused window.
+    /// * `commands` - Bevy commands to trigger events.
     fn display_change(
         active_id: u32,
         main_cid: ConnID,

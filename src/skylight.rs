@@ -138,6 +138,16 @@ unsafe extern "C" {
     /// extern `CFStringRef` SLSCopyActiveMenuBarDisplayIdentifier(int cid);
     pub fn SLSCopyActiveMenuBarDisplayIdentifier(cid: ConnID) -> CFStringRef;
 
+    /// Retrieves the height of the menu bar for a given display.
+    ///
+    /// # Arguments
+    ///
+    /// * `did` - The `CGDirectDisplayID` of the display.
+    /// * `height` - A mutable pointer to a `u32` where the height will be stored.
+    ///
+    /// # Returns
+    ///
+    /// A `CGError` indicating success or failure.
     pub fn SLSGetDisplayMenubarHeight(did: CGDirectDisplayID, height: *mut u32) -> CGError;
 
     /// Copies a list of windows with specified options and tags.

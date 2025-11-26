@@ -58,7 +58,7 @@ pub struct Application {
 }
 
 impl Drop for Application {
-    /// Cleans up the `AXObserver` by removing all registered notifications when the `InnerApplication` is dropped.
+    /// Cleans up the `AXObserver` by removing all registered notifications when the `Application` is dropped.
     fn drop(&mut self) {
         self.handler
             .remove_observer(&ObserverType::Application, &self.element, &AX_NOTIFICATIONS);
@@ -66,7 +66,7 @@ impl Drop for Application {
 }
 
 impl Application {
-    /// Creates a new `InnerApplication` instance for a given process.
+    /// Creates a new `Application` instance for a given process.
     /// It obtains the Accessibility UI element for the application and its connection ID.
     ///
     /// # Arguments
@@ -77,7 +77,7 @@ impl Application {
     ///
     /// # Returns
     ///
-    /// `Ok(Self)` if the `InnerApplication` is created successfully, otherwise `Err(Error)`.
+    /// `Ok(Self)` if the `Application` is created successfully, otherwise `Err(Error)`.
     pub fn new(main_cid: ConnID, process: &Process, events: &EventSender) -> Result<Self> {
         let refer = unsafe {
             let ptr = AXUIElementCreateApplication(process.pid);
@@ -102,7 +102,7 @@ impl Application {
     ///
     /// # Returns
     ///
-    /// `Ok(Pid)` with the process ID if successful, otherwise `Err(Error)` if the application has shut down.
+    /// The process ID.
     pub fn pid(&self) -> Pid {
         self.pid
     }
@@ -111,7 +111,7 @@ impl Application {
     ///
     /// # Returns
     ///
-    /// `Ok(ProcessSerialNumber)` with the PSN if successful, otherwise `Err(Error)` if the application has shut down.
+    /// The process serial number.
     pub fn psn(&self) -> ProcessSerialNumber {
         self.psn
     }
@@ -120,7 +120,7 @@ impl Application {
     ///
     /// # Returns
     ///
-    /// `Ok(ConnID)` with the connection ID if successful, otherwise `Err(Error)` if the application has shut down.
+    /// The connection ID.
     pub fn connection(&self) -> Option<ConnID> {
         self.connection
     }
@@ -165,6 +165,7 @@ impl Application {
     ///
     /// # Returns
     ///
+    /// `Ok(bool)` where `true` means all observers were successfully registered and `retry` list is empty, otherwise `Err(Error)`.
     pub fn observe_window(&mut self, window: &Window) -> Result<bool> {
         self.handler
             .add_observer(
@@ -215,7 +216,7 @@ impl ObserverContext {
     ///
     /// # Arguments
     ///
-    /// * `notification` - The name of the accessibility notification as a `String`.
+    /// * `notification` - The name of the accessibility notification as a `&str`.
     /// * `element` - The `AXUIElementRef` associated with the notification.
     fn notify(&self, notification: &str, element: AXUIElementRef) {
         match self.which {
@@ -229,7 +230,7 @@ impl ObserverContext {
     ///
     /// # Arguments
     ///
-    /// * `notification` - The name of the accessibility notification as a `String`.
+    /// * `notification` - The name of the accessibility notification as a `&str`.
     /// * `element` - The `AXUIElementRef` associated with the notification.
     fn notify_app(&self, notification: &str, element: AXUIElementRef) {
         match notification {
@@ -279,7 +280,7 @@ impl ObserverContext {
     ///
     /// # Arguments
     ///
-    /// * `notification` - The name of the accessibility notification as a `String`.
+    /// * `notification` - The name of the accessibility notification as a `&str`.
     /// * `window_id` - The ID of the window associated with the notification.
     fn notify_window(&self, notification: &str, window_id: WinID) {
         let event = match notification {
@@ -355,7 +356,7 @@ impl AxObserverHandler {
     ///
     /// # Arguments
     ///
-    /// * `element` - The `AxuWrapperType` to observe.
+    /// * `element` - The `&AXUIWrapper` to observe.
     /// * `notifications` - A slice of static strings representing the notification names to add.
     /// * `which` - Adds event type to callback context. I.e. an application or window specific.
     ///
@@ -425,7 +426,7 @@ impl AxObserverHandler {
     /// # Arguments
     ///
     /// * `which` - Adds event type to callback context. I.e. an application or window specific.
-    /// * `element` - The `AXUIElementRef` from which to remove notifications.
+    /// * `element` - The `&AXUIWrapper` from which to remove notifications.
     /// * `notifications` - A slice of static strings representing the notification names to remove.
     pub fn remove_observer(
         &mut self,

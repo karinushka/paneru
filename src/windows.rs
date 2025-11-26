@@ -139,15 +139,15 @@ impl WindowPane {
         }
     }
 
-    /// Retrieves the window ID at a specified index in the pane.
+    /// Retrieves the window panel at a specified index in the pane.
     ///
     /// # Arguments
     ///
-    /// * `at` - The index from which to retrieve the window ID.
+    /// * `at` - The index from which to retrieve the window panel.
     ///
     /// # Returns
     ///
-    /// `Ok(WinID)` with the window ID if the index is valid, otherwise `Err(Error)`.
+    /// `Ok(Panel)` with the window panel if the index is valid, otherwise `Err(Error)`.
     pub fn get(&self, at: usize) -> Result<Panel> {
         self.pane.get(at).cloned().ok_or(Error::new(
             ErrorKind::InvalidInput,
@@ -174,11 +174,11 @@ impl WindowPane {
         self.pane.len()
     }
 
-    /// Returns the ID of the first window in the pane.
+    /// Returns the first panel in the pane.
     ///
     /// # Returns
     ///
-    /// `Ok(WinID)` with the first window's ID, otherwise `Err(Error)` if the pane is empty.
+    /// `Ok(Panel)` with the first panel, otherwise `Err(Error)` if the pane is empty.
     pub fn first(&self) -> Result<Panel> {
         self.pane.front().cloned().ok_or(Error::new(
             ErrorKind::NotFound,
@@ -186,11 +186,11 @@ impl WindowPane {
         ))
     }
 
-    /// Returns the ID of the last window in the pane.
+    /// Returns the last panel in the pane.
     ///
     /// # Returns
     ///
-    /// `Ok(WinID)` with the last window's ID, otherwise `Err(Error)` if the pane is empty.
+    /// `Ok(Panel)` with the last panel, otherwise `Err(Error)` if the pane is empty.
     pub fn last(&self) -> Result<Panel> {
         self.pane.back().cloned().ok_or(Error::new(
             ErrorKind::NotFound,
@@ -204,7 +204,7 @@ impl WindowPane {
     /// # Arguments
     ///
     /// * `window_id` - The ID of the starting window.
-    /// * `accessor` - A closure that takes a `WinID` and returns `true` to continue iteration, `false` to stop.
+    /// * `accessor` - A closure that takes a `&Panel` and returns `true` to continue iteration, `false` to stop.
     ///
     /// # Returns
     ///
@@ -229,7 +229,7 @@ impl WindowPane {
     /// # Arguments
     ///
     /// * `window_id` - The ID of the starting window.
-    /// * `accessor` - A closure that takes a `WinID` and returns `true` to continue iteration, `false` to stop.
+    /// * `accessor` - A closure that takes a `&Panel` and returns `true` to continue iteration, `false` to stop.
     ///
     /// # Returns
     ///
@@ -586,7 +586,7 @@ impl Display {
     ///
     /// # Returns
     ///
-    /// `Ok(WindowPane)` if the active panel is found, otherwise `Err(Error)`.
+    /// `Ok(&mut WindowPane)` if the active panel is found, otherwise `Err(Error)`.
     pub fn active_panel(&mut self, cid: ConnID) -> Result<&mut WindowPane> {
         let space_id = self.active_display_space(cid)?;
         self.spaces.get_mut(&space_id).ok_or(Error::new(
@@ -634,11 +634,11 @@ pub fn ax_window_id(element_ref: AXUIElementRef) -> Result<WinID> {
     Ok(window_id)
 }
 
-/// Retrieves the process ID (Pid) from an `AxuWrapperType` representing an Accessibility UI element.
+/// Retrieves the process ID (Pid) from an `AXUIWrapper` representing an Accessibility UI element.
 ///
 /// # Arguments
 ///
-/// * `element_ref` - A reference to the `CFRetained<AxuWrapperType>` element.
+/// * `element_ref` - A reference to the `CFRetained<AXUIWrapper>` element.
 ///
 /// # Returns
 ///
@@ -675,7 +675,7 @@ impl Window {
     ///
     /// # Arguments
     ///
-    /// * `element` - A `CFRetained<AxuWrapperType>` reference to the Accessibility UI element.
+    /// * `element` - A `CFRetained<AXUIWrapper>` reference to the Accessibility UI element.
     ///
     /// # Returns
     ///
@@ -746,6 +746,10 @@ impl Window {
     /// Calculates the next preferred size ratio for resizing the window.
     /// It cycles through a predefined set of ratios.
     ///
+    /// # Arguments
+    ///
+    /// * `size_ratios` - A slice of `f64` representing the preset size ratios.
+    ///
     /// # Returns
     ///
     /// The next size ratio as `f64`.
@@ -776,11 +780,11 @@ impl Window {
         self.managed = manage;
     }
 
-    /// Returns the raw `AXUIElementRef` of the window's accessibility element.
+    /// Returns the accessibility element of the window.
     ///
     /// # Returns
     ///
-    /// The `AXUIElementRef` as `AXUIElementRef`.
+    /// A `CFRetained<AXUIWrapper>` representing the accessibility element.
     pub fn element(&self) -> CFRetained<AXUIWrapper> {
         self.ax_element.clone()
     }
@@ -910,6 +914,7 @@ impl Window {
     ///
     /// * `x` - The new x-coordinate for the window's origin.
     /// * `y` - The new y-coordinate for the window's origin.
+    /// * `display_bounds` - The `CGRect` of the display.
     pub fn reposition(&mut self, x: f64, y: f64, display_bounds: &CGRect) {
         if (self.frame.origin.x - x).abs() < 0.1 && (self.frame.origin.y - y).abs() < 0.1 {
             trace!("{}: already in position.", function_name!());
@@ -970,7 +975,7 @@ impl Window {
     ///
     /// # Arguments
     ///
-    /// * `display_bounds` - The `CGRect` representing the bounds of the display the window is on.
+    /// * `display_bounds` - An optional `CGRect` representing the bounds of the display the window is on.
     ///
     /// # Returns
     ///
@@ -1222,6 +1227,9 @@ impl Window {
     /// # Arguments
     ///
     /// * `display_bounds` - The `CGRect` representing the bounds of the display.
+    /// * `moving` - An optional `RepositionMarker` indicating if the window is currently moving.
+    /// * `entity` - The `Entity` of the window.
+    /// * `commands` - Bevy commands to trigger events.
     ///
     /// # Returns
     ///

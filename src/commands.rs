@@ -15,17 +15,17 @@ use crate::events::{
 use crate::skylight::ConnID;
 use crate::windows::{Display, Panel, Window, WindowPane};
 
-/// Retrieves a window ID in a specified direction relative to a `current_window_id` within a `WindowPane`.
+/// Retrieves a window `Entity` in a specified direction relative to a `current_window_id` within a `WindowPane`.
 ///
 /// # Arguments
 ///
 /// * `direction` - The direction (e.g., "west", "east", "first", "last").
-/// * `current_window_id` - The ID of the current window.
+/// * `current_window_id` - The `Entity` of the current window.
 /// * `strip` - A reference to the `WindowPane` to search within.
 ///
 /// # Returns
 ///
-/// `Some(WinID)` with the found window's ID, otherwise `None`.
+/// `Some(Entity)` with the found window's entity, otherwise `None`.
 fn get_window_in_direction(
     direction: &str,
     current_window_id: Entity,
@@ -77,13 +77,13 @@ fn get_window_in_direction(
 /// # Arguments
 ///
 /// * `argv` - A slice of strings representing the command arguments (e.g., [`east`]).
-/// * `current_window` - A reference to the currently focused `Window`.
+/// * `current_window` - The `Entity` of the currently focused `Window`.
 /// * `strip` - A reference to the active `WindowPane`.
 /// * `windows` - A query for all `Window` components.
 ///
 /// # Returns
 ///
-/// `Some(WinID)` with the ID of the newly focused window, otherwise `None`.
+/// `Some(Entity)` with the entity of the newly focused window, otherwise `None`.
 fn command_move_focus(
     argv: &[String],
     current_window: Entity,
@@ -104,14 +104,15 @@ fn command_move_focus(
 /// # Arguments
 ///
 /// * `argv` - A slice of strings representing the command arguments (e.g., [`west`]).
-/// * `current_window` - A reference to the currently focused `Window`.
+/// * `current` - The `Entity` of the currently focused `Window`.
 /// * `panel` - A reference to the active `WindowPane`.
 /// * `display_bounds` - The `CGRect` representing the bounds of the display.
 /// * `windows` - A mutable query for all `Window` components.
+/// * `commands` - Bevy commands to trigger events.
 ///
 /// # Returns
 ///
-/// `Some(Window)` with the window that was swapped with, otherwise `None`.
+/// `Some(Entity)` with the entity that was swapped with, otherwise `None`.
 fn command_swap_focus(
     argv: &[String],
     current: Entity,
@@ -164,7 +165,7 @@ fn command_swap_focus(
 /// * `argv` - A slice of strings representing the command arguments.
 /// * `main_cid` - The main connection ID.
 /// * `active_display` - The currently active display.
-/// * `focused_window` - A query for the currently focused window.
+/// * `focused_entity` - The `Entity` of the focused window.
 /// * `windows` - A mutable query for all `Window` components.
 /// * `commands` - Bevy commands to trigger events.
 /// * `config` - The optional configuration resource.
@@ -291,8 +292,7 @@ fn command_windows(
 /// * `trigger` - The Bevy event trigger containing the command arguments.
 /// * `sender` - The event sender socket.
 /// * `main_cid` - The main connection ID resource.
-/// * `windows` - A query for all windows.
-/// * `focused_window` - A query for the focused window.
+/// * `windows` - A query for all windows, including the focused one.
 /// * `display` - A query for the active display.
 /// * `commands` - Bevy commands to trigger events.
 /// * `config` - The optional configuration resource.

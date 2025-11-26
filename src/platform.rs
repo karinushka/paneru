@@ -460,7 +460,7 @@ impl ProcessHandler {
     ///
     /// # Arguments
     ///
-    /// * `psn` - A reference to the `ProcessSerialNumber` of the process involved in the event.
+    /// * `psn` - The `ProcessSerialNumber` of the process involved in the event.
     /// * `event` - The `ProcessEventApp` indicating the type of event.
     fn process_handler(&mut self, psn: ProcessSerialNumber, event: ProcessEventApp) {
         let _ = match event {

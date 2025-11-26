@@ -139,7 +139,7 @@ impl<T> std::convert::AsRef<T> for AXUIWrapper {
 }
 
 impl std::fmt::Display for AXUIWrapper {
-    /// Formats the `AxuWrapperType` for display, showing the raw pointer value.
+    /// Formats the `AXUIWrapper` for display, showing the raw pointer value.
     ///
     /// # Arguments
     ///
@@ -161,7 +161,7 @@ impl std::fmt::Display for AXUIWrapper {
 ///
 /// # Arguments
 ///
-/// * `element_ref` - A reference to the `CFRetained<AxuWrapperType>` representing the UI element.
+/// * `element_ref` - A reference to the `CFRetained<AXUIWrapper>` representing the UI element.
 /// * `name` - A `CFRetained<CFString>` representing the name of the attribute.
 ///
 /// # Returns
@@ -280,7 +280,7 @@ pub fn create_array<T>(values: &[T], cftype: CFNumberType) -> Result<CFRetained<
 ///
 /// # Arguments
 ///
-/// * `observer` - A reference to the `AxuWrapperType` wrapping the `AXObserverRef`.
+/// * `observer` - A reference to the `AXUIWrapper` wrapping the `AXObserverRef`.
 ///
 /// # Returns
 ///
@@ -294,7 +294,7 @@ fn run_loop_source(observer: &AXUIWrapper) -> Option<&CFRunLoopSource> {
 ///
 /// # Arguments
 ///
-/// * `observer` - A reference to the `AxuWrapperType` wrapping the `AXObserverRef`.
+/// * `observer` - A reference to the `AXUIWrapper` wrapping the `AXObserverRef`.
 /// * `mode` - An optional `CFRunLoopMode` for adding the source.
 ///
 /// # Returns
@@ -328,7 +328,7 @@ pub fn add_run_loop(observer: &AXUIWrapper, mode: Option<&CFRunLoopMode>) -> Res
 ///
 /// # Arguments
 ///
-/// * `observer` - A reference to the `AxuWrapperType` wrapping the `AXObserverRef`.
+/// * `observer` - A reference to the `AXUIWrapper` wrapping the `AXObserverRef`.
 pub fn remove_run_loop(observer: &AXUIWrapper) {
     if let Some(run_loop_source) = run_loop_source(observer) {
         debug!(

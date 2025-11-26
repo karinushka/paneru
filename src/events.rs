@@ -518,8 +518,8 @@ impl EventHandler {
     ///
     /// # Arguments
     ///
+    /// * `apps` - A query for all applications, checking if they are still marked as fresh.
     /// * `windows` - A query for all windows.
-    /// * `fresh_windows` - A query for windows still marked as fresh.
     /// * `initializing` - A query for the initializing marker entity.
     /// * `displays` - A query for all displays.
     /// * `main_cid` - The main connection ID resource.
@@ -562,6 +562,17 @@ impl EventHandler {
         }
     }
 
+    /// Animates window movement.
+    /// This is a Bevy system that runs on `Update`. It smoothly moves windows to their target
+    /// positions, as indicated by the `RepositionMarker` component.
+    ///
+    /// # Arguments
+    ///
+    /// * `windows` - A query for windows with a `RepositionMarker`.
+    /// * `displays` - A query for the active display.
+    /// * `time` - The Bevy `Time` resource.
+    /// * `config` - The optional configuration resource, used for animation speed.
+    /// * `commands` - Bevy commands to remove the `RepositionMarker` when animation is complete.
     #[allow(clippy::needless_pass_by_value)]
     fn animate_windows(
         windows: Query<(&mut Window, Entity, &RepositionMarker)>,
@@ -617,6 +628,15 @@ impl EventHandler {
         }
     }
 
+    /// Animates window resizing.
+    /// This is a Bevy system that runs on `Update`. It resizes windows to their target
+    /// dimensions, as indicated by the `ResizeMarker` component.
+    ///
+    /// # Arguments
+    ///
+    /// * `windows` - A query for windows with a `ResizeMarker`.
+    /// * `displays` - A query for the active display.
+    /// * `commands` - Bevy commands to remove the `ResizeMarker` when resizing is complete.
     #[allow(clippy::needless_pass_by_value)]
     fn animate_resize_windows(
         windows: Query<(&mut Window, Entity, &ResizeMarker)>,

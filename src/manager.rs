@@ -722,16 +722,24 @@ impl WindowManager {
     #[allow(clippy::needless_pass_by_value)]
     pub fn spawn_window_trigger(
         mut trigger: On<SpawnWindowTrigger>,
-        focused_window: Query<(Entity, &Window), With<FocusedMarker>>,
+        windows: Query<(Entity, &Window, Option<&FocusedMarker>)>,
         mut apps: Query<(Entity, &mut Application)>,
         mut active_display: Query<&mut Display, With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
         mut commands: Commands,
     ) {
-        let windows = &mut trigger.event_mut().0;
+        let new_windows = &mut trigger.event_mut().0;
 
-        while let Some(mut window) = windows.pop() {
+        while let Some(mut window) = new_windows.pop() {
             let window_id = window.id();
+
+            if windows
+                .iter()
+                .any(|(_, window, _)| window.id() == window_id)
+            {
+                continue;
+            }
+
             debug!("{}: window {}", function_name!(), window_id);
             let Ok(pid) = ax_window_pid(&window.element()) else {
                 warn!(
@@ -797,10 +805,10 @@ impl WindowManager {
             let entity = commands.spawn(window).id();
             commands.entity(entity).set_parent_in_place(app_entity);
 
-            let insert_at = focused_window
-                .single()
-                .ok()
-                .and_then(|(entity, _)| panel.index_of(entity).ok());
+            let focused_window = windows
+                .iter()
+                .find_map(|(entity, _, focused)| focused.map(|_| entity));
+            let insert_at = focused_window.and_then(|entity| panel.index_of(entity).ok());
             debug!("New window adding at {panel}");
             match insert_at {
                 Some(after) => {

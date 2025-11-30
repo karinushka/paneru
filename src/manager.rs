@@ -109,11 +109,7 @@ impl WindowManager {
                 Ok(window) => {
                     commands.trigger(SpawnWindowTrigger(vec![window]));
                 }
-                Err(err) => debug!(
-                    "{}: not adding window {element:?}: {}",
-                    function_name!(),
-                    err
-                ),
+                Err(err) => debug!("{}: not adding window {element:?}: {err}", function_name!(),),
             },
             Event::WindowMinimized { window_id } => {
                 if let Some((_, entity)) = find_window(*window_id) {
@@ -391,7 +387,7 @@ impl WindowManager {
                 );
                 match windows.iter().find(|(window, _)| window.id() == window_id) {
                     Some((window, _)) => {
-                        if also_minimized || !window.is_minimized() {
+                        if also_minimized || !window.minimized {
                             window_list.push(window.id());
                         }
                     }
@@ -782,15 +778,9 @@ impl WindowManager {
                     window_id
                 );
             }
-
             window.psn = Some(app.psn());
-            let minimized = window.is_minimized();
-            let is_root = Window::parent(app.connection().unwrap_or_default(), window_id).is_err()
-                || window.is_root();
-            {
-                window.minimized = minimized;
-                window.is_root = is_root;
-            }
+            window.eligible =
+                window.parent(app.connection().unwrap_or_default()).is_err() || window.is_root();
             let bundle_id = app.bundle_id().map(String::as_str).unwrap_or_default();
             debug!(
                 "{}: window {} isroot {} eligible {} bundle_id {}",

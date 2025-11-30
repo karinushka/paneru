@@ -666,7 +666,7 @@ pub struct Window {
     ax_element: CFRetained<AXUIWrapper>,
     pub frame: CGRect,
     pub minimized: bool,
-    pub is_root: bool,
+    pub eligible: bool,
     pub width_ratio: f64,
     managed: bool,
 }
@@ -689,7 +689,7 @@ impl Window {
             ax_element: element.clone(),
             frame: CGRect::default(),
             minimized: false,
-            is_root: false,
+            eligible: false,
             width_ratio: 0.33,
             managed: true,
         };
@@ -791,18 +791,17 @@ impl Window {
         self.ax_element.clone()
     }
 
-    /// Retrieves the parent window ID for a given window.
+    /// Retrieves the parent window ID for of the window.
     ///
     /// # Arguments
     ///
     /// * `main_conn` - The main connection ID.
-    /// * `window_id` - The ID of the window whose parent is sought.
     ///
     /// # Returns
     ///
     /// `Ok(WinID)` with the parent window ID if successful, otherwise `Err(Error)`.
-    pub fn parent(main_conn: ConnID, window_id: WinID) -> Result<WinID> {
-        let windows = create_array(&[window_id], CFNumberType::SInt32Type)?;
+    pub fn parent(&self, main_conn: ConnID) -> Result<WinID> {
+        let windows = create_array(&[self.id], CFNumberType::SInt32Type)?;
         unsafe {
             let query =
                 CFRetained::from_raw(SLSWindowQueryWindows(main_conn, &raw const *windows, 1));
@@ -857,7 +856,7 @@ impl Window {
     /// # Returns
     ///
     /// `true` if the subrole is unknown, `false` otherwise.
-    pub fn is_unknown(&self) -> bool {
+    fn is_unknown(&self) -> bool {
         self.subrole()
             .is_ok_and(|subrole| subrole.eq(kAXUnknownSubrole))
     }
@@ -867,11 +866,11 @@ impl Window {
     /// # Returns
     ///
     /// `true` if the window is minimized, `false` otherwise.
-    pub fn is_minimized(&self) -> bool {
+    fn is_minimized(&self) -> bool {
         let axminimized = CFString::from_static_str(kAXMinimizedAttribute);
         get_attribute::<CFBoolean>(&self.ax_element, &axminimized)
             .map(|minimized| CFBoolean::value(&minimized))
-            .is_ok_and(|minimized| minimized || self.minimized)
+            .is_ok_and(|minimized| minimized)
     }
 
     /// Checks if the window is a root window (i.e., not a child of another window).
@@ -892,7 +891,7 @@ impl Window {
     /// # Returns
     ///
     /// `true` if the window is real, `false` otherwise.
-    pub fn is_real(&self) -> bool {
+    fn is_real(&self) -> bool {
         let role = self.role().ok();
         let subrole = self.subrole().ok();
 
@@ -907,7 +906,7 @@ impl Window {
     ///
     /// `true` if the window is eligible, `false` otherwise.
     pub fn is_eligible(&self) -> bool {
-        self.is_root && self.is_real() // TODO: check for WINDOW_RULE_MANAGED
+        self.eligible
     }
 
     /// Repositions the window to the specified x and y coordinates.

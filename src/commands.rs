@@ -4,7 +4,7 @@ use bevy::ecs::query::With;
 use bevy::ecs::system::{Commands, Query, Res};
 use log::{error, warn};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use std::io::{ErrorKind, Result};
+use std::io::{Error, ErrorKind, Result};
 use stdext::function_name;
 
 use crate::config::{Config, preset_column_widths};
@@ -14,6 +14,86 @@ use crate::events::{
 };
 use crate::skylight::ConnID;
 use crate::windows::{Display, Panel, Window, WindowPane};
+
+enum Direction {
+    North,
+    South,
+    West,
+    East,
+    First,
+    Last,
+}
+
+enum Operation {
+    Focus(Direction),
+    Swap(Direction),
+    Center,
+    Resize,
+    Manage,
+    Stack(bool),
+}
+
+enum Command {
+    Window(Operation),
+    Quit,
+}
+
+fn parse_direction(dir: &str) -> Result<Direction> {
+    Ok(match dir {
+        "north" => Direction::North,
+        "south" => Direction::South,
+        "west" => Direction::West,
+        "east" => Direction::East,
+        "first" => Direction::First,
+        "last" => Direction::Last,
+        _ => {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("{}: Unhandled direction {dir}", function_name!()),
+            ));
+        }
+    })
+}
+
+fn parse_operation(argv: &[String]) -> Result<Operation> {
+    let empty = String::new();
+    let cmd = argv.first().unwrap_or(&empty).as_ref();
+    let err = Error::new(
+        ErrorKind::InvalidInput,
+        format!("{}: Invalid command '{argv:?}'", function_name!()),
+    );
+
+    let out = match cmd {
+        "focus" => Operation::Focus(parse_direction(argv.get(1).ok_or(err)?)?),
+        "swap" => Operation::Swap(parse_direction(argv.get(1).ok_or(err)?)?),
+        "center" => Operation::Center,
+        "resize" => Operation::Resize,
+        "manage" => Operation::Manage,
+        "stack" => Operation::Stack(true),
+        "unstack" => Operation::Stack(false),
+        _ => {
+            return Err(err);
+        }
+    };
+    Ok(out)
+}
+
+fn parse_command(argv: &[String]) -> Result<Command> {
+    let empty = String::new();
+    let cmd = argv.first().unwrap_or(&empty).as_ref();
+
+    let out = match cmd {
+        "window" => Command::Window(parse_operation(&argv[1..])?),
+        "quit" => Command::Quit,
+        _ => {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("{}: Unhandled command '{argv:?}'", function_name!()),
+            ));
+        }
+    };
+    Ok(out)
+}
 
 /// Retrieves a window `Entity` in a specified direction relative to a `current_window_id` within a `WindowPane`.
 ///
@@ -27,23 +107,27 @@ use crate::windows::{Display, Panel, Window, WindowPane};
 ///
 /// `Some(Entity)` with the found window's entity, otherwise `None`.
 fn get_window_in_direction(
-    direction: &str,
+    direction: &Direction,
     current_window_id: Entity,
     strip: &WindowPane,
 ) -> Option<Entity> {
     let index = strip.index_of(current_window_id).ok()?;
     match direction {
-        "west" => (index > 0)
+        Direction::West => (index > 0)
             .then(|| strip.get(index - 1).ok())
             .flatten()
             .and_then(|panel| panel.top()),
-        "east" => (index < strip.len() - 1)
+
+        Direction::East => (index < strip.len() - 1)
             .then(|| strip.get(index + 1).ok())
             .flatten()
             .and_then(|panel| panel.top()),
-        "first" => strip.first().ok().and_then(|panel| panel.top()),
-        "last" => strip.last().ok().and_then(|panel| panel.top()),
-        "north" => match strip.get(index).ok()? {
+
+        Direction::First => strip.first().ok().and_then(|panel| panel.top()),
+
+        Direction::Last => strip.last().ok().and_then(|panel| panel.top()),
+
+        Direction::North => match strip.get(index).ok()? {
             Panel::Single(window_id) => Some(window_id),
             Panel::Stack(stack) => stack
                 .iter()
@@ -52,7 +136,8 @@ fn get_window_in_direction(
                 .and_then(|(index, _)| (index > 0).then(|| stack.get(index - 1)).flatten())
                 .copied(),
         },
-        "south" => match strip.get(index).ok()? {
+
+        Direction::South => match strip.get(index).ok()? {
             Panel::Single(window_id) => Some(window_id),
             Panel::Stack(stack) => stack
                 .iter()
@@ -65,10 +150,6 @@ fn get_window_in_direction(
                 })
                 .copied(),
         },
-        dir => {
-            error!("{}: Unhandled direction {dir}", function_name!());
-            None
-        }
     }
 }
 
@@ -85,13 +166,11 @@ fn get_window_in_direction(
 ///
 /// `Some(Entity)` with the entity of the newly focused window, otherwise `None`.
 fn command_move_focus(
-    argv: &[String],
+    direction: &Direction,
     current_window: Entity,
     strip: &WindowPane,
     windows: &Query<&Window>,
 ) -> Option<Entity> {
-    let direction = argv.first()?;
-
     get_window_in_direction(direction, current_window, strip).inspect(|entity| {
         if let Ok(window) = windows.get(*entity) {
             window.focus_with_raise();
@@ -114,14 +193,13 @@ fn command_move_focus(
 ///
 /// `Some(Entity)` with the entity that was swapped with, otherwise `None`.
 fn command_swap_focus(
-    argv: &[String],
+    direction: &Direction,
     current: Entity,
     panel: &mut WindowPane,
     display_bounds: &CGRect,
     windows: &mut Query<&mut Window>,
     commands: &mut Commands,
 ) -> Option<Entity> {
-    let direction = argv.first()?;
     let index = panel.index_of(current).ok()?;
     let other_window = get_window_in_direction(direction, current, panel)?;
     let new_index = panel.index_of(other_window).ok()?;
@@ -158,6 +236,82 @@ fn command_swap_focus(
     Some(other_window)
 }
 
+fn command_center_window(
+    focused_entity: Entity,
+    windows: &mut Query<&mut Window>,
+    main_cid: ConnID,
+    active_display: &mut Display,
+    commands: &mut Commands,
+) {
+    let Ok(window) = windows.get_mut(focused_entity) else {
+        return;
+    };
+    let frame = window.frame();
+    commands.entity(focused_entity).insert(RepositionMarker {
+        origin: CGPoint {
+            x: (active_display.bounds.size.width - frame.size.width) / 2.0,
+            y: frame.origin.y,
+        },
+    });
+    window.center_mouse(main_cid);
+}
+
+fn resize_window(
+    active_display: &mut Display,
+    focused_entity: Entity,
+    windows: &mut Query<&mut Window>,
+    commands: &mut Commands,
+    config: Option<&Res<Config>>,
+) {
+    let Ok(window) = windows.get_mut(focused_entity) else {
+        return;
+    };
+    let display_width = active_display.bounds.size.width;
+    let width_ratios = preset_column_widths(config);
+    let width_ratio = window.next_size_ratio(&width_ratios);
+
+    let width = width_ratio * display_width;
+    let height = window.frame().size.height;
+    let x = (display_width - width).min(window.frame().origin.x);
+    let y = window.frame().origin.y;
+
+    commands.entity(focused_entity).insert(RepositionMarker {
+        origin: CGPoint { x, y },
+    });
+    commands.entity(focused_entity).insert(ResizeMarker {
+        size: CGSize { width, height },
+    });
+}
+
+fn manage_window(
+    active_panel: &mut WindowPane,
+    display_bounds: &CGRect,
+    focused_entity: Entity,
+    windows: &mut Query<&mut Window>,
+    commands: &mut Commands,
+) {
+    let Ok(mut window) = windows.get_mut(focused_entity) else {
+        return;
+    };
+    if window.managed() {
+        // Window already managed, remove it from the managed stack.
+        active_panel.remove(focused_entity);
+        window.manage(false);
+    } else {
+        // Add newly managed window to the stack.
+        let frame = window.frame();
+        commands.entity(focused_entity).insert(RepositionMarker {
+            origin: CGPoint {
+                x: frame.origin.x,
+                y: 0.0,
+            },
+        });
+        window.resize(frame.size.width, display_bounds.size.height, display_bounds);
+        active_panel.append(focused_entity);
+        window.manage(true);
+    }
+}
+
 /// Handles various "window" commands, such as focus, swap, center, resize, and manage.
 ///
 /// # Arguments
@@ -173,35 +327,29 @@ fn command_swap_focus(
 /// # Returns
 ///
 /// `Ok(())` if the command is processed successfully, otherwise `Err(Error)`.
-#[allow(clippy::needless_pass_by_value)]
 fn command_windows(
-    argv: &[String],
+    operation: Operation,
     main_cid: ConnID,
     active_display: &mut Display,
     focused_entity: Entity,
     windows: &mut Query<&mut Window>,
     commands: &mut Commands,
-    config: Option<Res<Config>>,
+    config: Option<&Res<Config>>,
 ) -> Result<()> {
-    if !windows.get(focused_entity).is_ok_and(Window::is_eligible) {
-        return Ok(());
-    }
-
-    let empty = String::new();
     let bounds = active_display.bounds;
     let active_panel = active_display.active_panel(main_cid)?;
     let error_msg =
         |err| std::io::Error::new(ErrorKind::NotFound, format!("{}: {err}", function_name!()));
 
-    match argv.first().unwrap_or(&empty).as_ref() {
-        "focus" => {
+    match operation {
+        Operation::Focus(direction) => {
             let mut lens = windows.transmute_lens::<&Window>();
-            command_move_focus(&argv[1..], focused_entity, active_panel, &lens.query());
+            command_move_focus(&direction, focused_entity, active_panel, &lens.query());
         }
 
-        "swap" => {
+        Operation::Swap(direction) => {
             command_swap_focus(
-                &argv[1..],
+                &direction,
                 focused_entity,
                 active_panel,
                 &bounds,
@@ -210,75 +358,33 @@ fn command_windows(
             );
         }
 
-        "center" => {
-            let window = windows.get_mut(focused_entity).map_err(error_msg)?;
-            let frame = window.frame();
-            commands.entity(focused_entity).insert(RepositionMarker {
-                origin: CGPoint {
-                    x: (active_display.bounds.size.width - frame.size.width) / 2.0,
-                    y: frame.origin.y,
-                },
-            });
-            window.center_mouse(main_cid);
+        Operation::Center => {
+            command_center_window(focused_entity, windows, main_cid, active_display, commands);
         }
 
-        "resize" => {
-            let display_width = active_display.bounds.size.width;
-            let window = windows.get_mut(focused_entity).map_err(error_msg)?;
-            let width_ratios = preset_column_widths(config.as_ref());
-            let width_ratio = window.next_size_ratio(&width_ratios);
-
-            let width = width_ratio * display_width;
-            let height = window.frame().size.height;
-            let x = (display_width - width).min(window.frame().origin.x);
-            let y = window.frame().origin.y;
-
-            commands.entity(focused_entity).insert(RepositionMarker {
-                origin: CGPoint { x, y },
-            });
-            commands.entity(focused_entity).insert(ResizeMarker {
-                size: CGSize { width, height },
-            });
+        Operation::Resize => {
+            resize_window(active_display, focused_entity, windows, commands, config);
         }
 
-        "manage" => {
-            let mut window = windows.get_mut(focused_entity).map_err(error_msg)?;
-            if window.managed() {
-                // Window already managed, remove it from the managed stack.
-                active_panel.remove(focused_entity);
-                window.manage(false);
+        Operation::Manage => {
+            manage_window(active_panel, &bounds, focused_entity, windows, commands);
+        }
+
+        Operation::Stack(stack) => {
+            if stack {
+                let window = windows.get(focused_entity).map_err(error_msg)?;
+                if !window.managed() {
+                    return Ok(());
+                }
+                active_panel.stack(focused_entity)?;
             } else {
-                // Add newly managed window to the stack.
-                let frame = window.frame();
-                commands.entity(focused_entity).insert(RepositionMarker {
-                    origin: CGPoint {
-                        x: frame.origin.x,
-                        y: 0.0,
-                    },
-                });
-                window.resize(frame.size.width, bounds.size.height, &bounds);
-                active_panel.append(focused_entity);
-                window.manage(true);
+                let window = windows.get(focused_entity).map_err(error_msg)?;
+                if !window.managed() {
+                    return Ok(());
+                }
+                active_panel.unstack(focused_entity)?;
             }
         }
-
-        "stack" => {
-            let window = windows.get(focused_entity).map_err(error_msg)?;
-            if !window.managed() {
-                return Ok(());
-            }
-            active_panel.stack(focused_entity)?;
-        }
-
-        "unstack" => {
-            let window = windows.get(focused_entity).map_err(error_msg)?;
-            if !window.managed() {
-                return Ok(());
-            }
-            active_panel.unstack(focused_entity)?;
-        }
-
-        _ => (),
     }
     let window = windows.get(focused_entity).map_err(error_msg)?;
     commands.trigger(ReshuffleAroundTrigger(window.id()));
@@ -325,26 +431,28 @@ pub fn process_command_trigger(
     {
         commands.trigger(WMEventTrigger(Event::DisplayChanged));
     }
+    let eligible = focused_window.is_eligible();
 
-    let mut lens = windows.transmute_lens::<&mut Window>();
-    let argv = &trigger.event().0;
-    if let Some(first) = argv.first() {
-        match first.as_ref() {
-            "window" => {
-                _ = command_windows(
-                    &argv[1..],
-                    main_cid,
-                    &mut active_display,
-                    focused_entity,
-                    &mut lens.query(),
-                    &mut commands,
-                    config,
-                )
-                .inspect_err(|err| warn!("{}: {err}", function_name!()));
+    let res = parse_command(&trigger.event().0).and_then(|command| match command {
+        Command::Window(operation) => {
+            if !eligible {
+                return Ok(());
             }
-            "quit" => sender.0.send(Event::Exit).unwrap(),
-            _ => warn!("{}: Unhandled command: {argv:?}", function_name!()),
+            let mut lens = windows.transmute_lens::<&mut Window>();
+            command_windows(
+                operation,
+                main_cid,
+                &mut active_display,
+                focused_entity,
+                &mut lens.query(),
+                &mut commands,
+                config.as_ref(),
+            )
         }
+        Command::Quit => sender.0.send(Event::Exit),
+    });
+    if let Err(err) = res {
+        error!("{}: {err}", function_name!());
     }
 }
 
@@ -377,18 +485,20 @@ mod tests {
         let e0 = entities[0];
         let e2 = entities[2];
         let e3 = entities[3];
+        let east = Direction::East;
+        let west = Direction::West;
 
         // From e2, east should be e3, west should be e0 (top of stack)
-        assert_eq!(get_window_in_direction("east", e2, &pane), Some(e3));
-        assert_eq!(get_window_in_direction("west", e2, &pane), Some(e0));
+        assert_eq!(get_window_in_direction(&east, e2, &pane), Some(e3));
+        assert_eq!(get_window_in_direction(&west, e2, &pane), Some(e0));
 
         // From e3, west is e2, east is None
-        assert_eq!(get_window_in_direction("west", e3, &pane), Some(e2));
-        assert_eq!(get_window_in_direction("east", e3, &pane), None);
+        assert_eq!(get_window_in_direction(&west, e3, &pane), Some(e2));
+        assert_eq!(get_window_in_direction(&east, e3, &pane), None);
 
         // From e0, east is e2, west is None
-        assert_eq!(get_window_in_direction("east", e0, &pane), Some(e2));
-        assert_eq!(get_window_in_direction("west", e0, &pane), None);
+        assert_eq!(get_window_in_direction(&east, e0, &pane), Some(e2));
+        assert_eq!(get_window_in_direction(&west, e0, &pane), None);
     }
 
     #[test]
@@ -396,13 +506,15 @@ mod tests {
         let (_world, pane, entities) = setup_world_with_layout();
         let e0 = entities[0];
         let e1 = entities[1];
+        let north = Direction::North;
+        let south = Direction::South;
 
         // From e0 (top of stack), south should be e1, north is None
-        assert_eq!(get_window_in_direction("south", e0, &pane), Some(e1));
-        assert_eq!(get_window_in_direction("north", e0, &pane), None);
+        assert_eq!(get_window_in_direction(&south, e0, &pane), Some(e1));
+        assert_eq!(get_window_in_direction(&north, e0, &pane), None);
 
         // From e1 (bottom of stack), north should be e0, south is None
-        assert_eq!(get_window_in_direction("north", e1, &pane), Some(e0));
-        assert_eq!(get_window_in_direction("south", e1, &pane), None);
+        assert_eq!(get_window_in_direction(&north, e1, &pane), Some(e0));
+        assert_eq!(get_window_in_direction(&south, e1, &pane), None);
     }
 }

@@ -9,7 +9,7 @@ use bevy::ecs::schedule::common_conditions::any_with_component;
 use bevy::ecs::system::{Commands, Query, Res};
 use bevy::ecs::world::World;
 use bevy::prelude::Event as BevyEvent;
-use bevy::time::{Time, Virtual};
+use bevy::time::{Time, Timer, Virtual};
 use log::{debug, error, info, trace, warn};
 use objc2::rc::Retained;
 use objc2_core_foundation::{CFRetained, CGPoint, CGSize};
@@ -208,7 +208,15 @@ pub struct FocusedMarker;
 
 // Signifies freshly created Process, Application or Window.
 #[derive(Component)]
-pub struct FreshMarker;
+pub struct FreshMarker(pub Timer);
+
+impl FreshMarker {
+    pub fn new() -> Self {
+        const READY_TIMEOUT_SEC: f32 = 2.0;
+        let ready_timer = Timer::from_seconds(READY_TIMEOUT_SEC, bevy::time::TimerMode::Once);
+        FreshMarker(ready_timer)
+    }
+}
 
 // Used to gather existing processes and windows.
 #[derive(Component)]
@@ -326,6 +334,7 @@ impl EventHandler {
                                 .run_if(any_with_component::<InitializingMarker>),
                             WindowManager::add_launched_process,
                             WindowManager::add_launched_application,
+                            WindowManager::ready_timer_cleanup,
                         ),
                     )
                     .run();

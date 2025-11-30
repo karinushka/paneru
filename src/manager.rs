@@ -66,7 +66,7 @@ impl WindowManager {
             Event::ApplicationLaunched { psn, observer } => {
                 if find_process(psn).is_none() {
                     let process = Process::new(psn, observer.clone());
-                    commands.spawn((FreshMarker, BProcess(process)));
+                    commands.spawn((FreshMarker::new(), BProcess(process)));
                 }
             }
 
@@ -1306,35 +1306,16 @@ impl WindowManager {
         cid: Res<MainConnection>,
         events: Res<SenderSocket>,
         process_query: Query<(Entity, &mut BProcess, Option<&Children>), With<FreshMarker>>,
-        time: Res<Time<Virtual>>,
         mut commands: Commands,
     ) {
         for (entity, mut process, children) in process_query {
             let process = &mut *process.0;
-            process.ready_timer.tick(time.delta());
-
             if !process.ready() {
-                trace!(
-                    "{}: Timer {}",
-                    function_name!(),
-                    process.ready_timer.elapsed().as_secs_f32()
-                );
-                if process.ready_timer.is_finished() {
-                    debug!(
-                        "{}: app {} is still not observable. Removing",
-                        function_name!(),
-                        process.name
-                    );
-                    commands.entity(entity).despawn();
-                }
                 continue;
             }
 
-            //
-            // NOTE: If we somehow receive a duplicate launched event due to the
-            // subscription-timing-mess above, simply ignore the event..
-            //
             if children.is_some() {
+                // Process already has an attached Application, so finish.
                 commands.entity(entity).remove::<FreshMarker>();
                 continue;
             }
@@ -1343,7 +1324,7 @@ impl WindowManager {
 
             if app.observe().is_ok_and(|good| good) {
                 commands
-                    .spawn((app, FreshMarker))
+                    .spawn((app, FreshMarker::new()))
                     .set_parent_in_place(entity);
             } else {
                 error!(
@@ -1352,14 +1333,6 @@ impl WindowManager {
                     process.name
                 );
             }
-
-            debug!(
-                "{}: app {} ready after {}ms.",
-                function_name!(),
-                process.name,
-                process.ready_timer.elapsed().as_millis(),
-            );
-            commands.entity(entity).remove::<FreshMarker>();
         }
     }
 
@@ -1379,7 +1352,9 @@ impl WindowManager {
         let find_window = |window_id| windows.iter().find(|window| window.id() == window_id);
 
         for (app, entity) in app_query {
-            let array = app.window_list().unwrap();
+            let Ok(array) = app.window_list() else {
+                continue;
+            };
             let create_window = |element_ref: NonNull<_>| {
                 let element = AXUIWrapper::retain(element_ref.as_ptr()).ok();
                 element.and_then(|element| {
@@ -1403,8 +1378,8 @@ impl WindowManager {
                 .filter_map(create_window)
                 .flatten()
                 .collect::<Vec<_>>();
-            commands.trigger(SpawnWindowTrigger(windows));
             commands.entity(entity).remove::<FreshMarker>();
+            commands.trigger(SpawnWindowTrigger(windows));
         }
     }
 
@@ -1947,6 +1922,35 @@ impl WindowManager {
         if mission_control_active.0 {
             #[warn(clippy::needless_return)]
             return;
+        }
+    }
+
+    /// Cleans up entities which have been initializing for too long.
+    ///
+    /// This can be processes which are not yet observable or applications which keep failing to
+    /// register some of the observers.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ready_timer_cleanup(
+        cleanup_query: Query<(Entity, &mut FreshMarker), With<FreshMarker>>,
+        time: Res<Time<Virtual>>,
+        mut commands: Commands,
+    ) {
+        for (entity, mut ready_timer) in cleanup_query {
+            let timer = &mut ready_timer.0;
+            timer.tick(time.delta());
+
+            trace!(
+                "{}: Entity {entity} Timer {}",
+                function_name!(),
+                timer.elapsed().as_secs_f32()
+            );
+            if timer.is_finished() {
+                debug!(
+                    "{}: Entity {entity} ran out of time. Removing",
+                    function_name!(),
+                );
+                commands.entity(entity).despawn();
+            }
         }
     }
 }

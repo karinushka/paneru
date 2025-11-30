@@ -1,4 +1,3 @@
-use bevy::time::Timer;
 use log::{debug, warn};
 use objc2::rc::Retained;
 use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication};
@@ -78,7 +77,6 @@ pub struct Process {
     pub name: String,
     pub application: Option<Retained<NSRunningApplication>>,
     pub policy: NSApplicationActivationPolicy,
-    pub ready_timer: Timer,
 
     pub observer: Retained<WorkspaceObserver>,
     pub observing_launched: AtomicBool,
@@ -105,7 +103,6 @@ impl Process {
     ///
     /// A `Pin<Box<Self>>` containing the new `Process` instance.
     pub fn new(psn: &ProcessSerialNumber, observer: Retained<WorkspaceObserver>) -> Pin<Box<Self>> {
-        const READY_TIMEOUT_SEC: f32 = 2.0;
         let mut pid: Pid = 0;
         unsafe { GetProcessPID(psn, NonNull::from(&mut pid).as_ptr()) };
 
@@ -125,7 +122,6 @@ impl Process {
             pid,
             application: apps,
             policy: NSApplicationActivationPolicy::Prohibited,
-            ready_timer: Timer::from_seconds(READY_TIMEOUT_SEC, bevy::time::TimerMode::Once),
             observer,
             observing_launched: AtomicBool::new(false),
             observing_activated: AtomicBool::new(false),

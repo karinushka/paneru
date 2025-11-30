@@ -1310,25 +1310,22 @@ impl WindowManager {
         mut commands: Commands,
     ) {
         for (entity, mut process, children) in process_query {
-            process.0.ready_timer.tick(time.delta());
+            let process = &mut *process.0;
+            process.ready_timer.tick(time.delta());
 
-            if process.0.terminated {
-                commands.entity(entity).despawn();
-                continue;
-            }
-            if !process.0.ready() {
+            if !process.ready() {
                 trace!(
                     "{}: Timer {}",
                     function_name!(),
-                    process.0.ready_timer.elapsed().as_secs_f32()
+                    process.ready_timer.elapsed().as_secs_f32()
                 );
-                if process.0.ready_timer.is_finished() {
+                if process.ready_timer.is_finished() {
                     debug!(
                         "{}: app {} is still not observable. Removing",
                         function_name!(),
-                        process.0.name
+                        process.name
                     );
-                    process.0.terminated = true;
+                    commands.entity(entity).despawn();
                 }
                 continue;
             }
@@ -1342,7 +1339,7 @@ impl WindowManager {
                 continue;
             }
 
-            let mut app = Application::new(cid.0, &process.0, &events.0).unwrap();
+            let mut app = Application::new(cid.0, process, &events.0).unwrap();
 
             if app.observe().is_ok_and(|good| good) {
                 commands
@@ -1352,15 +1349,15 @@ impl WindowManager {
                 error!(
                     "{}: failed to register some observers {}",
                     function_name!(),
-                    process.0.name
+                    process.name
                 );
             }
 
             debug!(
                 "{}: app {} ready after {}ms.",
                 function_name!(),
-                process.0.name,
-                process.0.ready_timer.elapsed().as_millis(),
+                process.name,
+                process.ready_timer.elapsed().as_millis(),
             );
             commands.entity(entity).remove::<FreshMarker>();
         }

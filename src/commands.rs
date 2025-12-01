@@ -4,10 +4,10 @@ use bevy::ecs::query::With;
 use bevy::ecs::system::{Commands, Query, Res};
 use log::{error, warn};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use std::io::{ErrorKind, Result};
 use stdext::function_name;
 
 use crate::config::{Config, preset_column_widths};
+use crate::errors::Result;
 use crate::events::{
     CommandTrigger, Event, FocusedMarker, MainConnection, RepositionMarker, ReshuffleAroundTrigger,
     ResizeMarker, SenderSocket, WMEventTrigger,
@@ -284,8 +284,6 @@ fn command_windows(
 ) -> Result<()> {
     let bounds = active_display.bounds;
     let active_panel = active_display.active_panel(main_cid)?;
-    let error_msg =
-        |err| std::io::Error::new(ErrorKind::NotFound, format!("{}: {err}", function_name!()));
 
     match operation {
         Operation::Focus(direction) => {
@@ -318,13 +316,13 @@ fn command_windows(
 
         Operation::Stack(stack) => {
             if *stack {
-                let window = windows.get(focused_entity).map_err(error_msg)?;
+                let window = windows.get(focused_entity)?;
                 if !window.managed() {
                     return Ok(());
                 }
                 active_panel.stack(focused_entity)?;
             } else {
-                let window = windows.get(focused_entity).map_err(error_msg)?;
+                let window = windows.get(focused_entity)?;
                 if !window.managed() {
                     return Ok(());
                 }
@@ -332,7 +330,7 @@ fn command_windows(
             }
         }
     }
-    let window = windows.get(focused_entity).map_err(error_msg)?;
+    let window = windows.get(focused_entity)?;
     commands.trigger(ReshuffleAroundTrigger(window.id()));
     Ok(())
 }

@@ -11,7 +11,7 @@ use objc2_core_foundation::{
     CFArray, CFMutableData, CFNumber, CFNumberType, CFRetained, CGPoint, CGRect,
 };
 use std::collections::HashMap;
-use std::io::{Error, ErrorKind, Result};
+use std::io::ErrorKind;
 use std::mem::take;
 use std::ops::Deref;
 use std::slice::from_raw_parts_mut;
@@ -19,6 +19,7 @@ use stdext::function_name;
 
 use crate::app::Application;
 use crate::config::Config;
+use crate::errors::{Error, Result};
 use crate::events::{
     BProcess, Event, ExistingMarker, FocusFollowsMouse, FocusedMarker, FreshMarker,
     InitializingMarker, MainConnection, MissionControlActive, OrphanedSpaces, RepositionMarker,
@@ -1015,22 +1016,12 @@ impl WindowManager {
         windows: &mut Query<(&mut Window, Entity, Option<&RepositionMarker>)>,
         commands: &mut Commands,
     ) -> Result<()> {
-        let mut active_display = active_display.single_mut().map_err(|err| {
-            Error::new(
-                ErrorKind::NotFound,
-                format!("{}: active display not found: {err}", function_name!()),
-            )
-        })?;
+        let mut active_display = active_display.single_mut()?;
         let display_bounds = active_display.bounds;
         let menubar_height = active_display.menubar_height;
         let active_panel = active_display.active_panel(main_cid)?;
 
-        let (window, _, moving) = windows.get_mut(entity).map_err(|err| {
-            Error::new(
-                ErrorKind::NotFound,
-                format!("{}: window not found: {err}", function_name!()),
-            )
-        })?;
+        let (window, _, moving) = windows.get_mut(entity)?;
         let frame = window.expose_window(&display_bounds, moving, entity, commands);
         trace!(
             "{}: Moving window {} to {:?}",
@@ -1609,12 +1600,7 @@ impl WindowManager {
             function_name!(),
         );
 
-        let (window, entity) = focused_window.single().map_err(|err| {
-            Error::new(
-                ErrorKind::NotFound,
-                format!("Can not find active windows: {err}."),
-            )
-        })?;
+        let (window, entity) = focused_window.single()?;
         let panel = active_display.active_panel(main_cid)?;
         debug!("{}: Active panel {panel}", function_name!());
 
@@ -1721,7 +1707,7 @@ impl WindowManager {
             };
         }
         if window_id == 0 {
-            Err(Error::other(format!(
+            Err(Error::invalid_window(&format!(
                 "{}: could not find a window at {point:?}",
                 function_name!()
             )))

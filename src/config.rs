@@ -3,7 +3,6 @@ use log::{error, info};
 use notify::EventHandler;
 use objc2_core_foundation::{CFData, CFString};
 use serde::{Deserialize, Deserializer, de};
-use std::io::{Error, ErrorKind, Result};
 use std::{
     collections::HashMap,
     ffi::c_void,
@@ -15,6 +14,7 @@ use stdext::function_name;
 use stdext::prelude::RwLockExt;
 
 use crate::commands::{Command, Direction, Operation};
+use crate::errors::{Error, Result};
 use crate::{platform::CFStringRef, skylight::OSStatus, util::AXUIWrapper};
 
 fn parse_direction(dir: &str) -> Result<Direction> {
@@ -26,10 +26,10 @@ fn parse_direction(dir: &str) -> Result<Direction> {
         "first" => Direction::First,
         "last" => Direction::Last,
         _ => {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                format!("{}: Unhandled direction {dir}", function_name!()),
-            ));
+            return Err(Error::InvalidConfig(format!(
+                "{}: Unhandled direction {dir}",
+                function_name!()
+            )));
         }
     })
 }
@@ -37,10 +37,7 @@ fn parse_direction(dir: &str) -> Result<Direction> {
 fn parse_operation(argv: &[&str]) -> Result<Operation> {
     let empty = "";
     let cmd = *argv.first().unwrap_or(&empty);
-    let err = Error::new(
-        ErrorKind::InvalidInput,
-        format!("{}: Invalid command '{argv:?}'", function_name!()),
-    );
+    let err = Error::InvalidConfig(format!("{}: Invalid command '{argv:?}'", function_name!()));
 
     let out = match cmd {
         "focus" => Operation::Focus(parse_direction(argv.get(1).ok_or(err)?)?),
@@ -65,10 +62,10 @@ pub fn parse_command(argv: &[&str]) -> Result<Command> {
         "window" => Command::Window(parse_operation(&argv[1..])?),
         "quit" => Command::Quit,
         _ => {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                format!("{}: Unhandled command '{argv:?}'", function_name!()),
-            ));
+            return Err(Error::InvalidConfig(format!(
+                "{}: Unhandled command '{argv:?}'",
+                function_name!()
+            )));
         }
     };
     Ok(out)
@@ -195,12 +192,7 @@ impl InnerConfig {
     /// `Ok(InnerConfig)` if the parsing is successful, otherwise `Err(String)` with an error message.
     fn parse_config(input: &str) -> Result<InnerConfig> {
         let virtual_keys = generate_virtual_keymap();
-        let mut config: InnerConfig = toml::from_str(input).map_err(|err| {
-            Error::new(
-                ErrorKind::InvalidInput,
-                format!("{}: error parsing config: {err}", function_name!()),
-            )
-        })?;
+        let mut config: InnerConfig = toml::from_str(input)?;
 
         for (command, binding) in &mut config.bindings {
             let argv = command.split('_').collect::<Vec<_>>();
@@ -314,10 +306,10 @@ fn parse_modifiers(input: &str) -> Result<u8> {
     let modifiers = input.split('+').map(str::trim).collect::<Vec<_>>();
     for modifier in &modifiers {
         if !MOD_NAMES.iter().any(|name| name == modifier) {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                format!("{}: Invalid modifier: {modifier}", function_name!()),
-            ));
+            return Err(Error::InvalidConfig(format!(
+                "{}: Invalid modifier: {modifier}",
+                function_name!()
+            )));
         }
 
         if let Some((shift, _)) = MOD_NAMES

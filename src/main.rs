@@ -1,8 +1,7 @@
 use chrono::Local;
 use clap::{Parser, Subcommand};
 use log::{debug, error};
-use std::io::{Error, ErrorKind, Result};
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::{fs, thread};
 use stdext::function_name;
@@ -10,6 +9,7 @@ use stdext::function_name;
 mod app;
 mod commands;
 mod config;
+mod errors;
 mod events;
 mod manager;
 mod platform;
@@ -26,6 +26,7 @@ use platform::PlatformCallbacks;
 use skylight::{SLSGetSpaceManagementMode, SLSMainConnectionID};
 
 use crate::config::parse_command;
+use crate::errors::{Error, Result};
 
 struct CommandReader {
     events: EventSender,
@@ -53,7 +54,8 @@ impl CommandReader {
 
         let mut stream = UnixStream::connect(CommandReader::SOCKET_PATH)?;
         stream.write_all(&size.to_le_bytes())?;
-        stream.write_all(&output)
+        stream.write_all(&output)?;
+        Ok(())
     }
 
     /// Creates a new `CommandReader` instance.

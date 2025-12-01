@@ -11,13 +11,14 @@ use core::ptr::NonNull;
 use log::{debug, error};
 use objc2_core_foundation::{CFArray, CFRetained, CFString, kCFRunLoopCommonModes};
 use std::ffi::c_void;
-use std::io::{Error, ErrorKind, Result};
+use std::io::ErrorKind;
 use std::ops::Deref;
 use std::pin::Pin;
 use std::ptr::null_mut;
 use std::sync::LazyLock;
 use stdext::function_name;
 
+use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
 use crate::platform::{
     AXObserverAddNotification, AXObserverCreate, AXObserverRemoveNotification, CFStringRef, Pid,

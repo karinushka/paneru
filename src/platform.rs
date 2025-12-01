@@ -26,7 +26,7 @@ use objc2_foundation::{
 };
 use std::env;
 use std::ffi::c_void;
-use std::io::{Error, ErrorKind, Result};
+use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::ptr::null_mut;
 use std::sync::atomic::AtomicBool;
@@ -35,6 +35,7 @@ use std::time::Duration;
 use stdext::function_name;
 
 use crate::config::Config;
+use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
 use crate::process::Process;
 use crate::skylight::OSStatus;
@@ -1394,18 +1395,11 @@ fn setup_config_watcher(events: EventSender, config: Config) -> Result<FsEventWa
     let setup = notify::Config::default().with_poll_interval(Duration::from_secs(3));
     let config_handler = ConfigHandler { events, config };
     config_handler.announce_fresh_config()?;
-    let watcher = RecommendedWatcher::new(config_handler, setup);
-    watcher
-        .and_then(|mut watcher| {
-            watcher.watch(CONFIGURATION_FILE.as_path(), RecursiveMode::NonRecursive)?;
-            Ok(watcher)
-        })
-        .map_err(|err| {
-            Error::new(
-                ErrorKind::PermissionDenied,
-                format!("{}: {err}", function_name!()),
-            )
-        })
+    let watcher = RecommendedWatcher::new(config_handler, setup).and_then(|mut watcher| {
+        watcher.watch(CONFIGURATION_FILE.as_path(), RecursiveMode::NonRecursive)?;
+        Ok(watcher)
+    })?;
+    Ok(watcher)
 }
 
 pub static CONFIGURATION_FILE: LazyLock<PathBuf> = LazyLock::new(|| {
@@ -1466,13 +1460,7 @@ impl PlatformCallbacks {
     ///
     /// `Ok(std::pin::Pin<Box<Self>>)` if the instance is created successfully, otherwise `Err(Error)`.
     pub fn new(events: EventSender) -> Result<std::pin::Pin<Box<Self>>> {
-        let config = Config::new(CONFIGURATION_FILE.as_path()).map_err(|err| {
-            Error::new(
-                ErrorKind::InvalidInput,
-                format!("{}: failed loading config {err}", function_name!()),
-            )
-        })?;
-
+        let config = Config::new(CONFIGURATION_FILE.as_path())?;
         let workspace_observer = WorkspaceObserver::new(events.clone());
         Ok(Box::pin(PlatformCallbacks {
             process_handler: ProcessHandler::new(events.clone(), workspace_observer.clone()),

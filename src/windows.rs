@@ -18,13 +18,14 @@ use objc2_core_graphics::{
     CGRectEqualToRect, CGWarpMouseCursorPosition,
 };
 use std::collections::{HashMap, VecDeque};
-use std::io::{Error, ErrorKind, Result};
+use std::io::ErrorKind;
 use std::ops::Deref;
 use std::ptr::null_mut;
 use std::thread;
 use std::time::Duration;
 use stdext::function_name;
 
+use crate::errors::{Error, Result};
 use crate::events::RepositionMarker;
 use crate::platform::{Pid, ProcessSerialNumber};
 use crate::skylight::{
@@ -682,7 +683,7 @@ impl Window {
     /// `Ok(Window)` if the window is created successfully, otherwise `Err(Error)`.
     pub fn new(element: &CFRetained<AXUIWrapper>) -> Result<Window> {
         let id = ax_window_id(element.as_ptr())?;
-        let window = Self {
+        let mut window = Self {
             id,
             psn: None,
             ax_element: element.clone(),
@@ -694,7 +695,7 @@ impl Window {
         };
 
         if window.is_unknown() {
-            return Err(Error::other(format!(
+            return Err(Error::invalid_window(&format!(
                 "{}: Ignoring AXUnknown window, id: {}",
                 function_name!(),
                 window.id()
@@ -702,13 +703,14 @@ impl Window {
         }
 
         if !window.is_real() {
-            return Err(Error::other(format!(
+            return Err(Error::invalid_window(&format!(
                 "{}: Ignoring non-real window, id: {}",
                 function_name!(),
                 window.id()
             )));
         }
 
+        window.minimized = window.is_minimized();
         debug!(
             "{}: created {} title: {} role: {} subrole: {}",
             function_name!(),

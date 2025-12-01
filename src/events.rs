@@ -15,7 +15,6 @@ use objc2::rc::Retained;
 use objc2_core_foundation::{CFRetained, CGPoint, CGSize};
 use objc2_core_graphics::CGDirectDisplayID;
 use std::collections::HashMap;
-use std::io::{Error, ErrorKind, Result};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
@@ -27,6 +26,7 @@ use stdext::function_name;
 use crate::app::Application;
 use crate::commands::{Command, process_command_trigger};
 use crate::config::Config;
+use crate::errors::Result;
 use crate::manager::WindowManager;
 use crate::platform::{ProcessSerialNumber, WorkspaceObserver};
 use crate::process::{Process, ProcessRef};
@@ -186,15 +186,7 @@ impl EventSender {
     ///
     /// `Ok(())` if the event is sent successfully, otherwise `Err(Error)`.
     pub fn send(&self, event: Event) -> Result<()> {
-        self.tx
-            .send(event)
-            .map_err(|err| {
-                Error::new(
-                    ErrorKind::ConnectionAborted,
-                    format!("{}: sending event: {err}", function_name!()),
-                )
-            })
-            .inspect_err(|err| error!("{err}"))
+        Ok(self.tx.send(event)?)
     }
 }
 

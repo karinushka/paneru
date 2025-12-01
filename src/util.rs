@@ -11,13 +11,14 @@ use objc2_core_foundation::{
 };
 use std::{
     ffi::{CStr, OsStr, c_int, c_void},
-    io::{Error, ErrorKind, Result},
+    io::ErrorKind,
     os::unix::ffi::OsStrExt,
     path::PathBuf,
     ptr::null_mut,
 };
 use stdext::function_name;
 
+use crate::errors::{Error, Result};
 use crate::skylight::AXUIElementCopyAttributeValue;
 
 pub struct Cleanuper {

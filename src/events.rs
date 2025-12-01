@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use stdext::function_name;
 
 use crate::app::Application;
-use crate::commands::process_command_trigger;
+use crate::commands::{Command, process_command_trigger};
 use crate::config::Config;
 use crate::manager::WindowManager;
 use crate::platform::{ProcessSerialNumber, WorkspaceObserver};
@@ -154,7 +154,7 @@ pub enum Event {
     },
 
     Command {
-        argv: Vec<String>,
+        command: Command,
     },
 
     TypeCount,
@@ -257,7 +257,7 @@ pub struct OrphanedSpaces(pub HashMap<u64, WindowPane>);
 pub struct WMEventTrigger(pub Event);
 
 #[derive(BevyEvent)]
-pub struct CommandTrigger(pub Vec<String>);
+pub struct CommandTrigger(pub Command);
 
 #[derive(BevyEvent)]
 pub struct ReshuffleAroundTrigger(pub WinID);
@@ -398,7 +398,7 @@ impl EventHandler {
     fn dispatch_toplevel_triggers(mut messages: MessageReader<Event>, mut commands: Commands) {
         for event in messages.read() {
             match event {
-                Event::Command { argv } => commands.trigger(CommandTrigger(argv.clone())),
+                Event::Command { command } => commands.trigger(CommandTrigger(command.clone())),
 
                 Event::ConfigRefresh { config } => {
                     info!("{}: Configuration changed.", function_name!());

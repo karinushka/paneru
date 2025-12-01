@@ -25,6 +25,8 @@ use events::{Event, EventHandler, EventSender};
 use platform::PlatformCallbacks;
 use skylight::{SLSGetSpaceManagementMode, SLSMainConnectionID};
 
+use crate::config::parse_command;
+
 struct CommandReader {
     events: EventSender,
 }
@@ -102,7 +104,9 @@ impl CommandReader {
                     .filter(|s| !s.is_empty())
                     .map(|s| String::from_utf8_lossy(s).to_string())
                     .collect::<Vec<_>>();
-                self.events.send(Event::Command { argv })?;
+                let argv_ref = argv.iter().map(String::as_str).collect::<Vec<_>>();
+                let command = parse_command(&argv_ref)?;
+                self.events.send(Event::Command { command })?;
             }
         }
         Ok(())

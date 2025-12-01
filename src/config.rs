@@ -3,6 +3,7 @@ use log::{error, info};
 use notify::EventHandler;
 use objc2_core_foundation::{CFData, CFString};
 use serde::{Deserialize, Deserializer, de};
+use std::io::{Error, ErrorKind, Result};
 use std::{
     collections::HashMap,
     ffi::c_void,
@@ -13,7 +14,65 @@ use std::{
 use stdext::function_name;
 use stdext::prelude::RwLockExt;
 
+use crate::commands::{Command, Direction, Operation};
 use crate::{platform::CFStringRef, skylight::OSStatus, util::AXUIWrapper};
+
+fn parse_direction(dir: &str) -> Result<Direction> {
+    Ok(match dir {
+        "north" => Direction::North,
+        "south" => Direction::South,
+        "west" => Direction::West,
+        "east" => Direction::East,
+        "first" => Direction::First,
+        "last" => Direction::Last,
+        _ => {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("{}: Unhandled direction {dir}", function_name!()),
+            ));
+        }
+    })
+}
+
+fn parse_operation(argv: &[&str]) -> Result<Operation> {
+    let empty = "";
+    let cmd = *argv.first().unwrap_or(&empty);
+    let err = Error::new(
+        ErrorKind::InvalidInput,
+        format!("{}: Invalid command '{argv:?}'", function_name!()),
+    );
+
+    let out = match cmd {
+        "focus" => Operation::Focus(parse_direction(argv.get(1).ok_or(err)?)?),
+        "swap" => Operation::Swap(parse_direction(argv.get(1).ok_or(err)?)?),
+        "center" => Operation::Center,
+        "resize" => Operation::Resize,
+        "manage" => Operation::Manage,
+        "stack" => Operation::Stack(true),
+        "unstack" => Operation::Stack(false),
+        _ => {
+            return Err(err);
+        }
+    };
+    Ok(out)
+}
+
+pub fn parse_command(argv: &[&str]) -> Result<Command> {
+    let empty = "";
+    let cmd = *argv.first().unwrap_or(&empty);
+
+    let out = match cmd {
+        "window" => Command::Window(parse_operation(&argv[1..])?),
+        "quit" => Command::Quit,
+        _ => {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("{}: Unhandled command '{argv:?}'", function_name!()),
+            ));
+        }
+    };
+    Ok(out)
+}
 
 #[derive(Clone, Debug, Resource)]
 pub struct Config {
@@ -30,7 +89,7 @@ impl Config {
     /// # Returns
     ///
     /// `Ok(Self)` if the configuration is loaded successfully, otherwise `Err(String)` with an error message.
-    pub fn new(path: &Path) -> Result<Self, String> {
+    pub fn new(path: &Path) -> Result<Self> {
         Ok(Config {
             inner: RwLock::new(InnerConfig::new(path)?).into(),
         })
@@ -45,7 +104,7 @@ impl Config {
     /// # Returns
     ///
     /// `Ok(())` if the configuration is reloaded successfully, otherwise `Err(String)` with an error message.
-    pub fn reload_config(&mut self, path: &Path) -> Result<(), String> {
+    pub fn reload_config(&mut self, path: &Path) -> Result<()> {
         let new = InnerConfig::new(path)?;
         let mut old = self.inner.force_write();
         old.options = new.options;
@@ -81,12 +140,12 @@ impl Config {
     /// # Returns
     ///
     /// `Some(Keybinding)` if a matching keybinding is found, otherwise `None`.
-    pub fn find_keybind(&self, keycode: u8, mask: u8) -> Option<Keybinding> {
+    pub fn find_keybind(&self, keycode: u8, mask: u8) -> Option<Command> {
         let lock = self.inner();
         lock.bindings
             .values()
             .find(|bind| bind.code == keycode && bind.modifiers == mask)
-            .cloned()
+            .map(|bind| bind.command.clone())
     }
 }
 
@@ -119,14 +178,8 @@ impl InnerConfig {
     /// # Returns
     ///
     /// `Ok(InnerConfig)` if the configuration is parsed successfully, otherwise `Err(String)` with an error message.
-    fn new(path: &Path) -> Result<InnerConfig, String> {
-        let input = std::fs::read_to_string(path).map_err(|err| {
-            format!(
-                "{}: can't open configuration in {} - {err}",
-                function_name!(),
-                path.display(),
-            )
-        })?;
+    fn new(path: &Path) -> Result<InnerConfig> {
+        let input = std::fs::read_to_string(path)?;
         InnerConfig::parse_config(&input)
     }
 
@@ -140,13 +193,19 @@ impl InnerConfig {
     /// # Returns
     ///
     /// `Ok(InnerConfig)` if the parsing is successful, otherwise `Err(String)` with an error message.
-    fn parse_config(input: &str) -> Result<InnerConfig, String> {
+    fn parse_config(input: &str) -> Result<InnerConfig> {
         let virtual_keys = generate_virtual_keymap();
-        let mut config: InnerConfig = toml::from_str(input)
-            .map_err(|err| format!("{}: error loading config: {err}", function_name!()))?;
+        let mut config: InnerConfig = toml::from_str(input).map_err(|err| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                format!("{}: error parsing config: {err}", function_name!()),
+            )
+        })?;
 
-        config.bindings.iter_mut().for_each(|(command, binding)| {
-            binding.command.clone_from(command);
+        for (command, binding) in &mut config.bindings {
+            let argv = command.split('_').collect::<Vec<_>>();
+            binding.command = parse_command(&argv)?;
+
             let code = virtual_keys
                 .iter()
                 .find(|(key, _)| key == &binding.key)
@@ -160,8 +219,7 @@ impl InnerConfig {
                 binding.code = code;
             }
             info!("bind: {binding:?}");
-        });
-
+        }
         Ok(config)
     }
 }
@@ -196,12 +254,12 @@ pub fn preset_column_widths(config: Option<&Res<Config>>) -> Vec<f64> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Keybinding {
     pub key: String,
     pub code: u8,
     pub modifiers: u8,
-    pub command: String,
+    pub command: Command,
 }
 
 impl<'de> Deserialize<'de> for Keybinding {
@@ -214,7 +272,7 @@ impl<'de> Deserialize<'de> for Keybinding {
     /// # Returns
     ///
     /// `Ok(Self)` if the deserialization is successful, otherwise `Err(D::Error)` with a custom error message.
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -235,7 +293,7 @@ impl<'de> Deserialize<'de> for Keybinding {
             key: key.unwrap().to_string(),
             code: 0,
             modifiers,
-            command: String::new(),
+            command: Command::Quit,
         })
     }
 }
@@ -249,14 +307,17 @@ impl<'de> Deserialize<'de> for Keybinding {
 /// # Returns
 ///
 /// `Ok(u8)` with the combined modifier bitmask if parsing is successful, otherwise `Err(String)` with an error message for an invalid modifier.
-fn parse_modifiers(input: &str) -> Result<u8, String> {
+fn parse_modifiers(input: &str) -> Result<u8> {
     static MOD_NAMES: [&str; 4] = ["alt", "shift", "cmd", "ctrl"];
     let mut out = 0;
 
     let modifiers = input.split('+').map(str::trim).collect::<Vec<_>>();
     for modifier in &modifiers {
         if !MOD_NAMES.iter().any(|name| name == modifier) {
-            return Err(format!("Invalid modifier: {modifier}"));
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("{}: Invalid modifier: {modifier}", function_name!()),
+            ));
         }
 
         if let Some((shift, _)) = MOD_NAMES
@@ -558,23 +619,26 @@ focus_follows_mouse = true
 
 [bindings]
 quit = "ctrl+alt-q"
-manage = "ctrl+alt-t"
+window_manage = "ctrl+alt-t"
 "#;
-    let config = InnerConfig::parse_config(input).expect("Failed to parse config");
+    let config = Config {
+        inner: RwLock::new(InnerConfig::parse_config(input).expect("Failed to parse config"))
+            .into(),
+    };
 
-    assert_eq!(config.options.focus_follows_mouse, Some(true));
+    assert_eq!(config.inner().options.focus_follows_mouse, Some(true));
 
-    let quit_binding = config.bindings.get("quit").expect("Quit binding not found");
-    assert_eq!(quit_binding.key, "q");
     // Modifiers: alt = 1<<0, ctrl = 1<<3.
-    assert_eq!(quit_binding.modifiers, (1 << 0) | (1 << 3));
-    assert_eq!(quit_binding.command, "quit");
+    let mask = (1 << 0) | (1 << 3);
+    let keycode = 0x0c; // 'q'
+    assert!(matches!(
+        config.find_keybind(keycode, mask),
+        Some(Command::Quit)
+    ));
 
-    let manage_binding = config
-        .bindings
-        .get("manage")
-        .expect("Manage binding not found");
-    assert_eq!(manage_binding.key, "t");
-    assert_eq!(manage_binding.modifiers, (1 << 0) | (1 << 3));
-    assert_eq!(manage_binding.command, "manage");
+    let keycode = 0x11; // 't'
+    assert!(matches!(
+        config.find_keybind(keycode, mask),
+        Some(Command::Window(Operation::Manage))
+    ));
 }

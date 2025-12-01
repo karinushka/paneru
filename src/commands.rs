@@ -4,7 +4,7 @@ use bevy::ecs::query::With;
 use bevy::ecs::system::{Commands, Query, Res};
 use log::{error, warn};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use std::io::{Error, ErrorKind, Result};
+use std::io::{ErrorKind, Result};
 use stdext::function_name;
 
 use crate::config::{Config, preset_column_widths};
@@ -15,7 +15,8 @@ use crate::events::{
 use crate::skylight::ConnID;
 use crate::windows::{Display, Panel, Window, WindowPane};
 
-enum Direction {
+#[derive(Clone, Debug)]
+pub enum Direction {
     North,
     South,
     West,
@@ -24,7 +25,8 @@ enum Direction {
     Last,
 }
 
-enum Operation {
+#[derive(Clone, Debug)]
+pub enum Operation {
     Focus(Direction),
     Swap(Direction),
     Center,
@@ -33,66 +35,10 @@ enum Operation {
     Stack(bool),
 }
 
-enum Command {
+#[derive(Clone, Debug)]
+pub enum Command {
     Window(Operation),
     Quit,
-}
-
-fn parse_direction(dir: &str) -> Result<Direction> {
-    Ok(match dir {
-        "north" => Direction::North,
-        "south" => Direction::South,
-        "west" => Direction::West,
-        "east" => Direction::East,
-        "first" => Direction::First,
-        "last" => Direction::Last,
-        _ => {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                format!("{}: Unhandled direction {dir}", function_name!()),
-            ));
-        }
-    })
-}
-
-fn parse_operation(argv: &[String]) -> Result<Operation> {
-    let empty = String::new();
-    let cmd = argv.first().unwrap_or(&empty).as_ref();
-    let err = Error::new(
-        ErrorKind::InvalidInput,
-        format!("{}: Invalid command '{argv:?}'", function_name!()),
-    );
-
-    let out = match cmd {
-        "focus" => Operation::Focus(parse_direction(argv.get(1).ok_or(err)?)?),
-        "swap" => Operation::Swap(parse_direction(argv.get(1).ok_or(err)?)?),
-        "center" => Operation::Center,
-        "resize" => Operation::Resize,
-        "manage" => Operation::Manage,
-        "stack" => Operation::Stack(true),
-        "unstack" => Operation::Stack(false),
-        _ => {
-            return Err(err);
-        }
-    };
-    Ok(out)
-}
-
-fn parse_command(argv: &[String]) -> Result<Command> {
-    let empty = String::new();
-    let cmd = argv.first().unwrap_or(&empty).as_ref();
-
-    let out = match cmd {
-        "window" => Command::Window(parse_operation(&argv[1..])?),
-        "quit" => Command::Quit,
-        _ => {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                format!("{}: Unhandled command '{argv:?}'", function_name!()),
-            ));
-        }
-    };
-    Ok(out)
 }
 
 /// Retrieves a window `Entity` in a specified direction relative to a `current_window_id` within a `WindowPane`.
@@ -328,7 +274,7 @@ fn manage_window(
 ///
 /// `Ok(())` if the command is processed successfully, otherwise `Err(Error)`.
 fn command_windows(
-    operation: Operation,
+    operation: &Operation,
     main_cid: ConnID,
     active_display: &mut Display,
     focused_entity: Entity,
@@ -344,12 +290,12 @@ fn command_windows(
     match operation {
         Operation::Focus(direction) => {
             let mut lens = windows.transmute_lens::<&Window>();
-            command_move_focus(&direction, focused_entity, active_panel, &lens.query());
+            command_move_focus(direction, focused_entity, active_panel, &lens.query());
         }
 
         Operation::Swap(direction) => {
             command_swap_focus(
-                &direction,
+                direction,
                 focused_entity,
                 active_panel,
                 &bounds,
@@ -371,7 +317,7 @@ fn command_windows(
         }
 
         Operation::Stack(stack) => {
-            if stack {
+            if *stack {
                 let window = windows.get(focused_entity).map_err(error_msg)?;
                 if !window.managed() {
                     return Ok(());
@@ -433,24 +379,25 @@ pub fn process_command_trigger(
     }
     let eligible = focused_window.is_eligible();
 
-    let res = parse_command(&trigger.event().0).and_then(|command| match command {
+    let res = match &trigger.event().0 {
         Command::Window(operation) => {
-            if !eligible {
-                return Ok(());
+            if eligible {
+                let mut lens = windows.transmute_lens::<&mut Window>();
+                command_windows(
+                    operation,
+                    main_cid,
+                    &mut active_display,
+                    focused_entity,
+                    &mut lens.query(),
+                    &mut commands,
+                    config.as_ref(),
+                )
+            } else {
+                Ok(())
             }
-            let mut lens = windows.transmute_lens::<&mut Window>();
-            command_windows(
-                operation,
-                main_cid,
-                &mut active_display,
-                focused_entity,
-                &mut lens.query(),
-                &mut commands,
-                config.as_ref(),
-            )
         }
         Command::Quit => sender.0.send(Event::Exit),
-    });
+    };
     if let Err(err) = res {
         error!("{}: {err}", function_name!());
     }

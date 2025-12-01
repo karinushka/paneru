@@ -727,19 +727,15 @@ impl InputHandler {
             .unwrap_or(0);
 
         let keycode = keycode.try_into().ok();
-        let bind = keycode.and_then(|keycode| self.config.find_keybind(keycode, mask));
-        bind.and_then(|bind| {
-            let command = bind
-                .command
-                .split('_')
-                .map(std::string::ToString::to_string)
-                .collect::<Vec<_>>();
-            self.events
-                .send(Event::Command { argv: command })
-                .inspect_err(|err| error!("{}: Error sending command: {err}", function_name!()))
-                .ok()
-        })
-        .is_some()
+        keycode
+            .and_then(|keycode| self.config.find_keybind(keycode, mask))
+            .and_then(|command| {
+                self.events
+                    .send(Event::Command { command })
+                    .inspect_err(|err| error!("{}: Error sending command: {err}", function_name!()))
+                    .ok()
+            })
+            .is_some()
     }
 }
 

@@ -1,4 +1,4 @@
-use log::{debug, warn};
+use log::debug;
 use objc2::rc::Retained;
 use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication};
 use objc2_core_foundation::{CFRetained, CFString};
@@ -246,21 +246,9 @@ impl Process {
                 self.pid
             );
             self.observe_finished_launching();
-
-            // NOTE: Do this again in case of race-conditions between the previous check and
-            // key-value observation subscription. Not actually sure if this can happen in
-            // practice..
-
-            if !self.finished_launching() {
-                return false;
-            }
-            self.unobserve_finished_launching();
-            warn!(
-                "{}: {} suddenly finished launching",
-                function_name!(),
-                self.name
-            );
+            return false;
         }
+        self.unobserve_finished_launching();
 
         if !self.is_observable() {
             debug!(
@@ -270,21 +258,9 @@ impl Process {
                 self.pid
             );
             self.observe_activation_policy();
-
-            // NOTE: Do this again in case of race-conditions between the previous check and
-            // key-value observation subscription. Not actually sure if this can happen in
-            // practice..
-
-            if !self.is_observable() {
-                return false;
-            }
-            self.unobserve_activation_policy();
-            warn!(
-                "{}: {} suddenly became observable",
-                function_name!(),
-                self.name
-            );
+            return false;
         }
+        self.unobserve_activation_policy();
         true
     }
 }

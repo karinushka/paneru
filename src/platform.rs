@@ -644,6 +644,9 @@ impl InputHandler {
         };
         if let Err(err) = result {
             error!("{}: error sending event: {err}", function_name!());
+            // The socket is dead, so no use trying to send to it.
+            // Trigger cleanup destructor, unregistering the handler.
+            self.cleanup = None;
         }
         // Do not intercept this event, let it fall through.
         false

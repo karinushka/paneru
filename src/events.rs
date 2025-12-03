@@ -212,7 +212,7 @@ pub struct FreshMarker(pub Timer);
 
 impl FreshMarker {
     pub fn new() -> Self {
-        const READY_TIMEOUT_SEC: f32 = 2.0;
+        const READY_TIMEOUT_SEC: f32 = 5.0;
         let ready_timer = Timer::from_seconds(READY_TIMEOUT_SEC, bevy::time::TimerMode::Once);
         FreshMarker(ready_timer)
     }

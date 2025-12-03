@@ -1327,7 +1327,7 @@ impl WindowManager {
                     .spawn((app, FreshMarker::new()))
                     .set_parent_in_place(entity);
             } else {
-                error!(
+                debug!(
                     "{}: failed to register some observers {}",
                     function_name!(),
                     process.name
@@ -1932,6 +1932,8 @@ impl WindowManager {
     #[allow(clippy::needless_pass_by_value)]
     pub fn ready_timer_cleanup(
         cleanup_query: Query<(Entity, &mut FreshMarker), With<FreshMarker>>,
+        processes: Query<&BProcess>,
+        applications: Query<&Application>,
         time: Res<Time<Virtual>>,
         mut commands: Commands,
     ) {
@@ -1945,10 +1947,19 @@ impl WindowManager {
                 timer.elapsed().as_secs_f32()
             );
             if timer.is_finished() {
-                debug!(
-                    "{}: Entity {entity} ran out of time. Removing",
-                    function_name!(),
-                );
+                if let Ok(app) = applications.get(entity) {
+                    debug!(
+                        "{}: Application pid {} did not become observable in time. Removing entity {entity}.",
+                        function_name!(),
+                        app.pid()
+                    );
+                } else if let Ok(process) = processes.get(entity) {
+                    debug!(
+                        "{}: Process '{}' did not become ready in time. Removing entity {entity}.",
+                        function_name!(),
+                        process.0.name,
+                    );
+                }
                 commands.entity(entity).despawn();
             }
         }

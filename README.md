@@ -238,6 +238,21 @@ window_unstack = "alt + shift - ]"
 
 # Quits the window manager.
 quit = "ctrl + alt - q"
+
+# Window properties, matched by a RegExp title string.
+[windows]
+
+[windows.pip]
+# Title RegExp pattern is required.
+title = "Picture.*(in)?.*[Pp]icture"
+# Do not manage this window, e.g. it will be floating.
+floating = true
+
+[windows.neovide]
+# Matches an editor and always inserts its window at index 1.
+title = ".*"
+bundle_id = "com.neovide.neovide"
+index = 1
 ```
 
 Paste this into your terminal to create a default configuration file:

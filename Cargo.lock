@@ -1436,6 +1436,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-foundation",
+ "regex",
  "serde",
  "stdext",
  "toml",

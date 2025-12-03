@@ -18,7 +18,7 @@ use std::slice::from_raw_parts_mut;
 use stdext::function_name;
 
 use crate::app::Application;
-use crate::config::Config;
+use crate::config::{Config, WindowParams};
 use crate::errors::{Error, Result};
 use crate::events::{
     BProcess, Event, ExistingMarker, FocusFollowsMouse, FocusedMarker, FreshMarker,
@@ -728,6 +728,7 @@ impl WindowManager {
         mut apps: Query<(Entity, &mut Application)>,
         mut active_display: Query<&mut Display, With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
+        config: Option<Res<Config>>,
         mut commands: Commands,
     ) {
         let new_windows = &mut trigger.event_mut().0;
@@ -790,23 +791,75 @@ impl WindowManager {
                 window.minimized = minimized;
                 window.is_root = is_root;
             }
+            let bundle_id = app.bundle_id().map(String::as_str).unwrap_or_default();
             debug!(
-                "{}: window {} isroot {} eligible {}",
+                "{}: window {} isroot {} eligible {} bundle_id {}",
                 function_name!(),
                 window_id,
                 window.is_root(),
                 window.is_eligible(),
+                bundle_id,
             );
 
-            _ = window.update_frame(Some(&active_display.bounds));
+            let title = window.title().unwrap_or_default();
+            let properties = config
+                .as_ref()
+                .and_then(|config| config.find_window_properties(&title, bundle_id))
+                .inspect(|_| {
+                    debug!(
+                        "{}: Applying window properties for '{title}",
+                        function_name!()
+                    );
+                });
+            WindowManager::apply_window_properties(
+                window,
+                app_entity,
+                properties.as_ref(),
+                &mut active_display,
+                main_cid.0,
+                &windows,
+                &mut commands,
+            );
+        }
+    }
 
-            let Ok(panel) = active_display.active_panel(main_cid.0) else {
-                return;
-            };
+    fn apply_window_properties(
+        mut window: Window,
+        app_entity: Entity,
+        properties: Option<&WindowParams>,
+        active_display: &mut Display,
+        main_cid: ConnID,
+        windows: &Query<(Entity, &Window, Option<&FocusedMarker>)>,
+        commands: &mut Commands,
+    ) {
+        let window_id = window.id();
+        let floating = properties
+            .as_ref()
+            .and_then(|props| props.floating)
+            .unwrap_or(false);
+        let wanted_insertion = properties.as_ref().and_then(|props| props.index);
+        window.manage(!floating);
 
-            let entity = commands.spawn(window).id();
-            commands.entity(entity).set_parent_in_place(app_entity);
+        _ = window.update_frame(Some(&active_display.bounds));
 
+        // Insert the window into the internal Bevy state.
+        let entity = commands.spawn(window).id();
+        commands.entity(entity).set_parent_in_place(app_entity);
+
+        if floating {
+            // Avoid managing window if it's floating.
+            return;
+        }
+
+        let Ok(panel) = active_display.active_panel(main_cid) else {
+            return;
+        };
+
+        // Attempt inserting the window at a pre-defined position.
+        let inserted =
+            wanted_insertion.and_then(|insert_at| panel.insert_at(insert_at, entity).ok());
+        if inserted.is_none() {
+            // If failed, just insert it after the current focus.
             let focused_window = windows
                 .iter()
                 .find_map(|(entity, _, focused)| focused.map(|_| entity));
@@ -819,8 +872,8 @@ impl WindowManager {
                 }
                 None => panel.append(entity),
             }
-            commands.trigger(ReshuffleAroundTrigger(window_id));
         }
+        commands.trigger(ReshuffleAroundTrigger(window_id));
     }
 
     /// Handles the event when a window is destroyed. It removes the window from the ECS world and relevant displays.

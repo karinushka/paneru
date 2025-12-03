@@ -2,6 +2,7 @@ use bevy::ecs::{resource::Resource, system::Res};
 use log::{error, info};
 use notify::EventHandler;
 use objc2_core_foundation::{CFData, CFString};
+use regex::Regex;
 use serde::{Deserialize, Deserializer, de};
 use std::{
     collections::HashMap,
@@ -105,8 +106,7 @@ impl Config {
     pub fn reload_config(&mut self, path: &Path) -> Result<()> {
         let new = InnerConfig::new(path)?;
         let mut old = self.inner.force_write();
-        old.options = new.options;
-        old.bindings = new.bindings;
+        *old = new;
         Ok(())
     }
 
@@ -145,6 +145,18 @@ impl Config {
             .find(|bind| bind.code == keycode && bind.modifiers == mask)
             .map(|bind| bind.command.clone())
     }
+
+    pub fn find_window_properties(&self, title: &str, bundle_id: &str) -> Option<WindowParams> {
+        self.inner().windows.as_ref().and_then(|windows| {
+            windows
+                .values()
+                .find(|params| {
+                    let bundle_match = params.bundle_id.as_ref().map(|id| id.as_str() == bundle_id);
+                    bundle_match.is_none_or(|m| m) && params.title.is_match(title)
+                })
+                .cloned()
+        })
+    }
 }
 
 impl EventHandler for Config {
@@ -164,6 +176,7 @@ impl EventHandler for Config {
 struct InnerConfig {
     options: MainOptions,
     bindings: HashMap<String, Keybinding>,
+    windows: Option<HashMap<String, WindowParams>>,
 }
 
 impl InnerConfig {
@@ -289,6 +302,23 @@ impl<'de> Deserialize<'de> for Keybinding {
             command: Command::Quit,
         })
     }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct WindowParams {
+    #[serde(deserialize_with = "deserialize_title")]
+    title: Regex,
+    bundle_id: Option<String>,
+    pub floating: Option<bool>,
+    pub index: Option<usize>,
+}
+
+fn deserialize_title<'de, D>(deserializer: D) -> std::result::Result<Regex, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    Regex::new(&s).map_err(de::Error::custom)
 }
 
 /// Parses a string containing modifier names (e.g., "alt", "shift", "cmd", "ctrl") separated by "+", and returns their combined bitmask.
@@ -613,6 +643,14 @@ focus_follows_mouse = true
 [bindings]
 quit = "ctrl+alt-q"
 window_manage = "ctrl+alt-t"
+
+[windows]
+
+[windows.pip]
+title = "picture.*picture"
+bundle_id = "com.something.apple"
+floating = true
+index = 1
 "#;
     let config = Config {
         inner: RwLock::new(InnerConfig::parse_config(input).expect("Failed to parse config"))
@@ -634,4 +672,10 @@ window_manage = "ctrl+alt-t"
         config.find_keybind(keycode, mask),
         Some(Command::Window(Operation::Manage))
     ));
+
+    let props = config
+        .find_window_properties("picture in picture", "com.someting.apple")
+        .unwrap();
+    assert_eq!(props.floating, Some(true));
+    assert_eq!(props.index, Some(1));
 }

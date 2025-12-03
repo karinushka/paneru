@@ -56,6 +56,7 @@ pub struct Application {
     pid: Pid,
     connection: Option<ConnID>,
     handler: AxObserverHandler,
+    bundle_id: Option<String>,
 }
 
 impl Drop for Application {
@@ -84,6 +85,11 @@ impl Application {
             let ptr = AXUIElementCreateApplication(process.pid);
             AXUIWrapper::retain(ptr)?
         };
+        let bundle_id = process
+            .application
+            .as_ref()
+            .and_then(|app| app.bundleIdentifier())
+            .map(|id| id.to_string());
         Ok(Self {
             element: refer,
             psn: process.psn,
@@ -96,6 +102,7 @@ impl Application {
                 }
             },
             handler: AxObserverHandler::new(process.pid, events.clone())?,
+            bundle_id,
         })
     }
 
@@ -199,6 +206,10 @@ impl Application {
         let mut psn = ProcessSerialNumber::default();
         unsafe { _SLPSGetFrontProcess(&mut psn) };
         self.psn == psn
+    }
+
+    pub fn bundle_id(&self) -> Option<&String> {
+        self.bundle_id.as_ref()
     }
 }
 

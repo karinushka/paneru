@@ -79,8 +79,8 @@ pub struct Process {
     pub policy: NSApplicationActivationPolicy,
 
     pub observer: Retained<WorkspaceObserver>,
-    pub observing_launched: AtomicBool,
-    pub observing_activated: AtomicBool,
+    observing_launched: AtomicBool,
+    observing_activated: AtomicBool,
 }
 
 impl Drop for Process {

@@ -730,6 +730,10 @@ impl WindowManager {
         mut commands: Commands,
     ) {
         let new_windows = &mut trigger.event_mut().0;
+        let Ok(mut active_display) = active_display.single_mut() else {
+            error!("{}: can not get current display.", function_name!());
+            return;
+        };
 
         while let Some(mut window) = new_windows.pop() {
             let window_id = window.id();
@@ -748,7 +752,7 @@ impl WindowManager {
                     function_name!(),
                     window_id,
                 );
-                return;
+                continue;
             };
             let Some((app_entity, mut app)) = apps.iter_mut().find(|(_, app)| app.pid() == pid)
             else {
@@ -756,7 +760,7 @@ impl WindowManager {
                     "{}: unable to find application with {pid}.",
                     function_name!()
                 );
-                return;
+                continue;
             };
 
             debug!(
@@ -793,10 +797,6 @@ impl WindowManager {
                 window.is_eligible(),
             );
 
-            let Ok(mut active_display) = active_display.single_mut() else {
-                return;
-            };
-            debug!("Active display {}", active_display.id);
             _ = window.update_frame(Some(&active_display.bounds));
 
             let Ok(panel) = active_display.active_panel(main_cid.0) else {
@@ -810,10 +810,10 @@ impl WindowManager {
                 .iter()
                 .find_map(|(entity, _, focused)| focused.map(|_| entity));
             let insert_at = focused_window.and_then(|entity| panel.index_of(entity).ok());
-            debug!("New window adding at {panel}");
+            debug!("{}: New window adding at {panel}", function_name!());
             match insert_at {
                 Some(after) => {
-                    debug!("New window inserted at {after}");
+                    debug!("{}: New window inserted at {after}", function_name!());
                     _ = panel.insert_at(after, entity);
                 }
                 None => panel.append(entity),

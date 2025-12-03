@@ -92,13 +92,14 @@ impl WindowManager {
     #[allow(clippy::needless_pass_by_value)]
     pub fn dispatch_application_messages(
         trigger: On<WMEventTrigger>,
-        windows: Query<(&Window, Entity)>,
+        windows: Query<(&Window, Entity, Option<&FocusedMarker>)>,
         mut displays: Query<&mut Display, With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
         mut commands: Commands,
     ) {
         let main_cid = main_cid.0;
-        let find_window = |window_id| windows.iter().find(|(window, _)| window.id() == window_id);
+        let find_window =
+            |window_id| windows.iter().find(|(window, _, _)| window.id() == window_id);
         let Ok(mut active_display) = displays.single_mut() else {
             warn!("{}: Unable to get current display.", function_name!());
             return;
@@ -116,15 +117,58 @@ impl WindowManager {
                 ),
             },
             Event::WindowMinimized { window_id } => {
-                if let Some((_, entity)) = find_window(*window_id) {
-                    active_display.remove_window(entity);
+                let Some((_, entity, was_focused)) = find_window(*window_id) else {
+                    return;
+                };
+                let was_focused = was_focused.is_some();
+
+                // Handle focus transfer and reshuffle similar to window destruction
+                if let Ok(panel) = active_display.active_panel(main_cid) {
+                    let mut neighbor_entity = None;
+                    // Try to find a window to the left first
+                    _ = panel.access_left_of(entity, |p| {
+                        neighbor_entity = p.top();
+                        false
+                    });
+                    // If no left neighbor, try to find a window to the right
+                    if neighbor_entity.is_none() {
+                        _ = panel.access_right_of(entity, |p| {
+                            neighbor_entity = p.top();
+                            false
+                        });
+                    }
+
+                    // If the minimized window was focused, transfer focus to the neighbor
+                    if was_focused {
+                        if let Some(neighbor_entity) = neighbor_entity {
+                            if let Ok((neighbor_window, _, _)) = windows.get(neighbor_entity) {
+                                debug!(
+                                    "{}: Transferring focus from minimized window {} to neighbor {}",
+                                    function_name!(),
+                                    window_id,
+                                    neighbor_window.id()
+                                );
+                                neighbor_window.focus_with_raise();
+                                commands.entity(neighbor_entity).insert(FocusedMarker);
+                            }
+                        }
+                    }
+
+                    // Trigger reshuffle around the neighbor
+                    if let Some(neighbor_entity) = neighbor_entity {
+                        if let Ok((neighbor_window, _, _)) = windows.get(neighbor_entity) {
+                            commands.trigger(ReshuffleAroundTrigger(neighbor_window.id()));
+                        }
+                    }
                 }
+
+                active_display.remove_window(entity);
             }
             Event::WindowDeminimized { window_id } => {
                 let Ok(pane) = active_display.active_panel(main_cid) else {
                     return;
                 };
-                if let Some((_, entity)) = find_window(*window_id) {
+                if let Some((_, entity, _)) = find_window(*window_id) {
                     pane.append(entity);
                 }
             }

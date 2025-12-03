@@ -3,12 +3,23 @@
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
-    { self, nixpkgs }:
+    { self, nixpkgs, rust-overlay }:
     let
-      pkgs = import nixpkgs { system = "aarch64-darwin"; };
+      system = "aarch64-darwin";
+      pkgs = import nixpkgs {
+        inherit system;
+        overlays = [ rust-overlay.overlays.default ];
+      };
+      rustToolchain = pkgs.rust-bin.stable."1.89.0".default.override {
+        extensions = [ "rust-src" "rust-analyzer" "clippy" "rustfmt" ];
+      };
       package = pkgs.rustPlatform.buildRustPackage {
         pname = "paneru";
         version = "0.2.0";
@@ -27,6 +38,16 @@
     {
       packages.aarch64-darwin.default = self.packages.aarch64-darwin.paneru;
       packages.aarch64-darwin.paneru = package;
+
+      devShells.aarch64-darwin.default = pkgs.mkShell {
+        buildInputs = [
+          rustToolchain
+          pkgs.apple-sdk.privateFrameworksHook
+        ];
+
+        # Set SDK path for build.rs
+        SDKROOT = "${pkgs.apple-sdk}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk";
+      };
       homeModules.paneru =
         { config, lib, ... }:
         let

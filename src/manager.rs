@@ -828,14 +828,14 @@ impl WindowManager {
     /// # Arguments
     ///
     /// * `trigger` - The Bevy event trigger containing the ID of the destroyed window.
-    /// * `windows` - A query for all windows with their parent.
+    /// * `windows` - A query for all windows with their parent and focus state.
     /// * `apps` - A query for all applications.
     /// * `displays` - A query for all displays.
     /// * `commands` - Bevy commands to despawn entities and trigger events.
     #[allow(clippy::needless_pass_by_value)]
     pub fn window_destroyed_trigger(
         trigger: On<WMEventTrigger>,
-        windows: Query<(&Window, Entity, &ChildOf)>,
+        windows: Query<(&Window, Entity, &ChildOf, Option<&FocusedMarker>)>,
         mut apps: Query<&mut Application>,
         mut displays: Query<&mut Display>,
         main_cid: Res<MainConnection>,
@@ -844,9 +844,9 @@ impl WindowManager {
         let Event::WindowDestroyed { window_id } = trigger.event().0 else {
             return;
         };
-        let Some((window, entity, child)) = windows
+        let Some((window, entity, child, was_focused)) = windows
             .iter()
-            .find(|(window, _, _)| window.id() == window_id)
+            .find(|(window, _, _, _)| window.id() == window_id)
         else {
             error!(
                 "{}: Trying to destroy non-existing window {window_id}.",
@@ -854,6 +854,7 @@ impl WindowManager {
             );
             return;
         };
+        let was_focused = was_focused.is_some();
 
         let Ok(mut app) = apps.get_mut(child.parent()) else {
             error!(
@@ -864,24 +865,48 @@ impl WindowManager {
             return;
         };
         app.unobserve_window(window);
-        commands.entity(entity).despawn();
 
         for mut display in &mut displays {
             if let Ok(panel) = display.active_panel(main_cid.0) {
-                let mut previous_id = None;
-                _ = panel.access_left_of(entity, |panel| {
-                    previous_id = panel
-                        .top()
-                        .and_then(|entity| windows.get(entity).ok())
-                        .map(|tuple| tuple.0.id());
+                let mut neighbor_entity = None;
+                _ = panel.access_left_of(entity, |p| {
+                    neighbor_entity = p.top();
                     false
                 });
-                if let Some(previous_id) = previous_id {
-                    commands.trigger(ReshuffleAroundTrigger(previous_id));
+                if neighbor_entity.is_none() {
+                    _ = panel.access_right_of(entity, |p| {
+                        neighbor_entity = p.top();
+                        false
+                    });
+                }
+
+                if was_focused {
+                    if let Some(neighbor_entity) = neighbor_entity {
+                        if let Ok((neighbor_window, _, _, _)) = windows.get(neighbor_entity) {
+                            debug!(
+                                "{}: Transferring focus from destroyed window {} to neighbor {}",
+                                function_name!(),
+                                window_id,
+                                neighbor_window.id()
+                            );
+                            // Focus the neighbor window via macOS APIs
+                            neighbor_window.focus_with_raise();
+                            // Add FocusedMarker to the neighbor
+                            commands.entity(neighbor_entity).insert(FocusedMarker);
+                        }
+                    }
+                }
+
+                if let Some(neighbor_entity) = neighbor_entity {
+                    if let Ok((neighbor_window, _, _, _)) = windows.get(neighbor_entity) {
+                        commands.trigger(ReshuffleAroundTrigger(neighbor_window.id()));
+                    }
                 }
             }
             display.remove_window(entity);
         }
+
+        commands.entity(entity).despawn();
     }
 
     /// Handles the event when a window is resized. It updates the window's frame and reshuffles windows.

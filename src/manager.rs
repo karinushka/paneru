@@ -122,9 +122,10 @@ impl WindowManager {
                 };
                 let was_focused = was_focused.is_some();
 
+                let mut neighbor_entity = None;
+
                 // Handle focus transfer and reshuffle similar to window destruction
                 if let Ok(panel) = active_display.active_panel(main_cid) {
-                    let mut neighbor_entity = None;
                     // Try to find a window to the left first
                     _ = panel.access_left_of(entity, |p| {
                         neighbor_entity = p.top();
@@ -153,16 +154,17 @@ impl WindowManager {
                             }
                         }
                     }
-
-                    // Trigger reshuffle around the neighbor
-                    if let Some(neighbor_entity) = neighbor_entity {
-                        if let Ok((neighbor_window, _, _)) = windows.get(neighbor_entity) {
-                            commands.trigger(ReshuffleAroundTrigger(neighbor_window.id()));
-                        }
-                    }
                 }
 
+                // Remove window from pane first, then trigger reshuffle
                 active_display.remove_window(entity);
+
+                // Trigger reshuffle around the neighbor after removal
+                if let Some(neighbor_entity) = neighbor_entity {
+                    if let Ok((neighbor_window, _, _)) = windows.get(neighbor_entity) {
+                        commands.trigger(ReshuffleAroundTrigger(neighbor_window.id()));
+                    }
+                }
             }
             Event::WindowDeminimized { window_id } => {
                 let Ok(pane) = active_display.active_panel(main_cid) else {
@@ -701,7 +703,7 @@ impl WindowManager {
         trigger: On<WMEventTrigger>,
         processes: Query<(&BProcess, &Children)>,
         applications: Query<&Application>,
-        focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
+        focused_window: Query<(Entity, &Window), With<FocusedMarker>>,
         mut focus_follows_mouse_id: ResMut<FocusFollowsMouse>,
         mut commands: Commands,
     ) {
@@ -725,12 +727,17 @@ impl WindowManager {
                 process.name
             );
         }
-        let Some(app) = children
-            .first()
-            .and_then(|entity| applications.get(*entity).ok())
-        else {
+        let Some(&app_entity) = children.first() else {
             error!(
                 "{}: No application for process {}.",
+                function_name!(),
+                process.name
+            );
+            return;
+        };
+        let Some(app) = applications.get(app_entity).ok() else {
+            error!(
+                "{}: No application component for process {}.",
                 function_name!(),
                 process.name
             );
@@ -740,14 +747,14 @@ impl WindowManager {
 
         match app.focused_window_id() {
             Err(_) => {
-                let Ok((_, focused_entity)) = focused_window.single() else {
+                let Ok((focused_entity, _)) = focused_window.single() else {
                     warn!("{}: window_manager_set_window_opacity", function_name!());
                     return;
                 };
 
                 focus_follows_mouse_id.as_mut().0 = None;
                 commands.entity(focused_entity).remove::<FocusedMarker>();
-                warn!("{}: reset focused window", function_name!());
+                warn!("{}: reset focused window", function_name!())
             }
             Ok(focused_id) => commands.trigger(WMEventTrigger(Event::WindowFocused {
                 window_id: focused_id,
@@ -911,8 +918,10 @@ impl WindowManager {
         app.unobserve_window(window);
 
         for mut display in &mut displays {
+            let mut neighbor_entity = None;
+
             if let Ok(panel) = display.active_panel(main_cid.0) {
-                let mut neighbor_entity = None;
+                // Try to find a window to the left first
                 _ = panel.access_left_of(entity, |p| {
                     neighbor_entity = p.top();
                     false
@@ -940,14 +949,15 @@ impl WindowManager {
                         }
                     }
                 }
+            }
 
-                if let Some(neighbor_entity) = neighbor_entity {
-                    if let Ok((neighbor_window, _, _, _)) = windows.get(neighbor_entity) {
-                        commands.trigger(ReshuffleAroundTrigger(neighbor_window.id()));
-                    }
+            display.remove_window(entity);
+
+            if let Some(neighbor_entity) = neighbor_entity {
+                if let Ok((neighbor_window, _, _, _)) = windows.get(neighbor_entity) {
+                    commands.trigger(ReshuffleAroundTrigger(neighbor_window.id()));
                 }
             }
-            display.remove_window(entity);
         }
 
         commands.entity(entity).despawn();

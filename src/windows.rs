@@ -862,6 +862,18 @@ impl Window {
             .is_ok_and(|subrole| subrole.eq(kAXUnknownSubrole))
     }
 
+    /// Checks if the window is still accessible via the Accessibility API.
+    /// This can be used to detect windows that have been closed/hidden without
+    /// sending a WindowDestroyed notification.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the window is accessible, `false` otherwise.
+    pub fn is_accessible(&self) -> bool {
+        // Try to get the role attribute - if this fails, the window is gone
+        self.role().is_ok()
+    }
+
     /// Checks if the window is minimized.
     ///
     /// # Returns

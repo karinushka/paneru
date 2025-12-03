@@ -2,7 +2,7 @@ use bevy::ecs::entity::Entity;
 use bevy::ecs::observer::On;
 use bevy::ecs::query::With;
 use bevy::ecs::system::{Commands, Query, Res};
-use log::{error, warn};
+use log::{debug, error, warn};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use stdext::function_name;
 
@@ -12,7 +12,7 @@ use crate::events::{
     CommandTrigger, Event, FocusedMarker, MainConnection, RepositionMarker, ReshuffleAroundTrigger,
     ResizeMarker, SenderSocket, WMEventTrigger,
 };
-use crate::skylight::ConnID;
+use crate::skylight::{ConnID, WinID};
 use crate::windows::{Display, Panel, Window, WindowPane};
 
 #[derive(Clone, Debug)]
@@ -100,7 +100,17 @@ fn get_window_in_direction(
     }
 }
 
+/// Result of attempting to focus a window.
+struct FocusResult {
+    /// Successfully focused window entity (if any)
+    focused: Option<Entity>,
+    /// Windows that need cleanup (inaccessible)
+    to_cleanup: Vec<(Entity, WinID)>,
+}
+
 /// Handles the "focus" command, moving focus to a window in a specified direction.
+/// Skips over inaccessible windows and continues searching until finding an accessible one.
+/// Returns both the focused window and any inaccessible windows encountered for cleanup.
 ///
 /// # Arguments
 ///
@@ -111,18 +121,51 @@ fn get_window_in_direction(
 ///
 /// # Returns
 ///
-/// `Some(Entity)` with the entity of the newly focused window, otherwise `None`.
+/// `FocusResult` containing the focused window (if found) and windows to clean up.
 fn command_move_focus(
     direction: &Direction,
     current_window: Entity,
     strip: &WindowPane,
     windows: &Query<&Window>,
-) -> Option<Entity> {
-    get_window_in_direction(direction, current_window, strip).inspect(|entity| {
-        if let Ok(window) = windows.get(*entity) {
-            window.focus_with_raise();
+) -> FocusResult {
+    let mut result = FocusResult {
+        focused: None,
+        to_cleanup: Vec::new(),
+    };
+
+    // Start searching from the current window
+    let mut search_from = current_window;
+
+    loop {
+        let Some(entity) = get_window_in_direction(direction, search_from, strip) else {
+            // No more windows in this direction
+            break;
+        };
+
+        let Ok(window) = windows.get(entity) else {
+            break;
+        };
+
+        // Check if the window is still accessible (not closed/hidden)
+        if !window.is_accessible() {
+            debug!(
+                "{}: Window {} is no longer accessible, needs cleanup",
+                function_name!(),
+                window.id()
+            );
+            result.to_cleanup.push((entity, window.id()));
+            // Continue searching from this inaccessible window's position
+            search_from = entity;
+            continue;
         }
-    })
+
+        // Found an accessible window - focus it
+        window.focus_with_raise();
+        result.focused = Some(entity);
+        break;
+    }
+
+    result
 }
 
 /// Handles the "swap" command, swapping the positions of the current window with another window in a specified direction.
@@ -326,7 +369,26 @@ fn command_windows(
     match operation {
         Operation::Focus(direction) => {
             let mut lens = windows.transmute_lens::<&Window>();
-            command_move_focus(direction, focused_entity, active_panel, &lens.query());
+            let result = command_move_focus(direction, focused_entity, active_panel, &lens.query());
+
+            // Clean up any inaccessible windows encountered
+            for (entity, window_id) in result.to_cleanup {
+                debug!(
+                    "{}: Cleaning up inaccessible window {}",
+                    function_name!(),
+                    window_id
+                );
+                // Remove from pane immediately
+                active_panel.remove(entity);
+                // Trigger WindowDestroyed to clean up the entity
+                commands.trigger(WMEventTrigger(Event::WindowDestroyed { window_id }));
+            }
+
+            // If we found an accessible window, update focus marker
+            if let Some(new_focus) = result.focused {
+                commands.entity(focused_entity).remove::<FocusedMarker>();
+                commands.entity(new_focus).insert(FocusedMarker);
+            }
         }
 
         Operation::Swap(direction) => {

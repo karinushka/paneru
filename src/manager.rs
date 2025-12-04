@@ -274,6 +274,13 @@ impl WindowManager {
                 }
             }
             for window_entity in new_windows {
+                if windows
+                    .get(window_entity)
+                    .is_ok_and(|(window, _)| !window.managed())
+                {
+                    // Window is not managed, do not insert it into the panel.
+                    continue;
+                }
                 if pane.index_of(window_entity).is_err() {
                     pane.append(window_entity);
                     if let Ok((mut window, _)) = windows.get_mut(window_entity) {

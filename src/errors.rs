@@ -67,6 +67,12 @@ impl<T> From<std::sync::mpsc::SendError<T>> for Error {
     }
 }
 
+impl From<std::sync::mpsc::RecvError> for Error {
+    fn from(err: std::sync::mpsc::RecvError) -> Self {
+        Error::Generic(format!("{err}"))
+    }
+}
+
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {
         Error::IO(format!("{err}"))

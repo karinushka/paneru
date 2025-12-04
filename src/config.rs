@@ -1,4 +1,4 @@
-use bevy::ecs::{resource::Resource, system::Res};
+use bevy::ecs::resource::Resource;
 use log::{error, info};
 use notify::EventHandler;
 use objc2_core_foundation::{CFData, CFString};
@@ -253,11 +253,8 @@ pub fn default_preset_column_widths() -> Vec<f64> {
 /// # Returns
 ///
 /// A `Vec<f64>` of preset column widths, or the default values if the config is not present.
-pub fn preset_column_widths(config: Option<&Res<Config>>) -> Vec<f64> {
-    match config {
-        Some(config) => config.options().preset_column_widths,
-        None => default_preset_column_widths(),
-    }
+pub fn preset_column_widths(config: &Config) -> Vec<f64> {
+    config.options().preset_column_widths
 }
 
 #[derive(Debug)]

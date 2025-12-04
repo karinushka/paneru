@@ -168,7 +168,7 @@ impl WindowManager {
         active_display: Query<&Display, With<FocusedMarker>>,
         mut focused_window: Query<(&mut Window, Entity), With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
-        config: Option<Res<Config>>,
+        config: Res<Config>,
         mut commands: Commands,
     ) {
         const SWIPE_THRESHOLD: f64 = 0.01;
@@ -176,7 +176,8 @@ impl WindowManager {
             return;
         };
         if config
-            .and_then(|config| config.options().swipe_gesture_fingers)
+            .options()
+            .swipe_gesture_fingers
             .is_some_and(|fingers| deltas.len() == fingers)
         {
             let Ok(active_display) = active_display.single() else {
@@ -731,7 +732,7 @@ impl WindowManager {
         mut apps: Query<(Entity, &mut Application)>,
         mut active_display: Query<&mut Display, With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
-        config: Option<Res<Config>>,
+        config: Res<Config>,
         mut commands: Commands,
     ) {
         let new_windows = &mut trigger.event_mut().0;
@@ -800,8 +801,7 @@ impl WindowManager {
 
             let title = window.title().unwrap_or_default();
             let properties = config
-                .as_ref()
-                .and_then(|config| config.find_window_properties(&title, bundle_id))
+                .find_window_properties(&title, bundle_id)
                 .inspect(|_| {
                     debug!(
                         "{}: Applying window properties for '{title}",
@@ -836,8 +836,9 @@ impl WindowManager {
             .unwrap_or(false);
         let wanted_insertion = properties.as_ref().and_then(|props| props.index);
         window.manage(!floating);
-
-        _ = window.update_frame(Some(&active_display.bounds));
+        _ = window
+            .update_frame(Some(&active_display.bounds))
+            .inspect_err(|err| error!("{}: {err}", function_name!()));
 
         // Insert the window into the internal Bevy state.
         let entity = commands.spawn(window).id();
@@ -1443,10 +1444,8 @@ impl WindowManager {
     /// # Returns
     ///
     /// `true` if focus follows mouse is enabled, `false` otherwise.
-    pub fn focus_follows_mouse(config: Option<&Res<Config>>) -> bool {
-        config
-            .and_then(|config| config.options().focus_follows_mouse)
-            .is_some_and(|ffm| ffm)
+    pub fn focus_follows_mouse(config: &Config) -> bool {
+        config.options().focus_follows_mouse.is_some_and(|ffm| ffm)
     }
 
     /// Handles display added events.
@@ -1798,7 +1797,7 @@ impl WindowManager {
         windows: Query<&Window>,
         focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
-        config: Option<Res<Config>>,
+        config: Res<Config>,
         mission_control_active: Res<MissionControlActive>,
         mut focus_follows_mouse_id: ResMut<FocusFollowsMouse>,
         mut skip_reshuffle: ResMut<SkipReshuffle>,

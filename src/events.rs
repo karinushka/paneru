@@ -276,10 +276,17 @@ impl EventHandler {
                 let main_cid = unsafe { SLSMainConnectionID() };
                 debug!("{}: My connection id: {main_cid}", function_name!());
 
-                let mut existing_processes =
-                    EventHandler::gather_initial_processes(&receiver, &sender);
+                let Ok((mut existing_processes, config)) =
+                    EventHandler::gather_initial_processes(&receiver)
+                else {
+                    error!(
+                        "{}: problem gathering existing processes.",
+                        function_name!()
+                    );
+                    return;
+                };
                 let process_setup = move |world: &mut World| {
-                    EventHandler::initial_setup(world, &mut existing_processes);
+                    EventHandler::initial_setup(world, &mut existing_processes, config.as_ref());
                 };
 
                 BevyApp::new()
@@ -452,37 +459,25 @@ impl EventHandler {
     /// A vector of `ProcessRef` for the processes launched before the window manager started.
     fn gather_initial_processes(
         receiver: &Receiver<Event>,
-        sender: &EventSender,
-    ) -> Vec<ProcessRef> {
-        let mut out = Vec::new();
+    ) -> Result<(Vec<ProcessRef>, Option<Config>)> {
+        let mut initial_processes = Vec::new();
         let mut initial_config = None;
         loop {
-            match receiver.recv() {
-                Ok(Event::ProcessesLoaded | Event::Exit) => break,
-                Ok(Event::ApplicationLaunched { psn, observer }) => {
-                    out.push(Process::new(&psn, observer.clone()));
+            match receiver.recv()? {
+                Event::ProcessesLoaded | Event::Exit => break,
+                Event::ApplicationLaunched { psn, observer } => {
+                    initial_processes.push(Process::new(&psn, observer.clone()));
                 }
-                Ok(Event::ConfigRefresh { config }) => {
+                Event::ConfigRefresh { config } => {
                     initial_config = Some(config);
                 }
-                Ok(event) => warn!(
+                event => warn!(
                     "{}: Stray event during initial process gathering: {event:?}",
                     function_name!()
                 ),
-                Err(err) => {
-                    warn!(
-                        "{}: Error reading initial processes: {err}",
-                        function_name!()
-                    );
-                    break;
-                }
             }
         }
-
-        if let Some(config) = initial_config {
-            _ = sender.send(Event::ConfigRefresh { config });
-        }
-        out
+        Ok((initial_processes, initial_config))
     }
 
     /// Sets up the initial state of the Bevy world, spawning existing processes.
@@ -491,25 +486,30 @@ impl EventHandler {
     ///
     /// * `world` - The Bevy world.
     /// * `existing_processes` - A mutable vector of `ProcessRef` for processes to add.
-    fn initial_setup(world: &mut World, existing_processes: &mut Vec<ProcessRef>) {
-        loop {
-            let Some(mut process) = existing_processes.pop() else {
-                break;
-            };
-            if !process.is_observable() {
+    fn initial_setup(
+        world: &mut World,
+        existing_processes: &mut Vec<ProcessRef>,
+        config: Option<&Config>,
+    ) {
+        if let Some(config) = config {
+            world.insert_resource(config.clone());
+        }
+
+        while let Some(mut process) = existing_processes.pop() {
+            if process.is_observable() {
+                debug!(
+                    "{}: Adding existing process {}",
+                    function_name!(),
+                    process.name
+                );
+                world.spawn((ExistingMarker, BProcess(process)));
+            } else {
                 debug!(
                     "{}: Existing application {} is not observable, ignoring it.",
                     function_name!(),
                     process.name,
                 );
-                continue;
             }
-            debug!(
-                "{}: Adding existing process {}",
-                function_name!(),
-                process.name
-            );
-            world.spawn((ExistingMarker, BProcess(process)));
         }
         world.spawn(InitializingMarker);
     }
@@ -579,14 +579,15 @@ impl EventHandler {
         windows: Query<(&mut Window, Entity, &RepositionMarker)>,
         displays: Query<&Display, With<FocusedMarker>>,
         time: Res<Time<Virtual>>,
-        config: Option<Res<Config>>,
+        config: Res<Config>,
         mut commands: Commands,
     ) {
         let Ok(active_display) = displays.single() else {
             return;
         };
         let move_speed = config
-            .and_then(|config| config.options().animation_speed)
+            .options()
+            .animation_speed
             // If unset, set it to something high, so the move happens immediately,
             // effectively disabling animation.
             .unwrap_or(1_000_000.0)

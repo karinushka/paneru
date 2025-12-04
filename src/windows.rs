@@ -95,19 +95,13 @@ impl WindowPane {
     /// * `after` - The index after which to insert the window.
     /// * `window_id` - The ID of the window to insert.
     ///
-    /// # Returns
-    ///
-    /// `Ok(usize)` with the new index of the inserted window, otherwise `Err(Error)` if the index is out of bounds.
-    pub fn insert_at(&mut self, after: usize, window_id: Entity) -> Result<usize> {
-        let index = after + 1;
-        if index > self.len() {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                format!("{}: index {after} out of bounds.", function_name!()),
-            ));
+    /// If the index is out of bounds, it will simply append at the end.
+    pub fn insert_at(&mut self, after: usize, window_id: Entity) {
+        let index = after;
+        if index >= self.len() {
+            self.pane.push_back(Panel::Single(window_id));
         }
         self.pane.insert(index, Panel::Single(window_id));
-        Ok(index)
     }
 
     /// Appends a window ID to the end of the pane.

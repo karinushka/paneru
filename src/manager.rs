@@ -862,23 +862,29 @@ impl WindowManager {
         };
 
         // Attempt inserting the window at a pre-defined position.
-        let inserted =
-            wanted_insertion.and_then(|insert_at| panel.insert_at(insert_at, entity).ok());
-        if inserted.is_none() {
-            // If failed, just insert it after the current focus.
-            let focused_window = windows
-                .iter()
-                .find_map(|(entity, _, focused)| focused.map(|_| entity));
-            let insert_at = focused_window.and_then(|entity| panel.index_of(entity).ok());
-            debug!("{}: New window adding at {panel}", function_name!());
-            match insert_at {
-                Some(after) => {
-                    debug!("{}: New window inserted at {after}", function_name!());
-                    _ = panel.insert_at(after, entity);
-                }
-                None => panel.append(entity),
+        let insert_at = wanted_insertion.map_or_else(
+            || {
+                // Otherwise attempt inserting it after the current focus.
+                let focused_window = windows
+                    .iter()
+                    .find_map(|(entity, _, focused)| focused.map(|_| entity));
+                // Insert to the right of the currently focused window
+                focused_window
+                    .and_then(|entity| panel.index_of(entity).ok())
+                    .and_then(|insert_at| (insert_at + 1 < panel.len()).then_some(insert_at + 1))
+            },
+            Some,
+        );
+
+        debug!("{}: New window adding at {panel}", function_name!());
+        match insert_at {
+            Some(after) => {
+                debug!("{}: New window inserted at {after}", function_name!());
+                panel.insert_at(after, entity);
             }
+            None => panel.append(entity),
         }
+        // }
         commands.trigger(ReshuffleAroundTrigger(window_id));
     }
 

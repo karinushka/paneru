@@ -92,13 +92,12 @@ impl WindowManager {
     #[allow(clippy::needless_pass_by_value)]
     pub fn dispatch_application_messages(
         trigger: On<WMEventTrigger>,
-        windows: Query<(&Window, Entity)>,
+        mut windows: Query<(&mut Window, Entity)>,
         mut displays: Query<&mut Display, With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
         mut commands: Commands,
     ) {
         let main_cid = main_cid.0;
-        let find_window = |window_id| windows.iter().find(|(window, _)| window.id() == window_id);
         let Ok(mut active_display) = displays.single_mut() else {
             warn!("{}: Unable to get current display.", function_name!());
             return;
@@ -112,7 +111,11 @@ impl WindowManager {
                 Err(err) => debug!("{}: not adding window {element:?}: {err}", function_name!(),),
             },
             Event::WindowMinimized { window_id } => {
-                if let Some((_, entity)) = find_window(*window_id) {
+                let found = windows
+                    .iter_mut()
+                    .find(|(window, _)| window.id() == *window_id);
+                if let Some((mut window, entity)) = found {
+                    window.manage(false);
                     active_display.remove_window(entity);
                 }
             }
@@ -120,9 +123,14 @@ impl WindowManager {
                 let Ok(pane) = active_display.active_panel(main_cid) else {
                     return;
                 };
-                if let Some((_, entity)) = find_window(*window_id) {
+                let found = windows
+                    .iter_mut()
+                    .find(|(window, _)| window.id() == *window_id);
+                if let Some((mut window, entity)) = found {
+                    window.manage(true);
                     pane.append(entity);
                 }
+                commands.trigger(ReshuffleAroundTrigger(*window_id));
             }
             _ => (),
         }

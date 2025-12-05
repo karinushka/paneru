@@ -126,18 +126,9 @@ impl WindowManager {
 
                 // Handle focus transfer and reshuffle similar to window destruction
                 if let Ok(panel) = active_display.active_panel(main_cid) {
-                    // Try to find a window to the left first
-                    _ = panel.access_left_of(entity, |p| {
+                    _ = panel.access_neighbor_of(entity, |p| {
                         neighbor_entity = p.top();
-                        false
                     });
-                    // If no left neighbor, try to find a window to the right
-                    if neighbor_entity.is_none() {
-                        _ = panel.access_right_of(entity, |p| {
-                            neighbor_entity = p.top();
-                            false
-                        });
-                    }
 
                     // If the minimized window was focused, transfer focus to the neighbor
                     if was_focused {
@@ -921,17 +912,9 @@ impl WindowManager {
             let mut neighbor_entity = None;
 
             if let Ok(panel) = display.active_panel(main_cid.0) {
-                // Try to find a window to the left first
-                _ = panel.access_left_of(entity, |p| {
+                _ = panel.access_neighbor_of(entity, |p| {
                     neighbor_entity = p.top();
-                    false
                 });
-                if neighbor_entity.is_none() {
-                    _ = panel.access_right_of(entity, |p| {
-                        neighbor_entity = p.top();
-                        false
-                    });
-                }
 
                 if was_focused {
                     if let Some(neighbor_entity) = neighbor_entity {

@@ -844,6 +844,7 @@ impl WindowManager {
         let Event::WindowDestroyed { window_id } = trigger.event().0 else {
             return;
         };
+
         let Some((window, entity, child)) = windows
             .iter()
             .find(|(window, _, _)| window.id() == window_id)
@@ -867,17 +868,27 @@ impl WindowManager {
         commands.entity(entity).despawn();
 
         for mut display in &mut displays {
-            if let Ok(panel) = display.active_panel(main_cid.0) {
-                let mut previous_id = None;
-                _ = panel.access_left_of(entity, |panel| {
-                    previous_id = panel
-                        .top()
-                        .and_then(|entity| windows.get(entity).ok())
-                        .map(|tuple| tuple.0.id());
-                    false
-                });
-                if let Some(previous_id) = previous_id {
-                    commands.trigger(ReshuffleAroundTrigger(previous_id));
+            let Ok(panel) = display.active_panel(main_cid.0) else {
+                continue;
+            };
+
+            // Move focus to a left neighbour if the panel has more windows.
+            if let Ok(index) = panel.index_of(entity)
+                && panel.len() > 1
+            {
+                let neighbour = panel.get(index.saturating_sub(1)).ok();
+
+                if let Some((window, _, _)) = neighbour
+                    .and_then(|pane| pane.top())
+                    .and_then(|entity| windows.get(entity).ok())
+                {
+                    let window_id = window.id();
+                    debug!(
+                        "{}: window destroyed, moving focus to {window_id}",
+                        function_name!()
+                    );
+                    commands.trigger(WMEventTrigger(Event::WindowFocused { window_id }));
+                    commands.trigger(ReshuffleAroundTrigger(window_id));
                 }
             }
             display.remove_window(entity);
@@ -948,10 +959,9 @@ impl WindowManager {
             return;
         }
         let main_cid = main_cid.0;
-        let Some((window, entity, child)) =
-            windows.iter().find_map(|(window, entity, child, _)| {
-                (window.id() == window_id).then_some((window, entity, child))
-            })
+        let Some((window, entity, child, _)) = windows
+            .iter()
+            .find(|(window, _, _, _)| window.id() == window_id)
         else {
             error!("{}: Unable to find window id {window_id}", function_name!());
             return;

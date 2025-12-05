@@ -44,6 +44,7 @@ fn parse_operation(argv: &[&str]) -> Result<Operation> {
         "swap" => Operation::Swap(parse_direction(argv.get(1).ok_or(err)?)?),
         "center" => Operation::Center,
         "resize" => Operation::Resize,
+        "fullwidth" => Operation::FullWidth,
         "manage" => Operation::Manage,
         "stack" => Operation::Stack(true),
         "unstack" => Operation::Stack(false),

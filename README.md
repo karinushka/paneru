@@ -144,6 +144,7 @@ Paneru provides a home manager module to install and configure paneru.
         window_swap_last = "alt + shift - l";
         window_center = "alt - c";
         window_resize = "alt - r";
+        window_fullwidth = "alt - f";
         window_manage = "ctrl + alt - t";
         window_stack = "alt - ]";
         window_unstack = "alt + shift - ]";
@@ -224,6 +225,9 @@ window_center = "alt - c"
 
 # Cycles between the window sizes defined in the `preset_column_widths` option.
 window_resize = "alt - r"
+
+# Toggle full width for the current focused window.
+window_fullwidth = "alt - f";
 
 # Toggles the window for management. If unmanaged, the window will be "floating".
 window_manage = "ctrl + alt - t"

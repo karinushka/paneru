@@ -31,6 +31,7 @@ pub enum Operation {
     Swap(Direction),
     Center,
     Resize,
+    FullWidth,
     Manage,
     Stack(bool),
 }
@@ -229,6 +230,43 @@ fn resize_window(
     });
 }
 
+fn full_width_window(
+    active_display: &mut Display,
+    focused_entity: Entity,
+    windows: &mut Query<&mut Window>,
+    commands: &mut Commands,
+    config: Option<&Res<Config>>,
+) {
+    let Ok(mut window) = windows.get_mut(focused_entity) else {
+        return;
+    };
+
+    let display_width = active_display.bounds.size.width;
+    let height = window.frame().size.height;
+    let y = window.frame().origin.y;
+
+    let is_full_width = (window.frame().size.width - display_width).abs() < 1.0;
+
+    let (width, width_ratio, x) = if is_full_width {
+        let width_ratios = preset_column_widths(config);
+        let ratio = *width_ratios.first().unwrap_or(&0.5);
+        let w = ratio * display_width;
+        let x_pos = (display_width - w).min(window.frame().origin.x);
+        (w, ratio, x_pos)
+    } else {
+        (display_width, 1.0, 0.0)
+    };
+
+    commands.entity(focused_entity).insert(RepositionMarker {
+        origin: CGPoint { x, y },
+    });
+    commands.entity(focused_entity).insert(ResizeMarker {
+        size: CGSize { width, height },
+    });
+
+    window.width_ratio = width_ratio;
+}
+
 fn manage_window(
     active_panel: &mut WindowPane,
     display_bounds: &CGRect,
@@ -308,6 +346,10 @@ fn command_windows(
 
         Operation::Resize => {
             resize_window(active_display, focused_entity, windows, commands, config);
+        }
+
+        Operation::FullWidth => {
+            full_width_window(active_display, focused_entity, windows, commands, config);
         }
 
         Operation::Manage => {

@@ -1,5 +1,6 @@
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
+use bevy::ecs::message::MessageWriter;
 use bevy::ecs::observer::On;
 use bevy::ecs::query::With;
 use bevy::ecs::system::{Commands, Query, Res, ResMut};
@@ -608,6 +609,7 @@ impl WindowManager {
         initializing: Query<&InitializingMarker>,
         main_cid: Res<MainConnection>,
         config: Res<Config>,
+        mut messages: MessageWriter<Event>,
         mut focus_follows_mouse_id: ResMut<FocusFollowsMouse>,
         mut skip_reshuffle: ResMut<SkipReshuffle>,
         mut commands: Commands,
@@ -623,7 +625,11 @@ impl WindowManager {
             .iter()
             .find(|(window, _, _, _)| window.id() == window_id)
         else {
-            error!("{}: Unable to find window id {window_id}", function_name!());
+            debug!(
+                "{}: Early focus event for window id {window_id}. Re-queueing.",
+                function_name!()
+            );
+            messages.write(Event::WindowFocused { window_id });
             return;
         };
         for (window, entity, _, focused) in windows {

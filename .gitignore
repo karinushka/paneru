@@ -1,1 +1,6 @@
 /target
+# TODO: delete
+.envrc
+.vscode
+.direnv
+paneru.err.log

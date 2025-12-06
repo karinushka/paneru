@@ -250,6 +250,40 @@ impl WindowPane {
         Ok(())
     }
 
+    /// Accesses the nearest neighbor of a given window, trying left first, then right.
+    /// Calls the accessor function with the first neighbor found.
+    ///
+    /// # Arguments
+    ///
+    /// * `window_id` - The ID of the window to find a neighbor for.
+    /// * `accessor` - A closure that takes a `&Panel`. Return value is ignored since only one neighbor is accessed.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if successful, otherwise `Err(Error)` if the starting window is not found.
+    pub fn access_neighbor_of(
+        &self,
+        window_id: Entity,
+        mut accessor: impl FnMut(&Panel),
+    ) -> Result<()> {
+        let index = self.index_of(window_id)?;
+
+        // Try left first (immediate left neighbor)
+        if index > 0 {
+            if let Some(panel) = self.pane.get(index - 1) {
+                accessor(panel);
+                return Ok(());
+            }
+        }
+
+        // No left neighbor, try right
+        if let Some(panel) = self.pane.get(index + 1) {
+            accessor(panel);
+        }
+
+        Ok(())
+    }
+
     /// Stacks the window with the given ID onto the panel to its left.
     ///
     /// # Arguments
@@ -860,6 +894,18 @@ impl Window {
     pub fn is_unknown(&self) -> bool {
         self.subrole()
             .is_ok_and(|subrole| subrole.eq(kAXUnknownSubrole))
+    }
+
+    /// Checks if the window is still accessible via the Accessibility API.
+    /// This can be used to detect windows that have been closed/hidden without
+    /// sending a WindowDestroyed notification.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the window is accessible, `false` otherwise.
+    pub fn is_accessible(&self) -> bool {
+        // Try to get the role attribute - if this fails, the window is gone
+        self.role().is_ok()
     }
 
     /// Checks if the window is minimized.

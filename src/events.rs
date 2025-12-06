@@ -5,7 +5,6 @@ use bevy::ecs::message::{Message, MessageReader, Messages};
 use bevy::ecs::query::With;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs;
-use bevy::ecs::schedule::common_conditions::any_with_component;
 use bevy::ecs::system::{Commands, Query, Res};
 use bevy::ecs::world::World;
 use bevy::prelude::Event as BevyEvent;
@@ -23,7 +22,6 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use stdext::function_name;
 
-use crate::app::Application;
 use crate::commands::{Command, process_command_trigger};
 use crate::config::Config;
 use crate::errors::Result;
@@ -190,10 +188,6 @@ impl EventSender {
     }
 }
 
-// While this marker exists in the world, the system is gathering existing windows.
-#[derive(Component)]
-pub struct InitializingMarker;
-
 // Used to signify currently active display and focused window.
 #[derive(Component)]
 pub struct FocusedMarker;
@@ -273,59 +267,57 @@ impl EventHandler {
             sender.clone(),
             quit.clone(),
             thread::spawn(move || {
-                let main_cid = unsafe { SLSMainConnectionID() };
-                debug!("{}: My connection id: {main_cid}", function_name!());
-
-                let Ok((mut existing_processes, config)) =
-                    EventHandler::gather_initial_processes(&receiver)
-                else {
-                    error!(
-                        "{}: problem gathering existing processes.",
-                        function_name!()
-                    );
-                    return;
-                };
-                let process_setup = move |world: &mut World| {
-                    EventHandler::initial_setup(world, &mut existing_processes, config.as_ref());
-                };
-
-                let mut app = BevyApp::new();
-                app.set_runner(move |app| EventHandler::custom_loop(app, &receiver))
-                    .init_resource::<Messages<Event>>()
-                    .insert_resource(Time::<Virtual>::from_max_delta(Duration::from_secs(10)))
-                    .insert_resource(MainConnection(main_cid))
-                    .insert_resource(SenderSocket(sender))
-                    .insert_resource(SkipReshuffle(false))
-                    .insert_resource(MissionControlActive(false))
-                    .insert_resource(FocusFollowsMouse(None))
-                    .insert_resource(OrphanedSpaces(HashMap::new()))
-                    .add_observer(process_command_trigger);
-
-                WindowManager::register_triggers(&mut app);
-
-                app.add_systems(Startup, EventHandler::gather_displays)
-                    .add_systems(Startup, process_setup.after(EventHandler::gather_displays))
-                    .add_systems(
-                        Update,
-                        (
-                            EventHandler::dispatch_toplevel_triggers,
-                            EventHandler::animate_windows,
-                            EventHandler::animate_resize_windows,
-                            WindowManager::add_existing_process
-                                .run_if(any_with_component::<InitializingMarker>),
-                            WindowManager::add_existing_application
-                                .run_if(any_with_component::<InitializingMarker>),
-                            EventHandler::finish_setup
-                                .run_if(any_with_component::<InitializingMarker>),
-                            WindowManager::add_launched_process,
-                            WindowManager::add_launched_application,
-                            WindowManager::ready_timer_cleanup,
-                        ),
-                    )
-                    .run();
-                quit.store(true, std::sync::atomic::Ordering::Relaxed);
+                if let Err(err) = EventHandler::runner(receiver, sender, &quit) {
+                    error!("{}: Error in the runner: {err}", function_name!());
+                }
             }),
         )
+    }
+
+    fn runner(
+        receiver: Receiver<Event>,
+        sender: EventSender,
+        quit: &Arc<AtomicBool>,
+    ) -> Result<()> {
+        let main_cid = unsafe { SLSMainConnectionID() };
+        debug!("{}: My connection id: {main_cid}", function_name!());
+
+        let (mut existing_processes, config) = EventHandler::gather_initial_processes(&receiver)?;
+        let process_setup = move |world: &mut World| {
+            EventHandler::initial_setup(world, &mut existing_processes, config.as_ref());
+        };
+
+        let mut app = BevyApp::new();
+        app.set_runner(move |app| EventHandler::custom_loop(app, &receiver))
+            .init_resource::<Messages<Event>>()
+            .insert_resource(Time::<Virtual>::from_max_delta(Duration::from_secs(10)))
+            .insert_resource(MainConnection(main_cid))
+            .insert_resource(SenderSocket(sender))
+            .insert_resource(SkipReshuffle(false))
+            .insert_resource(MissionControlActive(false))
+            .insert_resource(FocusFollowsMouse(None))
+            .insert_resource(OrphanedSpaces(HashMap::new()))
+            .add_observer(process_command_trigger);
+
+        WindowManager::register_triggers(&mut app);
+
+        app.add_systems(Startup, EventHandler::gather_displays)
+            .add_systems(Startup, process_setup.after(EventHandler::gather_displays))
+            .add_systems(
+                Update,
+                (
+                    EventHandler::dispatch_toplevel_triggers,
+                    EventHandler::animate_windows,
+                    EventHandler::animate_resize_windows,
+                    WindowManager::add_launched_process,
+                    WindowManager::add_launched_application,
+                    WindowManager::ready_timer_cleanup,
+                ),
+            )
+            .run();
+
+        quit.store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
 
     /// The custom Bevy application loop, handling events from the receiver.
@@ -497,11 +489,24 @@ impl EventHandler {
                 );
             }
         }
-        world.spawn(InitializingMarker);
+
+        // Run initial setup systems in a one-shot way.
+        let existing_apps_setup = [
+            world.register_system(WindowManager::add_existing_process),
+            world.register_system(WindowManager::add_existing_application),
+            world.register_system(EventHandler::finish_setup),
+        ];
+
+        let init = existing_apps_setup
+            .into_iter()
+            .map(|id| world.run_system(id))
+            .collect::<std::result::Result<Vec<()>, _>>();
+        if let Err(err) = init {
+            error!("{}: Error running initial systems: {err}", function_name!());
+        }
     }
 
     /// Finishes the initialization process once all initial windows are loaded.
-    /// Removes the `InitializingMarker` and triggers a focus check.
     ///
     /// # Arguments
     ///
@@ -513,37 +518,29 @@ impl EventHandler {
     /// * `commands` - Bevy commands to despawn entities and send messages.
     #[allow(clippy::needless_pass_by_value)]
     fn finish_setup(
-        apps: Query<(&Application, Entity, Option<&FreshMarker>)>,
         mut windows: Query<(&mut Window, Entity)>,
-        initializing: Query<(Entity, &InitializingMarker)>,
         displays: Query<(&mut Display, Option<&FocusedMarker>)>,
         main_cid: Res<MainConnection>,
         mut commands: Commands,
     ) {
-        if !windows.is_empty()
-            && apps.iter().all(|(_, _, fresh)| fresh.is_none())
-            && let Ok((entity, _)) = initializing.single()
-        {
-            commands.entity(entity).despawn();
-            info!(
-                "{}: Finished Initialization: found {} windows.",
-                function_name!(),
-                windows.iter().len()
-            );
+        info!(
+            "{}: Finished Initialization: found {} windows.",
+            function_name!(),
+            windows.iter().len()
+        );
 
-            for (mut display, active) in displays {
-                WindowManager::refresh_display(main_cid.0, &mut display, &mut windows);
+        for (mut display, active) in displays {
+            WindowManager::refresh_display(main_cid.0, &mut display, &mut windows);
 
-                if active.is_some() {
-                    let first_window = display
-                        .active_panel(main_cid.0)
-                        .ok()
-                        .and_then(|panel| panel.first().ok())
-                        .and_then(|panel| panel.top());
-                    if let Some(entity) = first_window {
-                        debug!("{}: focusing {entity}", function_name!());
-                        commands.entity(entity).insert(FocusedMarker);
-                    }
+            if active.is_some() {
+                let first_window = display
+                    .active_panel(main_cid.0)
+                    .ok()
+                    .and_then(|panel| panel.first().ok())
+                    .and_then(|panel| panel.top());
+                if let Some(entity) = first_window {
+                    debug!("{}: focusing {entity}", function_name!());
+                    commands.entity(entity).insert(FocusedMarker);
                 }
             }
         }

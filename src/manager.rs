@@ -114,6 +114,7 @@ impl WindowManager {
         trigger: On<WMEventTrigger>,
         mut windows: Query<(&mut Window, Entity)>,
         mut displays: Query<&mut Display, With<FocusedMarker>>,
+        applications: Query<(&Application, &Children)>,
         main_cid: Res<MainConnection>,
         mut commands: Commands,
     ) {
@@ -151,6 +152,52 @@ impl WindowManager {
                     &mut commands,
                 )
                 .inspect_err(|err| warn!("{}: Unminimizing window: {err}", function_name!()));
+            }
+
+            Event::ApplicationHidden { pid } => {
+                let Some((_, children)) = applications.iter().find(|(app, _)| app.pid() == *pid)
+                else {
+                    warn!("{}: Unable to find application {pid}", function_name!());
+                    return;
+                };
+
+                let window_ids = children
+                    .iter()
+                    .filter_map(|entity| windows.get(*entity).map(|(window, _)| window.id()).ok())
+                    .collect::<Vec<_>>();
+                for window_id in window_ids {
+                    _ = window_minimized(
+                        window_id,
+                        &mut windows,
+                        &mut active_display,
+                        main_cid,
+                        &mut commands,
+                    )
+                    .inspect_err(|err| warn!("{}: Minimizing window: {err}", function_name!()));
+                }
+            }
+
+            Event::ApplicationVisible { pid } => {
+                let Some((_, children)) = applications.iter().find(|(app, _)| app.pid() == *pid)
+                else {
+                    warn!("{}: Unable to find application {pid}", function_name!());
+                    return;
+                };
+
+                let window_ids = children
+                    .iter()
+                    .filter_map(|entity| windows.get(*entity).map(|(window, _)| window.id()).ok())
+                    .collect::<Vec<_>>();
+                for window_id in window_ids {
+                    _ = window_unminimized(
+                        window_id,
+                        &mut windows,
+                        &mut active_display,
+                        main_cid,
+                        &mut commands,
+                    )
+                    .inspect_err(|err| warn!("{}: Unminimizing window: {err}", function_name!()));
+                }
             }
 
             _ => (),

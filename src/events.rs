@@ -57,10 +57,10 @@ pub enum Event {
     ApplicationActivated,
     ApplicationDeactivated,
     ApplicationVisible {
-        msg: String,
+        pid: i32,
     },
     ApplicationHidden {
-        msg: String,
+        pid: i32,
     },
 
     WindowCreated {

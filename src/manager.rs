@@ -576,6 +576,7 @@ impl WindowManager {
         current_focus: Query<(&Window, Entity), With<FocusedMarker>>,
         initializing: Query<&InitializingMarker>,
         main_cid: Res<MainConnection>,
+        config: Res<Config>,
         mut focus_follows_mouse_id: ResMut<FocusFollowsMouse>,
         mut skip_reshuffle: ResMut<SkipReshuffle>,
         mut commands: Commands,
@@ -620,7 +621,8 @@ impl WindowManager {
         if let Some((_, previous_entity)) = previous_focus {
             commands.entity(previous_entity).remove::<FocusedMarker>();
         }
-        if previous_focus.is_none_or(|(previous, _)| previous.id() != window_id)
+        if mouse_follows_focus(&config)
+            && previous_focus.is_none_or(|(previous, _)| previous.id() != window_id)
             && focus_follows_mouse_id.0.is_none_or(|id| id != window_id)
         {
             window.center_mouse(main_cid);
@@ -1882,7 +1884,13 @@ fn reposition_stack(
 ///
 /// `true` if focus follows mouse is enabled, `false` otherwise.
 fn focus_follows_mouse(config: &Config) -> bool {
-    config.options().focus_follows_mouse.is_some_and(|ffm| ffm)
+    // Default is enabled.
+    config.options().focus_follows_mouse.is_none_or(|ffm| ffm)
+}
+
+fn mouse_follows_focus(config: &Config) -> bool {
+    // Default is enabled.
+    config.options().mouse_follows_focus.is_none_or(|mff| mff)
 }
 
 /// Handles display change events by updating the active display and reorienting windows.

@@ -233,6 +233,7 @@ impl InnerConfig {
 #[derive(Deserialize, Clone, Debug)]
 pub struct MainOptions {
     pub focus_follows_mouse: Option<bool>,
+    pub mouse_follows_focus: Option<bool>,
     pub swipe_gesture_fingers: Option<usize>,
     #[serde(default = "default_preset_column_widths")]
     pub preset_column_widths: Vec<f64>,

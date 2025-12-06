@@ -122,7 +122,6 @@ Paneru provides a home manager module to install and configure paneru.
     # Equivalent to what you would put into `~/.paneru` (See Configuration options below).
     settings = {
       options = {
-        focus_follows_mouse = true;
         preset_column_widths = [
           0.25
           0.33
@@ -183,8 +182,12 @@ starting point:
 # Example configuration for Paneru.
 #
 [options]
-# Enables focus follows mouse. Set to false or remove the line to disable.
-focus_follows_mouse = true
+# Enables focus follows mouse. Enabled by default, set to false to disable.
+# focus_follows_mouse = true
+
+# Enables mouse follows focus. Enabled by default, set to false to disable.
+# mouse_follows_focus = true
+
 # Array of widths used by the `window_resize` action to cycle between.
 # Defaults to 25%, 33%, 50%, 66% and 75%.
 preset_column_widths = [ 0.25, 0.33, 0.50, 0.66, 0.75 ]
@@ -227,7 +230,7 @@ window_center = "alt - c"
 window_resize = "alt - r"
 
 # Toggle full width for the current focused window.
-window_fullwidth = "alt - f";
+window_fullwidth = "alt - f"
 
 # Toggles the window for management. If unmanaged, the window will be "floating".
 window_manage = "ctrl + alt - t"

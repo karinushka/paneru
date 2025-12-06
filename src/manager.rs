@@ -130,28 +130,29 @@ impl WindowManager {
                 }
                 Err(err) => debug!("{}: not adding window {element:?}: {err}", function_name!(),),
             },
+
             Event::WindowMinimized { window_id } => {
-                let found = windows
-                    .iter_mut()
-                    .find(|(window, _)| window.id() == *window_id);
-                if let Some((mut window, entity)) = found {
-                    window.manage(false);
-                    active_display.remove_window(entity);
-                }
+                _ = window_minimized(
+                    *window_id,
+                    &mut windows,
+                    &mut active_display,
+                    main_cid,
+                    &mut commands,
+                )
+                .inspect_err(|err| warn!("{}: Minimizing window: {err}", function_name!()));
             }
+
             Event::WindowDeminimized { window_id } => {
-                let Ok(pane) = active_display.active_panel(main_cid) else {
-                    return;
-                };
-                let found = windows
-                    .iter_mut()
-                    .find(|(window, _)| window.id() == *window_id);
-                if let Some((mut window, entity)) = found {
-                    window.manage(true);
-                    pane.append(entity);
-                }
-                commands.trigger(ReshuffleAroundTrigger(*window_id));
+                _ = window_unminimized(
+                    *window_id,
+                    &mut windows,
+                    &mut active_display,
+                    main_cid,
+                    &mut commands,
+                )
+                .inspect_err(|err| warn!("{}: Unminimizing window: {err}", function_name!()));
             }
+
             _ => (),
         }
     }
@@ -463,7 +464,7 @@ impl WindowManager {
     #[allow(clippy::needless_pass_by_value)]
     pub fn window_destroyed_trigger(
         trigger: On<WMEventTrigger>,
-        windows: Query<(&Window, Entity, &ChildOf)>,
+        mut windows: Query<(&Window, Entity, &ChildOf)>,
         mut apps: Query<&mut Application>,
         mut displays: Query<&mut Display>,
         main_cid: Res<MainConnection>,
@@ -495,30 +496,13 @@ impl WindowManager {
         app.unobserve_window(window);
         commands.entity(entity).despawn();
 
+        let mut lens = windows.transmute_lens::<&Window>();
         for mut display in &mut displays {
             let Ok(panel) = display.active_panel(main_cid.0) else {
                 continue;
             };
 
-            // Move focus to a left neighbour if the panel has more windows.
-            if let Ok(index) = panel.index_of(entity)
-                && panel.len() > 1
-            {
-                let neighbour = panel.get(index.saturating_sub(1)).ok();
-
-                if let Some((window, _, _)) = neighbour
-                    .and_then(|pane| pane.top())
-                    .and_then(|entity| windows.get(entity).ok())
-                {
-                    let window_id = window.id();
-                    debug!(
-                        "{}: window destroyed, moving focus to {window_id}",
-                        function_name!()
-                    );
-                    commands.trigger(WMEventTrigger(Event::WindowFocused { window_id }));
-                    commands.trigger(ReshuffleAroundTrigger(window_id));
-                }
-            }
+            give_away_focus(entity, &lens.query(), panel, &mut commands);
             display.remove_window(entity);
         }
     }
@@ -2036,4 +2020,73 @@ fn find_window_at_point(main_cid: ConnID, point: &CGPoint) -> Result<WinID> {
     } else {
         Ok(window_id)
     }
+}
+
+/// Moves the focus away to a neighbour window.
+fn give_away_focus(
+    entity: Entity,
+    windows: &Query<&Window>,
+    active_pane: &mut WindowPane,
+    commands: &mut Commands,
+) {
+    // Move focus to a left neighbour if the panel has more windows.
+    if let Ok(index) = active_pane.index_of(entity)
+        && active_pane.len() > 1
+    {
+        let neighbour = active_pane.get(index.saturating_sub(1)).ok();
+
+        if let Some(window) = neighbour
+            .and_then(|pane| pane.top())
+            .and_then(|entity| windows.get(entity).ok())
+        {
+            let window_id = window.id();
+            debug!(
+                "{}: window destroyed, moving focus to {window_id}",
+                function_name!()
+            );
+            commands.trigger(WMEventTrigger(Event::WindowFocused { window_id }));
+            commands.trigger(ReshuffleAroundTrigger(window_id));
+        }
+    }
+}
+
+fn window_minimized(
+    window_id: WinID,
+    windows: &mut Query<(&mut Window, Entity)>,
+    active_display: &mut Display,
+    main_cid: ConnID,
+    commands: &mut Commands,
+) -> Result<()> {
+    let (mut window, entity) = windows
+        .iter_mut()
+        .find(|(window, _)| window.id() == window_id)
+        .ok_or(Error::InvalidWindow)?;
+
+    window.manage(false);
+
+    let mut lens = windows.transmute_lens::<&Window>();
+    let active_panel = active_display.active_panel(main_cid)?;
+    give_away_focus(entity, &lens.query(), active_panel, commands);
+
+    active_display.remove_window(entity);
+    Ok(())
+}
+
+fn window_unminimized(
+    window_id: WinID,
+    windows: &mut Query<(&mut Window, Entity)>,
+    active_display: &mut Display,
+    main_cid: ConnID,
+    commands: &mut Commands,
+) -> Result<()> {
+    let active_panel = active_display.active_panel(main_cid)?;
+    let (mut window, entity) = windows
+        .iter_mut()
+        .find(|(window, _)| window.id() == window_id)
+        .ok_or(Error::InvalidWindow)?;
+
+    window.manage(true);
+    active_panel.append(entity);
+    commands.trigger(ReshuffleAroundTrigger(window_id));
+    Ok(())
 }

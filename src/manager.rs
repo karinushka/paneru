@@ -22,9 +22,9 @@ use crate::app::Application;
 use crate::config::{Config, WindowParams};
 use crate::errors::{Error, Result};
 use crate::events::{
-    BProcess, Event, ExistingMarker, FocusFollowsMouse, FocusedMarker, FreshMarker,
-    InitializingMarker, MainConnection, MissionControlActive, OrphanedSpaces, RepositionMarker,
-    ReshuffleAroundTrigger, SenderSocket, SkipReshuffle, SpawnWindowTrigger, WMEventTrigger,
+    BProcess, Event, ExistingMarker, FocusFollowsMouse, FocusedMarker, FreshMarker, MainConnection,
+    MissionControlActive, OrphanedSpaces, RepositionMarker, ReshuffleAroundTrigger, SenderSocket,
+    SkipReshuffle, SpawnWindowTrigger, WMEventTrigger,
 };
 use crate::process::Process;
 use crate::skylight::{
@@ -606,7 +606,6 @@ impl WindowManager {
         applications: Query<&Application>,
         windows: Query<(&Window, Entity, &ChildOf, Option<&FocusedMarker>)>,
         current_focus: Query<(&Window, Entity), With<FocusedMarker>>,
-        initializing: Query<&InitializingMarker>,
         main_cid: Res<MainConnection>,
         config: Res<Config>,
         mut messages: MessageWriter<Event>,
@@ -617,9 +616,6 @@ impl WindowManager {
         let Event::WindowFocused { window_id } = trigger.event().0 else {
             return;
         };
-        if initializing.single().is_ok() {
-            return;
-        }
         let main_cid = main_cid.0;
         let Some((window, entity, child, _)) = windows
             .iter()

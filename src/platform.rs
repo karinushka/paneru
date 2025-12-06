@@ -793,9 +793,7 @@ define_class!(
                 app.processIdentifier()
             };
 
-            let msg = Event::ApplicationHidden{
-                msg: format!("WorkspaceObserver: {pid}"),
-            };
+            let msg = Event::ApplicationHidden{ pid };
             _ = self.ivars().events.send(msg);
         }
 
@@ -812,9 +810,7 @@ define_class!(
                 let app: &NSRunningApplication =  msg_send![user_info, objectForKey: NSWorkspaceApplicationKey];
                 app.processIdentifier()
             };
-            let msg = Event::ApplicationVisible{
-                msg: format!("WorkspaceObserver: {pid}"),
-            };
+            let msg = Event::ApplicationVisible{ pid };
             _ = self.ivars().events.send(msg);
         }
 

@@ -672,7 +672,7 @@ index = 1
     ));
 
     let props = config
-        .find_window_properties("picture in picture", "com.someting.apple")
+        .find_window_properties("picture in picture", "com.something.apple")
         .unwrap();
     assert_eq!(props.floating, Some(true));
     assert_eq!(props.index, Some(1));

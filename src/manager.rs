@@ -44,6 +44,26 @@ const THRESHOLD: f64 = 10.0;
 pub struct WindowManager;
 
 impl WindowManager {
+    pub fn register_triggers(app: &mut bevy::app::App) {
+        app.add_observer(WindowManager::mouse_moved_trigger)
+            .add_observer(WindowManager::mouse_down_trigger)
+            .add_observer(WindowManager::mouse_dragged_trigger)
+            .add_observer(WindowManager::display_change_trigger)
+            .add_observer(WindowManager::display_add_trigger)
+            .add_observer(WindowManager::display_remove_trigger)
+            .add_observer(WindowManager::display_moved_trigger)
+            .add_observer(WindowManager::front_switched_trigger)
+            .add_observer(WindowManager::window_focused_trigger)
+            .add_observer(WindowManager::reshuffle_around_trigger)
+            .add_observer(WindowManager::swipe_gesture_trigger)
+            .add_observer(WindowManager::mission_control_trigger)
+            .add_observer(WindowManager::application_event_trigger)
+            .add_observer(WindowManager::dispatch_application_messages)
+            .add_observer(WindowManager::window_resized_trigger)
+            .add_observer(WindowManager::window_destroyed_trigger)
+            .add_observer(WindowManager::spawn_window_trigger);
+    }
+
     /// Dispatches process-related messages, such as application launch and termination.
     ///
     /// # Arguments
@@ -194,7 +214,7 @@ impl WindowManager {
             };
             let delta = deltas.iter().sum::<f64>();
             if delta.abs() > SWIPE_THRESHOLD {
-                WindowManager::slide_window(
+                slide_window(
                     main_cid.0,
                     &mut focused_window,
                     active_display,
@@ -202,52 +222,6 @@ impl WindowManager {
                     &mut commands,
                 );
             }
-        }
-    }
-
-    /// Finds and re-inserts orphaned spaces into displays that have empty spaces.
-    ///
-    /// # Arguments
-    ///
-    /// * `orphaned_spaces` - A map of space IDs to `WindowPane`s that are currently orphaned.
-    /// * `display` - A mutable reference to a `Display`.
-    /// * `windows` - A query for all windows.
-    fn find_orphaned_spaces(
-        orphaned_spaces: &mut HashMap<u64, WindowPane>,
-        display: &mut Display,
-        windows: &mut Query<&mut Window>,
-    ) {
-        let mut relocated_windows = vec![];
-        for (space_id, pane) in &mut display.spaces {
-            debug!(
-                "{}: Checking space {space_id} for orphans: {pane}",
-                function_name!()
-            );
-            if let Some(space) = orphaned_spaces.remove(space_id) {
-                debug!(
-                    "{}: Reinserting orphaned space {space_id} into display {}",
-                    function_name!(),
-                    display.id
-                );
-                for window_id in space.all_windows() {
-                    // TODO: check for clashing windows.
-                    pane.append(window_id);
-                    relocated_windows.push((window_id, display.bounds));
-                }
-            }
-        }
-
-        for (entity, bounds) in relocated_windows {
-            let Ok(mut window) = windows.get_mut(entity) else {
-                continue;
-            };
-            _ = window.update_frame(Some(&bounds));
-            debug!(
-                "{}: Relocated window {} has ratio {:.02}",
-                function_name!(),
-                window.id(),
-                window.width_ratio,
-            );
         }
     }
 
@@ -273,8 +247,7 @@ impl WindowManager {
         let display_bounds = display.bounds;
         for (space_id, pane) in &mut display.spaces {
             let mut lens = windows.transmute_lens::<(&Window, Entity)>();
-            let new_windows =
-                WindowManager::refresh_windows_space(main_cid, *space_id, &lens.query());
+            let new_windows = refresh_windows_space(main_cid, *space_id, &lens.query());
 
             // Preserve the order - do not flush existing windows.
             for window_entity in pane.all_windows() {
@@ -302,356 +275,6 @@ impl WindowManager {
                 function_name!()
             );
         }
-    }
-
-    /// Repopulates the current window panel with eligible windows from a specified space.
-    ///
-    /// # Arguments
-    ///
-    /// * `main_cid` - The main connection ID.
-    /// * `space_id` - The ID of the space to refresh windows from.
-    /// * `windows` - A query for all windows.
-    fn refresh_windows_space(
-        main_cid: ConnID,
-        space_id: u64,
-        windows: &Query<(&Window, Entity)>,
-    ) -> Vec<Entity> {
-        WindowManager::space_window_list_for_connection(main_cid, &[space_id], None, false, windows)
-            .inspect_err(|err| {
-                warn!(
-                    "{}: getting windows for space {space_id}: {err}",
-                    function_name!()
-                );
-            })
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|window_id| windows.iter().find(|(window, _)| window.id() == window_id))
-            .filter_map(|(window, entity)| window.is_eligible().then_some(entity))
-            .collect()
-    }
-
-    /// Retrieves a list of window IDs for specified spaces and connection, with an option to include minimized windows.
-    /// This function uses `SkyLight` API calls.
-    ///
-    /// # Arguments
-    ///
-    /// * `main_cid` - The main connection ID.
-    /// * `spaces` - A slice of space IDs to query windows from.
-    /// * `cid` - An optional connection ID. If `None`, the main connection ID is used.
-    /// * `also_minimized` - A boolean indicating whether to include minimized windows in the result.
-    /// * `windows` - A query for all windows.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(Vec<WinID>)` containing the list of window IDs if successful, otherwise `Err(Error)`.
-    fn space_window_list_for_connection(
-        main_cid: ConnID,
-        spaces: &[u64],
-        cid: Option<ConnID>,
-        also_minimized: bool,
-        windows: &Query<(&Window, Entity)>,
-    ) -> Result<Vec<WinID>> {
-        unsafe {
-            let space_list_ref = create_array(spaces, CFNumberType::SInt64Type)?;
-
-            let mut set_tags = 0i64;
-            let mut clear_tags = 0i64;
-            let options = if also_minimized { 0x7 } else { 0x2 };
-            let ptr = NonNull::new(SLSCopyWindowsWithOptionsAndTags(
-                main_cid,
-                cid.unwrap_or(0),
-                &raw const *space_list_ref,
-                options,
-                &mut set_tags,
-                &mut clear_tags,
-            ))
-            .ok_or(Error::new(
-                ErrorKind::InvalidInput,
-                format!(
-                    "{}: nullptr returned from SLSCopyWindowsWithOptionsAndTags.",
-                    function_name!()
-                ),
-            ))?;
-            let window_list_ref = CFRetained::from_raw(ptr);
-
-            let count = window_list_ref.count();
-            if count == 0 {
-                return Err(Error::new(
-                    ErrorKind::InvalidData,
-                    format!("{}: zero windows returned", function_name!()),
-                ));
-            }
-
-            let query = CFRetained::from_raw(SLSWindowQueryWindows(
-                main_cid,
-                &raw const *window_list_ref,
-                count,
-            ));
-            let iterator =
-                CFRetained::from_raw(SLSWindowQueryResultCopyWindows(query.deref().into()));
-
-            let mut window_list = Vec::with_capacity(count.try_into().unwrap());
-            while SLSWindowIteratorAdvance(&raw const *iterator) {
-                let tags = SLSWindowIteratorGetTags(&raw const *iterator);
-                let attributes = SLSWindowIteratorGetAttributes(&raw const *iterator);
-                let parent_wid: WinID = SLSWindowIteratorGetParentID(&raw const *iterator);
-                let window_id: WinID = SLSWindowIteratorGetWindowID(&raw const *iterator);
-
-                trace!(
-                    "{}: id: {window_id} parent: {parent_wid} tags: 0x{tags:x} attributes: 0x{attributes:x}",
-                    function_name!()
-                );
-                match windows.iter().find(|(window, _)| window.id() == window_id) {
-                    Some((window, _)) => {
-                        if also_minimized || !window.minimized {
-                            window_list.push(window.id());
-                        }
-                    }
-                    None => {
-                        if WindowManager::found_valid_window(parent_wid, attributes, tags) {
-                            window_list.push(window_id);
-                        }
-                    }
-                }
-            }
-            Ok(window_list)
-        }
-    }
-
-    /// Determines if a window is valid based on its parent ID, attributes, and tags.
-    /// This function implements complex logic to filter out irrelevant or invalid windows.
-    ///
-    /// # Arguments
-    ///
-    /// * `parent_wid` - The parent window ID.
-    /// * `attributes` - The attributes of the window.
-    /// * `tags` - The tags associated with the window.
-    ///
-    /// # Returns
-    ///
-    /// `true` if the window is considered valid, `false` otherwise.
-    fn found_valid_window(parent_wid: WinID, attributes: i64, tags: i64) -> bool {
-        parent_wid == 0
-            && ((0 != (attributes & 0x2) || 0 != (tags & 0x0400_0000_0000_0000))
-                && (0 != (tags & 0x1) || (0 != (tags & 0x2) && 0 != (tags & 0x8000_0000))))
-            || ((attributes == 0x0 || attributes == 0x1)
-                && (0 != (tags & 0x1000_0000_0000_0000) || 0 != (tags & 0x0300_0000_0000_0000))
-                && (0 != (tags & 0x1) || (0 != (tags & 0x2) && 0 != (tags & 0x8000_0000))))
-    }
-
-    /// Retrieves a list of existing application window IDs for a given application.
-    /// It queries windows across all active displays and spaces associated with the application's connection.
-    ///
-    /// # Arguments
-    ///
-    /// * `cid` - The connection ID.
-    /// * `app` - A reference to the `Application` for which to retrieve window IDs.
-    /// * `spaces` - A slice of space IDs to query.
-    /// * `windows` - A query for all windows.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(Vec<WinID>)` containing the list of window IDs if successful, otherwise `Err(Error)`.
-    fn existing_application_window_list(
-        cid: ConnID,
-        app: &Application,
-        spaces: &[u64],
-        windows: &Query<(&Window, Entity)>,
-    ) -> Result<Vec<WinID>> {
-        if spaces.is_empty() {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("{}: no spaces returned", function_name!()),
-            ));
-        }
-        WindowManager::space_window_list_for_connection(
-            cid,
-            spaces,
-            app.connection(),
-            true,
-            windows,
-        )
-    }
-
-    /// Attempts to find and add unresolved windows for a given application by brute-forcing `element_id` values.
-    /// This is a workaround for macOS API limitations that do not return `AXUIElementRef` for windows on inactive spaces.
-    ///
-    /// # Arguments
-    ///
-    /// * `app` - A reference to the `Application` whose windows are to be brute-forced.
-    /// * `window_list` - A mutable vector of `WinID`s representing the expected global window list; found windows are removed from this list.
-    fn bruteforce_windows(app: &mut Application, window_list: &mut Vec<WinID>) -> Vec<Window> {
-        const MAGIC: u32 = 0x636f_636f;
-        let mut found_windows = Vec::new();
-        debug!(
-            "{}: App {:?} has unresolved window on other desktops, bruteforcing them.",
-            function_name!(),
-            app.psn(),
-        );
-
-        //
-        // NOTE: MacOS API does not return AXUIElementRef of windows on inactive spaces. However,
-        // we can just brute-force the element_id and create the AXUIElementRef ourselves.
-        //  https://github.com/decodism
-        //  https://github.com/lwouis/alt-tab-macos/issues/1324#issuecomment-2631035482
-        //
-
-        unsafe {
-            const BUFSIZE: isize = 0x14;
-            let Some(data_ref) = CFMutableData::new(None, BUFSIZE) else {
-                error!("{}: error creating mutable data", function_name!());
-                return found_windows;
-            };
-            CFMutableData::increase_length(data_ref.deref().into(), BUFSIZE);
-
-            let data = from_raw_parts_mut(
-                CFMutableData::mutable_byte_ptr(data_ref.deref().into()),
-                BUFSIZE as usize,
-            );
-            let bytes = app.pid().to_ne_bytes();
-            data[0x0..bytes.len()].copy_from_slice(&bytes);
-            let bytes = MAGIC.to_ne_bytes();
-            data[0x8..0x8 + bytes.len()].copy_from_slice(&bytes);
-
-            for element_id in 0..0x7fffu64 {
-                //
-                // NOTE: Only the element_id changes between iterations.
-                //
-
-                let bytes = element_id.to_ne_bytes();
-                data[0xc..0xc + bytes.len()].copy_from_slice(&bytes);
-
-                let Ok(element_ref) =
-                    AXUIWrapper::retain(_AXUIElementCreateWithRemoteToken(data_ref.as_ref()))
-                else {
-                    continue;
-                };
-                let Ok(window_id) = ax_window_id(element_ref.as_ptr()) else {
-                    continue;
-                };
-
-                if let Some(index) = window_list.iter().position(|&id| id == window_id) {
-                    window_list.remove(index);
-                    debug!("{}: Found window {window_id:?}", function_name!());
-                    if let Ok(window) = Window::new(&element_ref)
-                        .inspect_err(|err| warn!("{}: {err}", function_name!()))
-                    {
-                        found_windows.push(window);
-                    }
-                }
-            }
-        }
-        found_windows
-    }
-
-    /// Adds existing windows for a given application, attempting to resolve any that are not yet found.
-    /// It compares the application's reported window list with the global window list and uses brute-forcing if necessary.
-    ///
-    /// # Arguments
-    ///
-    /// * `cid` - The connection ID.
-    /// * `app` - A mutable reference to the `Application` whose windows are to be added.
-    /// * `spaces` - A slice of space IDs to query.
-    /// * `refresh_index` - An integer indicating the refresh index, used to determine if all windows are resolved.
-    /// * `windows` - A query for all windows.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(Vec<Window>)` containing the found windows, otherwise `Err(Error)`.
-    fn add_existing_application_windows(
-        cid: ConnID,
-        app: &mut Application,
-        spaces: &[u64],
-        refresh_index: i32,
-        windows: &Query<(&Window, Entity)>,
-    ) -> Result<Vec<Window>> {
-        let global_window_list =
-            WindowManager::existing_application_window_list(cid, app, spaces, windows)?;
-        if global_window_list.is_empty() {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                format!(
-                    "{}: No windows found for app {:?}",
-                    function_name!(),
-                    app.psn()
-                ),
-            ));
-        }
-        debug!(
-            "{}: App {:?} has global windows: {global_window_list:?}",
-            function_name!(),
-            app.psn(),
-        );
-
-        let window_list = app.window_list();
-        let window_count = window_list
-            .as_ref()
-            .map(|window_list| CFArray::count(window_list))
-            .unwrap_or(0);
-
-        let mut found_windows: Vec<Window> = Vec::new();
-        let mut empty_count = 0;
-        if let Ok(window_list) = window_list {
-            for window_ref in get_array_values(&window_list) {
-                let Ok(window_id) = ax_window_id(window_ref.as_ptr()) else {
-                    empty_count += 1;
-                    continue;
-                };
-
-                //
-                // FIXME: The AX API appears to always include a single element for Finder that
-                // returns an empty window id. This is likely the desktop window. Other similar
-                // cases should be handled the same way; simply ignore the window when we attempt
-                // to do an equality check to see if we have correctly discovered the number of
-                // windows to track.
-                //
-
-                if !found_windows.iter().any(|window| window.id() == window_id) {
-                    let window_ref = AXUIWrapper::retain(window_ref.as_ptr())?;
-                    debug!(
-                        "{}: Add window: {:?} {window_id}",
-                        function_name!(),
-                        app.psn()
-                    );
-                    if let Ok(window) = Window::new(&window_ref)
-                        .inspect_err(|err| debug!("{}: {err}", function_name!()))
-                    {
-                        found_windows.push(window);
-                    }
-                }
-            }
-        }
-
-        if isize::try_from(global_window_list.len())
-            .is_ok_and(|length| length == (window_count - empty_count))
-        {
-            if refresh_index != -1 {
-                debug!(
-                    "{}: All windows for {:?} are now resolved",
-                    function_name!(),
-                    app.psn(),
-                );
-            }
-        } else {
-            let find_window =
-                |window_id| found_windows.iter().find(|window| window.id() == window_id);
-            let mut app_window_list: Vec<WinID> = global_window_list
-                .iter()
-                .filter(|window_id| find_window(**window_id).is_none())
-                .copied()
-                .collect();
-
-            if !app_window_list.is_empty() {
-                debug!(
-                    "{}: {:?} has windows that are not yet resolved",
-                    function_name!(),
-                    app.psn(),
-                );
-                found_windows.extend(WindowManager::bruteforce_windows(app, &mut app_window_list));
-            }
-        }
-
-        Ok(found_windows)
     }
 
     /// Handles the event when an application switches to the front. It updates the focused window and PSN.
@@ -816,7 +439,7 @@ impl WindowManager {
                         function_name!()
                     );
                 });
-            WindowManager::apply_window_properties(
+            apply_window_properties(
                 window,
                 app_entity,
                 properties.as_ref(),
@@ -826,66 +449,6 @@ impl WindowManager {
                 &mut commands,
             );
         }
-    }
-
-    fn apply_window_properties(
-        mut window: Window,
-        app_entity: Entity,
-        properties: Option<&WindowParams>,
-        active_display: &mut Display,
-        main_cid: ConnID,
-        windows: &Query<(Entity, &Window, Option<&FocusedMarker>)>,
-        commands: &mut Commands,
-    ) {
-        let window_id = window.id();
-        let floating = properties
-            .as_ref()
-            .and_then(|props| props.floating)
-            .unwrap_or(false);
-        let wanted_insertion = properties.as_ref().and_then(|props| props.index);
-        window.manage(!floating);
-        _ = window
-            .update_frame(Some(&active_display.bounds))
-            .inspect_err(|err| error!("{}: {err}", function_name!()));
-
-        // Insert the window into the internal Bevy state.
-        let entity = commands.spawn(window).id();
-        commands.entity(entity).set_parent_in_place(app_entity);
-
-        if floating {
-            // Avoid managing window if it's floating.
-            return;
-        }
-
-        let Ok(panel) = active_display.active_panel(main_cid) else {
-            return;
-        };
-
-        // Attempt inserting the window at a pre-defined position.
-        let insert_at = wanted_insertion.map_or_else(
-            || {
-                // Otherwise attempt inserting it after the current focus.
-                let focused_window = windows
-                    .iter()
-                    .find_map(|(entity, _, focused)| focused.map(|_| entity));
-                // Insert to the right of the currently focused window
-                focused_window
-                    .and_then(|entity| panel.index_of(entity).ok())
-                    .and_then(|insert_at| (insert_at + 1 < panel.len()).then_some(insert_at + 1))
-            },
-            Some,
-        );
-
-        debug!("{}: New window adding at {panel}", function_name!());
-        match insert_at {
-            Some(after) => {
-                debug!("{}: New window inserted at {after}", function_name!());
-                panel.insert_at(after, entity);
-            }
-            None => panel.append(entity),
-        }
-        // }
-        commands.trigger(ReshuffleAroundTrigger(window_id));
     }
 
     /// Handles the event when a window is destroyed. It removes the window from the ECS world and relevant displays.
@@ -1073,121 +636,6 @@ impl WindowManager {
         }
     }
 
-    /// Reshuffles windows around a given window entity within the active panel to ensure visibility.
-    /// Windows to the right and left of the focused window are repositioned.
-    ///
-    /// # Arguments
-    ///
-    /// * `main_cid` - The main connection ID.
-    /// * `active_display` - A query for the active display.
-    /// * `entity` - The `Entity` of the window to reshuffle around.
-    /// * `windows` - A query for all windows.
-    /// * `commands` - Bevy commands to trigger events.
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn reshuffle_around(
-        main_cid: ConnID,
-        active_display: &mut Query<&mut Display, With<FocusedMarker>>,
-        entity: Entity,
-        windows: &mut Query<(&mut Window, Entity, Option<&RepositionMarker>)>,
-        commands: &mut Commands,
-    ) -> Result<()> {
-        let mut active_display = active_display.single_mut()?;
-        let display_bounds = active_display.bounds;
-        let menubar_height = active_display.menubar_height;
-        let active_panel = active_display.active_panel(main_cid)?;
-
-        let (window, _, moving) = windows.get_mut(entity)?;
-        let frame = window.expose_window(&display_bounds, moving, entity, commands);
-        trace!(
-            "{}: Moving window {} to {:?}",
-            function_name!(),
-            window.id(),
-            frame.origin
-        );
-        let panel = active_panel
-            .index_of(entity)
-            .and_then(|index| active_panel.get(index))?;
-
-        WindowManager::reposition_stack(
-            frame.origin.x,
-            &panel,
-            frame.size.width,
-            &display_bounds,
-            menubar_height,
-            windows,
-            commands,
-        );
-
-        // Shuffling windows to the right of the focus.
-        let mut upper_left = frame.origin.x + frame.size.width;
-        _ = active_panel.access_right_of(entity, |panel| {
-            let frame = panel
-                .top()
-                .and_then(|entity| windows.get(entity).ok())
-                .map(|(window, _, _)| (window.id(), window.frame));
-            if let Some((window_id, frame)) = frame {
-                trace!(
-                    "{}: window {window_id} right: frame: {frame:?}",
-                    function_name!()
-                );
-
-                // Check for window getting off screen.
-                if upper_left > display_bounds.size.width - THRESHOLD {
-                    upper_left = display_bounds.size.width - THRESHOLD;
-                }
-
-                if (frame.origin.x - upper_left).abs() > 0.1 {
-                    WindowManager::reposition_stack(
-                        upper_left,
-                        panel,
-                        frame.size.width,
-                        &display_bounds,
-                        menubar_height,
-                        windows,
-                        commands,
-                    );
-                }
-                upper_left += frame.size.width;
-            }
-            true // continue through all windows
-        });
-
-        // Shuffling windows to the left of the focus.
-        let mut upper_left = frame.origin.x;
-        _ = active_panel.access_left_of(entity, |panel| {
-            let frame = panel
-                .top()
-                .and_then(|entity| windows.get(entity).ok())
-                .map(|(window, _, _)| (window.id(), window.frame));
-            if let Some((window_id, frame)) = frame {
-                trace!(
-                    "{}: window {window_id} left: frame: {frame:?}",
-                    function_name!()
-                );
-
-                // Check for window getting off screen.
-                if upper_left < THRESHOLD {
-                    upper_left = THRESHOLD;
-                }
-                upper_left -= frame.size.width;
-
-                if (frame.origin.x - upper_left).abs() > 0.1 {
-                    WindowManager::reposition_stack(
-                        upper_left,
-                        panel,
-                        frame.size.width,
-                        &display_bounds,
-                        menubar_height,
-                        windows,
-                        commands,
-                    );
-                }
-            }
-            true // continue through all windows
-        });
-        Ok(())
-    }
-
     /// A Bevy system that triggers the `reshuffle_around` logic in response to a `ReshuffleAroundTrigger` event.
     ///
     /// # Arguments
@@ -1212,7 +660,7 @@ impl WindowManager {
             return;
         };
         if window.managed() {
-            _ = WindowManager::reshuffle_around(
+            _ = reshuffle_around(
                 main_cid.0,
                 &mut active_display,
                 entity,
@@ -1222,77 +670,6 @@ impl WindowManager {
             .inspect_err(|err| {
                 error!("{}: failed with: {err}", function_name!());
             });
-        }
-    }
-
-    /// Repositions all windows within a given panel stack.
-    ///
-    /// # Arguments
-    ///
-    /// * `upper_left` - The x-coordinate of the upper-left corner of the stack.
-    /// * `panel` - The panel containing the windows to reposition.
-    /// * `width` - The width of each window in the stack.
-    /// * `display_bounds` - The bounds of the display.
-    /// * `menubar_height` - The height of the menu bar.
-    /// * `windows` - A query for all windows.
-    /// * `commands` - Bevy commands to trigger events.
-    fn reposition_stack(
-        upper_left: f64,
-        panel: &Panel,
-        width: f64,
-        display_bounds: &CGRect,
-        menubar_height: f64,
-        windows: &mut Query<(&mut Window, Entity, Option<&RepositionMarker>)>,
-        commands: &mut Commands,
-    ) {
-        const REMAINING_THERSHOLD: f64 = 200.0;
-        let display_height = display_bounds.size.height - menubar_height;
-        let entities = match panel {
-            Panel::Single(entity) => vec![*entity],
-            Panel::Stack(stack) => stack.clone(),
-        };
-        let count: f64 = u32::try_from(entities.len()).unwrap().into();
-        let mut fits = 0f64;
-        let mut height = menubar_height;
-        let mut remaining = display_height;
-        for entity in &entities[0..entities.len() - 1] {
-            remaining = display_height - height;
-            if let Ok((window, _, _)) = windows.get(*entity) {
-                if window.frame().size.height > remaining - REMAINING_THERSHOLD {
-                    trace!(
-                        "{}: height {height}, remaining {remaining}",
-                        function_name!()
-                    );
-                    break;
-                }
-                height += window.frame().size.height;
-                fits += 1.0;
-            }
-        }
-        let avg_height = remaining / (count - fits);
-        trace!(
-            "{}: fits {fits:.0} avg_height {avg_height:.0}",
-            function_name!()
-        );
-
-        let mut y_pos = 0f64;
-        for entity in entities {
-            if let Ok((mut window, entity, _)) = windows.get_mut(entity) {
-                let window_height = window.frame().size.height;
-                commands.entity(entity).insert(RepositionMarker {
-                    origin: CGPoint {
-                        x: upper_left,
-                        y: y_pos,
-                    },
-                });
-                if fits > 0.0 {
-                    y_pos += window_height;
-                    fits -= 1.0;
-                } else {
-                    window.resize(width, avg_height, display_bounds);
-                    y_pos += avg_height;
-                }
-            }
         }
     }
 
@@ -1346,10 +723,9 @@ impl WindowManager {
 
         for (mut app, entity) in app_query {
             if app.observe().is_ok_and(|result| result)
-                && let Ok(windows) = WindowManager::add_existing_application_windows(
-                    cid.0, &mut app, &spaces, 0, &windows,
-                )
-                .inspect_err(|err| warn!("{}: {err}", function_name!()))
+                && let Ok(windows) =
+                    add_existing_application_windows(cid.0, &mut app, &spaces, 0, &windows)
+                        .inspect_err(|err| warn!("{}: {err}", function_name!()))
             {
                 commands.trigger(SpawnWindowTrigger(windows));
             }
@@ -1449,19 +825,6 @@ impl WindowManager {
         }
     }
 
-    /// Checks if the "focus follows mouse" feature is enabled.
-    ///
-    /// # Arguments
-    ///
-    /// * `config` - An optional reference to the `Config` resource.
-    ///
-    /// # Returns
-    ///
-    /// `true` if focus follows mouse is enabled, `false` otherwise.
-    pub fn focus_follows_mouse(config: &Config) -> bool {
-        config.options().focus_follows_mouse.is_some_and(|ffm| ffm)
-    }
-
     /// Handles display added events.
     /// It updates the list of displays and re-evaluates orphaned spaces.
     ///
@@ -1492,7 +855,7 @@ impl WindowManager {
             error!("{}: Unable to find added display!", function_name!());
             return;
         };
-        WindowManager::find_orphaned_spaces(&mut orphaned_spaces.0, &mut display, &mut windows);
+        find_orphaned_spaces(&mut orphaned_spaces.0, &mut display, &mut windows);
 
         for (id, pane) in &display.spaces {
             debug!("{}: Space {id} - {pane}", function_name!());
@@ -1541,7 +904,7 @@ impl WindowManager {
         }
 
         for (mut display, _) in displays {
-            WindowManager::find_orphaned_spaces(orphaned_spaces, &mut display, &mut windows);
+            find_orphaned_spaces(orphaned_spaces, &mut display, &mut windows);
         }
         commands.entity(entity).despawn();
         commands.trigger(WMEventTrigger(Event::DisplayChanged));
@@ -1586,7 +949,7 @@ impl WindowManager {
             return;
         };
         *display = moved_display;
-        WindowManager::find_orphaned_spaces(&mut orphaned_spaces.0, &mut display, &mut windows);
+        find_orphaned_spaces(&mut orphaned_spaces.0, &mut display, &mut windows);
 
         for (id, pane) in &display.spaces {
             debug!("{}: Space {id} - {pane}", function_name!());
@@ -1634,7 +997,7 @@ impl WindowManager {
             commands.entity(previous_entity).remove::<FocusedMarker>();
         }
 
-        _ = WindowManager::display_change(
+        _ = display_change(
             active_id,
             main_cid,
             &mut displays,
@@ -1642,151 +1005,6 @@ impl WindowManager {
             &mut commands,
         )
         .inspect_err(|err| warn!("{}: {err}", function_name!()));
-    }
-
-    /// Handles display change events by updating the active display and reorienting windows.
-    ///
-    /// # Arguments
-    ///
-    /// * `active_id` - The ID of the active display.
-    /// * `main_cid` - The main connection ID.
-    /// * `displays` - A query for all displays.
-    /// * `focused_window` - A query for the focused window.
-    /// * `commands` - Bevy commands to trigger events.
-    fn display_change(
-        active_id: u32,
-        main_cid: ConnID,
-        displays: &mut Query<(&mut Display, Entity, Option<&FocusedMarker>)>,
-        focused_window: &Query<(&Window, Entity), With<FocusedMarker>>,
-        commands: &mut Commands,
-    ) -> Result<()> {
-        let (mut active_display, entity, _) = displays
-            .iter_mut()
-            .find(|(display, _, _)| display.id == active_id)
-            .ok_or(Error::new(
-                ErrorKind::NotFound,
-                "Can not find active display {display_id}.",
-            ))?;
-        commands.entity(entity).insert(FocusedMarker);
-        debug!(
-            "{}: Display ({active_id}) or Workspace changed, reorienting windows.",
-            function_name!(),
-        );
-
-        let (window, entity) = focused_window.single()?;
-        let panel = active_display.active_panel(main_cid)?;
-        debug!("{}: Active panel {panel}", function_name!());
-
-        if !window.managed() || panel.index_of(entity).is_ok() {
-            return Ok(());
-        }
-        debug!(
-            "{}: Window {} moved between displays or workspaces.",
-            function_name!(),
-            window.id(),
-        );
-
-        // Current window is not present in the current pane. This is probably due to it being
-        // moved to a different desktop. Re-insert it into a correct pane.
-        for (mut display, _, _) in displays {
-            // First remove it from all the displays.
-            display.remove_window(entity);
-
-            if display.id == active_id {
-                // .. and then re-insert it into the current one.
-                if let Ok(panel) = display.active_panel(main_cid) {
-                    panel.append(entity);
-                }
-            }
-        }
-
-        commands.trigger(ReshuffleAroundTrigger(window.id()));
-        Ok(())
-    }
-
-    /// Slides a window horizontally based on a swipe gesture.
-    ///
-    /// # Arguments
-    ///
-    /// * `main_cid` - The main connection ID.
-    /// * `focused_window` - A query for the currently focused window.
-    /// * `active_display` - A reference to the active display.
-    /// * `delta_x` - The horizontal delta of the swipe gesture.
-    /// * `commands` - Bevy commands to trigger a reshuffle.
-    fn slide_window(
-        main_cid: ConnID,
-        focused_window: &mut Query<(&mut Window, Entity), With<FocusedMarker>>,
-        active_display: &Display,
-        delta_x: f64,
-        commands: &mut Commands,
-    ) {
-        trace!("{}: Windows slide {delta_x}.", function_name!());
-        let Ok((mut window, _)) = focused_window.single_mut() else {
-            warn!("{}: No window focused.", function_name!());
-            return;
-        };
-        let frame = window.frame();
-        // Delta is relative to the touchpad size, so to avoid too fast movement we
-        // scale it down by half.
-        let x = frame.origin.x - (active_display.bounds.size.width / 2.0 * delta_x);
-        window.reposition(
-            x.min(active_display.bounds.size.width - frame.size.width)
-                .max(0.0),
-            frame.origin.y,
-            &active_display.bounds,
-        );
-        window.center_mouse(main_cid);
-        commands.trigger(ReshuffleAroundTrigger(window.id()));
-    }
-
-    /// Finds a window at a given screen point using `SkyLight` API.
-    ///
-    /// # Arguments
-    ///
-    /// * `main_cid` - The main connection ID.
-    /// * `point` - A reference to the `CGPoint` representing the screen coordinate.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(WinID)` with the found window's ID if successful, otherwise `Err(Error)`.
-    fn find_window_at_point(main_cid: ConnID, point: &CGPoint) -> Result<WinID> {
-        let mut window_id: WinID = 0;
-        let mut window_conn_id: ConnID = 0;
-        let mut window_point = CGPoint { x: 0f64, y: 0f64 };
-        unsafe {
-            SLSFindWindowAndOwner(
-                main_cid,
-                0, // filter window id
-                1,
-                0,
-                point,
-                &mut window_point,
-                &mut window_id,
-                &mut window_conn_id,
-            )
-        };
-        if main_cid == window_conn_id {
-            unsafe {
-                SLSFindWindowAndOwner(
-                    main_cid,
-                    window_id,
-                    -1,
-                    0,
-                    point,
-                    &mut window_point,
-                    &mut window_id,
-                    &mut window_conn_id,
-                )
-            };
-        }
-        if window_id == 0 {
-            Err(Error::invalid_window(&format!(
-                "{}: could not find a window at {point:?}",
-                function_name!()
-            )))
-        } else {
-            Ok(window_id)
-        }
     }
 
     /// Handles mouse moved events.
@@ -1821,7 +1039,7 @@ impl WindowManager {
         };
         let main_cid = main_cid.0;
 
-        if !WindowManager::focus_follows_mouse(config.as_ref()) {
+        if !focus_follows_mouse(config.as_ref()) {
             return;
         }
         if mission_control_active.0 {
@@ -1831,12 +1049,15 @@ impl WindowManager {
             trace!("{}: ffm_window_id > 0", function_name!());
             return;
         }
-        let Ok(window_id) = WindowManager::find_window_at_point(main_cid, &point) else {
-            // TODO: notfound
+        let Ok(window_id) = find_window_at_point(main_cid, &point) else {
+            debug!(
+                "{}: can not find window at point {point:?}",
+                function_name!()
+            );
             return;
         };
         let Ok((focused_window, _)) = focused_window.single() else {
-            // TODO: notfound
+            debug!("{}: can not find focused widnow.", function_name!());
             return;
         };
         if focused_window.id() == window_id {
@@ -1948,7 +1169,7 @@ impl WindowManager {
             return;
         };
 
-        let Some(window) = WindowManager::find_window_at_point(main_cid, &point)
+        let Some(window) = find_window_at_point(main_cid, &point)
             .ok()
             .and_then(|window_id| windows.iter().find(|window| window.id() == window_id))
         else {
@@ -2022,5 +1243,789 @@ impl WindowManager {
                 commands.entity(entity).despawn();
             }
         }
+    }
+}
+
+/// Finds and re-inserts orphaned spaces into displays that have empty spaces.
+///
+/// # Arguments
+///
+/// * `orphaned_spaces` - A map of space IDs to `WindowPane`s that are currently orphaned.
+/// * `display` - A mutable reference to a `Display`.
+/// * `windows` - A query for all windows.
+fn find_orphaned_spaces(
+    orphaned_spaces: &mut HashMap<u64, WindowPane>,
+    display: &mut Display,
+    windows: &mut Query<&mut Window>,
+) {
+    let mut relocated_windows = vec![];
+    for (space_id, pane) in &mut display.spaces {
+        debug!(
+            "{}: Checking space {space_id} for orphans: {pane}",
+            function_name!()
+        );
+        if let Some(space) = orphaned_spaces.remove(space_id) {
+            debug!(
+                "{}: Reinserting orphaned space {space_id} into display {}",
+                function_name!(),
+                display.id
+            );
+            for window_id in space.all_windows() {
+                // TODO: check for clashing windows.
+                pane.append(window_id);
+                relocated_windows.push((window_id, display.bounds));
+            }
+        }
+    }
+
+    for (entity, bounds) in relocated_windows {
+        let Ok(mut window) = windows.get_mut(entity) else {
+            continue;
+        };
+        _ = window.update_frame(Some(&bounds));
+        debug!(
+            "{}: Relocated window {} has ratio {:.02}",
+            function_name!(),
+            window.id(),
+            window.width_ratio,
+        );
+    }
+}
+
+/// Repopulates the current window panel with eligible windows from a specified space.
+///
+/// # Arguments
+///
+/// * `main_cid` - The main connection ID.
+/// * `space_id` - The ID of the space to refresh windows from.
+/// * `windows` - A query for all windows.
+fn refresh_windows_space(
+    main_cid: ConnID,
+    space_id: u64,
+    windows: &Query<(&Window, Entity)>,
+) -> Vec<Entity> {
+    space_window_list_for_connection(main_cid, &[space_id], None, false, windows)
+        .inspect_err(|err| {
+            warn!(
+                "{}: getting windows for space {space_id}: {err}",
+                function_name!()
+            );
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|window_id| windows.iter().find(|(window, _)| window.id() == window_id))
+        .filter_map(|(window, entity)| window.is_eligible().then_some(entity))
+        .collect()
+}
+
+/// Retrieves a list of window IDs for specified spaces and connection, with an option to include minimized windows.
+/// This function uses `SkyLight` API calls.
+///
+/// # Arguments
+///
+/// * `main_cid` - The main connection ID.
+/// * `spaces` - A slice of space IDs to query windows from.
+/// * `cid` - An optional connection ID. If `None`, the main connection ID is used.
+/// * `also_minimized` - A boolean indicating whether to include minimized windows in the result.
+/// * `windows` - A query for all windows.
+///
+/// # Returns
+///
+/// `Ok(Vec<WinID>)` containing the list of window IDs if successful, otherwise `Err(Error)`.
+fn space_window_list_for_connection(
+    main_cid: ConnID,
+    spaces: &[u64],
+    cid: Option<ConnID>,
+    also_minimized: bool,
+    windows: &Query<(&Window, Entity)>,
+) -> Result<Vec<WinID>> {
+    unsafe {
+        let space_list_ref = create_array(spaces, CFNumberType::SInt64Type)?;
+
+        let mut set_tags = 0i64;
+        let mut clear_tags = 0i64;
+        let options = if also_minimized { 0x7 } else { 0x2 };
+        let ptr = NonNull::new(SLSCopyWindowsWithOptionsAndTags(
+            main_cid,
+            cid.unwrap_or(0),
+            &raw const *space_list_ref,
+            options,
+            &mut set_tags,
+            &mut clear_tags,
+        ))
+        .ok_or(Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "{}: nullptr returned from SLSCopyWindowsWithOptionsAndTags.",
+                function_name!()
+            ),
+        ))?;
+        let window_list_ref = CFRetained::from_raw(ptr);
+
+        let count = window_list_ref.count();
+        if count == 0 {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("{}: zero windows returned", function_name!()),
+            ));
+        }
+
+        let query = CFRetained::from_raw(SLSWindowQueryWindows(
+            main_cid,
+            &raw const *window_list_ref,
+            count,
+        ));
+        let iterator = CFRetained::from_raw(SLSWindowQueryResultCopyWindows(query.deref().into()));
+
+        let mut window_list = Vec::with_capacity(count.try_into().unwrap());
+        while SLSWindowIteratorAdvance(&raw const *iterator) {
+            let tags = SLSWindowIteratorGetTags(&raw const *iterator);
+            let attributes = SLSWindowIteratorGetAttributes(&raw const *iterator);
+            let parent_wid: WinID = SLSWindowIteratorGetParentID(&raw const *iterator);
+            let window_id: WinID = SLSWindowIteratorGetWindowID(&raw const *iterator);
+
+            trace!(
+                "{}: id: {window_id} parent: {parent_wid} tags: 0x{tags:x} attributes: 0x{attributes:x}",
+                function_name!()
+            );
+            match windows.iter().find(|(window, _)| window.id() == window_id) {
+                Some((window, _)) => {
+                    if also_minimized || !window.minimized {
+                        window_list.push(window.id());
+                    }
+                }
+                None => {
+                    if found_valid_window(parent_wid, attributes, tags) {
+                        window_list.push(window_id);
+                    }
+                }
+            }
+        }
+        Ok(window_list)
+    }
+}
+
+/// Determines if a window is valid based on its parent ID, attributes, and tags.
+/// This function implements complex logic to filter out irrelevant or invalid windows.
+///
+/// # Arguments
+///
+/// * `parent_wid` - The parent window ID.
+/// * `attributes` - The attributes of the window.
+/// * `tags` - The tags associated with the window.
+///
+/// # Returns
+///
+/// `true` if the window is considered valid, `false` otherwise.
+fn found_valid_window(parent_wid: WinID, attributes: i64, tags: i64) -> bool {
+    parent_wid == 0
+        && ((0 != (attributes & 0x2) || 0 != (tags & 0x0400_0000_0000_0000))
+            && (0 != (tags & 0x1) || (0 != (tags & 0x2) && 0 != (tags & 0x8000_0000))))
+        || ((attributes == 0x0 || attributes == 0x1)
+            && (0 != (tags & 0x1000_0000_0000_0000) || 0 != (tags & 0x0300_0000_0000_0000))
+            && (0 != (tags & 0x1) || (0 != (tags & 0x2) && 0 != (tags & 0x8000_0000))))
+}
+
+/// Retrieves a list of existing application window IDs for a given application.
+/// It queries windows across all active displays and spaces associated with the application's connection.
+///
+/// # Arguments
+///
+/// * `cid` - The connection ID.
+/// * `app` - A reference to the `Application` for which to retrieve window IDs.
+/// * `spaces` - A slice of space IDs to query.
+/// * `windows` - A query for all windows.
+///
+/// # Returns
+///
+/// `Ok(Vec<WinID>)` containing the list of window IDs if successful, otherwise `Err(Error)`.
+fn existing_application_window_list(
+    cid: ConnID,
+    app: &Application,
+    spaces: &[u64],
+    windows: &Query<(&Window, Entity)>,
+) -> Result<Vec<WinID>> {
+    if spaces.is_empty() {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("{}: no spaces returned", function_name!()),
+        ));
+    }
+    space_window_list_for_connection(cid, spaces, app.connection(), true, windows)
+}
+
+/// Attempts to find and add unresolved windows for a given application by brute-forcing `element_id` values.
+/// This is a workaround for macOS API limitations that do not return `AXUIElementRef` for windows on inactive spaces.
+///
+/// # Arguments
+///
+/// * `app` - A reference to the `Application` whose windows are to be brute-forced.
+/// * `window_list` - A mutable vector of `WinID`s representing the expected global window list; found windows are removed from this list.
+fn bruteforce_windows(app: &mut Application, window_list: &mut Vec<WinID>) -> Vec<Window> {
+    const MAGIC: u32 = 0x636f_636f;
+    let mut found_windows = Vec::new();
+    debug!(
+        "{}: App {:?} has unresolved window on other desktops, bruteforcing them.",
+        function_name!(),
+        app.psn(),
+    );
+
+    //
+    // NOTE: MacOS API does not return AXUIElementRef of windows on inactive spaces. However,
+    // we can just brute-force the element_id and create the AXUIElementRef ourselves.
+    //  https://github.com/decodism
+    //  https://github.com/lwouis/alt-tab-macos/issues/1324#issuecomment-2631035482
+    //
+
+    unsafe {
+        const BUFSIZE: isize = 0x14;
+        let Some(data_ref) = CFMutableData::new(None, BUFSIZE) else {
+            error!("{}: error creating mutable data", function_name!());
+            return found_windows;
+        };
+        CFMutableData::increase_length(data_ref.deref().into(), BUFSIZE);
+
+        let data = from_raw_parts_mut(
+            CFMutableData::mutable_byte_ptr(data_ref.deref().into()),
+            BUFSIZE as usize,
+        );
+        let bytes = app.pid().to_ne_bytes();
+        data[0x0..bytes.len()].copy_from_slice(&bytes);
+        let bytes = MAGIC.to_ne_bytes();
+        data[0x8..0x8 + bytes.len()].copy_from_slice(&bytes);
+
+        for element_id in 0..0x7fffu64 {
+            //
+            // NOTE: Only the element_id changes between iterations.
+            //
+
+            let bytes = element_id.to_ne_bytes();
+            data[0xc..0xc + bytes.len()].copy_from_slice(&bytes);
+
+            let Ok(element_ref) =
+                AXUIWrapper::retain(_AXUIElementCreateWithRemoteToken(data_ref.as_ref()))
+            else {
+                continue;
+            };
+            let Ok(window_id) = ax_window_id(element_ref.as_ptr()) else {
+                continue;
+            };
+
+            if let Some(index) = window_list.iter().position(|&id| id == window_id) {
+                window_list.remove(index);
+                debug!("{}: Found window {window_id:?}", function_name!());
+                if let Ok(window) = Window::new(&element_ref)
+                    .inspect_err(|err| warn!("{}: {err}", function_name!()))
+                {
+                    found_windows.push(window);
+                }
+            }
+        }
+    }
+    found_windows
+}
+
+/// Adds existing windows for a given application, attempting to resolve any that are not yet found.
+/// It compares the application's reported window list with the global window list and uses brute-forcing if necessary.
+///
+/// # Arguments
+///
+/// * `cid` - The connection ID.
+/// * `app` - A mutable reference to the `Application` whose windows are to be added.
+/// * `spaces` - A slice of space IDs to query.
+/// * `refresh_index` - An integer indicating the refresh index, used to determine if all windows are resolved.
+/// * `windows` - A query for all windows.
+///
+/// # Returns
+///
+/// `Ok(Vec<Window>)` containing the found windows, otherwise `Err(Error)`.
+fn add_existing_application_windows(
+    cid: ConnID,
+    app: &mut Application,
+    spaces: &[u64],
+    refresh_index: i32,
+    windows: &Query<(&Window, Entity)>,
+) -> Result<Vec<Window>> {
+    let global_window_list = existing_application_window_list(cid, app, spaces, windows)?;
+    if global_window_list.is_empty() {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "{}: No windows found for app {:?}",
+                function_name!(),
+                app.psn()
+            ),
+        ));
+    }
+    debug!(
+        "{}: App {:?} has global windows: {global_window_list:?}",
+        function_name!(),
+        app.psn(),
+    );
+
+    let window_list = app.window_list();
+    let window_count = window_list
+        .as_ref()
+        .map(|window_list| CFArray::count(window_list))
+        .unwrap_or(0);
+
+    let mut found_windows: Vec<Window> = Vec::new();
+    let mut empty_count = 0;
+    if let Ok(window_list) = window_list {
+        for window_ref in get_array_values(&window_list) {
+            let Ok(window_id) = ax_window_id(window_ref.as_ptr()) else {
+                empty_count += 1;
+                continue;
+            };
+
+            if !found_windows.iter().any(|window| window.id() == window_id) {
+                let window_ref = AXUIWrapper::retain(window_ref.as_ptr())?;
+                debug!(
+                    "{}: Add window: {:?} {window_id}",
+                    function_name!(),
+                    app.psn()
+                );
+                if let Ok(window) = Window::new(&window_ref)
+                    .inspect_err(|err| debug!("{}: {err}", function_name!()))
+                {
+                    found_windows.push(window);
+                }
+            }
+        }
+    }
+
+    if isize::try_from(global_window_list.len())
+        .is_ok_and(|length| length == (window_count - empty_count))
+    {
+        if refresh_index != -1 {
+            debug!(
+                "{}: All windows for {:?} are now resolved",
+                function_name!(),
+                app.psn(),
+            );
+        }
+    } else {
+        let find_window = |window_id| found_windows.iter().find(|window| window.id() == window_id);
+        let mut app_window_list: Vec<WinID> = global_window_list
+            .iter()
+            .filter(|window_id| find_window(**window_id).is_none())
+            .copied()
+            .collect();
+
+        if !app_window_list.is_empty() {
+            debug!(
+                "{}: {:?} has windows that are not yet resolved",
+                function_name!(),
+                app.psn(),
+            );
+            found_windows.extend(bruteforce_windows(app, &mut app_window_list));
+        }
+    }
+
+    Ok(found_windows)
+}
+
+fn apply_window_properties(
+    mut window: Window,
+    app_entity: Entity,
+    properties: Option<&WindowParams>,
+    active_display: &mut Display,
+    main_cid: ConnID,
+    windows: &Query<(Entity, &Window, Option<&FocusedMarker>)>,
+    commands: &mut Commands,
+) {
+    let window_id = window.id();
+    let floating = properties
+        .as_ref()
+        .and_then(|props| props.floating)
+        .unwrap_or(false);
+    let wanted_insertion = properties.as_ref().and_then(|props| props.index);
+    window.manage(!floating);
+    _ = window
+        .update_frame(Some(&active_display.bounds))
+        .inspect_err(|err| error!("{}: {err}", function_name!()));
+
+    // Insert the window into the internal Bevy state.
+    let entity = commands.spawn(window).id();
+    commands.entity(entity).set_parent_in_place(app_entity);
+
+    if floating {
+        // Avoid managing window if it's floating.
+        return;
+    }
+
+    let Ok(panel) = active_display.active_panel(main_cid) else {
+        return;
+    };
+
+    // Attempt inserting the window at a pre-defined position.
+    let insert_at = wanted_insertion.map_or_else(
+        || {
+            // Otherwise attempt inserting it after the current focus.
+            let focused_window = windows
+                .iter()
+                .find_map(|(entity, _, focused)| focused.map(|_| entity));
+            // Insert to the right of the currently focused window
+            focused_window
+                .and_then(|entity| panel.index_of(entity).ok())
+                .and_then(|insert_at| (insert_at + 1 < panel.len()).then_some(insert_at + 1))
+        },
+        Some,
+    );
+
+    debug!("{}: New window adding at {panel}", function_name!());
+    match insert_at {
+        Some(after) => {
+            debug!("{}: New window inserted at {after}", function_name!());
+            panel.insert_at(after, entity);
+        }
+        None => panel.append(entity),
+    }
+
+    commands.trigger(ReshuffleAroundTrigger(window_id));
+}
+
+/// Reshuffles windows around a given window entity within the active panel to ensure visibility.
+/// Windows to the right and left of the focused window are repositioned.
+///
+/// # Arguments
+///
+/// * `main_cid` - The main connection ID.
+/// * `active_display` - A query for the active display.
+/// * `entity` - The `Entity` of the window to reshuffle around.
+/// * `windows` - A query for all windows.
+/// * `commands` - Bevy commands to trigger events.
+#[allow(clippy::needless_pass_by_value)]
+fn reshuffle_around(
+    main_cid: ConnID,
+    active_display: &mut Query<&mut Display, With<FocusedMarker>>,
+    entity: Entity,
+    windows: &mut Query<(&mut Window, Entity, Option<&RepositionMarker>)>,
+    commands: &mut Commands,
+) -> Result<()> {
+    let mut active_display = active_display.single_mut()?;
+    let display_bounds = active_display.bounds;
+    let menubar_height = active_display.menubar_height;
+    let active_panel = active_display.active_panel(main_cid)?;
+
+    let (window, _, moving) = windows.get_mut(entity)?;
+    let frame = window.expose_window(&display_bounds, moving, entity, commands);
+    trace!(
+        "{}: Moving window {} to {:?}",
+        function_name!(),
+        window.id(),
+        frame.origin
+    );
+    let panel = active_panel
+        .index_of(entity)
+        .and_then(|index| active_panel.get(index))?;
+
+    reposition_stack(
+        frame.origin.x,
+        &panel,
+        frame.size.width,
+        &display_bounds,
+        menubar_height,
+        windows,
+        commands,
+    );
+
+    // Shuffling windows to the right of the focus.
+    let mut upper_left = frame.origin.x + frame.size.width;
+    _ = active_panel.access_right_of(entity, |panel| {
+        let frame = panel
+            .top()
+            .and_then(|entity| windows.get(entity).ok())
+            .map(|(window, _, _)| (window.id(), window.frame));
+        if let Some((window_id, frame)) = frame {
+            trace!(
+                "{}: window {window_id} right: frame: {frame:?}",
+                function_name!()
+            );
+
+            // Check for window getting off screen.
+            if upper_left > display_bounds.size.width - THRESHOLD {
+                upper_left = display_bounds.size.width - THRESHOLD;
+            }
+
+            if (frame.origin.x - upper_left).abs() > 0.1 {
+                reposition_stack(
+                    upper_left,
+                    panel,
+                    frame.size.width,
+                    &display_bounds,
+                    menubar_height,
+                    windows,
+                    commands,
+                );
+            }
+            upper_left += frame.size.width;
+        }
+        true // continue through all windows
+    });
+
+    // Shuffling windows to the left of the focus.
+    let mut upper_left = frame.origin.x;
+    _ = active_panel.access_left_of(entity, |panel| {
+        let frame = panel
+            .top()
+            .and_then(|entity| windows.get(entity).ok())
+            .map(|(window, _, _)| (window.id(), window.frame));
+        if let Some((window_id, frame)) = frame {
+            trace!(
+                "{}: window {window_id} left: frame: {frame:?}",
+                function_name!()
+            );
+
+            // Check for window getting off screen.
+            if upper_left < THRESHOLD {
+                upper_left = THRESHOLD;
+            }
+            upper_left -= frame.size.width;
+
+            if (frame.origin.x - upper_left).abs() > 0.1 {
+                reposition_stack(
+                    upper_left,
+                    panel,
+                    frame.size.width,
+                    &display_bounds,
+                    menubar_height,
+                    windows,
+                    commands,
+                );
+            }
+        }
+        true // continue through all windows
+    });
+    Ok(())
+}
+
+/// Repositions all windows within a given panel stack.
+///
+/// # Arguments
+///
+/// * `upper_left` - The x-coordinate of the upper-left corner of the stack.
+/// * `panel` - The panel containing the windows to reposition.
+/// * `width` - The width of each window in the stack.
+/// * `display_bounds` - The bounds of the display.
+/// * `menubar_height` - The height of the menu bar.
+/// * `windows` - A query for all windows.
+/// * `commands` - Bevy commands to trigger events.
+fn reposition_stack(
+    upper_left: f64,
+    panel: &Panel,
+    width: f64,
+    display_bounds: &CGRect,
+    menubar_height: f64,
+    windows: &mut Query<(&mut Window, Entity, Option<&RepositionMarker>)>,
+    commands: &mut Commands,
+) {
+    const REMAINING_THERSHOLD: f64 = 200.0;
+    let display_height = display_bounds.size.height - menubar_height;
+    let entities = match panel {
+        Panel::Single(entity) => vec![*entity],
+        Panel::Stack(stack) => stack.clone(),
+    };
+    let count: f64 = u32::try_from(entities.len()).unwrap().into();
+    let mut fits = 0f64;
+    let mut height = menubar_height;
+    let mut remaining = display_height;
+    for entity in &entities[0..entities.len() - 1] {
+        remaining = display_height - height;
+        if let Ok((window, _, _)) = windows.get(*entity) {
+            if window.frame().size.height > remaining - REMAINING_THERSHOLD {
+                trace!(
+                    "{}: height {height}, remaining {remaining}",
+                    function_name!()
+                );
+                break;
+            }
+            height += window.frame().size.height;
+            fits += 1.0;
+        }
+    }
+    let avg_height = remaining / (count - fits);
+    trace!(
+        "{}: fits {fits:.0} avg_height {avg_height:.0}",
+        function_name!()
+    );
+
+    let mut y_pos = 0f64;
+    for entity in entities {
+        if let Ok((mut window, entity, _)) = windows.get_mut(entity) {
+            let window_height = window.frame().size.height;
+
+            commands.entity(entity).insert(RepositionMarker {
+                origin: CGPoint {
+                    x: upper_left,
+                    y: y_pos,
+                },
+            });
+            if fits > 0.0 {
+                y_pos += window_height;
+                fits -= 1.0;
+            } else {
+                window.resize(width, avg_height, display_bounds);
+                y_pos += avg_height;
+            }
+        }
+    }
+}
+
+/// Checks if the "focus follows mouse" feature is enabled.
+///
+/// # Arguments
+///
+/// * `config` - An optional reference to the `Config` resource.
+///
+/// # Returns
+///
+/// `true` if focus follows mouse is enabled, `false` otherwise.
+fn focus_follows_mouse(config: &Config) -> bool {
+    config.options().focus_follows_mouse.is_some_and(|ffm| ffm)
+}
+
+/// Handles display change events by updating the active display and reorienting windows.
+///
+/// # Arguments
+///
+/// * `active_id` - The ID of the active display.
+/// * `main_cid` - The main connection ID.
+/// * `displays` - A query for all displays.
+/// * `focused_window` - A query for the focused window.
+/// * `commands` - Bevy commands to trigger events.
+fn display_change(
+    active_id: u32,
+    main_cid: ConnID,
+    displays: &mut Query<(&mut Display, Entity, Option<&FocusedMarker>)>,
+    focused_window: &Query<(&Window, Entity), With<FocusedMarker>>,
+    commands: &mut Commands,
+) -> Result<()> {
+    let (mut active_display, entity, _) = displays
+        .iter_mut()
+        .find(|(display, _, _)| display.id == active_id)
+        .ok_or(Error::new(
+            ErrorKind::NotFound,
+            "Can not find active display {display_id}.",
+        ))?;
+    commands.entity(entity).insert(FocusedMarker);
+    debug!(
+        "{}: Display ({active_id}) or Workspace changed, reorienting windows.",
+        function_name!(),
+    );
+
+    let (window, entity) = focused_window.single()?;
+    let panel = active_display.active_panel(main_cid)?;
+    debug!("{}: Active panel {panel}", function_name!());
+
+    if !window.managed() || panel.index_of(entity).is_ok() {
+        return Ok(());
+    }
+    debug!(
+        "{}: Window {} moved between displays or workspaces.",
+        function_name!(),
+        window.id(),
+    );
+
+    // Current window is not present in the current pane. This is probably due to it being
+    // moved to a different desktop. Re-insert it into a correct pane.
+    for (mut display, _, _) in displays {
+        // First remove it from all the displays.
+        display.remove_window(entity);
+
+        if display.id == active_id {
+            // .. and then re-insert it into the current one.
+            if let Ok(panel) = display.active_panel(main_cid) {
+                panel.append(entity);
+            }
+        }
+    }
+
+    commands.trigger(ReshuffleAroundTrigger(window.id()));
+    Ok(())
+}
+
+/// Slides a window horizontally based on a swipe gesture.
+///
+/// # Arguments
+///
+/// * `main_cid` - The main connection ID.
+/// * `focused_window` - A query for the currently focused window.
+/// * `active_display` - A reference to the active display.
+/// * `delta_x` - The horizontal delta of the swipe gesture.
+/// * `commands` - Bevy commands to trigger a reshuffle.
+fn slide_window(
+    main_cid: ConnID,
+    focused_window: &mut Query<(&mut Window, Entity), With<FocusedMarker>>,
+    active_display: &Display,
+    delta_x: f64,
+    commands: &mut Commands,
+) {
+    trace!("{}: Windows slide {delta_x}.", function_name!());
+    let Ok((mut window, _)) = focused_window.single_mut() else {
+        warn!("{}: No window focused.", function_name!());
+        return;
+    };
+    let frame = window.frame();
+    // Delta is relative to the touchpad size, so to avoid too fast movement we
+    // scale it down by half.
+    let x = frame.origin.x - (active_display.bounds.size.width / 2.0 * delta_x);
+    window.reposition(
+        x.min(active_display.bounds.size.width - frame.size.width)
+            .max(0.0),
+        frame.origin.y,
+        &active_display.bounds,
+    );
+    window.center_mouse(main_cid);
+    commands.trigger(ReshuffleAroundTrigger(window.id()));
+}
+
+/// Finds a window at a given screen point using `SkyLight` API.
+///
+/// # Arguments
+///
+/// * `main_cid` - The main connection ID.
+/// * `point` - A reference to the `CGPoint` representing the screen coordinate.
+///
+/// # Returns
+///
+/// `Ok(WinID)` with the found window's ID if successful, otherwise `Err(Error)`.
+fn find_window_at_point(main_cid: ConnID, point: &CGPoint) -> Result<WinID> {
+    let mut window_id: WinID = 0;
+    let mut window_conn_id: ConnID = 0;
+    let mut window_point = CGPoint { x: 0f64, y: 0f64 };
+    unsafe {
+        SLSFindWindowAndOwner(
+            main_cid,
+            0, // filter window id
+            1,
+            0,
+            point,
+            &mut window_point,
+            &mut window_id,
+            &mut window_conn_id,
+        )
+    };
+    if main_cid == window_conn_id {
+        unsafe {
+            SLSFindWindowAndOwner(
+                main_cid,
+                window_id,
+                -1,
+                0,
+                point,
+                &mut window_point,
+                &mut window_id,
+                &mut window_conn_id,
+            )
+        };
+    }
+    if window_id == 0 {
+        Err(Error::invalid_window(&format!(
+            "{}: could not find a window at {point:?}",
+            function_name!()
+        )))
+    } else {
+        Ok(window_id)
     }
 }

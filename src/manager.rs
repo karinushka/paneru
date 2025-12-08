@@ -3,7 +3,7 @@ use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::MessageWriter;
 use bevy::ecs::observer::On;
 use bevy::ecs::query::With;
-use bevy::ecs::system::{Commands, Query, Res, ResMut};
+use bevy::ecs::system::{Commands, Local, Query, Res, ResMut};
 use bevy::time::{Time, Virtual};
 use bevy::transform::commands::BuildChildrenTransformExt;
 use core::ptr::NonNull;
@@ -14,8 +14,9 @@ use objc2_core_foundation::{
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::mem::take;
-use std::ops::Deref;
+use std::ops::{Add, Deref};
 use std::slice::from_raw_parts_mut;
+use std::time::Duration;
 use stdext::function_name;
 
 use crate::app::Application;
@@ -609,6 +610,8 @@ impl WindowManager {
         initializing: Query<&InitializingMarker>,
         main_cid: Res<MainConnection>,
         config: Res<Config>,
+        time: Res<Time<Virtual>>,
+        mut delayed_focus: Local<HashMap<WinID, Duration>>,
         mut messages: MessageWriter<Event>,
         mut focus_follows_mouse_id: ResMut<FocusFollowsMouse>,
         mut skip_reshuffle: ResMut<SkipReshuffle>,
@@ -625,11 +628,7 @@ impl WindowManager {
             .iter()
             .find(|(window, _, _, _)| window.id() == window_id)
         else {
-            debug!(
-                "{}: Early focus event for window id {window_id}. Re-queueing.",
-                function_name!()
-            );
-            messages.write(Event::WindowFocused { window_id });
+            stray_focus_event(window_id, &time, &mut delayed_focus, &mut messages);
             return;
         };
         for (window, entity, _, focused) in windows {
@@ -2142,4 +2141,32 @@ fn window_unminimized(
     active_panel.append(entity);
     commands.trigger(ReshuffleAroundTrigger(window_id));
     Ok(())
+}
+
+fn stray_focus_event(
+    window_id: WinID,
+    time: &Time<Virtual>,
+    delayed_focus: &mut HashMap<WinID, Duration>,
+    messages: &mut MessageWriter<Event>,
+) {
+    const STRAY_FOCUS_TIMEOUT_SECS: u64 = 1;
+
+    let focus_start = delayed_focus.entry(window_id).or_insert(time.elapsed());
+    if focus_start.add(Duration::new(STRAY_FOCUS_TIMEOUT_SECS, 0)) > time.elapsed() {
+        debug!(
+            "{}: Early focus event for window id {window_id}. Re-queueing.",
+            function_name!()
+        );
+        debug!(
+            "REQUEUE: {} {}",
+            focus_start.as_secs_f32(),
+            time.elapsed().as_secs_f32()
+        );
+        messages.write(Event::WindowFocused { window_id });
+    } else {
+        warn!(
+            "{}: Window {window_id} still missing after {STRAY_FOCUS_TIMEOUT_SECS}s.",
+            function_name!()
+        );
+    }
 }

@@ -627,6 +627,8 @@ impl WindowManager {
             stray_focus_event(window_id, &time, &mut delayed_focus, &mut messages);
             return;
         };
+        delayed_focus.remove(&window_id);
+
         for (window, entity, _, focused) in windows {
             if focused.is_some() && window.id() != window_id {
                 commands.entity(entity).remove::<FocusedMarker>();
@@ -2147,17 +2149,14 @@ fn stray_focus_event(
 ) {
     const STRAY_FOCUS_TIMEOUT_SECS: u64 = 1;
 
-    let focus_start = delayed_focus.entry(window_id).or_insert(time.elapsed());
-    if focus_start.add(Duration::new(STRAY_FOCUS_TIMEOUT_SECS, 0)) > time.elapsed() {
+    let focus_start = delayed_focus.entry(window_id).or_insert_with(|| {
         debug!(
             "{}: Early focus event for window id {window_id}. Re-queueing.",
             function_name!()
         );
-        debug!(
-            "REQUEUE: {} {}",
-            focus_start.as_secs_f32(),
-            time.elapsed().as_secs_f32()
-        );
+        time.elapsed()
+    });
+    if focus_start.add(Duration::new(STRAY_FOCUS_TIMEOUT_SECS, 0)) > time.elapsed() {
         messages.write(Event::WindowFocused { window_id });
     } else {
         warn!(

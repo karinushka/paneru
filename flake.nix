@@ -11,7 +11,7 @@
       pkgs = import nixpkgs { system = "aarch64-darwin"; };
       package = pkgs.rustPlatform.buildRustPackage {
         pname = "paneru";
-        version = "0.2.0";
+        version = "0.3.0";
         src = pkgs.lib.cleanSource ./.;
         postPatch = ''
           substituteInPlace build.rs --replace-fail \

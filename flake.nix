@@ -11,7 +11,7 @@
       pkgs = import nixpkgs { system = "aarch64-darwin"; };
       package = pkgs.rustPlatform.buildRustPackage {
         pname = "paneru";
-        version = "0.2.0";
+        version = "0.3.0";
         src = pkgs.lib.cleanSource ./.;
         postPatch = ''
           substituteInPlace build.rs --replace-fail \
@@ -112,8 +112,13 @@
               };
             };
 
-            home.file.".paneru.toml".source =
-              tomlFormat.generate ".paneru.toml" config.services.paneru.settings;
+            xdg.configFile."paneru/paneru.toml" = lib.mkIf (config.xdg.enable) {
+              source = tomlFormat.generate "paneru.toml" config.services.paneru.settings;
+            };
+
+            home.file.".paneru.toml" = lib.mkIf (!config.xdg.enable) {
+              source = tomlFormat.generate ".paneru.toml" config.services.paneru.settings;
+            };
           };
         };
     };

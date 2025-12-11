@@ -172,9 +172,15 @@ Although we strongly recommend using home manager, the paneru flake also exposes
 
 ### Configuration
 
-To configure Paneru, create a configuration file named `.paneru` in your home
-directory (`~/.paneru`). You can use the following example configuration as a
-starting point:
+Paneru checks for configuration in following locations:
+
+* `$HOME/.paneru`
+* `$HOME/.paneru.toml`
+* `$XDG_CONFIG_HOME/paneru/paneru.toml`
+
+Additionally it allows overriding the location with `$PANERU_CONFIG` environment variable.
+
+You can use the following example configuration as a starting point:
 
 ```
 # syntax=toml

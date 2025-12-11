@@ -112,8 +112,8 @@
               };
             };
 
-            home.file.".paneru.toml".source =
-              tomlFormat.generate ".paneru.toml" config.services.paneru.settings;
+            xdg.configFile."paneru/paneru.toml".source =
+              tomlFormat.generate "paneru.toml" config.services.paneru.settings;
           };
         };
     };

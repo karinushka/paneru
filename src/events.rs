@@ -2,7 +2,7 @@ use bevy::app::{App as BevyApp, AppExit, Startup, Update};
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::message::{Message, MessageReader, Messages};
-use bevy::ecs::query::With;
+use bevy::ecs::query::{Has, With};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs;
 use bevy::ecs::system::{Commands, Populated, Query, Res, Single};
@@ -519,7 +519,7 @@ impl EventHandler {
     #[allow(clippy::needless_pass_by_value)]
     fn finish_setup(
         mut windows: Query<(&mut Window, Entity)>,
-        displays: Query<(&mut Display, Option<&FocusedMarker>)>,
+        displays: Query<(&mut Display, Has<FocusedMarker>)>,
         main_cid: Res<MainConnection>,
         mut commands: Commands,
     ) {
@@ -532,7 +532,7 @@ impl EventHandler {
         for (mut display, active) in displays {
             WindowManager::refresh_display(main_cid.0, &mut display, &mut windows);
 
-            if active.is_some() {
+            if active {
                 let first_window = display
                     .active_panel(main_cid.0)
                     .ok()

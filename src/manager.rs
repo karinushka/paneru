@@ -401,7 +401,7 @@ impl WindowManager {
     #[allow(clippy::needless_pass_by_value)]
     pub fn spawn_window_trigger(
         mut trigger: On<SpawnWindowTrigger>,
-        windows: Query<(Entity, &Window, Option<&FocusedMarker>)>,
+        windows: Query<(Entity, &Window, Has<FocusedMarker>)>,
         mut apps: Query<(Entity, &mut Application)>,
         mut active_display: Single<&mut Display, With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
@@ -589,7 +589,7 @@ impl WindowManager {
     pub fn window_focused_trigger(
         trigger: On<WMEventTrigger>,
         applications: Query<&Application>,
-        windows: Query<(&Window, Entity, &ChildOf, Option<&FocusedMarker>)>,
+        windows: Query<(&Window, Entity, &ChildOf, Has<FocusedMarker>)>,
         current_focus: Query<(&Window, Entity), With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
         config: Res<Config>,
@@ -614,10 +614,10 @@ impl WindowManager {
         delayed_focus.remove(&window_id);
 
         for (window, entity, _, focused) in windows {
-            if focused.is_some() && window.id() != window_id {
+            if focused && window.id() != window_id {
                 commands.entity(entity).remove::<FocusedMarker>();
             }
-            if focused.is_none() && window.id() == window_id {
+            if !focused && window.id() == window_id {
                 commands.entity(entity).insert(FocusedMarker);
             }
         }
@@ -995,7 +995,7 @@ impl WindowManager {
     pub fn display_change_trigger(
         trigger: On<WMEventTrigger>,
         focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
-        mut displays: Query<(&mut Display, Entity, Option<&FocusedMarker>)>,
+        mut displays: Query<(&mut Display, Entity, Has<FocusedMarker>)>,
         main_cid: Res<MainConnection>,
         mut commands: Commands,
     ) {
@@ -1011,7 +1011,7 @@ impl WindowManager {
         };
 
         if let Some((previous_display, previous_entity, _)) =
-            displays.iter().find(|(_, _, active)| active.is_some())
+            displays.iter().find(|(_, _, active)| *active)
             && previous_display.id != active_id
         {
             commands.entity(previous_entity).remove::<FocusedMarker>();
@@ -1144,7 +1144,7 @@ impl WindowManager {
             }
         }
 
-        //  Do not reshuffle windows due to moved mouse focus.
+        // Do not reshuffle windows due to moved mouse focus.
         skip_reshuffle.as_mut().0 = true;
         window.focus_without_raise(&focused_window);
         focus_follows_mouse_id.as_mut().0 = Some(window_id);
@@ -1188,7 +1188,6 @@ impl WindowManager {
             return;
         };
         if !window.fully_visible(&active_display.bounds) {
-            // WindowManager::reshuffle_around(main_cid, &window, active_display, find_window)?;
             commands.trigger(ReshuffleAroundTrigger(window.id()));
         }
     }
@@ -1643,7 +1642,7 @@ fn apply_window_properties(
     properties: Option<&WindowParams>,
     active_display: &mut Display,
     main_cid: ConnID,
-    windows: &Query<(Entity, &Window, Option<&FocusedMarker>)>,
+    windows: &Query<(Entity, &Window, Has<FocusedMarker>)>,
     commands: &mut Commands,
 ) {
     let window_id = window.id();
@@ -1676,7 +1675,7 @@ fn apply_window_properties(
             // Otherwise attempt inserting it after the current focus.
             let focused_window = windows
                 .iter()
-                .find_map(|(entity, _, focused)| focused.map(|_| entity));
+                .find_map(|(entity, _, focused)| focused.then_some(entity));
             // Insert to the right of the currently focused window
             focused_window
                 .and_then(|entity| panel.index_of(entity).ok())
@@ -1914,7 +1913,7 @@ fn mouse_follows_focus(config: &Config) -> bool {
 fn display_change(
     active_id: u32,
     main_cid: ConnID,
-    displays: &mut Query<(&mut Display, Entity, Option<&FocusedMarker>)>,
+    displays: &mut Query<(&mut Display, Entity, Has<FocusedMarker>)>,
     focused_window: &Query<(&Window, Entity), With<FocusedMarker>>,
     commands: &mut Commands,
 ) -> Result<()> {

@@ -1,6 +1,6 @@
 use bevy::ecs::entity::Entity;
 use bevy::ecs::observer::On;
-use bevy::ecs::query::With;
+use bevy::ecs::query::{Has, With};
 use bevy::ecs::system::{Commands, Query, Res, Single};
 use log::{error, warn};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -393,13 +393,12 @@ pub fn process_command_trigger(
     trigger: On<CommandTrigger>,
     sender: Res<SenderSocket>,
     main_cid: Res<MainConnection>,
-    mut windows: Query<(&mut Window, Entity, Option<&FocusedMarker>)>,
+    mut windows: Query<(&mut Window, Entity, Has<FocusedMarker>)>,
     mut active_display: Single<&mut Display, With<FocusedMarker>>,
     mut commands: Commands,
     config: Res<Config>,
 ) {
-    let Some((focused_window, focused_entity, _)) =
-        windows.iter().find(|(_, _, focus)| focus.is_some())
+    let Some((focused_window, focused_entity, _)) = windows.iter().find(|(_, _, focus)| *focus)
     else {
         warn!("{}: Unable to get focused window.", function_name!());
         return;

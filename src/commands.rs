@@ -1,7 +1,7 @@
 use bevy::ecs::entity::Entity;
 use bevy::ecs::observer::On;
 use bevy::ecs::query::With;
-use bevy::ecs::system::{Commands, Query, Res};
+use bevy::ecs::system::{Commands, Query, Res, Single};
 use log::{error, warn};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use stdext::function_name;
@@ -394,14 +394,10 @@ pub fn process_command_trigger(
     sender: Res<SenderSocket>,
     main_cid: Res<MainConnection>,
     mut windows: Query<(&mut Window, Entity, Option<&FocusedMarker>)>,
-    mut display: Query<&mut Display, With<FocusedMarker>>,
+    mut active_display: Single<&mut Display, With<FocusedMarker>>,
     mut commands: Commands,
     config: Res<Config>,
 ) {
-    let Ok(mut active_display) = display.single_mut() else {
-        warn!("{}: Unable to get current display.", function_name!());
-        return;
-    };
     let Some((focused_window, focused_entity, _)) =
         windows.iter().find(|(_, _, focus)| focus.is_some())
     else {

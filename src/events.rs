@@ -5,7 +5,7 @@ use bevy::ecs::message::{Message, MessageReader, Messages};
 use bevy::ecs::query::With;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs;
-use bevy::ecs::system::{Commands, Query, Res};
+use bevy::ecs::system::{Commands, Populated, Query, Res, Single};
 use bevy::ecs::world::World;
 use bevy::prelude::Event as BevyEvent;
 use bevy::time::{Time, Timer, Virtual};
@@ -559,15 +559,12 @@ impl EventHandler {
     /// * `commands` - Bevy commands to remove the `RepositionMarker` when animation is complete.
     #[allow(clippy::needless_pass_by_value)]
     fn animate_windows(
-        windows: Query<(&mut Window, Entity, &RepositionMarker)>,
-        displays: Query<&Display, With<FocusedMarker>>,
+        windows: Populated<(&mut Window, Entity, &RepositionMarker)>,
+        active_display: Single<&Display, With<FocusedMarker>>,
         time: Res<Time<Virtual>>,
         config: Res<Config>,
         mut commands: Commands,
     ) {
-        let Ok(active_display) = displays.single() else {
-            return;
-        };
         let move_speed = config
             .options()
             .animation_speed
@@ -624,14 +621,10 @@ impl EventHandler {
     /// * `commands` - Bevy commands to remove the `ResizeMarker` when resizing is complete.
     #[allow(clippy::needless_pass_by_value)]
     fn animate_resize_windows(
-        windows: Query<(&mut Window, Entity, &ResizeMarker)>,
-        displays: Query<&Display, With<FocusedMarker>>,
+        windows: Populated<(&mut Window, Entity, &ResizeMarker)>,
+        active_display: Single<&Display, With<FocusedMarker>>,
         mut commands: Commands,
     ) {
-        let Ok(active_display) = displays.single() else {
-            return;
-        };
-
         for (mut window, entity, ResizeMarker { size }) in windows {
             let origin = window.frame().origin;
             let width = if origin.x + size.width < active_display.bounds.size.width + 0.4 {

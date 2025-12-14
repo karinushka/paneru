@@ -2,8 +2,8 @@ use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::MessageWriter;
 use bevy::ecs::observer::On;
-use bevy::ecs::query::With;
-use bevy::ecs::system::{Commands, Local, Query, Res, ResMut};
+use bevy::ecs::query::{Has, With};
+use bevy::ecs::system::{Commands, Local, Populated, Query, Res, ResMut, Single};
 use bevy::time::{Time, Virtual};
 use bevy::transform::commands::BuildChildrenTransformExt;
 use core::ptr::NonNull;
@@ -115,16 +115,12 @@ impl WindowManager {
     pub fn dispatch_application_messages(
         trigger: On<WMEventTrigger>,
         mut windows: Query<(&mut Window, Entity)>,
-        mut displays: Query<&mut Display, With<FocusedMarker>>,
+        mut active_display: Single<&mut Display, With<FocusedMarker>>,
         applications: Query<(&Application, &Children)>,
         main_cid: Res<MainConnection>,
         mut commands: Commands,
     ) {
         let main_cid = main_cid.0;
-        let Ok(mut active_display) = displays.single_mut() else {
-            warn!("{}: Unable to get current display.", function_name!());
-            return;
-        };
 
         match &trigger.event().0 {
             Event::WindowCreated { element } => match Window::new(element) {
@@ -243,8 +239,8 @@ impl WindowManager {
     #[allow(clippy::needless_pass_by_value)]
     pub fn swipe_gesture_trigger(
         trigger: On<WMEventTrigger>,
-        active_display: Query<&Display, With<FocusedMarker>>,
-        mut focused_window: Query<(&mut Window, Entity), With<FocusedMarker>>,
+        active_display: Single<&Display, With<FocusedMarker>>,
+        mut focused_window: Single<&mut Window, With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
         config: Res<Config>,
         mut commands: Commands,
@@ -258,16 +254,12 @@ impl WindowManager {
             .swipe_gesture_fingers
             .is_some_and(|fingers| deltas.len() == fingers)
         {
-            let Ok(active_display) = active_display.single() else {
-                warn!("{}: Unable to get current display.", function_name!());
-                return;
-            };
             let delta = deltas.iter().sum::<f64>();
             if delta.abs() > SWIPE_THRESHOLD {
                 slide_window(
                     main_cid.0,
                     &mut focused_window,
-                    active_display,
+                    &active_display,
                     delta,
                     &mut commands,
                 );
@@ -411,16 +403,12 @@ impl WindowManager {
         mut trigger: On<SpawnWindowTrigger>,
         windows: Query<(Entity, &Window, Option<&FocusedMarker>)>,
         mut apps: Query<(Entity, &mut Application)>,
-        mut active_display: Query<&mut Display, With<FocusedMarker>>,
+        mut active_display: Single<&mut Display, With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
         config: Res<Config>,
         mut commands: Commands,
     ) {
         let new_windows = &mut trigger.event_mut().0;
-        let Ok(mut active_display) = active_display.single_mut() else {
-            error!("{}: can not get current display.", function_name!());
-            return;
-        };
 
         while let Some(mut window) = new_windows.pop() {
             let window_id = window.id();
@@ -568,14 +556,10 @@ impl WindowManager {
     pub fn window_resized_trigger(
         trigger: On<WMEventTrigger>,
         mut windows: Query<(&mut Window, Entity)>,
-        displays: Query<&mut Display, With<FocusedMarker>>,
+        active_display: Single<&mut Display, With<FocusedMarker>>,
         mut commands: Commands,
     ) {
         let Event::WindowResized { window_id } = trigger.event().0 else {
-            return;
-        };
-        let Ok(active_display) = displays.single() else {
-            warn!("{}: Unable to get current display.", function_name!());
             return;
         };
         let Some((mut window, _)) = windows
@@ -685,7 +669,7 @@ impl WindowManager {
     pub fn reshuffle_around_trigger(
         trigger: On<ReshuffleAroundTrigger>,
         main_cid: Res<MainConnection>,
-        mut active_display: Query<&mut Display, With<FocusedMarker>>,
+        mut active_display: Single<&mut Display, With<FocusedMarker>>,
         mut windows: Query<(&mut Window, Entity, Option<&RepositionMarker>)>,
         mut commands: Commands,
     ) {
@@ -783,7 +767,7 @@ impl WindowManager {
     pub fn add_launched_process(
         cid: Res<MainConnection>,
         events: Res<SenderSocket>,
-        process_query: Query<(Entity, &mut BProcess, Option<&Children>), With<FreshMarker>>,
+        process_query: Populated<(Entity, &mut BProcess, Has<Children>), With<FreshMarker>>,
         mut commands: Commands,
     ) {
         for (entity, mut process, children) in process_query {
@@ -792,7 +776,7 @@ impl WindowManager {
                 continue;
             }
 
-            if children.is_some() {
+            if children {
                 // Process already has an attached Application, so finish.
                 commands.entity(entity).remove::<FreshMarker>();
                 continue;
@@ -822,7 +806,7 @@ impl WindowManager {
     /// * `windows` - A query for all windows.
     /// * `commands` - Bevy commands to spawn entities and manage components.
     pub fn add_launched_application(
-        app_query: Query<(&mut Application, Entity), With<FreshMarker>>,
+        app_query: Populated<(&mut Application, Entity), With<FreshMarker>>,
         windows: Query<&Window>,
         mut commands: Commands,
     ) {
@@ -1063,7 +1047,7 @@ impl WindowManager {
     pub fn mouse_moved_trigger(
         trigger: On<WMEventTrigger>,
         windows: Query<&Window>,
-        focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
+        focused_window: Single<&Window, With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
         config: Res<Config>,
         mission_control_active: Res<MissionControlActive>,
@@ -1090,10 +1074,6 @@ impl WindowManager {
                 "{}: can not find window at point {point:?}",
                 function_name!()
             );
-            return;
-        };
-        let Ok((focused_window, _)) = focused_window.single() else {
-            debug!("{}: can not find focused widnow.", function_name!());
             return;
         };
         if focused_window.id() == window_id {
@@ -1166,7 +1146,7 @@ impl WindowManager {
 
         //  Do not reshuffle windows due to moved mouse focus.
         skip_reshuffle.as_mut().0 = true;
-        window.focus_without_raise(focused_window);
+        window.focus_without_raise(&focused_window);
         focus_follows_mouse_id.as_mut().0 = Some(window_id);
     }
 
@@ -1187,7 +1167,7 @@ impl WindowManager {
     pub fn mouse_down_trigger(
         trigger: On<WMEventTrigger>,
         windows: Query<&Window>,
-        active_display: Query<&Display, With<FocusedMarker>>,
+        active_display: Single<&Display, With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
         mission_control_active: Res<MissionControlActive>,
         mut commands: Commands,
@@ -1200,10 +1180,6 @@ impl WindowManager {
             return;
         }
         let main_cid = main_cid.0;
-        let Ok(active_display) = active_display.single() else {
-            warn!("{}: Unable to get current display.", function_name!());
-            return;
-        };
 
         let Some(window) = find_window_at_point(main_cid, &point)
             .ok()
@@ -1247,7 +1223,7 @@ impl WindowManager {
     /// register some of the observers.
     #[allow(clippy::needless_pass_by_value)]
     pub fn ready_timer_cleanup(
-        cleanup_query: Query<(Entity, &mut FreshMarker), With<FreshMarker>>,
+        cleanup_query: Populated<(Entity, &mut FreshMarker), With<FreshMarker>>,
         processes: Query<&BProcess>,
         applications: Query<&Application>,
         time: Res<Time<Virtual>>,
@@ -1734,12 +1710,11 @@ fn apply_window_properties(
 #[allow(clippy::needless_pass_by_value)]
 fn reshuffle_around(
     main_cid: ConnID,
-    active_display: &mut Query<&mut Display, With<FocusedMarker>>,
+    active_display: &mut Display,
     entity: Entity,
     windows: &mut Query<(&mut Window, Entity, Option<&RepositionMarker>)>,
     commands: &mut Commands,
 ) -> Result<()> {
-    let mut active_display = active_display.single_mut()?;
     let display_bounds = active_display.bounds;
     let menubar_height = active_display.menubar_height;
     let active_panel = active_display.active_panel(main_cid)?;
@@ -1998,16 +1973,12 @@ fn display_change(
 /// * `commands` - Bevy commands to trigger a reshuffle.
 fn slide_window(
     main_cid: ConnID,
-    focused_window: &mut Query<(&mut Window, Entity), With<FocusedMarker>>,
+    window: &mut Window,
     active_display: &Display,
     delta_x: f64,
     commands: &mut Commands,
 ) {
     trace!("{}: Windows slide {delta_x}.", function_name!());
-    let Ok((mut window, _)) = focused_window.single_mut() else {
-        warn!("{}: No window focused.", function_name!());
-        return;
-    };
     let frame = window.frame();
     // Delta is relative to the touchpad size, so to avoid too fast movement we
     // scale it down by half.

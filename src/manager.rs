@@ -5,7 +5,6 @@ use bevy::ecs::observer::On;
 use bevy::ecs::query::{Has, Or, With};
 use bevy::ecs::system::{Commands, Local, Populated, Query, Res, ResMut, Single};
 use bevy::time::{Time, Virtual};
-use bevy::transform::commands::BuildChildrenTransformExt;
 use core::ptr::NonNull;
 use log::{debug, error, trace, warn};
 use objc2_core_foundation::{
@@ -721,9 +720,7 @@ impl WindowManager {
     ) {
         for (entity, process) in process_query {
             let app = Application::new(cid.0, &process.0, &events.0).unwrap();
-            commands
-                .spawn((app, ExistingMarker))
-                .set_parent_in_place(entity);
+            commands.spawn((app, ExistingMarker, ChildOf(entity)));
             commands.entity(entity).remove::<ExistingMarker>();
         }
     }
@@ -1701,8 +1698,7 @@ fn apply_window_properties(
         .inspect_err(|err| error!("{}: {err}", function_name!()));
 
     // Insert the window into the internal Bevy state.
-    let entity = commands.spawn(window).id();
-    commands.entity(entity).set_parent_in_place(app_entity);
+    let entity = commands.spawn((window, ChildOf(app_entity))).id();
 
     if floating {
         // Avoid managing window if it's floating.

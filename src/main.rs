@@ -12,6 +12,7 @@ mod config;
 mod errors;
 mod events;
 mod manager;
+mod params;
 mod platform;
 mod process;
 mod service;

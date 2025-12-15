@@ -3,7 +3,7 @@ use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::MessageWriter;
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Has, Or, With};
-use bevy::ecs::system::{Commands, Local, Populated, Query, Res, ResMut, Single};
+use bevy::ecs::system::{Commands, Populated, Query, Res, ResMut, Single};
 use bevy::time::{Time, Virtual};
 use core::ptr::NonNull;
 use log::{debug, error, trace, warn};
@@ -19,13 +19,14 @@ use std::time::Duration;
 use stdext::function_name;
 
 use crate::app::Application;
-use crate::config::{Config, WindowParams};
+use crate::config::WindowParams;
 use crate::errors::{Error, Result};
 use crate::events::{
-    BProcess, Event, ExistingMarker, FocusFollowsMouse, FocusedMarker, FreshMarker, MainConnection,
+    BProcess, Event, ExistingMarker, FocusedMarker, FreshMarker, MainConnection,
     MissionControlActive, OrphanedSpaces, RepositionMarker, ReshuffleAroundTrigger, SenderSocket,
-    SkipReshuffle, SpawnWindowTrigger, StrayFocusEvent, Timeout, WMEventTrigger,
+    SpawnWindowTrigger, StrayFocusEvent, Timeout, WMEventTrigger,
 };
+use crate::params::Configuration;
 use crate::process::Process;
 use crate::skylight::{
     _AXUIElementCreateWithRemoteToken, ConnID, SLSCopyAssociatedWindows,
@@ -250,7 +251,7 @@ impl WindowManager {
         active_display: Single<&Display, With<FocusedMarker>>,
         mut focused_window: Single<&mut Window, With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
-        config: Res<Config>,
+        config: Configuration,
         mut commands: Commands,
     ) {
         const SWIPE_THRESHOLD: f64 = 0.01;
@@ -258,8 +259,7 @@ impl WindowManager {
             return;
         };
         if config
-            .options()
-            .swipe_gesture_fingers
+            .swipe_gesture_fingers()
             .is_some_and(|fingers| deltas.len() == fingers)
         {
             let delta = deltas.iter().sum::<f64>();
@@ -343,7 +343,8 @@ impl WindowManager {
         processes: Query<(&BProcess, &Children)>,
         applications: Query<&Application>,
         focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
-        mut focus_follows_mouse_id: ResMut<FocusFollowsMouse>,
+        // mut focus_follows_mouse_id: ResMut<FocusFollowsMouse>,
+        mut config: Configuration,
         mut commands: Commands,
     ) {
         let Event::ApplicationFrontSwitched { ref psn } = trigger.event().0 else {
@@ -386,7 +387,7 @@ impl WindowManager {
                     return;
                 };
 
-                focus_follows_mouse_id.as_mut().0 = None;
+                config.set_ffm_flag(None);
                 commands.entity(focused_entity).remove::<FocusedMarker>();
                 warn!("{}: reset focused window", function_name!());
             }
@@ -413,7 +414,7 @@ impl WindowManager {
         mut apps: Query<(Entity, &mut Application)>,
         mut active_display: Single<&mut Display, With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
-        config: Res<Config>,
+        config: Configuration,
         mut commands: Commands,
     ) {
         let new_windows = &mut trigger.event_mut().0;
@@ -593,17 +594,14 @@ impl WindowManager {
     /// * `focus_follows_mouse_id` - The resource to track focus follows mouse window ID.
     /// * `skip_reshuffle` - The resource to indicate if reshuffling should be skipped.
     /// * `commands` - Bevy commands to manage components and trigger events.
-    #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+    #[allow(clippy::needless_pass_by_value)]
     pub fn window_focused_trigger(
         trigger: On<WMEventTrigger>,
         applications: Query<&Application>,
         windows: Query<(&Window, Entity, &ChildOf, Has<FocusedMarker>)>,
         current_focus: Query<(&Window, Entity), With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
-        config: Res<Config>,
-        mut delayed_focus: Local<HashMap<WinID, Duration>>,
-        mut focus_follows_mouse_id: ResMut<FocusFollowsMouse>,
-        mut skip_reshuffle: ResMut<SkipReshuffle>,
+        mut config: Configuration,
         mut commands: Commands,
     ) {
         const STRAY_FOCUS_RETRY_SEC: u64 = 2;
@@ -611,7 +609,7 @@ impl WindowManager {
         let Event::WindowFocused { window_id } = trigger.event().0 else {
             return;
         };
-        let main_cid = main_cid.0;
+
         let Some((window, entity, child, _)) = windows
             .iter()
             .find(|(window, _, _, _)| window.id() == window_id)
@@ -620,7 +618,6 @@ impl WindowManager {
             commands.spawn((timeout, StrayFocusEvent(window_id)));
             return;
         };
-        delayed_focus.remove(&window_id);
 
         for (window, entity, _, focused) in windows {
             if focused && window.id() != window_id {
@@ -648,18 +645,18 @@ impl WindowManager {
         if let Some((_, previous_entity)) = previous_focus {
             commands.entity(previous_entity).remove::<FocusedMarker>();
         }
-        if mouse_follows_focus(&config)
+        if config.mouse_follows_focus()
             && previous_focus.is_none_or(|(previous, _)| previous.id() != window_id)
-            && focus_follows_mouse_id.0.is_none_or(|id| id != window_id)
+            && config.ffm_flag().is_none_or(|id| id != window_id)
         {
-            window.center_mouse(main_cid);
+            window.center_mouse(main_cid.0);
         }
 
         commands.entity(entity).insert(FocusedMarker);
-        focus_follows_mouse_id.as_mut().0 = None;
+        config.set_ffm_flag(None);
 
-        if skip_reshuffle.0 {
-            skip_reshuffle.as_mut().0 = false;
+        if config.skip_reshuffle() {
+            config.set_skip_reshuffle(false);
         } else {
             commands.trigger(ReshuffleAroundTrigger(window.id()));
         }
@@ -880,9 +877,9 @@ impl WindowManager {
         let Event::DisplayAdded { display_id } = trigger.event().0 else {
             return;
         };
-        let main_cid = main_cid.0;
+
         debug!("{}: Display Added: {display_id:?}", function_name!());
-        let Some(mut display) = Display::present_displays(main_cid)
+        let Some(mut display) = Display::present_displays(main_cid.0)
             .into_iter()
             .find(|display| display.id == display_id)
         else {
@@ -967,7 +964,7 @@ impl WindowManager {
         let Event::DisplayMoved { display_id } = trigger.event().0 else {
             return;
         };
-        let main_cid = main_cid.0;
+
         debug!("{}: Display Moved: {display_id:?}", function_name!());
         let Some((mut display, _)) = displays
             .iter_mut()
@@ -976,7 +973,7 @@ impl WindowManager {
             error!("{}: Unable to find moved display!", function_name!());
             return;
         };
-        let Some(moved_display) = Display::present_displays(main_cid)
+        let Some(moved_display) = Display::present_displays(main_cid.0)
             .into_iter()
             .find(|display| display.id == display_id)
         else {
@@ -1054,32 +1051,26 @@ impl WindowManager {
     /// * `focused_window` - A query for the currently focused window.
     /// * `main_cid` - The main connection ID resource.
     /// * `config` - The optional configuration resource.
-    /// * `mission_control_active` - A resource indicating if Mission Control is active.
-    /// * `focus_follows_mouse_id` - A resource to track the window ID for focus-follows-mouse.
-    /// * `skip_reshuffle` - A resource to indicate if reshuffling should be skipped.
-    #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+    #[allow(clippy::needless_pass_by_value)]
     pub fn mouse_moved_trigger(
         trigger: On<WMEventTrigger>,
         windows: Query<&Window>,
         focused_window: Single<&Window, With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
-        config: Res<Config>,
-        mission_control_active: Res<MissionControlActive>,
-        mut focus_follows_mouse_id: ResMut<FocusFollowsMouse>,
-        mut skip_reshuffle: ResMut<SkipReshuffle>,
+        mut config: Configuration,
     ) {
         let Event::MouseMoved { point } = trigger.event().0 else {
             return;
         };
         let main_cid = main_cid.0;
 
-        if !focus_follows_mouse(config.as_ref()) {
+        if !config.focus_follows_mouse() {
             return;
         }
-        if mission_control_active.0 {
+        if config.mission_control_active() {
             return;
         }
-        if focus_follows_mouse_id.0.is_some() {
+        if config.ffm_flag().is_some() {
             trace!("{}: ffm_window_id > 0", function_name!());
             return;
         }
@@ -1159,9 +1150,9 @@ impl WindowManager {
         }
 
         // Do not reshuffle windows due to moved mouse focus.
-        skip_reshuffle.as_mut().0 = true;
+        config.set_skip_reshuffle(true);
         window.focus_without_raise(&focused_window);
-        focus_follows_mouse_id.as_mut().0 = Some(window_id);
+        config.set_ffm_flag(Some(window_id));
     }
 
     /// Handles mouse down events.
@@ -1193,9 +1184,8 @@ impl WindowManager {
         if mission_control_active.0 {
             return;
         }
-        let main_cid = main_cid.0;
 
-        let Some(window) = find_window_at_point(main_cid, &point)
+        let Some(window) = find_window_at_point(main_cid.0, &point)
             .ok()
             .and_then(|window_id| windows.iter().find(|window| window.id() == window_id))
         else {
@@ -1920,25 +1910,6 @@ fn reposition_stack(
             }
         }
     }
-}
-
-/// Checks if the "focus follows mouse" feature is enabled.
-///
-/// # Arguments
-///
-/// * `config` - An optional reference to the `Config` resource.
-///
-/// # Returns
-///
-/// `true` if focus follows mouse is enabled, `false` otherwise.
-fn focus_follows_mouse(config: &Config) -> bool {
-    // Default is enabled.
-    config.options().focus_follows_mouse.is_none_or(|ffm| ffm)
-}
-
-fn mouse_follows_focus(config: &Config) -> bool {
-    // Default is enabled.
-    config.options().mouse_follows_focus.is_none_or(|mff| mff)
 }
 
 /// Handles display change events by updating the active display and reorienting windows.

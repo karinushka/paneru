@@ -2,7 +2,7 @@ use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::MessageWriter;
 use bevy::ecs::observer::On;
-use bevy::ecs::query::{Has, With};
+use bevy::ecs::query::{Has, Or, With};
 use bevy::ecs::system::{Commands, Local, Populated, Query, Res, ResMut, Single};
 use bevy::time::{Time, Virtual};
 use bevy::transform::commands::BuildChildrenTransformExt;
@@ -25,7 +25,7 @@ use crate::errors::{Error, Result};
 use crate::events::{
     BProcess, Event, ExistingMarker, FocusFollowsMouse, FocusedMarker, FreshMarker, MainConnection,
     MissionControlActive, OrphanedSpaces, RepositionMarker, ReshuffleAroundTrigger, SenderSocket,
-    SkipReshuffle, SpawnWindowTrigger, WMEventTrigger,
+    SkipReshuffle, SpawnWindowTrigger, Timeout, WMEventTrigger,
 };
 use crate::process::Process;
 use crate::skylight::{
@@ -79,6 +79,7 @@ impl WindowManager {
         processes: Query<(&BProcess, Entity)>,
         mut commands: Commands,
     ) {
+        const PROCESS_READY_TIMEOUT_SEC: u64 = 5;
         let find_process = |psn| {
             processes
                 .iter()
@@ -89,7 +90,15 @@ impl WindowManager {
             Event::ApplicationLaunched { psn, observer } => {
                 if find_process(psn).is_none() {
                     let process = Process::new(psn, observer.clone());
-                    commands.spawn((FreshMarker::new(), BProcess(process)));
+                    let timeout = Timeout::new(
+                        Duration::from_secs(PROCESS_READY_TIMEOUT_SEC),
+                        Some(format!(
+                            "{}: Process '{}' did not become ready in {PROCESS_READY_TIMEOUT_SEC}s.",
+                            function_name!(),
+                            process.name
+                        )),
+                    );
+                    commands.spawn((FreshMarker, timeout, BProcess(process)));
                 }
             }
 
@@ -770,6 +779,7 @@ impl WindowManager {
         process_query: Populated<(Entity, &mut BProcess, Has<Children>), With<FreshMarker>>,
         mut commands: Commands,
     ) {
+        const APP_OBSERVABLE_TIMEOUT_SEC: u64 = 5;
         for (entity, mut process, children) in process_query {
             let process = &mut *process.0;
             if !process.ready() {
@@ -785,9 +795,15 @@ impl WindowManager {
             let mut app = Application::new(cid.0, process, &events.0).unwrap();
 
             if app.observe().is_ok_and(|good| good) {
-                commands
-                    .spawn((app, FreshMarker::new()))
-                    .set_parent_in_place(entity);
+                let timeout = Timeout::new(
+                    Duration::from_secs(APP_OBSERVABLE_TIMEOUT_SEC),
+                    Some(format!(
+                        "{}: Application pid {} did not become observable in {APP_OBSERVABLE_TIMEOUT_SEC}s.",
+                        function_name!(),
+                        app.pid()
+                    )),
+                );
+                commands.spawn((app, FreshMarker, timeout, ChildOf(entity)));
             } else {
                 debug!(
                     "{}: failed to register some observers {}",
@@ -1220,38 +1236,46 @@ impl WindowManager {
     ///
     /// This can be processes which are not yet observable or applications which keep failing to
     /// register some of the observers.
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn ready_timer_cleanup(
-        cleanup_query: Populated<(Entity, &mut FreshMarker), With<FreshMarker>>,
-        processes: Query<&BProcess>,
-        applications: Query<&Application>,
-        time: Res<Time<Virtual>>,
+    #[allow(clippy::type_complexity)]
+    pub fn fresh_marker_cleanup(
+        cleanup: Populated<
+            (Entity, Has<FreshMarker>, &Timeout),
+            Or<(With<BProcess>, With<Application>)>,
+        >,
         mut commands: Commands,
     ) {
-        for (entity, mut ready_timer) in cleanup_query {
-            let timer = &mut ready_timer.0;
-            timer.tick(time.delta());
+        for (entity, fresh, _) in cleanup {
+            if !fresh {
+                // Process was ready before the timer finished.
+                commands.entity(entity).remove::<Timeout>();
+            }
+        }
+    }
 
-            trace!(
-                "{}: Entity {entity} Timer {}",
-                function_name!(),
-                timer.elapsed().as_secs_f32()
-            );
-            if timer.is_finished() {
-                if let Ok(app) = applications.get(entity) {
-                    debug!(
-                        "{}: Application pid {} did not become observable in time. Removing entity {entity}.",
-                        function_name!(),
-                        app.pid()
-                    );
-                } else if let Ok(process) = processes.get(entity) {
-                    debug!(
-                        "{}: Process '{}' did not become ready in time. Removing entity {entity}.",
-                        function_name!(),
-                        process.0.name,
-                    );
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn timeout_ticker(
+        timers: Populated<(Entity, &mut Timeout)>,
+        clock: Res<Time<Virtual>>,
+        mut commands: Commands,
+    ) {
+        for (entity, mut timeout) in timers {
+            if timeout.timer.is_finished() {
+                trace!(
+                    "{}: Despawning entity {entity} due to timeout.",
+                    function_name!(),
+                );
+                if let Some(message) = &timeout.message {
+                    debug!("{message}");
                 }
+                trace!("{}: Removing timer {entity}", function_name!());
                 commands.entity(entity).despawn();
+            } else {
+                trace!(
+                    "{}: Timer {}",
+                    function_name!(),
+                    timeout.timer.elapsed().as_secs_f32()
+                );
+                timeout.timer.tick(clock.delta());
             }
         }
     }

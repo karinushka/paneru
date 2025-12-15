@@ -194,15 +194,7 @@ pub struct FocusedMarker;
 
 // Signifies freshly created Process, Application or Window.
 #[derive(Component)]
-pub struct FreshMarker(pub Timer);
-
-impl FreshMarker {
-    pub fn new() -> Self {
-        const READY_TIMEOUT_SEC: f32 = 5.0;
-        let ready_timer = Timer::from_seconds(READY_TIMEOUT_SEC, bevy::time::TimerMode::Once);
-        FreshMarker(ready_timer)
-    }
-}
+pub struct FreshMarker;
 
 // Used to gather existing processes and windows.
 #[derive(Component)]
@@ -220,6 +212,20 @@ pub struct ResizeMarker {
 
 #[derive(Component)]
 pub struct BProcess(pub ProcessRef);
+
+#[derive(Component)]
+pub struct Timeout {
+    pub timer: Timer,
+    pub message: Option<String>,
+}
+
+impl Timeout {
+    /// Creates a new timeout with a duration and an optional message.
+    pub fn new(duration: Duration, message: Option<String>) -> Self {
+        let timer = Timer::from_seconds(duration.as_secs_f32(), bevy::time::TimerMode::Once);
+        Self { timer, message }
+    }
+}
 
 #[derive(Resource)]
 pub struct MainConnection(pub ConnID);
@@ -311,7 +317,8 @@ impl EventHandler {
                     EventHandler::animate_resize_windows,
                     WindowManager::add_launched_process,
                     WindowManager::add_launched_application,
-                    WindowManager::ready_timer_cleanup,
+                    WindowManager::fresh_marker_cleanup,
+                    WindowManager::timeout_ticker,
                 ),
             )
             .run();

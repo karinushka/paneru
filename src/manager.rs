@@ -14,7 +14,7 @@ use objc2_core_foundation::{
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::mem::take;
-use std::ops::{Add, Deref};
+use std::ops::Deref;
 use std::slice::from_raw_parts_mut;
 use std::time::Duration;
 use stdext::function_name;
@@ -25,7 +25,7 @@ use crate::errors::{Error, Result};
 use crate::events::{
     BProcess, Event, ExistingMarker, FocusFollowsMouse, FocusedMarker, FreshMarker, MainConnection,
     MissionControlActive, OrphanedSpaces, RepositionMarker, ReshuffleAroundTrigger, SenderSocket,
-    SkipReshuffle, SpawnWindowTrigger, Timeout, WMEventTrigger,
+    SkipReshuffle, SpawnWindowTrigger, StrayFocusEvent, Timeout, WMEventTrigger,
 };
 use crate::process::Process;
 use crate::skylight::{
@@ -602,13 +602,13 @@ impl WindowManager {
         current_focus: Query<(&Window, Entity), With<FocusedMarker>>,
         main_cid: Res<MainConnection>,
         config: Res<Config>,
-        time: Res<Time<Virtual>>,
         mut delayed_focus: Local<HashMap<WinID, Duration>>,
-        mut messages: MessageWriter<Event>,
         mut focus_follows_mouse_id: ResMut<FocusFollowsMouse>,
         mut skip_reshuffle: ResMut<SkipReshuffle>,
         mut commands: Commands,
     ) {
+        const STRAY_FOCUS_RETRY_SEC: u64 = 2;
+
         let Event::WindowFocused { window_id } = trigger.event().0 else {
             return;
         };
@@ -617,7 +617,8 @@ impl WindowManager {
             .iter()
             .find(|(window, _, _, _)| window.id() == window_id)
         else {
-            stray_focus_event(window_id, &time, &mut delayed_focus, &mut messages);
+            let timeout = Timeout::new(Duration::from_secs(STRAY_FOCUS_RETRY_SEC), None);
+            commands.spawn((timeout, StrayFocusEvent(window_id)));
             return;
         };
         delayed_focus.remove(&window_id);
@@ -1276,6 +1277,25 @@ impl WindowManager {
                     timeout.timer.elapsed().as_secs_f32()
                 );
                 timeout.timer.tick(clock.delta());
+            }
+        }
+    }
+
+    pub fn retry_stray_focus(
+        focus_events: Populated<(Entity, &StrayFocusEvent)>,
+        windows: Query<&Window>,
+        mut messages: MessageWriter<Event>,
+        mut commands: Commands,
+    ) {
+        for (timeout_entity, stray_focus) in focus_events {
+            let window_id = stray_focus.0;
+            if windows.iter().any(|window| window.id() == window_id) {
+                debug!(
+                    "{}: Re-queueing lost focus event for window id {window_id}.",
+                    function_name!()
+                );
+                messages.write(Event::WindowFocused { window_id });
+                commands.entity(timeout_entity).despawn();
             }
         }
     }
@@ -2133,29 +2153,4 @@ fn window_unminimized(
     active_panel.append(entity);
     commands.trigger(ReshuffleAroundTrigger(window_id));
     Ok(())
-}
-
-fn stray_focus_event(
-    window_id: WinID,
-    time: &Time<Virtual>,
-    delayed_focus: &mut HashMap<WinID, Duration>,
-    messages: &mut MessageWriter<Event>,
-) {
-    const STRAY_FOCUS_TIMEOUT_SECS: u64 = 1;
-
-    let focus_start = delayed_focus.entry(window_id).or_insert_with(|| {
-        debug!(
-            "{}: Early focus event for window id {window_id}. Re-queueing.",
-            function_name!()
-        );
-        time.elapsed()
-    });
-    if focus_start.add(Duration::new(STRAY_FOCUS_TIMEOUT_SECS, 0)) > time.elapsed() {
-        messages.write(Event::WindowFocused { window_id });
-    } else {
-        warn!(
-            "{}: Window {window_id} still missing after {STRAY_FOCUS_TIMEOUT_SECS}s.",
-            function_name!()
-        );
-    }
 }

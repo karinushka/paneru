@@ -227,6 +227,10 @@ impl Timeout {
     }
 }
 
+// Used as a retry for stray focus event arriving before window is created.
+#[derive(Component)]
+pub struct StrayFocusEvent(pub WinID);
+
 #[derive(Resource)]
 pub struct MainConnection(pub ConnID);
 
@@ -319,6 +323,7 @@ impl EventHandler {
                     WindowManager::add_launched_application,
                     WindowManager::fresh_marker_cleanup,
                     WindowManager::timeout_ticker,
+                    WindowManager::retry_stray_focus,
                 ),
             )
             .run();

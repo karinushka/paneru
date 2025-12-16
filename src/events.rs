@@ -28,6 +28,7 @@ use crate::manager::WindowManager;
 use crate::platform::{ProcessSerialNumber, WorkspaceObserver};
 use crate::process::{Process, ProcessRef};
 use crate::skylight::{ConnID, SLSMainConnectionID, WinID};
+use crate::triggers::register_triggers;
 use crate::util::AXUIWrapper;
 use crate::windows::{Display, Window, WindowPane};
 
@@ -308,27 +309,21 @@ impl EventHandler {
             .insert_resource(SkipReshuffle(false))
             .insert_resource(MissionControlActive(false))
             .insert_resource(FocusFollowsMouse(None))
-            .add_observer(process_command_trigger);
-
-        WindowManager::register_triggers(&mut app);
-
-        app.add_systems(Startup, EventHandler::gather_displays)
+            .add_observer(process_command_trigger)
+            .add_systems(Startup, EventHandler::gather_displays)
             .add_systems(Startup, process_setup.after(EventHandler::gather_displays))
             .add_systems(
                 Update,
                 (
+                    // NOTE: To avoid weird timing issues, the dispatcher should be the first one.
                     EventHandler::dispatch_toplevel_triggers,
                     EventHandler::animate_windows,
                     EventHandler::animate_resize_windows,
-                    WindowManager::add_launched_process,
-                    WindowManager::add_launched_application,
-                    WindowManager::fresh_marker_cleanup,
-                    WindowManager::timeout_ticker,
-                    WindowManager::retry_stray_focus,
-                    WindowManager::find_orphaned_spaces,
                 ),
-            )
-            .run();
+            );
+        register_triggers(&mut app);
+        WindowManager::register_systems(&mut app);
+        app.run();
 
         quit.store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())

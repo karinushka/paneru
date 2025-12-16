@@ -9,8 +9,8 @@ use stdext::function_name;
 use crate::config::{Config, preset_column_widths};
 use crate::errors::Result;
 use crate::events::{
-    CommandTrigger, Event, FocusedMarker, MainConnection, RepositionMarker, ReshuffleAroundTrigger,
-    ResizeMarker, SenderSocket, WMEventTrigger,
+    ActiveDisplayMarker, CommandTrigger, Event, FocusedMarker, MainConnection, RepositionMarker,
+    ReshuffleAroundTrigger, ResizeMarker, SenderSocket, WMEventTrigger,
 };
 use crate::skylight::ConnID;
 use crate::windows::{Display, Panel, Window, WindowPane};
@@ -394,7 +394,7 @@ pub fn process_command_trigger(
     sender: Res<SenderSocket>,
     main_cid: Res<MainConnection>,
     mut windows: Query<(&mut Window, Entity, Has<FocusedMarker>)>,
-    mut active_display: Single<&mut Display, With<FocusedMarker>>,
+    mut active_display: Single<&mut Display, With<ActiveDisplayMarker>>,
     mut commands: Commands,
     config: Res<Config>,
 ) {

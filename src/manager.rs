@@ -17,8 +17,8 @@ use stdext::function_name;
 use crate::app::Application;
 use crate::errors::{Error, Result};
 use crate::events::{
-    BProcess, Event, ExistingMarker, FocusedMarker, FreshMarker, MainConnection, OrphanedPane,
-    SenderSocket, SpawnWindowTrigger, StrayFocusEvent, Timeout,
+    ActiveDisplayMarker, BProcess, Event, ExistingMarker, FreshMarker, MainConnection,
+    OrphanedPane, SenderSocket, SpawnWindowTrigger, StrayFocusEvent, Timeout,
 };
 use crate::skylight::{
     _AXUIElementCreateWithRemoteToken, ConnID, SLSCopyWindowsWithOptionsAndTags,
@@ -329,7 +329,7 @@ impl WindowManager {
     #[allow(clippy::needless_pass_by_value)]
     pub fn find_orphaned_spaces(
         orphaned_spaces: Populated<(Entity, &mut OrphanedPane)>,
-        mut active_display: Single<&mut Display, With<FocusedMarker>>,
+        mut active_display: Single<&mut Display, With<ActiveDisplayMarker>>,
         mut commands: Commands,
     ) {
         let display_id = active_display.id;

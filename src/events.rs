@@ -188,9 +188,13 @@ impl EventSender {
     }
 }
 
-// Used to signify currently active display and focused window.
+// Used to signify currently focused window.
 #[derive(Component)]
 pub struct FocusedMarker;
+
+// Used to signify currently active display
+#[derive(Component)]
+pub struct ActiveDisplayMarker;
 
 // Signifies freshly created Process, Application or Window.
 #[derive(Component)]
@@ -430,7 +434,7 @@ impl EventHandler {
         };
         for display in Display::present_displays(cid.0) {
             if display.id == active_display {
-                commands.spawn((display, FocusedMarker));
+                commands.spawn((display, ActiveDisplayMarker));
             } else {
                 commands.spawn(display);
             }
@@ -531,7 +535,7 @@ impl EventHandler {
     #[allow(clippy::needless_pass_by_value)]
     fn finish_setup(
         mut windows: Query<(&mut Window, Entity)>,
-        displays: Query<(&mut Display, Has<FocusedMarker>)>,
+        displays: Query<(&mut Display, Has<ActiveDisplayMarker>)>,
         main_cid: Res<MainConnection>,
         mut commands: Commands,
     ) {
@@ -572,7 +576,7 @@ impl EventHandler {
     #[allow(clippy::needless_pass_by_value)]
     fn animate_windows(
         windows: Populated<(&mut Window, Entity, &RepositionMarker)>,
-        active_display: Single<&Display, With<FocusedMarker>>,
+        active_display: Single<&Display, With<ActiveDisplayMarker>>,
         time: Res<Time<Virtual>>,
         config: Res<Config>,
         mut commands: Commands,
@@ -634,7 +638,7 @@ impl EventHandler {
     #[allow(clippy::needless_pass_by_value)]
     fn animate_resize_windows(
         windows: Populated<(&mut Window, Entity, &ResizeMarker)>,
-        active_display: Single<&Display, With<FocusedMarker>>,
+        active_display: Single<&Display, With<ActiveDisplayMarker>>,
         mut commands: Commands,
     ) {
         for (mut window, entity, ResizeMarker { size }) in windows {

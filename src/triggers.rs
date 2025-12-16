@@ -1,12 +1,12 @@
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
+use bevy::ecs::lifecycle::Add;
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Has, With};
 use bevy::ecs::system::{Commands, Query, Res, ResMut, Single};
 use core::ptr::NonNull;
 use log::{debug, error, trace, warn};
 use objc2_core_foundation::{CFNumber, CFNumberType, CFRetained, CGPoint, CGRect};
-use std::io::ErrorKind;
 use std::mem::take;
 use std::time::Duration;
 use stdext::function_name;
@@ -15,9 +15,9 @@ use crate::app::Application;
 use crate::config::WindowParams;
 use crate::errors::{Error, Result};
 use crate::events::{
-    BProcess, Event, FocusedMarker, FreshMarker, MainConnection, MissionControlActive,
-    OrphanedPane, RepositionMarker, ReshuffleAroundTrigger, SpawnWindowTrigger, StrayFocusEvent,
-    Timeout, WMEventTrigger, WindowDraggedMarker,
+    ActiveDisplayMarker, BProcess, Event, FocusedMarker, FreshMarker, MainConnection,
+    MissionControlActive, OrphanedPane, RepositionMarker, ReshuffleAroundTrigger,
+    SpawnWindowTrigger, StrayFocusEvent, Timeout, WMEventTrigger, WindowDraggedMarker,
 };
 use crate::params::Configuration;
 use crate::process::Process;
@@ -33,6 +33,7 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(mouse_down_trigger)
         .add_observer(mouse_dragged_trigger)
         .add_observer(display_change_trigger)
+        .add_observer(active_display_trigger)
         .add_observer(display_add_trigger)
         .add_observer(display_remove_trigger)
         .add_observer(display_moved_trigger)
@@ -182,7 +183,7 @@ fn mouse_moved_trigger(
 fn mouse_down_trigger(
     trigger: On<WMEventTrigger>,
     windows: Query<&Window>,
-    active_display: Single<&Display, With<FocusedMarker>>,
+    active_display: Single<&Display, With<ActiveDisplayMarker>>,
     main_cid: Res<MainConnection>,
     mission_control_active: Res<MissionControlActive>,
     mut commands: Commands,
@@ -323,8 +324,7 @@ fn mouse_dragged_trigger(
 #[allow(clippy::needless_pass_by_value)]
 fn display_change_trigger(
     trigger: On<WMEventTrigger>,
-    focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
-    mut displays: Query<(&mut Display, Entity, Has<FocusedMarker>)>,
+    displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
     main_cid: Res<MainConnection>,
     mut commands: Commands,
 ) {
@@ -339,58 +339,46 @@ fn display_change_trigger(
         return;
     };
 
-    if let Some((previous_display, previous_entity, _)) =
-        displays.iter().find(|(_, _, active)| *active)
-        && previous_display.id != active_id
-    {
-        commands.entity(previous_entity).remove::<FocusedMarker>();
+    for (display, entity, focused) in displays {
+        if focused && display.id != active_id {
+            debug!(
+                "{}: Display id {} no longer active",
+                function_name!(),
+                display.id
+            );
+            commands.entity(entity).remove::<ActiveDisplayMarker>();
+        }
+        if !focused && display.id == active_id {
+            debug!("{}: Display id {} is active", function_name!(), display.id);
+            commands.entity(entity).insert(ActiveDisplayMarker);
+        }
     }
-
-    _ = display_change(
-        active_id,
-        main_cid,
-        &mut displays,
-        &focused_window,
-        &mut commands,
-    )
-    .inspect_err(|err| warn!("{}: {err}", function_name!()));
 }
 
-/// Handles display change events by updating the active display and reorienting windows.
-///
-/// # Arguments
-///
-/// * `active_id` - The ID of the active display.
-/// * `main_cid` - The main connection ID.
-/// * `displays` - A query for all displays.
-/// * `focused_window` - A query for the focused window.
-/// * `commands` - Bevy commands to trigger events.
-fn display_change(
-    active_id: u32,
-    main_cid: ConnID,
-    displays: &mut Query<(&mut Display, Entity, Has<FocusedMarker>)>,
-    focused_window: &Query<(&Window, Entity), With<FocusedMarker>>,
-    commands: &mut Commands,
-) -> Result<()> {
-    let (mut active_display, entity, _) = displays
-        .iter_mut()
-        .find(|(display, _, _)| display.id == active_id)
-        .ok_or(Error::new(
-            ErrorKind::NotFound,
-            "Can not find active display {display_id}.",
-        ))?;
-    commands.entity(entity).insert(FocusedMarker);
+#[allow(clippy::needless_pass_by_value)]
+fn active_display_trigger(
+    trigger: On<Add, ActiveDisplayMarker>,
+    mut displays: Query<&mut Display>,
+    focused_window: Single<(&Window, Entity), With<FocusedMarker>>,
+    main_cid: Res<MainConnection>,
+    mut commands: Commands,
+) {
+    let Ok(mut active_display) = displays.get_mut(trigger.event().entity) else {
+        error!("{}: Can not find active display.", function_name!());
+        return;
+    };
+    let active_display_id = active_display.id;
+    let Ok(panel) = active_display.active_panel(main_cid.0) else {
+        return;
+    };
     debug!(
-        "{}: Display ({active_id}) or Workspace changed, reorienting windows.",
-        function_name!(),
+        "{}: Display ({active_display_id}) changed, panel {panel}.",
+        function_name!()
     );
 
-    let (window, entity) = focused_window.single()?;
-    let panel = active_display.active_panel(main_cid)?;
-    debug!("{}: Active panel {panel}", function_name!());
-
+    let (window, entity) = *focused_window;
     if !window.managed() || panel.index_of(entity).is_ok() {
-        return Ok(());
+        return;
     }
     debug!(
         "{}: Window {} moved between displays or workspaces.",
@@ -400,20 +388,19 @@ fn display_change(
 
     // Current window is not present in the current pane. This is probably due to it being
     // moved to a different desktop. Re-insert it into a correct pane.
-    for (mut display, _, _) in displays {
+    for mut display in displays {
         // First remove it from all the displays.
         display.remove_window(entity);
 
-        if display.id == active_id {
+        if display.id == active_display_id {
             // .. and then re-insert it into the current one.
-            if let Ok(panel) = display.active_panel(main_cid) {
+            if let Ok(panel) = display.active_panel(main_cid.0) {
                 panel.append(entity);
             }
         }
     }
 
     commands.trigger(ReshuffleAroundTrigger(window.id()));
-    Ok(())
 }
 
 /// Handles display added events.
@@ -688,7 +675,7 @@ fn window_focused_trigger(
 fn reshuffle_around_trigger(
     trigger: On<ReshuffleAroundTrigger>,
     main_cid: Res<MainConnection>,
-    mut active_display: Single<&mut Display, With<FocusedMarker>>,
+    mut active_display: Single<&mut Display, With<ActiveDisplayMarker>>,
     mut windows: Query<(&mut Window, Entity, Option<&RepositionMarker>)>,
     mut commands: Commands,
 ) {
@@ -911,7 +898,7 @@ fn reposition_stack(
 #[allow(clippy::needless_pass_by_value)]
 fn swipe_gesture_trigger(
     trigger: On<WMEventTrigger>,
-    active_display: Single<&Display, With<FocusedMarker>>,
+    active_display: Single<&Display, With<ActiveDisplayMarker>>,
     mut focused_window: Single<&mut Window, With<FocusedMarker>>,
     main_cid: Res<MainConnection>,
     config: Configuration,
@@ -1051,7 +1038,7 @@ fn application_event_trigger(
 fn dispatch_application_messages(
     trigger: On<WMEventTrigger>,
     mut windows: Query<(&mut Window, Entity)>,
-    mut active_display: Single<&mut Display, With<FocusedMarker>>,
+    mut active_display: Single<&mut Display, With<ActiveDisplayMarker>>,
     applications: Query<(&Application, &Children)>,
     main_cid: Res<MainConnection>,
     mut commands: Commands,
@@ -1189,7 +1176,7 @@ fn window_unminimized(
 fn window_resized_trigger(
     trigger: On<WMEventTrigger>,
     mut windows: Query<(&mut Window, Entity)>,
-    active_display: Single<&mut Display, With<FocusedMarker>>,
+    active_display: Single<&mut Display, With<ActiveDisplayMarker>>,
     mut commands: Commands,
 ) {
     let Event::WindowResized { window_id } = trigger.event().0 else {
@@ -1303,7 +1290,7 @@ fn spawn_window_trigger(
     mut trigger: On<SpawnWindowTrigger>,
     windows: Query<(Entity, &Window, Has<FocusedMarker>)>,
     mut apps: Query<(Entity, &mut Application)>,
-    mut active_display: Single<&mut Display, With<FocusedMarker>>,
+    mut active_display: Single<&mut Display, With<ActiveDisplayMarker>>,
     main_cid: Res<MainConnection>,
     config: Configuration,
     mut commands: Commands,

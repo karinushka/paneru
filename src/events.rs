@@ -211,6 +211,9 @@ pub struct ResizeMarker {
 }
 
 #[derive(Component)]
+pub struct WindowDraggedMarker(pub Entity);
+
+#[derive(Component)]
 pub struct BProcess(pub ProcessRef);
 
 #[derive(Component)]

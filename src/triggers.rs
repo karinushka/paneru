@@ -17,7 +17,7 @@ use crate::errors::{Error, Result};
 use crate::events::{
     BProcess, Event, FocusedMarker, FreshMarker, MainConnection, MissionControlActive,
     OrphanedPane, RepositionMarker, ReshuffleAroundTrigger, SpawnWindowTrigger, StrayFocusEvent,
-    Timeout, WMEventTrigger,
+    Timeout, WMEventTrigger, WindowDraggedMarker,
 };
 use crate::params::Configuration;
 use crate::process::Process;
@@ -267,16 +267,42 @@ fn find_window_at_point(main_cid: ConnID, point: &CGPoint) -> Result<WinID> {
 #[allow(clippy::needless_pass_by_value)]
 fn mouse_dragged_trigger(
     trigger: On<WMEventTrigger>,
+    windows: Query<(Entity, &Window)>,
+    mut drag_marker: Query<(&mut Timeout, &mut WindowDraggedMarker)>,
+    main_cid: Res<MainConnection>,
     mission_control_active: Res<MissionControlActive>,
+    mut commands: Commands,
 ) {
+    const DRAG_MARKER_TIMEOUT_MS: u64 = 3000;
     let Event::MouseDragged { point } = trigger.event().0 else {
         return;
     };
-    trace!("{}: {point:?}", function_name!());
-
     if mission_control_active.0 {
         #[warn(clippy::needless_return)]
         return;
+    }
+
+    let Some((entity, window)) = find_window_at_point(main_cid.0, &point)
+        .ok()
+        .and_then(|window_id| windows.iter().find(|(_, window)| window.id() == window_id))
+    else {
+        return;
+    };
+
+    if let Ok((mut timeout, mut marker)) = drag_marker.single_mut() {
+        // Change the current marker contents and refresh the timer.
+        if entity != marker.0 {
+            marker.as_mut().0 = entity;
+            timeout.timer.reset();
+        }
+    } else {
+        trace!(
+            "{}: Adding a drag marker ({entity}) to window id {}.",
+            function_name!(),
+            window.id(),
+        );
+        let timeout = Timeout::new(Duration::from_millis(DRAG_MARKER_TIMEOUT_MS), None);
+        commands.spawn((timeout, WindowDraggedMarker(entity)));
     }
 }
 

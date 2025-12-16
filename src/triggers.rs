@@ -359,7 +359,8 @@ fn display_change_trigger(
 fn active_display_trigger(
     trigger: On<Add, ActiveDisplayMarker>,
     mut displays: Query<&mut Display>,
-    focused_window: Single<(&Window, Entity), With<FocusedMarker>>,
+    drag_marker: Query<(Entity, &WindowDraggedMarker)>,
+    windows: Query<&Window>,
     main_cid: Res<MainConnection>,
     mut commands: Commands,
 ) {
@@ -376,18 +377,22 @@ fn active_display_trigger(
         function_name!()
     );
 
-    let (window, entity) = *focused_window;
+    let dragged = drag_marker
+        .single()
+        .ok()
+        .and_then(|(_, WindowDraggedMarker(entity))| windows.get(*entity).ok().zip(Some(*entity)));
+    let Some((window, entity)) = dragged else {
+        return;
+    };
+
     if !window.managed() || panel.index_of(entity).is_ok() {
         return;
     }
     debug!(
-        "{}: Window {} moved between displays or workspaces.",
+        "{}: Window {} dragged to display {active_display_id}.",
         function_name!(),
         window.id(),
     );
-
-    // Current window is not present in the current pane. This is probably due to it being
-    // moved to a different desktop. Re-insert it into a correct pane.
     for mut display in displays {
         // First remove it from all the displays.
         display.remove_window(entity);

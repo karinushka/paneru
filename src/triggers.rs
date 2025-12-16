@@ -525,9 +525,6 @@ fn front_switched_trigger(
     trigger: On<WMEventTrigger>,
     processes: Query<(&BProcess, &Children)>,
     applications: Query<&Application>,
-    focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
-    // mut focus_follows_mouse_id: ResMut<FocusFollowsMouse>,
-    mut config: Configuration,
     mut commands: Commands,
 ) {
     let Event::ApplicationFrontSwitched { ref psn } = trigger.event().0 else {
@@ -563,20 +560,15 @@ fn front_switched_trigger(
     };
     debug!("{}: {}", function_name!(), process.name);
 
-    match app.focused_window_id() {
-        Err(_) => {
-            let Ok((_, focused_entity)) = focused_window.single() else {
-                warn!("{}: window_manager_set_window_opacity", function_name!());
-                return;
-            };
-
-            config.set_ffm_flag(None);
-            commands.entity(focused_entity).remove::<FocusedMarker>();
-            warn!("{}: reset focused window", function_name!());
-        }
-        Ok(focused_id) => commands.trigger(WMEventTrigger(Event::WindowFocused {
+    if let Ok(focused_id) = app.focused_window_id().inspect_err(|err| {
+        warn!(
+            "{}: keeping current focused window: {err}",
+            function_name!()
+        );
+    }) {
+        commands.trigger(WMEventTrigger(Event::WindowFocused {
             window_id: focused_id,
-        })),
+        }));
     }
 }
 

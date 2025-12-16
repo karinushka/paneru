@@ -13,7 +13,6 @@ use log::{debug, error, info, trace, warn};
 use objc2::rc::Retained;
 use objc2_core_foundation::{CFRetained, CGPoint, CGSize};
 use objc2_core_graphics::CGDirectDisplayID;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
@@ -231,6 +230,12 @@ impl Timeout {
 #[derive(Component)]
 pub struct StrayFocusEvent(pub WinID);
 
+#[derive(Component)]
+pub struct OrphanedPane {
+    pub id: u64,
+    pub pane: WindowPane,
+}
+
 #[derive(Resource)]
 pub struct MainConnection(pub ConnID);
 
@@ -245,9 +250,6 @@ pub struct MissionControlActive(pub bool);
 
 #[derive(Resource)]
 pub struct FocusFollowsMouse(pub Option<WinID>);
-
-#[derive(Resource)]
-pub struct OrphanedSpaces(pub HashMap<u64, WindowPane>);
 
 #[derive(BevyEvent)]
 pub struct WMEventTrigger(pub Event);
@@ -306,7 +308,6 @@ impl EventHandler {
             .insert_resource(SkipReshuffle(false))
             .insert_resource(MissionControlActive(false))
             .insert_resource(FocusFollowsMouse(None))
-            .insert_resource(OrphanedSpaces(HashMap::new()))
             .add_observer(process_command_trigger);
 
         WindowManager::register_triggers(&mut app);
@@ -324,6 +325,7 @@ impl EventHandler {
                     WindowManager::fresh_marker_cleanup,
                     WindowManager::timeout_ticker,
                     WindowManager::retry_stray_focus,
+                    WindowManager::find_orphaned_spaces,
                 ),
             )
             .run();

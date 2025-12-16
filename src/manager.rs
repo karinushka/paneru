@@ -10,7 +10,6 @@ use log::{debug, error, trace, warn};
 use objc2_core_foundation::{
     CFArray, CFMutableData, CFNumber, CFNumberType, CFRetained, CGPoint, CGRect,
 };
-use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::mem::take;
 use std::ops::Deref;
@@ -23,7 +22,7 @@ use crate::config::WindowParams;
 use crate::errors::{Error, Result};
 use crate::events::{
     BProcess, Event, ExistingMarker, FocusedMarker, FreshMarker, MainConnection,
-    MissionControlActive, OrphanedSpaces, RepositionMarker, ReshuffleAroundTrigger, SenderSocket,
+    MissionControlActive, OrphanedPane, RepositionMarker, ReshuffleAroundTrigger, SenderSocket,
     SpawnWindowTrigger, StrayFocusEvent, Timeout, WMEventTrigger,
 };
 use crate::params::Configuration;
@@ -869,9 +868,7 @@ impl WindowManager {
     #[allow(clippy::needless_pass_by_value)]
     pub fn display_add_trigger(
         trigger: On<WMEventTrigger>,
-        mut windows: Query<&mut Window>,
         main_cid: Res<MainConnection>,
-        mut orphaned_spaces: ResMut<OrphanedSpaces>,
         mut commands: Commands,
     ) {
         let Event::DisplayAdded { display_id } = trigger.event().0 else {
@@ -879,14 +876,13 @@ impl WindowManager {
         };
 
         debug!("{}: Display Added: {display_id:?}", function_name!());
-        let Some(mut display) = Display::present_displays(main_cid.0)
+        let Some(display) = Display::present_displays(main_cid.0)
             .into_iter()
             .find(|display| display.id == display_id)
         else {
             error!("{}: Unable to find added display!", function_name!());
             return;
         };
-        find_orphaned_spaces(&mut orphaned_spaces.0, &mut display, &mut windows);
 
         for (id, pane) in &display.spaces {
             debug!("{}: Space {id} - {pane}", function_name!());
@@ -909,8 +905,6 @@ impl WindowManager {
     pub fn display_remove_trigger(
         trigger: On<WMEventTrigger>,
         mut displays: Query<(&mut Display, Entity)>,
-        mut windows: Query<&mut Window>,
-        mut orphaned_spaces: ResMut<OrphanedSpaces>,
         mut commands: Commands,
     ) {
         let Event::DisplayRemoved { display_id } = trigger.event().0 else {
@@ -925,18 +919,14 @@ impl WindowManager {
             return;
         };
 
-        let orphaned_spaces = &mut orphaned_spaces.0;
-        for (space_id, pane) in take(&mut display.spaces)
+        for (id, pane) in take(&mut display.spaces)
             .into_iter()
             .filter(|(_, pane)| pane.len() > 0)
         {
             debug!("{}: adding {pane} to orphaned list.", function_name!(),);
-            orphaned_spaces.insert(space_id, pane);
+            commands.spawn(OrphanedPane { id, pane });
         }
 
-        for (mut display, _) in displays {
-            find_orphaned_spaces(orphaned_spaces, &mut display, &mut windows);
-        }
         commands.entity(entity).despawn();
         commands.trigger(WMEventTrigger(Event::DisplayChanged));
     }
@@ -956,9 +946,7 @@ impl WindowManager {
     pub fn display_moved_trigger(
         trigger: On<WMEventTrigger>,
         mut displays: Query<(&mut Display, Entity)>,
-        mut windows: Query<&mut Window>,
         main_cid: Res<MainConnection>,
-        mut orphaned_spaces: ResMut<OrphanedSpaces>,
         mut commands: Commands,
     ) {
         let Event::DisplayMoved { display_id } = trigger.event().0 else {
@@ -980,7 +968,6 @@ impl WindowManager {
             return;
         };
         *display = moved_display;
-        find_orphaned_spaces(&mut orphaned_spaces.0, &mut display, &mut windows);
 
         for (id, pane) in &display.spaces {
             debug!("{}: Space {id} - {pane}", function_name!());
@@ -1286,51 +1273,39 @@ impl WindowManager {
             }
         }
     }
-}
 
-/// Finds and re-inserts orphaned spaces into displays that have empty spaces.
-///
-/// # Arguments
-///
-/// * `orphaned_spaces` - A map of space IDs to `WindowPane`s that are currently orphaned.
-/// * `display` - A mutable reference to a `Display`.
-/// * `windows` - A query for all windows.
-fn find_orphaned_spaces(
-    orphaned_spaces: &mut HashMap<u64, WindowPane>,
-    display: &mut Display,
-    windows: &mut Query<&mut Window>,
-) {
-    let mut relocated_windows = vec![];
-    for (space_id, pane) in &mut display.spaces {
-        debug!(
-            "{}: Checking space {space_id} for orphans: {pane}",
-            function_name!()
-        );
-        if let Some(space) = orphaned_spaces.remove(space_id) {
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn find_orphaned_spaces(
+        orphaned_spaces: Populated<(Entity, &mut OrphanedPane)>,
+        mut active_display: Single<&mut Display, With<FocusedMarker>>,
+        mut commands: Commands,
+    ) {
+        let display_id = active_display.id;
+
+        for (entity, orphan_pane) in orphaned_spaces {
             debug!(
-                "{}: Reinserting orphaned space {space_id} into display {}",
+                "{}: Checking orphaned pane {}",
                 function_name!(),
-                display.id
+                orphan_pane.id
             );
-            for window_id in space.all_windows() {
-                // TODO: check for clashing windows.
-                pane.append(window_id);
-                relocated_windows.push((window_id, display.bounds));
+            for (space_id, pane) in &mut active_display.spaces {
+                if *space_id == orphan_pane.id {
+                    debug!(
+                        "{}: Re-inserting orphaned pane {} into display {}",
+                        function_name!(),
+                        orphan_pane.id,
+                        display_id
+                    );
+
+                    for window_entity in orphan_pane.pane.all_windows() {
+                        // TODO: check for clashing windows.
+                        pane.append(window_entity);
+                    }
+
+                    commands.entity(entity).despawn();
+                }
             }
         }
-    }
-
-    for (entity, bounds) in relocated_windows {
-        let Ok(mut window) = windows.get_mut(entity) else {
-            continue;
-        };
-        _ = window.update_frame(Some(&bounds));
-        debug!(
-            "{}: Relocated window {} has ratio {:.02}",
-            function_name!(),
-            window.id(),
-            window.width_ratio,
-        );
     }
 }
 

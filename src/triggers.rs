@@ -607,6 +607,7 @@ fn window_focused_trigger(
     trigger: On<WMEventTrigger>,
     applications: Query<&Application>,
     windows: Query<(&Window, Entity, &ChildOf, Has<FocusedMarker>)>,
+    active_display: Single<&Display, With<ActiveDisplayMarker>>,
     main_cid: Res<MainConnection>,
     mut config: Configuration,
     mut commands: Commands,
@@ -654,7 +655,7 @@ fn window_focused_trigger(
         && previous_focus_id.is_none_or(|previous_id| previous_id != window_id)
         && config.ffm_flag().is_none_or(|id| id != window_id)
     {
-        window.center_mouse(main_cid.0);
+        window.center_mouse(main_cid.0, &active_display.bounds);
     }
 
     commands.entity(entity).insert(FocusedMarker);
@@ -957,7 +958,7 @@ fn slide_window(
         frame.origin.y,
         &active_display.bounds,
     );
-    window.center_mouse(main_cid);
+    window.center_mouse(main_cid, &active_display.bounds);
     commands.trigger(ReshuffleAroundTrigger(window.id()));
 }
 

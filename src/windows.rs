@@ -1188,7 +1188,7 @@ impl Window {
     /// # Arguments
     ///
     /// * `cid` - The connection ID.
-    pub fn center_mouse(&self, cid: ConnID) {
+    pub fn center_mouse(&self, cid: ConnID, display_bounds: &CGRect) {
         // TODO: check for MouseFollowsFocus setting in WindowManager and also whether it's
         // overriden for individual window.
 
@@ -1205,8 +1205,8 @@ impl Window {
         }
 
         let center = CGPoint::new(
-            self.frame.origin.x + self.frame.size.width / 2.0,
-            self.frame.origin.y + self.frame.size.height / 2.0,
+            display_bounds.origin.x + self.frame.origin.x + self.frame.size.width / 2.0,
+            display_bounds.origin.y + self.frame.origin.y + self.frame.size.height / 2.0,
         );
         let display_id = self.display_id(cid);
         #[allow(clippy::redundant_closure)]

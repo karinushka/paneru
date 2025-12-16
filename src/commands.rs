@@ -200,7 +200,7 @@ fn command_center_window(
             y: frame.origin.y,
         },
     });
-    window.center_mouse(main_cid);
+    window.center_mouse(main_cid, &active_display.bounds);
 }
 
 fn resize_window(

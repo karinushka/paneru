@@ -281,8 +281,9 @@ impl ObserverContext {
                 return;
             }
             accessibility_sys::kAXCreatedNotification => {
-                let Ok(element) = AXUIWrapper::retain(element) else {
-                    error!("{}: invalid element {element:?}", function_name!());
+                let Ok(element) = AXUIWrapper::retain(element).inspect_err(|err| {
+                    error!("{}: invalid element {element:?}: {err}", function_name!());
+                }) else {
                     return;
                 };
                 _ = self.events.send(Event::WindowCreated { element });
@@ -291,11 +292,9 @@ impl ObserverContext {
             _ => (),
         }
 
-        let Ok(window_id) = ax_window_id(element) else {
-            error!(
-                "{}: notification {notification} invalid window_id {element:?}",
-                function_name!(),
-            );
+        let Ok(window_id) = ax_window_id(element)
+            .inspect_err(|err| error!("{}: notification {notification}: {err}", function_name!(),))
+        else {
             return;
         };
         let event = match notification {

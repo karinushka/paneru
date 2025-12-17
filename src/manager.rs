@@ -140,7 +140,6 @@ impl WindowManager {
         cid: Res<MainConnection>,
         displays: Query<&Display>,
         app_query: Query<(&mut Application, Entity), With<ExistingMarker>>,
-        windows: Query<(&Window, Entity)>,
         mut commands: Commands,
     ) {
         let spaces = displays
@@ -150,9 +149,8 @@ impl WindowManager {
 
         for (mut app, entity) in app_query {
             if app.observe().is_ok_and(|result| result)
-                && let Ok(windows) =
-                    add_existing_application_windows(cid.0, &mut app, &spaces, 0, &windows)
-                        .inspect_err(|err| warn!("{}: {err}", function_name!()))
+                && let Ok(windows) = add_existing_application_windows(cid.0, &mut app, &spaces, 0)
+                    .inspect_err(|err| warn!("{}: {err}", function_name!()))
             {
                 commands.trigger(SpawnWindowTrigger(windows));
             }
@@ -373,7 +371,7 @@ fn refresh_windows_space(
     space_id: u64,
     windows: &Query<(&Window, Entity)>,
 ) -> Vec<Entity> {
-    space_window_list_for_connection(main_cid, &[space_id], None, false, windows)
+    space_window_list_for_connection(main_cid, &[space_id], None, false)
         .inspect_err(|err| {
             warn!(
                 "{}: getting windows for space {space_id}: {err}",
@@ -396,7 +394,6 @@ fn refresh_windows_space(
 /// * `spaces` - A slice of space IDs to query windows from.
 /// * `cid` - An optional connection ID. If `None`, the main connection ID is used.
 /// * `also_minimized` - A boolean indicating whether to include minimized windows in the result.
-/// * `windows` - A query for all windows.
 ///
 /// # Returns
 ///
@@ -406,72 +403,65 @@ fn space_window_list_for_connection(
     spaces: &[u64],
     cid: Option<ConnID>,
     also_minimized: bool,
-    windows: &Query<(&Window, Entity)>,
 ) -> Result<Vec<WinID>> {
-    unsafe {
-        let space_list_ref = create_array(spaces, CFNumberType::SInt64Type)?;
+    let space_list_ref = create_array(spaces, CFNumberType::SInt64Type)?;
 
-        let mut set_tags = 0i64;
-        let mut clear_tags = 0i64;
-        let options = if also_minimized { 0x7 } else { 0x2 };
-        let ptr = NonNull::new(SLSCopyWindowsWithOptionsAndTags(
+    let mut set_tags = 0i64;
+    let mut clear_tags = 0i64;
+    let options = if also_minimized { 0x7 } else { 0x2 };
+    let ptr = NonNull::new(unsafe {
+        SLSCopyWindowsWithOptionsAndTags(
             main_cid,
             cid.unwrap_or(0),
             &raw const *space_list_ref,
             options,
             &mut set_tags,
             &mut clear_tags,
-        ))
-        .ok_or(Error::new(
-            ErrorKind::InvalidInput,
-            format!(
-                "{}: nullptr returned from SLSCopyWindowsWithOptionsAndTags.",
-                function_name!()
-            ),
-        ))?;
-        let window_list_ref = CFRetained::from_raw(ptr);
+        )
+    })
+    .ok_or(Error::new(
+        ErrorKind::InvalidInput,
+        format!(
+            "{}: nullptr returned from SLSCopyWindowsWithOptionsAndTags.",
+            function_name!()
+        ),
+    ))?;
+    let window_list_ref = unsafe { CFRetained::from_raw(ptr) };
 
-        let count = window_list_ref.count();
-        if count == 0 {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("{}: zero windows returned", function_name!()),
-            ));
-        }
+    let count = window_list_ref.count();
+    if count == 0 {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("{}: zero windows returned", function_name!()),
+        ));
+    }
 
-        let query = CFRetained::from_raw(SLSWindowQueryWindows(
+    let query = unsafe {
+        CFRetained::from_raw(SLSWindowQueryWindows(
             main_cid,
             &raw const *window_list_ref,
             count,
-        ));
-        let iterator = CFRetained::from_raw(SLSWindowQueryResultCopyWindows(query.deref().into()));
+        ))
+    };
+    let iterator =
+        unsafe { CFRetained::from_raw(SLSWindowQueryResultCopyWindows(query.deref().into())) };
 
-        let mut window_list = Vec::with_capacity(count.try_into().unwrap());
-        while SLSWindowIteratorAdvance(&raw const *iterator) {
-            let tags = SLSWindowIteratorGetTags(&raw const *iterator);
-            let attributes = SLSWindowIteratorGetAttributes(&raw const *iterator);
-            let parent_wid: WinID = SLSWindowIteratorGetParentID(&raw const *iterator);
-            let window_id: WinID = SLSWindowIteratorGetWindowID(&raw const *iterator);
+    let mut window_list = Vec::with_capacity(count.try_into().unwrap());
+    while unsafe { SLSWindowIteratorAdvance(&raw const *iterator) } {
+        let tags = unsafe { SLSWindowIteratorGetTags(&raw const *iterator) };
+        let attributes = unsafe { SLSWindowIteratorGetAttributes(&raw const *iterator) };
+        let parent_wid: WinID = unsafe { SLSWindowIteratorGetParentID(&raw const *iterator) };
+        let window_id: WinID = unsafe { SLSWindowIteratorGetWindowID(&raw const *iterator) };
 
-            trace!(
-                "{}: id: {window_id} parent: {parent_wid} tags: 0x{tags:x} attributes: 0x{attributes:x}",
-                function_name!()
-            );
-            match windows.iter().find(|(window, _)| window.id() == window_id) {
-                Some((window, _)) => {
-                    if also_minimized || !window.minimized {
-                        window_list.push(window.id());
-                    }
-                }
-                None => {
-                    if found_valid_window(parent_wid, attributes, tags) {
-                        window_list.push(window_id);
-                    }
-                }
-            }
+        trace!(
+            "{}: id: {window_id} parent: {parent_wid} tags: 0x{tags:x} attributes: 0x{attributes:x}",
+            function_name!()
+        );
+        if found_valid_window(parent_wid, attributes, tags) {
+            window_list.push(window_id);
         }
-        Ok(window_list)
     }
+    Ok(window_list)
 }
 
 /// Determines if a window is valid based on its parent ID, attributes, and tags.
@@ -512,7 +502,6 @@ fn existing_application_window_list(
     cid: ConnID,
     app: &Application,
     spaces: &[u64],
-    windows: &Query<(&Window, Entity)>,
 ) -> Result<Vec<WinID>> {
     if spaces.is_empty() {
         return Err(Error::new(
@@ -520,7 +509,7 @@ fn existing_application_window_list(
             format!("{}: no spaces returned", function_name!()),
         ));
     }
-    space_window_list_for_connection(cid, spaces, app.connection(), true, windows)
+    space_window_list_for_connection(cid, spaces, app.connection(), true)
 }
 
 /// Attempts to find and add unresolved windows for a given application by brute-forcing `element_id` values.
@@ -613,9 +602,8 @@ fn add_existing_application_windows(
     app: &mut Application,
     spaces: &[u64],
     refresh_index: i32,
-    windows: &Query<(&Window, Entity)>,
 ) -> Result<Vec<Window>> {
-    let global_window_list = existing_application_window_list(cid, app, spaces, windows)?;
+    let global_window_list = existing_application_window_list(cid, app, spaces)?;
     if global_window_list.is_empty() {
         return Err(Error::new(
             ErrorKind::InvalidData,

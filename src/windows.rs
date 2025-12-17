@@ -568,7 +568,7 @@ impl Display {
     /// # Returns
     ///
     /// `Ok(u64)` with the space ID if successful, otherwise `Err(Error)`.
-    fn active_display_space(&self, cid: ConnID) -> Result<u64> {
+    pub fn active_display_space(&self, cid: ConnID) -> Result<u64> {
         Display::uuid_from_id(self.id)
             .map(|uuid| unsafe { SLSManagedDisplayGetCurrentSpace(cid, &raw const *uuid) })
     }

@@ -385,6 +385,10 @@ fn refresh_windows_space(
         .collect()
 }
 
+pub fn windows_in_workspace(main_cid: ConnID, space_id: u64) -> Result<Vec<WinID>> {
+    space_window_list_for_connection(main_cid, &[space_id], None, true)
+}
+
 /// Retrieves a list of window IDs for specified spaces and connection, with an option to include minimized windows.
 /// This function uses `SkyLight` API calls.
 ///

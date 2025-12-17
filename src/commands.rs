@@ -410,6 +410,9 @@ pub fn process_command_trigger(
             .and_then(|panel| panel.index_of(focused_entity))
             .is_err()
     {
+        // TODO: Workaround for 26.2, where workspace notifications are not arriving. So if a
+        // window is missing in the current space, try to trigger a workspace change event.
+        commands.trigger(WMEventTrigger(Event::SpaceChanged));
         commands.trigger(WMEventTrigger(Event::DisplayChanged));
     }
     let eligible = focused_window.is_eligible();

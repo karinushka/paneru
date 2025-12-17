@@ -363,22 +363,14 @@ pub fn exe_path() -> Option<PathBuf> {
 /// # Returns
 ///
 /// `true` if Accessibility privileges are granted, `false` otherwise.
-#[allow(dead_code)]
 pub fn check_ax_privilege() -> bool {
     unsafe {
-        let mut keys = vec![kAXTrustedCheckOptionPrompt.cast::<c_void>()];
-        let mut values = vec![NonNull::from(kCFBooleanTrue.unwrap()).as_ptr() as *const c_void];
-
-        CFDictionary::new(
-            None,
-            keys.as_mut_ptr(),
-            values.as_mut_ptr(),
-            isize::try_from(keys.len()).unwrap(),
-            &raw const kCFCopyStringDictionaryKeyCallBacks,
-            &raw const kCFTypeDictionaryValueCallBacks,
-        )
-        .map(|options| NonNull::from_ref(&*options).as_ptr())
-        .map(|options| AXIsProcessTrustedWithOptions(options.cast()))
-        .is_some_and(|supported| supported)
+        let keys = [kAXTrustedCheckOptionPrompt
+            .cast::<CFString>()
+            .as_ref()
+            .unwrap()];
+        let values = [kCFBooleanTrue.unwrap()];
+        let opts = CFDictionary::from_slices(&keys, &values);
+        AXIsProcessTrustedWithOptions((&raw const *opts).cast())
     }
 }

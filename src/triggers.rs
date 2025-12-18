@@ -174,10 +174,10 @@ fn mouse_down_trigger(
     let Event::MouseDown { point } = trigger.event().0 else {
         return;
     };
-    trace!("{}: {point:?}", function_name!());
     if mission_control_active.0 {
         return;
     }
+    trace!("{}: {point:?}", function_name!());
 
     let Some((window, entity)) = window_manager
         .find_window_at_point(&point)
@@ -216,7 +216,6 @@ fn mouse_dragged_trigger(
         return;
     };
     if mission_control_active.0 {
-        #[warn(clippy::needless_return)]
         return;
     }
 
@@ -788,7 +787,7 @@ pub fn reshuffle_around_window(
             let frame = panel
                 .top()
                 .and_then(|entity| windows.get(entity).ok())
-                .map(|(window, _, _)| (window.id(), window.frame));
+                .map(|(window, _, _)| (window.id(), window.frame()));
             if let Some((window_id, frame)) = frame {
                 trace!(
                     "{}: window {window_id} right: frame: {frame:?}",
@@ -822,7 +821,7 @@ pub fn reshuffle_around_window(
             let frame = panel
                 .top()
                 .and_then(|entity| windows.get(entity).ok())
-                .map(|(window, _, _)| (window.id(), window.frame));
+                .map(|(window, _, _)| (window.id(), window.frame()));
             if let Some((window_id, frame)) = frame {
                 trace!(
                     "{}: window {window_id} left: frame: {frame:?}",

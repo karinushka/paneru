@@ -501,10 +501,10 @@ pub struct Window {
     id: WinID,
     pub psn: Option<ProcessSerialNumber>,
     ax_element: CFRetained<AXUIWrapper>,
-    pub frame: CGRect,
-    pub minimized: bool,
+    frame: CGRect,
+    minimized: bool,
     pub eligible: bool,
-    pub width_ratio: f64,
+    width_ratio: f64,
 }
 
 impl Window {
@@ -995,6 +995,10 @@ impl Window {
             trace!("{}: focus resposition to {frame:?}", function_name!());
         }
         frame
+    }
+
+    pub fn width_ratio(&mut self, width_ratio: f64) {
+        self.width_ratio = width_ratio;
     }
 }
 

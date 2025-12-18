@@ -268,7 +268,7 @@ fn full_width_window(
         size: CGSize { width, height },
     });
 
-    window.width_ratio = width_ratio;
+    window.width_ratio(width_ratio);
 }
 
 /// Toggles the managed state of the focused window.

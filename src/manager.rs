@@ -635,13 +635,14 @@ impl WindowManager {
             );
             return;
         }
-        if CGRectContainsPoint(window.frame, cursor) {
+        let frame = window.frame();
+        if CGRectContainsPoint(frame, cursor) {
             return;
         }
 
         let center = CGPoint::new(
-            display_bounds.origin.x + window.frame.origin.x + window.frame.size.width / 2.0,
-            display_bounds.origin.y + window.frame.origin.y + window.frame.size.height / 2.0,
+            display_bounds.origin.x + frame.origin.x + frame.size.width / 2.0,
+            display_bounds.origin.y + frame.origin.y + frame.size.height / 2.0,
         );
         let display_id = self.display_id(window.id());
         #[allow(clippy::redundant_closure)]

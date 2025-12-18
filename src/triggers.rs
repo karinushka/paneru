@@ -38,6 +38,7 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(display_remove_trigger)
         .add_observer(display_moved_trigger)
         .add_observer(front_switched_trigger)
+        .add_observer(center_mouse_trigger)
         .add_observer(window_focused_trigger)
         .add_observer(reshuffle_around_trigger)
         .add_observer(swipe_gesture_trigger)
@@ -594,6 +595,23 @@ fn front_switched_trigger(
     }
 }
 
+#[allow(clippy::needless_pass_by_value)]
+fn center_mouse_trigger(
+    trigger: On<Add, FocusedMarker>,
+    active_display: ActiveDisplay,
+    windows: Query<(&Window, Entity)>,
+    window_manager: Res<WindowManager>,
+    config: Configuration,
+) {
+    let Ok((window, _)) = windows.get(trigger.event().entity) else {
+        return;
+    };
+
+    if config.mouse_follows_focus() && config.ffm_flag().is_none_or(|id| id != window.id()) {
+        window_manager.center_mouse(window, &active_display.bounds());
+    }
+}
+
 /// Handles the event when a window gains focus. It updates the focused window, PSN, and reshuffles windows.
 /// It also centers the mouse on the focused window if focus-follows-mouse is enabled.
 ///
@@ -611,8 +629,6 @@ fn window_focused_trigger(
     trigger: On<WMEventTrigger>,
     applications: Query<&Application>,
     windows: Query<(&Window, Entity, &ChildOf, Has<FocusedMarker>)>,
-    active_display: Single<&Display, With<ActiveDisplayMarker>>,
-    window_manager: Res<WindowManager>,
     mut config: Configuration,
     mut commands: Commands,
 ) {
@@ -631,10 +647,8 @@ fn window_focused_trigger(
         return;
     };
 
-    let mut previous_focus_id = None;
     for (window, entity, _, focused) in windows {
         if focused && window.id() != window_id {
-            previous_focus_id = Some(window.id());
             commands.entity(entity).remove::<FocusedMarker>();
         }
         if !focused && window.id() == window_id {
@@ -653,13 +667,6 @@ fn window_focused_trigger(
     };
     if !app.is_frontmost() {
         return;
-    }
-
-    if config.mouse_follows_focus()
-        && previous_focus_id.is_none_or(|previous_id| previous_id != window_id)
-        && config.ffm_flag().is_none_or(|id| id != window_id)
-    {
-        window_manager.center_mouse(window, &active_display.bounds);
     }
 
     commands.entity(entity).insert(FocusedMarker);

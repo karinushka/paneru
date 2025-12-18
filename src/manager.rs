@@ -619,9 +619,6 @@ impl WindowManager {
 
     /// Centers the mouse cursor on the window if it's not already within the window's bounds.
     pub fn center_mouse(&self, window: &Window, display_bounds: &CGRect) {
-        // TODO: check for MouseFollowsFocus setting in WindowManager and also whether it's
-        // overriden for individual window.
-
         let mut cursor = CGPoint::default();
         if unsafe { CGError::Success != SLSGetCurrentCursorLocation(self.main_cid, &mut cursor) } {
             warn!(

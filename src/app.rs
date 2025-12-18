@@ -9,7 +9,8 @@ use accessibility_sys::{
 use bevy::ecs::component::Component;
 use core::ptr::NonNull;
 use log::{debug, error};
-use objc2_core_foundation::{CFArray, CFRetained, CFString, kCFRunLoopCommonModes};
+use objc2_core_foundation::{CFArray, CFNumberType, CFRetained, CFString, kCFRunLoopCommonModes};
+use objc2_core_graphics::CGDirectDisplayID;
 use std::ffi::c_void;
 use std::io::ErrorKind;
 use std::ops::Deref;
@@ -20,13 +21,17 @@ use stdext::function_name;
 
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
+use crate::manager::WindowManager;
 use crate::platform::{
     AXObserverAddNotification, AXObserverCreate, AXObserverRemoveNotification, CFStringRef, Pid,
     ProcessSerialNumber,
 };
 use crate::process::Process;
-use crate::skylight::{_SLPSGetFrontProcess, ConnID, SLSGetConnectionIDForPSN, WinID};
-use crate::util::{AXUIWrapper, add_run_loop, get_attribute, remove_run_loop};
+use crate::skylight::{
+    _SLPSGetFrontProcess, ConnID, SLSWindowIteratorAdvance, SLSWindowIteratorGetCount,
+    SLSWindowIteratorGetParentID, SLSWindowQueryResultCopyWindows, SLSWindowQueryWindows, WinID,
+};
+use crate::util::{AXUIWrapper, add_run_loop, create_array, get_attribute, remove_run_loop};
 use crate::windows::{Window, ax_window_id};
 
 pub static AX_NOTIFICATIONS: LazyLock<Vec<&str>> = LazyLock::new(|| {
@@ -80,7 +85,7 @@ impl Application {
     /// # Returns
     ///
     /// `Ok(Self)` if the `Application` is created successfully, otherwise `Err(Error)`.
-    pub fn new(main_cid: ConnID, process: &Process, events: &EventSender) -> Result<Self> {
+    pub fn new(wm: &WindowManager, process: &Process, events: &EventSender) -> Result<Self> {
         let refer = unsafe {
             let ptr = AXUIElementCreateApplication(process.pid);
             AXUIWrapper::retain(ptr)?
@@ -94,13 +99,7 @@ impl Application {
             element: refer,
             psn: process.psn,
             pid: process.pid,
-            connection: {
-                unsafe {
-                    let mut connection: ConnID = 0;
-                    SLSGetConnectionIDForPSN(main_cid, &process.psn, &mut connection);
-                    Some(connection)
-                }
-            },
+            connection: wm.connection_for_process(process.psn),
             handler: AxObserverHandler::new(process.pid, events.clone())?,
             bundle_id,
         })
@@ -210,6 +209,28 @@ impl Application {
 
     pub fn bundle_id(&self) -> Option<&String> {
         self.bundle_id.as_ref()
+    }
+
+    /// Returns the parent window for a given display.
+    pub fn parent_window(&self, display_id: CGDirectDisplayID) -> Result<WinID> {
+        let windows = create_array(&[display_id], CFNumberType::SInt32Type)?;
+        unsafe {
+            let query = CFRetained::from_raw(SLSWindowQueryWindows(
+                self.connection.unwrap_or_default(),
+                &raw const *windows,
+                1,
+            ));
+            let iterator = &raw const *CFRetained::from_raw(SLSWindowQueryResultCopyWindows(
+                query.deref().into(),
+            ));
+            if 1 == SLSWindowIteratorGetCount(iterator) && SLSWindowIteratorAdvance(iterator) {
+                return Ok(SLSWindowIteratorGetParentID(iterator));
+            }
+        }
+        Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("{}: error creating an array.", function_name!()),
+        ))
     }
 }
 

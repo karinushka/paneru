@@ -27,7 +27,7 @@ use crate::errors::Result;
 use crate::manager::WindowManager;
 use crate::platform::{ProcessSerialNumber, WorkspaceObserver};
 use crate::process::{Process, ProcessRef};
-use crate::skylight::{ConnID, SLSMainConnectionID, WinID};
+use crate::skylight::WinID;
 use crate::triggers::register_triggers;
 use crate::util::AXUIWrapper;
 use crate::windows::{Display, Window, WindowPane};
@@ -245,9 +245,6 @@ pub struct OrphanedPane {
 }
 
 #[derive(Resource)]
-pub struct MainConnection(pub ConnID);
-
-#[derive(Resource)]
 pub struct SenderSocket(pub EventSender);
 
 #[derive(Resource)]
@@ -299,9 +296,6 @@ impl EventHandler {
         sender: EventSender,
         quit: &Arc<AtomicBool>,
     ) -> Result<()> {
-        let main_cid = unsafe { SLSMainConnectionID() };
-        debug!("{}: My connection id: {main_cid}", function_name!());
-
         let (mut existing_processes, config) = EventHandler::gather_initial_processes(&receiver)?;
         let process_setup = move |world: &mut World| {
             EventHandler::initial_setup(world, &mut existing_processes, config.as_ref());
@@ -311,7 +305,7 @@ impl EventHandler {
         app.set_runner(move |app| EventHandler::custom_loop(app, &receiver))
             .init_resource::<Messages<Event>>()
             .insert_resource(Time::<Virtual>::from_max_delta(Duration::from_secs(10)))
-            .insert_resource(MainConnection(main_cid))
+            .insert_resource(WindowManager::new())
             .insert_resource(SenderSocket(sender))
             .insert_resource(SkipReshuffle(false))
             .insert_resource(MissionControlActive(false))
@@ -427,13 +421,13 @@ impl EventHandler {
     /// * `cid` - The main connection ID resource.
     /// * `commands` - Bevy commands to spawn entities.
     #[allow(clippy::needless_pass_by_value)]
-    fn gather_displays(cid: Res<MainConnection>, mut commands: Commands) {
-        let Ok(active_display) = Display::active_display_id(cid.0) else {
+    fn gather_displays(window_manager: Res<WindowManager>, mut commands: Commands) {
+        let Ok(active_display_id) = window_manager.active_display_id() else {
             error!("{}: Unable to get active display id!", function_name!());
             return;
         };
-        for display in Display::present_displays(cid.0) {
-            if display.id == active_display {
+        for display in window_manager.present_displays() {
+            if display.id() == active_display_id {
                 commands.spawn((display, ActiveDisplayMarker));
             } else {
                 commands.spawn(display);
@@ -536,7 +530,7 @@ impl EventHandler {
     fn finish_setup(
         mut windows: Query<(&mut Window, Entity)>,
         displays: Query<(&mut Display, Has<ActiveDisplayMarker>)>,
-        main_cid: Res<MainConnection>,
+        window_manager: Res<WindowManager>,
         mut commands: Commands,
     ) {
         info!(
@@ -546,11 +540,14 @@ impl EventHandler {
         );
 
         for (mut display, active) in displays {
-            WindowManager::refresh_display(main_cid.0, &mut display, &mut windows);
+            window_manager.refresh_display(&mut display, &mut windows);
 
             if active {
-                let first_window = display
-                    .active_panel(main_cid.0)
+                let active_panel = window_manager
+                    .active_display_space(display.id())
+                    .and_then(|active_space| display.active_panel(active_space));
+
+                let first_window = active_panel
                     .ok()
                     .and_then(|panel| panel.first().ok())
                     .and_then(|panel| panel.top());

@@ -9,10 +9,10 @@ use stdext::function_name;
 use crate::config::{Config, preset_column_widths};
 use crate::errors::Result;
 use crate::events::{
-    ActiveDisplayMarker, CommandTrigger, Event, FocusedMarker, MainConnection, RepositionMarker,
+    ActiveDisplayMarker, CommandTrigger, Event, FocusedMarker, RepositionMarker,
     ReshuffleAroundTrigger, ResizeMarker, SenderSocket, WMEventTrigger,
 };
-use crate::skylight::ConnID;
+use crate::manager::WindowManager;
 use crate::windows::{Display, Panel, Window, WindowPane};
 
 #[derive(Clone, Debug)]
@@ -186,7 +186,7 @@ fn command_swap_focus(
 fn command_center_window(
     focused_entity: Entity,
     windows: &mut Query<&mut Window>,
-    main_cid: ConnID,
+    window_manager: &WindowManager,
     active_display: &mut Display,
     commands: &mut Commands,
 ) {
@@ -200,7 +200,7 @@ fn command_center_window(
             y: frame.origin.y,
         },
     });
-    window.center_mouse(main_cid, &active_display.bounds);
+    window_manager.center_mouse(&window, &active_display.bounds);
 }
 
 fn resize_window(
@@ -313,7 +313,7 @@ fn manage_window(
 /// `Ok(())` if the command is processed successfully, otherwise `Err(Error)`.
 fn command_windows(
     operation: &Operation,
-    main_cid: ConnID,
+    window_manager: &WindowManager,
     active_display: &mut Display,
     focused_entity: Entity,
     windows: &mut Query<&mut Window>,
@@ -321,7 +321,9 @@ fn command_windows(
     config: &Config,
 ) -> Result<()> {
     let bounds = active_display.bounds;
-    let active_panel = active_display.active_panel(main_cid)?;
+    let active_panel = window_manager
+        .active_display_space(active_display.id())
+        .and_then(|active_space| active_display.active_panel(active_space))?;
 
     if active_panel.index_of(focused_entity).is_err() {
         // TODO: Workaround for mising workspace change notifications.
@@ -347,7 +349,13 @@ fn command_windows(
         }
 
         Operation::Center => {
-            command_center_window(focused_entity, windows, main_cid, active_display, commands);
+            command_center_window(
+                focused_entity,
+                windows,
+                window_manager,
+                active_display,
+                commands,
+            );
         }
 
         Operation::Resize => {
@@ -398,7 +406,7 @@ fn command_windows(
 pub fn process_command_trigger(
     trigger: On<CommandTrigger>,
     sender: Res<SenderSocket>,
-    main_cid: Res<MainConnection>,
+    window_manager: Res<WindowManager>,
     mut windows: Query<(&mut Window, Entity, Has<FocusedMarker>)>,
     mut active_display: Single<&mut Display, With<ActiveDisplayMarker>>,
     mut commands: Commands,
@@ -409,10 +417,10 @@ pub fn process_command_trigger(
         warn!("{}: Unable to get focused window.", function_name!());
         return;
     };
-    let main_cid = main_cid.0;
     if focused_window.managed()
-        && active_display
-            .active_panel(main_cid)
+        && window_manager
+            .active_display_space(active_display.id())
+            .and_then(|active_space| active_display.active_panel(active_space))
             .and_then(|panel| panel.index_of(focused_entity))
             .is_err()
     {
@@ -429,7 +437,7 @@ pub fn process_command_trigger(
                 let mut lens = windows.transmute_lens::<&mut Window>();
                 command_windows(
                     operation,
-                    main_cid,
+                    &window_manager,
                     &mut active_display,
                     focused_entity,
                     &mut lens.query(),

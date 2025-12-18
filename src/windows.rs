@@ -8,18 +8,13 @@ use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::system::Commands;
 use core::ptr::NonNull;
-use log::{debug, trace, warn};
+use log::{debug, trace};
 use objc2_core_foundation::{
-    CFArray, CFBoolean, CFEqual, CFNumber, CFNumberType, CFRetained, CFString, CFType, CFUUID,
-    CGPoint, CGRect, CGSize,
+    CFBoolean, CFEqual, CFRetained, CFString, CFType, CFUUID, CGPoint, CGRect, CGSize,
 };
-use objc2_core_graphics::{
-    CGDirectDisplayID, CGDisplayBounds, CGError, CGGetActiveDisplayList, CGRectContainsPoint,
-    CGRectEqualToRect, CGWarpMouseCursorPosition,
-};
+use objc2_core_graphics::{CGDirectDisplayID, CGDisplayBounds, CGRectEqualToRect};
 use std::collections::{HashMap, VecDeque};
 use std::io::ErrorKind;
-use std::ops::Deref;
 use std::ptr::null_mut;
 use std::thread;
 use std::time::Duration;
@@ -31,14 +26,9 @@ use crate::platform::{Pid, ProcessSerialNumber};
 use crate::skylight::{
     _AXUIElementGetWindow, _SLPSSetFrontProcessWithOptions, AXUIElementCopyAttributeValue,
     AXUIElementPerformAction, AXUIElementSetAttributeValue, CGDisplayCreateUUIDFromDisplayID,
-    CGDisplayGetDisplayIDFromUUID, ConnID, SLPSPostEventRecordTo,
-    SLSCopyActiveMenuBarDisplayIdentifier, SLSCopyBestManagedDisplayForRect,
-    SLSCopyManagedDisplayForWindow, SLSCopyManagedDisplaySpaces, SLSGetCurrentCursorLocation,
-    SLSGetDisplayMenubarHeight, SLSGetWindowBounds, SLSManagedDisplayGetCurrentSpace,
-    SLSWindowIteratorAdvance, SLSWindowIteratorGetCount, SLSWindowIteratorGetParentID,
-    SLSWindowQueryResultCopyWindows, SLSWindowQueryWindows, WinID,
+    CGDisplayGetDisplayIDFromUUID, SLPSPostEventRecordTo, SLSGetDisplayMenubarHeight, WinID,
 };
-use crate::util::{AXUIWrapper, create_array, get_array_values, get_attribute, get_cfdict_value};
+use crate::util::{AXUIWrapper, get_attribute};
 
 #[derive(Clone, Debug)]
 pub enum Panel {
@@ -334,7 +324,7 @@ impl std::fmt::Display for WindowPane {
 
 #[derive(Component)]
 pub struct Display {
-    pub id: CGDirectDisplayID,
+    id: CGDirectDisplayID,
     // Map of workspaces, containing panels of windows.
     pub spaces: HashMap<u64, WindowPane>,
     pub bounds: CGRect,
@@ -352,7 +342,7 @@ impl Display {
     /// # Returns
     ///
     /// A new `Display` instance.
-    fn new(id: CGDirectDisplayID, spaces: Vec<u64>) -> Self {
+    pub fn new(id: CGDirectDisplayID, spaces: Vec<u64>) -> Self {
         let spaces = spaces
             .into_iter()
             .map(|id| (id, WindowPane::default()))
@@ -379,7 +369,7 @@ impl Display {
     /// # Returns
     ///
     /// `Ok(CFRetained<CFString>)` with the UUID string if successful, otherwise `Err(Error)`.
-    fn uuid_from_id(id: CGDirectDisplayID) -> Result<CFRetained<CFString>> {
+    pub fn uuid_from_id(id: CGDirectDisplayID) -> Result<CFRetained<CFString>> {
         unsafe {
             let uuid = NonNull::new(CGDisplayCreateUUIDFromDisplayID(id))
                 .map(|ptr| CFRetained::from_raw(ptr))
@@ -403,7 +393,7 @@ impl Display {
     /// # Returns
     ///
     /// `Ok(u32)` with the `CGDirectDisplayID` if successful, otherwise `Err(Error)`.
-    fn id_from_uuid(uuid: &CFRetained<CFString>) -> Result<u32> {
+    pub fn id_from_uuid(uuid: &CFRetained<CFString>) -> Result<u32> {
         unsafe {
             let id = CFUUID::from_string(None, Some(uuid)).ok_or(Error::new(
                 ErrorKind::NotFound,
@@ -411,178 +401,6 @@ impl Display {
             ))?;
             Ok(CGDisplayGetDisplayIDFromUUID(&id))
         }
-    }
-
-    /// Retrieves a list of space IDs for a given display UUID and connection ID.
-    ///
-    /// # Arguments
-    ///
-    /// * `uuid` - A reference to the `CFString` representing the display's UUID.
-    /// * `cid` - The connection ID.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(Vec<u64>)` with the list of space IDs if successful, otherwise `Err(Error)`.
-    fn display_space_list(uuid: &CFString, cid: ConnID) -> Result<Vec<u64>> {
-        let display_spaces = NonNull::new(unsafe { SLSCopyManagedDisplaySpaces(cid) })
-            .map(|ptr| unsafe { CFRetained::from_raw(ptr) })
-            .ok_or(Error::new(
-                ErrorKind::PermissionDenied,
-                format!(
-                    "{}: can not copy managed display spaces for {cid}.",
-                    function_name!()
-                ),
-            ))?;
-
-        for display in get_array_values(display_spaces.as_ref()) {
-            let display_ref = unsafe { display.as_ref() };
-            trace!("{}: display {display_ref:?}", function_name!());
-            let identifier = get_cfdict_value::<CFString>(
-                display_ref,
-                &CFString::from_static_str("Display Identifier"),
-            )?;
-            let identifier_ref = unsafe { identifier.as_ref() };
-            debug!(
-                "{}: identifier {identifier_ref:?} uuid {uuid:?}",
-                function_name!()
-            );
-            // FIXME: For some reason the main display does not have a UUID in the name, but is
-            // referenced as simply "Main".
-            if identifier_ref.to_string().ne("Main") && !CFEqual(Some(identifier_ref), Some(uuid)) {
-                continue;
-            }
-
-            let spaces =
-                get_cfdict_value::<CFArray>(display_ref, &CFString::from_static_str("Spaces"))?;
-            debug!("{}: spaces {spaces:?}", function_name!());
-
-            let space_list = get_array_values(unsafe { spaces.as_ref() })
-                .filter_map(|space| {
-                    let num = get_cfdict_value::<CFNumber>(
-                        unsafe { space.as_ref() },
-                        &CFString::from_static_str("id64"),
-                    )
-                    .ok()?;
-
-                    let mut id = 0u64;
-                    unsafe {
-                        CFNumber::value(
-                            num.as_ref(),
-                            CFNumber::r#type(num.as_ref()),
-                            NonNull::from(&mut id).as_ptr().cast(),
-                        )
-                    };
-                    (id != 0).then_some(id)
-                })
-                .collect::<Vec<u64>>();
-            return Ok(space_list);
-        }
-        Err(Error::new(
-            ErrorKind::NotFound,
-            format!("{}: could not get any displays for {cid}", function_name!(),),
-        ))
-    }
-
-    /// Retrieves a list of all currently present displays, along with their associated spaces.
-    ///
-    /// # Arguments
-    ///
-    /// * `cid` - The connection ID.
-    ///
-    /// # Returns
-    ///
-    /// A `Vec<Self>` containing `Display` objects for all present displays.
-    pub fn present_displays(cid: ConnID) -> Vec<Self> {
-        let mut count = 0u32;
-        unsafe {
-            CGGetActiveDisplayList(0, null_mut(), &raw mut count);
-        }
-        if count < 1 {
-            return vec![];
-        }
-        let mut displays = Vec::with_capacity(count.try_into().unwrap());
-        unsafe {
-            CGGetActiveDisplayList(count, displays.as_mut_ptr(), &raw mut count);
-            displays.set_len(count.try_into().unwrap());
-        }
-        displays
-            .into_iter()
-            .flat_map(|id| {
-                let uuid = Display::uuid_from_id(id);
-                uuid.and_then(|uuid| {
-                    Display::display_space_list(uuid.as_ref(), cid)
-                        .map(|spaces| Display::new(id, spaces))
-                })
-            })
-            .collect()
-    }
-
-    /// Retrieves the UUID of the active menu bar display.
-    ///
-    /// # Arguments
-    ///
-    /// * `cid` - The connection ID.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(CFRetained<CFString>)` with the UUID if successful, otherwise `Err(Error)`.
-    fn active_display_uuid(cid: ConnID) -> Result<CFRetained<CFString>> {
-        unsafe {
-            let ptr = SLSCopyActiveMenuBarDisplayIdentifier(cid);
-            let ptr = NonNull::new(ptr.cast_mut()).ok_or(Error::new(
-                ErrorKind::NotFound,
-                format!(
-                    "{}: can not find active display for connection {cid}.",
-                    function_name!(),
-                ),
-            ))?;
-            Ok(CFRetained::from_raw(ptr))
-        }
-    }
-
-    /// Retrieves the `CGDirectDisplayID` of the active menu bar display.
-    ///
-    /// # Arguments
-    ///
-    /// * `cid` - The connection ID.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(u32)` with the display ID if successful, otherwise `Err(Error)`.
-    pub fn active_display_id(cid: ConnID) -> Result<u32> {
-        let uuid = Display::active_display_uuid(cid)?;
-        Display::id_from_uuid(&uuid)
-    }
-
-    /// Retrieves the ID of the current active space on this display.
-    ///
-    /// # Arguments
-    ///
-    /// * `cid` - The connection ID.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(u64)` with the space ID if successful, otherwise `Err(Error)`.
-    pub fn active_display_space(&self, cid: ConnID) -> Result<u64> {
-        Display::uuid_from_id(self.id)
-            .map(|uuid| unsafe { SLSManagedDisplayGetCurrentSpace(cid, &raw const *uuid) })
-    }
-
-    /// Retrieves the `WindowPane` corresponding to the active space on this display.
-    ///
-    /// # Arguments
-    ///
-    /// * `cid` - The connection ID.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(&mut WindowPane)` if the active panel is found, otherwise `Err(Error)`.
-    pub fn active_panel(&mut self, cid: ConnID) -> Result<&mut WindowPane> {
-        let space_id = self.active_display_space(cid)?;
-        self.spaces.get_mut(&space_id).ok_or(Error::new(
-            ErrorKind::NotFound,
-            format!("{}: can not find space {space_id}.", function_name!()),
-        ))
     }
 
     /// Removes a window from all panes across all spaces on this display.
@@ -594,6 +412,27 @@ impl Display {
         self.spaces
             .values_mut()
             .for_each(|pane| pane.remove(window_id));
+    }
+
+    /// Retrieves the `WindowPane` corresponding to the active space on this display.
+    ///
+    /// # Arguments
+    ///
+    /// * `cid` - The connection ID.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(&mut WindowPane)` if the active panel is found, otherwise `Err(Error)`.
+    pub fn active_panel(&mut self, space_id: u64) -> Result<&mut WindowPane> {
+        self.spaces.get_mut(&space_id).ok_or(Error::new(
+            ErrorKind::NotFound,
+            format!("{}: can not find space {space_id}.", function_name!()),
+        ))
+    }
+
+    /// Returns the ID of the display.
+    pub fn id(&self) -> CGDirectDisplayID {
+        self.id
     }
 }
 
@@ -778,33 +617,6 @@ impl Window {
     /// A `CFRetained<AXUIWrapper>` representing the accessibility element.
     pub fn element(&self) -> CFRetained<AXUIWrapper> {
         self.ax_element.clone()
-    }
-
-    /// Retrieves the parent window ID for of the window.
-    ///
-    /// # Arguments
-    ///
-    /// * `main_conn` - The main connection ID.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(WinID)` with the parent window ID if successful, otherwise `Err(Error)`.
-    pub fn parent(&self, main_conn: ConnID) -> Result<WinID> {
-        let windows = create_array(&[self.id], CFNumberType::SInt32Type)?;
-        unsafe {
-            let query =
-                CFRetained::from_raw(SLSWindowQueryWindows(main_conn, &raw const *windows, 1));
-            let iterator = &raw const *CFRetained::from_raw(SLSWindowQueryResultCopyWindows(
-                query.deref().into(),
-            ));
-            if 1 == SLSWindowIteratorGetCount(iterator) && SLSWindowIteratorAdvance(iterator) {
-                return Ok(SLSWindowIteratorGetParentID(iterator));
-            }
-        }
-        Err(Error::new(
-            ErrorKind::InvalidInput,
-            format!("{}: error creating an array.", function_name!()),
-        ))
     }
 
     /// Retrieves the title of the window.
@@ -1125,53 +937,6 @@ impl Window {
         unsafe { AXUIElementPerformAction(element_ref, &action) };
     }
 
-    /// Retrieves the UUID of the display the window is currently on.
-    /// It first tries `SLSCopyManagedDisplayForWindow` and then falls back to `SLSCopyBestManagedDisplayForRect`.
-    ///
-    /// # Arguments
-    ///
-    /// * `cid` - The connection ID.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(Retained<CFString>)` with the display UUID if successful, otherwise `Err(Error)`.
-    fn display_uuid(&self, cid: ConnID) -> Result<CFRetained<CFString>> {
-        let window_id = self.id();
-        let uuid = unsafe {
-            NonNull::new(SLSCopyManagedDisplayForWindow(cid, window_id).cast_mut())
-                .map(|uuid| CFRetained::from_raw(uuid))
-        };
-        uuid.or_else(|| {
-            let mut frame = CGRect::default();
-            unsafe {
-                SLSGetWindowBounds(cid, window_id, &mut frame);
-                NonNull::new(SLSCopyBestManagedDisplayForRect(cid, frame).cast_mut())
-                    .map(|uuid| CFRetained::from_raw(uuid))
-            }
-        })
-        .ok_or(Error::new(
-            ErrorKind::InvalidInput,
-            format!(
-                "{}: can not get display uuid for window {window_id}.",
-                function_name!()
-            ),
-        ))
-    }
-
-    /// Retrieves the `CGDirectDisplayID` of the display the window is currently on.
-    ///
-    /// # Arguments
-    ///
-    /// * `cid` - The connection ID.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(u32)` with the display ID if successful, otherwise `Err(Error)`.
-    fn display_id(&self, cid: ConnID) -> Result<u32> {
-        let uuid = self.display_uuid(cid);
-        uuid.and_then(|uuid| Display::id_from_uuid(&uuid))
-    }
-
     /// Checks if the window is fully visible within the given display bounds.
     ///
     /// # Arguments
@@ -1184,40 +949,6 @@ impl Window {
     pub fn fully_visible(&self, display_bounds: &CGRect) -> bool {
         self.frame.origin.x > 0.0
             && self.frame.origin.x < display_bounds.size.width - self.frame.size.width
-    }
-
-    /// Centers the mouse cursor on the window if it's not already within the window's bounds.
-    ///
-    /// # Arguments
-    ///
-    /// * `cid` - The connection ID.
-    pub fn center_mouse(&self, cid: ConnID, display_bounds: &CGRect) {
-        // TODO: check for MouseFollowsFocus setting in WindowManager and also whether it's
-        // overriden for individual window.
-
-        let mut cursor = CGPoint::default();
-        if unsafe { CGError::Success != SLSGetCurrentCursorLocation(cid, &mut cursor) } {
-            warn!(
-                "{}: Unable to get current cursor position.",
-                function_name!()
-            );
-            return;
-        }
-        if CGRectContainsPoint(self.frame, cursor) {
-            return;
-        }
-
-        let center = CGPoint::new(
-            display_bounds.origin.x + self.frame.origin.x + self.frame.size.width / 2.0,
-            display_bounds.origin.y + self.frame.origin.y + self.frame.size.height / 2.0,
-        );
-        let display_id = self.display_id(cid);
-        #[allow(clippy::redundant_closure)]
-        let bounds = display_id.map(|display_id| CGDisplayBounds(display_id));
-        if bounds.is_ok_and(|bounds| !CGRectContainsPoint(bounds, center)) {
-            return;
-        }
-        CGWarpMouseCursorPosition(center);
     }
 
     /// Adjusts the window's position to ensure it is fully exposed (visible on screen) within the display bounds.

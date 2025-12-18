@@ -14,14 +14,14 @@ use crate::app::Application;
 use crate::config::WindowParams;
 use crate::errors::{Error, Result};
 use crate::events::{
-    ActiveDisplayMarker, BProcess, Event, FocusedMarker, FreshMarker, MainConnection,
-    MissionControlActive, OrphanedPane, RepositionMarker, ReshuffleAroundTrigger,
-    SpawnWindowTrigger, StrayFocusEvent, Timeout, WMEventTrigger, WindowDraggedMarker,
+    ActiveDisplayMarker, BProcess, Event, FocusedMarker, FreshMarker, MissionControlActive,
+    OrphanedPane, RepositionMarker, ReshuffleAroundTrigger, SpawnWindowTrigger, StrayFocusEvent,
+    Timeout, WMEventTrigger, WindowDraggedMarker,
 };
-use crate::manager::{WindowManager, windows_in_workspace};
+use crate::manager::WindowManager;
 use crate::params::Configuration;
 use crate::process::Process;
-use crate::skylight::{ConnID, SLSFindWindowAndOwner, WinID};
+use crate::skylight::WinID;
 use crate::windows::{Display, Panel, Window, WindowPane, ax_window_pid};
 
 const WINDOW_HIDDEN_THRESHOLD: f64 = 10.0;
@@ -67,13 +67,12 @@ fn mouse_moved_trigger(
     trigger: On<WMEventTrigger>,
     windows: Query<&Window>,
     focused_window: Single<&Window, With<FocusedMarker>>,
-    main_cid: Res<MainConnection>,
+    window_manager: Res<WindowManager>,
     mut config: Configuration,
 ) {
     let Event::MouseMoved { point } = trigger.event().0 else {
         return;
     };
-    let main_cid = main_cid.0;
 
     if !config.focus_follows_mouse() {
         return;
@@ -85,7 +84,7 @@ fn mouse_moved_trigger(
         trace!("{}: ffm_window_id > 0", function_name!());
         return;
     }
-    let Ok(window_id) = find_window_at_point(main_cid, &point) else {
+    let Ok(window_id) = window_manager.find_window_at_point(&point) else {
         debug!(
             "{}: can not find window at point {point:?}",
             function_name!()
@@ -109,7 +108,8 @@ fn mouse_moved_trigger(
         return;
     }
 
-    let child_windows = WindowManager::get_associated_windows(main_cid, window_id)
+    let child_windows = window_manager
+        .get_associated_windows(window_id)
         .iter()
         .filter_map(|child_wid| {
             let child_window = windows.iter().find(|window| window.id() == *child_wid);
@@ -160,7 +160,7 @@ fn mouse_down_trigger(
     trigger: On<WMEventTrigger>,
     windows: Query<&Window>,
     active_display: Single<&Display, With<ActiveDisplayMarker>>,
-    main_cid: Res<MainConnection>,
+    window_manager: Res<WindowManager>,
     mission_control_active: Res<MissionControlActive>,
     mut commands: Commands,
 ) {
@@ -172,7 +172,8 @@ fn mouse_down_trigger(
         return;
     }
 
-    let Some(window) = find_window_at_point(main_cid.0, &point)
+    let Some(window) = window_manager
+        .find_window_at_point(&point)
         .ok()
         .and_then(|window_id| windows.iter().find(|window| window.id() == window_id))
     else {
@@ -180,56 +181,6 @@ fn mouse_down_trigger(
     };
     if !window.fully_visible(&active_display.bounds) {
         commands.trigger(ReshuffleAroundTrigger(window.id()));
-    }
-}
-
-/// Finds a window at a given screen point using `SkyLight` API.
-///
-/// # Arguments
-///
-/// * `main_cid` - The main connection ID.
-/// * `point` - A reference to the `CGPoint` representing the screen coordinate.
-///
-/// # Returns
-///
-/// `Ok(WinID)` with the found window's ID if successful, otherwise `Err(Error)`.
-fn find_window_at_point(main_cid: ConnID, point: &CGPoint) -> Result<WinID> {
-    let mut window_id: WinID = 0;
-    let mut window_conn_id: ConnID = 0;
-    let mut window_point = CGPoint { x: 0f64, y: 0f64 };
-    unsafe {
-        SLSFindWindowAndOwner(
-            main_cid,
-            0, // filter window id
-            1,
-            0,
-            point,
-            &mut window_point,
-            &mut window_id,
-            &mut window_conn_id,
-        )
-    };
-    if main_cid == window_conn_id {
-        unsafe {
-            SLSFindWindowAndOwner(
-                main_cid,
-                window_id,
-                -1,
-                0,
-                point,
-                &mut window_point,
-                &mut window_id,
-                &mut window_conn_id,
-            )
-        };
-    }
-    if window_id == 0 {
-        Err(Error::invalid_window(&format!(
-            "{}: could not find a window at {point:?}",
-            function_name!()
-        )))
-    } else {
-        Ok(window_id)
     }
 }
 
@@ -246,7 +197,7 @@ fn mouse_dragged_trigger(
     trigger: On<WMEventTrigger>,
     windows: Query<(Entity, &Window)>,
     mut drag_marker: Query<(&mut Timeout, &mut WindowDraggedMarker)>,
-    main_cid: Res<MainConnection>,
+    window_manager: Res<WindowManager>,
     mission_control_active: Res<MissionControlActive>,
     mut commands: Commands,
 ) {
@@ -259,7 +210,8 @@ fn mouse_dragged_trigger(
         return;
     }
 
-    let Some((entity, window)) = find_window_at_point(main_cid.0, &point)
+    let Some((entity, window)) = window_manager
+        .find_window_at_point(&point)
         .ok()
         .and_then(|window_id| windows.iter().find(|(_, window)| window.id() == window_id))
     else {
@@ -288,17 +240,17 @@ fn workspace_change_trigger(
     trigger: On<WMEventTrigger>,
     mut active_display: Single<&mut Display, With<ActiveDisplayMarker>>,
     focused_window: Single<(&Window, Entity), With<FocusedMarker>>,
-    main_cid: Res<MainConnection>,
+    window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
     let Event::SpaceChanged = trigger.event().0 else {
         return;
     };
 
-    let Ok(workspace_id) = active_display.active_display_space(main_cid.0) else {
+    let Ok(workspace_id) = window_manager.active_display_space(active_display.id()) else {
         return;
     };
-    let Ok(panel) = active_display.active_panel(main_cid.0) else {
+    let Ok(panel) = active_display.active_panel(workspace_id) else {
         return;
     };
     let (window, entity) = *focused_window;
@@ -307,7 +259,7 @@ fn workspace_change_trigger(
         return;
     }
 
-    let windows = windows_in_workspace(main_cid.0, workspace_id);
+    let windows = window_manager.windows_in_workspace(workspace_id);
     if !windows.is_ok_and(|windows| {
         windows
             .into_iter()
@@ -323,7 +275,7 @@ fn workspace_change_trigger(
     );
 
     active_display.remove_window(entity);
-    if let Ok(panel) = active_display.active_panel(main_cid.0) {
+    if let Ok(panel) = active_display.active_panel(workspace_id) {
         panel.append(entity);
     }
 
@@ -348,29 +300,33 @@ fn workspace_change_trigger(
 fn display_change_trigger(
     trigger: On<WMEventTrigger>,
     displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
-    main_cid: Res<MainConnection>,
+    window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
     let Event::DisplayChanged = trigger.event().0 else {
         return;
     };
 
-    let Ok(active_id) = Display::active_display_id(main_cid.0) else {
+    let Ok(active_id) = window_manager.active_display_id() else {
         error!("{}: Unable to get active display id!", function_name!());
         return;
     };
 
     for (display, entity, focused) in displays {
-        if focused && display.id != active_id {
+        if focused && display.id() != active_id {
             debug!(
                 "{}: Display id {} no longer active",
                 function_name!(),
-                display.id
+                display.id()
             );
             commands.entity(entity).remove::<ActiveDisplayMarker>();
         }
-        if !focused && display.id == active_id {
-            debug!("{}: Display id {} is active", function_name!(), display.id);
+        if !focused && display.id() == active_id {
+            debug!(
+                "{}: Display id {} is active",
+                function_name!(),
+                display.id()
+            );
             commands.entity(entity).insert(ActiveDisplayMarker);
         }
     }
@@ -382,18 +338,18 @@ fn active_display_trigger(
     mut displays: Query<&mut Display>,
     drag_marker: Single<(Entity, &WindowDraggedMarker)>,
     windows: Query<&Window>,
-    main_cid: Res<MainConnection>,
+    window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
     let Ok(mut active_display) = displays.get_mut(trigger.event().entity) else {
         error!("{}: Can not find active display.", function_name!());
         return;
     };
-    let active_display_id = active_display.id;
-    let Ok(workspace_id) = active_display.active_display_space(main_cid.0) else {
+    let active_display_id = active_display.id();
+    let Ok(workspace_id) = window_manager.active_display_space(active_display_id) else {
         return;
     };
-    let Ok(panel) = active_display.active_panel(main_cid.0) else {
+    let Ok(panel) = active_display.active_panel(workspace_id) else {
         return;
     };
     debug!(
@@ -411,7 +367,7 @@ fn active_display_trigger(
         // Window is either unmanaged or already in the current space.
         return;
     }
-    let windows = windows_in_workspace(main_cid.0, workspace_id);
+    let windows = window_manager.windows_in_workspace(workspace_id);
     if !windows.is_ok_and(|windows| {
         windows
             .into_iter()
@@ -425,17 +381,17 @@ fn active_display_trigger(
         function_name!(),
         window.id(),
     );
-    for mut display in displays {
-        // First remove it from all the displays.
-        display.remove_window(entity);
 
-        if display.id == active_display_id {
-            // .. and then re-insert it into the current one.
-            if let Ok(panel) = display.active_panel(main_cid.0) {
-                panel.append(entity);
-            }
-        }
+    // Insert the window into the current panel.
+    if let Ok(panel) = active_display.active_panel(workspace_id) {
+        panel.append(entity);
     }
+    // And then remove from all the other.
+    displays.iter_mut().for_each(|mut display| {
+        if display.id() != active_display_id {
+            display.remove_window(entity);
+        }
+    });
 
     commands.trigger(ReshuffleAroundTrigger(window.id()));
 }
@@ -453,7 +409,7 @@ fn active_display_trigger(
 #[allow(clippy::needless_pass_by_value)]
 fn display_add_trigger(
     trigger: On<WMEventTrigger>,
-    main_cid: Res<MainConnection>,
+    window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
     let Event::DisplayAdded { display_id } = trigger.event().0 else {
@@ -461,9 +417,10 @@ fn display_add_trigger(
     };
 
     debug!("{}: Display Added: {display_id:?}", function_name!());
-    let Some(display) = Display::present_displays(main_cid.0)
+    let Some(display) = window_manager
+        .present_displays()
         .into_iter()
-        .find(|display| display.id == display_id)
+        .find(|display| display.id() == display_id)
     else {
         error!("{}: Unable to find added display!", function_name!());
         return;
@@ -498,7 +455,7 @@ fn display_remove_trigger(
     debug!("{}: Display Removed: {display_id:?}", function_name!());
     let Some((mut display, entity)) = displays
         .iter_mut()
-        .find(|(display, _)| display.id == display_id)
+        .find(|(display, _)| display.id() == display_id)
     else {
         error!("{}: Unable to find removed display!", function_name!());
         return;
@@ -531,7 +488,7 @@ fn display_remove_trigger(
 fn display_moved_trigger(
     trigger: On<WMEventTrigger>,
     mut displays: Query<(&mut Display, Entity)>,
-    main_cid: Res<MainConnection>,
+    window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
     let Event::DisplayMoved { display_id } = trigger.event().0 else {
@@ -541,14 +498,15 @@ fn display_moved_trigger(
     debug!("{}: Display Moved: {display_id:?}", function_name!());
     let Some((mut display, _)) = displays
         .iter_mut()
-        .find(|(display, _)| display.id == display_id)
+        .find(|(display, _)| display.id() == display_id)
     else {
         error!("{}: Unable to find moved display!", function_name!());
         return;
     };
-    let Some(moved_display) = Display::present_displays(main_cid.0)
+    let Some(moved_display) = window_manager
+        .present_displays()
         .into_iter()
-        .find(|display| display.id == display_id)
+        .find(|display| display.id() == display_id)
     else {
         return;
     };
@@ -640,7 +598,7 @@ fn window_focused_trigger(
     applications: Query<&Application>,
     windows: Query<(&Window, Entity, &ChildOf, Has<FocusedMarker>)>,
     active_display: Single<&Display, With<ActiveDisplayMarker>>,
-    main_cid: Res<MainConnection>,
+    window_manager: Res<WindowManager>,
     mut config: Configuration,
     mut commands: Commands,
 ) {
@@ -687,7 +645,7 @@ fn window_focused_trigger(
         && previous_focus_id.is_none_or(|previous_id| previous_id != window_id)
         && config.ffm_flag().is_none_or(|id| id != window_id)
     {
-        window.center_mouse(main_cid.0, &active_display.bounds);
+        window_manager.center_mouse(window, &active_display.bounds);
     }
 
     commands.entity(entity).insert(FocusedMarker);
@@ -712,7 +670,7 @@ fn window_focused_trigger(
 #[allow(clippy::needless_pass_by_value)]
 fn reshuffle_around_trigger(
     trigger: On<ReshuffleAroundTrigger>,
-    main_cid: Res<MainConnection>,
+    window_manager: Res<WindowManager>,
     mut active_display: Single<&mut Display, With<ActiveDisplayMarker>>,
     mut windows: Query<(&mut Window, Entity, Option<&RepositionMarker>)>,
     mut commands: Commands,
@@ -725,7 +683,7 @@ fn reshuffle_around_trigger(
     };
     if window.managed() {
         _ = reshuffle_around(
-            main_cid.0,
+            &window_manager,
             &mut active_display,
             entity,
             &mut windows,
@@ -749,7 +707,7 @@ fn reshuffle_around_trigger(
 /// * `commands` - Bevy commands to trigger events.
 #[allow(clippy::needless_pass_by_value)]
 fn reshuffle_around(
-    main_cid: ConnID,
+    window_manager: &WindowManager,
     active_display: &mut Display,
     entity: Entity,
     windows: &mut Query<(&mut Window, Entity, Option<&RepositionMarker>)>,
@@ -757,7 +715,9 @@ fn reshuffle_around(
 ) -> Result<()> {
     let display_bounds = active_display.bounds;
     let menubar_height = active_display.menubar_height;
-    let active_panel = active_display.active_panel(main_cid)?;
+    let active_panel = window_manager
+        .active_display_space(active_display.id())
+        .and_then(|active_space| active_display.active_panel(active_space))?;
 
     let (window, _, moving) = windows.get_mut(entity)?;
     let frame = window.expose_window(&display_bounds, moving, entity, commands);
@@ -938,7 +898,7 @@ fn swipe_gesture_trigger(
     trigger: On<WMEventTrigger>,
     active_display: Single<&Display, With<ActiveDisplayMarker>>,
     mut focused_window: Single<&mut Window, With<FocusedMarker>>,
-    main_cid: Res<MainConnection>,
+    window_manager: Res<WindowManager>,
     config: Configuration,
     mut commands: Commands,
 ) {
@@ -953,7 +913,7 @@ fn swipe_gesture_trigger(
         let delta = deltas.iter().sum::<f64>();
         if delta.abs() > SWIPE_THRESHOLD {
             slide_window(
-                main_cid.0,
+                &window_manager,
                 &mut focused_window,
                 &active_display,
                 delta,
@@ -973,7 +933,7 @@ fn swipe_gesture_trigger(
 /// * `delta_x` - The horizontal delta of the swipe gesture.
 /// * `commands` - Bevy commands to trigger a reshuffle.
 fn slide_window(
-    main_cid: ConnID,
+    window_manager: &WindowManager,
     window: &mut Window,
     active_display: &Display,
     delta_x: f64,
@@ -990,7 +950,7 @@ fn slide_window(
         frame.origin.y,
         &active_display.bounds,
     );
-    window.center_mouse(main_cid, &active_display.bounds);
+    window_manager.center_mouse(window, &active_display.bounds);
     commands.trigger(ReshuffleAroundTrigger(window.id()));
 }
 
@@ -1078,11 +1038,9 @@ fn dispatch_application_messages(
     mut windows: Query<(&mut Window, Entity)>,
     mut active_display: Single<&mut Display, With<ActiveDisplayMarker>>,
     applications: Query<(&Application, &Children)>,
-    main_cid: Res<MainConnection>,
+    window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
-    let main_cid = main_cid.0;
-
     match &trigger.event().0 {
         Event::WindowCreated { element } => match Window::new(element) {
             Ok(window) => {
@@ -1096,7 +1054,7 @@ fn dispatch_application_messages(
                 *window_id,
                 &mut windows,
                 &mut active_display,
-                main_cid,
+                &window_manager,
                 &mut commands,
             )
             .inspect_err(|err| warn!("{}: Minimizing window: {err}", function_name!()));
@@ -1107,7 +1065,7 @@ fn dispatch_application_messages(
                 *window_id,
                 &mut windows,
                 &mut active_display,
-                main_cid,
+                &window_manager,
                 &mut commands,
             )
             .inspect_err(|err| warn!("{}: Unminimizing window: {err}", function_name!()));
@@ -1128,7 +1086,7 @@ fn dispatch_application_messages(
                     window_id,
                     &mut windows,
                     &mut active_display,
-                    main_cid,
+                    &window_manager,
                     &mut commands,
                 )
                 .inspect_err(|err| warn!("{}: Minimizing window: {err}", function_name!()));
@@ -1150,7 +1108,7 @@ fn dispatch_application_messages(
                     window_id,
                     &mut windows,
                     &mut active_display,
-                    main_cid,
+                    &window_manager,
                     &mut commands,
                 )
                 .inspect_err(|err| warn!("{}: Unminimizing window: {err}", function_name!()));
@@ -1165,7 +1123,7 @@ fn window_minimized(
     window_id: WinID,
     windows: &mut Query<(&mut Window, Entity)>,
     active_display: &mut Display,
-    main_cid: ConnID,
+    window_manager: &WindowManager,
     commands: &mut Commands,
 ) -> Result<()> {
     let (mut window, entity) = windows
@@ -1176,7 +1134,9 @@ fn window_minimized(
     window.manage(false);
 
     let mut lens = windows.transmute_lens::<&Window>();
-    let active_panel = active_display.active_panel(main_cid)?;
+    let active_panel = window_manager
+        .active_display_space(active_display.id())
+        .and_then(|active_space| active_display.active_panel(active_space))?;
     give_away_focus(entity, &lens.query(), active_panel, commands);
 
     active_display.remove_window(entity);
@@ -1187,10 +1147,12 @@ fn window_unminimized(
     window_id: WinID,
     windows: &mut Query<(&mut Window, Entity)>,
     active_display: &mut Display,
-    main_cid: ConnID,
+    window_manager: &WindowManager,
     commands: &mut Commands,
 ) -> Result<()> {
-    let active_panel = active_display.active_panel(main_cid)?;
+    let active_panel = window_manager
+        .active_display_space(active_display.id())
+        .and_then(|active_space| active_display.active_panel(active_space))?;
     let (mut window, entity) = windows
         .iter_mut()
         .find(|(window, _)| window.id() == window_id)
@@ -1245,7 +1207,7 @@ fn window_destroyed_trigger(
     mut windows: Query<(&Window, Entity, &ChildOf)>,
     mut apps: Query<&mut Application>,
     mut displays: Query<&mut Display>,
-    main_cid: Res<MainConnection>,
+    window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
     let Event::WindowDestroyed { window_id } = trigger.event().0 else {
@@ -1276,7 +1238,10 @@ fn window_destroyed_trigger(
 
     let mut lens = windows.transmute_lens::<&Window>();
     for mut display in &mut displays {
-        let Ok(panel) = display.active_panel(main_cid.0) else {
+        let Ok(panel) = window_manager
+            .active_display_space(display.id())
+            .and_then(|active_space| display.active_panel(active_space))
+        else {
             continue;
         };
 
@@ -1329,8 +1294,8 @@ fn spawn_window_trigger(
     windows: Query<(Entity, &Window, Has<FocusedMarker>)>,
     mut apps: Query<(Entity, &mut Application)>,
     mut active_display: Single<&mut Display, With<ActiveDisplayMarker>>,
-    main_cid: Res<MainConnection>,
     config: Configuration,
+    window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
     let new_windows = &mut trigger.event_mut().0;
@@ -1380,8 +1345,7 @@ fn spawn_window_trigger(
             );
         }
         window.psn = Some(app.psn());
-        window.eligible =
-            window.parent(app.connection().unwrap_or_default()).is_err() || window.is_root();
+        window.eligible = app.parent_window(active_display.id()).is_err() || window.is_root();
         let bundle_id = app.bundle_id().map(String::as_str).unwrap_or_default();
         debug!(
             "{}: window {} isroot {} eligible {} bundle_id {}",
@@ -1406,8 +1370,8 @@ fn spawn_window_trigger(
             app_entity,
             properties.as_ref(),
             &mut active_display,
-            main_cid.0,
             &windows,
+            &window_manager,
             &mut commands,
         );
     }
@@ -1418,8 +1382,8 @@ fn apply_window_properties(
     app_entity: Entity,
     properties: Option<&WindowParams>,
     active_display: &mut Display,
-    main_cid: ConnID,
     windows: &Query<(Entity, &Window, Has<FocusedMarker>)>,
+    window_manager: &WindowManager,
     commands: &mut Commands,
 ) {
     let window_id = window.id();
@@ -1441,7 +1405,10 @@ fn apply_window_properties(
         return;
     }
 
-    let Ok(panel) = active_display.active_panel(main_cid) else {
+    let Ok(panel) = window_manager
+        .active_display_space(active_display.id())
+        .and_then(|active_space| active_display.active_panel(active_space))
+    else {
         return;
     };
 

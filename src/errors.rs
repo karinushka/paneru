@@ -13,11 +13,13 @@ pub enum Error {
 }
 
 impl Error {
+    /// Creates a new generic error.
     #[allow(clippy::needless_pass_by_value)]
     pub fn new<S: ToString + Display>(flavor: std::io::ErrorKind, msg: S) -> Self {
         Error::Generic(format!("{flavor}: {msg}"))
     }
 
+    /// Creates a new invalid window error.
     pub fn invalid_window(message: &str) -> Self {
         debug!("{message}");
         Error::InvalidWindow

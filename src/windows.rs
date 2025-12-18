@@ -37,7 +37,7 @@ pub enum Panel {
 }
 
 impl Panel {
-    /// Returns the top window ID in the panel.
+    /// Returns the top window entity in the panel.
     pub fn top(&self) -> Option<Entity> {
         match self {
             Panel::Single(id) => Some(id),

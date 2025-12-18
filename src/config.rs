@@ -18,6 +18,7 @@ use crate::commands::{Command, Direction, Operation};
 use crate::errors::{Error, Result};
 use crate::{platform::CFStringRef, skylight::OSStatus, util::AXUIWrapper};
 
+/// Parses a string into a `Direction` enum.
 fn parse_direction(dir: &str) -> Result<Direction> {
     Ok(match dir {
         "north" => Direction::North,
@@ -35,6 +36,7 @@ fn parse_direction(dir: &str) -> Result<Direction> {
     })
 }
 
+/// Parses a command string into a `Operation` enum.
 fn parse_operation(argv: &[&str]) -> Result<Operation> {
     let empty = "";
     let cmd = *argv.first().unwrap_or(&empty);
@@ -56,6 +58,7 @@ fn parse_operation(argv: &[&str]) -> Result<Operation> {
     Ok(out)
 }
 
+/// Parses a command string into a `Command` enum.
 pub fn parse_command(argv: &[&str]) -> Result<Command> {
     let empty = "";
     let cmd = *argv.first().unwrap_or(&empty);
@@ -146,6 +149,7 @@ impl Config {
             .map(|bind| bind.command.clone())
     }
 
+    /// Finds window properties for a given title and bundle ID.
     pub fn find_window_properties(&self, title: &str, bundle_id: &str) -> Option<WindowParams> {
         self.inner().windows.as_ref().and_then(|windows| {
             windows
@@ -311,6 +315,7 @@ pub struct WindowParams {
     pub index: Option<usize>,
 }
 
+/// Deserializes a regular expression from a string for window titles.
 fn deserialize_title<'de, D>(deserializer: D) -> std::result::Result<Regex, D::Error>
 where
     D: Deserializer<'de>,

@@ -207,6 +207,7 @@ impl Application {
         self.psn == psn
     }
 
+    /// Returns the bundle identifier of the application.
     pub fn bundle_id(&self) -> Option<&String> {
         self.bundle_id.as_ref()
     }

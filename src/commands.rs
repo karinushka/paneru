@@ -183,6 +183,7 @@ fn command_swap_focus(
     Some(other_window)
 }
 
+/// Centers the focused window on the active display.
 fn command_center_window(
     focused_entity: Entity,
     windows: &mut Query<&mut Window>,
@@ -203,6 +204,7 @@ fn command_center_window(
     window_manager.center_mouse(&window, &active_display.bounds);
 }
 
+/// Resizes the focused window based on preset column widths.
 fn resize_window(
     active_display: &mut Display,
     focused_entity: Entity,
@@ -230,6 +232,7 @@ fn resize_window(
     });
 }
 
+/// Toggles the focused window between full-width and a preset width.
 fn full_width_window(
     active_display: &mut Display,
     focused_entity: Entity,
@@ -267,6 +270,7 @@ fn full_width_window(
     window.width_ratio = width_ratio;
 }
 
+/// Toggles the managed state of the focused window.
 fn manage_window(
     active_panel: &mut WindowPane,
     display_bounds: &CGRect,

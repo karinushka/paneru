@@ -823,6 +823,14 @@ impl Window {
         Ok(title.to_string())
     }
 
+    /// Returns true if the window has a valid role.
+    pub fn valid_role(&self) -> Result<bool> {
+        let role = self.role()?;
+        Ok(["AXSheet", "AXDrawer"]
+            .iter()
+            .any(|axrole| axrole.eq(&role)))
+    }
+
     /// Retrieves the role of the window (e.g., "`AXWindow`").
     ///
     /// # Returns

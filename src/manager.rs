@@ -7,7 +7,7 @@ use bevy::ecs::system::{Commands, Populated, Query, Res, Single};
 use bevy::time::{Time, Virtual};
 use core::ptr::NonNull;
 use log::{debug, error, trace, warn};
-use objc2_core_foundation::{CFArray, CFMutableData, CFNumberType, CFRetained};
+use objc2_core_foundation::{CFArray, CFMutableData, CFNumber, CFNumberType, CFRetained};
 use std::io::ErrorKind;
 use std::ops::Deref;
 use std::slice::from_raw_parts_mut;
@@ -21,10 +21,10 @@ use crate::events::{
     OrphanedPane, SenderSocket, SpawnWindowTrigger, StrayFocusEvent, Timeout,
 };
 use crate::skylight::{
-    _AXUIElementCreateWithRemoteToken, ConnID, SLSCopyWindowsWithOptionsAndTags,
-    SLSWindowIteratorAdvance, SLSWindowIteratorGetAttributes, SLSWindowIteratorGetParentID,
-    SLSWindowIteratorGetTags, SLSWindowIteratorGetWindowID, SLSWindowQueryResultCopyWindows,
-    SLSWindowQueryWindows, WinID,
+    _AXUIElementCreateWithRemoteToken, ConnID, SLSCopyAssociatedWindows,
+    SLSCopyWindowsWithOptionsAndTags, SLSWindowIteratorAdvance, SLSWindowIteratorGetAttributes,
+    SLSWindowIteratorGetParentID, SLSWindowIteratorGetTags, SLSWindowIteratorGetWindowID,
+    SLSWindowQueryResultCopyWindows, SLSWindowQueryWindows, WinID,
 };
 use crate::util::{AXUIWrapper, create_array, get_array_values};
 use crate::windows::{Display, Window, ax_window_id};
@@ -356,6 +356,42 @@ impl WindowManager {
                 }
             }
         }
+    }
+
+    // Returns child windows of the main window.
+    pub fn get_associated_windows(main_cid: ConnID, window_id: WinID) -> Vec<WinID> {
+        let window_list = unsafe {
+            let arr_ref = SLSCopyAssociatedWindows(main_cid, window_id);
+            CFRetained::retain(arr_ref)
+        };
+
+        get_array_values(&window_list)
+            .filter_map(|item| {
+                let mut child_wid: WinID = 0;
+                if unsafe {
+                    CFNumber::value(
+                        item.as_ref(),
+                        CFNumberType::SInt32Type,
+                        NonNull::from(&mut child_wid).as_ptr().cast(),
+                    )
+                } {
+                    debug!(
+                        "{}: checking {}'s childen: {}",
+                        function_name!(),
+                        window_id,
+                        child_wid
+                    );
+                    (child_wid != 0).then_some(child_wid)
+                } else {
+                    warn!(
+                        "{}: Unable to find subwindows of window {}: {item:?}.",
+                        function_name!(),
+                        window_id
+                    );
+                    None
+                }
+            })
+            .collect()
     }
 }
 

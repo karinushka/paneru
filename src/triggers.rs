@@ -4,9 +4,8 @@ use bevy::ecs::lifecycle::Add;
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Has, With};
 use bevy::ecs::system::{Commands, Query, Res, ResMut, Single};
-use core::ptr::NonNull;
 use log::{debug, error, trace, warn};
-use objc2_core_foundation::{CFNumber, CFNumberType, CFRetained, CGPoint, CGRect};
+use objc2_core_foundation::{CGPoint, CGRect};
 use std::mem::take;
 use std::time::Duration;
 use stdext::function_name;
@@ -19,11 +18,10 @@ use crate::events::{
     MissionControlActive, OrphanedPane, RepositionMarker, ReshuffleAroundTrigger,
     SpawnWindowTrigger, StrayFocusEvent, Timeout, WMEventTrigger, WindowDraggedMarker,
 };
-use crate::manager::windows_in_workspace;
+use crate::manager::{WindowManager, windows_in_workspace};
 use crate::params::Configuration;
 use crate::process::Process;
-use crate::skylight::{ConnID, SLSCopyAssociatedWindows, SLSFindWindowAndOwner, WinID};
-use crate::util::get_array_values;
+use crate::skylight::{ConnID, SLSFindWindowAndOwner, WinID};
 use crate::windows::{Display, Panel, Window, WindowPane, ax_window_pid};
 
 const WINDOW_HIDDEN_THRESHOLD: f64 = 10.0;
@@ -111,61 +109,37 @@ fn mouse_moved_trigger(
         return;
     }
 
-    let window_list = unsafe {
-        let arr_ref = SLSCopyAssociatedWindows(main_cid, window_id);
-        CFRetained::retain(arr_ref)
-    };
-
-    let mut window = window;
-    for item in get_array_values(&window_list) {
-        let mut child_wid: WinID = 0;
-        unsafe {
-            if !CFNumber::value(
-                item.as_ref(),
-                CFNumberType::SInt32Type,
-                NonNull::from(&mut child_wid).as_ptr().cast(),
-            ) {
+    let child_windows = WindowManager::get_associated_windows(main_cid, window_id)
+        .iter()
+        .filter_map(|child_wid| {
+            let child_window = windows.iter().find(|window| window.id() == *child_wid);
+            if child_window.is_none() {
                 warn!(
-                    "{}: Unable to find subwindows of window {}: {item:?}.",
-                    function_name!(),
-                    window_id
+                    "{}: Unable to find child window {child_wid}.",
+                    function_name!()
                 );
-                continue;
             }
-        };
-        debug!(
-            "{}: checking {}'s childen: {}",
-            function_name!(),
-            window_id,
-            child_wid
-        );
-        let Some(child_window) = windows.iter().find(|window| window.id() == child_wid) else {
-            warn!(
-                "{}: Unable to find child window {child_wid}.",
-                function_name!()
-            );
-            continue;
-        };
+            child_window
+        })
+        .collect::<Vec<_>>();
 
-        let Ok(role) = window.role() else {
-            warn!("{}: finding role for {window_id}", function_name!(),);
-            continue;
-        };
-
-        let valid = ["AXSheet", "AXDrawer"]
-            .iter()
-            .any(|axrole| axrole.eq(&role));
-
-        if valid {
-            window = child_window;
-            break;
-        }
-    }
+    let valid_role = child_windows.into_iter().find(|window| {
+        window
+            .valid_role()
+            .inspect_err(|err| {
+                warn!(
+                    "{}: Can not get role for children of {window_id}: {err}",
+                    function_name!(),
+                );
+            })
+            .is_ok()
+    });
+    let window = valid_role.unwrap_or(window);
 
     // Do not reshuffle windows due to moved mouse focus.
     config.set_skip_reshuffle(true);
+    config.set_ffm_flag(Some(window.id()));
     window.focus_without_raise(&focused_window);
-    config.set_ffm_flag(Some(window_id));
 }
 
 /// Handles mouse down events.

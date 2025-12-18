@@ -424,63 +424,58 @@ impl Display {
     ///
     /// `Ok(Vec<u64>)` with the list of space IDs if successful, otherwise `Err(Error)`.
     fn display_space_list(uuid: &CFString, cid: ConnID) -> Result<Vec<u64>> {
-        // let uuid = DisplayManager::display_uuid(display)?;
-        unsafe {
-            let display_spaces = NonNull::new(SLSCopyManagedDisplaySpaces(cid))
-                .map(|ptr| CFRetained::from_raw(ptr))
-                .ok_or(Error::new(
-                    ErrorKind::PermissionDenied,
-                    format!(
-                        "{}: can not copy managed display spaces for {cid}.",
-                        function_name!()
-                    ),
-                ))?;
+        let display_spaces = NonNull::new(unsafe { SLSCopyManagedDisplaySpaces(cid) })
+            .map(|ptr| unsafe { CFRetained::from_raw(ptr) })
+            .ok_or(Error::new(
+                ErrorKind::PermissionDenied,
+                format!(
+                    "{}: can not copy managed display spaces for {cid}.",
+                    function_name!()
+                ),
+            ))?;
 
-            for display in get_array_values(display_spaces.as_ref()) {
-                trace!("{}: display {:?}", function_name!(), display.as_ref());
-                let identifier = get_cfdict_value::<CFString>(
-                    display.as_ref(),
-                    &CFString::from_static_str("Display Identifier"),
-                )?;
-                debug!(
-                    "{}: identifier {:?} uuid {:?}",
-                    function_name!(),
-                    identifier.as_ref(),
-                    uuid
-                );
-                // FIXME: For some reason the main display does not have a UUID in the name, but is
-                // referenced as simply "Main".
-                if identifier.as_ref().to_string().ne("Main")
-                    && !CFEqual(Some(identifier.as_ref()), Some(uuid))
-                {
-                    continue;
-                }
+        for display in get_array_values(display_spaces.as_ref()) {
+            let display_ref = unsafe { display.as_ref() };
+            trace!("{}: display {display_ref:?}", function_name!());
+            let identifier = get_cfdict_value::<CFString>(
+                display_ref,
+                &CFString::from_static_str("Display Identifier"),
+            )?;
+            let identifier_ref = unsafe { identifier.as_ref() };
+            debug!(
+                "{}: identifier {identifier_ref:?} uuid {uuid:?}",
+                function_name!()
+            );
+            // FIXME: For some reason the main display does not have a UUID in the name, but is
+            // referenced as simply "Main".
+            if identifier_ref.to_string().ne("Main") && !CFEqual(Some(identifier_ref), Some(uuid)) {
+                continue;
+            }
 
-                let spaces = get_cfdict_value::<CFArray>(
-                    display.as_ref(),
-                    &CFString::from_static_str("Spaces"),
-                )?;
-                debug!("{}: spaces {spaces:?}", function_name!());
+            let spaces =
+                get_cfdict_value::<CFArray>(display_ref, &CFString::from_static_str("Spaces"))?;
+            debug!("{}: spaces {spaces:?}", function_name!());
 
-                let space_list = get_array_values(spaces.as_ref())
-                    .filter_map(|space| {
-                        let num = get_cfdict_value::<CFNumber>(
-                            space.as_ref(),
-                            &CFString::from_static_str("id64"),
-                        )
-                        .ok()?;
+            let space_list = get_array_values(unsafe { spaces.as_ref() })
+                .filter_map(|space| {
+                    let num = get_cfdict_value::<CFNumber>(
+                        unsafe { space.as_ref() },
+                        &CFString::from_static_str("id64"),
+                    )
+                    .ok()?;
 
-                        let mut id = 0u64;
+                    let mut id = 0u64;
+                    unsafe {
                         CFNumber::value(
                             num.as_ref(),
                             CFNumber::r#type(num.as_ref()),
                             NonNull::from(&mut id).as_ptr().cast(),
-                        );
-                        Some(id)
-                    })
-                    .collect::<Vec<u64>>();
-                return Ok(space_list);
-            }
+                        )
+                    };
+                    (id != 0).then_some(id)
+                })
+                .collect::<Vec<u64>>();
+            return Ok(space_list);
         }
         Err(Error::new(
             ErrorKind::NotFound,

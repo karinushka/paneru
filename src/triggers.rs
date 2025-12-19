@@ -2,7 +2,7 @@ use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::lifecycle::Add;
 use bevy::ecs::observer::On;
-use bevy::ecs::query::{Has, With};
+use bevy::ecs::query::{Has, With, Without};
 use bevy::ecs::system::{Commands, Query, Res, ResMut, Single};
 use log::{debug, error, trace, warn};
 use objc2_core_foundation::{CGPoint, CGRect};
@@ -245,8 +245,9 @@ fn mouse_dragged_trigger(
 #[allow(clippy::needless_pass_by_value)]
 fn workspace_change_trigger(
     trigger: On<WMEventTrigger>,
-    mut active_display: ActiveDisplayMut,
     focused_window: Single<(&Window, Entity), With<FocusedMarker>>,
+    mut active_display: ActiveDisplayMut,
+    mut other_displays: Query<&mut Display, Without<ActiveDisplayMarker>>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
@@ -281,6 +282,9 @@ fn workspace_change_trigger(
         window.id(),
     );
 
+    other_displays
+        .iter_mut()
+        .for_each(|mut display| display.remove_window(entity));
     active_display.display().remove_window(entity);
     if let Ok(panel) = active_display.active_panel() {
         panel.append(entity);

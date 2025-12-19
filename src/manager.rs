@@ -4,7 +4,7 @@ use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::MessageWriter;
 use bevy::ecs::query::{Has, Or, With};
 use bevy::ecs::resource::Resource;
-use bevy::ecs::system::{Commands, Populated, Query, Res};
+use bevy::ecs::system::{Commands, Local, Populated, Query, Res};
 use bevy::time::{Time, Virtual};
 use core::ptr::NonNull;
 use log::{debug, error, trace, warn};
@@ -26,9 +26,9 @@ use crate::app::Application;
 use crate::errors::{Error, Result};
 use crate::events::{
     BProcess, Event, ExistingMarker, FreshMarker, OrphanedPane, SenderSocket, SpawnWindowTrigger,
-    StrayFocusEvent, Timeout,
+    StrayFocusEvent, Timeout, WMEventTrigger,
 };
-use crate::params::ActiveDisplayMut;
+use crate::params::{ActiveDisplay, ActiveDisplayMut, ThrottledSystem};
 use crate::platform::ProcessSerialNumber;
 use crate::skylight::{
     _AXUIElementCreateWithRemoteToken, ConnID, SLSCopyActiveMenuBarDisplayIdentifier,
@@ -74,6 +74,8 @@ impl WindowManager {
                 WindowManager::timeout_ticker,
                 WindowManager::retry_stray_focus,
                 WindowManager::find_orphaned_spaces,
+                WindowManager::display_changes_watcher,
+                WindowManager::workspace_change_watcher,
             ),
         );
     }
@@ -853,6 +855,99 @@ impl WindowManager {
     /// Returns a list of windows in a given workspace.
     pub fn windows_in_workspace(&self, space_id: u64) -> Result<Vec<WinID>> {
         space_window_list_for_connection(self.main_cid, &[space_id], None, true)
+    }
+
+    /// Periodically checks for windows moved between spaces and displays.
+    /// TODO: Workaround for Tahoe 26.x, where workspace notifications are not arriving. So if a
+    /// window is missing in the current space, try to trigger a workspace change event.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn workspace_change_watcher(
+        // _: Single<&Window, With<FocusedMarker>>, // Will only run if there's a focused window.
+        active_display: ActiveDisplay,
+        window_manager: Res<WindowManager>,
+        mut throttle: ThrottledSystem,
+        mut current_space: Local<u64>,
+        mut commands: Commands,
+    ) {
+        const WORKSPACE_CHANGE_FREQ_MS: u64 = 1000;
+        if throttle.throttled(Duration::from_millis(WORKSPACE_CHANGE_FREQ_MS)) {
+            return;
+        }
+
+        let Ok(space_id) = window_manager
+            .active_display_space(active_display.id())
+            .inspect_err(|err| warn!("{}: {err}", function_name!()))
+        else {
+            return;
+        };
+
+        if *current_space != space_id {
+            *current_space = space_id;
+            debug!("{}: workspace changed to {space_id}", function_name!());
+            commands.trigger(WMEventTrigger(Event::SpaceChanged));
+        }
+    }
+
+    /// Periodically checks for displays added and removed.
+    /// TODO: Workaround for Tahoe 26.x, where display change notifications are not arriving.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn display_changes_watcher(
+        active_display: ActiveDisplay,
+        // displays: Query<&Display, Without<ActiveDisplayMarker>>,
+        window_manager: Res<WindowManager>,
+        mut throttle: ThrottledSystem,
+        mut commands: Commands,
+    ) {
+        const DISPLAY_CHANGE_CHECK_FREQ_MS: u64 = 1000;
+        if throttle.throttled(Duration::from_millis(DISPLAY_CHANGE_CHECK_FREQ_MS)) {
+            return;
+        }
+
+        let Ok(current_display_id) = window_manager.active_display_id() else {
+            return;
+        };
+        if current_display_id == active_display.id() {
+            return;
+        }
+
+        let present_displays = window_manager.present_displays();
+        active_display.displays().for_each(|display| {
+            if !present_displays
+                .iter()
+                .any(|present_display| present_display.id() == display.id())
+            {
+                debug!(
+                    "{}: detected removal of display {}",
+                    function_name!(),
+                    display.id()
+                );
+                commands.trigger(WMEventTrigger(Event::DisplayRemoved {
+                    display_id: display.id(),
+                }));
+            }
+        });
+
+        if active_display
+            .displays()
+            .any(|display| display.id() == current_display_id)
+        {
+            debug!(
+                "{}: detected dislay change from {}.",
+                function_name!(),
+                active_display.id(),
+            );
+            commands.trigger(WMEventTrigger(Event::DisplayChanged));
+            return;
+        }
+
+        debug!(
+            "{}: detected added display {}.",
+            function_name!(),
+            current_display_id
+        );
+        commands.trigger(WMEventTrigger(Event::DisplayAdded {
+            display_id: current_display_id,
+        }));
     }
 }
 

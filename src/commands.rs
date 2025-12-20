@@ -1,8 +1,8 @@
 use bevy::ecs::entity::Entity;
 use bevy::ecs::observer::On;
-use bevy::ecs::query::Has;
-use bevy::ecs::system::{Commands, Query, Res};
-use log::{error, warn};
+use bevy::ecs::query::{Has, With};
+use bevy::ecs::system::{Commands, Query, Res, Single};
+use log::{debug, error};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use stdext::function_name;
 
@@ -10,7 +10,7 @@ use crate::config::{Config, preset_column_widths};
 use crate::errors::Result;
 use crate::events::{
     CommandTrigger, Event, FocusedMarker, RepositionMarker, ReshuffleAroundMarker, ResizeMarker,
-    SenderSocket, WMEventTrigger,
+    SenderSocket, Unmanaged, WMEventTrigger,
 };
 use crate::manager::WindowManager;
 use crate::params::ActiveDisplayMut;
@@ -273,31 +273,22 @@ fn full_width_window(
 
 /// Toggles the managed state of the focused window.
 fn manage_window(
-    active_panel: &mut WindowPane,
-    display_bounds: &CGRect,
     focused_entity: Entity,
-    windows: &mut Query<&mut Window>,
+    windows: &mut Query<(&mut Window, Entity, Has<Unmanaged>)>,
     commands: &mut Commands,
 ) {
-    let Ok(mut window) = windows.get_mut(focused_entity) else {
+    let Ok((window, entity, unmanaged)) = windows.get_mut(focused_entity) else {
         return;
     };
-    if window.managed() {
-        // Window already managed, remove it from the managed stack.
-        active_panel.remove(focused_entity);
-        window.manage(false);
+    debug!(
+        "{}: window: {} {entity} unmanaged: {unmanaged}.",
+        function_name!(),
+        window.id()
+    );
+    if unmanaged {
+        commands.entity(entity).remove::<Unmanaged>();
     } else {
-        // Add newly managed window to the stack.
-        let frame = window.frame();
-        commands.entity(focused_entity).insert(RepositionMarker {
-            origin: CGPoint {
-                x: frame.origin.x,
-                y: 0.0,
-            },
-        });
-        window.resize(frame.size.width, display_bounds.size.height, display_bounds);
-        active_panel.append(focused_entity);
-        window.manage(true);
+        commands.entity(entity).insert(Unmanaged::Floating);
     }
 }
 
@@ -321,18 +312,22 @@ fn command_windows(
     window_manager: &WindowManager,
     active_display: &mut ActiveDisplayMut,
     focused_entity: Entity,
-    windows: &mut Query<&mut Window>,
+    windows: &mut Query<(&mut Window, Entity, Has<Unmanaged>)>,
     commands: &mut Commands,
     config: &Config,
 ) -> Result<()> {
     let bounds = active_display.bounds();
     let active_panel = active_display.active_panel()?;
+    let managed = windows
+        .get(focused_entity)
+        .is_ok_and(|(_, _, unmanaged)| !unmanaged);
 
-    if active_panel.index_of(focused_entity).is_err() {
+    if managed && active_panel.index_of(focused_entity).is_err() {
         // TODO: Workaround for mising workspace change notifications.
         commands.trigger(WMEventTrigger(Event::SpaceChanged));
         return Ok(());
     }
+    let mut lens = windows.transmute_lens::<&mut Window>();
 
     match operation {
         Operation::Focus(direction) => {
@@ -346,7 +341,7 @@ fn command_windows(
                 focused_entity,
                 active_panel,
                 &bounds,
-                windows,
+                &mut lens.query(),
                 commands,
             );
         }
@@ -354,7 +349,7 @@ fn command_windows(
         Operation::Center => {
             command_center_window(
                 focused_entity,
-                windows,
+                &mut lens.query(),
                 window_manager,
                 active_display,
                 commands,
@@ -365,7 +360,7 @@ fn command_windows(
             resize_window(
                 active_display.display(),
                 focused_entity,
-                windows,
+                &mut lens.query(),
                 commands,
                 config,
             );
@@ -375,28 +370,23 @@ fn command_windows(
             full_width_window(
                 active_display.display(),
                 focused_entity,
-                windows,
+                &mut lens.query(),
                 commands,
                 config,
             );
         }
 
         Operation::Manage => {
-            manage_window(active_panel, &bounds, focused_entity, windows, commands);
+            manage_window(focused_entity, windows, commands);
         }
 
         Operation::Stack(stack) => {
-            if *stack {
-                let window = windows.get(focused_entity)?;
-                if !window.managed() {
-                    return Ok(());
-                }
+            let (_, _, unmanaged) = windows.get(focused_entity)?;
+            if unmanaged {
+                return Ok(());
+            } else if *stack {
                 active_panel.stack(focused_entity)?;
             } else {
-                let window = windows.get(focused_entity)?;
-                if !window.managed() {
-                    return Ok(());
-                }
                 active_panel.unstack(focused_entity)?;
             }
         }
@@ -418,39 +408,26 @@ fn command_windows(
 /// * `display` - A query for the active display.
 /// * `commands` - Bevy commands to trigger events.
 /// * `config` - The optional configuration resource.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 pub fn process_command_trigger(
     trigger: On<CommandTrigger>,
     sender: Res<SenderSocket>,
     window_manager: Res<WindowManager>,
-    mut windows: Query<(&mut Window, Entity, Has<FocusedMarker>)>,
+    current_focus: Single<Entity, With<FocusedMarker>>,
+    mut windows: Query<(&mut Window, Entity, Has<Unmanaged>)>,
     mut active_display: ActiveDisplayMut,
     mut commands: Commands,
     config: Res<Config>,
 ) {
-    let Some((focused_window, focused_entity, _)) = windows.iter().find(|(_, _, focus)| *focus)
-    else {
-        warn!("{}: Unable to get focused window.", function_name!());
-        return;
-    };
-    if focused_window.managed()
-        && window_manager
-            .active_display_space(active_display.id())
-            .and_then(|active_space| active_display.display().active_panel(active_space))
-            .and_then(|panel| panel.index_of(focused_entity))
-            .is_err()
-    {
-        // TODO: Workaround for 26.2, where workspace notifications are not arriving. So if a
-        // window is missing in the current space, try to trigger a workspace change event.
-        commands.trigger(WMEventTrigger(Event::SpaceChanged));
-        commands.trigger(WMEventTrigger(Event::DisplayChanged));
-    }
-    let eligible = focused_window.is_eligible();
+    let focused_entity = *current_focus;
+    let eligible = windows
+        .get(focused_entity)
+        .is_ok_and(|(window, _, _)| window.is_eligible());
 
     let res = match &trigger.event().0 {
         Command::Window(operation) => {
             if eligible {
-                let mut lens = windows.transmute_lens::<&mut Window>();
+                let mut lens = windows.transmute_lens::<(&mut Window, Entity, Has<Unmanaged>)>();
                 command_windows(
                     operation,
                     &window_manager,

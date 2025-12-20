@@ -505,7 +505,6 @@ pub struct Window {
     pub minimized: bool,
     pub eligible: bool,
     pub width_ratio: f64,
-    managed: bool,
 }
 
 impl Window {
@@ -528,7 +527,6 @@ impl Window {
             minimized: false,
             eligible: false,
             width_ratio: 0.33,
-            managed: true,
         };
 
         if window.is_unknown() {
@@ -599,24 +597,6 @@ impl Window {
             .find(|r| **r > current + 0.05)
             .copied()
             .unwrap_or_else(|| *size_ratios.first().unwrap())
-    }
-
-    /// Checks if the window is currently managed by the window manager.
-    ///
-    /// # Returns
-    ///
-    /// `true` if the window is managed, `false` otherwise.
-    pub fn managed(&self) -> bool {
-        self.managed
-    }
-
-    /// Sets the managed status of the window.
-    ///
-    /// # Arguments
-    ///
-    /// * `manage` - A boolean indicating whether to manage the window.
-    pub fn manage(&mut self, manage: bool) {
-        self.managed = manage;
     }
 
     /// Returns the accessibility element of the window.

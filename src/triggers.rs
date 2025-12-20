@@ -1,6 +1,6 @@
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
-use bevy::ecs::lifecycle::Add;
+use bevy::ecs::lifecycle::{Add, Remove};
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Has, With, Without};
 use bevy::ecs::system::{Commands, Populated, Query, Res, ResMut, Single};
@@ -12,16 +12,14 @@ use stdext::function_name;
 
 use crate::app::Application;
 use crate::config::WindowParams;
-use crate::errors::{Error, Result};
 use crate::events::{
     ActiveDisplayMarker, BProcess, Event, FocusedMarker, FreshMarker, MissionControlActive,
     OrphanedPane, RepositionMarker, ReshuffleAroundMarker, SpawnWindowTrigger, StrayFocusEvent,
-    Timeout, WMEventTrigger, WindowDraggedMarker,
+    Timeout, Unmanaged, WMEventTrigger, WindowDraggedMarker,
 };
 use crate::manager::WindowManager;
 use crate::params::{ActiveDisplay, ActiveDisplayMut, Configuration};
 use crate::process::Process;
-use crate::skylight::WinID;
 use crate::windows::{Display, Panel, Window, WindowPane, ax_window_pid};
 
 const WINDOW_HIDDEN_THRESHOLD: f64 = 10.0;
@@ -46,6 +44,8 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(dispatch_application_messages)
         .add_observer(window_resized_trigger)
         .add_observer(window_destroyed_trigger)
+        .add_observer(window_unmanaged_trigger)
+        .add_observer(window_managed_trigger)
         .add_observer(spawn_window_trigger);
 }
 
@@ -245,7 +245,7 @@ fn mouse_dragged_trigger(
 #[allow(clippy::needless_pass_by_value)]
 fn workspace_change_trigger(
     trigger: On<WMEventTrigger>,
-    focused_window: Single<(&Window, Entity), With<FocusedMarker>>,
+    focused_window: Single<(&Window, Entity, Has<Unmanaged>), With<FocusedMarker>>,
     mut active_display: ActiveDisplayMut,
     mut other_displays: Query<&mut Display, Without<ActiveDisplayMarker>>,
     window_manager: Res<WindowManager>,
@@ -261,8 +261,8 @@ fn workspace_change_trigger(
     let Ok(panel) = active_display.display().active_panel(workspace_id) else {
         return;
     };
-    let (window, entity) = *focused_window;
-    if !window.managed() || panel.index_of(entity).is_ok() {
+    let (window, entity, unmanaged) = *focused_window;
+    if unmanaged || panel.index_of(entity).is_ok() {
         // Window is either unmanaged or already in the current space.
         return;
     }
@@ -348,7 +348,7 @@ fn active_display_trigger(
     trigger: On<Add, ActiveDisplayMarker>,
     mut displays: Query<&mut Display>,
     drag_marker: Single<(Entity, &WindowDraggedMarker)>,
-    windows: Query<&Window>,
+    windows: Query<&Window, Without<Unmanaged>>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
@@ -374,7 +374,7 @@ fn active_display_trigger(
         return;
     };
 
-    if !window.managed() || panel.index_of(entity).is_ok() {
+    if panel.index_of(entity).is_ok() {
         // Window is either unmanaged or already in the current space.
         return;
     }
@@ -1031,27 +1031,23 @@ fn application_event_trigger(
 #[allow(clippy::needless_pass_by_value)]
 fn dispatch_application_messages(
     trigger: On<WMEventTrigger>,
-    mut windows: Query<(&mut Window, Entity)>,
-    mut active_display: ActiveDisplayMut,
+    windows: Query<(&mut Window, Entity)>,
     applications: Query<(&Application, &Children)>,
     mut commands: Commands,
 ) {
-    match &trigger.event().0 {
-        Event::WindowCreated { element } => match Window::new(element) {
-            Ok(window) => {
-                commands.trigger(SpawnWindowTrigger(vec![window]));
-            }
-            Err(err) => debug!("{}: not adding window {element:?}: {err}", function_name!(),),
-        },
+    let find_window = |window_id| windows.iter().find(|window| window.0.id() == window_id);
 
+    match &trigger.event().0 {
         Event::WindowMinimized { window_id } => {
-            _ = window_minimized(*window_id, &mut windows, &mut active_display, &mut commands)
-                .inspect_err(|err| warn!("{}: Minimizing window: {err}", function_name!()));
+            if let Some((_, entity)) = find_window(*window_id) {
+                commands.entity(entity).insert(Unmanaged::Minimized);
+            }
         }
 
         Event::WindowDeminimized { window_id } => {
-            _ = window_unminimized(*window_id, &mut windows, &mut active_display, &mut commands)
-                .inspect_err(|err| warn!("{}: Unminimizing window: {err}", function_name!()));
+            if let Some((_, entity)) = find_window(*window_id) {
+                commands.entity(entity).remove::<Unmanaged>();
+            }
         }
 
         Event::ApplicationHidden { pid } => {
@@ -1059,14 +1055,8 @@ fn dispatch_application_messages(
                 warn!("{}: Unable to find with pid {pid}", function_name!());
                 return;
             };
-
-            let window_ids = children
-                .iter()
-                .filter_map(|entity| windows.get(*entity).map(|(window, _)| window.id()).ok())
-                .collect::<Vec<_>>();
-            for window_id in window_ids {
-                _ = window_minimized(window_id, &mut windows, &mut active_display, &mut commands)
-                    .inspect_err(|err| warn!("{}: Minimizing window: {err}", function_name!()));
+            for entity in children {
+                commands.entity(*entity).insert(Unmanaged::Hidden);
             }
         }
 
@@ -1078,58 +1068,66 @@ fn dispatch_application_messages(
                 );
                 return;
             };
-
-            let window_ids = children
-                .iter()
-                .filter_map(|entity| windows.get(*entity).map(|(window, _)| window.id()).ok())
-                .collect::<Vec<_>>();
-            for window_id in window_ids {
-                _ = window_unminimized(window_id, &mut windows, &mut active_display, &mut commands)
-                    .inspect_err(|err| warn!("{}: Unminimizing window: {err}", function_name!()));
+            for entity in children {
+                commands.entity(*entity).remove::<Unmanaged>();
             }
         }
-
         _ => (),
     }
 }
 
-fn window_minimized(
-    window_id: WinID,
-    windows: &mut Query<(&mut Window, Entity)>,
-    active_display: &mut ActiveDisplayMut,
-    commands: &mut Commands,
-) -> Result<()> {
-    let (mut window, entity) = windows
-        .iter_mut()
-        .find(|(window, _)| window.id() == window_id)
-        .ok_or(Error::InvalidWindow)?;
+#[allow(clippy::needless_pass_by_value)]
+fn window_unmanaged_trigger(
+    trigger: On<Add, Unmanaged>,
+    mut windows: Query<(&Window, Option<&Unmanaged>)>,
+    mut active_display: ActiveDisplayMut,
+    mut commands: Commands,
+) {
+    let entity = trigger.event().entity;
+    let Ok((_, marker)) = windows.get(trigger.event().entity) else {
+        return;
+    };
+    if let Some(marker) = marker {
+        match marker {
+            Unmanaged::Floating => {
+                debug!("{}: Entity {entity} is floating.", function_name!(),);
+                active_display.display().remove_window(entity);
+            }
 
-    window.manage(false);
+            Unmanaged::Minimized | Unmanaged::Hidden => {
+                debug!("{}: Entity {entity} is minimized.", function_name!());
+                let mut lens = windows.transmute_lens::<&Window>();
+                let Ok(active_panel) = active_display
+                    .active_panel()
+                    .inspect_err(|err| debug!("{}: {err}", function_name!()))
+                else {
+                    return;
+                };
 
-    let mut lens = windows.transmute_lens::<&Window>();
-    let active_panel = active_display.active_panel()?;
-    give_away_focus(entity, &lens.query(), active_panel, commands);
-
-    active_display.display().remove_window(entity);
-    Ok(())
+                give_away_focus(entity, &lens.query(), active_panel, &mut commands);
+                active_display.display().remove_window(entity);
+            }
+        }
+    }
 }
 
-fn window_unminimized(
-    window_id: WinID,
-    windows: &mut Query<(&mut Window, Entity)>,
-    active_display: &mut ActiveDisplayMut,
-    commands: &mut Commands,
-) -> Result<()> {
-    let active_panel = active_display.active_panel()?;
-    let (mut window, entity) = windows
-        .iter_mut()
-        .find(|(window, _)| window.id() == window_id)
-        .ok_or(Error::InvalidWindow)?;
+#[allow(clippy::needless_pass_by_value)]
+fn window_managed_trigger(
+    trigger: On<Remove, Unmanaged>,
+    mut active_display: ActiveDisplayMut,
+    mut commands: Commands,
+) {
+    let entity = trigger.event().entity;
+    debug!("{}: Entity {entity} is managed again.", function_name!(),);
+    let Ok(active_panel) = active_display
+        .active_panel()
+        .inspect_err(|err| debug!("{}: {err}", function_name!()))
+    else {
+        return;
+    };
 
-    window.manage(true);
     active_panel.append(entity);
     commands.entity(entity).insert(ReshuffleAroundMarker);
-    Ok(())
 }
 
 /// Handles the event when a window is resized. It updates the window's frame and reshuffles windows.
@@ -1277,7 +1275,6 @@ fn spawn_window_trigger(
             continue;
         }
 
-        debug!("{}: window {}", function_name!(), window_id);
         let Ok(pid) = ax_window_pid(&window.element()) else {
             warn!(
                 "{}: Unable to get window pid for {}",
@@ -1356,7 +1353,6 @@ fn apply_window_properties(
         .and_then(|props| props.floating)
         .unwrap_or(false);
     let wanted_insertion = properties.as_ref().and_then(|props| props.index);
-    window.manage(!floating);
     _ = window
         .update_frame(Some(&active_display.bounds()))
         .inspect_err(|err| error!("{}: {err}", function_name!()));
@@ -1366,6 +1362,7 @@ fn apply_window_properties(
 
     if floating {
         // Avoid managing window if it's floating.
+        commands.entity(entity).insert(Unmanaged::Floating);
         return;
     }
 

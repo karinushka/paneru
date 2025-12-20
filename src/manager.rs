@@ -26,7 +26,7 @@ use crate::app::Application;
 use crate::errors::{Error, Result};
 use crate::events::{
     BProcess, Event, ExistingMarker, FreshMarker, OrphanedPane, SenderSocket, SpawnWindowTrigger,
-    StrayFocusEvent, Timeout, WMEventTrigger,
+    StrayFocusEvent, Timeout, Unmanaged, WMEventTrigger,
 };
 use crate::params::{ActiveDisplay, ActiveDisplayMut, ThrottledSystem};
 use crate::platform::ProcessSerialNumber;
@@ -90,7 +90,7 @@ impl WindowManager {
     pub fn refresh_display(
         &self,
         display: &mut Display,
-        windows: &mut Query<(&mut Window, Entity)>,
+        windows: &mut Query<(&mut Window, Entity, Has<Unmanaged>)>,
     ) {
         debug!(
             "{}: Refreshing windows on display {}",
@@ -112,14 +112,14 @@ impl WindowManager {
             for window_entity in new_windows {
                 if windows
                     .get(window_entity)
-                    .is_ok_and(|(window, _)| !window.managed())
+                    .is_ok_and(|(_, _, unmanaged)| unmanaged)
                 {
                     // Window is not managed, do not insert it into the panel.
                     continue;
                 }
                 if pane.index_of(window_entity).is_err() {
                     pane.append(window_entity);
-                    if let Ok((mut window, _)) = windows.get_mut(window_entity) {
+                    if let Ok((mut window, _, _)) = windows.get_mut(window_entity) {
                         _ = window.update_frame(Some(&display_bounds));
                     }
                 }

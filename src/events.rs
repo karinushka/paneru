@@ -222,6 +222,13 @@ pub struct WindowDraggedMarker(pub Entity);
 pub struct ReshuffleAroundMarker;
 
 #[derive(Component)]
+pub enum Unmanaged {
+    Floating,
+    Minimized,
+    Hidden,
+}
+
+#[derive(Component)]
 pub struct BProcess(pub ProcessRef);
 
 #[derive(Component)]
@@ -394,6 +401,14 @@ impl EventHandler {
                     commands.insert_resource(config.clone());
                 }
 
+                Event::WindowCreated { element } => {
+                    if let Ok(window) = Window::new(element).inspect_err(|err| {
+                        debug!("{}: not adding window {element:?}: {err}", function_name!());
+                    }) {
+                        commands.trigger(SpawnWindowTrigger(vec![window]));
+                    }
+                }
+
                 Event::WindowTitleChanged { window_id } => {
                     trace!("{}: WindowTitleChanged: {window_id:?}", function_name!());
                 }
@@ -530,7 +545,7 @@ impl EventHandler {
     /// * `commands` - Bevy commands to despawn entities and send messages.
     #[allow(clippy::needless_pass_by_value)]
     fn finish_setup(
-        mut windows: Query<(&mut Window, Entity)>,
+        mut windows: Query<(&mut Window, Entity, Has<Unmanaged>)>,
         displays: Query<(&mut Display, Has<ActiveDisplayMarker>)>,
         window_manager: Res<WindowManager>,
         mut commands: Commands,

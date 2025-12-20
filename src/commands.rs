@@ -323,6 +323,12 @@ fn command_windows(
     let bounds = active_display.bounds;
     let active_panel = active_display.active_panel(main_cid)?;
 
+    if active_panel.index_of(focused_entity).is_err() {
+        // TODO: Workaround for mising workspace change notifications.
+        commands.trigger(WMEventTrigger(Event::SpaceChanged));
+        return Ok(());
+    }
+
     match operation {
         Operation::Focus(direction) => {
             let mut lens = windows.transmute_lens::<&Window>();

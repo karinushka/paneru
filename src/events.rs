@@ -493,7 +493,7 @@ impl EventHandler {
                 world.spawn((ExistingMarker, BProcess(process)));
             } else {
                 debug!(
-                    "{}: Existing application {} is not observable, ignoring it.",
+                    "{}: Existing application '{}' is not observable, ignoring it.",
                     function_name!(),
                     process.name,
                 );

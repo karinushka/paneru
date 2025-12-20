@@ -219,9 +219,8 @@ impl WindowManager {
                 let timeout = Timeout::new(
                     Duration::from_secs(APP_OBSERVABLE_TIMEOUT_SEC),
                     Some(format!(
-                        "{}: Application pid {} did not become observable in {APP_OBSERVABLE_TIMEOUT_SEC}s.",
+                        "{}: {app} did not become observable in {APP_OBSERVABLE_TIMEOUT_SEC}s.",
                         function_name!(),
-                        app.pid()
                     )),
                 );
                 commands.spawn((app, FreshMarker, timeout, ChildOf(entity)));
@@ -671,17 +670,12 @@ impl WindowManager {
         if global_window_list.is_empty() {
             return Err(Error::new(
                 ErrorKind::InvalidData,
-                format!(
-                    "{}: No windows found for app {:?}",
-                    function_name!(),
-                    app.psn()
-                ),
+                format!("{}: No windows found for {app}", function_name!()),
             ));
         }
         debug!(
-            "{}: App {:?} has global windows: {global_window_list:?}",
-            function_name!(),
-            app.psn(),
+            "{}: {app} has global windows: {global_window_list:?}",
+            function_name!()
         );
 
         // CFArrayRef window_list_ref = application_window_list(application);
@@ -999,9 +993,8 @@ fn bruteforce_windows(app: &mut Application, window_list: &mut Vec<WinID>) -> Ve
     const MAGIC: u32 = 0x636f_636f;
     let mut found_windows = Vec::new();
     debug!(
-        "{}: App {:?} has unresolved window on other desktops, bruteforcing them.",
-        function_name!(),
-        app.psn(),
+        "{}: {app} has unresolved window on other desktops, bruteforcing them.",
+        function_name!()
     );
 
     //

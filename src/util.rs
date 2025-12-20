@@ -6,8 +6,7 @@ use core::ptr::NonNull;
 use log::debug;
 use objc2_core_foundation::{
     CFArray, CFDictionary, CFNumber, CFNumberType, CFRetained, CFRunLoop, CFRunLoopMode,
-    CFRunLoopSource, CFString, CFType, Type, kCFBooleanTrue, kCFCopyStringDictionaryKeyCallBacks,
-    kCFTypeArrayCallBacks, kCFTypeDictionaryValueCallBacks,
+    CFRunLoopSource, CFString, CFType, Type, kCFBooleanTrue, kCFTypeArrayCallBacks,
 };
 use std::{
     ffi::{CStr, OsStr, c_int, c_void},

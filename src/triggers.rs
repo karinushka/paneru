@@ -550,7 +550,7 @@ fn front_switched_trigger(
 
     if children.len() > 1 {
         warn!(
-            "{}: Multiple apps registered to process {}.",
+            "{}: Multiple apps registered to process '{}'.",
             function_name!(),
             process.name
         );
@@ -560,7 +560,7 @@ fn front_switched_trigger(
         .and_then(|entity| applications.get(*entity).ok())
     else {
         error!(
-            "{}: No application for process {}.",
+            "{}: No application for process '{}'.",
             function_name!(),
             process.name
         );
@@ -1073,7 +1073,7 @@ fn dispatch_application_messages(
 
         Event::ApplicationHidden { pid } => {
             let Some((_, children)) = applications.iter().find(|(app, _)| app.pid() == *pid) else {
-                warn!("{}: Unable to find application {pid}", function_name!());
+                warn!("{}: Unable to find with pid {pid}", function_name!());
                 return;
             };
 
@@ -1095,7 +1095,10 @@ fn dispatch_application_messages(
 
         Event::ApplicationVisible { pid } => {
             let Some((_, children)) = applications.iter().find(|(app, _)| app.pid() == *pid) else {
-                warn!("{}: Unable to find application {pid}", function_name!());
+                warn!(
+                    "{}: Unable to find application with pid {pid}",
+                    function_name!()
+                );
                 return;
             };
 
@@ -1321,7 +1324,7 @@ fn spawn_window_trigger(
         };
         let Some((app_entity, mut app)) = apps.iter_mut().find(|(_, app)| app.pid() == pid) else {
             warn!(
-                "{}: unable to find application with {pid}.",
+                "{}: unable to find application with pid {pid}.",
                 function_name!()
             );
             continue;

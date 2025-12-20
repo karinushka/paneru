@@ -62,6 +62,7 @@ pub struct Application {
     connection: Option<ConnID>,
     handler: AxObserverHandler,
     bundle_id: Option<String>,
+    name: String,
 }
 
 impl Drop for Application {
@@ -69,6 +70,12 @@ impl Drop for Application {
     fn drop(&mut self) {
         self.handler
             .remove_observer(&ObserverType::Application, &self.element, &AX_NOTIFICATIONS);
+    }
+}
+
+impl std::fmt::Display for Application {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "app '{}' (pid {})", self.name, self.pid)
     }
 }
 
@@ -102,6 +109,7 @@ impl Application {
             connection: wm.connection_for_process(process.psn),
             handler: AxObserverHandler::new(process.pid, events.clone())?,
             bundle_id,
+            name: process.name.clone(),
         })
     }
 

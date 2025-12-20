@@ -66,7 +66,7 @@ pub fn register_triggers(app: &mut bevy::app::App) {
 fn mouse_moved_trigger(
     trigger: On<WMEventTrigger>,
     windows: Query<&Window>,
-    focused_window: Single<&Window, With<FocusedMarker>>,
+    focused_window: Query<&Window, With<FocusedMarker>>,
     window_manager: Res<WindowManager>,
     mut config: Configuration,
 ) {
@@ -91,7 +91,10 @@ fn mouse_moved_trigger(
         );
         return;
     };
-    if focused_window.id() == window_id {
+    if focused_window
+        .single()
+        .is_ok_and(|window| window.id() == window_id)
+    {
         trace!("{}: allready focused {}", function_name!(), window_id);
         return;
     }
@@ -139,7 +142,11 @@ fn mouse_moved_trigger(
     // Do not reshuffle windows due to moved mouse focus.
     config.set_skip_reshuffle(true);
     config.set_ffm_flag(Some(window.id()));
-    window.focus_without_raise(&focused_window);
+    if let Ok(focused_window) = focused_window.single() {
+        window.focus_without_raise(focused_window);
+    } else {
+        window.focus_with_raise();
+    }
 }
 
 /// Handles mouse down events.
@@ -531,8 +538,10 @@ fn display_moved_trigger(
 #[allow(clippy::needless_pass_by_value)]
 fn front_switched_trigger(
     trigger: On<WMEventTrigger>,
+    focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
     processes: Query<(&BProcess, &Children)>,
     applications: Query<&Application>,
+    mut config: Configuration,
     mut commands: Commands,
 ) {
     let Event::ApplicationFrontSwitched { ref psn } = trigger.event().0 else {
@@ -569,14 +578,15 @@ fn front_switched_trigger(
     debug!("{}: {}", function_name!(), process.name);
 
     if let Ok(focused_id) = app.focused_window_id().inspect_err(|err| {
-        warn!(
-            "{}: keeping current focused window: {err}",
-            function_name!()
-        );
+        warn!("{}: can not get current focus: {err}", function_name!());
     }) {
         commands.trigger(WMEventTrigger(Event::WindowFocused {
             window_id: focused_id,
         }));
+    } else if let Ok((_, entity)) = focused_window.single() {
+        debug!("{}: reseting focus.", function_name!());
+        config.set_ffm_flag(None);
+        commands.entity(entity).remove::<FocusedMarker>();
     }
 }
 

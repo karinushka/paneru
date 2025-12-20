@@ -9,7 +9,7 @@ use stdext::function_name;
 use crate::config::{Config, preset_column_widths};
 use crate::errors::Result;
 use crate::events::{
-    CommandTrigger, Event, FocusedMarker, RepositionMarker, ReshuffleAroundTrigger, ResizeMarker,
+    CommandTrigger, Event, FocusedMarker, RepositionMarker, ReshuffleAroundMarker, ResizeMarker,
     SenderSocket, WMEventTrigger,
 };
 use crate::manager::WindowManager;
@@ -401,8 +401,9 @@ fn command_windows(
             }
         }
     }
-    let window = windows.get(focused_entity)?;
-    commands.trigger(ReshuffleAroundTrigger(window.id()));
+    commands
+        .entity(focused_entity)
+        .insert(ReshuffleAroundMarker);
     Ok(())
 }
 

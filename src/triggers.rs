@@ -3,7 +3,7 @@ use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::lifecycle::Add;
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Has, With, Without};
-use bevy::ecs::system::{Commands, Query, Res, ResMut, Single};
+use bevy::ecs::system::{Commands, Populated, Query, Res, ResMut, Single};
 use log::{debug, error, trace, warn};
 use objc2_core_foundation::{CGPoint, CGRect};
 use std::mem::take;
@@ -15,7 +15,7 @@ use crate::config::WindowParams;
 use crate::errors::{Error, Result};
 use crate::events::{
     ActiveDisplayMarker, BProcess, Event, FocusedMarker, FreshMarker, MissionControlActive,
-    OrphanedPane, RepositionMarker, ReshuffleAroundTrigger, SpawnWindowTrigger, StrayFocusEvent,
+    OrphanedPane, RepositionMarker, ReshuffleAroundMarker, SpawnWindowTrigger, StrayFocusEvent,
     Timeout, WMEventTrigger, WindowDraggedMarker,
 };
 use crate::manager::WindowManager;
@@ -40,7 +40,6 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(front_switched_trigger)
         .add_observer(center_mouse_trigger)
         .add_observer(window_focused_trigger)
-        .add_observer(reshuffle_around_trigger)
         .add_observer(swipe_gesture_trigger)
         .add_observer(mission_control_trigger)
         .add_observer(application_event_trigger)
@@ -166,7 +165,7 @@ fn mouse_moved_trigger(
 #[allow(clippy::needless_pass_by_value)]
 fn mouse_down_trigger(
     trigger: On<WMEventTrigger>,
-    windows: Query<&Window>,
+    windows: Query<(&Window, Entity)>,
     active_display: ActiveDisplay,
     window_manager: Res<WindowManager>,
     mission_control_active: Res<MissionControlActive>,
@@ -180,15 +179,15 @@ fn mouse_down_trigger(
         return;
     }
 
-    let Some(window) = window_manager
+    let Some((window, entity)) = window_manager
         .find_window_at_point(&point)
         .ok()
-        .and_then(|window_id| windows.iter().find(|window| window.id() == window_id))
+        .and_then(|window_id| windows.iter().find(|(window, _)| window.id() == window_id))
     else {
         return;
     };
     if !window.fully_visible(&active_display.bounds()) {
-        commands.trigger(ReshuffleAroundTrigger(window.id()));
+        commands.entity(entity).insert(ReshuffleAroundMarker);
     }
 }
 
@@ -291,7 +290,7 @@ fn workspace_change_trigger(
         panel.append(entity);
     }
 
-    commands.trigger(ReshuffleAroundTrigger(window.id()));
+    commands.entity(entity).insert(ReshuffleAroundMarker);
 }
 
 /// Handles display change events.
@@ -405,7 +404,7 @@ fn active_display_trigger(
         }
     });
 
-    commands.trigger(ReshuffleAroundTrigger(window.id()));
+    commands.entity(entity).insert(ReshuffleAroundMarker);
 }
 
 /// Handles display added events.
@@ -675,38 +674,7 @@ fn window_focused_trigger(
     if config.skip_reshuffle() {
         config.set_skip_reshuffle(false);
     } else {
-        commands.trigger(ReshuffleAroundTrigger(window.id()));
-    }
-}
-
-/// A Bevy system that triggers the `reshuffle_around` logic in response to a `ReshuffleAroundTrigger` event.
-///
-/// # Arguments
-///
-/// * `trigger` - The Bevy event trigger containing the ID of the window to reshuffle around.
-/// * `main_cid` - The main connection ID resource.
-/// * `active_display` - A query for the active display.
-/// * `windows` - A query for all windows.
-/// * `commands` - Bevy commands to trigger events.
-#[allow(clippy::needless_pass_by_value)]
-fn reshuffle_around_trigger(
-    trigger: On<ReshuffleAroundTrigger>,
-    active_display: ActiveDisplay,
-    mut windows: Query<(&mut Window, Entity, Option<&RepositionMarker>)>,
-    mut commands: Commands,
-) {
-    let Some((window, entity, _)) = windows
-        .iter()
-        .find(|(window, _, _)| window.id() == trigger.event().0)
-    else {
-        return;
-    };
-    if window.managed() {
-        _ = reshuffle_around(&active_display, entity, &mut windows, &mut commands).inspect_err(
-            |err| {
-                error!("{}: failed with: {err}", function_name!());
-            },
-        );
+        commands.entity(entity).insert(ReshuffleAroundMarker);
     }
 }
 
@@ -721,106 +689,128 @@ fn reshuffle_around_trigger(
 /// * `windows` - A query for all windows.
 /// * `commands` - Bevy commands to trigger events.
 #[allow(clippy::needless_pass_by_value)]
-fn reshuffle_around(
-    active_display: &ActiveDisplay,
-    entity: Entity,
-    windows: &mut Query<(&mut Window, Entity, Option<&RepositionMarker>)>,
-    commands: &mut Commands,
-) -> Result<()> {
-    let display_bounds = active_display.bounds();
-    let menubar_height = active_display.display().menubar_height;
-    let active_panel = active_display.active_panel()?;
+pub fn reshuffle_around_window(
+    active_display: ActiveDisplay,
+    marker: Populated<Entity, With<ReshuffleAroundMarker>>,
+    mut windows: Query<(&mut Window, Entity, Option<&RepositionMarker>)>,
+    window_manager: Res<WindowManager>,
+    mut commands: Commands,
+) {
+    if window_manager
+        .active_display_id()
+        .is_ok_and(|id| active_display.id() != id)
+    {
+        debug!("{}: detected display change.", function_name!());
+        commands.trigger(WMEventTrigger(Event::DisplayChanged));
+        return;
+    }
 
-    let (window, _, moving) = windows.get_mut(entity)?;
-    let frame = window.expose_window(&display_bounds, moving, entity, commands);
-    trace!(
-        "{}: Moving window {} to {:?}",
-        function_name!(),
-        window.id(),
-        frame.origin
-    );
-    let panel = active_panel
-        .index_of(entity)
-        .and_then(|index| active_panel.get(index))?;
+    let shuffled = marker.into_iter().collect::<Vec<_>>();
+    for entity in shuffled {
+        let Ok((window, _, moving)) = windows.get(entity) else {
+            continue;
+        };
 
-    reposition_stack(
-        frame.origin.x,
-        &panel,
-        frame.size.width,
-        &display_bounds,
-        menubar_height,
-        windows,
-        commands,
-    );
+        commands.entity(entity).remove::<ReshuffleAroundMarker>();
+        let display_bounds = active_display.bounds();
+        let menubar_height = active_display.display().menubar_height;
+        let Ok(active_panel) = active_display.active_panel() else {
+            return;
+        };
 
-    // Shuffling windows to the right of the focus.
-    let mut upper_left = frame.origin.x + frame.size.width;
-    _ = active_panel.access_right_of(entity, |panel| {
-        let frame = panel
-            .top()
-            .and_then(|entity| windows.get(entity).ok())
-            .map(|(window, _, _)| (window.id(), window.frame));
-        if let Some((window_id, frame)) = frame {
-            trace!(
-                "{}: window {window_id} right: frame: {frame:?}",
-                function_name!()
-            );
+        // let (window, _, moving) = windows.get_mut(entity)?;
+        let frame = window.expose_window(&display_bounds, moving, entity, &mut commands);
+        trace!(
+            "{}: Moving window {} to {:?}",
+            function_name!(),
+            window.id(),
+            frame.origin
+        );
+        let Ok(panel) = active_panel
+            .index_of(entity)
+            .and_then(|index| active_panel.get(index))
+        else {
+            return;
+        };
 
-            // Check for window getting off screen.
-            if upper_left > display_bounds.size.width - WINDOW_HIDDEN_THRESHOLD {
-                upper_left = display_bounds.size.width - WINDOW_HIDDEN_THRESHOLD;
-            }
+        reposition_stack(
+            frame.origin.x,
+            &panel,
+            frame.size.width,
+            &display_bounds,
+            menubar_height,
+            &mut windows,
+            &mut commands,
+        );
 
-            if (frame.origin.x - upper_left).abs() > 0.1 {
-                reposition_stack(
-                    upper_left,
-                    panel,
-                    frame.size.width,
-                    &display_bounds,
-                    menubar_height,
-                    windows,
-                    commands,
+        // Shuffling windows to the right of the focus.
+        let mut upper_left = frame.origin.x + frame.size.width;
+        _ = active_panel.access_right_of(entity, |panel| {
+            let frame = panel
+                .top()
+                .and_then(|entity| windows.get(entity).ok())
+                .map(|(window, _, _)| (window.id(), window.frame));
+            if let Some((window_id, frame)) = frame {
+                trace!(
+                    "{}: window {window_id} right: frame: {frame:?}",
+                    function_name!()
                 );
+
+                // Check for window getting off screen.
+                if upper_left > display_bounds.size.width - WINDOW_HIDDEN_THRESHOLD {
+                    upper_left = display_bounds.size.width - WINDOW_HIDDEN_THRESHOLD;
+                }
+
+                if (frame.origin.x - upper_left).abs() > 0.1 {
+                    reposition_stack(
+                        upper_left,
+                        panel,
+                        frame.size.width,
+                        &display_bounds,
+                        menubar_height,
+                        &mut windows,
+                        &mut commands,
+                    );
+                }
+                upper_left += frame.size.width;
             }
-            upper_left += frame.size.width;
-        }
-        true // continue through all windows
-    });
+            true // continue through all windows
+        });
 
-    // Shuffling windows to the left of the focus.
-    let mut upper_left = frame.origin.x;
-    _ = active_panel.access_left_of(entity, |panel| {
-        let frame = panel
-            .top()
-            .and_then(|entity| windows.get(entity).ok())
-            .map(|(window, _, _)| (window.id(), window.frame));
-        if let Some((window_id, frame)) = frame {
-            trace!(
-                "{}: window {window_id} left: frame: {frame:?}",
-                function_name!()
-            );
-
-            // Check for window getting off screen.
-            if upper_left < WINDOW_HIDDEN_THRESHOLD {
-                upper_left = WINDOW_HIDDEN_THRESHOLD;
-            }
-            upper_left -= frame.size.width;
-
-            if (frame.origin.x - upper_left).abs() > 0.1 {
-                reposition_stack(
-                    upper_left,
-                    panel,
-                    frame.size.width,
-                    &display_bounds,
-                    menubar_height,
-                    windows,
-                    commands,
+        // Shuffling windows to the left of the focus.
+        let mut upper_left = frame.origin.x;
+        _ = active_panel.access_left_of(entity, |panel| {
+            let frame = panel
+                .top()
+                .and_then(|entity| windows.get(entity).ok())
+                .map(|(window, _, _)| (window.id(), window.frame));
+            if let Some((window_id, frame)) = frame {
+                trace!(
+                    "{}: window {window_id} left: frame: {frame:?}",
+                    function_name!()
                 );
+
+                // Check for window getting off screen.
+                if upper_left < WINDOW_HIDDEN_THRESHOLD {
+                    upper_left = WINDOW_HIDDEN_THRESHOLD;
+                }
+                upper_left -= frame.size.width;
+
+                if (frame.origin.x - upper_left).abs() > 0.1 {
+                    reposition_stack(
+                        upper_left,
+                        panel,
+                        frame.size.width,
+                        &display_bounds,
+                        menubar_height,
+                        &mut windows,
+                        &mut commands,
+                    );
+                }
             }
-        }
-        true // continue through all windows
-    });
-    Ok(())
+            true // continue through all windows
+        });
+    }
 }
 
 /// Repositions all windows within a given panel stack.
@@ -909,7 +899,7 @@ fn reposition_stack(
 fn swipe_gesture_trigger(
     trigger: On<WMEventTrigger>,
     active_display: ActiveDisplay,
-    mut focused_window: Single<&mut Window, With<FocusedMarker>>,
+    mut focused_window: Single<(&mut Window, Entity), With<FocusedMarker>>,
     window_manager: Res<WindowManager>,
     config: Configuration,
     mut commands: Commands,
@@ -924,13 +914,9 @@ fn swipe_gesture_trigger(
     {
         let delta = deltas.iter().sum::<f64>();
         if delta.abs() > SWIPE_THRESHOLD {
-            slide_window(
-                &window_manager,
-                &mut focused_window,
-                active_display.display(),
-                delta,
-                &mut commands,
-            );
+            let (ref mut window, entity) = *focused_window;
+            slide_window(&window_manager, window, active_display.display(), delta);
+            commands.entity(entity).insert(ReshuffleAroundMarker);
         }
     }
 }
@@ -949,7 +935,6 @@ fn slide_window(
     window: &mut Window,
     active_display: &Display,
     delta_x: f64,
-    commands: &mut Commands,
 ) {
     trace!("{}: Windows slide {delta_x}.", function_name!());
     let frame = window.frame();
@@ -963,7 +948,6 @@ fn slide_window(
         &active_display.bounds,
     );
     window_manager.center_mouse(window, &active_display.bounds);
-    commands.trigger(ReshuffleAroundTrigger(window.id()));
 }
 
 /// Handles Mission Control events, updating the `MissionControlActive` resource.
@@ -1144,7 +1128,7 @@ fn window_unminimized(
 
     window.manage(true);
     active_panel.append(entity);
-    commands.trigger(ReshuffleAroundTrigger(window_id));
+    commands.entity(entity).insert(ReshuffleAroundMarker);
     Ok(())
 }
 
@@ -1166,14 +1150,14 @@ fn window_resized_trigger(
     let Event::WindowResized { window_id } = trigger.event().0 else {
         return;
     };
-    let Some((mut window, _)) = windows
+    let Some((mut window, entity)) = windows
         .iter_mut()
         .find(|(window, _)| window.id() == window_id)
     else {
         return;
     };
     _ = window.update_frame(Some(&active_display.bounds()));
-    commands.trigger(ReshuffleAroundTrigger(window.id()));
+    commands.entity(entity).insert(ReshuffleAroundMarker);
 }
 
 /// Handles the event when a window is destroyed. It removes the window from the ECS world and relevant displays.
@@ -1247,9 +1231,9 @@ fn give_away_focus(
     {
         let neighbour = active_pane.get(index.saturating_sub(1)).ok();
 
-        if let Some(window) = neighbour
+        if let Some((window, entity)) = neighbour
             .and_then(|pane| pane.top())
-            .and_then(|entity| windows.get(entity).ok())
+            .and_then(|entity| windows.get(entity).ok().zip(Some(entity)))
         {
             let window_id = window.id();
             debug!(
@@ -1257,7 +1241,7 @@ fn give_away_focus(
                 function_name!()
             );
             commands.trigger(WMEventTrigger(Event::WindowFocused { window_id }));
-            commands.trigger(ReshuffleAroundTrigger(window_id));
+            commands.entity(entity).insert(ReshuffleAroundMarker);
         }
     }
 }
@@ -1367,7 +1351,6 @@ fn apply_window_properties(
     windows: &Query<(Entity, &Window, Has<FocusedMarker>)>,
     commands: &mut Commands,
 ) {
-    let window_id = window.id();
     let floating = properties
         .as_ref()
         .and_then(|props| props.floating)
@@ -1414,5 +1397,5 @@ fn apply_window_properties(
         None => panel.append(entity),
     }
 
-    commands.trigger(ReshuffleAroundTrigger(window_id));
+    commands.entity(entity).insert(ReshuffleAroundMarker);
 }

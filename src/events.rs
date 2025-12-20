@@ -29,7 +29,7 @@ use crate::params::ActiveDisplay;
 use crate::platform::{ProcessSerialNumber, WorkspaceObserver};
 use crate::process::{Process, ProcessRef};
 use crate::skylight::WinID;
-use crate::triggers::register_triggers;
+use crate::triggers::{register_triggers, reshuffle_around_window};
 use crate::util::AXUIWrapper;
 use crate::windows::{Display, Window, WindowPane};
 
@@ -219,6 +219,9 @@ pub struct ResizeMarker {
 pub struct WindowDraggedMarker(pub Entity);
 
 #[derive(Component)]
+pub struct ReshuffleAroundMarker;
+
+#[derive(Component)]
 pub struct BProcess(pub ProcessRef);
 
 #[derive(Component)]
@@ -262,9 +265,6 @@ pub struct WMEventTrigger(pub Event);
 
 #[derive(BevyEvent)]
 pub struct CommandTrigger(pub Command);
-
-#[derive(BevyEvent)]
-pub struct ReshuffleAroundTrigger(pub WinID);
 
 #[derive(BevyEvent)]
 pub struct SpawnWindowTrigger(pub Vec<Window>);
@@ -319,6 +319,7 @@ impl EventHandler {
                 (
                     // NOTE: To avoid weird timing issues, the dispatcher should be the first one.
                     EventHandler::dispatch_toplevel_triggers,
+                    reshuffle_around_window,
                     EventHandler::animate_windows,
                     EventHandler::animate_resize_windows,
                 ),

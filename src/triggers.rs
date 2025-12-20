@@ -282,7 +282,7 @@ fn workspace_change_trigger(
     );
 
     active_display.display().remove_window(entity);
-    if let Ok(panel) = active_display.display().active_panel_mut(workspace_id) {
+    if let Ok(panel) = active_display.active_panel() {
         panel.append(entity);
     }
 
@@ -680,8 +680,7 @@ fn window_focused_trigger(
 #[allow(clippy::needless_pass_by_value)]
 fn reshuffle_around_trigger(
     trigger: On<ReshuffleAroundTrigger>,
-    window_manager: Res<WindowManager>,
-    mut active_display: ActiveDisplayMut,
+    active_display: ActiveDisplay,
     mut windows: Query<(&mut Window, Entity, Option<&RepositionMarker>)>,
     mut commands: Commands,
 ) {
@@ -692,16 +691,11 @@ fn reshuffle_around_trigger(
         return;
     };
     if window.managed() {
-        _ = reshuffle_around(
-            &window_manager,
-            active_display.display(),
-            entity,
-            &mut windows,
-            &mut commands,
-        )
-        .inspect_err(|err| {
-            error!("{}: failed with: {err}", function_name!());
-        });
+        _ = reshuffle_around(&active_display, entity, &mut windows, &mut commands).inspect_err(
+            |err| {
+                error!("{}: failed with: {err}", function_name!());
+            },
+        );
     }
 }
 
@@ -717,17 +711,14 @@ fn reshuffle_around_trigger(
 /// * `commands` - Bevy commands to trigger events.
 #[allow(clippy::needless_pass_by_value)]
 fn reshuffle_around(
-    window_manager: &WindowManager,
-    active_display: &mut Display,
+    active_display: &ActiveDisplay,
     entity: Entity,
     windows: &mut Query<(&mut Window, Entity, Option<&RepositionMarker>)>,
     commands: &mut Commands,
 ) -> Result<()> {
-    let display_bounds = active_display.bounds;
-    let menubar_height = active_display.menubar_height;
-    let active_panel = window_manager
-        .active_display_space(active_display.id())
-        .and_then(|active_space| active_display.active_panel(active_space))?;
+    let display_bounds = active_display.bounds();
+    let menubar_height = active_display.display().menubar_height;
+    let active_panel = active_display.active_panel()?;
 
     let (window, _, moving) = windows.get_mut(entity)?;
     let frame = window.expose_window(&display_bounds, moving, entity, commands);
@@ -1048,7 +1039,6 @@ fn dispatch_application_messages(
     mut windows: Query<(&mut Window, Entity)>,
     mut active_display: ActiveDisplayMut,
     applications: Query<(&Application, &Children)>,
-    window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
     match &trigger.event().0 {
@@ -1060,25 +1050,13 @@ fn dispatch_application_messages(
         },
 
         Event::WindowMinimized { window_id } => {
-            _ = window_minimized(
-                *window_id,
-                &mut windows,
-                active_display.display(),
-                &window_manager,
-                &mut commands,
-            )
-            .inspect_err(|err| warn!("{}: Minimizing window: {err}", function_name!()));
+            _ = window_minimized(*window_id, &mut windows, &mut active_display, &mut commands)
+                .inspect_err(|err| warn!("{}: Minimizing window: {err}", function_name!()));
         }
 
         Event::WindowDeminimized { window_id } => {
-            _ = window_unminimized(
-                *window_id,
-                &mut windows,
-                active_display.display(),
-                &window_manager,
-                &mut commands,
-            )
-            .inspect_err(|err| warn!("{}: Unminimizing window: {err}", function_name!()));
+            _ = window_unminimized(*window_id, &mut windows, &mut active_display, &mut commands)
+                .inspect_err(|err| warn!("{}: Unminimizing window: {err}", function_name!()));
         }
 
         Event::ApplicationHidden { pid } => {
@@ -1092,14 +1070,8 @@ fn dispatch_application_messages(
                 .filter_map(|entity| windows.get(*entity).map(|(window, _)| window.id()).ok())
                 .collect::<Vec<_>>();
             for window_id in window_ids {
-                _ = window_minimized(
-                    window_id,
-                    &mut windows,
-                    active_display.display(),
-                    &window_manager,
-                    &mut commands,
-                )
-                .inspect_err(|err| warn!("{}: Minimizing window: {err}", function_name!()));
+                _ = window_minimized(window_id, &mut windows, &mut active_display, &mut commands)
+                    .inspect_err(|err| warn!("{}: Minimizing window: {err}", function_name!()));
             }
         }
 
@@ -1117,14 +1089,8 @@ fn dispatch_application_messages(
                 .filter_map(|entity| windows.get(*entity).map(|(window, _)| window.id()).ok())
                 .collect::<Vec<_>>();
             for window_id in window_ids {
-                _ = window_unminimized(
-                    window_id,
-                    &mut windows,
-                    active_display.display(),
-                    &window_manager,
-                    &mut commands,
-                )
-                .inspect_err(|err| warn!("{}: Unminimizing window: {err}", function_name!()));
+                _ = window_unminimized(window_id, &mut windows, &mut active_display, &mut commands)
+                    .inspect_err(|err| warn!("{}: Unminimizing window: {err}", function_name!()));
             }
         }
 
@@ -1135,8 +1101,7 @@ fn dispatch_application_messages(
 fn window_minimized(
     window_id: WinID,
     windows: &mut Query<(&mut Window, Entity)>,
-    active_display: &mut Display,
-    window_manager: &WindowManager,
+    active_display: &mut ActiveDisplayMut,
     commands: &mut Commands,
 ) -> Result<()> {
     let (mut window, entity) = windows
@@ -1147,25 +1112,20 @@ fn window_minimized(
     window.manage(false);
 
     let mut lens = windows.transmute_lens::<&Window>();
-    let active_panel = window_manager
-        .active_display_space(active_display.id())
-        .and_then(|active_space| active_display.active_panel(active_space))?;
+    let active_panel = active_display.active_panel()?;
     give_away_focus(entity, &lens.query(), active_panel, commands);
 
-    active_display.remove_window(entity);
+    active_display.display().remove_window(entity);
     Ok(())
 }
 
 fn window_unminimized(
     window_id: WinID,
     windows: &mut Query<(&mut Window, Entity)>,
-    active_display: &mut Display,
-    window_manager: &WindowManager,
+    active_display: &mut ActiveDisplayMut,
     commands: &mut Commands,
 ) -> Result<()> {
-    let active_panel = window_manager
-        .active_display_space(active_display.id())
-        .and_then(|active_space| active_display.active_panel_mut(active_space))?;
+    let active_panel = active_display.active_panel()?;
     let (mut window, entity) = windows
         .iter_mut()
         .find(|(window, _)| window.id() == window_id)
@@ -1308,7 +1268,6 @@ fn spawn_window_trigger(
     mut apps: Query<(Entity, &mut Application)>,
     mut active_display: ActiveDisplayMut,
     config: Configuration,
-    window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
     let new_windows = &mut trigger.event_mut().0;
@@ -1382,9 +1341,8 @@ fn spawn_window_trigger(
             window,
             app_entity,
             properties.as_ref(),
-            active_display.display(),
+            &mut active_display,
             &windows,
-            &window_manager,
             &mut commands,
         );
     }
@@ -1394,9 +1352,8 @@ fn apply_window_properties(
     mut window: Window,
     app_entity: Entity,
     properties: Option<&WindowParams>,
-    active_display: &mut Display,
+    active_display: &mut ActiveDisplayMut,
     windows: &Query<(Entity, &Window, Has<FocusedMarker>)>,
-    window_manager: &WindowManager,
     commands: &mut Commands,
 ) {
     let window_id = window.id();
@@ -1407,7 +1364,7 @@ fn apply_window_properties(
     let wanted_insertion = properties.as_ref().and_then(|props| props.index);
     window.manage(!floating);
     _ = window
-        .update_frame(Some(&active_display.bounds))
+        .update_frame(Some(&active_display.bounds()))
         .inspect_err(|err| error!("{}: {err}", function_name!()));
 
     // Insert the window into the internal Bevy state.
@@ -1418,10 +1375,7 @@ fn apply_window_properties(
         return;
     }
 
-    let Ok(panel) = window_manager
-        .active_display_space(active_display.id())
-        .and_then(|active_space| active_display.active_panel_mut(active_space))
-    else {
+    let Ok(panel) = active_display.active_panel() else {
         return;
     };
 

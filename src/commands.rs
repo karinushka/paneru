@@ -189,7 +189,7 @@ fn command_center_window(
     focused_entity: Entity,
     windows: &mut Query<&mut Window>,
     window_manager: &WindowManager,
-    active_display: &mut Display,
+    active_display: &ActiveDisplayMut,
     commands: &mut Commands,
 ) {
     let Ok(window) = windows.get_mut(focused_entity) else {
@@ -198,11 +198,11 @@ fn command_center_window(
     let frame = window.frame();
     commands.entity(focused_entity).insert(RepositionMarker {
         origin: CGPoint {
-            x: (active_display.bounds.size.width - frame.size.width) / 2.0,
+            x: (active_display.bounds().size.width - frame.size.width) / 2.0,
             y: frame.origin.y,
         },
     });
-    window_manager.center_mouse(&window, &active_display.bounds);
+    window_manager.center_mouse(&window, &active_display.bounds());
 }
 
 /// Resizes the focused window based on preset column widths.
@@ -319,16 +319,14 @@ fn manage_window(
 fn command_windows(
     operation: &Operation,
     window_manager: &WindowManager,
-    active_display: &mut Display,
+    active_display: &mut ActiveDisplayMut,
     focused_entity: Entity,
     windows: &mut Query<&mut Window>,
     commands: &mut Commands,
     config: &Config,
 ) -> Result<()> {
-    let bounds = active_display.bounds;
-    let active_panel = window_manager
-        .active_display_space(active_display.id())
-        .and_then(|active_space| active_display.active_panel_mut(active_space))?;
+    let bounds = active_display.bounds();
+    let active_panel = active_display.active_panel()?;
 
     if active_panel.index_of(focused_entity).is_err() {
         // TODO: Workaround for mising workspace change notifications.
@@ -364,11 +362,23 @@ fn command_windows(
         }
 
         Operation::Resize => {
-            resize_window(active_display, focused_entity, windows, commands, config);
+            resize_window(
+                active_display.display(),
+                focused_entity,
+                windows,
+                commands,
+                config,
+            );
         }
 
         Operation::FullWidth => {
-            full_width_window(active_display, focused_entity, windows, commands, config);
+            full_width_window(
+                active_display.display(),
+                focused_entity,
+                windows,
+                commands,
+                config,
+            );
         }
 
         Operation::Manage => {
@@ -443,7 +453,7 @@ pub fn process_command_trigger(
                 command_windows(
                     operation,
                     &window_manager,
-                    active_display.display(),
+                    &mut active_display,
                     focused_entity,
                     &mut lens.query(),
                     &mut commands,

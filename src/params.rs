@@ -1,6 +1,6 @@
 use bevy::ecs::{
-    query::With,
-    system::{Res, ResMut, Single, SystemParam},
+    query::{With, Without},
+    system::{Query, Res, ResMut, Single, SystemParam},
 };
 use objc2_core_foundation::CGRect;
 use objc2_core_graphics::CGDirectDisplayID;
@@ -8,8 +8,9 @@ use objc2_core_graphics::CGDirectDisplayID;
 use crate::{
     config::{Config, WindowParams},
     events::{ActiveDisplayMarker, FocusFollowsMouse, MissionControlActive, SkipReshuffle},
+    manager::WindowManager,
     skylight::WinID,
-    windows::Display,
+    windows::{Display, WindowPane},
 };
 
 #[derive(SystemParam)]
@@ -78,11 +79,27 @@ impl Configuration<'_> {
 #[derive(SystemParam)]
 pub struct ActiveDisplay<'w, 's> {
     display: Single<'w, 's, &'static Display, With<ActiveDisplayMarker>>,
+    displays: Query<'w, 's, &'static Display, Without<ActiveDisplayMarker>>,
+    window_manager: Res<'w, WindowManager>,
 }
 
 impl ActiveDisplay<'_, '_> {
     pub fn display(&self) -> &Display {
         &self.display
+    }
+
+    pub fn displays(&self) -> impl Iterator<Item = &Display> {
+        self.displays.iter().chain(std::iter::once(*self.display))
+    }
+
+    pub fn id(&self) -> CGDirectDisplayID {
+        self.display.id()
+    }
+
+    pub fn active_panel(&self) -> crate::errors::Result<&WindowPane> {
+        self.window_manager
+            .active_display_space(self.display.id())
+            .and_then(|workspace_id| self.display.active_panel(workspace_id))
     }
 
     pub fn bounds(&self) -> CGRect {
@@ -93,6 +110,7 @@ impl ActiveDisplay<'_, '_> {
 #[derive(SystemParam)]
 pub struct ActiveDisplayMut<'w, 's> {
     display: Single<'w, 's, &'static mut Display, With<ActiveDisplayMarker>>,
+    window_manager: Res<'w, WindowManager>,
 }
 
 impl ActiveDisplayMut<'_, '_> {
@@ -102,5 +120,15 @@ impl ActiveDisplayMut<'_, '_> {
 
     pub fn id(&self) -> CGDirectDisplayID {
         self.display.id()
+    }
+
+    pub fn active_panel(&mut self) -> crate::errors::Result<&mut WindowPane> {
+        self.window_manager
+            .active_display_space(self.display.id())
+            .and_then(|workspace_id| self.display.active_panel_mut(workspace_id))
+    }
+
+    pub fn bounds(&self) -> CGRect {
+        self.display.bounds
     }
 }

@@ -1,7 +1,7 @@
 use bevy::ecs::entity::Entity;
 use bevy::ecs::observer::On;
-use bevy::ecs::query::{Has, With};
-use bevy::ecs::system::{Commands, Query, Res, Single};
+use bevy::ecs::query::Has;
+use bevy::ecs::system::{Commands, Query, Res};
 use log::{error, warn};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use stdext::function_name;
@@ -9,10 +9,11 @@ use stdext::function_name;
 use crate::config::{Config, preset_column_widths};
 use crate::errors::Result;
 use crate::events::{
-    ActiveDisplayMarker, CommandTrigger, Event, FocusedMarker, RepositionMarker,
-    ReshuffleAroundTrigger, ResizeMarker, SenderSocket, WMEventTrigger,
+    CommandTrigger, Event, FocusedMarker, RepositionMarker, ReshuffleAroundTrigger, ResizeMarker,
+    SenderSocket, WMEventTrigger,
 };
 use crate::manager::WindowManager;
+use crate::params::ActiveDisplayMut;
 use crate::windows::{Display, Panel, Window, WindowPane};
 
 #[derive(Clone, Debug)]
@@ -412,7 +413,7 @@ pub fn process_command_trigger(
     sender: Res<SenderSocket>,
     window_manager: Res<WindowManager>,
     mut windows: Query<(&mut Window, Entity, Has<FocusedMarker>)>,
-    mut active_display: Single<&mut Display, With<ActiveDisplayMarker>>,
+    mut active_display: ActiveDisplayMut,
     mut commands: Commands,
     config: Res<Config>,
 ) {
@@ -424,7 +425,7 @@ pub fn process_command_trigger(
     if focused_window.managed()
         && window_manager
             .active_display_space(active_display.id())
-            .and_then(|active_space| active_display.active_panel(active_space))
+            .and_then(|active_space| active_display.display().active_panel(active_space))
             .and_then(|panel| panel.index_of(focused_entity))
             .is_err()
     {
@@ -442,7 +443,7 @@ pub fn process_command_trigger(
                 command_windows(
                     operation,
                     &window_manager,
-                    &mut active_display,
+                    active_display.display(),
                     focused_entity,
                     &mut lens.query(),
                     &mut commands,

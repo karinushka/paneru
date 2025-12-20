@@ -1,9 +1,15 @@
-use bevy::ecs::system::{Res, ResMut, SystemParam};
+use bevy::ecs::{
+    query::With,
+    system::{Res, ResMut, Single, SystemParam},
+};
+use objc2_core_foundation::CGRect;
+use objc2_core_graphics::CGDirectDisplayID;
 
 use crate::{
     config::{Config, WindowParams},
-    events::{FocusFollowsMouse, MissionControlActive, SkipReshuffle},
+    events::{ActiveDisplayMarker, FocusFollowsMouse, MissionControlActive, SkipReshuffle},
     skylight::WinID,
+    windows::Display,
 };
 
 #[derive(SystemParam)]
@@ -66,5 +72,35 @@ impl Configuration<'_> {
     /// Returns true if Mission Control is active.
     pub fn mission_control_active(&self) -> bool {
         self.mission_control_active.0
+    }
+}
+
+#[derive(SystemParam)]
+pub struct ActiveDisplay<'w, 's> {
+    display: Single<'w, 's, &'static Display, With<ActiveDisplayMarker>>,
+}
+
+impl ActiveDisplay<'_, '_> {
+    pub fn display(&self) -> &Display {
+        &self.display
+    }
+
+    pub fn bounds(&self) -> CGRect {
+        self.display.bounds
+    }
+}
+
+#[derive(SystemParam)]
+pub struct ActiveDisplayMut<'w, 's> {
+    display: Single<'w, 's, &'static mut Display, With<ActiveDisplayMarker>>,
+}
+
+impl ActiveDisplayMut<'_, '_> {
+    pub fn display(&mut self) -> &mut Display {
+        &mut self.display
+    }
+
+    pub fn id(&self) -> CGDirectDisplayID {
+        self.display.id()
     }
 }

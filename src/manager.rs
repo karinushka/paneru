@@ -4,7 +4,7 @@ use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::MessageWriter;
 use bevy::ecs::query::{Has, Or, With};
 use bevy::ecs::resource::Resource;
-use bevy::ecs::system::{Commands, Populated, Query, Res, Single};
+use bevy::ecs::system::{Commands, Populated, Query, Res};
 use bevy::time::{Time, Virtual};
 use core::ptr::NonNull;
 use log::{debug, error, trace, warn};
@@ -25,9 +25,10 @@ use stdext::function_name;
 use crate::app::Application;
 use crate::errors::{Error, Result};
 use crate::events::{
-    ActiveDisplayMarker, BProcess, Event, ExistingMarker, FreshMarker, OrphanedPane, SenderSocket,
-    SpawnWindowTrigger, StrayFocusEvent, Timeout,
+    BProcess, Event, ExistingMarker, FreshMarker, OrphanedPane, SenderSocket, SpawnWindowTrigger,
+    StrayFocusEvent, Timeout,
 };
+use crate::params::ActiveDisplayMut;
 use crate::platform::ProcessSerialNumber;
 use crate::skylight::{
     _AXUIElementCreateWithRemoteToken, ConnID, SLSCopyActiveMenuBarDisplayIdentifier,
@@ -354,7 +355,7 @@ impl WindowManager {
     #[allow(clippy::needless_pass_by_value)]
     pub fn find_orphaned_spaces(
         orphaned_spaces: Populated<(Entity, &mut OrphanedPane)>,
-        mut active_display: Single<&mut Display, With<ActiveDisplayMarker>>,
+        mut active_display: ActiveDisplayMut,
         mut commands: Commands,
     ) {
         let active_display_id = active_display.id();
@@ -365,7 +366,7 @@ impl WindowManager {
                 function_name!(),
                 orphan_pane.id
             );
-            for (space_id, pane) in &mut active_display.spaces {
+            for (space_id, pane) in &mut active_display.display().spaces {
                 if *space_id == orphan_pane.id {
                     debug!(
                         "{}: Re-inserting orphaned pane {} into display {}",

@@ -2,10 +2,10 @@ use bevy::app::{App as BevyApp, AppExit, Startup, Update};
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::message::{Message, MessageReader, Messages};
-use bevy::ecs::query::{Has, With};
+use bevy::ecs::query::Has;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs;
-use bevy::ecs::system::{Commands, Populated, Query, Res, Single};
+use bevy::ecs::system::{Commands, Populated, Query, Res};
 use bevy::ecs::world::World;
 use bevy::prelude::Event as BevyEvent;
 use bevy::time::{Time, Timer, Virtual};
@@ -25,6 +25,7 @@ use crate::commands::{Command, process_command_trigger};
 use crate::config::Config;
 use crate::errors::Result;
 use crate::manager::WindowManager;
+use crate::params::ActiveDisplay;
 use crate::platform::{ProcessSerialNumber, WorkspaceObserver};
 use crate::process::{Process, ProcessRef};
 use crate::skylight::WinID;
@@ -573,7 +574,7 @@ impl EventHandler {
     #[allow(clippy::needless_pass_by_value)]
     fn animate_windows(
         windows: Populated<(&mut Window, Entity, &RepositionMarker)>,
-        active_display: Single<&Display, With<ActiveDisplayMarker>>,
+        active_display: ActiveDisplay,
         time: Res<Time<Virtual>>,
         config: Res<Config>,
         mut commands: Commands,
@@ -595,8 +596,8 @@ impl EventHandler {
                 commands.entity(entity).remove::<RepositionMarker>();
                 window.reposition(
                     origin.x,
-                    origin.y.max(active_display.menubar_height),
-                    &active_display.bounds,
+                    origin.y.max(active_display.display().menubar_height),
+                    &active_display.bounds(),
                 );
                 continue;
             }
@@ -617,8 +618,8 @@ impl EventHandler {
             );
             window.reposition(
                 current.x + delta_x,
-                (current.y + delta_y).max(active_display.menubar_height),
-                &active_display.bounds,
+                (current.y + delta_y).max(active_display.display().menubar_height),
+                &active_display.bounds(),
             );
         }
     }
@@ -635,16 +636,16 @@ impl EventHandler {
     #[allow(clippy::needless_pass_by_value)]
     fn animate_resize_windows(
         windows: Populated<(&mut Window, Entity, &ResizeMarker)>,
-        active_display: Single<&Display, With<ActiveDisplayMarker>>,
+        active_display: ActiveDisplay,
         mut commands: Commands,
     ) {
         for (mut window, entity, ResizeMarker { size }) in windows {
             let origin = window.frame().origin;
-            let width = if origin.x + size.width < active_display.bounds.size.width + 0.4 {
+            let width = if origin.x + size.width < active_display.bounds().size.width + 0.4 {
                 commands.entity(entity).remove::<ResizeMarker>();
                 size.width
             } else {
-                active_display.bounds.size.width - origin.x
+                active_display.bounds().size.width - origin.x
             };
             debug!(
                 "{}: window {} resize {}:{}",
@@ -653,7 +654,7 @@ impl EventHandler {
                 width,
                 size.height,
             );
-            window.resize(width, size.height, &active_display.bounds);
+            window.resize(width, size.height, &active_display.bounds());
         }
     }
 }

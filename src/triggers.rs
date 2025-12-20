@@ -19,7 +19,7 @@ use crate::events::{
     Timeout, WMEventTrigger, WindowDraggedMarker,
 };
 use crate::manager::WindowManager;
-use crate::params::Configuration;
+use crate::params::{ActiveDisplay, ActiveDisplayMut, Configuration};
 use crate::process::Process;
 use crate::skylight::WinID;
 use crate::windows::{Display, Panel, Window, WindowPane, ax_window_pid};
@@ -166,7 +166,7 @@ fn mouse_moved_trigger(
 fn mouse_down_trigger(
     trigger: On<WMEventTrigger>,
     windows: Query<&Window>,
-    active_display: Single<&Display, With<ActiveDisplayMarker>>,
+    active_display: ActiveDisplay,
     window_manager: Res<WindowManager>,
     mission_control_active: Res<MissionControlActive>,
     mut commands: Commands,
@@ -186,7 +186,7 @@ fn mouse_down_trigger(
     else {
         return;
     };
-    if !window.fully_visible(&active_display.bounds) {
+    if !window.fully_visible(&active_display.bounds()) {
         commands.trigger(ReshuffleAroundTrigger(window.id()));
     }
 }
@@ -245,7 +245,7 @@ fn mouse_dragged_trigger(
 #[allow(clippy::needless_pass_by_value)]
 fn workspace_change_trigger(
     trigger: On<WMEventTrigger>,
-    mut active_display: Single<&mut Display, With<ActiveDisplayMarker>>,
+    mut active_display: ActiveDisplayMut,
     focused_window: Single<(&Window, Entity), With<FocusedMarker>>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
@@ -257,7 +257,7 @@ fn workspace_change_trigger(
     let Ok(workspace_id) = window_manager.active_display_space(active_display.id()) else {
         return;
     };
-    let Ok(panel) = active_display.active_panel(workspace_id) else {
+    let Ok(panel) = active_display.display().active_panel(workspace_id) else {
         return;
     };
     let (window, entity) = *focused_window;
@@ -281,8 +281,8 @@ fn workspace_change_trigger(
         window.id(),
     );
 
-    active_display.remove_window(entity);
-    if let Ok(panel) = active_display.active_panel_mut(workspace_id) {
+    active_display.display().remove_window(entity);
+    if let Ok(panel) = active_display.display().active_panel_mut(workspace_id) {
         panel.append(entity);
     }
 
@@ -681,7 +681,7 @@ fn window_focused_trigger(
 fn reshuffle_around_trigger(
     trigger: On<ReshuffleAroundTrigger>,
     window_manager: Res<WindowManager>,
-    mut active_display: Single<&mut Display, With<ActiveDisplayMarker>>,
+    mut active_display: ActiveDisplayMut,
     mut windows: Query<(&mut Window, Entity, Option<&RepositionMarker>)>,
     mut commands: Commands,
 ) {
@@ -694,7 +694,7 @@ fn reshuffle_around_trigger(
     if window.managed() {
         _ = reshuffle_around(
             &window_manager,
-            &mut active_display,
+            active_display.display(),
             entity,
             &mut windows,
             &mut commands,
@@ -906,7 +906,7 @@ fn reposition_stack(
 #[allow(clippy::needless_pass_by_value)]
 fn swipe_gesture_trigger(
     trigger: On<WMEventTrigger>,
-    active_display: Single<&Display, With<ActiveDisplayMarker>>,
+    active_display: ActiveDisplay,
     mut focused_window: Single<&mut Window, With<FocusedMarker>>,
     window_manager: Res<WindowManager>,
     config: Configuration,
@@ -925,7 +925,7 @@ fn swipe_gesture_trigger(
             slide_window(
                 &window_manager,
                 &mut focused_window,
-                &active_display,
+                active_display.display(),
                 delta,
                 &mut commands,
             );
@@ -1046,7 +1046,7 @@ fn application_event_trigger(
 fn dispatch_application_messages(
     trigger: On<WMEventTrigger>,
     mut windows: Query<(&mut Window, Entity)>,
-    mut active_display: Single<&mut Display, With<ActiveDisplayMarker>>,
+    mut active_display: ActiveDisplayMut,
     applications: Query<(&Application, &Children)>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
@@ -1063,7 +1063,7 @@ fn dispatch_application_messages(
             _ = window_minimized(
                 *window_id,
                 &mut windows,
-                &mut active_display,
+                active_display.display(),
                 &window_manager,
                 &mut commands,
             )
@@ -1074,7 +1074,7 @@ fn dispatch_application_messages(
             _ = window_unminimized(
                 *window_id,
                 &mut windows,
-                &mut active_display,
+                active_display.display(),
                 &window_manager,
                 &mut commands,
             )
@@ -1095,7 +1095,7 @@ fn dispatch_application_messages(
                 _ = window_minimized(
                     window_id,
                     &mut windows,
-                    &mut active_display,
+                    active_display.display(),
                     &window_manager,
                     &mut commands,
                 )
@@ -1120,7 +1120,7 @@ fn dispatch_application_messages(
                 _ = window_unminimized(
                     window_id,
                     &mut windows,
-                    &mut active_display,
+                    active_display.display(),
                     &window_manager,
                     &mut commands,
                 )
@@ -1189,7 +1189,7 @@ fn window_unminimized(
 fn window_resized_trigger(
     trigger: On<WMEventTrigger>,
     mut windows: Query<(&mut Window, Entity)>,
-    active_display: Single<&mut Display, With<ActiveDisplayMarker>>,
+    active_display: ActiveDisplay,
     mut commands: Commands,
 ) {
     let Event::WindowResized { window_id } = trigger.event().0 else {
@@ -1201,7 +1201,7 @@ fn window_resized_trigger(
     else {
         return;
     };
-    _ = window.update_frame(Some(&active_display.bounds));
+    _ = window.update_frame(Some(&active_display.bounds()));
     commands.trigger(ReshuffleAroundTrigger(window.id()));
 }
 
@@ -1306,7 +1306,7 @@ fn spawn_window_trigger(
     mut trigger: On<SpawnWindowTrigger>,
     windows: Query<(Entity, &Window, Has<FocusedMarker>)>,
     mut apps: Query<(Entity, &mut Application)>,
-    mut active_display: Single<&mut Display, With<ActiveDisplayMarker>>,
+    mut active_display: ActiveDisplayMut,
     config: Configuration,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
@@ -1382,7 +1382,7 @@ fn spawn_window_trigger(
             window,
             app_entity,
             properties.as_ref(),
-            &mut active_display,
+            active_display.display(),
             &windows,
             &window_manager,
             &mut commands,

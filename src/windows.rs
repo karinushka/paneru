@@ -423,11 +423,20 @@ impl Display {
     /// # Returns
     ///
     /// `Ok(&mut WindowPane)` if the active panel is found, otherwise `Err(Error)`.
-    pub fn active_panel(&mut self, space_id: u64) -> Result<&mut WindowPane> {
-        self.spaces.get_mut(&space_id).ok_or(Error::new(
-            ErrorKind::NotFound,
-            format!("{}: can not find space {space_id}.", function_name!()),
-        ))
+    pub fn active_panel(&self, space_id: u64) -> Result<&WindowPane> {
+        self.spaces.get(&space_id).ok_or(Error::NotFound(format!(
+            "{}: space {space_id}.",
+            function_name!()
+        )))
+    }
+
+    pub fn active_panel_mut(&mut self, space_id: u64) -> Result<&mut WindowPane> {
+        self.spaces
+            .get_mut(&space_id)
+            .ok_or(Error::NotFound(format!(
+                "{}: space {space_id}.",
+                function_name!()
+            )))
     }
 
     /// Returns the ID of the display.

@@ -8,6 +8,7 @@ pub enum Error {
     InvalidWindow,
     InvalidConfig(String),
     ConfigurationWatcher(String),
+    NotFound(String),
     IO(String),
     Generic(String),
 }
@@ -32,6 +33,7 @@ impl Display for Error {
             Error::InvalidWindow => "Invalid window".to_string(),
             Error::InvalidConfig(msg) => format!("Invalid configuration: {msg}"),
             Error::ConfigurationWatcher(msg) => format!("Watching config file: {msg}"),
+            Error::NotFound(msg) => format!("Not found: {msg}"),
             Error::IO(msg) => format!("IO error: {msg}"),
             Error::Generic(msg) => format!("Generic error: {msg}"),
         };

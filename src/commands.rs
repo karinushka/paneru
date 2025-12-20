@@ -327,7 +327,7 @@ fn command_windows(
     let bounds = active_display.bounds;
     let active_panel = window_manager
         .active_display_space(active_display.id())
-        .and_then(|active_space| active_display.active_panel(active_space))?;
+        .and_then(|active_space| active_display.active_panel_mut(active_space))?;
 
     if active_panel.index_of(focused_entity).is_err() {
         // TODO: Workaround for mising workspace change notifications.

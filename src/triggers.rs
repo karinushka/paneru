@@ -282,7 +282,7 @@ fn workspace_change_trigger(
     );
 
     active_display.remove_window(entity);
-    if let Ok(panel) = active_display.active_panel(workspace_id) {
+    if let Ok(panel) = active_display.active_panel_mut(workspace_id) {
         panel.append(entity);
     }
 
@@ -390,7 +390,7 @@ fn active_display_trigger(
     );
 
     // Insert the window into the current panel.
-    if let Ok(panel) = active_display.active_panel(workspace_id) {
+    if let Ok(panel) = active_display.active_panel_mut(workspace_id) {
         panel.append(entity);
     }
     // And then remove from all the other.
@@ -1165,7 +1165,7 @@ fn window_unminimized(
 ) -> Result<()> {
     let active_panel = window_manager
         .active_display_space(active_display.id())
-        .and_then(|active_space| active_display.active_panel(active_space))?;
+        .and_then(|active_space| active_display.active_panel_mut(active_space))?;
     let (mut window, entity) = windows
         .iter_mut()
         .find(|(window, _)| window.id() == window_id)
@@ -1267,7 +1267,7 @@ fn window_destroyed_trigger(
 fn give_away_focus(
     entity: Entity,
     windows: &Query<&Window>,
-    active_pane: &mut WindowPane,
+    active_pane: &WindowPane,
     commands: &mut Commands,
 ) {
     // Move focus to a left neighbour if the panel has more windows.
@@ -1420,7 +1420,7 @@ fn apply_window_properties(
 
     let Ok(panel) = window_manager
         .active_display_space(active_display.id())
-        .and_then(|active_space| active_display.active_panel(active_space))
+        .and_then(|active_space| active_display.active_panel_mut(active_space))
     else {
         return;
     };

@@ -469,7 +469,10 @@ fn display_add_trigger(
         .into_iter()
         .find(|display| display.id() == display_id)
     else {
-        error!("{}: Unable to find added display!", function_name!());
+        error!(
+            "{}: Unable to find added display id {display_id}!",
+            function_name!()
+        );
         return;
     };
 

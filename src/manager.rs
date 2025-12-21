@@ -27,8 +27,9 @@ use stdext::function_name;
 use crate::app::Application;
 use crate::errors::{Error, Result};
 use crate::events::{
-    BProcess, Event, ExistingMarker, FreshMarker, OrphanedPane, PollForNotifications, SenderSocket,
-    SpawnWindowTrigger, StrayFocusEvent, Timeout, Unmanaged, WMEventTrigger,
+    ActiveDisplayMarker, BProcess, Event, ExistingMarker, FreshMarker, OrphanedPane,
+    PollForNotifications, SenderSocket, SpawnWindowTrigger, StrayFocusEvent, Timeout, Unmanaged,
+    WMEventTrigger,
 };
 use crate::params::{ActiveDisplay, ActiveDisplayMut, ThrottledSystem};
 use crate::platform::ProcessSerialNumber;
@@ -898,8 +899,7 @@ impl WindowManager {
     /// TODO: Workaround for Tahoe 26.x, where display change notifications are not arriving.
     #[allow(clippy::needless_pass_by_value)]
     pub fn display_changes_watcher(
-        active_display: ActiveDisplay,
-        // displays: Query<&Display, Without<ActiveDisplayMarker>>,
+        displays: Query<(&Display, Has<ActiveDisplayMarker>)>,
         window_manager: Res<WindowManager>,
         mut throttle: ThrottledSystem,
         mut commands: Commands,
@@ -912,12 +912,32 @@ impl WindowManager {
         let Ok(current_display_id) = window_manager.active_display_id() else {
             return;
         };
-        if current_display_id == active_display.id() {
-            return;
+        let found = displays
+            .iter()
+            .find(|(display, _)| display.id() == current_display_id);
+        if let Some((_, active)) = found {
+            if active {
+                return;
+            }
+            debug!(
+                "{}: detected dislay change from {}.",
+                function_name!(),
+                current_display_id,
+            );
+            commands.trigger(WMEventTrigger(Event::DisplayChanged));
+        } else {
+            debug!(
+                "{}: new display {} detected.",
+                function_name!(),
+                current_display_id
+            );
+            commands.trigger(WMEventTrigger(Event::DisplayAdded {
+                display_id: current_display_id,
+            }));
         }
 
         let present_displays = window_manager.present_displays();
-        active_display.displays().for_each(|display| {
+        displays.iter().for_each(|(display, _)| {
             if !present_displays
                 .iter()
                 .any(|present_display| present_display.id() == display.id())
@@ -932,28 +952,6 @@ impl WindowManager {
                 }));
             }
         });
-
-        if active_display
-            .displays()
-            .any(|display| display.id() == current_display_id)
-        {
-            debug!(
-                "{}: detected dislay change from {}.",
-                function_name!(),
-                active_display.id(),
-            );
-            commands.trigger(WMEventTrigger(Event::DisplayChanged));
-            return;
-        }
-
-        debug!(
-            "{}: detected added display {}.",
-            function_name!(),
-            current_display_id
-        );
-        commands.trigger(WMEventTrigger(Event::DisplayAdded {
-            display_id: current_display_id,
-        }));
     }
 }
 

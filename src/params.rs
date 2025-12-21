@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use bevy::{
     ecs::{
-        query::{With, Without},
-        system::{Local, Query, Res, ResMut, Single, SystemParam},
+        query::With,
+        system::{Local, Res, ResMut, Single, SystemParam},
     },
     time::{Time, Timer, TimerMode, Virtual},
 };
@@ -102,17 +102,12 @@ impl ThrottledSystem<'_, '_> {
 #[derive(SystemParam)]
 pub struct ActiveDisplay<'w, 's> {
     display: Single<'w, 's, &'static Display, With<ActiveDisplayMarker>>,
-    displays: Query<'w, 's, &'static Display, Without<ActiveDisplayMarker>>,
     window_manager: Res<'w, WindowManager>,
 }
 
 impl ActiveDisplay<'_, '_> {
     pub fn display(&self) -> &Display {
         &self.display
-    }
-
-    pub fn displays(&self) -> impl Iterator<Item = &Display> {
-        self.displays.iter().chain(std::iter::once(*self.display))
     }
 
     pub fn id(&self) -> CGDirectDisplayID {

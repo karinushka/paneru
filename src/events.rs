@@ -216,7 +216,10 @@ pub struct ResizeMarker {
 }
 
 #[derive(Component)]
-pub struct WindowDraggedMarker(pub Entity);
+pub struct WindowDraggedMarker {
+    pub entity: Entity,
+    pub display_id: CGDirectDisplayID,
+}
 
 #[derive(Component)]
 pub struct ReshuffleAroundMarker;

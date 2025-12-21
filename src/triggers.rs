@@ -204,6 +204,7 @@ fn mouse_down_trigger(
 #[allow(clippy::needless_pass_by_value)]
 fn mouse_dragged_trigger(
     trigger: On<WMEventTrigger>,
+    active_display: ActiveDisplay,
     windows: Query<(Entity, &Window)>,
     mut drag_marker: Query<(&mut Timeout, &mut WindowDraggedMarker)>,
     window_manager: Res<WindowManager>,
@@ -229,25 +230,42 @@ fn mouse_dragged_trigger(
 
     if let Ok((mut timeout, mut marker)) = drag_marker.single_mut() {
         // Change the current marker contents and refresh the timer.
-        if entity != marker.0 {
-            marker.as_mut().0 = entity;
+        if entity != marker.entity {
+            let marker = marker.as_mut();
+            marker.entity = entity;
+            marker.display_id = active_display.id();
             timeout.timer.reset();
         }
     } else {
         trace!(
-            "{}: Adding a drag marker ({entity}) to window id {}.",
+            "{}: Adding a drag marker ({entity}, {}) to window id {}.",
             function_name!(),
+            active_display.id(),
             window.id(),
         );
         let timeout = Timeout::new(Duration::from_millis(DRAG_MARKER_TIMEOUT_MS), None);
-        commands.spawn((timeout, WindowDraggedMarker(entity)));
+        commands.spawn((
+            timeout,
+            WindowDraggedMarker {
+                entity,
+                display_id: active_display.id(),
+            },
+        ));
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 fn workspace_change_trigger(
     trigger: On<WMEventTrigger>,
-    focused_window: Single<(&Window, Entity, Has<Unmanaged>), With<FocusedMarker>>,
+    focused_window: Single<
+        (
+            &Window,
+            Entity,
+            Option<&WindowDraggedMarker>,
+            Has<Unmanaged>,
+        ),
+        With<FocusedMarker>,
+    >,
     mut active_display: ActiveDisplayMut,
     mut other_displays: Query<&mut Display, Without<ActiveDisplayMarker>>,
     window_manager: Res<WindowManager>,
@@ -263,9 +281,18 @@ fn workspace_change_trigger(
     let Ok(panel) = active_display.display().active_panel(workspace_id) else {
         return;
     };
-    let (window, entity, unmanaged) = *focused_window;
+    let (window, entity, drag_marker, unmanaged) = *focused_window;
     if unmanaged || panel.index_of(entity).is_ok() {
         // Window is either unmanaged or already in the current space.
+        return;
+    }
+    if drag_marker.is_some_and(|marker| marker.display_id != active_display.id()) {
+        // Moving across displays is handled in the display change trigger.
+        debug!(
+            "{}: drag marker has the same display_id {}",
+            function_name!(),
+            active_display.id()
+        );
         return;
     }
 
@@ -373,7 +400,11 @@ fn active_display_trigger(
     );
 
     // This function will not run unless a WindowDraggedMarker exists.
-    let WindowDraggedMarker(entity) = *drag_marker.1;
+    let WindowDraggedMarker { entity, display_id } = *drag_marker.1;
+    if display_id == active_display_id {
+        // Still in the same display, do not relocate.
+        return;
+    }
     let Ok(window) = windows.get(entity) else {
         return;
     };

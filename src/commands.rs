@@ -391,9 +391,9 @@ fn command_windows(
             }
         }
     }
-    commands
-        .entity(focused_entity)
-        .insert(ReshuffleAroundMarker);
+    if let Ok(mut cmd) = commands.get_entity(focused_entity) {
+        cmd.try_insert(ReshuffleAroundMarker);
+    }
     Ok(())
 }
 

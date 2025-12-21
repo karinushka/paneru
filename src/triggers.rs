@@ -186,8 +186,10 @@ fn mouse_down_trigger(
     else {
         return;
     };
-    if !window.fully_visible(&active_display.bounds()) {
-        commands.entity(entity).insert(ReshuffleAroundMarker);
+    if !window.fully_visible(&active_display.bounds())
+        && let Ok(mut cmd) = commands.get_entity(entity)
+    {
+        cmd.try_insert(ReshuffleAroundMarker);
     }
 }
 
@@ -290,7 +292,9 @@ fn workspace_change_trigger(
         panel.append(entity);
     }
 
-    commands.entity(entity).insert(ReshuffleAroundMarker);
+    if let Ok(mut cmd) = commands.get_entity(entity) {
+        cmd.try_insert(ReshuffleAroundMarker);
+    }
 }
 
 /// Handles display change events.
@@ -404,7 +408,9 @@ fn active_display_trigger(
         }
     });
 
-    commands.entity(entity).insert(ReshuffleAroundMarker);
+    if let Ok(mut cmd) = commands.get_entity(entity) {
+        cmd.try_insert(ReshuffleAroundMarker);
+    }
 }
 
 /// Handles display added events.
@@ -673,8 +679,8 @@ fn window_focused_trigger(
 
     if config.skip_reshuffle() {
         config.set_skip_reshuffle(false);
-    } else {
-        commands.entity(entity).insert(ReshuffleAroundMarker);
+    } else if let Ok(mut cmd) = commands.get_entity(entity) {
+        cmd.try_insert(ReshuffleAroundMarker);
     }
 }
 
@@ -688,7 +694,7 @@ fn window_focused_trigger(
 /// * `entity` - The `Entity` of the window to reshuffle around.
 /// * `windows` - A query for all windows.
 /// * `commands` - Bevy commands to trigger events.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 pub fn reshuffle_around_window(
     active_display: ActiveDisplay,
     marker: Populated<Entity, With<ReshuffleAroundMarker>>,
@@ -711,7 +717,9 @@ pub fn reshuffle_around_window(
             continue;
         };
 
-        commands.entity(entity).remove::<ReshuffleAroundMarker>();
+        if let Ok(mut cmd) = commands.get_entity(entity) {
+            cmd.try_remove::<ReshuffleAroundMarker>();
+        }
         let display_bounds = active_display.bounds();
         let menubar_height = active_display.display().menubar_height;
         let Ok(active_panel) = active_display.active_panel() else {
@@ -916,7 +924,9 @@ fn swipe_gesture_trigger(
         if delta.abs() > SWIPE_THRESHOLD {
             let (ref mut window, entity) = *focused_window;
             slide_window(&window_manager, window, active_display.display(), delta);
-            commands.entity(entity).insert(ReshuffleAroundMarker);
+            if let Ok(mut cmd) = commands.get_entity(entity) {
+                cmd.try_insert(ReshuffleAroundMarker);
+            }
         }
     }
 }
@@ -1127,7 +1137,9 @@ fn window_managed_trigger(
     };
 
     active_panel.append(entity);
-    commands.entity(entity).insert(ReshuffleAroundMarker);
+    if let Ok(mut cmd) = commands.get_entity(entity) {
+        cmd.try_insert(ReshuffleAroundMarker);
+    }
 }
 
 /// Handles the event when a window is resized. It updates the window's frame and reshuffles windows.
@@ -1155,7 +1167,9 @@ fn window_resized_trigger(
         return;
     };
     _ = window.update_frame(Some(&active_display.bounds()));
-    commands.entity(entity).insert(ReshuffleAroundMarker);
+    if let Ok(mut cmd) = commands.get_entity(entity) {
+        cmd.try_insert(ReshuffleAroundMarker);
+    }
 }
 
 /// Handles the event when a window is destroyed. It removes the window from the ECS world and relevant displays.
@@ -1239,7 +1253,9 @@ fn give_away_focus(
                 function_name!()
             );
             commands.trigger(WMEventTrigger(Event::WindowFocused { window_id }));
-            commands.entity(entity).insert(ReshuffleAroundMarker);
+            if let Ok(mut cmd) = commands.get_entity(entity) {
+                cmd.try_insert(ReshuffleAroundMarker);
+            }
         }
     }
 }
@@ -1394,5 +1410,7 @@ fn apply_window_properties(
         None => panel.append(entity),
     }
 
-    commands.entity(entity).insert(ReshuffleAroundMarker);
+    if let Ok(mut cmd) = commands.get_entity(entity) {
+        cmd.try_insert(ReshuffleAroundMarker);
+    }
 }

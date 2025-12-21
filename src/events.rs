@@ -5,7 +5,7 @@ use bevy::ecs::message::{Message, MessageReader, Messages};
 use bevy::ecs::query::Has;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs;
-use bevy::ecs::system::{Commands, Populated, Query, Res};
+use bevy::ecs::system::{Commands, Populated, Query, Res, ResMut};
 use bevy::ecs::world::World;
 use bevy::prelude::Event as BevyEvent;
 use bevy::time::{Time, Timer, Virtual};
@@ -270,6 +270,9 @@ pub struct MissionControlActive(pub bool);
 #[derive(Resource)]
 pub struct FocusFollowsMouse(pub Option<WinID>);
 
+#[derive(PartialEq, Resource)]
+pub struct PollForNotifications(pub bool);
+
 #[derive(BevyEvent)]
 pub struct WMEventTrigger(pub Event);
 
@@ -321,6 +324,7 @@ impl EventHandler {
             .insert_resource(SkipReshuffle(false))
             .insert_resource(MissionControlActive(false))
             .insert_resource(FocusFollowsMouse(None))
+            .insert_resource(PollForNotifications(true))
             .add_observer(process_command_trigger)
             .add_systems(Startup, EventHandler::gather_displays)
             .add_systems(Startup, process_setup.after(EventHandler::gather_displays))
@@ -394,7 +398,11 @@ impl EventHandler {
     /// * `messages` - A `MessageReader` for incoming `Event` messages.
     /// * `commands` - Bevy commands to trigger events or insert resources.
     #[allow(clippy::needless_pass_by_value)]
-    fn dispatch_toplevel_triggers(mut messages: MessageReader<Event>, mut commands: Commands) {
+    fn dispatch_toplevel_triggers(
+        mut messages: MessageReader<Event>,
+        mut broken_notifications: ResMut<PollForNotifications>,
+        mut commands: Commands,
+    ) {
         for event in messages.read() {
             match event {
                 Event::Command { command } => commands.trigger(CommandTrigger(command.clone())),
@@ -410,6 +418,17 @@ impl EventHandler {
                     }) {
                         commands.trigger(SpawnWindowTrigger(vec![window]));
                     }
+                }
+
+                Event::SpaceChanged => {
+                    if broken_notifications.0 {
+                        broken_notifications.0 = false;
+                        info!(
+                            "{}: Workspace and display notifications arriving correctly. Disabling the polling.",
+                            function_name!()
+                        );
+                    }
+                    commands.trigger(WMEventTrigger(event.clone()));
                 }
 
                 Event::WindowTitleChanged { window_id } => {

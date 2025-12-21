@@ -4,6 +4,8 @@ use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::MessageWriter;
 use bevy::ecs::query::{Has, Or, With};
 use bevy::ecs::resource::Resource;
+use bevy::ecs::schedule::IntoScheduleConfigs;
+use bevy::ecs::schedule::common_conditions::resource_equals;
 use bevy::ecs::system::{Commands, Local, Populated, Query, Res};
 use bevy::time::{Time, Virtual};
 use core::ptr::NonNull;
@@ -25,8 +27,8 @@ use stdext::function_name;
 use crate::app::Application;
 use crate::errors::{Error, Result};
 use crate::events::{
-    BProcess, Event, ExistingMarker, FreshMarker, OrphanedPane, SenderSocket, SpawnWindowTrigger,
-    StrayFocusEvent, Timeout, Unmanaged, WMEventTrigger,
+    BProcess, Event, ExistingMarker, FreshMarker, OrphanedPane, PollForNotifications, SenderSocket,
+    SpawnWindowTrigger, StrayFocusEvent, Timeout, Unmanaged, WMEventTrigger,
 };
 use crate::params::{ActiveDisplay, ActiveDisplayMut, ThrottledSystem};
 use crate::platform::ProcessSerialNumber;
@@ -74,9 +76,15 @@ impl WindowManager {
                 WindowManager::timeout_ticker,
                 WindowManager::retry_stray_focus,
                 WindowManager::find_orphaned_spaces,
+            ),
+        );
+        app.add_systems(
+            Update,
+            (
                 WindowManager::display_changes_watcher,
                 WindowManager::workspace_change_watcher,
-            ),
+            )
+                .run_if(resource_equals(PollForNotifications(true))),
         );
     }
 

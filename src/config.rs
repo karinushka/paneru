@@ -51,6 +51,7 @@ fn parse_operation(argv: &[&str]) -> Result<Operation> {
         "manage" => Operation::Manage,
         "stack" => Operation::Stack(true),
         "unstack" => Operation::Stack(false),
+        "nextdisplay" => Operation::ToNextDisplay,
         _ => {
             return Err(err);
         }

@@ -33,6 +33,7 @@ pub enum Operation {
     Center,
     Resize,
     FullWidth,
+    ToNextDisplay,
     Manage,
     Stack(bool),
 }
@@ -305,6 +306,48 @@ fn manage_window(
     }
 }
 
+fn to_next_display(
+    focused_entity: Entity,
+    windows: &mut Query<(&mut Window, Entity, Has<Unmanaged>)>,
+    active_display: &mut ActiveDisplayMut,
+    commands: &mut Commands,
+) {
+    let Ok((window, entity, unmanaged)) = windows.get_mut(focused_entity) else {
+        return;
+    };
+    if unmanaged {
+        return;
+    }
+
+    let Some(other) = active_display.other().next() else {
+        debug!("{}: no other display to move window to.", function_name!());
+        return;
+    };
+
+    debug!(
+        "{}: moving window (id {}, {entity}) to display {}: {}:{}.",
+        function_name!(),
+        window.id(),
+        other.id(),
+        other.bounds.size.width / 2.0,
+        other.menubar_height,
+    );
+    let dest = CGPoint::new(other.bounds.size.width / 2.0, other.menubar_height);
+    if let Ok(mut cmd) = commands.get_entity(focused_entity) {
+        cmd.try_insert((
+            ReshuffleAroundMarker,
+            RepositionMarker {
+                origin: dest,
+                display_id: other.id(),
+            },
+        ));
+    }
+
+    if let Ok(panel) = active_display.active_panel() {
+        panel.remove(entity);
+    }
+}
+
 /// Handles various "window" commands, such as focus, swap, center, resize, and manage.
 ///
 /// # Arguments
@@ -385,6 +428,10 @@ fn command_windows(
                 commands,
                 config,
             );
+        }
+
+        Operation::ToNextDisplay => {
+            to_next_display(focused_entity, windows, active_display, commands);
         }
 
         Operation::Manage => {

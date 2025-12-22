@@ -245,6 +245,9 @@ window_manage = "ctrl + alt - t"
 window_stack = "alt - ]"
 window_unstack = "alt + shift - ]"
 
+# Moves currently focused window to another display.
+window_nextdisplay = "alt - n"
+
 # Quits the window manager.
 quit = "ctrl + alt - q"
 

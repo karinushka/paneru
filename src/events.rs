@@ -592,7 +592,7 @@ impl EventHandler {
                     .and_then(|panel| panel.top());
                 if let Some(entity) = first_window {
                     debug!("{}: focusing {entity}", function_name!());
-                    commands.entity(entity).insert(FocusedMarker);
+                    commands.entity(entity).try_insert(FocusedMarker);
                 }
             }
         }
@@ -631,7 +631,7 @@ impl EventHandler {
             let mut delta_x = (origin.x - current.x).abs().min(move_delta);
             let mut delta_y = (origin.y - current.y).abs().min(move_delta);
             if delta_x < move_delta && delta_y < move_delta {
-                commands.entity(entity).remove::<RepositionMarker>();
+                commands.entity(entity).try_remove::<RepositionMarker>();
                 window.reposition(
                     origin.x,
                     origin.y.max(active_display.display().menubar_height),
@@ -680,7 +680,7 @@ impl EventHandler {
         for (mut window, entity, ResizeMarker { size }) in windows {
             let origin = window.frame().origin;
             let width = if origin.x + size.width < active_display.bounds().size.width + 0.4 {
-                commands.entity(entity).remove::<ResizeMarker>();
+                commands.entity(entity).try_remove::<ResizeMarker>();
                 size.width
             } else {
                 active_display.bounds().size.width - origin.x

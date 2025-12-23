@@ -159,7 +159,7 @@ impl WindowManager {
         for (entity, process) in process_query {
             let app = Application::new(&wm, &process.0, &events.0).unwrap();
             commands.spawn((app, ExistingMarker, ChildOf(entity)));
-            commands.entity(entity).remove::<ExistingMarker>();
+            commands.entity(entity).try_remove::<ExistingMarker>();
         }
     }
 
@@ -192,7 +192,7 @@ impl WindowManager {
             {
                 commands.trigger(SpawnWindowTrigger(windows));
             }
-            commands.entity(entity).remove::<ExistingMarker>();
+            commands.entity(entity).try_remove::<ExistingMarker>();
         }
     }
 
@@ -221,7 +221,7 @@ impl WindowManager {
 
             if children {
                 // Process already has an attached Application, so finish.
-                commands.entity(entity).remove::<FreshMarker>();
+                commands.entity(entity).try_remove::<FreshMarker>();
                 continue;
             }
 
@@ -288,7 +288,7 @@ impl WindowManager {
                 .filter_map(create_window)
                 .flatten()
                 .collect::<Vec<_>>();
-            commands.entity(entity).remove::<FreshMarker>();
+            commands.entity(entity).try_remove::<FreshMarker>();
             commands.trigger(SpawnWindowTrigger(windows));
         }
     }
@@ -308,7 +308,7 @@ impl WindowManager {
         for (entity, fresh, _) in cleanup {
             if !fresh {
                 // Process was ready before the timer finished.
-                commands.entity(entity).remove::<Timeout>();
+                commands.entity(entity).try_remove::<Timeout>();
             }
         }
     }

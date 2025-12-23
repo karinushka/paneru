@@ -360,7 +360,7 @@ fn display_change_trigger(
                 function_name!(),
                 display.id()
             );
-            commands.entity(entity).remove::<ActiveDisplayMarker>();
+            commands.entity(entity).try_remove::<ActiveDisplayMarker>();
         }
         if !focused && display.id() == active_id {
             debug!(
@@ -368,7 +368,7 @@ fn display_change_trigger(
                 function_name!(),
                 display.id()
             );
-            commands.entity(entity).insert(ActiveDisplayMarker);
+            commands.entity(entity).try_insert(ActiveDisplayMarker);
         }
     }
 }
@@ -629,7 +629,7 @@ fn front_switched_trigger(
     } else if let Ok((_, entity)) = focused_window.single() {
         debug!("{}: reseting focus.", function_name!());
         config.set_ffm_flag(None);
-        commands.entity(entity).remove::<FocusedMarker>();
+        commands.entity(entity).try_remove::<FocusedMarker>();
     }
 }
 
@@ -687,10 +687,10 @@ fn window_focused_trigger(
 
     for (window, entity, _, focused) in windows {
         if focused && window.id() != window_id {
-            commands.entity(entity).remove::<FocusedMarker>();
+            commands.entity(entity).try_remove::<FocusedMarker>();
         }
         if !focused && window.id() == window_id {
-            commands.entity(entity).insert(FocusedMarker);
+            commands.entity(entity).try_insert(FocusedMarker);
         }
     }
 
@@ -707,7 +707,7 @@ fn window_focused_trigger(
         return;
     }
 
-    commands.entity(entity).insert(FocusedMarker);
+    commands.entity(entity).try_insert(FocusedMarker);
     config.set_ffm_flag(None);
 
     if config.skip_reshuffle() {
@@ -909,7 +909,7 @@ fn reposition_stack(
         if let Ok((mut window, entity, _)) = windows.get_mut(entity) {
             let window_height = window.frame().size.height;
 
-            commands.entity(entity).insert(RepositionMarker {
+            commands.entity(entity).try_insert(RepositionMarker {
                 origin: CGPoint {
                     x: upper_left,
                     y: y_pos,
@@ -1083,13 +1083,13 @@ fn dispatch_application_messages(
     match &trigger.event().0 {
         Event::WindowMinimized { window_id } => {
             if let Some((_, entity)) = find_window(*window_id) {
-                commands.entity(entity).insert(Unmanaged::Minimized);
+                commands.entity(entity).try_insert(Unmanaged::Minimized);
             }
         }
 
         Event::WindowDeminimized { window_id } => {
             if let Some((_, entity)) = find_window(*window_id) {
-                commands.entity(entity).remove::<Unmanaged>();
+                commands.entity(entity).try_remove::<Unmanaged>();
             }
         }
 
@@ -1099,7 +1099,7 @@ fn dispatch_application_messages(
                 return;
             };
             for entity in children {
-                commands.entity(*entity).insert(Unmanaged::Hidden);
+                commands.entity(*entity).try_insert(Unmanaged::Hidden);
             }
         }
 
@@ -1112,7 +1112,7 @@ fn dispatch_application_messages(
                 return;
             };
             for entity in children {
-                commands.entity(*entity).remove::<Unmanaged>();
+                commands.entity(*entity).try_remove::<Unmanaged>();
             }
         }
         _ => (),
@@ -1411,7 +1411,7 @@ fn apply_window_properties(
 
     if floating {
         // Avoid managing window if it's floating.
-        commands.entity(entity).insert(Unmanaged::Floating);
+        commands.entity(entity).try_insert(Unmanaged::Floating);
         return;
     }
 

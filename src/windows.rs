@@ -989,7 +989,7 @@ impl Window {
             false
         };
         if moved {
-            commands.entity(entity).insert(RepositionMarker {
+            commands.entity(entity).try_insert(RepositionMarker {
                 origin: frame.origin,
             });
             trace!("{}: focus resposition to {frame:?}", function_name!());

@@ -168,7 +168,7 @@ fn command_swap_focus(
             .frame()
             .origin
     };
-    commands.entity(current).insert(RepositionMarker {
+    commands.entity(current).try_insert(RepositionMarker {
         origin: CGPoint {
             x: origin.x,
             y: origin.y,
@@ -196,12 +196,14 @@ fn command_center_window(
         return;
     };
     let frame = window.frame();
-    commands.entity(focused_entity).insert(RepositionMarker {
-        origin: CGPoint {
-            x: (active_display.bounds().size.width - frame.size.width) / 2.0,
-            y: frame.origin.y,
-        },
-    });
+    commands
+        .entity(focused_entity)
+        .try_insert(RepositionMarker {
+            origin: CGPoint {
+                x: (active_display.bounds().size.width - frame.size.width) / 2.0,
+                y: frame.origin.y,
+            },
+        });
     window_manager.center_mouse(&window, &active_display.bounds());
 }
 
@@ -225,10 +227,12 @@ fn resize_window(
     let x = (display_width - width).min(window.frame().origin.x);
     let y = window.frame().origin.y;
 
-    commands.entity(focused_entity).insert(RepositionMarker {
-        origin: CGPoint { x, y },
-    });
-    commands.entity(focused_entity).insert(ResizeMarker {
+    commands
+        .entity(focused_entity)
+        .try_insert(RepositionMarker {
+            origin: CGPoint { x, y },
+        });
+    commands.entity(focused_entity).try_insert(ResizeMarker {
         size: CGSize { width, height },
     });
 }
@@ -261,10 +265,12 @@ fn full_width_window(
         (display_width, 1.0, 0.0)
     };
 
-    commands.entity(focused_entity).insert(RepositionMarker {
-        origin: CGPoint { x, y },
-    });
-    commands.entity(focused_entity).insert(ResizeMarker {
+    commands
+        .entity(focused_entity)
+        .try_insert(RepositionMarker {
+            origin: CGPoint { x, y },
+        });
+    commands.entity(focused_entity).try_insert(ResizeMarker {
         size: CGSize { width, height },
     });
 
@@ -286,9 +292,9 @@ fn manage_window(
         window.id()
     );
     if unmanaged {
-        commands.entity(entity).remove::<Unmanaged>();
+        commands.entity(entity).try_remove::<Unmanaged>();
     } else {
-        commands.entity(entity).insert(Unmanaged::Floating);
+        commands.entity(entity).try_insert(Unmanaged::Floating);
     }
 }
 

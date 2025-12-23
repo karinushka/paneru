@@ -2,8 +2,9 @@ use std::time::Duration;
 
 use bevy::{
     ecs::{
-        query::With,
-        system::{Local, Res, ResMut, Single, SystemParam},
+        query::{With, Without},
+        system::{Local, Query, Res, ResMut, Single, SystemParam},
+        world::Mut,
     },
     time::{Time, Timer, TimerMode, Virtual},
 };
@@ -103,6 +104,7 @@ impl ThrottledSystem<'_, '_> {
 pub struct ActiveDisplay<'w, 's> {
     display: Single<'w, 's, &'static Display, With<ActiveDisplayMarker>>,
     window_manager: Res<'w, WindowManager>,
+    other_displays: Query<'w, 's, &'static Display, Without<ActiveDisplayMarker>>,
 }
 
 impl ActiveDisplay<'_, '_> {
@@ -112,6 +114,10 @@ impl ActiveDisplay<'_, '_> {
 
     pub fn id(&self) -> CGDirectDisplayID {
         self.display.id()
+    }
+
+    pub fn other(&self) -> impl Iterator<Item = &Display> {
+        self.other_displays.iter()
     }
 
     pub fn active_panel(&self) -> crate::errors::Result<&WindowPane> {
@@ -129,6 +135,7 @@ impl ActiveDisplay<'_, '_> {
 pub struct ActiveDisplayMut<'w, 's> {
     display: Single<'w, 's, &'static mut Display, With<ActiveDisplayMarker>>,
     window_manager: Res<'w, WindowManager>,
+    other_displays: Query<'w, 's, &'static mut Display, Without<ActiveDisplayMarker>>,
 }
 
 impl ActiveDisplayMut<'_, '_> {
@@ -138,6 +145,10 @@ impl ActiveDisplayMut<'_, '_> {
 
     pub fn id(&self) -> CGDirectDisplayID {
         self.display.id()
+    }
+
+    pub fn other(&mut self) -> impl Iterator<Item = Mut<'_, Display>> {
+        self.other_displays.iter_mut()
     }
 
     pub fn active_panel(&mut self) -> crate::errors::Result<&mut WindowPane> {

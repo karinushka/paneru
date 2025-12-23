@@ -3,7 +3,7 @@ use bevy::ecs::observer::On;
 use bevy::ecs::query::{Has, With};
 use bevy::ecs::system::{Commands, Query, Res, Single};
 use log::{debug, error};
-use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{CGPoint, CGSize};
 use stdext::function_name;
 
 use crate::config::{Config, preset_column_widths};
@@ -143,11 +143,14 @@ fn command_move_focus(
 fn command_swap_focus(
     direction: &Direction,
     current: Entity,
-    panel: &mut WindowPane,
-    display_bounds: &CGRect,
+    active_display: &mut ActiveDisplayMut,
     windows: &mut Query<&mut Window>,
     commands: &mut Commands,
 ) -> Option<Entity> {
+    let display_bounds = active_display.bounds();
+    let display_id = active_display.id();
+    let panel = active_display.active_panel().ok()?;
+
     let index = panel.index_of(current).ok()?;
     let other_window = get_window_in_direction(direction, current, panel)?;
     let new_index = panel.index_of(other_window).ok()?;
@@ -173,6 +176,7 @@ fn command_swap_focus(
             x: origin.x,
             y: origin.y,
         },
+        display_id,
     });
     if index < new_index {
         (index..new_index).for_each(|idx| panel.swap(idx, idx + 1));
@@ -203,6 +207,7 @@ fn command_center_window(
                 x: (active_display.bounds().size.width - frame.size.width) / 2.0,
                 y: frame.origin.y,
             },
+            display_id: active_display.id(),
         });
     window_manager.center_mouse(&window, &active_display.bounds());
 }
@@ -231,6 +236,7 @@ fn resize_window(
         .entity(focused_entity)
         .try_insert(RepositionMarker {
             origin: CGPoint { x, y },
+            display_id: active_display.id(),
         });
     commands.entity(focused_entity).try_insert(ResizeMarker {
         size: CGSize { width, height },
@@ -269,6 +275,7 @@ fn full_width_window(
         .entity(focused_entity)
         .try_insert(RepositionMarker {
             origin: CGPoint { x, y },
+            display_id: active_display.id(),
         });
     commands.entity(focused_entity).try_insert(ResizeMarker {
         size: CGSize { width, height },
@@ -322,7 +329,6 @@ fn command_windows(
     commands: &mut Commands,
     config: &Config,
 ) -> Result<()> {
-    let bounds = active_display.bounds();
     let active_panel = active_display.active_panel()?;
     let managed = windows
         .get(focused_entity)
@@ -345,8 +351,7 @@ fn command_windows(
             command_swap_focus(
                 direction,
                 focused_entity,
-                active_panel,
-                &bounds,
+                active_display,
                 &mut lens.query(),
                 commands,
             );

@@ -5,7 +5,7 @@ use bevy::ecs::observer::On;
 use bevy::ecs::query::{Has, With, Without};
 use bevy::ecs::system::{Commands, Populated, Query, Res, ResMut, Single};
 use log::{debug, error, trace, warn};
-use objc2_core_foundation::{CGPoint, CGRect};
+use objc2_core_foundation::CGPoint;
 use std::mem::take;
 use std::time::Duration;
 use stdext::function_name;
@@ -266,7 +266,6 @@ fn workspace_change_trigger(
         With<FocusedMarker>,
     >,
     mut active_display: ActiveDisplayMut,
-    mut other_displays: Query<&mut Display, Without<ActiveDisplayMarker>>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
@@ -310,8 +309,8 @@ fn workspace_change_trigger(
         window.id(),
     );
 
-    other_displays
-        .iter_mut()
+    active_display
+        .other()
         .for_each(|mut display| display.remove_window(entity));
     active_display.display().remove_window(entity);
     if let Ok(panel) = active_display.active_panel() {
@@ -754,13 +753,12 @@ pub fn reshuffle_around_window(
             cmd.try_remove::<ReshuffleAroundMarker>();
         }
         let display_bounds = active_display.bounds();
-        let menubar_height = active_display.display().menubar_height;
         let Ok(active_panel) = active_display.active_panel() else {
             return;
         };
 
         // let (window, _, moving) = windows.get_mut(entity)?;
-        let frame = window.expose_window(&display_bounds, moving, entity, &mut commands);
+        let frame = window.expose_window(&active_display, moving, entity, &mut commands);
         trace!(
             "{}: Moving window {} to {:?}",
             function_name!(),
@@ -778,8 +776,7 @@ pub fn reshuffle_around_window(
             frame.origin.x,
             &panel,
             frame.size.width,
-            &display_bounds,
-            menubar_height,
+            &active_display,
             &mut windows,
             &mut commands,
         );
@@ -807,8 +804,7 @@ pub fn reshuffle_around_window(
                         upper_left,
                         panel,
                         frame.size.width,
-                        &display_bounds,
-                        menubar_height,
+                        &active_display,
                         &mut windows,
                         &mut commands,
                     );
@@ -842,8 +838,7 @@ pub fn reshuffle_around_window(
                         upper_left,
                         panel,
                         frame.size.width,
-                        &display_bounds,
-                        menubar_height,
+                        &active_display,
                         &mut windows,
                         &mut commands,
                     );
@@ -869,20 +864,20 @@ fn reposition_stack(
     upper_left: f64,
     panel: &Panel,
     width: f64,
-    display_bounds: &CGRect,
-    menubar_height: f64,
+    active_display: &ActiveDisplay,
     windows: &mut Query<(&mut Window, Entity, Option<&RepositionMarker>)>,
     commands: &mut Commands,
 ) {
     const REMAINING_THERSHOLD: f64 = 200.0;
-    let display_height = display_bounds.size.height - menubar_height;
+    let display_height =
+        active_display.bounds().size.height - active_display.display().menubar_height;
     let entities = match panel {
         Panel::Single(entity) => vec![*entity],
         Panel::Stack(stack) => stack.clone(),
     };
     let count: f64 = u32::try_from(entities.len()).unwrap().into();
     let mut fits = 0f64;
-    let mut height = menubar_height;
+    let mut height = active_display.display().menubar_height;
     let mut remaining = display_height;
     for entity in &entities[0..entities.len() - 1] {
         remaining = display_height - height;
@@ -914,12 +909,13 @@ fn reposition_stack(
                     x: upper_left,
                     y: y_pos,
                 },
+                display_id: active_display.id(),
             });
             if fits > 0.0 {
                 y_pos += window_height;
                 fits -= 1.0;
             } else {
-                window.resize(width, avg_height, display_bounds);
+                window.resize(width, avg_height, &active_display.bounds());
                 y_pos += avg_height;
             }
         }

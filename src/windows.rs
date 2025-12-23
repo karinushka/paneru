@@ -22,6 +22,7 @@ use stdext::function_name;
 
 use crate::errors::{Error, Result};
 use crate::events::RepositionMarker;
+use crate::params::ActiveDisplay;
 use crate::platform::{Pid, ProcessSerialNumber};
 use crate::skylight::{
     _AXUIElementGetWindow, _SLPSSetFrontProcessWithOptions, AXUIElementCopyAttributeValue,
@@ -954,20 +955,28 @@ impl Window {
     /// The adjusted `CGRect` of the window after exposure.
     pub fn expose_window(
         &self,
-        display_bounds: &CGRect,
+        active_display: &ActiveDisplay,
         moving: Option<&RepositionMarker>,
         entity: Entity,
         commands: &mut Commands,
     ) -> CGRect {
         // Check if window needs to be fully exposed
         let window_id = self.id();
-        let mut frame = if let Some(RepositionMarker { origin }) = moving {
-            let mut frame = self.frame;
-            frame.origin = *origin;
-            frame
-        } else {
-            self.frame
-        };
+        let (mut frame, display_bounds) =
+            if let Some(RepositionMarker { origin, display_id }) = moving {
+                let frame = CGRect {
+                    origin: *origin,
+                    ..self.frame
+                };
+                let bounds = active_display
+                    .other()
+                    .find(|display| display.id() == *display_id)
+                    .map_or(active_display.bounds(), |display| display.bounds);
+
+                (frame, bounds)
+            } else {
+                (self.frame, active_display.bounds())
+            };
         trace!("{}: focus original position {frame:?}", function_name!());
         let moved = if frame.origin.x + frame.size.width > display_bounds.size.width {
             trace!(
@@ -989,8 +998,13 @@ impl Window {
             false
         };
         if moved {
+            let display_id = match moving {
+                Some(marker) => marker.display_id,
+                None => active_display.id(),
+            };
             commands.entity(entity).try_insert(RepositionMarker {
                 origin: frame.origin,
+                display_id,
             });
             trace!("{}: focus resposition to {frame:?}", function_name!());
         }

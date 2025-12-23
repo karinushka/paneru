@@ -208,6 +208,7 @@ pub struct ExistingMarker;
 #[derive(Component)]
 pub struct RepositionMarker {
     pub origin: CGPoint,
+    pub display_id: CGDirectDisplayID,
 }
 
 #[derive(Component)]
@@ -612,7 +613,7 @@ impl EventHandler {
     #[allow(clippy::needless_pass_by_value)]
     fn animate_windows(
         windows: Populated<(&mut Window, Entity, &RepositionMarker)>,
-        active_display: ActiveDisplay,
+        displays: Query<&Display>,
         time: Res<Time<Virtual>>,
         config: Res<Config>,
         mut commands: Commands,
@@ -626,7 +627,10 @@ impl EventHandler {
             .max(500.0);
         let move_delta = move_speed * time.delta_secs_f64();
 
-        for (mut window, entity, RepositionMarker { origin }) in windows {
+        for (mut window, entity, RepositionMarker { origin, display_id }) in windows {
+            let Some(display) = displays.iter().find(|display| display.id() == *display_id) else {
+                continue;
+            };
             let current = window.frame().origin;
             let mut delta_x = (origin.x - current.x).abs().min(move_delta);
             let mut delta_y = (origin.y - current.y).abs().min(move_delta);
@@ -634,8 +638,8 @@ impl EventHandler {
                 commands.entity(entity).try_remove::<RepositionMarker>();
                 window.reposition(
                     origin.x,
-                    origin.y.max(active_display.display().menubar_height),
-                    &active_display.bounds(),
+                    origin.y.max(display.menubar_height),
+                    &display.bounds,
                 );
                 continue;
             }
@@ -656,8 +660,8 @@ impl EventHandler {
             );
             window.reposition(
                 current.x + delta_x,
-                (current.y + delta_y).max(active_display.display().menubar_height),
-                &active_display.bounds(),
+                (current.y + delta_y).max(display.menubar_height),
+                &display.bounds,
             );
         }
     }

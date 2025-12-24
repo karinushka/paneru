@@ -498,6 +498,7 @@ fn display_remove_trigger(
     mut displays: Query<(&mut Display, Entity)>,
     mut commands: Commands,
 ) {
+    const ORPHANED_SPACES_TIMEOUT_SEC: u64 = 5;
     let Event::DisplayRemoved { display_id } = trigger.event().0 else {
         return;
     };
@@ -514,8 +515,15 @@ fn display_remove_trigger(
         .into_iter()
         .filter(|(_, pane)| pane.len() > 0)
     {
-        debug!("{}: adding {pane} to orphaned list.", function_name!(),);
-        commands.spawn(OrphanedPane { id, pane });
+        debug!("{}: adding {id} {pane} to orphaned list.", function_name!());
+        let timeout = Timeout::new(
+            Duration::from_secs(ORPHANED_SPACES_TIMEOUT_SEC),
+            Some(format!(
+                "{}: Orphaned pane {id} ({pane}) could not be re-inserted after {ORPHANED_SPACES_TIMEOUT_SEC}s.",
+                function_name!(),
+            )),
+        );
+        commands.spawn((timeout, OrphanedPane { id, pane }));
     }
 
     commands.entity(entity).despawn();

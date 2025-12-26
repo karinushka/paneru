@@ -30,7 +30,9 @@ use crate::skylight::{
     _SLPSGetFrontProcess, ConnID, SLSWindowIteratorAdvance, SLSWindowIteratorGetCount,
     SLSWindowIteratorGetParentID, SLSWindowQueryResultCopyWindows, SLSWindowQueryWindows, WinID,
 };
-use crate::util::{AXUIWrapper, add_run_loop, create_array, get_attribute, remove_run_loop};
+use crate::util::{
+    AXUIWrapper, add_run_loop, create_array, get_array_values, get_attribute, remove_run_loop,
+};
 use crate::windows::{Window, ax_window_id};
 
 pub static AX_NOTIFICATIONS: LazyLock<Vec<&str>> = LazyLock::new(|| {
@@ -155,9 +157,15 @@ impl Application {
     /// # Returns
     ///
     /// `Ok(CFRetained<CFArray>)` containing the list of window elements if successful, otherwise `Err(Error)`.
-    pub fn window_list(&self) -> Result<CFRetained<CFArray>> {
+    pub fn window_list(&self) -> Result<Vec<Result<Window>>> {
         let axwindows = CFString::from_static_str(kAXWindowsAttribute);
-        get_attribute::<CFArray>(&self.element, &axwindows)
+        let array = get_attribute::<CFArray>(&self.element, &axwindows)?;
+        let out = get_array_values::<accessibility_sys::__AXUIElement>(&array)
+            .map(|element| {
+                AXUIWrapper::retain(element.as_ptr()).and_then(|element| Window::new(&element))
+            })
+            .collect();
+        Ok(out)
     }
 
     /// Registers observers for general application-level accessibility notifications (e.g., `kAXCreatedNotification`).

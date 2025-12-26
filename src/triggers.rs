@@ -20,7 +20,7 @@ use crate::events::{
 };
 use crate::params::{ActiveDisplay, ActiveDisplayMut, Configuration};
 use crate::process::Process;
-use crate::windows::{Display, Panel, Window, WindowPane, ax_window_pid};
+use crate::windows::{Display, Panel, Window, WindowPane};
 
 const WINDOW_HIDDEN_THRESHOLD: f64 = 10.0;
 
@@ -1342,7 +1342,7 @@ fn spawn_window_trigger(
             continue;
         }
 
-        let Ok(pid) = ax_window_pid(&window.element()) else {
+        let Ok(pid) = window.pid() else {
             warn!(
                 "{}: Unable to get window pid for {}",
                 function_name!(),

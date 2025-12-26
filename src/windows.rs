@@ -473,30 +473,6 @@ pub fn ax_window_id(element_ref: AXUIElementRef) -> Result<WinID> {
     Ok(window_id)
 }
 
-/// Retrieves the process ID (Pid) from an `AXUIWrapper` representing an Accessibility UI element.
-///
-/// # Arguments
-///
-/// * `element_ref` - A reference to the `CFRetained<AXUIWrapper>` element.
-///
-/// # Returns
-///
-/// `Ok(Pid)` with the process ID if successful, otherwise `Err(Error)`.
-pub fn ax_window_pid(element_ref: &CFRetained<AXUIWrapper>) -> Result<Pid> {
-    let pid: Pid = unsafe {
-        NonNull::new_unchecked(element_ref.as_ptr::<Pid>())
-            .byte_add(0x10)
-            .read()
-    };
-    (pid != 0).then_some(pid).ok_or(Error::new(
-        ErrorKind::InvalidData,
-        format!(
-            "{}: can not get pid from {element_ref:?}.",
-            function_name!()
-        ),
-    ))
-}
-
 #[derive(Component, Debug)]
 pub struct Window {
     id: WinID,
@@ -1013,6 +989,24 @@ impl Window {
 
     pub fn width_ratio(&mut self, width_ratio: f64) {
         self.width_ratio = width_ratio;
+    }
+
+    pub fn pid(&self) -> Result<Pid> {
+        let pid: Pid = unsafe {
+            // return *(pid_t *)((void *) ref + 0x10);
+            NonNull::new_unchecked(self.ax_element.as_ptr::<Pid>())
+                .byte_add(0x10)
+                .read()
+            // *(((element_ref.as_ptr() as *const c_void).wrapping_add(0x10)) as *const Pid)
+        };
+        (pid != 0).then_some(pid).ok_or(Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "{}: can not get pid from {:?}.",
+                function_name!(),
+                self.ax_element
+            ),
+        ))
     }
 }
 

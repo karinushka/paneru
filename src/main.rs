@@ -17,6 +17,7 @@ mod platform;
 mod process;
 mod service;
 mod skylight;
+mod systems;
 mod triggers;
 mod util;
 mod windows;

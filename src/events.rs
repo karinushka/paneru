@@ -1,15 +1,13 @@
-use bevy::app::{App as BevyApp, AppExit, Startup, Update};
+use bevy::app::{App as BevyApp, AppExit, Startup};
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
-use bevy::ecs::message::{Message, MessageReader, Messages};
-use bevy::ecs::query::Has;
+use bevy::ecs::message::{Message, Messages};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs;
-use bevy::ecs::system::{Commands, Populated, Query, Res, ResMut};
 use bevy::ecs::world::World;
 use bevy::prelude::Event as BevyEvent;
 use bevy::time::{Time, Timer, Virtual};
-use log::{debug, error, info, trace, warn};
+use log::{debug, error, warn};
 use objc2::rc::Retained;
 use objc2_core_foundation::{CFRetained, CGPoint, CGSize};
 use objc2_core_graphics::CGDirectDisplayID;
@@ -25,13 +23,13 @@ use crate::commands::{Command, process_command_trigger};
 use crate::config::Config;
 use crate::errors::Result;
 use crate::manager::WindowManager;
-use crate::params::ActiveDisplay;
 use crate::platform::{ProcessSerialNumber, WorkspaceObserver};
 use crate::process::{Process, ProcessRef};
 use crate::skylight::WinID;
-use crate::triggers::{register_triggers, reshuffle_around_window};
+use crate::systems::{gather_displays, register_systems, run_initial_oneshot_systems};
+use crate::triggers::register_triggers;
 use crate::util::AXUIWrapper;
-use crate::windows::{Display, Window, WindowPane};
+use crate::windows::{Window, WindowPane};
 
 #[allow(dead_code)]
 #[derive(Clone, Debug, Message)]
@@ -327,20 +325,10 @@ impl EventHandler {
             .insert_resource(FocusFollowsMouse(None))
             .insert_resource(PollForNotifications(true))
             .add_observer(process_command_trigger)
-            .add_systems(Startup, EventHandler::gather_displays)
-            .add_systems(Startup, process_setup.after(EventHandler::gather_displays))
-            .add_systems(
-                Update,
-                (
-                    // NOTE: To avoid weird timing issues, the dispatcher should be the first one.
-                    EventHandler::dispatch_toplevel_triggers,
-                    reshuffle_around_window,
-                    EventHandler::animate_windows,
-                    EventHandler::animate_resize_windows,
-                ),
-            );
+            .add_systems(Startup, gather_displays)
+            .add_systems(Startup, process_setup.after(gather_displays));
         register_triggers(&mut app);
-        WindowManager::register_systems(&mut app);
+        register_systems(&mut app);
         app.run();
 
         quit.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -390,89 +378,6 @@ impl EventHandler {
                 .advance_by(delta);
         }
         AppExit::Success
-    }
-
-    /// Processes a single incoming `Event`. It dispatches various event types to the `WindowManager` or other internal handlers.
-    ///
-    /// # Arguments
-    ///
-    /// * `messages` - A `MessageReader` for incoming `Event` messages.
-    /// * `commands` - Bevy commands to trigger events or insert resources.
-    #[allow(clippy::needless_pass_by_value)]
-    fn dispatch_toplevel_triggers(
-        mut messages: MessageReader<Event>,
-        mut broken_notifications: ResMut<PollForNotifications>,
-        mut commands: Commands,
-    ) {
-        for event in messages.read() {
-            match event {
-                Event::Command { command } => commands.trigger(CommandTrigger(command.clone())),
-
-                Event::ConfigRefresh { config } => {
-                    info!("{}: Configuration changed.", function_name!());
-                    commands.insert_resource(config.clone());
-                }
-
-                Event::WindowCreated { element } => {
-                    if let Ok(window) = Window::new(element).inspect_err(|err| {
-                        debug!("{}: not adding window {element:?}: {err}", function_name!());
-                    }) {
-                        commands.trigger(SpawnWindowTrigger(vec![window]));
-                    }
-                }
-
-                Event::SpaceChanged => {
-                    if broken_notifications.0 {
-                        broken_notifications.0 = false;
-                        info!(
-                            "{}: Workspace and display notifications arriving correctly. Disabling the polling.",
-                            function_name!()
-                        );
-                    }
-                    commands.trigger(WMEventTrigger(event.clone()));
-                }
-
-                Event::WindowTitleChanged { window_id } => {
-                    trace!("{}: WindowTitleChanged: {window_id:?}", function_name!());
-                }
-                Event::MenuClosed { window_id } => {
-                    trace!("{}: MenuClosed event: {window_id:?}", function_name!());
-                }
-                Event::DisplayResized { display_id } => {
-                    debug!("{}: Display Resized: {display_id:?}", function_name!());
-                }
-                Event::DisplayConfigured { display_id } => {
-                    debug!("{}: Display Configured: {display_id:?}", function_name!());
-                }
-                Event::SystemWoke { msg } => {
-                    debug!("{}: system woke: {msg:?}", function_name!());
-                }
-
-                _ => commands.trigger(WMEventTrigger(event.clone())),
-            }
-        }
-    }
-
-    /// Gathers all present displays and spawns them as entities in the Bevy world.
-    /// The active display is marked with `FocusedMarker`.
-    ///
-    /// # Arguments
-    ///
-    /// * `cid` - The main connection ID resource.
-    /// * `commands` - Bevy commands to spawn entities.
-    #[allow(clippy::needless_pass_by_value)]
-    fn gather_displays(window_manager: Res<WindowManager>, mut commands: Commands) {
-        let Ok(active_display_id) = window_manager.active_display_id() else {
-            error!("{}: Unable to get active display id!", function_name!());
-            return;
-        };
-        for display in window_manager.present_displays() {
-            if display.id() == active_display_id {
-                commands.spawn((display, ActiveDisplayMarker));
-            } else {
-                commands.spawn(display);
-            }
-        }
     }
 
     /// Gathers initial processes and configuration before the main loop starts.
@@ -540,163 +445,6 @@ impl EventHandler {
             }
         }
 
-        // Run initial setup systems in a one-shot way.
-        let existing_apps_setup = [
-            world.register_system(WindowManager::add_existing_process),
-            world.register_system(WindowManager::add_existing_application),
-            world.register_system(EventHandler::finish_setup),
-        ];
-
-        let init = existing_apps_setup
-            .into_iter()
-            .map(|id| world.run_system(id))
-            .collect::<std::result::Result<Vec<()>, _>>();
-        if let Err(err) = init {
-            error!("{}: Error running initial systems: {err}", function_name!());
-        }
-    }
-
-    /// Finishes the initialization process once all initial windows are loaded.
-    ///
-    /// # Arguments
-    ///
-    /// * `apps` - A query for all applications, checking if they are still marked as fresh.
-    /// * `windows` - A query for all windows.
-    /// * `initializing` - A query for the initializing marker entity.
-    /// * `displays` - A query for all displays.
-    /// * `main_cid` - The main connection ID resource.
-    /// * `commands` - Bevy commands to despawn entities and send messages.
-    #[allow(clippy::needless_pass_by_value)]
-    fn finish_setup(
-        mut windows: Query<(&mut Window, Entity, Has<Unmanaged>)>,
-        displays: Query<(&mut Display, Has<ActiveDisplayMarker>)>,
-        window_manager: Res<WindowManager>,
-        mut commands: Commands,
-    ) {
-        info!(
-            "{}: Finished Initialization: found {} windows.",
-            function_name!(),
-            windows.iter().len()
-        );
-
-        for (mut display, active) in displays {
-            window_manager.refresh_display(&mut display, &mut windows);
-
-            if active {
-                let active_panel = window_manager
-                    .active_display_space(display.id())
-                    .and_then(|active_space| display.active_panel(active_space));
-
-                let first_window = active_panel
-                    .ok()
-                    .and_then(|panel| panel.first().ok())
-                    .and_then(|panel| panel.top());
-                if let Some(entity) = first_window {
-                    debug!("{}: focusing {entity}", function_name!());
-                    commands.entity(entity).try_insert(FocusedMarker);
-                }
-            }
-        }
-    }
-
-    /// Animates window movement.
-    /// This is a Bevy system that runs on `Update`. It smoothly moves windows to their target
-    /// positions, as indicated by the `RepositionMarker` component.
-    ///
-    /// # Arguments
-    ///
-    /// * `windows` - A query for windows with a `RepositionMarker`.
-    /// * `displays` - A query for the active display.
-    /// * `time` - The Bevy `Time` resource.
-    /// * `config` - The optional configuration resource, used for animation speed.
-    /// * `commands` - Bevy commands to remove the `RepositionMarker` when animation is complete.
-    #[allow(clippy::needless_pass_by_value)]
-    fn animate_windows(
-        windows: Populated<(&mut Window, Entity, &RepositionMarker)>,
-        displays: Query<&Display>,
-        time: Res<Time<Virtual>>,
-        config: Res<Config>,
-        mut commands: Commands,
-    ) {
-        let move_speed = config
-            .options()
-            .animation_speed
-            // If unset, set it to something high, so the move happens immediately,
-            // effectively disabling animation.
-            .unwrap_or(1_000_000.0)
-            .max(500.0);
-        let move_delta = move_speed * time.delta_secs_f64();
-
-        for (mut window, entity, RepositionMarker { origin, display_id }) in windows {
-            let Some(display) = displays.iter().find(|display| display.id() == *display_id) else {
-                continue;
-            };
-            let current = window.frame().origin;
-            let mut delta_x = (origin.x - current.x).abs().min(move_delta);
-            let mut delta_y = (origin.y - current.y).abs().min(move_delta);
-            if delta_x < move_delta && delta_y < move_delta {
-                commands.entity(entity).try_remove::<RepositionMarker>();
-                window.reposition(
-                    origin.x,
-                    origin.y.max(display.menubar_height),
-                    &display.bounds,
-                );
-                continue;
-            }
-
-            if origin.x < current.x {
-                delta_x = -delta_x;
-            }
-            if origin.y < current.y {
-                delta_y = -delta_y;
-            }
-            trace!(
-                "{}: window {} dest {:?} delta {move_delta:.0} moving to {:.0}:{:.0}",
-                function_name!(),
-                window.id(),
-                origin,
-                current.x + delta_x,
-                current.y + delta_y,
-            );
-            window.reposition(
-                current.x + delta_x,
-                (current.y + delta_y).max(display.menubar_height),
-                &display.bounds,
-            );
-        }
-    }
-
-    /// Animates window resizing.
-    /// This is a Bevy system that runs on `Update`. It resizes windows to their target
-    /// dimensions, as indicated by the `ResizeMarker` component.
-    ///
-    /// # Arguments
-    ///
-    /// * `windows` - A query for windows with a `ResizeMarker`.
-    /// * `displays` - A query for the active display.
-    /// * `commands` - Bevy commands to remove the `ResizeMarker` when resizing is complete.
-    #[allow(clippy::needless_pass_by_value)]
-    fn animate_resize_windows(
-        windows: Populated<(&mut Window, Entity, &ResizeMarker)>,
-        active_display: ActiveDisplay,
-        mut commands: Commands,
-    ) {
-        for (mut window, entity, ResizeMarker { size }) in windows {
-            let origin = window.frame().origin;
-            let width = if origin.x + size.width < active_display.bounds().size.width + 0.4 {
-                commands.entity(entity).try_remove::<ResizeMarker>();
-                size.width
-            } else {
-                active_display.bounds().size.width - origin.x
-            };
-            debug!(
-                "{}: window {} resize {}:{}",
-                function_name!(),
-                window.id(),
-                width,
-                size.height,
-            );
-            window.resize(width, size.height, &active_display.bounds());
-        }
+        run_initial_oneshot_systems(world);
     }
 }

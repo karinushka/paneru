@@ -956,6 +956,7 @@ fn swipe_gesture_trigger(
     trigger: On<WMEventTrigger>,
     active_display: ActiveDisplay,
     mut focused_window: Single<(&mut Window, Entity), With<FocusedMarker>>,
+    other_windows: Query<(&Window, Entity), Without<FocusedMarker>>,
     window_manager: Res<WindowManager>,
     config: Configuration,
     mut commands: Commands,
@@ -969,12 +970,26 @@ fn swipe_gesture_trigger(
         .is_some_and(|fingers| deltas.len() == fingers)
     {
         let delta = deltas.iter().sum::<f64>();
-        if delta.abs() > SWIPE_THRESHOLD {
-            let (ref mut window, entity) = *focused_window;
-            slide_window(&window_manager, window, active_display.display(), delta);
-            if let Ok(mut cmd) = commands.get_entity(entity) {
-                cmd.try_insert(ReshuffleAroundMarker);
-            }
+        if delta.abs() < SWIPE_THRESHOLD {
+            return;
+        }
+
+        let (ref mut window, entity) = *focused_window;
+
+        slide_window(&window_manager, window, &active_display, delta);
+        if let Ok(mut cmd) = commands.get_entity(entity) {
+            cmd.try_insert(ReshuffleAroundMarker);
+        }
+
+        if config.continuous_swipe() {
+            slide_to_next_window(
+                window,
+                entity,
+                &active_display,
+                deltas,
+                other_windows,
+                commands,
+            );
         }
     }
 }
@@ -991,23 +1006,66 @@ fn swipe_gesture_trigger(
 fn slide_window(
     window_manager: &WindowManager,
     window: &mut Window,
-    active_display: &Display,
+    active_display: &ActiveDisplay,
     delta_x: f64,
 ) {
     trace!("{}: Windows slide {delta_x}.", function_name!());
     let frame = window.frame();
     // Delta is relative to the touchpad size, so to avoid too fast movement we
     // scale it down by half.
-    let x = frame.origin.x - (active_display.bounds.size.width / 2.0 * delta_x);
+    let x = frame.origin.x - (active_display.bounds().size.width / 2.0 * delta_x);
+
     window.reposition(
-        x.min(active_display.bounds.size.width - frame.size.width)
+        x.min(active_display.bounds().size.width - frame.size.width)
             .max(0.0),
         frame.origin.y,
-        &active_display.bounds,
+        &active_display.bounds(),
     );
+
     window_manager
         .0
-        .center_mouse(window, &active_display.bounds);
+        .center_mouse(window, &active_display.bounds());
+}
+
+fn slide_to_next_window(
+    window: &mut Window,
+    entity: Entity,
+    active_display: &ActiveDisplay,
+    deltas: &[f64],
+    other_windows: Query<(&Window, Entity), Without<FocusedMarker>>,
+    mut commands: Commands,
+) {
+    let delta_x = deltas.iter().sum::<f64>();
+    let frame = window.frame();
+    let x = frame.origin.x - (active_display.bounds().size.width / 2.0 * delta_x);
+
+    if x > 0.0 && x < (active_display.bounds().size.width - frame.size.width) {
+        return;
+    }
+    let Ok(pane) = active_display.active_panel() else {
+        return;
+    };
+    let mut next_window = Some(entity);
+    let get_neighbour = |p: &Panel| {
+        next_window = p.top();
+        false
+    };
+    if x < 0.0 {
+        let _ = pane.access_right_of(entity, get_neighbour);
+    } else {
+        let _ = pane.access_left_of(entity, get_neighbour);
+    }
+
+    let Some((window, _)) = next_window.and_then(|entity| other_windows.get(entity).ok()) else {
+        return;
+    };
+
+    commands.trigger(WMEventTrigger(Event::WindowFocused {
+        window_id: window.id(),
+    }));
+    commands.trigger(WMEventTrigger(Event::Swipe {
+        deltas: deltas.to_owned(),
+    }));
 }
 
 /// Handles Mission Control events, updating the `MissionControlActive` resource.

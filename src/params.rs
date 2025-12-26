@@ -46,6 +46,11 @@ impl Configuration<'_> {
             .is_none_or(|mff| mff)
     }
 
+    pub fn continuous_swipe(&self) -> bool {
+        // Default is enabled.
+        self.config.options().continuous_swipe.is_none_or(|cs| cs)
+    }
+
     /// Returns the number of fingers for swipe gestures.
     pub fn swipe_gesture_fingers(&self) -> Option<usize> {
         self.config.options().swipe_gesture_fingers

@@ -1,13 +1,7 @@
-use bevy::app::Update;
 use bevy::ecs::entity::Entity;
-use bevy::ecs::hierarchy::{ChildOf, Children};
-use bevy::ecs::message::MessageWriter;
-use bevy::ecs::query::{Has, Or, With};
+use bevy::ecs::query::Has;
 use bevy::ecs::resource::Resource;
-use bevy::ecs::schedule::IntoScheduleConfigs;
-use bevy::ecs::schedule::common_conditions::resource_equals;
-use bevy::ecs::system::{Commands, Local, Populated, Query, Res};
-use bevy::time::{Time, Virtual};
+use bevy::ecs::system::Query;
 use core::ptr::NonNull;
 use log::{debug, error, trace, warn};
 use objc2_core_foundation::{
@@ -21,17 +15,11 @@ use std::io::ErrorKind;
 use std::ops::Deref;
 use std::ptr::null_mut;
 use std::slice::from_raw_parts_mut;
-use std::time::Duration;
 use stdext::function_name;
 
 use crate::app::Application;
 use crate::errors::{Error, Result};
-use crate::events::{
-    ActiveDisplayMarker, BProcess, Event, ExistingMarker, FreshMarker, OrphanedPane,
-    PollForNotifications, SenderSocket, SpawnWindowTrigger, StrayFocusEvent, Timeout, Unmanaged,
-    WMEventTrigger,
-};
-use crate::params::{ActiveDisplay, ActiveDisplayMut, ThrottledSystem};
+use crate::events::Unmanaged;
 use crate::platform::ProcessSerialNumber;
 use crate::skylight::{
     _AXUIElementCreateWithRemoteToken, ConnID, SLSCopyActiveMenuBarDisplayIdentifier,
@@ -60,33 +48,6 @@ impl WindowManager {
         debug!("{}: My connection id: {main_cid}", function_name!());
 
         Self { main_cid }
-    }
-
-    /// Registers the Bevy systems for the `WindowManager`.
-    ///
-    /// # Arguments
-    ///
-    /// * `app` - The Bevy application to register the systems with.
-    pub fn register_systems(app: &mut bevy::app::App) {
-        app.add_systems(
-            Update,
-            (
-                WindowManager::add_launched_process,
-                WindowManager::add_launched_application,
-                WindowManager::fresh_marker_cleanup,
-                WindowManager::timeout_ticker,
-                WindowManager::retry_stray_focus,
-                WindowManager::find_orphaned_spaces,
-            ),
-        );
-        app.add_systems(
-            Update,
-            (
-                WindowManager::display_changes_watcher,
-                WindowManager::workspace_change_watcher,
-            )
-                .run_if(resource_equals(PollForNotifications(true))),
-        );
     }
 
     /// Refreshes the list of active displays and reorganizes windows across them.
@@ -137,263 +98,6 @@ impl WindowManager {
                 "{}: space {space_id}: after refresh {pane}",
                 function_name!()
             );
-        }
-    }
-
-    /// Adds an existing process to the window manager. This is used during initial setup for already running applications.
-    /// It attempts to create and observe the application and its windows.
-    ///
-    /// # Arguments
-    ///
-    /// * `wm` - The `WindowManager` resource.
-    /// * `events` - The event sender socket resource.
-    /// * `process_query` - A query for existing processes marked with `ExistingMarker`.
-    /// * `commands` - Bevy commands to spawn entities and manage components.
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn add_existing_process(
-        wm: Res<WindowManager>,
-        events: Res<SenderSocket>,
-        process_query: Query<(Entity, &BProcess), With<ExistingMarker>>,
-        mut commands: Commands,
-    ) {
-        for (entity, process) in process_query {
-            let app = Application::new(&wm, &process.0, &events.0).unwrap();
-            commands.spawn((app, ExistingMarker, ChildOf(entity)));
-            commands.entity(entity).try_remove::<ExistingMarker>();
-        }
-    }
-
-    /// Adds an existing application to the window manager. This is used during initial setup.
-    /// It observes the application and adds its windows.
-    ///
-    /// # Arguments
-    ///
-    /// * `wm` - The `WindowManager` resource.
-    /// * `displays` - A query for all displays.
-    /// * `app_query` - A query for existing applications marked with `ExistingMarker`.
-    /// * `commands` - Bevy commands to spawn entities and manage components.
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn add_existing_application(
-        wm: Res<WindowManager>,
-        displays: Query<&Display>,
-        app_query: Query<(&mut Application, Entity), With<ExistingMarker>>,
-        mut commands: Commands,
-    ) {
-        let spaces = displays
-            .iter()
-            .flat_map(|display| display.spaces.keys().copied().collect::<Vec<_>>())
-            .collect::<Vec<_>>();
-
-        for (mut app, entity) in app_query {
-            if app.observe().is_ok_and(|result| result)
-                && let Ok(windows) = wm
-                    .add_existing_application_windows(&mut app, &spaces, 0)
-                    .inspect_err(|err| warn!("{}: {err}", function_name!()))
-            {
-                commands.trigger(SpawnWindowTrigger(windows));
-            }
-            commands.entity(entity).try_remove::<ExistingMarker>();
-        }
-    }
-
-    /// Handles the event when a new application is launched. It creates a `Process` and `Application` object,
-    /// observes the application for events, and adds its windows to the manager.
-    ///
-    /// # Arguments
-    ///
-    /// * `wm` - The `WindowManager` resource.
-    /// * `events` - The event sender socket resource.
-    /// * `process_query` - A query for newly launched processes marked with `FreshMarker`.
-    /// * `commands` - Bevy commands to spawn entities and manage components.
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn add_launched_process(
-        wm: Res<WindowManager>,
-        events: Res<SenderSocket>,
-        process_query: Populated<(Entity, &mut BProcess, Has<Children>), With<FreshMarker>>,
-        mut commands: Commands,
-    ) {
-        const APP_OBSERVABLE_TIMEOUT_SEC: u64 = 5;
-        for (entity, mut process, children) in process_query {
-            let process = &mut *process.0;
-            if !process.ready() {
-                continue;
-            }
-
-            if children {
-                // Process already has an attached Application, so finish.
-                commands.entity(entity).try_remove::<FreshMarker>();
-                continue;
-            }
-
-            let mut app = Application::new(&wm, process, &events.0).unwrap();
-
-            if app.observe().is_ok_and(|good| good) {
-                let timeout = Timeout::new(
-                    Duration::from_secs(APP_OBSERVABLE_TIMEOUT_SEC),
-                    Some(format!(
-                        "{}: {app} did not become observable in {APP_OBSERVABLE_TIMEOUT_SEC}s.",
-                        function_name!(),
-                    )),
-                );
-                commands.spawn((app, FreshMarker, timeout, ChildOf(entity)));
-            } else {
-                debug!(
-                    "{}: failed to register some observers {}",
-                    function_name!(),
-                    process.name
-                );
-            }
-        }
-    }
-
-    /// Adds windows for a newly launched application.
-    ///
-    /// # Arguments
-    ///
-    /// * `app_query` - A query for newly launched applications marked with `FreshMarker`.
-    /// * `windows` - A query for all windows.
-    /// * `commands` - Bevy commands to spawn entities and manage components.
-    pub fn add_launched_application(
-        app_query: Populated<(&mut Application, Entity), With<FreshMarker>>,
-        windows: Query<&Window>,
-        mut commands: Commands,
-    ) {
-        // TODO: maybe refactor this with add_existing_application_windows()
-        let find_window = |window_id| windows.iter().find(|window| window.id() == window_id);
-
-        for (app, entity) in app_query {
-            let Ok(array) = app.window_list() else {
-                continue;
-            };
-            let create_window = |element_ref: NonNull<_>| {
-                let element = AXUIWrapper::retain(element_ref.as_ptr()).ok();
-                element.and_then(|element| {
-                    let window_id = ax_window_id(element.as_ptr())
-                        .inspect_err(|err| {
-                            warn!("{}: error adding window: {err}", function_name!());
-                        })
-                        .ok()?;
-                    if find_window(window_id).is_none() {
-                        // Window does not exist, create it.
-                        Some(Window::new(&element).inspect_err(|err| {
-                            warn!("{}: error adding window: {err}.", function_name!());
-                        }))
-                    } else {
-                        // Window already exists, skip it.
-                        None
-                    }
-                })
-            };
-            let windows = get_array_values::<accessibility_sys::__AXUIElement>(&array)
-                .filter_map(create_window)
-                .flatten()
-                .collect::<Vec<_>>();
-            commands.entity(entity).try_remove::<FreshMarker>();
-            commands.trigger(SpawnWindowTrigger(windows));
-        }
-    }
-
-    /// Cleans up entities which have been initializing for too long.
-    ///
-    /// This can be processes which are not yet observable or applications which keep failing to
-    /// register some of the observers.
-    #[allow(clippy::type_complexity)]
-    pub fn fresh_marker_cleanup(
-        cleanup: Populated<
-            (Entity, Has<FreshMarker>, &Timeout),
-            Or<(With<BProcess>, With<Application>)>,
-        >,
-        mut commands: Commands,
-    ) {
-        for (entity, fresh, _) in cleanup {
-            if !fresh {
-                // Process was ready before the timer finished.
-                commands.entity(entity).try_remove::<Timeout>();
-            }
-        }
-    }
-
-    /// A Bevy system that ticks timers and despawns entities when their timers finish.
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn timeout_ticker(
-        timers: Populated<(Entity, &mut Timeout)>,
-        clock: Res<Time<Virtual>>,
-        mut commands: Commands,
-    ) {
-        for (entity, mut timeout) in timers {
-            if timeout.timer.is_finished() {
-                trace!(
-                    "{}: Despawning entity {entity} due to timeout.",
-                    function_name!(),
-                );
-                if let Some(message) = &timeout.message {
-                    debug!("{message}");
-                }
-                trace!("{}: Removing timer {entity}", function_name!());
-                commands.entity(entity).despawn();
-            } else {
-                trace!(
-                    "{}: Timer {}",
-                    function_name!(),
-                    timeout.timer.elapsed().as_secs_f32()
-                );
-                timeout.timer.tick(clock.delta());
-            }
-        }
-    }
-
-    /// A Bevy system that retries focusing a window if the focus event arrived before the window was created.
-    pub fn retry_stray_focus(
-        focus_events: Populated<(Entity, &StrayFocusEvent)>,
-        windows: Query<&Window>,
-        mut messages: MessageWriter<Event>,
-        mut commands: Commands,
-    ) {
-        for (timeout_entity, stray_focus) in focus_events {
-            let window_id = stray_focus.0;
-            if windows.iter().any(|window| window.id() == window_id) {
-                debug!(
-                    "{}: Re-queueing lost focus event for window id {window_id}.",
-                    function_name!()
-                );
-                messages.write(Event::WindowFocused { window_id });
-                commands.entity(timeout_entity).despawn();
-            }
-        }
-    }
-
-    /// A Bevy system that finds and re-assigns orphaned spaces to the active display.
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn find_orphaned_spaces(
-        orphaned_spaces: Populated<(Entity, &mut OrphanedPane)>,
-        mut active_display: ActiveDisplayMut,
-        mut commands: Commands,
-    ) {
-        let active_display_id = active_display.id();
-
-        for (entity, orphan_pane) in orphaned_spaces {
-            debug!(
-                "{}: Checking orphaned pane {}",
-                function_name!(),
-                orphan_pane.id
-            );
-            for (space_id, pane) in &mut active_display.display().spaces {
-                if *space_id == orphan_pane.id {
-                    debug!(
-                        "{}: Re-inserting orphaned pane {} into display {}",
-                        function_name!(),
-                        orphan_pane.id,
-                        active_display_id
-                    );
-
-                    for window_entity in orphan_pane.pane.all_windows() {
-                        // TODO: check for clashing windows.
-                        pane.append(window_entity);
-                    }
-
-                    commands.entity(entity).despawn();
-                }
-            }
         }
     }
 
@@ -668,7 +372,7 @@ impl WindowManager {
     /// `Ok(Vec<Window>)` containing the found windows, otherwise `Err(Error)`.
     // bool window_manager_add_existing_application_windows(struct space_manager *sm,
     // struct window_manager *wm, struct application *application, int refresh_index)
-    fn add_existing_application_windows(
+    pub fn add_existing_application_windows(
         &self,
         app: &mut Application,
         spaces: &[u64],
@@ -862,96 +566,6 @@ impl WindowManager {
     /// Returns a list of windows in a given workspace.
     pub fn windows_in_workspace(&self, space_id: u64) -> Result<Vec<WinID>> {
         space_window_list_for_connection(self.main_cid, &[space_id], None, true)
-    }
-
-    /// Periodically checks for windows moved between spaces and displays.
-    /// TODO: Workaround for Tahoe 26.x, where workspace notifications are not arriving. So if a
-    /// window is missing in the current space, try to trigger a workspace change event.
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn workspace_change_watcher(
-        // _: Single<&Window, With<FocusedMarker>>, // Will only run if there's a focused window.
-        active_display: ActiveDisplay,
-        window_manager: Res<WindowManager>,
-        mut throttle: ThrottledSystem,
-        mut current_space: Local<u64>,
-        mut commands: Commands,
-    ) {
-        const WORKSPACE_CHANGE_FREQ_MS: u64 = 1000;
-        if throttle.throttled(Duration::from_millis(WORKSPACE_CHANGE_FREQ_MS)) {
-            return;
-        }
-
-        let Ok(space_id) = window_manager
-            .active_display_space(active_display.id())
-            .inspect_err(|err| warn!("{}: {err}", function_name!()))
-        else {
-            return;
-        };
-
-        if *current_space != space_id {
-            *current_space = space_id;
-            debug!("{}: workspace changed to {space_id}", function_name!());
-            commands.trigger(WMEventTrigger(Event::SpaceChanged));
-        }
-    }
-
-    /// Periodically checks for displays added and removed.
-    /// TODO: Workaround for Tahoe 26.x, where display change notifications are not arriving.
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn display_changes_watcher(
-        displays: Query<(&Display, Has<ActiveDisplayMarker>)>,
-        window_manager: Res<WindowManager>,
-        mut throttle: ThrottledSystem,
-        mut commands: Commands,
-    ) {
-        const DISPLAY_CHANGE_CHECK_FREQ_MS: u64 = 1000;
-        if throttle.throttled(Duration::from_millis(DISPLAY_CHANGE_CHECK_FREQ_MS)) {
-            return;
-        }
-
-        let Ok(current_display_id) = window_manager.active_display_id() else {
-            return;
-        };
-        let found = displays
-            .iter()
-            .find(|(display, _)| display.id() == current_display_id);
-        if let Some((_, active)) = found {
-            if active {
-                return;
-            }
-            debug!(
-                "{}: detected dislay change from {}.",
-                function_name!(),
-                current_display_id,
-            );
-            commands.trigger(WMEventTrigger(Event::DisplayChanged));
-        } else {
-            debug!(
-                "{}: new display {} detected.",
-                function_name!(),
-                current_display_id
-            );
-            commands.trigger(WMEventTrigger(Event::DisplayAdded {
-                display_id: current_display_id,
-            }));
-        }
-
-        let present_displays = window_manager.present_displays();
-        displays.iter().for_each(|(display, _)| {
-            if !present_displays
-                .iter()
-                .any(|present_display| present_display.id() == display.id())
-            {
-                debug!(
-                    "{}: detected removal of display {}",
-                    function_name!(),
-                    display.id()
-                );
-                commands.trigger(WMEventTrigger(Event::DisplayRemoved {
-                    display_id: display.id(),
-                }));
-            }
-        });
     }
 }
 

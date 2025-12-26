@@ -12,12 +12,12 @@ use stdext::function_name;
 
 use crate::app::Application;
 use crate::config::WindowParams;
+use crate::events::WindowManager;
 use crate::events::{
     ActiveDisplayMarker, BProcess, Event, FocusedMarker, FreshMarker, MissionControlActive,
     OrphanedPane, RepositionMarker, ReshuffleAroundMarker, SpawnWindowTrigger, StrayFocusEvent,
     Timeout, Unmanaged, WMEventTrigger, WindowDraggedMarker,
 };
-use crate::manager::WindowManager;
 use crate::params::{ActiveDisplay, ActiveDisplayMut, Configuration};
 use crate::process::Process;
 use crate::windows::{Display, Panel, Window, WindowPane, ax_window_pid};
@@ -84,7 +84,7 @@ fn mouse_moved_trigger(
         trace!("{}: ffm_window_id > 0", function_name!());
         return;
     }
-    let Ok(window_id) = window_manager.find_window_at_point(&point) else {
+    let Ok(window_id) = window_manager.0.find_window_at_point(&point) else {
         debug!(
             "{}: can not find window at point {point:?}",
             function_name!()
@@ -112,6 +112,7 @@ fn mouse_moved_trigger(
     }
 
     let child_windows = window_manager
+        .0
         .get_associated_windows(window_id)
         .iter()
         .filter_map(|child_wid| {
@@ -180,6 +181,7 @@ fn mouse_down_trigger(
     trace!("{}: {point:?}", function_name!());
 
     let Some((window, entity)) = window_manager
+        .0
         .find_window_at_point(&point)
         .ok()
         .and_then(|window_id| windows.iter().find(|(window, _)| window.id() == window_id))
@@ -220,6 +222,7 @@ fn mouse_dragged_trigger(
     }
 
     let Some((entity, window)) = window_manager
+        .0
         .find_window_at_point(&point)
         .ok()
         .and_then(|window_id| windows.iter().find(|(_, window)| window.id() == window_id))
@@ -273,7 +276,7 @@ fn workspace_change_trigger(
         return;
     };
 
-    let Ok(workspace_id) = window_manager.active_display_space(active_display.id()) else {
+    let Ok(workspace_id) = window_manager.0.active_display_space(active_display.id()) else {
         return;
     };
     let Ok(panel) = active_display.display().active_panel(workspace_id) else {
@@ -294,7 +297,7 @@ fn workspace_change_trigger(
         return;
     }
 
-    let windows = window_manager.windows_in_workspace(workspace_id);
+    let windows = window_manager.0.windows_in_workspace(workspace_id);
     if !windows.is_ok_and(|windows| {
         windows
             .into_iter()
@@ -347,7 +350,7 @@ fn display_change_trigger(
         return;
     };
 
-    let Ok(active_id) = window_manager.active_display_id() else {
+    let Ok(active_id) = window_manager.0.active_display_id() else {
         error!("{}: Unable to get active display id!", function_name!());
         return;
     };
@@ -386,7 +389,7 @@ fn active_display_trigger(
         return;
     };
     let active_display_id = active_display.id();
-    let Ok(workspace_id) = window_manager.active_display_space(active_display_id) else {
+    let Ok(workspace_id) = window_manager.0.active_display_space(active_display_id) else {
         return;
     };
     let Ok(panel) = active_display.active_panel(workspace_id) else {
@@ -411,7 +414,7 @@ fn active_display_trigger(
         // Window is either unmanaged or already in the current space.
         return;
     }
-    let windows = window_manager.windows_in_workspace(workspace_id);
+    let windows = window_manager.0.windows_in_workspace(workspace_id);
     if !windows.is_ok_and(|windows| {
         windows
             .into_iter()
@@ -464,6 +467,7 @@ fn display_add_trigger(
 
     debug!("{}: Display Added: {display_id:?}", function_name!());
     let Some(display) = window_manager
+        .0
         .present_displays()
         .into_iter()
         .find(|display| display.id() == display_id)
@@ -561,6 +565,7 @@ fn display_moved_trigger(
         return;
     };
     let Some(moved_display) = window_manager
+        .0
         .present_displays()
         .into_iter()
         .find(|display| display.id() == display_id)
@@ -656,7 +661,9 @@ fn center_mouse_trigger(
         && !config.skip_reshuffle()
         && config.ffm_flag().is_none_or(|id| id != window.id())
     {
-        window_manager.center_mouse(window, &active_display.bounds());
+        window_manager
+            .0
+            .center_mouse(window, &active_display.bounds());
     }
 }
 
@@ -746,6 +753,7 @@ pub fn reshuffle_around_window(
     mut commands: Commands,
 ) {
     if window_manager
+        .0
         .active_display_id()
         .is_ok_and(|id| active_display.id() != id)
     {
@@ -997,7 +1005,9 @@ fn slide_window(
         frame.origin.y,
         &active_display.bounds,
     );
-    window_manager.center_mouse(window, &active_display.bounds);
+    window_manager
+        .0
+        .center_mouse(window, &active_display.bounds);
 }
 
 /// Handles Mission Control events, updating the `MissionControlActive` resource.
@@ -1259,6 +1269,7 @@ fn window_destroyed_trigger(
     let mut lens = windows.transmute_lens::<&Window>();
     for mut display in &mut displays {
         let Ok(panel) = window_manager
+            .0
             .active_display_space(display.id())
             .and_then(|active_space| display.active_panel(active_space))
         else {

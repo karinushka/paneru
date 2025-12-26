@@ -13,8 +13,8 @@ use objc2_core_graphics::CGDirectDisplayID;
 
 use crate::{
     config::{Config, WindowParams},
+    events::WindowManager,
     events::{ActiveDisplayMarker, FocusFollowsMouse, MissionControlActive, SkipReshuffle},
-    manager::WindowManager,
     skylight::WinID,
     windows::{Display, WindowPane},
 };
@@ -122,6 +122,7 @@ impl ActiveDisplay<'_, '_> {
 
     pub fn active_panel(&self) -> crate::errors::Result<&WindowPane> {
         self.window_manager
+            .0
             .active_display_space(self.display.id())
             .and_then(|workspace_id| self.display.active_panel(workspace_id))
     }
@@ -153,6 +154,7 @@ impl ActiveDisplayMut<'_, '_> {
 
     pub fn active_panel(&mut self) -> crate::errors::Result<&mut WindowPane> {
         self.window_manager
+            .0
             .active_display_space(self.display.id())
             .and_then(|workspace_id| self.display.active_panel_mut(workspace_id))
     }

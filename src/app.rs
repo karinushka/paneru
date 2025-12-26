@@ -20,8 +20,7 @@ use std::sync::LazyLock;
 use stdext::function_name;
 
 use crate::errors::{Error, Result};
-use crate::events::{Event, EventSender};
-use crate::manager::WindowManager;
+use crate::events::{Event, EventSender, WindowManager};
 use crate::platform::{
     AXObserverAddNotification, AXObserverCreate, AXObserverRemoveNotification, CFStringRef, Pid,
     ProcessSerialNumber,
@@ -106,7 +105,7 @@ impl Application {
             element: refer,
             psn: process.psn,
             pid: process.pid,
-            connection: wm.connection_for_process(process.psn),
+            connection: wm.0.connection_for_process(process.psn),
             handler: AxObserverHandler::new(process.pid, events.clone())?,
             bundle_id,
             name: process.name.clone(),

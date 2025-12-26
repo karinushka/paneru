@@ -15,12 +15,12 @@ use stdext::function_name;
 
 use crate::app::Application;
 use crate::config::Config;
+use crate::events::WindowManager;
 use crate::events::{
     ActiveDisplayMarker, BProcess, CommandTrigger, Event, ExistingMarker, FocusedMarker,
     FreshMarker, OrphanedPane, PollForNotifications, RepositionMarker, ResizeMarker, SenderSocket,
     SpawnWindowTrigger, StrayFocusEvent, Timeout, Unmanaged, WMEventTrigger,
 };
-use crate::manager::WindowManager;
 use crate::params::{ActiveDisplay, ActiveDisplayMut, ThrottledSystem};
 use crate::util::{AXUIWrapper, get_array_values};
 use crate::windows::{Display, Window, ax_window_id};
@@ -141,11 +141,11 @@ pub fn run_initial_oneshot_systems(world: &mut World) {
 /// * `commands` - Bevy commands to spawn entities.
 #[allow(clippy::needless_pass_by_value)]
 pub fn gather_displays(window_manager: Res<WindowManager>, mut commands: Commands) {
-    let Ok(active_display_id) = window_manager.active_display_id() else {
+    let Ok(active_display_id) = window_manager.0.active_display_id() else {
         error!("{}: Unable to get active display id!", function_name!());
         return;
     };
-    for display in window_manager.present_displays() {
+    for display in window_manager.0.present_displays() {
         if display.id() == active_display_id {
             commands.spawn((display, ActiveDisplayMarker));
         } else {
@@ -200,9 +200,9 @@ fn add_existing_application(
 
     for (mut app, entity) in app_query {
         if app.observe().is_ok_and(|result| result)
-            && let Ok(windows) = wm
-                .add_existing_application_windows(&mut app, &spaces, 0)
-                .inspect_err(|err| warn!("{}: {err}", function_name!()))
+            && let Ok(windows) =
+                wm.0.add_existing_application_windows(&mut app, &spaces, 0)
+                    .inspect_err(|err| warn!("{}: {err}", function_name!()))
         {
             commands.trigger(SpawnWindowTrigger(windows));
         }
@@ -234,10 +234,11 @@ fn finish_setup(
     );
 
     for (mut display, active) in displays {
-        window_manager.refresh_display(&mut display, &mut windows);
+        window_manager.0.refresh_display(&mut display, &mut windows);
 
         if active {
             let active_panel = window_manager
+                .0
                 .active_display_space(display.id())
                 .and_then(|active_space| display.active_panel(active_space));
 
@@ -468,7 +469,7 @@ fn display_changes_watcher(
         return;
     }
 
-    let Ok(current_display_id) = window_manager.active_display_id() else {
+    let Ok(current_display_id) = window_manager.0.active_display_id() else {
         return;
     };
     let found = displays
@@ -495,7 +496,7 @@ fn display_changes_watcher(
         }));
     }
 
-    let present_displays = window_manager.present_displays();
+    let present_displays = window_manager.0.present_displays();
     displays.iter().for_each(|(display, _)| {
         if !present_displays
             .iter()
@@ -530,6 +531,7 @@ fn workspace_change_watcher(
     }
 
     let Ok(space_id) = window_manager
+        .0
         .active_display_space(active_display.id())
         .inspect_err(|err| warn!("{}: {err}", function_name!()))
     else {

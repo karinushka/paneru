@@ -22,7 +22,7 @@ use stdext::function_name;
 use crate::commands::{Command, process_command_trigger};
 use crate::config::Config;
 use crate::errors::Result;
-use crate::manager::WindowManager;
+use crate::manager::{WindowManagerApi, WindowManagerOS};
 use crate::platform::{ProcessSerialNumber, WorkspaceObserver};
 use crate::process::{Process, ProcessRef};
 use crate::skylight::WinID;
@@ -269,6 +269,9 @@ pub struct MissionControlActive(pub bool);
 #[derive(Resource)]
 pub struct FocusFollowsMouse(pub Option<WinID>);
 
+#[derive(Resource)]
+pub struct WindowManager(pub Box<dyn WindowManagerApi>);
+
 #[derive(PartialEq, Resource)]
 pub struct PollForNotifications(pub bool);
 
@@ -318,7 +321,7 @@ impl EventHandler {
         app.set_runner(move |app| EventHandler::custom_loop(app, &receiver))
             .init_resource::<Messages<Event>>()
             .insert_resource(Time::<Virtual>::from_max_delta(Duration::from_secs(10)))
-            .insert_resource(WindowManager::new())
+            .insert_resource(WindowManager(Box::new(WindowManagerOS::new())))
             .insert_resource(SenderSocket(sender))
             .insert_resource(SkipReshuffle(false))
             .insert_resource(MissionControlActive(false))

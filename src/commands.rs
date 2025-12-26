@@ -8,11 +8,11 @@ use stdext::function_name;
 
 use crate::config::{Config, preset_column_widths};
 use crate::errors::Result;
+use crate::events::WindowManager;
 use crate::events::{
     CommandTrigger, Event, FocusedMarker, RepositionMarker, ReshuffleAroundMarker, ResizeMarker,
     SenderSocket, Unmanaged, WMEventTrigger,
 };
-use crate::manager::WindowManager;
 use crate::params::ActiveDisplayMut;
 use crate::windows::{Display, Panel, Window, WindowPane};
 
@@ -210,7 +210,9 @@ fn command_center_window(
             },
             display_id: active_display.id(),
         });
-    window_manager.center_mouse(&window, &active_display.bounds());
+    window_manager
+        .0
+        .center_mouse(&window, &active_display.bounds());
 }
 
 /// Resizes the focused window based on preset column widths.

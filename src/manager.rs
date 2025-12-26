@@ -439,56 +439,26 @@ impl WindowManagerApi for WindowManagerOS {
             function_name!()
         );
 
-        // CFArrayRef window_list_ref = application_window_list(application);
-        // int window_count = window_list_ref ? CFArrayGetCount(window_list_ref) : 0;
-        let window_list = app.window_list();
-        let window_count = window_list
-            .as_ref()
-            .map(|window_list| CFArray::count(window_list))
-            .unwrap_or(0);
 
         let mut found_windows: Vec<Window> = Vec::new();
-        let mut empty_count = 0;
-        if let Ok(window_list) = window_list {
-            // for idx in 0..window_count {
-            for window_ref in get_array_values(&window_list) {
-                let Ok(window_id) = ax_window_id(window_ref.as_ptr()) else {
-                    empty_count += 1;
-                    continue;
-                };
-
-                //
-                // FIXME: The AX API appears to always include a single element for Finder that
-                // returns an empty window id. This is likely the desktop window. Other similar
-                // cases should be handled the same way; simply ignore the window when we attempt
-                // to do an equality check to see if we have correctly discovered the number of
-                // windows to track.
-                //
-
-                // if (!window_manager_find_window(wm, window_id)) {
-                //     window_manager_create_and_add_window(
-                //     sm, wm, application, CFRetain(window_ref), window_id, false);
-                // }
-                if !found_windows.iter().any(|window| window.id() == window_id) {
-                    let window_ref = AXUIWrapper::retain(window_ref.as_ptr())?;
-                    debug!(
-                        "{}: Add window: {:?} {window_id}",
-                        function_name!(),
-                        app.psn()
-                    );
-                    if let Ok(window) = Window::new(&window_ref)
-                        .inspect_err(|err| debug!("{}: {err}", function_name!()))
+        for found in app.window_list()? {
+            match found {
+                Ok(found_window) => {
+                    if !found_windows
+                        .iter()
+                        .any(|window| window.id() == found_window.id())
                     {
-                        found_windows.push(window);
+                        found_windows.push(found_window);
                     }
+                }
+                Err(err) => {
+                    debug!("{}: create window: {err}", function_name!());
                 }
             }
         }
 
         // if (global_window_count == window_count-empty_count)
-        if isize::try_from(global_window_list.len())
-            .is_ok_and(|length| length == (window_count - empty_count))
-        {
+        if global_window_list.len() == found_windows.len() {
             if refresh_index != -1 {
                 debug!(
                     "{}: All windows for {:?} are now resolved",

@@ -8,7 +8,6 @@ use bevy::ecs::schedule::common_conditions::resource_equals;
 use bevy::ecs::system::{Commands, Local, Populated, Query, Res, ResMut};
 use bevy::ecs::world::World;
 use bevy::time::{Time, Virtual};
-use core::ptr::NonNull;
 use log::{debug, error, info, trace, warn};
 use std::time::Duration;
 use stdext::function_name;
@@ -22,8 +21,7 @@ use crate::events::{
     SpawnWindowTrigger, StrayFocusEvent, Timeout, Unmanaged, WMEventTrigger,
 };
 use crate::params::{ActiveDisplay, ActiveDisplayMut, ThrottledSystem};
-use crate::util::{AXUIWrapper, get_array_values};
-use crate::windows::{Display, Window, ax_window_id};
+use crate::windows::{Display, Window};
 
 /// Registers the Bevy systems for the `WindowManager`.
 ///
@@ -320,34 +318,23 @@ fn add_launched_application(
     let find_window = |window_id| windows.iter().find(|window| window.id() == window_id);
 
     for (app, entity) in app_query {
-        let Ok(array) = app.window_list() else {
+        let Ok(app_windows) = app.window_list() else {
             continue;
         };
-        let create_window = |element_ref: NonNull<_>| {
-            let element = AXUIWrapper::retain(element_ref.as_ptr()).ok();
-            element.and_then(|element| {
-                let window_id = ax_window_id(element.as_ptr())
-                    .inspect_err(|err| {
-                        warn!("{}: error adding window: {err}", function_name!());
+        let create_windows = app_windows
+            .into_iter()
+            .filter_map(|window| {
+                window
+                    .inspect_err(|err| warn!("{}: error adding window: {err}", function_name!()))
+                    .ok()
+                    .and_then(|window| {
+                        // Window does not exist, create it.
+                        find_window(window.id()).is_none().then_some(window)
                     })
-                    .ok()?;
-                if find_window(window_id).is_none() {
-                    // Window does not exist, create it.
-                    Some(Window::new(&element).inspect_err(|err| {
-                        warn!("{}: error adding window: {err}.", function_name!());
-                    }))
-                } else {
-                    // Window already exists, skip it.
-                    None
-                }
             })
-        };
-        let windows = get_array_values::<accessibility_sys::__AXUIElement>(&array)
-            .filter_map(create_window)
-            .flatten()
-            .collect::<Vec<_>>();
+            .collect();
         commands.entity(entity).try_remove::<FreshMarker>();
-        commands.trigger(SpawnWindowTrigger(windows));
+        commands.trigger(SpawnWindowTrigger(create_windows));
     }
 }
 

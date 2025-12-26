@@ -243,6 +243,7 @@ pub struct MainOptions {
     #[serde(default = "default_preset_column_widths")]
     pub preset_column_widths: Vec<f64>,
     pub animation_speed: Option<f64>,
+    pub continuous_swipe: Option<bool>,
 }
 
 /// Returns a default set of column widths.

@@ -47,14 +47,70 @@ pub trait WindowApi: Send + Sync {
     fn update_frame(&mut self, display_bounds: Option<&CGRect>) -> Result<()>;
     fn focus_without_raise(&self, currently_focused: &Window);
     fn focus_with_raise(&self);
-    fn fully_visible(&self, display_bounds: &CGRect) -> bool;
+
+    fn fully_visible(&self, display_bounds: &CGRect) -> bool {
+        self.frame().origin.x > 0.0
+            && self.frame().origin.x < display_bounds.size.width - self.frame().size.width
+    }
+
     fn expose_window(
         &self,
         active_display: &ActiveDisplay,
         moving: Option<&RepositionMarker>,
         entity: Entity,
         commands: &mut Commands,
-    ) -> CGRect;
+    ) -> CGRect {
+        // Check if window needs to be fully exposed
+        let window_id = self.id();
+        let (mut frame, display_bounds) =
+            if let Some(RepositionMarker { origin, display_id }) = moving {
+                let frame = CGRect {
+                    origin: *origin,
+                    ..self.frame()
+                };
+                let bounds = active_display
+                    .other()
+                    .find(|display| display.id() == *display_id)
+                    .map_or(active_display.bounds(), |display| display.bounds);
+
+                (frame, bounds)
+            } else {
+                (self.frame(), active_display.bounds())
+            };
+        trace!("{}: focus original position {frame:?}", function_name!());
+        let moved = if frame.origin.x + frame.size.width > display_bounds.size.width {
+            trace!(
+                "{}: Bumped window {} to the left",
+                function_name!(),
+                window_id
+            );
+            frame.origin.x = display_bounds.size.width - frame.size.width;
+            true
+        } else if frame.origin.x < 0.0 {
+            trace!(
+                "{}: Bumped window {} to the right",
+                function_name!(),
+                window_id
+            );
+            frame.origin.x = 0.0;
+            true
+        } else {
+            false
+        };
+        if moved {
+            let display_id = match moving {
+                Some(marker) => marker.display_id,
+                None => active_display.id(),
+            };
+            commands.entity(entity).try_insert(RepositionMarker {
+                origin: frame.origin,
+                display_id,
+            });
+            trace!("{}: focus resposition to {frame:?}", function_name!());
+        }
+        frame
+    }
+
     fn width_ratio(&mut self, width_ratio: f64);
     fn pid(&self) -> Result<Pid>;
     fn set_psn(&mut self, psn: ProcessSerialNumber);
@@ -540,90 +596,6 @@ impl WindowApi for WindowOS {
         let element_ref = self.ax_element.as_ptr();
         let action = CFString::from_static_str(kAXRaiseAction);
         unsafe { AXUIElementPerformAction(element_ref, &action) };
-    }
-
-    /// Checks if the window is fully visible within the given display bounds.
-    ///
-    /// # Arguments
-    ///
-    /// * `display_bounds` - The `CGRect` representing the bounds of the display.
-    ///
-    /// # Returns
-    ///
-    /// `true` if the window is fully visible, `false` otherwise.
-    fn fully_visible(&self, display_bounds: &CGRect) -> bool {
-        self.frame.origin.x > 0.0
-            && self.frame.origin.x < display_bounds.size.width - self.frame.size.width
-    }
-
-    /// Adjusts the window's position to ensure it is fully exposed (visible on screen) within the display bounds.
-    ///
-    /// # Arguments
-    ///
-    /// * `display_bounds` - The `CGRect` representing the bounds of the display.
-    /// * `moving` - An optional `RepositionMarker` indicating if the window is currently moving.
-    /// * `entity` - The `Entity` of the window.
-    /// * `commands` - Bevy commands to trigger events.
-    ///
-    /// # Returns
-    ///
-    /// The adjusted `CGRect` of the window after exposure.
-    fn expose_window(
-        &self,
-        active_display: &ActiveDisplay,
-        moving: Option<&RepositionMarker>,
-        entity: Entity,
-        commands: &mut Commands,
-    ) -> CGRect {
-        // Check if window needs to be fully exposed
-        let window_id = self.id();
-        let (mut frame, display_bounds) =
-            if let Some(RepositionMarker { origin, display_id }) = moving {
-                let frame = CGRect {
-                    origin: *origin,
-                    ..self.frame
-                };
-                let bounds = active_display
-                    .other()
-                    .find(|display| display.id() == *display_id)
-                    .map_or(active_display.bounds(), |display| display.bounds);
-
-                (frame, bounds)
-            } else {
-                (self.frame, active_display.bounds())
-            };
-        trace!("{}: focus original position {frame:?}", function_name!());
-        let moved = if frame.origin.x + frame.size.width > display_bounds.size.width {
-            trace!(
-                "{}: Bumped window {} to the left",
-                function_name!(),
-                window_id
-            );
-            frame.origin.x = display_bounds.size.width - frame.size.width;
-            true
-        } else if frame.origin.x < 0.0 {
-            trace!(
-                "{}: Bumped window {} to the right",
-                function_name!(),
-                window_id
-            );
-            frame.origin.x = 0.0;
-            true
-        } else {
-            false
-        };
-        if moved {
-            let display_id = match moving {
-                Some(marker) => marker.display_id,
-                None => active_display.id(),
-            };
-            commands.entity(entity).try_insert(RepositionMarker {
-                origin: frame.origin,
-                display_id,
-            });
-            trace!("{}: focus resposition to {frame:?}", function_name!());
-        }
-        frame
     }
 
     fn width_ratio(&mut self, width_ratio: f64) {

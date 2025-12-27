@@ -164,6 +164,14 @@ impl Config {
     }
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            inner: RwLock::new(InnerConfig::default()).into(),
+        }
+    }
+}
+
 impl EventHandler for Config {
     /// Handles file system events, specifically used for reloading the configuration file.
     ///
@@ -177,7 +185,7 @@ impl EventHandler for Config {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Default)]
 struct InnerConfig {
     options: MainOptions,
     bindings: HashMap<String, Keybinding>,
@@ -235,7 +243,7 @@ impl InnerConfig {
     }
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug, Default)]
 pub struct MainOptions {
     pub focus_follows_mouse: Option<bool>,
     pub mouse_follows_focus: Option<bool>,

@@ -23,6 +23,9 @@ mod triggers;
 mod util;
 mod windows;
 
+#[cfg(test)]
+mod tests;
+
 embed_plist::embed_info_plist!("../assets/Info.plist");
 
 use events::{Event, EventHandler, EventSender};

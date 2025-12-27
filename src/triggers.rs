@@ -12,6 +12,7 @@ use stdext::function_name;
 
 use crate::app::Application;
 use crate::config::WindowParams;
+use crate::display::{Display, Panel, WindowPane};
 use crate::events::WindowManager;
 use crate::events::{
     ActiveDisplayMarker, BProcess, Event, FocusedMarker, FreshMarker, MissionControlActive,
@@ -20,7 +21,7 @@ use crate::events::{
 };
 use crate::params::{ActiveDisplay, ActiveDisplayMut, Configuration};
 use crate::process::Process;
-use crate::windows::{Display, Panel, Window, WindowPane};
+use crate::windows::Window;
 
 const WINDOW_HIDDEN_THRESHOLD: f64 = 10.0;
 

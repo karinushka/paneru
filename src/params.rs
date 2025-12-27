@@ -13,10 +13,11 @@ use objc2_core_graphics::CGDirectDisplayID;
 
 use crate::{
     config::{Config, WindowParams},
-    events::WindowManager,
-    events::{ActiveDisplayMarker, FocusFollowsMouse, MissionControlActive, SkipReshuffle},
+    display::{Display, WindowPane},
+    events::{
+        ActiveDisplayMarker, FocusFollowsMouse, MissionControlActive, SkipReshuffle, WindowManager,
+    },
     skylight::WinID,
-    windows::{Display, WindowPane},
 };
 
 #[derive(SystemParam)]

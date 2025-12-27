@@ -21,6 +21,7 @@ use stdext::function_name;
 
 use crate::commands::{Command, process_command_trigger};
 use crate::config::Config;
+use crate::display::WindowPane;
 use crate::errors::Result;
 use crate::manager::{WindowManagerApi, WindowManagerOS};
 use crate::platform::{ProcessSerialNumber, WorkspaceObserver};
@@ -29,7 +30,7 @@ use crate::skylight::WinID;
 use crate::systems::{gather_displays, register_systems, run_initial_oneshot_systems};
 use crate::triggers::register_triggers;
 use crate::util::AXUIWrapper;
-use crate::windows::{Window, WindowPane};
+use crate::windows::Window;
 
 #[allow(dead_code)]
 #[derive(Clone, Debug, Message)]

@@ -33,7 +33,7 @@ use crate::skylight::{
 use crate::util::{
     AXUIWrapper, add_run_loop, create_array, get_array_values, get_attribute, remove_run_loop,
 };
-use crate::windows::{Window, ax_window_id};
+use crate::windows::{Window, WindowOS, ax_window_id};
 
 pub static AX_NOTIFICATIONS: LazyLock<Vec<&str>> = LazyLock::new(|| {
     vec![
@@ -162,7 +162,9 @@ impl Application {
         let array = get_attribute::<CFArray>(&self.element, &axwindows)?;
         let out = get_array_values::<accessibility_sys::__AXUIElement>(&array)
             .map(|element| {
-                AXUIWrapper::retain(element.as_ptr()).and_then(|element| Window::new(&element))
+                AXUIWrapper::retain(element.as_ptr()).and_then(|element| {
+                    WindowOS::new(&element).map(|window| Window::new(Box::new(window)))
+                })
             })
             .collect();
         Ok(out)

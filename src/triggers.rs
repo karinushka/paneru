@@ -1434,8 +1434,9 @@ fn spawn_window_trigger(
                 window_id
             );
         }
-        window.psn = Some(app.psn());
-        window.eligible = app.parent_window(active_display.id()).is_err() || window.is_root();
+        window.set_psn(app.psn());
+        let eligible = app.parent_window(active_display.id()).is_err() || window.is_root();
+        window.set_eligible(eligible);
         let bundle_id = app.bundle_id().map(String::as_str).unwrap_or_default();
         debug!(
             "{}: window {} isroot {} eligible {} bundle_id {}",

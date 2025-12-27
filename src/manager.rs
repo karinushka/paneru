@@ -27,10 +27,11 @@ use crate::skylight::{
     _AXUIElementCreateWithRemoteToken, ConnID, SLSCopyActiveMenuBarDisplayIdentifier,
     SLSCopyAssociatedWindows, SLSCopyBestManagedDisplayForRect, SLSCopyManagedDisplayForWindow,
     SLSCopyManagedDisplaySpaces, SLSCopyWindowsWithOptionsAndTags, SLSFindWindowAndOwner,
-    SLSGetConnectionIDForPSN, SLSGetCurrentCursorLocation, SLSGetWindowBounds, SLSMainConnectionID,
-    SLSManagedDisplayGetCurrentSpace, SLSWindowIteratorAdvance, SLSWindowIteratorGetAttributes,
-    SLSWindowIteratorGetParentID, SLSWindowIteratorGetTags, SLSWindowIteratorGetWindowID,
-    SLSWindowQueryResultCopyWindows, SLSWindowQueryWindows, WinID,
+    SLSGetConnectionIDForPSN, SLSGetCurrentCursorLocation, SLSGetDisplayMenubarHeight,
+    SLSGetWindowBounds, SLSMainConnectionID, SLSManagedDisplayGetCurrentSpace,
+    SLSWindowIteratorAdvance, SLSWindowIteratorGetAttributes, SLSWindowIteratorGetParentID,
+    SLSWindowIteratorGetTags, SLSWindowIteratorGetWindowID, SLSWindowQueryResultCopyWindows,
+    SLSWindowQueryWindows, WinID,
 };
 use crate::util::{AXUIWrapper, create_array, get_array_values, get_cfdict_value};
 use crate::windows::{Window, WindowOS, ax_window_id};
@@ -376,8 +377,13 @@ impl WindowManagerApi for WindowManagerOS {
             .flat_map(|id| {
                 let uuid = Display::uuid_from_id(id);
                 uuid.and_then(|uuid| {
-                    self.display_space_list(uuid.as_ref())
-                        .map(|spaces| Display::new(id, spaces))
+                    self.display_space_list(uuid.as_ref()).map(|spaces| {
+                        let bounds = CGDisplayBounds(id);
+                        let mut menubar_height: u32 = 0;
+                        unsafe { SLSGetDisplayMenubarHeight(id, &raw mut menubar_height) };
+                        debug!("{}: menubar height: {menubar_height}", function_name!());
+                        Display::new(id, spaces, bounds, menubar_height)
+                    })
                 })
             })
             .collect()

@@ -3,15 +3,13 @@ use bevy::ecs::entity::Entity;
 use core::ptr::NonNull;
 use log::debug;
 use objc2_core_foundation::{CFRetained, CFString, CFUUID, CGRect};
-use objc2_core_graphics::{CGDirectDisplayID, CGDisplayBounds};
+use objc2_core_graphics::CGDirectDisplayID;
 use std::collections::{HashMap, VecDeque};
 use std::io::ErrorKind;
 use stdext::function_name;
 
 use crate::errors::{Error, Result};
-use crate::skylight::{
-    CGDisplayCreateUUIDFromDisplayID, CGDisplayGetDisplayIDFromUUID, SLSGetDisplayMenubarHeight,
-};
+use crate::skylight::{CGDisplayCreateUUIDFromDisplayID, CGDisplayGetDisplayIDFromUUID};
 
 #[derive(Clone, Debug)]
 pub enum Panel {
@@ -326,16 +324,16 @@ impl Display {
     /// # Returns
     ///
     /// A new `Display` instance.
-    pub fn new(id: CGDirectDisplayID, spaces: Vec<u64>) -> Self {
+    pub fn new(
+        id: CGDirectDisplayID,
+        spaces: Vec<u64>,
+        bounds: CGRect,
+        menubar_height: u32,
+    ) -> Self {
         let spaces = spaces
             .into_iter()
             .map(|id| (id, WindowPane::default()))
             .collect::<HashMap<_, _>>();
-        let bounds = CGDisplayBounds(id);
-        let mut menubar_height: u32 = 0;
-        unsafe { SLSGetDisplayMenubarHeight(id, &raw mut menubar_height) };
-        debug!("{}: menubar height: {menubar_height}", function_name!());
-
         Self {
             id,
             spaces,

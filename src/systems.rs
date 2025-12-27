@@ -7,7 +7,7 @@ use bevy::ecs::schedule::IntoScheduleConfigs;
 use bevy::ecs::schedule::common_conditions::resource_equals;
 use bevy::ecs::system::{Commands, Local, Populated, Query, Res, ResMut};
 use bevy::ecs::world::World;
-use bevy::time::{Time, Virtual};
+use bevy::time::Time;
 use log::{debug, error, info, trace, warn};
 use std::time::Duration;
 use stdext::function_name;
@@ -362,7 +362,7 @@ fn fresh_marker_cleanup(
 #[allow(clippy::needless_pass_by_value)]
 fn timeout_ticker(
     timers: Populated<(Entity, &mut Timeout)>,
-    clock: Res<Time<Virtual>>,
+    clock: Res<Time>,
     mut commands: Commands,
 ) {
     for (entity, mut timeout) in timers {
@@ -547,7 +547,7 @@ fn workspace_change_watcher(
 fn animate_windows(
     windows: Populated<(&mut Window, Entity, &RepositionMarker)>,
     displays: Query<&Display>,
-    time: Res<Time<Virtual>>,
+    time: Res<Time>,
     config: Res<Config>,
     mut commands: Commands,
 ) {

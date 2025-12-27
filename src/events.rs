@@ -6,7 +6,7 @@ use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs;
 use bevy::ecs::world::World;
 use bevy::prelude::Event as BevyEvent;
-use bevy::time::{Time, Timer, Virtual};
+use bevy::time::{Time, TimePlugin, Timer, Virtual};
 use log::{debug, error, warn};
 use objc2::rc::Retained;
 use objc2_core_foundation::{CFRetained, CGPoint, CGSize};
@@ -16,7 +16,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::thread;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use stdext::function_name;
 
 use crate::commands::{Command, process_command_trigger};
@@ -319,6 +319,7 @@ impl EventHandler {
 
         let mut app = BevyApp::new();
         app.set_runner(move |app| EventHandler::custom_loop(app, &receiver))
+            .add_plugins(TimePlugin)
             .init_resource::<Messages<Event>>()
             .insert_resource(Time::<Virtual>::from_max_delta(Duration::from_secs(10)))
             .insert_resource(WindowManager(Box::new(WindowManagerOS::new())))
@@ -355,7 +356,6 @@ impl EventHandler {
         app.cleanup();
 
         let mut timeout = LOOP_TIMEOUT_STEP;
-        let mut last_update = Instant::now();
         while app.should_exit().is_none() {
             app.update();
             match rx.recv_timeout(Duration::from_millis(timeout)) {
@@ -371,14 +371,6 @@ impl EventHandler {
                 }
                 _ => todo!(),
             }
-
-            // Manually get and update the Time resource.
-            let now = Instant::now();
-            let delta = now - last_update;
-            last_update = now;
-            app.world_mut()
-                .resource_mut::<Time<Virtual>>()
-                .advance_by(delta);
         }
         AppExit::Success
     }

@@ -6,7 +6,7 @@ use bevy::{
         system::{Local, Query, Res, ResMut, Single, SystemParam},
         world::Mut,
     },
-    time::{Time, Timer, TimerMode, Virtual},
+    time::{Time, Timer, TimerMode},
 };
 use objc2_core_foundation::CGRect;
 use objc2_core_graphics::CGDirectDisplayID;
@@ -89,7 +89,7 @@ impl Configuration<'_> {
 
 #[derive(SystemParam)]
 pub struct ThrottledSystem<'w, 's> {
-    time: Res<'w, Time<Virtual>>,
+    time: Res<'w, Time>,
     timer: Local<'s, Timer>,
 }
 

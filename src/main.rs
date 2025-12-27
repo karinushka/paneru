@@ -9,6 +9,7 @@ use stdext::function_name;
 mod app;
 mod commands;
 mod config;
+mod display;
 mod errors;
 mod events;
 mod manager;

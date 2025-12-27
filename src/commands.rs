@@ -7,6 +7,7 @@ use objc2_core_foundation::{CGPoint, CGSize};
 use stdext::function_name;
 
 use crate::config::{Config, preset_column_widths};
+use crate::display::{Display, Panel, WindowPane};
 use crate::errors::Result;
 use crate::events::WindowManager;
 use crate::events::{
@@ -14,7 +15,7 @@ use crate::events::{
     SenderSocket, Unmanaged, WMEventTrigger,
 };
 use crate::params::ActiveDisplayMut;
-use crate::windows::{Display, Panel, Window, WindowPane};
+use crate::windows::Window;
 
 #[derive(Clone, Debug)]
 pub enum Direction {
@@ -511,7 +512,6 @@ pub fn process_command_trigger(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::windows::WindowPane;
     use bevy::prelude::*;
 
     fn setup_world_with_layout() -> (World, WindowPane, Vec<Entity>) {

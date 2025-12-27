@@ -14,6 +14,7 @@ use stdext::function_name;
 
 use crate::app::Application;
 use crate::config::Config;
+use crate::display::Display;
 use crate::events::WindowManager;
 use crate::events::{
     ActiveDisplayMarker, BProcess, CommandTrigger, Event, ExistingMarker, FocusedMarker,
@@ -21,7 +22,7 @@ use crate::events::{
     SpawnWindowTrigger, StrayFocusEvent, Timeout, Unmanaged, WMEventTrigger,
 };
 use crate::params::{ActiveDisplay, ActiveDisplayMut, ThrottledSystem};
-use crate::windows::{Display, Window};
+use crate::windows::Window;
 
 /// Registers the Bevy systems for the `WindowManager`.
 ///

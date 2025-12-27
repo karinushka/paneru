@@ -17,6 +17,7 @@ use std::slice::from_raw_parts_mut;
 use stdext::function_name;
 
 use crate::app::Application;
+use crate::display::Display;
 use crate::errors::{Error, Result};
 use crate::events::Unmanaged;
 use crate::platform::ProcessSerialNumber;
@@ -30,7 +31,7 @@ use crate::skylight::{
     SLSWindowQueryResultCopyWindows, SLSWindowQueryWindows, WinID,
 };
 use crate::util::{AXUIWrapper, create_array, get_array_values, get_cfdict_value};
-use crate::windows::{Display, Window, ax_window_id};
+use crate::windows::{Window, ax_window_id};
 
 pub trait WindowManagerApi: Send + Sync {
     fn refresh_display(

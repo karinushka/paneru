@@ -14,6 +14,7 @@ use objc2_core_foundation::{
 };
 use objc2_core_graphics::CGRectEqualToRect;
 use std::io::ErrorKind;
+use std::ops::{Deref, DerefMut};
 use std::ptr::null_mut;
 use std::thread;
 use std::time::Duration;
@@ -28,6 +29,59 @@ use crate::skylight::{
     AXUIElementPerformAction, AXUIElementSetAttributeValue, SLPSPostEventRecordTo, WinID,
 };
 use crate::util::{AXUIWrapper, get_attribute};
+
+pub trait WindowApi: Send + Sync {
+    fn id(&self) -> WinID;
+    fn psn(&self) -> Option<ProcessSerialNumber>;
+    fn frame(&self) -> CGRect;
+    fn next_size_ratio(&self, size_ratios: &[f64]) -> f64;
+    fn element(&self) -> CFRetained<AXUIWrapper>;
+    fn title(&self) -> Result<String>;
+    fn valid_role(&self) -> Result<bool>;
+    fn role(&self) -> Result<String>;
+    fn subrole(&self) -> Result<String>;
+    fn is_root(&self) -> bool;
+    fn is_eligible(&self) -> bool;
+    fn reposition(&mut self, x: f64, y: f64, display_bounds: &CGRect);
+    fn resize(&mut self, width: f64, height: f64, display_bounds: &CGRect);
+    fn update_frame(&mut self, display_bounds: Option<&CGRect>) -> Result<()>;
+    fn focus_without_raise(&self, currently_focused: &Window);
+    fn focus_with_raise(&self);
+    fn fully_visible(&self, display_bounds: &CGRect) -> bool;
+    fn expose_window(
+        &self,
+        active_display: &ActiveDisplay,
+        moving: Option<&RepositionMarker>,
+        entity: Entity,
+        commands: &mut Commands,
+    ) -> CGRect;
+    fn width_ratio(&mut self, width_ratio: f64);
+    fn pid(&self) -> Result<Pid>;
+    fn set_psn(&mut self, psn: ProcessSerialNumber);
+    fn set_eligible(&mut self, eligible: bool);
+}
+
+#[derive(Component)]
+pub struct Window(Box<dyn WindowApi>);
+
+impl Deref for Window {
+    type Target = Box<dyn WindowApi>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for Window {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Window {
+    pub fn new(window: Box<dyn WindowApi>) -> Self {
+        Window(window)
+    }
+}
 
 /// Retrieves the window ID (`WinID`) from an `AXUIElementRef`.
 ///
@@ -56,18 +110,22 @@ pub fn ax_window_id(element_ref: AXUIElementRef) -> Result<WinID> {
     Ok(window_id)
 }
 
-#[derive(Component, Debug)]
-pub struct Window {
+// const CPS_ALL_WINDOWS: u32 = 0x100;
+const CPS_USER_GENERATED: u32 = 0x200;
+// const CPS_NO_WINDOWS: u32 = 0x400;
+
+#[derive(Debug)]
+pub struct WindowOS {
     id: WinID,
-    pub psn: Option<ProcessSerialNumber>,
+    psn: Option<ProcessSerialNumber>,
     ax_element: CFRetained<AXUIWrapper>,
     frame: CGRect,
     minimized: bool,
-    pub eligible: bool,
+    eligible: bool,
     width_ratio: f64,
 }
 
-impl Window {
+impl WindowOS {
     /// Creates a new `Window` instance.
     ///
     /// # Arguments
@@ -77,7 +135,7 @@ impl Window {
     /// # Returns
     ///
     /// `Ok(Window)` if the window is created successfully, otherwise `Err(Error)`.
-    pub fn new(element: &CFRetained<AXUIWrapper>) -> Result<Window> {
+    pub fn new(element: &CFRetained<AXUIWrapper>) -> Result<Self> {
         let id = ax_window_id(element.as_ptr())?;
         let mut window = Self {
             id,
@@ -117,98 +175,6 @@ impl Window {
         Ok(window)
     }
 
-    /// Returns the ID of the window.
-    ///
-    /// # Returns
-    ///
-    /// The window ID as `WinID`.
-    pub fn id(&self) -> WinID {
-        self.id
-    }
-
-    /// Returns the process serial number of the window.
-    pub fn psn(&self) -> Option<ProcessSerialNumber> {
-        self.psn
-    }
-
-    /// Returns the current frame (`CGRect`) of the window.
-    ///
-    /// # Returns
-    ///
-    /// The window's frame as `CGRect`.
-    pub fn frame(&self) -> CGRect {
-        self.frame
-    }
-
-    /// Calculates the next preferred size ratio for resizing the window.
-    /// It cycles through a predefined set of ratios.
-    ///
-    /// # Arguments
-    ///
-    /// * `size_ratios` - A slice of `f64` representing the preset size ratios.
-    ///
-    /// # Returns
-    ///
-    /// The next size ratio as `f64`.
-    pub fn next_size_ratio(&self, size_ratios: &[f64]) -> f64 {
-        let current = self.width_ratio;
-        size_ratios
-            .iter()
-            .find(|r| **r > current + 0.05)
-            .copied()
-            .unwrap_or_else(|| *size_ratios.first().unwrap())
-    }
-
-    /// Returns the accessibility element of the window.
-    ///
-    /// # Returns
-    ///
-    /// A `CFRetained<AXUIWrapper>` representing the accessibility element.
-    pub fn element(&self) -> CFRetained<AXUIWrapper> {
-        self.ax_element.clone()
-    }
-
-    /// Retrieves the title of the window.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(String)` with the window title if successful, otherwise `Err(Error)`.
-    pub fn title(&self) -> Result<String> {
-        let axtitle = CFString::from_static_str(kAXTitleAttribute);
-        let title = get_attribute::<CFString>(&self.ax_element, &axtitle)?;
-        Ok(title.to_string())
-    }
-
-    /// Returns true if the window has a valid role.
-    pub fn valid_role(&self) -> Result<bool> {
-        let role = self.role()?;
-        Ok(["AXSheet", "AXDrawer"]
-            .iter()
-            .any(|axrole| axrole.eq(&role)))
-    }
-
-    /// Retrieves the role of the window (e.g., "`AXWindow`").
-    ///
-    /// # Returns
-    ///
-    /// `Ok(String)` with the window role if successful, otherwise `Err(Error)`.
-    pub fn role(&self) -> Result<String> {
-        let axrole = CFString::from_static_str(kAXRoleAttribute);
-        let role = get_attribute::<CFString>(&self.ax_element, &axrole)?;
-        Ok(role.to_string())
-    }
-
-    /// Retrieves the subrole of the window (e.g., "`AXStandardWindow`").
-    ///
-    /// # Returns
-    ///
-    /// `Ok(String)` with the window subrole if successful, otherwise `Err(Error)`.
-    pub fn subrole(&self) -> Result<String> {
-        let axrole = CFString::from_static_str(kAXSubroleAttribute);
-        let role = get_attribute::<CFString>(&self.ax_element, &axrole)?;
-        Ok(role.to_string())
-    }
-
     /// Checks if the window's subrole is "`AXUnknownSubrole`".
     ///
     /// # Returns
@@ -231,18 +197,6 @@ impl Window {
             .is_ok_and(|minimized| minimized)
     }
 
-    /// Checks if the window is a root window (i.e., not a child of another window).
-    ///
-    /// # Returns
-    ///
-    /// `true` if the window is a root window, `false` otherwise.
-    pub fn is_root(&self) -> bool {
-        let cftype = self.ax_element.as_ref();
-        let axparent = CFString::from_static_str(kAXParentAttribute);
-        get_attribute::<CFType>(&self.ax_element, &axparent)
-            .is_ok_and(|parent| !CFEqual(Some(&*parent), Some(cftype)))
-    }
-
     /// Checks if the window is a "real" window based on its role and subrole.
     /// It considers standard and floating window subroles as real.
     ///
@@ -258,12 +212,145 @@ impl Window {
                 && subrole.as_deref() == Some(kAXFloatingWindowSubrole))
     }
 
+    /// Makes the window the key window for its application by sending synthesized events.
+    ///
+    /// # Arguments
+    ///
+    /// * `psn` - The process serial number of the application.
+    fn make_key_window(&self, psn: &ProcessSerialNumber) {
+        let window_id = self.id();
+        //
+        // :SynthesizedEvent
+        //
+        // NOTE(koekeishiya): These events will be picked up by an event-tap registered at the
+        // "Annotated Session" location; specifying that an event-tap is placed at the point where
+        // session events have been annotated to flow to an application.
+
+        let mut event_bytes = [0u8; 0xf8];
+        event_bytes[0x04] = 0xf8;
+        event_bytes[0x3a] = 0x10;
+        event_bytes[0x3c..0x40].copy_from_slice(&window_id.to_ne_bytes());
+        event_bytes[0x20..0x30].fill(0xff);
+
+        event_bytes[0x08] = 0x01;
+        unsafe { SLPSPostEventRecordTo(psn, event_bytes.as_ptr().cast()) };
+
+        event_bytes[0x08] = 0x02;
+        unsafe { SLPSPostEventRecordTo(psn, event_bytes.as_ptr().cast()) };
+    }
+}
+
+impl WindowApi for WindowOS {
+    /// Returns the ID of the window.
+    ///
+    /// # Returns
+    ///
+    /// The window ID as `WinID`.
+    fn id(&self) -> WinID {
+        self.id
+    }
+
+    /// Returns the process serial number of the window.
+    fn psn(&self) -> Option<ProcessSerialNumber> {
+        self.psn
+    }
+
+    /// Returns the current frame (`CGRect`) of the window.
+    ///
+    /// # Returns
+    ///
+    /// The window's frame as `CGRect`.
+    fn frame(&self) -> CGRect {
+        self.frame
+    }
+
+    /// Calculates the next preferred size ratio for resizing the window.
+    /// It cycles through a predefined set of ratios.
+    ///
+    /// # Arguments
+    ///
+    /// * `size_ratios` - A slice of `f64` representing the preset size ratios.
+    ///
+    /// # Returns
+    ///
+    /// The next size ratio as `f64`.
+    fn next_size_ratio(&self, size_ratios: &[f64]) -> f64 {
+        let current = self.width_ratio;
+        size_ratios
+            .iter()
+            .find(|r| **r > current + 0.05)
+            .copied()
+            .unwrap_or_else(|| *size_ratios.first().unwrap())
+    }
+
+    /// Returns the accessibility element of the window.
+    ///
+    /// # Returns
+    ///
+    /// A `CFRetained<AXUIWrapper>` representing the accessibility element.
+    fn element(&self) -> CFRetained<AXUIWrapper> {
+        self.ax_element.clone()
+    }
+
+    /// Retrieves the title of the window.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(String)` with the window title if successful, otherwise `Err(Error)`.
+    fn title(&self) -> Result<String> {
+        let axtitle = CFString::from_static_str(kAXTitleAttribute);
+        let title = get_attribute::<CFString>(&self.ax_element, &axtitle)?;
+        Ok(title.to_string())
+    }
+
+    /// Returns true if the window has a valid role.
+    fn valid_role(&self) -> Result<bool> {
+        let role = self.role()?;
+        Ok(["AXSheet", "AXDrawer"]
+            .iter()
+            .any(|axrole| axrole.eq(&role)))
+    }
+
+    /// Retrieves the role of the window (e.g., "`AXWindow`").
+    ///
+    /// # Returns
+    ///
+    /// `Ok(String)` with the window role if successful, otherwise `Err(Error)`.
+    fn role(&self) -> Result<String> {
+        let axrole = CFString::from_static_str(kAXRoleAttribute);
+        let role = get_attribute::<CFString>(&self.ax_element, &axrole)?;
+        Ok(role.to_string())
+    }
+
+    /// Retrieves the subrole of the window (e.g., "`AXStandardWindow`").
+    ///
+    /// # Returns
+    ///
+    /// `Ok(String)` with the window subrole if successful, otherwise `Err(Error)`.
+    fn subrole(&self) -> Result<String> {
+        let axrole = CFString::from_static_str(kAXSubroleAttribute);
+        let role = get_attribute::<CFString>(&self.ax_element, &axrole)?;
+        Ok(role.to_string())
+    }
+
+    /// Checks if the window is a root window (i.e., not a child of another window).
+    ///
+    /// # Returns
+    ///
+    /// `true` if the window is a root window, `false` otherwise.
+    fn is_root(&self) -> bool {
+        let cftype = self.ax_element.as_ref();
+        let axparent = CFString::from_static_str(kAXParentAttribute);
+        get_attribute::<CFType>(&self.ax_element, &axparent)
+            .is_ok_and(|parent| !CFEqual(Some(&*parent), Some(cftype)))
+    }
+
     /// Checks if the window is eligible for management (i.e., it is a root and a real window).
     ///
     /// # Returns
     ///
     /// `true` if the window is eligible, `false` otherwise.
-    pub fn is_eligible(&self) -> bool {
+    fn is_eligible(&self) -> bool {
         self.eligible
     }
 
@@ -274,7 +361,7 @@ impl Window {
     /// * `x` - The new x-coordinate for the window's origin.
     /// * `y` - The new y-coordinate for the window's origin.
     /// * `display_bounds` - The `CGRect` of the display.
-    pub fn reposition(&mut self, x: f64, y: f64, display_bounds: &CGRect) {
+    fn reposition(&mut self, x: f64, y: f64, display_bounds: &CGRect) {
         if (self.frame.origin.x - x).abs() < 0.1 && (self.frame.origin.y - y).abs() < 0.1 {
             trace!("{}: already in position.", function_name!());
             return;
@@ -306,7 +393,7 @@ impl Window {
     /// * `width` - The new width of the window.
     /// * `height` - The new height of the window.
     /// * `display_bounds` - The `CGRect` representing the bounds of the display the window is on.
-    pub fn resize(&mut self, width: f64, height: f64, display_bounds: &CGRect) {
+    fn resize(&mut self, width: f64, height: f64, display_bounds: &CGRect) {
         if (self.frame.size.width - width).abs() < 0.1
             && (self.frame.size.height - height).abs() < 0.1
         {
@@ -339,7 +426,7 @@ impl Window {
     /// # Returns
     ///
     /// `Ok(())` if the frame is updated successfully, otherwise `Err(Error)`.
-    pub fn update_frame(&mut self, display_bounds: Option<&CGRect>) -> Result<()> {
+    fn update_frame(&mut self, display_bounds: Option<&CGRect>) -> Result<()> {
         // CGRect frame = {0};
         // CFTypeRef position_ref = NULL;
         // CFTypeRef size_ref = NULL;
@@ -401,43 +488,12 @@ impl Window {
         Ok(())
     }
 
-    /// Makes the window the key window for its application by sending synthesized events.
-    ///
-    /// # Arguments
-    ///
-    /// * `psn` - The process serial number of the application.
-    fn make_key_window(&self, psn: &ProcessSerialNumber) {
-        let window_id = self.id();
-        //
-        // :SynthesizedEvent
-        //
-        // NOTE(koekeishiya): These events will be picked up by an event-tap registered at the
-        // "Annotated Session" location; specifying that an event-tap is placed at the point where
-        // session events have been annotated to flow to an application.
-
-        let mut event_bytes = [0u8; 0xf8];
-        event_bytes[0x04] = 0xf8;
-        event_bytes[0x3a] = 0x10;
-        event_bytes[0x3c..0x40].copy_from_slice(&window_id.to_ne_bytes());
-        event_bytes[0x20..0x30].fill(0xff);
-
-        event_bytes[0x08] = 0x01;
-        unsafe { SLPSPostEventRecordTo(psn, event_bytes.as_ptr().cast()) };
-
-        event_bytes[0x08] = 0x02;
-        unsafe { SLPSPostEventRecordTo(psn, event_bytes.as_ptr().cast()) };
-    }
-
-    // const CPS_ALL_WINDOWS: u32 = 0x100;
-    const CPS_USER_GENERATED: u32 = 0x200;
-    // const CPS_NO_WINDOWS: u32 = 0x400;
-
     /// Focuses the window without raising it. This involves sending specific events to the process.
     ///
     /// # Arguments
     ///
     /// * `currently_focused` - A reference to the currently focused window.
-    pub fn focus_without_raise(&self, currently_focused: &Window) {
+    fn focus_without_raise(&self, currently_focused: &Window) {
         let Some((psn, focused_psn)) = self.psn().zip(currently_focused.psn()) else {
             return;
         };
@@ -466,19 +522,19 @@ impl Window {
         }
 
         unsafe {
-            _SLPSSetFrontProcessWithOptions(&psn, window_id, Self::CPS_USER_GENERATED);
+            _SLPSSetFrontProcessWithOptions(&psn, window_id, CPS_USER_GENERATED);
         }
         self.make_key_window(&psn);
     }
 
     /// Focuses the window and raises it to the front.
-    pub fn focus_with_raise(&self) {
+    fn focus_with_raise(&self) {
         let Some(psn) = self.psn else {
             return;
         };
         let window_id = self.id();
         unsafe {
-            _SLPSSetFrontProcessWithOptions(&psn, window_id, Self::CPS_USER_GENERATED);
+            _SLPSSetFrontProcessWithOptions(&psn, window_id, CPS_USER_GENERATED);
         }
         self.make_key_window(&psn);
         let element_ref = self.ax_element.as_ptr();
@@ -495,7 +551,7 @@ impl Window {
     /// # Returns
     ///
     /// `true` if the window is fully visible, `false` otherwise.
-    pub fn fully_visible(&self, display_bounds: &CGRect) -> bool {
+    fn fully_visible(&self, display_bounds: &CGRect) -> bool {
         self.frame.origin.x > 0.0
             && self.frame.origin.x < display_bounds.size.width - self.frame.size.width
     }
@@ -512,7 +568,7 @@ impl Window {
     /// # Returns
     ///
     /// The adjusted `CGRect` of the window after exposure.
-    pub fn expose_window(
+    fn expose_window(
         &self,
         active_display: &ActiveDisplay,
         moving: Option<&RepositionMarker>,
@@ -570,11 +626,11 @@ impl Window {
         frame
     }
 
-    pub fn width_ratio(&mut self, width_ratio: f64) {
+    fn width_ratio(&mut self, width_ratio: f64) {
         self.width_ratio = width_ratio;
     }
 
-    pub fn pid(&self) -> Result<Pid> {
+    fn pid(&self) -> Result<Pid> {
         let pid: Pid = unsafe {
             // return *(pid_t *)((void *) ref + 0x10);
             NonNull::new_unchecked(self.ax_element.as_ptr::<Pid>())
@@ -590,5 +646,13 @@ impl Window {
                 self.ax_element
             ),
         ))
+    }
+
+    fn set_psn(&mut self, psn: ProcessSerialNumber) {
+        self.psn = Some(psn);
+    }
+
+    fn set_eligible(&mut self, eligible: bool) {
+        self.eligible = eligible;
     }
 }

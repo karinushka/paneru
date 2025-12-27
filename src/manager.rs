@@ -31,7 +31,7 @@ use crate::skylight::{
     SLSWindowQueryResultCopyWindows, SLSWindowQueryWindows, WinID,
 };
 use crate::util::{AXUIWrapper, create_array, get_array_values, get_cfdict_value};
-use crate::windows::{Window, ax_window_id};
+use crate::windows::{Window, WindowOS, ax_window_id};
 
 pub trait WindowManagerApi: Send + Sync {
     fn refresh_display(
@@ -748,10 +748,10 @@ fn bruteforce_windows(app: &mut Application, window_list: &mut Vec<WinID>) -> Ve
             if let Some(index) = window_list.iter().position(|&id| id == window_id) {
                 window_list.remove(index);
                 debug!("{}: Found window {window_id:?}", function_name!());
-                if let Ok(window) = Window::new(&element_ref)
+                if let Ok(window) = WindowOS::new(&element_ref)
                     .inspect_err(|err| warn!("{}: {err}", function_name!()))
                 {
-                    found_windows.push(window);
+                    found_windows.push(Window::new(Box::new(window)));
                 }
             }
         }

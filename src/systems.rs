@@ -22,7 +22,7 @@ use crate::events::{
     SpawnWindowTrigger, StrayFocusEvent, Timeout, Unmanaged, WMEventTrigger,
 };
 use crate::params::{ActiveDisplay, ActiveDisplayMut, ThrottledSystem};
-use crate::windows::Window;
+use crate::windows::{Window, WindowOS};
 
 /// Registers the Bevy systems for the `WindowManager`.
 ///
@@ -75,9 +75,12 @@ fn dispatch_toplevel_triggers(
             }
 
             Event::WindowCreated { element } => {
-                if let Ok(window) = Window::new(element).inspect_err(|err| {
-                    trace!("{}: not adding window {element:?}: {err}", function_name!());
-                }) {
+                if let Ok(window) = WindowOS::new(element)
+                    .inspect_err(|err| {
+                        trace!("{}: not adding window {element:?}: {err}", function_name!());
+                    })
+                    .map(|window| Window::new(Box::new(window)))
+                {
                     commands.trigger(SpawnWindowTrigger(vec![window]));
                 }
             }

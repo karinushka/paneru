@@ -644,7 +644,10 @@ fn center_mouse_trigger(
         return;
     };
 
-    if config.mouse_follows_focus() && config.ffm_flag().is_none_or(|id| id != window.id()) {
+    if config.mouse_follows_focus()
+        && !config.skip_reshuffle()
+        && config.ffm_flag().is_none_or(|id| id != window.id())
+    {
         window_manager.center_mouse(window, &active_display.bounds());
     }
 }

@@ -172,7 +172,7 @@ fn add_existing_process(
     mut commands: Commands,
 ) {
     for (entity, process) in process_query {
-        let app = window_manager.new_application(&process.0).unwrap();
+        let app = window_manager.new_application(&*process.0).unwrap();
         commands.spawn((app, ExistingMarker, ChildOf(entity)));
         commands.entity(entity).try_remove::<ExistingMarker>();
     }
@@ -297,7 +297,7 @@ fn add_launched_process(
             debug!(
                 "{}: failed to register some observers {}",
                 function_name!(),
-                process.name
+                process.name()
             );
         }
     }

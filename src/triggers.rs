@@ -604,7 +604,7 @@ fn front_switched_trigger(
         return;
     };
     let Some((BProcess(process), children)) =
-        processes.iter().find(|process| &process.0.0.psn == psn)
+        processes.iter().find(|process| &process.0.psn() == psn)
     else {
         error!(
             "{}: Unable to find process with PSN {psn:?}",
@@ -617,7 +617,7 @@ fn front_switched_trigger(
         warn!(
             "{}: Multiple apps registered to process '{}'.",
             function_name!(),
-            process.name
+            process.name()
         );
     }
     let Some(app) = children
@@ -627,11 +627,11 @@ fn front_switched_trigger(
         error!(
             "{}: No application for process '{}'.",
             function_name!(),
-            process.name
+            process.name()
         );
         return;
     };
-    debug!("{}: {}", function_name!(), process.name);
+    debug!("{}: {}", function_name!(), process.name());
 
     if let Ok(focused_id) = app.focused_window_id().inspect_err(|err| {
         warn!("{}: can not get current focus: {err}", function_name!());
@@ -1110,22 +1110,22 @@ fn application_event_trigger(
     let find_process = |psn| {
         processes
             .iter()
-            .find(|(BProcess(process), _)| &process.psn == psn)
+            .find(|(BProcess(process), _)| &process.psn() == psn)
     };
 
     match &trigger.event().0 {
         Event::ApplicationLaunched { psn, observer } => {
             if find_process(psn).is_none() {
-                let process = Process::new(psn, observer.clone());
+                let process: BProcess = Process::new(psn, observer.clone()).into();
                 let timeout = Timeout::new(
                     Duration::from_secs(PROCESS_READY_TIMEOUT_SEC),
                     Some(format!(
                         "{}: Process '{}' did not become ready in {PROCESS_READY_TIMEOUT_SEC}s.",
                         function_name!(),
-                        process.name
+                        process.name()
                     )),
                 );
-                commands.spawn((FreshMarker, timeout, BProcess(process)));
+                commands.spawn((FreshMarker, timeout, process));
             }
         }
 

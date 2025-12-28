@@ -11,6 +11,7 @@ use log::{debug, error, warn};
 use objc2::rc::Retained;
 use objc2_core_foundation::{CFRetained, CGPoint, CGSize};
 use objc2_core_graphics::CGDirectDisplayID;
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
@@ -25,7 +26,7 @@ use crate::display::WindowPane;
 use crate::errors::Result;
 use crate::manager::{WindowManager, WindowManagerOS};
 use crate::platform::{ProcessSerialNumber, WorkspaceObserver};
-use crate::process::{Process, ProcessRef};
+use crate::process::{Process, ProcessApi};
 use crate::skylight::WinID;
 use crate::systems::{gather_displays, register_systems, run_initial_oneshot_systems};
 use crate::triggers::register_triggers;
@@ -232,7 +233,20 @@ pub enum Unmanaged {
 }
 
 #[derive(Component)]
-pub struct BProcess(pub ProcessRef);
+pub struct BProcess(pub Box<dyn ProcessApi>);
+
+impl Deref for BProcess {
+    type Target = Box<dyn ProcessApi>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for BProcess {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 #[derive(Component)]
 pub struct Timeout {
@@ -381,14 +395,14 @@ impl EventHandler {
     /// A vector of `ProcessRef` for the processes launched before the window manager started.
     fn gather_initial_processes(
         receiver: &Receiver<Event>,
-    ) -> Result<(Vec<ProcessRef>, Option<Config>)> {
+    ) -> Result<(Vec<BProcess>, Option<Config>)> {
         let mut initial_processes = Vec::new();
         let mut initial_config = None;
         loop {
             match receiver.recv()? {
                 Event::ProcessesLoaded | Event::Exit => break,
                 Event::ApplicationLaunched { psn, observer } => {
-                    initial_processes.push(Process::new(&psn, observer.clone()));
+                    initial_processes.push(Process::new(&psn, observer.clone()).into());
                 }
                 Event::ConfigRefresh { config } => {
                     initial_config = Some(config);
@@ -410,7 +424,7 @@ impl EventHandler {
     /// * `existing_processes` - A mutable vector of `ProcessRef` for processes to add.
     fn initial_setup(
         world: &mut World,
-        existing_processes: &mut Vec<ProcessRef>,
+        existing_processes: &mut Vec<BProcess>,
         config: Option<&Config>,
     ) {
         if let Some(config) = config {
@@ -422,14 +436,14 @@ impl EventHandler {
                 debug!(
                     "{}: Adding existing process {}",
                     function_name!(),
-                    process.name
+                    process.name()
                 );
-                world.spawn((ExistingMarker, BProcess(process)));
+                world.spawn((ExistingMarker, process));
             } else {
                 debug!(
                     "{}: Existing application '{}' is not observable, ignoring it.",
                     function_name!(),
-                    process.name,
+                    process.name(),
                 );
             }
         }

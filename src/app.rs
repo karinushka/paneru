@@ -25,7 +25,7 @@ use crate::platform::{
     AXObserverAddNotification, AXObserverCreate, AXObserverRemoveNotification, CFStringRef, Pid,
     ProcessSerialNumber,
 };
-use crate::process::Process;
+use crate::process::ProcessApi;
 use crate::skylight::{
     _SLPSGetFrontProcess, ConnID, SLSWindowIteratorAdvance, SLSWindowIteratorGetCount,
     SLSWindowIteratorGetParentID, SLSWindowQueryResultCopyWindows, SLSWindowQueryWindows, WinID,
@@ -136,26 +136,26 @@ impl ApplicationOS {
     /// `Ok(Self)` if the `Application` is created successfully, otherwise `Err(Error)`.
     pub fn new(
         connection: Option<ConnID>,
-        process: &Process,
+        process: &dyn ProcessApi,
         events: &EventSender,
     ) -> Result<Self> {
         let refer = unsafe {
-            let ptr = AXUIElementCreateApplication(process.pid);
+            let ptr = AXUIElementCreateApplication(process.pid());
             AXUIWrapper::retain(ptr)?
         };
         let bundle_id = process
-            .application
+            .application()
             .as_ref()
             .and_then(|app| app.bundleIdentifier())
             .map(|id| id.to_string());
         Ok(Self {
             element: refer,
-            psn: process.psn,
-            pid: process.pid,
+            psn: process.psn(),
+            pid: process.pid(),
             connection,
-            handler: AxObserverHandler::new(process.pid, events.clone())?,
+            handler: AxObserverHandler::new(process.pid(), events.clone())?,
             bundle_id,
-            name: process.name.clone(),
+            name: process.name().to_string(),
         })
     }
 }

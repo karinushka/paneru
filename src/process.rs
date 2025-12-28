@@ -10,6 +10,7 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use stdext::function_name;
 
+use crate::events::BProcess;
 use crate::platform::{Pid, ProcessSerialNumber, WorkspaceObserver};
 use crate::skylight::OSStatus;
 
@@ -68,7 +69,50 @@ unsafe extern "C" {
     fn GetProcessPID(psn: *const ProcessSerialNumber, pid: *mut Pid) -> OSStatus;
 }
 
-pub type ProcessRef = Pin<Box<Process>>;
+pub trait ProcessApi: Send + Sync {
+    fn is_observable(&mut self) -> bool;
+    fn name(&self) -> &str;
+    fn pid(&self) -> Pid;
+    fn psn(&self) -> ProcessSerialNumber;
+    fn application(&self) -> Option<Retained<NSRunningApplication>>;
+    fn ready(&mut self) -> bool;
+}
+
+pub struct ProcessOS {
+    pub inner: Pin<Box<Process>>,
+}
+
+impl ProcessApi for ProcessOS {
+    fn is_observable(&mut self) -> bool {
+        self.inner.is_observable()
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name.as_str()
+    }
+
+    fn pid(&self) -> Pid {
+        self.inner.pid
+    }
+
+    fn psn(&self) -> ProcessSerialNumber {
+        self.inner.psn
+    }
+
+    fn application(&self) -> Option<Retained<NSRunningApplication>> {
+        self.inner.application.clone()
+    }
+
+    fn ready(&mut self) -> bool {
+        self.inner.ready()
+    }
+}
+
+impl From<Pin<Box<Process>>> for BProcess {
+    fn from(inner: Pin<Box<Process>>) -> Self {
+        BProcess(Box::new(ProcessOS { inner }))
+    }
+}
 
 #[repr(C)]
 pub struct Process {

@@ -201,28 +201,28 @@ impl Process {
 
     /// Subscribes to "finishedLaunching" key-value observations for the associated `NSRunningApplication`.
     pub fn observe_finished_launching(&self) {
-        if !self.observing_launched.swap(true, Ordering::Relaxed) {
+        if !self.observing_launched.swap(true, Ordering::Acquire) {
             self.observe("finishedLaunching");
         }
     }
 
     /// Unsubscribes from "finishedLaunching" key-value observations.
     pub fn unobserve_finished_launching(&self) {
-        if self.observing_launched.swap(false, Ordering::Relaxed) {
+        if self.observing_launched.swap(false, Ordering::Release) {
             self.unobserve("finishedLaunching");
         }
     }
 
     /// Subscribes to "activationPolicy" key-value observations for the associated `NSRunningApplication`.
     pub fn observe_activation_policy(&self) {
-        if !self.observing_activated.swap(true, Ordering::Relaxed) {
+        if !self.observing_activated.swap(true, Ordering::Acquire) {
             self.observe("activationPolicy");
         }
     }
 
     /// Unsubscribes from "activationPolicy" key-value observations.
     pub fn unobserve_activation_policy(&self) {
-        if self.observing_activated.swap(false, Ordering::Relaxed) {
+        if self.observing_activated.swap(false, Ordering::Release) {
             self.unobserve("activationPolicy");
         }
     }

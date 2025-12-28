@@ -13,14 +13,14 @@ use objc2_core_foundation::{CFArray, CFNumberType, CFRetained, CFString, kCFRunL
 use objc2_core_graphics::CGDirectDisplayID;
 use std::ffi::c_void;
 use std::io::ErrorKind;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::ptr::null_mut;
 use std::sync::LazyLock;
 use stdext::function_name;
 
 use crate::errors::{Error, Result};
-use crate::events::{Event, EventSender, WindowManager};
+use crate::events::{Event, EventSender};
 use crate::platform::{
     AXObserverAddNotification, AXObserverCreate, AXObserverRemoveNotification, CFStringRef, Pid,
     ProcessSerialNumber,
@@ -55,8 +55,49 @@ pub static AX_WINDOW_NOTIFICATIONS: LazyLock<Vec<&str>> = LazyLock::new(|| {
     ]
 });
 
+pub trait ApplicationApi: Send + Sync {
+    fn pid(&self) -> Pid;
+    fn psn(&self) -> ProcessSerialNumber;
+    fn connection(&self) -> Option<ConnID>;
+    fn focused_window_id(&self) -> Result<WinID>;
+    fn window_list(&self) -> Result<Vec<Result<Window>>>;
+    fn observe(&mut self) -> Result<bool>;
+    fn observe_window(&mut self, window: &Window) -> Result<bool>;
+    fn unobserve_window(&mut self, window: &Window);
+    fn is_frontmost(&self) -> bool;
+    fn bundle_id(&self) -> Option<&str>;
+    fn parent_window(&self, display_id: CGDirectDisplayID) -> Result<WinID>;
+}
+
 #[derive(Component)]
-pub struct Application {
+pub struct Application(Box<dyn ApplicationApi>);
+
+impl Deref for Application {
+    type Target = Box<dyn ApplicationApi>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for Application {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl std::fmt::Display for Application {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "app (pid {})", self.pid())
+    }
+}
+
+impl Application {
+    pub fn new(app: Box<dyn ApplicationApi>) -> Self {
+        Application(app)
+    }
+}
+
+pub struct ApplicationOS {
     element: CFRetained<AXUIWrapper>,
     psn: ProcessSerialNumber,
     pid: Pid,
@@ -66,7 +107,7 @@ pub struct Application {
     name: String,
 }
 
-impl Drop for Application {
+impl Drop for ApplicationOS {
     /// Cleans up the `AXObserver` by removing all registered notifications when the `Application` is dropped.
     fn drop(&mut self) {
         self.handler
@@ -74,13 +115,13 @@ impl Drop for Application {
     }
 }
 
-impl std::fmt::Display for Application {
+impl std::fmt::Display for ApplicationOS {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "app '{}' (pid {})", self.name, self.pid)
     }
 }
 
-impl Application {
+impl ApplicationOS {
     /// Creates a new `Application` instance for a given process.
     /// It obtains the Accessibility UI element for the application and its connection ID.
     ///
@@ -93,7 +134,11 @@ impl Application {
     /// # Returns
     ///
     /// `Ok(Self)` if the `Application` is created successfully, otherwise `Err(Error)`.
-    pub fn new(wm: &WindowManager, process: &Process, events: &EventSender) -> Result<Self> {
+    pub fn new(
+        connection: Option<ConnID>,
+        process: &Process,
+        events: &EventSender,
+    ) -> Result<Self> {
         let refer = unsafe {
             let ptr = AXUIElementCreateApplication(process.pid);
             AXUIWrapper::retain(ptr)?
@@ -107,19 +152,21 @@ impl Application {
             element: refer,
             psn: process.psn,
             pid: process.pid,
-            connection: wm.0.connection_for_process(process.psn),
+            connection,
             handler: AxObserverHandler::new(process.pid, events.clone())?,
             bundle_id,
             name: process.name.clone(),
         })
     }
+}
 
+impl ApplicationApi for ApplicationOS {
     /// Retrieves the process ID (Pid) of the application.
     ///
     /// # Returns
     ///
     /// The process ID.
-    pub fn pid(&self) -> Pid {
+    fn pid(&self) -> Pid {
         self.pid
     }
 
@@ -128,7 +175,7 @@ impl Application {
     /// # Returns
     ///
     /// The process serial number.
-    pub fn psn(&self) -> ProcessSerialNumber {
+    fn psn(&self) -> ProcessSerialNumber {
         self.psn
     }
 
@@ -137,7 +184,7 @@ impl Application {
     /// # Returns
     ///
     /// The connection ID.
-    pub fn connection(&self) -> Option<ConnID> {
+    fn connection(&self) -> Option<ConnID> {
         self.connection
     }
 
@@ -146,7 +193,7 @@ impl Application {
     /// # Returns
     ///
     /// `Ok(WinID)` with the focused window ID if successful, otherwise `Err(Error)`.
-    pub fn focused_window_id(&self) -> Result<WinID> {
+    fn focused_window_id(&self) -> Result<WinID> {
         let axmain = CFString::from_static_str(kAXFocusedWindowAttribute);
         let focused = get_attribute::<AXUIWrapper>(&self.element, &axmain)?;
         ax_window_id(focused.as_ptr())
@@ -157,7 +204,7 @@ impl Application {
     /// # Returns
     ///
     /// `Ok(CFRetained<CFArray>)` containing the list of window elements if successful, otherwise `Err(Error)`.
-    pub fn window_list(&self) -> Result<Vec<Result<Window>>> {
+    fn window_list(&self) -> Result<Vec<Result<Window>>> {
         let axwindows = CFString::from_static_str(kAXWindowsAttribute);
         let array = get_attribute::<CFArray>(&self.element, &axwindows)?;
         let out = get_array_values::<accessibility_sys::__AXUIElement>(&array)
@@ -175,7 +222,7 @@ impl Application {
     /// # Returns
     ///
     /// `Ok(bool)` where `true` means all observers were successfully registered and `retry` list is empty, otherwise `Err(Error)`.
-    pub fn observe(&mut self) -> Result<bool> {
+    fn observe(&mut self) -> Result<bool> {
         self.handler
             .add_observer(&self.element, &AX_NOTIFICATIONS, ObserverType::Application)
             .map(|retry| retry.is_empty())
@@ -190,7 +237,7 @@ impl Application {
     /// # Returns
     ///
     /// `Ok(bool)` where `true` means all observers were successfully registered and `retry` list is empty, otherwise `Err(Error)`.
-    pub fn observe_window(&mut self, window: &Window) -> Result<bool> {
+    fn observe_window(&mut self, window: &Window) -> Result<bool> {
         self.handler
             .add_observer(
                 window.element().deref(),
@@ -205,7 +252,7 @@ impl Application {
     /// # Arguments
     ///
     /// * `window` - A reference to the `Window` object to unobserve.
-    pub fn unobserve_window(&mut self, window: &Window) {
+    fn unobserve_window(&mut self, window: &Window) {
         self.handler.remove_observer(
             &ObserverType::Window(window.id()),
             window.element().deref(),
@@ -218,19 +265,19 @@ impl Application {
     /// # Returns
     ///
     /// `true` if the application is frontmost, `false` otherwise.
-    pub fn is_frontmost(&self) -> bool {
+    fn is_frontmost(&self) -> bool {
         let mut psn = ProcessSerialNumber::default();
         unsafe { _SLPSGetFrontProcess(&mut psn) };
         self.psn == psn
     }
 
     /// Returns the bundle identifier of the application.
-    pub fn bundle_id(&self) -> Option<&String> {
-        self.bundle_id.as_ref()
+    fn bundle_id(&self) -> Option<&str> {
+        self.bundle_id.as_deref()
     }
 
     /// Returns the parent window for a given display.
-    pub fn parent_window(&self, display_id: CGDirectDisplayID) -> Result<WinID> {
+    fn parent_window(&self, display_id: CGDirectDisplayID) -> Result<WinID> {
         let windows = create_array(&[display_id], CFNumberType::SInt32Type)?;
         unsafe {
             let query = CFRetained::from_raw(SLSWindowQueryWindows(

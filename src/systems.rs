@@ -15,12 +15,12 @@ use stdext::function_name;
 use crate::app::Application;
 use crate::config::Config;
 use crate::display::Display;
-use crate::events::WindowManager;
 use crate::events::{
     ActiveDisplayMarker, BProcess, CommandTrigger, Event, ExistingMarker, FocusedMarker,
-    FreshMarker, OrphanedPane, PollForNotifications, RepositionMarker, ResizeMarker, SenderSocket,
+    FreshMarker, OrphanedPane, PollForNotifications, RepositionMarker, ResizeMarker,
     SpawnWindowTrigger, StrayFocusEvent, Timeout, Unmanaged, WMEventTrigger,
 };
+use crate::manager::WindowManager;
 use crate::params::{ActiveDisplay, ActiveDisplayMut, ThrottledSystem};
 use crate::windows::{Window, WindowOS};
 
@@ -143,11 +143,11 @@ pub fn run_initial_oneshot_systems(world: &mut World) {
 /// * `commands` - Bevy commands to spawn entities.
 #[allow(clippy::needless_pass_by_value)]
 pub fn gather_displays(window_manager: Res<WindowManager>, mut commands: Commands) {
-    let Ok(active_display_id) = window_manager.0.active_display_id() else {
+    let Ok(active_display_id) = window_manager.active_display_id() else {
         error!("{}: Unable to get active display id!", function_name!());
         return;
     };
-    for display in window_manager.0.present_displays() {
+    for display in window_manager.present_displays() {
         if display.id() == active_display_id {
             commands.spawn((display, ActiveDisplayMarker));
         } else {
@@ -167,13 +167,12 @@ pub fn gather_displays(window_manager: Res<WindowManager>, mut commands: Command
 /// * `commands` - Bevy commands to spawn entities and manage components.
 #[allow(clippy::needless_pass_by_value)]
 fn add_existing_process(
-    wm: Res<WindowManager>,
-    events: Res<SenderSocket>,
+    window_manager: Res<WindowManager>,
     process_query: Query<(Entity, &BProcess), With<ExistingMarker>>,
     mut commands: Commands,
 ) {
     for (entity, process) in process_query {
-        let app = Application::new(&wm, &process.0, &events.0).unwrap();
+        let app = window_manager.new_application(&process.0).unwrap();
         commands.spawn((app, ExistingMarker, ChildOf(entity)));
         commands.entity(entity).try_remove::<ExistingMarker>();
     }
@@ -190,7 +189,7 @@ fn add_existing_process(
 /// * `commands` - Bevy commands to spawn entities and manage components.
 #[allow(clippy::needless_pass_by_value)]
 fn add_existing_application(
-    wm: Res<WindowManager>,
+    window_manager: Res<WindowManager>,
     displays: Query<&Display>,
     app_query: Query<(&mut Application, Entity), With<ExistingMarker>>,
     mut commands: Commands,
@@ -202,9 +201,9 @@ fn add_existing_application(
 
     for (mut app, entity) in app_query {
         if app.observe().is_ok_and(|result| result)
-            && let Ok(windows) =
-                wm.0.add_existing_application_windows(&mut app, &spaces, 0)
-                    .inspect_err(|err| warn!("{}: {err}", function_name!()))
+            && let Ok(windows) = window_manager
+                .add_existing_application_windows(&mut app, &spaces, 0)
+                .inspect_err(|err| warn!("{}: {err}", function_name!()))
         {
             commands.trigger(SpawnWindowTrigger(windows));
         }
@@ -236,11 +235,10 @@ fn finish_setup(
     );
 
     for (mut display, active) in displays {
-        window_manager.0.refresh_display(&mut display, &mut windows);
+        window_manager.refresh_display(&mut display, &mut windows);
 
         if active {
             let active_panel = window_manager
-                .0
                 .active_display_space(display.id())
                 .and_then(|active_space| display.active_panel(active_space));
 
@@ -267,8 +265,7 @@ fn finish_setup(
 /// * `commands` - Bevy commands to spawn entities and manage components.
 #[allow(clippy::needless_pass_by_value)]
 fn add_launched_process(
-    wm: Res<WindowManager>,
-    events: Res<SenderSocket>,
+    window_manager: Res<WindowManager>,
     process_query: Populated<(Entity, &mut BProcess, Has<Children>), With<FreshMarker>>,
     mut commands: Commands,
 ) {
@@ -285,7 +282,7 @@ fn add_launched_process(
             continue;
         }
 
-        let mut app = Application::new(&wm, process, &events.0).unwrap();
+        let mut app = window_manager.new_application(process).unwrap();
 
         if app.observe().is_ok_and(|good| good) {
             let timeout = Timeout::new(
@@ -460,7 +457,7 @@ fn display_changes_watcher(
         return;
     }
 
-    let Ok(current_display_id) = window_manager.0.active_display_id() else {
+    let Ok(current_display_id) = window_manager.active_display_id() else {
         return;
     };
     let found = displays
@@ -487,7 +484,7 @@ fn display_changes_watcher(
         }));
     }
 
-    let present_displays = window_manager.0.present_displays();
+    let present_displays = window_manager.present_displays();
     displays.iter().for_each(|(display, _)| {
         if !present_displays
             .iter()

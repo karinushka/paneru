@@ -9,11 +9,11 @@ use stdext::function_name;
 use crate::config::{Config, preset_column_widths};
 use crate::display::{Display, Panel, WindowPane};
 use crate::errors::Result;
-use crate::events::WindowManager;
 use crate::events::{
     CommandTrigger, Event, FocusedMarker, RepositionMarker, ReshuffleAroundMarker, ResizeMarker,
-    SenderSocket, Unmanaged, WMEventTrigger,
+    Unmanaged, WMEventTrigger,
 };
+use crate::manager::WindowManager;
 use crate::params::ActiveDisplayMut;
 use crate::windows::Window;
 
@@ -472,7 +472,6 @@ fn command_windows(
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 pub fn process_command_trigger(
     trigger: On<CommandTrigger>,
-    sender: Res<SenderSocket>,
     window_manager: Res<WindowManager>,
     current_focus: Single<Entity, With<FocusedMarker>>,
     mut windows: Query<(&mut Window, Entity, Has<Unmanaged>)>,
@@ -502,7 +501,7 @@ pub fn process_command_trigger(
                 Ok(())
             }
         }
-        Command::Quit => sender.0.send(Event::Exit),
+        Command::Quit => window_manager.quit(),
     };
     if let Err(err) = res {
         error!("{}: {err}", function_name!());

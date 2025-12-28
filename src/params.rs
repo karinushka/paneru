@@ -14,9 +14,8 @@ use objc2_core_graphics::CGDirectDisplayID;
 use crate::{
     config::{Config, WindowParams},
     display::{Display, WindowPane},
-    events::{
-        ActiveDisplayMarker, FocusFollowsMouse, MissionControlActive, SkipReshuffle, WindowManager,
-    },
+    events::{ActiveDisplayMarker, FocusFollowsMouse, MissionControlActive, SkipReshuffle},
+    manager::WindowManager,
     skylight::WinID,
 };
 

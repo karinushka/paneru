@@ -1,5 +1,6 @@
 use bevy::ecs::entity::Entity;
 use bevy::ecs::query::Has;
+use bevy::ecs::resource::Resource;
 use bevy::ecs::system::Query;
 use core::ptr::NonNull;
 use log::{debug, error, trace, warn};
@@ -11,16 +12,17 @@ use objc2_core_graphics::{
     CGWarpMouseCursorPosition,
 };
 use std::io::ErrorKind;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 use std::ptr::null_mut;
 use std::slice::from_raw_parts_mut;
 use stdext::function_name;
 
-use crate::app::Application;
+use crate::app::{Application, ApplicationOS};
 use crate::display::Display;
 use crate::errors::{Error, Result};
-use crate::events::Unmanaged;
+use crate::events::{Event, EventSender, Unmanaged};
 use crate::platform::ProcessSerialNumber;
+use crate::process::Process;
 use crate::skylight::{
     _AXUIElementCreateWithRemoteToken, ConnID, SLSCopyActiveMenuBarDisplayIdentifier,
     SLSCopyAssociatedWindows, SLSCopyBestManagedDisplayForRect, SLSCopyManagedDisplayForWindow,
@@ -34,13 +36,13 @@ use crate::util::{AXUIWrapper, create_array, get_array_values, get_cfdict_value}
 use crate::windows::{Window, WindowOS, ax_window_id};
 
 pub trait WindowManagerApi: Send + Sync {
+    fn new_application(&self, process: &Process) -> Result<Application>;
     fn refresh_display(
         &self,
         display: &mut Display,
         windows: &mut Query<(&mut Window, Entity, Has<Unmanaged>)>,
     );
     fn get_associated_windows(&self, window_id: WinID) -> Vec<WinID>;
-    fn connection_for_process(&self, psn: ProcessSerialNumber) -> Option<ConnID>;
     fn present_displays(&self) -> Vec<Display>;
     fn active_display_id(&self) -> Result<u32>;
     fn active_display_space(&self, display_id: CGDirectDisplayID) -> Result<u64>;
@@ -53,6 +55,23 @@ pub trait WindowManagerApi: Send + Sync {
     ) -> Result<Vec<Window>>;
     fn find_window_at_point(&self, point: &CGPoint) -> Result<WinID>;
     fn windows_in_workspace(&self, space_id: u64) -> Result<Vec<WinID>>;
+    fn quit(&self) -> Result<()>;
+}
+
+#[derive(Resource)]
+pub struct WindowManager(pub Box<dyn WindowManagerApi>);
+
+impl Deref for WindowManager {
+    type Target = Box<dyn WindowManagerApi>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for WindowManager {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
 
 /// The main window manager logic.
@@ -60,15 +79,19 @@ pub trait WindowManagerApi: Send + Sync {
 /// This struct contains the Bevy systems that respond to events and manage windows.
 pub struct WindowManagerOS {
     main_cid: ConnID,
+    event_sender: EventSender,
 }
 
 impl WindowManagerOS {
     /// Creates a new `WindowManager` instance.
-    pub fn new() -> Self {
+    pub fn new(event_sender: EventSender) -> Self {
         let main_cid = unsafe { SLSMainConnectionID() };
         debug!("{}: My connection id: {main_cid}", function_name!());
 
-        Self { main_cid }
+        Self {
+            main_cid,
+            event_sender,
+        }
     }
 
     /// Retrieves a list of space IDs for a given display UUID.
@@ -227,9 +250,22 @@ impl WindowManagerOS {
             .filter_map(|(window, entity)| window.is_eligible().then_some(entity))
             .collect()
     }
+
+    /// Returns the connection ID for a given process serial number.
+    fn connection_for_process(&self, psn: ProcessSerialNumber) -> Option<ConnID> {
+        let mut connection: ConnID = 0;
+        unsafe { SLSGetConnectionIDForPSN(self.main_cid, &psn, &mut connection) };
+        (connection != 0).then_some(connection)
+    }
 }
 
 impl WindowManagerApi for WindowManagerOS {
+    fn new_application(&self, process: &Process) -> Result<Application> {
+        let connection = self.connection_for_process(process.psn);
+        ApplicationOS::new(connection, process, &self.event_sender)
+            .map(|app| Application::new(Box::new(app)))
+    }
+
     /// Refreshes the list of active displays and reorganizes windows across them.
     /// It preserves spaces from old displays if they still exist.
     ///
@@ -315,13 +351,6 @@ impl WindowManagerApi for WindowManagerOS {
                 }
             })
             .collect()
-    }
-
-    /// Returns the connection ID for a given process serial number.
-    fn connection_for_process(&self, psn: ProcessSerialNumber) -> Option<ConnID> {
-        let mut connection: ConnID = 0;
-        unsafe { SLSGetConnectionIDForPSN(self.main_cid, &psn, &mut connection) };
-        (connection != 0).then_some(connection)
     }
 
     /// Retrieves a list of all currently present displays, along with their associated spaces.
@@ -559,6 +588,10 @@ impl WindowManagerApi for WindowManagerOS {
     /// Returns a list of windows in a given workspace.
     fn windows_in_workspace(&self, space_id: u64) -> Result<Vec<WinID>> {
         space_window_list_for_connection(self.main_cid, &[space_id], None, true)
+    }
+
+    fn quit(&self) -> Result<()> {
+        self.event_sender.send(Event::Exit)
     }
 }
 

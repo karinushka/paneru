@@ -23,7 +23,7 @@ use crate::commands::{Command, process_command_trigger};
 use crate::config::Config;
 use crate::display::WindowPane;
 use crate::errors::Result;
-use crate::manager::{WindowManagerApi, WindowManagerOS};
+use crate::manager::{WindowManager, WindowManagerOS};
 use crate::platform::{ProcessSerialNumber, WorkspaceObserver};
 use crate::process::{Process, ProcessRef};
 use crate::skylight::WinID;
@@ -259,9 +259,6 @@ pub struct OrphanedPane {
 }
 
 #[derive(Resource)]
-pub struct SenderSocket(pub EventSender);
-
-#[derive(Resource)]
 pub struct SkipReshuffle(pub bool);
 
 #[derive(Resource)]
@@ -269,9 +266,6 @@ pub struct MissionControlActive(pub bool);
 
 #[derive(Resource)]
 pub struct FocusFollowsMouse(pub Option<WinID>);
-
-#[derive(Resource)]
-pub struct WindowManager(pub Box<dyn WindowManagerApi>);
 
 #[derive(PartialEq, Resource)]
 pub struct PollForNotifications(pub bool);
@@ -323,8 +317,7 @@ impl EventHandler {
             .add_plugins(TimePlugin)
             .init_resource::<Messages<Event>>()
             .insert_resource(Time::<Virtual>::from_max_delta(Duration::from_secs(10)))
-            .insert_resource(WindowManager(Box::new(WindowManagerOS::new())))
-            .insert_resource(SenderSocket(sender))
+            .insert_resource(WindowManager(Box::new(WindowManagerOS::new(sender))))
             .insert_resource(SkipReshuffle(false))
             .insert_resource(MissionControlActive(false))
             .insert_resource(FocusFollowsMouse(None))

@@ -13,12 +13,12 @@ use stdext::function_name;
 use crate::app::Application;
 use crate::config::WindowParams;
 use crate::display::{Display, Panel, WindowPane};
-use crate::events::WindowManager;
 use crate::events::{
     ActiveDisplayMarker, BProcess, Event, FocusedMarker, FreshMarker, MissionControlActive,
     OrphanedPane, RepositionMarker, ReshuffleAroundMarker, SpawnWindowTrigger, StrayFocusEvent,
     Timeout, Unmanaged, WMEventTrigger, WindowDraggedMarker,
 };
+use crate::manager::WindowManager;
 use crate::params::{ActiveDisplay, ActiveDisplayMut, Configuration};
 use crate::process::Process;
 use crate::windows::Window;
@@ -85,7 +85,7 @@ fn mouse_moved_trigger(
         trace!("{}: ffm_window_id > 0", function_name!());
         return;
     }
-    let Ok(window_id) = window_manager.0.find_window_at_point(&point) else {
+    let Ok(window_id) = window_manager.find_window_at_point(&point) else {
         debug!(
             "{}: can not find window at point {point:?}",
             function_name!()
@@ -277,7 +277,7 @@ fn workspace_change_trigger(
         return;
     };
 
-    let Ok(workspace_id) = window_manager.0.active_display_space(active_display.id()) else {
+    let Ok(workspace_id) = window_manager.active_display_space(active_display.id()) else {
         return;
     };
     let Ok(panel) = active_display.display().active_panel(workspace_id) else {
@@ -298,7 +298,7 @@ fn workspace_change_trigger(
         return;
     }
 
-    let windows = window_manager.0.windows_in_workspace(workspace_id);
+    let windows = window_manager.windows_in_workspace(workspace_id);
     if !windows.is_ok_and(|windows| {
         windows
             .into_iter()
@@ -351,7 +351,7 @@ fn display_change_trigger(
         return;
     };
 
-    let Ok(active_id) = window_manager.0.active_display_id() else {
+    let Ok(active_id) = window_manager.active_display_id() else {
         error!("{}: Unable to get active display id!", function_name!());
         return;
     };
@@ -390,7 +390,7 @@ fn active_display_trigger(
         return;
     };
     let active_display_id = active_display.id();
-    let Ok(workspace_id) = window_manager.0.active_display_space(active_display_id) else {
+    let Ok(workspace_id) = window_manager.active_display_space(active_display_id) else {
         return;
     };
     let Ok(panel) = active_display.active_panel(workspace_id) else {
@@ -415,7 +415,7 @@ fn active_display_trigger(
         // Window is either unmanaged or already in the current space.
         return;
     }
-    let windows = window_manager.0.windows_in_workspace(workspace_id);
+    let windows = window_manager.windows_in_workspace(workspace_id);
     if !windows.is_ok_and(|windows| {
         windows
             .into_iter()
@@ -1437,7 +1437,7 @@ fn spawn_window_trigger(
         window.set_psn(app.psn());
         let eligible = app.parent_window(active_display.id()).is_err() || window.is_root();
         window.set_eligible(eligible);
-        let bundle_id = app.bundle_id().map(String::as_str).unwrap_or_default();
+        let bundle_id = app.bundle_id().unwrap_or_default();
         debug!(
             "{}: window {} isroot {} eligible {} bundle_id {}",
             function_name!(),

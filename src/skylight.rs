@@ -6,8 +6,11 @@ use objc2_core_graphics::{CGDirectDisplayID, CGError};
 
 use crate::platform::{CFStringRef, ProcessSerialNumber};
 
+/// Type alias for `OSStatus`, a 32-bit integer error code used by macOS system services.
 pub type OSStatus = i32;
+/// Type alias for `WinID`, a 32-bit integer representing a window identifier in `SkyLight`.
 pub type WinID = i32;
+/// Type alias for `ConnID`, a 64-bit integer representing a connection identifier in `SkyLight`.
 pub type ConnID = i64;
 
 #[link(name = "SkyLight", kind = "framework")]
@@ -29,6 +32,7 @@ unsafe extern "C" {
     pub fn _AXUIElementGetWindow(element: AXUIElementRef, wid: &mut WinID) -> OSStatus;
 
     /// Retrieves the main connection ID for the `SkyLight` API.
+    /// This connection ID is required for most `SkyLight` API calls.
     ///
     /// # Returns
     ///
@@ -42,8 +46,8 @@ unsafe extern "C" {
     ///
     /// # Arguments
     ///
-    /// * `cid` - The connection ID.
-    /// * `window_id` - The ID of the window.
+    /// * `cid` - The `ConnID` of the connection.
+    /// * `window_id` - The `WinID` of the window.
     /// * `frame` - A mutable reference to a `CGRect` where the window bounds will be stored.
     ///
     /// # Returns
@@ -55,30 +59,32 @@ unsafe extern "C" {
     pub fn SLSGetWindowBounds(cid: ConnID, window_id: WinID, frame: &mut CGRect) -> CGError;
 
     /// Copies the managed display identifier for a given window.
+    /// This function returns a `CFStringRef` that identifies the display where the window is currently located.
     ///
     /// # Arguments
     ///
-    /// * `cid` - The connection ID.
-    /// * `window_id` - The ID of the window.
+    /// * `cid` - The `ConnID` of the connection.
+    /// * `window_id` - The `WinID` of the window.
     ///
     /// # Returns
     ///
-    /// A `CFStringRef` representing the display identifier.
+    /// A `CFStringRef` representing the display identifier, or `NULL` if not found.
     ///
     /// # Original signature
     /// extern `CFStringRef` SLSCopyManagedDisplayForWindow(int cid, `uint32_t` wid);
     pub fn SLSCopyManagedDisplayForWindow(cid: ConnID, window_id: WinID) -> CFStringRef;
 
     /// Copies the best managed display identifier for a given rectangle.
+    /// This function determines which display best contains or is intersected by the provided rectangle.
     ///
     /// # Arguments
     ///
-    /// * `cid` - The connection ID.
+    /// * `cid` - The `ConnID` of the connection.
     /// * `frame` - The `CGRect` to find the best display for.
     ///
     /// # Returns
     ///
-    /// A `CFStringRef` representing the best display identifier.
+    /// A `CFStringRef` representing the best display identifier, or `NULL` if not found.
     ///
     /// # Original signature
     /// extern `CFStringRef` SLSCopyBestManagedDisplayForRect(int cid, `CGRect` rect);
@@ -92,7 +98,7 @@ unsafe extern "C" {
     ///
     /// # Returns
     ///
-    /// A raw pointer to a `CFUUID` if successful.
+    /// A raw pointer to a `CFUUID` if successful, or `NULL` if the UUID cannot be created.
     ///
     /// # Original signature
     /// extern `CFUUIDRef` `CGDisplayCreateUUIDFromDisplayID`(`uint32_t` did);
@@ -107,13 +113,16 @@ unsafe extern "C" {
     /// # Returns
     ///
     /// A `u32` representing the `CGDirectDisplayID`.
+    ///
+    /// # Original signature
+    /// extern `uint32_t` `CGDisplayGetDisplayIDFromUUID`(`CFUUIDRef` uuid);
     pub fn CGDisplayGetDisplayIDFromUUID(display: &CFUUID) -> u32;
 
     /// Retrieves the current space ID for a managed display.
     ///
     /// # Arguments
     ///
-    /// * `cid` - The connection ID.
+    /// * `cid` - The `ConnID` of the connection.
     /// * `uuid` - A `CFStringRef` representing the display's UUID.
     ///
     /// # Returns
@@ -125,14 +134,15 @@ unsafe extern "C" {
     pub fn SLSManagedDisplayGetCurrentSpace(cid: ConnID, uuid: CFStringRef) -> u64;
 
     /// Copies the active menu bar display identifier.
+    /// This function returns a `CFStringRef` that identifies the display where the primary menu bar is currently active.
     ///
     /// # Arguments
     ///
-    /// * `cid` - The connection ID.
+    /// * `cid` - The `ConnID` of the connection.
     ///
     /// # Returns
     ///
-    /// A `CFStringRef` representing the active menu bar display identifier.
+    /// A `CFStringRef` representing the active menu bar display identifier, or `NULL` if not found.
     ///
     /// # Original signature
     /// extern `CFStringRef` SLSCopyActiveMenuBarDisplayIdentifier(int cid);
@@ -151,19 +161,20 @@ unsafe extern "C" {
     pub fn SLSGetDisplayMenubarHeight(did: CGDirectDisplayID, height: *mut u32) -> CGError;
 
     /// Copies a list of windows with specified options and tags.
+    /// This function is used to query windows based on their owner, associated spaces, and various options like including minimized windows.
     ///
     /// # Arguments
     ///
-    /// * `cid` - The connection ID.
-    /// * `owner` - The owner connection ID (0 for all windows).
-    /// * `spaces` - A raw pointer to a `CFArray` of space IDs.
-    /// * `options` - An integer representing the query options.
-    /// * `set_tags` - A mutable reference to an `i64` to store set tags.
-    /// * `clear_tags` - A mutable reference to an `i64` to store clear tags.
+    /// * `cid` - The `ConnID` of the connection.
+    /// * `owner` - The owner connection ID (0 for all windows, or a specific application's `ConnID`).
+    /// * `spaces` - A raw pointer to a `CFArray` of space IDs to query within.
+    /// * `options` - An integer representing the query options (e.g., `0x2` for normal windows, `0x7` for normal + minimized).
+    /// * `set_tags` - A mutable reference to an `i64` to store tags that are set on the returned windows.
+    /// * `clear_tags` - A mutable reference to an `i64` to store tags that are cleared on the returned windows.
     ///
     /// # Returns
     ///
-    /// A raw pointer to a `CFArray` of window information.
+    /// A raw pointer to a `CFArray` of window information (dictionaries), or `NULL` if no windows are found or an error occurs.
     ///
     /// # Original signature
     /// extern `CFArrayRef` SLSCopyWindowsWithOptionsAndTags(int cid, `uint32_t` owner, `CFArrayRef` spaces, `uint32_t` options, `uint64_t` *`set_tags`, `uint64_t` *`clear_tags`);
@@ -177,43 +188,46 @@ unsafe extern "C" {
     ) -> *mut CFArray;
 
     /// Retrieves the space management mode for a connection ID.
+    /// This function is typically used to check if "Displays have separate Spaces" is enabled.
     ///
     /// # Arguments
     ///
-    /// * `cid` - The connection ID.
+    /// * `cid` - The `ConnID` of the connection.
     ///
     /// # Returns
     ///
-    /// An `i32` representing the space management mode.
+    /// An `i32` representing the space management mode (1 if separate spaces are enabled, 0 otherwise).
     ///
     /// # Original signature
     /// extern int SLSGetSpaceManagementMode(int cid);
     pub fn SLSGetSpaceManagementMode(cid: ConnID) -> i32;
 
     /// Copies a list of managed display spaces.
+    /// This function returns an array of dictionaries, where each dictionary describes a managed display and its associated spaces.
     ///
     /// # Arguments
     ///
-    /// * `cid` - The connection ID.
+    /// * `cid` - The `ConnID` of the connection.
     ///
     /// # Returns
     ///
-    /// A raw pointer to a `CFArray` of managed display spaces.
+    /// A raw pointer to a `CFArray` of managed display spaces, or `NULL` if not found or an error occurs.
     ///
     /// # Original signature
     /// extern `CFArrayRef` SLSCopyManagedDisplaySpaces(int cid);
     pub fn SLSCopyManagedDisplaySpaces(cid: ConnID) -> *mut CFArray;
 
     /// Copies a list of associated windows for a given window ID.
+    /// This typically refers to child windows or windows grouped with the primary window.
     ///
     /// # Arguments
     ///
-    /// * `cid` - The connection ID.
-    /// * `window_id` - The ID of the window.
+    /// * `cid` - The `ConnID` of the connection.
+    /// * `window_id` - The `WinID` of the window.
     ///
     /// # Returns
     ///
-    /// A `NonNull<CFArray>` containing associated windows.
+    /// A `NonNull<CFArray>` containing associated windows, or `NULL` if not found or an error occurs.
     ///
     /// # Original signature
     /// extern `CFArrayRef` SLSCopyAssociatedWindows(int cid, `uint32_t` wid);
@@ -375,12 +389,13 @@ unsafe extern "C" {
     ) -> CGError;
 
     /// Sets the frontmost process with additional options and a target window ID.
+    /// This function brings the specified process to the front and can optionally focus on a specific window within that process.
     ///
     /// # Arguments
     ///
     /// * `psn` - A reference to the `ProcessSerialNumber` of the process to bring to front.
-    /// * `window_id` - The ID of the window to focus within the process.
-    /// * `mode` - A `u32` representing the activation mode.
+    /// * `window_id` - The `WinID` of the window to focus within the process (0 for no specific window).
+    /// * `mode` - A `u32` representing the activation mode (e.g., `0x1` for `kCGSProcessActivateOptionsPreferringOtherApps`).
     ///
     /// # Returns
     ///
@@ -395,11 +410,12 @@ unsafe extern "C" {
     ) -> CGError;
 
     /// Posts an event record to a target `ProcessSerialNumber`.
+    /// This function sends a low-level event to a specific process, often used for synthetic input.
     ///
     /// # Arguments
     ///
     /// * `psn` - A reference to the `ProcessSerialNumber` of the target process.
-    /// * `event` - A raw pointer to the event data.
+    /// * `event` - A raw pointer to the event data (e.g., `CGEventRef` converted to `*const c_void`).
     ///
     /// # Returns
     ///
@@ -410,14 +426,16 @@ unsafe extern "C" {
     pub fn SLPSPostEventRecordTo(psn: &ProcessSerialNumber, event: *const c_void) -> CGError;
 
     /// Finds a window and its owner at a specified screen point.
+    /// This function can be used to identify which window is under the mouse cursor and its owning application.
     ///
     /// # Arguments
     ///
-    /// * `cid` - The connection ID.
-    /// * `filter_window_id` - A window ID to filter the search (0 for no filter).
-    /// * `_` - Two unused `i64` arguments.
+    /// * `cid` - The `ConnID` of the connection.
+    /// * `filter_window_id` - A `WinID` to filter the search (0 for no filter).
+    /// * `_unused1` - An unused `i64` argument (historically used for options).
+    /// * `_unused2` - Another unused `i64` argument.
     /// * `point` - A reference to a `CGPoint` representing the screen coordinate.
-    /// * `window_point` - A mutable reference to a `CGPoint` to store the window-relative coordinate.
+    /// * `window_point` - A mutable reference to a `CGPoint` to store the window-relative coordinate of the found window.
     /// * `window_id` - A mutable reference to a `WinID` to store the found window's ID.
     /// * `window_cid` - A mutable reference to a `ConnID` to store the found window's connection ID.
     ///
@@ -430,8 +448,8 @@ unsafe extern "C" {
     pub fn SLSFindWindowAndOwner(
         cid: ConnID,
         filter_window_id: WinID,
-        _: i64,
-        _: i64,
+        _unused1: i64,
+        _unused2: i64,
         point: &CGPoint,
         window_point: &mut CGPoint,
         window_id: &mut WinID,
@@ -442,7 +460,7 @@ unsafe extern "C" {
     ///
     /// # Arguments
     ///
-    /// * `cid` - The connection ID.
+    /// * `cid` - The `ConnID` of the connection.
     /// * `cursor` - A mutable reference to a `CGPoint` where the cursor location will be stored.
     ///
     /// # Returns
@@ -458,12 +476,12 @@ unsafe extern "C" {
     /// # Arguments
     ///
     /// * `element` - An `AXUIElementRef` pointing to the UI element.
-    /// * `attribute` - A reference to a `CFString` representing the attribute name.
+    /// * `attribute` - A reference to a `CFString` representing the attribute name (e.g., `kAXWindowsAttribute`).
     /// * `value` - A mutable reference to a raw pointer to a `CFType` where the attribute value will be stored.
     ///
     /// # Returns
     ///
-    /// An `i32` indicating success or failure.
+    /// An `i32` indicating success or failure (`kAXErrorSuccess` for success).
     pub fn AXUIElementCopyAttributeValue(
         element: AXUIElementRef,
         attribute: &CFString,
@@ -480,7 +498,7 @@ unsafe extern "C" {
     ///
     /// # Returns
     ///
-    /// An `i32` indicating success or failure.
+    /// An `i32` indicating success or failure (`kAXErrorSuccess` for success).
     pub fn AXUIElementSetAttributeValue(
         element: AXUIElementRef,
         attribute: &CFString,
@@ -492,23 +510,23 @@ unsafe extern "C" {
     /// # Arguments
     ///
     /// * `element` - An `AXUIElementRef` pointing to the UI element.
-    /// * `action` - A reference to a `CFString` representing the action to perform.
+    /// * `action` - A reference to a `CFString` representing the action to perform (e.g., `kAXRaiseAction`).
     ///
     /// # Returns
     ///
-    /// An `i32` indicating success or failure.
+    /// An `i32` indicating success or failure (`kAXErrorSuccess` for success).
     pub fn AXUIElementPerformAction(element: AXUIElementRef, action: &CFString) -> i32;
 
     /// Creates an `AXUIElementRef` from a remote token (`CFDataRef`).
-    /// This is often used to get an `AXUIElementRef` for windows on inactive spaces.
+    /// This is often used to get an `AXUIElementRef` for windows on inactive spaces or to access windows that are not directly discoverable through other Accessibility APIs.
     ///
     /// # Arguments
     ///
-    /// * `data` - A reference to a `CFMutableData` containing the remote token.
+    /// * `data` - A reference to a `CFMutableData` containing the remote token, which includes process ID and window details.
     ///
     /// # Returns
     ///
-    /// An `AXUIElementRef` if successful.
+    /// An `AXUIElementRef` if successful, or `NULL` if the element cannot be created from the token.
     ///
     /// # Original signature
     /// extern `AXUIElementRef` _AXUIElementCreateWithRemoteToken(CFDataRef data);

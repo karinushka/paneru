@@ -35,22 +35,27 @@ use skylight::{SLSGetSpaceManagementMode, SLSMainConnectionID};
 use crate::config::parse_command;
 use crate::errors::{Error, Result};
 
+/// `CommandReader` is responsible for sending and receiving commands via a Unix socket.
+/// It acts as an IPC mechanism for the `paneru` application, allowing external processes
+/// or the CLI client to communicate with the running daemon.
 struct CommandReader {
     events: EventSender,
 }
 
 impl CommandReader {
+    /// The path to the Unix socket used for inter-process communication.
     const SOCKET_PATH: &str = "/tmp/paneru.socket";
 
     /// Sends a command and its arguments to the running `paneru` application via a Unix socket.
+    /// The arguments are serialized and sent as a byte stream.
     ///
     /// # Arguments
     ///
-    /// * `params` - An iterator over command-line arguments, where the first element (usually the program name) is omitted.
+    /// * `params` - An iterator over command-line arguments, where each `String` is a parameter.
     ///
     /// # Returns
     ///
-    /// `Ok(())` if the command is sent successfully, otherwise `Err(Error)`.
+    /// `Ok(())` if the command is sent successfully, otherwise `Err(Error)` if an I/O error occurs or the connection fails.
     fn send_command(params: impl IntoIterator<Item = String>) -> Result<()> {
         let output = params
             .into_iter()
@@ -79,6 +84,7 @@ impl CommandReader {
     }
 
     /// Starts the `CommandReader` in a new thread, listening for incoming commands on a Unix socket.
+    /// Any errors encountered in the runner thread are logged.
     fn start(mut self) {
         thread::spawn(move || {
             if let Err(err) = self.runner() {
@@ -88,11 +94,13 @@ impl CommandReader {
     }
 
     /// The main runner function for the `CommandReader` thread. It binds to a Unix socket,
-    /// listens for incoming connections, reads command size and data, and dispatches them as events.
+    /// listens for incoming connections, reads command size and data, and dispatches them as `Event::Command`.
+    /// This loop continues indefinitely until an unrecoverable error occurs.
     ///
     /// # Returns
     ///
-    /// `Ok(())` if the runner completes successfully, otherwise `Err(Error)`.
+    /// `Ok(())` if the runner completes successfully (though it's typically a long-running loop),
+    /// otherwise `Err(Error)` if a binding or I/O error occurs.
     fn runner(&mut self) -> Result<()> {
         _ = fs::remove_file(CommandReader::SOCKET_PATH);
         let listener = UnixListener::bind(CommandReader::SOCKET_PATH)?;
@@ -123,7 +131,7 @@ impl CommandReader {
 }
 
 /// Checks if the macOS "Displays have separate Spaces" option is enabled.
-/// This is crucial for the window manager's functionality.
+/// This is crucial for the window manager's functionality, as Paneru relies on independent spaces per display.
 ///
 /// # Returns
 ///
@@ -135,7 +143,8 @@ fn check_separate_spaces() -> bool {
     }
 }
 
-/// The command line options to be collected.
+/// `Paneru` is the main command-line interface structure for the window manager.
+/// It defines the available subcommands for controlling the Paneru daemon.
 #[derive(Clone, Debug, Default, Parser)]
 #[command(
     version = clap::crate_version!(),
@@ -143,36 +152,40 @@ fn check_separate_spaces() -> bool {
     about = clap::crate_description!(),
 )]
 pub struct Paneru {
-    /// Launch the daemon directly in the console.
+    /// The subcommand to execute (e.g., `launch`, `install`, `send-cmd`).
     #[clap(subcommand)]
     subcmd: Option<SubCmd>,
 }
 
+/// `SubCmd` enumerates the available command-line subcommands for `paneru`.
+/// These subcommands allow users to launch the daemon, install/uninstall it as a service,
+/// start/stop/restart the service, or send commands to a running daemon.
 #[derive(Clone, Debug, Default, Subcommand)]
 pub enum SubCmd {
-    /// Launch the daemon directly in the console.
+    /// Launches the `paneru` daemon directly in the console (default behavior).
     #[default]
     Launch,
 
-    /// Install the service.
+    /// Installs the `paneru` daemon as a background service.
     Install,
 
-    /// Uninstall the service.
+    /// Uninstalls the `paneru` background service.
     Uninstall,
 
-    /// Reinstall the service.
+    /// Reinstalls the `paneru` background service.
     Reinstall,
 
-    /// Start the service.
+    /// Starts the `paneru` background service.
     Start,
 
-    /// Stop the service.
+    /// Stops the `paneru` background service.
     Stop,
 
-    /// Restart the service.
+    /// Restarts the `paneru` background service.
     Restart,
 
-    /// Send a command via socket to the running daemon.
+    /// Sends a command via a Unix socket to the running `paneru` daemon.
+    /// This subcommand is hidden from normal `--help` output.
     #[clap(hide = true)]
     SendCmd {
         #[arg(trailing_var_arg = true)]
@@ -218,10 +231,15 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Launches the window manager.
+/// Launches the `paneru` window manager daemon.
 ///
-/// This function first checks for separate spaces,
-/// then initializes event handling and platform callbacks and runs the main event loop.
+/// This function performs initial checks (e.g., for separate spaces),
+/// initializes event handling and platform callbacks, and then runs the main event loop.
+/// It also sets up a `CommandReader` to listen for IPC commands.
+///
+/// # Returns
+///
+/// `Ok(())` if the daemon launches and runs successfully, otherwise `Err(Error)` if setup fails.
 fn launch() -> Result<()> {
     if !check_separate_spaces() {
         error!(

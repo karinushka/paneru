@@ -17,6 +17,7 @@ use crate::manager::WindowManager;
 use crate::params::ActiveDisplayMut;
 use crate::windows::Window;
 
+/// Represents a cardinal or directional choice for window manipulation.
 #[derive(Clone, Debug)]
 pub enum Direction {
     North,
@@ -27,21 +28,33 @@ pub enum Direction {
     Last,
 }
 
+/// Defines the various operations that can be performed on windows.
 #[derive(Clone, Debug)]
 pub enum Operation {
+    /// Focuses on a window in the specified `Direction`.
     Focus(Direction),
+    /// Swaps the current window with another in the specified `Direction`.
     Swap(Direction),
+    /// Centers the currently focused window on the display.
     Center,
+    /// Resizes the focused window.
     Resize,
+    /// Toggles the focused window to full width or a preset width.
     FullWidth,
+    /// Moves the focused window to the next available display.
     ToNextDisplay,
+    /// Toggles the managed state of the focused window.
     Manage,
+    /// Stacks or unstacks a window. The boolean indicates whether to stack (`true`) or unstack (`false`).
     Stack(bool),
 }
 
+/// Represents a command that can be issued to the window manager.
 #[derive(Clone, Debug)]
 pub enum Command {
+    /// A command targeting a window with a specific `Operation`.
     Window(Operation),
+    /// A command to quit the window manager application.
     Quit,
 }
 
@@ -49,7 +62,7 @@ pub enum Command {
 ///
 /// # Arguments
 ///
-/// * `direction` - The direction (e.g., "west", "east", "first", "last").
+/// * `direction` - The direction (e.g., `West`, `East`, `First`, `Last`, `North`, `South`).
 /// * `current_window_id` - The `Entity` of the current window.
 /// * `strip` - A reference to the `WindowPane` to search within.
 ///
@@ -107,7 +120,7 @@ fn get_window_in_direction(
 ///
 /// # Arguments
 ///
-/// * `argv` - A slice of strings representing the command arguments (e.g., [`east`]).
+/// * `direction` - The `Direction` to move focus (e.g., `Direction::East`).
 /// * `current_window` - The `Entity` of the currently focused `Window`.
 /// * `strip` - A reference to the active `WindowPane`.
 /// * `windows` - A query for all `Window` components.
@@ -132,10 +145,9 @@ fn command_move_focus(
 ///
 /// # Arguments
 ///
-/// * `argv` - A slice of strings representing the command arguments (e.g., [`west`]).
+/// * `direction` - The `Direction` to swap the window (e.g., `Direction::West`).
 /// * `current` - The `Entity` of the currently focused `Window`.
-/// * `panel` - A reference to the active `WindowPane`.
-/// * `display_bounds` - The `CGRect` representing the bounds of the display.
+/// * `active_display` - A mutable reference to the `ActiveDisplayMut` representing the active display.
 /// * `windows` - A mutable query for all `Window` components.
 /// * `commands` - Bevy commands to trigger events.
 ///
@@ -191,6 +203,14 @@ fn command_swap_focus(
 }
 
 /// Centers the focused window on the active display.
+///
+/// # Arguments
+///
+/// * `focused_entity` - The `Entity` of the currently focused window.
+/// * `windows` - A mutable query for all `Window` components.
+/// * `window_manager` - The `WindowManager` resource.
+/// * `active_display` - The `ActiveDisplayMut` resource representing the active display.
+/// * `commands` - Bevy commands to trigger events.
 fn command_center_window(
     focused_entity: Entity,
     windows: &mut Query<&mut Window>,
@@ -217,6 +237,14 @@ fn command_center_window(
 }
 
 /// Resizes the focused window based on preset column widths.
+///
+/// # Arguments
+///
+/// * `active_display` - A mutable reference to the `Display` resource.
+/// * `focused_entity` - The `Entity` of the currently focused window.
+/// * `windows` - A mutable query for all `Window` components.
+/// * `commands` - Bevy commands to trigger events.
+/// * `config` - The `Config` resource.
 fn resize_window(
     active_display: &mut Display,
     focused_entity: Entity,
@@ -248,6 +276,14 @@ fn resize_window(
 }
 
 /// Toggles the focused window between full-width and a preset width.
+///
+/// # Arguments
+///
+/// * `active_display` - A mutable reference to the `Display` resource.
+/// * `focused_entity` - The `Entity` of the currently focused window.
+/// * `windows` - A mutable query for all `Window` components.
+/// * `commands` - Bevy commands to trigger events.
+/// * `config` - The `Config` resource.
 fn full_width_window(
     active_display: &mut Display,
     focused_entity: Entity,
@@ -289,6 +325,13 @@ fn full_width_window(
 }
 
 /// Toggles the managed state of the focused window.
+/// If the window is currently unmanaged, it becomes managed. If managed, it becomes unmanaged (floating).
+///
+/// # Arguments
+///
+/// * `focused_entity` - The `Entity` of the currently focused window.
+/// * `windows` - A mutable query for `Window` components, their `Entity`, and whether they have the `Unmanaged` marker.
+/// * `commands` - Bevy commands to modify entities.
 fn manage_window(
     focused_entity: Entity,
     windows: &mut Query<(&mut Window, Entity, Has<Unmanaged>)>,
@@ -309,6 +352,15 @@ fn manage_window(
     }
 }
 
+/// Moves the focused window to the next available display.
+/// The window will be repositioned to the center of the new display.
+///
+/// # Arguments
+///
+/// * `focused_entity` - The `Entity` of the currently focused window.
+/// * `windows` - A mutable query for `Window` components, their `Entity`, and whether they have the `Unmanaged` marker.
+/// * `active_display` - A mutable reference to the `ActiveDisplayMut` resource.
+/// * `commands` - Bevy commands to modify entities and trigger events.
 fn to_next_display(
     focused_entity: Entity,
     windows: &mut Query<(&mut Window, Entity, Has<Unmanaged>)>,
@@ -351,17 +403,17 @@ fn to_next_display(
     }
 }
 
-/// Handles various "window" commands, such as focus, swap, center, resize, and manage.
+/// Handles various "window" commands, such as focus, swap, center, resize, manage, and stack.
 ///
 /// # Arguments
 ///
-/// * `argv` - A slice of strings representing the command arguments.
-/// * `main_cid` - The main connection ID.
-/// * `active_display` - The currently active display.
+/// * `operation` - The `Operation` to perform on the window.
+/// * `window_manager` - The `WindowManager` resource.
+/// * `active_display` - A mutable reference to the `ActiveDisplayMut` resource.
 /// * `focused_entity` - The `Entity` of the focused window.
-/// * `windows` - A mutable query for all `Window` components.
+/// * `windows` - A mutable query for `Window` components, their `Entity`, and whether they have the `Unmanaged` marker.
 /// * `commands` - Bevy commands to trigger events.
-/// * `config` - The optional configuration resource.
+/// * `config` - The `Config` resource.
 ///
 /// # Returns
 ///
@@ -458,17 +510,18 @@ fn command_windows(
     Ok(())
 }
 
-/// Dispatches a command based on the first argument (e.g., "window", "quit").
+/// Dispatches a command based on the `CommandTrigger` event.
+/// This function is a Bevy system that reacts to `CommandTrigger` events and executes the corresponding window manager command.
 ///
 /// # Arguments
 ///
-/// * `trigger` - The Bevy event trigger containing the command arguments.
-/// * `sender` - The event sender socket.
-/// * `main_cid` - The main connection ID resource.
-/// * `windows` - A query for all windows, including the focused one.
-/// * `display` - A query for the active display.
-/// * `commands` - Bevy commands to trigger events.
-/// * `config` - The optional configuration resource.
+/// * `trigger` - The `On<CommandTrigger>` event trigger containing the command to process.
+/// * `window_manager` - The `WindowManager` resource for interacting with the window management logic.
+/// * `current_focus` - A `Single` query for the `Entity` of the currently focused window, identified by `With<FocusedMarker>`.
+/// * `windows` - A query for `Window` components, their `Entity`, and whether they have the `Unmanaged` marker.
+/// * `active_display` - A mutable reference to the `ActiveDisplayMut` resource.
+/// * `commands` - Bevy commands to trigger events and modify entities.
+/// * `config` - The `Config` resource, containing application settings.
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 pub fn process_command_trigger(
     trigger: On<CommandTrigger>,

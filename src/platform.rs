@@ -41,8 +41,17 @@ use crate::skylight::OSStatus;
 use crate::util::{AXUIWrapper, Cleanuper, add_run_loop, check_ax_privilege, remove_run_loop};
 
 pub type Pid = i32;
+/// Type alias for a raw pointer to an immutable `CFString`.
 pub type CFStringRef = *const CFString;
 
+/// Type alias for the callback function signature used by `AXObserver`.
+///
+/// # Arguments
+///
+/// * `observer` - The `AXObserverRef` that invoked the callback.
+/// * `element` - The `AXUIElementRef` associated with the notification.
+/// * `notification` - The raw `CFStringRef` representing the notification name.
+/// * `refcon` - A raw pointer to user-defined context data.
 type AXObserverCallback = unsafe extern "C" fn(
     observer: AXObserverRef,
     element: AXUIElementRef,
@@ -55,7 +64,7 @@ unsafe extern "C" {
     ///
     /// # Arguments
     ///
-    /// * `application` - The process ID (Pid) of the application to observe.
+    /// * `application` - The process ID (`Pid`) of the application to observe.
     /// * `callback` - The `AXObserverCallback` function to be invoked when notifications occur.
     /// * `out_observer` - A mutable reference to an `AXObserverRef` where the created observer will be stored.
     ///
@@ -72,10 +81,10 @@ unsafe extern "C" {
     ///
     /// # Arguments
     ///
-    /// * `observer` - The `AXObserverRef`.
-    /// * `element` - The `AXUIElementRef` to observe.
-    /// * `notification` - A reference to a `CFString` representing the notification name.
-    /// * `refcon` - A raw pointer to user-defined context data.
+    /// * `observer` - The `AXObserverRef` to add the notification to.
+    /// * `element` - The `AXUIElementRef` to observe for the notification.
+    /// * `notification` - A reference to a `CFString` representing the notification name (e.g., `kAXWindowMovedNotification`).
+    /// * `refcon` - A raw pointer to user-defined context data, typically a `struct` instance.
     ///
     /// # Returns
     ///
@@ -91,7 +100,7 @@ unsafe extern "C" {
     ///
     /// # Arguments
     ///
-    /// * `observer` - The `AXObserverRef`.
+    /// * `observer` - The `AXObserverRef` from which to remove the notification.
     /// * `element` - The `AXUIElementRef` from which to remove the notification.
     /// * `notification` - A reference to a `CFString` representing the notification name.
     ///
@@ -105,13 +114,18 @@ unsafe extern "C" {
     ) -> AXError;
 }
 
+/// Represents a process serial number (PSN), a unique identifier for a running process on macOS.
+/// It is used by the Carbon APIs to identify applications.
 #[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq)]
 #[repr(C)]
 pub struct ProcessSerialNumber {
+    /// The high-order 32 bits of the process serial number.
     pub high: u32,
+    /// The low-order 32 bits of the process serial number.
     pub low: u32,
 }
 
+/// Type alias for the callback function signature used by `InstallEventHandler` for process events.
 type ProcessCallbackFn = extern "C-unwind" fn(
     this: *mut c_void,
     event: *const ProcessEvent,
@@ -120,6 +134,7 @@ type ProcessCallbackFn = extern "C-unwind" fn(
 
 unsafe extern "C" {
     /// Retrieves the application event target.
+    /// This function returns an `EventTargetRef` that represents the application's event queue.
     ///
     /// # Returns
     ///
@@ -130,14 +145,15 @@ unsafe extern "C" {
     fn GetApplicationEventTarget() -> *const ProcessEventTarget;
 
     /// Installs an event handler for a specific event target and event types.
+    /// This function sets up a callback to be invoked when specified Carbon events occur.
     ///
     /// # Arguments
     ///
-    /// * `target` - The `EventTargetRef` to install the handler on.
+    /// * `target` - The `EventTargetRef` to install the handler on, typically obtained from `GetApplicationEventTarget`.
     /// * `handler` - The `ProcessCallbackFn` to be called when events match.
     /// * `event_len` - The number of event types in `events`.
     /// * `events` - A raw pointer to an array of `EventTypeSpec` defining the events to handle.
-    /// * `user_data` - A raw pointer to user-defined data to pass to the handler.
+    /// * `user_data` - A raw pointer to user-defined data to pass to the handler's `context` parameter.
     /// * `handler_ref` - A mutable raw pointer to an `EventHandlerRef` where the installed handler
     ///   reference will be stored.
     ///
@@ -174,11 +190,10 @@ unsafe extern "C" {
     /// An `OSStatus` indicating success or failure.
     ///
     /// # Original signature
+    /// extern `OSStatus` RemoveEventHandler(EventHandlerRef inHandlerRef)
     fn RemoveEventHandler(handler_ref: *const ProcessEventHandler) -> OSStatus;
 
     /// Gets a piece of data from the given event, if it exists.
-    ///
-    /// # Discussion
     /// The Carbon Event Manager will automatically use `AppleEvent` coercion handlers to convert
     /// the data in the event into the desired type, if possible. You may also pass `typeWildCard`
     /// to request that the data be returned in its original format.
@@ -188,14 +203,15 @@ unsafe extern "C" {
     ///
     /// # Arguments
     ///
-    /// * `inEvent` - The event to get the parameter from.
-    /// * `inName` - The symbolic name of the parameter.
-    /// * `inDesiredType` - The desired type of the parameter.
-    /// * `outActualType` - The actual type of the parameter, or `NULL`.
-    /// * `inBufferSize` - The size of the output buffer specified by `outData`. Pass zero and
-    ///   `NULL` for `outData` if data is not desired. * `outActualSize` - The actual size of the
+    /// * `event` - The event to get the parameter from.
+    /// * `param_name` - The symbolic name of the parameter (e.g., `kEventParamProcessID`).
+    /// * `param_type` - The desired type of the parameter (e.g., `typeProcessSerialNumber`).
+    /// * `actual_type` - A mutable pointer to `u32` to store the actual type of the parameter, or `NULL`.
+    /// * `size` - The size of the output buffer specified by `data`. Pass zero and
+    ///   `NULL` for `data` if data is not desired.
+    /// * `actual_size` - A mutable pointer to `u32` to store the actual size of the
     ///   data, or `NULL`.
-    /// * `outData` - The pointer to the buffer which will receive the parameter data, or `NULL`.
+    /// * `data` - A mutable pointer to the buffer which will receive the parameter data, or `NULL`.
     ///
     /// # Returns
     ///
@@ -222,8 +238,6 @@ unsafe extern "C" {
     ) -> OSStatus;
 
     /// Returns the kind of the given event (e.g., mousedown).
-    ///
-    /// # Discussion
     /// Event kinds overlap between event classes (e.g., `kEventMouseDown` and `kEventAppActivated`
     /// have the same value). The combination of class and kind determines an event signature.
     ///
@@ -232,7 +246,7 @@ unsafe extern "C" {
     ///
     /// # Arguments
     ///
-    /// * `inEvent` - The event in question.
+    /// * `event` - The event in question.
     ///
     /// # Returns
     ///
@@ -243,6 +257,7 @@ unsafe extern "C" {
     fn GetEventKind(event: *const ProcessEvent) -> u32;
 
     /// Retrieves the next available process's serial number.
+    /// This function iterates through all running processes and returns their PSN.
     ///
     /// # Arguments
     ///
@@ -272,60 +287,94 @@ unsafe extern "C" {
 //   OSType              eventClass;
 //   UInt32              eventKind;
 // };
+/// Specifies a Carbon event by its class and kind.
+/// Used for registering and matching events with event handlers.
 #[repr(C)]
 struct EventTypeSpec {
+    /// The event class (e.g., `kEventClassApplication`).
     event_class: u32,
+    /// The event kind within its class (e.g., `kEventAppLaunched`).
     event_kind: u32,
 }
 
+/// An opaque type representing a Carbon event handler reference.
 #[repr(C)]
 struct ProcessEventHandler {
     _opaque: [u8; 0],
 }
 
+/// An opaque type representing a Carbon event target reference.
 #[repr(C)]
 struct ProcessEventTarget {
     _opaque: [u8; 0],
 }
 
+/// An opaque type representing a Carbon event.
 #[repr(C)]
 struct ProcessEvent {
     _opaque: [u8; 0],
 }
 
+/// `ProcessHandler` is a Rust-side representation of the handler for Carbon process events.
+/// It receives raw Carbon events and dispatches them as higher-level `Event`s through an `EventSender`.
 #[repr(C)]
 struct ProcessHandler {
+    /// The sender for dispatching processed events.
     events: EventSender,
+    /// An optional `Cleanuper` to manage the unregistration of the Carbon event handler.
     cleanup: Option<Cleanuper>,
+    /// A retained reference to the `WorkspaceObserver`, used for `ApplicationLaunched` events.
     observer: Retained<WorkspaceObserver>,
 }
 
+/// An enum representing different types of Carbon application-related events.
+/// These correspond to specific event kinds within the `kEventClassApplication` event class.
 #[repr(C)]
 #[allow(dead_code)]
 enum ProcessEventApp {
+    /// Application activated event.
     Activated = 1,
+    /// Application deactivated event.
     Deactivated = 2,
+    /// Application quit event.
     Quit = 3,
+    /// Application launch notification.
     LaunchNotification = 4,
+    /// Application launched event.
     Launched = 5,
+    /// Application terminated event.
     Terminated = 6,
+    /// Frontmost application switched event.
     FrontSwitched = 7,
 
+    /// Focus menu bar event.
     FocusMenuBar = 8,
+    /// Focus next document window event.
     FocusNextDocumentWindow = 9,
+    /// Focus next floating window event.
     FocusNextFloatingWindow = 10,
+    /// Focus toolbar event.
     FocusToolbar = 11,
+    /// Focus drawer event.
     FocusDrawer = 12,
 
+    /// Get Dock tile menu event.
     GetDockTileMenu = 20,
+    /// Update Dock tile event.
     UpdateDockTile = 21,
 
+    /// Is event in Instant Mouser event.
     IsEventInInstantMouser = 104,
 
+    /// Application hidden event.
     Hidden = 107,
+    /// Application shown event.
     Shown = 108,
+    /// System UI mode changed event.
     SystemUIModeChanged = 109,
+    /// Available window bounds changed event.
     AvailableWindowBoundsChanged = 110,
+    /// Active window changed event.
     ActiveWindowChanged = 111,
 }
 
@@ -350,6 +399,11 @@ impl ProcessHandler {
 
     /// Starts the process handler by registering a C-callback with the underlying private API.
     /// It also sends initial `ApplicationLaunched` events for already running processes.
+    ///
+    /// # Side Effects
+    ///
+    /// - Registers a Carbon event handler, which will be unregistered when `cleanup` is dropped.
+    /// - Iterates through existing processes and dispatches `ApplicationLaunched` events for them.
     fn start(&mut self) {
         const APPL_CLASS: &str = "appl";
         const PROCESS_EVENT_LAUNCHED: u32 = 5;
@@ -461,7 +515,7 @@ impl ProcessHandler {
     /// # Arguments
     ///
     /// * `psn` - The `ProcessSerialNumber` of the process involved in the event.
-    /// * `event` - The `ProcessEventApp` indicating the type of event.
+    /// * `event` - The `ProcessEventApp` indicating the type of event (e.g., `Launched`, `Terminated`).
     fn process_handler(&mut self, psn: ProcessSerialNumber, event: ProcessEventApp) {
         let _ = match event {
             ProcessEventApp::Launched => self.events.send(Event::ApplicationLaunched {
@@ -485,11 +539,18 @@ impl ProcessHandler {
     }
 }
 
+/// `InputHandler` manages low-level input events from the macOS `CGEventTap`.
+/// It intercepts keyboard and mouse events, processes gestures, and dispatches them as higher-level `Event`s.
 struct InputHandler {
+    /// The `EventSender` for dispatching input events.
     events: EventSender,
+    /// The application `Config` for looking up keybindings.
     config: Config,
+    /// An optional `Cleanuper` to manage the unregistration of the event tap.
     cleanup: Option<Cleanuper>,
+    /// Stores the previous touch positions for swipe gesture detection.
     finger_position: Option<Retained<NSSet<NSTouch>>>,
+    /// The `CFMachPort` representing the `CGEventTap`.
     tap_port: Option<CFRetained<CFMachPort>>,
 }
 
@@ -736,8 +797,11 @@ impl InputHandler {
     }
 }
 
+/// `Ivars` is a helper struct to hold instance variables for Objective-C classes implemented in Rust.
+/// It primarily stores an `EventSender` for communication with the main event loop.
 #[derive(Debug, Clone)]
 pub struct Ivars {
+    /// The `EventSender` to dispatch events.
     events: EventSender,
 }
 
@@ -1030,10 +1094,15 @@ impl Drop for WorkspaceObserver {
     }
 }
 
+/// `MissionControlHandler` manages observation of Mission Control related accessibility events from the Dock process.
+/// It dispatches specific `Event` types when Mission Control actions (e.g., showing all windows, showing desktop) occur.
 #[derive(Debug)]
 struct MissionControlHandler {
+    /// The `EventSender` to dispatch Mission Control events.
     events: EventSender,
+    /// An optional `AXUIWrapper` for the Dock application's UI element.
     element: Option<CFRetained<AXUIWrapper>>,
+    /// An optional `AXUIWrapper` for the `AXObserver` instance.
     observer: Option<CFRetained<AXUIWrapper>>,
 }
 
@@ -1055,6 +1124,7 @@ impl MissionControlHandler {
         }
     }
 
+    /// A constant array of `&str` representing the Mission Control accessibility event names that are observed.
     const EVENTS: [&str; 4] = [
         "AXExposeShowAllWindows",
         "AXExposeShowFrontWindows",
@@ -1094,7 +1164,8 @@ impl MissionControlHandler {
             .inspect_err(|err| error!("{}: error sending event: {err}", function_name!()));
     }
 
-    /// Retrieves the process ID (Pid) of the Dock application.
+    /// Retrieves the process ID (`Pid`) of the Dock application.
+    /// This function uses `NSRunningApplication` to find the Dock by its bundle identifier.
     ///
     /// # Returns
     ///
@@ -1113,11 +1184,12 @@ impl MissionControlHandler {
     }
 
     /// Starts observing Mission Control accessibility notifications from the Dock process.
-    /// It creates an `AXObserver` and adds it to the run loop.
+    /// It creates an `AXObserver` for the Dock application and registers for specific Mission Control events.
+    /// The observer is then added to the run loop.
     ///
     /// # Returns
     ///
-    /// `Ok(())` if observation is started successfully, otherwise `Err(Error)`.
+    /// `Ok(())` if observation is started successfully, otherwise `Err(Error)` if permissions are denied or setup fails.
     fn observe(&mut self) -> Result<()> {
         let pid = MissionControlHandler::dock_pid()?;
         let element = AXUIWrapper::from_retained(unsafe { AXUIElementCreateApplication(pid) })?;
@@ -1163,6 +1235,12 @@ impl MissionControlHandler {
     }
 
     /// Stops observing Mission Control accessibility notifications and cleans up resources.
+    /// It removes all registered notifications from the `AXObserver` and invalidates the run loop source.
+    ///
+    /// # Side Effects
+    ///
+    /// - Deregisters `AXObserver` notifications.
+    /// - Removes the `AXObserver` from the run loop.
     fn unobserve(&mut self) {
         if let Some((observer, element)) = self.observer.take().zip(self.element.as_ref()) {
             for name in &Self::EVENTS {
@@ -1190,11 +1268,12 @@ impl MissionControlHandler {
     }
 
     /// The static callback function for the Mission Control `AXObserver`. It dispatches to the `mission_control_handler` method.
+    /// This function is declared as `extern "C"`.
     ///
     /// # Arguments
     ///
-    /// * `observer` - The `AXObserverRef`.
-    /// * `element` - The `AXUIElementRef`.
+    /// * `observer` - The `AXObserverRef` that invoked the callback.
+    /// * `element` - The `AXUIElementRef` associated with the notification.
     /// * `notification` - The raw `CFStringRef` representing the notification name.
     /// * `context` - A raw pointer to the `MissionControlHandler` instance.
     extern "C" fn callback(
@@ -1222,13 +1301,18 @@ impl MissionControlHandler {
 
 impl Drop for MissionControlHandler {
     /// Unobserves Mission Control notifications when the `MissionControlHandler` is dropped.
+    /// This ensures that system resources are properly released when the handler is no longer needed.
     fn drop(&mut self) {
         self.unobserve();
     }
 }
 
+/// `DisplayHandler` manages callbacks for macOS display reconfiguration events.
+/// It dispatches `Event`s related to display changes (e.g., addition, removal, resizing) to the event loop.
 struct DisplayHandler {
+    /// The `EventSender` for dispatching display-related events.
     events: EventSender,
+    /// An optional `Cleanuper` to manage the unregistration of the display reconfiguration callback.
     cleanup: Option<Cleanuper>,
 }
 
@@ -1250,10 +1334,15 @@ impl DisplayHandler {
     }
 
     /// Starts the display handler by registering a callback for display reconfiguration events.
+    /// This function uses `CGDisplayRegisterReconfigurationCallback` to receive notifications about display changes.
     ///
     /// # Returns
     ///
-    /// `Ok(())` if the callback is registered successfully, otherwise `Err(Error)`.
+    /// `Ok(())` if the callback is registered successfully, otherwise `Err(Error)` if permission is denied.
+    ///
+    /// # Side Effects
+    ///
+    /// - Registers a `CGDisplayReconfigurationCallback`, which will be unregistered when `cleanup` is dropped.
     fn start(&mut self) -> Result<()> {
         info!("{}: Registering display handler", function_name!());
         let this = unsafe { NonNull::new_unchecked(self).as_ptr() };
@@ -1292,6 +1381,7 @@ impl DisplayHandler {
     }
 
     /// Handles display change events and sends corresponding `Event`s (e.g., `DisplayAdded`, `DisplayRemoved`).
+    /// This function maps the `CGDisplayChangeSummaryFlags` to specific `Event` types and dispatches them.
     ///
     /// # Arguments
     ///
@@ -1324,13 +1414,18 @@ impl DisplayHandler {
     }
 }
 
+/// `ConfigHandler` is an implementation of `notify::EventHandler` that reloads the application configuration
+/// when the configuration file changes. It also dispatches a `ConfigRefresh` event.
 struct ConfigHandler {
+    /// The `EventSender` for dispatching `ConfigRefresh` events.
     events: EventSender,
+    /// The `Config` resource that is being watched and reloaded.
     config: Config,
 }
 
 impl ConfigHandler {
     /// Sends a `ConfigRefresh` event with the current configuration to the event handler.
+    /// This signals the main application loop to update its configuration based on the latest file content.
     ///
     /// # Returns
     ///
@@ -1345,6 +1440,7 @@ impl ConfigHandler {
 
 impl notify::EventHandler for ConfigHandler {
     /// Handles file system events for the configuration file. When the content changes, it reloads the configuration.
+    /// Specifically, it responds to `ModifyKind::Data(DataChange::Content)` events.
     ///
     /// # Arguments
     ///
@@ -1371,11 +1467,12 @@ impl notify::EventHandler for ConfigHandler {
 }
 
 /// Sets up a file system watcher for the configuration file.
+/// It uses `notify` crate's `RecommendedWatcher` to monitor changes to `CONFIGURATION_FILE`.
 ///
 /// # Arguments
 ///
-/// * `events` - An `EventSender` to send `ConfigRefresh` events.
-/// * `config` - The initial `Config` object.
+/// * `events` - An `EventSender` to send `ConfigRefresh` events when the file changes.
+/// * `config` - The initial `Config` object to be loaded and refreshed.
 ///
 /// # Returns
 ///
@@ -1391,6 +1488,9 @@ fn setup_config_watcher(events: EventSender, config: Config) -> Result<FsEventWa
     Ok(watcher)
 }
 
+/// A `LazyLock` that determines the path to the application's configuration file.
+/// It checks the `PANERU_CONFIG` environment variable first, then standard XDG locations and user home directory.
+/// If no configuration file is found, the application will panic.
 pub static CONFIGURATION_FILE: LazyLock<PathBuf> = LazyLock::new(|| {
     if let Ok(path_str) = env::var("PANERU_CONFIG") {
         let path = PathBuf::from(path_str);
@@ -1428,18 +1528,29 @@ pub static CONFIGURATION_FILE: LazyLock<PathBuf> = LazyLock::new(|| {
         })
 });
 
+/// `PlatformCallbacks` aggregates and manages all platform-specific event handlers and observers.
+/// It serves as the central point for setting up and running macOS-specific interactions with the window manager.
 pub struct PlatformCallbacks {
+    /// The main `EventSender` for dispatching events across the application.
     events: EventSender,
+    /// Handler for Carbon process events.
     process_handler: ProcessHandler,
+    /// Handler for low-level input events (keyboard, mouse, gestures).
     event_handler: InputHandler,
+    /// Observer for `NSWorkspace` and distributed notifications.
     workspace_observer: Retained<WorkspaceObserver>,
+    /// Handler for Mission Control accessibility events.
     mission_control_observer: MissionControlHandler,
+    /// Handler for Core Graphics display reconfiguration events.
     display_handler: DisplayHandler,
+    /// The file system watcher for the configuration file.
     _config_watcher: FsEventWatcher,
 }
 
 impl PlatformCallbacks {
     /// Creates a new `PlatformCallbacks` instance, initializing various handlers and watchers.
+    /// This involves setting up `Config`, `WorkspaceObserver`, `ProcessHandler`, `InputHandler`,
+    /// `MissionControlHandler`, `DisplayHandler`, and `FsEventWatcher`.
     ///
     /// # Arguments
     ///
@@ -1463,11 +1574,18 @@ impl PlatformCallbacks {
     }
 
     /// Sets up and starts all platform-specific handlers, including input, display, Mission Control, workspace, and process handlers.
-    /// It also sends a `ProcessesLoaded` event.
+    /// It also performs initial checks for Accessibility permissions and sends a `ProcessesLoaded` event.
     ///
     /// # Returns
     ///
     /// `Ok(())` if all handlers are set up successfully, otherwise `Err(Error)`.
+    ///
+    /// # Side Effects
+    ///
+    /// - Starts the Cocoa run loop.
+    /// - Requests Accessibility permissions if not already granted.
+    /// - Activates `CGEventTap`, `CGDisplayReconfigurationCallback`, `AXObserver` for Mission Control,
+    ///   `NSWorkspace` observers, and Carbon process event handlers.
     pub fn setup_handlers(&mut self) -> Result<()> {
         // This is required to receive some Cocoa notifications into Carbon code, like
         // NSWorkspaceActiveSpaceDidChangeNotification and
@@ -1497,6 +1615,7 @@ impl PlatformCallbacks {
     }
 
     /// Runs the main event loop for platform callbacks. It continuously processes events until the `quit` signal is set.
+    /// This function enters a `CFRunLoop` and waits for events, periodically checking the `quit` flag.
     ///
     /// # Arguments
     ///

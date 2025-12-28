@@ -1,6 +1,5 @@
 use bevy::ecs::resource::Resource;
 use log::{error, info};
-use notify::EventHandler;
 use objc2_core_foundation::{CFData, CFString};
 use regex::Regex;
 use serde::{Deserialize, Deserializer, de};
@@ -19,6 +18,14 @@ use crate::errors::{Error, Result};
 use crate::{platform::CFStringRef, skylight::OSStatus, util::AXUIWrapper};
 
 /// Parses a string into a `Direction` enum.
+///
+/// # Arguments
+///
+/// * `dir` - The string representation of the direction (e.g., "north", "west").
+///
+/// # Returns
+///
+/// `Ok(Direction)` if the string is a valid direction, otherwise `Err(Error::InvalidConfig)`.
 fn parse_direction(dir: &str) -> Result<Direction> {
     Ok(match dir {
         "north" => Direction::North,
@@ -36,7 +43,15 @@ fn parse_direction(dir: &str) -> Result<Direction> {
     })
 }
 
-/// Parses a command string into a `Operation` enum.
+/// Parses a command argument vector into an `Operation` enum.
+///
+/// # Arguments
+///
+/// * `argv` - A slice of strings representing the command arguments (e.g., `["focus", "east"]`).
+///
+/// # Returns
+///
+/// `Ok(Operation)` if the arguments represent a valid operation, otherwise `Err(Error::InvalidConfig)`.
 fn parse_operation(argv: &[&str]) -> Result<Operation> {
     let empty = "";
     let cmd = *argv.first().unwrap_or(&empty);
@@ -59,7 +74,15 @@ fn parse_operation(argv: &[&str]) -> Result<Operation> {
     Ok(out)
 }
 
-/// Parses a command string into a `Command` enum.
+/// Parses a command argument vector into a `Command` enum.
+///
+/// # Arguments
+///
+/// * `argv` - A slice of strings representing the command arguments (e.g., `["window", "focus", "east"]`).
+///
+/// # Returns
+///
+/// `Ok(Command)` if the arguments represent a valid command, otherwise `Err(Error::InvalidConfig)`.
 pub fn parse_command(argv: &[&str]) -> Result<Command> {
     let empty = "";
     let cmd = *argv.first().unwrap_or(&empty);
@@ -77,6 +100,8 @@ pub fn parse_command(argv: &[&str]) -> Result<Command> {
     Ok(out)
 }
 
+/// `Config` manages the application's configuration, including options, keybindings, and window-specific parameters.
+/// It provides methods for loading, reloading, and querying configuration settings.
 #[derive(Clone, Debug, Resource)]
 pub struct Config {
     inner: Arc<RwLock<InnerConfig>>,
@@ -91,7 +116,7 @@ impl Config {
     ///
     /// # Returns
     ///
-    /// `Ok(Self)` if the configuration is loaded successfully, otherwise `Err(String)` with an error message.
+    /// `Ok(Self)` if the configuration is loaded successfully, otherwise `Err(Error)` with an error message.
     pub fn new(path: &Path) -> Result<Self> {
         Ok(Config {
             inner: RwLock::new(InnerConfig::new(path)?).into(),
@@ -106,7 +131,7 @@ impl Config {
     ///
     /// # Returns
     ///
-    /// `Ok(())` if the configuration is reloaded successfully, otherwise `Err(String)` with an error message.
+    /// `Ok(())` if the configuration is reloaded successfully, otherwise `Err(Error)` with an error message.
     pub fn reload_config(&mut self, path: &Path) -> Result<()> {
         let new = InnerConfig::new(path)?;
         let mut old = self.inner.force_write();
@@ -132,16 +157,16 @@ impl Config {
         self.inner().options.clone()
     }
 
-    /// Finds a keybinding matching the given keycode and modifier mask.
+    /// Finds a keybinding matching the given `keycode` and `modifier` mask.
     ///
     /// # Arguments
     ///
-    /// * `keycode` - The key code of the keybinding to find.
-    /// * `mask` - The modifier mask (e.g., Alt, Shift, Cmd, Ctrl) of the keybinding.
+    /// * `keycode` - The raw key code of the keybinding to find.
+    /// * `mask` - The modifier mask (e.g., `Alt`, `Shift`, `Cmd`, `Ctrl`) of the keybinding.
     ///
     /// # Returns
     ///
-    /// `Some(Keybinding)` if a matching keybinding is found, otherwise `None`.
+    /// `Some(Command)` if a matching keybinding is found, otherwise `None`.
     pub fn find_keybind(&self, keycode: u8, mask: u8) -> Option<Command> {
         let lock = self.inner();
         lock.bindings
@@ -150,7 +175,17 @@ impl Config {
             .map(|bind| bind.command.clone())
     }
 
-    /// Finds window properties for a given title and bundle ID.
+    /// Finds window properties for a given `title` and `bundle_id`.
+    /// It iterates through configured window parameters and returns the first match.
+    ///
+    /// # Arguments
+    ///
+    /// * `title` - The title of the window to match.
+    /// * `bundle_id` - The bundle identifier of the application owning the window.
+    ///
+    /// # Returns
+    ///
+    /// `Some(WindowParams)` if matching window properties are found, otherwise `None`.
     pub fn find_window_properties(&self, title: &str, bundle_id: &str) -> Option<WindowParams> {
         self.inner().windows.as_ref().and_then(|windows| {
             windows
@@ -165,6 +200,7 @@ impl Config {
 }
 
 impl Default for Config {
+    /// Returns a default `Config` instance with an empty `InnerConfig`.
     fn default() -> Self {
         Config {
             inner: RwLock::new(InnerConfig::default()).into(),
@@ -172,19 +208,8 @@ impl Default for Config {
     }
 }
 
-impl EventHandler for Config {
-    /// Handles file system events, specifically used for reloading the configuration file.
-    ///
-    /// # Arguments
-    ///
-    /// * `event` - The result of a file system event.
-    fn handle_event(&mut self, event: notify::Result<notify::Event>) {
-        if let Ok(event) = event {
-            info!("Event: {event:?}");
-        }
-    }
-}
-
+/// `InnerConfig` holds the actual configuration data parsed from a file, including options, keybindings, and window parameters.
+/// It is typically accessed via an `Arc<RwLock<InnerConfig>>` within the `Config` struct.
 #[derive(Deserialize, Debug, Default)]
 struct InnerConfig {
     options: MainOptions,
@@ -193,7 +218,7 @@ struct InnerConfig {
 }
 
 impl InnerConfig {
-    /// Creates a new `InnerConfig` by reading and parsing the configuration file from the specified path.
+    /// Creates a new `InnerConfig` by reading and parsing the configuration file from the specified `path`.
     ///
     /// # Arguments
     ///
@@ -201,13 +226,13 @@ impl InnerConfig {
     ///
     /// # Returns
     ///
-    /// `Ok(InnerConfig)` if the configuration is parsed successfully, otherwise `Err(String)` with an error message.
+    /// `Ok(InnerConfig)` if the configuration is parsed successfully, otherwise `Err(Error)` with an error message.
     fn new(path: &Path) -> Result<InnerConfig> {
         let input = std::fs::read_to_string(path)?;
         InnerConfig::parse_config(&input)
     }
 
-    /// Parses the configuration from a string input.
+    /// Parses the configuration from a string `input`.
     /// It populates the `code` and `command` fields of `Keybinding` by looking up virtual keys and literal keycodes.
     ///
     /// # Arguments
@@ -216,7 +241,7 @@ impl InnerConfig {
     ///
     /// # Returns
     ///
-    /// `Ok(InnerConfig)` if the parsing is successful, otherwise `Err(String)` with an error message.
+    /// `Ok(InnerConfig)` if the parsing is successful, otherwise `Err(Error)` with an error message.
     fn parse_config(input: &str) -> Result<InnerConfig> {
         let virtual_keys = generate_virtual_keymap();
         let mut config: InnerConfig = toml::from_str(input)?;
@@ -243,14 +268,22 @@ impl InnerConfig {
     }
 }
 
+/// `MainOptions` represents the primary configuration options for the window manager.
+/// These options control various behaviors such as mouse focus, gesture recognition, and window animation.
 #[derive(Deserialize, Clone, Debug, Default)]
 pub struct MainOptions {
+    /// Enables or disables focus follows mouse behavior.
     pub focus_follows_mouse: Option<bool>,
+    /// Enables or disables mouse follows focus behavior.
     pub mouse_follows_focus: Option<bool>,
+    /// The number of fingers required for swipe gestures to move windows.
     pub swipe_gesture_fingers: Option<usize>,
+    /// A list of preset column widths (as ratios) used for resizing windows.
     #[serde(default = "default_preset_column_widths")]
     pub preset_column_widths: Vec<f64>,
+    /// The animation speed for window movements in pixels per second.
     pub animation_speed: Option<f64>,
+    /// Enables or disables continuous swipe behavior for windows.
     pub continuous_swipe: Option<bool>,
 }
 
@@ -263,15 +296,17 @@ pub fn default_preset_column_widths() -> Vec<f64> {
 ///
 /// # Arguments
 ///
-/// * `config` - An optional `Config` resource.
+/// * `config` - A reference to the `Config` resource.
 ///
 /// # Returns
 ///
-/// A `Vec<f64>` of preset column widths, or the default values if the config is not present.
+/// A `Vec<f64>` of preset column widths from the configuration, or default values if not specified.
 pub fn preset_column_widths(config: &Config) -> Vec<f64> {
     config.options().preset_column_widths
 }
 
+/// `Keybinding` represents a keyboard shortcut and the command it triggers.
+/// It includes the key, its raw keycode, modifier keys, and the associated command.
 #[derive(Debug)]
 pub struct Keybinding {
     pub key: String,
@@ -281,7 +316,8 @@ pub struct Keybinding {
 }
 
 impl<'de> Deserialize<'de> for Keybinding {
-    /// Deserializes a `Keybinding` from a string input. The input string is expected to be in a format like "modifier-key" or "key".
+    /// Deserializes a `Keybinding` from a string input. The input string is expected to be in a format like "`modifier+modifier-key`" or "`key`".
+    /// Examples: "`ctrl+alt-q`", "`shift-tab`", "`h`".
     ///
     /// # Arguments
     ///
@@ -316,12 +352,18 @@ impl<'de> Deserialize<'de> for Keybinding {
     }
 }
 
+/// `WindowParams` defines rules and properties for specific windows based on their title or bundle ID.
+/// These parameters can override default window management behavior, such as forcing a window to float or setting its initial index.
 #[derive(Clone, Debug, Deserialize)]
 pub struct WindowParams {
+    /// A regular expression to match against the window's title.
     #[serde(deserialize_with = "deserialize_title")]
     title: Regex,
+    /// An optional bundle identifier to match against the application's bundle ID.
     bundle_id: Option<String>,
+    /// If `true`, the window will be managed as a floating window (not tiled).
     pub floating: Option<bool>,
+    /// An optional preferred index for the window's position in the window strip.
     pub index: Option<usize>,
 }
 
@@ -338,7 +380,7 @@ where
 ///
 /// # Arguments
 ///
-/// * `input` - The string containing modifier names.
+/// * `input` - The string containing modifier names (e.g., "ctrl+alt").
 ///
 /// # Returns
 ///
@@ -370,18 +412,22 @@ fn parse_modifiers(input: &str) -> Result<u8> {
 #[link(name = "Carbon", kind = "framework")]
 unsafe extern "C" {
     /// Returns a reference to the currently selected keyboard layout input source that is ASCII-capable.
+    ///
+    /// # Returns
+    ///
+    /// A raw pointer to the `TISInputSourceRef` (a `c_void` pointer) if successful, otherwise `null_mut()`.
     fn TISCopyCurrentASCIICapableKeyboardLayoutInputSource() -> *mut c_void;
 
     /// Retrieves a specified property of an input source.
     ///
     /// # Arguments
     ///
-    /// * `keyboard` - The input source.
-    /// * `property` - The property to retrieve.
+    /// * `keyboard` - The raw pointer to the `TISInputSourceRef`.
+    /// * `property` - The `CFStringRef` representing the property to retrieve (e.g., `kTISPropertyUnicodeKeyLayoutData`).
     ///
     /// # Returns
     ///
-    /// A `CFData` reference containing the property value.
+    /// A raw pointer to `CFData` containing the property value.
     fn TISGetInputSourceProperty(keyboard: *const c_void, property: CFStringRef) -> *mut CFData;
 
     /// Translates a virtual key code to a Unicode string according to the specified keyboard layout.
@@ -390,14 +436,14 @@ unsafe extern "C" {
     ///
     /// * `keyLayoutPtr` - A pointer to the keyboard layout data.
     /// * `virtualKeyCode` - The virtual key code to translate.
-    /// * `keyAction` - The key action (e.g., key down, key up).
-    /// * `modifierKeyState` - The state of the modifier keys.
-    /// * `keyboardType` - The type of keyboard.
+    /// * `keyAction` - The key action (e.g., `UCKeyAction::Down`).
+    /// * `modifierKeyState` - The state of the modifier keys (e.g., `kUCKeyModifierAlphaLockBit`).
+    /// * `keyboardType` - The type of keyboard, typically obtained from `LMGetKbdType()`.
     /// * `keyTranslateOptions` - Options for the translation process.
-    /// * `deadKeyState` - A pointer to the dead key state.
-    /// * `maxStringLength` - The maximum length of the output string.
-    /// * `actualStringLength` - A pointer to store the actual length of the output string.
-    /// * `unicodeString` - A pointer to the buffer to store the resulting Unicode string.
+    /// * `deadKeyState` - A mutable reference to a `u32` representing the dead key state.
+    /// * `maxStringLength` - The maximum length of the output Unicode string buffer.
+    /// * `actualStringLength` - A mutable reference to an `isize` to store the actual length of the output Unicode string.
+    /// * `unicodeString` - A mutable pointer to the buffer to store the resulting Unicode string.
     ///
     /// # Returns
     ///
@@ -416,9 +462,13 @@ unsafe extern "C" {
     ) -> OSStatus;
 
     /// Returns the keyboard type for the system.
+    ///
+    /// # Returns
+    ///
+    /// A `u8` representing the keyboard type.
     fn LMGetKbdType() -> u8;
 
-    /// A key for accessing the Unicode keyboard layout data from an input source's properties.
+    /// A constant `CFStringRef` representing the property key for Unicode keyboard layout data.
     static kTISPropertyUnicodeKeyLayoutData: CFStringRef;
 
 }
@@ -582,7 +632,9 @@ fn literal_keycode() -> impl Iterator<Item = &'static (&'static str, u8)> {
     LITERAL_KEYCODE.iter()
 }
 
+/// Represents the action of a key, used in `UCKeyTranslate`.
 enum UCKeyAction {
+    /// The key is going down.
     Down = 0, // key is going down
               /*
               Up = 1,      // key is going up

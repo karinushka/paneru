@@ -25,6 +25,9 @@ use crate::params::{ActiveDisplay, ActiveDisplayMut, ThrottledSystem};
 use crate::windows::{Window, WindowOS};
 
 /// Registers the Bevy systems for the `WindowManager`.
+/// This function adds various systems to the `Update` schedule, including event dispatchers,
+/// process/application/window lifecycle management, animation, and periodic watchers.
+/// Systems that poll for notifications are conditionally run based on the `PollForNotifications` resource.
 ///
 /// # Arguments
 ///
@@ -54,10 +57,12 @@ pub fn register_systems(app: &mut bevy::app::App) {
 }
 
 /// Processes a single incoming `Event`. It dispatches various event types to the `WindowManager` or other internal handlers.
+/// This system reads `Event` messages and triggers appropriate Bevy events or modifies resources based on the event type.
 ///
 /// # Arguments
 ///
 /// * `messages` - A `MessageReader` for incoming `Event` messages.
+/// * `broken_notifications` - A mutable `ResMut` for the `PollForNotifications` resource, used to manage polling state.
 /// * `commands` - Bevy commands to trigger events or insert resources.
 #[allow(clippy::needless_pass_by_value)]
 fn dispatch_toplevel_triggers(
@@ -118,6 +123,12 @@ fn dispatch_toplevel_triggers(
 }
 
 /// Runs initial setup systems in a one-shot way.
+/// This function registers and runs systems that are crucial for the initial state setup of the Bevy world,
+/// such as adding existing processes and applications.
+///
+/// # Arguments
+///
+/// * `world` - The Bevy `World` instance to run the systems on.
 pub fn run_initial_oneshot_systems(world: &mut World) {
     let existing_apps_setup = [
         world.register_system(add_existing_process),
@@ -135,11 +146,11 @@ pub fn run_initial_oneshot_systems(world: &mut World) {
 }
 
 /// Gathers all present displays and spawns them as entities in the Bevy world.
-/// The active display is marked with `FocusedMarker`.
+/// The currently active display (identified by `window_manager.active_display_id()`) is marked with `ActiveDisplayMarker`.
 ///
 /// # Arguments
 ///
-/// * `cid` - The main connection ID resource.
+/// * `window_manager` - The `WindowManager` resource for querying display information.
 /// * `commands` - Bevy commands to spawn entities.
 #[allow(clippy::needless_pass_by_value)]
 pub fn gather_displays(window_manager: Res<WindowManager>, mut commands: Commands) {
@@ -157,13 +168,13 @@ pub fn gather_displays(window_manager: Res<WindowManager>, mut commands: Command
 }
 
 /// Adds an existing process to the window manager. This is used during initial setup for already running applications.
-/// It attempts to create and observe the application and its windows.
+/// It attempts to create a new `Application` instance from the `BProcess` and attaches it as a child entity.
+/// The `ExistingMarker` is then removed from the process entity.
 ///
 /// # Arguments
 ///
-/// * `wm` - The `WindowManager` resource.
-/// * `events` - The event sender socket resource.
-/// * `process_query` - A query for existing processes marked with `ExistingMarker`.
+/// * `window_manager` - The `WindowManager` resource for creating new application instances.
+/// * `process_query` - A query for existing `BProcess` entities marked with `ExistingMarker`.
 /// * `commands` - Bevy commands to spawn entities and manage components.
 #[allow(clippy::needless_pass_by_value)]
 fn add_existing_process(
@@ -179,13 +190,14 @@ fn add_existing_process(
 }
 
 /// Adds an existing application to the window manager. This is used during initial setup.
-/// It observes the application and adds its windows.
+/// It observes the application, adds its windows to the manager, and then triggers `SpawnWindowTrigger` events for newly found windows.
+/// The `ExistingMarker` is removed from the application entity after processing.
 ///
 /// # Arguments
 ///
-/// * `wm` - The `WindowManager` resource.
-/// * `displays` - A query for all displays.
-/// * `app_query` - A query for existing applications marked with `ExistingMarker`.
+/// * `window_manager` - The `WindowManager` resource for interacting with window management logic.
+/// * `displays` - A query for all `Display` entities, used to gather all existing space IDs.
+/// * `app_query` - A query for existing `Application` entities marked with `ExistingMarker`.
 /// * `commands` - Bevy commands to spawn entities and manage components.
 #[allow(clippy::needless_pass_by_value)]
 fn add_existing_application(
@@ -212,15 +224,15 @@ fn add_existing_application(
 }
 
 /// Finishes the initialization process once all initial windows are loaded.
+/// This system refreshes displays, assigns the `FocusedMarker` to the first window of the active space,
+/// and logs the total number of managed windows.
 ///
 /// # Arguments
 ///
-/// * `apps` - A query for all applications, checking if they are still marked as fresh.
-/// * `windows` - A query for all windows.
-/// * `initializing` - A query for the initializing marker entity.
-/// * `displays` - A query for all displays.
-/// * `main_cid` - The main connection ID resource.
-/// * `commands` - Bevy commands to despawn entities and send messages.
+/// * `windows` - A mutable query for all `Window` components, their `Entity`, and `Has<Unmanaged>` status.
+/// * `displays` - A query for all `Display` entities, including whether they have the `ActiveDisplayMarker`.
+/// * `window_manager` - The `WindowManager` resource for refreshing displays and getting active space information.
+/// * `commands` - Bevy commands to insert components like `FocusedMarker`.
 #[allow(clippy::needless_pass_by_value)]
 fn finish_setup(
     mut windows: Query<(&mut Window, Entity, Has<Unmanaged>)>,
@@ -256,12 +268,14 @@ fn finish_setup(
 
 /// Handles the event when a new application is launched. It creates a `Process` and `Application` object,
 /// observes the application for events, and adds its windows to the manager.
+/// This system processes `BProcess` entities marked with `FreshMarker`.
+/// If the process is not yet ready, it continues observing it. If ready, it attempts to create and observe an `Application`.
+/// A `Timeout` is added to the application if it takes too long to become observable.
 ///
 /// # Arguments
 ///
-/// * `wm` - The `WindowManager` resource.
-/// * `events` - The event sender socket resource.
-/// * `process_query` - A query for newly launched processes marked with `FreshMarker`.
+/// * `window_manager` - The `WindowManager` resource for creating new application instances.
+/// * `process_query` - A `Populated` query for `(Entity, &mut BProcess, Has<Children>)` with `With<FreshMarker>`.
 /// * `commands` - Bevy commands to spawn entities and manage components.
 #[allow(clippy::needless_pass_by_value)]
 fn add_launched_process(
@@ -304,11 +318,14 @@ fn add_launched_process(
 }
 
 /// Adds windows for a newly launched application.
+/// This system processes `Application` entities marked with `FreshMarker`.
+/// It queries the application's window list, filters out already existing windows, and triggers `SpawnWindowTrigger` events for new windows.
+/// The `FreshMarker` is removed from the application entity after processing.
 ///
 /// # Arguments
 ///
-/// * `app_query` - A query for newly launched applications marked with `FreshMarker`.
-/// * `windows` - A query for all windows.
+/// * `app_query` - A `Populated` query for `(&mut Application, Entity)` with `With<FreshMarker>`.
+/// * `windows` - A query for all `Window` components, used to check for existing windows.
 /// * `commands` - Bevy commands to spawn entities and manage components.
 fn add_launched_application(
     app_query: Populated<(&mut Application, Entity), With<FreshMarker>>,
@@ -339,10 +356,16 @@ fn add_launched_application(
     }
 }
 
-/// Cleans up entities which have been initializing for too long.
+/// Cleans up entities which have been initializing for too long, specifically `BProcess` or `Application` entities.
+/// This system removes the `Timeout` component from entities that are no longer `Fresh`.
 ///
 /// This can be processes which are not yet observable or applications which keep failing to
 /// register some of the observers.
+///
+/// # Arguments
+///
+/// * `cleanup` - A `Populated` query for `(Entity, Has<FreshMarker>, &Timeout)` components, targeting `BProcess` or `Application` entities.
+/// * `commands` - Bevy commands to remove components.
 #[allow(clippy::type_complexity)]
 fn fresh_marker_cleanup(
     cleanup: Populated<
@@ -359,7 +382,14 @@ fn fresh_marker_cleanup(
     }
 }
 
-/// A Bevy system that ticks timers and despawns entities when their timers finish.
+/// A Bevy system that ticks `Timeout` timers and despawns entities when their timers finish.
+/// This system is responsible for cleaning up entities that have exceeded their allotted time for an operation.
+///
+/// # Arguments
+///
+/// * `timers` - A `Populated` query for `(Entity, &mut Timeout)` components.
+/// * `clock` - The Bevy `Time` resource for getting the delta time.
+/// * `commands` - Bevy commands to despawn entities.
 #[allow(clippy::needless_pass_by_value)]
 fn timeout_ticker(
     timers: Populated<(Entity, &mut Timeout)>,
@@ -388,7 +418,15 @@ fn timeout_ticker(
     }
 }
 
-/// A Bevy system that retries focusing a window if the focus event arrived before the window was created.
+/// A Bevy system that retries focusing a window if a `StrayFocusEvent` arrived before the window was created.
+/// If the window is now present in the `World`, the `WindowFocused` event is re-queued, and the `StrayFocusEvent` entity is despawned.
+///
+/// # Arguments
+///
+/// * `focus_events` - A `Populated` query for `(Entity, &StrayFocusEvent)` components.
+/// * `windows` - A query for all `Window` components, used to check for the existence of the target window.
+/// * `messages` - A `MessageWriter` for sending new `Event` messages.
+/// * `commands` - Bevy commands to despawn entities.
 fn retry_stray_focus(
     focus_events: Populated<(Entity, &StrayFocusEvent)>,
     windows: Query<&Window>,
@@ -409,6 +447,14 @@ fn retry_stray_focus(
 }
 
 /// A Bevy system that finds and re-assigns orphaned spaces to the active display.
+/// This system iterates through `OrphanedPane` entities, attempts to merge their windows into an existing space on the active display,
+/// and then despawns the `OrphanedPane` entity.
+///
+/// # Arguments
+///
+/// * `orphaned_spaces` - A `Populated` query for `(Entity, &mut OrphanedPane)` components.
+/// * `active_display` - A mutable `ActiveDisplayMut` system parameter for the currently active display.
+/// * `commands` - Bevy commands to despawn entities.
 #[allow(clippy::needless_pass_by_value)]
 fn find_orphaned_spaces(
     orphaned_spaces: Populated<(Entity, &mut OrphanedPane)>,
@@ -443,8 +489,16 @@ fn find_orphaned_spaces(
     }
 }
 
-/// Periodically checks for displays added and removed.
-/// TODO: Workaround for Tahoe 26.x, where display change notifications are not arriving.
+/// Periodically checks for displays added and removed, as well as changes in the active display.
+/// This system acts as a workaround for inconsistent display change notifications on some macOS versions.
+/// It uses `ThrottledSystem` to limit its execution frequency.
+///
+/// # Arguments
+///
+/// * `displays` - A query for all `Display` entities, including whether they have the `ActiveDisplayMarker`.
+/// * `window_manager` - The `WindowManager` resource for querying active display information.
+/// * `throttle` - A `ThrottledSystem` to control the execution rate of this system.
+/// * `commands` - Bevy commands to trigger `WMEventTrigger` events for display changes.
 #[allow(clippy::needless_pass_by_value)]
 fn display_changes_watcher(
     displays: Query<(&Display, Has<ActiveDisplayMarker>)>,
@@ -502,9 +556,17 @@ fn display_changes_watcher(
     });
 }
 
-/// Periodically checks for windows moved between spaces and displays.
-/// TODO: Workaround for Tahoe 26.x, where workspace notifications are not arriving. So if a
-/// window is missing in the current space, try to trigger a workspace change event.
+/// Periodically checks for changes in the active workspace (space) on the active display.
+/// This system acts as a workaround for inconsistent workspace change notifications on some macOS versions.
+/// If a change is detected, it triggers an `Event::SpaceChanged` event.
+///
+/// # Arguments
+///
+/// * `active_display` - An `ActiveDisplay` system parameter providing immutable access to the active display.
+/// * `window_manager` - The `WindowManager` resource for querying active space information.
+/// * `throttle` - A `ThrottledSystem` to control the execution rate of this system.
+/// * `current_space` - A `Local` resource storing the ID of the currently observed space.
+/// * `commands` - Bevy commands to trigger `WMEventTrigger` events for space changes.
 #[allow(clippy::needless_pass_by_value)]
 fn workspace_change_watcher(
     active_display: ActiveDisplay,
@@ -536,13 +598,15 @@ fn workspace_change_watcher(
 /// Animates window movement.
 /// This is a Bevy system that runs on `Update`. It smoothly moves windows to their target
 /// positions, as indicated by the `RepositionMarker` component.
+/// Animation speed is controlled by the `animation_speed` in the `Config`.
+/// When a window reaches its target position, the `RepositionMarker` is removed.
 ///
 /// # Arguments
 ///
-/// * `windows` - A query for windows with a `RepositionMarker`.
-/// * `displays` - A query for the active display.
-/// * `time` - The Bevy `Time` resource.
-/// * `config` - The optional configuration resource, used for animation speed.
+/// * `windows` - A `Populated` query for `(&mut Window, Entity, &RepositionMarker)` components.
+/// * `displays` - A query for all `Display` entities, used to get display bounds and menubar height.
+/// * `time` - The Bevy `Time` resource for calculating delta time.
+/// * `config` - The `Config` resource, used for animation speed.
 /// * `commands` - Bevy commands to remove the `RepositionMarker` when animation is complete.
 #[allow(clippy::needless_pass_by_value)]
 fn animate_windows(
@@ -554,7 +618,7 @@ fn animate_windows(
 ) {
     let move_speed = config
         .options()
-        .animation_speed
+    .animation_speed
         // If unset, set it to something high, so the move happens immediately,
         // effectively disabling animation.
         .unwrap_or(1_000_000.0)
@@ -603,11 +667,12 @@ fn animate_windows(
 /// Animates window resizing.
 /// This is a Bevy system that runs on `Update`. It resizes windows to their target
 /// dimensions, as indicated by the `ResizeMarker` component.
+/// When a window reaches its target size, the `ResizeMarker` is removed.
 ///
 /// # Arguments
 ///
-/// * `windows` - A query for windows with a `ResizeMarker`.
-/// * `displays` - A query for the active display.
+/// * `windows` - A `Populated` query for `(&mut Window, Entity, &ResizeMarker)` components.
+/// * `active_display` - An `ActiveDisplay` system parameter providing immutable access to the active display.
 /// * `commands` - Bevy commands to remove the `ResizeMarker` when resizing is complete.
 #[allow(clippy::needless_pass_by_value)]
 fn animate_resize_windows(

@@ -34,6 +34,9 @@ use crate::util::{
 };
 use crate::windows::{Window, WindowOS, ax_window_id};
 
+/// A static `LazyLock` that holds a list of `AXNotification` strings to be observed for application-level events.
+/// These notifications are general events related to an application's lifecycle and state changes,
+/// such as a new window being created, the focused window changing, or a menu being opened/closed.
 pub static AX_NOTIFICATIONS: LazyLock<Vec<&str>> = LazyLock::new(|| {
     vec![
         kAXCreatedNotification,
@@ -46,6 +49,9 @@ pub static AX_NOTIFICATIONS: LazyLock<Vec<&str>> = LazyLock::new(|| {
     ]
 });
 
+/// A static `LazyLock` that holds a list of `AXNotification` strings to be observed for window-specific events.
+/// These notifications are related to individual window lifecycle events,
+/// such as a window being destroyed, miniaturized (minimized), or deminiaturized (restored).
 pub static AX_WINDOW_NOTIFICATIONS: LazyLock<Vec<&str>> = LazyLock::new(|| {
     vec![
         kAXUIElementDestroyedNotification,
@@ -55,19 +61,64 @@ pub static AX_WINDOW_NOTIFICATIONS: LazyLock<Vec<&str>> = LazyLock::new(|| {
 });
 
 pub trait ApplicationApi: Send + Sync {
+    /// Returns the process ID of the application.
     fn pid(&self) -> Pid;
+    /// Returns the process serial number of the application.
     fn psn(&self) -> ProcessSerialNumber;
+    /// Returns the connection ID of the application.
     fn connection(&self) -> Option<ConnID>;
+    /// Returns the ID of the currently focused window for this application.
+    ///
+    /// # Errors
+    ///
+    /// Returns an `Error` if the focused window cannot be determined.
     fn focused_window_id(&self) -> Result<WinID>;
+    /// Returns a list of all windows belonging to this application.
+    ///
+    /// # Errors
+    ///
+    /// Returns an `Error` if the window list cannot be retrieved.
     fn window_list(&self) -> Result<Vec<Result<Window>>>;
+    /// Starts observing application-level accessibility notifications.
+    ///
+    /// # Errors
+    ///
+    /// Returns an `Error` if observers cannot be registered.
     fn observe(&mut self) -> Result<bool>;
+    /// Starts observing window-specific accessibility notifications for a given window.
+    ///
+    /// # Arguments
+    ///
+    /// * `window` - The `Window` to observe.
+    ///
+    /// # Errors
+    ///
+    /// Returns an `Error` if observers cannot be registered.
     fn observe_window(&mut self, window: &Window) -> Result<bool>;
+    /// Stops observing window-specific accessibility notifications for a given window.
+    ///
+    /// # Arguments
+    ///
+    /// * `window` - The `Window` to unobserve.
     fn unobserve_window(&mut self, window: &Window);
+    /// Checks if the application is currently the frontmost application.
     fn is_frontmost(&self) -> bool;
+    /// Returns the bundle identifier of the application.
     fn bundle_id(&self) -> Option<&str>;
+    /// Returns the ID of the parent window for a given display.
+    ///
+    /// # Arguments
+    ///
+    /// * `display_id` - The `CGDirectDisplayID` of the display.
+    ///
+    /// # Errors
+    ///
+    /// Returns an `Error` if the parent window cannot be determined.
     fn parent_window(&self, display_id: CGDirectDisplayID) -> Result<WinID>;
 }
 
+/// A wrapper struct for `ApplicationApi` trait objects, allowing for dynamic dispatch.
+/// It implements `Deref` and `DerefMut` to easily access the underlying `ApplicationApi` methods.
 #[derive(Component)]
 pub struct Application(Box<dyn ApplicationApi>);
 
@@ -91,11 +142,18 @@ impl std::fmt::Display for Application {
 }
 
 impl Application {
+    /// Creates a new `Application` instance from a boxed `ApplicationApi` trait object.
+    ///
+    /// # Arguments
+    ///
+    /// * `app` - A `Box<dyn ApplicationApi>` representing the application implementation.
     pub fn new(app: Box<dyn ApplicationApi>) -> Self {
         Application(app)
     }
 }
 
+/// `ApplicationOS` is a concrete implementation of the `ApplicationApi` trait for macOS.
+/// It manages an application's accessibility UI element, process information, and event observation.
 pub struct ApplicationOS {
     element: CFRetained<AXUIWrapper>,
     psn: ProcessSerialNumber,
@@ -126,7 +184,7 @@ impl ApplicationOS {
     ///
     /// # Arguments
     ///
-    /// * `main_cid` - The main connection ID for the `SkyLight` API.
+    /// * `connection` - The main connection ID for the `SkyLight` API.
     /// * `process` - A reference to the `Process` associated with this application.
     /// * `events` - An `EventSender` to send events from the `AXObserver`.
     ///
@@ -202,7 +260,7 @@ impl ApplicationApi for ApplicationOS {
     ///
     /// # Returns
     ///
-    /// `Ok(CFRetained<CFArray>)` containing the list of window elements if successful, otherwise `Err(Error)`.
+    /// `Ok(Vec<Result<Window>>)` containing the list of window objects if successful, otherwise `Err(Error)`.
     fn window_list(&self) -> Result<Vec<Result<Window>>> {
         let axwindows = CFString::from_static_str(kAXWindowsAttribute);
         let array = get_attribute::<CFArray>(&self.element, &axwindows)?;
@@ -271,11 +329,23 @@ impl ApplicationApi for ApplicationOS {
     }
 
     /// Returns the bundle identifier of the application.
+    ///
+    /// # Returns
+    ///
+    /// An `Option<&str>` containing the bundle ID if available, otherwise `None`.
     fn bundle_id(&self) -> Option<&str> {
         self.bundle_id.as_deref()
     }
 
     /// Returns the parent window for a given display.
+    ///
+    /// # Arguments
+    ///
+    /// * `display_id` - The `CGDirectDisplayID` of the display.
+    ///
+    /// # Errors
+    ///
+    /// Returns an `Error` if the parent window cannot be determined.
     fn parent_window(&self, display_id: CGDirectDisplayID) -> Result<WinID> {
         let windows = create_array(&[display_id], CFNumberType::SInt32Type)?;
         unsafe {
@@ -298,11 +368,16 @@ impl ApplicationApi for ApplicationOS {
     }
 }
 
+/// An enum representing the type of observer being used.
+/// `Application` refers to an observer for application-level events.
+/// `Window(WinID)` refers to an observer for a specific window, identified by its `WinID`.
 enum ObserverType {
     Application,
     Window(WinID),
 }
 
+/// `ObserverContext` holds the `EventSender` and the `ObserverType`,
+/// which are used within the `AXObserver` callback to dispatch accessibility events.
 struct ObserverContext {
     events: EventSender,
     which: ObserverType,
@@ -310,6 +385,7 @@ struct ObserverContext {
 
 impl ObserverContext {
     /// Notifies the event sender about an accessibility event.
+    /// It dispatches the event to either `notify_app` or `notify_window` based on the `ObserverType`.
     ///
     /// # Arguments
     ///
@@ -402,6 +478,8 @@ impl ObserverContext {
     }
 }
 
+/// `AxObserverHandler` manages the lifecycle of an `AXObserver`,
+/// including its creation, registration of notifications, and removal from the run loop.
 struct AxObserverHandler {
     observer: CFRetained<AXUIWrapper>,
     events: EventSender,
@@ -454,7 +532,7 @@ impl AxObserverHandler {
     ///
     /// * `element` - The `&AXUIWrapper` to observe.
     /// * `notifications` - A slice of static strings representing the notification names to add.
-    /// * `which` - Adds event type to callback context. I.e. an application or window specific.
+    /// * `which` - The type of observer context (application-specific or window-specific).
     ///
     /// # Returns
     ///
@@ -521,7 +599,7 @@ impl AxObserverHandler {
     ///
     /// # Arguments
     ///
-    /// * `which` - Adds event type to callback context. I.e. an application or window specific.
+    /// * `which` - The type of observer context (application-specific or window-specific) for which to remove notifications.
     /// * `element` - The `&AXUIWrapper` from which to remove notifications.
     /// * `notifications` - A slice of static strings representing the notification names to remove.
     pub fn remove_observer(
@@ -558,12 +636,12 @@ impl AxObserverHandler {
     ///
     /// # Arguments
     ///
-    /// * `_` - The `AXObserverRef` (unused).
+    /// * `_observer` - The `AXObserverRef` (unused).
     /// * `element` - The `AXUIElementRef` associated with the notification.
     /// * `notification` - The raw `CFStringRef` representing the notification name.
     /// * `context` - A raw pointer to the user-defined context `ObserverContext`.
     extern "C" fn callback(
-        _: AXObserverRef,
+        _observer: AXObserverRef,
         element: AXUIElementRef,
         notification: CFStringRef,
         context: *mut c_void,

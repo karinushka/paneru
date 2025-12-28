@@ -38,46 +38,56 @@ const TEST_MENUBAR_HEIGHT: i32 = 20;
 const TEST_WINDOW_WIDTH: i32 = 400;
 const TEST_WINDOW_HEIGHT: i32 = 1000;
 
+/// A mock implementation of the `ProcessApi` trait for testing purposes.
 struct MockProcess {
     psn: ProcessSerialNumber,
 }
 
 impl ProcessApi for MockProcess {
+    /// Always returns `true`, indicating the mock process is observable.
     fn is_observable(&mut self) -> bool {
         println!("{}:", function_name!());
         true
     }
 
+    /// Returns a static name for the mock process.
     fn name(&self) -> &'static str {
         "test"
     }
 
+    /// Returns a predefined PID for the mock process.
     fn pid(&self) -> Pid {
         println!("{}:", function_name!());
         TEST_PROCESS_ID
     }
 
+    /// Returns the `ProcessSerialNumber` of the mock process.
     fn psn(&self) -> ProcessSerialNumber {
         println!("{}: {:?}", function_name!(), self.psn);
         self.psn
     }
 
+    /// Always returns `None` for the `NSRunningApplication`.
     fn application(&self) -> Option<objc2::rc::Retained<objc2_app_kit::NSRunningApplication>> {
         println!("{}:", function_name!());
         None
     }
 
+    /// Always returns `true`, indicating the mock process is ready.
     fn ready(&mut self) -> bool {
         println!("{}:", function_name!());
         true
     }
 }
 
+/// A mock implementation of the `ApplicationApi` trait for testing purposes.
+/// It internally holds an `InnerMockApplication` within an `Arc<RwLock>`.
 #[derive(Clone)]
 struct MockApplication {
     inner: Arc<RwLock<InnerMockApplication>>,
 }
 
+/// The inner state of `MockApplication`, containing process serial number, PID, and focused window ID.
 struct InnerMockApplication {
     psn: ProcessSerialNumber,
     pid: Pid,
@@ -85,6 +95,12 @@ struct InnerMockApplication {
 }
 
 impl MockApplication {
+    /// Creates a new `MockApplication` instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `psn` - The `ProcessSerialNumber` for this mock application.
+    /// * `pid` - The `Pid` for this mock application.
     fn new(psn: ProcessSerialNumber, pid: Pid) -> Self {
         MockApplication {
             inner: Arc::new(RwLock::new(InnerMockApplication {
@@ -97,21 +113,29 @@ impl MockApplication {
 }
 
 impl ApplicationApi for MockApplication {
+    /// Returns the PID of the mock application.
     fn pid(&self) -> Pid {
         println!("{}:", function_name!());
         self.inner.force_read().pid
     }
 
+    /// Returns the `ProcessSerialNumber` of the mock application.
     fn psn(&self) -> ProcessSerialNumber {
         println!("{}:", function_name!());
         self.inner.force_read().psn
     }
 
+    /// Always returns `Some(0)` for the connection ID.
     fn connection(&self) -> Option<ConnID> {
         println!("{}:", function_name!());
         Some(0)
     }
 
+    /// Returns the currently focused window ID for the mock application.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(WinID)` if a window is focused, otherwise `Err(Error::InvalidWindow)`.
     fn focused_window_id(&self) -> Result<WinID> {
         let id = self
             .inner
@@ -122,44 +146,53 @@ impl ApplicationApi for MockApplication {
         id
     }
 
+    /// Always returns an empty vector of window lists for the mock application.
     fn window_list(&self) -> Result<Vec<Result<Window>>> {
         println!("{}:", function_name!());
         Ok(vec![])
     }
 
+    /// Always returns `Ok(true)` for observe operations on the mock application.
     fn observe(&mut self) -> Result<bool> {
         println!("{}:", function_name!());
         Ok(true)
     }
 
+    /// Always returns `Ok(true)` for observe window operations on the mock application.
     fn observe_window(&mut self, _window: &Window) -> Result<bool> {
         println!("{}:", function_name!());
         Ok(true)
     }
 
+    /// Does nothing for unobserve window operations on the mock application.
     fn unobserve_window(&mut self, _window: &Window) {
         println!("{}:", function_name!());
     }
 
+    /// Always returns `true`, indicating the mock application is frontmost.
     fn is_frontmost(&self) -> bool {
         println!("{}:", function_name!());
         true
     }
 
+    /// Always returns `Some("test")` for the bundle ID.
     fn bundle_id(&self) -> Option<&str> {
         println!("{}:", function_name!());
         Some("test")
     }
 
+    /// Always returns `Ok(0)` for the parent window ID.
     fn parent_window(&self, _display_id: CGDirectDisplayID) -> Result<WinID> {
         println!("{}:", function_name!());
         Ok(0)
     }
 }
 
+/// A mock implementation of the `WindowManagerApi` trait for testing purposes.
 struct MockWindowManager {}
 
 impl WindowManagerApi for MockWindowManager {
+    /// Creates a new mock application.
     fn new_application(&self, _process: &dyn ProcessApi) -> Result<Application> {
         println!("{}:", function_name!());
         Ok(Application::new(Box::new(MockApplication {
@@ -171,6 +204,7 @@ impl WindowManagerApi for MockWindowManager {
         })))
     }
 
+    /// Does nothing, as display refreshing is not tested at this level.
     fn refresh_display(
         &self,
         _display: &mut Display,
@@ -179,30 +213,36 @@ impl WindowManagerApi for MockWindowManager {
         println!("{}:", function_name!());
     }
 
+    /// Always returns an empty vector, as associated windows are not tested at this level.
     fn get_associated_windows(&self, _window_id: WinID) -> Vec<WinID> {
         println!("{}:", function_name!());
         vec![]
     }
 
+    /// Always returns an empty vector, as present displays are mocked elsewhere.
     fn present_displays(&self) -> Vec<Display> {
         println!("{}: []", function_name!());
         vec![]
     }
 
+    /// Returns a predefined active display ID.
     fn active_display_id(&self) -> Result<u32> {
         println!("{}: {TEST_DISPLAY_ID}", function_name!());
         Ok(TEST_DISPLAY_ID)
     }
 
+    /// Returns a predefined active display space ID.
     fn active_display_space(&self, _display_id: CGDirectDisplayID) -> Result<u64> {
         println!("{}: {TEST_WORKSPACE_ID}", function_name!());
         Ok(TEST_WORKSPACE_ID)
     }
 
+    /// Does nothing, as mouse centering is not tested at this level.
     fn center_mouse(&self, _window: &Window, _display_bounds: &CGRect) {
         println!("{}:", function_name!());
     }
 
+    /// Always returns an empty vector of windows.
     fn add_existing_application_windows(
         &self,
         _app: &mut Application,
@@ -213,22 +253,26 @@ impl WindowManagerApi for MockWindowManager {
         Ok(vec![])
     }
 
+    /// Always returns `Ok(0)`.
     fn find_window_at_point(&self, _point: &CGPoint) -> Result<WinID> {
         println!("{}:", function_name!());
         Ok(0)
     }
 
+    /// Always returns an empty vector of window IDs.
     fn windows_in_workspace(&self, _space_id: u64) -> Result<Vec<WinID>> {
         println!("{}:", function_name!());
         Ok(vec![])
     }
 
+    /// Always returns `Ok(())`.
     fn quit(&self) -> Result<()> {
         println!("{}:", function_name!());
         Ok(())
     }
 }
 
+/// A mock implementation of the `WindowApi` trait for testing purposes.
 struct MockWindow {
     id: WinID,
     psn: Option<ProcessSerialNumber>,
@@ -238,24 +282,29 @@ struct MockWindow {
 }
 
 impl WindowApi for MockWindow {
+    /// Returns the ID of the mock window.
     fn id(&self) -> WinID {
         self.id
     }
 
+    /// Returns the `ProcessSerialNumber` of the process owning the mock window.
     fn psn(&self) -> Option<ProcessSerialNumber> {
         println!("{}:", function_name!());
         self.psn
     }
 
+    /// Returns the frame (`CGRect`) of the mock window.
     fn frame(&self) -> CGRect {
         self.frame
     }
 
+    /// Always returns `0.5` for the next size ratio.
     fn next_size_ratio(&self, _: &[f64]) -> f64 {
         println!("{}:", function_name!());
         0.5
     }
 
+    /// Returns a dummy `CFRetained<AXUIWrapper>` for the mock window's accessibility element.
     fn element(&self) -> CFRetained<AXUIWrapper> {
         println!("{}:", function_name!());
         let mut s = CFString::from_static_str("");
@@ -263,53 +312,63 @@ impl WindowApi for MockWindow {
         // self.ax_element.clone()
     }
 
+    /// Always returns an empty string for the window title.
     fn title(&self) -> Result<String> {
         println!("{}:", function_name!());
         Ok(String::new())
     }
 
+    /// Always returns `Ok(true)` for valid role.
     fn valid_role(&self) -> Result<bool> {
         println!("{}:", function_name!());
         Ok(true)
     }
 
+    /// Always returns an empty string for the window role.
     fn role(&self) -> Result<String> {
         println!("{}:", function_name!());
         Ok(String::new())
     }
 
+    /// Always returns an empty string for the window subrole.
     fn subrole(&self) -> Result<String> {
         println!("{}:", function_name!());
         Ok(String::new())
     }
 
+    /// Always returns `true` for root status.
     fn is_root(&self) -> bool {
         println!("{}:", function_name!());
         true
     }
 
+    /// Always returns `true` for eligibility.
     fn is_eligible(&self) -> bool {
         println!("{}:", function_name!());
         true
     }
 
+    /// Repositions the mock window's frame to the given coordinates.
     fn reposition(&mut self, x: f64, y: f64, _display_bounds: &CGRect) {
         println!("{}: id {} to {x:.02}:{y:.02}", function_name!(), self.id);
         self.frame.origin.x = x;
         self.frame.origin.y = y;
     }
 
+    /// Resizes the mock window's frame to the given dimensions.
     fn resize(&mut self, width: f64, height: f64, _display_bounds: &CGRect) {
         println!("{}: id {} to {width}x{height}", function_name!(), self.id);
         self.frame.size.width = width;
         self.frame.size.height = height;
     }
 
+    /// Always returns `Ok(())` for updating the frame.
     fn update_frame(&mut self, _display_bounds: Option<&CGRect>) -> Result<()> {
         println!("{}:", function_name!());
         Ok(())
     }
 
+    /// Prints a debug message for focus without raise.
     fn focus_without_raise(&self, currently_focused: &Window) {
         println!(
             "{}: id {} {}",
@@ -319,6 +378,7 @@ impl WindowApi for MockWindow {
         );
     }
 
+    /// Prints a debug message for focus with raise and updates the mock application's focused ID.
     fn focus_with_raise(&self) {
         println!("{}: id {}", function_name!(), self.id);
         if let Some(events) = &self.event_queue {
@@ -332,26 +392,39 @@ impl WindowApi for MockWindow {
         self.app.inner.force_write().focused_id = Some(self.id);
     }
 
+    /// Does nothing for width ratio.
     fn width_ratio(&mut self, _width_ratio: f64) {
         println!("{}:", function_name!());
     }
 
+    /// Always returns `Ok(0)` for PID.
     fn pid(&self) -> Result<Pid> {
         println!("{}:", function_name!());
         Ok(0)
     }
 
+    /// Sets the `ProcessSerialNumber` for the mock window.
     fn set_psn(&mut self, psn: ProcessSerialNumber) {
         println!("{}:", function_name!());
         self.psn = Some(psn);
     }
 
+    /// Does nothing for set eligible.
     fn set_eligible(&mut self, _eligible: bool) {
         println!("{}:", function_name!());
     }
 }
 
 impl MockWindow {
+    /// Creates a new `MockWindow` instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The `WinID` of the window.
+    /// * `psn` - An `Option<ProcessSerialNumber>` for the owning process.
+    /// * `frame` - The `CGRect` representing the window's initial frame.
+    /// * `event_queue` - An optional reference to an `EventQueue` for simulating events.
+    /// * `app` - A `MockApplication` instance associated with this window.
     fn new(
         id: WinID,
         psn: Option<ProcessSerialNumber>,
@@ -369,6 +442,18 @@ impl MockWindow {
     }
 }
 
+/// Sets up a test process with mock windows within the Bevy world.
+///
+/// # Arguments
+///
+/// * `psn` - The `ProcessSerialNumber` for the test process.
+/// * `world` - A mutable reference to the Bevy `World`.
+/// * `panel` - A mutable reference to a `WindowPane` to append windows to.
+/// * `event_queue` - A reference to an `EventQueue` for mock application events.
+///
+/// # Returns
+///
+/// The created `MockApplication` instance.
 fn setup_test_process(
     psn: ProcessSerialNumber,
     world: &mut World,
@@ -415,6 +500,18 @@ fn setup_test_process(
     application
 }
 
+/// Sets up the Bevy `App` and `World` with necessary resources and mock components for testing.
+/// It configures the `TimePlugin`, `WindowManager` (with `MockWindowManager`), `Config`, and other resources, then spawns a mock display and process.
+/// The `process_command_trigger` system and other core systems are registered.
+///
+/// # Arguments
+///
+/// * `app` - A mutable reference to the Bevy `App` instance.
+/// * `event_queue` - A reference to an `EventQueue` for mock application events.
+///
+/// # Returns
+///
+/// The created `MockApplication` instance for the test setup.
 fn setup_world(app: &mut App, event_queue: &EventQueue) -> MockApplication {
     let psn = ProcessSerialNumber { high: 1, low: 2 };
 
@@ -457,8 +554,17 @@ fn setup_world(app: &mut App, event_queue: &EventQueue) -> MockApplication {
     process
 }
 
+/// Type alias for a shared, thread-safe queue of `Event`s, used for simulating internal events in tests.
 type EventQueue = Arc<RwLock<Vec<Event>>>;
 
+/// Runs the main test loop, simulating command dispatch and Bevy app updates.
+/// For each command, the Bevy app is updated multiple times, and internal mock events are flushed.
+/// A `verifier` closure is called after each command to assert the state of the world.
+///
+/// # Arguments
+///
+/// * `commands` - A slice of `Event`s representing commands to dispatch.
+/// * `verifier` - A closure that takes the current iteration and a mutable reference to the `World` for assertions.
 fn run_main_loop(commands: &[Event], mut verifier: impl FnMut(usize, &mut World)) {
     let mut app = App::new();
     let internal_events = Arc::new(RwLock::new(Vec::<Event>::new()));
@@ -480,6 +586,13 @@ fn run_main_loop(commands: &[Event], mut verifier: impl FnMut(usize, &mut World)
     }
 }
 
+/// Verifies the positions of windows against a set of expected positions.
+/// This function queries `Window` components from the world and asserts their `origin.x` and `origin.y` values.
+///
+/// # Arguments
+///
+/// * `expected_positions` - A slice of `(WinID, (i32, i32))` tuples, where `WinID` is the window ID and `(i32, i32)` are the expected (x, y) coordinates.
+/// * `world` - A mutable reference to the Bevy `World` for querying window components.
 fn verify_window_positions(expected_positions: &[(WinID, (i32, i32))], world: &mut World) {
     let mut query = world.query::<&Window>();
     for window in query.iter(world) {

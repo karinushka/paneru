@@ -22,7 +22,7 @@ use crate::display::Display;
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender, Unmanaged};
 use crate::platform::ProcessSerialNumber;
-use crate::process::Process;
+use crate::process::ProcessApi;
 use crate::skylight::{
     _AXUIElementCreateWithRemoteToken, ConnID, SLSCopyActiveMenuBarDisplayIdentifier,
     SLSCopyAssociatedWindows, SLSCopyBestManagedDisplayForRect, SLSCopyManagedDisplayForWindow,
@@ -37,7 +37,7 @@ use crate::util::{AXUIWrapper, create_array, get_array_values, get_cfdict_value}
 use crate::windows::{Window, WindowOS, ax_window_id};
 
 pub trait WindowManagerApi: Send + Sync {
-    fn new_application(&self, process: &Process) -> Result<Application>;
+    fn new_application(&self, process: &dyn ProcessApi) -> Result<Application>;
     fn refresh_display(
         &self,
         display: &mut Display,
@@ -261,8 +261,8 @@ impl WindowManagerOS {
 }
 
 impl WindowManagerApi for WindowManagerOS {
-    fn new_application(&self, process: &Process) -> Result<Application> {
-        let connection = self.connection_for_process(process.psn);
+    fn new_application(&self, process: &dyn ProcessApi) -> Result<Application> {
+        let connection = self.connection_for_process(process.psn());
         ApplicationOS::new(connection, process, &self.event_sender)
             .map(|app| Application::new(Box::new(app)))
     }

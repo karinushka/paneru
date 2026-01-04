@@ -5,7 +5,6 @@ use log::debug;
 use objc2_core_foundation::{CFRetained, CFString, CFUUID, CGRect};
 use objc2_core_graphics::CGDirectDisplayID;
 use std::collections::{HashMap, VecDeque};
-use std::io::ErrorKind;
 use stdext::function_name;
 
 use crate::errors::{Error, Result};
@@ -50,13 +49,10 @@ impl WindowPane {
                 Panel::Single(id) => *id == window_id,
                 Panel::Stack(stack) => stack.contains(&window_id),
             })
-            .ok_or(Error::new(
-                ErrorKind::NotFound,
-                format!(
-                    "{}: can not find window {window_id} in the current pane.",
-                    function_name!()
-                ),
-            ))
+            .ok_or(Error::NotFound(format!(
+                "{}: can not find window {window_id} in the current pane.",
+                function_name!()
+            )))
     }
 
     /// Inserts a window ID into the pane at a specified position.
@@ -115,10 +111,13 @@ impl WindowPane {
     ///
     /// `Ok(Panel)` with the window panel if the index is valid, otherwise `Err(Error)`.
     pub fn get(&self, at: usize) -> Result<Panel> {
-        self.pane.get(at).cloned().ok_or(Error::new(
-            ErrorKind::InvalidInput,
-            format!("{}: {at} out of bounds", function_name!()),
-        ))
+        self.pane
+            .get(at)
+            .cloned()
+            .ok_or(Error::InvalidInput(format!(
+                "{}: {at} out of bounds",
+                function_name!()
+            )))
     }
 
     /// Swaps the positions of two windows within the pane.
@@ -146,10 +145,10 @@ impl WindowPane {
     ///
     /// `Ok(Panel)` with the first panel, otherwise `Err(Error)` if the pane is empty.
     pub fn first(&self) -> Result<Panel> {
-        self.pane.front().cloned().ok_or(Error::new(
-            ErrorKind::NotFound,
-            format!("{}: can not find first element.", function_name!()),
-        ))
+        self.pane.front().cloned().ok_or(Error::NotFound(format!(
+            "{}: can not find first element.",
+            function_name!()
+        )))
     }
 
     /// Returns the last panel in the pane.
@@ -158,10 +157,10 @@ impl WindowPane {
     ///
     /// `Ok(Panel)` with the last panel, otherwise `Err(Error)` if the pane is empty.
     pub fn last(&self) -> Result<Panel> {
-        self.pane.back().cloned().ok_or(Error::new(
-            ErrorKind::NotFound,
-            format!("{}: can not find last element.", function_name!()),
-        ))
+        self.pane.back().cloned().ok_or(Error::NotFound(format!(
+            "{}: can not find last element.",
+            function_name!()
+        )))
     }
 
     /// Iterates over windows to the right of a given window, applying an accessor function to each.
@@ -355,14 +354,14 @@ impl Display {
         unsafe {
             let uuid = NonNull::new(CGDisplayCreateUUIDFromDisplayID(id))
                 .map(|ptr| CFRetained::from_raw(ptr))
-                .ok_or(Error::new(
-                    ErrorKind::InvalidData,
-                    format!("{}: can not create uuid from {id}.", function_name!()),
-                ))?;
-            CFUUID::new_string(None, Some(&uuid)).ok_or(Error::new(
-                ErrorKind::InvalidData,
-                format!("{}: can not create string from {uuid:?}.", function_name!()),
-            ))
+                .ok_or(Error::InvalidInput(format!(
+                    "{}: can not create uuid from {id}.",
+                    function_name!()
+                )))?;
+            CFUUID::new_string(None, Some(&uuid)).ok_or(Error::InvalidInput(format!(
+                "{}: can not create string from {uuid:?}.",
+                function_name!()
+            )))
         }
     }
 
@@ -377,10 +376,10 @@ impl Display {
     /// `Ok(u32)` with the `CGDirectDisplayID` if successful, otherwise `Err(Error)`.
     pub fn id_from_uuid(uuid: &CFRetained<CFString>) -> Result<u32> {
         unsafe {
-            let id = CFUUID::from_string(None, Some(uuid)).ok_or(Error::new(
-                ErrorKind::NotFound,
-                format!("{}: can not convert from {uuid}.", function_name!()),
-            ))?;
+            let id = CFUUID::from_string(None, Some(uuid)).ok_or(Error::NotFound(format!(
+                "{}: can not convert from {uuid}.",
+                function_name!()
+            )))?;
             Ok(CGDisplayGetDisplayIDFromUUID(&id))
         }
     }

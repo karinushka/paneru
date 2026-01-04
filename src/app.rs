@@ -12,7 +12,6 @@ use log::{debug, error};
 use objc2_core_foundation::{CFArray, CFNumberType, CFRetained, CFString, kCFRunLoopCommonModes};
 use objc2_core_graphics::CGDirectDisplayID;
 use std::ffi::c_void;
-use std::io::ErrorKind;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::ptr::null_mut;
@@ -292,10 +291,10 @@ impl ApplicationApi for ApplicationOS {
                 return Ok(SLSWindowIteratorGetParentID(iterator));
             }
         }
-        Err(Error::new(
-            ErrorKind::InvalidInput,
-            format!("{}: error creating an array.", function_name!()),
-        ))
+        Err(Error::InvalidInput(format!(
+            "{}: error creating an array.",
+            function_name!()
+        )))
     }
 }
 
@@ -434,10 +433,10 @@ impl AxObserverHandler {
             if kAXErrorSuccess == AXObserverCreate(pid, Self::callback, &mut observer_ref) {
                 AXUIWrapper::from_retained(observer_ref)?
             } else {
-                return Err(Error::new(
-                    ErrorKind::PermissionDenied,
-                    format!("{}: error creating observer.", function_name!()),
-                ));
+                return Err(Error::PermissionDenied(format!(
+                    "{}: error creating observer.",
+                    function_name!()
+                )));
             }
         };
 
@@ -509,10 +508,10 @@ impl AxObserverHandler {
             })
             .collect::<Vec<_>>();
         if added.is_empty() {
-            Err(Error::new(
-                ErrorKind::PermissionDenied,
-                format!("{}: unable to register any observers!", function_name!()),
-            ))
+            Err(Error::PermissionDenied(format!(
+                "{}: unable to register any observers!",
+                function_name!()
+            )))
         } else {
             Ok(retry)
         }

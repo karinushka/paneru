@@ -13,7 +13,6 @@ use objc2_core_foundation::{
     CFBoolean, CFEqual, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize,
 };
 use objc2_core_graphics::CGRectEqualToRect;
-use std::io::ErrorKind;
 use std::ops::{Deref, DerefMut};
 use std::ptr::null_mut;
 use std::thread;
@@ -149,19 +148,16 @@ impl Window {
 ///
 /// `Ok(WinID)` with the window ID if successful, otherwise `Err(Error)`.
 pub fn ax_window_id(element_ref: AXUIElementRef) -> Result<WinID> {
-    let ptr = NonNull::new(element_ref).ok_or(Error::new(
-        ErrorKind::InvalidInput,
-        format!("{}: nullptr passed as element.", function_name!()),
-    ))?;
+    let ptr = NonNull::new(element_ref).ok_or(Error::InvalidInput(format!(
+        "{}: nullptr passed as element.",
+        function_name!()
+    )))?;
     let mut window_id: WinID = 0;
     if 0 != unsafe { _AXUIElementGetWindow(ptr.as_ptr(), &mut window_id) } || window_id == 0 {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            format!(
-                "{}: Unable to get window id from element {element_ref:?}.",
-                function_name!()
-            ),
-        ));
+        return Err(Error::InvalidInput(format!(
+            "{}: Unable to get window id from element {element_ref:?}.",
+            function_name!()
+        )));
     }
     Ok(window_id)
 }
@@ -610,14 +606,11 @@ impl WindowApi for WindowOS {
                 .read()
             // *(((element_ref.as_ptr() as *const c_void).wrapping_add(0x10)) as *const Pid)
         };
-        (pid != 0).then_some(pid).ok_or(Error::new(
-            ErrorKind::InvalidData,
-            format!(
-                "{}: can not get pid from {:?}.",
-                function_name!(),
-                self.ax_element
-            ),
-        ))
+        (pid != 0).then_some(pid).ok_or(Error::InvalidInput(format!(
+            "{}: can not get pid from {:?}.",
+            function_name!(),
+            self.ax_element
+        )))
     }
 
     fn set_psn(&mut self, psn: ProcessSerialNumber) {

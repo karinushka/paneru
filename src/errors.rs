@@ -9,6 +9,11 @@ pub enum Error {
     InvalidConfig(String),
     ConfigurationWatcher(String),
     NotFound(String),
+    /// Indicates a permission error.
+    PermissionDenied(String),
+    /// Indicates a problem with input.
+    InvalidInput(String),
+    /// Represents an I/O error, typically from `std::io::Error`.
     IO(String),
     Generic(String),
 }
@@ -34,6 +39,8 @@ impl Display for Error {
             Error::InvalidConfig(msg) => format!("Invalid configuration: {msg}"),
             Error::ConfigurationWatcher(msg) => format!("Watching config file: {msg}"),
             Error::NotFound(msg) => format!("Not found: {msg}"),
+            Error::PermissionDenied(msg) => format!("Permission denied: {msg}"),
+            Error::InvalidInput(msg) => format!("Invalid input: {msg}"),
             Error::IO(msg) => format!("IO error: {msg}"),
             Error::Generic(msg) => format!("Generic error: {msg}"),
         };

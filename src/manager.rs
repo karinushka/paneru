@@ -11,7 +11,6 @@ use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayBounds, CGError, CGGetActiveDisplayList, CGRectContainsPoint,
     CGWarpMouseCursorPosition,
 };
-use std::io::ErrorKind;
 use std::ops::{Deref, DerefMut};
 use std::ptr::null_mut;
 use std::slice::from_raw_parts_mut;
@@ -107,14 +106,11 @@ impl WindowManagerOS {
     fn display_space_list(&self, uuid: &CFString) -> Result<Vec<u64>> {
         let display_spaces = NonNull::new(unsafe { SLSCopyManagedDisplaySpaces(self.main_cid) })
             .map(|ptr| unsafe { CFRetained::from_raw(ptr) })
-            .ok_or(Error::new(
-                ErrorKind::PermissionDenied,
-                format!(
-                    "{}: can not copy managed display spaces for {}.",
-                    function_name!(),
-                    self.main_cid
-                ),
-            ))?;
+            .ok_or(Error::PermissionDenied(format!(
+                "{}: can not copy managed display spaces for {}.",
+                function_name!(),
+                self.main_cid
+            )))?;
 
         for display in get_array_values(display_spaces.as_ref()) {
             let display_ref = unsafe { display.as_ref() };
@@ -159,14 +155,11 @@ impl WindowManagerOS {
                 .collect::<Vec<u64>>();
             return Ok(space_list);
         }
-        Err(Error::new(
-            ErrorKind::NotFound,
-            format!(
-                "{}: could not get any displays for {}",
-                function_name!(),
-                self.main_cid
-            ),
-        ))
+        Err(Error::PermissionDenied(format!(
+            "{}: could not get any displays for {}",
+            function_name!(),
+            self.main_cid
+        )))
     }
 
     /// Retrieves the UUID of the active menu bar display.
@@ -177,14 +170,11 @@ impl WindowManagerOS {
     fn active_display_uuid(&self) -> Result<CFRetained<CFString>> {
         unsafe {
             let ptr = SLSCopyActiveMenuBarDisplayIdentifier(self.main_cid);
-            let ptr = NonNull::new(ptr.cast_mut()).ok_or(Error::new(
-                ErrorKind::NotFound,
-                format!(
-                    "{}: can not find active display for connection {}.",
-                    function_name!(),
-                    self.main_cid
-                ),
-            ))?;
+            let ptr = NonNull::new(ptr.cast_mut()).ok_or(Error::NotFound(format!(
+                "{}: can not find active display for connection {}.",
+                function_name!(),
+                self.main_cid
+            )))?;
             Ok(CFRetained::from_raw(ptr))
         }
     }
@@ -208,13 +198,10 @@ impl WindowManagerOS {
                     .map(|uuid| CFRetained::from_raw(uuid))
             }
         })
-        .ok_or(Error::new(
-            ErrorKind::InvalidInput,
-            format!(
-                "{}: can not get display uuid for window {window_id}.",
-                function_name!()
-            ),
-        ))
+        .ok_or(Error::InvalidInput(format!(
+            "{}: can not get display uuid for window {window_id}.",
+            function_name!()
+        )))
     }
 
     /// Retrieves the `CGDirectDisplayID` of the display the window is currently on.
@@ -465,10 +452,10 @@ impl WindowManagerApi for WindowManagerOS {
         // if (!global_window_list) return result;
         let global_window_list = existing_application_window_list(self.main_cid, app, spaces)?;
         if global_window_list.is_empty() {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("{}: No windows found for {app}", function_name!()),
-            ));
+            return Err(Error::InvalidInput(format!(
+                "{}: No windows found for {app}",
+                function_name!()
+            )));
         }
         debug!(
             "{}: {app} has global windows: {global_window_list:?}",
@@ -635,21 +622,18 @@ fn space_window_list_for_connection(
             &mut clear_tags,
         )
     })
-    .ok_or(Error::new(
-        ErrorKind::InvalidInput,
-        format!(
-            "{}: nullptr returned from SLSCopyWindowsWithOptionsAndTags.",
-            function_name!()
-        ),
-    ))?;
+    .ok_or(Error::InvalidInput(format!(
+        "{}: nullptr returned from SLSCopyWindowsWithOptionsAndTags.",
+        function_name!()
+    )))?;
     let window_list_ref = unsafe { CFRetained::from_raw(ptr) };
 
     let count = window_list_ref.count();
     if count == 0 {
-        return Err(Error::new(
-            ErrorKind::InvalidData,
-            format!("{}: zero windows returned", function_name!()),
-        ));
+        return Err(Error::NotFound(format!(
+            "{}: zero windows returned",
+            function_name!()
+        )));
     }
 
     let query = unsafe {
@@ -720,10 +704,10 @@ fn existing_application_window_list(
     spaces: &[u64],
 ) -> Result<Vec<WinID>> {
     if spaces.is_empty() {
-        return Err(Error::new(
-            ErrorKind::InvalidData,
-            format!("{}: no spaces returned", function_name!()),
-        ));
+        return Err(Error::NotFound(format!(
+            "{}: no spaces returned",
+            function_name!()
+        )));
     }
     space_window_list_for_connection(cid, spaces, app.connection(), true)
 }

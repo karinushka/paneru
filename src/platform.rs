@@ -26,7 +26,6 @@ use objc2_foundation::{
 };
 use std::env;
 use std::ffi::c_void;
-use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::ptr::null_mut;
 use std::sync::atomic::AtomicBool;
@@ -542,19 +541,19 @@ impl InputHandler {
                 this.cast(),
             );
             if self.tap_port.is_none() {
-                return Err(Error::new(
-                    ErrorKind::PermissionDenied,
-                    format!("{}: Can not create EventTap.", function_name!()),
-                ));
+                return Err(Error::PermissionDenied(format!(
+                    "{}: Can not create EventTap.",
+                    function_name!()
+                )));
             }
 
             let (run_loop_source, main_loop) =
                 CFMachPort::new_run_loop_source(None, self.tap_port.as_deref(), 0)
                     .zip(CFRunLoop::main())
-                    .ok_or(Error::new(
-                        ErrorKind::PermissionDenied,
-                        format!("{}: Unable to create run loop source", function_name!()),
-                    ))?;
+                    .ok_or(Error::PermissionDenied(format!(
+                        "{}: Unable to create run loop source",
+                        function_name!()
+                    )))?;
             CFRunLoop::add_source(&main_loop, Some(&run_loop_source), kCFRunLoopCommonModes);
 
             let port = self.tap_port.clone().unwrap();
@@ -666,13 +665,10 @@ impl InputHandler {
     fn handle_swipe(&mut self, event: &CGEvent) -> Result<()> {
         const GESTURE_MINIMAL_FINGERS: usize = 3;
         let Some(ns_event) = NSEvent::eventWithCGEvent(event) else {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                format!(
-                    "{}: Unable to convert {event:?} to NSEvent.",
-                    function_name!()
-                ),
-            ));
+            return Err(Error::InvalidInput(format!(
+                "{}: Unable to convert {event:?} to NSEvent.",
+                function_name!()
+            )));
         };
         if ns_event.r#type() != NSEventType::Gesture {
             return Ok(());
@@ -1110,10 +1106,10 @@ impl MissionControlHandler {
             .iter()
             .next()
             .map(|running| running.processIdentifier())
-            .ok_or(Error::new(
-                ErrorKind::NotFound,
-                format!("{}: can not find dock.", function_name!()),
-            ))
+            .ok_or(Error::NotFound(format!(
+                "{}: can not find dock.",
+                function_name!()
+            )))
     }
 
     /// Starts observing Mission Control accessibility notifications from the Dock process.
@@ -1130,10 +1126,10 @@ impl MissionControlHandler {
             if kAXErrorSuccess == AXObserverCreate(pid, Self::callback, &mut observer_ref) {
                 AXUIWrapper::from_retained(observer_ref)?
             } else {
-                return Err(Error::new(
-                    ErrorKind::PermissionDenied,
-                    format!("{}: error creating observer.", function_name!()),
-                ));
+                return Err(Error::PermissionDenied(format!(
+                    "{}: error creating observer.",
+                    function_name!()
+                )));
             }
         };
 
@@ -1264,13 +1260,10 @@ impl DisplayHandler {
         let result =
             unsafe { CGDisplayRegisterReconfigurationCallback(Some(Self::callback), this.cast()) };
         if result != CGError::Success {
-            return Err(Error::new(
-                ErrorKind::PermissionDenied,
-                format!(
-                    "{}: registering display handler callback: {result:?}",
-                    function_name!()
-                ),
-            ));
+            return Err(Error::PermissionDenied(format!(
+                "{}: registering display handler callback: {result:?}",
+                function_name!()
+            )));
         }
         self.cleanup = Some(Cleanuper::new(Box::new(move || unsafe {
             info!("{}: Unregistering display handler", function_name!());
@@ -1481,23 +1474,17 @@ impl PlatformCallbacks {
         // NSWorkspaceActiveDisplayDidChangeNotification
         // Found on: https://stackoverflow.com/questions/68893386/unable-to-receive-nsworkspaceactivespacedidchangenotification-specifically-but
         if !NSApplication::load() {
-            return Err(Error::new(
-                ErrorKind::Unsupported,
-                format!(
-                    "{}: Can not startup Cocoa runloop from Carbon code.",
-                    function_name!()
-                ),
-            ));
+            return Err(Error::PermissionDenied(format!(
+                "{}: Can not startup Cocoa runloop from Carbon code.",
+                function_name!()
+            )));
         }
 
         if !check_ax_privilege() {
-            return Err(Error::new(
-                ErrorKind::PermissionDenied,
-                format!(
-                    "{}: Accessibility permissions are required. Please enable them in System Preferences -> Security & Privacy -> Privacy -> Accessibility.",
-                    function_name!()
-                ),
-            ));
+            return Err(Error::PermissionDenied(format!(
+                "{}: Accessibility permissions are required. Please enable them in System Preferences -> Security & Privacy -> Privacy -> Accessibility.",
+                function_name!()
+            )));
         }
 
         self.event_handler.start()?;

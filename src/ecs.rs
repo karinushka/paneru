@@ -37,7 +37,10 @@ mod triggers;
 ///
 /// * `app` - The Bevy application to register the systems with.
 pub fn register_systems(app: &mut bevy::app::App) {
-    app.add_systems(PreUpdate, systems::dispatch_toplevel_triggers);
+    app.add_systems(
+        PreUpdate,
+        (systems::dispatch_toplevel_triggers, systems::pump_events),
+    );
     app.add_systems(
         Update,
         (

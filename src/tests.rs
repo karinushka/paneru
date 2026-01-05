@@ -521,7 +521,7 @@ fn setup_world(app: &mut App, event_queue: &EventQueue) -> MockApplication {
     let psn = ProcessSerialNumber { high: 1, low: 2 };
 
     app.add_plugins(TimePlugin)
-        .init_resource::<Messages<crate::events::Event>>()
+        .init_resource::<Messages<Event>>()
         .insert_resource(WindowManager(Box::new(MockWindowManager {})))
         .insert_resource(PollForNotifications(true))
         .insert_resource(SkipReshuffle(false))

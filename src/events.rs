@@ -1,17 +1,14 @@
-use bevy::app::{App as BevyApp, AppExit, Startup};
+use bevy::MinimalPlugins;
+use bevy::app::{App as BevyApp, Startup};
 use bevy::ecs::message::{Message, Messages};
 use bevy::ecs::schedule::IntoScheduleConfigs;
 use bevy::ecs::world::World;
-use bevy::time::{Time, TimePlugin, Virtual};
+use bevy::time::{Time, Virtual};
 use log::{debug, error, warn};
 use objc2::rc::Retained;
 use objc2_core_foundation::{CFRetained, CGPoint};
 use objc2_core_graphics::CGDirectDisplayID;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
-use std::thread;
-use std::thread::JoinHandle;
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 use stdext::function_name;
 
@@ -24,7 +21,7 @@ use crate::ecs::{
 };
 use crate::errors::Result;
 use crate::manager::{Process, WindowManager, WindowManagerApi, WindowManagerOS};
-use crate::platform::{ProcessSerialNumber, WinID, WorkspaceObserver};
+use crate::platform::{PlatformCallbacks, ProcessSerialNumber, WinID, WorkspaceObserver};
 use crate::util::AXUIWrapper;
 
 /// `Event` represents various system-level and application-specific occurrences that the window manager reacts to.
@@ -157,7 +154,7 @@ impl EventSender {
     /// # Returns
     ///
     /// A tuple containing the `EventSender` and `Receiver` for the created channel.
-    fn new() -> (Self, Receiver<Event>) {
+    pub fn new() -> (Self, Receiver<Event>) {
         let (tx, rx) = channel::<Event>();
         (Self { tx }, rx)
     }
@@ -181,56 +178,24 @@ impl EventSender {
 pub struct EventHandler;
 
 impl EventHandler {
-    /// Runs the main event loop in a new thread.
-    /// This function sets up the MPSC channel for events, creates a quit signal, and spawns the event runner thread.
-    ///
-    /// # Returns
-    ///
-    /// A tuple containing the `EventSender` for sending events, an `Arc<AtomicBool>` to signal the application to quit,
-    /// and the `JoinHandle` for the event runner thread.
-    pub fn run() -> (EventSender, Arc<AtomicBool>, JoinHandle<()>) {
-        let (sender, receiver) = EventSender::new();
-        let quit = Arc::new(AtomicBool::new(false));
-
-        (
-            sender.clone(),
-            quit.clone(),
-            thread::spawn(move || {
-                if let Err(err) = EventHandler::runner(receiver, sender, &quit) {
-                    error!("{}: Error in the runner: {err}", function_name!());
-                }
-            }),
-        )
-    }
-
-    /// The main runner function for the event loop, executed in a separate thread.
-    /// It sets up the Bevy application, registers systems and triggers, and runs the custom Bevy loop.
-    ///
-    /// # Arguments
-    ///
-    /// * `receiver` - The `Receiver` for incoming events.
-    /// * `sender` - The `EventSender` to send events (used for `WindowManagerOS` initialization).
-    /// * `quit` - An `Arc<AtomicBool>` to signal when the application should exit.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` if the runner completes successfully, otherwise `Err(Error)`.
-    fn runner(
-        receiver: Receiver<Event>,
-        sender: EventSender,
-        quit: &Arc<AtomicBool>,
-    ) -> Result<()> {
-        let (mut existing_processes, config) = EventHandler::gather_initial_processes(&receiver)?;
+    pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<BevyApp> {
         let process_setup = move |world: &mut World| {
+            let Some((mut existing_processes, config)) = world
+                .get_non_send_resource::<Receiver<Event>>()
+                .and_then(|receiver| EventHandler::gather_initial_processes(receiver).ok())
+            else {
+                error!("{}: gathering initial processes.", function_name!());
+                return;
+            };
             EventHandler::initial_setup(world, &mut existing_processes, config.as_ref());
         };
 
-        let window_manager: Box<dyn WindowManagerApi> = Box::new(WindowManagerOS::new(sender));
+        let window_manager: Box<dyn WindowManagerApi> =
+            Box::new(WindowManagerOS::new(sender.clone()));
         let watcher = window_manager.setup_config_watcher(CONFIGURATION_FILE.as_path())?;
 
         let mut app = BevyApp::new();
-        app.set_runner(move |app| EventHandler::custom_loop(app, &receiver))
-            .add_plugins(TimePlugin)
+        app.add_plugins(MinimalPlugins)
             .init_resource::<Messages<Event>>()
             .insert_resource(Time::<Virtual>::from_max_delta(Duration::from_secs(10)))
             .insert_resource(WindowManager(window_manager))
@@ -245,48 +210,13 @@ impl EventHandler {
 
         register_triggers(&mut app);
         register_systems(&mut app);
-        app.run();
 
-        quit.store(true, std::sync::atomic::Ordering::Relaxed);
-        Ok(())
-    }
+        let mut platform_callbacks = PlatformCallbacks::new(sender)?;
+        platform_callbacks.setup_handlers()?;
+        app.insert_non_send_resource(platform_callbacks);
+        app.insert_non_send_resource(receiver);
 
-    /// The custom Bevy application loop, handling events from the receiver.
-    /// This loop continuously updates the Bevy app and processes incoming events from the MPSC channel.
-    /// It includes a timeout mechanism to prevent excessive CPU usage when no events are present.
-    ///
-    /// # Arguments
-    ///
-    /// * `app` - The Bevy application instance.
-    /// * `rx` - The `Receiver` for incoming events.
-    ///
-    /// # Returns
-    ///
-    /// An `AppExit` code, typically `AppExit::Success`.
-    fn custom_loop(mut app: BevyApp, rx: &Receiver<Event>) -> AppExit {
-        const LOOP_MAX_TIMEOUT_MS: u64 = 5000;
-        const LOOP_TIMEOUT_STEP: u64 = 1;
-        app.finish();
-        app.cleanup();
-
-        let mut timeout = LOOP_TIMEOUT_STEP;
-        while app.should_exit().is_none() {
-            app.update();
-            match rx.recv_timeout(Duration::from_millis(timeout)) {
-                Ok(Event::Exit) => {
-                    app.world_mut().write_message::<AppExit>(AppExit::Success);
-                }
-                Ok(event) => {
-                    app.world_mut().write_message::<Event>(event);
-                    timeout = LOOP_TIMEOUT_STEP;
-                }
-                Err(RecvTimeoutError::Timeout) => {
-                    timeout = timeout.min(LOOP_MAX_TIMEOUT_MS) + LOOP_TIMEOUT_STEP;
-                }
-                _ => todo!(),
-            }
-        }
-        AppExit::Success
+        Ok(app)
     }
 
     /// Gathers initial processes and configuration before the main Bevy loop starts.

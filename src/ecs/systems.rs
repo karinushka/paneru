@@ -1,12 +1,15 @@
+use bevy::app::AppExit;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::query::{Has, Or, With};
-use bevy::ecs::system::{Commands, Local, Populated, Query, Res, ResMut};
+use bevy::ecs::system::{Commands, Local, NonSend, NonSendMut, Populated, Query, Res, ResMut};
 use bevy::ecs::world::World;
 use bevy::time::Time;
 use log::{debug, error, info, trace, warn};
 use std::collections::HashSet;
+use std::pin::Pin;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::Duration;
 use stdext::function_name;
 
@@ -24,6 +27,7 @@ use crate::ecs::{
 };
 use crate::events::Event;
 use crate::manager::{Application, Display, Panel, Window, WindowManager, WindowOS, WindowPane};
+use crate::platform::PlatformCallbacks;
 
 const WINDOW_HIDDEN_THRESHOLD: f64 = 10.0;
 
@@ -1022,6 +1026,42 @@ fn binpack_heights(heights: &[f64], min_height: f64, total_height: f64) -> Optio
     }
 
     Some(output)
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn pump_events(
+    mut exit: MessageWriter<AppExit>,
+    mut messages: MessageWriter<Event>,
+    incoming_events: Option<NonSend<Receiver<Event>>>,
+    platform: Option<NonSendMut<Pin<Box<PlatformCallbacks>>>>,
+    mut timeout: Local<u32>,
+) {
+    const LOOP_MAX_TIMEOUT_MS: u32 = 500;
+    const LOOP_TIMEOUT_STEP: u32 = 1;
+
+    let Some((ref mut platform, incoming_events)) = platform.zip(incoming_events) else {
+        // No platform interface or incoming event pipe - probably executing in a unit test.
+        return;
+    };
+
+    platform.pump_cocoa_event_loop(f64::from(*timeout) / 1000.0);
+    loop {
+        // Repeatedly drain the events until timeout.
+        match incoming_events.recv_timeout(Duration::from_millis(1)) {
+            Ok(Event::Exit) | Err(RecvTimeoutError::Disconnected) => {
+                exit.write(AppExit::Success);
+                break;
+            }
+            Ok(event) => {
+                messages.write(event);
+                *timeout = LOOP_TIMEOUT_STEP;
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                *timeout = timeout.min(LOOP_MAX_TIMEOUT_MS) + LOOP_TIMEOUT_STEP;
+                break;
+            }
+        }
+    }
 }
 
 #[test]

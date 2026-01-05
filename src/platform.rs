@@ -1,13 +1,11 @@
 use accessibility_sys::{AXError, AXObserverRef, AXUIElementRef};
-use log::{error, info};
+use log::error;
 use objc2::MainThreadMarker;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSEventMask};
 use objc2_core_foundation::CFString;
-use objc2_foundation::NSDefaultRunLoopMode;
+use objc2_foundation::{NSDate, NSDefaultRunLoopMode};
 use std::ffi::c_void;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use stdext::function_name;
 
 use crate::config::{CONFIGURATION_FILE, Config};
@@ -205,44 +203,27 @@ impl PlatformCallbacks {
         self.events.send(Event::ProcessesLoaded)
     }
 
-    /// Runs the main event loop for platform callbacks. It continuously processes events until the `quit` signal is set.
-    /// This function enters a `CFRunLoop` and waits for events, periodically checking the `quit` flag.
-    ///
-    /// # Arguments
-    ///
-    /// * `quit` - An `Arc<AtomicBool>` used to signal the run loop to exit.
-    pub fn run(&mut self, quit: &Arc<AtomicBool>) {
-        info!("{}: Starting run loop...", function_name!());
-        loop {
-            if quit.load(std::sync::atomic::Ordering::Relaxed) {
-                break;
-            }
-            autoreleasepool(|_| {
-                // Manually pump events for a few seconds.
-                let until_date = objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(2.0);
+    pub fn pump_cocoa_event_loop(&mut self, timeout: f64) {
+        autoreleasepool(|_| {
+            let until_date = NSDate::dateWithTimeIntervalSinceNow(timeout);
 
-                // nextEventMatchingMask:untilDate:inMode:dequeue:
-                // This is the core of the Cocoa event loop.
-                let event = unsafe {
-                    self.cocoa_app
-                        .nextEventMatchingMask_untilDate_inMode_dequeue(
-                            NSEventMask::Any,
-                            Some(&until_date),
-                            NSDefaultRunLoopMode,
-                            true, // Dequeue so we can handle it
-                        )
-                };
-
+            // nextEventMatchingMask:untilDate:inMode:dequeue:
+            // This is the core of the Cocoa event loop.
+            while let Some(event) = unsafe {
+                self.cocoa_app
+                    .nextEventMatchingMask_untilDate_inMode_dequeue(
+                        NSEventMask::Any,
+                        Some(&until_date),
+                        NSDefaultRunLoopMode,
+                        true, // Dequeue so we can handle it
+                    )
+            } {
                 // Dispatch the event to the system
-                if let Some(e) = event {
-                    self.cocoa_app.sendEvent(&e);
-                }
+                self.cocoa_app.sendEvent(&event);
+            }
 
-                // Housekeeping for UI/Notifications
-                self.cocoa_app.updateWindows();
-            });
-        }
-        _ = self.events.send(Event::Exit);
-        info!("{}: Run loop finished.", function_name!());
+            // Housekeeping for UI/Notifications
+            self.cocoa_app.updateWindows();
+        });
     }
 }

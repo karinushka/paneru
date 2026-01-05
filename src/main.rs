@@ -17,8 +17,7 @@ mod tests;
 
 embed_plist::embed_info_plist!("../assets/Info.plist");
 
-use events::EventHandler;
-use platform::PlatformCallbacks;
+use events::{EventHandler, EventSender};
 
 use errors::Result;
 use platform::service;
@@ -100,7 +99,11 @@ fn main() -> Result<()> {
     let service = || service::Service::try_new(service::ID);
 
     match Paneru::parse().subcmd.unwrap_or_default() {
-        SubCmd::Launch => launch()?,
+        SubCmd::Launch => {
+            let (sender, receiver) = EventSender::new();
+            CommandReader::new(sender.clone()).start();
+            EventHandler::setup_bevy_app(sender, receiver)?.run();
+        }
         SubCmd::Install => service()?.install()?,
         SubCmd::Uninstall => service()?.uninstall()?,
         SubCmd::Reinstall => service()?.reinstall()?,
@@ -109,28 +112,5 @@ fn main() -> Result<()> {
         SubCmd::Restart => service()?.restart()?,
         SubCmd::SendCmd { cmd } => CommandReader::send_command(cmd)?,
     }
-    Ok(())
-}
-
-/// Launches the `paneru` window manager daemon.
-///
-/// This function performs initial checks (e.g., for separate spaces),
-/// initializes event handling and platform callbacks, and then runs the main event loop.
-/// It also sets up a `CommandReader` to listen for IPC commands.
-///
-/// # Returns
-///
-/// `Ok(())` if the daemon launches and runs successfully, otherwise `Err(Error)` if setup fails.
-fn launch() -> Result<()> {
-    let (sender, quit, handle) = EventHandler::run();
-
-    CommandReader::new(sender.clone()).start();
-
-    let mut platform_callbacks = PlatformCallbacks::new(sender)?;
-    platform_callbacks.setup_handlers()?;
-
-    platform_callbacks.run(&quit);
-
-    handle.join().expect("Cannot join threads at the end.");
     Ok(())
 }

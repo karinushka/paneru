@@ -407,7 +407,7 @@ impl ProcessHandler {
     ///
     /// - Registers a Carbon event handler, which will be unregistered when `cleanup` is dropped.
     /// - Iterates through existing processes and dispatches `ApplicationLaunched` events for them.
-    fn start(&mut self) {
+    fn start(&mut self) -> Result<()> {
         const APPL_CLASS: &str = "appl";
         const PROCESS_EVENT_LAUNCHED: u32 = 5;
         const PROCESS_EVENT_TERMINATED: u32 = 6;
@@ -442,12 +442,18 @@ impl ProcessHandler {
             InstallEventHandler(
                 target,
                 Self::callback,
-                3,
+                events.len().try_into()?,
                 events.as_ptr(),
                 NonNull::new_unchecked(self).as_ptr().cast(),
                 &raw mut handler,
             )
         };
+        if result != 0 || handler.is_null() {
+            return Err(Error::PermissionDenied(format!(
+                "{}: Error registering process event handler.",
+                function_name!()
+            )));
+        }
         debug!(
             "{}: Registered process_handler (result = {result}): {handler:x?}",
             function_name!()
@@ -460,6 +466,7 @@ impl ProcessHandler {
             );
             RemoveEventHandler(handler);
         })));
+        Ok(())
     }
 
     /// The C-callback function invoked by the private process handling API. It dispatches to the `process_handler` method.
@@ -1622,7 +1629,7 @@ impl PlatformCallbacks {
         self.display_handler.start()?;
         self.mission_control_observer.observe()?;
         self.workspace_observer.start();
-        self.process_handler.start();
+        self.process_handler.start()?;
 
         self.events.send(Event::ProcessesLoaded)
     }

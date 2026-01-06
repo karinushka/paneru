@@ -24,8 +24,7 @@ use crate::ecs::{
 };
 use crate::errors::Result;
 use crate::manager::{Process, WindowManager, WindowManagerOS};
-use crate::platform::{ProcessSerialNumber, WorkspaceObserver};
-use crate::skylight::WinID;
+use crate::platform::{ProcessSerialNumber, WinID, WorkspaceObserver};
 use crate::util::AXUIWrapper;
 
 /// `Event` represents various system-level and application-specific occurrences that the window manager reacts to.

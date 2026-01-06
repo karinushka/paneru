@@ -18,7 +18,7 @@ use objc2_core_graphics::CGDirectDisplayID;
 use crate::commands::Command;
 use crate::events::Event;
 use crate::manager::{ProcessApi, Window, WindowPane};
-use crate::skylight::WinID;
+use crate::platform::WinID;
 pub use systems::gather_displays;
 pub use systems::run_initial_oneshot_systems;
 

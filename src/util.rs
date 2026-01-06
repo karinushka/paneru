@@ -1,12 +1,9 @@
-use accessibility_sys::{
-    AXIsProcessTrustedWithOptions, AXObserverGetRunLoopSource, AXUIElementRef,
-    kAXTrustedCheckOptionPrompt,
-};
+use accessibility_sys::{AXObserverGetRunLoopSource, AXUIElementRef};
 use core::ptr::NonNull;
 use log::debug;
 use objc2_core_foundation::{
     CFArray, CFDictionary, CFNumber, CFNumberType, CFRetained, CFRunLoop, CFRunLoopMode,
-    CFRunLoopSource, CFString, CFType, Type, kCFBooleanTrue, kCFTypeArrayCallBacks,
+    CFRunLoopSource, CFString, CFType, Type, kCFTypeArrayCallBacks,
 };
 use std::{
     ffi::{CStr, OsStr, c_int, c_void},
@@ -16,10 +13,9 @@ use std::{
 };
 use stdext::function_name;
 
-use crate::skylight::AXUIElementCopyAttributeValue;
 use crate::{
     errors::{Error, Result},
-    skylight::{SLSGetSpaceManagementMode, SLSMainConnectionID},
+    manager::AXUIElementCopyAttributeValue,
 };
 
 pub struct Cleanuper {
@@ -350,38 +346,4 @@ pub fn exe_path() -> Option<PathBuf> {
     let path = unsafe { _NSGetExecutablePath(path_buf.as_mut_ptr(), &raw mut path_buf_size) == 0 }
         .then(|| CStr::from_bytes_until_nul(&path_buf).ok())??;
     Some(OsStr::from_bytes(path.to_bytes()).into())
-}
-
-/// Checks if the application has Accessibility privileges.
-/// It will prompt the user to grant permission if not already granted.
-///
-/// # Returns
-///
-/// `true` if Accessibility privileges are granted, `false` otherwise.
-pub fn check_ax_privilege() -> bool {
-    unsafe {
-        let keys = [kAXTrustedCheckOptionPrompt
-            .cast::<CFString>()
-            .as_ref()
-            .unwrap()];
-        let values = [kCFBooleanTrue.unwrap()];
-        let opts = CFDictionary::from_slices(&keys, &values);
-        AXIsProcessTrustedWithOptions((&raw const *opts).cast())
-    }
-}
-
-/// Checks if the macOS "Displays have separate Spaces" option is enabled.
-/// This is crucial for the window manager's functionality, as Paneru relies on independent spaces per display.
-///
-/// # Returns
-///
-/// `true` if separate spaces are enabled, `false` otherwise.
-pub fn check_separate_spaces() -> bool {
-    // if (!(SLSGetSpaceManagementMode(SLSMainConnectionID()) == 1)) {
-    //     require("yabai: 'display has separate spaces' is disabled! abort..\n");
-    // }
-    unsafe {
-        let cid = SLSMainConnectionID();
-        SLSGetSpaceManagementMode(cid) == 1
-    }
 }

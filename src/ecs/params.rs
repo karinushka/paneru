@@ -15,7 +15,7 @@ use super::{ActiveDisplayMarker, FocusFollowsMouse, MissionControlActive, SkipRe
 use crate::{
     config::{Config, WindowParams},
     manager::{Display, WindowManager, WindowPane},
-    skylight::WinID,
+    platform::WinID,
 };
 
 /// A Bevy `SystemParam` that provides access to the application's configuration and related state.

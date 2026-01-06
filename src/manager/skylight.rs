@@ -4,18 +4,10 @@ use accessibility_sys::AXUIElementRef;
 use objc2_core_foundation::{CFArray, CFMutableData, CFString, CFType, CFUUID, CGPoint, CGRect};
 use objc2_core_graphics::{CGDirectDisplayID, CGError};
 
-use crate::platform::{CFStringRef, ProcessSerialNumber};
-
-/// Type alias for `OSStatus`, a 32-bit integer error code used by macOS system services.
-pub type OSStatus = i32;
-/// Type alias for `WinID`, a 32-bit integer representing a window identifier in `SkyLight`.
-pub type WinID = i32;
-/// Type alias for `ConnID`, a 64-bit integer representing a connection identifier in `SkyLight`.
-pub type ConnID = i64;
+use crate::platform::{CFStringRef, ConnID, OSStatus, ProcessSerialNumber, WinID};
 
 #[link(name = "SkyLight", kind = "framework")]
 unsafe extern "C" {
-
     /// Retrieves the window ID (`WinID`) associated with an Accessibility UI element.
     ///
     /// # Arguments

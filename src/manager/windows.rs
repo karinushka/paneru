@@ -19,14 +19,14 @@ use std::thread;
 use std::time::Duration;
 use stdext::function_name;
 
+use super::skylight::{
+    _AXUIElementGetWindow, _SLPSSetFrontProcessWithOptions, AXUIElementCopyAttributeValue,
+    AXUIElementPerformAction, AXUIElementSetAttributeValue, SLPSPostEventRecordTo,
+};
 use crate::ecs::RepositionMarker;
 use crate::ecs::params::ActiveDisplay;
 use crate::errors::{Error, Result};
-use crate::platform::{Pid, ProcessSerialNumber};
-use crate::skylight::{
-    _AXUIElementGetWindow, _SLPSSetFrontProcessWithOptions, AXUIElementCopyAttributeValue,
-    AXUIElementPerformAction, AXUIElementSetAttributeValue, SLPSPostEventRecordTo, WinID,
-};
+use crate::platform::{Pid, ProcessSerialNumber, WinID};
 use crate::util::{AXUIWrapper, get_attribute};
 
 pub trait WindowApi: Send + Sync {

@@ -1,3 +1,4 @@
+use accessibility_sys::{AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt};
 use bevy::ecs::entity::Entity;
 use bevy::ecs::query::Has;
 use bevy::ecs::resource::Resource;
@@ -5,7 +6,8 @@ use bevy::ecs::system::Query;
 use core::ptr::NonNull;
 use log::{debug, error, trace, warn};
 use objc2_core_foundation::{
-    CFArray, CFEqual, CFMutableData, CFNumber, CFNumberType, CFRetained, CFString, CGPoint, CGRect,
+    CFArray, CFDictionary, CFEqual, CFMutableData, CFNumber, CFNumberType, CFRetained, CFString,
+    CGPoint, CGRect, kCFBooleanTrue,
 };
 use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayBounds, CGError, CGGetActiveDisplayList, CGRectContainsPoint,
@@ -19,27 +21,30 @@ use stdext::function_name;
 use crate::ecs::Unmanaged;
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
-use crate::manager::app::ApplicationOS;
-pub use crate::manager::app::{Application, ApplicationApi};
-pub use crate::manager::display::{Display, Panel, WindowPane};
-pub use crate::manager::process::{Process, ProcessApi};
-pub use crate::manager::windows::{Window, WindowApi, WindowOS, ax_window_id};
-use crate::platform::ProcessSerialNumber;
-use crate::skylight::{
-    _AXUIElementCreateWithRemoteToken, ConnID, SLSCopyActiveMenuBarDisplayIdentifier,
+use crate::manager::skylight::SLSGetSpaceManagementMode;
+use crate::platform::{ConnID, ProcessSerialNumber, WinID};
+use crate::util::{AXUIWrapper, create_array, get_array_values, get_cfdict_value};
+use app::ApplicationOS;
+pub use app::{Application, ApplicationApi};
+pub use display::{Display, Panel, WindowPane};
+pub use process::{Process, ProcessApi};
+pub use skylight::AXUIElementCopyAttributeValue;
+use skylight::{
+    _AXUIElementCreateWithRemoteToken, SLSCopyActiveMenuBarDisplayIdentifier,
     SLSCopyAssociatedWindows, SLSCopyBestManagedDisplayForRect, SLSCopyManagedDisplayForWindow,
     SLSCopyManagedDisplaySpaces, SLSCopyWindowsWithOptionsAndTags, SLSFindWindowAndOwner,
     SLSGetConnectionIDForPSN, SLSGetCurrentCursorLocation, SLSGetDisplayMenubarHeight,
     SLSGetWindowBounds, SLSMainConnectionID, SLSManagedDisplayGetCurrentSpace,
     SLSWindowIteratorAdvance, SLSWindowIteratorGetAttributes, SLSWindowIteratorGetParentID,
     SLSWindowIteratorGetTags, SLSWindowIteratorGetWindowID, SLSWindowQueryResultCopyWindows,
-    SLSWindowQueryWindows, WinID,
+    SLSWindowQueryWindows,
 };
-use crate::util::{AXUIWrapper, create_array, get_array_values, get_cfdict_value};
+pub use windows::{Window, WindowApi, WindowOS, ax_window_id};
 
 mod app;
 mod display;
 mod process;
+mod skylight;
 mod windows;
 
 /// Defines the interface for a window manager, abstracting OS-specific operations.
@@ -905,4 +910,35 @@ fn bruteforce_windows(app: &mut Application, window_list: &mut Vec<WinID>) -> Ve
         }
     }
     found_windows
+}
+
+/// Checks if the application has Accessibility privileges.
+/// It will prompt the user to grant permission if not already granted.
+///
+/// # Returns
+///
+/// `true` if Accessibility privileges are granted, `false` otherwise.
+pub fn check_ax_privilege() -> bool {
+    unsafe {
+        let keys = [kAXTrustedCheckOptionPrompt
+            .cast::<CFString>()
+            .as_ref()
+            .unwrap()];
+        let values = [kCFBooleanTrue.unwrap()];
+        let opts = CFDictionary::from_slices(&keys, &values);
+        AXIsProcessTrustedWithOptions((&raw const *opts).cast())
+    }
+}
+
+/// Checks if the macOS "Displays have separate Spaces" option is enabled.
+/// This is crucial for the window manager's functionality, as Paneru relies on independent spaces per display.
+///
+/// # Returns
+///
+/// `true` if separate spaces are enabled, `false` otherwise.
+pub fn check_separate_spaces() -> bool {
+    unsafe {
+        let cid = SLSMainConnectionID();
+        SLSGetSpaceManagementMode(cid) == 1
+    }
 }

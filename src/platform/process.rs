@@ -7,7 +7,7 @@ use stdext::function_name;
 use super::workspace::WorkspaceObserver;
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
-use crate::skylight::OSStatus;
+use crate::platform::OSStatus;
 use crate::util::Cleanuper;
 
 /// Represents a process serial number (PSN), a unique identifier for a running process on macOS.

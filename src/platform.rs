@@ -16,7 +16,7 @@ use stdext::function_name;
 use crate::config::Config;
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
-use crate::util::{check_ax_privilege, check_separate_spaces};
+use crate::manager::{check_ax_privilege, check_separate_spaces};
 use display::DisplayHandler;
 use input::InputHandler;
 use mission_control::MissionControlHandler;
@@ -29,6 +29,13 @@ mod input;
 mod mission_control;
 mod process;
 mod workspace;
+
+/// Type alias for `OSStatus`, a 32-bit integer error code used by macOS system services.
+pub type OSStatus = i32;
+/// Type alias for `WinID`, a 32-bit integer representing a window identifier in `SkyLight`.
+pub type WinID = i32;
+/// Type alias for `ConnID`, a 64-bit integer representing a connection identifier in `SkyLight`.
+pub type ConnID = i64;
 
 pub type Pid = i32;
 /// Type alias for a raw pointer to an immutable `CFString`.

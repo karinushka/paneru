@@ -14,7 +14,6 @@ mod events;
 mod manager;
 mod platform;
 mod service;
-mod skylight;
 mod util;
 
 #[cfg(test)]

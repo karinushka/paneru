@@ -7,8 +7,8 @@ use objc2_core_graphics::CGDirectDisplayID;
 use std::collections::{HashMap, VecDeque};
 use stdext::function_name;
 
+use super::skylight::{CGDisplayCreateUUIDFromDisplayID, CGDisplayGetDisplayIDFromUUID};
 use crate::errors::{Error, Result};
-use crate::skylight::{CGDisplayCreateUUIDFromDisplayID, CGDisplayGetDisplayIDFromUUID};
 
 /// Represents a single panel within a `WindowPane`, which can either hold a single window or a stack of windows.
 #[derive(Clone, Debug)]

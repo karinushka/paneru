@@ -13,9 +13,12 @@ use std::{
 use stdext::function_name;
 use stdext::prelude::RwLockExt;
 
-use crate::commands::{Command, Direction, Operation};
 use crate::errors::{Error, Result};
-use crate::{platform::CFStringRef, skylight::OSStatus, util::AXUIWrapper};
+use crate::{
+    commands::{Command, Direction, Operation},
+    platform::OSStatus,
+};
+use crate::{platform::CFStringRef, util::AXUIWrapper};
 
 /// Parses a string into a `Direction` enum.
 ///

@@ -11,8 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use stdext::function_name;
 
 use crate::ecs::BProcess;
-use crate::platform::{Pid, ProcessSerialNumber, WorkspaceObserver};
-use crate::skylight::OSStatus;
+use crate::platform::{OSStatus, Pid, ProcessSerialNumber, WorkspaceObserver};
 
 unsafe extern "C" {
     /// Get a copy of the name of a process.

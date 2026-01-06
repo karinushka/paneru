@@ -20,9 +20,8 @@ use crate::manager::{
     Application, ApplicationApi, Display, ProcessApi, Window, WindowApi, WindowManager,
     WindowManagerApi, WindowPane,
 };
-use crate::platform::Pid;
-use crate::skylight::ConnID;
-use crate::{platform::ProcessSerialNumber, skylight::WinID, util::AXUIWrapper};
+use crate::platform::{ConnID, Pid, WinID};
+use crate::{platform::ProcessSerialNumber, util::AXUIWrapper};
 
 const TEST_PROCESS_ID: i32 = 1;
 const TEST_DISPLAY_ID: u32 = 1;

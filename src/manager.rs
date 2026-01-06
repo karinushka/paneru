@@ -16,13 +16,15 @@ use std::ptr::null_mut;
 use std::slice::from_raw_parts_mut;
 use stdext::function_name;
 
-use crate::app::{Application, ApplicationOS};
-use crate::display::Display;
 use crate::ecs::Unmanaged;
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
+use crate::manager::app::ApplicationOS;
+pub use crate::manager::app::{Application, ApplicationApi};
+pub use crate::manager::display::{Display, Panel, WindowPane};
+pub use crate::manager::process::{Process, ProcessApi};
+pub use crate::manager::windows::{Window, WindowApi, WindowOS, ax_window_id};
 use crate::platform::ProcessSerialNumber;
-use crate::process::ProcessApi;
 use crate::skylight::{
     _AXUIElementCreateWithRemoteToken, ConnID, SLSCopyActiveMenuBarDisplayIdentifier,
     SLSCopyAssociatedWindows, SLSCopyBestManagedDisplayForRect, SLSCopyManagedDisplayForWindow,
@@ -34,7 +36,11 @@ use crate::skylight::{
     SLSWindowQueryWindows, WinID,
 };
 use crate::util::{AXUIWrapper, create_array, get_array_values, get_cfdict_value};
-use crate::windows::{Window, WindowOS, ax_window_id};
+
+mod app;
+mod display;
+mod process;
+mod windows;
 
 /// Defines the interface for a window manager, abstracting OS-specific operations.
 pub trait WindowManagerApi: Send + Sync {

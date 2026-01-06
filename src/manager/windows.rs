@@ -216,7 +216,7 @@ impl WindowOS {
         }
 
         window.minimized = window.is_minimized();
-        debug!(
+        trace!(
             "{}: created {} title: {} role: {} subrole: {}",
             function_name!(),
             window.id(),
@@ -271,14 +271,8 @@ impl WindowOS {
     /// * `psn` - The process serial number of the application.
     fn make_key_window(&self, psn: &ProcessSerialNumber) {
         let window_id = self.id();
-        //
-        // :SynthesizedEvent
-        //
-        // NOTE(koekeishiya): These events will be picked up by an event-tap registered at the
-        // "Annotated Session" location; specifying that an event-tap is placed at the point where
-        // session events have been annotated to flow to an application.
-
         let mut event_bytes = [0u8; 0xf8];
+
         event_bytes[0x04] = 0xf8;
         event_bytes[0x3a] = 0x10;
         event_bytes[0x3c..0x40].copy_from_slice(&window_id.to_ne_bytes());
@@ -341,6 +335,7 @@ impl WindowApi for WindowOS {
     ///
     /// A `CFRetained<AXUIWrapper>` representing the accessibility element.
     fn element(&self) -> CFRetained<AXUIWrapper> {
+        // unsafe { NonNull::new_unchecked(self.inner().ax_element.as_ptr::<c_void>()).addr() }
         self.ax_element.clone()
     }
 
@@ -393,6 +388,9 @@ impl WindowApi for WindowOS {
     fn is_root(&self) -> bool {
         let cftype = self.ax_element.as_ref();
         let axparent = CFString::from_static_str(kAXParentAttribute);
+        // if (AXUIElementCopyAttributeValue(window->ref, kAXParentAttribute, &value) == kAXErrorSuccess) {
+        //     result = !(value && !CFEqual(value, window->application->ref));
+        // }
         get_attribute::<CFType>(&self.ax_element, &axparent)
             .is_ok_and(|parent| !CFEqual(Some(&*parent), Some(cftype)))
     }
@@ -403,6 +401,7 @@ impl WindowApi for WindowOS {
     ///
     /// `true` if the window is eligible, `false` otherwise.
     fn is_eligible(&self) -> bool {
+        // bool result = window->is_root && (window_is_real(window) || window_check_rule_flag(window, WINDOW_RULE_MANAGED));
         self.eligible
     }
 
@@ -479,22 +478,6 @@ impl WindowApi for WindowOS {
     ///
     /// `Ok(())` if the frame is updated successfully, otherwise `Err(Error)`.
     fn update_frame(&mut self, display_bounds: Option<&CGRect>) -> Result<()> {
-        // CGRect frame = {0};
-        // CFTypeRef position_ref = NULL;
-        // CFTypeRef size_ref = NULL;
-        //
-        // AXUIElementCopyAttributeValue(window->ref, kAXPositionAttribute, &position_ref);
-        // AXUIElementCopyAttributeValue(window->ref, kAXSizeAttribute, &size_ref);
-        //
-        // if (position_ref) {
-        //     AXValueGetValue(position_ref, kAXValueTypeCGPoint, &frame.origin);
-        //     CFRelease(position_ref);
-        // }
-        //
-        // if (size_ref) {
-        //     AXValueGetValue(size_ref, kAXValueTypeCGSize, &frame.size);
-        //     CFRelease(size_ref);
-        // }
         let window_ref = self.ax_element.as_ptr();
 
         let position = unsafe {
@@ -561,7 +544,7 @@ impl WindowApi for WindowOS {
             unsafe {
                 SLPSPostEventRecordTo(&focused_psn, event_bytes.as_ptr().cast());
             }
-            // @hack
+
             // Artificially delay the activation by 1ms. This is necessary because some
             // applications appear to be confused if both of the events appear instantaneously.
             thread::sleep(Duration::from_millis(20));
@@ -600,11 +583,9 @@ impl WindowApi for WindowOS {
 
     fn pid(&self) -> Result<Pid> {
         let pid: Pid = unsafe {
-            // return *(pid_t *)((void *) ref + 0x10);
             NonNull::new_unchecked(self.ax_element.as_ptr::<Pid>())
                 .byte_add(0x10)
                 .read()
-            // *(((element_ref.as_ptr() as *const c_void).wrapping_add(0x10)) as *const Pid)
         };
         (pid != 0).then_some(pid).ok_or(Error::InvalidInput(format!(
             "{}: can not get pid from {:?}.",

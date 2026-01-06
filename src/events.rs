@@ -23,9 +23,8 @@ use crate::ecs::{
     run_initial_oneshot_systems,
 };
 use crate::errors::Result;
-use crate::manager::{WindowManager, WindowManagerOS};
+use crate::manager::{Process, WindowManager, WindowManagerOS};
 use crate::platform::{ProcessSerialNumber, WorkspaceObserver};
-use crate::process::Process;
 use crate::skylight::WinID;
 use crate::util::AXUIWrapper;
 

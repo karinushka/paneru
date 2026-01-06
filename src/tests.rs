@@ -8,24 +8,21 @@ use objc2_core_foundation::{CFRetained, CFString, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGDirectDisplayID;
 use stdext::prelude::RwLockExt;
 
-use crate::app::{Application, ApplicationApi};
 use crate::commands::{Command, Direction, Operation, process_command_trigger};
 use crate::config::Config;
-use crate::display::{Display, WindowPane};
 use crate::ecs::{
     ActiveDisplayMarker, BProcess, FocusFollowsMouse, FocusedMarker, MissionControlActive,
     PollForNotifications, SkipReshuffle, Unmanaged, register_systems, register_triggers,
 };
 use crate::errors::{Error, Result};
 use crate::events::Event;
-use crate::manager::{WindowManager, WindowManagerApi};
-use crate::platform::Pid;
-use crate::process::ProcessApi;
-use crate::skylight::ConnID;
-use crate::windows::Window;
-use crate::{
-    platform::ProcessSerialNumber, skylight::WinID, util::AXUIWrapper, windows::WindowApi,
+use crate::manager::{
+    Application, ApplicationApi, Display, ProcessApi, Window, WindowApi, WindowManager,
+    WindowManagerApi, WindowPane,
 };
+use crate::platform::Pid;
+use crate::skylight::ConnID;
+use crate::{platform::ProcessSerialNumber, skylight::WinID, util::AXUIWrapper};
 
 const TEST_PROCESS_ID: i32 = 1;
 const TEST_DISPLAY_ID: u32 = 1;

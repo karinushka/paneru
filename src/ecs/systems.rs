@@ -14,13 +14,10 @@ use super::{
     OrphanedPane, PollForNotifications, RepositionMarker, ResizeMarker, SpawnWindowTrigger,
     StrayFocusEvent, Timeout, Unmanaged, WMEventTrigger,
 };
-use crate::app::Application;
 use crate::config::Config;
-use crate::display::Display;
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, ThrottledSystem};
 use crate::events::Event;
-use crate::manager::WindowManager;
-use crate::windows::{Window, WindowOS};
+use crate::manager::{Application, Display, Window, WindowManager, WindowOS};
 
 /// Processes a single incoming `Event`. It dispatches various event types to the `WindowManager` or other internal handlers.
 /// This system reads `Event` messages and triggers appropriate Bevy events or modifies resources based on the event type.

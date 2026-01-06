@@ -6,20 +6,16 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::{fs, thread};
 use stdext::function_name;
 
-mod app;
 mod commands;
 mod config;
-mod display;
 mod ecs;
 mod errors;
 mod events;
 mod manager;
 mod platform;
-mod process;
 mod service;
 mod skylight;
 mod util;
-mod windows;
 
 #[cfg(test)]
 mod tests;

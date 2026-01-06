@@ -20,11 +20,11 @@ use stdext::function_name;
 
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
+use crate::manager::{ProcessApi, Window, WindowOS, ax_window_id};
 use crate::platform::{
     AXObserverAddNotification, AXObserverCreate, AXObserverRemoveNotification, CFStringRef, Pid,
     ProcessSerialNumber,
 };
-use crate::process::ProcessApi;
 use crate::skylight::{
     _SLPSGetFrontProcess, ConnID, SLSWindowIteratorAdvance, SLSWindowIteratorGetCount,
     SLSWindowIteratorGetParentID, SLSWindowQueryResultCopyWindows, SLSWindowQueryWindows, WinID,
@@ -32,7 +32,6 @@ use crate::skylight::{
 use crate::util::{
     AXUIWrapper, add_run_loop, create_array, get_array_values, get_attribute, remove_run_loop,
 };
-use crate::windows::{Window, WindowOS, ax_window_id};
 
 /// A static `LazyLock` that holds a list of `AXNotification` strings to be observed for application-level events.
 /// These notifications are general events related to an application's lifecycle and state changes,

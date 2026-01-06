@@ -13,7 +13,7 @@ use std::ffi::c_void;
 use stdext::function_name;
 
 use crate::events::{Event, EventSender};
-use crate::process::Process;
+use crate::manager::Process;
 
 /// `Ivars` is a helper struct to hold instance variables for Objective-C classes implemented in Rust.
 /// It primarily stores an `EventSender` for communication with the main event loop.

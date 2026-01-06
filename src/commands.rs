@@ -7,7 +7,6 @@ use objc2_core_foundation::{CGPoint, CGSize};
 use stdext::function_name;
 
 use crate::config::{Config, preset_column_widths};
-use crate::display::{Display, Panel, WindowPane};
 use crate::ecs::params::ActiveDisplayMut;
 use crate::ecs::{
     CommandTrigger, FocusedMarker, RepositionMarker, ReshuffleAroundMarker, ResizeMarker,
@@ -15,8 +14,7 @@ use crate::ecs::{
 };
 use crate::errors::Result;
 use crate::events::Event;
-use crate::manager::WindowManager;
-use crate::windows::Window;
+use crate::manager::{Display, Panel, Window, WindowManager, WindowPane};
 
 /// Represents a cardinal or directional choice for window manipulation.
 #[derive(Clone, Debug)]

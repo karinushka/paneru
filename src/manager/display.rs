@@ -336,7 +336,6 @@ impl std::fmt::Display for WindowPane {
 pub struct Display {
     /// The unique identifier for this display provided by Core Graphics.
     id: CGDirectDisplayID,
-    // uuid: CFRetained<CFString>,
     /// A map of space IDs to their corresponding `WindowPane`s.
     pub spaces: HashMap<u64, WindowPane>,
     /// The physical bounds (origin and size) of the display.

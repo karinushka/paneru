@@ -15,14 +15,10 @@ use super::{
     RepositionMarker, ReshuffleAroundMarker, SpawnWindowTrigger, StrayFocusEvent, Timeout,
     Unmanaged, WMEventTrigger, WindowDraggedMarker,
 };
-use crate::app::Application;
 use crate::config::WindowParams;
-use crate::display::{Display, Panel, WindowPane};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration};
 use crate::events::Event;
-use crate::manager::WindowManager;
-use crate::process::Process;
-use crate::windows::Window;
+use crate::manager::{Application, Display, Panel, Process, Window, WindowManager, WindowPane};
 
 const WINDOW_HIDDEN_THRESHOLD: f64 = 10.0;
 

@@ -17,8 +17,11 @@ use std::{
 };
 use stdext::function_name;
 
-use crate::errors::{Error, Result};
 use crate::skylight::AXUIElementCopyAttributeValue;
+use crate::{
+    errors::{Error, Result},
+    skylight::{SLSGetSpaceManagementMode, SLSMainConnectionID},
+};
 
 pub struct Cleanuper {
     cleanup: Box<dyn Fn()>,
@@ -371,5 +374,21 @@ pub fn check_ax_privilege() -> bool {
         let values = [kCFBooleanTrue.unwrap()];
         let opts = CFDictionary::from_slices(&keys, &values);
         AXIsProcessTrustedWithOptions((&raw const *opts).cast())
+    }
+}
+
+/// Checks if the macOS "Displays have separate Spaces" option is enabled.
+/// This is crucial for the window manager's functionality, as Paneru relies on independent spaces per display.
+///
+/// # Returns
+///
+/// `true` if separate spaces are enabled, `false` otherwise.
+pub fn check_separate_spaces() -> bool {
+    // if (!(SLSGetSpaceManagementMode(SLSMainConnectionID()) == 1)) {
+    //     require("yabai: 'display has separate spaces' is disabled! abort..\n");
+    // }
+    unsafe {
+        let cid = SLSMainConnectionID();
+        SLSGetSpaceManagementMode(cid) == 1
     }
 }

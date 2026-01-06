@@ -1,7 +1,7 @@
 use chrono::Local;
 use clap::{Parser, Subcommand};
 use log::{debug, error};
-use std::io::{ErrorKind, Read, Write};
+use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::{fs, thread};
 use stdext::function_name;
@@ -30,10 +30,9 @@ embed_plist::embed_info_plist!("../assets/Info.plist");
 
 use events::{Event, EventHandler, EventSender};
 use platform::PlatformCallbacks;
-use skylight::{SLSGetSpaceManagementMode, SLSMainConnectionID};
 
 use crate::config::parse_command;
-use crate::errors::{Error, Result};
+use crate::errors::Result;
 
 /// `CommandReader` is responsible for sending and receiving commands via a Unix socket.
 /// It acts as an IPC mechanism for the `paneru` application, allowing external processes
@@ -127,19 +126,6 @@ impl CommandReader {
             }
         }
         Ok(())
-    }
-}
-
-/// Checks if the macOS "Displays have separate Spaces" option is enabled.
-/// This is crucial for the window manager's functionality, as Paneru relies on independent spaces per display.
-///
-/// # Returns
-///
-/// `true` if separate spaces are enabled, `false` otherwise.
-fn check_separate_spaces() -> bool {
-    unsafe {
-        let cid = SLSMainConnectionID();
-        SLSGetSpaceManagementMode(cid) == 1
     }
 }
 
@@ -241,17 +227,6 @@ fn main() -> Result<()> {
 ///
 /// `Ok(())` if the daemon launches and runs successfully, otherwise `Err(Error)` if setup fails.
 fn launch() -> Result<()> {
-    if !check_separate_spaces() {
-        error!(
-            "{}: Option 'display has separate spaces' disabled.",
-            function_name!()
-        );
-        return Err(Error::new(
-            ErrorKind::Unsupported,
-            "Option 'display has separate spaces' disabled.",
-        ));
-    }
-
     let (sender, quit, handle) = EventHandler::run();
 
     CommandReader::new(sender.clone()).start();

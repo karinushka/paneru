@@ -12,7 +12,7 @@ use crate::app::{Application, ApplicationApi};
 use crate::commands::{Command, Direction, Operation, process_command_trigger};
 use crate::config::Config;
 use crate::display::{Display, WindowPane};
-use crate::errors::Result;
+use crate::errors::{Error, Result};
 use crate::events::{
     ActiveDisplayMarker, BProcess, Event, FocusFollowsMouse, FocusedMarker, MissionControlActive,
     PollForNotifications, SkipReshuffle, Unmanaged,

@@ -38,7 +38,10 @@ use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
 use crate::process::Process;
 use crate::skylight::OSStatus;
-use crate::util::{AXUIWrapper, Cleanuper, add_run_loop, check_ax_privilege, remove_run_loop};
+use crate::util::{
+    AXUIWrapper, Cleanuper, add_run_loop, check_ax_privilege, check_separate_spaces,
+    remove_run_loop,
+};
 
 pub type Pid = i32;
 /// Type alias for a raw pointer to an immutable `CFString`.
@@ -1603,6 +1606,16 @@ impl PlatformCallbacks {
                 "{}: Accessibility permissions are required. Please enable them in System Preferences -> Security & Privacy -> Privacy -> Accessibility.",
                 function_name!()
             )));
+        }
+
+        if !check_separate_spaces() {
+            error!(
+                "{}: Option 'display has separate spaces' disabled.",
+                function_name!()
+            );
+            return Err(Error::InvalidConfig(
+                "Option 'display has separate spaces' disabled.".to_string(),
+            ));
         }
 
         self.event_handler.start()?;

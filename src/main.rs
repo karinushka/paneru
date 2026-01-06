@@ -13,7 +13,6 @@ mod errors;
 mod events;
 mod manager;
 mod platform;
-mod service;
 mod util;
 
 #[cfg(test)]
@@ -26,6 +25,7 @@ use platform::PlatformCallbacks;
 
 use crate::config::parse_command;
 use crate::errors::Result;
+use crate::platform::service;
 
 /// `CommandReader` is responsible for sending and receiving commands via a Unix socket.
 /// It acts as an IPC mechanism for the `paneru` application, allowing external processes

@@ -170,7 +170,7 @@ impl Service {
     #[must_use]
     pub fn launchd_plist(&self) -> String {
         format!(
-            include_str!("../assets/launchd.plist"),
+            include_str!("../../assets/launchd.plist"),
             name = self.raw.name,
             bin_path = self.bin_path.display(),
             out_log_path = self.raw.out_log_path,

@@ -28,6 +28,7 @@ mod display;
 mod input;
 mod mission_control;
 mod process;
+pub mod service;
 mod workspace;
 
 /// Type alias for `OSStatus`, a 32-bit integer error code used by macOS system services.

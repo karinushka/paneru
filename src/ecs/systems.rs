@@ -37,11 +37,6 @@ pub(super) fn dispatch_toplevel_triggers(
         match event {
             Event::Command { command } => commands.trigger(CommandTrigger(command.clone())),
 
-            Event::ConfigRefresh { config } => {
-                info!("{}: Configuration changed.", function_name!());
-                commands.insert_resource(config.clone());
-            }
-
             Event::WindowCreated { element } => {
                 if let Ok(window) = WindowOS::new(element)
                     .inspect_err(|err| {

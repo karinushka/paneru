@@ -3,8 +3,10 @@ use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::lifecycle::{Add, Remove};
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Has, With, Without};
-use bevy::ecs::system::{Commands, Populated, Query, Res, ResMut, Single};
-use log::{debug, error, trace, warn};
+use bevy::ecs::system::{Commands, NonSendMut, Populated, Query, Res, ResMut, Single};
+use log::{debug, error, info, trace, warn};
+use notify::event::{DataChange, MetadataKind, ModifyKind};
+use notify::{EventKind, Watcher};
 use objc2_core_foundation::CGPoint;
 use std::mem::take;
 use std::time::Duration;
@@ -15,10 +17,11 @@ use super::{
     RepositionMarker, ReshuffleAroundMarker, SpawnWindowTrigger, StrayFocusEvent, Timeout,
     Unmanaged, WMEventTrigger, WindowDraggedMarker,
 };
-use crate::config::WindowParams;
+use crate::config::{Config, WindowParams};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration};
 use crate::events::Event;
 use crate::manager::{Application, Display, Panel, Process, Window, WindowManager, WindowPane};
+use crate::util::symlink_target;
 
 const WINDOW_HIDDEN_THRESHOLD: f64 = 10.0;
 
@@ -1497,5 +1500,75 @@ fn apply_window_properties(
 
     if let Ok(mut cmd) = commands.get_entity(entity) {
         cmd.try_insert(ReshuffleAroundMarker);
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn refresh_configuration_trigger(
+    trigger: On<WMEventTrigger>,
+    window_manager: Res<WindowManager>,
+    mut config: ResMut<Config>,
+    watcher: Option<NonSendMut<Box<dyn Watcher>>>,
+) {
+    let Event::ConfigRefresh(event) = &trigger.event().0 else {
+        return;
+    };
+    let Some(mut watcher) = watcher else {
+        return;
+    };
+
+    match &event.kind {
+        EventKind::Modify(
+            // When using the RecommendedWatcher, the event triggers on file data.
+            // When using PollWatcher, it triggers on modification time.
+            ModifyKind::Metadata(MetadataKind::WriteTime) | ModifyKind::Data(DataChange::Content),
+        ) => (),
+        EventKind::Remove(_) => {
+            for path in &event.paths {
+                _ = watcher.unwatch(path).inspect_err(|err| {
+                    error!(
+                        "{}: unwatching the config '{}': {err}",
+                        function_name!(),
+                        path.display()
+                    );
+                });
+            }
+            return;
+        }
+        _ => return,
+    }
+
+    for path in &event.paths {
+        if let Some(symlink) = symlink_target(path) {
+            debug!(
+                "{}: symlink '{}' changed, replacing the watcher.",
+                function_name!(),
+                symlink.display()
+            );
+            if let Ok(new_watcher) = window_manager
+                .setup_config_watcher(path)
+                .inspect_err(|err| {
+                    error!(
+                        "{}: watching the config '{}': {err}",
+                        function_name!(),
+                        path.display()
+                    );
+                })
+            {
+                *watcher = new_watcher;
+            }
+        }
+        info!(
+            "{}: Reloading configuration file; {}",
+            function_name!(),
+            path.display()
+        );
+        _ = config.reload_config(path.as_path()).inspect_err(|err| {
+            error!(
+                "{}: loading config '{}': {err}",
+                function_name!(),
+                path.display()
+            );
+        });
     }
 }

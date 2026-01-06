@@ -8,7 +8,7 @@ use objc2_core_foundation::{
 use std::{
     ffi::{CStr, OsStr, c_int, c_void},
     os::unix::ffi::OsStrExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     ptr::null_mut,
 };
 use stdext::function_name;
@@ -346,4 +346,15 @@ pub fn exe_path() -> Option<PathBuf> {
     let path = unsafe { _NSGetExecutablePath(path_buf.as_mut_ptr(), &raw mut path_buf_size) == 0 }
         .then(|| CStr::from_bytes_until_nul(&path_buf).ok())??;
     Some(OsStr::from_bytes(path.to_bytes()).into())
+}
+
+pub fn symlink_target(path: &Path) -> Option<PathBuf> {
+    if let Ok(metadata) = std::fs::symlink_metadata(path)
+        && metadata.file_type().is_symlink()
+        && let Ok(target) = std::fs::canonicalize(path)
+    {
+        Some(target)
+    } else {
+        None
+    }
 }

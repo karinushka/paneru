@@ -5,6 +5,7 @@ use bevy::ecs::resource::Resource;
 use bevy::ecs::system::Query;
 use core::ptr::NonNull;
 use log::{debug, error, trace, warn};
+use notify::{RecursiveMode, Watcher};
 use objc2_core_foundation::{
     CFArray, CFDictionary, CFEqual, CFMutableData, CFNumber, CFNumberType, CFRetained, CFString,
     CGPoint, CGRect, kCFBooleanTrue,
@@ -14,8 +15,10 @@ use objc2_core_graphics::{
     CGWarpMouseCursorPosition,
 };
 use std::ops::{Deref, DerefMut};
+use std::path::Path;
 use std::ptr::null_mut;
 use std::slice::from_raw_parts_mut;
+use std::time::Duration;
 use stdext::function_name;
 
 use crate::ecs::Unmanaged;
@@ -23,7 +26,7 @@ use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
 use crate::manager::skylight::SLSGetSpaceManagementMode;
 use crate::platform::{ConnID, ProcessSerialNumber, WinID};
-use crate::util::{AXUIWrapper, create_array, get_array_values, get_cfdict_value};
+use crate::util::{AXUIWrapper, create_array, get_array_values, get_cfdict_value, symlink_target};
 use app::ApplicationOS;
 pub use app::{Application, ApplicationApi};
 pub use display::{Display, Panel, WindowPane};
@@ -152,6 +155,8 @@ pub trait WindowManagerApi: Send + Sync {
     ///
     /// `Ok(())` if the exit event is sent successfully, otherwise `Err(Error)`.
     fn quit(&self) -> Result<()>;
+
+    fn setup_config_watcher(&self, path: &Path) -> Result<Box<dyn Watcher>>;
 }
 
 /// `WindowManager` is a Bevy resource that holds a boxed `WindowManagerApi` trait object.
@@ -717,6 +722,39 @@ impl WindowManagerApi for WindowManagerOS {
     fn quit(&self) -> Result<()> {
         self.event_sender.send(Event::Exit)
     }
+
+    fn setup_config_watcher(&self, path: &Path) -> Result<Box<dyn Watcher>> {
+        let setup = notify::Config::default()
+            .with_poll_interval(Duration::from_secs(3))
+            .with_follow_symlinks(false);
+        let config_handler = ConfigHandler(self.event_sender.clone());
+        let symlink = symlink_target(path);
+
+        let mut watcher = if let Some(symlink) = symlink {
+            setup.with_follow_symlinks(true);
+            let mut watcher = notify::PollWatcher::new(config_handler, setup)?;
+            debug!(
+                "{}: watching symlink target {} for changes.",
+                function_name!(),
+                symlink.display()
+            );
+            watcher.watch(&symlink, RecursiveMode::NonRecursive)?;
+
+            Ok::<Box<dyn Watcher>, Error>(Box::new(watcher))
+        } else {
+            Ok::<Box<dyn Watcher>, Error>(Box::new(notify::RecommendedWatcher::new(
+                config_handler,
+                setup,
+            )?))
+        }?;
+        debug!(
+            "{}: watching config file {} for changes.",
+            function_name!(),
+            path.display()
+        );
+        watcher.watch(path, RecursiveMode::NonRecursive)?;
+        Ok(watcher)
+    }
 }
 
 /// Retrieves a list of window IDs for specified spaces and connection, with an option to include minimized windows.
@@ -940,5 +978,25 @@ pub fn check_separate_spaces() -> bool {
     unsafe {
         let cid = SLSMainConnectionID();
         SLSGetSpaceManagementMode(cid) == 1
+    }
+}
+
+/// `ConfigHandler` is an implementation of `notify::EventHandler` that reloads the application configuration
+/// when the configuration file changes. It also dispatches a `ConfigRefresh` event.
+struct ConfigHandler(EventSender);
+
+impl notify::EventHandler for ConfigHandler {
+    /// Handles file system events for the configuration file. When the content changes, it reloads the configuration.
+    /// Specifically, it responds to `ModifyKind::Data(DataChange::Content)` events.
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - The result of a file system event.
+    fn handle_event(&mut self, event: notify::Result<notify::Event>) {
+        if let Ok(event) = event {
+            _ = self.0.send(Event::ConfigRefresh(event)).inspect_err(|err| {
+                warn!("{}: error sending config refresh: {err}", function_name!());
+            });
+        }
     }
 }

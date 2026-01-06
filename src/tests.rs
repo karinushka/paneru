@@ -265,6 +265,10 @@ impl WindowManagerApi for MockWindowManager {
         println!("{}:", function_name!());
         Ok(())
     }
+
+    fn setup_config_watcher(&self, _: &std::path::Path) -> Result<Box<dyn notify::Watcher>> {
+        todo!()
+    }
 }
 
 /// A mock implementation of the `WindowApi` trait for testing purposes.

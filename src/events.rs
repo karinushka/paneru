@@ -16,14 +16,14 @@ use std::time::Duration;
 use stdext::function_name;
 
 use crate::commands::{Command, process_command_trigger};
-use crate::config::Config;
+use crate::config::{CONFIGURATION_FILE, Config};
 use crate::ecs::{
     BProcess, ExistingMarker, FocusFollowsMouse, MissionControlActive, PollForNotifications,
     SkipReshuffle, gather_displays, register_systems, register_triggers,
     run_initial_oneshot_systems,
 };
 use crate::errors::Result;
-use crate::manager::{Process, WindowManager, WindowManagerOS};
+use crate::manager::{Process, WindowManager, WindowManagerApi, WindowManagerOS};
 use crate::platform::{ProcessSerialNumber, WinID, WorkspaceObserver};
 use crate::util::AXUIWrapper;
 
@@ -36,8 +36,11 @@ pub enum Event {
     Exit,
     /// Indicates that the initial set of processes has been loaded.
     ProcessesLoaded,
+
+    /// Announces the initialy loaded configuration
+    InitialConfig(Config),
     /// Signals that the configuration should be reloaded.
-    ConfigRefresh { config: Config },
+    ConfigRefresh(notify::Event),
 
     /// An application has been launched.
     ApplicationLaunched {
@@ -222,19 +225,24 @@ impl EventHandler {
             EventHandler::initial_setup(world, &mut existing_processes, config.as_ref());
         };
 
+        let window_manager: Box<dyn WindowManagerApi> = Box::new(WindowManagerOS::new(sender));
+        let watcher = window_manager.setup_config_watcher(CONFIGURATION_FILE.as_path())?;
+
         let mut app = BevyApp::new();
         app.set_runner(move |app| EventHandler::custom_loop(app, &receiver))
             .add_plugins(TimePlugin)
             .init_resource::<Messages<Event>>()
             .insert_resource(Time::<Virtual>::from_max_delta(Duration::from_secs(10)))
-            .insert_resource(WindowManager(Box::new(WindowManagerOS::new(sender))))
+            .insert_resource(WindowManager(window_manager))
             .insert_resource(SkipReshuffle(false))
             .insert_resource(MissionControlActive(false))
             .insert_resource(FocusFollowsMouse(None))
             .insert_resource(PollForNotifications(true))
             .add_observer(process_command_trigger)
-            .add_systems(Startup, gather_displays)
-            .add_systems(Startup, process_setup.after(gather_displays));
+            .add_systems(Startup, (gather_displays, process_setup).chain());
+
+        app.insert_non_send_resource(watcher);
+
         register_triggers(&mut app);
         register_systems(&mut app);
         app.run();
@@ -303,7 +311,7 @@ impl EventHandler {
                 Event::ApplicationLaunched { psn, observer } => {
                     initial_processes.push(Process::new(&psn, observer.clone()).into());
                 }
-                Event::ConfigRefresh { config } => {
+                Event::InitialConfig(config) => {
                     initial_config = Some(config);
                 }
                 event => warn!(

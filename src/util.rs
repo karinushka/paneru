@@ -10,7 +10,6 @@ use objc2_core_foundation::{
 };
 use std::{
     ffi::{CStr, OsStr, c_int, c_void},
-    io::ErrorKind,
     os::unix::ffi::OsStrExt,
     path::PathBuf,
     ptr::null_mut,
@@ -84,10 +83,10 @@ impl AXUIWrapper {
     pub fn from_ptr<T>(ptr: *mut T) -> Result<NonNull<Self>> {
         NonNull::new(ptr)
             .map(std::ptr::NonNull::cast)
-            .ok_or(Error::new(
-                ErrorKind::InvalidInput,
-                format!("{}: nullptr passed.", function_name!()),
-            ))
+            .ok_or(Error::InvalidInput(format!(
+                "{}: nullptr passed.",
+                function_name!()
+            )))
     }
 
     /// Wraps an already retained raw pointer of type `T` into a `CFRetained<Self>`.
@@ -178,18 +177,15 @@ pub fn get_attribute<T: Type>(
     if 0 == unsafe { AXUIElementCopyAttributeValue(element_ref.as_ptr(), name, &mut attribute) } {
         NonNull::new(attribute)
             .map(|ptr| unsafe { CFRetained::from_raw(ptr.cast()) })
-            .ok_or(Error::new(
-                ErrorKind::InvalidData,
-                format!(
-                    "{}: nullptr while getting attribute {name}.",
-                    function_name!()
-                ),
-            ))
+            .ok_or(Error::InvalidInput(format!(
+                "{}: nullptr while getting attribute {name}.",
+                function_name!()
+            )))
     } else {
-        Err(Error::new(
-            ErrorKind::NotFound,
-            format!("{}: failed getting attribute {name}.", function_name!()),
-        ))
+        Err(Error::NotFound(format!(
+            "{}: failed getting attribute {name}.",
+            function_name!()
+        )))
     }
 }
 
@@ -211,10 +207,10 @@ pub fn get_cfdict_value<T>(dict: &CFDictionary, key: &CFString) -> Result<NonNul
     let ptr = unsafe { CFDictionary::value(dict, NonNull::from(key).as_ptr().cast()) };
     NonNull::new(ptr.cast_mut())
         .map(std::ptr::NonNull::cast::<T>)
-        .ok_or(Error::new(
-            ErrorKind::InvalidData,
-            format!("{}: can not get data for key {key}", function_name!(),),
-        ))
+        .ok_or(Error::InvalidInput(format!(
+            "{}: can not get data for key {key}",
+            function_name!(),
+        )))
 }
 
 /// Retrieves an iterator over the values in a `CFArray`.
@@ -273,10 +269,10 @@ pub fn create_array<T>(values: &[T], cftype: CFNumberType) -> Result<CFRetained<
             &raw const kCFTypeArrayCallBacks,
         )
     }
-    .ok_or(Error::new(
-        ErrorKind::InvalidData,
-        format!("{}: can not create an array.", function_name!()),
-    ))
+    .ok_or(Error::InvalidInput(format!(
+        "{}: can not create an array.",
+        function_name!()
+    )))
 }
 
 /// Retrieves the `CFRunLoopSource` associated with an `AXObserver`.
@@ -316,14 +312,11 @@ pub fn add_run_loop(observer: &AXUIWrapper, mode: Option<&CFRunLoopMode>) -> Res
             CFRunLoop::add_source(&main_loop, run_loop, mode);
             Ok(())
         }
-        _ => Err(Error::new(
-            ErrorKind::PermissionDenied,
-            format!(
-                "{}: Unable to register run loop source for observer {:?} ",
-                function_name!(),
-                observer.as_ptr::<CFRunLoopSource>(),
-            ),
-        )),
+        _ => Err(Error::PermissionDenied(format!(
+            "{}: Unable to register run loop source for observer {:?} ",
+            function_name!(),
+            observer.as_ptr::<CFRunLoopSource>(),
+        ))),
     }
 }
 

@@ -43,9 +43,7 @@ pub enum Event {
     /// Indicates that the initial set of processes has been loaded.
     ProcessesLoaded,
     /// Signals that the configuration should be reloaded.
-    ConfigRefresh {
-        config: Config,
-    },
+    ConfigRefresh { config: Config },
 
     /// An application has been launched.
     ApplicationLaunched {
@@ -54,83 +52,49 @@ pub enum Event {
     },
 
     /// An application has terminated.
-    ApplicationTerminated {
-        psn: ProcessSerialNumber,
-    },
+    ApplicationTerminated { psn: ProcessSerialNumber },
     /// The frontmost application has switched.
-    ApplicationFrontSwitched {
-        psn: ProcessSerialNumber,
-    },
+    ApplicationFrontSwitched { psn: ProcessSerialNumber },
     /// The application has been activated.
     ApplicationActivated,
     /// The application has been deactivated.
     ApplicationDeactivated,
     /// An application has become visible.
-    ApplicationVisible {
-        pid: i32,
-    },
+    ApplicationVisible { pid: i32 },
     /// An application has become hidden.
-    ApplicationHidden {
-        pid: i32,
-    },
+    ApplicationHidden { pid: i32 },
 
     /// A window has been created.
-    WindowCreated {
-        element: CFRetained<AXUIWrapper>,
-    },
+    WindowCreated { element: CFRetained<AXUIWrapper> },
     /// A window has been destroyed.
-    WindowDestroyed {
-        window_id: WinID,
-    },
+    WindowDestroyed { window_id: WinID },
     /// A window has gained focus.
-    WindowFocused {
-        window_id: WinID,
-    },
+    WindowFocused { window_id: WinID },
     /// A window has been moved.
-    WindowMoved {
-        window_id: WinID,
-    },
+    WindowMoved { window_id: WinID },
     /// A window has been resized.
-    WindowResized {
-        window_id: WinID,
-    },
+    WindowResized { window_id: WinID },
     /// A window has been minimized.
-    WindowMinimized {
-        window_id: WinID,
-    },
+    WindowMinimized { window_id: WinID },
     /// A window has been de-minimized (restored).
-    WindowDeminimized {
-        window_id: WinID,
-    },
+    WindowDeminimized { window_id: WinID },
     /// A window's title has changed.
-    WindowTitleChanged {
-        window_id: WinID,
-    },
+    WindowTitleChanged { window_id: WinID },
 
     /// Indicates the currently focused item.
     CurrentlyFocused,
 
     /// A mouse down event has occurred.
-    MouseDown {
-        point: CGPoint,
-    },
+    MouseDown { point: CGPoint },
     /// A mouse up event has occurred.
-    MouseUp {
-        point: CGPoint,
-    },
+    MouseUp { point: CGPoint },
     /// A mouse drag event has occurred.
-    MouseDragged {
-        point: CGPoint,
-    },
+    MouseDragged { point: CGPoint },
     /// A mouse move event has occurred.
-    MouseMoved {
-        point: CGPoint,
-    },
+    MouseMoved { point: CGPoint },
 
     /// A swipe gesture has been detected.
-    Swipe {
-        deltas: Vec<f64>,
-    },
+    Swipe { deltas: Vec<f64> },
 
     /// A new space (virtual desktop) has been created.
     SpaceCreated,
@@ -140,25 +104,15 @@ pub enum Event {
     SpaceChanged,
 
     /// A new display has been added.
-    DisplayAdded {
-        display_id: CGDirectDisplayID,
-    },
+    DisplayAdded { display_id: CGDirectDisplayID },
     /// A display has been removed.
-    DisplayRemoved {
-        display_id: CGDirectDisplayID,
-    },
+    DisplayRemoved { display_id: CGDirectDisplayID },
     /// A display has been moved.
-    DisplayMoved {
-        display_id: CGDirectDisplayID,
-    },
+    DisplayMoved { display_id: CGDirectDisplayID },
     /// A display has been resized.
-    DisplayResized {
-        display_id: CGDirectDisplayID,
-    },
+    DisplayResized { display_id: CGDirectDisplayID },
     /// A display's configuration has changed.
-    DisplayConfigured {
-        display_id: CGDirectDisplayID,
-    },
+    DisplayConfigured { display_id: CGDirectDisplayID },
     /// The overall display arrangement has changed.
     DisplayChanged,
 
@@ -172,35 +126,21 @@ pub enum Event {
     MissionControlExit,
 
     /// Dock preferences have changed.
-    DockDidChangePref {
-        msg: String,
-    },
+    DockDidChangePref { msg: String },
     /// The Dock has restarted.
-    DockDidRestart {
-        msg: String,
-    },
+    DockDidRestart { msg: String },
 
     /// A menu has been opened.
-    MenuOpened {
-        window_id: WinID,
-    },
+    MenuOpened { window_id: WinID },
     /// A menu has been closed.
-    MenuClosed {
-        window_id: WinID,
-    },
+    MenuClosed { window_id: WinID },
     /// The visibility of the menu bar has changed.
-    MenuBarHiddenChanged {
-        msg: String,
-    },
+    MenuBarHiddenChanged { msg: String },
     /// The system has woken from sleep.
-    SystemWoke {
-        msg: String,
-    },
+    SystemWoke { msg: String },
 
     /// A command has been issued to the window manager.
-    Command {
-        command: Command,
-    },
+    Command { command: Command },
 
     /// Represents the total number of event types (for internal use, e.g., array sizing).
     TypeCount,

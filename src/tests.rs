@@ -12,17 +12,16 @@ use crate::app::{Application, ApplicationApi};
 use crate::commands::{Command, Direction, Operation, process_command_trigger};
 use crate::config::Config;
 use crate::display::{Display, WindowPane};
-use crate::errors::{Error, Result};
-use crate::events::{
-    ActiveDisplayMarker, BProcess, Event, FocusFollowsMouse, FocusedMarker, MissionControlActive,
-    PollForNotifications, SkipReshuffle, Unmanaged,
+use crate::ecs::{
+    ActiveDisplayMarker, BProcess, FocusFollowsMouse, FocusedMarker, MissionControlActive,
+    PollForNotifications, SkipReshuffle, Unmanaged, register_systems, register_triggers,
 };
+use crate::errors::{Error, Result};
+use crate::events::Event;
 use crate::manager::{WindowManager, WindowManagerApi};
 use crate::platform::Pid;
 use crate::process::ProcessApi;
 use crate::skylight::ConnID;
-use crate::systems::register_systems;
-use crate::triggers::register_triggers;
 use crate::windows::Window;
 use crate::{
     platform::ProcessSerialNumber, skylight::WinID, util::AXUIWrapper, windows::WindowApi,

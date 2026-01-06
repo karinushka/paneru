@@ -1,17 +1,12 @@
 use bevy::app::{App as BevyApp, AppExit, Startup};
-use bevy::ecs::component::Component;
-use bevy::ecs::entity::Entity;
 use bevy::ecs::message::{Message, Messages};
-use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs;
 use bevy::ecs::world::World;
-use bevy::prelude::Event as BevyEvent;
-use bevy::time::{Time, TimePlugin, Timer, Virtual};
+use bevy::time::{Time, TimePlugin, Virtual};
 use log::{debug, error, warn};
 use objc2::rc::Retained;
-use objc2_core_foundation::{CFRetained, CGPoint, CGSize};
+use objc2_core_foundation::{CFRetained, CGPoint};
 use objc2_core_graphics::CGDirectDisplayID;
-use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
@@ -22,16 +17,17 @@ use stdext::function_name;
 
 use crate::commands::{Command, process_command_trigger};
 use crate::config::Config;
-use crate::display::WindowPane;
+use crate::ecs::{
+    BProcess, ExistingMarker, FocusFollowsMouse, MissionControlActive, PollForNotifications,
+    SkipReshuffle, gather_displays, register_systems, register_triggers,
+    run_initial_oneshot_systems,
+};
 use crate::errors::Result;
 use crate::manager::{WindowManager, WindowManagerOS};
 use crate::platform::{ProcessSerialNumber, WorkspaceObserver};
-use crate::process::{Process, ProcessApi};
+use crate::process::Process;
 use crate::skylight::WinID;
-use crate::systems::{gather_displays, register_systems, run_initial_oneshot_systems};
-use crate::triggers::register_triggers;
 use crate::util::AXUIWrapper;
-use crate::windows::Window;
 
 /// `Event` represents various system-level and application-specific occurrences that the window manager reacts to.
 /// These events drive the core logic of the window manager, from window creation to display changes.
@@ -178,147 +174,6 @@ impl EventSender {
         Ok(self.tx.send(event)?)
     }
 }
-
-/// Marker component for the currently focused window.
-#[derive(Component)]
-pub struct FocusedMarker;
-
-/// Marker component for the currently active display.
-#[derive(Component)]
-pub struct ActiveDisplayMarker;
-
-/// Marker component signifying a freshly created process, application, or window.
-#[derive(Component)]
-pub struct FreshMarker;
-
-/// Marker component used to gather existing processes and windows during initialization.
-#[derive(Component)]
-pub struct ExistingMarker;
-
-/// Component representing a request to reposition a window.
-#[derive(Component)]
-pub struct RepositionMarker {
-    /// The new origin (x, y coordinates) for the window.
-    pub origin: CGPoint,
-    /// The ID of the display the window should be moved to.
-    pub display_id: CGDirectDisplayID,
-}
-
-/// Component representing a request to resize a window.
-#[derive(Component)]
-pub struct ResizeMarker {
-    /// The new size (width, height) for the window.
-    pub size: CGSize,
-}
-
-/// Marker component indicating that a window is currently being dragged by the mouse.
-#[derive(Component)]
-pub struct WindowDraggedMarker {
-    /// The entity ID of the dragged window.
-    pub entity: Entity,
-    /// The ID of the display the window is being dragged on.
-    pub display_id: CGDirectDisplayID,
-}
-
-/// Marker component indicating that windows around the marked entity need to be reshuffled.
-#[derive(Component)]
-pub struct ReshuffleAroundMarker;
-
-/// Enum component indicating the unmanaged state of a window.
-#[derive(Component)]
-pub enum Unmanaged {
-    /// The window is floating and not part of the tiling layout.
-    Floating,
-    /// The window is minimized.
-    Minimized,
-    /// The window is hidden.
-    Hidden,
-}
-
-/// Wrapper component for a `ProcessApi` trait object, enabling dynamic dispatch for process-related operations within Bevy.
-#[derive(Component)]
-pub struct BProcess(pub Box<dyn ProcessApi>);
-
-impl Deref for BProcess {
-    type Target = Box<dyn ProcessApi>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for BProcess {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-/// Component to manage a timeout, often used for delaying actions or retries.
-#[derive(Component)]
-pub struct Timeout {
-    /// The Bevy timer instance.
-    pub timer: Timer,
-    /// An optional message associated with the timeout.
-    pub message: Option<String>,
-}
-
-impl Timeout {
-    /// Creates a new `Timeout` with a specified duration and an optional message.
-    /// The timer is set to run once.
-    ///
-    /// # Arguments
-    ///
-    /// * `duration` - The `Duration` for the timeout.
-    /// * `message` - An `Option<String>` containing a message to associate with the timeout.
-    ///
-    /// # Returns
-    ///
-    /// A new `Timeout` instance.
-    pub fn new(duration: Duration, message: Option<String>) -> Self {
-        let timer = Timer::from_seconds(duration.as_secs_f32(), bevy::time::TimerMode::Once);
-        Self { timer, message }
-    }
-}
-
-/// Component used as a retry mechanism for stray focus events that arrive before the target window is fully created.
-#[derive(Component)]
-pub struct StrayFocusEvent(pub WinID);
-
-/// Component representing a `WindowPane` that has become orphaned, typically due to a space being destroyed or reassigned.
-#[derive(Component)]
-pub struct OrphanedPane {
-    /// The ID of the orphaned space.
-    pub id: u64,
-    /// The `WindowPane` that was orphaned.
-    pub pane: WindowPane,
-}
-
-/// Resource to control whether window reshuffling should be skipped.
-#[derive(Resource)]
-pub struct SkipReshuffle(pub bool);
-
-/// Resource indicating whether Mission Control is currently active.
-#[derive(Resource)]
-pub struct MissionControlActive(pub bool);
-
-/// Resource holding the `WinID` of a window that should gain focus when focus-follows-mouse is enabled.
-#[derive(Resource)]
-pub struct FocusFollowsMouse(pub Option<WinID>);
-
-/// Resource to control whether the application should poll for notifications.
-#[derive(PartialEq, Resource)]
-pub struct PollForNotifications(pub bool);
-
-/// Bevy event trigger for general window manager events.
-#[derive(BevyEvent)]
-pub struct WMEventTrigger(pub Event);
-
-/// Bevy event trigger for commands issued to the window manager.
-#[derive(BevyEvent)]
-pub struct CommandTrigger(pub Command);
-
-/// Bevy event trigger for spawning new windows.
-#[derive(BevyEvent)]
-pub struct SpawnWindowTrigger(pub Vec<Window>);
 
 /// `EventHandler` is responsible for setting up and running the main event loop of the window manager.
 /// It acts as the central hub for receiving system events, dispatching them to the Bevy ECS, and managing the application's lifecycle.

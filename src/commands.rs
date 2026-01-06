@@ -8,13 +8,14 @@ use stdext::function_name;
 
 use crate::config::{Config, preset_column_widths};
 use crate::display::{Display, Panel, WindowPane};
-use crate::errors::Result;
-use crate::events::{
-    CommandTrigger, Event, FocusedMarker, RepositionMarker, ReshuffleAroundMarker, ResizeMarker,
+use crate::ecs::params::ActiveDisplayMut;
+use crate::ecs::{
+    CommandTrigger, FocusedMarker, RepositionMarker, ReshuffleAroundMarker, ResizeMarker,
     Unmanaged, WMEventTrigger,
 };
+use crate::errors::Result;
+use crate::events::Event;
 use crate::manager::WindowManager;
-use crate::params::ActiveDisplayMut;
 use crate::windows::Window;
 
 /// Represents a cardinal or directional choice for window manipulation.

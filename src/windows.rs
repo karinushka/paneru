@@ -19,9 +19,9 @@ use std::thread;
 use std::time::Duration;
 use stdext::function_name;
 
+use crate::ecs::RepositionMarker;
+use crate::ecs::params::ActiveDisplay;
 use crate::errors::{Error, Result};
-use crate::events::RepositionMarker;
-use crate::params::ActiveDisplay;
 use crate::platform::{Pid, ProcessSerialNumber};
 use crate::skylight::{
     _AXUIElementGetWindow, _SLPSSetFrontProcessWithOptions, AXUIElementCopyAttributeValue,

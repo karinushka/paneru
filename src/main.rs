@@ -10,16 +10,14 @@ mod app;
 mod commands;
 mod config;
 mod display;
+mod ecs;
 mod errors;
 mod events;
 mod manager;
-mod params;
 mod platform;
 mod process;
 mod service;
 mod skylight;
-mod systems;
-mod triggers;
 mod util;
 mod windows;
 

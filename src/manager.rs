@@ -18,8 +18,9 @@ use stdext::function_name;
 
 use crate::app::{Application, ApplicationOS};
 use crate::display::Display;
+use crate::ecs::Unmanaged;
 use crate::errors::{Error, Result};
-use crate::events::{Event, EventSender, Unmanaged};
+use crate::events::{Event, EventSender};
 use crate::platform::ProcessSerialNumber;
 use crate::process::ProcessApi;
 use crate::skylight::{

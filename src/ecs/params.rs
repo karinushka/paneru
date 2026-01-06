@@ -11,10 +11,10 @@ use bevy::{
 use objc2_core_foundation::CGRect;
 use objc2_core_graphics::CGDirectDisplayID;
 
+use super::{ActiveDisplayMarker, FocusFollowsMouse, MissionControlActive, SkipReshuffle};
 use crate::{
     config::{Config, WindowParams},
     display::{Display, WindowPane},
-    events::{ActiveDisplayMarker, FocusFollowsMouse, MissionControlActive, SkipReshuffle},
     manager::WindowManager,
     skylight::WinID,
 };

@@ -10,7 +10,7 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use stdext::function_name;
 
-use crate::events::BProcess;
+use crate::ecs::BProcess;
 use crate::platform::{Pid, ProcessSerialNumber, WorkspaceObserver};
 use crate::skylight::OSStatus;
 

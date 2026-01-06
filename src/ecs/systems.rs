@@ -1,10 +1,7 @@
-use bevy::app::Update;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::query::{Has, Or, With};
-use bevy::ecs::schedule::IntoScheduleConfigs;
-use bevy::ecs::schedule::common_conditions::resource_equals;
 use bevy::ecs::system::{Commands, Local, Populated, Query, Res, ResMut};
 use bevy::ecs::world::World;
 use bevy::time::Time;
@@ -12,49 +9,18 @@ use log::{debug, error, info, trace, warn};
 use std::time::Duration;
 use stdext::function_name;
 
+use super::{
+    ActiveDisplayMarker, BProcess, CommandTrigger, ExistingMarker, FocusedMarker, FreshMarker,
+    OrphanedPane, PollForNotifications, RepositionMarker, ResizeMarker, SpawnWindowTrigger,
+    StrayFocusEvent, Timeout, Unmanaged, WMEventTrigger,
+};
 use crate::app::Application;
 use crate::config::Config;
 use crate::display::Display;
-use crate::events::{
-    ActiveDisplayMarker, BProcess, CommandTrigger, Event, ExistingMarker, FocusedMarker,
-    FreshMarker, OrphanedPane, PollForNotifications, RepositionMarker, ResizeMarker,
-    SpawnWindowTrigger, StrayFocusEvent, Timeout, Unmanaged, WMEventTrigger,
-};
+use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, ThrottledSystem};
+use crate::events::Event;
 use crate::manager::WindowManager;
-use crate::params::{ActiveDisplay, ActiveDisplayMut, ThrottledSystem};
 use crate::windows::{Window, WindowOS};
-
-/// Registers the Bevy systems for the `WindowManager`.
-/// This function adds various systems to the `Update` schedule, including event dispatchers,
-/// process/application/window lifecycle management, animation, and periodic watchers.
-/// Systems that poll for notifications are conditionally run based on the `PollForNotifications` resource.
-///
-/// # Arguments
-///
-/// * `app` - The Bevy application to register the systems with.
-pub fn register_systems(app: &mut bevy::app::App) {
-    app.add_systems(
-        Update,
-        (
-            // NOTE: To avoid weird timing issues, the dispatcher should be the first one.
-            dispatch_toplevel_triggers,
-            crate::triggers::reshuffle_around_window,
-            add_launched_process,
-            add_launched_application,
-            fresh_marker_cleanup,
-            timeout_ticker,
-            retry_stray_focus,
-            find_orphaned_spaces,
-            animate_windows,
-            animate_resize_windows,
-        ),
-    );
-    app.add_systems(
-        Update,
-        (display_changes_watcher, workspace_change_watcher)
-            .run_if(resource_equals(PollForNotifications(true))),
-    );
-}
 
 /// Processes a single incoming `Event`. It dispatches various event types to the `WindowManager` or other internal handlers.
 /// This system reads `Event` messages and triggers appropriate Bevy events or modifies resources based on the event type.
@@ -65,7 +31,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
 /// * `broken_notifications` - A mutable `ResMut` for the `PollForNotifications` resource, used to manage polling state.
 /// * `commands` - Bevy commands to trigger events or insert resources.
 #[allow(clippy::needless_pass_by_value)]
-fn dispatch_toplevel_triggers(
+pub(super) fn dispatch_toplevel_triggers(
     mut messages: MessageReader<Event>,
     mut broken_notifications: ResMut<PollForNotifications>,
     mut commands: Commands,
@@ -278,7 +244,7 @@ fn finish_setup(
 /// * `process_query` - A `Populated` query for `(Entity, &mut BProcess, Has<Children>)` with `With<FreshMarker>`.
 /// * `commands` - Bevy commands to spawn entities and manage components.
 #[allow(clippy::needless_pass_by_value)]
-fn add_launched_process(
+pub(super) fn add_launched_process(
     window_manager: Res<WindowManager>,
     process_query: Populated<(Entity, &mut BProcess, Has<Children>), With<FreshMarker>>,
     mut commands: Commands,
@@ -327,7 +293,7 @@ fn add_launched_process(
 /// * `app_query` - A `Populated` query for `(&mut Application, Entity)` with `With<FreshMarker>`.
 /// * `windows` - A query for all `Window` components, used to check for existing windows.
 /// * `commands` - Bevy commands to spawn entities and manage components.
-fn add_launched_application(
+pub(super) fn add_launched_application(
     app_query: Populated<(&mut Application, Entity), With<FreshMarker>>,
     windows: Query<&Window>,
     mut commands: Commands,
@@ -367,7 +333,7 @@ fn add_launched_application(
 /// * `cleanup` - A `Populated` query for `(Entity, Has<FreshMarker>, &Timeout)` components, targeting `BProcess` or `Application` entities.
 /// * `commands` - Bevy commands to remove components.
 #[allow(clippy::type_complexity)]
-fn fresh_marker_cleanup(
+pub(super) fn fresh_marker_cleanup(
     cleanup: Populated<
         (Entity, Has<FreshMarker>, &Timeout),
         Or<(With<BProcess>, With<Application>)>,
@@ -391,7 +357,7 @@ fn fresh_marker_cleanup(
 /// * `clock` - The Bevy `Time` resource for getting the delta time.
 /// * `commands` - Bevy commands to despawn entities.
 #[allow(clippy::needless_pass_by_value)]
-fn timeout_ticker(
+pub(super) fn timeout_ticker(
     timers: Populated<(Entity, &mut Timeout)>,
     clock: Res<Time>,
     mut commands: Commands,
@@ -427,7 +393,7 @@ fn timeout_ticker(
 /// * `windows` - A query for all `Window` components, used to check for the existence of the target window.
 /// * `messages` - A `MessageWriter` for sending new `Event` messages.
 /// * `commands` - Bevy commands to despawn entities.
-fn retry_stray_focus(
+pub(super) fn retry_stray_focus(
     focus_events: Populated<(Entity, &StrayFocusEvent)>,
     windows: Query<&Window>,
     mut messages: MessageWriter<Event>,
@@ -456,7 +422,7 @@ fn retry_stray_focus(
 /// * `active_display` - A mutable `ActiveDisplayMut` system parameter for the currently active display.
 /// * `commands` - Bevy commands to despawn entities.
 #[allow(clippy::needless_pass_by_value)]
-fn find_orphaned_spaces(
+pub(super) fn find_orphaned_spaces(
     orphaned_spaces: Populated<(Entity, &mut OrphanedPane)>,
     mut active_display: ActiveDisplayMut,
     mut commands: Commands,
@@ -500,7 +466,7 @@ fn find_orphaned_spaces(
 /// * `throttle` - A `ThrottledSystem` to control the execution rate of this system.
 /// * `commands` - Bevy commands to trigger `WMEventTrigger` events for display changes.
 #[allow(clippy::needless_pass_by_value)]
-fn display_changes_watcher(
+pub(super) fn display_changes_watcher(
     displays: Query<(&Display, Has<ActiveDisplayMarker>)>,
     window_manager: Res<WindowManager>,
     mut throttle: ThrottledSystem,
@@ -568,7 +534,8 @@ fn display_changes_watcher(
 /// * `current_space` - A `Local` resource storing the ID of the currently observed space.
 /// * `commands` - Bevy commands to trigger `WMEventTrigger` events for space changes.
 #[allow(clippy::needless_pass_by_value)]
-fn workspace_change_watcher(
+pub(super) fn workspace_change_watcher(
+    // _: Single<&Window, With<FocusedMarker>>, // Will only run if there's a focused window.
     active_display: ActiveDisplay,
     window_manager: Res<WindowManager>,
     mut throttle: ThrottledSystem,
@@ -609,7 +576,7 @@ fn workspace_change_watcher(
 /// * `config` - The `Config` resource, used for animation speed.
 /// * `commands` - Bevy commands to remove the `RepositionMarker` when animation is complete.
 #[allow(clippy::needless_pass_by_value)]
-fn animate_windows(
+pub(super) fn animate_windows(
     windows: Populated<(&mut Window, Entity, &RepositionMarker)>,
     displays: Query<&Display>,
     time: Res<Time>,
@@ -618,7 +585,7 @@ fn animate_windows(
 ) {
     let move_speed = config
         .options()
-    .animation_speed
+        .animation_speed
         // If unset, set it to something high, so the move happens immediately,
         // effectively disabling animation.
         .unwrap_or(1_000_000.0)
@@ -675,7 +642,7 @@ fn animate_windows(
 /// * `active_display` - An `ActiveDisplay` system parameter providing immutable access to the active display.
 /// * `commands` - Bevy commands to remove the `ResizeMarker` when resizing is complete.
 #[allow(clippy::needless_pass_by_value)]
-fn animate_resize_windows(
+pub(super) fn animate_resize_windows(
     windows: Populated<(&mut Window, Entity, &ResizeMarker)>,
     active_display: ActiveDisplay,
     mut commands: Commands,

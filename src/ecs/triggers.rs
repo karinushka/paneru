@@ -10,45 +10,21 @@ use std::mem::take;
 use std::time::Duration;
 use stdext::function_name;
 
+use super::{
+    ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, MissionControlActive, OrphanedPane,
+    RepositionMarker, ReshuffleAroundMarker, SpawnWindowTrigger, StrayFocusEvent, Timeout,
+    Unmanaged, WMEventTrigger, WindowDraggedMarker,
+};
 use crate::app::Application;
 use crate::config::WindowParams;
 use crate::display::{Display, Panel, WindowPane};
-use crate::events::{
-    ActiveDisplayMarker, BProcess, Event, FocusedMarker, FreshMarker, MissionControlActive,
-    OrphanedPane, RepositionMarker, ReshuffleAroundMarker, SpawnWindowTrigger, StrayFocusEvent,
-    Timeout, Unmanaged, WMEventTrigger, WindowDraggedMarker,
-};
+use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration};
+use crate::events::Event;
 use crate::manager::WindowManager;
-use crate::params::{ActiveDisplay, ActiveDisplayMut, Configuration};
 use crate::process::Process;
 use crate::windows::Window;
 
 const WINDOW_HIDDEN_THRESHOLD: f64 = 10.0;
-
-/// Registers all the event triggers for the window manager.
-pub fn register_triggers(app: &mut bevy::app::App) {
-    app.add_observer(mouse_moved_trigger)
-        .add_observer(mouse_down_trigger)
-        .add_observer(mouse_dragged_trigger)
-        .add_observer(workspace_change_trigger)
-        .add_observer(display_change_trigger)
-        .add_observer(active_display_trigger)
-        .add_observer(display_add_trigger)
-        .add_observer(display_remove_trigger)
-        .add_observer(display_moved_trigger)
-        .add_observer(front_switched_trigger)
-        .add_observer(center_mouse_trigger)
-        .add_observer(window_focused_trigger)
-        .add_observer(swipe_gesture_trigger)
-        .add_observer(mission_control_trigger)
-        .add_observer(application_event_trigger)
-        .add_observer(dispatch_application_messages)
-        .add_observer(window_resized_trigger)
-        .add_observer(window_destroyed_trigger)
-        .add_observer(window_unmanaged_trigger)
-        .add_observer(window_managed_trigger)
-        .add_observer(spawn_window_trigger);
-}
 
 /// Handles mouse moved events.
 ///
@@ -64,7 +40,7 @@ pub fn register_triggers(app: &mut bevy::app::App) {
 /// * `main_cid` - The main connection ID resource.
 /// * `config` - The optional configuration resource.
 #[allow(clippy::needless_pass_by_value)]
-fn mouse_moved_trigger(
+pub(super) fn mouse_moved_trigger(
     trigger: On<WMEventTrigger>,
     windows: Query<&Window>,
     focused_window: Query<&Window, With<FocusedMarker>>,
@@ -165,7 +141,7 @@ fn mouse_moved_trigger(
 /// * `mission_control_active` - A resource indicating if Mission Control is active.
 /// * `commands` - Bevy commands to trigger a reshuffle.
 #[allow(clippy::needless_pass_by_value)]
-fn mouse_down_trigger(
+pub(super) fn mouse_down_trigger(
     trigger: On<WMEventTrigger>,
     windows: Query<(&Window, Entity)>,
     active_display: ActiveDisplay,
@@ -205,7 +181,7 @@ fn mouse_down_trigger(
 /// * `trigger` - The Bevy event trigger containing the mouse dragged event.
 /// * `mission_control_active` - A resource indicating if Mission Control is active.
 #[allow(clippy::needless_pass_by_value)]
-fn mouse_dragged_trigger(
+pub(super) fn mouse_dragged_trigger(
     trigger: On<WMEventTrigger>,
     active_display: ActiveDisplay,
     windows: Query<(Entity, &Window)>,
@@ -240,7 +216,7 @@ fn mouse_dragged_trigger(
             timeout.timer.reset();
         }
     } else {
-        trace!(
+        debug!(
             "{}: Adding a drag marker ({entity}, {}) to window id {}.",
             function_name!(),
             active_display.id(),
@@ -258,7 +234,7 @@ fn mouse_dragged_trigger(
 }
 
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
-fn workspace_change_trigger(
+pub(super) fn workspace_change_trigger(
     trigger: On<WMEventTrigger>,
     focused_window: Single<
         (
@@ -341,7 +317,7 @@ fn workspace_change_trigger(
 /// * `main_cid` - The main connection ID resource.
 /// * `commands` - Bevy commands to manage components and trigger events.
 #[allow(clippy::needless_pass_by_value)]
-fn display_change_trigger(
+pub(super) fn display_change_trigger(
     trigger: On<WMEventTrigger>,
     displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
     window_manager: Res<WindowManager>,
@@ -377,7 +353,7 @@ fn display_change_trigger(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn active_display_trigger(
+pub(super) fn active_display_trigger(
     trigger: On<Add, ActiveDisplayMarker>,
     mut displays: Query<&mut Display>,
     drag_marker: Single<(Entity, &WindowDraggedMarker)>,
@@ -457,7 +433,7 @@ fn active_display_trigger(
 /// * `orphaned_spaces` - The resource for orphaned spaces.
 /// * `commands` - Bevy commands to spawn/despawn entities and trigger events.
 #[allow(clippy::needless_pass_by_value)]
-fn display_add_trigger(
+pub(super) fn display_add_trigger(
     trigger: On<WMEventTrigger>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
@@ -498,7 +474,7 @@ fn display_add_trigger(
 /// * `orphaned_spaces` - The resource for orphaned spaces.
 /// * `commands` - Bevy commands to despawn entities and trigger events.
 #[allow(clippy::needless_pass_by_value)]
-fn display_remove_trigger(
+pub(super) fn display_remove_trigger(
     trigger: On<WMEventTrigger>,
     mut displays: Query<(&mut Display, Entity)>,
     mut commands: Commands,
@@ -547,7 +523,7 @@ fn display_remove_trigger(
 /// * `orphaned_spaces` - The resource for orphaned spaces.
 /// * `commands` - Bevy commands to trigger events.
 #[allow(clippy::needless_pass_by_value)]
-fn display_moved_trigger(
+pub(super) fn display_moved_trigger(
     trigger: On<WMEventTrigger>,
     mut displays: Query<(&mut Display, Entity)>,
     window_manager: Res<WindowManager>,
@@ -574,6 +550,7 @@ fn display_moved_trigger(
         return;
     };
     *display = moved_display;
+    // find_orphaned_spaces(&mut orphaned_spaces.0, &mut display, &mut windows);
 
     for (id, pane) in &display.spaces {
         debug!("{}: Space {id} - {pane}", function_name!());
@@ -592,7 +569,7 @@ fn display_moved_trigger(
 /// * `focus_follows_mouse_id` - The resource to track focus follows mouse window ID.
 /// * `commands` - Bevy commands to trigger events and manage components.
 #[allow(clippy::needless_pass_by_value)]
-fn front_switched_trigger(
+pub(super) fn front_switched_trigger(
     trigger: On<WMEventTrigger>,
     focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
     processes: Query<(&BProcess, &Children)>,
@@ -647,7 +624,7 @@ fn front_switched_trigger(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn center_mouse_trigger(
+pub(super) fn center_mouse_trigger(
     trigger: On<Add, FocusedMarker>,
     active_display: ActiveDisplay,
     windows: Query<(&Window, Entity)>,
@@ -681,7 +658,7 @@ fn center_mouse_trigger(
 /// * `skip_reshuffle` - The resource to indicate if reshuffling should be skipped.
 /// * `commands` - Bevy commands to manage components and trigger events.
 #[allow(clippy::needless_pass_by_value)]
-fn window_focused_trigger(
+pub(super) fn window_focused_trigger(
     trigger: On<WMEventTrigger>,
     applications: Query<&Application>,
     windows: Query<(&Window, Entity, &ChildOf, Has<FocusedMarker>)>,
@@ -713,6 +690,7 @@ fn window_focused_trigger(
     }
 
     debug!("{}: window id {}", function_name!(), window.id());
+
     let Ok(app) = applications.get(child.parent()) else {
         warn!(
             "{}: Unable to get parent for window {}.",
@@ -729,6 +707,7 @@ fn window_focused_trigger(
     config.set_ffm_flag(None);
 
     if config.skip_reshuffle() {
+        // window_manager.skip_reshuffle = false;
         config.set_skip_reshuffle(false);
     } else if let Ok(mut cmd) = commands.get_entity(entity) {
         cmd.try_insert(ReshuffleAroundMarker);
@@ -777,7 +756,6 @@ pub fn reshuffle_around_window(
             return;
         };
 
-        // let (window, _, moving) = windows.get_mut(entity)?;
         let frame = window.expose_window(&active_display, moving, entity, &mut commands);
         trace!(
             "{}: Moving window {} to {:?}",
@@ -923,7 +901,7 @@ fn reposition_stack(
     for entity in entities {
         if let Ok((mut window, entity, _)) = windows.get_mut(entity) {
             let window_height = window.frame().size.height;
-
+            // window.reposition(upper_left, y_pos, display_bounds);
             commands.entity(entity).try_insert(RepositionMarker {
                 origin: CGPoint {
                     x: upper_left,
@@ -953,7 +931,7 @@ fn reposition_stack(
 /// * `config` - The optional configuration resource.
 /// * `commands` - Bevy commands to trigger events.
 #[allow(clippy::needless_pass_by_value)]
-fn swipe_gesture_trigger(
+pub(super) fn swipe_gesture_trigger(
     trigger: On<WMEventTrigger>,
     active_display: ActiveDisplay,
     mut focused_window: Single<(&mut Window, Entity), With<FocusedMarker>>,
@@ -1076,7 +1054,7 @@ fn slide_to_next_window(
 /// * `trigger` - The Bevy event trigger containing the Mission Control event.
 /// * `mission_control_active` - The `MissionControlActive` resource.
 #[allow(clippy::needless_pass_by_value)]
-fn mission_control_trigger(
+pub(super) fn mission_control_trigger(
     trigger: On<WMEventTrigger>,
     mut mission_control_active: ResMut<MissionControlActive>,
 ) {
@@ -1101,7 +1079,7 @@ fn mission_control_trigger(
 /// * `processes` - A query for all processes.
 /// * `commands` - Bevy commands to spawn or despawn entities.
 #[allow(clippy::needless_pass_by_value)]
-fn application_event_trigger(
+pub(super) fn application_event_trigger(
     trigger: On<WMEventTrigger>,
     processes: Query<(&BProcess, Entity)>,
     mut commands: Commands,
@@ -1148,7 +1126,7 @@ fn application_event_trigger(
 /// * `main_cid` - The main connection ID resource.
 /// * `commands` - Bevy commands to spawn or despawn entities.
 #[allow(clippy::needless_pass_by_value)]
-fn dispatch_application_messages(
+pub(super) fn dispatch_application_messages(
     trigger: On<WMEventTrigger>,
     windows: Query<(&mut Window, Entity)>,
     applications: Query<(&Application, &Children)>,
@@ -1196,7 +1174,7 @@ fn dispatch_application_messages(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn window_unmanaged_trigger(
+pub(super) fn window_unmanaged_trigger(
     trigger: On<Add, Unmanaged>,
     mut windows: Query<(&Window, Option<&Unmanaged>)>,
     mut active_display: ActiveDisplayMut,
@@ -1231,7 +1209,7 @@ fn window_unmanaged_trigger(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn window_managed_trigger(
+pub(super) fn window_managed_trigger(
     trigger: On<Remove, Unmanaged>,
     mut active_display: ActiveDisplayMut,
     mut commands: Commands,
@@ -1260,7 +1238,7 @@ fn window_managed_trigger(
 /// * `displays` - A query for the active display.
 /// * `commands` - Bevy commands to trigger events.
 #[allow(clippy::needless_pass_by_value)]
-fn window_resized_trigger(
+pub(super) fn window_resized_trigger(
     trigger: On<WMEventTrigger>,
     mut windows: Query<(&mut Window, Entity)>,
     active_display: ActiveDisplay,
@@ -1291,7 +1269,7 @@ fn window_resized_trigger(
 /// * `displays` - A query for all displays.
 /// * `commands` - Bevy commands to despawn entities and trigger events.
 #[allow(clippy::needless_pass_by_value)]
-fn window_destroyed_trigger(
+pub(super) fn window_destroyed_trigger(
     trigger: On<WMEventTrigger>,
     mut windows: Query<(&Window, Entity, &ChildOf)>,
     mut apps: Query<&mut Application>,
@@ -1381,7 +1359,7 @@ fn give_away_focus(
 /// * `main_cid` - The main connection ID resource.
 /// * `commands` - Bevy commands to manage components and trigger events.
 #[allow(clippy::needless_pass_by_value)]
-fn spawn_window_trigger(
+pub(super) fn spawn_window_trigger(
     mut trigger: On<SpawnWindowTrigger>,
     windows: Query<(Entity, &Window, Has<FocusedMarker>)>,
     mut apps: Query<(Entity, &mut Application)>,
@@ -1402,7 +1380,7 @@ fn spawn_window_trigger(
         }
 
         let Ok(pid) = window.pid() else {
-            warn!(
+            trace!(
                 "{}: Unable to get window pid for {}",
                 function_name!(),
                 window_id,
@@ -1410,7 +1388,7 @@ fn spawn_window_trigger(
             continue;
         };
         let Some((app_entity, mut app)) = apps.iter_mut().find(|(_, app)| app.pid() == pid) else {
-            warn!(
+            trace!(
                 "{}: unable to find application with pid {pid}.",
                 function_name!()
             );

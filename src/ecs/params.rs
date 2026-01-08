@@ -160,6 +160,24 @@ impl ThrottledSystem<'_, '_> {
     }
 }
 
+/// Similar to the `ThrottledSystem`, but for Triggers which do not run regularly.
+#[derive(SystemParam)]
+pub struct RateLimitTrigger<'w, 's> {
+    time: Res<'w, Time>,
+    elapsed: Local<'s, Duration>,
+}
+
+impl RateLimitTrigger<'_, '_> {
+    /// Returns `true` if the trigger should be rate limited (i.e., has run recently and the duration has not elapsed).
+    pub fn rate_limit(&mut self, duration: Duration) -> bool {
+        if self.time.elapsed().saturating_sub(*self.elapsed) > duration {
+            *self.elapsed = self.time.elapsed();
+            return true;
+        }
+        false
+    }
+}
+
 /// A Bevy `SystemParam` that provides immutable access to the currently active `Display` and other displays.
 /// It ensures that only one display is marked as active at any given time.
 #[derive(SystemParam)]

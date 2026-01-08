@@ -202,6 +202,7 @@ impl InputHandler {
     ///
     /// `Ok(())` if the event is processed successfully, otherwise `Err(Error)`.
     fn handle_swipe(&mut self, event: &CGEvent) -> Result<()> {
+        const SWIPE_THRESHOLD: f64 = 0.001;
         const GESTURE_MINIMAL_FINGERS: usize = 3;
         let Some(ns_event) = NSEvent::eventWithCGEvent(event) else {
             return Err(Error::InvalidInput(format!(
@@ -225,7 +226,9 @@ impl InputHandler {
                 .zip(&fingers)
                 .map(|(p, c)| p.normalizedPosition().x - c.normalizedPosition().x)
                 .collect::<Vec<_>>();
-            _ = self.events.send(Event::Swipe { deltas });
+            if deltas.iter().all(|p| p.abs() > SWIPE_THRESHOLD) {
+                _ = self.events.send(Event::Swipe { deltas });
+            }
         }
         self.finger_position = Some(fingers);
         Ok(())

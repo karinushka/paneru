@@ -6,6 +6,7 @@ use bevy::ecs::system::{Commands, Local, Populated, Query, Res, ResMut};
 use bevy::ecs::world::World;
 use bevy::time::Time;
 use log::{debug, error, info, trace, warn};
+use objc2_core_foundation::CGPoint;
 use std::time::Duration;
 use stdext::function_name;
 
@@ -15,9 +16,12 @@ use super::{
     StrayFocusEvent, Timeout, Unmanaged, WMEventTrigger,
 };
 use crate::config::Config;
-use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, ThrottledSystem};
+use crate::ecs::params::{
+    ActiveDisplay, ActiveDisplayMut, Configuration, DebouncedSystem, ThrottledSystem,
+};
+use crate::ecs::{ReshuffleAroundMarker, WindowSwipeMarker};
 use crate::events::Event;
-use crate::manager::{Application, Display, Window, WindowManager, WindowOS};
+use crate::manager::{Application, Display, Panel, Window, WindowManager, WindowOS};
 
 /// Processes a single incoming `Event`. It dispatches various event types to the `WindowManager` or other internal handlers.
 /// This system reads `Event` messages and triggers appropriate Bevy events or modifies resources based on the event type.
@@ -656,4 +660,85 @@ pub(super) fn animate_resize_windows(
         );
         window.resize(width, size.height, &active_display.bounds());
     }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn window_swiper(
+    sliding: Populated<(&Window, Entity, &WindowSwipeMarker)>,
+    windows: Query<(&Window, Entity)>,
+    active_display: ActiveDisplay,
+    config: Configuration,
+    mut debouncer: DebouncedSystem,
+    mut commands: Commands,
+) {
+    const DEBOUNCE_SWIPE_EVENTS_MS: u64 = 500;
+    for (window, entity, WindowSwipeMarker(delta)) in sliding {
+        commands.entity(entity).try_remove::<WindowSwipeMarker>();
+
+        let pos_x = window.frame().origin.x - (active_display.bounds().size.width * delta);
+        let frame = window.frame();
+
+        commands.entity(entity).try_insert(RepositionMarker {
+            origin: CGPoint {
+                x: pos_x
+                    .min(active_display.bounds().size.width - frame.size.width)
+                    .max(0.0),
+                y: frame.origin.y,
+            },
+            display_id: active_display.id(),
+        });
+
+        if pos_x > 0.0 && pos_x < (active_display.bounds().size.width - frame.size.width) {
+            commands.entity(entity).try_insert(ReshuffleAroundMarker);
+            return;
+        }
+
+        if !config.continuous_swipe()
+            || debouncer.bounce(Duration::from_millis(DEBOUNCE_SWIPE_EVENTS_MS))
+        {
+            return;
+        }
+
+        if let Some((window, _)) =
+            slide_to_next_window(&active_display, entity, *delta, pos_x, &mut commands)
+                .and_then(|entity| windows.get(entity).ok())
+        {
+            commands.trigger(WMEventTrigger(Event::WindowFocused {
+                window_id: window.id(),
+            }));
+        }
+    }
+}
+
+fn slide_to_next_window(
+    active_display: &ActiveDisplay,
+    entity: Entity,
+    delta: f64,
+    delta_x: f64,
+    commands: &mut Commands,
+) -> Option<Entity> {
+    let Ok(pane) = active_display.active_panel() else {
+        return None;
+    };
+
+    let mut neighbour = None;
+    let get_neighbour = |p: &Panel| {
+        neighbour = p.top();
+        false
+    };
+    if delta_x < 0.0 {
+        let _ = pane.access_right_of(entity, get_neighbour);
+    } else {
+        let _ = pane.access_left_of(entity, get_neighbour);
+    }
+
+    neighbour.inspect(|neighbour| {
+        debug!(
+            "{}: switching to {neighbour} with delta {delta}",
+            function_name!()
+        );
+        commands
+            .entity(*neighbour)
+            .try_insert(ReshuffleAroundMarker);
+    })
 }

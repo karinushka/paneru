@@ -160,21 +160,22 @@ impl ThrottledSystem<'_, '_> {
     }
 }
 
-/// Similar to the `ThrottledSystem`, but for Triggers which do not run regularly.
+/// Similar to the `ThrottledSystem`, but only allows an event to happen no events happened for a
+/// specified Duration.
 #[derive(SystemParam)]
-pub struct RateLimitTrigger<'w, 's> {
+pub struct DebouncedSystem<'w, 's> {
     time: Res<'w, Time>,
     elapsed: Local<'s, Duration>,
 }
 
-impl RateLimitTrigger<'_, '_> {
-    /// Returns `true` if the trigger should be rate limited (i.e., has run recently and the duration has not elapsed).
-    pub fn rate_limit(&mut self, duration: Duration) -> bool {
+impl DebouncedSystem<'_, '_> {
+    /// Returns `true` if the event should ignored (debounced).
+    pub fn bounce(&mut self, duration: Duration) -> bool {
         if self.time.elapsed().saturating_sub(*self.elapsed) > duration {
             *self.elapsed = self.time.elapsed();
-            return true;
+            return false;
         }
-        false
+        true
     }
 }
 

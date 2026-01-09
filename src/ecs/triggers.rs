@@ -1,7 +1,6 @@
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::lifecycle::{Add, Remove};
-use bevy::ecs::message::MessageWriter;
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Has, With, Without};
 use bevy::ecs::system::{Commands, NonSendMut, Populated, Query, Res, ResMut, Single};
@@ -19,7 +18,8 @@ use super::{
     Unmanaged, WMEventTrigger, WindowDraggedMarker,
 };
 use crate::config::{Config, WindowParams};
-use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration, RateLimitTrigger};
+use crate::ecs::WindowSwipeMarker;
+use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration};
 use crate::events::Event;
 use crate::manager::{Application, Display, Panel, Process, Window, WindowManager, WindowPane};
 use crate::util::symlink_target;
@@ -930,115 +930,31 @@ fn reposition_stack(
 /// * `main_cid` - The main connection ID resource.
 /// * `config` - The optional configuration resource.
 /// * `commands` - Bevy commands to trigger events.
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[allow(clippy::needless_pass_by_value)]
 pub(super) fn swipe_gesture_trigger(
     trigger: On<WMEventTrigger>,
+    focused_window: Single<(&Window, Entity), With<FocusedMarker>>,
     active_display: ActiveDisplay,
-    mut focused_window: Single<(&mut Window, Entity), With<FocusedMarker>>,
-    other_windows: Query<(&Window, Entity), Without<FocusedMarker>>,
     config: Configuration,
-    mut rate_limit: RateLimitTrigger,
-    mut messages: MessageWriter<Event>,
     mut commands: Commands,
 ) {
-    const RATELIMIT_FOCUS_EVENTS_MS: u64 = 300;
     let Event::Swipe { ref deltas } = trigger.event().0 else {
         return;
     };
-
     if config
         .swipe_gesture_fingers()
-        .is_some_and(|fingers| deltas.len() == fingers)
+        .is_none_or(|fingers| deltas.len() != fingers)
     {
-        let (ref mut window, entity) = *focused_window;
-        let frame = window.frame();
-
-        // Delta is relative to the touchpad size, so relate it the display size.
-        let delta = deltas.iter().sum::<f64>().clamp(-0.2, 0.2);
-        let delta_x = frame.origin.x - (active_display.bounds().size.width * delta);
-
-        slide_window(entity, window, &active_display, delta_x, &mut commands);
-        if let Ok(mut cmd) = commands.get_entity(entity) {
-            cmd.try_insert(ReshuffleAroundMarker);
-        }
-
-        if config.continuous_swipe() {
-            let frame = window.frame();
-
-            if delta_x > 0.0 && delta_x < (active_display.bounds().size.width - frame.size.width) {
-                return;
-            }
-            if rate_limit.rate_limit(Duration::from_millis(RATELIMIT_FOCUS_EVENTS_MS)) {
-                return;
-            }
-            let Ok(pane) = active_display.active_panel() else {
-                return;
-            };
-
-            slide_to_next_window(pane, entity, deltas, delta_x, other_windows, &mut messages);
-        }
-    }
-}
-
-/// Slides a window horizontally based on a swipe gesture.
-///
-/// # Arguments
-///
-/// * `main_cid` - The main connection ID.
-/// * `focused_window` - A query for the currently focused window.
-/// * `active_display` - A reference to the active display.
-/// * `delta_x` - The horizontal delta of the swipe gesture.
-/// * `commands` - Bevy commands to trigger a reshuffle.
-fn slide_window(
-    entity: Entity,
-    window: &mut Window,
-    active_display: &ActiveDisplay,
-    delta_x: f64,
-    commands: &mut Commands,
-) {
-    trace!("{}: Windows slide {delta_x}.", function_name!());
-    let frame = window.frame();
-
-    commands.entity(entity).try_insert(RepositionMarker {
-        origin: CGPoint {
-            x: delta_x
-                .min(active_display.bounds().size.width - frame.size.width)
-                .max(0.0),
-            y: frame.origin.y,
-        },
-        display_id: active_display.id(),
-    });
-}
-
-fn slide_to_next_window(
-    pane: &WindowPane,
-    entity: Entity,
-    deltas: &[f64],
-    delta_x: f64,
-    other_windows: Query<(&Window, Entity), Without<FocusedMarker>>,
-    messages: &mut MessageWriter<Event>,
-) {
-    let mut next_window = Some(entity);
-    let get_neighbour = |p: &Panel| {
-        next_window = p.top();
-        false
-    };
-    if delta_x < 0.0 {
-        let _ = pane.access_right_of(entity, get_neighbour);
-    } else {
-        let _ = pane.access_left_of(entity, get_neighbour);
-    }
-
-    let Some((window, _)) = next_window.and_then(|entity| other_windows.get(entity).ok()) else {
         return;
-    };
+    }
+    let swipe_resolution = 1.0 / active_display.bounds().size.width;
+    let delta = deltas.iter().sum::<f64>();
+    if delta.abs() < swipe_resolution {
+        return;
+    }
 
-    messages.write(Event::WindowFocused {
-        window_id: window.id(),
-    });
-    messages.write(Event::Swipe {
-        deltas: deltas.to_owned(),
-    });
+    let (_, entity) = *focused_window;
+    commands.entity(entity).try_insert(WindowSwipeMarker(delta));
 }
 
 /// Handles Mission Control events, updating the `MissionControlActive` resource.

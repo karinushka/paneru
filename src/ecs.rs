@@ -41,6 +41,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
             // NOTE: To avoid weird timing issues, the dispatcher should be the first one.
             systems::dispatch_toplevel_triggers,
             triggers::reshuffle_around_window,
+            systems::window_swiper,
             systems::add_launched_process,
             systems::add_launched_application,
             systems::fresh_marker_cleanup,
@@ -131,6 +132,9 @@ pub struct WindowDraggedMarker {
 /// Marker component indicating that windows around the marked entity need to be reshuffled.
 #[derive(Component)]
 pub struct ReshuffleAroundMarker;
+
+#[derive(Component)]
+pub struct WindowSwipeMarker(pub f64);
 
 /// Enum component indicating the unmanaged state of a window.
 #[derive(Component)]

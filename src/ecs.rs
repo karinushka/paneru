@@ -40,7 +40,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
         (
             // NOTE: To avoid weird timing issues, the dispatcher should be the first one.
             systems::dispatch_toplevel_triggers,
-            triggers::reshuffle_around_window,
+            systems::reshuffle_around_window,
             systems::window_swiper,
             systems::add_launched_process,
             systems::add_launched_application,

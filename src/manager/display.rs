@@ -172,55 +172,20 @@ impl WindowPane {
         )))
     }
 
-    /// Iterates over panels to the right of a given window's panel, applying an accessor function to each.
-    /// Iteration starts from the panel immediately to the right of the window's panel.
-    ///
-    /// # Arguments
-    ///
-    /// * `entity` - Entity of the starting window.
-    /// * `accessor` - A closure that takes a `&Panel` and returns `true` to continue iteration, `false` to stop.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` if successful, otherwise `Err(Error)` if the starting window is not found.
-    pub fn access_right_of(
-        &self,
-        entity: Entity,
-        mut accessor: impl FnMut(&Panel) -> bool,
-    ) -> Result<()> {
-        let index = self.index_of(entity)?;
-        for panel in self.pane.range(1 + index..) {
-            if !accessor(panel) {
-                break;
-            }
-        }
-        Ok(())
+    pub fn right_neighbour(&self, entity: Entity) -> Option<Entity> {
+        let index = self.index_of(entity).ok()?;
+        (index < self.pane.len())
+            .then_some(index + 1)
+            .and_then(|index| self.pane.get(index))
+            .and_then(Panel::top)
     }
 
-    /// Iterates over panels to the left of a given window's panel (in reverse order), applying an accessor function to each.
-    /// Iteration starts from the panel immediately to the left of the window's panel.
-    ///
-    /// # Arguments
-    ///
-    /// * `entity` - Entity of the starting window.
-    /// * `accessor` - A closure that takes a `&Panel` and returns `true` to continue iteration, `false` to stop.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` if successful, otherwise `Err(Error)` if the starting window is not found.
-    pub fn access_left_of(
-        &self,
-        entity: Entity,
-        mut accessor: impl FnMut(&Panel) -> bool,
-    ) -> Result<()> {
-        let index = self.index_of(entity)?;
-        for panel in self.pane.range(0..index).rev() {
-            // NOTE: left side iterates backwards.
-            if !accessor(panel) {
-                break;
-            }
-        }
-        Ok(())
+    pub fn left_neighbour(&self, entity: Entity) -> Option<Entity> {
+        let index = self.index_of(entity).ok()?;
+        (index > 0)
+            .then(|| index - 1)
+            .and_then(|index| self.pane.get(index))
+            .and_then(Panel::top)
     }
 
     /// Stacks the window with the given ID onto the panel to its left.
@@ -315,6 +280,10 @@ impl WindowPane {
                 Panel::Stack(ids) => ids.clone(),
             })
             .collect()
+    }
+
+    pub fn all_columns(&self) -> Vec<Entity> {
+        self.pane.iter().filter_map(Panel::top).collect()
     }
 }
 

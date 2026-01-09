@@ -596,7 +596,9 @@ fn verify_window_positions(expected_positions: &[(WinID, (i32, i32))], world: &m
     let mut query = world.query::<&Window>();
     for window in query.iter(world) {
         #[allow(clippy::cast_possible_truncation)]
-        if let Some((_, (x, y))) = expected_positions.iter().find(|id| id.0 == window.id()) {
+        if let Some((window_id, (x, y))) = expected_positions.iter().find(|id| id.0 == window.id())
+        {
+            debug!("WinID: {window_id}");
             assert_eq!(*x, window.frame().origin.x as i32);
             assert_eq!(*y, window.frame().origin.y as i32);
         }
@@ -681,6 +683,7 @@ fn test_window_shuffle() {
         ];
 
         if let Some(positions) = iterations[iteration] {
+            debug!("Iteration: {iteration}");
             verify_window_positions(positions, world);
         }
     };

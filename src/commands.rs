@@ -70,41 +70,35 @@ pub enum Command {
 /// `Some(Entity)` with the found window's entity, otherwise `None`.
 fn get_window_in_direction(
     direction: &Direction,
-    current_window_id: Entity,
-    strip: &WindowPane,
+    entity: Entity,
+    panel: &WindowPane,
 ) -> Option<Entity> {
-    let index = strip.index_of(current_window_id).ok()?;
+    let index = panel.index_of(entity).ok()?;
+
     match direction {
-        Direction::West => (index > 0)
-            .then(|| strip.get(index - 1).ok())
-            .flatten()
-            .and_then(|panel| panel.top()),
+        Direction::West => panel.left_neighbour(entity),
+        Direction::East => panel.right_neighbour(entity),
 
-        Direction::East => (index < strip.len() - 1)
-            .then(|| strip.get(index + 1).ok())
-            .flatten()
-            .and_then(|panel| panel.top()),
+        Direction::First => panel.first().ok().and_then(|panel| panel.top()),
 
-        Direction::First => strip.first().ok().and_then(|panel| panel.top()),
+        Direction::Last => panel.last().ok().and_then(|panel| panel.top()),
 
-        Direction::Last => strip.last().ok().and_then(|panel| panel.top()),
-
-        Direction::North => match strip.get(index).ok()? {
-            Panel::Single(window_id) => Some(window_id),
+        Direction::North => match panel.get(index).ok()? {
+            Panel::Single(window) => Some(window),
             Panel::Stack(stack) => stack
                 .iter()
                 .enumerate()
-                .find(|(_, window_id)| current_window_id == **window_id)
+                .find(|(_, window_id)| entity == **window_id)
                 .and_then(|(index, _)| (index > 0).then(|| stack.get(index - 1)).flatten())
                 .copied(),
         },
 
-        Direction::South => match strip.get(index).ok()? {
-            Panel::Single(window_id) => Some(window_id),
+        Direction::South => match panel.get(index).ok()? {
+            Panel::Single(window) => Some(window),
             Panel::Stack(stack) => stack
                 .iter()
                 .enumerate()
-                .find(|(_, window_id)| current_window_id == **window_id)
+                .find(|(_, window_id)| entity == **window_id)
                 .and_then(|(index, _)| {
                     (index < stack.len() - 1)
                         .then(|| stack.get(index + 1))

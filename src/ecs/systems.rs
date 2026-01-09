@@ -21,7 +21,9 @@ use crate::ecs::params::{
 };
 use crate::ecs::{ReshuffleAroundMarker, WindowSwipeMarker};
 use crate::events::Event;
-use crate::manager::{Application, Display, Panel, Window, WindowManager, WindowOS};
+use crate::manager::{Application, Display, Panel, Window, WindowManager, WindowOS, WindowPane};
+
+const WINDOW_HIDDEN_THRESHOLD: f64 = 10.0;
 
 /// Processes a single incoming `Event`. It dispatches various event types to the `WindowManager` or other internal handlers.
 /// This system reads `Event` messages and triggers appropriate Bevy events or modifies resources based on the event type.
@@ -720,17 +722,11 @@ fn slide_to_next_window(
     let Ok(pane) = active_display.active_panel() else {
         return None;
     };
-
-    let mut neighbour = None;
-    let get_neighbour = |p: &Panel| {
-        neighbour = p.top();
-        false
-    };
-    if delta_x < 0.0 {
-        let _ = pane.access_right_of(entity, get_neighbour);
+    let neighbour = if delta_x < 0.0 {
+        pane.right_neighbour(entity)
     } else {
-        let _ = pane.access_left_of(entity, get_neighbour);
-    }
+        pane.left_neighbour(entity)
+    };
 
     neighbour.inspect(|neighbour| {
         debug!(
@@ -741,4 +737,220 @@ fn slide_to_next_window(
             .entity(*neighbour)
             .try_insert(ReshuffleAroundMarker);
     })
+}
+
+/// Reshuffles windows around a given window entity within the active panel to ensure visibility.
+/// Windows to the right and left of the focused window are repositioned.
+///
+/// # Arguments
+///
+/// * `main_cid` - The main connection ID.
+/// * `active_display` - A query for the active display.
+/// * `entity` - The `Entity` of the window to reshuffle around.
+/// * `windows` - A query for all windows.
+/// * `commands` - Bevy commands to trigger events.
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn reshuffle_around_window(
+    active_display: ActiveDisplay,
+    marker: Populated<Entity, With<ReshuffleAroundMarker>>,
+    mut windows: Query<(&mut Window, Entity, Option<&RepositionMarker>)>,
+    window_manager: Res<WindowManager>,
+    mut commands: Commands,
+) {
+    if window_manager
+        .0
+        .active_display_id()
+        .is_ok_and(|id| active_display.id() != id)
+    {
+        debug!("{}: detected display change.", function_name!());
+        commands.trigger(WMEventTrigger(Event::DisplayChanged));
+        return;
+    }
+
+    let shuffled = marker.into_iter().collect::<Vec<_>>();
+    for entity in shuffled {
+        let Ok((window, _, moving)) = windows.get(entity) else {
+            continue;
+        };
+
+        if let Ok(mut cmd) = commands.get_entity(entity) {
+            cmd.try_remove::<ReshuffleAroundMarker>();
+        }
+        let display_bounds = active_display.bounds();
+        let Ok(active_panel) = active_display.active_panel() else {
+            return;
+        };
+
+        let frame = window.expose_window(&active_display, moving, entity, &mut commands);
+        let window_width = |entity| {
+            windows
+                .get(entity)
+                .ok()
+                .map(|window| window.0.frame().size.width)
+        };
+
+        let Some(positions) = calculate_positions(
+            entity,
+            frame.origin.x,
+            display_bounds.size.width,
+            active_panel,
+            &window_width,
+        ) else {
+            return;
+        };
+        let positions = positions
+            .zip(active_panel.all_columns())
+            .map(|(position, entity)| (position, entity, window_width(entity).unwrap()))
+            .collect::<Vec<_>>();
+
+        for (upper_left, entity, width) in positions {
+            let Ok(panel) = active_panel
+                .index_of(entity)
+                .and_then(|index| active_panel.get(index))
+            else {
+                continue;
+            };
+
+            reposition_stack(
+                upper_left,
+                &panel,
+                width,
+                &active_display,
+                &mut windows,
+                &mut commands,
+            );
+        }
+    }
+}
+
+pub fn absolute_positions<W>(
+    active_panel: &WindowPane,
+    window_width: W,
+) -> impl Iterator<Item = f64>
+where
+    W: Fn(Entity) -> Option<f64>,
+{
+    let mut left_edge = 0.0;
+
+    active_panel
+        .all_columns()
+        .into_iter()
+        .filter_map(window_width)
+        .map(move |width| {
+            let temp = left_edge;
+            left_edge += width;
+            temp
+        })
+}
+
+fn calculate_positions<W>(
+    entity: Entity,
+    current_x: f64,
+    display_width: f64,
+    active_panel: &WindowPane,
+    window_width: W,
+) -> Option<impl Iterator<Item = f64>>
+where
+    W: Fn(Entity) -> Option<f64>,
+{
+    let widths = active_panel
+        .all_columns()
+        .into_iter()
+        .filter_map(&window_width)
+        .collect::<Vec<_>>();
+    let positions = absolute_positions(active_panel, &window_width).collect::<Vec<_>>();
+    let offset = active_panel
+        .index_of(entity)
+        .ok()
+        .and_then(|index| positions.get(index))
+        .map(|offset| current_x - offset)?;
+
+    Some(
+        positions
+            .into_iter()
+            .zip(widths)
+            .map(move |(position, width)| {
+                let left_edge = position + offset;
+                if left_edge + width < 0.0 {
+                    0.0 - width + WINDOW_HIDDEN_THRESHOLD
+                } else if left_edge > display_width - WINDOW_HIDDEN_THRESHOLD {
+                    display_width - WINDOW_HIDDEN_THRESHOLD
+                } else {
+                    left_edge
+                }
+            }),
+    )
+}
+
+/// Repositions all windows within a given panel stack.
+///
+/// # Arguments
+///
+/// * `upper_left` - The x-coordinate of the upper-left corner of the stack.
+/// * `panel` - The panel containing the windows to reposition.
+/// * `width` - The width of each window in the stack.
+/// * `display_bounds` - The bounds of the display.
+/// * `menubar_height` - The height of the menu bar.
+/// * `windows` - A query for all windows.
+/// * `commands` - Bevy commands to trigger events.
+fn reposition_stack(
+    upper_left: f64,
+    panel: &Panel,
+    width: f64,
+    active_display: &ActiveDisplay,
+    windows: &mut Query<(&mut Window, Entity, Option<&RepositionMarker>)>,
+    commands: &mut Commands,
+) {
+    const REMAINING_THERSHOLD: f64 = 200.0;
+    let display_height =
+        active_display.bounds().size.height - active_display.display().menubar_height;
+    let entities = match panel {
+        Panel::Single(entity) => vec![*entity],
+        Panel::Stack(stack) => stack.clone(),
+    };
+    let count: f64 = u32::try_from(entities.len()).unwrap().into();
+    let mut fits = 0f64;
+    let mut height = active_display.display().menubar_height;
+    let mut remaining = display_height;
+    for entity in &entities[0..entities.len() - 1] {
+        remaining = display_height - height;
+        if let Ok((window, _, _)) = windows.get(*entity) {
+            if window.frame().size.height > remaining - REMAINING_THERSHOLD {
+                trace!(
+                    "{}: height {height}, remaining {remaining}",
+                    function_name!()
+                );
+                break;
+            }
+            height += window.frame().size.height;
+            fits += 1.0;
+        }
+    }
+    let avg_height = remaining / (count - fits);
+    trace!(
+        "{}: fits {fits:.0} avg_height {avg_height:.0}",
+        function_name!()
+    );
+
+    let mut y_pos = 0f64;
+    for entity in entities {
+        if let Ok((mut window, entity, _)) = windows.get_mut(entity) {
+            let window_height = window.frame().size.height;
+            // window.reposition(upper_left, y_pos, display_bounds);
+            commands.entity(entity).try_insert(RepositionMarker {
+                origin: CGPoint {
+                    x: upper_left,
+                    y: y_pos,
+                },
+                display_id: active_display.id(),
+            });
+            if fits > 0.0 {
+                y_pos += window_height;
+                fits -= 1.0;
+            } else {
+                window.resize(width, avg_height, &active_display.bounds());
+                y_pos += avg_height;
+            }
+        }
+    }
 }

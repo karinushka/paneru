@@ -657,15 +657,15 @@ fn test_window_shuffle() {
     let centered = (TEST_DISPLAY_WIDTH - TEST_WINDOW_WIDTH) / 2;
     let expected_positions_stacked = [
         (0, (centered, TEST_MENUBAR_HEIGHT)),
-        (1, (centered, 364)),
+        (1, (centered, 374)),
         (2, (centered + TEST_WINDOW_WIDTH, TEST_MENUBAR_HEIGHT)),
         (3, (offscreen_right, TEST_MENUBAR_HEIGHT)),
         (4, (offscreen_right, TEST_MENUBAR_HEIGHT)),
     ];
     let expected_positions_stacked2 = [
         (0, (centered, TEST_MENUBAR_HEIGHT)),
-        (1, (centered, 364)),
-        (2, (centered, 546)),
+        (1, (centered, 249)),
+        (2, (centered, 498)),
         (3, (712, TEST_MENUBAR_HEIGHT)),
         (4, (offscreen_right, TEST_MENUBAR_HEIGHT)),
     ];

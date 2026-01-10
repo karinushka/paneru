@@ -822,10 +822,12 @@ pub(super) fn reshuffle_around_window(
         ) else {
             return;
         };
-        let positions = positions
-            .zip(active_panel.all_columns())
-            .map(|(position, entity)| (position, entity, window_width(entity).unwrap()))
-            .collect::<Vec<_>>();
+        let positions =
+            positions
+                .zip(active_panel.all_columns())
+                .filter_map(|(position, entity)| {
+                    window_width(entity).map(|width| (position, entity, width))
+                });
 
         for (upper_left, entity, width) in positions {
             let Ok(panel) = active_panel
@@ -925,53 +927,110 @@ fn reposition_stack(
     windows: &Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
     commands: &mut Commands,
 ) {
-    const REMAINING_THERSHOLD: f64 = 200.0;
+    const MIN_WINDOW_HEIGHT: f64 = 200.0;
     let display_height =
         active_display.bounds().size.height - active_display.display().menubar_height;
     let entities = match panel {
         Panel::Single(entity) => vec![*entity],
         Panel::Stack(stack) => stack.clone(),
     };
-    let count: f64 = u32::try_from(entities.len()).unwrap().into();
-    let mut fits = 0f64;
-    let mut height = active_display.display().menubar_height;
-    let mut remaining = display_height;
-    for entity in &entities[0..entities.len() - 1] {
-        remaining = display_height - height;
-        if let Ok((window, _, resizing)) = windows.get(*entity) {
-            let size = resizing.map_or(window.frame().size, |resize| resize.size);
-
-            if size.height > remaining - REMAINING_THERSHOLD {
-                trace!(
-                    "{}: height {height}, remaining {remaining}",
-                    function_name!()
-                );
-                break;
-            }
-            height += size.height;
-            fits += 1.0;
-        }
+    let heights = entities
+        .iter()
+        .filter_map(|entity| {
+            windows.get(*entity).ok().map(|(window, _, resizing)| {
+                resizing.map_or(window.frame().size.height, |marker| marker.size.height)
+            })
+        })
+        .collect::<Vec<_>>();
+    if heights.len() != entities.len() {
+        warn!("{}: Mismatch in heights and entities.", function_name!());
+        return;
     }
-    let avg_height = remaining / (count - fits);
-    trace!(
-        "{}: fits {fits:.0} avg_height {avg_height:.0}",
-        function_name!()
-    );
+
+    let Some(heights) = binpack_heights(&heights, MIN_WINDOW_HEIGHT, display_height) else {
+        info!("{}: Unable to fit all windows.", function_name!());
+        return;
+    };
 
     let mut y_pos = 0f64;
-    for entity in entities {
-        if let Ok((window, _, resizing)) = windows.get(entity) {
-            let window_height =
-                resizing.map_or(window.frame().size.height, |resize| resize.size.height);
+    for (entity, window_height) in entities.into_iter().zip(heights) {
+        reposition_entity(entity, upper_left, y_pos, active_display.id(), commands);
+        resize_entity(entity, width, window_height, active_display.id(), commands);
+        y_pos += window_height;
+    }
+}
 
-            reposition_entity(entity, upper_left, y_pos, active_display.id(), commands);
-            if fits > 0.0 {
-                y_pos += window_height;
-                fits -= 1.0;
+fn binpack_heights(heights: &[f64], min_height: f64, total_height: f64) -> Option<Vec<f64>> {
+    let mut count = heights.len();
+    let mut output = vec![];
+
+    loop {
+        let mut idx = 0;
+
+        let mut remaining = total_height;
+        while idx < count {
+            let remaining_windows = u32::try_from(heights.len() - idx).unwrap();
+
+            if heights[idx] < remaining {
+                if idx + 1 == count {
+                    output.push(remaining);
+                } else {
+                    output.push(heights[idx]);
+                }
+                remaining -= heights[idx];
+            } else if remaining >= min_height * f64::from(remaining_windows) {
+                output.push(remaining);
+                remaining = 0.0;
             } else {
-                resize_entity(entity, width, avg_height, active_display.id(), commands);
-                y_pos += avg_height;
+                break;
             }
+            idx += 1;
+        }
+
+        if idx == count {
+            break;
+        }
+        count -= 1;
+        output.clear();
+    }
+
+    let remaining = heights.len() - count;
+    if remaining > 0 {
+        count -= 1;
+        output.truncate(count);
+        let sum = output.iter().fold(0.0, |acc, height| acc + height);
+        let avg_height =
+            ((total_height - sum) / f64::from(u32::try_from(remaining + 1).unwrap())).floor();
+        if avg_height < min_height {
+            return None;
+        }
+
+        while count < heights.len() {
+            output.push(avg_height);
+            count += 1;
         }
     }
+
+    Some(output)
+}
+
+#[test]
+fn test_binpack() {
+    const MIN_HEIGHT: f64 = 100.0;
+    let heights = [300.0, 300.0, 300.0, 300.0];
+
+    let out = binpack_heights(&heights, MIN_HEIGHT, 1500.0).unwrap();
+    assert_eq!(out, vec![300.0, 300.0, 300.0, 600.0]);
+
+    let out = binpack_heights(&heights, MIN_HEIGHT, 1024.0).unwrap();
+    assert_eq!(out, vec![300.0, 300.0, 300.0, 124.0]);
+
+    let out = binpack_heights(&heights, MIN_HEIGHT, 800.0).unwrap();
+    assert_eq!(out, vec![300.0, 300.0, 100.0, 100.0]);
+
+    let out = binpack_heights(&heights, MIN_HEIGHT, 440.0).unwrap();
+    assert_eq!(out, vec![110.0, 110.0, 110.0, 110.0]);
+
+    let out = binpack_heights(&heights, MIN_HEIGHT, 390.0);
+    assert_eq!(out, None);
 }

@@ -119,6 +119,7 @@ pub struct RepositionMarker {
 pub struct ResizeMarker {
     /// The new size (width, height) for the window.
     pub size: CGSize,
+    pub display_id: CGDirectDisplayID,
 }
 
 /// Marker component indicating that a window is currently being dragged by the mouse.
@@ -248,10 +249,17 @@ pub fn reposition_entity(
     }
 }
 
-pub fn resize_entity(entity: Entity, width: f64, height: f64, commands: &mut Commands) {
+pub fn resize_entity(
+    entity: Entity,
+    width: f64,
+    height: f64,
+    display_id: CGDirectDisplayID,
+    commands: &mut Commands,
+) {
     if let Ok(mut entity_cmmands) = commands.get_entity(entity) {
         entity_cmmands.try_insert(ResizeMarker {
             size: CGSize { width, height },
+            display_id,
         });
     }
 }

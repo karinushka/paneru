@@ -24,7 +24,7 @@ use super::skylight::{
     AXUIElementPerformAction, AXUIElementSetAttributeValue, SLPSPostEventRecordTo,
 };
 use crate::ecs::params::ActiveDisplay;
-use crate::ecs::{RepositionMarker, reposition_entity};
+use crate::ecs::{RepositionMarker, ResizeMarker, reposition_entity};
 use crate::errors::{Error, Result};
 use crate::platform::{Pid, ProcessSerialNumber, WinID};
 use crate::util::{AXUIWrapper, get_attribute};
@@ -56,55 +56,50 @@ pub trait WindowApi: Send + Sync {
         &self,
         active_display: &ActiveDisplay,
         moving: Option<&RepositionMarker>,
+        resizing: Option<&ResizeMarker>,
         entity: Entity,
         commands: &mut Commands,
     ) -> CGRect {
         // Check if window needs to be fully exposed
         let window_id = self.id();
-        let (mut frame, display_bounds) =
-            if let Some(RepositionMarker { origin, display_id }) = moving {
-                let frame = CGRect {
-                    origin: *origin,
-                    ..self.frame()
-                };
-                let bounds = active_display
-                    .other()
-                    .find(|display| display.id() == *display_id)
-                    .map_or(active_display.bounds(), |display| display.bounds);
+        let (mut origin, display_bounds) =
+            moving.map_or((self.frame().origin, active_display.bounds()), |marker| {
+                (
+                    marker.origin,
+                    active_display
+                        .other()
+                        .find(|display| display.id() == marker.display_id)
+                        .map_or(active_display.bounds(), |display| display.bounds),
+                )
+            });
+        let size = resizing.map_or(self.frame().size, |marker| marker.size);
 
-                (frame, bounds)
-            } else {
-                (self.frame(), active_display.bounds())
-            };
-        trace!("{}: focus original position {frame:?}", function_name!());
-        let moved = if frame.origin.x + frame.size.width > display_bounds.size.width {
+        let moved = if origin.x + size.width > display_bounds.size.width {
             trace!(
                 "{}: Bumped window {} to the left",
                 function_name!(),
                 window_id
             );
-            frame.origin.x = display_bounds.size.width - frame.size.width;
+            origin.x = display_bounds.size.width - size.width;
             true
-        } else if frame.origin.x < 0.0 {
+        } else if origin.x < 0.0 {
             trace!(
                 "{}: Bumped window {} to the right",
                 function_name!(),
                 window_id
             );
-            frame.origin.x = 0.0;
+            origin.x = 0.0;
             true
         } else {
             false
         };
+
         if moved {
-            let display_id = match moving {
-                Some(marker) => marker.display_id,
-                None => active_display.id(),
-            };
-            reposition_entity(entity, frame.origin.x, frame.origin.y, display_id, commands);
-            trace!("{}: focus resposition to {frame:?}", function_name!());
+            let display_id = moving.map_or(active_display.id(), |marker| marker.display_id);
+            reposition_entity(entity, origin.x, origin.y, display_id, commands);
+            trace!("{}: focus resposition to {origin:?}", function_name!());
         }
-        frame
+        CGRect::new(origin, size)
     }
 
     fn width_ratio(&mut self, width_ratio: f64);

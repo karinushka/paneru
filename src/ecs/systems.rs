@@ -18,7 +18,9 @@ use crate::config::Config;
 use crate::ecs::params::{
     ActiveDisplay, ActiveDisplayMut, Configuration, DebouncedSystem, ThrottledSystem,
 };
-use crate::ecs::{ReshuffleAroundMarker, WindowSwipeMarker, reposition_entity, reshuffle_around};
+use crate::ecs::{
+    ReshuffleAroundMarker, WindowSwipeMarker, reposition_entity, reshuffle_around, resize_entity,
+};
 use crate::events::Event;
 use crate::manager::{Application, Display, Panel, Window, WindowManager, WindowOS, WindowPane};
 
@@ -641,25 +643,52 @@ pub(super) fn animate_windows(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn animate_resize_windows(
     windows: Populated<(&mut Window, Entity, &ResizeMarker)>,
-    active_display: ActiveDisplay,
+    displays: Query<&Display>,
+    time: Res<Time>,
+    config: Res<Config>,
     mut commands: Commands,
 ) {
-    for (mut window, entity, ResizeMarker { size }) in windows {
-        let origin = window.frame().origin;
-        let width = if origin.x + size.width < active_display.bounds().size.width + 0.4 {
-            commands.entity(entity).try_remove::<ResizeMarker>();
-            size.width
-        } else {
-            active_display.bounds().size.width - origin.x
+    let move_speed = config
+        .options()
+        .animation_speed
+        // If unset, set it to something high, so the move happens immediately,
+        // effectively disabling animation.
+        .unwrap_or(1_000_000.0)
+        .max(500.0);
+    let move_delta = move_speed * time.delta_secs_f64();
+
+    for (mut window, entity, ResizeMarker { size, display_id }) in windows {
+        let Some(display) = displays.iter().find(|display| display.id() == *display_id) else {
+            continue;
         };
-        debug!(
-            "{}: window {} resize {}:{}",
+        let current = window.frame().size;
+        let mut delta_x = (size.width - current.width).abs().min(move_delta);
+        let mut delta_y = (size.height - current.height).abs().min(move_delta);
+        if delta_x < move_delta && delta_y < move_delta {
+            commands.entity(entity).try_remove::<ResizeMarker>();
+            window.resize(size.width, size.height, &display.bounds);
+            continue;
+        }
+
+        if size.width < current.width {
+            delta_x = -delta_x;
+        }
+        if size.height < current.height {
+            delta_y = -delta_y;
+        }
+        trace!(
+            "{}: window {} size {:?} delta {move_delta:.0} resizing to {:.0}:{:.0}",
             function_name!(),
             window.id(),
-            width,
-            size.height,
+            size,
+            current.width + delta_x,
+            current.height + delta_y,
         );
-        window.resize(width, size.height, &active_display.bounds());
+        window.resize(
+            current.width + delta_x,
+            current.height + delta_y,
+            &display.bounds,
+        );
     }
 }
 
@@ -750,7 +779,7 @@ fn slide_to_next_window(
 pub(super) fn reshuffle_around_window(
     active_display: ActiveDisplay,
     marker: Populated<Entity, With<ReshuffleAroundMarker>>,
-    mut windows: Query<(&mut Window, Entity, Option<&RepositionMarker>)>,
+    windows: Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
@@ -764,26 +793,24 @@ pub(super) fn reshuffle_around_window(
         return;
     }
 
-    let shuffled = marker.into_iter().collect::<Vec<_>>();
-    for entity in shuffled {
-        let Ok((window, _, moving)) = windows.get(entity) else {
-            continue;
-        };
+    let display_bounds = active_display.bounds();
+    let Ok(active_panel) = active_display.active_panel() else {
+        return;
+    };
 
+    for entity in marker {
         if let Ok(mut cmd) = commands.get_entity(entity) {
             cmd.try_remove::<ReshuffleAroundMarker>();
         }
-        let display_bounds = active_display.bounds();
-        let Ok(active_panel) = active_display.active_panel() else {
-            return;
+        let Ok((window, moving, resizing)) = windows.get(entity) else {
+            continue;
         };
 
-        let frame = window.expose_window(&active_display, moving, entity, &mut commands);
+        let frame = window.expose_window(&active_display, moving, resizing, entity, &mut commands);
         let window_width = |entity| {
-            windows
-                .get(entity)
-                .ok()
-                .map(|window| window.0.frame().size.width)
+            windows.get(entity).ok().map(|(window, _, resizing)| {
+                resizing.map_or(window.frame().size.width, |marker| marker.size.width)
+            })
         };
 
         let Some(positions) = calculate_positions(
@@ -813,7 +840,7 @@ pub(super) fn reshuffle_around_window(
                 &panel,
                 width,
                 &active_display,
-                &mut windows,
+                &windows,
                 &mut commands,
             );
         }
@@ -895,7 +922,7 @@ fn reposition_stack(
     panel: &Panel,
     width: f64,
     active_display: &ActiveDisplay,
-    windows: &mut Query<(&mut Window, Entity, Option<&RepositionMarker>)>,
+    windows: &Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
     commands: &mut Commands,
 ) {
     const REMAINING_THERSHOLD: f64 = 200.0;
@@ -911,15 +938,17 @@ fn reposition_stack(
     let mut remaining = display_height;
     for entity in &entities[0..entities.len() - 1] {
         remaining = display_height - height;
-        if let Ok((window, _, _)) = windows.get(*entity) {
-            if window.frame().size.height > remaining - REMAINING_THERSHOLD {
+        if let Ok((window, _, resizing)) = windows.get(*entity) {
+            let size = resizing.map_or(window.frame().size, |resize| resize.size);
+
+            if size.height > remaining - REMAINING_THERSHOLD {
                 trace!(
                     "{}: height {height}, remaining {remaining}",
                     function_name!()
                 );
                 break;
             }
-            height += window.frame().size.height;
+            height += size.height;
             fits += 1.0;
         }
     }
@@ -931,15 +960,16 @@ fn reposition_stack(
 
     let mut y_pos = 0f64;
     for entity in entities {
-        if let Ok((mut window, entity, _)) = windows.get_mut(entity) {
-            let window_height = window.frame().size.height;
+        if let Ok((window, _, resizing)) = windows.get(entity) {
+            let window_height =
+                resizing.map_or(window.frame().size.height, |resize| resize.size.height);
 
             reposition_entity(entity, upper_left, y_pos, active_display.id(), commands);
             if fits > 0.0 {
                 y_pos += window_height;
                 fits -= 1.0;
             } else {
-                window.resize(width, avg_height, &active_display.bounds());
+                resize_entity(entity, width, avg_height, active_display.id(), commands);
                 y_pos += avg_height;
             }
         }

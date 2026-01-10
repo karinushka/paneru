@@ -250,7 +250,7 @@ fn resize_window(
     let y = window.frame().origin.y;
 
     reposition_entity(focused_entity, x, y, active_display.id(), commands);
-    resize_entity(focused_entity, width, height, commands);
+    resize_entity(focused_entity, width, height, active_display.id(), commands);
 }
 
 /// Toggles the focused window between full-width and a preset width.
@@ -290,7 +290,7 @@ fn full_width_window(
     };
 
     reposition_entity(focused_entity, x, y, active_display.id(), commands);
-    resize_entity(focused_entity, width, height, commands);
+    resize_entity(focused_entity, width, height, active_display.id(), commands);
 
     window.width_ratio(width_ratio);
 }

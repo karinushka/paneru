@@ -19,7 +19,9 @@ use crate::config::{Config, WindowParams};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration};
 use crate::ecs::{WindowSwipeMarker, reshuffle_around};
 use crate::events::Event;
-use crate::manager::{Application, Display, Process, Window, WindowManager, WindowPane};
+use crate::manager::{
+    Application, Display, Process, Window, WindowManager, WindowPadding, WindowPane,
+};
 use crate::util::symlink_target;
 
 /// Handles mouse moved events.
@@ -1146,6 +1148,14 @@ fn apply_window_properties(
         .find_map(|props| props.floating)
         .unwrap_or(false);
     let wanted_insertion = properties.iter().find_map(|props| props.index);
+
+    if let Some(padding) = properties.iter().find_map(|props| props.vertical_padding) {
+        window.set_padding(WindowPadding::Vertical(padding.clamp(0, 50)));
+    }
+    if let Some(padding) = properties.iter().find_map(|props| props.horizontal_padding) {
+        window.set_padding(WindowPadding::Horizontal(padding.clamp(0, 50)));
+    }
+
     _ = window
         .update_frame(Some(&active_display.bounds()))
         .inspect_err(|err| error!("{}: {err}", function_name!()));

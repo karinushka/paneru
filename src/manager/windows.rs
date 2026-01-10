@@ -29,6 +29,11 @@ use crate::errors::{Error, Result};
 use crate::platform::{Pid, ProcessSerialNumber, WinID};
 use crate::util::{AXUIWrapper, get_attribute};
 
+pub enum WindowPadding {
+    Vertical(u16),
+    Horizontal(u16),
+}
+
 pub trait WindowApi: Send + Sync {
     fn id(&self) -> WinID;
     fn psn(&self) -> Option<ProcessSerialNumber>;
@@ -106,6 +111,7 @@ pub trait WindowApi: Send + Sync {
     fn pid(&self) -> Result<Pid>;
     fn set_psn(&mut self, psn: ProcessSerialNumber);
     fn set_eligible(&mut self, eligible: bool);
+    fn set_padding(&mut self, padding: WindowPadding);
 }
 
 #[derive(Component)]
@@ -164,6 +170,8 @@ pub struct WindowOS {
     psn: Option<ProcessSerialNumber>,
     ax_element: CFRetained<AXUIWrapper>,
     frame: CGRect,
+    vertical_padding: f64,
+    horizontal_padding: f64,
     minimized: bool,
     eligible: bool,
     width_ratio: f64,
@@ -186,6 +194,8 @@ impl WindowOS {
             psn: None,
             ax_element: element.clone(),
             frame: CGRect::default(),
+            vertical_padding: 0.0,
+            horizontal_padding: 0.0,
             minimized: false,
             eligible: false,
             width_ratio: 0.33,
@@ -409,7 +419,10 @@ impl WindowApi for WindowOS {
             trace!("{}: already in position.", function_name!());
             return;
         }
-        let mut point = CGPoint::new(x + display_bounds.origin.x, y + display_bounds.origin.y);
+        let mut point = CGPoint::new(
+            x + display_bounds.origin.x + self.horizontal_padding,
+            y + display_bounds.origin.y + self.vertical_padding,
+        );
         let position_ref = unsafe {
             AXValueCreate(
                 kAXValueTypeCGPoint,
@@ -443,7 +456,9 @@ impl WindowApi for WindowOS {
             trace!("{}: already correct size.", function_name!());
             return;
         }
-        let mut size = CGSize::new(width, height);
+        let width_padding = 2.0 * self.horizontal_padding;
+        let height_padding = 2.0 * self.vertical_padding;
+        let mut size = CGSize::new(width - width_padding, height - height_padding);
         let size_ref =
             unsafe { AXValueCreate(kAXValueTypeCGSize, NonNull::from(&mut size).as_ptr().cast()) };
         if let Ok(position) = AXUIWrapper::retain(size_ref) {
@@ -454,6 +469,8 @@ impl WindowApi for WindowOS {
                     position.as_ref(),
                 )
             };
+            size.width += width_padding;
+            size.height += height_padding;
             self.frame.size = size;
             self.width_ratio = size.width / display_bounds.size.width;
         }
@@ -505,6 +522,8 @@ impl WindowApi for WindowOS {
             );
         }
         if !CGRectEqualToRect(frame, self.frame) {
+            frame.size.width += 2.0 * self.horizontal_padding;
+            frame.size.height += 2.0 * self.vertical_padding;
             self.frame = frame;
             self.width_ratio = if let Some(display_bounds) = display_bounds {
                 frame.size.width / display_bounds.size.width
@@ -592,5 +611,12 @@ impl WindowApi for WindowOS {
 
     fn set_eligible(&mut self, eligible: bool) {
         self.eligible = eligible;
+    }
+
+    fn set_padding(&mut self, padding: WindowPadding) {
+        match padding {
+            WindowPadding::Vertical(padding) => self.vertical_padding = f64::from(padding),
+            WindowPadding::Horizontal(padding) => self.horizontal_padding = f64::from(padding),
+        }
     }
 }

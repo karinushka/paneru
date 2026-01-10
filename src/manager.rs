@@ -42,7 +42,7 @@ use skylight::{
     SLSWindowIteratorGetTags, SLSWindowIteratorGetWindowID, SLSWindowQueryResultCopyWindows,
     SLSWindowQueryWindows,
 };
-pub use windows::{Window, WindowApi, WindowOS, ax_window_id};
+pub use windows::{Window, WindowApi, WindowOS, WindowPadding, ax_window_id};
 
 mod app;
 mod display;

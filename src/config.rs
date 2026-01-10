@@ -415,6 +415,8 @@ pub struct WindowParams {
     pub floating: Option<bool>,
     /// An optional preferred index for the window's position in the window strip.
     pub index: Option<usize>,
+    pub vertical_padding: Option<u16>,
+    pub horizontal_padding: Option<u16>,
 }
 
 /// Deserializes a regular expression from a string for window titles.

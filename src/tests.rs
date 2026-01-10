@@ -412,6 +412,10 @@ impl WindowApi for MockWindow {
     fn set_eligible(&mut self, _eligible: bool) {
         println!("{}:", function_name!());
     }
+
+    fn set_padding(&mut self, _padding: manager::WindowPadding) {
+        println!("{}:", function_name!());
+    }
 }
 
 impl MockWindow {

@@ -270,6 +270,12 @@ floating = true
 title = ".*"
 bundle_id = "com.neovide.neovide"
 index = 1
+
+[windows.all]
+# Matches all windows and adds a few pixels of spacing to their borders.
+title = ".*"
+horizontal_padding = 4
+vertical_padding = 2
 ```
 
 Paste this into your terminal to create a default configuration file:

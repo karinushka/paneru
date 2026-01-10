@@ -12,10 +12,19 @@ Each monitor operates with its own independent window strip, ensuring that
 windows remain confined to their respective displays and do not "overflow" onto
 adjacent monitors.
 
-![Screencap of Paneru in action](images/screenshot.gif)
+<video src="https://github.com/user-attachments/assets/cbc2e820-635f-408b-923a-6cb47c44704c"></video>
 
 ## Why Paneru?
 
+- **Niri-like Behavior on MacOS:** Inspired by the user experience of [Niri],
+  Paneru aims to bring a similar scrollable tiling workflow to MacOS.
+- **Works with MacOS workspaces:** You can use existing workspaces and switch
+  between them with keyboard or touchpad gestures - with a separate window strip
+  on each. Drag and dropping windows between them works as well.
+- **Focus follows mouse on MacOS:** Very useful for people who would like to
+  avoid an extra click.
+- **Sliding windows with touchpad:** Using a touchpad is quite natural for
+  navigation of the window pane.
 - **Optimal for Large Displays:** Standard tiling window managers can be
   suboptimal for large displays, often resulting in either huge maximized
   windows or numerous tiny, unusable windows. Paneru addresses this by
@@ -24,15 +33,6 @@ adjacent monitors.
   traditional tiling can make windows too small to be productive, forcing users
   to constantly maximize. Paneru's sliding strip approach aims to provide a
   better experience without this compromise.
-- **Niri-like Behavior on MacOS:** Inspired by the user experience of [Niri],
-  Paneru aims to bring a similar scrollable tiling workflow to MacOS.
-- **Focus follows mouse on MacOS:** Very useful for people who would like to
-  avoid an extra click.
-- **Sliding windows with touchpad:** Using a touchpad is quite natural for
-  navigation of the window pane.
-- **Learning Opportunity:** This project serves as a hands-on opportunity to
-  delve into the MacOS API and Objective-C, as well as to deepen understanding
-  and practice Rust programming.
 
 ## Inspiration
 

@@ -44,20 +44,20 @@ impl WindowPane {
     ///
     /// # Arguments
     ///
-    /// * `window_id` - The ID of the window to find.
+    /// * `entity` - Entity of the window to find.
     ///
     /// # Returns
     ///
     /// `Ok(usize)` with the index if found, otherwise `Err(Error)`.
-    pub fn index_of(&self, window_id: Entity) -> Result<usize> {
+    pub fn index_of(&self, entity: Entity) -> Result<usize> {
         self.pane
             .iter()
             .position(|panel| match panel {
-                Panel::Single(id) => *id == window_id,
-                Panel::Stack(stack) => stack.contains(&window_id),
+                Panel::Single(id) => *id == entity,
+                Panel::Stack(stack) => stack.contains(&entity),
             })
             .ok_or(Error::NotFound(format!(
-                "{}: can not find window {window_id} in the current pane.",
+                "{}: can not find window {entity} in the current pane.",
                 function_name!()
             )))
     }
@@ -67,24 +67,24 @@ impl WindowPane {
     ///
     /// # Arguments
     ///
-    /// * `after` - The index at which to insert the window. If `after` is greater than or equal to the current length,
+    /// * `after` - The index at which to insert the window. If `after` is greater than or equal to the entity length,
     ///   the window is appended to the end.
-    /// * `window_id` - The ID of the window to insert.
-    pub fn insert_at(&mut self, after: usize, window_id: Entity) {
+    /// * `entity` - Entity of the window to insert.
+    pub fn insert_at(&mut self, after: usize, entity: Entity) {
         let index = after;
         if index >= self.len() {
-            self.pane.push_back(Panel::Single(window_id));
+            self.pane.push_back(Panel::Single(entity));
         }
-        self.pane.insert(index, Panel::Single(window_id));
+        self.pane.insert(index, Panel::Single(entity));
     }
 
     /// Appends a window ID as a `Single` panel to the end of the pane.
     ///
     /// # Arguments
     ///
-    /// * `window_id` - The ID of the window to append.
-    pub fn append(&mut self, window_id: Entity) {
-        self.pane.push_back(Panel::Single(window_id));
+    /// * `entity` - Entity of the window to append.
+    pub fn append(&mut self, entity: Entity) {
+        self.pane.push_back(Panel::Single(entity));
     }
 
     /// Removes a window ID from the pane.
@@ -93,15 +93,15 @@ impl WindowPane {
     ///
     /// # Arguments
     ///
-    /// * `window_id` - The ID of the window to remove.
-    pub fn remove(&mut self, window_id: Entity) {
+    /// * `entity` - Entity of the window to remove.
+    pub fn remove(&mut self, entity: Entity) {
         let removed = self
-            .index_of(window_id)
+            .index_of(entity)
             .ok()
             .and_then(|index| self.pane.remove(index).zip(Some(index)));
 
         if let Some((Panel::Stack(mut stack), index)) = removed {
-            stack.retain(|id| *id != window_id);
+            stack.retain(|id| *id != entity);
             if stack.len() > 1 {
                 self.pane.insert(index, Panel::Stack(stack));
             } else if let Some(remaining_id) = stack.first() {
@@ -177,7 +177,7 @@ impl WindowPane {
     ///
     /// # Arguments
     ///
-    /// * `window_id` - The ID of the starting window.
+    /// * `entity` - Entity of the starting window.
     /// * `accessor` - A closure that takes a `&Panel` and returns `true` to continue iteration, `false` to stop.
     ///
     /// # Returns
@@ -185,10 +185,10 @@ impl WindowPane {
     /// `Ok(())` if successful, otherwise `Err(Error)` if the starting window is not found.
     pub fn access_right_of(
         &self,
-        window_id: Entity,
+        entity: Entity,
         mut accessor: impl FnMut(&Panel) -> bool,
     ) -> Result<()> {
-        let index = self.index_of(window_id)?;
+        let index = self.index_of(entity)?;
         for panel in self.pane.range(1 + index..) {
             if !accessor(panel) {
                 break;
@@ -202,7 +202,7 @@ impl WindowPane {
     ///
     /// # Arguments
     ///
-    /// * `window_id` - The ID of the starting window.
+    /// * `entity` - Entity of the starting window.
     /// * `accessor` - A closure that takes a `&Panel` and returns `true` to continue iteration, `false` to stop.
     ///
     /// # Returns
@@ -210,10 +210,10 @@ impl WindowPane {
     /// `Ok(())` if successful, otherwise `Err(Error)` if the starting window is not found.
     pub fn access_left_of(
         &self,
-        window_id: Entity,
+        entity: Entity,
         mut accessor: impl FnMut(&Panel) -> bool,
     ) -> Result<()> {
-        let index = self.index_of(window_id)?;
+        let index = self.index_of(entity)?;
         for panel in self.pane.range(0..index).rev() {
             // NOTE: left side iterates backwards.
             if !accessor(panel) {
@@ -228,13 +228,13 @@ impl WindowPane {
     ///
     /// # Arguments
     ///
-    /// * `window_id` - The ID of the window to stack.
+    /// * `entity` - Entity of the window to stack.
     ///
     /// # Returns
     ///
     /// `Ok(())` if the stacking is successful or not needed, otherwise `Err(Error)` if the window is not found.
-    pub fn stack(&mut self, window_id: Entity) -> Result<()> {
-        let index = self.index_of(window_id)?;
+    pub fn stack(&mut self, entity: Entity) -> Result<()> {
+        let index = self.index_of(entity)?;
         if index == 0 {
             // Can not stack to the left if left most window already.
             return Ok(());
@@ -249,10 +249,10 @@ impl WindowPane {
         if let Some(panel) = panel {
             let newstack = match panel {
                 Panel::Stack(mut stack) => {
-                    stack.push(window_id);
+                    stack.push(entity);
                     stack
                 }
-                Panel::Single(id) => vec![id, window_id],
+                Panel::Single(id) => vec![id, entity],
             };
 
             debug!("Stacked windows: {newstack:#?}");
@@ -262,18 +262,18 @@ impl WindowPane {
         Ok(())
     }
 
-    /// Unstacks the window with the given ID from its current stack.
+    /// Unstacks the window with the given ID from its entity stack.
     /// If the window is in a single panel, no action is taken.
     ///
     /// # Arguments
     ///
-    /// * `window_id` - The ID of the window to unstack.
+    /// * `entity` - Entity of the window to unstack.
     ///
     /// # Returns
     ///
     /// `Ok(())` if the unstacking is successful or not needed, otherwise `Err(Error)` if the window is not found.
-    pub fn unstack(&mut self, window_id: Entity) -> Result<()> {
-        let index = self.index_of(window_id)?;
+    pub fn unstack(&mut self, entity: Entity) -> Result<()> {
+        let index = self.index_of(entity)?;
         if let Panel::Single(_) = self.pane[index] {
             // Can not unstack a single pane
             return Ok(());
@@ -283,7 +283,7 @@ impl WindowPane {
         if let Some(panel) = panel {
             let newstack = match panel {
                 Panel::Stack(mut stack) => {
-                    stack.retain(|id| *id != window_id);
+                    stack.retain(|id| *id != entity);
                     if stack.len() == 1 {
                         Panel::Single(stack[0])
                     } else {
@@ -293,7 +293,7 @@ impl WindowPane {
                 Panel::Single(_) => unreachable!("Is checked at the start of the function"),
             };
             // Re-insert the unstacked window as a single panel
-            self.pane.insert(index, Panel::Single(window_id));
+            self.pane.insert(index, Panel::Single(entity));
             // Re-insert the modified stack (if not empty) at the original position
             self.pane.insert(index, newstack);
         }
@@ -311,7 +311,7 @@ impl WindowPane {
         self.pane
             .iter()
             .flat_map(|panel| match panel {
-                Panel::Single(window_id) => vec![*window_id],
+                Panel::Single(entity) => vec![*entity],
                 Panel::Stack(ids) => ids.clone(),
             })
             .collect()

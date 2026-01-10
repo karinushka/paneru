@@ -79,7 +79,7 @@ impl Configuration<'_> {
     /// # Returns
     ///
     /// `Some(WindowParams)` if matching window properties are found, otherwise `None`.
-    pub fn find_window_properties(&self, title: &str, bundle_id: &str) -> Option<WindowParams> {
+    pub fn find_window_properties(&self, title: &str, bundle_id: &str) -> Vec<WindowParams> {
         self.config.find_window_properties(title, bundle_id)
     }
 

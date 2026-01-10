@@ -230,16 +230,22 @@ impl Config {
     /// # Returns
     ///
     /// `Some(WindowParams)` if matching window properties are found, otherwise `None`.
-    pub fn find_window_properties(&self, title: &str, bundle_id: &str) -> Option<WindowParams> {
-        self.inner().windows.as_ref().and_then(|windows| {
-            windows
-                .values()
-                .find(|params| {
-                    let bundle_match = params.bundle_id.as_ref().map(|id| id.as_str() == bundle_id);
-                    bundle_match.is_none_or(|m| m) && params.title.is_match(title)
-                })
-                .cloned()
-        })
+    pub fn find_window_properties(&self, title: &str, bundle_id: &str) -> Vec<WindowParams> {
+        self.inner()
+            .windows
+            .as_ref()
+            .map(|windows| {
+                windows
+                    .values()
+                    .filter(|params| {
+                        let bundle_match =
+                            params.bundle_id.as_ref().map(|id| id.as_str() == bundle_id);
+                        bundle_match.is_none_or(|m| m) && params.title.is_match(title)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -782,9 +788,7 @@ index = 1
         Some(Command::Window(Operation::Manage))
     ));
 
-    let props = config
-        .find_window_properties("picture in picture", "com.something.apple")
-        .unwrap();
-    assert_eq!(props.floating, Some(true));
-    assert_eq!(props.index, Some(1));
+    let props = config.find_window_properties("picture in picture", "com.something.apple");
+    assert_eq!(props[0].floating, Some(true));
+    assert_eq!(props[0].index, Some(1));
 }

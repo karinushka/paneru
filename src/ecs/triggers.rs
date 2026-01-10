@@ -1114,18 +1114,18 @@ pub(super) fn spawn_window_trigger(
         );
 
         let title = window.title().unwrap_or_default();
-        let properties = config
-            .find_window_properties(&title, bundle_id)
-            .inspect(|_| {
-                debug!(
-                    "{}: Applying window properties for '{title}",
-                    function_name!()
-                );
-            });
+        let properties = config.find_window_properties(&title, bundle_id);
+        if !properties.is_empty() {
+            debug!(
+                "{}: Applying window properties for '{}'",
+                function_name!(),
+                window.id()
+            );
+        }
         apply_window_properties(
             window,
             app_entity,
-            properties.as_ref(),
+            &properties,
             &mut active_display,
             &windows,
             &mut commands,
@@ -1136,16 +1136,16 @@ pub(super) fn spawn_window_trigger(
 fn apply_window_properties(
     mut window: Window,
     app_entity: Entity,
-    properties: Option<&WindowParams>,
+    properties: &[WindowParams],
     active_display: &mut ActiveDisplayMut,
     windows: &Query<(Entity, &Window, Has<FocusedMarker>)>,
     commands: &mut Commands,
 ) {
     let floating = properties
-        .as_ref()
-        .and_then(|props| props.floating)
+        .iter()
+        .find_map(|props| props.floating)
         .unwrap_or(false);
-    let wanted_insertion = properties.as_ref().and_then(|props| props.index);
+    let wanted_insertion = properties.iter().find_map(|props| props.index);
     _ = window
         .update_frame(Some(&active_display.bounds()))
         .inspect_err(|err| error!("{}: {err}", function_name!()));

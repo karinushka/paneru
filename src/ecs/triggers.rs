@@ -13,12 +13,11 @@ use stdext::function_name;
 
 use super::{
     ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, MissionControlActive, OrphanedPane,
-    ReshuffleAroundMarker, SpawnWindowTrigger, StrayFocusEvent, Timeout, Unmanaged, WMEventTrigger,
-    WindowDraggedMarker,
+    SpawnWindowTrigger, StrayFocusEvent, Timeout, Unmanaged, WMEventTrigger, WindowDraggedMarker,
 };
 use crate::config::{Config, WindowParams};
-use crate::ecs::WindowSwipeMarker;
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration};
+use crate::ecs::{WindowSwipeMarker, reshuffle_around};
 use crate::events::Event;
 use crate::manager::{Application, Display, Process, Window, WindowManager, WindowPane};
 use crate::util::symlink_target;
@@ -162,10 +161,8 @@ pub(super) fn mouse_down_trigger(
     else {
         return;
     };
-    if !window.fully_visible(&active_display.bounds())
-        && let Ok(mut cmd) = commands.get_entity(entity)
-    {
-        cmd.try_insert(ReshuffleAroundMarker);
+    if !window.fully_visible(&active_display.bounds()) {
+        reshuffle_around(entity, &mut commands);
     }
 }
 
@@ -294,9 +291,7 @@ pub(super) fn workspace_change_trigger(
         panel.append(entity);
     }
 
-    if let Ok(mut cmd) = commands.get_entity(entity) {
-        cmd.try_insert(ReshuffleAroundMarker);
-    }
+    reshuffle_around(entity, &mut commands);
 }
 
 /// Handles display change events.
@@ -414,9 +409,7 @@ pub(super) fn active_display_trigger(
         }
     });
 
-    if let Ok(mut cmd) = commands.get_entity(entity) {
-        cmd.try_insert(ReshuffleAroundMarker);
-    }
+    reshuffle_around(entity, &mut commands);
 }
 
 /// Handles display added events.
@@ -706,8 +699,8 @@ pub(super) fn window_focused_trigger(
     if config.skip_reshuffle() {
         // window_manager.skip_reshuffle = false;
         config.set_skip_reshuffle(false);
-    } else if let Ok(mut cmd) = commands.get_entity(entity) {
-        cmd.try_insert(ReshuffleAroundMarker);
+    } else {
+        reshuffle_around(entity, &mut commands);
     }
 }
 
@@ -925,9 +918,7 @@ pub(super) fn window_managed_trigger(
     };
 
     active_panel.append(entity);
-    if let Ok(mut cmd) = commands.get_entity(entity) {
-        cmd.try_insert(ReshuffleAroundMarker);
-    }
+    reshuffle_around(entity, &mut commands);
 }
 
 /// Handles the event when a window is resized. It updates the window's frame and reshuffles windows.
@@ -955,9 +946,7 @@ pub(super) fn window_resized_trigger(
         return;
     };
     _ = window.update_frame(Some(&active_display.bounds()));
-    if let Ok(mut cmd) = commands.get_entity(entity) {
-        cmd.try_insert(ReshuffleAroundMarker);
-    }
+    reshuffle_around(entity, &mut commands);
 }
 
 /// Handles the event when a window is destroyed. It removes the window from the ECS world and relevant displays.
@@ -1042,9 +1031,7 @@ fn give_away_focus(
                 function_name!()
             );
             commands.trigger(WMEventTrigger(Event::WindowFocused { window_id }));
-            if let Ok(mut cmd) = commands.get_entity(entity) {
-                cmd.try_insert(ReshuffleAroundMarker);
-            }
+            reshuffle_around(entity, commands);
         }
     }
 }
@@ -1200,9 +1187,7 @@ fn apply_window_properties(
         None => panel.append(entity),
     }
 
-    if let Ok(mut cmd) = commands.get_entity(entity) {
-        cmd.try_insert(ReshuffleAroundMarker);
-    }
+    reshuffle_around(entity, commands);
 }
 
 #[allow(clippy::needless_pass_by_value)]

@@ -2,6 +2,7 @@ use std::ops::{Deref, DerefMut};
 use std::time::Duration;
 
 use bevy::ecs::resource::Resource;
+use bevy::ecs::system::Commands;
 use bevy::prelude::Event as BevyEvent;
 use bevy::time::Timer;
 use bevy::{
@@ -231,3 +232,32 @@ pub struct CommandTrigger(pub Command);
 /// Bevy event trigger for spawning new windows.
 #[derive(BevyEvent)]
 pub struct SpawnWindowTrigger(pub Vec<Window>);
+
+pub fn reposition_entity(
+    entity: Entity,
+    x: f64,
+    y: f64,
+    display_id: CGDirectDisplayID,
+    commands: &mut Commands,
+) {
+    if let Ok(mut entity_cmmands) = commands.get_entity(entity) {
+        entity_cmmands.try_insert(RepositionMarker {
+            origin: CGPoint { x, y },
+            display_id,
+        });
+    }
+}
+
+pub fn resize_entity(entity: Entity, width: f64, height: f64, commands: &mut Commands) {
+    if let Ok(mut entity_cmmands) = commands.get_entity(entity) {
+        entity_cmmands.try_insert(ResizeMarker {
+            size: CGSize { width, height },
+        });
+    }
+}
+
+pub fn reshuffle_around(entity: Entity, commands: &mut Commands) {
+    if let Ok(mut entity_commands) = commands.get_entity(entity) {
+        entity_commands.try_insert(ReshuffleAroundMarker);
+    }
+}

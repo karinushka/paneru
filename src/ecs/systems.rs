@@ -6,7 +6,6 @@ use bevy::ecs::system::{Commands, Local, Populated, Query, Res, ResMut};
 use bevy::ecs::world::World;
 use bevy::time::Time;
 use log::{debug, error, info, trace, warn};
-use objc2_core_foundation::CGPoint;
 use std::time::Duration;
 use stdext::function_name;
 
@@ -19,7 +18,7 @@ use crate::config::Config;
 use crate::ecs::params::{
     ActiveDisplay, ActiveDisplayMut, Configuration, DebouncedSystem, ThrottledSystem,
 };
-use crate::ecs::{ReshuffleAroundMarker, WindowSwipeMarker};
+use crate::ecs::{ReshuffleAroundMarker, WindowSwipeMarker, reposition_entity, reshuffle_around};
 use crate::events::Event;
 use crate::manager::{Application, Display, Panel, Window, WindowManager, WindowOS, WindowPane};
 
@@ -680,18 +679,18 @@ pub(super) fn window_swiper(
         let pos_x = window.frame().origin.x - (active_display.bounds().size.width * delta);
         let frame = window.frame();
 
-        commands.entity(entity).try_insert(RepositionMarker {
-            origin: CGPoint {
-                x: pos_x
-                    .min(active_display.bounds().size.width - frame.size.width)
-                    .max(0.0),
-                y: frame.origin.y,
-            },
-            display_id: active_display.id(),
-        });
+        reposition_entity(
+            entity,
+            pos_x
+                .min(active_display.bounds().size.width - frame.size.width)
+                .max(0.0),
+            frame.origin.y,
+            active_display.id(),
+            &mut commands,
+        );
 
         if pos_x > 0.0 && pos_x < (active_display.bounds().size.width - frame.size.width) {
-            commands.entity(entity).try_insert(ReshuffleAroundMarker);
+            reshuffle_around(entity, &mut commands);
             return;
         }
 
@@ -733,9 +732,7 @@ fn slide_to_next_window(
             "{}: switching to {neighbour} with delta {delta}",
             function_name!()
         );
-        commands
-            .entity(*neighbour)
-            .try_insert(ReshuffleAroundMarker);
+        reshuffle_around(*neighbour, commands);
     })
 }
 
@@ -936,14 +933,8 @@ fn reposition_stack(
     for entity in entities {
         if let Ok((mut window, entity, _)) = windows.get_mut(entity) {
             let window_height = window.frame().size.height;
-            // window.reposition(upper_left, y_pos, display_bounds);
-            commands.entity(entity).try_insert(RepositionMarker {
-                origin: CGPoint {
-                    x: upper_left,
-                    y: y_pos,
-                },
-                display_id: active_display.id(),
-            });
+
+            reposition_entity(entity, upper_left, y_pos, active_display.id(), commands);
             if fits > 0.0 {
                 y_pos += window_height;
                 fits -= 1.0;

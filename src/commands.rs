@@ -3,14 +3,14 @@ use bevy::ecs::observer::On;
 use bevy::ecs::query::{Has, With};
 use bevy::ecs::system::{Commands, Query, Res, Single};
 use log::{debug, error};
-use objc2_core_foundation::{CGPoint, CGSize};
+use objc2_core_foundation::CGPoint;
 use stdext::function_name;
 
 use crate::config::{Config, preset_column_widths};
 use crate::ecs::params::ActiveDisplayMut;
 use crate::ecs::{
-    CommandTrigger, FocusedMarker, RepositionMarker, ReshuffleAroundMarker, ResizeMarker,
-    Unmanaged, WMEventTrigger,
+    CommandTrigger, FocusedMarker, Unmanaged, WMEventTrigger, reposition_entity, reshuffle_around,
+    resize_entity,
 };
 use crate::errors::Result;
 use crate::events::Event;
@@ -178,13 +178,7 @@ fn command_swap_focus(
             .frame()
             .origin
     };
-    commands.entity(current).try_insert(RepositionMarker {
-        origin: CGPoint {
-            x: origin.x,
-            y: origin.y,
-        },
-        display_id,
-    });
+    reposition_entity(current, origin.x, origin.y, display_id, commands);
     if index < new_index {
         (index..new_index).for_each(|idx| panel.swap(idx, idx + 1));
     } else {
@@ -215,15 +209,13 @@ fn command_center_window(
         return;
     };
     let frame = window.frame();
-    commands
-        .entity(focused_entity)
-        .try_insert(RepositionMarker {
-            origin: CGPoint {
-                x: (active_display.bounds().size.width - frame.size.width) / 2.0,
-                y: frame.origin.y,
-            },
-            display_id: active_display.id(),
-        });
+    reposition_entity(
+        focused_entity,
+        (active_display.bounds().size.width - frame.size.width) / 2.0,
+        frame.origin.y,
+        active_display.id(),
+        commands,
+    );
     window_manager
         .0
         .center_mouse(&window, &active_display.bounds());
@@ -257,15 +249,8 @@ fn resize_window(
     let x = (display_width - width).min(window.frame().origin.x);
     let y = window.frame().origin.y;
 
-    commands
-        .entity(focused_entity)
-        .try_insert(RepositionMarker {
-            origin: CGPoint { x, y },
-            display_id: active_display.id(),
-        });
-    commands.entity(focused_entity).try_insert(ResizeMarker {
-        size: CGSize { width, height },
-    });
+    reposition_entity(focused_entity, x, y, active_display.id(), commands);
+    resize_entity(focused_entity, width, height, commands);
 }
 
 /// Toggles the focused window between full-width and a preset width.
@@ -304,15 +289,8 @@ fn full_width_window(
         (display_width, 1.0, 0.0)
     };
 
-    commands
-        .entity(focused_entity)
-        .try_insert(RepositionMarker {
-            origin: CGPoint { x, y },
-            display_id: active_display.id(),
-        });
-    commands.entity(focused_entity).try_insert(ResizeMarker {
-        size: CGSize { width, height },
-    });
+    reposition_entity(focused_entity, x, y, active_display.id(), commands);
+    resize_entity(focused_entity, width, height, commands);
 
     window.width_ratio(width_ratio);
 }
@@ -381,15 +359,8 @@ fn to_next_display(
         other.menubar_height,
     );
     let dest = CGPoint::new(other.bounds.size.width / 2.0, other.menubar_height);
-    if let Ok(mut cmd) = commands.get_entity(focused_entity) {
-        cmd.try_insert((
-            ReshuffleAroundMarker,
-            RepositionMarker {
-                origin: dest,
-                display_id: other.id(),
-            },
-        ));
-    }
+    reposition_entity(focused_entity, dest.x, dest.y, other.id(), commands);
+    reshuffle_around(focused_entity, commands);
 
     if let Ok(panel) = active_display.active_panel() {
         panel.remove(entity);
@@ -497,9 +468,7 @@ fn command_windows(
             }
         }
     }
-    if let Ok(mut cmd) = commands.get_entity(focused_entity) {
-        cmd.try_insert(ReshuffleAroundMarker);
-    }
+    reshuffle_around(focused_entity, commands);
     Ok(())
 }
 

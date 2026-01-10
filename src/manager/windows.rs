@@ -23,8 +23,8 @@ use super::skylight::{
     _AXUIElementGetWindow, _SLPSSetFrontProcessWithOptions, AXUIElementCopyAttributeValue,
     AXUIElementPerformAction, AXUIElementSetAttributeValue, SLPSPostEventRecordTo,
 };
-use crate::ecs::RepositionMarker;
 use crate::ecs::params::ActiveDisplay;
+use crate::ecs::{RepositionMarker, reposition_entity};
 use crate::errors::{Error, Result};
 use crate::platform::{Pid, ProcessSerialNumber, WinID};
 use crate::util::{AXUIWrapper, get_attribute};
@@ -101,10 +101,7 @@ pub trait WindowApi: Send + Sync {
                 Some(marker) => marker.display_id,
                 None => active_display.id(),
             };
-            commands.entity(entity).try_insert(RepositionMarker {
-                origin: frame.origin,
-                display_id,
-            });
+            reposition_entity(entity, frame.origin.x, frame.origin.y, display_id, commands);
             trace!("{}: focus resposition to {frame:?}", function_name!());
         }
         frame

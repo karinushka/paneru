@@ -95,7 +95,13 @@ impl InputHandler {
                     )))?;
             CFRunLoop::add_source(&main_loop, Some(&run_loop_source), kCFRunLoopCommonModes);
 
-            let port = self.tap_port.clone().unwrap();
+            let port = self
+                .tap_port
+                .clone()
+                .ok_or(Error::PermissionDenied(format!(
+                    "{}: invalid tap port.",
+                    function_name!()
+                )))?;
             self.cleanup = Some(Cleanuper::new(Box::new(move || {
                 info!("{}: Unregistering event_handler", function_name!());
                 CFRunLoop::remove_source(&main_loop, Some(&run_loop_source), kCFRunLoopCommonModes);

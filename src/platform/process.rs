@@ -315,7 +315,7 @@ impl ProcessHandler {
         }
 
         let target = unsafe { GetApplicationEventTarget() };
-        let event_class = u32::from_be_bytes(APPL_CLASS.as_bytes().try_into().unwrap());
+        let event_class = u32::from_be_bytes(APPL_CLASS.as_bytes().try_into()?);
         let events = [
             EventTypeSpec {
                 event_class,

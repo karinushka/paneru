@@ -53,7 +53,7 @@ impl CommandReader {
             .into_iter()
             .flat_map(|param| [param.as_bytes(), &[0]].concat())
             .collect::<Vec<_>>();
-        let size: u32 = output.len().try_into().unwrap();
+        let size: u32 = output.len().try_into()?;
         debug!("{}: {:?} {output:?}", function_name!(), size.to_le_bytes());
 
         let mut stream = UnixStream::connect(CommandReader::SOCKET_PATH)?;

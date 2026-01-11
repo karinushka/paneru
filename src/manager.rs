@@ -815,7 +815,7 @@ fn space_window_list_for_connection(
     let iterator =
         unsafe { CFRetained::from_raw(SLSWindowQueryResultCopyWindows(query.deref().into())) };
 
-    let mut window_list = Vec::with_capacity(count.try_into().unwrap());
+    let mut window_list = Vec::with_capacity(count.try_into()?);
     while unsafe { SLSWindowIteratorAdvance(&raw const *iterator) } {
         let tags = unsafe { SLSWindowIteratorGetTags(&raw const *iterator) };
         let attributes = unsafe { SLSWindowIteratorGetAttributes(&raw const *iterator) };

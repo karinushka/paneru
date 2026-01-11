@@ -148,7 +148,14 @@ fn add_existing_process(
     mut commands: Commands,
 ) {
     for (entity, process) in process_query {
-        let app = window_manager.new_application(&*process.0).unwrap();
+        let Ok(app) = window_manager.new_application(&*process.0) else {
+            error!(
+                "{}: creating aplication from process '{}'",
+                function_name!(),
+                process.name(),
+            );
+            return;
+        };
         commands.spawn((app, ExistingMarker, ChildOf(entity)));
         commands.entity(entity).try_remove::<ExistingMarker>();
     }
@@ -261,7 +268,14 @@ pub(super) fn add_launched_process(
             continue;
         }
 
-        let mut app = window_manager.new_application(process).unwrap();
+        let Ok(mut app) = window_manager.new_application(process) else {
+            error!(
+                "{}: creating aplication from process '{}'",
+                function_name!(),
+                process.name()
+            );
+            return;
+        };
 
         if app.observe().is_ok_and(|good| good) {
             let timeout = Timeout::new(

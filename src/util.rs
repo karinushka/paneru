@@ -261,7 +261,7 @@ pub fn create_array<T>(values: &[T], cftype: CFNumberType) -> Result<CFRetained<
         CFArray::new(
             None,
             ptrs.as_mut_ptr(),
-            numbers.len().try_into().unwrap(),
+            numbers.len().try_into()?,
             &raw const kCFTypeArrayCallBacks,
         )
     }
@@ -342,7 +342,7 @@ pub fn exe_path() -> Option<PathBuf> {
 
     let mut path_buf = [0_u8; 4096];
 
-    let mut path_buf_size = u32::try_from(path_buf.len()).unwrap();
+    let mut path_buf_size = u32::try_from(path_buf.len()).ok()?;
     let path = unsafe { _NSGetExecutablePath(path_buf.as_mut_ptr(), &raw mut path_buf_size) == 0 }
         .then(|| CStr::from_bytes_until_nul(&path_buf).ok())??;
     Some(OsStr::from_bytes(path.to_bytes()).into())

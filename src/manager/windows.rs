@@ -328,7 +328,7 @@ impl WindowApi for WindowOS {
             .iter()
             .find(|r| **r > current + 0.05)
             .copied()
-            .unwrap_or_else(|| *size_ratios.first().unwrap())
+            .unwrap_or_else(|| *size_ratios.first().unwrap_or(&0.5))
     }
 
     /// Returns the accessibility element of the window.

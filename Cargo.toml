@@ -1,6 +1,6 @@
 [package]
 name = "paneru"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 rust-version = "1.89.0"
 description = "A sliding, tiling window manager for MacOS."
@@ -18,11 +18,11 @@ pedantic = "warn"
 accessibility-sys = "0.2.0"
 bevy = { version = "0.17.3", default-features = false }
 chrono = "0.4.42"
-clap = { version = "4.5.53", features = ["cargo", "derive"] }
+clap = { version = "4.5.54", features = ["cargo", "derive"] }
 embed_plist = "1.2.2"
 env_logger = "0.11.8"
 launchctl = "0.3.2"
-libc = "0.2.178"
+libc = "0.2.179"
 log = "0.4.29"
 notify = { version = "8.2.0", features = ["macos_fsevent"] }
 objc2 = { version = "0.6.3", features = ["catch-all", "exception"] }

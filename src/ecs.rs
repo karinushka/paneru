@@ -1,6 +1,7 @@
 use std::ops::{Deref, DerefMut};
 use std::time::Duration;
 
+use bevy::app::{PostUpdate, PreUpdate};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::system::Commands;
 use bevy::prelude::Event as BevyEvent;
@@ -36,11 +37,10 @@ mod triggers;
 ///
 /// * `app` - The Bevy application to register the systems with.
 pub fn register_systems(app: &mut bevy::app::App) {
+    app.add_systems(PreUpdate, systems::dispatch_toplevel_triggers);
     app.add_systems(
         Update,
         (
-            // NOTE: To avoid weird timing issues, the dispatcher should be the first one.
-            systems::dispatch_toplevel_triggers,
             systems::reshuffle_around_window,
             systems::window_swiper,
             systems::add_launched_process,
@@ -49,8 +49,6 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::timeout_ticker,
             systems::retry_stray_focus,
             systems::find_orphaned_spaces,
-            systems::animate_windows,
-            systems::animate_resize_windows,
         ),
     );
     app.add_systems(
@@ -60,6 +58,10 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::workspace_change_watcher,
         )
             .run_if(resource_equals(PollForNotifications(true))),
+    );
+    app.add_systems(
+        PostUpdate,
+        (systems::animate_windows, systems::animate_resize_windows),
     );
 }
 

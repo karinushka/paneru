@@ -215,8 +215,10 @@ impl Config {
         let lock = self.inner();
         lock.bindings
             .values()
-            .find(|bind| bind.code == keycode && bind.modifiers == mask)
-            .map(|bind| bind.command.clone())
+            .flat_map(|binds| binds.all())
+            .find_map(|bind| {
+                (bind.code == keycode && bind.modifiers == mask).then_some(bind.command.clone())
+            })
     }
 
     /// Finds window properties for a given `title` and `bundle_id`.
@@ -258,12 +260,35 @@ impl Default for Config {
     }
 }
 
+#[derive(Deserialize, Debug)]
+#[serde(untagged)]
+enum OneOrMore {
+    Single(Keybinding),
+    Multiple(Vec<Keybinding>),
+}
+
+impl OneOrMore {
+    fn all(&self) -> Vec<&Keybinding> {
+        match self {
+            OneOrMore::Single(one) => vec![one],
+            OneOrMore::Multiple(many) => many.iter().collect::<Vec<_>>(),
+        }
+    }
+
+    fn all_mut(&mut self) -> Vec<&mut Keybinding> {
+        match self {
+            OneOrMore::Single(one) => vec![one],
+            OneOrMore::Multiple(many) => many.iter_mut().collect::<Vec<_>>(),
+        }
+    }
+}
+
 /// `InnerConfig` holds the actual configuration data parsed from a file, including options, keybindings, and window parameters.
 /// It is typically accessed via an `Arc<RwLock<InnerConfig>>` within the `Config` struct.
 #[derive(Deserialize, Debug, Default)]
 struct InnerConfig {
     options: MainOptions,
-    bindings: HashMap<String, Keybinding>,
+    bindings: HashMap<String, OneOrMore>,
     windows: Option<HashMap<String, WindowParams>>,
 }
 
@@ -296,23 +321,27 @@ impl InnerConfig {
         let virtual_keys = generate_virtual_keymap();
         let mut config: InnerConfig = toml::from_str(input)?;
 
-        for (command, binding) in &mut config.bindings {
+        for (command, bindings) in &mut config.bindings {
             let argv = command.split('_').collect::<Vec<_>>();
-            binding.command = parse_command(&argv)?;
+            for binding in bindings.all_mut() {
+                binding.command = parse_command(&argv)?;
 
-            let code = virtual_keys
-                .iter()
-                .find(|(key, _)| key == &binding.key)
-                .map(|(_, code)| *code)
-                .or_else(|| {
-                    literal_keycode()
-                        .find(|(key, _)| key == &binding.key)
-                        .map(|(_, code)| *code)
-                });
-            if let Some(code) = code {
-                binding.code = code;
+                let code = virtual_keys
+                    .iter()
+                    .find(|(key, _)| key == &binding.key)
+                    .map(|(_, code)| *code)
+                    .or_else(|| {
+                        literal_keycode()
+                            .find(|(key, _)| key == &binding.key)
+                            .map(|(_, code)| *code)
+                    });
+                if let Some(code) = code {
+                    binding.code = code;
+                } else {
+                    error!("{}: invalid key '{}'", function_name!(), &binding.key);
+                }
+                info!("bind: {binding:?}");
             }
-            info!("bind: {binding:?}");
         }
         Ok(config)
     }
@@ -760,6 +789,7 @@ focus_follows_mouse = true
 [bindings]
 quit = "ctrl+alt-q"
 window_manage = "ctrl+alt-t"
+window_stack = ["ctrl-s", "alt-s"]
 
 [windows]
 
@@ -773,21 +803,39 @@ index = 1
         inner: RwLock::new(InnerConfig::parse_config(input).expect("Failed to parse config"))
             .into(),
     };
+    let find_key = |k| {
+        virtual_keycode()
+            .find_map(|(s, v)| (format!("{k}") == *s).then_some(*v))
+            .unwrap()
+    };
 
     assert_eq!(config.inner().options.focus_follows_mouse, Some(true));
 
     // Modifiers: alt = 1<<0, ctrl = 1<<3.
     let mask = (1 << 0) | (1 << 3);
-    let keycode = 0x0c; // 'q'
+    let keycode = find_key('q');
     assert!(matches!(
         config.find_keybind(keycode, mask),
         Some(Command::Quit)
     ));
 
-    let keycode = 0x11; // 't'
+    let keycode = find_key('t');
     assert!(matches!(
         config.find_keybind(keycode, mask),
         Some(Command::Window(Operation::Manage))
+    ));
+
+    let mask = 1 << 3; // ctrl
+    let keycode = find_key('s');
+    assert!(matches!(
+        config.find_keybind(keycode, mask),
+        Some(Command::Window(Operation::Stack(true)))
+    ));
+
+    let mask = 1; // alt
+    assert!(matches!(
+        config.find_keybind(keycode, mask),
+        Some(Command::Window(Operation::Stack(true)))
     ));
 
     let props = config.find_window_properties("picture in picture", "com.something.apple");

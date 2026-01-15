@@ -217,10 +217,10 @@ animation_speed = 4000
 
 [bindings]
 # Moves the focus between windows.
-window_focus_west = "cmd - h"
-window_focus_east = "cmd - l"
-window_focus_north = "cmd - k"
-window_focus_south = "cmd - j"
+window_focus_west = ["cmd - h", "cmd - leftarrow"]
+window_focus_east = ["cmd - l", "cmd - rightarrow"]
+window_focus_north = ["cmd - k", "cmd - uparrow"]
+window_focus_south = ["cmd - j", "cmd - downarrow"]
 
 # Swaps windows in chosen direction.
 window_swap_west = "alt - h"

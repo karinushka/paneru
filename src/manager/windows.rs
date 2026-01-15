@@ -336,7 +336,6 @@ impl WindowApi for WindowOS {
     ///
     /// A `CFRetained<AXUIWrapper>` representing the accessibility element.
     fn element(&self) -> CFRetained<AXUIWrapper> {
-        // unsafe { NonNull::new_unchecked(self.inner().ax_element.as_ptr::<c_void>()).addr() }
         self.ax_element.clone()
     }
 
@@ -389,9 +388,6 @@ impl WindowApi for WindowOS {
     fn is_root(&self) -> bool {
         let cftype = self.ax_element.as_ref();
         let axparent = CFString::from_static_str(kAXParentAttribute);
-        // if (AXUIElementCopyAttributeValue(window->ref, kAXParentAttribute, &value) == kAXErrorSuccess) {
-        //     result = !(value && !CFEqual(value, window->application->ref));
-        // }
         get_attribute::<CFType>(&self.ax_element, &axparent)
             .is_ok_and(|parent| !CFEqual(Some(&*parent), Some(cftype)))
     }
@@ -402,7 +398,6 @@ impl WindowApi for WindowOS {
     ///
     /// `true` if the window is eligible, `false` otherwise.
     fn is_eligible(&self) -> bool {
-        // bool result = window->is_root && (window_is_real(window) || window_check_rule_flag(window, WINDOW_RULE_MANAGED));
         self.eligible
     }
 

@@ -343,9 +343,6 @@ unsafe extern "C" {
     /// extern `uint64_t` SLSWindowIteratorGetAttributes(CFTypeRef iterator);
     pub fn SLSWindowIteratorGetAttributes(iterator: *const CFType) -> i64;
 
-    // extern int SLSWindowIteratorGetLevel(CFTypeRef iterator, int32_t index);
-    // pub fn SLSWindowIteratorGetLevel(iterator: *const CFType, index: i32) -> isize;
-
     /// Retrieves the frontmost process's `ProcessSerialNumber`.
     ///
     /// # Arguments

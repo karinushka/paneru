@@ -529,9 +529,6 @@ impl WindowManagerApi for WindowManagerOS {
     ///
     /// `Ok(u64)` with the space ID if successful, otherwise `Err(Error)`.
     fn active_display_space(&self, display_id: CGDirectDisplayID) -> Result<u64> {
-        // let cid = self.main_cid;
-        // let uuid = Display::active_display_uuid(cid);
-        // uuid.map(|uuid| unsafe { SLSManagedDisplayGetCurrentSpace(cid, uuid.deref()) })
         Display::uuid_from_id(display_id).map(|uuid| unsafe {
             SLSManagedDisplayGetCurrentSpace(self.main_cid, &raw const *uuid)
         })
@@ -577,16 +574,12 @@ impl WindowManagerApi for WindowManagerOS {
     /// # Returns
     ///
     /// `Ok(Vec<Window>)` containing the found windows, otherwise `Err(Error)`.
-    // bool window_manager_add_existing_application_windows(struct space_manager *sm,
-    // struct window_manager *wm, struct application *application, int refresh_index)
     fn add_existing_application_windows(
         &self,
         app: &mut Application,
         spaces: &[u64],
         refresh_index: i32,
     ) -> Result<Vec<Window>> {
-        // uint32_t *global_window_list = window_manager_existing_application_window_list(application, &global_window_count);
-        // if (!global_window_list) return result;
         let global_window_list = existing_application_window_list(self.main_cid, app, spaces)?;
         if global_window_list.is_empty() {
             return Err(Error::InvalidInput(format!(
@@ -616,7 +609,6 @@ impl WindowManagerApi for WindowManagerOS {
             }
         }
 
-        // if (global_window_count == window_count-empty_count)
         if global_window_list.len() == found_windows.len() {
             if refresh_index != -1 {
                 debug!(
@@ -626,13 +618,6 @@ impl WindowManagerApi for WindowManagerOS {
                 );
             }
         } else {
-            // for (int i = 0; i < global_window_count; ++i) {
-            //     struct window *window = window_manager_find_window(wm, global_window_list[i]);
-            //     if (!window) {
-            //         missing_window = true;
-            //         break;
-            //     }
-            // }
             let find_window =
                 |window_id| found_windows.iter().find(|window| window.id() == window_id);
             let mut app_window_list: Vec<WinID> = global_window_list
@@ -641,7 +626,6 @@ impl WindowManagerApi for WindowManagerOS {
                 .copied()
                 .collect();
 
-            // if (missing_window) {
             if !app_window_list.is_empty() {
                 debug!(
                     "{}: {:?} has windows that are not yet resolved",
@@ -649,19 +633,8 @@ impl WindowManagerApi for WindowManagerOS {
                     app.psn(),
                 );
                 found_windows.extend(bruteforce_windows(app, &mut app_window_list));
-
-                // } else {
-                //     // debug("%s: all windows for %s are now resolved\n", __FUNCTION__, application->name);
-                //     info!(
-                //         "add_existing_application_windows: All windows for {} are now resolved (second pass)",
-                //         app.inner().name
-                //     );
-                //     // buf_del(wm->applications_to_refresh, refresh_index);
-                //     result = true;
             }
         }
-
-        // if (window_list_ref) CFRelease(window_list_ref);
         Ok(found_windows)
     }
 

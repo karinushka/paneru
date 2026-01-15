@@ -16,7 +16,7 @@ pedantic = "warn"
 
 [dependencies]
 accessibility-sys = "0.2.0"
-bevy = { version = "0.17.3", default-features = false, features = [
+bevy = { version = "0.18.0", default-features = false, features = [
   "multi_threaded",
 ] }
 chrono = "0.4.43"

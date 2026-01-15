@@ -310,7 +310,6 @@ impl WindowApi for MockWindow {
         println!("{}:", function_name!());
         let mut s = CFString::from_static_str("");
         AXUIWrapper::from_retained(&raw mut s).unwrap()
-        // self.ax_element.clone()
     }
 
     /// Always returns an empty string for the window title.

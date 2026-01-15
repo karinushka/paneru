@@ -202,6 +202,9 @@ impl Config {
         self.inner().options.clone()
     }
 
+    // Returns the animation speed in 1/10th of screen size per second.
+    // E.g. a value of 20 means: move at a speed of two screen sizes per second.
+    // If a screen is 1920px, the calculated speed would be 3840 pixels/second.
     pub fn animation_speed(&self) -> f64 {
         self.options()
             .animation_speed

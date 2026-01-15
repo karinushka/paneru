@@ -262,14 +262,16 @@ impl InputHandler {
         let mask = MODIFIER_MASKS
             .iter()
             .enumerate()
-            .filter_map(|(bitshift, modifier)| {
-                modifier
+            .fold(0, |acc, (bitshift, modifier_masks)| {
+                if modifier_masks
                     .iter()
-                    .any(|mask| *mask == (eventflags.0 & mask))
-                    .then_some(1 << bitshift)
-            })
-            .reduce(|acc, mask| acc + mask)
-            .unwrap_or(0);
+                    .any(|mask_val| *mask_val == (eventflags.0 & mask_val))
+                {
+                    acc + (1 << bitshift)
+                } else {
+                    acc
+                }
+            });
 
         let keycode = keycode.try_into().ok();
         keycode

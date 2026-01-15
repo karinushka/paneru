@@ -6,6 +6,7 @@ use bevy::ecs::system::{Commands, Local, Populated, Query, Res, ResMut};
 use bevy::ecs::world::World;
 use bevy::time::Time;
 use log::{debug, error, info, trace, warn};
+use std::collections::HashSet;
 use std::time::Duration;
 use stdext::function_name;
 
@@ -252,12 +253,19 @@ fn finish_setup(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn add_launched_process(
     window_manager: Res<WindowManager>,
-    process_query: Populated<(Entity, &mut BProcess, Has<Children>), With<FreshMarker>>,
+    fresh_processes: Populated<(Entity, &mut BProcess, Has<Children>), With<FreshMarker>>,
     mut commands: Commands,
 ) {
     const APP_OBSERVABLE_TIMEOUT_SEC: u64 = 5;
-    for (entity, mut process, children) in process_query {
+    let mut already_seen = HashSet::new();
+
+    for (entity, mut process, children) in fresh_processes {
         let process = &mut *process.0;
+
+        if !already_seen.insert(process.psn()) {
+            continue;
+        }
+
         if !process.ready() {
             continue;
         }

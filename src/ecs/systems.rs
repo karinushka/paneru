@@ -604,19 +604,13 @@ pub(super) fn animate_windows(
     config: Res<Config>,
     mut commands: Commands,
 ) {
-    let move_speed = config
-        .options()
-        .animation_speed
-        // If unset, set it to something high, so the move happens immediately,
-        // effectively disabling animation.
-        .unwrap_or(1_000_000.0)
-        .max(500.0);
-    let move_delta = move_speed * time.delta_secs_f64();
+    let move_ratio = config.animation_speed() * time.delta_secs_f64();
 
     for (mut window, entity, RepositionMarker { origin, display_id }) in windows {
         let Some(display) = displays.iter().find(|display| display.id() == *display_id) else {
             continue;
         };
+        let move_delta = (move_ratio * display.bounds.size.width).ceil();
         let current = window.frame().origin;
         let mut delta_x = (origin.x - current.x).abs().min(move_delta);
         let mut delta_y = (origin.y - current.y).abs().min(move_delta);
@@ -670,19 +664,13 @@ pub(super) fn animate_resize_windows(
     config: Res<Config>,
     mut commands: Commands,
 ) {
-    let move_speed = config
-        .options()
-        .animation_speed
-        // If unset, set it to something high, so the move happens immediately,
-        // effectively disabling animation.
-        .unwrap_or(1_000_000.0)
-        .max(500.0);
-    let move_delta = move_speed * time.delta_secs_f64();
+    let move_ratio = config.animation_speed() * time.delta_secs_f64();
 
     for (mut window, entity, ResizeMarker { size, display_id }) in windows {
         let Some(display) = displays.iter().find(|display| display.id() == *display_id) else {
             continue;
         };
+        let move_delta = (move_ratio * display.bounds.size.width).ceil();
         let current = window.frame().size;
         let mut delta_x = (size.width - current.width).abs().min(move_delta);
         let mut delta_y = (size.height - current.height).abs().min(move_delta);

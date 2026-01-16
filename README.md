@@ -211,9 +211,10 @@ swipe_gesture_fingers = 4
 # fully exposed. Enabled by default.
 # continuous_swipe = true
 
-# Window movement speed in pixels/second.
+# Animation speed in 1/10th of display resolution per second.
+# E.g. a value of 20 means: move at a speed of two display sizes per second.
 # To disable animations, leave this unset or set to a very large value.
-animation_speed = 4000
+animation_speed = 50
 
 [bindings]
 # Moves the focus between windows.

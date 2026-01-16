@@ -201,6 +201,16 @@ impl Config {
         self.inner().options.clone()
     }
 
+    pub fn animation_speed(&self) -> f64 {
+        self.options()
+            .animation_speed
+            // If unset, set it to something high, so the move happens immediately,
+            // effectively disabling animation.
+            .unwrap_or(1_000_000.0)
+            .max(5.0)
+            / 10.0
+    }
+
     /// Finds a keybinding matching the given `keycode` and `modifier` mask.
     ///
     /// # Arguments

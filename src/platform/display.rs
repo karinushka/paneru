@@ -96,7 +96,7 @@ impl DisplayHandler {
         display_id: CGDirectDisplayID,
         flags: CGDisplayChangeSummaryFlags,
     ) {
-        debug!("display_handler: display change {display_id:?}");
+        debug!("{}: display change {display_id:?}", function_name!());
         let event = if flags.contains(CGDisplayChangeSummaryFlags::AddFlag) {
             Event::DisplayAdded { display_id }
         } else if flags.contains(CGDisplayChangeSummaryFlags::RemoveFlag) {

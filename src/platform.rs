@@ -1,8 +1,10 @@
 use accessibility_sys::{AXError, AXObserverRef, AXUIElementRef};
 use log::{error, info};
+use objc2::MainThreadMarker;
 use objc2::rc::{Retained, autoreleasepool};
-use objc2_app_kit::NSApplication;
-use objc2_core_foundation::{CFRunLoop, CFString, kCFRunLoopDefaultMode};
+use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSEventMask};
+use objc2_core_foundation::CFString;
+use objc2_foundation::NSDefaultRunLoopMode;
 use std::ffi::c_void;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -110,6 +112,7 @@ unsafe extern "C" {
 /// `PlatformCallbacks` aggregates and manages all platform-specific event handlers and observers.
 /// It serves as the central point for setting up and running macOS-specific interactions with the window manager.
 pub struct PlatformCallbacks {
+    cocoa_app: Retained<NSApplication>,
     /// The main `EventSender` for dispatching events across the application.
     events: EventSender,
     /// Handler for Carbon process events.
@@ -140,8 +143,19 @@ impl PlatformCallbacks {
         let config = Config::new(CONFIGURATION_FILE.as_path())?;
         events.send(Event::InitialConfig(config.clone()))?;
 
+        // This is required to receive some Cocoa notifications into Carbon code, like
+        // NSWorkspaceActiveSpaceDidChangeNotification and
+        // NSWorkspaceActiveDisplayDidChangeNotification
+        // Found on: https://stackoverflow.com/questions/68893386/unable-to-receive-nsworkspaceactivespacedidchangenotification-specifically-but
+        let main_thread = MainThreadMarker::new().unwrap();
+        let cocoa_app = NSApplication::sharedApplication(main_thread);
+        cocoa_app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+        cocoa_app.finishLaunching();
+        NSApplication::load();
+
         let workspace_observer = WorkspaceObserver::new(events.clone());
         Ok(Box::pin(PlatformCallbacks {
+            cocoa_app,
             process_handler: ProcessHandler::new(events.clone(), workspace_observer.clone()),
             event_handler: InputHandler::new(events.clone(), config.clone()),
             workspace_observer,
@@ -165,17 +179,6 @@ impl PlatformCallbacks {
     /// - Activates `CGEventTap`, `CGDisplayReconfigurationCallback`, `AXObserver` for Mission Control,
     ///   `NSWorkspace` observers, and Carbon process event handlers.
     pub fn setup_handlers(&mut self) -> Result<()> {
-        // This is required to receive some Cocoa notifications into Carbon code, like
-        // NSWorkspaceActiveSpaceDidChangeNotification and
-        // NSWorkspaceActiveDisplayDidChangeNotification
-        // Found on: https://stackoverflow.com/questions/68893386/unable-to-receive-nsworkspaceactivespacedidchangenotification-specifically-but
-        if !NSApplication::load() {
-            return Err(Error::PermissionDenied(format!(
-                "{}: Can not startup Cocoa runloop from Carbon code.",
-                function_name!()
-            )));
-        }
-
         if !check_ax_privilege() {
             return Err(Error::PermissionDenied(format!(
                 "{}: Accessibility permissions are required. Please enable them in System Preferences -> Security & Privacy -> Privacy -> Accessibility.",
@@ -214,8 +217,29 @@ impl PlatformCallbacks {
             if quit.load(std::sync::atomic::Ordering::Relaxed) {
                 break;
             }
-            autoreleasepool(|_| unsafe {
-                CFRunLoop::run_in_mode(kCFRunLoopDefaultMode, 3.0, false);
+            autoreleasepool(|_| {
+                // Manually pump events for a few seconds.
+                let until_date = objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(2.0);
+
+                // nextEventMatchingMask:untilDate:inMode:dequeue:
+                // This is the core of the Cocoa event loop.
+                let event = unsafe {
+                    self.cocoa_app
+                        .nextEventMatchingMask_untilDate_inMode_dequeue(
+                            NSEventMask::Any,
+                            Some(&until_date),
+                            NSDefaultRunLoopMode,
+                            true, // Dequeue so we can handle it
+                        )
+                };
+
+                // Dispatch the event to the system
+                if let Some(e) = event {
+                    self.cocoa_app.sendEvent(&e);
+                }
+
+                // Housekeeping for UI/Notifications
+                self.cocoa_app.updateWindows();
             });
         }
         _ = self.events.send(Event::Exit);

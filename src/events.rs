@@ -265,7 +265,7 @@ impl EventHandler {
     /// An `AppExit` code, typically `AppExit::Success`.
     fn custom_loop(mut app: BevyApp, rx: &Receiver<Event>) -> AppExit {
         const LOOP_MAX_TIMEOUT_MS: u64 = 5000;
-        const LOOP_TIMEOUT_STEP: u64 = 5;
+        const LOOP_TIMEOUT_STEP: u64 = 1;
         app.finish();
         app.cleanup();
 

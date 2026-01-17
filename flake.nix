@@ -9,9 +9,21 @@
     { self, nixpkgs }:
     let
       pkgs = import nixpkgs { system = "aarch64-darwin"; };
+      mkDate = longDate: (nixpkgs.lib.concatStringsSep "-" [
+        (builtins.substring 0 4 longDate)
+        (builtins.substring 4 2 longDate)
+        (builtins.substring 6 2 longDate)
+      ]);
+      props = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+      version =
+        props.package.version
+        + "+date="
+        + (mkDate (self.lastModifiedDate or "19700101"))
+        + "_"
+        + (self.shortRev or "dirty");
       package = pkgs.rustPlatform.buildRustPackage {
         pname = "paneru";
-        version = "0.3.0";
+        inherit version;
         src = pkgs.lib.cleanSource ./.;
         postPatch = ''
           substituteInPlace build.rs --replace-fail \

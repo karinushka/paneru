@@ -447,7 +447,8 @@ pub(super) fn retry_stray_focus(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn find_orphaned_spaces(
     orphaned_spaces: Populated<(Entity, &mut OrphanedPane)>,
-    windows: Query<(&Window, Entity)>,
+    windows: Query<(&Window, Entity, Option<&Unmanaged>)>,
+    window_manager: Res<WindowManager>,
     mut displays: Query<&mut Display>,
     mut commands: Commands,
 ) {
@@ -470,23 +471,49 @@ pub(super) fn find_orphaned_spaces(
                         display_id
                     );
 
+                    let mut in_workspace = window_manager
+                        .windows_in_workspace(*space_id)
+                        .inspect_err(|err| {
+                            warn!("{}: getting windows in workspace: {err}", function_name!());
+                        })
+                        .unwrap_or_default();
+
                     for entity in orphan_pane.pane.all_windows() {
                         // TODO: check for clashing windows.
                         pane.append(entity);
 
                         // Update window ratios on the new display.
-                        if let Ok((window, _)) = windows.get(entity) {
+                        if let Ok((window, _, _)) = windows.get(entity) {
                             let width = bounds.size.width * window.width_ratio();
                             let height = bounds.size.height;
                             debug!(
-                                "{}: refreshing frame for window {}: {:.0}x{:.0}",
+                                "{}: refreshing ratio {:.1} for window {}: {:.0}x{:.0}",
                                 function_name!(),
+                                window.width_ratio(),
                                 window.id(),
                                 width,
                                 height,
                             );
                             resize_entity(entity, width, height, display_id, &mut commands);
+
+                            in_workspace.retain(|window_id| *window_id != window.id());
                         }
+                    }
+
+                    // Find remaining windows which are otuside of the pane.
+                    let floating = in_workspace.iter().filter_map(|window_id| {
+                        windows.iter().find_map(|(window, entity, unmanaged)| {
+                            (*window_id == window.id()
+                                && matches!(unmanaged, Some(Unmanaged::Floating)))
+                            .then_some(entity)
+                        })
+                    });
+                    for window_entity in floating {
+                        debug!(
+                            "{}: repositioning floating window {window_entity}",
+                            function_name!(),
+                        );
+                        reposition_entity(window_entity, 0.0, 0.0, display_id, &mut commands);
                     }
 
                     commands.entity(pane_entity).despawn();

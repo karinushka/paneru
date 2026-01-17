@@ -54,8 +54,8 @@
             };
 
             settings = lib.mkOption {
-              type = lib.types.attrs;
-              default = { };
+              type = lib.types.nullOr lib.types.attrs;
+              default = null;
               description = "Configuration to put in `~/.paneru.toml`.";
               example = {
                 options = {
@@ -112,12 +112,12 @@
               };
             };
 
-            xdg.configFile."paneru/paneru.toml" = lib.mkIf (config.xdg.enable) {
-              source = tomlFormat.generate "paneru.toml" config.services.paneru.settings;
+            xdg.configFile."paneru/paneru.toml" = lib.mkIf (config.xdg.enable && cfg.settings != null) {
+              source = tomlFormat.generate "paneru.toml" cfg.settings;
             };
 
-            home.file.".paneru.toml" = lib.mkIf (!config.xdg.enable) {
-              source = tomlFormat.generate ".paneru.toml" config.services.paneru.settings;
+            home.file.".paneru.toml" = lib.mkIf (!config.xdg.enable && cfg.settings != null) {
+              source = tomlFormat.generate ".paneru.toml" cfg.settings;
             };
           };
         };

@@ -19,9 +19,7 @@ use super::{
     StrayFocusEvent, Timeout, Unmanaged, WMEventTrigger,
 };
 use crate::config::Config;
-use crate::ecs::params::{
-    ActiveDisplay, ActiveDisplayMut, Configuration, DebouncedSystem, ThrottledSystem,
-};
+use crate::ecs::params::{ActiveDisplay, Configuration, DebouncedSystem, ThrottledSystem};
 use crate::ecs::{
     ReshuffleAroundMarker, WindowSwipeMarker, reposition_entity, reshuffle_around, resize_entity,
 };
@@ -449,32 +447,51 @@ pub(super) fn retry_stray_focus(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn find_orphaned_spaces(
     orphaned_spaces: Populated<(Entity, &mut OrphanedPane)>,
-    mut active_display: ActiveDisplayMut,
+    windows: Query<(&Window, Entity)>,
+    mut displays: Query<&mut Display>,
     mut commands: Commands,
 ) {
-    let active_display_id = active_display.id();
-
-    for (entity, orphan_pane) in orphaned_spaces {
+    for (pane_entity, orphan_pane) in orphaned_spaces {
         debug!(
             "{}: Checking orphaned pane {}",
             function_name!(),
             orphan_pane.id
         );
-        for (space_id, pane) in &mut active_display.display().spaces {
-            if *space_id == orphan_pane.id {
-                debug!(
-                    "{}: Re-inserting orphaned pane {} into display {}",
-                    function_name!(),
-                    orphan_pane.id,
-                    active_display_id
-                );
+        for mut display in &mut displays {
+            let display_id = display.id();
+            let bounds = display.bounds;
 
-                for window_entity in orphan_pane.pane.all_windows() {
-                    // TODO: check for clashing windows.
-                    pane.append(window_entity);
+            for (space_id, pane) in &mut display.spaces {
+                if *space_id == orphan_pane.id {
+                    debug!(
+                        "{}: Re-inserting orphaned pane {} into display {}",
+                        function_name!(),
+                        orphan_pane.id,
+                        display_id
+                    );
+
+                    for entity in orphan_pane.pane.all_windows() {
+                        // TODO: check for clashing windows.
+                        pane.append(entity);
+
+                        // Update window ratios on the new display.
+                        if let Ok((window, _)) = windows.get(entity) {
+                            let width = bounds.size.width * window.width_ratio();
+                            let height = bounds.size.height;
+                            debug!(
+                                "{}: refreshing frame for window {}: {:.0}x{:.0}",
+                                function_name!(),
+                                window.id(),
+                                width,
+                                height,
+                            );
+                            resize_entity(entity, width, height, display_id, &mut commands);
+                        }
+                    }
+
+                    commands.entity(pane_entity).despawn();
+                    break;
                 }
-
-                commands.entity(entity).despawn();
             }
         }
     }

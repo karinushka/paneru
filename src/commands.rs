@@ -55,6 +55,7 @@ pub enum Command {
     Window(Operation),
     /// A command to quit the window manager application.
     Quit,
+    PrintState,
 }
 
 /// Retrieves a window `Entity` in a specified direction relative to a `current_window_id` within a `WindowPane`.
@@ -513,6 +514,10 @@ pub fn process_command_trigger(
             } else {
                 Ok(())
             }
+        }
+        Command::PrintState => {
+            commands.trigger(WMEventTrigger(Event::PrintState));
+            Ok(())
         }
         Command::Quit => window_manager.quit(),
     };

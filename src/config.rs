@@ -132,6 +132,7 @@ pub fn parse_command(argv: &[&str]) -> Result<Command> {
     let cmd = *argv.first().unwrap_or(&empty);
 
     let out = match cmd {
+        "printstate" => Command::PrintState,
         "window" => Command::Window(parse_operation(&argv[1..])?),
         "quit" => Command::Quit,
         _ => {

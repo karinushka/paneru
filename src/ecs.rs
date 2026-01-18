@@ -91,7 +91,8 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::window_unmanaged_trigger)
         .add_observer(triggers::window_managed_trigger)
         .add_observer(triggers::spawn_window_trigger)
-        .add_observer(triggers::refresh_configuration_trigger);
+        .add_observer(triggers::refresh_configuration_trigger)
+        .add_observer(triggers::print_internal_state_trigger);
 }
 
 /// Marker component for the currently focused window.
@@ -144,7 +145,7 @@ pub struct ReshuffleAroundMarker;
 pub struct WindowSwipeMarker(pub f64);
 
 /// Enum component indicating the unmanaged state of a window.
-#[derive(Component)]
+#[derive(Component, Debug)]
 pub enum Unmanaged {
     /// The window is floating and not part of the tiling layout.
     Floating,

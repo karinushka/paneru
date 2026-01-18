@@ -136,8 +136,8 @@ pub enum Event {
     /// A command has been issued to the window manager.
     Command { command: Command },
 
-    /// Represents the total number of event types (for internal use, e.g., array sizing).
-    TypeCount,
+    /// Dump internal window manager state.
+    PrintState,
 }
 
 /// `EventSender` is a thin wrapper around a `std::sync::mpsc::Sender` for `Event`s.

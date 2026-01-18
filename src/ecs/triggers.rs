@@ -1,4 +1,4 @@
-use bevy::ecs::entity::Entity;
+use bevy::ecs::entity::{Entity, EntityHashSet};
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::lifecycle::{Add, Remove};
 use bevy::ecs::observer::On;
@@ -1267,5 +1267,70 @@ pub(super) fn refresh_configuration_trigger(
                 path.display()
             );
         });
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn print_internal_state_trigger(
+    trigger: On<WMEventTrigger>,
+    windows: Query<(Entity, &Window, Option<&Unmanaged>, Has<FocusedMarker>)>,
+    displays: Query<(&Display, Has<ActiveDisplayMarker>)>,
+) {
+    let Event::PrintState = &trigger.event().0 else {
+        return;
+    };
+
+    let print_window =
+        |(entity, window, unmanaged, focused): (Entity, &Window, Option<_>, bool)| {
+            format!(
+                "id: {}, {entity}, {:.0}:{:.0}, {:.0}x{:.0}{}{}, title: '{:.70}'",
+                window.id(),
+                window.frame().origin.x,
+                window.frame().origin.y,
+                window.frame().size.width,
+                window.frame().size.height,
+                if focused { ", focused" } else { "" },
+                unmanaged.map(|m| format!(", {m:?}")).unwrap_or_default(),
+                window.title().unwrap_or_default()
+            )
+        };
+
+    let mut seen = EntityHashSet::new();
+
+    for (display, active) in displays {
+        for (space, strip) in &display.spaces {
+            let windows = strip
+                .all_windows()
+                .iter()
+                .flat_map(|entity| windows.get(*entity))
+                .inspect(|entity| {
+                    seen.insert(entity.0);
+                })
+                .map(print_window)
+                .collect::<Vec<_>>();
+
+            debug!(
+                "{}: Display {}{}, workspace {space}:\n{}",
+                function_name!(),
+                display.id(),
+                if active { ", active" } else { "" },
+                windows.join("\n")
+            );
+        }
+    }
+
+    let remaining = windows
+        .iter()
+        .filter(|entity| !seen.contains(&entity.0))
+        .map(print_window)
+        .collect::<Vec<_>>();
+    debug!("{}: Remaining:\n{}", function_name!(), remaining.join("\n"));
+
+    if let Some(pool) = bevy::tasks::ComputeTaskPool::try_get() {
+        debug!(
+            "{}: Running with {} threads",
+            function_name!(),
+            pool.thread_num()
+        );
     }
 }

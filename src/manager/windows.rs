@@ -48,7 +48,7 @@ pub trait WindowApi: Send + Sync {
     fn is_eligible(&self) -> bool;
     fn reposition(&mut self, x: f64, y: f64, display_bounds: &CGRect);
     fn resize(&mut self, width: f64, height: f64, display_bounds: &CGRect);
-    fn update_frame(&mut self, display_bounds: Option<&CGRect>) -> Result<()>;
+    fn update_frame(&mut self, display_bounds: &CGRect) -> Result<()>;
     fn focus_without_raise(&self, currently_focused: &Window);
     fn focus_with_raise(&self);
 
@@ -486,7 +486,7 @@ impl WindowApi for WindowOS {
     /// # Returns
     ///
     /// `Ok(())` if the frame is updated successfully, otherwise `Err(Error)`.
-    fn update_frame(&mut self, display_bounds: Option<&CGRect>) -> Result<()> {
+    fn update_frame(&mut self, display_bounds: &CGRect) -> Result<()> {
         let window_ref = self.ax_element.as_ptr();
 
         let position = unsafe {
@@ -525,11 +525,7 @@ impl WindowApi for WindowOS {
             frame.size.width += 2.0 * self.horizontal_padding;
             frame.size.height += 2.0 * self.vertical_padding;
             self.frame = frame;
-            self.width_ratio = if let Some(display_bounds) = display_bounds {
-                frame.size.width / display_bounds.size.width
-            } else {
-                0.5
-            };
+            self.width_ratio = frame.size.width / display_bounds.size.width;
         }
         Ok(())
     }

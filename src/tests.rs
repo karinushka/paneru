@@ -364,7 +364,7 @@ impl WindowApi for MockWindow {
     }
 
     /// Always returns `Ok(())` for updating the frame.
-    fn update_frame(&mut self, _display_bounds: Option<&CGRect>) -> Result<()> {
+    fn update_frame(&mut self, _display_bounds: &CGRect) -> Result<()> {
         println!("{}:", function_name!());
         Ok(())
     }

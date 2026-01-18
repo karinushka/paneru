@@ -947,7 +947,7 @@ pub(super) fn window_resized_trigger(
     else {
         return;
     };
-    _ = window.update_frame(Some(&active_display.bounds()));
+    _ = window.update_frame(&active_display.bounds());
     reshuffle_around(entity, &mut commands);
 }
 
@@ -1157,7 +1157,7 @@ fn apply_window_properties(
     }
 
     _ = window
-        .update_frame(Some(&active_display.bounds()))
+        .update_frame(&active_display.bounds())
         .inspect_err(|err| error!("{}: {err}", function_name!()));
 
     // Insert the window into the internal Bevy state.

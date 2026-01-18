@@ -269,7 +269,7 @@ fn full_width_window(
     commands: &mut Commands,
     config: &Config,
 ) {
-    let Ok(mut window) = windows.get_mut(focused_entity) else {
+    let Ok(window) = windows.get(focused_entity) else {
         return;
     };
 
@@ -279,20 +279,18 @@ fn full_width_window(
 
     let is_full_width = (window.frame().size.width - display_width).abs() < 1.0;
 
-    let (width, width_ratio, x) = if is_full_width {
+    let (width, x) = if is_full_width {
         let width_ratios = preset_column_widths(config);
         let ratio = *width_ratios.first().unwrap_or(&0.5);
         let w = ratio * display_width;
         let x_pos = (display_width - w).min(window.frame().origin.x);
-        (w, ratio, x_pos)
+        (w, x_pos)
     } else {
-        (display_width, 1.0, 0.0)
+        (display_width, 0.0)
     };
 
     reposition_entity(focused_entity, x, y, active_display.id(), commands);
     resize_entity(focused_entity, width, height, active_display.id(), commands);
-
-    window.width_ratio(width_ratio);
 }
 
 /// Toggles the managed state of the focused window.

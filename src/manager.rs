@@ -431,7 +431,7 @@ impl WindowManagerApi for WindowManagerOS {
                 if pane.index_of(window_entity).is_err() {
                     pane.append(window_entity);
                     if let Ok((mut window, _, _)) = windows.get_mut(window_entity) {
-                        _ = window.update_frame(Some(&display_bounds));
+                        _ = window.update_frame(&display_bounds);
                     }
                 }
             }

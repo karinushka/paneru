@@ -107,7 +107,7 @@ pub trait WindowApi: Send + Sync {
         CGRect::new(origin, size)
     }
 
-    fn width_ratio(&mut self, width_ratio: f64);
+    fn width_ratio(&self) -> f64;
     fn pid(&self) -> Result<Pid>;
     fn set_psn(&mut self, psn: ProcessSerialNumber);
     fn set_eligible(&mut self, eligible: bool);
@@ -584,8 +584,8 @@ impl WindowApi for WindowOS {
         unsafe { AXUIElementPerformAction(element_ref, &action) };
     }
 
-    fn width_ratio(&mut self, width_ratio: f64) {
-        self.width_ratio = width_ratio;
+    fn width_ratio(&self) -> f64 {
+        self.width_ratio
     }
 
     fn pid(&self) -> Result<Pid> {

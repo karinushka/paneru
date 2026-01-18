@@ -394,8 +394,9 @@ impl WindowApi for MockWindow {
     }
 
     /// Does nothing for width ratio.
-    fn width_ratio(&mut self, _width_ratio: f64) {
+    fn width_ratio(&self) -> f64 {
         println!("{}:", function_name!());
+        0.5
     }
 
     /// Always returns `Ok(0)` for PID.

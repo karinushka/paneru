@@ -77,28 +77,54 @@ impl CommandReader {
     fn runner(&mut self) -> Result<()> {
         _ = fs::remove_file(CommandReader::SOCKET_PATH);
         let listener = UnixListener::bind(CommandReader::SOCKET_PATH)?;
-        for mut stream in listener.incoming().flatten() {
+
+        for stream in listener.incoming() {
+            let Ok(mut stream) =
+                stream.inspect_err(|err| error!("{}: reading stream {err}", function_name!()))
+            else {
+                continue;
+            };
             let mut buffer = [0u8; 4];
-            if 4 != stream.read(&mut buffer)? {
-                error!("{}: Did not read size header.", function_name!());
-                break;
+
+            if !full_read(&mut stream, buffer.len(), &mut buffer) {
+                continue;
             }
             let size = u32::from_le_bytes(buffer) as usize;
             let mut buffer = vec![0u8; size];
-            loop {
-                if size != stream.read(&mut buffer)? {
-                    break;
-                }
-                let argv = buffer
-                    .split(|c| *c == 0)
-                    .filter(|s| !s.is_empty())
-                    .map(|s| String::from_utf8_lossy(s).to_string())
-                    .collect::<Vec<_>>();
-                let argv_ref = argv.iter().map(String::as_str).collect::<Vec<_>>();
-                let command = parse_command(&argv_ref)?;
-                self.events.send(Event::Command { command })?;
+
+            if !full_read(&mut stream, buffer.len(), &mut buffer) {
+                continue;
+            }
+            let argv = buffer
+                .split(|c| *c == 0)
+                .filter(|s| !s.is_empty())
+                .map(|s| String::from_utf8_lossy(s).to_string())
+                .collect::<Vec<_>>();
+            let argv_ref = argv.iter().map(String::as_str).collect::<Vec<_>>();
+
+            if let Ok(command) = parse_command(&argv_ref)
+                .inspect_err(|err| error!("{}: parsing command: {err}", function_name!()))
+            {
+                _ = self
+                    .events
+                    .send(Event::Command { command })
+                    .inspect_err(|err| {
+                        error!("{}: sending command: {err}", function_name!());
+                    });
             }
         }
         Ok(())
+    }
+}
+
+fn full_read(stream: &mut UnixStream, expected: usize, buffer: &mut [u8]) -> bool {
+    if let Ok(count) = stream.read(buffer).inspect_err(|err| {
+        error!("{}: {err}", function_name!());
+    }) && count == expected
+    {
+        true
+    } else {
+        error!("{}: short read, expected {expected}.", function_name!());
+        false
     }
 }

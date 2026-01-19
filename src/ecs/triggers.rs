@@ -1121,10 +1121,15 @@ fn apply_window_properties(
         .unwrap_or(false);
     let wanted_insertion = properties.iter().find_map(|props| props.index);
 
-    if let Some(padding) = properties.iter().find_map(|props| props.vertical_padding) {
+    // Do not add padding to floating windows.
+    if let Some(padding) = properties.iter().find_map(|props| props.vertical_padding)
+        && !floating
+    {
         window.set_padding(WindowPadding::Vertical(padding.clamp(0, 50)));
     }
-    if let Some(padding) = properties.iter().find_map(|props| props.horizontal_padding) {
+    if let Some(padding) = properties.iter().find_map(|props| props.horizontal_padding)
+        && !floating
+    {
         window.set_padding(WindowPadding::Horizontal(padding.clamp(0, 50)));
     }
 

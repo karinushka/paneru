@@ -12,7 +12,6 @@ use log::{debug, trace};
 use objc2_core_foundation::{
     CFBoolean, CFEqual, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize,
 };
-use objc2_core_graphics::CGRectEqualToRect;
 use std::ops::{Deref, DerefMut};
 use std::ptr::null_mut;
 use std::thread;
@@ -521,12 +520,12 @@ impl WindowApi for WindowOS {
                 NonNull::from(&mut frame.size).as_ptr().cast(),
             );
         }
-        if !CGRectEqualToRect(frame, self.frame) {
-            frame.size.width += 2.0 * self.horizontal_padding;
-            frame.size.height += 2.0 * self.vertical_padding;
-            self.frame = frame;
-            self.width_ratio = frame.size.width / display_bounds.size.width;
-        }
+        frame.size.width += 2.0 * self.horizontal_padding;
+        frame.size.height += 2.0 * self.vertical_padding;
+        frame.origin.x -= self.horizontal_padding;
+        frame.origin.y -= self.vertical_padding;
+        self.frame = frame;
+        self.width_ratio = frame.size.width / display_bounds.size.width;
         Ok(())
     }
 

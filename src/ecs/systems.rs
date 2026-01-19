@@ -1108,6 +1108,31 @@ pub(super) fn pump_events(
     }
 }
 
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn window_update_frame(
+    mut messages: MessageReader<Event>,
+    mut windows: Query<(&mut Window, Entity)>,
+    active_display: ActiveDisplay,
+    mut commands: Commands,
+) {
+    for event in messages.read() {
+        match event {
+            Event::WindowMoved { window_id } | Event::WindowResized { window_id } => {
+                if let Some((mut window, entity)) = windows
+                    .iter_mut()
+                    .find(|(window, _)| window.id() == *window_id)
+                {
+                    _ = window.update_frame(&active_display.bounds());
+                    if matches!(event, Event::WindowResized { window_id: _ }) {
+                        reshuffle_around(entity, &mut commands);
+                    }
+                }
+            }
+            _ => (),
+        }
+    }
+}
+
 #[test]
 fn test_binpack() {
     const MIN_HEIGHT: f64 = 100.0;

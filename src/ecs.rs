@@ -52,6 +52,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::timeout_ticker,
             systems::retry_stray_focus,
             systems::find_orphaned_spaces,
+            systems::window_update_frame,
         ),
     );
     app.add_systems(
@@ -86,7 +87,6 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::mission_control_trigger)
         .add_observer(triggers::application_event_trigger)
         .add_observer(triggers::dispatch_application_messages)
-        .add_observer(triggers::window_resized_trigger)
         .add_observer(triggers::window_destroyed_trigger)
         .add_observer(triggers::window_unmanaged_trigger)
         .add_observer(triggers::window_managed_trigger)

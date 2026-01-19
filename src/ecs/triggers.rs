@@ -923,34 +923,6 @@ pub(super) fn window_managed_trigger(
     reshuffle_around(entity, &mut commands);
 }
 
-/// Handles the event when a window is resized. It updates the window's frame and reshuffles windows.
-///
-/// # Arguments
-///
-/// * `trigger` - The Bevy event trigger containing the window resized event.
-/// * `windows` - A mutable query for all `Window` components.
-/// * `displays` - A query for the active display.
-/// * `commands` - Bevy commands to trigger events.
-#[allow(clippy::needless_pass_by_value)]
-pub(super) fn window_resized_trigger(
-    trigger: On<WMEventTrigger>,
-    mut windows: Query<(&mut Window, Entity)>,
-    active_display: ActiveDisplay,
-    mut commands: Commands,
-) {
-    let Event::WindowResized { window_id } = trigger.event().0 else {
-        return;
-    };
-    let Some((mut window, entity)) = windows
-        .iter_mut()
-        .find(|(window, _)| window.id() == window_id)
-    else {
-        return;
-    };
-    _ = window.update_frame(&active_display.bounds());
-    reshuffle_around(entity, &mut commands);
-}
-
 /// Handles the event when a window is destroyed. It removes the window from the ECS world and relevant displays.
 ///
 /// # Arguments

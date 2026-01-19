@@ -16,7 +16,9 @@ pedantic = "warn"
 
 [dependencies]
 accessibility-sys = "0.2.0"
-bevy = { version = "0.17.3", default-features = false }
+bevy = { version = "0.17.3", default-features = false, features = [
+  "multi_threaded",
+] }
 chrono = "0.4.42"
 clap = { version = "4.5.54", features = ["cargo", "derive"] }
 embed_plist = "1.2.2"

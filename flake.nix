@@ -116,6 +116,8 @@
                 ProcessType = "Interactive";
                 EnvironmentVariables = {
                   NO_COLOR = "1";
+                  XDG_CONFIG_HOME =
+                    if config.xdg.enable then config.xdg.configHome else "${config.home.homeDirectory}/.config";
                 };
                 RunAtLoad = true;
                 StandardOutPath = "/tmp/paneru.log";

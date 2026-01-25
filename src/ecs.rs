@@ -6,6 +6,7 @@ use bevy::ecs::resource::Resource;
 use bevy::ecs::system::Commands;
 use bevy::prelude::Event as BevyEvent;
 use bevy::time::Timer;
+use bevy::time::common_conditions::on_timer;
 use bevy::{
     app::Update,
     ecs::{
@@ -37,6 +38,7 @@ mod triggers;
 ///
 /// * `app` - The Bevy application to register the systems with.
 pub fn register_systems(app: &mut bevy::app::App) {
+    const DISPLAY_CHANGE_CHECK_FREQ_MS: u64 = 1000;
     app.add_systems(
         PreUpdate,
         (systems::dispatch_toplevel_triggers, systems::pump_events),
@@ -61,7 +63,10 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::display_changes_watcher,
             systems::workspace_change_watcher,
         )
-            .run_if(resource_equals(PollForNotifications(true))),
+            .run_if(resource_equals(PollForNotifications(true)))
+            .run_if(on_timer(Duration::from_millis(
+                DISPLAY_CHANGE_CHECK_FREQ_MS,
+            ))),
     );
     app.add_systems(
         PostUpdate,

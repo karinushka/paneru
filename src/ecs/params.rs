@@ -6,7 +6,7 @@ use bevy::{
         system::{Local, Query, Res, ResMut, Single, SystemParam},
         world::Mut,
     },
-    time::{Time, Timer, TimerMode},
+    time::Time,
 };
 use objc2_core_foundation::CGRect;
 use objc2_core_graphics::CGDirectDisplayID;
@@ -127,36 +127,6 @@ impl Configuration<'_> {
     /// `true` if Mission Control is active, `false` otherwise.
     pub fn mission_control_active(&self) -> bool {
         self.mission_control_active.0
-    }
-}
-
-/// A Bevy `SystemParam` for creating throttled systems.
-/// It uses a `Timer` to ensure that a system runs only after a specified duration has passed.
-#[derive(SystemParam)]
-pub struct ThrottledSystem<'w, 's> {
-    /// The `Time` resource for tracking elapsed time.
-    time: Res<'w, Time>,
-    /// A `Local` timer instance specific to this system parameter.
-    timer: Local<'s, Timer>,
-}
-
-impl ThrottledSystem<'_, '_> {
-    /// Returns `true` if the system should be throttled (i.e., has run recently and the duration has not elapsed).
-    /// The timer is initialized or reset based on the provided `duration`.
-    ///
-    /// # Arguments
-    ///
-    /// * `duration` - The `Duration` to throttle the system for.
-    ///
-    /// # Returns
-    ///
-    /// `true` if the system is throttled, `false` otherwise (meaning it's ready to run).
-    pub fn throttled(&mut self, duration: Duration) -> bool {
-        if self.timer.duration().as_secs() == 0 {
-            *self.timer = Timer::from_seconds(duration.as_secs_f32(), TimerMode::Repeating);
-        }
-        self.timer.tick(self.time.delta());
-        !self.timer.just_finished()
     }
 }
 

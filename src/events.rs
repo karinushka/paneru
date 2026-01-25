@@ -203,12 +203,9 @@ impl EventHandler {
             .insert_resource(FocusFollowsMouse(None))
             .insert_resource(PollForNotifications(true))
             .add_observer(process_command_trigger)
-            .add_systems(Startup, (gather_displays, process_setup).chain());
-
-        app.insert_non_send_resource(watcher);
-
-        register_triggers(&mut app);
-        register_systems(&mut app);
+            .add_systems(Startup, (gather_displays, process_setup).chain())
+            .insert_non_send_resource(watcher)
+            .add_plugins((register_triggers, register_systems));
 
         let mut platform_callbacks = PlatformCallbacks::new(sender)?;
         platform_callbacks.setup_handlers()?;

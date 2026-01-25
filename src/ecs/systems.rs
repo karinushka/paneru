@@ -21,7 +21,7 @@ use super::{
     StrayFocusEvent, Timeout, Unmanaged, WMEventTrigger,
 };
 use crate::config::Config;
-use crate::ecs::params::{ActiveDisplay, Configuration, DebouncedSystem, ThrottledSystem};
+use crate::ecs::params::{ActiveDisplay, Configuration, DebouncedSystem};
 use crate::ecs::{
     ReshuffleAroundMarker, WindowSwipeMarker, reposition_entity, reshuffle_around, resize_entity,
 };
@@ -533,14 +533,8 @@ pub(super) fn find_orphaned_spaces(
 pub(super) fn display_changes_watcher(
     displays: Query<(&Display, Has<ActiveDisplayMarker>)>,
     window_manager: Res<WindowManager>,
-    mut throttle: ThrottledSystem,
     mut commands: Commands,
 ) {
-    const DISPLAY_CHANGE_CHECK_FREQ_MS: u64 = 1000;
-    if throttle.throttled(Duration::from_millis(DISPLAY_CHANGE_CHECK_FREQ_MS)) {
-        return;
-    }
-
     let Ok(current_display_id) = window_manager.active_display_id() else {
         return;
     };
@@ -599,18 +593,11 @@ pub(super) fn display_changes_watcher(
 /// * `commands` - Bevy commands to trigger `WMEventTrigger` events for space changes.
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn workspace_change_watcher(
-    // _: Single<&Window, With<FocusedMarker>>, // Will only run if there's a focused window.
     active_display: ActiveDisplay,
     window_manager: Res<WindowManager>,
-    mut throttle: ThrottledSystem,
     mut current_space: Local<u64>,
     mut commands: Commands,
 ) {
-    const WORKSPACE_CHANGE_FREQ_MS: u64 = 1000;
-    if throttle.throttled(Duration::from_millis(WORKSPACE_CHANGE_FREQ_MS)) {
-        return;
-    }
-
     let Ok(space_id) = window_manager
         .0
         .active_display_space(active_display.id())

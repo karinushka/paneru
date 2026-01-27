@@ -320,7 +320,7 @@ impl WindowApi for MockWindow {
     }
 
     /// Always returns `Ok(true)` for valid role.
-    fn valid_role(&self) -> Result<bool> {
+    fn child_role(&self) -> Result<bool> {
         println!("{}:", function_name!());
         Ok(true)
     }

@@ -88,34 +88,24 @@ pub(super) fn mouse_moved_trigger(
         return;
     }
 
-    let child_windows = window_manager
-        .0
+    let child_window = window_manager
         .get_associated_windows(window_id)
-        .iter()
-        .filter_map(|child_wid| {
-            let child_window = windows.iter().find(|window| window.id() == *child_wid);
-            if child_window.is_none() {
-                warn!(
-                    "{}: Unable to find child window {child_wid}.",
-                    function_name!()
-                );
-            }
-            child_window
-        })
-        .collect::<Vec<_>>();
-
-    let valid_role = child_windows.into_iter().find(|window| {
-        window
-            .valid_role()
-            .inspect_err(|err| {
-                warn!(
-                    "{}: Can not get role for children of {window_id}: {err}",
-                    function_name!(),
-                );
-            })
-            .is_ok()
-    });
-    let window = valid_role.unwrap_or(window);
+        .into_iter()
+        .find_map(|child_wid| {
+            windows
+                .iter()
+                .find(|window| window.id() == child_wid)
+                .and_then(|window| {
+                    window
+                        .child_role()
+                        .inspect_err(|err| {
+                            warn!("{}: getting role {window_id}: {err}", function_name!());
+                        })
+                        .is_ok_and(|child| child)
+                        .then_some(window)
+                })
+        });
+    let window = child_window.unwrap_or(window);
 
     // Do not reshuffle windows due to moved mouse focus.
     config.set_skip_reshuffle(true);
@@ -630,9 +620,8 @@ pub(super) fn center_mouse_trigger(
         && !config.skip_reshuffle()
         && config.ffm_flag().is_none_or(|id| id != window.id())
     {
-        window_manager
-            .0
-            .center_mouse(window, &active_display.bounds());
+        debug!("{}: centering on {}.", function_name!(), window.id());
+        window_manager.center_mouse(window, &active_display.bounds());
     }
 }
 

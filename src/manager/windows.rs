@@ -40,7 +40,7 @@ pub trait WindowApi: Send + Sync {
     fn next_size_ratio(&self, size_ratios: &[f64]) -> f64;
     fn element(&self) -> CFRetained<AXUIWrapper>;
     fn title(&self) -> Result<String>;
-    fn valid_role(&self) -> Result<bool>;
+    fn child_role(&self) -> Result<bool>;
     fn role(&self) -> Result<String>;
     fn subrole(&self) -> Result<String>;
     fn is_root(&self) -> bool;
@@ -350,8 +350,8 @@ impl WindowApi for WindowOS {
         Ok(title.to_string())
     }
 
-    /// Returns true if the window has a valid role.
-    fn valid_role(&self) -> Result<bool> {
+    /// Returns true if the window has a child role.
+    fn child_role(&self) -> Result<bool> {
         let role = self.role()?;
         Ok(["AXSheet", "AXDrawer"]
             .iter()

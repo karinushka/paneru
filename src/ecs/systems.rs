@@ -18,7 +18,7 @@ use stdext::function_name;
 use super::{
     ActiveDisplayMarker, BProcess, CommandTrigger, ExistingMarker, FocusedMarker, FreshMarker,
     OrphanedPane, PollForNotifications, RepositionMarker, ResizeMarker, SpawnWindowTrigger,
-    StrayFocusEvent, Timeout, Unmanaged, WMEventTrigger,
+    Timeout, Unmanaged, WMEventTrigger,
 };
 use crate::config::Config;
 use crate::ecs::params::{ActiveDisplay, Configuration, DebouncedSystem};
@@ -398,34 +398,6 @@ pub(super) fn timeout_ticker(
                 timeout.timer.elapsed().as_secs_f32()
             );
             timeout.timer.tick(clock.delta());
-        }
-    }
-}
-
-/// A Bevy system that retries focusing a window if a `StrayFocusEvent` arrived before the window was created.
-/// If the window is now present in the `World`, the `WindowFocused` event is re-queued, and the `StrayFocusEvent` entity is despawned.
-///
-/// # Arguments
-///
-/// * `focus_events` - A `Populated` query for `(Entity, &StrayFocusEvent)` components.
-/// * `windows` - A query for all `Window` components, used to check for the existence of the target window.
-/// * `messages` - A `MessageWriter` for sending new `Event` messages.
-/// * `commands` - Bevy commands to despawn entities.
-pub(super) fn retry_stray_focus(
-    focus_events: Populated<(Entity, &StrayFocusEvent)>,
-    windows: Query<&Window>,
-    mut messages: MessageWriter<Event>,
-    mut commands: Commands,
-) {
-    for (timeout_entity, stray_focus) in focus_events {
-        let window_id = stray_focus.0;
-        if windows.iter().any(|window| window.id() == window_id) {
-            debug!(
-                "{}: Re-queueing lost focus event for window id {window_id}.",
-                function_name!()
-            );
-            messages.write(Event::WindowFocused { window_id });
-            commands.entity(timeout_entity).despawn();
         }
     }
 }

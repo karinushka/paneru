@@ -52,7 +52,6 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::add_launched_application,
             systems::fresh_marker_cleanup,
             systems::timeout_ticker,
-            systems::retry_stray_focus,
             systems::find_orphaned_spaces,
             systems::window_update_frame,
         ),
@@ -97,7 +96,8 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::window_managed_trigger)
         .add_observer(triggers::spawn_window_trigger)
         .add_observer(triggers::refresh_configuration_trigger)
-        .add_observer(triggers::print_internal_state_trigger);
+        .add_observer(triggers::print_internal_state_trigger)
+        .add_observer(triggers::stray_focus_observer);
 }
 
 /// Marker component for the currently focused window.

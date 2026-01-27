@@ -1,9 +1,10 @@
 use bevy::ecs::entity::{Entity, EntityHashSet};
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::lifecycle::{Add, Remove};
+use bevy::ecs::message::MessageWriter;
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Has, With, Without};
-use bevy::ecs::system::{Commands, NonSendMut, Query, Res, ResMut, Single};
+use bevy::ecs::system::{Commands, NonSendMut, Populated, Query, Res, ResMut, Single};
 use log::{debug, error, info, trace, warn};
 use notify::event::{DataChange, MetadataKind, ModifyKind};
 use notify::{EventKind, Watcher};
@@ -1298,4 +1299,30 @@ pub(super) fn print_internal_state_trigger(
             pool.thread_num()
         );
     }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn stray_focus_observer(
+    trigger: On<Add, Window>,
+    focus_events: Populated<(Entity, &StrayFocusEvent)>,
+    windows: Query<&Window>,
+    mut messages: MessageWriter<Event>,
+    mut commands: Commands,
+) {
+    let entity = trigger.event().entity;
+    let Ok(window_id) = windows.get(entity).map(|window| window.id()) else {
+        return;
+    };
+
+    focus_events
+        .iter()
+        .filter(|(_, stray_focus)| stray_focus.0 == window_id)
+        .for_each(|(timeout_entity, _)| {
+            debug!(
+                "{}: Re-queueing lost focus event for window id {window_id}.",
+                function_name!()
+            );
+            messages.write(Event::WindowFocused { window_id });
+            commands.entity(timeout_entity).despawn();
+        });
 }

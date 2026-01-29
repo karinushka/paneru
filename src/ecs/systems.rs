@@ -999,11 +999,31 @@ fn reposition_stack(
         return;
     };
 
-    let mut y_pos = 0f64;
+    let display_width = active_display.bounds().size.width;
+    let other_display = active_display.other().next();
+    let display_above = other_display.is_some_and(|other_display| {
+        active_display.bounds().origin.x < other_display.bounds.origin.x
+    });
+    // If there are multiple displays and the other display is located above, there is a chance
+    // that MacOS will bump the windows over to another display when moving them around.
+    // To avoid that we nudge the off-screen windows slightly down.
+    let visible_window = !display_above
+        || upper_left + width > WINDOW_HIDDEN_THRESHOLD
+            && upper_left < display_width - WINDOW_HIDDEN_THRESHOLD;
+
+    let mut y_pos = if visible_window {
+        0.0
+    } else {
+        // NOTE: If the window is "off screen", move it down slightly
+        // to avoid MacOS moving it over to another display
+        display_height / 4.0
+    };
     for (entity, window_height) in entities.into_iter().zip(heights) {
         reposition_entity(entity, upper_left, y_pos, active_display.id(), commands);
         resize_entity(entity, width, window_height, active_display.id(), commands);
-        y_pos += window_height;
+        if visible_window {
+            y_pos += window_height;
+        }
     }
 }
 

@@ -520,6 +520,9 @@ impl WindowApi for WindowOS {
                 NonNull::from(&mut frame.size).as_ptr().cast(),
             );
         }
+        frame.origin.x -= display_bounds.origin.x;
+        frame.origin.y -= display_bounds.origin.y;
+
         frame.size.width += 2.0 * self.horizontal_padding;
         frame.size.height += 2.0 * self.vertical_padding;
         frame.origin.x -= self.horizontal_padding;

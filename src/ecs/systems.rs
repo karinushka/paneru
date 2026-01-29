@@ -1122,6 +1122,15 @@ pub(super) fn window_update_frame(
                     .iter_mut()
                     .find(|(window, _)| window.id() == *window_id)
                 {
+                    if active_display
+                        .active_panel()
+                        .and_then(|panel| panel.index_of(entity))
+                        .is_err()
+                    {
+                        // Do not refresh size of windows on other displays or workspaces.
+                        continue;
+                    }
+
                     _ = window.update_frame(&active_display.bounds());
                     if matches!(event, Event::WindowResized { window_id: _ }) {
                         reshuffle_around(entity, &mut commands);

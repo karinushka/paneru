@@ -838,19 +838,8 @@ pub(super) fn reshuffle_around_window(
     active_display: ActiveDisplay,
     marker: Populated<Entity, With<ReshuffleAroundMarker>>,
     windows: Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
-    window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
-    if window_manager
-        .0
-        .active_display_id()
-        .is_ok_and(|id| active_display.id() != id)
-    {
-        debug!("{}: detected display change.", function_name!());
-        commands.trigger(WMEventTrigger(Event::DisplayChanged));
-        return;
-    }
-
     let display_bounds = active_display.bounds();
     let Ok(active_panel) = active_display.active_panel() else {
         return;

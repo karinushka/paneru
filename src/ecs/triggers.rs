@@ -18,10 +18,12 @@ use super::{
 use crate::config::{Config, WindowParams};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration};
 use crate::ecs::{WindowSwipeMarker, reshuffle_around};
+use crate::errors::Result;
 use crate::events::Event;
 use crate::manager::{
     Application, Display, Process, Window, WindowManager, WindowPadding, WindowPane,
 };
+use crate::platform::WinID;
 use crate::util::symlink_target;
 
 /// Handles mouse moved events.
@@ -229,18 +231,28 @@ pub(super) fn mouse_dragged_trigger(
     }
 }
 
+fn windows_not_in_pane<F: Fn(WinID) -> Option<Entity>>(
+    workspace_id: u64,
+    find_window: F,
+    panel: &WindowPane,
+    window_manager: &WindowManager,
+) -> Result<Vec<Entity>> {
+    let moved_windows = window_manager
+        .windows_in_workspace(workspace_id)
+        .map(|ids| {
+            ids.into_iter()
+                .filter_map(find_window)
+                // Filter out the ones already in this workspace.
+                .filter(|entity| panel.index_of(*entity).is_err())
+                .collect::<Vec<_>>()
+        })?;
+    Ok(moved_windows)
+}
+
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 pub(super) fn workspace_change_trigger(
     trigger: On<WMEventTrigger>,
-    focused_window: Single<
-        (
-            &Window,
-            Entity,
-            Option<&WindowDraggedMarker>,
-            Has<Unmanaged>,
-        ),
-        With<FocusedMarker>,
-    >,
+    windows: Query<(&Window, Entity), Without<Unmanaged>>,
     mut active_display: ActiveDisplayMut,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
@@ -252,48 +264,46 @@ pub(super) fn workspace_change_trigger(
     let Ok(workspace_id) = window_manager.active_display_space(active_display.id()) else {
         return;
     };
-    let Ok(panel) = active_display.display().active_panel(workspace_id) else {
+    let Ok(panel) = active_display.active_panel() else {
         return;
     };
-    let (window, entity, drag_marker, unmanaged) = *focused_window;
-    if unmanaged || panel.index_of(entity).is_ok() {
-        // Window is either unmanaged or already in the current space.
-        return;
-    }
-    if drag_marker.is_some_and(|marker| marker.display_id != active_display.id()) {
-        // Moving across displays is handled in the display change trigger.
-        debug!(
-            "{}: drag marker has the same display_id {}",
-            function_name!(),
-            active_display.id()
-        );
-        return;
-    }
-
-    let windows = window_manager.windows_in_workspace(workspace_id);
-    if !windows.is_ok_and(|windows| {
-        windows
-            .into_iter()
-            .any(|window_id| window.id() == window_id)
-    }) {
-        // The focused window is not present in the current workspace, don't move it.
-        return;
-    }
     debug!(
-        "{}: Window {} moved to workspace {workspace_id}.",
-        function_name!(),
-        window.id(),
+        "{}: workspace {workspace_id}, pane {panel}",
+        function_name!()
     );
 
-    active_display
-        .other()
-        .for_each(|mut display| display.remove_window(entity));
-    active_display.display().remove_window(entity);
-    if let Ok(panel) = active_display.active_panel() {
-        panel.append(entity);
-    }
+    let find_window = |window_id| {
+        windows
+            .into_iter()
+            .find_map(|(window, entity)| (window.id() == window_id).then_some(entity))
+    };
+    let Ok(moved_windows) = windows_not_in_pane(workspace_id, find_window, panel, &window_manager)
+        .inspect_err(|err| {
+            warn!(
+                "{}: unable to get windows in the current workspace: {err}",
+                function_name!()
+            );
+        })
+    else {
+        return;
+    };
 
-    reshuffle_around(entity, &mut commands);
+    for entity in moved_windows {
+        debug!(
+            "{}: Window {entity} moved to workspace {workspace_id}.",
+            function_name!()
+        );
+
+        active_display
+            .other()
+            .for_each(|mut display| display.remove_window(entity));
+        active_display.display().remove_window(entity);
+        if let Ok(panel) = active_display.active_panel() {
+            panel.append(entity);
+        }
+
+        reshuffle_around(entity, &mut commands);
+    }
 }
 
 /// Handles display change events.
@@ -349,69 +359,58 @@ pub(super) fn display_change_trigger(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn active_display_trigger(
     trigger: On<Add, ActiveDisplayMarker>,
+    windows: Query<(&Window, Entity), Without<Unmanaged>>,
     mut displays: Query<&mut Display>,
-    drag_marker: Single<(Entity, &WindowDraggedMarker)>,
-    windows: Query<&Window, Without<Unmanaged>>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
-    let Ok(mut active_display) = displays.get_mut(trigger.event().entity) else {
-        error!("{}: Can not find active display.", function_name!());
+    let Ok(active_display) = displays.get(trigger.entity) else {
         return;
     };
-    let active_display_id = active_display.id();
-    let Ok(workspace_id) = window_manager.active_display_space(active_display_id) else {
+    let Ok(workspace_id) = window_manager.active_display_space(active_display.id()) else {
         return;
     };
     let Ok(panel) = active_display.active_panel(workspace_id) else {
         return;
     };
     debug!(
-        "{}: Display ({active_display_id}) changed, panel {panel}.",
+        "{}: workspace {workspace_id}, pane {panel}",
         function_name!()
     );
 
-    // This function will not run unless a WindowDraggedMarker exists.
-    let WindowDraggedMarker { entity, display_id } = *drag_marker.1;
-    if display_id == active_display_id {
-        // Still in the same display, do not relocate.
-        return;
-    }
-    let Ok(window) = windows.get(entity) else {
+    let find_window = |window_id| {
+        windows
+            .into_iter()
+            .find_map(|(window, entity)| (window.id() == window_id).then_some(entity))
+    };
+    let Ok(moved_windows) = windows_not_in_pane(workspace_id, find_window, panel, &window_manager)
+        .inspect_err(|err| {
+            warn!(
+                "{}: unable to get windows in the current workspace: {err}",
+                function_name!()
+            );
+        })
+    else {
         return;
     };
 
-    if panel.index_of(entity).is_ok() {
-        // Window is either unmanaged or already in the current space.
-        return;
-    }
-    let windows = window_manager.windows_in_workspace(workspace_id);
-    if !windows.is_ok_and(|windows| {
-        windows
-            .into_iter()
-            .any(|window_id| window.id() == window_id)
-    }) {
-        // The focused window is not present in the current workspace, don't move it.
-        return;
-    }
-    debug!(
-        "{}: Window {} dragged to display {active_display_id}.",
-        function_name!(),
-        window.id(),
-    );
+    for entity in moved_windows {
+        debug!(
+            "{}: Window {entity} moved to workspace {workspace_id}.",
+            function_name!()
+        );
 
-    // Insert the window into the current panel.
-    if let Ok(panel) = active_display.active_panel_mut(workspace_id) {
-        panel.append(entity);
-    }
-    // And then remove from all the other.
-    displays.iter_mut().for_each(|mut display| {
-        if display.id() != active_display_id {
-            display.remove_window(entity);
+        displays
+            .iter_mut()
+            .for_each(|mut display| display.remove_window(entity));
+
+        if let Ok(mut display) = displays.get_mut(trigger.entity)
+            && let Ok(panel) = display.active_panel_mut(workspace_id)
+        {
+            panel.append(entity);
+            reshuffle_around(entity, &mut commands);
         }
-    });
-
-    reshuffle_around(entity, &mut commands);
+    }
 }
 
 /// Handles display added events.

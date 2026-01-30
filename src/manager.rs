@@ -1,8 +1,6 @@
 use accessibility_sys::{AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt};
 use bevy::ecs::entity::Entity;
-use bevy::ecs::query::Has;
 use bevy::ecs::resource::Resource;
-use bevy::ecs::system::Query;
 use core::ptr::NonNull;
 use derive_more::{DerefMut, with_trait::Deref};
 use log::{debug, error, trace, warn};
@@ -21,7 +19,6 @@ use std::slice::from_raw_parts_mut;
 use std::time::Duration;
 use stdext::function_name;
 
-use crate::ecs::Unmanaged;
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
 use crate::platform::{ConnID, ProcessSerialNumber, WinID};
@@ -67,11 +64,7 @@ pub trait WindowManagerApi: Send + Sync {
     ///
     /// * `display` - A mutable reference to the `Display` to refresh.
     /// * `windows` - A mutable query for all `Window` components, their `Entity`, and `Has<Unmanaged>` status.
-    fn refresh_display(
-        &self,
-        display: &mut Display,
-        windows: &mut Query<(&mut Window, Entity, Has<Unmanaged>)>,
-    );
+    fn refresh_display(&self, display: &mut Display, windows: &[(&Window, Entity)]);
     /// Retrieves a list of window IDs associated with a parent window.
     ///
     /// # Arguments
@@ -334,11 +327,7 @@ impl WindowManagerOS {
     /// # Returns
     ///
     /// A `Vec<Entity>` containing the entities of eligible windows in the specified space.
-    fn refresh_windows_space(
-        &self,
-        space_id: u64,
-        windows: &Query<(&Window, Entity)>,
-    ) -> Vec<Entity> {
+    fn refresh_windows_space(&self, space_id: u64, windows: &[(&Window, Entity)]) -> Vec<Entity> {
         space_window_list_for_connection(self.main_cid, &[space_id], None, false)
             .inspect_err(|err| {
                 warn!(
@@ -350,6 +339,7 @@ impl WindowManagerOS {
             .into_iter()
             .filter_map(|window_id| windows.iter().find(|(window, _)| window.id() == window_id))
             .filter_map(|(window, entity)| window.is_eligible().then_some(entity))
+            .copied()
             .collect()
     }
 
@@ -384,21 +374,15 @@ impl WindowManagerApi for WindowManagerOS {
     ///
     /// * `display` - A mutable reference to the `Display` to refresh.
     /// * `windows` - A mutable query for all `Window` components, their `Entity`, and `Has<Unmanaged>` status.
-    fn refresh_display(
-        &self,
-        display: &mut Display,
-        windows: &mut Query<(&mut Window, Entity, Has<Unmanaged>)>,
-    ) {
+    fn refresh_display(&self, display: &mut Display, windows: &[(&Window, Entity)]) {
         debug!(
             "{}: Refreshing windows on display {}",
             function_name!(),
             display.id()
         );
 
-        let display_bounds = display.bounds;
         for (space_id, pane) in &mut display.spaces {
-            let mut lens = windows.transmute_lens::<(&Window, Entity)>();
-            let new_windows = self.refresh_windows_space(*space_id, &lens.query());
+            let new_windows = self.refresh_windows_space(*space_id, windows);
 
             // Preserve the order - do not flush existing windows.
             for window_entity in pane.all_windows() {
@@ -407,18 +391,8 @@ impl WindowManagerApi for WindowManagerOS {
                 }
             }
             for window_entity in new_windows {
-                if windows
-                    .get(window_entity)
-                    .is_ok_and(|(_, _, unmanaged)| unmanaged)
-                {
-                    // Window is not managed, do not insert it into the panel.
-                    continue;
-                }
                 if pane.index_of(window_entity).is_err() {
                     pane.append(window_entity);
-                    if let Ok((mut window, _, _)) = windows.get_mut(window_entity) {
-                        _ = window.update_frame(&display_bounds);
-                    }
                 }
             }
             debug!(

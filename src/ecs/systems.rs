@@ -21,7 +21,7 @@ use super::{
     Timeout, Unmanaged, WMEventTrigger,
 };
 use crate::config::Config;
-use crate::ecs::params::{ActiveDisplay, Configuration, DebouncedSystem};
+use crate::ecs::params::{ActiveDisplay, Configuration, DebouncedSystem, Windows};
 use crate::ecs::{
     ReshuffleAroundMarker, WindowSwipeMarker, reposition_entity, reshuffle_around, resize_entity,
 };
@@ -205,7 +205,7 @@ fn add_existing_application(
 /// * `commands` - Bevy commands to insert components like `FocusedMarker`.
 #[allow(clippy::needless_pass_by_value)]
 fn finish_setup(
-    mut windows: Query<(&mut Window, Entity, Has<Unmanaged>)>,
+    windows: Windows,
     displays: Query<(&mut Display, Has<ActiveDisplayMarker>)>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
@@ -217,7 +217,13 @@ fn finish_setup(
     );
 
     for (mut display, active) in displays {
-        window_manager.refresh_display(&mut display, &mut windows);
+        let windows = windows
+            .iter()
+            .filter_map(|(window, entity, _, unmanaged)| {
+                unmanaged.is_none().then_some((window, entity))
+            })
+            .collect::<Vec<_>>();
+        window_manager.refresh_display(&mut display, &windows);
 
         if active {
             let active_panel = window_manager
@@ -311,13 +317,14 @@ pub(super) fn add_launched_process(
 /// * `app_query` - A `Populated` query for `(&mut Application, Entity)` with `With<FreshMarker>`.
 /// * `windows` - A query for all `Window` components, used to check for existing windows.
 /// * `commands` - Bevy commands to spawn entities and manage components.
+#[allow(clippy::needless_pass_by_value)]
 pub(super) fn add_launched_application(
     app_query: Populated<(&mut Application, Entity), With<FreshMarker>>,
-    windows: Query<&Window>,
+    windows: Windows,
     mut commands: Commands,
 ) {
     // TODO: maybe refactor this with add_existing_application_windows()
-    let find_window = |window_id| windows.iter().find(|window| window.id() == window_id);
+    let find_window = |window_id| windows.find(window_id);
 
     for (app, entity) in app_query {
         let Ok(app_windows) = app.window_list() else {
@@ -414,7 +421,7 @@ pub(super) fn timeout_ticker(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn find_orphaned_spaces(
     orphaned_spaces: Populated<(Entity, &mut OrphanedPane)>,
-    windows: Query<(&Window, Entity, Option<&Unmanaged>)>,
+    windows: Windows,
     window_manager: Res<WindowManager>,
     mut displays: Query<&mut Display>,
     mut commands: Commands,
@@ -450,7 +457,7 @@ pub(super) fn find_orphaned_spaces(
                         pane.append(entity);
 
                         // Update window ratios on the new display.
-                        if let Ok((window, _, _)) = windows.get(entity) {
+                        if let Some(window) = windows.get(entity) {
                             let width = bounds.size.width * window.width_ratio();
                             let height = bounds.size.height;
                             debug!(
@@ -468,12 +475,12 @@ pub(super) fn find_orphaned_spaces(
                     }
 
                     // Find remaining windows which are otuside of the pane.
-                    let floating = in_workspace.iter().filter_map(|window_id| {
-                        windows.iter().find_map(|(window, entity, unmanaged)| {
-                            (*window_id == window.id()
-                                && matches!(unmanaged, Some(Unmanaged::Floating)))
-                            .then_some(entity)
-                        })
+                    let floating = in_workspace.into_iter().filter_map(|window_id| {
+                        windows
+                            .find_all(window_id)
+                            .and_then(|(_, entity, _, unmanaged)| {
+                                matches!(unmanaged, Some(Unmanaged::Floating)).then_some(entity)
+                            })
                     });
                     for window_entity in floating {
                         debug!(
@@ -707,7 +714,7 @@ pub(super) fn animate_resize_windows(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn window_swiper(
     sliding: Populated<(&Window, Entity, &WindowSwipeMarker)>,
-    windows: Query<(&Window, Entity)>,
+    windows: Windows,
     active_display: ActiveDisplay,
     config: Configuration,
     mut debouncer: DebouncedSystem,
@@ -741,9 +748,9 @@ pub(super) fn window_swiper(
             return;
         }
 
-        if let Some((window, _)) =
+        if let Some(window) =
             slide_to_next_window(&active_display, entity, *delta, pos_x, &mut commands)
-                .and_then(|entity| windows.get(entity).ok())
+                .and_then(|entity| windows.get(entity))
         {
             commands.trigger(WMEventTrigger(Event::WindowFocused {
                 window_id: window.id(),

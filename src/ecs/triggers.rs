@@ -3,7 +3,7 @@ use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::lifecycle::{Add, Remove};
 use bevy::ecs::message::MessageWriter;
 use bevy::ecs::observer::On;
-use bevy::ecs::query::{Has, With, Without};
+use bevy::ecs::query::{Has, With};
 use bevy::ecs::system::{Commands, NonSendMut, Populated, Query, Res, ResMut, Single};
 use log::{debug, error, info, trace, warn};
 use notify::event::{DataChange, MetadataKind, ModifyKind};
@@ -17,7 +17,7 @@ use super::{
     SpawnWindowTrigger, StrayFocusEvent, Timeout, Unmanaged, WMEventTrigger, WindowDraggedMarker,
 };
 use crate::config::{Config, WindowParams};
-use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration};
+use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration, Windows};
 use crate::ecs::{WindowSwipeMarker, reshuffle_around};
 use crate::errors::Result;
 use crate::events::Event;
@@ -43,8 +43,7 @@ use crate::util::symlink_target;
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn mouse_moved_trigger(
     trigger: On<WMEventTrigger>,
-    windows: Query<&Window>,
-    focused_window: Query<&Window, With<FocusedMarker>>,
+    windows: Windows,
     window_manager: Res<WindowManager>,
     mut config: Configuration,
 ) {
@@ -69,14 +68,14 @@ pub(super) fn mouse_moved_trigger(
         );
         return;
     };
-    if focused_window
-        .single()
-        .is_ok_and(|window| window.id() == window_id)
+    if windows
+        .focused()
+        .is_some_and(|(window, _)| window.id() == window_id)
     {
         trace!("{}: allready focused {}", function_name!(), window_id);
         return;
     }
-    let Some(window) = windows.iter().find(|window| window.id() == window_id) else {
+    let Some((window, _)) = windows.find(window_id) else {
         trace!(
             "{}: can not find focused window: {}",
             function_name!(),
@@ -93,25 +92,22 @@ pub(super) fn mouse_moved_trigger(
         .get_associated_windows(window_id)
         .into_iter()
         .find_map(|child_wid| {
-            windows
-                .iter()
-                .find(|window| window.id() == child_wid)
-                .and_then(|window| {
-                    window
-                        .child_role()
-                        .inspect_err(|err| {
-                            warn!("{}: getting role {window_id}: {err}", function_name!());
-                        })
-                        .is_ok_and(|child| child)
-                        .then_some(window)
-                })
+            windows.find(child_wid).and_then(|(window, _)| {
+                window
+                    .child_role()
+                    .inspect_err(|err| {
+                        warn!("{}: getting role {window_id}: {err}", function_name!());
+                    })
+                    .is_ok_and(|child| child)
+                    .then_some(window)
+            })
         });
     let window = child_window.unwrap_or(window);
 
     // Do not reshuffle windows due to moved mouse focus.
     config.set_skip_reshuffle(true);
     config.set_ffm_flag(Some(window.id()));
-    if let Ok(focused_window) = focused_window.single() {
+    if let Some((focused_window, _)) = windows.focused() {
         window.focus_without_raise(focused_window);
     } else {
         window.focus_with_raise();
@@ -134,7 +130,7 @@ pub(super) fn mouse_moved_trigger(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn mouse_down_trigger(
     trigger: On<WMEventTrigger>,
-    windows: Query<(&Window, Entity)>,
+    windows: Windows,
     active_display: ActiveDisplay,
     window_manager: Res<WindowManager>,
     mission_control_active: Res<MissionControlActive>,
@@ -152,7 +148,7 @@ pub(super) fn mouse_down_trigger(
         .0
         .find_window_at_point(&point)
         .ok()
-        .and_then(|window_id| windows.iter().find(|(window, _)| window.id() == window_id))
+        .and_then(|window_id| windows.find(window_id))
     else {
         return;
     };
@@ -173,7 +169,7 @@ pub(super) fn mouse_down_trigger(
 pub(super) fn mouse_dragged_trigger(
     trigger: On<WMEventTrigger>,
     active_display: ActiveDisplay,
-    windows: Query<(Entity, &Window)>,
+    windows: Windows,
     mut drag_marker: Query<(&mut Timeout, &mut WindowDraggedMarker)>,
     window_manager: Res<WindowManager>,
     mission_control_active: Res<MissionControlActive>,
@@ -187,11 +183,11 @@ pub(super) fn mouse_dragged_trigger(
         return;
     }
 
-    let Some((entity, window)) = window_manager
+    let Some((window, entity)) = window_manager
         .0
         .find_window_at_point(&point)
         .ok()
-        .and_then(|window_id| windows.iter().find(|(_, window)| window.id() == window_id))
+        .and_then(|window_id| windows.find(window_id))
     else {
         return;
     };
@@ -243,7 +239,7 @@ fn windows_not_in_pane<F: Fn(WinID) -> Option<Entity>>(
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 pub(super) fn workspace_change_trigger(
     trigger: On<WMEventTrigger>,
-    windows: Query<(&Window, Entity), Without<Unmanaged>>,
+    windows: Windows,
     mut active_display: ActiveDisplayMut,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
@@ -263,11 +259,7 @@ pub(super) fn workspace_change_trigger(
         function_name!()
     );
 
-    let find_window = |window_id| {
-        windows
-            .into_iter()
-            .find_map(|(window, entity)| (window.id() == window_id).then_some(entity))
-    };
+    let find_window = |window_id| windows.find_managed(window_id).map(|(_, entity)| entity);
     let Ok(moved_windows) = windows_not_in_pane(workspace_id, find_window, panel, &window_manager)
         .inspect_err(|err| {
             warn!(
@@ -350,7 +342,7 @@ pub(super) fn display_change_trigger(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn active_display_trigger(
     trigger: On<Add, ActiveDisplayMarker>,
-    windows: Query<(&Window, Entity), Without<Unmanaged>>,
+    windows: Windows,
     mut displays: Query<&mut Display>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
@@ -369,11 +361,7 @@ pub(super) fn active_display_trigger(
         function_name!()
     );
 
-    let find_window = |window_id| {
-        windows
-            .into_iter()
-            .find_map(|(window, entity)| (window.id() == window_id).then_some(entity))
-    };
+    let find_window = |window_id| windows.find_managed(window_id).map(|(_, entity)| entity);
     let Ok(moved_windows) = windows_not_in_pane(workspace_id, find_window, panel, &window_manager)
         .inspect_err(|err| {
             warn!(
@@ -553,7 +541,7 @@ pub(super) fn display_moved_trigger(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn front_switched_trigger(
     trigger: On<WMEventTrigger>,
-    focused_window: Query<(&Window, Entity), With<FocusedMarker>>,
+    windows: Windows,
     processes: Query<(&BProcess, &Children)>,
     applications: Query<&Application>,
     mut config: Configuration,
@@ -598,7 +586,7 @@ pub(super) fn front_switched_trigger(
         commands.trigger(WMEventTrigger(Event::WindowFocused {
             window_id: focused_id,
         }));
-    } else if let Ok((_, entity)) = focused_window.single() {
+    } else if let Some((_, entity)) = windows.focused() {
         debug!("{}: reseting focus.", function_name!());
         config.set_ffm_flag(None);
         commands.entity(entity).try_remove::<FocusedMarker>();
@@ -609,11 +597,11 @@ pub(super) fn front_switched_trigger(
 pub(super) fn center_mouse_trigger(
     trigger: On<Add, FocusedMarker>,
     active_display: ActiveDisplay,
-    windows: Query<(&Window, Entity)>,
+    windows: Windows,
     window_manager: Res<WindowManager>,
     config: Configuration,
 ) {
-    let Ok((window, _)) = windows.get(trigger.event().entity) else {
+    let Some(window) = windows.get(trigger.event().entity) else {
         return;
     };
 
@@ -642,7 +630,7 @@ pub(super) fn center_mouse_trigger(
 pub(super) fn window_focused_trigger(
     trigger: On<WMEventTrigger>,
     applications: Query<&Application>,
-    windows: Query<(&Window, Entity, &ChildOf, Has<FocusedMarker>)>,
+    windows: Windows,
     mut config: Configuration,
     mut commands: Commands,
 ) {
@@ -653,15 +641,17 @@ pub(super) fn window_focused_trigger(
     };
 
     let Some((window, entity, child, _)) = windows
-        .iter()
-        .find(|(window, _, _, _)| window.id() == window_id)
+        .find(window_id)
+        .and_then(|(_, entity)| windows.get_all(entity))
     else {
         let timeout = Timeout::new(Duration::from_secs(STRAY_FOCUS_RETRY_SEC), None);
         commands.spawn((timeout, StrayFocusEvent(window_id)));
         return;
     };
 
-    for (window, entity, _, focused) in windows {
+    let focus = windows.focused().map(|(_, entity)| entity);
+    for (window, entity, _, _) in windows.iter() {
+        let focused = focus.is_some_and(|focus| entity == focus);
         if focused && window.id() != window_id {
             commands.entity(entity).try_remove::<FocusedMarker>();
         }
@@ -813,11 +803,11 @@ pub(super) fn application_event_trigger(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn dispatch_application_messages(
     trigger: On<WMEventTrigger>,
-    windows: Query<(&mut Window, Entity)>,
+    windows: Windows,
     applications: Query<(&Application, &Children)>,
     mut commands: Commands,
 ) {
-    let find_window = |window_id| windows.iter().find(|window| window.0.id() == window_id);
+    let find_window = |window_id| windows.find(window_id);
 
     match &trigger.event().0 {
         Event::WindowMinimized { window_id } => {
@@ -861,12 +851,12 @@ pub(super) fn dispatch_application_messages(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn window_unmanaged_trigger(
     trigger: On<Add, Unmanaged>,
-    mut windows: Query<(&Window, Option<&Unmanaged>)>,
+    windows: Windows,
     mut active_display: ActiveDisplayMut,
     mut commands: Commands,
 ) {
     let entity = trigger.event().entity;
-    let Ok((_, marker)) = windows.get(trigger.event().entity) else {
+    let Some((_, _, _, marker)) = windows.get_all(trigger.event().entity) else {
         return;
     };
     if let Some(marker) = marker {
@@ -878,7 +868,6 @@ pub(super) fn window_unmanaged_trigger(
 
             Unmanaged::Minimized | Unmanaged::Hidden => {
                 debug!("{}: Entity {entity} is minimized.", function_name!());
-                let mut lens = windows.transmute_lens::<&Window>();
                 let Ok(active_panel) = active_display
                     .active_panel()
                     .inspect_err(|err| debug!("{}: {err}", function_name!()))
@@ -886,7 +875,7 @@ pub(super) fn window_unmanaged_trigger(
                     return;
                 };
 
-                give_away_focus(entity, &lens.query(), active_panel, &mut commands);
+                give_away_focus(entity, &windows, active_panel, &mut commands);
                 active_display.display().remove_window(entity);
             }
         }
@@ -924,7 +913,7 @@ pub(super) fn window_managed_trigger(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn window_destroyed_trigger(
     trigger: On<WMEventTrigger>,
-    mut windows: Query<(&Window, Entity, &ChildOf)>,
+    windows: Windows,
     mut apps: Query<&mut Application>,
     mut displays: Query<&mut Display>,
     window_manager: Res<WindowManager>,
@@ -934,10 +923,7 @@ pub(super) fn window_destroyed_trigger(
         return;
     };
 
-    let Some((window, entity, child)) = windows
-        .iter()
-        .find(|(window, _, _)| window.id() == window_id)
-    else {
+    let Some((window, entity, child, _)) = windows.find_all(window_id) else {
         error!(
             "{}: Trying to destroy non-existing window {window_id}.",
             function_name!()
@@ -956,7 +942,6 @@ pub(super) fn window_destroyed_trigger(
     app.unobserve_window(window);
     commands.entity(entity).despawn();
 
-    let mut lens = windows.transmute_lens::<&Window>();
     for mut display in &mut displays {
         let Ok(panel) = window_manager
             .0
@@ -966,7 +951,7 @@ pub(super) fn window_destroyed_trigger(
             continue;
         };
 
-        give_away_focus(entity, &lens.query(), panel, &mut commands);
+        give_away_focus(entity, &windows, panel, &mut commands);
         display.remove_window(entity);
     }
 }
@@ -974,7 +959,7 @@ pub(super) fn window_destroyed_trigger(
 /// Moves the focus away to a neighbour window.
 fn give_away_focus(
     entity: Entity,
-    windows: &Query<&Window>,
+    windows: &Windows,
     active_pane: &WindowPane,
     commands: &mut Commands,
 ) {
@@ -986,7 +971,7 @@ fn give_away_focus(
 
         if let Some((window, entity)) = neighbour
             .and_then(|pane| pane.top())
-            .and_then(|entity| windows.get(entity).ok().zip(Some(entity)))
+            .and_then(|entity| windows.get(entity).zip(Some(entity)))
         {
             let window_id = window.id();
             debug!(
@@ -1012,7 +997,7 @@ fn give_away_focus(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn spawn_window_trigger(
     mut trigger: On<SpawnWindowTrigger>,
-    windows: Query<(Entity, &Window, Has<FocusedMarker>)>,
+    windows: Windows,
     mut apps: Query<(Entity, &mut Application)>,
     mut active_display: ActiveDisplayMut,
     config: Configuration,
@@ -1023,10 +1008,7 @@ pub(super) fn spawn_window_trigger(
     while let Some(mut window) = new_windows.pop() {
         let window_id = window.id();
 
-        if windows
-            .iter()
-            .any(|(_, window, _)| window.id() == window_id)
-        {
+        if windows.find_all(window_id).is_some() {
             continue;
         }
 
@@ -1101,7 +1083,7 @@ fn apply_window_properties(
     app_entity: Entity,
     properties: &[WindowParams],
     active_display: &mut ActiveDisplayMut,
-    windows: &Query<(Entity, &Window, Has<FocusedMarker>)>,
+    windows: &Windows,
     commands: &mut Commands,
 ) {
     let floating = properties
@@ -1143,12 +1125,10 @@ fn apply_window_properties(
     let insert_at = wanted_insertion.map_or_else(
         || {
             // Otherwise attempt inserting it after the current focus.
-            let focused_window = windows
-                .iter()
-                .find_map(|(entity, _, focused)| focused.then_some(entity));
+            let focused_window = windows.focused();
             // Insert to the right of the currently focused window
             focused_window
-                .and_then(|entity| panel.index_of(entity).ok())
+                .and_then(|(_, entity)| panel.index_of(entity).ok())
                 .and_then(|insert_at| (insert_at + 1 < panel.len()).then_some(insert_at + 1))
         },
         Some,
@@ -1239,27 +1219,31 @@ pub(super) fn refresh_configuration_trigger(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn print_internal_state_trigger(
     trigger: On<WMEventTrigger>,
-    windows: Query<(Entity, &Window, Option<&Unmanaged>, Has<FocusedMarker>)>,
+    windows: Windows,
     displays: Query<(&Display, Has<ActiveDisplayMarker>)>,
 ) {
     let Event::PrintState = &trigger.event().0 else {
         return;
     };
 
-    let print_window =
-        |(entity, window, unmanaged, focused): (Entity, &Window, Option<_>, bool)| {
-            format!(
-                "id: {}, {entity}, {:.0}:{:.0}, {:.0}x{:.0}{}{}, title: '{:.70}'",
-                window.id(),
-                window.frame().origin.x,
-                window.frame().origin.y,
-                window.frame().size.width,
-                window.frame().size.height,
-                if focused { ", focused" } else { "" },
-                unmanaged.map(|m| format!(", {m:?}")).unwrap_or_default(),
-                window.title().unwrap_or_default()
-            )
-        };
+    let focused = windows.focused();
+    let print_window = |(window, entity, _, unmanaged): (&Window, Entity, &ChildOf, Option<_>)| {
+        format!(
+            "id: {}, {entity}, {:.0}:{:.0}, {:.0}x{:.0}{}{}, title: '{:.70}'",
+            window.id(),
+            window.frame().origin.x,
+            window.frame().origin.y,
+            window.frame().size.width,
+            window.frame().size.height,
+            if focused.is_some_and(|(_, focus)| focus == entity) {
+                ", focused"
+            } else {
+                ""
+            },
+            unmanaged.map(|m| format!(", {m:?}")).unwrap_or_default(),
+            window.title().unwrap_or_default()
+        )
+    };
 
     let mut seen = EntityHashSet::new();
 
@@ -1268,9 +1252,9 @@ pub(super) fn print_internal_state_trigger(
             let windows = strip
                 .all_windows()
                 .iter()
-                .flat_map(|entity| windows.get(*entity))
-                .inspect(|entity| {
-                    seen.insert(entity.0);
+                .filter_map(|entity| windows.get_all(*entity))
+                .inspect(|(_, entity, _, _)| {
+                    seen.insert(*entity);
                 })
                 .map(print_window)
                 .collect::<Vec<_>>();
@@ -1285,9 +1269,9 @@ pub(super) fn print_internal_state_trigger(
         }
     }
 
-    let remaining = windows
+    let remaining = seen
         .iter()
-        .filter(|entity| !seen.contains(&entity.0))
+        .filter_map(|entity| windows.get_all(*entity))
         .map(print_window)
         .collect::<Vec<_>>();
     debug!("{}: Remaining:\n{}", function_name!(), remaining.join("\n"));
@@ -1305,12 +1289,12 @@ pub(super) fn print_internal_state_trigger(
 pub(super) fn stray_focus_observer(
     trigger: On<Add, Window>,
     focus_events: Populated<(Entity, &StrayFocusEvent)>,
-    windows: Query<&Window>,
+    windows: Windows,
     mut messages: MessageWriter<Event>,
     mut commands: Commands,
 ) {
     let entity = trigger.event().entity;
-    let Ok(window_id) = windows.get(entity).map(|window| window.id()) else {
+    let Some(window_id) = windows.get(entity).map(|window| window.id()) else {
         return;
     };
 

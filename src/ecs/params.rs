@@ -2,19 +2,24 @@ use std::time::Duration;
 
 use bevy::{
     ecs::{
+        entity::Entity,
+        hierarchy::ChildOf,
         query::{With, Without},
         system::{Local, Query, Res, ResMut, Single, SystemParam},
         world::Mut,
     },
     time::Time,
 };
+use log::warn;
 use objc2_core_foundation::CGRect;
 use objc2_core_graphics::CGDirectDisplayID;
+use stdext::function_name;
 
 use super::{ActiveDisplayMarker, FocusFollowsMouse, MissionControlActive, SkipReshuffle};
 use crate::{
     config::{Config, WindowParams},
-    manager::{Display, WindowManager, WindowPane},
+    ecs::{FocusedMarker, Unmanaged},
+    manager::{Display, Window, WindowManager, WindowPane},
     platform::WinID,
 };
 
@@ -238,5 +243,76 @@ impl ActiveDisplayMut<'_, '_> {
     /// Returns the `CGRect` representing the bounds of the active display.
     pub fn bounds(&self) -> CGRect {
         self.display.bounds
+    }
+}
+
+#[derive(SystemParam)]
+pub struct Windows<'w, 's> {
+    all: Query<
+        'w,
+        's,
+        (
+            &'static Window,
+            Entity,
+            &'static ChildOf,
+            Option<&'static Unmanaged>,
+        ),
+    >,
+    focus: Query<'w, 's, (&'static Window, Entity), With<FocusedMarker>>,
+}
+
+impl Windows<'_, '_> {
+    pub fn get_all(
+        &self,
+        entity: Entity,
+    ) -> Option<(&Window, Entity, &ChildOf, Option<&Unmanaged>)> {
+        self.all
+            .get(entity)
+            .inspect_err(|err| warn!("{}: unable to find window: {err}", function_name!()))
+            .ok()
+    }
+
+    pub fn get(&self, entity: Entity) -> Option<&Window> {
+        self.get_all(entity).map(|(window, _, _, _)| window)
+    }
+
+    pub fn find_all(
+        &self,
+        window_id: WinID,
+    ) -> Option<(&Window, Entity, &ChildOf, Option<&Unmanaged>)> {
+        self.all
+            .iter()
+            .find(|(window, _, _, _)| window.id() == window_id)
+    }
+
+    pub fn find(&self, window_id: WinID) -> Option<(&Window, Entity)> {
+        self.find_all(window_id)
+            .map(|(window, entity, _, _)| (window, entity))
+    }
+
+    pub fn find_managed(&self, window_id: WinID) -> Option<(&Window, Entity)> {
+        self.all.iter().find_map(|(window, entity, _, unmanaged)| {
+            (unmanaged.is_none() && window.id() == window_id).then_some((window, entity))
+        })
+    }
+
+    pub fn focused(&self) -> Option<(&Window, Entity)> {
+        self.focus.single().ok()
+    }
+
+    pub fn iter(
+        &self,
+    ) -> bevy::ecs::query::QueryIter<
+        '_,
+        '_,
+        (
+            &'static Window,
+            Entity,
+            &'static ChildOf,
+            Option<&'static Unmanaged>,
+        ),
+        (),
+    > {
+        self.all.iter()
     }
 }

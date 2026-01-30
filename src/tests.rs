@@ -14,7 +14,7 @@ use crate::commands::{Command, Direction, Operation, process_command_trigger};
 use crate::config::Config;
 use crate::ecs::{
     ActiveDisplayMarker, BProcess, FocusFollowsMouse, FocusedMarker, MissionControlActive,
-    PollForNotifications, SkipReshuffle, Unmanaged, register_systems, register_triggers,
+    PollForNotifications, SkipReshuffle, register_systems, register_triggers,
 };
 use crate::errors::{Error, Result};
 use crate::events::Event;
@@ -202,11 +202,7 @@ impl WindowManagerApi for MockWindowManager {
     }
 
     /// Does nothing, as display refreshing is not tested at this level.
-    fn refresh_display(
-        &self,
-        _display: &mut Display,
-        _windows: &mut Query<(&mut Window, Entity, Has<Unmanaged>)>,
-    ) {
+    fn refresh_display(&self, _display: &mut Display, _windows: &[(&Window, Entity)]) {
         println!("{}:", function_name!());
     }
 

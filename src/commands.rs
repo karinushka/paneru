@@ -1,20 +1,20 @@
 use bevy::ecs::entity::Entity;
 use bevy::ecs::observer::On;
-use bevy::ecs::query::{Has, With};
-use bevy::ecs::system::{Commands, Query, Res, Single};
+use bevy::ecs::query::With;
+use bevy::ecs::system::{Commands, Res, Single};
 use log::{debug, error};
 use objc2_core_foundation::CGPoint;
 use stdext::function_name;
 
 use crate::config::{Config, preset_column_widths};
-use crate::ecs::params::ActiveDisplayMut;
+use crate::ecs::params::{ActiveDisplayMut, Windows};
 use crate::ecs::{
     CommandTrigger, FocusedMarker, Unmanaged, WMEventTrigger, reposition_entity, reshuffle_around,
     resize_entity,
 };
 use crate::errors::Result;
 use crate::events::Event;
-use crate::manager::{Display, Panel, Window, WindowManager, WindowPane};
+use crate::manager::{Panel, WindowManager, WindowPane};
 
 /// Represents a cardinal or directional choice for window manipulation.
 #[derive(Clone, Debug)]
@@ -124,12 +124,12 @@ fn get_window_in_direction(
 /// `Some(Entity)` with the entity of the newly focused window, otherwise `None`.
 fn command_move_focus(
     direction: &Direction,
-    current_window: Entity,
     strip: &WindowPane,
-    windows: &Query<&Window>,
+    windows: &Windows,
 ) -> Option<Entity> {
-    get_window_in_direction(direction, current_window, strip).inspect(|entity| {
-        if let Ok(window) = windows.get(*entity) {
+    let (_, entity) = windows.focused()?;
+    get_window_in_direction(direction, entity, strip).inspect(|entity| {
+        if let Some(window) = windows.get(*entity) {
             window.focus_with_raise();
         }
     })
@@ -150,19 +150,19 @@ fn command_move_focus(
 /// `Some(Entity)` with the entity that was swapped with, otherwise `None`.
 fn command_swap_focus(
     direction: &Direction,
-    current: Entity,
+    windows: &Windows,
     active_display: &mut ActiveDisplayMut,
-    windows: &mut Query<&mut Window>,
     commands: &mut Commands,
 ) -> Option<Entity> {
     let display_bounds = active_display.bounds();
     let display_id = active_display.id();
     let panel = active_display.active_panel().ok()?;
 
+    let (_, current) = windows.focused()?;
     let index = panel.index_of(current).ok()?;
     let other_window = get_window_in_direction(direction, current, panel)?;
     let new_index = panel.index_of(other_window).ok()?;
-    let current_frame = windows.get(current).ok()?.frame();
+    let current_frame = windows.get(current)?.frame();
 
     let origin = if new_index == 0 {
         // If reached far left, snap the window to left.
@@ -175,7 +175,7 @@ fn command_swap_focus(
             .get(new_index)
             .ok()
             .and_then(|panel| panel.top())
-            .and_then(|entity| windows.get(entity).ok())?
+            .and_then(|entity| windows.get(entity))?
             .frame()
             .origin
     };
@@ -200,18 +200,17 @@ fn command_swap_focus(
 /// * `active_display` - The `ActiveDisplayMut` resource representing the active display.
 /// * `commands` - Bevy commands to trigger events.
 fn command_center_window(
-    focused_entity: Entity,
-    windows: &mut Query<&mut Window>,
-    window_manager: &WindowManager,
+    windows: &Windows,
     active_display: &ActiveDisplayMut,
+    window_manager: &WindowManager,
     commands: &mut Commands,
 ) {
-    let Ok(window) = windows.get_mut(focused_entity) else {
+    let Some((window, entity)) = windows.focused() else {
         return;
     };
     let frame = window.frame();
     reposition_entity(
-        focused_entity,
+        entity,
         (active_display.bounds().size.width - frame.size.width) / 2.0,
         frame.origin.y,
         active_display.id(),
@@ -219,7 +218,7 @@ fn command_center_window(
     );
     window_manager
         .0
-        .center_mouse(&window, &active_display.bounds());
+        .center_mouse(window, &active_display.bounds());
 }
 
 /// Resizes the focused window based on preset column widths.
@@ -232,16 +231,15 @@ fn command_center_window(
 /// * `commands` - Bevy commands to trigger events.
 /// * `config` - The `Config` resource.
 fn resize_window(
-    active_display: &mut Display,
-    focused_entity: Entity,
-    windows: &mut Query<&mut Window>,
+    windows: &Windows,
+    active_display: &mut ActiveDisplayMut,
     commands: &mut Commands,
     config: &Config,
 ) {
-    let Ok(window) = windows.get_mut(focused_entity) else {
+    let Some((window, entity)) = windows.focused() else {
         return;
     };
-    let display_width = active_display.bounds.size.width;
+    let display_width = active_display.bounds().size.width;
     let width_ratios = preset_column_widths(config);
     let width_ratio = window.next_size_ratio(&width_ratios);
 
@@ -250,8 +248,8 @@ fn resize_window(
     let x = (display_width - width).min(window.frame().origin.x);
     let y = window.frame().origin.y;
 
-    reposition_entity(focused_entity, x, y, active_display.id(), commands);
-    resize_entity(focused_entity, width, height, active_display.id(), commands);
+    reposition_entity(entity, x, y, active_display.id(), commands);
+    resize_entity(entity, width, height, active_display.id(), commands);
 }
 
 /// Toggles the focused window between full-width and a preset width.
@@ -264,17 +262,16 @@ fn resize_window(
 /// * `commands` - Bevy commands to trigger events.
 /// * `config` - The `Config` resource.
 fn full_width_window(
-    active_display: &mut Display,
-    focused_entity: Entity,
-    windows: &mut Query<&mut Window>,
+    windows: &Windows,
+    active_display: &mut ActiveDisplayMut,
     commands: &mut Commands,
     config: &Config,
 ) {
-    let Ok(window) = windows.get(focused_entity) else {
+    let Some((window, entity)) = windows.focused() else {
         return;
     };
 
-    let display_width = active_display.bounds.size.width;
+    let display_width = active_display.bounds().size.width;
     let height = window.frame().size.height;
     let y = window.frame().origin.y;
 
@@ -290,8 +287,8 @@ fn full_width_window(
         (display_width, 0.0)
     };
 
-    reposition_entity(focused_entity, x, y, active_display.id(), commands);
-    resize_entity(focused_entity, width, height, active_display.id(), commands);
+    reposition_entity(entity, x, y, active_display.id(), commands);
+    resize_entity(entity, width, height, active_display.id(), commands);
 }
 
 /// Toggles the managed state of the focused window.
@@ -302,20 +299,20 @@ fn full_width_window(
 /// * `focused_entity` - The `Entity` of the currently focused window.
 /// * `windows` - A mutable query for `Window` components, their `Entity`, and whether they have the `Unmanaged` marker.
 /// * `commands` - Bevy commands to modify entities.
-fn manage_window(
-    focused_entity: Entity,
-    windows: &mut Query<(&mut Window, Entity, Has<Unmanaged>)>,
-    commands: &mut Commands,
-) {
-    let Ok((window, entity, unmanaged)) = windows.get_mut(focused_entity) else {
+fn manage_window(windows: &Windows, commands: &mut Commands) {
+    let Some((window, entity, _, unmanaged)) = windows
+        .focused()
+        .and_then(|(_, entity)| windows.get_all(entity))
+    else {
         return;
     };
     debug!(
-        "{}: window: {} {entity} unmanaged: {unmanaged}.",
+        "{}: window: {} {entity} unmanaged: {}.",
         function_name!(),
-        window.id()
+        window.id(),
+        unmanaged.is_some()
     );
-    if unmanaged {
+    if unmanaged.is_some() {
         commands.entity(entity).try_remove::<Unmanaged>();
     } else {
         commands.entity(entity).try_insert(Unmanaged::Floating);
@@ -332,15 +329,17 @@ fn manage_window(
 /// * `active_display` - A mutable reference to the `ActiveDisplayMut` resource.
 /// * `commands` - Bevy commands to modify entities and trigger events.
 fn to_next_display(
-    focused_entity: Entity,
-    windows: &mut Query<(&mut Window, Entity, Has<Unmanaged>)>,
+    windows: &Windows,
     active_display: &mut ActiveDisplayMut,
     commands: &mut Commands,
 ) {
-    let Ok((window, entity, unmanaged)) = windows.get_mut(focused_entity) else {
+    let Some((window, entity, _, unmanaged)) = windows
+        .focused()
+        .and_then(|(_, entity)| windows.get_all(entity))
+    else {
         return;
     };
-    if unmanaged {
+    if unmanaged.is_some() {
         return;
     }
 
@@ -358,8 +357,8 @@ fn to_next_display(
         other.menubar_height,
     );
     let dest = CGPoint::new(other.bounds.size.width / 2.0, other.menubar_height);
-    reposition_entity(focused_entity, dest.x, dest.y, other.id(), commands);
-    reshuffle_around(focused_entity, commands);
+    reposition_entity(entity, dest.x, dest.y, other.id(), commands);
+    reshuffle_around(entity, commands);
 
     if let Ok(panel) = active_display.active_panel() {
         panel.remove(entity);
@@ -383,91 +382,63 @@ fn to_next_display(
 /// `Ok(())` if the command is processed successfully, otherwise `Err(Error)`.
 fn command_windows(
     operation: &Operation,
-    window_manager: &WindowManager,
+    windows: &Windows,
     active_display: &mut ActiveDisplayMut,
-    focused_entity: Entity,
-    windows: &mut Query<(&mut Window, Entity, Has<Unmanaged>)>,
+    window_manager: &WindowManager,
     commands: &mut Commands,
     config: &Config,
 ) -> Result<()> {
     let active_panel = active_display.active_panel()?;
-    let managed = windows
-        .get(focused_entity)
-        .is_ok_and(|(_, _, unmanaged)| !unmanaged);
-
-    if managed && active_panel.index_of(focused_entity).is_err() {
-        // TODO: Workaround for mising workspace change notifications.
-        commands.trigger(WMEventTrigger(Event::SpaceChanged));
-        return Ok(());
-    }
-    let mut lens = windows.transmute_lens::<&mut Window>();
 
     match operation {
         Operation::Focus(direction) => {
-            let mut lens = windows.transmute_lens::<&Window>();
-            command_move_focus(direction, focused_entity, active_panel, &lens.query());
+            command_move_focus(direction, active_panel, windows);
         }
 
         Operation::Swap(direction) => {
-            command_swap_focus(
-                direction,
-                focused_entity,
-                active_display,
-                &mut lens.query(),
-                commands,
-            );
+            command_swap_focus(direction, windows, active_display, commands);
         }
 
         Operation::Center => {
-            command_center_window(
-                focused_entity,
-                &mut lens.query(),
-                window_manager,
-                active_display,
-                commands,
-            );
+            command_center_window(windows, active_display, window_manager, commands);
         }
 
         Operation::Resize => {
-            resize_window(
-                active_display.display(),
-                focused_entity,
-                &mut lens.query(),
-                commands,
-                config,
-            );
+            resize_window(windows, active_display, commands, config);
         }
 
         Operation::FullWidth => {
-            full_width_window(
-                active_display.display(),
-                focused_entity,
-                &mut lens.query(),
-                commands,
-                config,
-            );
+            full_width_window(windows, active_display, commands, config);
         }
 
         Operation::ToNextDisplay => {
-            to_next_display(focused_entity, windows, active_display, commands);
+            to_next_display(windows, active_display, commands);
         }
 
         Operation::Manage => {
-            manage_window(focused_entity, windows, commands);
+            manage_window(windows, commands);
         }
 
         Operation::Stack(stack) => {
-            let (_, _, unmanaged) = windows.get(focused_entity)?;
-            if unmanaged {
-                return Ok(());
-            } else if *stack {
-                active_panel.stack(focused_entity)?;
+            if let Some((_, entity, _, unmanaged)) = windows
+                .focused()
+                .and_then(|(_, entity)| windows.get_all(entity))
+            {
+                if unmanaged.is_some() {
+                    return Ok(());
+                } else if *stack {
+                    active_panel.stack(entity)?;
+                } else {
+                    active_panel.unstack(entity)?;
+                }
             } else {
-                active_panel.unstack(focused_entity)?;
+                return Ok(());
             }
         }
     }
-    reshuffle_around(focused_entity, commands);
+    if let Some((_, entity)) = windows.focused() {
+        reshuffle_around(entity, commands);
+    }
     Ok(())
 }
 
@@ -486,28 +457,24 @@ fn command_windows(
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 pub fn process_command_trigger(
     trigger: On<CommandTrigger>,
-    window_manager: Res<WindowManager>,
-    current_focus: Single<Entity, With<FocusedMarker>>,
-    mut windows: Query<(&mut Window, Entity, Has<Unmanaged>)>,
+    _: Single<Entity, With<FocusedMarker>>, // Will not execute without focused window.
+    windows: Windows,
     mut active_display: ActiveDisplayMut,
+    window_manager: Res<WindowManager>,
     mut commands: Commands,
     config: Res<Config>,
 ) {
-    let focused_entity = *current_focus;
-    let eligible = windows
-        .get(focused_entity)
-        .is_ok_and(|(window, _, _)| window.is_eligible());
-
     let res = match &trigger.event().0 {
         Command::Window(operation) => {
+            let eligible = windows
+                .focused()
+                .is_some_and(|(window, _)| window.is_eligible());
             if eligible {
-                let mut lens = windows.transmute_lens::<(&mut Window, Entity, Has<Unmanaged>)>();
                 command_windows(
                     operation,
-                    &window_manager,
+                    &windows,
                     &mut active_display,
-                    focused_entity,
-                    &mut lens.query(),
+                    &window_manager,
                     &mut commands,
                     config.as_ref(),
                 )

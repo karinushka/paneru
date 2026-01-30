@@ -8,11 +8,11 @@ use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::system::Commands;
 use core::ptr::NonNull;
+use derive_more::{DerefMut, with_trait::Deref};
 use log::{debug, trace};
 use objc2_core_foundation::{
     CFBoolean, CFEqual, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize,
 };
-use std::ops::{Deref, DerefMut};
 use std::ptr::null_mut;
 use std::thread;
 use std::time::Duration;
@@ -113,21 +113,8 @@ pub trait WindowApi: Send + Sync {
     fn set_padding(&mut self, padding: WindowPadding);
 }
 
-#[derive(Component)]
+#[derive(Component, Deref, DerefMut)]
 pub struct Window(Box<dyn WindowApi>);
-
-impl Deref for Window {
-    type Target = Box<dyn WindowApi>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for Window {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
 
 impl Window {
     pub fn new(window: Box<dyn WindowApi>) -> Self {

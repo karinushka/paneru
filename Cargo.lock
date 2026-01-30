@@ -2483,6 +2483,7 @@ dependencies = [
  "bevy",
  "chrono",
  "clap",
+ "derive_more",
  "embed_plist",
  "env_logger",
  "launchctl",

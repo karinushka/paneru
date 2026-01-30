@@ -1,4 +1,3 @@
-use std::ops::{Deref, DerefMut};
 use std::time::Duration;
 
 use bevy::app::{PostUpdate, PreUpdate};
@@ -15,6 +14,7 @@ use bevy::{
         schedule::{IntoScheduleConfigs, common_conditions::resource_equals},
     },
 };
+use derive_more::{Deref, DerefMut};
 use objc2_core_foundation::{CGPoint, CGSize};
 use objc2_core_graphics::CGDirectDisplayID;
 
@@ -161,21 +161,8 @@ pub enum Unmanaged {
 }
 
 /// Wrapper component for a `ProcessApi` trait object, enabling dynamic dispatch for process-related operations within Bevy.
-#[derive(Component)]
+#[derive(Component, Deref, DerefMut)]
 pub struct BProcess(pub Box<dyn ProcessApi>);
-
-impl Deref for BProcess {
-    type Target = Box<dyn ProcessApi>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for BProcess {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
 
 /// Component to manage a timeout, often used for delaying actions or retries.
 #[derive(Component)]

@@ -4,6 +4,7 @@ use bevy::ecs::query::Has;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::system::Query;
 use core::ptr::NonNull;
+use derive_more::{DerefMut, with_trait::Deref};
 use log::{debug, error, trace, warn};
 use notify::{RecursiveMode, Watcher};
 use objc2_core_foundation::{
@@ -14,7 +15,6 @@ use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayBounds, CGError, CGGetActiveDisplayList, CGRectContainsPoint,
     CGWarpMouseCursorPosition,
 };
-use std::ops::{Deref, DerefMut};
 use std::path::Path;
 use std::ptr::null_mut;
 use std::slice::from_raw_parts_mut;
@@ -160,21 +160,8 @@ pub trait WindowManagerApi: Send + Sync {
 
 /// `WindowManager` is a Bevy resource that holds a boxed `WindowManagerApi` trait object.
 /// It allows for dynamic dispatch to the OS-specific window management implementation.
-#[derive(Resource)]
+#[derive(Deref, DerefMut, Resource)]
 pub struct WindowManager(pub Box<dyn WindowManagerApi>);
-
-impl Deref for WindowManager {
-    type Target = Box<dyn WindowManagerApi>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for WindowManager {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
 
 /// `WindowManagerOS` is the macOS-specific implementation of the `WindowManagerApi` trait.
 /// It directly interacts with the macOS `SkyLight` and Accessibility APIs to manage windows.

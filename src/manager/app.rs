@@ -8,11 +8,11 @@ use accessibility_sys::{
 };
 use bevy::ecs::component::Component;
 use core::ptr::NonNull;
+use derive_more::{DerefMut, with_trait::Deref};
 use log::{debug, error};
 use objc2_core_foundation::{CFArray, CFNumberType, CFRetained, CFString, kCFRunLoopCommonModes};
 use objc2_core_graphics::CGDirectDisplayID;
 use std::ffi::c_void;
-use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::ptr::null_mut;
 use std::sync::LazyLock;
@@ -118,21 +118,8 @@ pub trait ApplicationApi: Send + Sync {
 
 /// A wrapper struct for `ApplicationApi` trait objects, allowing for dynamic dispatch.
 /// It implements `Deref` and `DerefMut` to easily access the underlying `ApplicationApi` methods.
-#[derive(Component)]
+#[derive(Component, Deref, DerefMut)]
 pub struct Application(Box<dyn ApplicationApi>);
-
-impl Deref for Application {
-    type Target = Box<dyn ApplicationApi>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for Application {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
 
 impl std::fmt::Display for Application {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

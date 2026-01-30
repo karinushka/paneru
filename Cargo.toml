@@ -21,6 +21,7 @@ bevy = { version = "0.18.0", default-features = false, features = [
 ] }
 chrono = "0.4.43"
 clap = { version = "4.5.54", features = ["cargo", "derive"] }
+derive_more = { version = "2.1.1", features = ["deref", "deref_mut"] }
 embed_plist = "1.2.2"
 env_logger = "0.11.8"
 launchctl = "0.3.2"

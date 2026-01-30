@@ -21,7 +21,7 @@ use stdext::function_name;
 
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
-use crate::platform::{ConnID, ProcessSerialNumber, WinID};
+use crate::platform::{ConnID, ProcessSerialNumber, WinID, WorkspaceId};
 use crate::util::{AXUIWrapper, create_array, get_array_values, get_cfdict_value, symlink_target};
 use app::ApplicationOS;
 pub use app::{Application, ApplicationApi};
@@ -96,7 +96,7 @@ pub trait WindowManagerApi: Send + Sync {
     /// # Returns
     ///
     /// `Ok(u64)` with the space ID if successful, otherwise `Err(Error)`.
-    fn active_display_space(&self, display_id: CGDirectDisplayID) -> Result<u64>;
+    fn active_display_space(&self, display_id: CGDirectDisplayID) -> Result<WorkspaceId>;
     /// Centers the mouse cursor on a given window within its display bounds if it's not already within the window.
     ///
     /// # Arguments
@@ -118,7 +118,7 @@ pub trait WindowManagerApi: Send + Sync {
     fn add_existing_application_windows(
         &self,
         app: &mut Application,
-        spaces: &[u64],
+        spaces: &[WorkspaceId],
         refresh_index: i32,
     ) -> Result<Vec<Window>>;
     /// Finds the `WinID` of a window at a given screen point.
@@ -140,7 +140,7 @@ pub trait WindowManagerApi: Send + Sync {
     /// # Returns
     ///
     /// `Ok(Vec<WinID>)` containing the list of window IDs, otherwise `Err(Error)`.
-    fn windows_in_workspace(&self, space_id: u64) -> Result<Vec<WinID>>;
+    fn windows_in_workspace(&self, space_id: WorkspaceId) -> Result<Vec<WinID>>;
     /// Sends an `Event::Exit` to the event loop, signaling the application to quit.
     ///
     /// # Returns
@@ -194,7 +194,7 @@ impl WindowManagerOS {
     /// # Returns
     ///
     /// `Ok(Vec<u64>)` with the list of space IDs if successful, otherwise `Err(Error)` if the spaces cannot be retrieved or the display is not found.
-    fn display_space_list(&self, uuid: &CFString) -> Result<Vec<u64>> {
+    fn display_space_list(&self, uuid: &CFString) -> Result<Vec<WorkspaceId>> {
         let display_spaces = NonNull::new(unsafe { SLSCopyManagedDisplaySpaces(self.main_cid) })
             .map(|ptr| unsafe { CFRetained::from_raw(ptr) })
             .ok_or(Error::PermissionDenied(format!(
@@ -243,7 +243,7 @@ impl WindowManagerOS {
                     };
                     (id != 0).then_some(id)
                 })
-                .collect::<Vec<u64>>();
+                .collect::<Vec<WorkspaceId>>();
             return Ok(space_list);
         }
         Err(Error::PermissionDenied(format!(
@@ -327,7 +327,11 @@ impl WindowManagerOS {
     /// # Returns
     ///
     /// A `Vec<Entity>` containing the entities of eligible windows in the specified space.
-    fn refresh_windows_space(&self, space_id: u64, windows: &[(&Window, Entity)]) -> Vec<Entity> {
+    fn refresh_windows_space(
+        &self,
+        space_id: WorkspaceId,
+        windows: &[(&Window, Entity)],
+    ) -> Vec<Entity> {
         space_window_list_for_connection(self.main_cid, &[space_id], None, false)
             .inspect_err(|err| {
                 warn!(
@@ -488,7 +492,7 @@ impl WindowManagerApi for WindowManagerOS {
     /// # Returns
     ///
     /// `Ok(u64)` with the space ID if successful, otherwise `Err(Error)`.
-    fn active_display_space(&self, display_id: CGDirectDisplayID) -> Result<u64> {
+    fn active_display_space(&self, display_id: CGDirectDisplayID) -> Result<WorkspaceId> {
         Display::uuid_from_id(display_id).map(|uuid| unsafe {
             SLSManagedDisplayGetCurrentSpace(self.main_cid, &raw const *uuid)
         })
@@ -537,7 +541,7 @@ impl WindowManagerApi for WindowManagerOS {
     fn add_existing_application_windows(
         &self,
         app: &mut Application,
-        spaces: &[u64],
+        spaces: &[WorkspaceId],
         refresh_index: i32,
     ) -> Result<Vec<Window>> {
         let global_window_list = existing_application_window_list(self.main_cid, app, spaces)?;
@@ -648,7 +652,7 @@ impl WindowManagerApi for WindowManagerOS {
     }
 
     /// Returns a list of windows in a given workspace.
-    fn windows_in_workspace(&self, space_id: u64) -> Result<Vec<WinID>> {
+    fn windows_in_workspace(&self, space_id: WorkspaceId) -> Result<Vec<WinID>> {
         space_window_list_for_connection(self.main_cid, &[space_id], None, true)
     }
 
@@ -705,7 +709,7 @@ impl WindowManagerApi for WindowManagerOS {
 /// `Ok(Vec<WinID>)` containing the list of window IDs if successful, otherwise `Err(Error)`.
 fn space_window_list_for_connection(
     main_cid: ConnID,
-    spaces: &[u64],
+    spaces: &[WorkspaceId],
     cid: Option<ConnID>,
     also_minimized: bool,
 ) -> Result<Vec<WinID>> {
@@ -802,7 +806,7 @@ fn found_valid_window(parent_wid: WinID, attributes: i64, tags: i64) -> bool {
 fn existing_application_window_list(
     cid: ConnID,
     app: &Application,
-    spaces: &[u64],
+    spaces: &[WorkspaceId],
 ) -> Result<Vec<WinID>> {
     if spaces.is_empty() {
         return Err(Error::NotFound(format!(

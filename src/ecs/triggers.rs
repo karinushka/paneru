@@ -24,7 +24,7 @@ use crate::events::Event;
 use crate::manager::{
     Application, Display, LayoutStrip, Process, Window, WindowManager, WindowPadding,
 };
-use crate::platform::WinID;
+use crate::platform::{WinID, WorkspaceId};
 use crate::util::symlink_target;
 
 /// Handles mouse moved events.
@@ -219,7 +219,7 @@ pub(super) fn mouse_dragged_trigger(
 }
 
 fn windows_not_in_strip<F: Fn(WinID) -> Option<Entity>>(
-    workspace_id: u64,
+    workspace_id: WorkspaceId,
     find_window: F,
     strip: &LayoutStrip,
     window_manager: &WindowManager,

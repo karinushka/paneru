@@ -21,7 +21,7 @@ use objc2_core_graphics::CGDirectDisplayID;
 use crate::commands::Command;
 use crate::events::Event;
 use crate::manager::{LayoutStrip, ProcessApi, Window};
-use crate::platform::WinID;
+use crate::platform::{WinID, WorkspaceId};
 pub use systems::gather_displays;
 pub use systems::initial_oneshot_systems;
 
@@ -199,7 +199,7 @@ pub struct StrayFocusEvent(pub WinID);
 #[derive(Component)]
 pub struct OrphanedStrip {
     /// The ID of the orphaned space.
-    pub id: u64,
+    pub id: WorkspaceId,
     /// The `LayoutStrip` that was orphaned.
     pub strip: LayoutStrip,
 }

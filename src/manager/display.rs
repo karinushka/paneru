@@ -8,7 +8,10 @@ use std::collections::{HashMap, VecDeque};
 use stdext::function_name;
 
 use super::skylight::{CGDisplayCreateUUIDFromDisplayID, CGDisplayGetDisplayIDFromUUID};
-use crate::errors::{Error, Result};
+use crate::{
+    errors::{Error, Result},
+    platform::WorkspaceId,
+};
 
 /// Represents a single panel within a `LayoutStrip`, which can either hold a single window or a stack of windows.
 #[derive(Clone, Debug)]
@@ -307,7 +310,7 @@ pub struct Display {
     /// The unique identifier for this display provided by Core Graphics.
     id: CGDirectDisplayID,
     /// A map of space IDs to their corresponding `LayoutStrip`s.
-    pub spaces: HashMap<u64, LayoutStrip>,
+    pub spaces: HashMap<WorkspaceId, LayoutStrip>,
     /// The physical bounds (origin and size) of the display.
     pub bounds: CGRect,
     /// The height of the menubar on this display.
@@ -329,7 +332,7 @@ impl Display {
     /// A new `Display` instance.
     pub fn new(
         id: CGDirectDisplayID,
-        spaces: Vec<u64>,
+        spaces: Vec<WorkspaceId>,
         bounds: CGRect,
         menubar_height: u32,
     ) -> Self {
@@ -408,7 +411,7 @@ impl Display {
     /// # Returns
     ///
     /// `Ok(&LayoutStrip)` if the active panel is found, otherwise `Err(Error)`.
-    pub fn active_strip(&self, space_id: u64) -> Result<&LayoutStrip> {
+    pub fn active_strip(&self, space_id: WorkspaceId) -> Result<&LayoutStrip> {
         self.spaces.get(&space_id).ok_or(Error::NotFound(format!(
             "{}: space {space_id}.",
             function_name!()
@@ -424,7 +427,7 @@ impl Display {
     /// # Returns
     ///
     /// `Ok(&mut LayoutStrip)` if the active panel is found, otherwise `Err(Error)`.
-    pub fn active_strip_mut(&mut self, space_id: u64) -> Result<&mut LayoutStrip> {
+    pub fn active_strip_mut(&mut self, space_id: WorkspaceId) -> Result<&mut LayoutStrip> {
         self.spaces
             .get_mut(&space_id)
             .ok_or(Error::NotFound(format!(

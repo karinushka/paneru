@@ -22,7 +22,7 @@ use crate::manager::{
     Application, ApplicationApi, Display, LayoutStrip, ProcessApi, Window, WindowApi,
     WindowManager, WindowManagerApi,
 };
-use crate::platform::{ConnID, Pid, WinID};
+use crate::platform::{ConnID, Pid, WinID, WorkspaceId};
 use crate::{platform::ProcessSerialNumber, util::AXUIWrapper};
 
 const TEST_PROCESS_ID: i32 = 1;
@@ -225,7 +225,7 @@ impl WindowManagerApi for MockWindowManager {
     }
 
     /// Returns a predefined active display space ID.
-    fn active_display_space(&self, _display_id: CGDirectDisplayID) -> Result<u64> {
+    fn active_display_space(&self, _display_id: CGDirectDisplayID) -> Result<WorkspaceId> {
         println!("{}: {TEST_WORKSPACE_ID}", function_name!());
         Ok(TEST_WORKSPACE_ID)
     }
@@ -239,7 +239,7 @@ impl WindowManagerApi for MockWindowManager {
     fn add_existing_application_windows(
         &self,
         _app: &mut Application,
-        _spaces: &[u64],
+        _spaces: &[WorkspaceId],
         _refresh_index: i32,
     ) -> Result<Vec<Window>> {
         println!("{}:", function_name!());
@@ -253,7 +253,7 @@ impl WindowManagerApi for MockWindowManager {
     }
 
     /// Always returns an empty vector of window IDs.
-    fn windows_in_workspace(&self, _space_id: u64) -> Result<Vec<WinID>> {
+    fn windows_in_workspace(&self, _space_id: WorkspaceId) -> Result<Vec<WinID>> {
         println!("{}:", function_name!());
         Ok(vec![])
     }

@@ -37,6 +37,8 @@ pub type Pid = i32;
 /// Type alias for a raw pointer to an immutable `CFString`.
 pub type CFStringRef = *const CFString;
 
+pub type WorkspaceId = u64;
+
 /// Type alias for the callback function signature used by `AXObserver`.
 ///
 /// # Arguments

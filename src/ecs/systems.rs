@@ -27,7 +27,7 @@ use crate::ecs::{
 };
 use crate::events::Event;
 use crate::manager::{Application, Column, Display, LayoutStrip, Window, WindowManager, WindowOS};
-use crate::platform::PlatformCallbacks;
+use crate::platform::{PlatformCallbacks, WorkspaceId};
 
 const WINDOW_HIDDEN_THRESHOLD: f64 = 10.0;
 
@@ -574,7 +574,7 @@ pub(super) fn display_changes_watcher(
 pub(super) fn workspace_change_watcher(
     active_display: ActiveDisplay,
     window_manager: Res<WindowManager>,
-    mut current_space: Local<u64>,
+    mut current_space: Local<WorkspaceId>,
     mut commands: Commands,
 ) {
     let Ok(space_id) = window_manager

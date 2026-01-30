@@ -4,7 +4,7 @@ use core::ptr::NonNull;
 use log::debug;
 use objc2_core_foundation::{CFRetained, CFString, CFUUID, CGRect};
 use objc2_core_graphics::CGDirectDisplayID;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use stdext::function_name;
 
 use super::skylight::{CGDisplayCreateUUIDFromDisplayID, CGDisplayGetDisplayIDFromUUID};
@@ -36,12 +36,20 @@ impl Column {
 
 /// `LayoutStrip` manages a horizontal strip of `Panel`s, where each panel can contain a single window or a stack of windows.
 /// It provides methods for manipulating the arrangement and access to windows within the pane.
-#[derive(Debug, Default)]
+#[derive(Component, Debug, Default)]
 pub struct LayoutStrip {
+    id: WorkspaceId,
     columns: VecDeque<Column>,
 }
 
 impl LayoutStrip {
+    pub fn new(id: WorkspaceId) -> Self {
+        Self {
+            id,
+            columns: VecDeque::new(),
+        }
+    }
+
     /// Finds the index of a window within the pane.
     /// If the window is part of a stack, it returns the index of the panel containing the stack.
     ///
@@ -289,6 +297,10 @@ impl LayoutStrip {
     pub fn all_columns(&self) -> Vec<Entity> {
         self.columns.iter().filter_map(Column::top).collect()
     }
+
+    pub fn id(&self) -> WorkspaceId {
+        self.id
+    }
 }
 
 impl std::fmt::Display for LayoutStrip {
@@ -309,8 +321,6 @@ impl std::fmt::Display for LayoutStrip {
 pub struct Display {
     /// The unique identifier for this display provided by Core Graphics.
     id: CGDirectDisplayID,
-    /// A map of space IDs to their corresponding `LayoutStrip`s.
-    pub spaces: HashMap<WorkspaceId, LayoutStrip>,
     /// The physical bounds (origin and size) of the display.
     pub bounds: CGRect,
     /// The height of the menubar on this display.
@@ -330,19 +340,9 @@ impl Display {
     /// # Returns
     ///
     /// A new `Display` instance.
-    pub fn new(
-        id: CGDirectDisplayID,
-        spaces: Vec<WorkspaceId>,
-        bounds: CGRect,
-        menubar_height: u32,
-    ) -> Self {
-        let spaces = spaces
-            .into_iter()
-            .map(|id| (id, LayoutStrip::default()))
-            .collect::<HashMap<_, _>>();
+    pub fn new(id: CGDirectDisplayID, bounds: CGRect, menubar_height: u32) -> Self {
         Self {
             id,
-            spaces,
             bounds,
             menubar_height: menubar_height.into(),
         }
@@ -389,51 +389,6 @@ impl Display {
             )))?;
             Ok(CGDisplayGetDisplayIDFromUUID(&id))
         }
-    }
-
-    /// Removes a window from all panes across all spaces on this display.
-    ///
-    /// # Arguments
-    ///
-    /// * `window_id` - The ID of the window to remove.
-    pub fn remove_window(&mut self, window_id: Entity) {
-        self.spaces
-            .values_mut()
-            .for_each(|pane| pane.remove(window_id));
-    }
-
-    /// Retrieves an immutable reference to the `LayoutStrip` corresponding to the active space on this display.
-    ///
-    /// # Arguments
-    ///
-    /// * `space_id` - The ID of the active space.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(&LayoutStrip)` if the active panel is found, otherwise `Err(Error)`.
-    pub fn active_strip(&self, space_id: WorkspaceId) -> Result<&LayoutStrip> {
-        self.spaces.get(&space_id).ok_or(Error::NotFound(format!(
-            "{}: space {space_id}.",
-            function_name!()
-        )))
-    }
-
-    /// Retrieves a mutable reference to the `LayoutStrip` corresponding to the active space on this display.
-    ///
-    /// # Arguments
-    ///
-    /// * `space_id` - The ID of the active space.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(&mut LayoutStrip)` if the active panel is found, otherwise `Err(Error)`.
-    pub fn active_strip_mut(&mut self, space_id: WorkspaceId) -> Result<&mut LayoutStrip> {
-        self.spaces
-            .get_mut(&space_id)
-            .ok_or(Error::NotFound(format!(
-                "{}: space {space_id}.",
-                function_name!()
-            )))
     }
 
     /// Returns the `CGDirectDisplayID` of the display.

@@ -2,7 +2,7 @@ use bevy::app::AppExit;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::{MessageReader, MessageWriter};
-use bevy::ecs::query::{Has, Or, With};
+use bevy::ecs::query::{Has, Or, With, Without};
 use bevy::ecs::system::{
     Commands, Local, NonSend, NonSendMut, Populated, Query, Res, ResMut, SystemId,
 };
@@ -17,13 +17,14 @@ use stdext::function_name;
 
 use super::{
     ActiveDisplayMarker, BProcess, CommandTrigger, ExistingMarker, FocusedMarker, FreshMarker,
-    OrphanedStrip, PollForNotifications, RepositionMarker, ResizeMarker, SpawnWindowTrigger,
-    Timeout, Unmanaged, WMEventTrigger,
+    PollForNotifications, RepositionMarker, ResizeMarker, SpawnWindowTrigger, Timeout,
+    WMEventTrigger,
 };
 use crate::config::Config;
 use crate::ecs::params::{ActiveDisplay, Configuration, DebouncedSystem, Windows};
 use crate::ecs::{
-    ReshuffleAroundMarker, WindowSwipeMarker, reposition_entity, reshuffle_around, resize_entity,
+    ActiveWorkspaceMarker, ReshuffleAroundMarker, Unmanaged, WindowSwipeMarker, reposition_entity,
+    reshuffle_around, resize_entity,
 };
 use crate::events::Event;
 use crate::manager::{Application, Column, Display, LayoutStrip, Window, WindowManager, WindowOS};
@@ -121,11 +122,17 @@ pub fn gather_displays(window_manager: Res<WindowManager>, mut commands: Command
         error!("{}: Unable to get active display id!", function_name!());
         return;
     };
-    for display in window_manager.present_displays() {
-        if display.id() == active_display_id {
-            commands.spawn((display, ActiveDisplayMarker));
+    for (display, workspaces) in window_manager.present_displays() {
+        let entity = if display.id() == active_display_id {
+            commands.spawn((display, ActiveDisplayMarker))
         } else {
-            commands.spawn(display);
+            commands.spawn(display)
+        }
+        .id();
+
+        for id in workspaces {
+            let strip = LayoutStrip::new(id);
+            commands.spawn((strip, ChildOf(entity)));
         }
     }
 }
@@ -172,13 +179,13 @@ fn add_existing_process(
 #[allow(clippy::needless_pass_by_value)]
 fn add_existing_application(
     window_manager: Res<WindowManager>,
-    displays: Query<&Display>,
+    workspaces: Query<&LayoutStrip>,
     app_query: Query<(&mut Application, Entity), With<ExistingMarker>>,
     mut commands: Commands,
 ) {
-    let spaces = displays
-        .iter()
-        .flat_map(|display| display.spaces.keys().copied().collect::<Vec<_>>())
+    let spaces = workspaces
+        .into_iter()
+        .map(LayoutStrip::id)
         .collect::<Vec<_>>();
 
     for (mut app, entity) in app_query {
@@ -206,7 +213,8 @@ fn add_existing_application(
 #[allow(clippy::needless_pass_by_value)]
 fn finish_setup(
     windows: Windows,
-    displays: Query<(&mut Display, Has<ActiveDisplayMarker>)>,
+    mut workspaces: Query<(&mut LayoutStrip, Entity)>,
+    displays: Query<(&Display, Has<ActiveDisplayMarker>)>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
@@ -216,58 +224,65 @@ fn finish_setup(
         windows.iter().len()
     );
 
-    for (mut display, active) in displays {
-        for (space_id, ref mut strip) in &mut display.spaces {
-            let workspace_windows = window_manager
-                .windows_in_workspace(*space_id)
-                .inspect_err(|err| {
-                    warn!(
-                        "{}: failed to get windows on workspace {space_id}: {err}",
-                        function_name!()
-                    );
-                })
-                .ok()
-                .map(|workspace_windows| {
-                    workspace_windows
-                        .into_iter()
-                        .filter_map(|window_id| windows.find_managed(window_id))
-                        .collect::<Vec<_>>()
-                });
-            let Some(workspace_windows) = workspace_windows else {
-                continue;
-            };
+    for (mut strip, _) in &mut workspaces {
+        let workspace_windows = window_manager
+            .windows_in_workspace(strip.id())
+            .inspect_err(|err| {
+                warn!(
+                    "{}: failed to get windows on workspace {}: {err}",
+                    function_name!(),
+                    strip.id()
+                );
+            })
+            .ok()
+            .map(|workspace_windows| {
+                workspace_windows
+                    .into_iter()
+                    .filter_map(|window_id| windows.find_managed(window_id))
+                    .collect::<Vec<_>>()
+            });
+        let Some(workspace_windows) = workspace_windows else {
+            continue;
+        };
 
-            // Preserve the order - do not flush existing windows.
-            for entity in strip.all_windows() {
-                if !workspace_windows.iter().any(|(_, e)| *e == entity) {
-                    strip.remove(entity);
-                }
-            }
-            for (_, entity) in workspace_windows {
-                if strip.index_of(entity).is_err() {
-                    strip.append(entity);
-                }
-            }
-            debug!(
-                "{}: space {space_id}: after refresh {strip}",
-                function_name!()
-            );
-        }
-
-        if active {
-            let active_strip = window_manager
-                .active_display_space(display.id())
-                .and_then(|active_space| display.active_strip(active_space));
-
-            let first_window = active_strip
-                .ok()
-                .and_then(|strip| strip.first().ok())
-                .and_then(|column| column.top());
-            if let Some(entity) = first_window {
-                debug!("{}: focusing {entity}", function_name!());
-                commands.entity(entity).try_insert(FocusedMarker);
+        // Preserve the order - do not flush existing windows.
+        for entity in strip.all_windows() {
+            if !workspace_windows.iter().any(|(_, e)| *e == entity) {
+                strip.remove(entity);
             }
         }
+        for (_, entity) in workspace_windows {
+            if strip.index_of(entity).is_err() {
+                strip.append(entity);
+            }
+        }
+        debug!(
+            "{}: space {}: after refresh {strip:?}",
+            function_name!(),
+            strip.id()
+        );
+    }
+
+    let Some((display, _)) = displays.into_iter().find(|(_, active)| *active) else {
+        return;
+    };
+
+    let Some((active_strip, entity)) = window_manager
+        .active_display_space(display.id())
+        .ok()
+        .and_then(|id| workspaces.iter().find(|(strip, _)| strip.id() == id))
+    else {
+        return;
+    };
+
+    if let Ok(mut commands) = commands.get_entity(entity) {
+        commands.try_insert(ActiveWorkspaceMarker);
+    }
+
+    let first_window = active_strip.first().ok().and_then(|column| column.top());
+    if let Some(entity) = first_window {
+        debug!("{}: focusing {entity}", function_name!());
+        commands.entity(entity).try_insert(FocusedMarker);
     }
 }
 
@@ -448,81 +463,87 @@ pub(super) fn timeout_ticker(
 /// * `active_display` - A mutable `ActiveDisplayMut` system parameter for the currently active display.
 /// * `commands` - Bevy commands to despawn entities.
 #[allow(clippy::needless_pass_by_value)]
-pub(super) fn find_orphaned_spaces(
-    orphaned_spaces: Populated<(Entity, &mut OrphanedStrip)>,
+pub(super) fn find_orphaned_workspaces(
+    orphans: Populated<(&LayoutStrip, Entity), Without<ChildOf>>,
+    workspaces: Populated<(&LayoutStrip, Entity, &ChildOf), With<ChildOf>>,
     windows: Windows,
+    displays: Query<&Display>,
     window_manager: Res<WindowManager>,
-    mut displays: Query<&mut Display>,
     mut commands: Commands,
 ) {
-    for (strip_entity, orphan_strip) in orphaned_spaces {
+    let matched_orphans = workspaces.into_iter().filter_map(|(strip, entity, child)| {
+        orphans.iter().find_map(|(orphan, orphan_entity)| {
+            (strip.id() == orphan.id()).then_some((
+                child.parent(),
+                strip,
+                entity,
+                orphan,
+                orphan_entity,
+            ))
+        })
+    });
+
+    for (parent_display, strip, entity, orphan, orphan_entity) in matched_orphans {
+        let Ok(display) = displays.get(parent_display) else {
+            continue;
+        };
         debug!(
-            "{}: Checking orphaned strip {}",
+            "{}: Re-inserting orphaned strip {} into display {}",
             function_name!(),
-            orphan_strip.id
+            orphan.id(),
+            display.id(),
         );
-        for mut display in &mut displays {
-            let display_id = display.id();
-            let bounds = display.bounds;
 
-            for (space_id, strip) in &mut display.spaces {
-                if *space_id == orphan_strip.id {
-                    debug!(
-                        "{}: Re-inserting orphaned strip {} into display {}",
-                        function_name!(),
-                        orphan_strip.id,
-                        display_id
-                    );
+        if let Ok(mut commands) = commands.get_entity(orphan_entity) {
+            commands.try_remove::<Timeout>();
+        }
+        if let Ok(mut commands) = commands.get_entity(orphan_entity) {
+            commands.try_insert(ChildOf(parent_display));
+        }
+        if let Ok(mut commands) = commands.get_entity(entity) {
+            commands.try_despawn();
+        }
 
-                    let mut in_workspace = window_manager
-                        .windows_in_workspace(*space_id)
-                        .inspect_err(|err| {
-                            warn!("{}: getting windows in workspace: {err}", function_name!());
-                        })
-                        .unwrap_or_default();
+        let mut in_workspace = window_manager
+            .windows_in_workspace(strip.id())
+            .inspect_err(|err| {
+                warn!("{}: getting windows in workspace: {err}", function_name!());
+            })
+            .unwrap_or_default();
 
-                    for entity in orphan_strip.strip.all_windows() {
-                        // TODO: check for clashing windows.
-                        strip.append(entity);
+        for entity in orphan.all_windows() {
+            // Update window ratios on the new display.
+            if let Some(window) = windows.get(entity) {
+                let width = display.bounds.size.width * window.width_ratio();
+                let height = display.bounds.size.height;
+                debug!(
+                    "{}: refreshing ratio {:.1} for window {}: {:.0}x{:.0}",
+                    function_name!(),
+                    window.width_ratio(),
+                    window.id(),
+                    width,
+                    height,
+                );
+                resize_entity(entity, width, height, display.id(), &mut commands);
 
-                        // Update window ratios on the new display.
-                        if let Some(window) = windows.get(entity) {
-                            let width = bounds.size.width * window.width_ratio();
-                            let height = bounds.size.height;
-                            debug!(
-                                "{}: refreshing ratio {:.1} for window {}: {:.0}x{:.0}",
-                                function_name!(),
-                                window.width_ratio(),
-                                window.id(),
-                                width,
-                                height,
-                            );
-                            resize_entity(entity, width, height, display_id, &mut commands);
-
-                            in_workspace.retain(|window_id| *window_id != window.id());
-                        }
-                    }
-
-                    // Find remaining windows which are otuside of the strip.
-                    let floating = in_workspace.into_iter().filter_map(|window_id| {
-                        windows
-                            .find_all(window_id)
-                            .and_then(|(_, entity, _, unmanaged)| {
-                                matches!(unmanaged, Some(Unmanaged::Floating)).then_some(entity)
-                            })
-                    });
-                    for window_entity in floating {
-                        debug!(
-                            "{}: repositioning floating window {window_entity}",
-                            function_name!(),
-                        );
-                        reposition_entity(window_entity, 0.0, 0.0, display_id, &mut commands);
-                    }
-
-                    commands.entity(strip_entity).despawn();
-                    break;
-                }
+                in_workspace.retain(|window_id| *window_id != window.id());
             }
+        }
+
+        // Find remaining windows which are otuside of the strip.
+        let floating = in_workspace.into_iter().filter_map(|window_id| {
+            windows
+                .find_all(window_id)
+                .and_then(|(_, entity, _, unmanaged)| {
+                    matches!(unmanaged, Some(Unmanaged::Floating)).then_some(entity)
+                })
+        });
+        for window_entity in floating {
+            debug!(
+                "{}: repositioning floating window {window_entity}",
+                function_name!(),
+            );
+            reposition_entity(window_entity, 0.0, 0.0, display.id(), &mut commands);
         }
     }
 }
@@ -574,7 +595,7 @@ pub(super) fn display_changes_watcher(
     displays.iter().for_each(|(display, _)| {
         if !present_displays
             .iter()
-            .any(|present_display| present_display.id() == display.id())
+            .any(|(present_display, _)| present_display.id() == display.id())
         {
             debug!(
                 "{}: detected removal of display {}",
@@ -795,9 +816,8 @@ fn slide_to_next_window(
     delta_x: f64,
     commands: &mut Commands,
 ) -> Option<Entity> {
-    let Ok(strip) = active_display.active_strip() else {
-        return None;
-    };
+    let strip = active_display.active_strip();
+
     let neighbour = if delta_x < 0.0 {
         strip.right_neighbour(entity)
     } else {
@@ -831,9 +851,7 @@ pub(super) fn reshuffle_around_window(
     mut commands: Commands,
 ) {
     let display_bounds = active_display.bounds();
-    let Ok(active_strip) = active_display.active_strip() else {
-        return;
-    };
+    let active_strip = active_display.active_strip();
 
     for entity in marker {
         if let Ok(mut cmd) = commands.get_entity(entity) {
@@ -1121,11 +1139,7 @@ pub(super) fn window_update_frame(
                     .iter_mut()
                     .find(|(window, _)| window.id() == *window_id)
                 {
-                    if active_display
-                        .active_strip()
-                        .and_then(|strip| strip.index_of(entity))
-                        .is_err()
-                    {
+                    if active_display.active_strip().index_of(entity).is_err() {
                         // Do not refresh size of windows on other displays or workspaces.
                         continue;
                     }

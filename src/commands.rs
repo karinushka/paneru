@@ -156,22 +156,22 @@ fn command_swap_focus(
 ) -> Option<Entity> {
     let display_bounds = active_display.bounds();
     let display_id = active_display.id();
-    let strip = active_display.active_strip().ok()?;
+    let active_strip = active_display.active_strip();
 
     let (_, current) = windows.focused()?;
-    let index = strip.index_of(current).ok()?;
-    let other_window = get_window_in_direction(direction, current, strip)?;
-    let new_index = strip.index_of(other_window).ok()?;
+    let index = active_strip.index_of(current).ok()?;
+    let other_window = get_window_in_direction(direction, current, active_strip)?;
+    let new_index = active_strip.index_of(other_window).ok()?;
     let current_frame = windows.get(current)?.frame();
 
     let origin = if new_index == 0 {
         // If reached far left, snap the window to left.
         CGPoint::new(0.0, 0.0)
-    } else if new_index == (strip.len() - 1) {
+    } else if new_index == (active_strip.len() - 1) {
         // If reached full right, snap the window to right.
         CGPoint::new(display_bounds.size.width - current_frame.size.width, 0.0)
     } else {
-        strip
+        active_strip
             .get(new_index)
             .ok()
             .and_then(|column| column.top())
@@ -181,11 +181,11 @@ fn command_swap_focus(
     };
     reposition_entity(current, origin.x, origin.y, display_id, commands);
     if index < new_index {
-        (index..new_index).for_each(|idx| strip.swap(idx, idx + 1));
+        (index..new_index).for_each(|idx| active_strip.swap(idx, idx + 1));
     } else {
         (new_index..index)
             .rev()
-            .for_each(|idx| strip.swap(idx, idx + 1));
+            .for_each(|idx| active_strip.swap(idx, idx + 1));
     }
     Some(other_window)
 }
@@ -360,9 +360,7 @@ fn to_next_display(
     reposition_entity(entity, dest.x, dest.y, other.id(), commands);
     reshuffle_around(entity, commands);
 
-    if let Ok(strip) = active_display.active_strip() {
-        strip.remove(entity);
-    }
+    active_display.active_strip().remove(entity);
 }
 
 /// Handles various "window" commands, such as focus, swap, center, resize, manage, and stack.
@@ -388,11 +386,9 @@ fn command_windows(
     commands: &mut Commands,
     config: &Config,
 ) -> Result<()> {
-    let active_strip = active_display.active_strip()?;
-
     match operation {
         Operation::Focus(direction) => {
-            command_move_focus(direction, active_strip, windows);
+            command_move_focus(direction, active_display.active_strip(), windows);
         }
 
         Operation::Swap(direction) => {
@@ -427,9 +423,9 @@ fn command_windows(
                 if unmanaged.is_some() {
                     return Ok(());
                 } else if *stack {
-                    active_strip.stack(entity)?;
+                    active_display.active_strip().stack(entity)?;
                 } else {
-                    active_strip.unstack(entity)?;
+                    active_display.active_strip().unstack(entity)?;
                 }
             } else {
                 return Ok(());

@@ -8,17 +8,16 @@ use bevy::ecs::system::{Commands, NonSendMut, Populated, Query, Res, ResMut, Sin
 use log::{debug, error, info, trace, warn};
 use notify::event::{DataChange, MetadataKind, ModifyKind};
 use notify::{EventKind, Watcher};
-use std::mem::take;
 use std::time::Duration;
 use stdext::function_name;
 
 use super::{
-    ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, MissionControlActive, OrphanedStrip,
+    ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, MissionControlActive,
     SpawnWindowTrigger, StrayFocusEvent, Timeout, Unmanaged, WMEventTrigger, WindowDraggedMarker,
 };
 use crate::config::{Config, WindowParams};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration, Windows};
-use crate::ecs::{WindowSwipeMarker, reshuffle_around};
+use crate::ecs::{ActiveWorkspaceMarker, WindowSwipeMarker, reshuffle_around};
 use crate::errors::Result;
 use crate::events::Event;
 use crate::manager::{
@@ -236,11 +235,11 @@ fn windows_not_in_strip<F: Fn(WinID) -> Option<Entity>>(
     Ok(moved_windows)
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
+#[allow(clippy::needless_pass_by_value)]
 pub(super) fn workspace_change_trigger(
     trigger: On<WMEventTrigger>,
-    windows: Windows,
-    mut active_display: ActiveDisplayMut,
+    active_display: Single<&Display, With<ActiveDisplayMarker>>,
+    workspaces: Query<(&LayoutStrip, Entity, Has<ActiveWorkspaceMarker>)>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
@@ -249,24 +248,56 @@ pub(super) fn workspace_change_trigger(
     };
 
     let Ok(workspace_id) = window_manager.active_display_space(active_display.id()) else {
+        error!("{}: Unable to get active workspace id!", function_name!());
         return;
     };
-    let Ok(strip) = active_display.active_strip() else {
+
+    for (strip, entity, active) in workspaces {
+        if active && strip.id() != workspace_id {
+            debug!(
+                "{}: Workspace id {} no longer active",
+                function_name!(),
+                strip.id()
+            );
+            commands
+                .entity(entity)
+                .try_remove::<ActiveWorkspaceMarker>();
+        }
+        if !active && strip.id() == workspace_id {
+            debug!(
+                "{}: Workspace id {} is active",
+                function_name!(),
+                strip.id()
+            );
+            commands.entity(entity).try_insert(ActiveWorkspaceMarker);
+        }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
+pub(super) fn active_workspace_trigger(
+    trigger: On<Add, ActiveWorkspaceMarker>,
+    windows: Windows,
+    mut workspaces: Query<&mut LayoutStrip, With<ChildOf>>,
+    window_manager: Res<WindowManager>,
+    mut commands: Commands,
+) {
+    let Ok(active_strip) = workspaces.get(trigger.entity) else {
         return;
     };
-    debug!(
-        "{}: workspace {workspace_id}, strip {strip}",
-        function_name!()
-    );
+    let workspace_id = active_strip.id();
+    debug!("{}: workspace {workspace_id}", function_name!());
 
     let find_window = |window_id| windows.find_managed(window_id).map(|(_, entity)| entity);
-    let Ok(moved_windows) = windows_not_in_strip(workspace_id, find_window, strip, &window_manager)
-        .inspect_err(|err| {
-            warn!(
-                "{}: unable to get windows in the current workspace: {err}",
-                function_name!()
-            );
-        })
+    let Ok(moved_windows) =
+        windows_not_in_strip(workspace_id, find_window, active_strip, &window_manager).inspect_err(
+            |err| {
+                warn!(
+                    "{}: unable to get windows in the current workspace: {err}",
+                    function_name!()
+                );
+            },
+        )
     else {
         return;
     };
@@ -274,16 +305,15 @@ pub(super) fn workspace_change_trigger(
     for entity in moved_windows {
         debug!(
             "{}: Window {entity} moved to workspace {workspace_id}.",
-            function_name!()
+            function_name!(),
         );
 
-        active_display
-            .other()
-            .for_each(|mut display| display.remove_window(entity));
-        active_display.display().remove_window(entity);
-        if let Ok(strip) = active_display.active_strip() {
-            strip.append(entity);
-        }
+        workspaces.iter_mut().for_each(|mut strip| {
+            strip.remove(entity);
+            if strip.id() == workspace_id {
+                strip.append(entity);
+            }
+        });
 
         reshuffle_around(entity, &mut commands);
     }
@@ -341,55 +371,10 @@ pub(super) fn display_change_trigger(
 
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn active_display_trigger(
-    trigger: On<Add, ActiveDisplayMarker>,
-    windows: Windows,
-    mut displays: Query<&mut Display>,
-    window_manager: Res<WindowManager>,
-    mut commands: Commands,
+    _trigger: On<Add, ActiveDisplayMarker>,
+    mut messages: MessageWriter<Event>,
 ) {
-    let Ok(active_display) = displays.get(trigger.entity) else {
-        return;
-    };
-    let Ok(workspace_id) = window_manager.active_display_space(active_display.id()) else {
-        return;
-    };
-    let Ok(strip) = active_display.active_strip(workspace_id) else {
-        return;
-    };
-    debug!(
-        "{}: workspace {workspace_id}, strip {strip}",
-        function_name!()
-    );
-
-    let find_window = |window_id| windows.find_managed(window_id).map(|(_, entity)| entity);
-    let Ok(moved_windows) = windows_not_in_strip(workspace_id, find_window, strip, &window_manager)
-        .inspect_err(|err| {
-            warn!(
-                "{}: unable to get windows in the current workspace: {err}",
-                function_name!()
-            );
-        })
-    else {
-        return;
-    };
-
-    for entity in moved_windows {
-        debug!(
-            "{}: Window {entity} moved to workspace {workspace_id}.",
-            function_name!()
-        );
-
-        displays
-            .iter_mut()
-            .for_each(|mut display| display.remove_window(entity));
-
-        if let Ok(mut display) = displays.get_mut(trigger.entity)
-            && let Ok(strip) = display.active_strip_mut(workspace_id)
-        {
-            strip.append(entity);
-            reshuffle_around(entity, &mut commands);
-        }
-    }
+    messages.write(Event::SpaceChanged);
 }
 
 /// Handles display added events.
@@ -413,11 +398,11 @@ pub(super) fn display_add_trigger(
     };
 
     debug!("{}: Display Added: {display_id:?}", function_name!());
-    let Some(display) = window_manager
+    let Some((display, workspaces)) = window_manager
         .0
         .present_displays()
         .into_iter()
-        .find(|display| display.id() == display_id)
+        .find(|(display, _)| display.id() == display_id)
     else {
         error!(
             "{}: Unable to find added display id {display_id}!",
@@ -426,10 +411,11 @@ pub(super) fn display_add_trigger(
         return;
     };
 
-    for (id, strip) in &display.spaces {
-        debug!("{}: Space {id} - {strip}", function_name!());
-    }
-    commands.spawn(display);
+    let children = workspaces
+        .into_iter()
+        .map(|id| commands.spawn(LayoutStrip::new(id)).id())
+        .collect::<Vec<_>>();
+    commands.spawn(display).add_children(&children);
     commands.trigger(WMEventTrigger(Event::DisplayChanged));
 }
 
@@ -446,7 +432,8 @@ pub(super) fn display_add_trigger(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn display_remove_trigger(
     trigger: On<WMEventTrigger>,
-    mut displays: Query<(&mut Display, Entity)>,
+    workspaces: Query<(&LayoutStrip, Entity, &ChildOf)>,
+    displays: Query<(&Display, Entity)>,
     mut commands: Commands,
 ) {
     const ORPHANED_SPACES_TIMEOUT_SEC: u64 = 5;
@@ -454,33 +441,43 @@ pub(super) fn display_remove_trigger(
         return;
     };
     debug!("{}: Display Removed: {display_id:?}", function_name!());
-    let Some((mut display, entity)) = displays
-        .iter_mut()
+    let Some((display, display_entity)) = displays
+        .into_iter()
         .find(|(display, _)| display.id() == display_id)
     else {
         error!("{}: Unable to find removed display!", function_name!());
         return;
     };
 
-    for (id, strip) in take(&mut display.spaces)
+    for (strip, entity, _) in workspaces
         .into_iter()
-        .filter(|(_, strip)| strip.len() > 0)
+        .filter(|(_, _, child)| child.parent() == display_entity)
     {
         debug!(
-            "{}: adding {id} {strip} to orphaned list.",
-            function_name!()
+            "{}: orphaning strip {} after removal of display {}.",
+            function_name!(),
+            strip.id(),
+            display.id()
         );
         let timeout = Timeout::new(
             Duration::from_secs(ORPHANED_SPACES_TIMEOUT_SEC),
             Some(format!(
-                "{}: Orphaned pane {id} ({strip}) could not be re-inserted after {ORPHANED_SPACES_TIMEOUT_SEC}s.",
+                "{}: Orphaned strip {} ({strip}) could not be re-inserted after {ORPHANED_SPACES_TIMEOUT_SEC}s.",
                 function_name!(),
+                strip.id()
             )),
         );
-        commands.spawn((timeout, OrphanedStrip { id, strip }));
+        if let Ok(mut commands) = commands.get_entity(entity) {
+            commands.try_insert(timeout);
+        }
+        if let Ok(mut commands) = commands.get_entity(display_entity) {
+            commands.detach_child(entity);
+        }
     }
 
-    commands.entity(entity).despawn();
+    if let Ok(mut commands) = commands.get_entity(display_entity) {
+        commands.despawn();
+    }
     commands.trigger(WMEventTrigger(Event::DisplayChanged));
 }
 
@@ -514,20 +511,15 @@ pub(super) fn display_moved_trigger(
         error!("{}: Unable to find moved display!", function_name!());
         return;
     };
-    let Some(moved_display) = window_manager
+    let Some((moved_display, _)) = window_manager
         .0
         .present_displays()
         .into_iter()
-        .find(|display| display.id() == display_id)
+        .find(|(display, _)| display.id() == display_id)
     else {
         return;
     };
     *display = moved_display;
-    // find_orphaned_spaces(&mut orphaned_spaces.0, &mut display, &mut windows);
-
-    for (id, strip) in &display.spaces {
-        debug!("{}: Space {id} - {strip}", function_name!());
-    }
     commands.trigger(WMEventTrigger(Event::DisplayChanged));
 }
 
@@ -654,12 +646,15 @@ pub(super) fn window_focused_trigger(
 
     let focus = windows.focused().map(|(_, entity)| entity);
     for (window, entity, _, _) in windows.iter() {
+        let Ok(mut cmd) = commands.get_entity(entity) else {
+            continue;
+        };
         let focused = focus.is_some_and(|focus| entity == focus);
         if focused && window.id() != window_id {
-            commands.entity(entity).try_remove::<FocusedMarker>();
+            cmd.try_remove::<FocusedMarker>();
         }
         if !focused && window.id() == window_id {
-            commands.entity(entity).try_insert(FocusedMarker);
+            cmd.try_insert(FocusedMarker);
         }
     }
 
@@ -866,20 +861,14 @@ pub(super) fn window_unmanaged_trigger(
         match marker {
             Unmanaged::Floating => {
                 debug!("{}: Entity {entity} is floating.", function_name!(),);
-                active_display.display().remove_window(entity);
+                active_display.active_strip().remove(entity);
             }
 
             Unmanaged::Minimized | Unmanaged::Hidden => {
                 debug!("{}: Entity {entity} is minimized.", function_name!());
-                let Ok(active_strip) = active_display
-                    .active_strip()
-                    .inspect_err(|err| debug!("{}: {err}", function_name!()))
-                else {
-                    return;
-                };
-
+                let active_strip = active_display.active_strip();
                 give_away_focus(entity, &windows, active_strip, &mut commands);
-                active_display.display().remove_window(entity);
+                active_display.active_strip().remove(entity);
             }
         }
     }
@@ -893,14 +882,8 @@ pub(super) fn window_managed_trigger(
 ) {
     let entity = trigger.event().entity;
     debug!("{}: Entity {entity} is managed again.", function_name!(),);
-    let Ok(active_strip) = active_display
-        .active_strip()
-        .inspect_err(|err| debug!("{}: {err}", function_name!()))
-    else {
-        return;
-    };
 
-    active_strip.append(entity);
+    active_display.active_strip().append(entity);
     reshuffle_around(entity, &mut commands);
 }
 
@@ -918,8 +901,7 @@ pub(super) fn window_destroyed_trigger(
     trigger: On<WMEventTrigger>,
     windows: Windows,
     mut apps: Query<&mut Application>,
-    mut displays: Query<&mut Display>,
-    window_manager: Res<WindowManager>,
+    workspaces: Query<&mut LayoutStrip, With<ChildOf>>,
     mut commands: Commands,
 ) {
     let Event::WindowDestroyed { window_id } = trigger.event().0 else {
@@ -945,17 +927,12 @@ pub(super) fn window_destroyed_trigger(
     app.unobserve_window(window);
     commands.entity(entity).despawn();
 
-    for mut display in &mut displays {
-        let Ok(strip) = window_manager
-            .0
-            .active_display_space(display.id())
-            .and_then(|active_space| display.active_strip(active_space))
-        else {
-            continue;
-        };
+    for mut strip in workspaces {
+        if strip.index_of(entity).is_ok() {
+            give_away_focus(entity, &windows, &strip, &mut commands);
+        }
 
-        give_away_focus(entity, &windows, strip, &mut commands);
-        display.remove_window(entity);
+        strip.remove(entity);
     }
 }
 
@@ -1120,9 +1097,7 @@ fn apply_window_properties(
         return;
     }
 
-    let Ok(strip) = active_display.active_strip() else {
-        return;
-    };
+    let strip = active_display.active_strip();
 
     // Attempt inserting the window at a pre-defined position.
     let insert_at = wanted_insertion.map_or_else(
@@ -1223,7 +1198,8 @@ pub(super) fn refresh_configuration_trigger(
 pub(super) fn print_internal_state_trigger(
     trigger: On<WMEventTrigger>,
     windows: Windows,
-    displays: Query<(&Display, Has<ActiveDisplayMarker>)>,
+    workspaces: Query<(&LayoutStrip, Entity, &ChildOf)>,
+    displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
 ) {
     let Event::PrintState = &trigger.event().0 else {
         return;
@@ -1232,7 +1208,7 @@ pub(super) fn print_internal_state_trigger(
     let focused = windows.focused();
     let print_window = |(window, entity, _, unmanaged): (&Window, Entity, &ChildOf, Option<_>)| {
         format!(
-            "id: {}, {entity}, {:.0}:{:.0}, {:.0}x{:.0}{}{}, title: '{:.70}'",
+            "\tid: {}, {entity}, {:.0}:{:.0}, {:.0}x{:.0}{}{}, title: '{:.70}'",
             window.id(),
             window.frame().origin.x,
             window.frame().origin.y,
@@ -1250,8 +1226,11 @@ pub(super) fn print_internal_state_trigger(
 
     let mut seen = EntityHashSet::new();
 
-    for (display, active) in displays {
-        for (space, strip) in &display.spaces {
+    for (display, display_entity, active) in displays {
+        for (strip, _, _) in workspaces
+            .iter()
+            .filter(|(_, _, child)| child.parent() == display_entity)
+        {
             let windows = strip
                 .all_windows()
                 .iter()
@@ -1263,18 +1242,19 @@ pub(super) fn print_internal_state_trigger(
                 .collect::<Vec<_>>();
 
             debug!(
-                "{}: Display {}{}, workspace {space}:\n{}",
+                "{}: Display {}{}, workspace id {}:\n{}",
                 function_name!(),
                 display.id(),
                 if active { ", active" } else { "" },
+                strip.id(),
                 windows.join("\n")
             );
         }
     }
 
-    let remaining = seen
+    let remaining = windows
         .iter()
-        .filter_map(|entity| windows.get_all(*entity))
+        .filter(|entity| !seen.contains(&entity.1))
         .map(print_window)
         .collect::<Vec<_>>();
     debug!("{}: Remaining:\n{}", function_name!(), remaining.join("\n"));

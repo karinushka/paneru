@@ -20,8 +20,8 @@ use objc2_core_graphics::CGDirectDisplayID;
 
 use crate::commands::Command;
 use crate::events::Event;
-use crate::manager::{LayoutStrip, ProcessApi, Window};
-use crate::platform::{WinID, WorkspaceId};
+use crate::manager::{ProcessApi, Window};
+use crate::platform::WinID;
 pub use systems::gather_displays;
 pub use systems::initial_oneshot_systems;
 
@@ -52,8 +52,10 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::add_launched_application,
             systems::fresh_marker_cleanup,
             systems::timeout_ticker,
-            systems::find_orphaned_spaces,
             systems::window_update_frame,
+            systems::find_orphaned_workspaces.run_if(on_timer(Duration::from_millis(
+                DISPLAY_CHANGE_CHECK_FREQ_MS,
+            ))),
         ),
     );
     app.add_systems(
@@ -79,6 +81,7 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::mouse_down_trigger)
         .add_observer(triggers::mouse_dragged_trigger)
         .add_observer(triggers::workspace_change_trigger)
+        .add_observer(triggers::active_workspace_trigger)
         .add_observer(triggers::display_change_trigger)
         .add_observer(triggers::active_display_trigger)
         .add_observer(triggers::display_add_trigger)
@@ -103,6 +106,9 @@ pub fn register_triggers(app: &mut bevy::app::App) {
 /// Marker component for the currently focused window.
 #[derive(Component)]
 pub struct FocusedMarker;
+
+#[derive(Component)]
+pub struct ActiveWorkspaceMarker;
 
 /// Marker component for the currently active display.
 #[derive(Component)]
@@ -194,15 +200,6 @@ impl Timeout {
 /// Component used as a retry mechanism for stray focus events that arrive before the target window is fully created.
 #[derive(Component)]
 pub struct StrayFocusEvent(pub WinID);
-
-/// Component representing a `LayoutStrip` that has become orphaned, typically due to a space being destroyed or reassigned.
-#[derive(Component)]
-pub struct OrphanedStrip {
-    /// The ID of the orphaned space.
-    pub id: WorkspaceId,
-    /// The `LayoutStrip` that was orphaned.
-    pub strip: LayoutStrip,
-}
 
 /// Resource to control whether window reshuffling should be skipped.
 #[derive(Resource)]

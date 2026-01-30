@@ -72,7 +72,7 @@ pub trait WindowManagerApi: Send + Sync {
     /// # Returns
     ///
     /// A `Vec<Display>` containing `Display` objects for all present displays.
-    fn present_displays(&self) -> Vec<Display>;
+    fn present_displays(&self) -> Vec<(Display, Vec<WorkspaceId>)>;
     /// Retrieves the `CGDirectDisplayID` of the active menu bar display.
     ///
     /// # Returns
@@ -372,7 +372,7 @@ impl WindowManagerApi for WindowManagerOS {
     /// # Returns
     ///
     /// A `Vec<Self>` containing `Display` objects for all present displays.
-    fn present_displays(&self) -> Vec<Display> {
+    fn present_displays(&self) -> Vec<(Display, Vec<WorkspaceId>)> {
         let mut count = 0u32;
         unsafe {
             CGGetActiveDisplayList(0, null_mut(), &raw mut count);
@@ -387,17 +387,15 @@ impl WindowManagerApi for WindowManagerOS {
         }
         displays
             .into_iter()
-            .flat_map(|id| {
-                let uuid = Display::uuid_from_id(id);
-                uuid.and_then(|uuid| {
-                    self.display_space_list(uuid.as_ref()).map(|spaces| {
-                        let bounds = CGDisplayBounds(id);
-                        let mut menubar_height: u32 = 0;
-                        unsafe { SLSGetDisplayMenubarHeight(id, &raw mut menubar_height) };
-                        debug!("{}: menubar height: {menubar_height}", function_name!());
-                        Display::new(id, spaces, bounds, menubar_height)
-                    })
-                })
+            .filter_map(|id| {
+                let bounds = CGDisplayBounds(id);
+                let mut menubar_height: u32 = 0;
+                unsafe { SLSGetDisplayMenubarHeight(id, &raw mut menubar_height) };
+                debug!("{}: menubar height: {menubar_height}", function_name!());
+                let workspaces = Display::uuid_from_id(id)
+                    .and_then(|uuid| self.display_space_list(uuid.as_ref()))
+                    .ok()?;
+                Some((Display::new(id, bounds, menubar_height), workspaces))
             })
             .collect()
     }

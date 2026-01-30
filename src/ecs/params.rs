@@ -18,8 +18,8 @@ use stdext::function_name;
 use super::{ActiveDisplayMarker, FocusFollowsMouse, MissionControlActive, SkipReshuffle};
 use crate::{
     config::{Config, WindowParams},
-    ecs::{FocusedMarker, Unmanaged},
-    manager::{Display, LayoutStrip, Window, WindowManager},
+    ecs::{ActiveWorkspaceMarker, FocusedMarker, Unmanaged},
+    manager::{Display, LayoutStrip, Window},
     platform::WinID,
 };
 
@@ -158,10 +158,9 @@ impl DebouncedSystem<'_, '_> {
 /// It ensures that only one display is marked as active at any given time.
 #[derive(SystemParam)]
 pub struct ActiveDisplay<'w, 's> {
+    strip: Single<'w, 's, &'static LayoutStrip, With<ActiveWorkspaceMarker>>,
     /// The single active `Display` component, marked with `ActiveDisplayMarker`.
     display: Single<'w, 's, &'static Display, With<ActiveDisplayMarker>>,
-    /// The `WindowManager` resource for querying display and space information.
-    window_manager: Res<'w, WindowManager>,
     /// A query for all other `Display` components that are not marked as active.
     other_displays: Query<'w, 's, &'static Display, Without<ActiveDisplayMarker>>,
 }
@@ -182,16 +181,8 @@ impl ActiveDisplay<'_, '_> {
         self.other_displays.iter()
     }
 
-    /// Retrieves an immutable reference to the `LayoutStrip` of the active space on the active display.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(&LayoutStrip)` if the active panel is found, otherwise `Err(Error)`.
-    pub fn active_strip(&self) -> crate::errors::Result<&LayoutStrip> {
-        self.window_manager
-            .0
-            .active_display_space(self.display.id())
-            .and_then(|workspace_id| self.display.active_strip(workspace_id))
+    pub fn active_strip(&self) -> &LayoutStrip {
+        *self.strip
     }
 
     /// Returns the `CGRect` representing the bounds of the active display.
@@ -204,20 +195,14 @@ impl ActiveDisplay<'_, '_> {
 /// It allows systems to modify the active display and its associated `LayoutStrip`s.
 #[derive(SystemParam)]
 pub struct ActiveDisplayMut<'w, 's> {
+    strip: Single<'w, 's, &'static mut LayoutStrip, With<ActiveWorkspaceMarker>>,
     /// The single active `Display` component, marked with `ActiveDisplayMarker`.
     display: Single<'w, 's, &'static mut Display, With<ActiveDisplayMarker>>,
-    /// The `WindowManager` resource for querying display and space information.
-    window_manager: Res<'w, WindowManager>,
     /// A query for all other `Display` components that are not marked as active.
     other_displays: Query<'w, 's, &'static mut Display, Without<ActiveDisplayMarker>>,
 }
 
 impl ActiveDisplayMut<'_, '_> {
-    /// Returns a mutable reference to the active `Display`.
-    pub fn display(&mut self) -> &mut Display {
-        &mut self.display
-    }
-
     /// Returns the `CGDirectDisplayID` of the active display.
     pub fn id(&self) -> CGDirectDisplayID {
         self.display.id()
@@ -228,16 +213,8 @@ impl ActiveDisplayMut<'_, '_> {
         self.other_displays.iter_mut()
     }
 
-    /// Retrieves a mutable reference to the `LayoutStrip` of the active space on the active display.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(&mut LayoutStrip)` if the active panel is found, otherwise `Err(Error)`.
-    pub fn active_strip(&mut self) -> crate::errors::Result<&mut LayoutStrip> {
-        self.window_manager
-            .0
-            .active_display_space(self.display.id())
-            .and_then(|workspace_id| self.display.active_strip_mut(workspace_id))
+    pub fn active_strip(&mut self) -> &mut LayoutStrip {
+        &mut self.strip
     }
 
     /// Returns the `CGRect` representing the bounds of the active display.

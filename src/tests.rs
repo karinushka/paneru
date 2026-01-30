@@ -13,8 +13,8 @@ use stdext::prelude::RwLockExt;
 use crate::commands::{Command, Direction, Operation, process_command_trigger};
 use crate::config::Config;
 use crate::ecs::{
-    ActiveDisplayMarker, BProcess, FocusFollowsMouse, FocusedMarker, MissionControlActive,
-    PollForNotifications, SkipReshuffle, register_systems, register_triggers,
+    ActiveDisplayMarker, ActiveWorkspaceMarker, BProcess, FocusFollowsMouse, FocusedMarker,
+    MissionControlActive, PollForNotifications, SkipReshuffle, register_systems, register_triggers,
 };
 use crate::errors::{Error, Result};
 use crate::events::Event;
@@ -208,7 +208,7 @@ impl WindowManagerApi for MockWindowManager {
     }
 
     /// Always returns an empty vector, as present displays are mocked elsewhere.
-    fn present_displays(&self) -> Vec<Display> {
+    fn present_displays(&self) -> Vec<(Display, Vec<WorkspaceId>)> {
         println!("{}: []", function_name!());
         vec![]
     }
@@ -520,18 +520,16 @@ fn setup_world(app: &mut App, event_queue: &EventQueue) -> MockApplication {
         .insert_resource(FocusFollowsMouse(None))
         .insert_resource(PollForNotifications(true))
         .insert_resource(Config::default())
-        .add_observer(process_command_trigger);
-    register_triggers(app);
-    register_systems(app);
+        .add_observer(process_command_trigger)
+        .add_plugins((register_triggers, register_systems));
 
     app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
         100,
     )));
 
     let world = app.world_mut();
-    let mut display = Display::new(
+    let display = Display::new(
         TEST_DISPLAY_ID,
-        vec![TEST_WORKSPACE_ID],
         CGRect::new(
             CGPoint::new(0.0, 0.0),
             CGSize::new(
@@ -541,11 +539,11 @@ fn setup_world(app: &mut App, event_queue: &EventQueue) -> MockApplication {
         ),
         TEST_MENUBAR_HEIGHT as u32,
     );
-    let strip = display.active_strip_mut(TEST_WORKSPACE_ID).unwrap();
 
-    let process = setup_test_process(psn, world, strip, event_queue);
-
-    world.spawn((display, ActiveDisplayMarker));
+    let display_id = world.spawn((display, ActiveDisplayMarker)).id();
+    let mut strip = LayoutStrip::new(TEST_WORKSPACE_ID);
+    let process = setup_test_process(psn, world, &mut strip, event_queue);
+    world.spawn((strip, ActiveWorkspaceMarker, ChildOf(display_id)));
 
     process
 }

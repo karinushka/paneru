@@ -287,6 +287,7 @@ impl EventHandler {
                 _ = world.run_system(*id);
             }
         }
+        world.flush();
 
         for id in oneshot_systems {
             _ = world.unregister_system(id);

@@ -17,7 +17,7 @@ use stdext::function_name;
 
 use super::{
     ActiveDisplayMarker, BProcess, CommandTrigger, ExistingMarker, FocusedMarker, FreshMarker,
-    OrphanedPane, PollForNotifications, RepositionMarker, ResizeMarker, SpawnWindowTrigger,
+    OrphanedStrip, PollForNotifications, RepositionMarker, ResizeMarker, SpawnWindowTrigger,
     Timeout, Unmanaged, WMEventTrigger,
 };
 use crate::config::Config;
@@ -26,7 +26,7 @@ use crate::ecs::{
     ReshuffleAroundMarker, WindowSwipeMarker, reposition_entity, reshuffle_around, resize_entity,
 };
 use crate::events::Event;
-use crate::manager::{Application, Display, Panel, Window, WindowManager, WindowOS, WindowPane};
+use crate::manager::{Application, Column, Display, LayoutStrip, Window, WindowManager, WindowOS};
 use crate::platform::PlatformCallbacks;
 
 const WINDOW_HIDDEN_THRESHOLD: f64 = 10.0;
@@ -226,14 +226,14 @@ fn finish_setup(
         window_manager.refresh_display(&mut display, &windows);
 
         if active {
-            let active_panel = window_manager
+            let active_strip = window_manager
                 .active_display_space(display.id())
-                .and_then(|active_space| display.active_panel(active_space));
+                .and_then(|active_space| display.active_strip(active_space));
 
-            let first_window = active_panel
+            let first_window = active_strip
                 .ok()
-                .and_then(|panel| panel.first().ok())
-                .and_then(|panel| panel.top());
+                .and_then(|strip| strip.first().ok())
+                .and_then(|column| column.top());
             if let Some(entity) = first_window {
                 debug!("{}: focusing {entity}", function_name!());
                 commands.entity(entity).try_insert(FocusedMarker);
@@ -410,38 +410,38 @@ pub(super) fn timeout_ticker(
 }
 
 /// A Bevy system that finds and re-assigns orphaned spaces to the active display.
-/// This system iterates through `OrphanedPane` entities, attempts to merge their windows into an existing space on the active display,
-/// and then despawns the `OrphanedPane` entity.
+/// This system iterates through `OrphanedStrip` entities, attempts to merge their windows into an existing space on the active display,
+/// and then despawns the `OrphanedStrip` entity.
 ///
 /// # Arguments
 ///
-/// * `orphaned_spaces` - A `Populated` query for `(Entity, &mut OrphanedPane)` components.
+/// * `orphaned_spaces` - A `Populated` query for `(Entity, &mut OrphanedStrip)` components.
 /// * `active_display` - A mutable `ActiveDisplayMut` system parameter for the currently active display.
 /// * `commands` - Bevy commands to despawn entities.
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn find_orphaned_spaces(
-    orphaned_spaces: Populated<(Entity, &mut OrphanedPane)>,
+    orphaned_spaces: Populated<(Entity, &mut OrphanedStrip)>,
     windows: Windows,
     window_manager: Res<WindowManager>,
     mut displays: Query<&mut Display>,
     mut commands: Commands,
 ) {
-    for (pane_entity, orphan_pane) in orphaned_spaces {
+    for (strip_entity, orphan_strip) in orphaned_spaces {
         debug!(
-            "{}: Checking orphaned pane {}",
+            "{}: Checking orphaned strip {}",
             function_name!(),
-            orphan_pane.id
+            orphan_strip.id
         );
         for mut display in &mut displays {
             let display_id = display.id();
             let bounds = display.bounds;
 
-            for (space_id, pane) in &mut display.spaces {
-                if *space_id == orphan_pane.id {
+            for (space_id, strip) in &mut display.spaces {
+                if *space_id == orphan_strip.id {
                     debug!(
-                        "{}: Re-inserting orphaned pane {} into display {}",
+                        "{}: Re-inserting orphaned strip {} into display {}",
                         function_name!(),
-                        orphan_pane.id,
+                        orphan_strip.id,
                         display_id
                     );
 
@@ -452,9 +452,9 @@ pub(super) fn find_orphaned_spaces(
                         })
                         .unwrap_or_default();
 
-                    for entity in orphan_pane.pane.all_windows() {
+                    for entity in orphan_strip.strip.all_windows() {
                         // TODO: check for clashing windows.
-                        pane.append(entity);
+                        strip.append(entity);
 
                         // Update window ratios on the new display.
                         if let Some(window) = windows.get(entity) {
@@ -474,7 +474,7 @@ pub(super) fn find_orphaned_spaces(
                         }
                     }
 
-                    // Find remaining windows which are otuside of the pane.
+                    // Find remaining windows which are otuside of the strip.
                     let floating = in_workspace.into_iter().filter_map(|window_id| {
                         windows
                             .find_all(window_id)
@@ -490,7 +490,7 @@ pub(super) fn find_orphaned_spaces(
                         reposition_entity(window_entity, 0.0, 0.0, display_id, &mut commands);
                     }
 
-                    commands.entity(pane_entity).despawn();
+                    commands.entity(strip_entity).despawn();
                     break;
                 }
             }
@@ -766,13 +766,13 @@ fn slide_to_next_window(
     delta_x: f64,
     commands: &mut Commands,
 ) -> Option<Entity> {
-    let Ok(pane) = active_display.active_panel() else {
+    let Ok(strip) = active_display.active_strip() else {
         return None;
     };
     let neighbour = if delta_x < 0.0 {
-        pane.right_neighbour(entity)
+        strip.right_neighbour(entity)
     } else {
-        pane.left_neighbour(entity)
+        strip.left_neighbour(entity)
     };
 
     neighbour.inspect(|neighbour| {
@@ -784,7 +784,7 @@ fn slide_to_next_window(
     })
 }
 
-/// Reshuffles windows around a given window entity within the active panel to ensure visibility.
+/// Reshuffles windows around a given window entity within the active strip to ensure visibility.
 /// Windows to the right and left of the focused window are repositioned.
 ///
 /// # Arguments
@@ -802,7 +802,7 @@ pub(super) fn reshuffle_around_window(
     mut commands: Commands,
 ) {
     let display_bounds = active_display.bounds();
-    let Ok(active_panel) = active_display.active_panel() else {
+    let Ok(active_strip) = active_display.active_strip() else {
         return;
     };
 
@@ -825,29 +825,29 @@ pub(super) fn reshuffle_around_window(
             entity,
             frame.origin.x,
             display_bounds.size.width,
-            active_panel,
+            active_strip,
             &window_width,
         ) else {
             return;
         };
         let positions =
             positions
-                .zip(active_panel.all_columns())
+                .zip(active_strip.all_columns())
                 .filter_map(|(position, entity)| {
                     window_width(entity).map(|width| (position, entity, width))
                 });
 
         for (upper_left, entity, width) in positions {
-            let Ok(panel) = active_panel
+            let Ok(column) = active_strip
                 .index_of(entity)
-                .and_then(|index| active_panel.get(index))
+                .and_then(|index| active_strip.get(index))
             else {
                 continue;
             };
 
             reposition_stack(
                 upper_left,
-                &panel,
+                &column,
                 width,
                 &active_display,
                 &windows,
@@ -858,7 +858,7 @@ pub(super) fn reshuffle_around_window(
 }
 
 pub fn absolute_positions<W>(
-    active_panel: &WindowPane,
+    active_strip: &LayoutStrip,
     window_width: W,
 ) -> impl Iterator<Item = f64>
 where
@@ -866,7 +866,7 @@ where
 {
     let mut left_edge = 0.0;
 
-    active_panel
+    active_strip
         .all_columns()
         .into_iter()
         .filter_map(window_width)
@@ -881,19 +881,19 @@ fn calculate_positions<W>(
     entity: Entity,
     current_x: f64,
     display_width: f64,
-    active_panel: &WindowPane,
+    active_strip: &LayoutStrip,
     window_width: W,
 ) -> Option<impl Iterator<Item = f64>>
 where
     W: Fn(Entity) -> Option<f64>,
 {
-    let widths = active_panel
+    let widths = active_strip
         .all_columns()
         .into_iter()
         .filter_map(&window_width)
         .collect::<Vec<_>>();
-    let positions = absolute_positions(active_panel, &window_width).collect::<Vec<_>>();
-    let offset = active_panel
+    let positions = absolute_positions(active_strip, &window_width).collect::<Vec<_>>();
+    let offset = active_strip
         .index_of(entity)
         .ok()
         .and_then(|index| positions.get(index))
@@ -916,12 +916,12 @@ where
     )
 }
 
-/// Repositions all windows within a given panel stack.
+/// Repositions all windows within a given column stack.
 ///
 /// # Arguments
 ///
 /// * `upper_left` - The x-coordinate of the upper-left corner of the stack.
-/// * `panel` - The panel containing the windows to reposition.
+/// * `column` - The column containing the windows to reposition.
 /// * `width` - The width of each window in the stack.
 /// * `display_bounds` - The bounds of the display.
 /// * `menubar_height` - The height of the menu bar.
@@ -929,7 +929,7 @@ where
 /// * `commands` - Bevy commands to trigger events.
 fn reposition_stack(
     upper_left: f64,
-    panel: &Panel,
+    column: &Column,
     width: f64,
     active_display: &ActiveDisplay,
     windows: &Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
@@ -938,9 +938,9 @@ fn reposition_stack(
     const MIN_WINDOW_HEIGHT: f64 = 200.0;
     let display_height =
         active_display.bounds().size.height - active_display.display().menubar_height;
-    let entities = match panel {
-        Panel::Single(entity) => vec![*entity],
-        Panel::Stack(stack) => stack.clone(),
+    let entities = match column {
+        Column::Single(entity) => vec![*entity],
+        Column::Stack(stack) => stack.clone(),
     };
     let heights = entities
         .iter()
@@ -1093,8 +1093,8 @@ pub(super) fn window_update_frame(
                     .find(|(window, _)| window.id() == *window_id)
                 {
                     if active_display
-                        .active_panel()
-                        .and_then(|panel| panel.index_of(entity))
+                        .active_strip()
+                        .and_then(|strip| strip.index_of(entity))
                         .is_err()
                     {
                         // Do not refresh size of windows on other displays or workspaces.

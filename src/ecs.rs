@@ -20,7 +20,7 @@ use objc2_core_graphics::CGDirectDisplayID;
 
 use crate::commands::Command;
 use crate::events::Event;
-use crate::manager::{ProcessApi, Window, WindowPane};
+use crate::manager::{LayoutStrip, ProcessApi, Window};
 use crate::platform::WinID;
 pub use systems::gather_displays;
 pub use systems::initial_oneshot_systems;
@@ -195,13 +195,13 @@ impl Timeout {
 #[derive(Component)]
 pub struct StrayFocusEvent(pub WinID);
 
-/// Component representing a `WindowPane` that has become orphaned, typically due to a space being destroyed or reassigned.
+/// Component representing a `LayoutStrip` that has become orphaned, typically due to a space being destroyed or reassigned.
 #[derive(Component)]
-pub struct OrphanedPane {
+pub struct OrphanedStrip {
     /// The ID of the orphaned space.
     pub id: u64,
-    /// The `WindowPane` that was orphaned.
-    pub pane: WindowPane,
+    /// The `LayoutStrip` that was orphaned.
+    pub strip: LayoutStrip,
 }
 
 /// Resource to control whether window reshuffling should be skipped.

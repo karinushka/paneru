@@ -19,8 +19,8 @@ use crate::ecs::{
 use crate::errors::{Error, Result};
 use crate::events::Event;
 use crate::manager::{
-    Application, ApplicationApi, Display, ProcessApi, Window, WindowApi, WindowManager,
-    WindowManagerApi, WindowPane,
+    Application, ApplicationApi, Display, LayoutStrip, ProcessApi, Window, WindowApi,
+    WindowManager, WindowManagerApi,
 };
 use crate::platform::{ConnID, Pid, WinID};
 use crate::{platform::ProcessSerialNumber, util::AXUIWrapper};
@@ -449,7 +449,7 @@ impl MockWindow {
 ///
 /// * `psn` - The `ProcessSerialNumber` for the test process.
 /// * `world` - A mutable reference to the Bevy `World`.
-/// * `panel` - A mutable reference to a `WindowPane` to append windows to.
+/// * `strip` - A mutable reference to a `LayoutStrip` to append windows to.
 /// * `event_queue` - A reference to an `EventQueue` for mock application events.
 ///
 /// # Returns
@@ -458,7 +458,7 @@ impl MockWindow {
 fn setup_test_process(
     psn: ProcessSerialNumber,
     world: &mut World,
-    panel: &mut WindowPane,
+    strip: &mut LayoutStrip,
     event_queue: &EventQueue,
 ) -> MockApplication {
     let mock_process = MockProcess { psn };
@@ -494,9 +494,9 @@ fn setup_test_process(
         } else {
             world.spawn((ChildOf(parent_app), window)).id()
         };
-        panel.append(entity);
+        strip.append(entity);
     }
-    println!("panel {panel}");
+    println!("strip {strip}");
 
     application
 }
@@ -546,9 +546,9 @@ fn setup_world(app: &mut App, event_queue: &EventQueue) -> MockApplication {
         ),
         TEST_MENUBAR_HEIGHT as u32,
     );
-    let panel = display.active_panel_mut(TEST_WORKSPACE_ID).unwrap();
+    let strip = display.active_strip_mut(TEST_WORKSPACE_ID).unwrap();
 
-    let process = setup_test_process(psn, world, panel, event_queue);
+    let process = setup_test_process(psn, world, strip, event_queue);
 
     world.spawn((display, ActiveDisplayMarker));
 

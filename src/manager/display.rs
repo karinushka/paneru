@@ -10,35 +10,35 @@ use stdext::function_name;
 use super::skylight::{CGDisplayCreateUUIDFromDisplayID, CGDisplayGetDisplayIDFromUUID};
 use crate::errors::{Error, Result};
 
-/// Represents a single panel within a `WindowPane`, which can either hold a single window or a stack of windows.
+/// Represents a single panel within a `LayoutStrip`, which can either hold a single window or a stack of windows.
 #[derive(Clone, Debug)]
-pub enum Panel {
+pub enum Column {
     /// A panel containing a single window, identified by its `Entity`.
     Single(Entity),
     /// A panel containing a stack of windows, ordered from top to bottom.
     Stack(Vec<Entity>),
 }
 
-impl Panel {
+impl Column {
     /// Returns the top window entity in the panel.
     /// For a `Single` panel, it's the contained window. For a `Stack`, it's the first window in the stack.
     pub fn top(&self) -> Option<Entity> {
         match self {
-            Panel::Single(id) => Some(id),
-            Panel::Stack(stack) => stack.first(),
+            Column::Single(id) => Some(id),
+            Column::Stack(stack) => stack.first(),
         }
         .copied()
     }
 }
 
-/// `WindowPane` manages a horizontal strip of `Panel`s, where each panel can contain a single window or a stack of windows.
+/// `LayoutStrip` manages a horizontal strip of `Panel`s, where each panel can contain a single window or a stack of windows.
 /// It provides methods for manipulating the arrangement and access to windows within the pane.
 #[derive(Debug, Default)]
-pub struct WindowPane {
-    pane: VecDeque<Panel>,
+pub struct LayoutStrip {
+    columns: VecDeque<Column>,
 }
 
-impl WindowPane {
+impl LayoutStrip {
     /// Finds the index of a window within the pane.
     /// If the window is part of a stack, it returns the index of the panel containing the stack.
     ///
@@ -50,11 +50,11 @@ impl WindowPane {
     ///
     /// `Ok(usize)` with the index if found, otherwise `Err(Error)`.
     pub fn index_of(&self, entity: Entity) -> Result<usize> {
-        self.pane
+        self.columns
             .iter()
-            .position(|panel| match panel {
-                Panel::Single(id) => *id == entity,
-                Panel::Stack(stack) => stack.contains(&entity),
+            .position(|column| match column {
+                Column::Single(id) => *id == entity,
+                Column::Stack(stack) => stack.contains(&entity),
             })
             .ok_or(Error::NotFound(format!(
                 "{}: can not find window {entity} in the current pane.",
@@ -73,9 +73,9 @@ impl WindowPane {
     pub fn insert_at(&mut self, after: usize, entity: Entity) {
         let index = after;
         if index >= self.len() {
-            self.pane.push_back(Panel::Single(entity));
+            self.columns.push_back(Column::Single(entity));
         } else {
-            self.pane.insert(index, Panel::Single(entity));
+            self.columns.insert(index, Column::Single(entity));
         }
     }
 
@@ -85,7 +85,7 @@ impl WindowPane {
     ///
     /// * `entity` - Entity of the window to append.
     pub fn append(&mut self, entity: Entity) {
-        self.pane.push_back(Panel::Single(entity));
+        self.columns.push_back(Column::Single(entity));
     }
 
     /// Removes a window ID from the pane.
@@ -99,14 +99,14 @@ impl WindowPane {
         let removed = self
             .index_of(entity)
             .ok()
-            .and_then(|index| self.pane.remove(index).zip(Some(index)));
+            .and_then(|index| self.columns.remove(index).zip(Some(index)));
 
-        if let Some((Panel::Stack(mut stack), index)) = removed {
+        if let Some((Column::Stack(mut stack), index)) = removed {
             stack.retain(|id| *id != entity);
             if stack.len() > 1 {
-                self.pane.insert(index, Panel::Stack(stack));
+                self.columns.insert(index, Column::Stack(stack));
             } else if let Some(remaining_id) = stack.first() {
-                self.pane.insert(index, Panel::Single(*remaining_id));
+                self.columns.insert(index, Column::Single(*remaining_id));
             }
         }
     }
@@ -120,8 +120,8 @@ impl WindowPane {
     /// # Returns
     ///
     /// `Ok(Panel)` with the panel if the index is valid, otherwise `Err(Error)`.
-    pub fn get(&self, at: usize) -> Result<Panel> {
-        self.pane
+    pub fn get(&self, at: usize) -> Result<Column> {
+        self.columns
             .get(at)
             .cloned()
             .ok_or(Error::InvalidInput(format!(
@@ -137,7 +137,7 @@ impl WindowPane {
     /// * `left` - The index of the first panel.
     /// * `right` - The index of the second panel.
     pub fn swap(&mut self, left: usize, right: usize) {
-        self.pane.swap(left, right);
+        self.columns.swap(left, right);
     }
 
     /// Returns the number of panels in the pane.
@@ -146,7 +146,7 @@ impl WindowPane {
     ///
     /// The number of panels as `usize`.
     pub fn len(&self) -> usize {
-        self.pane.len()
+        self.columns.len()
     }
 
     /// Returns the first `Panel` in the pane.
@@ -154,8 +154,8 @@ impl WindowPane {
     /// # Returns
     ///
     /// `Ok(Panel)` with the first panel, otherwise `Err(Error)` if the pane is empty.
-    pub fn first(&self) -> Result<Panel> {
-        self.pane.front().cloned().ok_or(Error::NotFound(format!(
+    pub fn first(&self) -> Result<Column> {
+        self.columns.front().cloned().ok_or(Error::NotFound(format!(
             "{}: can not find first element.",
             function_name!()
         )))
@@ -166,8 +166,8 @@ impl WindowPane {
     /// # Returns
     ///
     /// `Ok(Panel)` with the last panel, otherwise `Err(Error)` if the pane is empty.
-    pub fn last(&self) -> Result<Panel> {
-        self.pane.back().cloned().ok_or(Error::NotFound(format!(
+    pub fn last(&self) -> Result<Column> {
+        self.columns.back().cloned().ok_or(Error::NotFound(format!(
             "{}: can not find last element.",
             function_name!()
         )))
@@ -175,18 +175,18 @@ impl WindowPane {
 
     pub fn right_neighbour(&self, entity: Entity) -> Option<Entity> {
         let index = self.index_of(entity).ok()?;
-        (index < self.pane.len())
+        (index < self.columns.len())
             .then_some(index + 1)
-            .and_then(|index| self.pane.get(index))
-            .and_then(Panel::top)
+            .and_then(|index| self.columns.get(index))
+            .and_then(Column::top)
     }
 
     pub fn left_neighbour(&self, entity: Entity) -> Option<Entity> {
         let index = self.index_of(entity).ok()?;
         (index > 0)
             .then(|| index - 1)
-            .and_then(|index| self.pane.get(index))
-            .and_then(Panel::top)
+            .and_then(|index| self.columns.get(index))
+            .and_then(Column::top)
     }
 
     /// Stacks the window with the given ID onto the panel to its left.
@@ -205,24 +205,24 @@ impl WindowPane {
             // Can not stack to the left if left most window already.
             return Ok(());
         }
-        if let Panel::Stack(_) = self.pane[index] {
+        if let Column::Stack(_) = self.columns[index] {
             // Already in a stack, do nothing.
             return Ok(());
         }
 
-        self.pane.remove(index);
-        let panel = self.pane.remove(index - 1);
-        if let Some(panel) = panel {
-            let newstack = match panel {
-                Panel::Stack(mut stack) => {
+        self.columns.remove(index);
+        let column = self.columns.remove(index - 1);
+        if let Some(column) = column {
+            let newstack = match column {
+                Column::Stack(mut stack) => {
                     stack.push(entity);
                     stack
                 }
-                Panel::Single(id) => vec![id, entity],
+                Column::Single(id) => vec![id, entity],
             };
 
             debug!("Stacked windows: {newstack:#?}");
-            self.pane.insert(index - 1, Panel::Stack(newstack));
+            self.columns.insert(index - 1, Column::Stack(newstack));
         }
 
         Ok(())
@@ -240,28 +240,28 @@ impl WindowPane {
     /// `Ok(())` if the unstacking is successful or not needed, otherwise `Err(Error)` if the window is not found.
     pub fn unstack(&mut self, entity: Entity) -> Result<()> {
         let index = self.index_of(entity)?;
-        if let Panel::Single(_) = self.pane[index] {
+        if let Column::Single(_) = self.columns[index] {
             // Can not unstack a single pane
             return Ok(());
         }
 
-        let panel = self.pane.remove(index);
-        if let Some(panel) = panel {
-            let newstack = match panel {
-                Panel::Stack(mut stack) => {
+        let column = self.columns.remove(index);
+        if let Some(column) = column {
+            let newstack = match column {
+                Column::Stack(mut stack) => {
                     stack.retain(|id| *id != entity);
                     if stack.len() == 1 {
-                        Panel::Single(stack[0])
+                        Column::Single(stack[0])
                     } else {
-                        Panel::Stack(stack)
+                        Column::Stack(stack)
                     }
                 }
-                Panel::Single(_) => unreachable!("Is checked at the start of the function"),
+                Column::Single(_) => unreachable!("Is checked at the start of the function"),
             };
             // Re-insert the unstacked window as a single panel
-            self.pane.insert(index, Panel::Single(entity));
+            self.columns.insert(index, Column::Single(entity));
             // Re-insert the modified stack (if not empty) at the original position
-            self.pane.insert(index, newstack);
+            self.columns.insert(index, newstack);
         }
 
         Ok(())
@@ -274,40 +274,40 @@ impl WindowPane {
     ///
     /// A `Vec<Entity>` containing all window IDs.
     pub fn all_windows(&self) -> Vec<Entity> {
-        self.pane
+        self.columns
             .iter()
-            .flat_map(|panel| match panel {
-                Panel::Single(entity) => vec![*entity],
-                Panel::Stack(ids) => ids.clone(),
+            .flat_map(|column| match column {
+                Column::Single(entity) => vec![*entity],
+                Column::Stack(ids) => ids.clone(),
             })
             .collect()
     }
 
     pub fn all_columns(&self) -> Vec<Entity> {
-        self.pane.iter().filter_map(Panel::top).collect()
+        self.columns.iter().filter_map(Column::top).collect()
     }
 }
 
-impl std::fmt::Display for WindowPane {
-    /// Formats the `WindowPane` for display, showing the arrangement of its panels.
+impl std::fmt::Display for LayoutStrip {
+    /// Formats the `LayoutStrip` for display, showing the arrangement of its panels.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let out = self
-            .pane
+            .columns
             .iter()
-            .map(|panel| format!("{panel:?}"))
+            .map(|column| format!("{column:?}"))
             .collect::<Vec<_>>();
         write!(f, "[{}]", out.join(", "))
     }
 }
 
 /// `Display` represents a physical monitor and manages its associated workspaces and window panes.
-/// Each display has a unique ID, bounds, and a collection of `WindowPane`s for different spaces.
+/// Each display has a unique ID, bounds, and a collection of `LayoutStrip`s for different spaces.
 #[derive(Component)]
 pub struct Display {
     /// The unique identifier for this display provided by Core Graphics.
     id: CGDirectDisplayID,
-    /// A map of space IDs to their corresponding `WindowPane`s.
-    pub spaces: HashMap<u64, WindowPane>,
+    /// A map of space IDs to their corresponding `LayoutStrip`s.
+    pub spaces: HashMap<u64, LayoutStrip>,
     /// The physical bounds (origin and size) of the display.
     pub bounds: CGRect,
     /// The height of the menubar on this display.
@@ -335,7 +335,7 @@ impl Display {
     ) -> Self {
         let spaces = spaces
             .into_iter()
-            .map(|id| (id, WindowPane::default()))
+            .map(|id| (id, LayoutStrip::default()))
             .collect::<HashMap<_, _>>();
         Self {
             id,
@@ -399,7 +399,7 @@ impl Display {
             .for_each(|pane| pane.remove(window_id));
     }
 
-    /// Retrieves an immutable reference to the `WindowPane` corresponding to the active space on this display.
+    /// Retrieves an immutable reference to the `LayoutStrip` corresponding to the active space on this display.
     ///
     /// # Arguments
     ///
@@ -407,15 +407,15 @@ impl Display {
     ///
     /// # Returns
     ///
-    /// `Ok(&WindowPane)` if the active panel is found, otherwise `Err(Error)`.
-    pub fn active_panel(&self, space_id: u64) -> Result<&WindowPane> {
+    /// `Ok(&LayoutStrip)` if the active panel is found, otherwise `Err(Error)`.
+    pub fn active_strip(&self, space_id: u64) -> Result<&LayoutStrip> {
         self.spaces.get(&space_id).ok_or(Error::NotFound(format!(
             "{}: space {space_id}.",
             function_name!()
         )))
     }
 
-    /// Retrieves a mutable reference to the `WindowPane` corresponding to the active space on this display.
+    /// Retrieves a mutable reference to the `LayoutStrip` corresponding to the active space on this display.
     ///
     /// # Arguments
     ///
@@ -423,8 +423,8 @@ impl Display {
     ///
     /// # Returns
     ///
-    /// `Ok(&mut WindowPane)` if the active panel is found, otherwise `Err(Error)`.
-    pub fn active_panel_mut(&mut self, space_id: u64) -> Result<&mut WindowPane> {
+    /// `Ok(&mut LayoutStrip)` if the active panel is found, otherwise `Err(Error)`.
+    pub fn active_strip_mut(&mut self, space_id: u64) -> Result<&mut LayoutStrip> {
         self.spaces
             .get_mut(&space_id)
             .ok_or(Error::NotFound(format!(
@@ -448,59 +448,59 @@ mod tests {
     use super::*;
     use bevy::prelude::*;
 
-    fn setup_world_and_pane() -> (World, WindowPane, Vec<Entity>) {
+    fn setup_world_and_strip() -> (World, LayoutStrip, Vec<Entity>) {
         let mut world = World::new();
         let entities = world.spawn_batch(vec![(), (), ()]).collect::<Vec<Entity>>();
 
-        let mut pane = WindowPane::default();
-        pane.append(entities[0]);
-        pane.append(entities[1]);
-        pane.append(entities[2]);
+        let mut strip = LayoutStrip::default();
+        strip.append(entities[0]);
+        strip.append(entities[1]);
+        strip.append(entities[2]);
 
-        (world, pane, entities)
+        (world, strip, entities)
     }
 
     #[test]
     fn test_window_pane_index_of() {
-        let (_world, pane, entities) = setup_world_and_pane();
-        assert_eq!(pane.index_of(entities[0]).unwrap(), 0);
-        assert_eq!(pane.index_of(entities[1]).unwrap(), 1);
-        assert_eq!(pane.index_of(entities[2]).unwrap(), 2);
+        let (_world, strip, entities) = setup_world_and_strip();
+        assert_eq!(strip.index_of(entities[0]).unwrap(), 0);
+        assert_eq!(strip.index_of(entities[1]).unwrap(), 1);
+        assert_eq!(strip.index_of(entities[2]).unwrap(), 2);
     }
 
     #[test]
     fn test_window_pane_swap() {
-        let (_world, mut pane, entities) = setup_world_and_pane();
-        pane.swap(0, 2);
-        assert_eq!(pane.index_of(entities[2]).unwrap(), 0);
-        assert_eq!(pane.index_of(entities[0]).unwrap(), 2);
+        let (_world, mut strip, entities) = setup_world_and_strip();
+        strip.swap(0, 2);
+        assert_eq!(strip.index_of(entities[2]).unwrap(), 0);
+        assert_eq!(strip.index_of(entities[0]).unwrap(), 2);
     }
 
     #[test]
     fn test_window_pane_stack_and_unstack() {
-        let (_world, mut pane, entities) = setup_world_and_pane();
+        let (_world, mut strip, entities) = setup_world_and_strip();
 
         // Stack [1] onto [0]
-        pane.stack(entities[1]).unwrap();
-        assert_eq!(pane.len(), 2);
-        assert_eq!(pane.index_of(entities[0]).unwrap(), 0);
-        assert_eq!(pane.index_of(entities[1]).unwrap(), 0); // Both in the same panel
+        strip.stack(entities[1]).unwrap();
+        assert_eq!(strip.len(), 2);
+        assert_eq!(strip.index_of(entities[0]).unwrap(), 0);
+        assert_eq!(strip.index_of(entities[1]).unwrap(), 0); // Both in the same panel
 
         // Check internal structure
-        match pane.get(0).unwrap() {
-            Panel::Stack(stack) => {
+        match strip.get(0).unwrap() {
+            Column::Stack(stack) => {
                 assert_eq!(stack.len(), 2);
                 assert_eq!(stack[0], entities[0]);
                 assert_eq!(stack[1], entities[1]);
             }
-            Panel::Single(_) => panic!("Expected a stack"),
+            Column::Single(_) => panic!("Expected a stack"),
         }
 
         // Unstack [0]
-        pane.unstack(entities[0]).unwrap();
-        assert_eq!(pane.len(), 3);
-        assert_eq!(pane.index_of(entities[1]).unwrap(), 0);
-        assert_eq!(pane.index_of(entities[0]).unwrap(), 1);
-        assert_eq!(pane.index_of(entities[2]).unwrap(), 2);
+        strip.unstack(entities[0]).unwrap();
+        assert_eq!(strip.len(), 3);
+        assert_eq!(strip.index_of(entities[1]).unwrap(), 0);
+        assert_eq!(strip.index_of(entities[0]).unwrap(), 1);
+        assert_eq!(strip.index_of(entities[2]).unwrap(), 2);
     }
 }

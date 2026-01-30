@@ -13,7 +13,7 @@ use std::time::Duration;
 use stdext::function_name;
 
 use super::{
-    ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, MissionControlActive, OrphanedPane,
+    ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, MissionControlActive, OrphanedStrip,
     SpawnWindowTrigger, StrayFocusEvent, Timeout, Unmanaged, WMEventTrigger, WindowDraggedMarker,
 };
 use crate::config::{Config, WindowParams};
@@ -22,7 +22,7 @@ use crate::ecs::{WindowSwipeMarker, reshuffle_around};
 use crate::errors::Result;
 use crate::events::Event;
 use crate::manager::{
-    Application, Display, Process, Window, WindowManager, WindowPadding, WindowPane,
+    Application, Display, LayoutStrip, Process, Window, WindowManager, WindowPadding,
 };
 use crate::platform::WinID;
 use crate::util::symlink_target;
@@ -218,10 +218,10 @@ pub(super) fn mouse_dragged_trigger(
     }
 }
 
-fn windows_not_in_pane<F: Fn(WinID) -> Option<Entity>>(
+fn windows_not_in_strip<F: Fn(WinID) -> Option<Entity>>(
     workspace_id: u64,
     find_window: F,
-    panel: &WindowPane,
+    strip: &LayoutStrip,
     window_manager: &WindowManager,
 ) -> Result<Vec<Entity>> {
     let moved_windows = window_manager
@@ -230,7 +230,7 @@ fn windows_not_in_pane<F: Fn(WinID) -> Option<Entity>>(
             ids.into_iter()
                 .filter_map(find_window)
                 // Filter out the ones already in this workspace.
-                .filter(|entity| panel.index_of(*entity).is_err())
+                .filter(|entity| strip.index_of(*entity).is_err())
                 .collect::<Vec<_>>()
         })?;
     Ok(moved_windows)
@@ -251,16 +251,16 @@ pub(super) fn workspace_change_trigger(
     let Ok(workspace_id) = window_manager.active_display_space(active_display.id()) else {
         return;
     };
-    let Ok(panel) = active_display.active_panel() else {
+    let Ok(strip) = active_display.active_strip() else {
         return;
     };
     debug!(
-        "{}: workspace {workspace_id}, pane {panel}",
+        "{}: workspace {workspace_id}, strip {strip}",
         function_name!()
     );
 
     let find_window = |window_id| windows.find_managed(window_id).map(|(_, entity)| entity);
-    let Ok(moved_windows) = windows_not_in_pane(workspace_id, find_window, panel, &window_manager)
+    let Ok(moved_windows) = windows_not_in_strip(workspace_id, find_window, strip, &window_manager)
         .inspect_err(|err| {
             warn!(
                 "{}: unable to get windows in the current workspace: {err}",
@@ -281,8 +281,8 @@ pub(super) fn workspace_change_trigger(
             .other()
             .for_each(|mut display| display.remove_window(entity));
         active_display.display().remove_window(entity);
-        if let Ok(panel) = active_display.active_panel() {
-            panel.append(entity);
+        if let Ok(strip) = active_display.active_strip() {
+            strip.append(entity);
         }
 
         reshuffle_around(entity, &mut commands);
@@ -293,7 +293,7 @@ pub(super) fn workspace_change_trigger(
 ///
 /// When the active display or space changes, this function ensures that the window manager's
 /// internal state is updated. It marks the new active display with `FocusedMarker` and moves
-/// the focused window to the correct `WindowPane` if it has been moved to a different display
+/// the focused window to the correct `LayoutStrip` if it has been moved to a different display
 /// or workspace.
 ///
 /// # Arguments
@@ -353,16 +353,16 @@ pub(super) fn active_display_trigger(
     let Ok(workspace_id) = window_manager.active_display_space(active_display.id()) else {
         return;
     };
-    let Ok(panel) = active_display.active_panel(workspace_id) else {
+    let Ok(strip) = active_display.active_strip(workspace_id) else {
         return;
     };
     debug!(
-        "{}: workspace {workspace_id}, pane {panel}",
+        "{}: workspace {workspace_id}, strip {strip}",
         function_name!()
     );
 
     let find_window = |window_id| windows.find_managed(window_id).map(|(_, entity)| entity);
-    let Ok(moved_windows) = windows_not_in_pane(workspace_id, find_window, panel, &window_manager)
+    let Ok(moved_windows) = windows_not_in_strip(workspace_id, find_window, strip, &window_manager)
         .inspect_err(|err| {
             warn!(
                 "{}: unable to get windows in the current workspace: {err}",
@@ -384,9 +384,9 @@ pub(super) fn active_display_trigger(
             .for_each(|mut display| display.remove_window(entity));
 
         if let Ok(mut display) = displays.get_mut(trigger.entity)
-            && let Ok(panel) = display.active_panel_mut(workspace_id)
+            && let Ok(strip) = display.active_strip_mut(workspace_id)
         {
-            panel.append(entity);
+            strip.append(entity);
             reshuffle_around(entity, &mut commands);
         }
     }
@@ -426,8 +426,8 @@ pub(super) fn display_add_trigger(
         return;
     };
 
-    for (id, pane) in &display.spaces {
-        debug!("{}: Space {id} - {pane}", function_name!());
+    for (id, strip) in &display.spaces {
+        debug!("{}: Space {id} - {strip}", function_name!());
     }
     commands.spawn(display);
     commands.trigger(WMEventTrigger(Event::DisplayChanged));
@@ -462,19 +462,22 @@ pub(super) fn display_remove_trigger(
         return;
     };
 
-    for (id, pane) in take(&mut display.spaces)
+    for (id, strip) in take(&mut display.spaces)
         .into_iter()
-        .filter(|(_, pane)| pane.len() > 0)
+        .filter(|(_, strip)| strip.len() > 0)
     {
-        debug!("{}: adding {id} {pane} to orphaned list.", function_name!());
+        debug!(
+            "{}: adding {id} {strip} to orphaned list.",
+            function_name!()
+        );
         let timeout = Timeout::new(
             Duration::from_secs(ORPHANED_SPACES_TIMEOUT_SEC),
             Some(format!(
-                "{}: Orphaned pane {id} ({pane}) could not be re-inserted after {ORPHANED_SPACES_TIMEOUT_SEC}s.",
+                "{}: Orphaned pane {id} ({strip}) could not be re-inserted after {ORPHANED_SPACES_TIMEOUT_SEC}s.",
                 function_name!(),
             )),
         );
-        commands.spawn((timeout, OrphanedPane { id, pane }));
+        commands.spawn((timeout, OrphanedStrip { id, strip }));
     }
 
     commands.entity(entity).despawn();
@@ -522,8 +525,8 @@ pub(super) fn display_moved_trigger(
     *display = moved_display;
     // find_orphaned_spaces(&mut orphaned_spaces.0, &mut display, &mut windows);
 
-    for (id, pane) in &display.spaces {
-        debug!("{}: Space {id} - {pane}", function_name!());
+    for (id, strip) in &display.spaces {
+        debug!("{}: Space {id} - {strip}", function_name!());
     }
     commands.trigger(WMEventTrigger(Event::DisplayChanged));
 }
@@ -868,14 +871,14 @@ pub(super) fn window_unmanaged_trigger(
 
             Unmanaged::Minimized | Unmanaged::Hidden => {
                 debug!("{}: Entity {entity} is minimized.", function_name!());
-                let Ok(active_panel) = active_display
-                    .active_panel()
+                let Ok(active_strip) = active_display
+                    .active_strip()
                     .inspect_err(|err| debug!("{}: {err}", function_name!()))
                 else {
                     return;
                 };
 
-                give_away_focus(entity, &windows, active_panel, &mut commands);
+                give_away_focus(entity, &windows, active_strip, &mut commands);
                 active_display.display().remove_window(entity);
             }
         }
@@ -890,14 +893,14 @@ pub(super) fn window_managed_trigger(
 ) {
     let entity = trigger.event().entity;
     debug!("{}: Entity {entity} is managed again.", function_name!(),);
-    let Ok(active_panel) = active_display
-        .active_panel()
+    let Ok(active_strip) = active_display
+        .active_strip()
         .inspect_err(|err| debug!("{}: {err}", function_name!()))
     else {
         return;
     };
 
-    active_panel.append(entity);
+    active_strip.append(entity);
     reshuffle_around(entity, &mut commands);
 }
 
@@ -943,15 +946,15 @@ pub(super) fn window_destroyed_trigger(
     commands.entity(entity).despawn();
 
     for mut display in &mut displays {
-        let Ok(panel) = window_manager
+        let Ok(strip) = window_manager
             .0
             .active_display_space(display.id())
-            .and_then(|active_space| display.active_panel(active_space))
+            .and_then(|active_space| display.active_strip(active_space))
         else {
             continue;
         };
 
-        give_away_focus(entity, &windows, panel, &mut commands);
+        give_away_focus(entity, &windows, strip, &mut commands);
         display.remove_window(entity);
     }
 }
@@ -960,17 +963,17 @@ pub(super) fn window_destroyed_trigger(
 fn give_away_focus(
     entity: Entity,
     windows: &Windows,
-    active_pane: &WindowPane,
+    active_strip: &LayoutStrip,
     commands: &mut Commands,
 ) {
     // Move focus to a left neighbour if the panel has more windows.
-    if let Ok(index) = active_pane.index_of(entity)
-        && active_pane.len() > 1
+    if let Ok(index) = active_strip.index_of(entity)
+        && active_strip.len() > 1
     {
-        let neighbour = active_pane.get(index.saturating_sub(1)).ok();
+        let neighbour = active_strip.get(index.saturating_sub(1)).ok();
 
         if let Some((window, entity)) = neighbour
-            .and_then(|pane| pane.top())
+            .and_then(|column| column.top())
             .and_then(|entity| windows.get(entity).zip(Some(entity)))
         {
             let window_id = window.id();
@@ -1117,7 +1120,7 @@ fn apply_window_properties(
         return;
     }
 
-    let Ok(panel) = active_display.active_panel() else {
+    let Ok(strip) = active_display.active_strip() else {
         return;
     };
 
@@ -1128,19 +1131,19 @@ fn apply_window_properties(
             let focused_window = windows.focused();
             // Insert to the right of the currently focused window
             focused_window
-                .and_then(|(_, entity)| panel.index_of(entity).ok())
-                .and_then(|insert_at| (insert_at + 1 < panel.len()).then_some(insert_at + 1))
+                .and_then(|(_, entity)| strip.index_of(entity).ok())
+                .and_then(|insert_at| (insert_at + 1 < strip.len()).then_some(insert_at + 1))
         },
         Some,
     );
 
-    debug!("{}: New window adding at {panel}", function_name!());
+    debug!("{}: New window adding at {strip}", function_name!());
     match insert_at {
         Some(after) => {
             debug!("{}: New window inserted at {after}", function_name!());
-            panel.insert_at(after, entity);
+            strip.insert_at(after, entity);
         }
-        None => panel.append(entity),
+        None => strip.append(entity),
     }
 
     reshuffle_around(entity, commands);

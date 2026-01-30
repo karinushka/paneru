@@ -25,7 +25,7 @@ use crate::platform::{ConnID, ProcessSerialNumber, WinID};
 use crate::util::{AXUIWrapper, create_array, get_array_values, get_cfdict_value, symlink_target};
 use app::ApplicationOS;
 pub use app::{Application, ApplicationApi};
-pub use display::{Display, Panel, WindowPane};
+pub use display::{Column, Display, LayoutStrip};
 pub use process::{Process, ProcessApi};
 pub use skylight::AXUIElementCopyAttributeValue;
 use skylight::{
@@ -367,7 +367,7 @@ impl WindowManagerApi for WindowManagerOS {
     }
 
     /// Refreshes the state of a given display, including its spaces and windows.
-    /// It repopulates each `WindowPane` with eligible windows from its corresponding space,
+    /// It repopulates each `LayoutStrip` with eligible windows from its corresponding space,
     /// ensuring that existing windows maintain their order and unmanaged windows are ignored.
     ///
     /// # Arguments
@@ -381,22 +381,22 @@ impl WindowManagerApi for WindowManagerOS {
             display.id()
         );
 
-        for (space_id, pane) in &mut display.spaces {
+        for (space_id, strip) in &mut display.spaces {
             let new_windows = self.refresh_windows_space(*space_id, windows);
 
             // Preserve the order - do not flush existing windows.
-            for window_entity in pane.all_windows() {
+            for window_entity in strip.all_windows() {
                 if !new_windows.contains(&window_entity) {
-                    pane.remove(window_entity);
+                    strip.remove(window_entity);
                 }
             }
             for window_entity in new_windows {
-                if pane.index_of(window_entity).is_err() {
-                    pane.append(window_entity);
+                if strip.index_of(window_entity).is_err() {
+                    strip.append(window_entity);
                 }
             }
             debug!(
-                "{}: space {space_id}: after refresh {pane}",
+                "{}: space {space_id}: after refresh {strip}",
                 function_name!()
             );
         }

@@ -14,7 +14,7 @@ use crate::ecs::{
 };
 use crate::errors::Result;
 use crate::events::Event;
-use crate::manager::{Panel, WindowManager, WindowPane};
+use crate::manager::{Column, LayoutStrip, WindowManager};
 
 /// Represents a cardinal or directional choice for window manipulation.
 #[derive(Clone, Debug)]
@@ -58,13 +58,13 @@ pub enum Command {
     PrintState,
 }
 
-/// Retrieves a window `Entity` in a specified direction relative to a `current_window_id` within a `WindowPane`.
+/// Retrieves a window `Entity` in a specified direction relative to a `current_window_id` within a `LayoutStrip`.
 ///
 /// # Arguments
 ///
 /// * `direction` - The direction (e.g., `West`, `East`, `First`, `Last`, `North`, `South`).
 /// * `current_window_id` - The `Entity` of the current window.
-/// * `strip` - A reference to the `WindowPane` to search within.
+/// * `strip` - A reference to the `LayoutStrip` to search within.
 ///
 /// # Returns
 ///
@@ -72,21 +72,21 @@ pub enum Command {
 fn get_window_in_direction(
     direction: &Direction,
     entity: Entity,
-    panel: &WindowPane,
+    strip: &LayoutStrip,
 ) -> Option<Entity> {
-    let index = panel.index_of(entity).ok()?;
+    let index = strip.index_of(entity).ok()?;
 
     match direction {
-        Direction::West => panel.left_neighbour(entity),
-        Direction::East => panel.right_neighbour(entity),
+        Direction::West => strip.left_neighbour(entity),
+        Direction::East => strip.right_neighbour(entity),
 
-        Direction::First => panel.first().ok().and_then(|panel| panel.top()),
+        Direction::First => strip.first().ok().and_then(|column| column.top()),
 
-        Direction::Last => panel.last().ok().and_then(|panel| panel.top()),
+        Direction::Last => strip.last().ok().and_then(|column| column.top()),
 
-        Direction::North => match panel.get(index).ok()? {
-            Panel::Single(window) => Some(window),
-            Panel::Stack(stack) => stack
+        Direction::North => match strip.get(index).ok()? {
+            Column::Single(window) => Some(window),
+            Column::Stack(stack) => stack
                 .iter()
                 .enumerate()
                 .find(|(_, window_id)| entity == **window_id)
@@ -94,9 +94,9 @@ fn get_window_in_direction(
                 .copied(),
         },
 
-        Direction::South => match panel.get(index).ok()? {
-            Panel::Single(window) => Some(window),
-            Panel::Stack(stack) => stack
+        Direction::South => match strip.get(index).ok()? {
+            Column::Single(window) => Some(window),
+            Column::Stack(stack) => stack
                 .iter()
                 .enumerate()
                 .find(|(_, window_id)| entity == **window_id)
@@ -116,7 +116,7 @@ fn get_window_in_direction(
 ///
 /// * `direction` - The `Direction` to move focus (e.g., `Direction::East`).
 /// * `current_window` - The `Entity` of the currently focused `Window`.
-/// * `strip` - A reference to the active `WindowPane`.
+/// * `strip` - A reference to the active `LayoutStrip`.
 /// * `windows` - A query for all `Window` components.
 ///
 /// # Returns
@@ -124,7 +124,7 @@ fn get_window_in_direction(
 /// `Some(Entity)` with the entity of the newly focused window, otherwise `None`.
 fn command_move_focus(
     direction: &Direction,
-    strip: &WindowPane,
+    strip: &LayoutStrip,
     windows: &Windows,
 ) -> Option<Entity> {
     let (_, entity) = windows.focused()?;
@@ -156,36 +156,36 @@ fn command_swap_focus(
 ) -> Option<Entity> {
     let display_bounds = active_display.bounds();
     let display_id = active_display.id();
-    let panel = active_display.active_panel().ok()?;
+    let strip = active_display.active_strip().ok()?;
 
     let (_, current) = windows.focused()?;
-    let index = panel.index_of(current).ok()?;
-    let other_window = get_window_in_direction(direction, current, panel)?;
-    let new_index = panel.index_of(other_window).ok()?;
+    let index = strip.index_of(current).ok()?;
+    let other_window = get_window_in_direction(direction, current, strip)?;
+    let new_index = strip.index_of(other_window).ok()?;
     let current_frame = windows.get(current)?.frame();
 
     let origin = if new_index == 0 {
         // If reached far left, snap the window to left.
         CGPoint::new(0.0, 0.0)
-    } else if new_index == (panel.len() - 1) {
+    } else if new_index == (strip.len() - 1) {
         // If reached full right, snap the window to right.
         CGPoint::new(display_bounds.size.width - current_frame.size.width, 0.0)
     } else {
-        panel
+        strip
             .get(new_index)
             .ok()
-            .and_then(|panel| panel.top())
+            .and_then(|column| column.top())
             .and_then(|entity| windows.get(entity))?
             .frame()
             .origin
     };
     reposition_entity(current, origin.x, origin.y, display_id, commands);
     if index < new_index {
-        (index..new_index).for_each(|idx| panel.swap(idx, idx + 1));
+        (index..new_index).for_each(|idx| strip.swap(idx, idx + 1));
     } else {
         (new_index..index)
             .rev()
-            .for_each(|idx| panel.swap(idx, idx + 1));
+            .for_each(|idx| strip.swap(idx, idx + 1));
     }
     Some(other_window)
 }
@@ -360,8 +360,8 @@ fn to_next_display(
     reposition_entity(entity, dest.x, dest.y, other.id(), commands);
     reshuffle_around(entity, commands);
 
-    if let Ok(panel) = active_display.active_panel() {
-        panel.remove(entity);
+    if let Ok(strip) = active_display.active_strip() {
+        strip.remove(entity);
     }
 }
 
@@ -388,11 +388,11 @@ fn command_windows(
     commands: &mut Commands,
     config: &Config,
 ) -> Result<()> {
-    let active_panel = active_display.active_panel()?;
+    let active_strip = active_display.active_strip()?;
 
     match operation {
         Operation::Focus(direction) => {
-            command_move_focus(direction, active_panel, windows);
+            command_move_focus(direction, active_strip, windows);
         }
 
         Operation::Swap(direction) => {
@@ -427,9 +427,9 @@ fn command_windows(
                 if unmanaged.is_some() {
                     return Ok(());
                 } else if *stack {
-                    active_panel.stack(entity)?;
+                    active_strip.stack(entity)?;
                 } else {
-                    active_panel.unstack(entity)?;
+                    active_strip.unstack(entity)?;
                 }
             } else {
                 return Ok(());
@@ -498,26 +498,26 @@ mod tests {
     use super::*;
     use bevy::prelude::*;
 
-    fn setup_world_with_layout() -> (World, WindowPane, Vec<Entity>) {
+    fn setup_world_with_layout() -> (World, LayoutStrip, Vec<Entity>) {
         let mut world = World::new();
         // e0, e1 are stacked, e2 is single, e3 is single
         let entities = world
             .spawn_batch(vec![(), (), (), ()])
             .collect::<Vec<Entity>>();
 
-        let mut pane = WindowPane::default();
-        pane.append(entities[0]); // This will become a stack
-        pane.append(entities[1]);
-        pane.append(entities[2]);
-        pane.append(entities[3]);
-        pane.stack(entities[1]).unwrap(); // Stack e1 onto e0
+        let mut strip = LayoutStrip::default();
+        strip.append(entities[0]); // This will become a stack
+        strip.append(entities[1]);
+        strip.append(entities[2]);
+        strip.append(entities[3]);
+        strip.stack(entities[1]).unwrap(); // Stack e1 onto e0
 
-        (world, pane, entities)
+        (world, strip, entities)
     }
 
     #[test]
     fn test_get_window_in_direction_simple() {
-        let (_world, pane, entities) = setup_world_with_layout();
+        let (_world, strip, entities) = setup_world_with_layout();
         let e0 = entities[0];
         let e2 = entities[2];
         let e3 = entities[3];
@@ -525,32 +525,32 @@ mod tests {
         let west = Direction::West;
 
         // From e2, east should be e3, west should be e0 (top of stack)
-        assert_eq!(get_window_in_direction(&east, e2, &pane), Some(e3));
-        assert_eq!(get_window_in_direction(&west, e2, &pane), Some(e0));
+        assert_eq!(get_window_in_direction(&east, e2, &strip), Some(e3));
+        assert_eq!(get_window_in_direction(&west, e2, &strip), Some(e0));
 
         // From e3, west is e2, east is None
-        assert_eq!(get_window_in_direction(&west, e3, &pane), Some(e2));
-        assert_eq!(get_window_in_direction(&east, e3, &pane), None);
+        assert_eq!(get_window_in_direction(&west, e3, &strip), Some(e2));
+        assert_eq!(get_window_in_direction(&east, e3, &strip), None);
 
         // From e0, east is e2, west is None
-        assert_eq!(get_window_in_direction(&east, e0, &pane), Some(e2));
-        assert_eq!(get_window_in_direction(&west, e0, &pane), None);
+        assert_eq!(get_window_in_direction(&east, e0, &strip), Some(e2));
+        assert_eq!(get_window_in_direction(&west, e0, &strip), None);
     }
 
     #[test]
     fn test_get_window_in_direction_stacked() {
-        let (_world, pane, entities) = setup_world_with_layout();
+        let (_world, strip, entities) = setup_world_with_layout();
         let e0 = entities[0];
         let e1 = entities[1];
         let north = Direction::North;
         let south = Direction::South;
 
         // From e0 (top of stack), south should be e1, north is None
-        assert_eq!(get_window_in_direction(&south, e0, &pane), Some(e1));
-        assert_eq!(get_window_in_direction(&north, e0, &pane), None);
+        assert_eq!(get_window_in_direction(&south, e0, &strip), Some(e1));
+        assert_eq!(get_window_in_direction(&north, e0, &strip), None);
 
         // From e1 (bottom of stack), north should be e0, south is None
-        assert_eq!(get_window_in_direction(&north, e1, &pane), Some(e0));
-        assert_eq!(get_window_in_direction(&south, e1, &pane), None);
+        assert_eq!(get_window_in_direction(&north, e1, &strip), Some(e0));
+        assert_eq!(get_window_in_direction(&south, e1, &strip), None);
     }
 }

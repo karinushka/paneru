@@ -217,13 +217,42 @@ fn finish_setup(
     );
 
     for (mut display, active) in displays {
-        let windows = windows
-            .iter()
-            .filter_map(|(window, entity, _, unmanaged)| {
-                unmanaged.is_none().then_some((window, entity))
-            })
-            .collect::<Vec<_>>();
-        window_manager.refresh_display(&mut display, &windows);
+        for (space_id, ref mut strip) in &mut display.spaces {
+            let workspace_windows = window_manager
+                .windows_in_workspace(*space_id)
+                .inspect_err(|err| {
+                    warn!(
+                        "{}: failed to get windows on workspace {space_id}: {err}",
+                        function_name!()
+                    );
+                })
+                .ok()
+                .map(|workspace_windows| {
+                    workspace_windows
+                        .into_iter()
+                        .filter_map(|window_id| windows.find_managed(window_id))
+                        .collect::<Vec<_>>()
+                });
+            let Some(workspace_windows) = workspace_windows else {
+                continue;
+            };
+
+            // Preserve the order - do not flush existing windows.
+            for entity in strip.all_windows() {
+                if !workspace_windows.iter().any(|(_, e)| *e == entity) {
+                    strip.remove(entity);
+                }
+            }
+            for (_, entity) in workspace_windows {
+                if strip.index_of(entity).is_err() {
+                    strip.append(entity);
+                }
+            }
+            debug!(
+                "{}: space {space_id}: after refresh {strip}",
+                function_name!()
+            );
+        }
 
         if active {
             let active_strip = window_manager

@@ -201,11 +201,6 @@ impl WindowManagerApi for MockWindowManager {
         })))
     }
 
-    /// Does nothing, as display refreshing is not tested at this level.
-    fn refresh_display(&self, _display: &mut Display, _windows: &[(&Window, Entity)]) {
-        println!("{}:", function_name!());
-    }
-
     /// Always returns an empty vector, as associated windows are not tested at this level.
     fn get_associated_windows(&self, _window_id: WinID) -> Vec<WinID> {
         println!("{}:", function_name!());

@@ -1,5 +1,4 @@
 use accessibility_sys::{AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt};
-use bevy::ecs::entity::Entity;
 use bevy::ecs::resource::Resource;
 use core::ptr::NonNull;
 use derive_more::{DerefMut, with_trait::Deref};
@@ -58,13 +57,6 @@ pub trait WindowManagerApi: Send + Sync {
     ///
     /// `Ok(Application)` if the application is successfully created, otherwise `Err(Error)`.
     fn new_application(&self, process: &dyn ProcessApi) -> Result<Application>;
-    /// Refreshes the state of a given display, including its spaces and windows.
-    ///
-    /// # Arguments
-    ///
-    /// * `display` - A mutable reference to the `Display` to refresh.
-    /// * `windows` - A mutable query for all `Window` components, their `Entity`, and `Has<Unmanaged>` status.
-    fn refresh_display(&self, display: &mut Display, windows: &[(&Window, Entity)]);
     /// Retrieves a list of window IDs associated with a parent window.
     ///
     /// # Arguments
@@ -316,37 +308,6 @@ impl WindowManagerOS {
         uuid.and_then(|uuid| Display::id_from_uuid(&uuid))
     }
 
-    /// Repopulates the current window panel with eligible windows from a specified space.
-    /// This function filters windows based on eligibility and ensures they are present in the panel.
-    ///
-    /// # Arguments
-    ///
-    /// * `space_id` - The ID of the space to refresh windows from.
-    /// * `windows` - A query for all `Window` components and their `Entity`.
-    ///
-    /// # Returns
-    ///
-    /// A `Vec<Entity>` containing the entities of eligible windows in the specified space.
-    fn refresh_windows_space(
-        &self,
-        space_id: WorkspaceId,
-        windows: &[(&Window, Entity)],
-    ) -> Vec<Entity> {
-        space_window_list_for_connection(self.main_cid, &[space_id], None, false)
-            .inspect_err(|err| {
-                warn!(
-                    "{}: getting windows for space {space_id}: {err}",
-                    function_name!()
-                );
-            })
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|window_id| windows.iter().find(|(window, _)| window.id() == window_id))
-            .filter_map(|(window, entity)| window.is_eligible().then_some(entity))
-            .copied()
-            .collect()
-    }
-
     /// Returns the connection ID (`ConnID`) for a given process serial number (`PSN`).
     ///
     /// # Arguments
@@ -368,42 +329,6 @@ impl WindowManagerApi for WindowManagerOS {
         let connection = self.connection_for_process(process.psn());
         ApplicationOS::new(connection, process, &self.event_sender)
             .map(|app| Application::new(Box::new(app)))
-    }
-
-    /// Refreshes the state of a given display, including its spaces and windows.
-    /// It repopulates each `LayoutStrip` with eligible windows from its corresponding space,
-    /// ensuring that existing windows maintain their order and unmanaged windows are ignored.
-    ///
-    /// # Arguments
-    ///
-    /// * `display` - A mutable reference to the `Display` to refresh.
-    /// * `windows` - A mutable query for all `Window` components, their `Entity`, and `Has<Unmanaged>` status.
-    fn refresh_display(&self, display: &mut Display, windows: &[(&Window, Entity)]) {
-        debug!(
-            "{}: Refreshing windows on display {}",
-            function_name!(),
-            display.id()
-        );
-
-        for (space_id, strip) in &mut display.spaces {
-            let new_windows = self.refresh_windows_space(*space_id, windows);
-
-            // Preserve the order - do not flush existing windows.
-            for window_entity in strip.all_windows() {
-                if !new_windows.contains(&window_entity) {
-                    strip.remove(window_entity);
-                }
-            }
-            for window_entity in new_windows {
-                if strip.index_of(window_entity).is_err() {
-                    strip.append(window_entity);
-                }
-            }
-            debug!(
-                "{}: space {space_id}: after refresh {strip}",
-                function_name!()
-            );
-        }
     }
 
     /// Returns child windows of the main window.

@@ -22,7 +22,7 @@ use crate::events::Event;
 use crate::manager::{ProcessApi, Window, WindowPane};
 use crate::platform::WinID;
 pub use systems::gather_displays;
-pub use systems::run_initial_oneshot_systems;
+pub use systems::initial_oneshot_systems;
 
 pub mod params;
 mod systems;

@@ -24,7 +24,6 @@ use stdext::function_name;
 use crate::ecs::Unmanaged;
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
-use crate::manager::skylight::SLSGetSpaceManagementMode;
 use crate::platform::{ConnID, ProcessSerialNumber, WinID};
 use crate::util::{AXUIWrapper, create_array, get_array_values, get_cfdict_value, symlink_target};
 use app::ApplicationOS;
@@ -37,10 +36,10 @@ use skylight::{
     SLSCopyAssociatedWindows, SLSCopyBestManagedDisplayForRect, SLSCopyManagedDisplayForWindow,
     SLSCopyManagedDisplaySpaces, SLSCopyWindowsWithOptionsAndTags, SLSFindWindowAndOwner,
     SLSGetConnectionIDForPSN, SLSGetCurrentCursorLocation, SLSGetDisplayMenubarHeight,
-    SLSGetWindowBounds, SLSMainConnectionID, SLSManagedDisplayGetCurrentSpace,
-    SLSWindowIteratorAdvance, SLSWindowIteratorGetAttributes, SLSWindowIteratorGetParentID,
-    SLSWindowIteratorGetTags, SLSWindowIteratorGetWindowID, SLSWindowQueryResultCopyWindows,
-    SLSWindowQueryWindows,
+    SLSGetSpaceManagementMode, SLSGetWindowBounds, SLSMainConnectionID,
+    SLSManagedDisplayGetCurrentSpace, SLSWindowIteratorAdvance, SLSWindowIteratorGetAttributes,
+    SLSWindowIteratorGetParentID, SLSWindowIteratorGetTags, SLSWindowIteratorGetWindowID,
+    SLSWindowQueryResultCopyWindows, SLSWindowQueryWindows,
 };
 pub use windows::{Window, WindowApi, WindowOS, WindowPadding, ax_window_id};
 

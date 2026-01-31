@@ -16,8 +16,7 @@ use crate::commands::{Command, process_command_trigger};
 use crate::config::{CONFIGURATION_FILE, Config};
 use crate::ecs::{
     BProcess, ExistingMarker, FocusFollowsMouse, MissionControlActive, PollForNotifications,
-    SkipReshuffle, gather_displays, register_systems, register_triggers,
-    run_initial_oneshot_systems,
+    SkipReshuffle, gather_displays, initial_oneshot_systems, register_systems, register_triggers,
 };
 use crate::errors::Result;
 use crate::manager::{Process, WindowManager, WindowManagerApi, WindowManagerOS};
@@ -270,6 +269,8 @@ impl EventHandler {
             world.insert_resource(config.clone());
         }
 
+        let oneshot_systems = initial_oneshot_systems(world);
+
         while let Some(mut process) = existing_processes.pop() {
             if process.is_observable() {
                 debug!(
@@ -285,8 +286,13 @@ impl EventHandler {
                     process.name(),
                 );
             }
+            for id in &oneshot_systems {
+                _ = world.run_system(*id);
+            }
         }
 
-        run_initial_oneshot_systems(world);
+        for id in oneshot_systems {
+            _ = world.unregister_system(id);
+        }
     }
 }

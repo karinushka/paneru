@@ -3,7 +3,9 @@ use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::query::{Has, Or, With};
-use bevy::ecs::system::{Commands, Local, NonSend, NonSendMut, Populated, Query, Res, ResMut};
+use bevy::ecs::system::{
+    Commands, Local, NonSend, NonSendMut, Populated, Query, Res, ResMut, SystemId,
+};
 use bevy::ecs::world::World;
 use bevy::time::Time;
 use log::{debug, error, info, trace, warn};
@@ -97,20 +99,13 @@ pub(super) fn dispatch_toplevel_triggers(
 /// # Arguments
 ///
 /// * `world` - The Bevy `World` instance to run the systems on.
-pub fn run_initial_oneshot_systems(world: &mut World) {
-    let existing_apps_setup = [
+pub fn initial_oneshot_systems(world: &mut World) -> Vec<SystemId> {
+    [
         world.register_system(add_existing_process),
         world.register_system(add_existing_application),
         world.register_system(finish_setup),
-    ];
-
-    let init = existing_apps_setup
-        .into_iter()
-        .map(|id| world.run_system(id))
-        .collect::<std::result::Result<Vec<()>, _>>();
-    if let Err(err) = init {
-        error!("{}: Error running initial systems: {err}", function_name!());
-    }
+    ]
+    .to_vec()
 }
 
 /// Gathers all present displays and spawns them as entities in the Bevy world.

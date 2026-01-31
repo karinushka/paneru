@@ -1,16 +1,15 @@
 use accessibility_sys::{
     AXObserverRef, AXUIElementCreateApplication, AXUIElementRef, kAXCreatedNotification,
-    kAXErrorSuccess, kAXFocusedWindowAttribute, kAXFocusedWindowChangedNotification,
-    kAXMenuClosedNotification, kAXMenuOpenedNotification, kAXTitleChangedNotification,
-    kAXUIElementDestroyedNotification, kAXWindowDeminiaturizedNotification,
-    kAXWindowMiniaturizedNotification, kAXWindowMovedNotification, kAXWindowResizedNotification,
-    kAXWindowsAttribute,
+    kAXErrorSuccess, kAXFocusedWindowChangedNotification, kAXMenuClosedNotification,
+    kAXMenuOpenedNotification, kAXTitleChangedNotification, kAXUIElementDestroyedNotification,
+    kAXWindowDeminiaturizedNotification, kAXWindowMiniaturizedNotification,
+    kAXWindowMovedNotification, kAXWindowResizedNotification,
 };
 use bevy::ecs::component::Component;
 use core::ptr::NonNull;
 use derive_more::{DerefMut, with_trait::Deref};
 use log::{debug, error};
-use objc2_core_foundation::{CFArray, CFNumberType, CFRetained, CFString, kCFRunLoopCommonModes};
+use objc2_core_foundation::{CFNumberType, CFRetained, CFString, kCFRunLoopCommonModes};
 use objc2_core_graphics::CGDirectDisplayID;
 use std::ffi::c_void;
 use std::pin::Pin;
@@ -29,9 +28,7 @@ use crate::platform::{
     AXObserverAddNotification, AXObserverCreate, AXObserverRemoveNotification, CFStringRef, ConnID,
     Pid, ProcessSerialNumber, WinID,
 };
-use crate::util::{
-    AXUIWrapper, add_run_loop, create_array, get_array_values, get_attribute, remove_run_loop,
-};
+use crate::util::{AXUIAttributes, AXUIWrapper, add_run_loop, create_array, remove_run_loop};
 
 /// A static `LazyLock` that holds a list of `AXNotification` strings to be observed for application-level events.
 /// These notifications are general events related to an application's lifecycle and state changes,
@@ -77,7 +74,7 @@ pub trait ApplicationApi: Send + Sync {
     /// # Errors
     ///
     /// Returns an `Error` if the window list cannot be retrieved.
-    fn window_list(&self) -> Result<Vec<Result<Window>>>;
+    fn window_list(&self) -> Vec<Window>;
     /// Starts observing application-level accessibility notifications.
     ///
     /// # Errors
@@ -237,9 +234,7 @@ impl ApplicationApi for ApplicationOS {
     ///
     /// `Ok(WinID)` with the focused window ID if successful, otherwise `Err(Error)`.
     fn focused_window_id(&self) -> Result<WinID> {
-        let axmain = CFString::from_static_str(kAXFocusedWindowAttribute);
-        let focused = get_attribute::<AXUIWrapper>(&self.element, &axmain)?;
-        ax_window_id(focused.as_ptr())
+        self.element.focused_window_id()
     }
 
     /// Retrieves a list of all windows associated with the application.
@@ -247,17 +242,18 @@ impl ApplicationApi for ApplicationOS {
     /// # Returns
     ///
     /// `Ok(Vec<Result<Window>>)` containing the list of window objects if successful, otherwise `Err(Error)`.
-    fn window_list(&self) -> Result<Vec<Result<Window>>> {
-        let axwindows = CFString::from_static_str(kAXWindowsAttribute);
-        let array = get_attribute::<CFArray>(&self.element, &axwindows)?;
-        let out = get_array_values::<accessibility_sys::__AXUIElement>(&array)
-            .map(|element| {
-                AXUIWrapper::retain(element.as_ptr()).and_then(|element| {
-                    WindowOS::new(&element).map(|window| Window::new(Box::new(window)))
-                })
+    fn window_list(&self) -> Vec<Window> {
+        self.element
+            .windows()
+            .map(|windows| {
+                windows
+                    .into_iter()
+                    .flat_map(|element| {
+                        WindowOS::new(&element).map(|window| Window::new(Box::new(window)))
+                    })
+                    .collect()
             })
-            .collect();
-        Ok(out)
+            .unwrap_or_default()
     }
 
     /// Registers observers for general application-level accessibility notifications (e.g., `kAXCreatedNotification`).

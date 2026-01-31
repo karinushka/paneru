@@ -1,8 +1,12 @@
-use accessibility_sys::{AXObserverGetRunLoopSource, AXUIElementRef};
+use accessibility_sys::{
+    AXObserverGetRunLoopSource, AXUIElementRef, kAXFocusedWindowAttribute, kAXMinimizedAttribute,
+    kAXParentAttribute, kAXRoleAttribute, kAXSubroleAttribute, kAXTitleAttribute,
+    kAXWindowsAttribute,
+};
 use core::ptr::NonNull;
 use log::debug;
 use objc2_core_foundation::{
-    CFArray, CFDictionary, CFNumber, CFNumberType, CFRetained, CFRunLoop, CFRunLoopMode,
+    CFArray, CFBoolean, CFDictionary, CFNumber, CFNumberType, CFRetained, CFRunLoop, CFRunLoopMode,
     CFRunLoopSource, CFString, CFType, Type, kCFTypeArrayCallBacks,
 };
 use std::{
@@ -15,7 +19,8 @@ use stdext::function_name;
 
 use crate::{
     errors::{Error, Result},
-    manager::AXUIElementCopyAttributeValue,
+    manager::{AXUIElementCopyAttributeValue, ax_window_id},
+    platform::WinID,
 };
 
 pub struct Cleanuper {
@@ -151,37 +156,70 @@ impl std::fmt::Display for AXUIWrapper {
     }
 }
 
-/// Retrieves the value of an accessibility attribute from a given UI element.
-///
-/// # Type Parameters
-///
-/// * `T` - The expected type of the attribute value, which must implement `objc2_core_foundation::Type`.
-///
-/// # Arguments
-///
-/// * `element_ref` - A reference to the `CFRetained<AXUIWrapper>` representing the UI element.
-/// * `name` - A `CFRetained<CFString>` representing the name of the attribute.
-///
-/// # Returns
-///
-/// `Ok(CFRetained<T>)` with the attribute value if successful, otherwise `Err(Error)`.
-pub fn get_attribute<T: Type>(
-    element_ref: &CFRetained<AXUIWrapper>,
-    name: &CFRetained<CFString>,
-) -> Result<CFRetained<T>> {
-    let mut attribute: *mut CFType = null_mut();
-    if 0 == unsafe { AXUIElementCopyAttributeValue(element_ref.as_ptr(), name, &mut attribute) } {
-        NonNull::new(attribute)
-            .map(|ptr| unsafe { CFRetained::from_raw(ptr.cast()) })
-            .ok_or(Error::InvalidInput(format!(
-                "{}: nullptr while getting attribute {name}.",
+pub trait AXUIAttributes {
+    fn parent(&self) -> Result<CFRetained<CFType>> {
+        let axname = CFString::from_static_str(kAXParentAttribute);
+        self.get_attribute::<CFType>(&axname)
+    }
+
+    fn subrole(&self) -> Result<String> {
+        let axname = CFString::from_static_str(kAXSubroleAttribute);
+        self.get_attribute::<CFString>(&axname)
+            .map(|value| value.to_string())
+    }
+
+    fn role(&self) -> Result<String> {
+        let axname = CFString::from_static_str(kAXRoleAttribute);
+        self.get_attribute::<CFString>(&axname)
+            .map(|value| value.to_string())
+    }
+
+    fn title(&self) -> Result<String> {
+        let axname = CFString::from_static_str(kAXTitleAttribute);
+        self.get_attribute::<CFString>(&axname)
+            .map(|value| value.to_string())
+    }
+
+    fn minimized(&self) -> Result<bool> {
+        let axname = CFString::from_static_str(kAXMinimizedAttribute);
+        self.get_attribute::<CFBoolean>(&axname)
+            .map(|value| CFBoolean::value(&value))
+    }
+
+    fn focused_window_id(&self) -> Result<WinID> {
+        let axname = CFString::from_static_str(kAXFocusedWindowAttribute);
+        self.get_attribute::<AXUIWrapper>(&axname)
+            .and_then(|focused| ax_window_id(focused.as_ptr()))
+    }
+
+    fn windows(&self) -> Result<Vec<CFRetained<AXUIWrapper>>> {
+        let axname = CFString::from_static_str(kAXWindowsAttribute);
+        let array = self.get_attribute::<CFArray>(&axname)?;
+        let out = get_array_values::<accessibility_sys::__AXUIElement>(&array)
+            .flat_map(|element| AXUIWrapper::retain(element.as_ptr()))
+            .collect();
+        Ok(out)
+    }
+
+    fn get_attribute<T: Type>(&self, name: &CFRetained<CFString>) -> Result<CFRetained<T>>;
+}
+
+impl AXUIAttributes for CFRetained<AXUIWrapper> {
+    fn get_attribute<T: Type>(&self, name: &CFRetained<CFString>) -> Result<CFRetained<T>> {
+        let mut attribute: *mut CFType = null_mut();
+        if 0 == unsafe { AXUIElementCopyAttributeValue(self.as_ptr(), name, &mut attribute) } {
+            NonNull::new(attribute)
+                .map(|ptr| unsafe { CFRetained::from_raw(ptr.cast()) })
+                .ok_or(Error::InvalidInput(format!(
+                    "{}: nullptr while getting attribute {name}.",
+                    function_name!()
+                )))
+        } else {
+            Err(Error::NotFound(format!(
+                "{}: failed getting attribute {name}.",
                 function_name!()
             )))
-    } else {
-        Err(Error::NotFound(format!(
-            "{}: failed getting attribute {name}.",
-            function_name!()
-        )))
+        }
     }
 }
 

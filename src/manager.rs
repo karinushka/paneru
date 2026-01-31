@@ -479,23 +479,7 @@ impl WindowManagerApi for WindowManagerOS {
             function_name!()
         );
 
-        let mut found_windows: Vec<Window> = Vec::new();
-        for found in app.window_list()? {
-            match found {
-                Ok(found_window) => {
-                    if !found_windows
-                        .iter()
-                        .any(|window| window.id() == found_window.id())
-                    {
-                        found_windows.push(found_window);
-                    }
-                }
-                Err(err) => {
-                    debug!("{}: create window: {err}", function_name!());
-                }
-            }
-        }
-
+        let mut found_windows = app.window_list();
         if global_window_list.len() == found_windows.len() {
             if refresh_index != -1 {
                 debug!(

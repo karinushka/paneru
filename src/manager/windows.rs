@@ -1,8 +1,7 @@
 use accessibility_sys::{
-    AXUIElementRef, AXValueCreate, AXValueGetValue, kAXFloatingWindowSubrole,
-    kAXMinimizedAttribute, kAXParentAttribute, kAXPositionAttribute, kAXRaiseAction,
-    kAXRoleAttribute, kAXSizeAttribute, kAXStandardWindowSubrole, kAXSubroleAttribute,
-    kAXTitleAttribute, kAXUnknownSubrole, kAXValueTypeCGPoint, kAXValueTypeCGSize, kAXWindowRole,
+    AXUIElementRef, AXValueCreate, AXValueGetValue, kAXFloatingWindowSubrole, kAXPositionAttribute,
+    kAXRaiseAction, kAXSizeAttribute, kAXStandardWindowSubrole, kAXUnknownSubrole,
+    kAXValueTypeCGPoint, kAXValueTypeCGSize, kAXWindowRole,
 };
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
@@ -10,9 +9,7 @@ use bevy::ecs::system::Commands;
 use core::ptr::NonNull;
 use derive_more::{DerefMut, with_trait::Deref};
 use log::{debug, trace};
-use objc2_core_foundation::{
-    CFBoolean, CFEqual, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize,
-};
+use objc2_core_foundation::{CFEqual, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize};
 use std::ptr::null_mut;
 use std::thread;
 use std::time::Duration;
@@ -26,7 +23,7 @@ use crate::ecs::params::ActiveDisplay;
 use crate::ecs::{RepositionMarker, ResizeMarker, reposition_entity};
 use crate::errors::{Error, Result};
 use crate::platform::{Pid, ProcessSerialNumber, WinID};
-use crate::util::{AXUIWrapper, get_attribute};
+use crate::util::{AXUIAttributes, AXUIWrapper};
 
 pub enum WindowPadding {
     Vertical(u16),
@@ -231,10 +228,7 @@ impl WindowOS {
     ///
     /// `true` if the window is minimized, `false` otherwise.
     fn is_minimized(&self) -> bool {
-        let axminimized = CFString::from_static_str(kAXMinimizedAttribute);
-        get_attribute::<CFBoolean>(&self.ax_element, &axminimized)
-            .map(|minimized| CFBoolean::value(&minimized))
-            .is_ok_and(|minimized| minimized)
+        self.ax_element.minimized().is_ok_and(|minimized| minimized)
     }
 
     /// Checks if the window is a "real" window based on its role and subrole.
@@ -332,9 +326,7 @@ impl WindowApi for WindowOS {
     ///
     /// `Ok(String)` with the window title if successful, otherwise `Err(Error)`.
     fn title(&self) -> Result<String> {
-        let axtitle = CFString::from_static_str(kAXTitleAttribute);
-        let title = get_attribute::<CFString>(&self.ax_element, &axtitle)?;
-        Ok(title.to_string())
+        self.ax_element.title()
     }
 
     /// Returns true if the window has a child role.
@@ -351,9 +343,7 @@ impl WindowApi for WindowOS {
     ///
     /// `Ok(String)` with the window role if successful, otherwise `Err(Error)`.
     fn role(&self) -> Result<String> {
-        let axrole = CFString::from_static_str(kAXRoleAttribute);
-        let role = get_attribute::<CFString>(&self.ax_element, &axrole)?;
-        Ok(role.to_string())
+        self.ax_element.role()
     }
 
     /// Retrieves the subrole of the window (e.g., "`AXStandardWindow`").
@@ -362,9 +352,7 @@ impl WindowApi for WindowOS {
     ///
     /// `Ok(String)` with the window subrole if successful, otherwise `Err(Error)`.
     fn subrole(&self) -> Result<String> {
-        let axrole = CFString::from_static_str(kAXSubroleAttribute);
-        let role = get_attribute::<CFString>(&self.ax_element, &axrole)?;
-        Ok(role.to_string())
+        self.ax_element.subrole()
     }
 
     /// Checks if the window is a root window (i.e., not a child of another window).
@@ -374,8 +362,8 @@ impl WindowApi for WindowOS {
     /// `true` if the window is a root window, `false` otherwise.
     fn is_root(&self) -> bool {
         let cftype = self.ax_element.as_ref();
-        let axparent = CFString::from_static_str(kAXParentAttribute);
-        get_attribute::<CFType>(&self.ax_element, &axparent)
+        self.ax_element
+            .parent()
             .is_ok_and(|parent| !CFEqual(Some(&*parent), Some(cftype)))
     }
 

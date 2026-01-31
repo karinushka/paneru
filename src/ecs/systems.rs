@@ -371,23 +371,14 @@ pub(super) fn add_launched_application(
     let find_window = |window_id| windows.find(window_id);
 
     for (app, entity) in app_query {
-        let Ok(app_windows) = app.window_list() else {
-            continue;
-        };
-        let create_windows = app_windows
-            .into_iter()
-            .filter_map(|window| {
-                window
-                    .inspect_err(|err| warn!("{}: error adding window: {err}", function_name!()))
-                    .ok()
-                    .and_then(|window| {
-                        // Window does not exist, create it.
-                        find_window(window.id()).is_none().then_some(window)
-                    })
-            })
-            .collect();
-        commands.entity(entity).try_remove::<FreshMarker>();
-        commands.trigger(SpawnWindowTrigger(create_windows));
+        let mut create_windows = app.window_list();
+        // Retain the non-existing windows, so they can be created.
+        create_windows.retain(|window| find_window(window.id()).is_none());
+
+        if !create_windows.is_empty() {
+            commands.entity(entity).try_remove::<FreshMarker>();
+            commands.trigger(SpawnWindowTrigger(create_windows));
+        }
     }
 }
 

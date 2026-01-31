@@ -144,9 +144,9 @@ impl ApplicationApi for MockApplication {
     }
 
     /// Always returns an empty vector of window lists for the mock application.
-    fn window_list(&self) -> Result<Vec<Result<Window>>> {
+    fn window_list(&self) -> Vec<Window> {
         println!("{}:", function_name!());
-        Ok(vec![])
+        vec![]
     }
 
     /// Always returns `Ok(true)` for observe operations on the mock application.

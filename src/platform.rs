@@ -6,12 +6,16 @@ use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSEventMask};
 use objc2_core_foundation::CFString;
 use objc2_foundation::{NSDate, NSDefaultRunLoopMode};
 use std::ffi::c_void;
+use std::pin::Pin;
 use stdext::function_name;
 
 use crate::config::{CONFIGURATION_FILE, Config};
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
 use crate::manager::{check_ax_privilege, check_separate_spaces};
+use crate::platform::display::PinnedDisplayHandler;
+use crate::platform::input::PinnedInputHandler;
+use crate::platform::process::PinnedProcessHandler;
 use display::DisplayHandler;
 use input::InputHandler;
 use mission_control::MissionControlHandler;
@@ -116,15 +120,15 @@ pub struct PlatformCallbacks {
     /// The main `EventSender` for dispatching events across the application.
     events: EventSender,
     /// Handler for Carbon process events.
-    process_handler: ProcessHandler,
+    process_handler: Option<PinnedProcessHandler>,
     /// Handler for low-level input events (keyboard, mouse, gestures).
-    event_handler: InputHandler,
+    event_handler: Option<PinnedInputHandler>,
     /// Observer for `NSWorkspace` and distributed notifications.
     workspace_observer: Retained<WorkspaceObserver>,
     /// Handler for Mission Control accessibility events.
     mission_control_observer: MissionControlHandler,
     /// Handler for Core Graphics display reconfiguration events.
-    display_handler: DisplayHandler,
+    display_handler: Option<PinnedDisplayHandler>,
 }
 
 impl PlatformCallbacks {
@@ -139,10 +143,7 @@ impl PlatformCallbacks {
     /// # Returns
     ///
     /// `Ok(std::pin::Pin<Box<Self>>)` if the instance is created successfully, otherwise `Err(Error)`.
-    pub fn new(events: EventSender) -> Result<std::pin::Pin<Box<Self>>> {
-        let config = Config::new(CONFIGURATION_FILE.as_path())?;
-        events.send(Event::InitialConfig(config.clone()))?;
-
+    pub fn new(events: EventSender) -> Pin<Box<Self>> {
         // This is required to receive some Cocoa notifications into Carbon code, like
         // NSWorkspaceActiveSpaceDidChangeNotification and
         // NSWorkspaceActiveDisplayDidChangeNotification
@@ -154,15 +155,15 @@ impl PlatformCallbacks {
         NSApplication::load();
 
         let workspace_observer = WorkspaceObserver::new(events.clone());
-        Ok(Box::pin(PlatformCallbacks {
+        Box::pin(PlatformCallbacks {
             cocoa_app,
-            process_handler: ProcessHandler::new(events.clone(), workspace_observer.clone()),
-            event_handler: InputHandler::new(events.clone(), config.clone()),
+            process_handler: None,
+            event_handler: None,
             workspace_observer,
             mission_control_observer: MissionControlHandler::new(events.clone()),
-            display_handler: DisplayHandler::new(events.clone()),
+            display_handler: None,
             events,
-        }))
+        })
     }
 
     /// Sets up and starts all platform-specific handlers, including input, display, Mission Control, workspace, and process handlers.
@@ -196,11 +197,16 @@ impl PlatformCallbacks {
             ));
         }
 
-        self.event_handler.start()?;
-        self.display_handler.start()?;
+        let config = Config::new(CONFIGURATION_FILE.as_path())?;
+        self.events.send(Event::InitialConfig(config.clone()))?;
+        self.event_handler = Some(InputHandler::new(self.events.clone(), config).start()?);
+
+        self.display_handler = Some(DisplayHandler::new(self.events.clone()).start()?);
+        self.process_handler = Some(
+            ProcessHandler::new(self.events.clone(), self.workspace_observer.clone()).start()?,
+        );
         self.mission_control_observer.observe()?;
         self.workspace_observer.start();
-        self.process_handler.start()?;
 
         self.events.send(Event::ProcessesLoaded)
     }

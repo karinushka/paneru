@@ -4,21 +4,26 @@ use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayChangeSummaryFlags, CGDisplayRegisterReconfigurationCallback,
     CGDisplayRemoveReconfigurationCallback, CGError,
 };
+use scopeguard::ScopeGuard;
 use std::ffi::c_void;
+use std::marker::PhantomPinned;
+use std::pin::Pin;
 use stdext::function_name;
 
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
-use crate::util::Cleanuper;
 
 /// `DisplayHandler` manages callbacks for macOS display reconfiguration events.
 /// It dispatches `Event`s related to display changes (e.g., addition, removal, resizing) to the event loop.
 pub(super) struct DisplayHandler {
     /// The `EventSender` for dispatching display-related events.
     events: EventSender,
-    /// An optional `Cleanuper` to manage the unregistration of the display reconfiguration callback.
-    cleanup: Option<Cleanuper>,
+    // Prevents from being Unpin automatically
+    _pin: PhantomPinned,
 }
+
+pub type PinnedDisplayHandler =
+    ScopeGuard<Pin<Box<DisplayHandler>>, Box<dyn FnOnce(Pin<Box<DisplayHandler>>)>>;
 
 impl DisplayHandler {
     /// Creates a new `DisplayHandler` instance.
@@ -33,7 +38,7 @@ impl DisplayHandler {
     pub(super) fn new(events: EventSender) -> Self {
         Self {
             events,
-            cleanup: None,
+            _pin: PhantomPinned,
         }
     }
 
@@ -47,9 +52,10 @@ impl DisplayHandler {
     /// # Side Effects
     ///
     /// - Registers a `CGDisplayReconfigurationCallback`, which will be unregistered when `cleanup` is dropped.
-    pub(super) fn start(&mut self) -> Result<()> {
+    pub(super) fn start(self) -> Result<PinnedDisplayHandler> {
         info!("{}: Registering display handler", function_name!());
-        let this = unsafe { NonNull::new_unchecked(self).as_ptr() };
+        let mut pinned = Box::pin(self);
+        let this = unsafe { NonNull::new_unchecked(pinned.as_mut().get_unchecked_mut()) }.as_ptr();
         let result =
             unsafe { CGDisplayRegisterReconfigurationCallback(Some(Self::callback), this.cast()) };
         if result != CGError::Success {
@@ -58,11 +64,17 @@ impl DisplayHandler {
                 function_name!()
             )));
         }
-        self.cleanup = Some(Cleanuper::new(Box::new(move || unsafe {
-            info!("{}: Unregistering display handler", function_name!());
-            CGDisplayRemoveReconfigurationCallback(Some(Self::callback), this.cast());
-        })));
-        Ok(())
+        Ok(scopeguard::guard(
+            pinned,
+            Box::new(|mut pin: Pin<Box<Self>>| {
+                info!("{}: Unregistering display handler", function_name!());
+                let this =
+                    unsafe { NonNull::new_unchecked(pin.as_mut().get_unchecked_mut()) }.as_ptr();
+                unsafe {
+                    CGDisplayRemoveReconfigurationCallback(Some(Self::callback), this.cast())
+                };
+            }),
+        ))
     }
 
     /// The C-callback function for `CGDisplayReconfigurationCallback`. It dispatches to the `display_handler` method.

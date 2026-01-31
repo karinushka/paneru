@@ -207,7 +207,7 @@ impl EventHandler {
             .insert_non_send_resource(watcher)
             .add_plugins((register_triggers, register_systems));
 
-        let mut platform_callbacks = PlatformCallbacks::new(sender)?;
+        let mut platform_callbacks = PlatformCallbacks::new(sender);
         platform_callbacks.setup_handlers()?;
         app.insert_non_send_resource(platform_callbacks);
         app.insert_non_send_resource(receiver);

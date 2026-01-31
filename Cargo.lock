@@ -2496,6 +2496,7 @@ dependencies = [
  "objc2-core-graphics",
  "objc2-foundation",
  "regex",
+ "scopeguard",
  "serde",
  "stdext",
  "toml",

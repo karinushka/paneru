@@ -23,33 +23,6 @@ use crate::{
     platform::WinID,
 };
 
-pub struct Cleanuper {
-    cleanup: Box<dyn Fn()>,
-}
-
-unsafe impl Send for Cleanuper {}
-
-impl Drop for Cleanuper {
-    fn drop(&mut self) {
-        (self.cleanup)();
-    }
-}
-
-impl Cleanuper {
-    /// Creates a new `Cleanuper` instance with a given cleanup closure.
-    ///
-    /// # Arguments
-    ///
-    /// * `cleanup` - A boxed closure `Box<dyn Fn()>` to be executed when `Cleanuper` is dropped.
-    ///
-    /// # Returns
-    ///
-    /// A new `Cleanuper` instance.
-    pub fn new(cleanup: Box<dyn Fn()>) -> Self {
-        Cleanuper { cleanup }
-    }
-}
-
 #[derive(Debug)]
 pub struct AXUIWrapper;
 unsafe impl objc2_core_foundation::Type for AXUIWrapper {}

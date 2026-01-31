@@ -8,29 +8,34 @@ use objc2_core_graphics::{
     CGEventTapPlacement, CGEventTapProxy, CGEventType,
 };
 use objc2_foundation::NSSet;
+use scopeguard::ScopeGuard;
 use std::ffi::c_void;
+use std::marker::PhantomPinned;
+use std::pin::Pin;
 use std::ptr::null_mut;
 use stdext::function_name;
 
 use crate::config::Config;
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
-use crate::util::Cleanuper;
 
 /// `InputHandler` manages low-level input events from the macOS `CGEventTap`.
 /// It intercepts keyboard and mouse events, processes gestures, and dispatches them as higher-level `Event`s.
 pub(super) struct InputHandler {
     /// The `EventSender` for dispatching input events.
-    events: EventSender,
+    events: Option<EventSender>,
     /// The application `Config` for looking up keybindings.
     config: Config,
-    /// An optional `Cleanuper` to manage the unregistration of the event tap.
-    cleanup: Option<Cleanuper>,
     /// Stores the previous touch positions for swipe gesture detection.
     finger_position: Option<Retained<NSSet<NSTouch>>>,
     /// The `CFMachPort` representing the `CGEventTap`.
     tap_port: Option<CFRetained<CFMachPort>>,
+    // Prevents from being Unpin automatically
+    _pin: PhantomPinned,
 }
+
+pub type PinnedInputHandler =
+    ScopeGuard<Pin<Box<InputHandler>>, Box<dyn FnOnce(Pin<Box<InputHandler>>)>>;
 
 impl InputHandler {
     /// Creates a new `InputHandler` instance.
@@ -45,11 +50,11 @@ impl InputHandler {
     /// A new `InputHandler`.
     pub(super) fn new(events: EventSender, config: Config) -> Self {
         InputHandler {
-            events,
+            events: Some(events),
             config,
-            cleanup: None,
             finger_position: None,
             tap_port: None,
+            _pin: PhantomPinned,
         }
     }
 
@@ -58,7 +63,7 @@ impl InputHandler {
     /// # Returns
     ///
     /// `Ok(())` if the event tap is created and started successfully, otherwise `Err(Error)`.
-    pub(super) fn start(&mut self) -> Result<()> {
+    pub(super) fn start(self) -> Result<PinnedInputHandler> {
         let mouse_event_mask = (1 << CGEventType::MouseMoved.0)
             | (1 << CGEventType::LeftMouseDown.0)
             | (1 << CGEventType::LeftMouseUp.0)
@@ -69,9 +74,10 @@ impl InputHandler {
             | (1 << NSEventType::Gesture.0)
             | (1 << CGEventType::KeyDown.0);
 
+        let mut pinned = Box::pin(self);
+        let this = unsafe { NonNull::new_unchecked(pinned.as_mut().get_unchecked_mut()) }.as_ptr();
         unsafe {
-            let this = NonNull::new_unchecked(self).as_ptr();
-            self.tap_port = CGEvent::tap_create(
+            (*this).tap_port = CGEvent::tap_create(
                 CGEventTapLocation::HIDEventTap,
                 CGEventTapPlacement::HeadInsertEventTap,
                 CGEventTapOptions::Default,
@@ -79,37 +85,40 @@ impl InputHandler {
                 Some(Self::callback),
                 this.cast(),
             );
-            if self.tap_port.is_none() {
-                return Err(Error::PermissionDenied(format!(
-                    "{}: Can not create EventTap.",
-                    function_name!()
-                )));
-            }
+        };
+        if pinned.tap_port.is_none() {
+            return Err(Error::PermissionDenied(format!(
+                "{}: Can not create EventTap.",
+                function_name!()
+            )));
+        }
 
-            let (run_loop_source, main_loop) =
-                CFMachPort::new_run_loop_source(None, self.tap_port.as_deref(), 0)
-                    .zip(CFRunLoop::main())
-                    .ok_or(Error::PermissionDenied(format!(
-                        "{}: Unable to create run loop source",
-                        function_name!()
-                    )))?;
-            CFRunLoop::add_source(&main_loop, Some(&run_loop_source), kCFRunLoopCommonModes);
-
-            let port = self
-                .tap_port
-                .clone()
+        let (run_loop_source, main_loop) =
+            CFMachPort::new_run_loop_source(None, pinned.tap_port.as_deref(), 0)
+                .zip(CFRunLoop::main())
                 .ok_or(Error::PermissionDenied(format!(
-                    "{}: invalid tap port.",
+                    "{}: Unable to create run loop source",
                     function_name!()
                 )))?;
-            self.cleanup = Some(Cleanuper::new(Box::new(move || {
+        let loop_mode = unsafe { kCFRunLoopCommonModes };
+        CFRunLoop::add_source(&main_loop, Some(&run_loop_source), loop_mode);
+
+        let port = pinned
+            .tap_port
+            .clone()
+            .ok_or(Error::PermissionDenied(format!(
+                "{}: invalid tap port.",
+                function_name!()
+            )))?;
+        Ok(scopeguard::guard(
+            pinned,
+            Box::new(move |_: Pin<Box<Self>>| {
                 info!("{}: Unregistering event_handler", function_name!());
-                CFRunLoop::remove_source(&main_loop, Some(&run_loop_source), kCFRunLoopCommonModes);
+                CFRunLoop::remove_source(&main_loop, Some(&run_loop_source), loop_mode);
                 CFMachPort::invalidate(&port);
                 CGEvent::tap_enable(&port, false);
-            })));
-        }
-        Ok(())
+            }),
+        ))
     }
 
     /// The C-callback function for the `CGEventTap`. It dispatches to the `input_handler` method.
@@ -154,6 +163,9 @@ impl InputHandler {
     ///
     /// `true` if the event should be intercepted (not passed further), `false` otherwise.
     fn input_handler(&mut self, event_type: CGEventType, event: &CGEvent) -> bool {
+        let Some(events) = &self.events else {
+            return false;
+        };
         let result = match event_type {
             CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
                 info!("{}: Tap Disabled", function_name!());
@@ -164,19 +176,19 @@ impl InputHandler {
             }
             CGEventType::LeftMouseDown | CGEventType::RightMouseDown => {
                 let point = CGEvent::location(Some(event));
-                self.events.send(Event::MouseDown { point })
+                events.send(Event::MouseDown { point })
             }
             CGEventType::LeftMouseUp | CGEventType::RightMouseUp => {
                 let point = CGEvent::location(Some(event));
-                self.events.send(Event::MouseUp { point })
+                events.send(Event::MouseUp { point })
             }
             CGEventType::LeftMouseDragged | CGEventType::RightMouseDragged => {
                 let point = CGEvent::location(Some(event));
-                self.events.send(Event::MouseDragged { point })
+                events.send(Event::MouseDragged { point })
             }
             CGEventType::MouseMoved => {
                 let point = CGEvent::location(Some(event));
-                self.events.send(Event::MouseMoved { point })
+                events.send(Event::MouseMoved { point })
             }
             CGEventType::KeyDown => {
                 let keycode =
@@ -191,7 +203,7 @@ impl InputHandler {
             error!("{}: error sending event: {err}", function_name!());
             // The socket is dead, so no use trying to send to it.
             // Trigger cleanup destructor, unregistering the handler.
-            self.cleanup = None;
+            self.events = None;
         }
         // Do not intercept this event, let it fall through.
         false
@@ -232,8 +244,10 @@ impl InputHandler {
                 .zip(&fingers)
                 .map(|(p, c)| p.normalizedPosition().x - c.normalizedPosition().x)
                 .collect::<Vec<_>>();
-            if deltas.iter().all(|p| p.abs() > SWIPE_THRESHOLD) {
-                _ = self.events.send(Event::Swipe { deltas });
+            if deltas.iter().all(|p| p.abs() > SWIPE_THRESHOLD)
+                && let Some(events) = &self.events
+            {
+                _ = events.send(Event::Swipe { deltas });
             }
         }
         self.finger_position = Some(fingers);
@@ -259,6 +273,9 @@ impl InputHandler {
             [0x0010_0000, 0x0000_0008, 0x0000_0010], // Command
             [0x0004_0000, 0x0000_0001, 0x0000_2000], // Control
         ];
+        let Some(events) = &self.events else {
+            return false;
+        };
         let mask = MODIFIER_MASKS
             .iter()
             .enumerate()
@@ -277,7 +294,7 @@ impl InputHandler {
         keycode
             .and_then(|keycode| self.config.find_keybind(keycode, mask))
             .and_then(|command| {
-                self.events
+                events
                     .send(Event::Command { command })
                     .inspect_err(|err| error!("{}: Error sending command: {err}", function_name!()))
                     .ok()

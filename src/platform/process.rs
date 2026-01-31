@@ -1,14 +1,16 @@
 use core::ptr::NonNull;
 use log::{debug, error, info};
 use objc2::rc::Retained;
+use scopeguard::ScopeGuard;
 use std::ffi::c_void;
+use std::marker::PhantomPinned;
+use std::pin::Pin;
 use stdext::function_name;
 
 use super::workspace::WorkspaceObserver;
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
 use crate::platform::OSStatus;
-use crate::util::Cleanuper;
 
 /// Represents a process serial number (PSN), a unique identifier for a running process on macOS.
 /// It is used by the Carbon APIs to identify applications.
@@ -217,11 +219,14 @@ struct ProcessEvent {
 pub(super) struct ProcessHandler {
     /// The sender for dispatching processed events.
     events: EventSender,
-    /// An optional `Cleanuper` to manage the unregistration of the Carbon event handler.
-    cleanup: Option<Cleanuper>,
     /// A retained reference to the `WorkspaceObserver`, used for `ApplicationLaunched` events.
     observer: Retained<WorkspaceObserver>,
+    // Prevents from being Unpin automatically
+    _pin: PhantomPinned,
 }
+
+pub type PinnedProcessHandler =
+    ScopeGuard<Pin<Box<ProcessHandler>>, Box<dyn FnOnce(Pin<Box<ProcessHandler>>)>>;
 
 /// An enum representing different types of Carbon application-related events.
 /// These correspond to specific event kinds within the `kEventClassApplication` event class.
@@ -288,8 +293,8 @@ impl ProcessHandler {
     pub(super) fn new(events: EventSender, observer: Retained<WorkspaceObserver>) -> Self {
         ProcessHandler {
             events,
-            cleanup: None,
             observer,
+            _pin: PhantomPinned,
         }
     }
 
@@ -300,7 +305,7 @@ impl ProcessHandler {
     ///
     /// - Registers a Carbon event handler, which will be unregistered when `cleanup` is dropped.
     /// - Iterates through existing processes and dispatches `ApplicationLaunched` events for them.
-    pub(super) fn start(&mut self) -> Result<()> {
+    pub(super) fn start(mut self) -> Result<PinnedProcessHandler> {
         const APPL_CLASS: &str = "appl";
         const PROCESS_EVENT_LAUNCHED: u32 = 5;
         const PROCESS_EVENT_TERMINATED: u32 = 6;
@@ -330,6 +335,9 @@ impl ProcessHandler {
                 event_kind: PROCESS_EVENT_FRONTSWITCHED,
             },
         ];
+
+        let mut pinned = Box::pin(self);
+        let this = unsafe { NonNull::new_unchecked(pinned.as_mut().get_unchecked_mut()) }.as_ptr();
         let mut handler: *const ProcessEventHandler = std::ptr::null();
         let result = unsafe {
             InstallEventHandler(
@@ -337,7 +345,7 @@ impl ProcessHandler {
                 Self::callback,
                 events.len().try_into()?,
                 events.as_ptr(),
-                NonNull::new_unchecked(self).as_ptr().cast(),
+                this.cast(),
                 &raw mut handler,
             )
         };
@@ -352,14 +360,16 @@ impl ProcessHandler {
             function_name!()
         );
 
-        self.cleanup = Some(Cleanuper::new(Box::new(move || unsafe {
-            info!(
-                "{}: Unregistering process_handler: {handler:?}",
-                function_name!()
-            );
-            RemoveEventHandler(handler);
-        })));
-        Ok(())
+        Ok(scopeguard::guard(
+            pinned,
+            Box::new(move |_: Pin<Box<Self>>| {
+                info!(
+                    "{}: Unregistering process_handler: {handler:?}",
+                    function_name!()
+                );
+                unsafe { RemoveEventHandler(handler) };
+            }),
+        ))
     }
 
     /// The C-callback function invoked by the private process handling API. It dispatches to the `process_handler` method.

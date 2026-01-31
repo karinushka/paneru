@@ -34,6 +34,7 @@ objc2-core-foundation = { version = "0.3.2", features = ["CFRunLoop"] }
 objc2-core-graphics = "0.3.2"
 objc2-foundation = { version = "0.3.2", features = ["NSNotification"] }
 regex = "1.12.2"
+scopeguard = "1.2.0"
 serde = { version = "1.0.228", features = ["derive"] }
 stdext = "0.3.3"
 toml = "0.9.11"

@@ -53,6 +53,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::fresh_marker_cleanup,
             systems::timeout_ticker,
             systems::window_update_frame,
+            systems::displays_rearranged,
             systems::find_orphaned_workspaces.run_if(on_timer(Duration::from_millis(
                 DISPLAY_CHANGE_CHECK_FREQ_MS,
             ))),
@@ -84,9 +85,6 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::active_workspace_trigger)
         .add_observer(triggers::display_change_trigger)
         .add_observer(triggers::active_display_trigger)
-        .add_observer(triggers::display_add_trigger)
-        .add_observer(triggers::display_remove_trigger)
-        .add_observer(triggers::display_moved_trigger)
         .add_observer(triggers::front_switched_trigger)
         .add_observer(triggers::center_mouse_trigger)
         .add_observer(triggers::window_focused_trigger)

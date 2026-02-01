@@ -9,6 +9,7 @@ use bevy::ecs::system::{
 use bevy::ecs::world::World;
 use bevy::time::Time;
 use log::{debug, error, info, trace, warn};
+use objc2_core_graphics::CGDirectDisplayID;
 use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -1144,6 +1145,129 @@ pub(super) fn window_update_frame(
             _ => (),
         }
     }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn displays_rearranged(
+    mut messages: MessageReader<Event>,
+    workspaces: Query<(&LayoutStrip, Entity, &ChildOf)>,
+    mut displays: Query<(&mut Display, Entity)>,
+    window_manager: Res<WindowManager>,
+    mut commands: Commands,
+) {
+    for event in messages.read() {
+        match event {
+            Event::DisplayAdded { display_id } => {
+                add_display(*display_id, &window_manager, &mut commands);
+            }
+            Event::DisplayRemoved { display_id } => {
+                remove_display(*display_id, &workspaces, &mut displays, &mut commands);
+            }
+            Event::DisplayMoved { display_id } => {
+                move_display(*display_id, &mut displays, &window_manager);
+            }
+            _ => continue,
+        }
+        commands.trigger(WMEventTrigger(Event::DisplayChanged));
+    }
+}
+
+fn add_display(
+    display_id: CGDirectDisplayID,
+    window_manager: &Res<WindowManager>,
+    commands: &mut Commands,
+) {
+    debug!("{}: Display Added: {display_id:?}", function_name!());
+    let Some((display, workspaces)) = window_manager
+        .0
+        .present_displays()
+        .into_iter()
+        .find(|(display, _)| display.id() == display_id)
+    else {
+        error!(
+            "{}: Unable to find added display id {display_id}!",
+            function_name!()
+        );
+        return;
+    };
+    // find_orphaned_spaces(&mut orphaned_spaces.0, &mut display, &mut windows);
+
+    let children = workspaces
+        .into_iter()
+        .map(|id| commands.spawn(LayoutStrip::new(id)).id())
+        .collect::<Vec<_>>();
+    commands.spawn(display).add_children(&children);
+}
+
+fn remove_display(
+    display_id: CGDirectDisplayID,
+    workspaces: &Query<(&LayoutStrip, Entity, &ChildOf)>,
+    displays: &mut Query<(&mut Display, Entity)>,
+    commands: &mut Commands,
+) {
+    const ORPHANED_SPACES_TIMEOUT_SEC: u64 = 30;
+    debug!("{}: Display Removed: {display_id:?}", function_name!());
+    let Some((display, display_entity)) = displays
+        .into_iter()
+        .find(|(display, _)| display.id() == display_id)
+    else {
+        error!("{}: Unable to find removed display!", function_name!());
+        return;
+    };
+
+    for (strip, entity, _) in workspaces
+        .into_iter()
+        .filter(|(_, _, child)| child.parent() == display_entity)
+    {
+        debug!(
+            "{}: orphaning strip {} after removal of display {}.",
+            function_name!(),
+            strip.id(),
+            display.id()
+        );
+        let timeout = Timeout::new(
+            Duration::from_secs(ORPHANED_SPACES_TIMEOUT_SEC),
+            Some(format!(
+                "{}: Orphaned strip {} ({strip}) could not be re-inserted after {ORPHANED_SPACES_TIMEOUT_SEC}s.",
+                function_name!(),
+                strip.id()
+            )),
+        );
+        if let Ok(mut commands) = commands.get_entity(entity) {
+            commands.try_insert(timeout);
+        }
+        if let Ok(mut commands) = commands.get_entity(display_entity) {
+            commands.detach_child(entity);
+        }
+    }
+
+    if let Ok(mut commands) = commands.get_entity(display_entity) {
+        commands.despawn();
+    }
+}
+
+fn move_display(
+    display_id: CGDirectDisplayID,
+    displays: &mut Query<(&mut Display, Entity)>,
+    window_manager: &Res<WindowManager>,
+) {
+    debug!("{}: Display Moved: {display_id:?}", function_name!());
+    let Some((mut display, _)) = displays
+        .iter_mut()
+        .find(|(display, _)| display.id() == display_id)
+    else {
+        error!("{}: Unable to find moved display!", function_name!());
+        return;
+    };
+    let Some((moved_display, _)) = window_manager
+        .0
+        .present_displays()
+        .into_iter()
+        .find(|(display, _)| display.id() == display_id)
+    else {
+        return;
+    };
+    *display = moved_display;
 }
 
 #[test]

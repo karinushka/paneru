@@ -17,11 +17,13 @@ mod tests;
 
 embed_plist::embed_info_plist!("../assets/Info.plist");
 
-use events::{EventHandler, EventSender};
+use events::EventSender;
 
 use errors::Result;
 use platform::service;
 use reader::CommandReader;
+
+use crate::ecs::setup_bevy_app;
 
 /// `Paneru` is the main command-line interface structure for the window manager.
 /// It defines the available subcommands for controlling the Paneru daemon.
@@ -102,7 +104,7 @@ fn main() -> Result<()> {
         SubCmd::Launch => {
             let (sender, receiver) = EventSender::new();
             CommandReader::new(sender.clone()).start();
-            EventHandler::setup_bevy_app(sender, receiver)?.run();
+            setup_bevy_app(sender, receiver)?.run();
         }
         SubCmd::Install => service()?.install()?,
         SubCmd::Uninstall => service()?.uninstall()?,

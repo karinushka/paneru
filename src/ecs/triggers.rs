@@ -356,7 +356,9 @@ pub(super) fn display_change_trigger(
                 function_name!(),
                 display.id()
             );
-            commands.entity(entity).try_remove::<ActiveDisplayMarker>();
+            if let Ok(mut cmd) = commands.get_entity(entity) {
+                cmd.try_remove::<ActiveDisplayMarker>();
+            }
         }
         if !focused && display.id() == active_id {
             debug!(
@@ -364,17 +366,12 @@ pub(super) fn display_change_trigger(
                 function_name!(),
                 display.id()
             );
-            commands.entity(entity).try_insert(ActiveDisplayMarker);
+            if let Ok(mut cmd) = commands.get_entity(entity) {
+                cmd.try_insert(ActiveDisplayMarker);
+            }
         }
     }
-}
-
-#[allow(clippy::needless_pass_by_value)]
-pub(super) fn active_display_trigger(
-    _trigger: On<Add, ActiveDisplayMarker>,
-    mut messages: MessageWriter<Event>,
-) {
-    messages.write(Event::SpaceChanged);
+    commands.trigger(WMEventTrigger(Event::SpaceChanged));
 }
 
 /// Handles the event when an application switches to the front. It updates the focused window and PSN.

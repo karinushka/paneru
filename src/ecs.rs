@@ -1,29 +1,32 @@
+use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
-use bevy::app::{PostUpdate, PreUpdate};
+use bevy::MinimalPlugins;
+use bevy::app::App as BevyApp;
+use bevy::app::{PostUpdate, PreUpdate, Startup};
+use bevy::ecs::message::Messages;
 use bevy::ecs::resource::Resource;
+use bevy::ecs::schedule::common_conditions::resource_exists;
 use bevy::ecs::system::Commands;
 use bevy::prelude::Event as BevyEvent;
 use bevy::time::Timer;
 use bevy::time::common_conditions::on_timer;
+use bevy::time::{Time, Virtual};
 use bevy::{
     app::Update,
-    ecs::{
-        component::Component,
-        entity::Entity,
-        schedule::{IntoScheduleConfigs, common_conditions::resource_equals},
-    },
+    ecs::{component::Component, entity::Entity, schedule::IntoScheduleConfigs},
 };
 use derive_more::{Deref, DerefMut};
-use objc2_core_foundation::{CGPoint, CGSize};
+use objc2_core_foundation::CGPoint;
+use objc2_core_foundation::CGSize;
 use objc2_core_graphics::CGDirectDisplayID;
 
-use crate::commands::Command;
-use crate::events::Event;
-use crate::manager::{ProcessApi, Window};
-use crate::platform::WinID;
-pub use systems::gather_displays;
-pub use systems::initial_oneshot_systems;
+use crate::commands::{Command, process_command_trigger};
+use crate::config::CONFIGURATION_FILE;
+use crate::errors::Result;
+use crate::events::{Event, EventSender};
+use crate::manager::{ProcessApi, Window, WindowManager, WindowManagerApi, WindowManagerOS};
+use crate::platform::{PlatformCallbacks, WinID};
 
 pub mod params;
 mod systems;
@@ -40,12 +43,23 @@ mod triggers;
 pub fn register_systems(app: &mut bevy::app::App) {
     const DISPLAY_CHANGE_CHECK_FREQ_MS: u64 = 1000;
     app.add_systems(
+        Startup,
+        (systems::gather_displays, systems::gather_initial_processes).chain(),
+    );
+    app.add_systems(
         PreUpdate,
         (systems::dispatch_toplevel_triggers, systems::pump_events),
     );
     app.add_systems(
         Update,
         (
+            (
+                systems::add_existing_process,
+                systems::add_existing_application,
+                systems::finish_setup,
+            )
+                .chain()
+                .run_if(resource_exists::<Initializing>),
             systems::reshuffle_around_window,
             systems::window_swiper,
             systems::add_launched_process,
@@ -65,7 +79,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::display_changes_watcher,
             systems::workspace_change_watcher,
         )
-            .run_if(resource_equals(PollForNotifications(true)))
+            .run_if(resource_exists::<PollForNotifications>)
             .run_if(on_timer(Duration::from_millis(
                 DISPLAY_CHANGE_CHECK_FREQ_MS,
             ))),
@@ -84,7 +98,6 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::workspace_change_trigger)
         .add_observer(triggers::active_workspace_trigger)
         .add_observer(triggers::display_change_trigger)
-        .add_observer(triggers::active_display_trigger)
         .add_observer(triggers::front_switched_trigger)
         .add_observer(triggers::center_mouse_trigger)
         .add_observer(triggers::window_focused_trigger)
@@ -213,7 +226,10 @@ pub struct FocusFollowsMouse(pub Option<WinID>);
 
 /// Resource to control whether the application should poll for notifications.
 #[derive(PartialEq, Resource)]
-pub struct PollForNotifications(pub bool);
+pub struct PollForNotifications;
+
+#[derive(PartialEq, Resource)]
+pub struct Initializing;
 
 /// Bevy event trigger for general window manager events.
 #[derive(BevyEvent)]
@@ -261,4 +277,30 @@ pub fn reshuffle_around(entity: Entity, commands: &mut Commands) {
     if let Ok(mut entity_commands) = commands.get_entity(entity) {
         entity_commands.try_insert(ReshuffleAroundMarker);
     }
+}
+
+pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<BevyApp> {
+    let window_manager: Box<dyn WindowManagerApi> = Box::new(WindowManagerOS::new(sender.clone()));
+    let watcher = window_manager.setup_config_watcher(CONFIGURATION_FILE.as_path())?;
+
+    let mut app = BevyApp::new();
+    app.add_plugins(MinimalPlugins)
+        .init_resource::<Messages<Event>>()
+        .insert_resource(Time::<Virtual>::from_max_delta(Duration::from_secs(10)))
+        .insert_resource(WindowManager(window_manager))
+        .insert_resource(SkipReshuffle(false))
+        .insert_resource(MissionControlActive(false))
+        .insert_resource(FocusFollowsMouse(None))
+        .insert_resource(PollForNotifications)
+        .insert_resource(Initializing)
+        .add_observer(process_command_trigger)
+        .insert_non_send_resource(watcher)
+        .add_plugins((register_triggers, register_systems));
+
+    let mut platform_callbacks = PlatformCallbacks::new(sender);
+    platform_callbacks.setup_handlers()?;
+    app.insert_non_send_resource(platform_callbacks);
+    app.insert_non_send_resource(receiver);
+
+    Ok(app)
 }

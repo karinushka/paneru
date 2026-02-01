@@ -514,11 +514,10 @@ fn setup_world(app: &mut App, event_queue: &EventQueue) -> MockApplication {
     app.add_plugins(TimePlugin)
         .init_resource::<Messages<Event>>()
         .insert_resource(WindowManager(Box::new(MockWindowManager {})))
-        .insert_resource(PollForNotifications(true))
+        .insert_resource(PollForNotifications)
         .insert_resource(SkipReshuffle(false))
         .insert_resource(MissionControlActive(false))
         .insert_resource(FocusFollowsMouse(None))
-        .insert_resource(PollForNotifications(true))
         .insert_resource(Config::default())
         .add_observer(process_command_trigger)
         .add_plugins((register_triggers, register_systems));

@@ -1,26 +1,13 @@
-use bevy::MinimalPlugins;
-use bevy::app::{App as BevyApp, Startup};
-use bevy::ecs::message::{Message, Messages};
-use bevy::ecs::schedule::IntoScheduleConfigs;
-use bevy::ecs::world::World;
-use bevy::time::{Time, Virtual};
-use log::{debug, error, warn};
+use bevy::ecs::message::Message;
 use objc2::rc::Retained;
 use objc2_core_foundation::{CFRetained, CGPoint};
 use objc2_core_graphics::CGDirectDisplayID;
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::time::Duration;
-use stdext::function_name;
 
-use crate::commands::{Command, process_command_trigger};
-use crate::config::{CONFIGURATION_FILE, Config};
-use crate::ecs::{
-    BProcess, ExistingMarker, FocusFollowsMouse, MissionControlActive, PollForNotifications,
-    SkipReshuffle, gather_displays, initial_oneshot_systems, register_systems, register_triggers,
-};
+use crate::commands::Command;
+use crate::config::Config;
 use crate::errors::Result;
-use crate::manager::{Process, WindowManager, WindowManagerApi, WindowManagerOS};
-use crate::platform::{PlatformCallbacks, ProcessSerialNumber, WinID, WorkspaceObserver};
+use crate::platform::{ProcessSerialNumber, WinID, WorkspaceObserver};
 use crate::util::AXUIWrapper;
 
 /// `Event` represents various system-level and application-specific occurrences that the window manager reacts to.
@@ -169,128 +156,5 @@ impl EventSender {
     /// `Ok(())` if the event is sent successfully, otherwise `Err(Error)` if the receiver has disconnected.
     pub fn send(&self, event: Event) -> Result<()> {
         Ok(self.tx.send(event)?)
-    }
-}
-
-/// `EventHandler` is responsible for setting up and running the main event loop of the window manager.
-/// It acts as the central hub for receiving system events, dispatching them to the Bevy ECS, and managing the application's lifecycle.
-pub struct EventHandler;
-
-impl EventHandler {
-    pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<BevyApp> {
-        let process_setup = move |world: &mut World| {
-            let Some((mut existing_processes, config)) = world
-                .get_non_send_resource::<Receiver<Event>>()
-                .and_then(|receiver| EventHandler::gather_initial_processes(receiver).ok())
-            else {
-                error!("{}: gathering initial processes.", function_name!());
-                return;
-            };
-            EventHandler::initial_setup(world, &mut existing_processes, config.as_ref());
-        };
-
-        let window_manager: Box<dyn WindowManagerApi> =
-            Box::new(WindowManagerOS::new(sender.clone()));
-        let watcher = window_manager.setup_config_watcher(CONFIGURATION_FILE.as_path())?;
-
-        let mut app = BevyApp::new();
-        app.add_plugins(MinimalPlugins)
-            .init_resource::<Messages<Event>>()
-            .insert_resource(Time::<Virtual>::from_max_delta(Duration::from_secs(10)))
-            .insert_resource(WindowManager(window_manager))
-            .insert_resource(SkipReshuffle(false))
-            .insert_resource(MissionControlActive(false))
-            .insert_resource(FocusFollowsMouse(None))
-            .insert_resource(PollForNotifications(true))
-            .add_observer(process_command_trigger)
-            .add_systems(Startup, (gather_displays, process_setup).chain())
-            .insert_non_send_resource(watcher)
-            .add_plugins((register_triggers, register_systems));
-
-        let mut platform_callbacks = PlatformCallbacks::new(sender);
-        platform_callbacks.setup_handlers()?;
-        app.insert_non_send_resource(platform_callbacks);
-        app.insert_non_send_resource(receiver);
-
-        Ok(app)
-    }
-
-    /// Gathers initial processes and configuration before the main Bevy loop starts.
-    /// It processes events from the receiver until `Event::ProcessesLoaded` or `Event::Exit` is received.
-    ///
-    /// # Arguments
-    ///
-    /// * `receiver` - The `Receiver` for incoming events.
-    ///
-    /// # Returns
-    ///
-    /// A tuple containing a vector of `BProcess` for initially launched processes and an `Option<Config>`.
-    /// Returns an `Err(Error)` if an error occurs during event reception.
-    fn gather_initial_processes(
-        receiver: &Receiver<Event>,
-    ) -> Result<(Vec<BProcess>, Option<Config>)> {
-        let mut initial_processes = Vec::new();
-        let mut initial_config = None;
-        loop {
-            match receiver.recv()? {
-                Event::ProcessesLoaded | Event::Exit => break,
-                Event::ApplicationLaunched { psn, observer } => {
-                    initial_processes.push(Process::new(&psn, observer.clone()).into());
-                }
-                Event::InitialConfig(config) => {
-                    initial_config = Some(config);
-                }
-                event => warn!(
-                    "{}: Stray event during initial process gathering: {event:?}",
-                    function_name!()
-                ),
-            }
-        }
-        Ok((initial_processes, initial_config))
-    }
-
-    /// Sets up the initial state of the Bevy world, spawning existing observable processes.
-    /// This function adds the configuration as a resource and spawns `ExistingMarker` and `BProcess` components for observable processes.
-    ///
-    /// # Arguments
-    ///
-    /// * `world` - The Bevy world instance to set up.
-    /// * `existing_processes` - A mutable vector of `BProcess` instances representing processes to add.
-    /// * `config` - An `Option<&Config>` containing the application configuration if available.
-    fn initial_setup(
-        world: &mut World,
-        existing_processes: &mut Vec<BProcess>,
-        config: Option<&Config>,
-    ) {
-        if let Some(config) = config {
-            world.insert_resource(config.clone());
-        }
-
-        let oneshot_systems = initial_oneshot_systems(world);
-
-        while let Some(mut process) = existing_processes.pop() {
-            if process.is_observable() {
-                debug!(
-                    "{}: Adding existing process {}",
-                    function_name!(),
-                    process.name()
-                );
-                world.spawn((ExistingMarker, process));
-            } else {
-                debug!(
-                    "{}: Existing application '{}' is not observable, ignoring it.",
-                    function_name!(),
-                    process.name(),
-                );
-            }
-            for id in &oneshot_systems {
-                _ = world.run_system(*id);
-            }
-        }
-        world.flush();
-
-        for id in oneshot_systems {
-            _ = world.unregister_system(id);
-        }
     }
 }

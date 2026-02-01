@@ -3,10 +3,7 @@ use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::query::{Has, Or, With, Without};
-use bevy::ecs::system::{
-    Commands, Local, NonSend, NonSendMut, Populated, Query, Res, ResMut, SystemId,
-};
-use bevy::ecs::world::World;
+use bevy::ecs::system::{Commands, Local, NonSend, NonSendMut, Populated, Query, Res};
 use bevy::time::Time;
 use log::{debug, error, info, trace, warn};
 use objc2_core_graphics::CGDirectDisplayID;
@@ -24,11 +21,13 @@ use super::{
 use crate::config::Config;
 use crate::ecs::params::{ActiveDisplay, Configuration, DebouncedSystem, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, ReshuffleAroundMarker, Unmanaged, WindowSwipeMarker, reposition_entity,
-    reshuffle_around, resize_entity,
+    ActiveWorkspaceMarker, Initializing, ReshuffleAroundMarker, Unmanaged, WindowSwipeMarker,
+    reposition_entity, reshuffle_around, resize_entity,
 };
 use crate::events::Event;
-use crate::manager::{Application, Column, Display, LayoutStrip, Window, WindowManager, WindowOS};
+use crate::manager::{
+    Application, Column, Display, LayoutStrip, Process, Window, WindowManager, WindowOS,
+};
 use crate::platform::{PlatformCallbacks, WorkspaceId};
 
 const WINDOW_HIDDEN_THRESHOLD: f64 = 10.0;
@@ -44,7 +43,7 @@ const WINDOW_HIDDEN_THRESHOLD: f64 = 10.0;
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn dispatch_toplevel_triggers(
     mut messages: MessageReader<Event>,
-    mut broken_notifications: ResMut<PollForNotifications>,
+    broken_notifications: Option<Res<PollForNotifications>>,
     mut commands: Commands,
 ) {
     for event in messages.read() {
@@ -63,12 +62,12 @@ pub(super) fn dispatch_toplevel_triggers(
             }
 
             Event::SpaceChanged => {
-                if broken_notifications.0 {
-                    broken_notifications.0 = false;
+                if broken_notifications.is_some() {
                     info!(
                         "{}: Workspace and display notifications arriving correctly. Disabling the polling.",
                         function_name!()
                     );
+                    commands.remove_resource::<PollForNotifications>();
                 }
                 commands.trigger(WMEventTrigger(event.clone()));
             }
@@ -94,22 +93,6 @@ pub(super) fn dispatch_toplevel_triggers(
     }
 }
 
-/// Runs initial setup systems in a one-shot way.
-/// This function registers and runs systems that are crucial for the initial state setup of the Bevy world,
-/// such as adding existing processes and applications.
-///
-/// # Arguments
-///
-/// * `world` - The Bevy `World` instance to run the systems on.
-pub fn initial_oneshot_systems(world: &mut World) -> Vec<SystemId> {
-    [
-        world.register_system(add_existing_process),
-        world.register_system(add_existing_application),
-        world.register_system(finish_setup),
-    ]
-    .to_vec()
-}
-
 /// Gathers all present displays and spawns them as entities in the Bevy world.
 /// The currently active display (identified by `window_manager.active_display_id()`) is marked with `ActiveDisplayMarker`.
 ///
@@ -131,9 +114,17 @@ pub fn gather_displays(window_manager: Res<WindowManager>, mut commands: Command
         }
         .id();
 
+        let Ok(active_space) = window_manager.active_display_space(active_display_id) else {
+            return;
+        };
+
         for id in workspaces {
             let strip = LayoutStrip::new(id);
-            commands.spawn((strip, ChildOf(entity)));
+            if id == active_space {
+                commands.spawn((strip, ActiveWorkspaceMarker, ChildOf(entity)));
+            } else {
+                commands.spawn((strip, ChildOf(entity)));
+            }
         }
     }
 }
@@ -148,12 +139,12 @@ pub fn gather_displays(window_manager: Res<WindowManager>, mut commands: Command
 /// * `process_query` - A query for existing `BProcess` entities marked with `ExistingMarker`.
 /// * `commands` - Bevy commands to spawn entities and manage components.
 #[allow(clippy::needless_pass_by_value)]
-fn add_existing_process(
+pub(crate) fn add_existing_process(
     window_manager: Res<WindowManager>,
-    process_query: Query<(Entity, &BProcess), With<ExistingMarker>>,
+    processes: Populated<(Entity, &BProcess), With<ExistingMarker>>,
     mut commands: Commands,
 ) {
-    for (entity, process) in process_query {
+    for (entity, process) in processes {
         let Ok(app) = window_manager.new_application(&*process.0) else {
             error!(
                 "{}: creating aplication from process '{}'",
@@ -178,10 +169,10 @@ fn add_existing_process(
 /// * `app_query` - A query for existing `Application` entities marked with `ExistingMarker`.
 /// * `commands` - Bevy commands to spawn entities and manage components.
 #[allow(clippy::needless_pass_by_value)]
-fn add_existing_application(
+pub(crate) fn add_existing_application(
     window_manager: Res<WindowManager>,
     workspaces: Query<&LayoutStrip>,
-    app_query: Query<(&mut Application, Entity), With<ExistingMarker>>,
+    fresh_apps: Populated<(&mut Application, Entity), With<ExistingMarker>>,
     mut commands: Commands,
 ) {
     let spaces = workspaces
@@ -189,7 +180,7 @@ fn add_existing_application(
         .map(LayoutStrip::id)
         .collect::<Vec<_>>();
 
-    for (mut app, entity) in app_query {
+    for (mut app, entity) in fresh_apps {
         if app.observe().is_ok_and(|result| result)
             && let Ok(windows) = window_manager
                 .add_existing_application_windows(&mut app, &spaces, 0)
@@ -212,20 +203,24 @@ fn add_existing_application(
 /// * `window_manager` - The `WindowManager` resource for refreshing displays and getting active space information.
 /// * `commands` - Bevy commands to insert components like `FocusedMarker`.
 #[allow(clippy::needless_pass_by_value)]
-fn finish_setup(
+pub(crate) fn finish_setup(
+    process_query: Query<Entity, With<ExistingMarker>>,
     windows: Windows,
-    mut workspaces: Query<(&mut LayoutStrip, Entity)>,
-    displays: Query<(&Display, Has<ActiveDisplayMarker>)>,
+    mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
+    if !process_query.is_empty() {
+        // The other two add_* functions are still running..
+        return;
+    }
     info!(
-        "{}: Finished Initialization: found {} windows.",
+        "{}: Initialization: found {} windows.",
         function_name!(),
         windows.iter().len()
     );
 
-    for (mut strip, _) in &mut workspaces {
+    for (mut strip, active_strip) in &mut workspaces {
         let workspace_windows = window_manager
             .windows_in_workspace(strip.id())
             .inspect_err(|err| {
@@ -262,29 +257,17 @@ fn finish_setup(
             function_name!(),
             strip.id()
         );
+
+        if active_strip {
+            let first_window = strip.first().ok().and_then(|column| column.top());
+            if let Some(entity) = first_window {
+                debug!("{}: focusing {entity}", function_name!());
+                commands.entity(entity).try_insert(FocusedMarker);
+            }
+        }
     }
 
-    let Some((display, _)) = displays.into_iter().find(|(_, active)| *active) else {
-        return;
-    };
-
-    let Some((active_strip, entity)) = window_manager
-        .active_display_space(display.id())
-        .ok()
-        .and_then(|id| workspaces.iter().find(|(strip, _)| strip.id() == id))
-    else {
-        return;
-    };
-
-    if let Ok(mut commands) = commands.get_entity(entity) {
-        commands.try_insert(ActiveWorkspaceMarker);
-    }
-
-    let first_window = active_strip.first().ok().and_then(|column| column.top());
-    if let Some(entity) = first_window {
-        debug!("{}: focusing {entity}", function_name!());
-        commands.entity(entity).try_insert(FocusedMarker);
-    }
+    commands.remove_resource::<Initializing>();
 }
 
 /// Handles the event when a new application is launched. It creates a `Process` and `Application` object,
@@ -378,6 +361,7 @@ pub(super) fn add_launched_application(
 
         if !create_windows.is_empty() {
             commands.entity(entity).try_remove::<FreshMarker>();
+            debug!("{}: spawn!", function_name!());
             commands.trigger(SpawnWindowTrigger(create_windows));
         }
     }
@@ -1268,6 +1252,54 @@ fn move_display(
         return;
     };
     *display = moved_display;
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn gather_initial_processes(
+    receiver: Option<NonSendMut<Receiver<Event>>>,
+    mut commands: Commands,
+) {
+    let Some(receiver) = receiver else {
+        // Probably running in a mock environment, ignore.
+        return;
+    };
+    let mut initial_processes: Vec<BProcess> = Vec::new();
+    let mut initial_config = None;
+    loop {
+        match receiver.recv().expect("error reading initial processes") {
+            Event::ProcessesLoaded | Event::Exit => break,
+            Event::ApplicationLaunched { psn, observer } => {
+                initial_processes.push(Process::new(&psn, observer.clone()).into());
+            }
+            Event::InitialConfig(config) => {
+                initial_config = Some(config);
+            }
+            event => warn!(
+                "{}: Stray event during initial process gathering: {event:?}",
+                function_name!()
+            ),
+        }
+    }
+    if let Some(config) = initial_config {
+        commands.insert_resource(config);
+    }
+
+    while let Some(mut process) = initial_processes.pop() {
+        if process.is_observable() {
+            debug!(
+                "{}: Adding existing process {}",
+                function_name!(),
+                process.name()
+            );
+            commands.spawn((ExistingMarker, process));
+        } else {
+            debug!(
+                "{}: Existing application '{}' is not observable, ignoring it.",
+                function_name!(),
+                process.name(),
+            );
+        }
+    }
 }
 
 #[test]

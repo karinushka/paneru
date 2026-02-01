@@ -5,8 +5,8 @@ use derive_more::{DerefMut, with_trait::Deref};
 use log::{debug, error, trace, warn};
 use notify::{RecursiveMode, Watcher};
 use objc2_core_foundation::{
-    CFArray, CFDictionary, CFEqual, CFMutableData, CFNumber, CFNumberType, CFRetained, CFString,
-    CGPoint, CGRect, kCFBooleanTrue,
+    CFArray, CFDictionary, CFMutableData, CFNumber, CFNumberType, CFRetained, CFString, CGPoint,
+    CGRect, kCFBooleanTrue,
 };
 use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayBounds, CGError, CGGetActiveDisplayList, CGRectContainsPoint,
@@ -21,7 +21,7 @@ use stdext::function_name;
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
 use crate::platform::{ConnID, ProcessSerialNumber, WinID, WorkspaceId};
-use crate::util::{AXUIWrapper, create_array, get_array_values, get_cfdict_value, symlink_target};
+use crate::util::{AXUIWrapper, create_array, symlink_target};
 use app::ApplicationOS;
 pub use app::{Application, ApplicationApi};
 pub use display::{Column, Display, LayoutStrip};
@@ -194,55 +194,54 @@ impl WindowManagerOS {
                 function_name!(),
                 self.main_cid
             )))?;
+        let uuid = uuid.to_string();
 
-        for display in get_array_values(display_spaces.as_ref()) {
-            let display_ref = unsafe { display.as_ref() };
-            trace!("{}: display {display_ref:?}", function_name!());
-            let identifier = get_cfdict_value::<CFString>(
-                display_ref,
-                &CFString::from_static_str("Display Identifier"),
-            )?;
-            let identifier_ref = unsafe { identifier.as_ref() };
-            debug!(
-                "{}: identifier {identifier_ref:?} uuid {uuid:?}",
-                function_name!()
-            );
-            // FIXME: For some reason the main display does not have a UUID in the name, but is
-            // referenced as simply "Main".
-            if identifier_ref.to_string().ne("Main") && !CFEqual(Some(identifier_ref), Some(uuid)) {
-                continue;
-            }
+        let display = display_spaces.iter().find(|display| {
+            let identifier = display
+                .get(&CFString::from_static_str("Display Identifier"))
+                .map(|name| name.to_string());
+            identifier.is_some_and(|identifier| {
+                // FIXME: Sometimes the main display simply has the name 'Main'.
+                identifier == "Main" || identifier == uuid
+            })
+        });
+        let Some(display) = display else {
+            return Err(Error::PermissionDenied(format!(
+                "{}: could not get any displays for {}",
+                function_name!(),
+                self.main_cid
+            )));
+        };
+        debug!("{}: found display with uuid '{uuid}'", function_name!());
 
-            let spaces =
-                get_cfdict_value::<CFArray>(display_ref, &CFString::from_static_str("Spaces"))?;
-            debug!("{}: spaces {spaces:?}", function_name!());
+        let display = unsafe {
+            display.cast_unchecked::<CFString, CFArray<CFDictionary<CFString, CFNumber>>>()
+        };
+        let Some(spaces) = display.get(&CFString::from_static_str("Spaces")) else {
+            return Err(Error::PermissionDenied(format!(
+                "{}: could not get any spaces for dislay '{uuid}'",
+                function_name!(),
+            )));
+        };
 
-            let space_list = get_array_values(unsafe { spaces.as_ref() })
-                .filter_map(|space| {
-                    let num = get_cfdict_value::<CFNumber>(
-                        unsafe { space.as_ref() },
-                        &CFString::from_static_str("id64"),
-                    )
-                    .ok()?;
-
-                    let mut id = 0u64;
-                    unsafe {
-                        CFNumber::value(
-                            num.as_ref(),
-                            CFNumber::r#type(num.as_ref()),
-                            NonNull::from(&mut id).as_ptr().cast(),
-                        )
-                    };
-                    (id != 0).then_some(id)
-                })
-                .collect::<Vec<WorkspaceId>>();
-            return Ok(space_list);
-        }
-        Err(Error::PermissionDenied(format!(
-            "{}: could not get any displays for {}",
+        let spaces = spaces
+            .iter()
+            .filter_map(|space| {
+                space
+                    .get(&CFString::from_static_str("id64"))
+                    .and_then(|id| id.as_i64().and_then(|value| u64::try_from(value).ok()))
+            })
+            .collect::<Vec<WorkspaceId>>();
+        debug!(
+            "{}: spaces [{}]",
             function_name!(),
-            self.main_cid
-        )))
+            spaces
+                .iter()
+                .map(|id| format!("{id}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        Ok(spaces)
     }
 
     /// Retrieves the UUID of the active menu bar display.
@@ -333,38 +332,10 @@ impl WindowManagerApi for WindowManagerOS {
 
     /// Returns child windows of the main window.
     fn get_associated_windows(&self, window_id: WinID) -> Vec<WinID> {
-        let window_list = unsafe {
-            let arr_ref = SLSCopyAssociatedWindows(self.main_cid, window_id);
-            CFRetained::retain(arr_ref)
-        };
-
-        get_array_values(&window_list)
-            .filter_map(|item| {
-                let mut child_wid: WinID = 0;
-                if unsafe {
-                    CFNumber::value(
-                        item.as_ref(),
-                        CFNumberType::SInt32Type,
-                        NonNull::from(&mut child_wid).as_ptr().cast(),
-                    )
-                } {
-                    debug!(
-                        "{}: checking {}'s childen: {}",
-                        function_name!(),
-                        window_id,
-                        child_wid
-                    );
-                    (child_wid != 0).then_some(child_wid)
-                } else {
-                    warn!(
-                        "{}: Unable to find subwindows of window {}: {item:?}.",
-                        function_name!(),
-                        window_id
-                    );
-                    None
-                }
-            })
-            .collect()
+        trace!("{}: for window {window_id}", function_name!());
+        let windows =
+            unsafe { CFRetained::retain(SLSCopyAssociatedWindows(self.main_cid, window_id)) };
+        windows.into_iter().filter_map(|id| id.as_i32()).collect()
     }
 
     /// Retrieves a list of all currently present displays, along with their associated spaces.

@@ -1,7 +1,9 @@
 use std::{ffi::c_void, ptr::NonNull};
 
 use accessibility_sys::AXUIElementRef;
-use objc2_core_foundation::{CFArray, CFMutableData, CFString, CFType, CFUUID, CGPoint, CGRect};
+use objc2_core_foundation::{
+    CFArray, CFDictionary, CFMutableData, CFNumber, CFString, CFType, CFUUID, CGPoint, CGRect,
+};
 use objc2_core_graphics::{CGDirectDisplayID, CGError};
 
 use crate::platform::{CFStringRef, ConnID, OSStatus, ProcessSerialNumber, WinID};
@@ -207,7 +209,9 @@ unsafe extern "C" {
     ///
     /// # Original signature
     /// extern `CFArrayRef` SLSCopyManagedDisplaySpaces(int cid);
-    pub fn SLSCopyManagedDisplaySpaces(cid: ConnID) -> *mut CFArray;
+    pub fn SLSCopyManagedDisplaySpaces(
+        cid: ConnID,
+    ) -> *mut CFArray<CFDictionary<CFString, CFString>>;
 
     /// Copies a list of associated windows for a given window ID.
     /// This typically refers to child windows or windows grouped with the primary window.
@@ -223,7 +227,7 @@ unsafe extern "C" {
     ///
     /// # Original signature
     /// extern `CFArrayRef` SLSCopyAssociatedWindows(int cid, `uint32_t` wid);
-    pub fn SLSCopyAssociatedWindows(cid: ConnID, window_id: WinID) -> NonNull<CFArray>;
+    pub fn SLSCopyAssociatedWindows(cid: ConnID, window_id: WinID) -> NonNull<CFArray<CFNumber>>;
 
     /// Queries windows based on a provided `CFArray` of window IDs.
     ///

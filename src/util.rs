@@ -6,7 +6,7 @@ use accessibility_sys::{
 use core::ptr::NonNull;
 use log::debug;
 use objc2_core_foundation::{
-    CFArray, CFBoolean, CFDictionary, CFNumber, CFNumberType, CFRetained, CFRunLoop, CFRunLoopMode,
+    CFArray, CFBoolean, CFNumber, CFNumberType, CFRetained, CFRunLoop, CFRunLoopMode,
     CFRunLoopSource, CFString, CFType, Type, kCFTypeArrayCallBacks,
 };
 use std::{
@@ -167,11 +167,8 @@ pub trait AXUIAttributes {
 
     fn windows(&self) -> Result<Vec<CFRetained<AXUIWrapper>>> {
         let axname = CFString::from_static_str(kAXWindowsAttribute);
-        let array = self.get_attribute::<CFArray>(&axname)?;
-        let out = get_array_values::<accessibility_sys::__AXUIElement>(&array)
-            .flat_map(|element| AXUIWrapper::retain(element.as_ptr()))
-            .collect();
-        Ok(out)
+        let array = self.get_attribute::<CFArray<AXUIWrapper>>(&axname)?;
+        Ok(array.to_vec())
     }
 
     fn get_attribute<T: Type>(&self, name: &CFRetained<CFString>) -> Result<CFRetained<T>>;
@@ -194,51 +191,6 @@ impl AXUIAttributes for CFRetained<AXUIWrapper> {
             )))
         }
     }
-}
-
-/// Retrieves a value from a `CFDictionary` given a key.
-///
-/// # Type Parameters
-///
-/// * `T` - The expected type of the value to retrieve.
-///
-/// # Arguments
-///
-/// * `dict` - A reference to the `CFDictionary`.
-/// * `key` - A reference to the `CFString` representing the key.
-///
-/// # Returns
-///
-/// `Ok(NonNull<T>)` with a non-null pointer to the value if found, otherwise `Err(Error)`.
-pub fn get_cfdict_value<T>(dict: &CFDictionary, key: &CFString) -> Result<NonNull<T>> {
-    let ptr = unsafe { CFDictionary::value(dict, NonNull::from(key).as_ptr().cast()) };
-    NonNull::new(ptr.cast_mut())
-        .map(std::ptr::NonNull::cast::<T>)
-        .ok_or(Error::InvalidInput(format!(
-            "{}: can not get data for key {key}",
-            function_name!(),
-        )))
-}
-
-/// Retrieves an iterator over the values in a `CFArray`.
-///
-/// # Type Parameters
-///
-/// * `T` - The expected type of the elements in the array.
-///
-/// # Arguments
-///
-/// * `array` - A reference to the `CFArray`.
-///
-/// # Returns
-///
-/// An iterator yielding `NonNull<T>` for each element in the array.
-pub fn get_array_values<T>(array: &CFArray) -> impl Iterator<Item = NonNull<T>> + use<'_, T> {
-    let count = CFArray::count(array);
-    (0..count).filter_map(move |idx| {
-        NonNull::new(unsafe { CFArray::value_at_index(array, idx).cast_mut() })
-            .map(std::ptr::NonNull::cast::<T>)
-    })
 }
 
 /// Creates a new `CFArray` from a slice of values and a specified `CFNumberType`.

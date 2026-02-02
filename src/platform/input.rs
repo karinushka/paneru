@@ -18,6 +18,7 @@ use stdext::function_name;
 use crate::config::Config;
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
+use crate::platform::Modifiers;
 
 /// `InputHandler` manages low-level input events from the macOS `CGEventTap`.
 /// It intercepts keyboard and mouse events, processes gestures, and dispatches them as higher-level `Event`s.
@@ -266,33 +267,27 @@ impl InputHandler {
     ///
     /// `true` if the key press was handled and should be intercepted, `false` otherwise.
     fn handle_keypress(&self, keycode: i64, eventflags: CGEventFlags) -> bool {
-        const MODIFIER_MASKS: [[u64; 3]; 4] = [
-            // Normal key, left, right.
-            [0x0008_0000, 0x0000_0020, 0x0000_0040], // Alt
-            [0x0002_0000, 0x0000_0002, 0x0000_0004], // Shift
-            [0x0010_0000, 0x0000_0008, 0x0000_0010], // Command
-            [0x0004_0000, 0x0000_0001, 0x0000_2000], // Control
+        const MODIFIER_MASKS: [(Modifiers, [u64; 3]); 4] = [
+            (Modifiers::ALT, [0x0008_0000, 0x0000_0020, 0x0000_0040]),
+            (Modifiers::SHIFT, [0x0002_0000, 0x0000_0002, 0x0000_0004]),
+            (Modifiers::CMD, [0x0010_0000, 0x0000_0008, 0x0000_0010]),
+            (Modifiers::CTRL, [0x0004_0000, 0x0000_0001, 0x0000_2000]),
         ];
         let Some(events) = &self.events else {
             return false;
         };
-        let mask = MODIFIER_MASKS
-            .iter()
-            .enumerate()
-            .fold(0, |acc, (bitshift, modifier_masks)| {
-                if modifier_masks
-                    .iter()
-                    .any(|mask_val| *mask_val == (eventflags.0 & mask_val))
-                {
-                    acc + (1 << bitshift)
-                } else {
-                    acc
-                }
-            });
+
+        let mut mask = Modifiers::empty();
+        for (modifier, masks) in MODIFIER_MASKS {
+            #[allow(clippy::manual_contains)]
+            if masks.iter().any(|&m| m == (eventflags.0 & m)) {
+                mask |= modifier;
+            }
+        }
 
         let keycode = keycode.try_into().ok();
         keycode
-            .and_then(|keycode| self.config.find_keybind(keycode, mask))
+            .and_then(|keycode| self.config.find_keybind(keycode, &mask))
             .and_then(|command| {
                 events
                     .send(Event::Command { command })

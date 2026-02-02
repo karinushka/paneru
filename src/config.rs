@@ -16,7 +16,7 @@ use stdext::function_name;
 
 use crate::{
     commands::{Command, Direction, Operation},
-    platform::OSStatus,
+    platform::{Modifiers, OSStatus},
 };
 use crate::{
     errors::{Error, Result},
@@ -227,14 +227,14 @@ impl Config {
     /// # Returns
     ///
     /// `Some(Command)` if a matching keybinding is found, otherwise `None`.
-    pub fn find_keybind(&self, keycode: u8, mask: u8) -> Option<Command> {
+    pub fn find_keybind(&self, keycode: u8, mask: &Modifiers) -> Option<Command> {
         let config = self.inner();
         config
             .bindings
             .values()
             .flat_map(|binds| binds.all())
             .find_map(|bind| {
-                (bind.code == keycode && bind.modifiers == mask).then_some(bind.command.clone())
+                (bind.code == keycode && bind.modifiers == *mask).then_some(bind.command.clone())
             })
     }
 
@@ -407,7 +407,7 @@ pub fn preset_column_widths(config: &Config) -> Vec<f64> {
 pub struct Keybinding {
     pub key: String,
     pub code: u8,
-    pub modifiers: u8,
+    pub modifiers: Modifiers,
     pub command: Command,
 }
 
@@ -436,7 +436,7 @@ impl<'de> Deserialize<'de> for Keybinding {
 
         let modifiers = match parts.pop() {
             Some(modifiers) => parse_modifiers(modifiers).map_err(de::Error::custom)?,
-            None => 0,
+            None => Modifiers::empty(),
         };
 
         Ok(Keybinding {
@@ -482,26 +482,23 @@ where
 ///
 /// # Returns
 ///
-/// `Ok(u8)` with the combined modifier bitmask if parsing is successful, otherwise `Err(String)` with an error message for an invalid modifier.
-fn parse_modifiers(input: &str) -> Result<u8> {
-    static MOD_NAMES: [&str; 4] = ["alt", "shift", "cmd", "ctrl"];
-    let mut out = 0;
+/// `Ok(Modifiers)` with the combined modifier bitmask if parsing is successful, otherwise `Err(String)` with an error message for an invalid modifier.
+fn parse_modifiers(input: &str) -> Result<Modifiers> {
+    let mut out = Modifiers::empty();
 
     let modifiers = input.split('+').map(str::trim).collect::<Vec<_>>();
     for modifier in &modifiers {
-        if !MOD_NAMES.iter().any(|name| name == modifier) {
-            return Err(Error::InvalidConfig(format!(
-                "{}: Invalid modifier: {modifier}",
-                function_name!()
-            )));
-        }
-
-        if let Some((shift, _)) = MOD_NAMES
-            .iter()
-            .enumerate()
-            .find(|(_, name)| *name == modifier)
-        {
-            out += 1 << shift;
+        out |= match *modifier {
+            "alt" => Modifiers::ALT,
+            "shift" => Modifiers::SHIFT,
+            "cmd" => Modifiers::CMD,
+            "ctrl" => Modifiers::CTRL,
+            _ => {
+                return Err(Error::InvalidConfig(format!(
+                    "{}: Invalid modifier: {modifier}",
+                    function_name!()
+                )));
+            }
         }
     }
     Ok(out)
@@ -834,29 +831,26 @@ index = 1
     assert_eq!(config.inner().options.focus_follows_mouse, Some(true));
 
     // Modifiers: alt = 1<<0, ctrl = 1<<3.
-    let mask = (1 << 0) | (1 << 3);
     let keycode = find_key('q');
     assert!(matches!(
-        config.find_keybind(keycode, mask),
+        config.find_keybind(keycode, &(Modifiers::ALT | Modifiers::CTRL)),
         Some(Command::Quit)
     ));
 
     let keycode = find_key('t');
     assert!(matches!(
-        config.find_keybind(keycode, mask),
+        config.find_keybind(keycode, &(Modifiers::ALT | Modifiers::CTRL)),
         Some(Command::Window(Operation::Manage))
     ));
 
-    let mask = 1 << 3; // ctrl
     let keycode = find_key('s');
     assert!(matches!(
-        config.find_keybind(keycode, mask),
+        config.find_keybind(keycode, &Modifiers::CTRL),
         Some(Command::Window(Operation::Stack(true)))
     ));
 
-    let mask = 1; // alt
     assert!(matches!(
-        config.find_keybind(keycode, mask),
+        config.find_keybind(keycode, &Modifiers::ALT),
         Some(Command::Window(Operation::Stack(true)))
     ));
 

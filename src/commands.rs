@@ -1,9 +1,9 @@
 use bevy::ecs::entity::Entity;
 use bevy::ecs::observer::On;
 use bevy::ecs::system::{Commands, Res, ResMut};
-use log::{debug, error};
 use objc2_core_foundation::CGPoint;
-use stdext::function_name;
+use tracing::{Level, instrument};
+use tracing::{debug, error};
 
 use crate::config::Config;
 use crate::ecs::params::{ActiveDisplayMut, Windows};
@@ -79,6 +79,7 @@ pub enum Command {
 /// # Returns
 ///
 /// `Some(Entity)` with the found window's entity, otherwise `None`.
+#[instrument(level = Level::DEBUG, ret)]
 fn get_window_in_direction(
     direction: &Direction,
     entity: Entity,
@@ -132,6 +133,7 @@ fn get_window_in_direction(
 /// # Returns
 ///
 /// `Some(Entity)` with the entity of the newly focused window, otherwise `None`.
+#[instrument(level = Level::DEBUG, ret, skip(windows))]
 fn command_move_focus(
     direction: &Direction,
     strip: &LayoutStrip,
@@ -158,6 +160,7 @@ fn command_move_focus(
 /// # Returns
 ///
 /// `Some(Entity)` with the entity that was swapped with, otherwise `None`.
+#[instrument(level = Level::DEBUG, ret, skip_all, fields(direction))]
 fn command_swap_focus(
     direction: &Direction,
     windows: &Windows,
@@ -321,8 +324,7 @@ fn manage_window(windows: &Windows, commands: &mut Commands) {
         return;
     };
     debug!(
-        "{}: window: {} {entity} unmanaged: {}.",
-        function_name!(),
+        "window: {} {entity} unmanaged: {}.",
         window.id(),
         unmanaged.is_some()
     );
@@ -358,13 +360,12 @@ fn to_next_display(
     }
 
     let Some(other) = active_display.other().next() else {
-        debug!("{}: no other display to move window to.", function_name!());
+        debug!("no other display to move window to.");
         return;
     };
 
     debug!(
-        "{}: moving window (id {}, {entity}) to display {}: {}:{}.",
-        function_name!(),
+        "moving window (id {}, {entity}) to display {}: {}:{}.",
         window.id(),
         other.id(),
         other.bounds.size.width / 2.0,
@@ -385,7 +386,7 @@ fn mouse_to_next_display(
     commands: &mut Commands,
 ) {
     let Some(other) = active_display.other().next() else {
-        debug!("{}: no other display to move mouse to.", function_name!());
+        debug!("no other display to move mouse to.");
         return;
     };
 
@@ -445,6 +446,7 @@ fn equalize_column(
 /// # Returns
 ///
 /// `Ok(())` if the command is processed successfully, otherwise `Err(Error)`.
+#[instrument(level = Level::DEBUG, skip_all, fields(operation), err)]
 fn command_windows(
     operation: &Operation,
     windows: &Windows,
@@ -521,6 +523,7 @@ fn command_windows(
 /// * `commands` - Bevy commands to trigger events and modify entities.
 /// * `config` - The `Config` resource, containing application settings.
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[instrument(level = Level::DEBUG, fields(trigger), skip_all)]
 pub fn process_command_trigger(
     trigger: On<CommandTrigger>,
     windows: Windows,
@@ -568,7 +571,7 @@ pub fn process_command_trigger(
         Command::Quit => window_manager.quit(),
     };
     if let Err(err) = res {
-        error!("{}: {err}", function_name!());
+        error!("{err}");
     }
 }
 

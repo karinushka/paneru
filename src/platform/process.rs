@@ -1,11 +1,11 @@
 use core::ptr::NonNull;
-use log::{debug, error, info};
 use objc2::rc::Retained;
 use scopeguard::ScopeGuard;
 use std::ffi::c_void;
 use std::marker::PhantomPinned;
 use std::pin::Pin;
 use stdext::function_name;
+use tracing::{debug, error, info};
 
 use super::workspace::WorkspaceObserver;
 use crate::errors::{Error, Result};
@@ -312,7 +312,7 @@ impl ProcessHandler {
         const PROCESS_EVENT_TERMINATED: u32 = 6;
         const PROCESS_EVENT_FRONTSWITCHED: u32 = 7;
 
-        info!("{}: Registering process_handler", function_name!());
+        info!("Registering process_handler");
 
         // Fake launch the existing processes.
         let mut psn = ProcessSerialNumber::default();
@@ -359,18 +359,12 @@ impl ProcessHandler {
                 function_name!()
             )));
         }
-        debug!(
-            "{}: Registered process_handler (result = {result}): {handler:x?}",
-            function_name!()
-        );
+        debug!("Registered process_handler (result = {result}): {handler:x?}");
 
         Ok(scopeguard::guard(
             pinned,
             Box::new(move |_: Pin<Box<Self>>| {
-                info!(
-                    "{}: Unregistering process_handler: {handler:?}",
-                    function_name!()
-                );
+                info!("Unregistering process_handler: {handler:?}");
                 unsafe { RemoveEventHandler(handler) };
             }),
         ))
@@ -393,36 +387,34 @@ impl ProcessHandler {
         event: *const ProcessEvent,
         this: *const c_void,
     ) -> OSStatus {
-        match NonNull::new(this.cast_mut())
+        if let Some(this) = NonNull::new(this.cast_mut())
             .map(|this| unsafe { this.cast::<ProcessHandler>().as_mut() })
         {
-            Some(this) => {
-                const PARAM: &str = "psn "; // kEventParamProcessID and typeProcessSerialNumber
-                let param_name = u32::from_be_bytes(PARAM.as_bytes().try_into().unwrap());
-                let param_type = param_name; // Uses the same FourCharCode as param_name
+            const PARAM: &str = "psn "; // kEventParamProcessID and typeProcessSerialNumber
+            let param_name = u32::from_be_bytes(PARAM.as_bytes().try_into().unwrap());
+            let param_type = param_name; // Uses the same FourCharCode as param_name
 
-                let mut psn = ProcessSerialNumber::default();
+            let mut psn = ProcessSerialNumber::default();
 
-                let res = unsafe {
-                    GetEventParameter(
-                        event,
-                        param_name,
-                        param_type,
-                        std::ptr::null_mut(),
-                        std::mem::size_of::<ProcessSerialNumber>()
-                            .try_into()
-                            .unwrap(),
-                        std::ptr::null_mut(),
-                        NonNull::from(&mut psn).as_ptr().cast(),
-                    )
-                };
-                if res == 0 {
-                    let decoded: ProcessEventApp =
-                        unsafe { std::mem::transmute(GetEventKind(event)) };
-                    this.process_handler(psn, decoded);
-                }
+            let res = unsafe {
+                GetEventParameter(
+                    event,
+                    param_name,
+                    param_type,
+                    std::ptr::null_mut(),
+                    std::mem::size_of::<ProcessSerialNumber>()
+                        .try_into()
+                        .unwrap(),
+                    std::ptr::null_mut(),
+                    NonNull::from(&mut psn).as_ptr().cast(),
+                )
+            };
+            if res == 0 {
+                let decoded: ProcessEventApp = unsafe { std::mem::transmute(GetEventKind(event)) };
+                this.process_handler(psn, decoded);
             }
-            _ => error!("Zero passed to Process Handler."),
+        } else {
+            error!("Zero passed to Process Handler.");
         }
         0
     }
@@ -444,14 +436,10 @@ impl ProcessHandler {
                 self.events.send(Event::ApplicationFrontSwitched { psn })
             }
             _ => {
-                error!(
-                    "{}: Unknown process event: {}",
-                    function_name!(),
-                    event as u32
-                );
+                error!("Unknown process event: {}", event as u32);
                 Ok(())
             }
         }
-        .inspect_err(|err| error!("{}: error sending event: {err}", function_name!()));
+        .inspect_err(|err| error!("error sending event: {err}"));
     }
 }

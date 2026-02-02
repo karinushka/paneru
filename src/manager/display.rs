@@ -1,11 +1,11 @@
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use core::ptr::NonNull;
-use log::debug;
 use objc2_core_foundation::{CFRetained, CFString, CFUUID, CGRect};
 use objc2_core_graphics::CGDirectDisplayID;
 use std::collections::VecDeque;
 use stdext::function_name;
+use tracing::debug;
 
 use super::skylight::{CGDisplayCreateUUIDFromDisplayID, CGDisplayGetDisplayIDFromUUID};
 use crate::{

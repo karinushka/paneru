@@ -8,7 +8,6 @@ use accessibility_sys::{
 use bevy::ecs::component::Component;
 use core::ptr::NonNull;
 use derive_more::{DerefMut, with_trait::Deref};
-use log::{debug, error};
 use objc2_core_foundation::{CFNumberType, CFRetained, CFString, kCFRunLoopCommonModes};
 use objc2_core_graphics::CGDirectDisplayID;
 use std::ffi::c_void;
@@ -16,6 +15,7 @@ use std::pin::Pin;
 use std::ptr::null_mut;
 use std::sync::LazyLock;
 use stdext::function_name;
+use tracing::{debug, error};
 
 use super::skylight::{
     _SLPSGetFrontProcess, SLSWindowIteratorAdvance, SLSWindowIteratorGetCount,
@@ -399,7 +399,7 @@ impl ObserverContext {
             }
             accessibility_sys::kAXCreatedNotification => {
                 let Ok(element) = AXUIWrapper::retain(element).inspect_err(|err| {
-                    error!("{}: invalid element {element:?}: {err}", function_name!());
+                    error!("invalid element {element:?}: {err}");
                 }) else {
                     return;
                 };
@@ -409,8 +409,8 @@ impl ObserverContext {
             _ => (),
         }
 
-        let Ok(window_id) = ax_window_id(element)
-            .inspect_err(|err| error!("{}: notification {notification}: {err}", function_name!(),))
+        let Ok(window_id) =
+            ax_window_id(element).inspect_err(|err| error!("notification {notification}: {err}"))
         else {
             return;
         };
@@ -423,10 +423,7 @@ impl ObserverContext {
             accessibility_sys::kAXMenuOpenedNotification => Event::MenuOpened { window_id },
             accessibility_sys::kAXMenuClosedNotification => Event::MenuClosed { window_id },
             _ => {
-                error!(
-                    "{}: unhandled application notification: {notification:?}",
-                    function_name!()
-                );
+                error!("unhandled application notification: {notification:?}");
                 return;
             }
         };
@@ -453,10 +450,7 @@ impl ObserverContext {
             }
 
             _ => {
-                error!(
-                    "{}: unhandled window notification: {notification:?}",
-                    function_name!()
-                );
+                error!("unhandled window notification: {notification:?}");
                 return;
             }
         };
@@ -542,10 +536,7 @@ impl AxObserverHandler {
         let added = notifications
             .iter()
             .filter_map(|name| {
-                debug!(
-                    "{}: adding {name} {element:x?} {observer:?}",
-                    function_name!()
-                );
+                debug!("adding {name} {element:x?} {observer:?}");
                 let notification = CFString::from_static_str(name);
                 match unsafe {
                     AXObserverAddNotification(
@@ -562,10 +553,7 @@ impl AxObserverHandler {
                         None
                     }
                     result => {
-                        error!(
-                            "{}: error adding {name} {element:x?} {observer:?}: {result}",
-                            function_name!()
-                        );
+                        error!("error adding {name} {element:x?} {observer:?}: {result}");
                         None
                     }
                 }
@@ -597,17 +585,11 @@ impl AxObserverHandler {
         for name in notifications {
             let observer: AXObserverRef = self.observer.deref().as_ptr();
             let notification = CFString::from_static_str(name);
-            debug!(
-                "{}: removing {name} {element:x?} {observer:?}",
-                function_name!()
-            );
+            debug!("removing {name} {element:x?} {observer:?}");
             let result =
                 unsafe { AXObserverRemoveNotification(observer, element.as_ptr(), &notification) };
             if result != kAXErrorSuccess {
-                debug!(
-                    "{}: error removing {name} {element:x?} {observer:?}: {result}",
-                    function_name!(),
-                );
+                debug!("error removing {name} {element:x?} {observer:?}: {result}");
             }
         }
         if let ObserverType::Window(removed) = which {

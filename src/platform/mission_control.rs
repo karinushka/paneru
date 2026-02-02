@@ -3,13 +3,13 @@ use accessibility_sys::{
     kAXErrorNotificationAlreadyRegistered, kAXErrorSuccess,
 };
 use core::ptr::NonNull;
-use log::{debug, error, warn};
 use objc2_app_kit::NSRunningApplication;
 use objc2_core_foundation::{CFRetained, CFString, kCFRunLoopDefaultMode};
 use objc2_foundation::NSString;
 use std::ffi::c_void;
 use std::ptr::null_mut;
 use stdext::function_name;
+use tracing::{debug, error, warn};
 
 use super::{
     AXObserverAddNotification, AXObserverCreate, AXObserverRemoveNotification, CFStringRef, Pid,
@@ -75,17 +75,14 @@ impl MissionControlHandler {
             "AXExposeShowDesktop" => Event::MissionControlShowDesktop,
             "AXExposeExit" => Event::MissionControlExit,
             _ => {
-                warn!(
-                    "{}: Unknown mission control event: {notification}",
-                    function_name!()
-                );
+                warn!("Unknown mission control event: {notification}");
                 return;
             }
         };
         _ = self
             .events
             .send(event)
-            .inspect_err(|err| error!("{}: error sending event: {err}", function_name!()));
+            .inspect_err(|err| error!("error sending event: {err}"));
     }
 
     /// Retrieves the process ID (`Pid`) of the Dock application.
@@ -130,11 +127,7 @@ impl MissionControlHandler {
         };
 
         for name in &Self::EVENTS {
-            debug!(
-                "{}: {name:?} {:?}",
-                function_name!(),
-                observer.as_ptr::<AXObserverRef>()
-            );
+            debug!("{name:?} {:?}", observer.as_ptr::<AXObserverRef>());
             let notification = CFString::from_static_str(name);
             match unsafe {
                 AXObserverAddNotification(
@@ -146,10 +139,7 @@ impl MissionControlHandler {
             } {
                 accessibility_sys::kAXErrorSuccess
                 | accessibility_sys::kAXErrorNotificationAlreadyRegistered => (),
-                result => error!(
-                    "{}: error registering {name} for application {pid}: {result}",
-                    function_name!(),
-                ),
+                result => error!("error registering {name} for application {pid}: {result}"),
             }
         }
         unsafe { add_run_loop(&observer, kCFRunLoopDefaultMode)? };
@@ -168,26 +158,19 @@ impl MissionControlHandler {
     fn unobserve(&mut self) {
         if let Some((observer, element)) = self.observer.take().zip(self.element.as_ref()) {
             for name in &Self::EVENTS {
-                debug!(
-                    "{}: {name:?} {:?}",
-                    function_name!(),
-                    observer.as_ptr::<AXObserverRef>()
-                );
+                debug!("{name:?} {:?}", observer.as_ptr::<AXObserverRef>());
                 let notification = CFString::from_static_str(name);
                 let result = unsafe {
                     AXObserverRemoveNotification(observer.as_ptr(), element.as_ptr(), &notification)
                 };
                 if result != kAXErrorSuccess && result != kAXErrorNotificationAlreadyRegistered {
-                    error!("{}: error unregistering {name}: {result}", function_name!());
+                    error!("error unregistering {name}: {result}");
                 }
             }
             remove_run_loop(&observer);
             drop(observer);
         } else {
-            warn!(
-                "{}: unobserving without observe or element",
-                function_name!()
-            );
+            warn!("unobserving without observe or element");
         }
     }
 
@@ -207,18 +190,17 @@ impl MissionControlHandler {
         context: *mut c_void,
     ) {
         let Some(notification) = NonNull::new(notification.cast_mut()) else {
-            error!("{}: nullptr 'notification' passed.", function_name!());
+            error!("nullptr 'notification' passed.");
             return;
         };
 
-        match NonNull::new(context)
+        if let Some(this) = NonNull::new(context)
             .map(|this| unsafe { this.cast::<MissionControlHandler>().as_ref() })
         {
-            Some(this) => {
-                let notification = unsafe { notification.as_ref() }.to_string();
-                this.mission_control_handler(observer, element, &notification);
-            }
-            _ => error!("Zero passed to MissionControlHandler."),
+            let notification = unsafe { notification.as_ref() }.to_string();
+            this.mission_control_handler(observer, element, &notification);
+        } else {
+            error!("Zero passed to MissionControlHandler.");
         }
     }
 }

@@ -1,5 +1,4 @@
 use core::ptr::NonNull;
-use log::{debug, error, info, warn};
 use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayChangeSummaryFlags, CGDisplayRegisterReconfigurationCallback,
     CGDisplayRemoveReconfigurationCallback, CGError,
@@ -8,7 +7,7 @@ use scopeguard::ScopeGuard;
 use std::ffi::c_void;
 use std::marker::PhantomPinned;
 use std::pin::Pin;
-use stdext::function_name;
+use tracing::{debug, error, info, warn};
 
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
@@ -53,21 +52,20 @@ impl DisplayHandler {
     ///
     /// - Registers a `CGDisplayReconfigurationCallback`, which will be unregistered when `cleanup` is dropped.
     pub(super) fn start(self) -> Result<PinnedDisplayHandler> {
-        info!("{}: Registering display handler", function_name!());
+        info!(" Registering display handler");
         let mut pinned = Box::pin(self);
         let this = unsafe { NonNull::new_unchecked(pinned.as_mut().get_unchecked_mut()) }.as_ptr();
         let result =
             unsafe { CGDisplayRegisterReconfigurationCallback(Some(Self::callback), this.cast()) };
         if result != CGError::Success {
             return Err(Error::PermissionDenied(format!(
-                "{}: registering display handler callback: {result:?}",
-                function_name!()
+                "registering display handler callback: {result:?}",
             )));
         }
         Ok(scopeguard::guard(
             pinned,
             Box::new(|mut pin: Pin<Box<Self>>| {
-                info!("{}: Unregistering display handler", function_name!());
+                info!("Unregistering display handler");
                 let this =
                     unsafe { NonNull::new_unchecked(pin.as_mut().get_unchecked_mut()) }.as_ptr();
                 unsafe {
@@ -90,9 +88,12 @@ impl DisplayHandler {
         flags: CGDisplayChangeSummaryFlags,
         context: *mut c_void,
     ) {
-        match NonNull::new(context).map(|this| unsafe { this.cast::<DisplayHandler>().as_mut() }) {
-            Some(this) => this.display_handler(display_id, flags),
-            _ => error!("Zero passed to Display Handler."),
+        if let Some(this) =
+            NonNull::new(context).map(|this| unsafe { this.cast::<DisplayHandler>().as_mut() })
+        {
+            this.display_handler(display_id, flags);
+        } else {
+            error!("Zero passed to Display Handler.");
         }
     }
 
@@ -108,7 +109,7 @@ impl DisplayHandler {
         display_id: CGDirectDisplayID,
         flags: CGDisplayChangeSummaryFlags,
     ) {
-        debug!("{}: display change {display_id:?}", function_name!());
+        debug!("display change {display_id:?}");
         let event = if flags.contains(CGDisplayChangeSummaryFlags::AddFlag) {
             Event::DisplayAdded { display_id }
         } else if flags.contains(CGDisplayChangeSummaryFlags::RemoveFlag) {
@@ -120,12 +121,12 @@ impl DisplayHandler {
         } else if flags.contains(CGDisplayChangeSummaryFlags::BeginConfigurationFlag) {
             Event::DisplayConfigured { display_id }
         } else {
-            warn!("{}: unknown flag {flags:?}.", function_name!());
+            warn!("unknown flag {flags:?}.");
             return;
         };
         _ = self
             .events
             .send(event)
-            .inspect_err(|err| warn!("{}: error sending event: {err}", function_name!()));
+            .inspect_err(|err| warn!("error sending event: {err}"));
     }
 }

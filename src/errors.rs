@@ -1,5 +1,5 @@
-use log::debug;
 use std::{any::TypeId, fmt::Display};
+use tracing::debug;
 
 /// A type alias for `std::result::Result` with a custom `Error` type.
 pub type Result<T> = std::result::Result<T, Error>;

@@ -4,11 +4,11 @@ use std::time::Duration;
 use super::*;
 use bevy::prelude::*;
 use bevy::time::{TimePlugin, TimeUpdateStrategy};
-use log::debug;
 use objc2_core_foundation::{CFRetained, CFString, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGDirectDisplayID;
 use stdext::function_name;
 use stdext::prelude::RwLockExt;
+use tracing::debug;
 
 use crate::commands::{Command, Direction, Operation, process_command_trigger};
 use crate::config::Config;
@@ -594,8 +594,6 @@ fn verify_window_positions(expected_positions: &[(WinID, (i32, i32))], world: &m
 
 #[test]
 fn test_window_shuffle() {
-    let _ = env_logger::builder().is_test(true).try_init();
-
     let commands = vec![
         Event::Command {
             command: Command::Window(Operation::Focus(Direction::Last)),

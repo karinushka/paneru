@@ -10,10 +10,9 @@ use bevy::{
     },
     time::Time,
 };
-use log::warn;
 use objc2_core_foundation::CGRect;
 use objc2_core_graphics::CGDirectDisplayID;
-use stdext::function_name;
+use tracing::warn;
 
 use super::{ActiveDisplayMarker, FocusFollowsMouse, MissionControlActive, SkipReshuffle};
 use crate::{
@@ -250,7 +249,7 @@ impl Windows<'_, '_> {
     ) -> Option<(&Window, Entity, &ChildOf, Option<&Unmanaged>)> {
         self.all
             .get(entity)
-            .inspect_err(|err| warn!("{}: unable to find window: {err}", function_name!()))
+            .inspect_err(|err| warn!("unable to find window: {err}"))
             .ok()
     }
 

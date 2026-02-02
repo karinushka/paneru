@@ -1,6 +1,5 @@
 use arc_swap::{ArcSwap, Guard};
 use bevy::ecs::resource::Resource;
-use log::{error, info, warn};
 use objc2_core_foundation::{CFData, CFString};
 use regex::Regex;
 use serde::{Deserialize, Deserializer, de};
@@ -13,6 +12,7 @@ use std::{
     sync::{Arc, LazyLock},
 };
 use stdext::function_name;
+use tracing::{error, info, warn};
 
 use crate::{
     commands::{Command, Direction, MouseMove, Operation},

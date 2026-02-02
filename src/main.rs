@@ -1,6 +1,5 @@
-use chrono::Local;
 use clap::{Parser, Subcommand};
-use std::io::Write;
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 mod commands;
 mod config;
@@ -82,20 +81,18 @@ pub enum SubCmd {
 ///
 /// `Ok(())` if the application runs successfully, otherwise `Err(Error)`.
 fn main() -> Result<()> {
-    // Set up logging (default level is INFO)
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .target(env_logger::Target::Stderr)
-        .format(|buf, record| {
-            writeln!(
-                buf,
-                "[{} {} {}:{}] {}",
-                Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
-                record.level(),
-                record.file().unwrap_or("unknown"),
-                record.line().unwrap_or(0),
-                record.args()
-            )
-        })
+    tracing_subscriber::registry()
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with(
+            fmt::layer()
+                .with_level(true)
+                .with_line_number(true)
+                .with_file(true)
+                .with_target(true)
+                .with_thread_ids(false)
+                .with_writer(std::io::stderr)
+                .compact(),
+        )
         .init();
 
     let service = || service::Service::try_new(service::ID);

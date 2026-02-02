@@ -25,10 +25,8 @@ chrono = "0.4.43"
 clap = { version = "4.5.57", features = ["cargo", "derive"] }
 derive_more = { version = "2.1.1", features = ["deref", "deref_mut"] }
 embed_plist = "1.2.2"
-env_logger = "0.11.8"
 launchctl = "0.3.2"
 libc = "0.2.180"
-log = "0.4.29"
 notify = { version = "8.2.0", features = ["macos_fsevent"] }
 objc2 = { version = "0.6.3", features = ["catch-all", "exception"] }
 objc2-app-kit = "0.3.2"
@@ -40,3 +38,5 @@ scopeguard = "1.2.0"
 serde = { version = "1.0.228", features = ["derive"] }
 stdext = "0.3.3"
 toml = "0.9.11"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }

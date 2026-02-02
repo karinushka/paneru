@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use log::{info, warn};
+use tracing::{info, warn};
 
 use crate::util::exe_path;
 

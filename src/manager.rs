@@ -2,7 +2,6 @@ use accessibility_sys::{AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionProm
 use bevy::ecs::resource::Resource;
 use core::ptr::NonNull;
 use derive_more::{DerefMut, with_trait::Deref};
-use log::{debug, error, trace, warn};
 use notify::{RecursiveMode, Watcher};
 use objc2_core_foundation::{
     CFArray, CFDictionary, CFMutableData, CFNumber, CFNumberType, CFRetained, CFString, CGPoint,
@@ -17,6 +16,7 @@ use std::ptr::null_mut;
 use std::slice::from_raw_parts_mut;
 use std::time::Duration;
 use stdext::function_name;
+use tracing::{debug, error, trace, warn};
 
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
@@ -167,7 +167,7 @@ impl WindowManagerOS {
     /// A new `WindowManagerOS` instance.
     pub fn new(event_sender: EventSender) -> Self {
         let main_cid = unsafe { SLSMainConnectionID() };
-        debug!("{}: My connection id: {main_cid}", function_name!());
+        debug!("My connection id: {main_cid}");
 
         Self {
             main_cid,
@@ -189,8 +189,7 @@ impl WindowManagerOS {
         let display_spaces = NonNull::new(unsafe { SLSCopyManagedDisplaySpaces(self.main_cid) })
             .map(|ptr| unsafe { CFRetained::from_raw(ptr) })
             .ok_or(Error::PermissionDenied(format!(
-                "{}: can not copy managed display spaces for {}.",
-                function_name!(),
+                "can not copy managed display spaces for {}.",
                 self.main_cid
             )))?;
         let uuid = uuid.to_string();
@@ -206,20 +205,18 @@ impl WindowManagerOS {
         });
         let Some(display) = display else {
             return Err(Error::PermissionDenied(format!(
-                "{}: could not get any displays for {}",
-                function_name!(),
+                "could not get any displays for {}",
                 self.main_cid
             )));
         };
-        debug!("{}: found display with uuid '{uuid}'", function_name!());
+        debug!("found display with uuid '{uuid}'");
 
         let display = unsafe {
             display.cast_unchecked::<CFString, CFArray<CFDictionary<CFString, CFNumber>>>()
         };
         let Some(spaces) = display.get(&CFString::from_static_str("Spaces")) else {
             return Err(Error::PermissionDenied(format!(
-                "{}: could not get any spaces for dislay '{uuid}'",
-                function_name!(),
+                "could not get any spaces for dislay '{uuid}'",
             )));
         };
 
@@ -232,8 +229,7 @@ impl WindowManagerOS {
             })
             .collect::<Vec<WorkspaceId>>();
         debug!(
-            "{}: spaces [{}]",
-            function_name!(),
+            "spaces [{}]",
             spaces
                 .iter()
                 .map(|id| format!("{id}"))
@@ -253,8 +249,7 @@ impl WindowManagerOS {
         unsafe {
             let ptr = SLSCopyActiveMenuBarDisplayIdentifier(self.main_cid);
             let ptr = NonNull::new(ptr.cast_mut()).ok_or(Error::NotFound(format!(
-                "{}: can not find active display for connection {}.",
-                function_name!(),
+                "can not find active display for connection {}.",
                 self.main_cid
             )))?;
             Ok(CFRetained::from_raw(ptr))
@@ -286,8 +281,7 @@ impl WindowManagerOS {
             }
         })
         .ok_or(Error::InvalidInput(format!(
-            "{}: can not get display uuid for window {window_id}.",
-            function_name!()
+            "can not get display uuid for window {window_id}.",
         )))
     }
 
@@ -331,7 +325,7 @@ impl WindowManagerApi for WindowManagerOS {
 
     /// Returns child windows of the main window.
     fn get_associated_windows(&self, window_id: WinID) -> Vec<WinID> {
-        trace!("{}: for window {window_id}", function_name!());
+        trace!("for window {window_id}");
         let windows =
             unsafe { CFRetained::retain(SLSCopyAssociatedWindows(self.main_cid, window_id)) };
         windows.into_iter().filter_map(|id| id.as_i32()).collect()
@@ -361,7 +355,7 @@ impl WindowManagerApi for WindowManagerOS {
                 let bounds = CGDisplayBounds(id);
                 let mut menubar_height: u32 = 0;
                 unsafe { SLSGetDisplayMenubarHeight(id, &raw mut menubar_height) };
-                debug!("{}: menubar height: {menubar_height}", function_name!());
+                debug!("menubar height: {menubar_height}");
                 let workspaces = Display::uuid_from_id(id)
                     .and_then(|uuid| self.display_space_list(uuid.as_ref()))
                     .ok()?;
@@ -398,10 +392,7 @@ impl WindowManagerApi for WindowManagerOS {
             if unsafe {
                 CGError::Success != SLSGetCurrentCursorLocation(self.main_cid, &mut cursor)
             } {
-                warn!(
-                    "{}: Unable to get current cursor position.",
-                    function_name!()
-                );
+                warn!("Unable to get current cursor position.");
                 return;
             }
             let frame = window.frame();
@@ -447,23 +438,13 @@ impl WindowManagerApi for WindowManagerOS {
     ) -> Result<(Vec<Window>, Vec<WinID>)> {
         let global_window_list = existing_application_window_list(self.main_cid, app, spaces)?;
         if global_window_list.is_empty() {
-            return Err(Error::InvalidInput(format!(
-                "{}: No windows found for {app}",
-                function_name!()
-            )));
+            return Err(Error::InvalidInput(format!("No windows found for {app}")));
         }
-        debug!(
-            "{}: {app} has global windows: {global_window_list:?}",
-            function_name!()
-        );
+        debug!("{app} has global windows: {global_window_list:?}");
 
         let found_windows = app.window_list();
         if found_windows.len() == global_window_list.len() {
-            debug!(
-                "{}: All windows for {:?} are now resolved",
-                function_name!(),
-                app.psn(),
-            );
+            debug!("All windows for {:?} are now resolved", app.psn());
             return Ok((found_windows, vec![]));
         }
 
@@ -473,8 +454,7 @@ impl WindowManagerApi for WindowManagerOS {
             .filter(|&window_id| find_window(window_id).is_none())
             .collect::<Vec<_>>();
         debug!(
-            "{}: {:?} has {} windows that are not yet resolved",
-            function_name!(),
+            "{:?} has {} windows that are not yet resolved",
             app.psn(),
             offscreen_windows.len()
         );
@@ -524,8 +504,7 @@ impl WindowManagerApi for WindowManagerOS {
         }
         if window_id == 0 {
             Err(Error::invalid_window(&format!(
-                "{}: could not find a window at {point:?}",
-                function_name!()
+                "could not find a window at {point:?}",
             )))
         } else {
             Ok(window_id)
@@ -551,11 +530,7 @@ impl WindowManagerApi for WindowManagerOS {
         let mut watcher = if let Some(symlink) = symlink {
             setup.with_follow_symlinks(true);
             let mut watcher = notify::PollWatcher::new(config_handler, setup)?;
-            debug!(
-                "{}: watching symlink target {} for changes.",
-                function_name!(),
-                symlink.display()
-            );
+            debug!("watching symlink target {} for changes.", symlink.display());
             watcher.watch(&symlink, RecursiveMode::NonRecursive)?;
 
             Ok::<Box<dyn Watcher>, Error>(Box::new(watcher))
@@ -565,11 +540,7 @@ impl WindowManagerApi for WindowManagerOS {
                 setup,
             )?))
         }?;
-        debug!(
-            "{}: watching config file {} for changes.",
-            function_name!(),
-            path.display()
-        );
+        debug!("watching config file {} for changes.", path.display());
         watcher.watch(path, RecursiveMode::NonRecursive)?;
         Ok(watcher)
     }
@@ -641,8 +612,7 @@ fn space_window_list_for_connection(
         let window_id: WinID = unsafe { SLSWindowIteratorGetWindowID(&raw const *iterator) };
 
         trace!(
-            "{}: id: {window_id} parent: {parent_wid} tags: 0x{tags:x} attributes: 0x{attributes:x}",
-            function_name!()
+            "id: {window_id} parent: {parent_wid} tags: 0x{tags:x} attributes: 0x{attributes:x}",
         );
         if found_valid_window(parent_wid, attributes, tags) {
             window_list.push(window_id);
@@ -709,10 +679,7 @@ pub fn bruteforce_windows(pid: Pid, mut window_list: Vec<WinID>) -> Vec<Window> 
     const MAGIC: u32 = 0x636f_636f;
     const BUFSIZE: isize = 0x14;
     let mut found_windows = Vec::new();
-    debug!(
-        "{}: {pid} has unresolved window on other desktops, bruteforcing them.",
-        function_name!()
-    );
+    debug!("{pid} has unresolved window on other desktops, bruteforcing them.");
 
     //
     // NOTE: MacOS API does not return AXUIElementRef of windows on inactive spaces. However,
@@ -722,7 +689,7 @@ pub fn bruteforce_windows(pid: Pid, mut window_list: Vec<WinID>) -> Vec<Window> 
     //
 
     let Some(data_ref) = CFMutableData::new(None, BUFSIZE) else {
-        error!("{}: error creating mutable data", function_name!());
+        error!("error creating mutable data");
         return found_windows;
     };
     CFMutableData::increase_length(data_ref.deref().into(), BUFSIZE);
@@ -753,10 +720,8 @@ pub fn bruteforce_windows(pid: Pid, mut window_list: Vec<WinID>) -> Vec<Window> 
 
         if let Some(index) = window_list.iter().position(|&id| id == window_id) {
             window_list.remove(index);
-            debug!("{}: Found window {window_id:?}", function_name!());
-            if let Ok(window) =
-                WindowOS::new(&element_ref).inspect_err(|err| warn!("{}: {err}", function_name!()))
-            {
+            debug!("Found window {window_id:?}");
+            if let Ok(window) = WindowOS::new(&element_ref).inspect_err(|err| warn!("{err}")) {
                 found_windows.push(Window::new(Box::new(window)));
             }
         }
@@ -809,7 +774,7 @@ impl notify::EventHandler for ConfigHandler {
     fn handle_event(&mut self, event: notify::Result<notify::Event>) {
         if let Ok(event) = event {
             _ = self.0.send(Event::ConfigRefresh(event)).inspect_err(|err| {
-                warn!("{}: error sending config refresh: {err}", function_name!());
+                warn!("error sending config refresh: {err}");
             });
         }
     }

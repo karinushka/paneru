@@ -1,4 +1,3 @@
-use log::debug;
 use objc2::rc::Retained;
 use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication};
 use objc2_core_foundation::{CFRetained, CFString};
@@ -8,7 +7,7 @@ use objc2_foundation::{
 use std::pin::Pin;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
-use stdext::function_name;
+use tracing::debug;
 
 use crate::ecs::BProcess;
 use crate::platform::{OSStatus, Pid, ProcessSerialNumber, WorkspaceObserver};
@@ -311,11 +310,7 @@ impl Process {
                     NonNull::from(self).as_ptr().cast(),
                 );
             }
-            debug!(
-                "{}: observing {flavor} for {}",
-                function_name!(),
-                &self.name
-            );
+            debug!("observing {flavor} for {}", &self.name);
         }
     }
 
@@ -339,11 +334,7 @@ impl Process {
                     NonNull::from(self).as_ptr().cast(),
                 );
             }
-            debug!(
-                "{}: removed {flavor} observers for {}",
-                function_name!(),
-                &self.name
-            );
+            debug!("removed {flavor} observers for {}", &self.name);
         }
     }
 
@@ -360,10 +351,8 @@ impl Process {
     pub fn ready(&mut self) -> bool {
         if !self.finished_launching() {
             debug!(
-                "{}: {} ({}) is not finished launching, subscribing to finishedLaunching changes",
-                function_name!(),
-                self.name,
-                self.pid
+                "{} ({}) is not finished launching, subscribing to finishedLaunching changes",
+                self.name, self.pid
             );
             self.observe_finished_launching();
             return false;
@@ -372,10 +361,8 @@ impl Process {
 
         if !self.is_observable() {
             debug!(
-                "{}: {} ({}) is not observable, subscribing to activationPolicy changes",
-                function_name!(),
-                self.name,
-                self.pid
+                "{} ({}) is not observable, subscribing to activationPolicy changes",
+                self.name, self.pid
             );
             self.observe_activation_policy();
             return false;

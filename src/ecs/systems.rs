@@ -7,13 +7,12 @@ use bevy::ecs::system::{Commands, Local, NonSend, NonSendMut, Populated, Query, 
 use bevy::tasks::AsyncComputeTaskPool;
 use bevy::tasks::futures_lite::future;
 use bevy::time::Time;
-use log::{debug, error, info, trace, warn};
 use objc2_core_graphics::CGDirectDisplayID;
 use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::Duration;
-use stdext::function_name;
+use tracing::{debug, error, info, trace, warn};
 
 use super::{
     ActiveDisplayMarker, BProcess, CommandTrigger, ExistingMarker, FocusedMarker, FreshMarker,
@@ -56,7 +55,7 @@ pub(super) fn dispatch_toplevel_triggers(
             Event::WindowCreated { element } => {
                 if let Ok(window) = WindowOS::new(element)
                     .inspect_err(|err| {
-                        trace!("{}: not adding window {element:?}: {err}", function_name!());
+                        trace!("not adding window {element:?}: {err}");
                     })
                     .map(|window| Window::new(Box::new(window)))
                 {
@@ -67,8 +66,7 @@ pub(super) fn dispatch_toplevel_triggers(
             Event::SpaceChanged => {
                 if broken_notifications.is_some() {
                     info!(
-                        "{}: Workspace and display notifications arriving correctly. Disabling the polling.",
-                        function_name!()
+                        "Workspace and display notifications arriving correctly. Disabling the polling.",
                     );
                     commands.remove_resource::<PollForNotifications>();
                 }
@@ -76,19 +74,19 @@ pub(super) fn dispatch_toplevel_triggers(
             }
 
             Event::WindowTitleChanged { window_id } => {
-                trace!("{}: WindowTitleChanged: {window_id:?}", function_name!());
+                trace!("WindowTitleChanged: {window_id:?}");
             }
             Event::MenuClosed { window_id } => {
-                trace!("{}: MenuClosed event: {window_id:?}", function_name!());
+                trace!("MenuClosed event: {window_id:?}");
             }
             Event::DisplayResized { display_id } => {
-                debug!("{}: Display Resized: {display_id:?}", function_name!());
+                debug!("Display Resized: {display_id:?}");
             }
             Event::DisplayConfigured { display_id } => {
-                debug!("{}: Display Configured: {display_id:?}", function_name!());
+                debug!("Display Configured: {display_id:?}");
             }
             Event::SystemWoke { msg } => {
-                debug!("{}: system woke: {msg:?}", function_name!());
+                debug!("system woke: {msg:?}");
             }
 
             _ => commands.trigger(WMEventTrigger(event.clone())),
@@ -106,7 +104,7 @@ pub(super) fn dispatch_toplevel_triggers(
 #[allow(clippy::needless_pass_by_value)]
 pub fn gather_displays(window_manager: Res<WindowManager>, mut commands: Commands) {
     let Ok(active_display_id) = window_manager.active_display_id() else {
-        error!("{}: Unable to get active display id!", function_name!());
+        error!("Unable to get active display id!");
         return;
     };
     for (display, workspaces) in window_manager.present_displays() {
@@ -149,11 +147,7 @@ pub(crate) fn add_existing_process(
 ) {
     for (entity, process) in processes {
         let Ok(app) = window_manager.new_application(&*process.0) else {
-            error!(
-                "{}: creating aplication from process '{}'",
-                function_name!(),
-                process.name(),
-            );
+            error!("creating aplication from process '{}'", process.name());
             return;
         };
         commands.spawn((app, ExistingMarker, ChildOf(entity)));
@@ -190,7 +184,7 @@ pub(crate) fn add_existing_application(
         if app.observe().is_ok_and(|result| result)
             && let Ok((found_windows, offscreen)) = window_manager
                 .find_existing_application_windows(&mut app, &spaces)
-                .inspect_err(|err| warn!("{}: {err}", function_name!()))
+                .inspect_err(|err| warn!("{err}"))
         {
             offscreen_windows.extend(offscreen);
             commands.trigger(SpawnWindowTrigger(found_windows));
@@ -240,21 +234,13 @@ pub(crate) fn finish_setup(
         return;
     }
 
-    info!(
-        "{}: Initialization: found {} windows.",
-        function_name!(),
-        windows.iter().len()
-    );
+    info!("Initialization: found {} windows.", windows.iter().len());
 
     for (mut strip, active_strip) in &mut workspaces {
         let workspace_windows = window_manager
             .windows_in_workspace(strip.id())
             .inspect_err(|err| {
-                warn!(
-                    "{}: failed to get windows on workspace {}: {err}",
-                    function_name!(),
-                    strip.id()
-                );
+                warn!("failed to get windows on workspace {}: {err}", strip.id());
             })
             .ok()
             .map(|workspace_windows| {
@@ -278,16 +264,12 @@ pub(crate) fn finish_setup(
                 strip.append(entity);
             }
         }
-        debug!(
-            "{}: space {}: after refresh {strip:?}",
-            function_name!(),
-            strip.id()
-        );
+        debug!("space {}: after refresh {strip:?}", strip.id());
 
         if active_strip {
             let first_window = strip.first().ok().and_then(|column| column.top());
             if let Some(entity) = first_window {
-                debug!("{}: focusing {entity}", function_name!());
+                debug!("focusing {entity}");
                 commands.entity(entity).try_insert(FocusedMarker);
             }
         }
@@ -334,11 +316,7 @@ pub(super) fn add_launched_process(
         }
 
         let Ok(mut app) = window_manager.new_application(process) else {
-            error!(
-                "{}: creating aplication from process '{}'",
-                function_name!(),
-                process.name()
-            );
+            error!("creating aplication from process '{}'", process.name());
             return;
         };
 
@@ -346,17 +324,12 @@ pub(super) fn add_launched_process(
             let timeout = Timeout::new(
                 Duration::from_secs(APP_OBSERVABLE_TIMEOUT_SEC),
                 Some(format!(
-                    "{}: {app} did not become observable in {APP_OBSERVABLE_TIMEOUT_SEC}s.",
-                    function_name!(),
+                    "{app} did not become observable in {APP_OBSERVABLE_TIMEOUT_SEC}s.",
                 )),
             );
             commands.spawn((app, FreshMarker, timeout, ChildOf(entity)));
         } else {
-            debug!(
-                "{}: failed to register some observers {}",
-                function_name!(),
-                process.name()
-            );
+            debug!("failed to register some observers {}", process.name());
         }
     }
 }
@@ -387,7 +360,7 @@ pub(super) fn add_launched_application(
 
         if !create_windows.is_empty() {
             commands.entity(entity).try_remove::<FreshMarker>();
-            debug!("{}: spawn!", function_name!());
+            debug!("spawn!");
             commands.trigger(SpawnWindowTrigger(create_windows));
         }
     }
@@ -435,21 +408,14 @@ pub(super) fn timeout_ticker(
 ) {
     for (entity, mut timeout) in timers {
         if timeout.timer.is_finished() {
-            trace!(
-                "{}: Despawning entity {entity} due to timeout.",
-                function_name!(),
-            );
+            trace!("Despawning entity {entity} due to timeout.");
             if let Some(message) = &timeout.message {
                 debug!("{message}");
             }
-            trace!("{}: Removing timer {entity}", function_name!());
+            trace!("Removing timer {entity}");
             commands.entity(entity).despawn();
         } else {
-            trace!(
-                "{}: Timer {}",
-                function_name!(),
-                timeout.timer.elapsed().as_secs_f32()
-            );
+            trace!("Timer {}", timeout.timer.elapsed().as_secs_f32());
             timeout.timer.tick(clock.delta());
         }
     }
@@ -489,11 +455,11 @@ pub(super) fn find_orphaned_workspaces(
         let Ok(display) = displays.get(parent_display) else {
             continue;
         };
+        let display_id = display.id();
         debug!(
-            "{}: Re-inserting orphaned strip {} into display {}",
-            function_name!(),
+            "Re-inserting orphaned strip: {parent_display}, {}, {entity}, {}, {orphan_entity}, display {display_id}",
+            strip.id(),
             orphan.id(),
-            display.id(),
         );
 
         if let Ok(mut commands) = commands.get_entity(orphan_entity) {
@@ -509,7 +475,7 @@ pub(super) fn find_orphaned_workspaces(
         let mut in_workspace = window_manager
             .windows_in_workspace(strip.id())
             .inspect_err(|err| {
-                warn!("{}: getting windows in workspace: {err}", function_name!());
+                warn!("getting windows in workspace: {err}");
             })
             .unwrap_or_default();
 
@@ -519,8 +485,7 @@ pub(super) fn find_orphaned_workspaces(
                 let width = display.bounds.size.width * window.width_ratio();
                 let height = display.bounds.size.height;
                 debug!(
-                    "{}: refreshing ratio {:.1} for window {}: {:.0}x{:.0}",
-                    function_name!(),
+                    "refreshing ratio {:.1} for window {}: {:.0}x{:.0}",
                     window.width_ratio(),
                     window.id(),
                     width,
@@ -541,10 +506,7 @@ pub(super) fn find_orphaned_workspaces(
                 })
         });
         for window_entity in floating {
-            debug!(
-                "{}: repositioning floating window {window_entity}",
-                function_name!(),
-            );
+            debug!("repositioning floating window {window_entity}");
             reposition_entity(window_entity, 0.0, 0.0, display.id(), &mut commands);
         }
     }
@@ -576,18 +538,10 @@ pub(super) fn display_changes_watcher(
         if active {
             return;
         }
-        debug!(
-            "{}: detected dislay change from {}.",
-            function_name!(),
-            current_display_id,
-        );
+        debug!("detected dislay change from {current_display_id}.");
         commands.trigger(WMEventTrigger(Event::DisplayChanged));
     } else {
-        debug!(
-            "{}: new display {} detected.",
-            function_name!(),
-            current_display_id
-        );
+        debug!("new display {current_display_id} detected.");
         commands.trigger(WMEventTrigger(Event::DisplayAdded {
             display_id: current_display_id,
         }));
@@ -599,11 +553,8 @@ pub(super) fn display_changes_watcher(
             .iter()
             .any(|(present_display, _)| present_display.id() == display.id())
         {
-            debug!(
-                "{}: detected removal of display {}",
-                function_name!(),
-                display.id()
-            );
+            let display_id = display.id();
+            debug!("detected removal of display {display_id}");
             commands.trigger(WMEventTrigger(Event::DisplayRemoved {
                 display_id: display.id(),
             }));
@@ -632,14 +583,14 @@ pub(super) fn workspace_change_watcher(
     let Ok(space_id) = window_manager
         .0
         .active_display_space(active_display.id())
-        .inspect_err(|err| warn!("{}: {err}", function_name!()))
+        .inspect_err(|err| warn!("{err}"))
     else {
         return;
     };
 
     if *current_space != space_id {
         *current_space = space_id;
-        debug!("{}: workspace changed to {space_id}", function_name!());
+        debug!("workspace changed to {space_id}");
         commands.trigger(WMEventTrigger(Event::SpaceChanged));
     }
 }
@@ -692,8 +643,7 @@ pub(super) fn animate_windows(
             delta_y = -delta_y;
         }
         trace!(
-            "{}: window {} dest {:?} delta {move_delta:.0} moving to {:.0}:{:.0}",
-            function_name!(),
+            "window {} dest {:?} delta {move_delta:.0} moving to {:.0}:{:.0}",
             window.id(),
             origin,
             current.x + delta_x,
@@ -748,8 +698,7 @@ pub(super) fn animate_resize_windows(
             delta_y = -delta_y;
         }
         trace!(
-            "{}: window {} size {:?} delta {move_delta:.0} resizing to {:.0}:{:.0}",
-            function_name!(),
+            "window {} size {:?} delta {move_delta:.0} resizing to {:.0}:{:.0}",
             window.id(),
             size,
             current.width + delta_x,
@@ -827,10 +776,7 @@ fn slide_to_next_window(
     };
 
     neighbour.inspect(|neighbour| {
-        debug!(
-            "{}: switching to {neighbour} with delta {delta}",
-            function_name!()
-        );
+        debug!("switching to {neighbour} with delta {delta}");
         reshuffle_around(*neighbour, commands);
     })
 }
@@ -1000,12 +946,12 @@ fn reposition_stack(
         })
         .collect::<Vec<_>>();
     if heights.len() != entities.len() {
-        warn!("{}: Mismatch in heights and entities.", function_name!());
+        warn!("Mismatch in heights and entities.");
         return;
     }
 
     let Some(heights) = binpack_heights(&heights, MIN_WINDOW_HEIGHT, display_height) else {
-        info!("{}: Unable to fit all windows.", function_name!());
+        info!("Unable to fit all windows.");
         return;
     };
 
@@ -1187,17 +1133,14 @@ fn add_display(
     window_manager: &Res<WindowManager>,
     commands: &mut Commands,
 ) {
-    debug!("{}: Display Added: {display_id:?}", function_name!());
+    debug!("Display Added: {display_id:?}");
     let Some((display, workspaces)) = window_manager
         .0
         .present_displays()
         .into_iter()
         .find(|(display, _)| display.id() == display_id)
     else {
-        error!(
-            "{}: Unable to find added display id {display_id}!",
-            function_name!()
-        );
+        error!("Unable to find added display id {display_id}!");
         return;
     };
     // find_orphaned_spaces(&mut orphaned_spaces.0, &mut display, &mut windows);
@@ -1216,12 +1159,12 @@ fn remove_display(
     commands: &mut Commands,
 ) {
     const ORPHANED_SPACES_TIMEOUT_SEC: u64 = 30;
-    debug!("{}: Display Removed: {display_id:?}", function_name!());
+    debug!("Display Removed: {display_id:?}");
     let Some((display, display_entity)) = displays
         .into_iter()
         .find(|(display, _)| display.id() == display_id)
     else {
-        error!("{}: Unable to find removed display!", function_name!());
+        error!("Unable to find removed display!");
         return;
     };
 
@@ -1229,17 +1172,15 @@ fn remove_display(
         .into_iter()
         .filter(|(_, _, child)| child.parent() == display_entity)
     {
+        let display_id = display.id();
         debug!(
-            "{}: orphaning strip {} after removal of display {}.",
-            function_name!(),
+            "orphaning strip {} after removal of display {display_id}.",
             strip.id(),
-            display.id()
         );
         let timeout = Timeout::new(
             Duration::from_secs(ORPHANED_SPACES_TIMEOUT_SEC),
             Some(format!(
-                "{}: Orphaned strip {} ({strip}) could not be re-inserted after {ORPHANED_SPACES_TIMEOUT_SEC}s.",
-                function_name!(),
+                "Orphaned strip {} ({strip}) could not be re-inserted after {ORPHANED_SPACES_TIMEOUT_SEC}s.",
                 strip.id()
             )),
         );
@@ -1261,12 +1202,12 @@ fn move_display(
     displays: &mut Query<(&mut Display, Entity)>,
     window_manager: &Res<WindowManager>,
 ) {
-    debug!("{}: Display Moved: {display_id:?}", function_name!());
+    debug!("Display Moved: {display_id:?}");
     let Some((mut display, _)) = displays
         .iter_mut()
         .find(|(display, _)| display.id() == display_id)
     else {
-        error!("{}: Unable to find moved display!", function_name!());
+        error!("Unable to find moved display!");
         return;
     };
     let Some((moved_display, _)) = window_manager
@@ -1300,10 +1241,7 @@ pub(crate) fn gather_initial_processes(
             Event::InitialConfig(config) => {
                 initial_config = Some(config);
             }
-            event => warn!(
-                "{}: Stray event during initial process gathering: {event:?}",
-                function_name!()
-            ),
+            event => warn!("Stray event during initial process gathering: {event:?}"),
         }
     }
     if let Some(config) = initial_config {
@@ -1312,16 +1250,11 @@ pub(crate) fn gather_initial_processes(
 
     while let Some(mut process) = initial_processes.pop() {
         if process.is_observable() {
-            debug!(
-                "{}: Adding existing process {}",
-                function_name!(),
-                process.name()
-            );
+            debug!("Adding existing process {}", process.name());
             commands.spawn((ExistingMarker, process));
         } else {
             debug!(
-                "{}: Existing application '{}' is not observable, ignoring it.",
-                function_name!(),
+                "Existing application '{}' is not observable, ignoring it.",
                 process.name(),
             );
         }

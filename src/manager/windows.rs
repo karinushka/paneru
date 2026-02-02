@@ -8,12 +8,12 @@ use bevy::ecs::entity::Entity;
 use bevy::ecs::system::Commands;
 use core::ptr::NonNull;
 use derive_more::{DerefMut, with_trait::Deref};
-use log::{debug, trace};
 use objc2_core_foundation::{CFEqual, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize};
 use std::ptr::null_mut;
 use std::thread;
 use std::time::Duration;
 use stdext::function_name;
+use tracing::{debug, trace};
 
 use super::skylight::{
     _AXUIElementGetWindow, _SLPSSetFrontProcessWithOptions, AXUIElementCopyAttributeValue,
@@ -75,19 +75,11 @@ pub trait WindowApi: Send + Sync {
         let size = resizing.map_or(self.frame().size, |marker| marker.size);
 
         let moved = if origin.x + size.width > display_bounds.size.width {
-            trace!(
-                "{}: Bumped window {} to the left",
-                function_name!(),
-                window_id
-            );
+            trace!("Bumped window {window_id} to the left");
             origin.x = display_bounds.size.width - size.width;
             true
         } else if origin.x < 0.0 {
-            trace!(
-                "{}: Bumped window {} to the right",
-                function_name!(),
-                window_id
-            );
+            trace!("Bumped window {window_id} to the right");
             origin.x = 0.0;
             true
         } else {
@@ -97,7 +89,7 @@ pub trait WindowApi: Send + Sync {
         if moved {
             let display_id = moving.map_or(active_display.id(), |marker| marker.display_id);
             reposition_entity(entity, origin.x, origin.y, display_id, commands);
-            trace!("{}: focus resposition to {origin:?}", function_name!());
+            trace!("focus resposition to {origin:?}");
         }
         CGRect::new(origin, size)
     }
@@ -186,24 +178,21 @@ impl WindowOS {
 
         if window.is_unknown() {
             return Err(Error::invalid_window(&format!(
-                "{}: Ignoring AXUnknown window, id: {}",
-                function_name!(),
+                "Ignoring AXUnknown window, id: {}",
                 window.id()
             )));
         }
 
         if !window.is_real() {
             return Err(Error::invalid_window(&format!(
-                "{}: Ignoring non-real window, id: {}",
-                function_name!(),
+                "Ignoring non-real window, id: {}",
                 window.id()
             )));
         }
 
         window.minimized = window.is_minimized();
         trace!(
-            "{}: created {} title: {} role: {} subrole: {}",
-            function_name!(),
+            "created {} title: {} role: {} subrole: {}",
             window.id(),
             window.title().unwrap_or_default(),
             window.role().unwrap_or_default(),
@@ -366,7 +355,7 @@ impl WindowApi for WindowOS {
     /// * `display_bounds` - The `CGRect` of the display.
     fn reposition(&mut self, x: f64, y: f64, display_bounds: &CGRect) {
         if (self.frame.origin.x - x).abs() < 0.1 && (self.frame.origin.y - y).abs() < 0.1 {
-            trace!("{}: already in position.", function_name!());
+            trace!("already in position.");
             return;
         }
         let mut point = CGPoint::new(
@@ -403,7 +392,7 @@ impl WindowApi for WindowOS {
         if (self.frame.size.width - width).abs() < 0.1
             && (self.frame.size.height - height).abs() < 0.1
         {
-            trace!("{}: already correct size.", function_name!());
+            trace!("already correct size.");
             return;
         }
         let width_padding = 2.0 * self.horizontal_padding;
@@ -495,7 +484,7 @@ impl WindowApi for WindowOS {
             return;
         };
         let window_id = self.id();
-        debug!("{}: {window_id}", function_name!());
+        debug!("{window_id}");
         if focused_psn == psn {
             let mut event_bytes = [0u8; 0xf8];
             event_bytes[0x04] = 0xf8;
@@ -550,8 +539,7 @@ impl WindowApi for WindowOS {
                 .read()
         };
         (pid != 0).then_some(pid).ok_or(Error::InvalidInput(format!(
-            "{}: can not get pid from {:?}.",
-            function_name!(),
+            "can not get pid from {:?}.",
             self.ax_element
         )))
     }

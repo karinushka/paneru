@@ -1,5 +1,4 @@
 use core::ptr::NonNull;
-use log::{debug, info, warn};
 use objc2::rc::Retained;
 use objc2::{AllocAnyThread, DefinedClass, define_class, msg_send, sel};
 use objc2_app_kit::{
@@ -10,7 +9,7 @@ use objc2_foundation::{
     NSNotificationCenter, NSNumber, NSObject, NSString,
 };
 use std::ffi::c_void;
-use stdext::function_name;
+use tracing::{debug, info, warn};
 
 use crate::events::{Event, EventSender};
 use crate::manager::Process;
@@ -159,7 +158,7 @@ define_class!(
             context: *mut c_void,
         ) {
             let Some(process) = NonNull::new(context).map(|ptr| unsafe { ptr.cast::<Process>().as_mut() }) else {
-                warn!("{}: null pointer passed as context", function_name!());
+                warn!("null pointer passed as context", );
                 return;
             };
 
@@ -181,7 +180,7 @@ define_class!(
                     process.unobserve_activation_policy();
                 }
                 err => {
-                    warn!("{}: unknown key path {err:?}", function_name!());
+                    warn!("unknown key path {err:?}", );
                     return;
                 }
             }
@@ -192,8 +191,8 @@ define_class!(
             };
             _= self.ivars().events.send(msg);
             debug!(
-                "{}: got {key_path:?} for {}",
-                function_name!(),
+                "got {key_path:?} for {}",
+
                 process.name
             );
         }
@@ -243,7 +242,7 @@ impl WorkspaceObserver {
         let notification_center = shared_ws.notificationCenter();
 
         for (sel, name) in &methods {
-            debug!("{}: registering {} with {name}", function_name!(), *sel);
+            debug!("registering {} with {name}", *sel);
             let notification_type = NSString::from_str(name);
             unsafe {
                 notification_center.addObserver_selector_name_object(
@@ -264,7 +263,7 @@ impl WorkspaceObserver {
         ];
         let distributed_notification_center = NSDistributedNotificationCenter::defaultCenter();
         for (sel, name) in &methods {
-            debug!("{}: registering {} with {name}", function_name!(), *sel);
+            debug!("registering {} with {name}", *sel);
             let notification_type = NSString::from_str(name);
             unsafe {
                 distributed_notification_center.addObserver_selector_name_object(
@@ -282,7 +281,7 @@ impl WorkspaceObserver {
         )];
         let default_center = NSNotificationCenter::defaultCenter();
         for (sel, name) in &methods {
-            debug!("{}: registering {} with {name}", function_name!(), *sel);
+            debug!("registering {} with {name}", *sel);
             let notification_type = NSString::from_str(name);
             unsafe {
                 default_center.addObserver_selector_name_object(
@@ -299,7 +298,7 @@ impl WorkspaceObserver {
 impl Drop for WorkspaceObserver {
     /// Deregisters all previously registered notification callbacks when the `WorkspaceObserver` is dropped.
     fn drop(&mut self) {
-        info!("{}: deregistering callbacks.", function_name!());
+        info!("deregistering callbacks.");
         unsafe {
             NSWorkspace::sharedWorkspace()
                 .notificationCenter()

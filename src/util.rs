@@ -4,7 +4,6 @@ use accessibility_sys::{
     kAXWindowsAttribute,
 };
 use core::ptr::NonNull;
-use log::debug;
 use objc2_core_foundation::{
     CFArray, CFBoolean, CFNumber, CFNumberType, CFRetained, CFRunLoop, CFRunLoopMode,
     CFRunLoopSource, CFString, CFType, Type, kCFTypeArrayCallBacks,
@@ -16,6 +15,7 @@ use std::{
     ptr::null_mut,
 };
 use stdext::function_name;
+use tracing::debug;
 
 use crate::{
     errors::{Error, Result},
@@ -182,8 +182,7 @@ impl AXUIAttributes for CFRetained<AXUIWrapper> {
         NonNull::new(attribute)
             .map(|ptr| unsafe { CFRetained::from_raw(ptr.cast()) })
             .ok_or(Error::InvalidInput(format!(
-                "{}: nullptr while getting attribute {name}.",
-                function_name!()
+                "nullptr while getting attribute {name}.",
             )))
     }
 }
@@ -259,16 +258,14 @@ pub fn add_run_loop(observer: &AXUIWrapper, mode: Option<&CFRunLoopMode>) -> Res
     match CFRunLoop::main() {
         Some(main_loop) if run_loop.is_some() => {
             debug!(
-                "{}: add runloop: {run_loop:?} observer {:?}",
-                function_name!(),
+                "add runloop: {run_loop:?} observer {:?}",
                 observer.as_ptr::<CFRunLoopSource>(),
             );
             CFRunLoop::add_source(&main_loop, run_loop, mode);
             Ok(())
         }
         _ => Err(Error::PermissionDenied(format!(
-            "{}: Unable to register run loop source for observer {:?} ",
-            function_name!(),
+            "Unable to register run loop source for observer {:?} ",
             observer.as_ptr::<CFRunLoopSource>(),
         ))),
     }
@@ -282,8 +279,7 @@ pub fn add_run_loop(observer: &AXUIWrapper, mode: Option<&CFRunLoopMode>) -> Res
 pub fn remove_run_loop(observer: &AXUIWrapper) {
     if let Some(run_loop_source) = run_loop_source(observer) {
         debug!(
-            "{}: removing runloop: {run_loop_source:?} observer {:?}",
-            function_name!(),
+            "removing runloop: {run_loop_source:?} observer {:?}",
             observer.as_ptr::<CFRunLoopSource>(),
         );
         CFRunLoopSource::invalidate(run_loop_source);

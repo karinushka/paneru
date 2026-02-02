@@ -1,5 +1,4 @@
 use accessibility_sys::{AXError, AXObserverRef, AXUIElementRef};
-use log::error;
 use objc2::MainThreadMarker;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSEventMask};
@@ -7,7 +6,7 @@ use objc2_core_foundation::CFString;
 use objc2_foundation::{NSDate, NSDefaultRunLoopMode};
 use std::ffi::c_void;
 use std::pin::Pin;
-use stdext::function_name;
+use tracing::error;
 
 use crate::config::{CONFIGURATION_FILE, Config};
 use crate::errors::{Error, Result};
@@ -191,17 +190,13 @@ impl PlatformCallbacks {
     ///   `NSWorkspace` observers, and Carbon process event handlers.
     pub fn setup_handlers(&mut self) -> Result<()> {
         if !check_ax_privilege() {
-            return Err(Error::PermissionDenied(format!(
-                "{}: Accessibility permissions are required. Please enable them in System Preferences -> Security & Privacy -> Privacy -> Accessibility.",
-                function_name!()
-            )));
+            return Err(Error::PermissionDenied(
+                "Accessibility permissions are required. Please enable them in System Preferences -> Security & Privacy -> Privacy -> Accessibility.".to_string(),
+            ));
         }
 
         if !check_separate_spaces() {
-            error!(
-                "{}: Option 'display has separate spaces' disabled.",
-                function_name!()
-            );
+            error!("Option 'display has separate spaces' disabled.");
             return Err(Error::InvalidConfig(
                 "Option 'display has separate spaces' disabled.".to_string(),
             ));

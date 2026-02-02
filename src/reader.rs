@@ -1,8 +1,7 @@
-use log::{debug, error};
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::{fs, thread};
-use stdext::function_name;
+use tracing::{debug, error};
 
 use crate::config::parse_command;
 use crate::errors::Result;
@@ -35,7 +34,7 @@ impl CommandReader {
             .flat_map(|param| [param.as_bytes(), &[0]].concat())
             .collect::<Vec<_>>();
         let size: u32 = output.len().try_into()?;
-        debug!("{}: {:?} {output:?}", function_name!(), size.to_le_bytes());
+        debug!("{:?} {output:?}", size.to_le_bytes());
 
         let mut stream = UnixStream::connect(CommandReader::SOCKET_PATH)?;
         stream.write_all(&size.to_le_bytes())?;
@@ -61,7 +60,7 @@ impl CommandReader {
     pub fn start(mut self) {
         thread::spawn(move || {
             if let Err(err) = self.runner() {
-                error!("{}: {err}", function_name!());
+                error!("{err}");
             }
         });
     }
@@ -79,9 +78,7 @@ impl CommandReader {
         let listener = UnixListener::bind(CommandReader::SOCKET_PATH)?;
 
         for stream in listener.incoming() {
-            let Ok(mut stream) =
-                stream.inspect_err(|err| error!("{}: reading stream {err}", function_name!()))
-            else {
+            let Ok(mut stream) = stream.inspect_err(|err| error!("reading stream {err}")) else {
                 continue;
             };
             let mut buffer = [0u8; 4];
@@ -102,14 +99,14 @@ impl CommandReader {
                 .collect::<Vec<_>>();
             let argv_ref = argv.iter().map(String::as_str).collect::<Vec<_>>();
 
-            if let Ok(command) = parse_command(&argv_ref)
-                .inspect_err(|err| error!("{}: parsing command: {err}", function_name!()))
+            if let Ok(command) =
+                parse_command(&argv_ref).inspect_err(|err| error!("parsing command: {err}"))
             {
                 _ = self
                     .events
                     .send(Event::Command { command })
                     .inspect_err(|err| {
-                        error!("{}: sending command: {err}", function_name!());
+                        error!("sending command: {err}");
                     });
             }
         }
@@ -119,12 +116,12 @@ impl CommandReader {
 
 fn full_read(stream: &mut UnixStream, expected: usize, buffer: &mut [u8]) -> bool {
     if let Ok(count) = stream.read(buffer).inspect_err(|err| {
-        error!("{}: {err}", function_name!());
+        error!("{err}");
     }) && count == expected
     {
         true
     } else {
-        error!("{}: short read, expected {expected}.", function_name!());
+        error!("short read, expected {expected}.");
         false
     }
 }

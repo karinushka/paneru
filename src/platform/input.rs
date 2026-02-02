@@ -1,5 +1,4 @@
 use core::ptr::NonNull;
-use log::{error, info};
 use objc2::rc::Retained;
 use objc2_app_kit::{NSEvent, NSEventType, NSTouch, NSTouchPhase};
 use objc2_core_foundation::{CFMachPort, CFRetained, CFRunLoop, kCFRunLoopCommonModes};
@@ -14,6 +13,7 @@ use std::marker::PhantomPinned;
 use std::pin::Pin;
 use std::ptr::null_mut;
 use stdext::function_name;
+use tracing::{error, info};
 
 use crate::config::Config;
 use crate::errors::{Error, Result};
@@ -114,7 +114,7 @@ impl InputHandler {
         Ok(scopeguard::guard(
             pinned,
             Box::new(move |_: Pin<Box<Self>>| {
-                info!("{}: Unregistering event_handler", function_name!());
+                info!("Unregistering event_handler");
                 CFRunLoop::remove_source(&main_loop, Some(&run_loop_source), loop_mode);
                 CFMachPort::invalidate(&port);
                 CGEvent::tap_enable(&port, false);
@@ -141,14 +141,15 @@ impl InputHandler {
         mut event_ref: NonNull<CGEvent>,
         this: *mut c_void,
     ) -> *mut CGEvent {
-        match NonNull::new(this).map(|this| unsafe { this.cast::<InputHandler>().as_mut() }) {
-            Some(this) => {
-                let intercept = this.input_handler(event_type, unsafe { event_ref.as_ref() });
-                if intercept {
-                    return null_mut();
-                }
+        if let Some(this) =
+            NonNull::new(this).map(|this| unsafe { this.cast::<InputHandler>().as_mut() })
+        {
+            let intercept = this.input_handler(event_type, unsafe { event_ref.as_ref() });
+            if intercept {
+                return null_mut();
             }
-            _ => error!("Zero passed to Event Handler."),
+        } else {
+            error!("Zero passed to Event Handler.");
         }
         unsafe { event_ref.as_mut() }
     }
@@ -169,7 +170,7 @@ impl InputHandler {
         };
         let result = match event_type {
             CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
-                info!("{}: Tap Disabled", function_name!());
+                info!("Tap Disabled");
                 if let Some(port) = &self.tap_port {
                     CGEvent::tap_enable(port, true);
                 }
@@ -201,7 +202,7 @@ impl InputHandler {
             _ => self.handle_swipe(event),
         };
         if let Err(err) = result {
-            error!("{}: error sending event: {err}", function_name!());
+            error!("error sending event: {err}");
             // The socket is dead, so no use trying to send to it.
             // Trigger cleanup destructor, unregistering the handler.
             self.events = None;
@@ -291,7 +292,7 @@ impl InputHandler {
             .and_then(|command| {
                 events
                     .send(Event::Command { command })
-                    .inspect_err(|err| error!("{}: Error sending command: {err}", function_name!()))
+                    .inspect_err(|err| error!("Error sending command: {err}"))
                     .ok()
             })
             .is_some()

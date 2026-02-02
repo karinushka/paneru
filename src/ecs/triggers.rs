@@ -5,11 +5,10 @@ use bevy::ecs::message::MessageWriter;
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Has, With};
 use bevy::ecs::system::{Commands, NonSendMut, Populated, Query, Res, ResMut, Single};
-use log::{debug, error, info, trace, warn};
 use notify::event::{DataChange, MetadataKind, ModifyKind};
 use notify::{EventKind, Watcher};
 use std::time::Duration;
-use stdext::function_name;
+use tracing::{debug, error, info, trace, warn};
 
 use super::{
     ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, MissionControlActive,
@@ -57,33 +56,26 @@ pub(super) fn mouse_moved_trigger(
         return;
     }
     if config.ffm_flag().is_some() {
-        trace!("{}: ffm_window_id > 0", function_name!());
+        trace!("ffm_window_id > 0");
         return;
     }
     let Ok(window_id) = window_manager.find_window_at_point(&point) else {
-        debug!(
-            "{}: can not find window at point {point:?}",
-            function_name!()
-        );
+        debug!("can not find window at point {point:?}");
         return;
     };
     if windows
         .focused()
         .is_some_and(|(window, _)| window.id() == window_id)
     {
-        trace!("{}: allready focused {}", function_name!(), window_id);
+        trace!("allready focused {window_id}");
         return;
     }
     let Some((window, _)) = windows.find(window_id) else {
-        trace!(
-            "{}: can not find focused window: {}",
-            function_name!(),
-            window_id
-        );
+        trace!("can not find focused window: {window_id}");
         return;
     };
     if !window.is_eligible() {
-        trace!("{}: {} not eligible", function_name!(), window_id);
+        trace!("{window_id} not eligible");
         return;
     }
 
@@ -95,13 +87,15 @@ pub(super) fn mouse_moved_trigger(
                 window
                     .child_role()
                     .inspect_err(|err| {
-                        warn!("{}: getting role {window_id}: {err}", function_name!());
+                        warn!("getting role {window_id}: {err}");
                     })
                     .is_ok_and(|child| child)
                     .then_some(window)
             })
         });
-    let window = child_window.unwrap_or(window);
+    if let Some(child) = child_window {
+        debug!("found child of {}: {}", child.id(), window.id());
+    }
 
     // Do not reshuffle windows due to moved mouse focus.
     config.set_skip_reshuffle(true);
@@ -141,7 +135,7 @@ pub(super) fn mouse_down_trigger(
     if mission_control_active.0 {
         return;
     }
-    trace!("{}: {point:?}", function_name!());
+    trace!("{point:?}");
 
     let Some((window, entity)) = window_manager
         .0
@@ -201,8 +195,7 @@ pub(super) fn mouse_dragged_trigger(
         }
     } else {
         debug!(
-            "{}: Adding a drag marker ({entity}, {}) to window id {}.",
-            function_name!(),
+            "Adding a drag marker ({entity}, {}) to window id {}.",
             active_display.id(),
             window.id(),
         );
@@ -248,27 +241,19 @@ pub(super) fn workspace_change_trigger(
     };
 
     let Ok(workspace_id) = window_manager.active_display_space(active_display.id()) else {
-        error!("{}: Unable to get active workspace id!", function_name!());
+        error!("Unable to get active workspace id!");
         return;
     };
 
     for (strip, entity, active) in workspaces {
         if active && strip.id() != workspace_id {
-            debug!(
-                "{}: Workspace id {} no longer active",
-                function_name!(),
-                strip.id()
-            );
+            debug!("Workspace id {} no longer active", strip.id());
             commands
                 .entity(entity)
                 .try_remove::<ActiveWorkspaceMarker>();
         }
         if !active && strip.id() == workspace_id {
-            debug!(
-                "{}: Workspace id {} is active",
-                function_name!(),
-                strip.id()
-            );
+            debug!("Workspace id {} is active", strip.id());
             commands.entity(entity).try_insert(ActiveWorkspaceMarker);
         }
     }
@@ -286,16 +271,13 @@ pub(super) fn active_workspace_trigger(
         return;
     };
     let workspace_id = active_strip.id();
-    debug!("{}: workspace {workspace_id}", function_name!());
+    debug!("workspace {workspace_id}");
 
     let find_window = |window_id| windows.find_managed(window_id).map(|(_, entity)| entity);
     let Ok(moved_windows) =
         windows_not_in_strip(workspace_id, find_window, active_strip, &window_manager).inspect_err(
             |err| {
-                warn!(
-                    "{}: unable to get windows in the current workspace: {err}",
-                    function_name!()
-                );
+                warn!("unable to get windows in the current workspace: {err}");
             },
         )
     else {
@@ -303,10 +285,7 @@ pub(super) fn active_workspace_trigger(
     };
 
     for entity in moved_windows {
-        debug!(
-            "{}: Window {entity} moved to workspace {workspace_id}.",
-            function_name!(),
-        );
+        debug!("Window {entity} moved to workspace {workspace_id}.");
 
         workspaces.iter_mut().for_each(|mut strip| {
             strip.remove(entity);
@@ -345,27 +324,20 @@ pub(super) fn display_change_trigger(
     };
 
     let Ok(active_id) = window_manager.active_display_id() else {
-        error!("{}: Unable to get active display id!", function_name!());
+        error!("Unable to get active display id!");
         return;
     };
 
     for (display, entity, focused) in displays {
-        if focused && display.id() != active_id {
-            debug!(
-                "{}: Display id {} no longer active",
-                function_name!(),
-                display.id()
-            );
+        let display_id = display.id();
+        if focused && display_id != active_id {
+            debug!("Display id {display_id} no longer active");
             if let Ok(mut cmd) = commands.get_entity(entity) {
                 cmd.try_remove::<ActiveDisplayMarker>();
             }
         }
-        if !focused && display.id() == active_id {
-            debug!(
-                "{}: Display id {} is active",
-                function_name!(),
-                display.id()
-            );
+        if !focused && display_id == active_id {
+            debug!("Display id {display_id} is active");
             if let Ok(mut cmd) = commands.get_entity(entity) {
                 cmd.try_insert(ActiveDisplayMarker);
             }
@@ -399,41 +371,30 @@ pub(super) fn front_switched_trigger(
     let Some((BProcess(process), children)) =
         processes.iter().find(|process| &process.0.psn() == psn)
     else {
-        error!(
-            "{}: Unable to find process with PSN {psn:?}",
-            function_name!()
-        );
+        error!("Unable to find process with PSN {psn:?}");
         return;
     };
 
     if children.len() > 1 {
-        warn!(
-            "{}: Multiple apps registered to process '{}'.",
-            function_name!(),
-            process.name()
-        );
+        warn!("Multiple apps registered to process '{}'.", process.name());
     }
     let Some(app) = children
         .first()
         .and_then(|entity| applications.get(*entity).ok())
     else {
-        error!(
-            "{}: No application for process '{}'.",
-            function_name!(),
-            process.name()
-        );
+        error!("No application for process '{}'.", process.name());
         return;
     };
-    debug!("{}: {}", function_name!(), process.name());
+    debug!("process name: {}", process.name());
 
     if let Ok(focused_id) = app.focused_window_id().inspect_err(|err| {
-        warn!("{}: can not get current focus: {err}", function_name!());
+        warn!("can not get current focus: {err}");
     }) {
         commands.trigger(WMEventTrigger(Event::WindowFocused {
             window_id: focused_id,
         }));
     } else if let Some((_, entity)) = windows.focused() {
-        debug!("{}: reseting focus.", function_name!());
+        debug!("reseting focus.");
         config.set_ffm_flag(None);
         commands.entity(entity).try_remove::<FocusedMarker>();
     }
@@ -455,7 +416,7 @@ pub(super) fn center_mouse_trigger(
         && !config.skip_reshuffle()
         && config.ffm_flag().is_none_or(|id| id != window.id())
     {
-        debug!("{}: centering on {}.", function_name!(), window.id());
+        debug!("centering on {}.", window.id());
         window_manager.center_mouse(Some(window), &active_display.bounds());
     }
 }
@@ -509,14 +470,10 @@ pub(super) fn window_focused_trigger(
         }
     }
 
-    debug!("{}: window id {}", function_name!(), window.id());
+    debug!("window id {}", window.id());
 
     let Ok(app) = applications.get(child.parent()) else {
-        warn!(
-            "{}: Unable to get parent for window {}.",
-            function_name!(),
-            window.id()
-        );
+        warn!("Unable to get parent for window {}.", window.id());
         return;
     };
     if !app.is_frontmost() {
@@ -625,8 +582,7 @@ pub(super) fn application_event_trigger(
                 let timeout = Timeout::new(
                     Duration::from_secs(PROCESS_READY_TIMEOUT_SEC),
                     Some(format!(
-                        "{}: Process '{}' did not become ready in {PROCESS_READY_TIMEOUT_SEC}s.",
-                        function_name!(),
+                        "Process '{}' did not become ready in {PROCESS_READY_TIMEOUT_SEC}s.",
                         process.name()
                     )),
                 );
@@ -676,7 +632,7 @@ pub(super) fn dispatch_application_messages(
 
         Event::ApplicationHidden { pid } => {
             let Some((_, children)) = applications.iter().find(|(app, _)| app.pid() == *pid) else {
-                warn!("{}: Unable to find with pid {pid}", function_name!());
+                warn!("Unable to find with pid {pid}");
                 return;
             };
             for entity in children {
@@ -686,10 +642,7 @@ pub(super) fn dispatch_application_messages(
 
         Event::ApplicationVisible { pid } => {
             let Some((_, children)) = applications.iter().find(|(app, _)| app.pid() == *pid) else {
-                warn!(
-                    "{}: Unable to find application with pid {pid}",
-                    function_name!()
-                );
+                warn!("Unable to find application with pid {pid}");
                 return;
             };
             for entity in children {
@@ -714,12 +667,12 @@ pub(super) fn window_unmanaged_trigger(
     if let Some(marker) = marker {
         match marker {
             Unmanaged::Floating => {
-                debug!("{}: Entity {entity} is floating.", function_name!(),);
+                debug!("Entity {entity} is floating.");
                 active_display.active_strip().remove(entity);
             }
 
             Unmanaged::Minimized | Unmanaged::Hidden => {
-                debug!("{}: Entity {entity} is minimized.", function_name!());
+                debug!("Entity {entity} is minimized.");
                 let active_strip = active_display.active_strip();
                 give_away_focus(entity, &windows, active_strip, &mut commands);
                 active_display.active_strip().remove(entity);
@@ -735,7 +688,7 @@ pub(super) fn window_managed_trigger(
     mut commands: Commands,
 ) {
     let entity = trigger.event().entity;
-    debug!("{}: Entity {entity} is managed again.", function_name!(),);
+    debug!("Entity {entity} is managed again.");
 
     active_display.active_strip().append(entity);
     reshuffle_around(entity, &mut commands);
@@ -763,19 +716,12 @@ pub(super) fn window_destroyed_trigger(
     };
 
     let Some((window, entity, child, _)) = windows.find_all(window_id) else {
-        error!(
-            "{}: Trying to destroy non-existing window {window_id}.",
-            function_name!()
-        );
+        error!("Trying to destroy non-existing window {window_id}.");
         return;
     };
 
     let Ok(mut app) = apps.get_mut(child.parent()) else {
-        error!(
-            "{}: Window {} has no parent!",
-            function_name!(),
-            window.id()
-        );
+        error!("Window {} has no parent!", window.id());
         return;
     };
     app.unobserve_window(window);
@@ -808,10 +754,7 @@ fn give_away_focus(
             .and_then(|entity| windows.get(entity).zip(Some(entity)))
         {
             let window_id = window.id();
-            debug!(
-                "{}: window destroyed, moving focus to {window_id}",
-                function_name!()
-            );
+            debug!("window destroyed, moving focus to {window_id}");
             commands.trigger(WMEventTrigger(Event::WindowFocused { window_id }));
             reshuffle_around(entity, commands);
         }
@@ -847,24 +790,16 @@ pub(super) fn spawn_window_trigger(
         }
 
         let Ok(pid) = window.pid() else {
-            trace!(
-                "{}: Unable to get window pid for {}",
-                function_name!(),
-                window_id,
-            );
+            trace!("Unable to get window pid for {window_id}");
             continue;
         };
         let Some((app_entity, mut app)) = apps.iter_mut().find(|(_, app)| app.pid() == pid) else {
-            trace!(
-                "{}: unable to find application with pid {pid}.",
-                function_name!()
-            );
+            trace!("unable to find application with pid {pid}.");
             continue;
         };
 
         debug!(
-            "{}: created {} title: {} role: {} subrole: {} element: {}",
-            function_name!(),
+            "created {} title: {} role: {} subrole: {} element: {}",
             window_id,
             window.title().unwrap_or_default(),
             window.role().unwrap_or_default(),
@@ -873,19 +808,14 @@ pub(super) fn spawn_window_trigger(
         );
 
         if app.observe_window(&window).is_err() {
-            warn!(
-                "{}: Error observing window {}.",
-                function_name!(),
-                window_id
-            );
+            warn!("Error observing window {window_id}.");
         }
         window.set_psn(app.psn());
         let eligible = app.parent_window(active_display.id()).is_err() || window.is_root();
         window.set_eligible(eligible);
         let bundle_id = app.bundle_id().unwrap_or_default();
         debug!(
-            "{}: window {} isroot {} eligible {} bundle_id {}",
-            function_name!(),
+            "window {} isroot {} eligible {} bundle_id {}",
             window_id,
             window.is_root(),
             window.is_eligible(),
@@ -895,11 +825,7 @@ pub(super) fn spawn_window_trigger(
         let title = window.title().unwrap_or_default();
         let properties = config.find_window_properties(&title, bundle_id);
         if !properties.is_empty() {
-            debug!(
-                "{}: Applying window properties for '{}'",
-                function_name!(),
-                window.id()
-            );
+            debug!("Applying window properties for '{}'", window.id());
         }
         apply_window_properties(
             window,
@@ -940,7 +866,7 @@ fn apply_window_properties(
 
     _ = window
         .update_frame(&active_display.bounds())
-        .inspect_err(|err| error!("{}: {err}", function_name!()));
+        .inspect_err(|err| error!("{err}"));
 
     // Insert the window into the internal Bevy state.
     let entity = commands.spawn((window, ChildOf(app_entity))).id();
@@ -966,10 +892,10 @@ fn apply_window_properties(
         Some,
     );
 
-    debug!("{}: New window adding at {strip}", function_name!());
+    debug!("New window adding at {strip}");
     match insert_at {
         Some(after) => {
-            debug!("{}: New window inserted at {after}", function_name!());
+            debug!("New window inserted at {after}");
             strip.insert_at(after, entity);
         }
         None => strip.append(entity),
@@ -1001,11 +927,7 @@ pub(super) fn refresh_configuration_trigger(
         EventKind::Remove(_) => {
             for path in &event.paths {
                 _ = watcher.unwatch(path).inspect_err(|err| {
-                    error!(
-                        "{}: unwatching the config '{}': {err}",
-                        function_name!(),
-                        path.display()
-                    );
+                    error!("unwatching the config '{}': {err}", path.display());
                 });
             }
             return;
@@ -1016,34 +938,21 @@ pub(super) fn refresh_configuration_trigger(
     for path in &event.paths {
         if let Some(symlink) = symlink_target(path) {
             debug!(
-                "{}: symlink '{}' changed, replacing the watcher.",
-                function_name!(),
+                "symlink '{}' changed, replacing the watcher.",
                 symlink.display()
             );
             if let Ok(new_watcher) = window_manager
                 .setup_config_watcher(path)
                 .inspect_err(|err| {
-                    error!(
-                        "{}: watching the config '{}': {err}",
-                        function_name!(),
-                        path.display()
-                    );
+                    error!("watching the config '{}': {err}", path.display());
                 })
             {
                 *watcher = new_watcher;
             }
         }
-        info!(
-            "{}: Reloading configuration file; {}",
-            function_name!(),
-            path.display()
-        );
+        info!("Reloading configuration file; {}", path.display());
         _ = config.reload_config(path.as_path()).inspect_err(|err| {
-            error!(
-                "{}: loading config '{}': {err}",
-                function_name!(),
-                path.display()
-            );
+            error!("loading config '{}': {err}", path.display());
         });
     }
 }
@@ -1097,10 +1006,9 @@ pub(super) fn print_internal_state_trigger(
                 .map(print_window)
                 .collect::<Vec<_>>();
 
+            let display_id = display.id();
             debug!(
-                "{}: Display {}{}, workspace id {}:\n{}",
-                function_name!(),
-                display.id(),
+                "Display {display_id}{}, workspace id {}: {strip}:\n{}",
                 if active { ", active" } else { "" },
                 strip.id(),
                 windows.join("\n")
@@ -1113,14 +1021,10 @@ pub(super) fn print_internal_state_trigger(
         .filter(|entity| !seen.contains(&entity.1))
         .map(print_window)
         .collect::<Vec<_>>();
-    debug!("{}: Remaining:\n{}", function_name!(), remaining.join("\n"));
+    debug!("Remaining:\n{}", remaining.join("\n"));
 
     if let Some(pool) = bevy::tasks::ComputeTaskPool::try_get() {
-        debug!(
-            "{}: Running with {} threads",
-            function_name!(),
-            pool.thread_num()
-        );
+        debug!("Running with {} threads", pool.thread_num());
     }
 }
 
@@ -1141,10 +1045,7 @@ pub(super) fn stray_focus_observer(
         .iter()
         .filter(|(_, stray_focus)| stray_focus.0 == window_id)
         .for_each(|(timeout_entity, _)| {
-            debug!(
-                "{}: Re-queueing lost focus event for window id {window_id}.",
-                function_name!()
-            );
+            debug!("Re-queueing lost focus event for window id {window_id}.");
             messages.write(Event::WindowFocused { window_id });
             commands.entity(timeout_entity).despawn();
         });

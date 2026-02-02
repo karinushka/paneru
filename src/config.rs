@@ -1,3 +1,4 @@
+use arc_swap::{ArcSwap, Guard};
 use bevy::ecs::resource::Resource;
 use log::{error, info, warn};
 use objc2_core_foundation::{CFData, CFString};
@@ -9,10 +10,9 @@ use std::{
     ffi::c_void,
     path::{Path, PathBuf},
     ptr::NonNull,
-    sync::{Arc, LazyLock, RwLock},
+    sync::{Arc, LazyLock},
 };
 use stdext::function_name;
-use stdext::prelude::RwLockExt;
 
 use crate::{
     commands::{Command, Direction, Operation},
@@ -152,7 +152,7 @@ pub fn parse_command(argv: &[&str]) -> Result<Command> {
 /// It provides methods for loading, reloading, and querying configuration settings.
 #[derive(Clone, Debug, Resource)]
 pub struct Config {
-    inner: Arc<RwLock<InnerConfig>>,
+    inner: Arc<ArcSwap<InnerConfig>>,
 }
 
 impl Config {
@@ -167,7 +167,7 @@ impl Config {
     /// `Ok(Self)` if the configuration is loaded successfully, otherwise `Err(Error)` with an error message.
     pub fn new(path: &Path) -> Result<Self> {
         Ok(Config {
-            inner: RwLock::new(InnerConfig::new(path)?).into(),
+            inner: Arc::new(ArcSwap::from_pointee(InnerConfig::new(path)?)),
         })
     }
 
@@ -182,8 +182,7 @@ impl Config {
     /// `Ok(())` if the configuration is reloaded successfully, otherwise `Err(Error)` with an error message.
     pub fn reload_config(&mut self, path: &Path) -> Result<()> {
         let new = InnerConfig::new(path)?;
-        let mut old = self.inner.force_write();
-        *old = new;
+        self.inner.store(Arc::new(new));
         Ok(())
     }
 
@@ -191,9 +190,9 @@ impl Config {
     ///
     /// # Returns
     ///
-    /// A `std::sync::RwLockReadGuard` allowing read access to `InnerConfig`.
-    fn inner(&self) -> std::sync::RwLockReadGuard<'_, InnerConfig> {
-        self.inner.force_read()
+    /// A `Guard<Arc<InnerConfig>>` allowing read access to `InnerConfig`.
+    fn inner(&self) -> Guard<Arc<InnerConfig>> {
+        self.inner.load()
     }
 
     /// Returns a clone of the `MainOptions` from the current configuration.
@@ -229,8 +228,9 @@ impl Config {
     ///
     /// `Some(Command)` if a matching keybinding is found, otherwise `None`.
     pub fn find_keybind(&self, keycode: u8, mask: u8) -> Option<Command> {
-        let lock = self.inner();
-        lock.bindings
+        let config = self.inner();
+        config
+            .bindings
             .values()
             .flat_map(|binds| binds.all())
             .find_map(|bind| {
@@ -272,7 +272,7 @@ impl Default for Config {
     /// Returns a default `Config` instance with an empty `InnerConfig`.
     fn default() -> Self {
         Config {
-            inner: RwLock::new(InnerConfig::default()).into(),
+            inner: Arc::new(ArcSwap::from_pointee(InnerConfig::default())),
         }
     }
 }
@@ -821,8 +821,9 @@ floating = true
 index = 1
 "#;
     let config = Config {
-        inner: RwLock::new(InnerConfig::parse_config(input).expect("Failed to parse config"))
-            .into(),
+        inner: Arc::new(ArcSwap::from_pointee(
+            InnerConfig::parse_config(input).expect("Failed to parse config"),
+        )),
     };
     let find_key = |k| {
         virtual_keycode()

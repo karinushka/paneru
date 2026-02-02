@@ -16,6 +16,7 @@ pedantic = "warn"
 
 [dependencies]
 accessibility-sys = "0.2.0"
+arc-swap = "1.8.1"
 bevy = { version = "0.18.0", default-features = false, features = [
   "multi_threaded",
 ] }

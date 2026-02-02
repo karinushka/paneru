@@ -21,7 +21,7 @@ use stdext::function_name;
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
 use crate::platform::{ConnID, ProcessSerialNumber, WinID, WorkspaceId};
-use crate::util::{AXUIWrapper, create_array, symlink_target};
+use crate::util::{AXUIWrapper, MacResult, create_array, symlink_target};
 use app::ApplicationOS;
 pub use app::{Application, ApplicationApi};
 pub use display::{Column, Display, LayoutStrip};
@@ -504,7 +504,8 @@ impl WindowManagerApi for WindowManagerOS {
                 &mut window_id,
                 &mut window_conn_id,
             )
-        };
+        }
+        .to_result(function_name!())?;
         if self.main_cid == window_conn_id {
             unsafe {
                 SLSFindWindowAndOwner(
@@ -517,7 +518,8 @@ impl WindowManagerApi for WindowManagerOS {
                     &mut window_id,
                     &mut window_conn_id,
                 )
-            };
+            }
+            .to_result(function_name!())?;
         }
         if window_id == 0 {
             Err(Error::invalid_window(&format!(

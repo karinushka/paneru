@@ -28,7 +28,9 @@ use crate::platform::{
     AXObserverAddNotification, AXObserverCreate, AXObserverRemoveNotification, CFStringRef, ConnID,
     Pid, ProcessSerialNumber, WinID,
 };
-use crate::util::{AXUIAttributes, AXUIWrapper, add_run_loop, create_array, remove_run_loop};
+use crate::util::{
+    AXUIAttributes, AXUIWrapper, MacResult, add_run_loop, create_array, remove_run_loop,
+};
 
 /// A static `LazyLock` that holds a list of `AXNotification` strings to be observed for application-level events.
 /// These notifications are general events related to an application's lifecycle and state changes,
@@ -306,8 +308,10 @@ impl ApplicationApi for ApplicationOS {
     /// `true` if the application is frontmost, `false` otherwise.
     fn is_frontmost(&self) -> bool {
         let mut psn = ProcessSerialNumber::default();
-        unsafe { _SLPSGetFrontProcess(&mut psn) };
-        self.psn == psn
+        unsafe { _SLPSGetFrontProcess(&mut psn) }
+            .to_result(function_name!())
+            .is_ok()
+            && self.psn == psn
     }
 
     /// Returns the bundle identifier of the application.

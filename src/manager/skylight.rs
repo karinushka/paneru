@@ -479,7 +479,7 @@ unsafe extern "C" {
         element: AXUIElementRef,
         attribute: &CFString,
         value: &mut *mut CFType,
-    ) -> i32;
+    ) -> OSStatus;
 
     /// Sets the value of an accessibility attribute for a UI element.
     ///
@@ -496,7 +496,7 @@ unsafe extern "C" {
         element: AXUIElementRef,
         attribute: &CFString,
         value: &CFType,
-    ) -> i32;
+    ) -> OSStatus;
 
     /// Performs an action on an accessibility UI element.
     ///
@@ -508,7 +508,7 @@ unsafe extern "C" {
     /// # Returns
     ///
     /// An `i32` indicating success or failure (`kAXErrorSuccess` for success).
-    pub fn AXUIElementPerformAction(element: AXUIElementRef, action: &CFString) -> i32;
+    pub fn AXUIElementPerformAction(element: AXUIElementRef, action: &CFString) -> OSStatus;
 
     /// Creates an `AXUIElementRef` from a remote token (`CFDataRef`).
     /// This is often used to get an `AXUIElementRef` for windows on inactive spaces or to access windows that are not directly discoverable through other Accessibility APIs.

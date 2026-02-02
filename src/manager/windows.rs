@@ -23,7 +23,7 @@ use crate::ecs::params::ActiveDisplay;
 use crate::ecs::{RepositionMarker, ResizeMarker, reposition_entity};
 use crate::errors::{Error, Result};
 use crate::platform::{Pid, ProcessSerialNumber, WinID};
-use crate::util::{AXUIAttributes, AXUIWrapper};
+use crate::util::{AXUIAttributes, AXUIWrapper, MacResult};
 
 pub enum WindowPadding {
     Vertical(u16),
@@ -134,7 +134,8 @@ pub fn ax_window_id(element_ref: AXUIElementRef) -> Result<WinID> {
         function_name!()
     )))?;
     let mut window_id: WinID = 0;
-    if 0 != unsafe { _AXUIElementGetWindow(ptr.as_ptr(), &mut window_id) } || window_id == 0 {
+    unsafe { _AXUIElementGetWindow(ptr.as_ptr(), &mut window_id) }.to_result(function_name!())?;
+    if window_id == 0 {
         return Err(Error::InvalidInput(format!(
             "{}: Unable to get window id from element {element_ref:?}.",
             function_name!()
@@ -464,7 +465,8 @@ impl WindowApi for WindowOS {
                 window_ref,
                 CFString::from_static_str(kAXPositionAttribute).as_ref(),
                 &mut position_ref,
-            );
+            )
+            .to_result(function_name!())?;
             AXUIWrapper::retain(position_ref)?
         };
         let size = unsafe {
@@ -473,7 +475,8 @@ impl WindowApi for WindowOS {
                 window_ref,
                 CFString::from_static_str(kAXSizeAttribute).as_ref(),
                 &mut size_ref,
-            );
+            )
+            .to_result(function_name!())?;
             AXUIWrapper::retain(size_ref)?
         };
 

@@ -11,6 +11,7 @@ use super::workspace::WorkspaceObserver;
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
 use crate::platform::OSStatus;
+use crate::util::MacResult;
 
 /// Represents a process serial number (PSN), a unique identifier for a running process on macOS.
 /// It is used by the Carbon APIs to identify applications.
@@ -315,7 +316,10 @@ impl ProcessHandler {
 
         // Fake launch the existing processes.
         let mut psn = ProcessSerialNumber::default();
-        while 0 == unsafe { GetNextProcess(&raw mut psn) } {
+        while unsafe { GetNextProcess(&raw mut psn) }
+            .to_result(function_name!())
+            .is_ok()
+        {
             self.process_handler(psn, ProcessEventApp::Launched);
         }
 

@@ -20,7 +20,7 @@ use stdext::function_name;
 use crate::{
     errors::{Error, Result},
     manager::{AXUIElementCopyAttributeValue, ax_window_id},
-    platform::WinID,
+    platform::{OSStatus, WinID},
 };
 
 #[derive(Debug)]
@@ -177,19 +177,14 @@ pub trait AXUIAttributes {
 impl AXUIAttributes for CFRetained<AXUIWrapper> {
     fn get_attribute<T: Type>(&self, name: &CFRetained<CFString>) -> Result<CFRetained<T>> {
         let mut attribute: *mut CFType = null_mut();
-        if 0 == unsafe { AXUIElementCopyAttributeValue(self.as_ptr(), name, &mut attribute) } {
-            NonNull::new(attribute)
-                .map(|ptr| unsafe { CFRetained::from_raw(ptr.cast()) })
-                .ok_or(Error::InvalidInput(format!(
-                    "{}: nullptr while getting attribute {name}.",
-                    function_name!()
-                )))
-        } else {
-            Err(Error::NotFound(format!(
-                "{}: failed getting attribute {name}.",
+        unsafe { AXUIElementCopyAttributeValue(self.as_ptr(), name, &mut attribute) }
+            .to_result(function_name!())?;
+        NonNull::new(attribute)
+            .map(|ptr| unsafe { CFRetained::from_raw(ptr.cast()) })
+            .ok_or(Error::InvalidInput(format!(
+                "{}: nullptr while getting attribute {name}.",
                 function_name!()
             )))
-        }
     }
 }
 
@@ -319,5 +314,18 @@ pub fn symlink_target(path: &Path) -> Option<PathBuf> {
         Some(target)
     } else {
         None
+    }
+}
+
+pub trait MacResult {
+    fn to_result(self, place: &str) -> Result<()>;
+}
+
+impl MacResult for OSStatus {
+    fn to_result(self, place: &str) -> Result<()> {
+        match self {
+            0 => Ok(()),
+            err => Err(Error::Generic(format!("{place}: MacOS Error Code: {err}"))),
+        }
     }
 }

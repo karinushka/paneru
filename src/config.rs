@@ -14,10 +14,13 @@ use std::{
 use stdext::function_name;
 use stdext::prelude::RwLockExt;
 
-use crate::errors::{Error, Result};
 use crate::{
     commands::{Command, Direction, Operation},
     platform::OSStatus,
+};
+use crate::{
+    errors::{Error, Result},
+    util::MacResult,
 };
 use crate::{platform::CFStringRef, util::AXUIWrapper};
 
@@ -771,21 +774,25 @@ fn generate_virtual_keymap() -> Vec<(String, u8)> {
     let mut chars = vec![0u16; 256];
     let mut got: isize = 0;
     virtual_keycode()
-        .filter_map(|(_, keycode)| unsafe {
-            (0 == UCKeyTranslate(
-                keyboard_layout.as_ptr(),
-                (*keycode).into(),
-                UCKeyAction::Down as u16,
-                0,
-                LMGetKbdType().into(),
-                1,
-                &mut state,
-                chars.len(),
-                &mut got,
-                chars.as_mut_ptr(),
-            ))
-            .then(|| {
-                let name = CFString::with_characters(None, chars.as_ptr(), got)
+        .filter_map(|(_, keycode)| {
+            unsafe {
+                UCKeyTranslate(
+                    keyboard_layout.as_ptr(),
+                    (*keycode).into(),
+                    UCKeyAction::Down as u16,
+                    0,
+                    LMGetKbdType().into(),
+                    1,
+                    &mut state,
+                    chars.len(),
+                    &mut got,
+                    chars.as_mut_ptr(),
+                )
+            }
+            .to_result(function_name!())
+            .ok()
+            .map(|()| {
+                let name = unsafe { CFString::with_characters(None, chars.as_ptr(), got) }
                     .map(|chars| chars.to_string());
                 name.zip(Some(*keycode))
             })

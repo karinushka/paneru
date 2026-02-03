@@ -321,16 +321,18 @@ There is a public Matrix room [`#paneru:matrix.org`](https://matrix.to/#/%23pane
 
 ## Architecture Overview
 
-The overall architecture is layered, with a platform interaction layer at the base.
-This bottom layer, primarily within `platform.rs`, interfaces directly with the MacOS operating system via Objective-C and Core Graphics APIs.
-It runs the main RunLoop in the main thread, receiving OS-level events and acting as the bridge between the operating system and the application's logic.
-Events captured by this layer, such as window events, application state changes, and mouse events, are then pushed into a multiple-producer single-consumer (MPSC) queue.
+Paneru's architecture is built around the **Bevy ECS (Entity Component System)**, which manages the window manager's state as a collection of entities (displays, workspaces, applications, and windows) and components.
 
-Higher layers of the application consume events from this queue.
-These layers include the `WindowManager`, `ProcessManager`, and various event handlers.
-The `WindowManager` is responsible for tracking and manipulating window states, while the `ProcessManager` handles the lifecycle of applications.
-Event handlers in modules like `events.rs` interpret the raw events and orchestrate the appropriate responses within the application.
-This design promotes a decoupled architecture, allowing modules to operate independently while reacting to system-level changes.
+The system is decoupled into three primary layers:
+
+1.  **Platform Layer (`src/platform/`)**: Directly interfaces with macOS via `objc2` and Core Graphics. It runs the native Cocoa event loop and pumps OS events into a channel consumed by Bevy.
+2.  **Management Layer (`src/manager/`)**: Defines OS-agnostic traits (`WindowManagerApi`, `WindowApi`) that abstract window manipulation. The macOS-specific implementations (`WindowManagerOS`, `WindowOS`) bridge these traits to the Accessibility and SkyLight APIs.
+3.  **ECS Layer (`src/ecs/`)**: The "brain" of the application. Bevy systems process incoming events, handle input triggers, and manage animations. 
+
+### Repository Structure
+
+- **`main` branch**: Contains the stable, released code.
+- **`testing` branch**: Used for experimental features and architectural refactors. This branch is volatile and may be force-pushed.
 
 ## Tile Scrollably Elsewhere
 

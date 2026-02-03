@@ -15,7 +15,7 @@ use std::{
 use stdext::function_name;
 
 use crate::{
-    commands::{Command, Direction, Operation},
+    commands::{Command, Direction, MouseMove, Operation},
     platform::{Modifiers, OSStatus},
 };
 use crate::{
@@ -121,6 +121,24 @@ fn parse_operation(argv: &[&str]) -> Result<Operation> {
     Ok(out)
 }
 
+/// Parses a command argument vector into a `MouseMove` enum.
+fn parse_mouse_move(argv: &[&str]) -> Result<MouseMove> {
+    let empty = "";
+    let cmd = *argv.first().unwrap_or(&empty);
+    let err = Error::InvalidConfig(format!(
+        "{}: Invalid mouse command '{argv:?}'",
+        function_name!()
+    ));
+
+    let out = match cmd {
+        "nextdisplay" => MouseMove::ToNextDisplay,
+        _ => {
+            return Err(err);
+        }
+    };
+    Ok(out)
+}
+
 /// Parses a command argument vector into a `Command` enum.
 ///
 /// # Arguments
@@ -137,6 +155,7 @@ pub fn parse_command(argv: &[&str]) -> Result<Command> {
     let out = match cmd {
         "printstate" => Command::PrintState,
         "window" => Command::Window(parse_operation(&argv[1..])?),
+        "mouse" => Command::Mouse(parse_mouse_move(&argv[1..])?),
         "quit" => Command::Quit,
         _ => {
             return Err(Error::InvalidConfig(format!(

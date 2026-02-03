@@ -95,7 +95,7 @@ pub trait WindowManagerApi: Send + Sync {
     ///
     /// * `window` - A reference to the `Window` to center the mouse on.
     /// * `display_bounds` - The `CGRect` representing the bounds of the display the window is on.
-    fn center_mouse(&self, window: &Window, display_bounds: &CGRect);
+    fn center_mouse(&self, window: Option<&Window>, display_bounds: &CGRect);
     /// Adds existing windows for a given application, potentially resolving unresolved windows.
     ///
     /// # Arguments
@@ -393,30 +393,40 @@ impl WindowManagerApi for WindowManagerOS {
     }
 
     /// Centers the mouse cursor on the window if it's not already within the window's bounds.
-    fn center_mouse(&self, window: &Window, display_bounds: &CGRect) {
-        let mut cursor = CGPoint::default();
-        if unsafe { CGError::Success != SLSGetCurrentCursorLocation(self.main_cid, &mut cursor) } {
-            warn!(
-                "{}: Unable to get current cursor position.",
-                function_name!()
-            );
-            return;
-        }
-        let frame = window.frame();
-        if CGRectContainsPoint(frame, cursor) {
-            return;
-        }
+    fn center_mouse(&self, window: Option<&Window>, display_bounds: &CGRect) {
+        let center = if let Some(window) = window {
+            let mut cursor = CGPoint::default();
+            if unsafe {
+                CGError::Success != SLSGetCurrentCursorLocation(self.main_cid, &mut cursor)
+            } {
+                warn!(
+                    "{}: Unable to get current cursor position.",
+                    function_name!()
+                );
+                return;
+            }
+            let frame = window.frame();
+            if CGRectContainsPoint(frame, cursor) {
+                return;
+            }
 
-        let center = CGPoint::new(
-            display_bounds.origin.x + frame.origin.x + frame.size.width / 2.0,
-            display_bounds.origin.y + frame.origin.y + frame.size.height / 2.0,
-        );
-        let display_id = self.display_id(window.id());
-        #[allow(clippy::redundant_closure)]
-        let bounds = display_id.map(|display_id| CGDisplayBounds(display_id));
-        if bounds.is_ok_and(|bounds| !CGRectContainsPoint(bounds, center)) {
-            return;
-        }
+            let center = CGPoint::new(
+                display_bounds.origin.x + frame.origin.x + frame.size.width / 2.0,
+                display_bounds.origin.y + frame.origin.y + frame.size.height / 2.0,
+            );
+            let display_id = self.display_id(window.id());
+            #[allow(clippy::redundant_closure)]
+            let bounds = display_id.map(|display_id| CGDisplayBounds(display_id));
+            if bounds.is_ok_and(|bounds| !CGRectContainsPoint(bounds, center)) {
+                return;
+            }
+            center
+        } else {
+            CGPoint::new(
+                display_bounds.origin.x + display_bounds.size.width / 2.0,
+                display_bounds.origin.y + display_bounds.size.height / 2.0,
+            )
+        };
         CGWarpMouseCursorPosition(center);
     }
 

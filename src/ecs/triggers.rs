@@ -456,7 +456,7 @@ pub(super) fn center_mouse_trigger(
         && config.ffm_flag().is_none_or(|id| id != window.id())
     {
         debug!("{}: centering on {}.", function_name!(), window.id());
-        window_manager.center_mouse(window, &active_display.bounds());
+        window_manager.center_mouse(Some(window), &active_display.bounds());
     }
 }
 

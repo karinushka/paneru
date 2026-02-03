@@ -226,7 +226,7 @@ impl WindowManagerApi for MockWindowManager {
     }
 
     /// Does nothing, as mouse centering is not tested at this level.
-    fn center_mouse(&self, _window: &Window, _display_bounds: &CGRect) {
+    fn center_mouse(&self, _window: Option<&Window>, _display_bounds: &CGRect) {
         println!("{}:", function_name!());
     }
 

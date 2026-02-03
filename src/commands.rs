@@ -1,7 +1,6 @@
 use bevy::ecs::entity::Entity;
 use bevy::ecs::observer::On;
-use bevy::ecs::query::With;
-use bevy::ecs::system::{Commands, Res, Single};
+use bevy::ecs::system::{Commands, Res, ResMut};
 use log::{debug, error};
 use objc2_core_foundation::CGPoint;
 use stdext::function_name;
@@ -9,8 +8,8 @@ use stdext::function_name;
 use crate::config::{Config, preset_column_widths};
 use crate::ecs::params::{ActiveDisplayMut, Windows};
 use crate::ecs::{
-    CommandTrigger, FocusedMarker, Unmanaged, WMEventTrigger, reposition_entity, reshuffle_around,
-    resize_entity,
+    CommandTrigger, FocusFollowsMouse, Unmanaged, WMEventTrigger, reposition_entity,
+    reshuffle_around, resize_entity,
 };
 use crate::errors::Result;
 use crate::events::Event;
@@ -48,11 +47,20 @@ pub enum Operation {
     Stack(bool),
 }
 
+/// Defines operations that can be performed on the mouse.
+#[derive(Clone, Debug)]
+pub enum MouseMove {
+    /// Moves the mouse pointer to the next available display.
+    ToNextDisplay,
+}
+
 /// Represents a command that can be issued to the window manager.
 #[derive(Clone, Debug)]
 pub enum Command {
     /// A command targeting a window with a specific `Operation`.
     Window(Operation),
+    /// A command targeting the mouse with a specific `MouseOperation`.
+    Mouse(MouseMove),
     /// A command to quit the window manager application.
     Quit,
     PrintState,
@@ -216,9 +224,7 @@ fn command_center_window(
         active_display.id(),
         commands,
     );
-    window_manager
-        .0
-        .center_mouse(window, &active_display.bounds());
+    window_manager.center_mouse(Some(window), &active_display.bounds());
 }
 
 /// Resizes the focused window based on preset column widths.
@@ -363,6 +369,27 @@ fn to_next_display(
     active_display.active_strip().remove(entity);
 }
 
+/// Moves the mouse pointer to the next available display.
+fn mouse_to_next_display(
+    active_display: &mut ActiveDisplayMut,
+    window_manager: &WindowManager,
+    ffm_flag: &mut ResMut<FocusFollowsMouse>,
+    commands: &mut Commands,
+) {
+    let Some(other) = active_display.other().next() else {
+        debug!("{}: no other display to move mouse to.", function_name!());
+        return;
+    };
+
+    let point = CGPoint::new(
+        other.bounds.origin.x + other.bounds.size.width / 2.0,
+        other.bounds.origin.y + other.bounds.size.height / 2.0,
+    );
+    window_manager.center_mouse(None, &other.bounds);
+    ffm_flag.as_mut().0 = None;
+    commands.trigger(WMEventTrigger(Event::MouseMoved { point }));
+}
+
 /// Handles various "window" commands, such as focus, swap, center, resize, manage, and stack.
 ///
 /// # Arguments
@@ -444,21 +471,20 @@ fn command_windows(
 /// # Arguments
 ///
 /// * `trigger` - The `On<CommandTrigger>` event trigger containing the command to process.
-/// * `window_manager` - The `WindowManager` resource for interacting with the window management logic.
-/// * `current_focus` - A `Single` query for the `Entity` of the currently focused window, identified by `With<FocusedMarker>`.
 /// * `windows` - A query for `Window` components, their `Entity`, and whether they have the `Unmanaged` marker.
 /// * `active_display` - A mutable reference to the `ActiveDisplayMut` resource.
+/// * `window_manager` - The `WindowManager` resource for interacting with the window management logic.
 /// * `commands` - Bevy commands to trigger events and modify entities.
 /// * `config` - The `Config` resource, containing application settings.
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 pub fn process_command_trigger(
     trigger: On<CommandTrigger>,
-    _: Single<Entity, With<FocusedMarker>>, // Will not execute without focused window.
     windows: Windows,
     mut active_display: ActiveDisplayMut,
     window_manager: Res<WindowManager>,
-    mut commands: Commands,
     config: Res<Config>,
+    mut ffm_flag: ResMut<FocusFollowsMouse>,
+    mut commands: Commands,
 ) {
     let res = match &trigger.event().0 {
         Command::Window(operation) => {
@@ -477,6 +503,19 @@ pub fn process_command_trigger(
             } else {
                 Ok(())
             }
+        }
+        Command::Mouse(movement) => {
+            match movement {
+                MouseMove::ToNextDisplay => {
+                    mouse_to_next_display(
+                        &mut active_display,
+                        &window_manager,
+                        &mut ffm_flag,
+                        &mut commands,
+                    );
+                }
+            }
+            Ok(())
         }
         Command::PrintState => {
             commands.trigger(WMEventTrigger(Event::PrintState));

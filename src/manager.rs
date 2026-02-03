@@ -107,11 +107,10 @@ pub trait WindowManagerApi: Send + Sync {
     /// # Returns
     ///
     /// `Ok(Vec<Window>)` containing the found and added windows, otherwise `Err(Error)`.
-    fn add_existing_application_windows(
+    fn find_existing_application_windows(
         &self,
         app: &mut Application,
         spaces: &[WorkspaceId],
-        refresh_index: i32,
     ) -> Result<Vec<Window>>;
     /// Finds the `WinID` of a window at a given screen point.
     ///
@@ -437,16 +436,14 @@ impl WindowManagerApi for WindowManagerOS {
     ///
     /// * `app` - A mutable reference to the `Application` whose windows are to be added.
     /// * `spaces` - A slice of space IDs to query.
-    /// * `refresh_index` - An integer indicating the refresh index, used to determine if all windows are resolved.
     ///
     /// # Returns
     ///
     /// `Ok(Vec<Window>)` containing the found windows, otherwise `Err(Error)`.
-    fn add_existing_application_windows(
+    fn find_existing_application_windows(
         &self,
         app: &mut Application,
         spaces: &[WorkspaceId],
-        refresh_index: i32,
     ) -> Result<Vec<Window>> {
         let global_window_list = existing_application_window_list(self.main_cid, app, spaces)?;
         if global_window_list.is_empty() {
@@ -462,13 +459,11 @@ impl WindowManagerApi for WindowManagerOS {
 
         let mut found_windows = app.window_list();
         if global_window_list.len() == found_windows.len() {
-            if refresh_index != -1 {
-                debug!(
-                    "{}: All windows for {:?} are now resolved",
-                    function_name!(),
-                    app.psn(),
-                );
-            }
+            debug!(
+                "{}: All windows for {:?} are now resolved",
+                function_name!(),
+                app.psn(),
+            );
         } else {
             let find_window =
                 |window_id| found_windows.iter().find(|window| window.id() == window_id);
@@ -716,6 +711,7 @@ fn existing_application_window_list(
 /// * `window_list` - A mutable vector of `WinID`s representing the expected global window list; found windows are removed from this list.
 fn bruteforce_windows(app: &mut Application, window_list: &mut Vec<WinID>) -> Vec<Window> {
     const MAGIC: u32 = 0x636f_636f;
+    const BUFSIZE: isize = 0x14;
     let mut found_windows = Vec::new();
     debug!(
         "{}: {app} has unresolved window on other desktops, bruteforcing them.",
@@ -729,48 +725,43 @@ fn bruteforce_windows(app: &mut Application, window_list: &mut Vec<WinID>) -> Ve
     //  https://github.com/lwouis/alt-tab-macos/issues/1324#issuecomment-2631035482
     //
 
-    unsafe {
-        const BUFSIZE: isize = 0x14;
-        let Some(data_ref) = CFMutableData::new(None, BUFSIZE) else {
-            error!("{}: error creating mutable data", function_name!());
-            return found_windows;
-        };
-        CFMutableData::increase_length(data_ref.deref().into(), BUFSIZE);
+    let Some(data_ref) = CFMutableData::new(None, BUFSIZE) else {
+        error!("{}: error creating mutable data", function_name!());
+        return found_windows;
+    };
+    CFMutableData::increase_length(data_ref.deref().into(), BUFSIZE);
 
-        let data = from_raw_parts_mut(
+    let data = unsafe {
+        from_raw_parts_mut(
             CFMutableData::mutable_byte_ptr(data_ref.deref().into()),
             BUFSIZE as usize,
-        );
-        let bytes = app.pid().to_ne_bytes();
-        data[0x0..bytes.len()].copy_from_slice(&bytes);
-        let bytes = MAGIC.to_ne_bytes();
-        data[0x8..0x8 + bytes.len()].copy_from_slice(&bytes);
+        )
+    };
+    let bytes = app.pid().to_ne_bytes();
+    data[0x0..bytes.len()].copy_from_slice(&bytes);
+    let bytes = MAGIC.to_ne_bytes();
+    data[0x8..0x8 + bytes.len()].copy_from_slice(&bytes);
 
-        for element_id in 0..0x7fffu64 {
-            //
-            // NOTE: Only the element_id changes between iterations.
-            //
+    for element_id in 0..0x7fffu64 {
+        let bytes = element_id.to_ne_bytes();
+        data[0xc..0xc + bytes.len()].copy_from_slice(&bytes);
 
-            let bytes = element_id.to_ne_bytes();
-            data[0xc..0xc + bytes.len()].copy_from_slice(&bytes);
+        let Ok(element_ref) =
+            AXUIWrapper::retain(unsafe { _AXUIElementCreateWithRemoteToken(data_ref.as_ref()) })
+        else {
+            continue;
+        };
+        let Ok(window_id) = ax_window_id(element_ref.as_ptr()) else {
+            continue;
+        };
 
-            let Ok(element_ref) =
-                AXUIWrapper::retain(_AXUIElementCreateWithRemoteToken(data_ref.as_ref()))
-            else {
-                continue;
-            };
-            let Ok(window_id) = ax_window_id(element_ref.as_ptr()) else {
-                continue;
-            };
-
-            if let Some(index) = window_list.iter().position(|&id| id == window_id) {
-                window_list.remove(index);
-                debug!("{}: Found window {window_id:?}", function_name!());
-                if let Ok(window) = WindowOS::new(&element_ref)
-                    .inspect_err(|err| warn!("{}: {err}", function_name!()))
-                {
-                    found_windows.push(Window::new(Box::new(window)));
-                }
+        if let Some(index) = window_list.iter().position(|&id| id == window_id) {
+            window_list.remove(index);
+            debug!("{}: Found window {window_id:?}", function_name!());
+            if let Ok(window) =
+                WindowOS::new(&element_ref).inspect_err(|err| warn!("{}: {err}", function_name!()))
+            {
+                found_windows.push(Window::new(Box::new(window)));
             }
         }
     }

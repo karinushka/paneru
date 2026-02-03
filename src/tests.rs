@@ -231,11 +231,10 @@ impl WindowManagerApi for MockWindowManager {
     }
 
     /// Always returns an empty vector of windows.
-    fn add_existing_application_windows(
+    fn find_existing_application_windows(
         &self,
         _app: &mut Application,
         _spaces: &[WorkspaceId],
-        _refresh_index: i32,
     ) -> Result<Vec<Window>> {
         println!("{}:", function_name!());
         Ok(vec![])

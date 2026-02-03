@@ -183,7 +183,7 @@ pub(crate) fn add_existing_application(
     for (mut app, entity) in fresh_apps {
         if app.observe().is_ok_and(|result| result)
             && let Ok(windows) = window_manager
-                .add_existing_application_windows(&mut app, &spaces, 0)
+                .find_existing_application_windows(&mut app, &spaces)
                 .inspect_err(|err| warn!("{}: {err}", function_name!()))
         {
             commands.trigger(SpawnWindowTrigger(windows));

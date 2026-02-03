@@ -18,7 +18,7 @@ use stdext::function_name;
 use super::{ActiveDisplayMarker, FocusFollowsMouse, MissionControlActive, SkipReshuffle};
 use crate::{
     config::{Config, WindowParams},
-    ecs::{ActiveWorkspaceMarker, FocusedMarker, Unmanaged},
+    ecs::{ActiveWorkspaceMarker, FocusedMarker, FullWidthMarker, Unmanaged},
     manager::{Display, LayoutStrip, Window},
     platform::WinID,
 };
@@ -240,6 +240,7 @@ pub struct Windows<'w, 's> {
         ),
     >,
     focus: Query<'w, 's, (&'static Window, Entity), With<FocusedMarker>>,
+    previous_size: Query<'w, 's, (&'static Window, Entity, &'static FullWidthMarker)>,
 }
 
 impl Windows<'_, '_> {
@@ -295,5 +296,12 @@ impl Windows<'_, '_> {
         (),
     > {
         self.all.iter()
+    }
+
+    pub fn full_width(&self, entity: Entity) -> Option<f64> {
+        self.previous_size
+            .get(entity)
+            .map(|(_, _, width)| width.0)
+            .ok()
     }
 }

@@ -166,6 +166,10 @@ pub struct ReshuffleAroundMarker;
 #[derive(Component)]
 pub struct WindowSwipeMarker(pub f64);
 
+/// Stores the width ratio of a window before it was made full-width.
+#[derive(Component)]
+pub struct FullWidthMarker(pub f64);
+
 /// Enum component indicating the unmanaged state of a window.
 #[derive(Component, Debug)]
 pub enum Unmanaged {

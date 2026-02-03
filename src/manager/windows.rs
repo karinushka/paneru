@@ -34,7 +34,6 @@ pub trait WindowApi: Send + Sync {
     fn id(&self) -> WinID;
     fn psn(&self) -> Option<ProcessSerialNumber>;
     fn frame(&self) -> CGRect;
-    fn next_size_ratio(&self, size_ratios: &[f64]) -> f64;
     fn element(&self) -> CFRetained<AXUIWrapper>;
     fn title(&self) -> Result<String>;
     fn child_role(&self) -> Result<bool>;
@@ -291,25 +290,6 @@ impl WindowApi for WindowOS {
     /// The window's frame as `CGRect`.
     fn frame(&self) -> CGRect {
         self.frame
-    }
-
-    /// Calculates the next preferred size ratio for resizing the window.
-    /// It cycles through a predefined set of ratios.
-    ///
-    /// # Arguments
-    ///
-    /// * `size_ratios` - A slice of `f64` representing the preset size ratios.
-    ///
-    /// # Returns
-    ///
-    /// The next size ratio as `f64`.
-    fn next_size_ratio(&self, size_ratios: &[f64]) -> f64 {
-        let current = self.width_ratio;
-        size_ratios
-            .iter()
-            .find(|r| **r > current + 0.05)
-            .copied()
-            .unwrap_or_else(|| *size_ratios.first().unwrap_or(&0.5))
     }
 
     /// Returns the accessibility element of the window.

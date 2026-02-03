@@ -5,11 +5,11 @@ use log::{debug, error};
 use objc2_core_foundation::CGPoint;
 use stdext::function_name;
 
-use crate::config::{Config, preset_column_widths};
+use crate::config::Config;
 use crate::ecs::params::{ActiveDisplayMut, Windows};
 use crate::ecs::{
-    CommandTrigger, FocusFollowsMouse, Unmanaged, WMEventTrigger, reposition_entity,
-    reshuffle_around, resize_entity,
+    CommandTrigger, FocusFollowsMouse, FullWidthMarker, Unmanaged, WMEventTrigger,
+    reposition_entity, reshuffle_around, resize_entity,
 };
 use crate::errors::Result;
 use crate::events::Event;
@@ -248,10 +248,14 @@ fn resize_window(
         return;
     };
     let display_width = active_display.bounds().size.width;
-    let width_ratios = preset_column_widths(config);
-    let width_ratio = window.next_size_ratio(&width_ratios);
+    let current_ratio = window.frame().size.width / display_width;
+    let next_ratio = config
+        .preset_column_widths()
+        .into_iter()
+        .find(|&r| r > current_ratio + 0.05)
+        .unwrap_or_else(|| *config.preset_column_widths().first().unwrap_or(&0.5));
 
-    let width = width_ratio * display_width;
+    let width = next_ratio * display_width;
     let height = window.frame().size.height;
     let x = (display_width - width).min(window.frame().origin.x);
     let y = window.frame().origin.y;
@@ -273,9 +277,11 @@ fn full_width_window(
     windows: &Windows,
     active_display: &mut ActiveDisplayMut,
     commands: &mut Commands,
-    config: &Config,
 ) {
-    let Some((window, entity)) = windows.focused() else {
+    let Some((window, entity, _, _)) = windows
+        .focused()
+        .and_then(|(_, entity)| windows.get_all(entity))
+    else {
         return;
     };
 
@@ -283,15 +289,15 @@ fn full_width_window(
     let height = window.frame().size.height;
     let y = window.frame().origin.y;
 
-    let is_full_width = (window.frame().size.width - display_width).abs() < 1.0;
-
-    let (width, x) = if is_full_width {
-        let width_ratios = preset_column_widths(config);
-        let ratio = *width_ratios.first().unwrap_or(&0.5);
-        let w = ratio * display_width;
+    let (width, x) = if let Some(previous_ratio) = windows.full_width(entity) {
+        commands.entity(entity).try_remove::<FullWidthMarker>();
+        let w = previous_ratio * display_width;
         let x_pos = (display_width - w).min(window.frame().origin.x);
         (w, x_pos)
     } else {
+        commands
+            .entity(entity)
+            .try_insert(FullWidthMarker(window.width_ratio()));
         (display_width, 0.0)
     };
 
@@ -465,7 +471,7 @@ fn command_windows(
         }
 
         Operation::FullWidth => {
-            full_width_window(windows, active_display, commands, config);
+            full_width_window(windows, active_display, commands);
         }
 
         Operation::ToNextDisplay => {

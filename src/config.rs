@@ -286,6 +286,10 @@ impl Config {
             })
             .unwrap_or_default()
     }
+
+    pub fn preset_column_widths(&self) -> Vec<f64> {
+        self.options().preset_column_widths
+    }
 }
 
 impl Default for Config {
@@ -406,19 +410,6 @@ pub struct MainOptions {
 /// Returns a default set of column widths.
 pub fn default_preset_column_widths() -> Vec<f64> {
     vec![0.25, 0.33333, 0.50, 0.66667, 0.75]
-}
-
-/// Retrieves the preset column widths from the configuration.
-///
-/// # Arguments
-///
-/// * `config` - A reference to the `Config` resource.
-///
-/// # Returns
-///
-/// A `Vec<f64>` of preset column widths from the configuration, or default values if not specified.
-pub fn preset_column_widths(config: &Config) -> Vec<f64> {
-    config.options().preset_column_widths
 }
 
 /// `Keybinding` represents a keyboard shortcut and the command it triggers.

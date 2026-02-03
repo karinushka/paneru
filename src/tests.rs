@@ -290,12 +290,6 @@ impl WindowApi for MockWindow {
         self.frame
     }
 
-    /// Always returns `0.5` for the next size ratio.
-    fn next_size_ratio(&self, _: &[f64]) -> f64 {
-        println!("{}:", function_name!());
-        0.5
-    }
-
     /// Returns a dummy `CFRetained<AXUIWrapper>` for the mock window's accessibility element.
     fn element(&self) -> CFRetained<AXUIWrapper> {
         println!("{}:", function_name!());

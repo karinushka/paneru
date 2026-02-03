@@ -257,6 +257,9 @@ window_nextdisplay = "alt + shift - n"
 # Moves the mouse pointer to the next display.
 mouse_nextdisplay = "alt - n"
 
+# Size stacked windows in the column to equal heights.
+window_equalize = "alt + shift - e"
+
 # Quits the window manager.
 quit = "ctrl + alt - q"
 

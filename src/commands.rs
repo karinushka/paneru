@@ -41,6 +41,8 @@ pub enum Operation {
     FullWidth,
     /// Moves the focused window to the next available display.
     ToNextDisplay,
+    /// Distributes heights equally among windows in the focused stack.
+    Equalize,
     /// Toggles the managed state of the focused window.
     Manage,
     /// Stacks or unstacks a window. The boolean indicates whether to stack (`true`) or unstack (`false`).
@@ -390,6 +392,38 @@ fn mouse_to_next_display(
     commands.trigger(WMEventTrigger(Event::MouseMoved { point }));
 }
 
+/// Distributes heights equally among all windows in the currently focused stack.
+fn equalize_column(
+    windows: &Windows,
+    active_display: &mut ActiveDisplayMut,
+    commands: &mut Commands,
+) {
+    let Some((_, entity)) = windows.focused() else {
+        return;
+    };
+    let active_strip = active_display.active_strip();
+    let Ok(column) = active_strip
+        .index_of(entity)
+        .and_then(|index| active_strip.get(index))
+    else {
+        return;
+    };
+
+    if let Column::Stack(stack) = column {
+        let display_height =
+            active_display.bounds().size.height - active_display.display().menubar_height;
+        #[allow(clippy::cast_precision_loss)]
+        let equal_height = (display_height / stack.len() as f64).floor();
+
+        for &entity in &stack {
+            if let Some(window) = windows.get(entity) {
+                let width = window.frame().size.width;
+                resize_entity(entity, width, equal_height, active_display.id(), commands);
+            }
+        }
+    }
+}
+
 /// Handles various "window" commands, such as focus, swap, center, resize, manage, and stack.
 ///
 /// # Arguments
@@ -436,6 +470,10 @@ fn command_windows(
 
         Operation::ToNextDisplay => {
             to_next_display(windows, active_display, commands);
+        }
+
+        Operation::Equalize => {
+            equalize_column(windows, active_display, commands);
         }
 
         Operation::Manage => {

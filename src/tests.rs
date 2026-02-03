@@ -235,9 +235,9 @@ impl WindowManagerApi for MockWindowManager {
         &self,
         _app: &mut Application,
         _spaces: &[WorkspaceId],
-    ) -> Result<Vec<Window>> {
+    ) -> Result<(Vec<Window>, Vec<WinID>)> {
         println!("{}:", function_name!());
-        Ok(vec![])
+        Ok((vec![], vec![]))
     }
 
     /// Always returns `Ok(0)`.

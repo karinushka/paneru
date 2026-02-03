@@ -9,6 +9,7 @@ use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::common_conditions::resource_exists;
 use bevy::ecs::system::Commands;
 use bevy::prelude::Event as BevyEvent;
+use bevy::tasks::Task;
 use bevy::time::Timer;
 use bevy::time::common_conditions::on_timer;
 use bevy::time::{Time, Virtual};
@@ -215,6 +216,9 @@ impl Timeout {
 /// Component used as a retry mechanism for stray focus events that arrive before the target window is fully created.
 #[derive(Component)]
 pub struct StrayFocusEvent(pub WinID);
+
+#[derive(Component)]
+pub struct BruteforceWindows(Task<Vec<Window>>);
 
 /// Resource to control whether window reshuffling should be skipped.
 #[derive(Resource)]

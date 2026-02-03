@@ -20,7 +20,7 @@ use stdext::function_name;
 
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
-use crate::platform::{ConnID, ProcessSerialNumber, WinID, WorkspaceId};
+use crate::platform::{ConnID, Pid, ProcessSerialNumber, WinID, WorkspaceId};
 use crate::util::{AXUIWrapper, MacResult, create_array, symlink_target};
 use app::ApplicationOS;
 pub use app::{Application, ApplicationApi};
@@ -111,7 +111,7 @@ pub trait WindowManagerApi: Send + Sync {
         &self,
         app: &mut Application,
         spaces: &[WorkspaceId],
-    ) -> Result<Vec<Window>>;
+    ) -> Result<(Vec<Window>, Vec<WinID>)>;
     /// Finds the `WinID` of a window at a given screen point.
     ///
     /// # Arguments
@@ -444,7 +444,7 @@ impl WindowManagerApi for WindowManagerOS {
         &self,
         app: &mut Application,
         spaces: &[WorkspaceId],
-    ) -> Result<Vec<Window>> {
+    ) -> Result<(Vec<Window>, Vec<WinID>)> {
         let global_window_list = existing_application_window_list(self.main_cid, app, spaces)?;
         if global_window_list.is_empty() {
             return Err(Error::InvalidInput(format!(
@@ -457,32 +457,28 @@ impl WindowManagerApi for WindowManagerOS {
             function_name!()
         );
 
-        let mut found_windows = app.window_list();
-        if global_window_list.len() == found_windows.len() {
+        let found_windows = app.window_list();
+        if found_windows.len() == global_window_list.len() {
             debug!(
                 "{}: All windows for {:?} are now resolved",
                 function_name!(),
                 app.psn(),
             );
-        } else {
-            let find_window =
-                |window_id| found_windows.iter().find(|window| window.id() == window_id);
-            let mut app_window_list: Vec<WinID> = global_window_list
-                .iter()
-                .filter(|window_id| find_window(**window_id).is_none())
-                .copied()
-                .collect();
-
-            if !app_window_list.is_empty() {
-                debug!(
-                    "{}: {:?} has windows that are not yet resolved",
-                    function_name!(),
-                    app.psn(),
-                );
-                found_windows.extend(bruteforce_windows(app, &mut app_window_list));
-            }
+            return Ok((found_windows, vec![]));
         }
-        Ok(found_windows)
+
+        let find_window = |window_id| found_windows.iter().find(|window| window.id() == window_id);
+        let offscreen_windows = global_window_list
+            .into_iter()
+            .filter(|&window_id| find_window(window_id).is_none())
+            .collect::<Vec<_>>();
+        debug!(
+            "{}: {:?} has {} windows that are not yet resolved",
+            function_name!(),
+            app.psn(),
+            offscreen_windows.len()
+        );
+        Ok((found_windows, offscreen_windows))
     }
 
     /// Finds a window at a given screen point using `SkyLight` API.
@@ -709,12 +705,12 @@ fn existing_application_window_list(
 ///
 /// * `app` - A reference to the `Application` whose windows are to be brute-forced.
 /// * `window_list` - A mutable vector of `WinID`s representing the expected global window list; found windows are removed from this list.
-fn bruteforce_windows(app: &mut Application, window_list: &mut Vec<WinID>) -> Vec<Window> {
+pub fn bruteforce_windows(pid: Pid, mut window_list: Vec<WinID>) -> Vec<Window> {
     const MAGIC: u32 = 0x636f_636f;
     const BUFSIZE: isize = 0x14;
     let mut found_windows = Vec::new();
     debug!(
-        "{}: {app} has unresolved window on other desktops, bruteforcing them.",
+        "{}: {pid} has unresolved window on other desktops, bruteforcing them.",
         function_name!()
     );
 
@@ -737,7 +733,7 @@ fn bruteforce_windows(app: &mut Application, window_list: &mut Vec<WinID>) -> Ve
             BUFSIZE as usize,
         )
     };
-    let bytes = app.pid().to_ne_bytes();
+    let bytes = pid.to_ne_bytes();
     data[0x0..bytes.len()].copy_from_slice(&bytes);
     let bytes = MAGIC.to_ne_bytes();
     data[0x8..0x8 + bytes.len()].copy_from_slice(&bytes);

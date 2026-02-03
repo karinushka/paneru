@@ -4,6 +4,8 @@ use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::query::{Has, Or, With, Without};
 use bevy::ecs::system::{Commands, Local, NonSend, NonSendMut, Populated, Query, Res};
+use bevy::tasks::AsyncComputeTaskPool;
+use bevy::tasks::futures_lite::future;
 use bevy::time::Time;
 use log::{debug, error, info, trace, warn};
 use objc2_core_graphics::CGDirectDisplayID;
@@ -21,12 +23,13 @@ use super::{
 use crate::config::Config;
 use crate::ecs::params::{ActiveDisplay, Configuration, DebouncedSystem, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, Initializing, ReshuffleAroundMarker, Unmanaged, WindowSwipeMarker,
-    reposition_entity, reshuffle_around, resize_entity,
+    ActiveWorkspaceMarker, BruteforceWindows, Initializing, ReshuffleAroundMarker, Unmanaged,
+    WindowSwipeMarker, reposition_entity, reshuffle_around, resize_entity,
 };
 use crate::events::Event;
 use crate::manager::{
     Application, Column, Display, LayoutStrip, Process, Window, WindowManager, WindowOS,
+    bruteforce_windows,
 };
 use crate::platform::{PlatformCallbacks, WorkspaceId};
 
@@ -179,16 +182,25 @@ pub(crate) fn add_existing_application(
         .into_iter()
         .map(LayoutStrip::id)
         .collect::<Vec<_>>();
+    let thread_pool = AsyncComputeTaskPool::get();
 
     for (mut app, entity) in fresh_apps {
+        let mut offscreen_windows = vec![];
+
         if app.observe().is_ok_and(|result| result)
-            && let Ok(windows) = window_manager
+            && let Ok((found_windows, offscreen)) = window_manager
                 .find_existing_application_windows(&mut app, &spaces)
                 .inspect_err(|err| warn!("{}: {err}", function_name!()))
         {
-            commands.trigger(SpawnWindowTrigger(windows));
+            offscreen_windows.extend(offscreen);
+            commands.trigger(SpawnWindowTrigger(found_windows));
         }
         commands.entity(entity).try_remove::<ExistingMarker>();
+
+        let pid = app.pid();
+        let bruteforce_task =
+            thread_pool.spawn(async move { bruteforce_windows(pid, offscreen_windows) });
+        commands.spawn(BruteforceWindows(bruteforce_task));
     }
 }
 
@@ -206,6 +218,7 @@ pub(crate) fn add_existing_application(
 pub(crate) fn finish_setup(
     process_query: Query<Entity, With<ExistingMarker>>,
     windows: Windows,
+    mut bruteforce_tasks: Query<(Entity, &mut BruteforceWindows)>,
     mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
@@ -214,6 +227,19 @@ pub(crate) fn finish_setup(
         // The other two add_* functions are still running..
         return;
     }
+
+    // Reap the bruteforced windows.
+    if !bruteforce_tasks.is_empty() {
+        for (entity, mut job) in &mut bruteforce_tasks {
+            if let Some(found_windows) = future::block_on(future::poll_once(&mut job.0)) {
+                commands.trigger(SpawnWindowTrigger(found_windows));
+                commands.entity(entity).despawn();
+            }
+        }
+        // Wait for the next tick to finish initialization.
+        return;
+    }
+
     info!(
         "{}: Initialization: found {} windows.",
         function_name!(),

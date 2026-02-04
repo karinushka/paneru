@@ -278,6 +278,12 @@ title = ".*"
 bundle_id = "com.neovide.neovide"
 index = 1
 
+[windows.popup]
+# Matches a popup and silently appends it at the end.
+title = "Unimportant popup window"
+dont_focus = true
+index = 100
+
 [windows.all]
 # Matches all windows and adds a few pixels of spacing to their borders.
 title = ".*"

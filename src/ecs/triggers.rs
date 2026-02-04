@@ -840,6 +840,10 @@ fn apply_window_properties(
         .find_map(|props| props.floating)
         .unwrap_or(false);
     let wanted_insertion = properties.iter().find_map(|props| props.index);
+    let dont_focus = properties
+        .iter()
+        .find_map(|props| props.dont_focus)
+        .unwrap_or(false);
 
     // Do not add padding to floating windows.
     if let Some(padding) = properties.iter().find_map(|props| props.vertical_padding)
@@ -890,7 +894,17 @@ fn apply_window_properties(
         None => strip.append(entity),
     }
 
-    reshuffle_around(entity, commands);
+    if dont_focus {
+        if let Some((focus, _)) = windows.focused() {
+            debug!(
+                "Not focusing new window {entity}, keeping focus on '{}'",
+                focus.title().unwrap_or_default()
+            );
+            focus.focus_with_raise();
+        }
+    } else {
+        reshuffle_around(entity, commands);
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)]

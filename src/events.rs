@@ -61,9 +61,6 @@ pub enum Event {
     /// A window's title has changed.
     WindowTitleChanged { window_id: WinID },
 
-    /// Indicates the currently focused item.
-    CurrentlyFocused,
-
     /// A mouse down event has occurred.
     MouseDown { point: CGPoint },
     /// A mouse up event has occurred.

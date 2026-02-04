@@ -474,6 +474,7 @@ pub struct WindowParams {
     pub index: Option<usize>,
     pub vertical_padding: Option<u16>,
     pub horizontal_padding: Option<u16>,
+    pub dont_focus: Option<bool>,
 }
 
 /// Deserializes a regular expression from a string for window titles.

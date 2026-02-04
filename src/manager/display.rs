@@ -74,8 +74,9 @@ impl WindowPane {
         let index = after;
         if index >= self.len() {
             self.pane.push_back(Panel::Single(entity));
+        } else {
+            self.pane.insert(index, Panel::Single(entity));
         }
-        self.pane.insert(index, Panel::Single(entity));
     }
 
     /// Appends a window ID as a `Single` panel to the end of the pane.

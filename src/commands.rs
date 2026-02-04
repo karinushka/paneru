@@ -347,6 +347,7 @@ fn manage_window(windows: &Windows, commands: &mut Commands) {
 fn to_next_display(
     windows: &Windows,
     active_display: &mut ActiveDisplayMut,
+    window_manager: &WindowManager,
     commands: &mut Commands,
 ) {
     let Some((window, entity, _, unmanaged)) = windows
@@ -375,6 +376,7 @@ fn to_next_display(
     reposition_entity(entity, dest.x, dest.y, other.id(), commands);
     reshuffle_around(entity, commands);
 
+    window_manager.center_mouse(None, &other.bounds);
     active_display.active_strip().remove(entity);
 }
 
@@ -477,7 +479,7 @@ fn command_windows(
         }
 
         Operation::ToNextDisplay => {
-            to_next_display(windows, active_display, commands);
+            to_next_display(windows, active_display, window_manager, commands);
         }
 
         Operation::Equalize => {

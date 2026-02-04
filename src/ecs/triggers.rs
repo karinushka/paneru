@@ -524,14 +524,17 @@ pub(super) fn window_focused_trigger(
     }
 
     commands.entity(entity).try_insert(FocusedMarker);
-    config.set_ffm_flag(None);
 
-    if config.skip_reshuffle() {
-        // window_manager.skip_reshuffle = false;
-        config.set_skip_reshuffle(false);
-    } else {
+    if !config.skip_reshuffle() {
         reshuffle_around(entity, &mut commands);
     }
+
+    // Check if the reshuffle was caused by a keyboard switch or mouse move.
+    // Skip reshuffle if caused by mouse - because then it won't center.
+    if config.ffm_flag().is_none() {
+        config.set_skip_reshuffle(false);
+    }
+    config.set_ffm_flag(None);
 }
 
 /// Handles swipe gesture events, potentially triggering window sliding.

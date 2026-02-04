@@ -1059,7 +1059,7 @@ pub(super) fn print_internal_state_trigger(
     let focused = windows.focused();
     let print_window = |(window, entity, _, unmanaged): (&Window, Entity, &ChildOf, Option<_>)| {
         format!(
-            "\tid: {}, {entity}, {:.0}:{:.0}, {:.0}x{:.0}{}{}, title: '{:.70}'",
+            "\tid: {}, {entity}, {:.0}:{:.0}, {:.0}x{:.0}{}{}, role: {}, subrole: {}, title: '{:.70}'",
             window.id(),
             window.frame().origin.x,
             window.frame().origin.y,
@@ -1071,6 +1071,8 @@ pub(super) fn print_internal_state_trigger(
                 ""
             },
             unmanaged.map(|m| format!(", {m:?}")).unwrap_or_default(),
+            window.role().unwrap_or_default(),
+            window.subrole().unwrap_or_default(),
             window.title().unwrap_or_default()
         )
     };

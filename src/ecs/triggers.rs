@@ -708,7 +708,6 @@ pub(super) fn window_destroyed_trigger(
     trigger: On<WMEventTrigger>,
     windows: Windows,
     mut apps: Query<&mut Application>,
-    mut workspaces: Query<&mut LayoutStrip, With<ChildOf>>,
     mut commands: Commands,
 ) {
     let Event::WindowDestroyed { window_id } = trigger.event().0 else {
@@ -726,13 +725,6 @@ pub(super) fn window_destroyed_trigger(
     };
     app.unobserve_window(window);
 
-    workspaces
-        .iter()
-        .filter(|strip| strip.index_of(entity).is_ok())
-        .for_each(|strip| give_away_focus(entity, &windows, strip, &mut commands));
-    workspaces
-        .par_iter_mut()
-        .for_each(|mut strip| strip.remove(entity));
     commands.entity(entity).despawn();
 }
 
@@ -1049,4 +1041,22 @@ pub(super) fn stray_focus_observer(
             messages.write(Event::WindowFocused { window_id });
             commands.entity(timeout_entity).despawn();
         });
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn window_removal_observer(
+    trigger: On<Remove, Window>,
+    windows: Windows,
+    mut workspaces: Query<&mut LayoutStrip>,
+    mut commands: Commands,
+) {
+    let entity = trigger.event().entity;
+
+    if let Some(mut strip) = workspaces
+        .iter_mut()
+        .find(|strip| strip.index_of(entity).is_ok())
+    {
+        give_away_focus(entity, &windows, &strip, &mut commands);
+        strip.remove(entity);
+    }
 }

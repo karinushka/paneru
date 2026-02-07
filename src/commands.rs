@@ -281,10 +281,7 @@ fn full_width_window(
     active_display: &mut ActiveDisplayMut,
     commands: &mut Commands,
 ) {
-    let Some((window, entity, _, _)) = windows
-        .focused()
-        .and_then(|(_, entity)| windows.get_all(entity))
-    else {
+    let Some((window, entity)) = windows.focused() else {
         return;
     };
 
@@ -317,9 +314,9 @@ fn full_width_window(
 /// * `windows` - A mutable query for `Window` components, their `Entity`, and whether they have the `Unmanaged` marker.
 /// * `commands` - Bevy commands to modify entities.
 fn manage_window(windows: &Windows, commands: &mut Commands) {
-    let Some((window, entity, _, unmanaged)) = windows
+    let Some((window, entity, unmanaged)) = windows
         .focused()
-        .and_then(|(_, entity)| windows.get_all(entity))
+        .and_then(|(_, entity)| windows.get_managed(entity))
     else {
         return;
     };
@@ -350,9 +347,9 @@ fn to_next_display(
     window_manager: &WindowManager,
     commands: &mut Commands,
 ) {
-    let Some((window, entity, _, unmanaged)) = windows
+    let Some((window, entity, unmanaged)) = windows
         .focused()
-        .and_then(|(_, entity)| windows.get_all(entity))
+        .and_then(|(_, entity)| windows.get_managed(entity))
     else {
         return;
     };
@@ -491,9 +488,9 @@ fn command_windows(
         }
 
         Operation::Stack(stack) => {
-            if let Some((_, entity, _, unmanaged)) = windows
+            if let Some((_, entity, unmanaged)) = windows
                 .focused()
-                .and_then(|(_, entity)| windows.get_all(entity))
+                .and_then(|(_, entity)| windows.get_managed(entity))
             {
                 if unmanaged.is_some() {
                     return Ok(());

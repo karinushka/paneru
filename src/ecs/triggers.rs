@@ -447,17 +447,14 @@ pub(super) fn window_focused_trigger(
         return;
     };
 
-    let Some((window, entity, child, _)) = windows
-        .find(window_id)
-        .and_then(|(_, entity)| windows.get_all(entity))
-    else {
+    let Some((window, entity, parent)) = windows.find_parent(window_id) else {
         let timeout = Timeout::new(Duration::from_secs(STRAY_FOCUS_RETRY_SEC), None);
         commands.spawn((timeout, StrayFocusEvent(window_id)));
         return;
     };
 
     let focus = windows.focused().map(|(_, entity)| entity);
-    for (window, entity, _, _) in windows.iter() {
+    for (window, entity) in windows.iter() {
         let Ok(mut cmd) = commands.get_entity(entity) else {
             continue;
         };
@@ -472,7 +469,7 @@ pub(super) fn window_focused_trigger(
 
     debug!("window id {}", window.id());
 
-    let Ok(app) = applications.get(child.parent()) else {
+    let Ok(app) = applications.get(parent) else {
         warn!("Unable to get parent for window {}.", window.id());
         return;
     };
@@ -661,7 +658,7 @@ pub(super) fn window_unmanaged_trigger(
     mut commands: Commands,
 ) {
     let entity = trigger.event().entity;
-    let Some((_, _, _, marker)) = windows.get_all(trigger.event().entity) else {
+    let Some((_, _, marker)) = windows.get_managed(trigger.event().entity) else {
         return;
     };
     if let Some(marker) = marker {
@@ -714,12 +711,12 @@ pub(super) fn window_destroyed_trigger(
         return;
     };
 
-    let Some((window, entity, child, _)) = windows.find_all(window_id) else {
+    let Some((window, entity, parent)) = windows.find_parent(window_id) else {
         error!("Trying to destroy non-existing window {window_id}.");
         return;
     };
 
-    let Ok(mut app) = apps.get_mut(child.parent()) else {
+    let Ok(mut app) = apps.get_mut(parent) else {
         error!("Window {} has no parent!", window.id());
         return;
     };
@@ -777,7 +774,7 @@ pub(super) fn spawn_window_trigger(
     while let Some(mut window) = new_windows.pop() {
         let window_id = window.id();
 
-        if windows.find_all(window_id).is_some() {
+        if windows.find(window_id).is_some() {
             continue;
         }
 
@@ -952,7 +949,8 @@ pub(super) fn refresh_configuration_trigger(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn print_internal_state_trigger(
     trigger: On<WMEventTrigger>,
-    windows: Windows,
+    focused: Query<(&Window, Entity), With<FocusedMarker>>,
+    windows: Query<(&Window, Entity, &ChildOf, Option<&Unmanaged>)>,
     workspaces: Query<(&LayoutStrip, Entity, &ChildOf)>,
     displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
 ) {
@@ -960,7 +958,7 @@ pub(super) fn print_internal_state_trigger(
         return;
     };
 
-    let focused = windows.focused();
+    let focused = focused.single().ok();
     let print_window = |(window, entity, _, unmanaged): (&Window, Entity, &ChildOf, Option<_>)| {
         format!(
             "\tid: {}, {entity}, {:.0}:{:.0}, {:.0}x{:.0}{}{}, role: {}, subrole: {}, title: '{:.70}'",
@@ -991,7 +989,7 @@ pub(super) fn print_internal_state_trigger(
             let windows = strip
                 .all_windows()
                 .iter()
-                .filter_map(|entity| windows.get_all(*entity))
+                .filter_map(|entity| windows.get(*entity).ok())
                 .inspect(|(_, entity, _, _)| {
                     seen.insert(*entity);
                 })

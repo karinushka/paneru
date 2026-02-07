@@ -228,6 +228,7 @@ impl ActiveDisplayMut<'_, '_> {
 
 #[derive(SystemParam)]
 pub struct Windows<'w, 's> {
+    #[allow(clippy::type_complexity)]
     all: Query<
         'w,
         's,
@@ -243,32 +244,34 @@ pub struct Windows<'w, 's> {
 }
 
 impl Windows<'_, '_> {
-    pub fn get_all(
-        &self,
-        entity: Entity,
-    ) -> Option<(&Window, Entity, &ChildOf, Option<&Unmanaged>)> {
+    #[allow(clippy::type_complexity)]
+    fn get_all(&self, entity: Entity) -> Option<(&Window, Entity, &ChildOf, Option<&Unmanaged>)> {
         self.all
             .get(entity)
             .inspect_err(|err| warn!("unable to find window: {err}"))
             .ok()
     }
 
+    pub fn get_managed(&self, entity: Entity) -> Option<(&Window, Entity, Option<&Unmanaged>)> {
+        self.get_all(entity)
+            .map(|(window, entity, _, unmanaged)| (window, entity, unmanaged))
+    }
+
     pub fn get(&self, entity: Entity) -> Option<&Window> {
         self.get_all(entity).map(|(window, _, _, _)| window)
     }
 
-    pub fn find_all(
-        &self,
-        window_id: WinID,
-    ) -> Option<(&Window, Entity, &ChildOf, Option<&Unmanaged>)> {
+    pub fn find(&self, window_id: WinID) -> Option<(&Window, Entity)> {
         self.all
-            .iter()
+            .into_iter()
             .find(|(window, _, _, _)| window.id() == window_id)
+            .map(|(window, entity, _, _)| (window, entity))
     }
 
-    pub fn find(&self, window_id: WinID) -> Option<(&Window, Entity)> {
-        self.find_all(window_id)
-            .map(|(window, entity, _, _)| (window, entity))
+    pub fn find_parent(&self, window_id: WinID) -> Option<(&Window, Entity, Entity)> {
+        self.all.iter().find_map(|(window, entity, childof, _)| {
+            (window.id() == window_id).then_some((window, entity, childof.parent()))
+        })
     }
 
     pub fn find_managed(&self, window_id: WinID) -> Option<(&Window, Entity)> {
@@ -281,20 +284,10 @@ impl Windows<'_, '_> {
         self.focus.single().ok()
     }
 
-    pub fn iter(
-        &self,
-    ) -> bevy::ecs::query::QueryIter<
-        '_,
-        '_,
-        (
-            &'static Window,
-            Entity,
-            &'static ChildOf,
-            Option<&'static Unmanaged>,
-        ),
-        (),
-    > {
-        self.all.iter()
+    pub fn iter(&self) -> impl Iterator<Item = (&Window, Entity)> {
+        self.all
+            .iter()
+            .map(|(window, entity, _, _)| (window, entity))
     }
 
     pub fn full_width(&self, entity: Entity) -> Option<f64> {

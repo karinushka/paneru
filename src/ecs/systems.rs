@@ -234,7 +234,10 @@ pub(crate) fn finish_setup(
         return;
     }
 
-    info!("Initialization: found {} windows.", windows.iter().len());
+    info!(
+        "Initialization: found {:?} windows.",
+        windows.iter().size_hint()
+    );
 
     for (mut strip, active_strip) in &mut workspaces {
         let workspace_windows = window_manager
@@ -497,11 +500,12 @@ pub(super) fn find_orphaned_workspaces(
             }
         }
 
-        // Find remaining windows which are otuside of the strip.
+        // Find remaining windows which are outside of the strip.
         let floating = in_workspace.into_iter().filter_map(|window_id| {
             windows
-                .find_all(window_id)
-                .and_then(|(_, entity, _, unmanaged)| {
+                .find(window_id)
+                .and_then(|(_, entity)| windows.get_managed(entity))
+                .and_then(|(_, entity, unmanaged)| {
                     matches!(unmanaged, Some(Unmanaged::Floating)).then_some(entity)
                 })
         });

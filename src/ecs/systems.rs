@@ -21,7 +21,7 @@ use super::{
     WMEventTrigger,
 };
 use crate::config::Config;
-use crate::ecs::params::{ActiveDisplay, Configuration, DebouncedSystem, Windows};
+use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, BruteforceWindows, Initializing, ReshuffleAroundMarker, Unmanaged,
     WindowSwipeMarker, reposition_entity, reshuffle_around, resize_entity,
@@ -765,75 +765,68 @@ pub(super) fn animate_resize_windows(
 
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn window_swiper(
-    sliding: Populated<(&Window, Entity, &WindowSwipeMarker)>,
-    windows: Windows,
+    sliding: Populated<(Entity, &WindowSwipeMarker)>,
     active_display: ActiveDisplay,
-    config: Configuration,
-    mut debouncer: DebouncedSystem,
+    mut windows: Query<(&mut Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
     mut commands: Commands,
 ) {
-    const DEBOUNCE_SWIPE_EVENTS_MS: u64 = 500;
-    for (window, entity, WindowSwipeMarker(delta)) in sliding {
+    let active_strip = active_display.active_strip();
+    let display_bounds = active_display.bounds();
+
+    for (entity, WindowSwipeMarker(delta)) in sliding {
         commands.entity(entity).try_remove::<WindowSwipeMarker>();
 
-        let pos_x = window.frame().origin.x - (active_display.bounds().size.width * delta);
-        let frame = window.frame();
+        let display_width = display_bounds.size.width;
 
-        reposition_entity(
-            entity,
-            pos_x
-                .min(active_display.bounds().size.width - frame.size.width)
-                .max(0.0),
-            frame.origin.y,
-            active_display.id(),
-            &mut commands,
-        );
+        let current_x = windows
+            .get(entity)
+            .ok()
+            .map(|(w, moving, _)| {
+                moving.map_or(w.frame().origin.x, |m| m.origin.x)
+            })
+            .unwrap_or(0.0);
+        let new_x = current_x - (display_width * delta);
 
-        if pos_x > 0.0 && pos_x < (active_display.bounds().size.width - frame.size.width) {
-            reshuffle_around(entity, &mut commands);
-            return;
-        }
+        let window_width = |e| {
+            windows.get(e).ok().map(|(w, _, resizing)| {
+                resizing.map_or(w.frame().size.width, |marker| marker.size.width)
+            })
+        };
 
-        if !config.continuous_swipe()
-            || debouncer.bounce(Duration::from_millis(DEBOUNCE_SWIPE_EVENTS_MS))
-        {
-            return;
-        }
+        // 计算纯偏移位置（无钳制），用于滑动平移
+        let abs_positions: Vec<f64> = absolute_positions(active_strip, &window_width).collect();
+        let Some(&anchor_abs) = active_strip
+            .index_of(entity)
+            .ok()
+            .and_then(|index| abs_positions.get(index))
+        else {
+            continue;
+        };
+        let offset = new_x - anchor_abs;
 
-        if let Some(window) =
-            slide_to_next_window(&active_display, entity, *delta, pos_x, &mut commands)
-                .and_then(|entity| windows.get(entity))
-        {
-            commands.trigger(WMEventTrigger(Event::WindowFocused {
-                window_id: window.id(),
-            }));
+        let targets: Vec<_> = abs_positions
+            .into_iter()
+            .zip(active_strip.all_columns())
+            .filter_map(|(abs_pos, col_entity)| {
+                window_width(col_entity).map(|_| (abs_pos + offset, col_entity))
+            })
+            .collect();
+
+        for (upper_left, col_entity) in targets {
+            if let Ok((mut w, _, _)) = windows.get_mut(col_entity) {
+                let y = w.frame().origin.y;
+                let width = w.frame().size.width;
+                if upper_left + width > -width && upper_left < display_width + width {
+                    w.reposition(upper_left, y, &display_bounds);
+                } else {
+                    w.set_origin(upper_left, y);
+                }
+                commands.entity(col_entity).try_remove::<RepositionMarker>();
+            }
         }
     }
 }
 
-fn slide_to_next_window(
-    active_display: &ActiveDisplay,
-    entity: Entity,
-    delta: f64,
-    delta_x: f64,
-    commands: &mut Commands,
-) -> Option<Entity> {
-    let strip = active_display.active_strip();
-
-    let neighbour = if delta_x < 0.0 {
-        strip.right_neighbour(entity)
-    } else {
-        strip.left_neighbour(entity)
-    };
-
-    neighbour.inspect(|neighbour| {
-        debug!(
-            "{}: switching to {neighbour} with delta {delta}",
-            function_name!()
-        );
-        reshuffle_around(*neighbour, commands);
-    })
-}
 
 /// Reshuffles windows around a given window entity within the active strip to ensure visibility.
 /// Windows to the right and left of the focused window are repositioned.

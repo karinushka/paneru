@@ -339,6 +339,11 @@ impl WindowApi for MockWindow {
         self.frame.origin.y = y;
     }
 
+    fn set_origin(&mut self, x: f64, y: f64) {
+        self.frame.origin.x = x;
+        self.frame.origin.y = y;
+    }
+
     /// Resizes the mock window's frame to the given dimensions.
     fn resize(&mut self, width: f64, height: f64, _display_bounds: &CGRect) {
         println!("{}: id {} to {width}x{height}", function_name!(), self.id);

@@ -42,6 +42,7 @@ pub trait WindowApi: Send + Sync {
     fn is_root(&self) -> bool;
     fn is_eligible(&self) -> bool;
     fn reposition(&mut self, x: f64, y: f64, display_bounds: &CGRect);
+    fn set_origin(&mut self, x: f64, y: f64);
     fn resize(&mut self, width: f64, height: f64, display_bounds: &CGRect);
     fn update_frame(&mut self, display_bounds: &CGRect) -> Result<()>;
     fn focus_without_raise(&self, currently_focused: &Window);
@@ -390,6 +391,11 @@ impl WindowApi for WindowOS {
             self.frame.origin.x = x;
             self.frame.origin.y = y;
         }
+    }
+
+    fn set_origin(&mut self, x: f64, y: f64) {
+        self.frame.origin.x = x;
+        self.frame.origin.y = y;
     }
 
     /// Resizes the window to the specified width and height. It also updates the `width_ratio`.

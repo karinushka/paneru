@@ -765,24 +765,26 @@ pub(super) fn animate_resize_windows(
 
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn window_swiper(
-    sliding: Populated<(&Window, Entity, &WindowSwipeMarker)>,
+    sliding: Populated<(Entity, &WindowSwipeMarker)>,
     active_display: ActiveDisplay,
-    windows: Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
+    mut windows: Query<(&mut Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
     mut commands: Commands,
 ) {
     let active_strip = active_display.active_strip();
+    let display_bounds = active_display.bounds();
 
-    for (window, entity, WindowSwipeMarker(delta)) in sliding {
+    for (entity, WindowSwipeMarker(delta)) in sliding {
         commands.entity(entity).try_remove::<WindowSwipeMarker>();
 
-        let display_width = active_display.bounds().size.width;
+        let display_width = display_bounds.size.width;
 
-        // 优先使用动画目标位置，而非当前物理位置
         let current_x = windows
             .get(entity)
             .ok()
-            .and_then(|(_, moving, _)| moving.map(|m| m.origin.x))
-            .unwrap_or(window.frame().origin.x);
+            .map(|(w, moving, _)| {
+                moving.map_or(w.frame().origin.x, |m| m.origin.x)
+            })
+            .unwrap_or(0.0);
         let new_x = current_x - (display_width * delta);
 
         let window_width = |e| {
@@ -800,29 +802,24 @@ pub(super) fn window_swiper(
             continue;
         };
 
-        let positions: Vec<_> = positions
+        let targets: Vec<_> = positions
             .zip(active_strip.all_columns())
             .filter_map(|(position, col_entity)| {
-                window_width(col_entity).map(|width| (position, col_entity, width))
+                window_width(col_entity).map(|_| (position, col_entity))
             })
             .collect();
 
-        for (upper_left, col_entity, width) in positions {
-            let Ok(column) = active_strip
-                .index_of(col_entity)
-                .and_then(|index| active_strip.get(index))
-            else {
-                continue;
-            };
-
-            reposition_stack(
-                upper_left,
-                &column,
-                width,
-                &active_display,
-                &windows,
-                &mut commands,
-            );
+        for (upper_left, col_entity) in targets {
+            if let Ok((mut w, _, _)) = windows.get_mut(col_entity) {
+                let y = w.frame().origin.y;
+                let width = w.frame().size.width;
+                if upper_left + width > -width && upper_left < display_width + width {
+                    w.reposition(upper_left, y, &display_bounds);
+                } else {
+                    w.set_origin(upper_left, y);
+                }
+                commands.entity(col_entity).try_remove::<RepositionMarker>();
+            }
         }
     }
 }

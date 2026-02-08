@@ -891,36 +891,30 @@ fn calculate_positions<W>(
     current_x: f64,
     display_width: f64,
     active_strip: &LayoutStrip,
-    window_width: W,
+    window_width: &W,
 ) -> Option<impl Iterator<Item = f64>>
 where
     W: Fn(Entity) -> Option<f64>,
 {
-    let widths = active_strip
-        .all_columns()
-        .into_iter()
-        .filter_map(&window_width)
-        .collect::<Vec<_>>();
-    let positions = absolute_positions(active_strip, &window_width).collect::<Vec<_>>();
+    let positions = absolute_positions(active_strip, window_width).collect::<Vec<_>>();
     let offset = active_strip
         .index_of(entity)
         .ok()
         .and_then(|index| positions.get(index))
         .map(|offset| current_x - offset)?;
-
     Some(
-        positions
+        active_strip
+            .all_columns()
             .into_iter()
-            .zip(widths)
-            .map(move |(position, width)| {
-                let left_edge = position + offset;
-                if left_edge + width < 0.0 {
-                    0.0 - width + WINDOW_HIDDEN_THRESHOLD
-                } else if left_edge > display_width - WINDOW_HIDDEN_THRESHOLD {
-                    display_width - WINDOW_HIDDEN_THRESHOLD
-                } else {
-                    left_edge
-                }
+            .filter_map(window_width)
+            .zip(positions)
+            .map(move |(width, position)| {
+                let top_left = position + offset;
+                top_left.clamp(
+                    // Make sure a small sliver of a window is visible.
+                    WINDOW_HIDDEN_THRESHOLD - width,
+                    display_width - WINDOW_HIDDEN_THRESHOLD,
+                )
             }),
     )
 }

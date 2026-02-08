@@ -21,7 +21,7 @@ use super::{
     WMEventTrigger,
 };
 use crate::config::Config;
-use crate::ecs::params::{ActiveDisplay, Configuration, DebouncedSystem, Windows};
+use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, BruteforceWindows, Initializing, ReshuffleAroundMarker, Unmanaged,
     WindowSwipeMarker, reposition_entity, reshuffle_around, resize_entity,
@@ -766,74 +766,67 @@ pub(super) fn animate_resize_windows(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn window_swiper(
     sliding: Populated<(&Window, Entity, &WindowSwipeMarker)>,
-    windows: Windows,
     active_display: ActiveDisplay,
-    config: Configuration,
-    mut debouncer: DebouncedSystem,
+    windows: Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
     mut commands: Commands,
 ) {
-    const DEBOUNCE_SWIPE_EVENTS_MS: u64 = 500;
+    let active_strip = active_display.active_strip();
+
     for (window, entity, WindowSwipeMarker(delta)) in sliding {
         commands.entity(entity).try_remove::<WindowSwipeMarker>();
 
-        let pos_x = window.frame().origin.x - (active_display.bounds().size.width * delta);
-        let frame = window.frame();
+        let display_width = active_display.bounds().size.width;
 
-        reposition_entity(
+        // 优先使用动画目标位置，而非当前物理位置
+        let current_x = windows
+            .get(entity)
+            .ok()
+            .and_then(|(_, moving, _)| moving.map(|m| m.origin.x))
+            .unwrap_or(window.frame().origin.x);
+        let new_x = current_x - (display_width * delta);
+
+        let window_width = |e| {
+            windows.get(e).ok().map(|(w, _, resizing)| {
+                resizing.map_or(w.frame().size.width, |marker| marker.size.width)
+            })
+        };
+
+        let Some(positions) = calculate_positions(
             entity,
-            pos_x
-                .min(active_display.bounds().size.width - frame.size.width)
-                .max(0.0),
-            frame.origin.y,
-            active_display.id(),
-            &mut commands,
-        );
+            new_x,
+            active_strip,
+            &window_width,
+        ) else {
+            continue;
+        };
 
-        if pos_x > 0.0 && pos_x < (active_display.bounds().size.width - frame.size.width) {
-            reshuffle_around(entity, &mut commands);
-            return;
-        }
+        let positions: Vec<_> = positions
+            .zip(active_strip.all_columns())
+            .filter_map(|(position, col_entity)| {
+                window_width(col_entity).map(|width| (position, col_entity, width))
+            })
+            .collect();
 
-        if !config.continuous_swipe()
-            || debouncer.bounce(Duration::from_millis(DEBOUNCE_SWIPE_EVENTS_MS))
-        {
-            return;
-        }
+        for (upper_left, col_entity, width) in positions {
+            let Ok(column) = active_strip
+                .index_of(col_entity)
+                .and_then(|index| active_strip.get(index))
+            else {
+                continue;
+            };
 
-        if let Some(window) =
-            slide_to_next_window(&active_display, entity, *delta, pos_x, &mut commands)
-                .and_then(|entity| windows.get(entity))
-        {
-            commands.trigger(WMEventTrigger(Event::WindowFocused {
-                window_id: window.id(),
-            }));
+            reposition_stack(
+                upper_left,
+                &column,
+                width,
+                &active_display,
+                &windows,
+                &mut commands,
+            );
         }
     }
 }
 
-fn slide_to_next_window(
-    active_display: &ActiveDisplay,
-    entity: Entity,
-    delta: f64,
-    delta_x: f64,
-    commands: &mut Commands,
-) -> Option<Entity> {
-    let strip = active_display.active_strip();
-
-    let neighbour = if delta_x < 0.0 {
-        strip.right_neighbour(entity)
-    } else {
-        strip.left_neighbour(entity)
-    };
-
-    neighbour.inspect(|neighbour| {
-        debug!(
-            "{}: switching to {neighbour} with delta {delta}",
-            function_name!()
-        );
-        reshuffle_around(*neighbour, commands);
-    })
-}
 
 /// Reshuffles windows around a given window entity within the active strip to ensure visibility.
 /// Windows to the right and left of the focused window are repositioned.
@@ -852,7 +845,6 @@ pub(super) fn reshuffle_around_window(
     windows: Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
     mut commands: Commands,
 ) {
-    let display_bounds = active_display.bounds();
     let active_strip = active_display.active_strip();
 
     for entity in marker {
@@ -873,7 +865,6 @@ pub(super) fn reshuffle_around_window(
         let Some(positions) = calculate_positions(
             entity,
             frame.origin.x,
-            display_bounds.size.width,
             active_strip,
             &window_width,
         ) else {
@@ -929,18 +920,12 @@ where
 fn calculate_positions<W>(
     entity: Entity,
     current_x: f64,
-    display_width: f64,
     active_strip: &LayoutStrip,
     window_width: W,
 ) -> Option<impl Iterator<Item = f64>>
 where
     W: Fn(Entity) -> Option<f64>,
 {
-    let widths = active_strip
-        .all_columns()
-        .into_iter()
-        .filter_map(&window_width)
-        .collect::<Vec<_>>();
     let positions = absolute_positions(active_strip, &window_width).collect::<Vec<_>>();
     let offset = active_strip
         .index_of(entity)
@@ -951,17 +936,7 @@ where
     Some(
         positions
             .into_iter()
-            .zip(widths)
-            .map(move |(position, width)| {
-                let left_edge = position + offset;
-                if left_edge + width < 0.0 {
-                    0.0 - width + WINDOW_HIDDEN_THRESHOLD
-                } else if left_edge > display_width - WINDOW_HIDDEN_THRESHOLD {
-                    display_width - WINDOW_HIDDEN_THRESHOLD
-                } else {
-                    left_edge
-                }
-            }),
+            .map(move |position| position + offset),
     )
 }
 

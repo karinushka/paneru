@@ -793,19 +793,22 @@ pub(super) fn window_swiper(
             })
         };
 
-        let Some(positions) = calculate_positions(
-            entity,
-            new_x,
-            active_strip,
-            &window_width,
-        ) else {
+        // 计算纯偏移位置（无钳制），用于滑动平移
+        let abs_positions: Vec<f64> = absolute_positions(active_strip, &window_width).collect();
+        let Some(&anchor_abs) = active_strip
+            .index_of(entity)
+            .ok()
+            .and_then(|index| abs_positions.get(index))
+        else {
             continue;
         };
+        let offset = new_x - anchor_abs;
 
-        let targets: Vec<_> = positions
+        let targets: Vec<_> = abs_positions
+            .into_iter()
             .zip(active_strip.all_columns())
-            .filter_map(|(position, col_entity)| {
-                window_width(col_entity).map(|_| (position, col_entity))
+            .filter_map(|(abs_pos, col_entity)| {
+                window_width(col_entity).map(|_| (abs_pos + offset, col_entity))
             })
             .collect();
 
@@ -842,6 +845,7 @@ pub(super) fn reshuffle_around_window(
     windows: Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
     mut commands: Commands,
 ) {
+    let display_bounds = active_display.bounds();
     let active_strip = active_display.active_strip();
 
     for entity in marker {
@@ -862,6 +866,7 @@ pub(super) fn reshuffle_around_window(
         let Some(positions) = calculate_positions(
             entity,
             frame.origin.x,
+            display_bounds.size.width,
             active_strip,
             &window_width,
         ) else {
@@ -917,12 +922,18 @@ where
 fn calculate_positions<W>(
     entity: Entity,
     current_x: f64,
+    display_width: f64,
     active_strip: &LayoutStrip,
     window_width: W,
 ) -> Option<impl Iterator<Item = f64>>
 where
     W: Fn(Entity) -> Option<f64>,
 {
+    let widths = active_strip
+        .all_columns()
+        .into_iter()
+        .filter_map(&window_width)
+        .collect::<Vec<_>>();
     let positions = absolute_positions(active_strip, &window_width).collect::<Vec<_>>();
     let offset = active_strip
         .index_of(entity)
@@ -933,7 +944,17 @@ where
     Some(
         positions
             .into_iter()
-            .map(move |position| position + offset),
+            .zip(widths)
+            .map(move |(position, width)| {
+                let left_edge = position + offset;
+                if left_edge + width < 0.0 {
+                    0.0 - width + WINDOW_HIDDEN_THRESHOLD
+                } else if left_edge > display_width - WINDOW_HIDDEN_THRESHOLD {
+                    display_width - WINDOW_HIDDEN_THRESHOLD
+                } else {
+                    left_edge
+                }
+            }),
     )
 }
 

@@ -16,7 +16,7 @@ use super::{
 };
 use crate::config::{Config, WindowParams};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration, Windows};
-use crate::ecs::{ActiveWorkspaceMarker, WindowSwipeMarker, reshuffle_around};
+use crate::ecs::{ActiveWorkspaceMarker, WindowSwipeMarker, reposition_entity, reshuffle_around};
 use crate::errors::Result;
 use crate::events::Event;
 use crate::manager::{
@@ -438,6 +438,7 @@ pub(super) fn window_focused_trigger(
     trigger: On<WMEventTrigger>,
     applications: Query<&Application>,
     windows: Windows,
+    active_display: ActiveDisplay,
     mut config: Configuration,
     mut commands: Commands,
 ) {
@@ -480,6 +481,15 @@ pub(super) fn window_focused_trigger(
     commands.entity(entity).try_insert(FocusedMarker);
 
     if !config.skip_reshuffle() {
+        if config.auto_center() {
+            reposition_entity(
+                entity,
+                (active_display.bounds().size.width - window.frame().size.width) / 2.0,
+                window.frame().origin.y,
+                active_display.id(),
+                &mut commands,
+            );
+        }
         reshuffle_around(entity, &mut commands);
     }
 

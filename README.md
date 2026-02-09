@@ -216,6 +216,10 @@ swipe_gesture_fingers = 4
 # To disable animations, leave this unset or set to a very large value.
 animation_speed = 50
 
+# Automatically center the focused window when switching focus with keyboard,
+# i.e. 'window_focus_west' or 'window_focus_east'.
+# auto_center = false
+
 [bindings]
 # Moves the focus between windows.
 window_focus_west = ["cmd - h", "cmd - leftarrow"]

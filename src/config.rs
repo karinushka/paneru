@@ -403,6 +403,8 @@ pub struct MainOptions {
     pub preset_column_widths: Vec<f64>,
     /// The animation speed for window movements in pixels per second.
     pub animation_speed: Option<f64>,
+    /// Automatically center the window when switching focus with keyboard.
+    pub auto_center: Option<bool>,
     /// Enables or disables continuous swipe behavior for windows.
     pub continuous_swipe: Option<bool>,
 }

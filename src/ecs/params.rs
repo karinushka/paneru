@@ -57,6 +57,14 @@ impl Configuration<'_> {
             .is_none_or(|mff| mff)
     }
 
+    pub fn auto_center(&self) -> bool {
+        // Default is enabled.
+        self.config
+            .options()
+            .auto_center
+            .is_some_and(|centered| centered)
+    }
+
     /// Returns `true` if continuous swipe behavior is enabled.
     /// If the configuration option is not set, it defaults to `true`.
     pub fn continuous_swipe(&self) -> bool {

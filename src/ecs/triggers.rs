@@ -674,24 +674,32 @@ pub(super) fn window_unmanaged_trigger(
     mut commands: Commands,
 ) {
     let entity = trigger.event().entity;
-    let Some((_, _, marker)) = windows.get_managed(trigger.event().entity) else {
+    let Some(marker) = windows
+        .get_managed(trigger.event().entity)
+        .and_then(|(_, _, marker)| marker)
+    else {
         return;
     };
-    if let Some(marker) = marker {
-        match marker {
-            Unmanaged::Floating => {
-                debug!("Entity {entity} is floating.");
-                active_display.active_strip().remove(entity);
-            }
+    let active_strip = active_display.active_strip();
 
-            Unmanaged::Minimized | Unmanaged::Hidden => {
-                debug!("Entity {entity} is minimized.");
-                let active_strip = active_display.active_strip();
-                give_away_focus(entity, &windows, active_strip, &mut commands);
-                active_display.active_strip().remove(entity);
+    match marker {
+        Unmanaged::Floating => {
+            debug!("Entity {entity} is floating.");
+            if let Some(neighbour) = active_strip
+                .left_neighbour(entity)
+                .or_else(|| active_strip.right_neighbour(entity))
+            {
+                debug!("Reshuffling around its neighbour {neighbour}.");
+                reshuffle_around(neighbour, &mut commands);
             }
         }
+
+        Unmanaged::Minimized | Unmanaged::Hidden => {
+            debug!("Entity {entity} is minimized.");
+            give_away_focus(entity, &windows, active_strip, &mut commands);
+        }
     }
+    active_strip.remove(entity);
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -749,20 +757,16 @@ fn give_away_focus(
     commands: &mut Commands,
 ) {
     // Move focus to a left neighbour if the panel has more windows.
-    if let Ok(index) = active_strip.index_of(entity)
-        && active_strip.len() > 1
+    if active_strip.len() > 1
+        && let Some((window, neighbour)) = active_strip
+            .left_neighbour(entity)
+            .or_else(|| active_strip.right_neighbour(entity))
+            .and_then(|e| windows.get(e).zip(Some(e)))
     {
-        let neighbour = active_strip.get(index.saturating_sub(1)).ok();
-
-        if let Some((window, entity)) = neighbour
-            .and_then(|column| column.top())
-            .and_then(|entity| windows.get(entity).zip(Some(entity)))
-        {
-            let window_id = window.id();
-            debug!("window destroyed, moving focus to {window_id}");
-            commands.trigger(WMEventTrigger(Event::WindowFocused { window_id }));
-            reshuffle_around(entity, commands);
-        }
+        let window_id = window.id();
+        debug!("giving away focus to {neighbour} {window_id}");
+        commands.trigger(WMEventTrigger(Event::WindowFocused { window_id }));
+        reshuffle_around(neighbour, commands);
     }
 }
 

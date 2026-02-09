@@ -374,6 +374,10 @@ fn to_next_display(
     reshuffle_around(entity, commands);
 
     window_manager.center_mouse(None, &other.bounds);
+
+    if let Some(neighbour) = active_display.active_strip().right_neighbour(entity) {
+        reshuffle_around(neighbour, commands);
+    }
     active_display.active_strip().remove(entity);
 }
 

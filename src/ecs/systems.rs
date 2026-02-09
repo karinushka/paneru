@@ -1102,12 +1102,14 @@ pub(super) fn window_update_frame(
                     .iter_mut()
                     .find(|(window, _)| window.id() == *window_id)
                 {
+                    _ = window.update_frame(&active_display.bounds());
+
                     if active_display.active_strip().index_of(entity).is_err() {
-                        // Do not refresh size of windows on other displays or workspaces.
+                        // Do not reshuffle for floating windows or on other displays or
+                        // workspaces.
                         continue;
                     }
 
-                    _ = window.update_frame(&active_display.bounds());
                     if matches!(event, Event::WindowResized { window_id: _ }) {
                         reshuffle_around(entity, &mut commands);
                     }

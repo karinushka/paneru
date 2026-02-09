@@ -298,7 +298,7 @@ fn full_width_window(
         commands
             .entity(entity)
             .try_insert(FullWidthMarker(window.width_ratio()));
-        (display_width, 0.0)
+        (display_width - 1.0, 0.0)
     };
 
     reposition_entity(entity, x, y, active_display.id(), commands);

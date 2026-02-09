@@ -17,7 +17,7 @@ use tracing::warn;
 use super::{ActiveDisplayMarker, FocusFollowsMouse, MissionControlActive, SkipReshuffle};
 use crate::{
     config::{Config, WindowParams},
-    ecs::{ActiveWorkspaceMarker, FocusedMarker, FullWidthMarker, Unmanaged},
+    ecs::{ActiveWorkspaceMarker, DockPosition, FocusedMarker, FullWidthMarker, Unmanaged},
     manager::{Display, LayoutStrip, Window},
     platform::WinID,
 };
@@ -167,7 +167,12 @@ impl DebouncedSystem<'_, '_> {
 pub struct ActiveDisplay<'w, 's> {
     strip: Single<'w, 's, &'static LayoutStrip, With<ActiveWorkspaceMarker>>,
     /// The single active `Display` component, marked with `ActiveDisplayMarker`.
-    display: Single<'w, 's, &'static Display, With<ActiveDisplayMarker>>,
+    display: Single<
+        'w,
+        's,
+        (&'static Display, Option<&'static DockPosition>),
+        With<ActiveDisplayMarker>,
+    >,
     /// A query for all other `Display` components that are not marked as active.
     other_displays: Query<'w, 's, &'static Display, Without<ActiveDisplayMarker>>,
 }
@@ -175,12 +180,12 @@ pub struct ActiveDisplay<'w, 's> {
 impl ActiveDisplay<'_, '_> {
     /// Returns an immutable reference to the active `Display`.
     pub fn display(&self) -> &Display {
-        &self.display
+        self.display.0
     }
 
     /// Returns the `CGDirectDisplayID` of the active display.
     pub fn id(&self) -> CGDirectDisplayID {
-        self.display.id()
+        self.display.0.id()
     }
 
     /// Returns an iterator over immutable references to all other displays (non-active).
@@ -194,7 +199,11 @@ impl ActiveDisplay<'_, '_> {
 
     /// Returns the `CGRect` representing the bounds of the active display.
     pub fn bounds(&self) -> CGRect {
-        self.display.bounds
+        self.display.0.bounds
+    }
+
+    pub fn dock(&self) -> Option<&DockPosition> {
+        self.display.1
     }
 }
 

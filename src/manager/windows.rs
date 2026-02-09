@@ -20,7 +20,7 @@ use super::skylight::{
     AXUIElementPerformAction, AXUIElementSetAttributeValue, SLPSPostEventRecordTo,
 };
 use crate::ecs::params::ActiveDisplay;
-use crate::ecs::{RepositionMarker, ResizeMarker, reposition_entity};
+use crate::ecs::{DockPosition, RepositionMarker, ResizeMarker, reposition_entity};
 use crate::errors::{Error, Result};
 use crate::platform::{Pid, ProcessSerialNumber, WinID};
 use crate::util::{AXUIAttributes, AXUIWrapper, MacResult};
@@ -57,6 +57,7 @@ pub trait WindowApi: Send + Sync {
         active_display: &ActiveDisplay,
         moving: Option<&RepositionMarker>,
         resizing: Option<&ResizeMarker>,
+        dock: Option<&DockPosition>,
         entity: Entity,
         commands: &mut Commands,
     ) -> CGRect {
@@ -85,6 +86,22 @@ pub trait WindowApi: Send + Sync {
         } else {
             false
         };
+
+        if let Some(dock) = dock {
+            match dock {
+                DockPosition::Left(offset) => {
+                    if origin.x < *offset {
+                        origin.x = *offset;
+                    }
+                }
+                DockPosition::Right(offset) => {
+                    if origin.x + size.width > display_bounds.size.width - *offset {
+                        origin.x = display_bounds.size.width - *offset - size.width;
+                    }
+                }
+                _ => (),
+            }
+        }
 
         if moved {
             let display_id = moving.map_or(active_display.id(), |marker| marker.display_id);

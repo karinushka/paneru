@@ -3,12 +3,14 @@ use bevy::ecs::entity::Entity;
 use core::ptr::NonNull;
 use objc2_core_foundation::{CFRetained, CFString, CFUUID, CGRect};
 use objc2_core_graphics::CGDirectDisplayID;
+use objc2_foundation::NSRect;
 use std::collections::VecDeque;
 use stdext::function_name;
 use tracing::debug;
 
 use super::skylight::{CGDisplayCreateUUIDFromDisplayID, CGDisplayGetDisplayIDFromUUID};
 use crate::{
+    ecs::DockPosition,
     errors::{Error, Result},
     platform::WorkspaceId,
 };
@@ -398,6 +400,20 @@ impl Display {
     /// The `CGDirectDisplayID` of the display.
     pub fn id(&self) -> CGDirectDisplayID {
         self.id
+    }
+
+    pub fn locate_dock(&self, visible_frame: &NSRect) -> DockPosition {
+        if self.bounds.origin.x < visible_frame.origin.x {
+            DockPosition::Left(visible_frame.origin.x - self.bounds.origin.x)
+        } else if visible_frame.size.width < self.bounds.size.width {
+            DockPosition::Right(self.bounds.size.width - visible_frame.size.width)
+        } else if visible_frame.size.height < self.bounds.size.height - self.menubar_height {
+            DockPosition::Bottom(
+                self.bounds.size.height - visible_frame.size.height - self.menubar_height,
+            )
+        } else {
+            DockPosition::Hidden
+        }
     }
 }
 

@@ -22,8 +22,9 @@ use super::{
 use crate::config::Config;
 use crate::ecs::params::{ActiveDisplay, Configuration, DebouncedSystem, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, BruteforceWindows, Initializing, ReshuffleAroundMarker, Unmanaged,
-    WindowSwipeMarker, reposition_entity, reshuffle_around, resize_entity,
+    ActiveWorkspaceMarker, BruteforceWindows, DockPosition, Initializing, LocateDockTrigger,
+    ReshuffleAroundMarker, Unmanaged, WindowSwipeMarker, reposition_entity, reshuffle_around,
+    resize_entity,
 };
 use crate::events::Event;
 use crate::manager::{
@@ -114,6 +115,8 @@ pub fn gather_displays(window_manager: Res<WindowManager>, mut commands: Command
             commands.spawn(display)
         }
         .id();
+
+        commands.trigger(LocateDockTrigger(entity));
 
         let Ok(active_space) = window_manager.active_display_space(active_display_id) else {
             return;
@@ -813,7 +816,14 @@ pub(super) fn reshuffle_around_window(
             continue;
         };
 
-        let frame = window.expose_window(&active_display, moving, resizing, entity, &mut commands);
+        let frame = window.expose_window(
+            &active_display,
+            moving,
+            resizing,
+            active_display.dock(),
+            entity,
+            &mut commands,
+        );
         let window_width = |entity| {
             windows.get(entity).ok().map(|(window, _, resizing)| {
                 resizing.map_or(window.frame().size.width, |marker| marker.size.width)
@@ -935,8 +945,15 @@ fn reposition_stack(
     commands: &mut Commands,
 ) {
     const MIN_WINDOW_HEIGHT: f64 = 200.0;
+    let dock_size = active_display.dock().map_or(0.0, |dock| {
+        if let DockPosition::Bottom(offset) = dock {
+            *offset
+        } else {
+            0.0
+        }
+    });
     let display_height =
-        active_display.bounds().size.height - active_display.display().menubar_height;
+        active_display.bounds().size.height - active_display.display().menubar_height - dock_size;
     let entities = match column {
         Column::Single(entity) => vec![*entity],
         Column::Stack(stack) => stack.clone(),

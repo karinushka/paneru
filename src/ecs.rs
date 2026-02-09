@@ -113,6 +113,7 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::refresh_configuration_trigger)
         .add_observer(triggers::print_internal_state_trigger)
         .add_observer(triggers::stray_focus_observer)
+        .add_observer(triggers::locate_dock_trigger)
         .add_observer(triggers::window_removal_observer);
 }
 
@@ -221,6 +222,14 @@ pub struct StrayFocusEvent(pub WinID);
 #[derive(Component)]
 pub struct BruteforceWindows(Task<Vec<Window>>);
 
+#[derive(Component, Debug)]
+pub enum DockPosition {
+    Bottom(f64),
+    Left(f64),
+    Right(f64),
+    Hidden,
+}
+
 /// Resource to control whether window reshuffling should be skipped.
 #[derive(Resource)]
 pub struct SkipReshuffle(pub bool);
@@ -251,6 +260,9 @@ pub struct CommandTrigger(pub Command);
 /// Bevy event trigger for spawning new windows.
 #[derive(BevyEvent)]
 pub struct SpawnWindowTrigger(pub Vec<Window>);
+
+#[derive(BevyEvent)]
+pub struct LocateDockTrigger(pub Entity);
 
 pub fn reposition_entity(
     entity: Entity,

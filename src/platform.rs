@@ -125,6 +125,7 @@ unsafe extern "C" {
 /// `PlatformCallbacks` aggregates and manages all platform-specific event handlers and observers.
 /// It serves as the central point for setting up and running macOS-specific interactions with the window manager.
 pub struct PlatformCallbacks {
+    pub main_thread_marker: MainThreadMarker,
     cocoa_app: Retained<NSApplication>,
     /// The main `EventSender` for dispatching events across the application.
     events: EventSender,
@@ -157,14 +158,15 @@ impl PlatformCallbacks {
         // NSWorkspaceActiveSpaceDidChangeNotification and
         // NSWorkspaceActiveDisplayDidChangeNotification
         // Found on: https://stackoverflow.com/questions/68893386/unable-to-receive-nsworkspaceactivespacedidchangenotification-specifically-but
-        let main_thread = MainThreadMarker::new().unwrap();
-        let cocoa_app = NSApplication::sharedApplication(main_thread);
+        let main_thread_marker = MainThreadMarker::new().unwrap();
+        let cocoa_app = NSApplication::sharedApplication(main_thread_marker);
         cocoa_app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
         cocoa_app.finishLaunching();
         NSApplication::load();
 
         let workspace_observer = WorkspaceObserver::new(events.clone());
         Box::pin(PlatformCallbacks {
+            main_thread_marker,
             cocoa_app,
             process_handler: None,
             event_handler: None,

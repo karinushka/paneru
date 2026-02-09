@@ -5,7 +5,7 @@ use accessibility_sys::{
 use core::ptr::NonNull;
 use objc2_app_kit::NSRunningApplication;
 use objc2_core_foundation::{CFRetained, CFString, kCFRunLoopDefaultMode};
-use objc2_foundation::NSString;
+use objc2_foundation::ns_string;
 use std::ffi::c_void;
 use std::ptr::null_mut;
 use stdext::function_name;
@@ -92,8 +92,8 @@ impl MissionControlHandler {
     ///
     /// `Ok(Pid)` with the Dock's process ID if found, otherwise `Err(Error)`.
     fn dock_pid() -> Result<Pid> {
-        let dock = NSString::from_str("com.apple.dock");
-        let array = NSRunningApplication::runningApplicationsWithBundleIdentifier(&dock);
+        let dock = ns_string!("com.apple.dock");
+        let array = NSRunningApplication::runningApplicationsWithBundleIdentifier(dock);
         array
             .iter()
             .next()

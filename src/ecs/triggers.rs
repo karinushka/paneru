@@ -4,9 +4,12 @@ use bevy::ecs::lifecycle::{Add, Remove};
 use bevy::ecs::message::MessageWriter;
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Has, With};
-use bevy::ecs::system::{Commands, NonSendMut, Populated, Query, Res, ResMut, Single};
+use bevy::ecs::system::{Commands, NonSend, NonSendMut, Populated, Query, Res, ResMut, Single};
 use notify::event::{DataChange, MetadataKind, ModifyKind};
 use notify::{EventKind, Watcher};
+use objc2_app_kit::NSScreen;
+use objc2_foundation::{NSNumber, NSString, ns_string};
+use std::pin::Pin;
 use std::time::Duration;
 use tracing::{debug, error, info, trace, warn};
 
@@ -16,13 +19,16 @@ use super::{
 };
 use crate::config::{Config, WindowParams};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration, Windows};
-use crate::ecs::{ActiveWorkspaceMarker, WindowSwipeMarker, reposition_entity, reshuffle_around};
+use crate::ecs::{
+    ActiveWorkspaceMarker, LocateDockTrigger, WindowSwipeMarker, reposition_entity,
+    reshuffle_around,
+};
 use crate::errors::Result;
 use crate::events::Event;
 use crate::manager::{
     Application, Display, LayoutStrip, Process, Window, WindowManager, WindowPadding,
 };
-use crate::platform::{WinID, WorkspaceId};
+use crate::platform::{PlatformCallbacks, WinID, WorkspaceId};
 use crate::util::symlink_target;
 
 /// Handles mouse moved events.
@@ -1080,5 +1086,36 @@ pub(super) fn window_removal_observer(
     {
         give_away_focus(entity, &windows, &strip, &mut commands);
         strip.remove(entity);
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn locate_dock_trigger(
+    trigger: On<LocateDockTrigger>,
+    displays: Query<(&mut Display, Entity)>,
+    platform: Option<NonSend<Pin<Box<PlatformCallbacks>>>>,
+    mut commands: Commands,
+) {
+    let Ok((display, entity)) = displays.get(trigger.event().0) else {
+        return;
+    };
+    let display_id = display.id();
+
+    // NSScreen::screen needs to run in the main thread, thus we run it in a NonSend trigger.
+    let screens = platform.map(|platform| NSScreen::screens(platform.main_thread_marker));
+    let dock = screens.as_ref().and_then(|screens| {
+        screens.iter().find_map(|screen| {
+            let dict = screen.deviceDescription();
+            let numbers = unsafe { dict.cast_unchecked::<NSString, NSNumber>() };
+            let id = numbers.objectForKey(ns_string!("NSScreenNumber"));
+            id.is_some_and(|id| id.as_u32() == display_id)
+                .then(|| display.locate_dock(&screen.visibleFrame()))
+        })
+    });
+    if let Some(dock) = dock {
+        debug!("dock on display {display_id}: {:?}", dock);
+        if let Ok(mut entity_cmmands) = commands.get_entity(entity) {
+            entity_cmmands.try_insert(dock);
+        }
     }
 }

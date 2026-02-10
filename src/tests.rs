@@ -402,6 +402,11 @@ impl WindowApi for MockWindow {
     fn set_padding(&mut self, _padding: manager::WindowPadding) {
         println!("{}:", function_name!());
     }
+
+    fn is_minimized(&self) -> bool {
+        println!("{}:", function_name!());
+        false
+    }
 }
 
 impl MockWindow {

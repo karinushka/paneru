@@ -41,6 +41,7 @@ pub trait WindowApi: Send + Sync {
     fn subrole(&self) -> Result<String>;
     fn is_root(&self) -> bool;
     fn is_eligible(&self) -> bool;
+    fn is_minimized(&self) -> bool;
     fn reposition(&mut self, x: f64, y: f64, display_bounds: &CGRect);
     fn resize(&mut self, width: f64, height: f64, display_bounds: &CGRect);
     fn update_frame(&mut self, display_bounds: &CGRect) -> Result<()>;
@@ -164,7 +165,6 @@ pub struct WindowOS {
     frame: CGRect,
     vertical_padding: f64,
     horizontal_padding: f64,
-    minimized: bool,
     eligible: bool,
     width_ratio: f64,
 }
@@ -181,14 +181,13 @@ impl WindowOS {
     /// `Ok(Window)` if the window is created successfully, otherwise `Err(Error)`.
     pub fn new(element: &CFRetained<AXUIWrapper>) -> Result<Self> {
         let id = ax_window_id(element.as_ptr())?;
-        let mut window = Self {
+        let window = Self {
             id,
             psn: None,
             ax_element: element.clone(),
             frame: CGRect::default(),
             vertical_padding: 0.0,
             horizontal_padding: 0.0,
-            minimized: false,
             eligible: false,
             width_ratio: 0.33,
         };
@@ -207,7 +206,6 @@ impl WindowOS {
             )));
         }
 
-        window.minimized = window.is_minimized();
         trace!(
             "created {} title: {} role: {} subrole: {}",
             window.id(),
@@ -226,15 +224,6 @@ impl WindowOS {
     fn is_unknown(&self) -> bool {
         self.subrole()
             .is_ok_and(|subrole| subrole.eq(kAXUnknownSubrole))
-    }
-
-    /// Checks if the window is minimized.
-    ///
-    /// # Returns
-    ///
-    /// `true` if the window is minimized, `false` otherwise.
-    fn is_minimized(&self) -> bool {
-        self.ax_element.minimized().is_ok_and(|minimized| minimized)
     }
 
     /// Checks if the window is a "real" window based on its role and subrole.
@@ -361,6 +350,10 @@ impl WindowApi for WindowOS {
     /// `true` if the window is eligible, `false` otherwise.
     fn is_eligible(&self) -> bool {
         self.eligible
+    }
+
+    fn is_minimized(&self) -> bool {
+        self.ax_element.minimized().is_ok_and(|minimized| minimized)
     }
 
     /// Repositions the window to the specified x and y coordinates.

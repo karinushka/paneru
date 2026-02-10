@@ -243,6 +243,7 @@ pub(crate) fn finish_setup(
     );
 
     for (mut strip, active_strip) in &mut workspaces {
+        debug!("space {}: before refresh {strip:?}", strip.id());
         let workspace_windows = window_manager
             .windows_in_workspace(strip.id())
             .inspect_err(|err| {
@@ -253,6 +254,14 @@ pub(crate) fn finish_setup(
                 workspace_windows
                     .into_iter()
                     .filter_map(|window_id| windows.find_managed(window_id))
+                    .filter(|(window, entity)| {
+                        if window.is_minimized() {
+                            commands.entity(*entity).try_insert(Unmanaged::Minimized);
+                            false
+                        } else {
+                            true
+                        }
+                    })
                     .collect::<Vec<_>>()
             });
         let Some(workspace_windows) = workspace_windows else {

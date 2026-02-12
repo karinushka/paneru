@@ -557,6 +557,20 @@ type EventQueue = Arc<RwLock<Vec<Event>>>;
 /// * `commands` - A slice of `Event`s representing commands to dispatch.
 /// * `verifier` - A closure that takes the current iteration and a mutable reference to the `World` for assertions.
 fn run_main_loop(commands: &[Event], mut verifier: impl FnMut(usize, &mut World)) {
+    tracing_subscriber::registry()
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with(
+            fmt::layer()
+                .with_level(true)
+                .with_line_number(true)
+                .with_file(true)
+                .with_target(true)
+                .with_thread_ids(false)
+                .with_writer(std::io::stderr)
+                .compact(),
+        )
+        .init();
+
     let mut app = App::new();
     let internal_events = Arc::new(RwLock::new(Vec::<Event>::new()));
     setup_world(&mut app, &internal_events);
@@ -647,15 +661,15 @@ fn test_window_shuffle() {
     let centered = (TEST_DISPLAY_WIDTH - TEST_WINDOW_WIDTH) / 2;
     let expected_positions_stacked = [
         (0, (centered, TEST_MENUBAR_HEIGHT)),
-        (1, (centered, 374)),
+        (1, (centered, 374 + TEST_MENUBAR_HEIGHT)),
         (2, (centered + TEST_WINDOW_WIDTH, TEST_MENUBAR_HEIGHT)),
         (3, (offscreen_right, TEST_MENUBAR_HEIGHT)),
         (4, (offscreen_right, TEST_MENUBAR_HEIGHT)),
     ];
     let expected_positions_stacked2 = [
         (0, (centered, TEST_MENUBAR_HEIGHT)),
-        (1, (centered, 249)),
-        (2, (centered, 498)),
+        (1, (centered, 249 + TEST_MENUBAR_HEIGHT)),
+        (2, (centered, 498 + TEST_MENUBAR_HEIGHT)),
         (3, (712, TEST_MENUBAR_HEIGHT)),
         (4, (offscreen_right, TEST_MENUBAR_HEIGHT)),
     ];

@@ -61,7 +61,6 @@ pub fn register_systems(app: &mut bevy::app::App) {
             )
                 .chain()
                 .run_if(resource_exists::<Initializing>),
-            systems::reshuffle_around_window,
             systems::window_swiper,
             systems::add_launched_process,
             systems::add_launched_application,
@@ -87,7 +86,11 @@ pub fn register_systems(app: &mut bevy::app::App) {
     );
     app.add_systems(
         PostUpdate,
-        (systems::animate_windows, systems::animate_resize_windows),
+        (
+            systems::redraw_layout_strip,
+            systems::animate_windows.after(systems::redraw_layout_strip),
+            systems::animate_resize_windows.after(systems::redraw_layout_strip),
+        ),
     );
 }
 

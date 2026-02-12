@@ -7,6 +7,7 @@ use bevy::ecs::system::{Commands, Local, NonSend, NonSendMut, Populated, Query, 
 use bevy::tasks::AsyncComputeTaskPool;
 use bevy::tasks::futures_lite::future;
 use bevy::time::Time;
+use objc2_core_foundation::CGRect;
 use objc2_core_graphics::CGDirectDisplayID;
 use std::collections::HashSet;
 use std::pin::Pin;
@@ -28,8 +29,7 @@ use crate::ecs::{
 };
 use crate::events::Event;
 use crate::manager::{
-    Application, Column, Display, LayoutStrip, Process, Window, WindowManager, WindowOS,
-    bruteforce_windows,
+    Application, Display, LayoutStrip, Process, Window, WindowManager, WindowOS, bruteforce_windows,
 };
 use crate::platform::{PlatformCallbacks, WorkspaceId};
 
@@ -797,25 +797,82 @@ fn slide_to_next_window(
     })
 }
 
-/// Reshuffles windows around a given window entity within the active strip to ensure visibility.
-/// Windows to the right and left of the focused window are repositioned.
-///
-/// # Arguments
-///
-/// * `main_cid` - The main connection ID.
-/// * `active_display` - A query for the active display.
-/// * `entity` - The `Entity` of the window to reshuffle around.
-/// * `windows` - A query for all windows.
-/// * `commands` - Bevy commands to trigger events.
+fn expose_window(
+    entity: Entity,
+    frame: &CGRect,
+    active_display: &ActiveDisplay,
+    moving: Option<&RepositionMarker>,
+    resizing: Option<&ResizeMarker>,
+    dock: Option<&DockPosition>,
+) -> CGRect {
+    // Check if window needs to be fully exposed
+    let (mut origin, display_bounds) =
+        moving.map_or((frame.origin, active_display.bounds()), |marker| {
+            (
+                marker.origin,
+                active_display
+                    .other()
+                    .find(|display| display.id() == marker.display_id)
+                    .map_or(active_display.bounds(), |display| display.bounds),
+            )
+        });
+    let size = resizing.map_or(frame.size, |marker| marker.size);
+
+    if origin.x + size.width > display_bounds.size.width {
+        trace!("Bumped window {entity} to the left");
+        origin.x = display_bounds.size.width - size.width;
+    } else if origin.x < 0.0 {
+        trace!("Bumped window {entity} to the right");
+        origin.x = 0.0;
+    }
+
+    if let Some(dock) = dock {
+        match dock {
+            DockPosition::Left(offset) => {
+                if origin.x < *offset {
+                    origin.x = *offset;
+                }
+            }
+            DockPosition::Right(offset) => {
+                if origin.x + size.width > display_bounds.size.width - *offset {
+                    origin.x = display_bounds.size.width - *offset - size.width;
+                }
+            }
+            _ => (),
+        }
+    }
+
+    CGRect::new(origin, size)
+}
+
 #[allow(clippy::needless_pass_by_value)]
-pub(super) fn reshuffle_around_window(
-    active_display: ActiveDisplay,
+pub(super) fn redraw_layout_strip(
     marker: Populated<Entity, With<ReshuffleAroundMarker>>,
+    active_display: ActiveDisplay,
     windows: Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
     mut commands: Commands,
 ) {
-    let display_bounds = active_display.bounds();
-    let active_strip = active_display.active_strip();
+    let get_window_frame = |entity| {
+        windows
+            .get(entity)
+            .map(|(window, reposition, resize)| {
+                let mut frame = window.frame();
+
+                if let Some(reposition) = reposition
+                    && reposition.display_id == active_display.id()
+                {
+                    frame.origin = reposition.origin;
+                }
+
+                if let Some(resize) = resize
+                    && resize.display_id == active_display.id()
+                {
+                    frame.size = resize.size;
+                }
+                frame
+            })
+            .ok()
+    };
 
     for entity in marker {
         if let Ok(mut cmd) = commands.get_entity(entity) {
@@ -825,240 +882,84 @@ pub(super) fn reshuffle_around_window(
             continue;
         };
 
-        let frame = window.expose_window(
+        let frame = expose_window(
+            entity,
+            &window.frame(),
             &active_display,
             moving,
             resizing,
             active_display.dock(),
-            entity,
-            &mut commands,
         );
-        let window_width = |entity| {
-            windows.get(entity).ok().map(|(window, _, resizing)| {
-                resizing.map_or(window.frame().size.width, |marker| marker.size.width)
-            })
-        };
 
-        let Some(positions) = calculate_positions(
-            entity,
-            frame.origin.x,
-            display_bounds.size.width,
-            active_strip,
-            &window_width,
-        ) else {
-            return;
-        };
-        let positions =
-            positions
-                .zip(active_strip.all_columns())
-                .filter_map(|(position, entity)| {
-                    window_width(entity).map(|width| (position, entity, width))
-                });
+        let layout_strip = active_display.active_strip();
 
-        for (upper_left, entity, width) in positions {
-            let Ok(column) = active_strip
-                .index_of(entity)
-                .and_then(|index| active_strip.get(index))
-            else {
+        let Some((_, abs_position)) = layout_strip.index_of(entity).ok().and_then(|index| {
+            layout_strip
+                .absolute_positions(&get_window_frame)
+                .nth(index)
+        }) else {
+            continue;
+        };
+        let viewport_offset = abs_position - frame.origin.x;
+
+        let dock_size = active_display.dock().map_or(0.0, |dock| {
+            if let DockPosition::Bottom(offset) = dock {
+                *offset
+            } else {
+                0.0
+            }
+        });
+        let menubar = active_display.display().menubar_height;
+        let mut display_bounds = active_display.bounds();
+        display_bounds.size.height -= menubar + dock_size;
+
+        let display_width = active_display.bounds().size.width;
+        let other_display = active_display.other().next();
+        let display_above = other_display.is_some_and(|other_display| {
+            active_display.bounds().origin.x < other_display.bounds.origin.x
+        });
+
+        for (entity, mut frame) in
+            layout_strip.calculate_layout(viewport_offset, &display_bounds, &get_window_frame)
+        {
+            let Some(old_frame) = get_window_frame(entity) else {
                 continue;
             };
 
-            reposition_stack(
-                upper_left,
-                &column,
-                width,
-                &active_display,
-                &windows,
-                &mut commands,
-            );
-        }
-    }
-}
-
-pub fn absolute_positions<W>(
-    active_strip: &LayoutStrip,
-    window_width: W,
-) -> impl Iterator<Item = f64>
-where
-    W: Fn(Entity) -> Option<f64>,
-{
-    let mut left_edge = 0.0;
-
-    active_strip
-        .all_columns()
-        .into_iter()
-        .filter_map(window_width)
-        .map(move |width| {
-            let temp = left_edge;
-            left_edge += width;
-            temp
-        })
-}
-
-fn calculate_positions<W>(
-    entity: Entity,
-    current_x: f64,
-    display_width: f64,
-    active_strip: &LayoutStrip,
-    window_width: &W,
-) -> Option<impl Iterator<Item = f64>>
-where
-    W: Fn(Entity) -> Option<f64>,
-{
-    let positions = absolute_positions(active_strip, window_width).collect::<Vec<_>>();
-    let offset = active_strip
-        .index_of(entity)
-        .ok()
-        .and_then(|index| positions.get(index))
-        .map(|offset| current_x - offset)?;
-    Some(
-        active_strip
-            .all_columns()
-            .into_iter()
-            .filter_map(window_width)
-            .zip(positions)
-            .map(move |(width, position)| {
-                let top_left = position + offset;
-                top_left.clamp(
-                    // Make sure a small sliver of a window is visible.
-                    WINDOW_HIDDEN_THRESHOLD - width,
-                    display_width - WINDOW_HIDDEN_THRESHOLD,
-                )
-            }),
-    )
-}
-
-/// Repositions all windows within a given column stack.
-///
-/// # Arguments
-///
-/// * `upper_left` - The x-coordinate of the upper-left corner of the stack.
-/// * `column` - The column containing the windows to reposition.
-/// * `width` - The width of each window in the stack.
-/// * `display_bounds` - The bounds of the display.
-/// * `menubar_height` - The height of the menu bar.
-/// * `windows` - A query for all windows.
-/// * `commands` - Bevy commands to trigger events.
-fn reposition_stack(
-    upper_left: f64,
-    column: &Column,
-    width: f64,
-    active_display: &ActiveDisplay,
-    windows: &Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
-    commands: &mut Commands,
-) {
-    const MIN_WINDOW_HEIGHT: f64 = 200.0;
-    let dock_size = active_display.dock().map_or(0.0, |dock| {
-        if let DockPosition::Bottom(offset) = dock {
-            *offset
-        } else {
-            0.0
-        }
-    });
-    let display_height =
-        active_display.bounds().size.height - active_display.display().menubar_height - dock_size;
-    let entities = match column {
-        Column::Single(entity) => vec![*entity],
-        Column::Stack(stack) => stack.clone(),
-    };
-    let heights = entities
-        .iter()
-        .filter_map(|entity| {
-            windows.get(*entity).ok().map(|(window, _, resizing)| {
-                resizing.map_or(window.frame().size.height, |marker| marker.size.height)
-            })
-        })
-        .collect::<Vec<_>>();
-    if heights.len() != entities.len() {
-        warn!("Mismatch in heights and entities.");
-        return;
-    }
-
-    let Some(heights) = binpack_heights(&heights, MIN_WINDOW_HEIGHT, display_height) else {
-        info!("Unable to fit all windows.");
-        return;
-    };
-
-    let display_width = active_display.bounds().size.width;
-    let other_display = active_display.other().next();
-    let display_above = other_display.is_some_and(|other_display| {
-        active_display.bounds().origin.x < other_display.bounds.origin.x
-    });
-    // If there are multiple displays and the other display is located above, there is a chance
-    // that MacOS will bump the windows over to another display when moving them around.
-    // To avoid that we nudge the off-screen windows slightly down.
-    let visible_window = !display_above
-        || upper_left + width > WINDOW_HIDDEN_THRESHOLD
-            && upper_left < display_width - WINDOW_HIDDEN_THRESHOLD;
-
-    let mut y_pos = if visible_window {
-        0.0
-    } else {
-        // NOTE: If the window is "off screen", move it down slightly
-        // to avoid MacOS moving it over to another display
-        display_height / 4.0
-    };
-    for (entity, window_height) in entities.into_iter().zip(heights) {
-        reposition_entity(entity, upper_left, y_pos, active_display.id(), commands);
-        resize_entity(entity, width, window_height, active_display.id(), commands);
-        if visible_window {
-            y_pos += window_height;
-        }
-    }
-}
-
-fn binpack_heights(heights: &[f64], min_height: f64, total_height: f64) -> Option<Vec<f64>> {
-    let mut count = heights.len();
-    let mut output = vec![];
-
-    loop {
-        let mut idx = 0;
-
-        let mut remaining = total_height;
-        while idx < count {
-            let remaining_windows = u32::try_from(heights.len() - idx).unwrap();
-
-            if heights[idx] < remaining {
-                if idx + 1 == count {
-                    output.push(remaining);
-                } else {
-                    output.push(heights[idx]);
-                }
-                remaining -= heights[idx];
-            } else if remaining >= min_height * f64::from(remaining_windows) {
-                output.push(remaining);
-                remaining = 0.0;
-            } else {
-                break;
+            if old_frame.size != frame.size
+                && let Ok(mut cmds) = commands.get_entity(entity)
+            {
+                cmds.try_insert(ResizeMarker {
+                    size: frame.size,
+                    display_id: active_display.id(),
+                });
             }
-            idx += 1;
-        }
 
-        if idx == count {
-            break;
+            // If there are multiple displays and the other display is located above, there is a chance
+            // that MacOS will bump the windows over to another display when moving them around.
+            // To avoid that we nudge the off-screen windows slightly down.
+            let visible_window = !display_above
+                || frame.origin.x + frame.size.width > WINDOW_HIDDEN_THRESHOLD
+                    && frame.origin.x < display_width - WINDOW_HIDDEN_THRESHOLD;
+
+            frame.origin.y += if visible_window {
+                menubar
+            } else {
+                // NOTE: If the window is "off screen", move it down slightly
+                // to avoid MacOS moving it over to another display
+                display_bounds.size.height / 4.0
+            };
+
+            if old_frame.origin != frame.origin
+                && let Ok(mut cmds) = commands.get_entity(entity)
+            {
+                cmds.try_insert(RepositionMarker {
+                    origin: frame.origin,
+                    display_id: active_display.id(),
+                });
+            }
         }
-        count -= 1;
-        output.clear();
     }
-
-    let remaining = heights.len() - count;
-    if remaining > 0 {
-        count -= 1;
-        output.truncate(count);
-        let sum = output.iter().fold(0.0, |acc, height| acc + height);
-        let avg_height =
-            ((total_height - sum) / f64::from(u32::try_from(remaining + 1).unwrap())).floor();
-        if avg_height < min_height {
-            return None;
-        }
-
-        while count < heights.len() {
-            output.push(avg_height);
-            count += 1;
-        }
-    }
-
-    Some(output)
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -1285,25 +1186,4 @@ pub(crate) fn gather_initial_processes(
             );
         }
     }
-}
-
-#[test]
-fn test_binpack() {
-    const MIN_HEIGHT: f64 = 100.0;
-    let heights = [300.0, 300.0, 300.0, 300.0];
-
-    let out = binpack_heights(&heights, MIN_HEIGHT, 1500.0).unwrap();
-    assert_eq!(out, vec![300.0, 300.0, 300.0, 600.0]);
-
-    let out = binpack_heights(&heights, MIN_HEIGHT, 1024.0).unwrap();
-    assert_eq!(out, vec![300.0, 300.0, 300.0, 124.0]);
-
-    let out = binpack_heights(&heights, MIN_HEIGHT, 800.0).unwrap();
-    assert_eq!(out, vec![300.0, 300.0, 100.0, 100.0]);
-
-    let out = binpack_heights(&heights, MIN_HEIGHT, 440.0).unwrap();
-    assert_eq!(out, vec![110.0, 110.0, 110.0, 110.0]);
-
-    let out = binpack_heights(&heights, MIN_HEIGHT, 390.0);
-    assert_eq!(out, None);
 }

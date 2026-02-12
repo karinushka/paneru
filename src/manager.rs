@@ -24,7 +24,8 @@ use crate::platform::{ConnID, Pid, ProcessSerialNumber, WinID, WorkspaceId};
 use crate::util::{AXUIWrapper, MacResult, create_array, symlink_target};
 use app::ApplicationOS;
 pub use app::{Application, ApplicationApi};
-pub use display::{Column, Display, LayoutStrip};
+pub use display::Display;
+pub use layout::{Column, LayoutStrip};
 pub use process::{Process, ProcessApi};
 pub use skylight::AXUIElementCopyAttributeValue;
 use skylight::{
@@ -41,6 +42,7 @@ pub use windows::{Window, WindowApi, WindowOS, WindowPadding, ax_window_id};
 
 mod app;
 mod display;
+mod layout;
 mod process;
 mod skylight;
 mod windows;

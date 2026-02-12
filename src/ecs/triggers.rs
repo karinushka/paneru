@@ -151,7 +151,10 @@ pub(super) fn mouse_down_trigger(
     else {
         return;
     };
-    if !window.fully_visible(&active_display.bounds()) {
+
+    if window.frame().origin.x < 0.0
+        || window.frame().origin.x > active_display.bounds().size.width - window.frame().size.width
+    {
         reshuffle_around(entity, &mut commands);
     }
 }

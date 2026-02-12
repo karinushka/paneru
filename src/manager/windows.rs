@@ -4,8 +4,6 @@ use accessibility_sys::{
     kAXValueTypeCGPoint, kAXValueTypeCGSize, kAXWindowRole,
 };
 use bevy::ecs::component::Component;
-use bevy::ecs::entity::Entity;
-use bevy::ecs::system::Commands;
 use core::ptr::NonNull;
 use derive_more::{DerefMut, with_trait::Deref};
 use objc2_core_foundation::{CFEqual, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize};
@@ -19,8 +17,6 @@ use super::skylight::{
     _AXUIElementGetWindow, _SLPSSetFrontProcessWithOptions, AXUIElementCopyAttributeValue,
     AXUIElementPerformAction, AXUIElementSetAttributeValue, SLPSPostEventRecordTo,
 };
-use crate::ecs::params::ActiveDisplay;
-use crate::ecs::{DockPosition, RepositionMarker, ResizeMarker, reposition_entity};
 use crate::errors::{Error, Result};
 use crate::platform::{Pid, ProcessSerialNumber, WinID};
 use crate::util::{AXUIAttributes, AXUIWrapper, MacResult};
@@ -47,71 +43,6 @@ pub trait WindowApi: Send + Sync {
     fn update_frame(&mut self, display_bounds: &CGRect) -> Result<()>;
     fn focus_without_raise(&self, currently_focused: &Window);
     fn focus_with_raise(&self);
-
-    fn fully_visible(&self, display_bounds: &CGRect) -> bool {
-        self.frame().origin.x > 0.0
-            && self.frame().origin.x < display_bounds.size.width - self.frame().size.width
-    }
-
-    fn expose_window(
-        &self,
-        active_display: &ActiveDisplay,
-        moving: Option<&RepositionMarker>,
-        resizing: Option<&ResizeMarker>,
-        dock: Option<&DockPosition>,
-        entity: Entity,
-        commands: &mut Commands,
-    ) -> CGRect {
-        // Check if window needs to be fully exposed
-        let window_id = self.id();
-        let (mut origin, display_bounds) =
-            moving.map_or((self.frame().origin, active_display.bounds()), |marker| {
-                (
-                    marker.origin,
-                    active_display
-                        .other()
-                        .find(|display| display.id() == marker.display_id)
-                        .map_or(active_display.bounds(), |display| display.bounds),
-                )
-            });
-        let size = resizing.map_or(self.frame().size, |marker| marker.size);
-
-        let moved = if origin.x + size.width > display_bounds.size.width {
-            trace!("Bumped window {window_id} to the left");
-            origin.x = display_bounds.size.width - size.width;
-            true
-        } else if origin.x < 0.0 {
-            trace!("Bumped window {window_id} to the right");
-            origin.x = 0.0;
-            true
-        } else {
-            false
-        };
-
-        if let Some(dock) = dock {
-            match dock {
-                DockPosition::Left(offset) => {
-                    if origin.x < *offset {
-                        origin.x = *offset;
-                    }
-                }
-                DockPosition::Right(offset) => {
-                    if origin.x + size.width > display_bounds.size.width - *offset {
-                        origin.x = display_bounds.size.width - *offset - size.width;
-                    }
-                }
-                _ => (),
-            }
-        }
-
-        if moved {
-            let display_id = moving.map_or(active_display.id(), |marker| marker.display_id);
-            reposition_entity(entity, origin.x, origin.y, display_id, commands);
-            trace!("focus resposition to {origin:?}");
-        }
-        CGRect::new(origin, size)
-    }
-
     fn width_ratio(&self) -> f64;
     fn pid(&self) -> Result<Pid>;
     fn set_psn(&mut self, psn: ProcessSerialNumber);

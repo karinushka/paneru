@@ -335,7 +335,6 @@ impl LayoutStrip {
         const MIN_WINDOW_HEIGHT: f64 = 200.0;
         const WINDOW_HIDDEN_THRESHOLD: f64 = 10.0;
 
-        debug!("viewport offset of {offset}");
         self.absolute_positions(get_window_frame)
             .filter_map(move |(column, position)| {
                 let windows = match column {

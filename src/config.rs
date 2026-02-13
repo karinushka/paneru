@@ -405,8 +405,9 @@ pub struct MainOptions {
     pub animation_speed: Option<f64>,
     /// Automatically center the window when switching focus with keyboard.
     pub auto_center: Option<bool>,
-    /// Enables or disables continuous swipe behavior for windows.
-    pub continuous_swipe: Option<bool>,
+
+    #[allow(dead_code)]
+    pub continuous_swipe: Option<bool>, // Deprecated
 }
 
 /// Returns a default set of column widths.

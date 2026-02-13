@@ -1,14 +1,9 @@
-use std::time::Duration;
-
-use bevy::{
-    ecs::{
-        entity::Entity,
-        hierarchy::ChildOf,
-        query::{With, Without},
-        system::{Local, Query, Res, ResMut, Single, SystemParam},
-        world::Mut,
-    },
-    time::Time,
+use bevy::ecs::{
+    entity::Entity,
+    hierarchy::ChildOf,
+    query::{With, Without},
+    system::{Query, Res, ResMut, Single, SystemParam},
+    world::Mut,
 };
 use objc2_core_foundation::CGRect;
 use objc2_core_graphics::CGDirectDisplayID;
@@ -63,13 +58,6 @@ impl Configuration<'_> {
             .options()
             .auto_center
             .is_some_and(|centered| centered)
-    }
-
-    /// Returns `true` if continuous swipe behavior is enabled.
-    /// If the configuration option is not set, it defaults to `true`.
-    pub fn continuous_swipe(&self) -> bool {
-        // Default is enabled.
-        self.config.options().continuous_swipe.is_none_or(|cs| cs)
     }
 
     /// Returns the configured number of fingers for swipe gestures.
@@ -139,25 +127,6 @@ impl Configuration<'_> {
     /// `true` if Mission Control is active, `false` otherwise.
     pub fn mission_control_active(&self) -> bool {
         self.mission_control_active.0
-    }
-}
-
-/// Similar to the `ThrottledSystem`, but only allows an event to happen no events happened for a
-/// specified Duration.
-#[derive(SystemParam)]
-pub struct DebouncedSystem<'w, 's> {
-    time: Res<'w, Time>,
-    elapsed: Local<'s, Duration>,
-}
-
-impl DebouncedSystem<'_, '_> {
-    /// Returns `true` if the event should ignored (debounced).
-    pub fn bounce(&mut self, duration: Duration) -> bool {
-        if self.time.elapsed().saturating_sub(*self.elapsed) > duration {
-            *self.elapsed = self.time.elapsed();
-            return false;
-        }
-        true
     }
 }
 

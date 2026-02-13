@@ -87,9 +87,9 @@ pub fn register_systems(app: &mut bevy::app::App) {
     app.add_systems(
         PostUpdate,
         (
-            systems::redraw_layout_strip,
-            systems::animate_windows.after(systems::redraw_layout_strip),
-            systems::animate_resize_windows.after(systems::redraw_layout_strip),
+            systems::reshuffle_layout_strip,
+            systems::animate_windows.after(systems::reshuffle_layout_strip),
+            systems::animate_resize_windows.after(systems::reshuffle_layout_strip),
         ),
     );
 }

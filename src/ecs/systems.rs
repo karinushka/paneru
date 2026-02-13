@@ -21,7 +21,7 @@ use super::{
     WMEventTrigger,
 };
 use crate::config::Config;
-use crate::ecs::params::{ActiveDisplay, Configuration, DebouncedSystem, Windows};
+use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, BruteforceWindows, DockPosition, Initializing, LocateDockTrigger,
     ReshuffleAroundMarker, Unmanaged, WindowSwipeMarker, reposition_entity, reshuffle_around,
@@ -730,71 +730,37 @@ pub(super) fn animate_resize_windows(
 
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn window_swiper(
-    sliding: Populated<(&Window, Entity, &WindowSwipeMarker)>,
-    windows: Windows,
+    sliding: Populated<(Entity, &WindowSwipeMarker)>,
+    windows: Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
     active_display: ActiveDisplay,
-    config: Configuration,
-    mut debouncer: DebouncedSystem,
     mut commands: Commands,
 ) {
-    const DEBOUNCE_SWIPE_EVENTS_MS: u64 = 500;
-    for (window, entity, WindowSwipeMarker(delta)) in sliding {
+    let get_window_frame = |entity| get_moving_window_frame(entity, &active_display, &windows);
+    let mut viewport = active_display.bounds();
+    viewport.size.height = get_display_height(&active_display);
+
+    for (entity, WindowSwipeMarker(delta)) in sliding {
         commands.entity(entity).try_remove::<WindowSwipeMarker>();
 
-        let pos_x = window.frame().origin.x - (active_display.bounds().size.width * delta);
-        let frame = window.frame();
+        let strip = active_display.active_strip();
+        let absolute_position = strip
+            .absolute_positions(&get_window_frame)
+            .find_map(|(column, pos)| column.top().is_some_and(|col| col == entity).then_some(pos));
+        let Some(viewport_offset) = absolute_position
+            .zip(get_window_frame(entity))
+            .map(|(pos, frame)| pos - frame.origin.x)
+        else {
+            continue;
+        };
+        let shift = viewport.size.width * delta;
 
-        reposition_entity(
-            entity,
-            pos_x
-                .min(active_display.bounds().size.width - frame.size.width)
-                .max(0.0),
-            frame.origin.y,
-            active_display.id(),
+        position_layout_windows(
+            viewport_offset + shift,
+            &active_display,
+            &get_window_frame,
             &mut commands,
         );
-
-        if pos_x > 0.0 && pos_x < (active_display.bounds().size.width - frame.size.width) {
-            reshuffle_around(entity, &mut commands);
-            return;
-        }
-
-        if !config.continuous_swipe()
-            || debouncer.bounce(Duration::from_millis(DEBOUNCE_SWIPE_EVENTS_MS))
-        {
-            return;
-        }
-
-        if let Some(window) =
-            slide_to_next_window(&active_display, entity, *delta, pos_x, &mut commands)
-                .and_then(|entity| windows.get(entity))
-        {
-            commands.trigger(WMEventTrigger(Event::WindowFocused {
-                window_id: window.id(),
-            }));
-        }
     }
-}
-
-fn slide_to_next_window(
-    active_display: &ActiveDisplay,
-    entity: Entity,
-    delta: f64,
-    delta_x: f64,
-    commands: &mut Commands,
-) -> Option<Entity> {
-    let strip = active_display.active_strip();
-
-    let neighbour = if delta_x < 0.0 {
-        strip.right_neighbour(entity)
-    } else {
-        strip.left_neighbour(entity)
-    };
-
-    neighbour.inspect(|neighbour| {
-        debug!("switching to {neighbour} with delta {delta}");
-        reshuffle_around(*neighbour, commands);
-    })
 }
 
 fn expose_window(
@@ -846,33 +812,13 @@ fn expose_window(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-pub(super) fn redraw_layout_strip(
+pub(super) fn reshuffle_layout_strip(
     marker: Populated<Entity, With<ReshuffleAroundMarker>>,
     active_display: ActiveDisplay,
     windows: Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
     mut commands: Commands,
 ) {
-    let get_window_frame = |entity| {
-        windows
-            .get(entity)
-            .map(|(window, reposition, resize)| {
-                let mut frame = window.frame();
-
-                if let Some(reposition) = reposition
-                    && reposition.display_id == active_display.id()
-                {
-                    frame.origin = reposition.origin;
-                }
-
-                if let Some(resize) = resize
-                    && resize.display_id == active_display.id()
-                {
-                    frame.size = resize.size;
-                }
-                frame
-            })
-            .ok()
-    };
+    let get_window_frame = |entity| get_moving_window_frame(entity, &active_display, &windows);
 
     for entity in marker {
         if let Ok(mut cmd) = commands.get_entity(entity) {
@@ -902,63 +848,12 @@ pub(super) fn redraw_layout_strip(
         };
         let viewport_offset = abs_position - frame.origin.x;
 
-        let dock_size = active_display.dock().map_or(0.0, |dock| {
-            if let DockPosition::Bottom(offset) = dock {
-                *offset
-            } else {
-                0.0
-            }
-        });
-        let menubar = active_display.display().menubar_height;
-        let mut display_bounds = active_display.bounds();
-        display_bounds.size.height -= menubar + dock_size;
-
-        let display_width = active_display.bounds().size.width;
-        let other_display = active_display.other().next();
-        let display_above = other_display.is_some_and(|other_display| {
-            active_display.bounds().origin.x < other_display.bounds.origin.x
-        });
-
-        for (entity, mut frame) in
-            layout_strip.calculate_layout(viewport_offset, &display_bounds, &get_window_frame)
-        {
-            let Some(old_frame) = get_window_frame(entity) else {
-                continue;
-            };
-
-            if old_frame.size != frame.size
-                && let Ok(mut cmds) = commands.get_entity(entity)
-            {
-                cmds.try_insert(ResizeMarker {
-                    size: frame.size,
-                    display_id: active_display.id(),
-                });
-            }
-
-            // If there are multiple displays and the other display is located above, there is a chance
-            // that MacOS will bump the windows over to another display when moving them around.
-            // To avoid that we nudge the off-screen windows slightly down.
-            let visible_window = !display_above
-                || frame.origin.x + frame.size.width > WINDOW_HIDDEN_THRESHOLD
-                    && frame.origin.x < display_width - WINDOW_HIDDEN_THRESHOLD;
-
-            frame.origin.y += if visible_window {
-                menubar
-            } else {
-                // NOTE: If the window is "off screen", move it down slightly
-                // to avoid MacOS moving it over to another display
-                display_bounds.size.height / 4.0
-            };
-
-            if old_frame.origin != frame.origin
-                && let Ok(mut cmds) = commands.get_entity(entity)
-            {
-                cmds.try_insert(RepositionMarker {
-                    origin: frame.origin,
-                    display_id: active_display.id(),
-                });
-            }
-        }
+        position_layout_windows(
+            viewport_offset,
+            &active_display,
+            &get_window_frame,
+            &mut commands,
+        );
     }
 }
 
@@ -1183,6 +1078,107 @@ pub(crate) fn gather_initial_processes(
             debug!(
                 "Existing application '{}' is not observable, ignoring it.",
                 process.name(),
+            );
+        }
+    }
+}
+
+fn get_moving_window_frame(
+    entity: Entity,
+    active_display: &ActiveDisplay,
+    windows: &Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
+) -> Option<CGRect> {
+    windows
+        .get(entity)
+        .map(|(window, reposition, resize)| {
+            let mut frame = window.frame();
+
+            if let Some(reposition) = reposition
+                && reposition.display_id == active_display.id()
+            {
+                frame.origin = reposition.origin;
+            }
+
+            if let Some(resize) = resize
+                && resize.display_id == active_display.id()
+            {
+                frame.size = resize.size;
+            }
+            frame
+        })
+        .inspect_err(|err| warn!("can not get frame of {entity}: {err}"))
+        .ok()
+}
+
+fn get_display_height(active_display: &ActiveDisplay) -> f64 {
+    let dock_size = active_display.dock().map_or(0.0, |dock| {
+        if let DockPosition::Bottom(offset) = dock {
+            *offset
+        } else {
+            0.0
+        }
+    });
+    let menubar = active_display.display().menubar_height;
+    active_display.bounds().size.height - menubar - dock_size
+}
+
+fn position_layout_windows<W>(
+    viewport_offset: f64,
+    active_display: &ActiveDisplay,
+    get_window_frame: &W,
+    commands: &mut Commands,
+) where
+    W: Fn(Entity) -> Option<CGRect>,
+{
+    let mut display_bounds = active_display.bounds();
+    display_bounds.size.height = get_display_height(active_display);
+
+    let display_width = active_display.bounds().size.width;
+    let other_display = active_display.other().next();
+    let display_above = other_display.is_some_and(|other_display| {
+        active_display.bounds().origin.x < other_display.bounds.origin.x
+    });
+
+    let layout_strip = active_display.active_strip();
+    for (entity, mut frame) in
+        layout_strip.calculate_layout(viewport_offset, &display_bounds, &get_window_frame)
+    {
+        let Some(old_frame) = get_window_frame(entity) else {
+            continue;
+        };
+
+        if old_frame.size != frame.size {
+            resize_entity(
+                entity,
+                frame.size.width,
+                frame.size.height,
+                active_display.id(),
+                commands,
+            );
+        }
+
+        // If there are multiple displays and the other display is located above, there is a chance
+        // that MacOS will bump the windows over to another display when moving them around.
+        // To avoid that we nudge the off-screen windows slightly down.
+        let visible_window = !display_above
+            || frame.origin.x + frame.size.width > WINDOW_HIDDEN_THRESHOLD
+                && frame.origin.x < display_width - WINDOW_HIDDEN_THRESHOLD;
+
+        frame.origin.y += if visible_window {
+            active_display.display().menubar_height
+        } else {
+            // NOTE: If the window is "off screen", move it down slightly
+            // to avoid MacOS moving it over to another display
+            display_bounds.size.height / 4.0
+        };
+
+        if old_frame.origin != frame.origin {
+            reposition_entity(
+                entity,
+                frame.origin.x,
+                frame.origin.y,
+                active_display.id(),
+                commands,
             );
         }
     }

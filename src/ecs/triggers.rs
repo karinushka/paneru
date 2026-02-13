@@ -749,7 +749,7 @@ pub(super) fn window_destroyed_trigger(
     };
     app.unobserve_window(window);
 
-    commands.entity(entity).despawn();
+    commands.entity(entity).remove::<Unmanaged>().despawn();
 }
 
 /// Moves the focus away to a neighbour window.

@@ -23,8 +23,8 @@ use crate::config::Config;
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, BruteforceWindows, DockPosition, Initializing, LocateDockTrigger,
-    ReshuffleAroundMarker, Unmanaged, WindowSwipeMarker, reposition_entity, reshuffle_around,
-    resize_entity,
+    ReshuffleAroundMarker, Unmanaged, WindowDraggedMarker, WindowSwipeMarker, reposition_entity,
+    reshuffle_around, resize_entity,
 };
 use crate::events::Event;
 use crate::manager::{
@@ -1208,6 +1208,25 @@ fn position_layout_windows<W>(
                 active_display.id(),
                 commands,
             );
+        }
+    }
+}
+
+pub(crate) fn reposition_dragged_window(
+    markers: Populated<(&Timeout, &WindowDraggedMarker)>,
+    mut commands: Commands,
+) {
+    for (
+        timeout,
+        WindowDraggedMarker {
+            entity,
+            display_id: _,
+        },
+    ) in markers
+    {
+        if timeout.timer.is_finished() {
+            debug!("Window {entity} dragged, refreshing layout.");
+            reshuffle_around(*entity, &mut commands);
         }
     }
 }

@@ -179,7 +179,7 @@ pub(super) fn mouse_dragged_trigger(
     mission_control_active: Res<MissionControlActive>,
     mut commands: Commands,
 ) {
-    const DRAG_MARKER_TIMEOUT_MS: u64 = 3000;
+    const DRAG_MARKER_TIMEOUT_MS: u64 = 1000;
     let Event::MouseDragged { point } = trigger.event().0 else {
         return;
     };

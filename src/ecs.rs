@@ -68,6 +68,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::timeout_ticker,
             systems::window_update_frame,
             systems::displays_rearranged,
+            systems::reposition_dragged_window,
             systems::find_orphaned_workspaces.run_if(on_timer(Duration::from_millis(
                 DISPLAY_CHANGE_CHECK_FREQ_MS,
             ))),

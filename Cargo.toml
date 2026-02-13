@@ -14,6 +14,10 @@ keywords = ["macos", "windowmanager", "window", "manager"]
 [lints.clippy]
 pedantic = "warn"
 
+[profile.release]
+codegen-units = 1
+lto = true
+
 [dependencies]
 accessibility-sys = "0.2.0"
 arc-swap = "1.8.1"

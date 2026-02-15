@@ -133,7 +133,7 @@ fn get_window_in_direction(
 /// # Returns
 ///
 /// `Some(Entity)` with the entity of the newly focused window, otherwise `None`.
-#[instrument(level = Level::DEBUG, ret, skip(windows))]
+#[instrument(level = Level::DEBUG, skip_all, fields(direction), ret)]
 fn command_move_focus(
     direction: &Direction,
     strip: &LayoutStrip,
@@ -163,7 +163,7 @@ fn command_move_focus(
 /// # Returns
 ///
 /// `Some(Entity)` with the entity that was swapped with, otherwise `None`.
-#[instrument(level = Level::DEBUG, ret, skip_all, fields(direction))]
+#[instrument(level = Level::DEBUG, skip_all, fields(direction), ret)]
 fn command_swap_focus(
     direction: &Direction,
     windows: &Windows,
@@ -530,7 +530,7 @@ fn command_windows(
 /// * `commands` - Bevy commands to trigger events and modify entities.
 /// * `config` - The `Config` resource, containing application settings.
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
-#[instrument(level = Level::DEBUG, fields(trigger), skip_all)]
+#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 pub fn process_command_trigger(
     trigger: On<CommandTrigger>,
     windows: Windows,

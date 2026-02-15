@@ -13,7 +13,7 @@ use crate::{
 
 /// `Display` represents a physical monitor and manages its associated workspaces and window panes.
 /// Each display has a unique ID, bounds, and a collection of `LayoutStrip`s for different spaces.
-#[derive(Component)]
+#[derive(Component, Debug)]
 pub struct Display {
     /// The unique identifier for this display provided by Core Graphics.
     id: CGDirectDisplayID,

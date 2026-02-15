@@ -16,7 +16,7 @@ use std::ptr::null_mut;
 use std::slice::from_raw_parts_mut;
 use std::time::Duration;
 use stdext::function_name;
-use tracing::{debug, error, trace, warn};
+use tracing::{Level, debug, error, instrument, trace, warn};
 
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
@@ -388,6 +388,7 @@ impl WindowManagerApi for WindowManagerOS {
     }
 
     /// Centers the mouse cursor on the window if it's not already within the window's bounds.
+    #[instrument(level = Level::DEBUG, skip_all, fields(window))]
     fn center_mouse(&self, window: Option<&Window>, display_bounds: &CGRect) {
         let center = if let Some(window) = window {
             let mut cursor = CGPoint::default();

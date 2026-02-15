@@ -11,7 +11,7 @@ use objc2_app_kit::NSScreen;
 use objc2_foundation::{NSNumber, NSString, ns_string};
 use std::pin::Pin;
 use std::time::Duration;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
     ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, MissionControlActive,
@@ -396,7 +396,7 @@ pub(super) fn front_switched_trigger(
         error!("No application for process '{}'.", process.name());
         return;
     };
-    debug!("process name: {}", process.name());
+    debug!("front switching process: {}", process.name());
 
     if let Ok(focused_id) = app.focused_window_id().inspect_err(|err| {
         warn!("can not get current focus: {err}");
@@ -786,6 +786,7 @@ fn give_away_focus(
 /// * `main_cid` - The main connection ID resource.
 /// * `commands` - Bevy commands to manage components and trigger events.
 #[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn spawn_window_trigger(
     mut trigger: On<SpawnWindowTrigger>,
     windows: Windows,
@@ -991,6 +992,7 @@ pub(super) fn refresh_configuration_trigger(
 }
 
 #[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn print_internal_state_trigger(
     trigger: On<WMEventTrigger>,
     focused: Query<(&Window, Entity), With<FocusedMarker>>,

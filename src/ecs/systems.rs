@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::Duration;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
     ActiveDisplayMarker, BProcess, CommandTrigger, ExistingMarker, FreshMarker,
@@ -143,6 +143,7 @@ pub fn gather_displays(window_manager: Res<WindowManager>, mut commands: Command
 /// * `process_query` - A query for existing `BProcess` entities marked with `ExistingMarker`.
 /// * `commands` - Bevy commands to spawn entities and manage components.
 #[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all)]
 pub(crate) fn add_existing_process(
     window_manager: Res<WindowManager>,
     processes: Populated<(Entity, &BProcess), With<ExistingMarker>>,
@@ -169,6 +170,7 @@ pub(crate) fn add_existing_process(
 /// * `app_query` - A query for existing `Application` entities marked with `ExistingMarker`.
 /// * `commands` - Bevy commands to spawn entities and manage components.
 #[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all)]
 pub(crate) fn add_existing_application(
     window_manager: Res<WindowManager>,
     workspaces: Query<&LayoutStrip>,
@@ -194,10 +196,12 @@ pub(crate) fn add_existing_application(
         }
         commands.entity(entity).try_remove::<ExistingMarker>();
 
-        let pid = app.pid();
-        let bruteforce_task =
-            thread_pool.spawn(async move { bruteforce_windows(pid, offscreen_windows) });
-        commands.spawn(BruteforceWindows(bruteforce_task));
+        if !offscreen_windows.is_empty() {
+            let pid = app.pid();
+            let bruteforce_task =
+                thread_pool.spawn(async move { bruteforce_windows(pid, offscreen_windows) });
+            commands.spawn(BruteforceWindows(bruteforce_task));
+        }
     }
 }
 
@@ -212,6 +216,7 @@ pub(crate) fn add_existing_application(
 /// * `window_manager` - The `WindowManager` resource for refreshing displays and getting active space information.
 /// * `commands` - Bevy commands to insert components like `FocusedMarker`.
 #[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all)]
 pub(crate) fn finish_setup(
     process_query: Query<Entity, With<ExistingMarker>>,
     windows: Windows,
@@ -630,6 +635,7 @@ pub(super) fn workspace_change_watcher(
 /// * `config` - The `Config` resource, used for animation speed.
 /// * `commands` - Bevy commands to remove the `RepositionMarker` when animation is complete.
 #[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn animate_windows(
     windows: Populated<(&mut Window, Entity, &RepositionMarker)>,
     displays: Query<&Display>,
@@ -689,6 +695,7 @@ pub(super) fn animate_windows(
 /// * `active_display` - An `ActiveDisplay` system parameter providing immutable access to the active display.
 /// * `commands` - Bevy commands to remove the `ResizeMarker` when resizing is complete.
 #[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn animate_resize_windows(
     windows: Populated<(&mut Window, Entity, &ResizeMarker)>,
     displays: Query<&Display>,
@@ -817,6 +824,7 @@ fn expose_window(
 }
 
 #[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn reshuffle_layout_strip(
     marker: Populated<Entity, With<ReshuffleAroundMarker>>,
     active_display: ActiveDisplay,
@@ -1088,6 +1096,7 @@ pub(crate) fn gather_initial_processes(
     }
 }
 
+#[instrument(level = Level::TRACE, skip_all, fields(entity), ret)]
 fn get_moving_window_frame(
     entity: Entity,
     active_display: &ActiveDisplay,

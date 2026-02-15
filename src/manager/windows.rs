@@ -21,6 +21,7 @@ use crate::errors::{Error, Result};
 use crate::platform::{Pid, ProcessSerialNumber, WinID};
 use crate::util::{AXUIAttributes, AXUIWrapper, MacResult};
 
+#[derive(Debug)]
 pub enum WindowPadding {
     Vertical(u16),
     Horizontal(u16),

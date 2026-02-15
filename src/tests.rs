@@ -4,7 +4,7 @@ use std::time::Duration;
 use super::*;
 use bevy::prelude::*;
 use bevy::time::{TimePlugin, TimeUpdateStrategy};
-use objc2_core_foundation::{CFRetained, CFString, CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGDirectDisplayID;
 use stdext::function_name;
 use stdext::prelude::RwLockExt;
@@ -278,10 +278,9 @@ impl WindowApi for MockWindow {
     }
 
     /// Returns a dummy `CFRetained<AXUIWrapper>` for the mock window's accessibility element.
-    fn element(&self) -> CFRetained<AXUIWrapper> {
+    fn element(&self) -> Option<CFRetained<AXUIWrapper>> {
         println!("{}:", function_name!());
-        let mut s = CFString::from_static_str("");
-        AXUIWrapper::from_retained(&raw mut s).unwrap()
+        None
     }
 
     /// Always returns an empty string for the window title.

@@ -818,7 +818,10 @@ pub(super) fn spawn_window_trigger(
             window.title().unwrap_or_default(),
             window.role().unwrap_or_default(),
             window.subrole().unwrap_or_default(),
-            window.element(),
+            window
+                .element()
+                .map(|element| format!("{element}"))
+                .unwrap_or_default(),
         );
 
         if app.observe_window(&window).is_err() {

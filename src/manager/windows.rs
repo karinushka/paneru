@@ -29,7 +29,7 @@ pub enum WindowPadding {
 pub trait WindowApi: Send + Sync {
     fn id(&self) -> WinID;
     fn frame(&self) -> CGRect;
-    fn element(&self) -> CFRetained<AXUIWrapper>;
+    fn element(&self) -> Option<CFRetained<AXUIWrapper>>;
     fn title(&self) -> Result<String>;
     fn child_role(&self) -> Result<bool>;
     fn role(&self) -> Result<String>;
@@ -215,8 +215,8 @@ impl WindowApi for WindowOS {
     /// # Returns
     ///
     /// A `CFRetained<AXUIWrapper>` representing the accessibility element.
-    fn element(&self) -> CFRetained<AXUIWrapper> {
-        self.ax_element.clone()
+    fn element(&self) -> Option<CFRetained<AXUIWrapper>> {
+        Some(self.ax_element.clone())
     }
 
     /// Retrieves the title of the window.

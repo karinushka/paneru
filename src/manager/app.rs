@@ -263,13 +263,17 @@ impl ApplicationApi for ApplicationOS {
     ///
     /// `Ok(bool)` where `true` means all observers were successfully registered and `retry` list is empty, otherwise `Err(Error)`.
     fn observe_window(&mut self, window: &Window) -> Result<bool> {
-        self.handler
-            .add_observer(
-                window.element().deref(),
-                &AX_WINDOW_NOTIFICATIONS,
-                ObserverType::Window(window.id()),
-            )
-            .map(|retry| retry.is_empty())
+        if let Some(element) = window.element() {
+            self.handler
+                .add_observer(
+                    &element,
+                    &AX_WINDOW_NOTIFICATIONS,
+                    ObserverType::Window(window.id()),
+                )
+                .map(|retry| retry.is_empty())
+        } else {
+            Err(Error::InvalidWindow)
+        }
     }
 
     /// Unregisters observers for a specific window's accessibility notifications.
@@ -278,11 +282,13 @@ impl ApplicationApi for ApplicationOS {
     ///
     /// * `window` - A reference to the `Window` object to unobserve.
     fn unobserve_window(&mut self, window: &Window) {
-        self.handler.remove_observer(
-            &ObserverType::Window(window.id()),
-            window.element().deref(),
-            &AX_WINDOW_NOTIFICATIONS,
-        );
+        if let Some(element) = window.element() {
+            self.handler.remove_observer(
+                &ObserverType::Window(window.id()),
+                &element,
+                &AX_WINDOW_NOTIFICATIONS,
+            );
+        }
     }
 
     /// Checks if the application is currently the frontmost application.

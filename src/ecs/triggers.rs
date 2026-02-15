@@ -48,6 +48,7 @@ use crate::util::symlink_target;
 pub(super) fn mouse_moved_trigger(
     trigger: On<WMEventTrigger>,
     windows: Windows,
+    apps: Query<&Application>,
     window_manager: Res<WindowManager>,
     mut config: Configuration,
 ) {
@@ -106,10 +107,15 @@ pub(super) fn mouse_moved_trigger(
     // Do not reshuffle windows due to moved mouse focus.
     config.set_skip_reshuffle(true);
     config.set_ffm_flag(Some(window.id()));
-    if let Some((focused_window, _)) = windows.focused() {
-        window.focus_without_raise(focused_window);
-    } else {
-        window.focus_with_raise();
+
+    if let Some(psn) = windows.psn(window.id(), &apps) {
+        if let Some((focused_window, _)) = windows.focused()
+            && let Some(focused_psn) = windows.psn(focused_window.id(), &apps)
+        {
+            window.focus_without_raise(psn, focused_window, focused_psn);
+        } else {
+            window.focus_with_raise(psn);
+        }
     }
 }
 
@@ -822,7 +828,6 @@ pub(super) fn spawn_window_trigger(
         if app.observe_window(&window).is_err() {
             warn!("Error observing window {window_id}.");
         }
-        window.set_psn(app.psn());
         let eligible = app.parent_window(active_display.id()).is_err() || window.is_root();
         window.set_eligible(eligible);
         let bundle_id = app.bundle_id().unwrap_or_default();
@@ -839,12 +844,15 @@ pub(super) fn spawn_window_trigger(
         if !properties.is_empty() {
             debug!("Applying window properties for '{}'", window.id());
         }
+
+        let mut lens = apps.transmute_lens::<&Application>();
         apply_window_properties(
             window,
             app_entity,
             &properties,
             &mut active_display,
             &windows,
+            &lens.query(),
             &mut commands,
         );
     }
@@ -856,6 +864,7 @@ fn apply_window_properties(
     properties: &[WindowParams],
     active_display: &mut ActiveDisplayMut,
     windows: &Windows,
+    apps: &Query<&Application>,
     commands: &mut Commands,
 ) {
     let floating = properties
@@ -918,12 +927,14 @@ fn apply_window_properties(
     }
 
     if dont_focus {
-        if let Some((focus, _)) = windows.focused() {
+        if let Some((focus, _)) = windows.focused()
+            && let Some(psn) = windows.psn(focus.id(), apps)
+        {
             debug!(
                 "Not focusing new window {entity}, keeping focus on '{}'",
                 focus.title().unwrap_or_default()
             );
-            focus.focus_with_raise();
+            focus.focus_with_raise(psn);
         }
     } else {
         reshuffle_around(entity, commands);

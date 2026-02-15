@@ -278,12 +278,6 @@ impl WindowApi for MockWindow {
         self.id
     }
 
-    /// Returns the `ProcessSerialNumber` of the process owning the mock window.
-    fn psn(&self) -> Option<ProcessSerialNumber> {
-        println!("{}:", function_name!());
-        self.psn
-    }
-
     /// Returns the frame (`CGRect`) of the mock window.
     fn frame(&self) -> CGRect {
         self.frame
@@ -353,7 +347,12 @@ impl WindowApi for MockWindow {
     }
 
     /// Prints a debug message for focus without raise.
-    fn focus_without_raise(&self, currently_focused: &Window) {
+    fn focus_without_raise(
+        &self,
+        _psn: ProcessSerialNumber,
+        currently_focused: &Window,
+        _ocused_psn: ProcessSerialNumber,
+    ) {
         println!(
             "{}: id {} {}",
             function_name!(),
@@ -363,7 +362,7 @@ impl WindowApi for MockWindow {
     }
 
     /// Prints a debug message for focus with raise and updates the mock application's focused ID.
-    fn focus_with_raise(&self) {
+    fn focus_with_raise(&self, _psn: ProcessSerialNumber) {
         println!("{}: id {}", function_name!(), self.id);
         if let Some(events) = &self.event_queue {
             events
@@ -386,12 +385,6 @@ impl WindowApi for MockWindow {
     fn pid(&self) -> Result<Pid> {
         println!("{}:", function_name!());
         Ok(0)
-    }
-
-    /// Sets the `ProcessSerialNumber` for the mock window.
-    fn set_psn(&mut self, psn: ProcessSerialNumber) {
-        println!("{}:", function_name!());
-        self.psn = Some(psn);
     }
 
     /// Does nothing for set eligible.

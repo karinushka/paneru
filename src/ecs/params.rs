@@ -13,8 +13,8 @@ use super::{ActiveDisplayMarker, FocusFollowsMouse, MissionControlActive, SkipRe
 use crate::{
     config::{Config, WindowParams},
     ecs::{ActiveWorkspaceMarker, DockPosition, FocusedMarker, FullWidthMarker, Unmanaged},
-    manager::{Display, LayoutStrip, Window},
-    platform::WinID,
+    manager::{Application, Display, LayoutStrip, Window},
+    platform::{ProcessSerialNumber, WinID},
 };
 
 /// A Bevy `SystemParam` that provides access to the application's configuration and related state.
@@ -281,5 +281,11 @@ impl Windows<'_, '_> {
             .get(entity)
             .map(|(_, _, width)| width.0)
             .ok()
+    }
+
+    pub fn psn(&self, window_id: WinID, apps: &Query<&Application>) -> Option<ProcessSerialNumber> {
+        self.find_parent(window_id)
+            .and_then(|(_, _, parent)| apps.get(parent).ok())
+            .map(|app| app.psn())
     }
 }

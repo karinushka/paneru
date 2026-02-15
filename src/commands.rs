@@ -1,6 +1,6 @@
 use bevy::ecs::entity::Entity;
 use bevy::ecs::observer::On;
-use bevy::ecs::system::{Commands, Res, ResMut};
+use bevy::ecs::system::{Commands, Query, Res, ResMut};
 use objc2_core_foundation::CGPoint;
 use tracing::{Level, instrument};
 use tracing::{debug, error};
@@ -13,7 +13,7 @@ use crate::ecs::{
 };
 use crate::errors::Result;
 use crate::events::Event;
-use crate::manager::{Column, LayoutStrip, WindowManager};
+use crate::manager::{Application, Column, LayoutStrip, WindowManager};
 
 /// Represents a cardinal or directional choice for window manipulation.
 #[derive(Clone, Debug)]
@@ -138,11 +138,14 @@ fn command_move_focus(
     direction: &Direction,
     strip: &LayoutStrip,
     windows: &Windows,
+    apps: &Query<&Application>,
 ) -> Option<Entity> {
     let (_, entity) = windows.focused()?;
     get_window_in_direction(direction, entity, strip).inspect(|entity| {
-        if let Some(window) = windows.get(*entity) {
-            window.focus_with_raise();
+        if let Some(window) = windows.get(*entity)
+            && let Some(psn) = windows.psn(window.id(), apps)
+        {
+            window.focus_with_raise(psn);
         }
     })
 }
@@ -454,13 +457,14 @@ fn command_windows(
     operation: &Operation,
     windows: &Windows,
     active_display: &mut ActiveDisplayMut,
+    apps: &Query<&Application>,
     window_manager: &WindowManager,
     commands: &mut Commands,
     config: &Config,
 ) -> Result<()> {
     match operation {
         Operation::Focus(direction) => {
-            command_move_focus(direction, active_display.active_strip(), windows);
+            command_move_focus(direction, active_display.active_strip(), windows, apps);
         }
 
         Operation::Swap(direction) => {
@@ -531,6 +535,7 @@ pub fn process_command_trigger(
     trigger: On<CommandTrigger>,
     windows: Windows,
     mut active_display: ActiveDisplayMut,
+    apps: Query<&Application>,
     window_manager: Res<WindowManager>,
     config: Res<Config>,
     mut ffm_flag: ResMut<FocusFollowsMouse>,
@@ -546,6 +551,7 @@ pub fn process_command_trigger(
                     operation,
                     &windows,
                     &mut active_display,
+                    &apps,
                     &window_manager,
                     &mut commands,
                     config.as_ref(),

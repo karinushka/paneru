@@ -28,7 +28,6 @@ pub enum WindowPadding {
 
 pub trait WindowApi: Send + Sync {
     fn id(&self) -> WinID;
-    fn psn(&self) -> Option<ProcessSerialNumber>;
     fn frame(&self) -> CGRect;
     fn element(&self) -> CFRetained<AXUIWrapper>;
     fn title(&self) -> Result<String>;
@@ -41,11 +40,15 @@ pub trait WindowApi: Send + Sync {
     fn reposition(&mut self, x: f64, y: f64, display_bounds: &CGRect);
     fn resize(&mut self, width: f64, height: f64, display_bounds: &CGRect);
     fn update_frame(&mut self, display_bounds: &CGRect) -> Result<()>;
-    fn focus_without_raise(&self, currently_focused: &Window);
-    fn focus_with_raise(&self);
+    fn focus_without_raise(
+        &self,
+        psn: ProcessSerialNumber,
+        currently_focused: &Window,
+        focused_psn: ProcessSerialNumber,
+    );
+    fn focus_with_raise(&self, psn: ProcessSerialNumber);
     fn width_ratio(&self) -> f64;
     fn pid(&self) -> Result<Pid>;
-    fn set_psn(&mut self, psn: ProcessSerialNumber);
     fn set_eligible(&mut self, eligible: bool);
     fn set_padding(&mut self, padding: WindowPadding);
 }
@@ -91,7 +94,6 @@ const CPS_USER_GENERATED: u32 = 0x200;
 #[derive(Debug)]
 pub struct WindowOS {
     id: WinID,
-    psn: Option<ProcessSerialNumber>,
     ax_element: CFRetained<AXUIWrapper>,
     frame: CGRect,
     vertical_padding: f64,
@@ -114,7 +116,6 @@ impl WindowOS {
         let id = ax_window_id(element.as_ptr())?;
         let window = Self {
             id,
-            psn: None,
             ax_element: element.clone(),
             frame: CGRect::default(),
             vertical_padding: 0.0,
@@ -202,11 +203,6 @@ impl WindowApi for WindowOS {
     /// The window ID as `WinID`.
     fn id(&self) -> WinID {
         self.id
-    }
-
-    /// Returns the process serial number of the window.
-    fn psn(&self) -> Option<ProcessSerialNumber> {
-        self.psn
     }
 
     /// Returns the current frame (`CGRect`) of the window.
@@ -420,10 +416,12 @@ impl WindowApi for WindowOS {
     /// # Arguments
     ///
     /// * `currently_focused` - A reference to the currently focused window.
-    fn focus_without_raise(&self, currently_focused: &Window) {
-        let Some((psn, focused_psn)) = self.psn().zip(currently_focused.psn()) else {
-            return;
-        };
+    fn focus_without_raise(
+        &self,
+        psn: ProcessSerialNumber,
+        currently_focused: &Window,
+        focused_psn: ProcessSerialNumber,
+    ) {
         let window_id = self.id();
         debug!("{window_id}");
         if focused_psn == psn {
@@ -455,10 +453,7 @@ impl WindowApi for WindowOS {
     }
 
     /// Focuses the window and raises it to the front.
-    fn focus_with_raise(&self) {
-        let Some(psn) = self.psn else {
-            return;
-        };
+    fn focus_with_raise(&self, psn: ProcessSerialNumber) {
         let window_id = self.id();
         unsafe {
             _SLPSSetFrontProcessWithOptions(&psn, window_id, CPS_USER_GENERATED);
@@ -483,10 +478,6 @@ impl WindowApi for WindowOS {
             "can not get pid from {:?}.",
             self.ax_element
         )))
-    }
-
-    fn set_psn(&mut self, psn: ProcessSerialNumber) {
-        self.psn = Some(psn);
     }
 
     fn set_eligible(&mut self, eligible: bool) {

@@ -81,10 +81,6 @@ pub(super) fn mouse_moved_trigger(
         trace!("can not find focused window: {window_id}");
         return;
     };
-    if !window.is_eligible() {
-        trace!("{window_id} not eligible");
-        return;
-    }
 
     let child_window = window_manager
         .get_associated_windows(window_id)
@@ -800,7 +796,7 @@ pub(super) fn spawn_window_trigger(
 ) {
     let new_windows = &mut trigger.event_mut().0;
 
-    while let Some(mut window) = new_windows.pop() {
+    while let Some(window) = new_windows.pop() {
         let window_id = window.id();
 
         if windows.find(window_id).is_some() {
@@ -828,14 +824,11 @@ pub(super) fn spawn_window_trigger(
         if app.observe_window(&window).is_err() {
             warn!("Error observing window {window_id}.");
         }
-        let eligible = app.parent_window(active_display.id()).is_err() || window.is_root();
-        window.set_eligible(eligible);
         let bundle_id = app.bundle_id().unwrap_or_default();
         debug!(
-            "window {} isroot {} eligible {} bundle_id {}",
+            "window {} isroot {} bundle_id {}",
             window_id,
             window.is_root(),
-            window.is_eligible(),
             bundle_id,
         );
 

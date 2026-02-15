@@ -177,12 +177,6 @@ impl ApplicationApi for MockApplication {
         println!("{}:", function_name!());
         Some("test")
     }
-
-    /// Always returns `Ok(0)` for the parent window ID.
-    fn parent_window(&self, _display_id: CGDirectDisplayID) -> Result<WinID> {
-        println!("{}:", function_name!());
-        Ok(0)
-    }
 }
 
 /// A mock implementation of the `WindowManagerApi` trait for testing purposes.
@@ -320,12 +314,6 @@ impl WindowApi for MockWindow {
         true
     }
 
-    /// Always returns `true` for eligibility.
-    fn is_eligible(&self) -> bool {
-        println!("{}:", function_name!());
-        true
-    }
-
     /// Repositions the mock window's frame to the given coordinates.
     fn reposition(&mut self, x: f64, y: f64, _display_bounds: &CGRect) {
         println!("{}: id {} to {x:.02}:{y:.02}", function_name!(), self.id);
@@ -385,11 +373,6 @@ impl WindowApi for MockWindow {
     fn pid(&self) -> Result<Pid> {
         println!("{}:", function_name!());
         Ok(0)
-    }
-
-    /// Does nothing for set eligible.
-    fn set_eligible(&mut self, _eligible: bool) {
-        println!("{}:", function_name!());
     }
 
     fn set_padding(&mut self, _padding: manager::WindowPadding) {

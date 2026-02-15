@@ -542,24 +542,15 @@ pub fn process_command_trigger(
     mut commands: Commands,
 ) {
     let res = match &trigger.event().0 {
-        Command::Window(operation) => {
-            let eligible = windows
-                .focused()
-                .is_some_and(|(window, _)| window.is_eligible());
-            if eligible {
-                command_windows(
-                    operation,
-                    &windows,
-                    &mut active_display,
-                    &apps,
-                    &window_manager,
-                    &mut commands,
-                    config.as_ref(),
-                )
-            } else {
-                Ok(())
-            }
-        }
+        Command::Window(operation) => command_windows(
+            operation,
+            &windows,
+            &mut active_display,
+            &apps,
+            &window_manager,
+            &mut commands,
+            config.as_ref(),
+        ),
         Command::Mouse(movement) => {
             match movement {
                 MouseMove::ToNextDisplay => {

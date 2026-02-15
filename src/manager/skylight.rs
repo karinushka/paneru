@@ -263,20 +263,6 @@ unsafe extern "C" {
     /// extern `CFTypeRef` SLSWindowQueryResultCopyWindows(CFTypeRef `window_query`);
     pub fn SLSWindowQueryResultCopyWindows(type_ref: NonNull<CFType>) -> NonNull<CFType>;
 
-    /// Retrieves the count of windows in a window iterator.
-    ///
-    /// # Arguments
-    ///
-    /// * `iterator` - A raw pointer to a `CFType` representing the window iterator.
-    ///
-    /// # Returns
-    ///
-    /// An `isize` representing the count of windows.
-    ///
-    /// # Original signature
-    /// extern int SLSWindowIteratorGetCount(CFTypeRef iterator);
-    pub fn SLSWindowIteratorGetCount(iterator: *const CFType) -> isize;
-
     /// Advances the window iterator to the next window.
     ///
     /// # Arguments

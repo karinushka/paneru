@@ -35,7 +35,6 @@ pub trait WindowApi: Send + Sync {
     fn role(&self) -> Result<String>;
     fn subrole(&self) -> Result<String>;
     fn is_root(&self) -> bool;
-    fn is_eligible(&self) -> bool;
     fn is_minimized(&self) -> bool;
     fn reposition(&mut self, x: f64, y: f64, display_bounds: &CGRect);
     fn resize(&mut self, width: f64, height: f64, display_bounds: &CGRect);
@@ -49,7 +48,6 @@ pub trait WindowApi: Send + Sync {
     fn focus_with_raise(&self, psn: ProcessSerialNumber);
     fn width_ratio(&self) -> f64;
     fn pid(&self) -> Result<Pid>;
-    fn set_eligible(&mut self, eligible: bool);
     fn set_padding(&mut self, padding: WindowPadding);
 }
 
@@ -98,7 +96,6 @@ pub struct WindowOS {
     frame: CGRect,
     vertical_padding: f64,
     horizontal_padding: f64,
-    eligible: bool,
     width_ratio: f64,
 }
 
@@ -120,7 +117,6 @@ impl WindowOS {
             frame: CGRect::default(),
             vertical_padding: 0.0,
             horizontal_padding: 0.0,
-            eligible: false,
             width_ratio: 0.33,
         };
 
@@ -268,15 +264,6 @@ impl WindowApi for WindowOS {
         self.ax_element
             .parent()
             .is_ok_and(|parent| !CFEqual(Some(&*parent), Some(cftype)))
-    }
-
-    /// Checks if the window is eligible for management (i.e., it is a root and a real window).
-    ///
-    /// # Returns
-    ///
-    /// `true` if the window is eligible, `false` otherwise.
-    fn is_eligible(&self) -> bool {
-        self.eligible
     }
 
     fn is_minimized(&self) -> bool {
@@ -478,10 +465,6 @@ impl WindowApi for WindowOS {
             "can not get pid from {:?}.",
             self.ax_element
         )))
-    }
-
-    fn set_eligible(&mut self, eligible: bool) {
-        self.eligible = eligible;
     }
 
     fn set_padding(&mut self, padding: WindowPadding) {

@@ -8,8 +8,7 @@ use accessibility_sys::{
 use bevy::ecs::component::Component;
 use core::ptr::NonNull;
 use derive_more::{DerefMut, with_trait::Deref};
-use objc2_core_foundation::{CFNumberType, CFRetained, CFString, kCFRunLoopCommonModes};
-use objc2_core_graphics::CGDirectDisplayID;
+use objc2_core_foundation::{CFRetained, CFString, kCFRunLoopCommonModes};
 use std::ffi::c_void;
 use std::pin::Pin;
 use std::ptr::null_mut;
@@ -17,10 +16,7 @@ use std::sync::LazyLock;
 use stdext::function_name;
 use tracing::{debug, error};
 
-use super::skylight::{
-    _SLPSGetFrontProcess, SLSWindowIteratorAdvance, SLSWindowIteratorGetCount,
-    SLSWindowIteratorGetParentID, SLSWindowQueryResultCopyWindows, SLSWindowQueryWindows,
-};
+use super::skylight::_SLPSGetFrontProcess;
 use super::{ProcessApi, Window, WindowOS, ax_window_id};
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
@@ -28,9 +24,7 @@ use crate::platform::{
     AXObserverAddNotification, AXObserverCreate, AXObserverRemoveNotification, CFStringRef, ConnID,
     Pid, ProcessSerialNumber, WinID,
 };
-use crate::util::{
-    AXUIAttributes, AXUIWrapper, MacResult, add_run_loop, create_array, remove_run_loop,
-};
+use crate::util::{AXUIAttributes, AXUIWrapper, MacResult, add_run_loop, remove_run_loop};
 
 /// A static `LazyLock` that holds a list of `AXNotification` strings to be observed for application-level events.
 /// These notifications are general events related to an application's lifecycle and state changes,
@@ -103,16 +97,6 @@ pub trait ApplicationApi: Send + Sync {
     fn is_frontmost(&self) -> bool;
     /// Returns the bundle identifier of the application.
     fn bundle_id(&self) -> Option<&str>;
-    /// Returns the ID of the parent window for a given display.
-    ///
-    /// # Arguments
-    ///
-    /// * `display_id` - The `CGDirectDisplayID` of the display.
-    ///
-    /// # Errors
-    ///
-    /// Returns an `Error` if the parent window cannot be determined.
-    fn parent_window(&self, display_id: CGDirectDisplayID) -> Result<WinID>;
 }
 
 /// A wrapper struct for `ApplicationApi` trait objects, allowing for dynamic dispatch.
@@ -321,36 +305,6 @@ impl ApplicationApi for ApplicationOS {
     /// An `Option<&str>` containing the bundle ID if available, otherwise `None`.
     fn bundle_id(&self) -> Option<&str> {
         self.bundle_id.as_deref()
-    }
-
-    /// Returns the parent window for a given display.
-    ///
-    /// # Arguments
-    ///
-    /// * `display_id` - The `CGDirectDisplayID` of the display.
-    ///
-    /// # Errors
-    ///
-    /// Returns an `Error` if the parent window cannot be determined.
-    fn parent_window(&self, display_id: CGDirectDisplayID) -> Result<WinID> {
-        let windows = create_array(&[display_id], CFNumberType::SInt32Type)?;
-        unsafe {
-            let query = CFRetained::from_raw(SLSWindowQueryWindows(
-                self.connection.unwrap_or_default(),
-                &raw const *windows,
-                1,
-            ));
-            let iterator = &raw const *CFRetained::from_raw(SLSWindowQueryResultCopyWindows(
-                query.deref().into(),
-            ));
-            if 1 == SLSWindowIteratorGetCount(iterator) && SLSWindowIteratorAdvance(iterator) {
-                return Ok(SLSWindowIteratorGetParentID(iterator));
-            }
-        }
-        Err(Error::InvalidInput(format!(
-            "{}: error creating an array.",
-            function_name!()
-        )))
     }
 }
 

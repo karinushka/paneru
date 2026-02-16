@@ -792,12 +792,12 @@ pub(super) fn spawn_window_trigger(
     windows: Windows,
     mut apps: Query<(Entity, &mut Application)>,
     mut active_display: ActiveDisplayMut,
-    config: Configuration,
+    mut config: Configuration,
     mut commands: Commands,
 ) {
     let new_windows = &mut trigger.event_mut().0;
 
-    while let Some(window) = new_windows.pop() {
+    while let Some(mut window) = new_windows.pop() {
         let window_id = window.id();
 
         if windows.find(window_id).is_some() {
@@ -842,36 +842,31 @@ pub(super) fn spawn_window_trigger(
             debug!("Applying window properties for '{}'", window.id());
         }
 
-        let mut lens = apps.transmute_lens::<&Application>();
+        apply_window_padding(&mut window, &mut active_display, &properties);
+
+        // Insert the window into the internal Bevy state.
+        let entity = commands.spawn((window, ChildOf(app_entity))).id();
+
         apply_window_properties(
-            window,
-            app_entity,
+            entity,
             &properties,
             &mut active_display,
             &windows,
-            &lens.query(),
+            &mut apps,
+            &mut config,
             &mut commands,
         );
     }
 }
 
-fn apply_window_properties(
-    mut window: Window,
-    app_entity: Entity,
-    properties: &[WindowParams],
+fn apply_window_padding(
+    window: &mut Window,
     active_display: &mut ActiveDisplayMut,
-    windows: &Windows,
-    apps: &Query<&Application>,
-    commands: &mut Commands,
+    properties: &[WindowParams],
 ) {
     let floating = properties
         .iter()
         .find_map(|props| props.floating)
-        .unwrap_or(false);
-    let wanted_insertion = properties.iter().find_map(|props| props.index);
-    let dont_focus = properties
-        .iter()
-        .find_map(|props| props.dont_focus)
         .unwrap_or(false);
 
     // Do not add padding to floating windows.
@@ -889,9 +884,26 @@ fn apply_window_properties(
     _ = window
         .update_frame(&active_display.bounds())
         .inspect_err(|err| error!("{err}"));
+}
 
-    // Insert the window into the internal Bevy state.
-    let entity = commands.spawn((window, ChildOf(app_entity))).id();
+fn apply_window_properties(
+    entity: Entity,
+    properties: &[WindowParams],
+    active_display: &mut ActiveDisplayMut,
+    windows: &Windows,
+    apps: &mut Query<(Entity, &mut Application)>,
+    config: &mut Configuration,
+    commands: &mut Commands,
+) {
+    let floating = properties
+        .iter()
+        .find_map(|props| props.floating)
+        .unwrap_or(false);
+    let wanted_insertion = properties.iter().find_map(|props| props.index);
+    let dont_focus = properties
+        .iter()
+        .find_map(|props| props.dont_focus)
+        .unwrap_or(false);
 
     if floating {
         // Avoid managing window if it's floating.
@@ -924,14 +936,16 @@ fn apply_window_properties(
     }
 
     if dont_focus {
+        let mut lens = apps.transmute_lens::<&Application>();
         if let Some((focus, _)) = windows.focused()
-            && let Some(psn) = windows.psn(focus.id(), apps)
+            && let Some(psn) = windows.psn(focus.id(), &lens.query())
         {
             debug!(
                 "Not focusing new window {entity}, keeping focus on '{}'",
                 focus.title().unwrap_or_default()
             );
             focus.focus_with_raise(psn);
+            config.set_skip_reshuffle(true);
         }
     } else {
         reshuffle_around(entity, commands);

@@ -14,8 +14,8 @@ use tracing::{Level, debug, instrument};
 use crate::commands::{Command, Direction, Operation, process_command_trigger};
 use crate::config::Config;
 use crate::ecs::{
-    BProcess, ExistingMarker, FocusFollowsMouse, Initializing, MissionControlActive,
-    PollForNotifications, SkipReshuffle, register_systems, register_triggers,
+    BProcess, ExistingMarker, FocusFollowsMouse, FocusedMarker, Initializing, MissionControlActive,
+    PollForNotifications, SkipReshuffle, SpawnWindowTrigger, register_systems, register_triggers,
 };
 use crate::errors::{Error, Result};
 use crate::events::Event;
@@ -748,5 +748,97 @@ fn test_startup_windows() {
     bevy.world_mut()
         .insert_resource(WindowManager(Box::new(window_manager)));
 
+    run_main_loop(&mut bevy, &internal_queue, &commands, check);
+}
+
+#[test]
+fn test_dont_focus() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 }, // Noop allowing everything to settle
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::Last)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::First)),
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    let offscreen_right = TEST_DISPLAY_WIDTH - 10;
+    let expected_positions = [
+        (2, (0, TEST_MENUBAR_HEIGHT)),
+        (1, (400, TEST_MENUBAR_HEIGHT)),
+        (0, (800, TEST_MENUBAR_HEIGHT)),
+        (3, (offscreen_right, TEST_MENUBAR_HEIGHT)),
+    ];
+
+    let mut bevy = setup_world();
+    let app = setup_process(bevy.world_mut());
+    let mock_app = app.clone();
+    let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
+    let event_queue = internal_queue.clone();
+
+    let windows = Box::new(move |_| {
+        (0..3)
+            .map(|i| {
+                let size = CGSize::new(f64::from(TEST_WINDOW_WIDTH), f64::from(TEST_WINDOW_HEIGHT));
+                let window = MockWindow::new(
+                    i,
+                    CGRect::new(CGPoint::new(100.0 * f64::from(i), 0.0), size),
+                    event_queue.clone(),
+                    mock_app.clone(),
+                );
+                Window::new(Box::new(window))
+            })
+            .collect::<Vec<_>>()
+    });
+    let window_manager = MockWindowManager { windows };
+    bevy.world_mut()
+        .insert_resource(WindowManager(Box::new(window_manager)));
+
+    let check_queue = internal_queue.clone();
+    let check = |iteration, world: &mut World| {
+        let iterations = [None, None, None, Some(expected_positions.as_slice())];
+
+        if let Some(positions) = iterations[iteration] {
+            debug!("Iteration: {iteration}");
+            verify_window_positions(positions, world);
+
+            let mut query = world.query::<(&Window, Has<FocusedMarker>)>();
+            for (window, focused) in query.iter(world) {
+                if focused {
+                    // Check that focus stayed on the first window.
+                    assert_eq!(window.id(), 2);
+                }
+            }
+        }
+
+        if iteration == 1 {
+            let size = CGSize::new(f64::from(TEST_WINDOW_WIDTH), f64::from(TEST_WINDOW_HEIGHT));
+            let window = MockWindow::new(
+                3,
+                CGRect::new(CGPoint::new(0.0, 0.0), size),
+                check_queue.clone(),
+                app.clone(),
+            );
+            let window = Window::new(Box::new(window));
+            world.trigger(SpawnWindowTrigger(vec![window]));
+        }
+    };
+
+    let config: Config = r#"
+[options]
+[bindings]
+[windows]
+[windows.skipfocus]
+title = ".*"
+dont_focus = true
+index = 100
+"#
+    .try_into()
+    .unwrap();
+    bevy.insert_resource(config);
     run_main_loop(&mut bevy, &internal_queue, &commands, check);
 }

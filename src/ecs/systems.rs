@@ -742,7 +742,7 @@ pub(super) fn animate_resize_windows(
 
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn window_swiper(
-    sliding: Populated<(Entity, &WindowSwipeMarker)>,
+    sliding: Populated<(Entity, Has<Unmanaged>, &WindowSwipeMarker)>,
     windows: Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
     active_display: ActiveDisplay,
     mut commands: Commands,
@@ -751,8 +751,22 @@ pub(super) fn window_swiper(
     let mut viewport = active_display.bounds();
     viewport.size.height = get_display_height(&active_display);
 
-    for (entity, WindowSwipeMarker(delta)) in sliding {
+    for (entity, unmanaged, WindowSwipeMarker(delta)) in sliding {
+        let shift = viewport.size.width * delta;
+
         commands.entity(entity).try_remove::<WindowSwipeMarker>();
+
+        if unmanaged && let Some(frame) = get_window_frame(entity) {
+            // Window is floating, just shift it directly.
+            reposition_entity(
+                entity,
+                frame.origin.x - shift,
+                frame.origin.y,
+                active_display.id(),
+                &mut commands,
+            );
+            continue;
+        }
 
         let strip = active_display.active_strip();
         let absolute_position = strip
@@ -764,7 +778,6 @@ pub(super) fn window_swiper(
         else {
             continue;
         };
-        let shift = viewport.size.width * delta;
 
         position_layout_windows(
             viewport_offset + shift,

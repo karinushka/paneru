@@ -492,7 +492,9 @@ pub(super) fn window_focused_trigger(
     commands.entity(entity).try_insert(FocusedMarker);
 
     if !config.skip_reshuffle() {
-        if config.auto_center() {
+        if config.auto_center()
+            && let Some((_, _, None)) = windows.get_managed(entity)
+        {
             reposition_entity(
                 entity,
                 (active_display.bounds().size.width - window.frame().size.width) / 2.0,

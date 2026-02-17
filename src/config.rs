@@ -7,6 +7,7 @@ use std::{
     collections::HashMap,
     env,
     ffi::c_void,
+    fs::read_to_string,
     path::{Path, PathBuf},
     ptr::NonNull,
     sync::{Arc, LazyLock},
@@ -186,8 +187,9 @@ impl Config {
     ///
     /// `Ok(Self)` if the configuration is loaded successfully, otherwise `Err(Error)` with an error message.
     pub fn new(path: &Path) -> Result<Self> {
+        let input = read_to_string(path)?;
         Ok(Config {
-            inner: Arc::new(ArcSwap::from_pointee(InnerConfig::new(path)?)),
+            inner: Arc::new(ArcSwap::from_pointee(InnerConfig::new(&input)?)),
         })
     }
 
@@ -201,7 +203,8 @@ impl Config {
     ///
     /// `Ok(())` if the configuration is reloaded successfully, otherwise `Err(Error)` with an error message.
     pub fn reload_config(&mut self, path: &Path) -> Result<()> {
-        let new = InnerConfig::new(path)?;
+        let input = read_to_string(path)?;
+        let new = InnerConfig::new(&input)?;
         self.inner.store(Arc::new(new));
         Ok(())
     }
@@ -301,6 +304,16 @@ impl Default for Config {
     }
 }
 
+impl TryFrom<&str> for Config {
+    type Error = crate::errors::Error;
+
+    fn try_from(input: &str) -> std::result::Result<Self, Self::Error> {
+        Ok(Config {
+            inner: Arc::new(ArcSwap::from_pointee(InnerConfig::new(input)?)),
+        })
+    }
+}
+
 #[derive(Deserialize, Debug)]
 #[serde(untagged)]
 enum OneOrMore {
@@ -343,9 +356,8 @@ impl InnerConfig {
     /// # Returns
     ///
     /// `Ok(InnerConfig)` if the configuration is parsed successfully, otherwise `Err(Error)` with an error message.
-    fn new(path: &Path) -> Result<InnerConfig> {
-        let input = std::fs::read_to_string(path)?;
-        InnerConfig::parse_config(&input)
+    fn new(input: &str) -> Result<InnerConfig> {
+        InnerConfig::parse_config(input)
     }
 
     /// Parses the configuration from a string `input`.

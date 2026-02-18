@@ -1017,6 +1017,10 @@ fn remove_display(
         .into_iter()
         .filter(|(_, _, child)| child.parent() == display_entity)
     {
+        if strip.len() == 0 {
+            // There are no windows on the layout strip, don't bother orphaning them.
+            continue;
+        }
         let display_id = display.id();
         debug!(
             "orphaning strip {} after removal of display {display_id}.",

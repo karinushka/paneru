@@ -4,7 +4,7 @@ use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::{Has, With};
 use bevy::ecs::system::{Commands, Query, Res, ResMut, Single};
-use objc2_core_foundation::CGPoint;
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use tracing::debug;
 use tracing::{Level, instrument};
 
@@ -491,10 +491,13 @@ fn to_next_display(
 }
 
 /// Moves the mouse pointer to the next available display.
+#[instrument(level = Level::DEBUG, skip_all)]
 #[allow(clippy::needless_pass_by_value)]
 fn mouse_to_next_display(
     mut messages: MessageReader<Event>,
-    mut active_display: ActiveDisplayMut,
+    windows: Windows,
+    layout_strips: Query<(&LayoutStrip, Entity)>,
+    displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
     window_manager: Res<WindowManager>,
     mut ffm_flag: ResMut<FocusFollowsMouse>,
     mut commands: Commands,
@@ -510,16 +513,53 @@ fn mouse_to_next_display(
         return;
     }
 
-    let Some(other) = active_display.other().next() else {
+    let Some((other, _, _)) = displays.iter().find(|(_, _, active)| !*active) else {
         debug!("no other display to move mouse to.");
         return;
     };
+    let Some((other_strip, _)) = window_manager
+        .active_display_space(other.id())
+        .ok()
+        .and_then(|id| layout_strips.iter().find(|(strip, _)| strip.id() == id))
+    else {
+        return;
+    };
+
+    let visible_width = |window: &Window| {
+        window.frame().origin.x.min(0.0) + window.frame().size.width
+            - (window.frame().origin.x + window.frame().size.width - other.bounds.size.width)
+                .max(0.0)
+    };
+    let Some(window) = other_strip
+        .all_windows()
+        .iter()
+        .filter_map(|entity| windows.get(*entity))
+        .max_by(|left, right| {
+            if visible_width(left) < visible_width(right) {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Greater
+            }
+        })
+    else {
+        debug!("no suitable windows on the other display to move the mouse.");
+        return;
+    };
+
+    let visible_frame = CGRect::new(
+        CGPoint::new(
+            other.bounds.origin.x + window.frame().origin.x.max(0.0),
+            other.bounds.origin.y + window.frame().origin.y,
+        ),
+        CGSize::new(visible_width(window), window.frame().size.height),
+    );
+    debug!("warping mouse to {visible_frame:?}",);
+    window_manager.center_mouse(None, &visible_frame);
 
     let point = CGPoint::new(
-        other.bounds.origin.x + other.bounds.size.width / 2.0,
-        other.bounds.origin.y + other.bounds.size.height / 2.0,
+        visible_frame.origin.x + visible_width(window) / 2.0,
+        visible_frame.origin.y + window.frame().size.height / 2.0,
     );
-    window_manager.center_mouse(None, &other.bounds);
     ffm_flag.as_mut().0 = None;
     commands.trigger(WMEventTrigger(Event::MouseMoved { point }));
 }

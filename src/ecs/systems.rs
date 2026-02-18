@@ -16,9 +16,8 @@ use std::time::Duration;
 use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
-    ActiveDisplayMarker, BProcess, CommandTrigger, ExistingMarker, FreshMarker,
-    PollForNotifications, RepositionMarker, ResizeMarker, SpawnWindowTrigger, Timeout,
-    WMEventTrigger,
+    ActiveDisplayMarker, BProcess, ExistingMarker, FreshMarker, PollForNotifications,
+    RepositionMarker, ResizeMarker, SpawnWindowTrigger, Timeout, WMEventTrigger,
 };
 use crate::config::Config;
 use crate::ecs::params::{ActiveDisplay, Windows};
@@ -51,8 +50,6 @@ pub(super) fn dispatch_toplevel_triggers(
 ) {
     for event in messages.read() {
         match event {
-            Event::Command { command } => commands.trigger(CommandTrigger(command.clone())),
-
             Event::WindowCreated { element } => {
                 if let Ok(window) = WindowOS::new(element)
                     .inspect_err(|err| {

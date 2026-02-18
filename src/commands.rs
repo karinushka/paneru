@@ -1,19 +1,21 @@
-use bevy::ecs::entity::Entity;
-use bevy::ecs::observer::On;
-use bevy::ecs::system::{Commands, Query, Res, ResMut};
+use bevy::app::PreUpdate;
+use bevy::ecs::entity::{Entity, EntityHashSet};
+use bevy::ecs::hierarchy::ChildOf;
+use bevy::ecs::message::MessageReader;
+use bevy::ecs::query::{Has, With};
+use bevy::ecs::system::{Commands, Query, Res, ResMut, Single};
 use objc2_core_foundation::CGPoint;
+use tracing::debug;
 use tracing::{Level, instrument};
-use tracing::{debug, error};
 
 use crate::config::Config;
-use crate::ecs::params::{ActiveDisplayMut, Windows};
+use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Windows};
 use crate::ecs::{
-    CommandTrigger, FocusFollowsMouse, FullWidthMarker, Unmanaged, WMEventTrigger,
-    reposition_entity, reshuffle_around, resize_entity,
+    ActiveDisplayMarker, FocusFollowsMouse, FocusedMarker, FullWidthMarker, Unmanaged,
+    WMEventTrigger, reposition_entity, reshuffle_around, resize_entity,
 };
-use crate::errors::Result;
 use crate::events::Event;
-use crate::manager::{Application, Column, LayoutStrip, WindowManager};
+use crate::manager::{Application, Column, Display, LayoutStrip, Window, WindowManager};
 
 /// Represents a cardinal or directional choice for window manipulation.
 #[derive(Clone, Debug)]
@@ -66,6 +68,43 @@ pub enum Command {
     /// A command to quit the window manager application.
     Quit,
     PrintState,
+}
+
+pub fn register_commands(app: &mut bevy::app::App) {
+    app.add_systems(
+        PreUpdate,
+        (
+            command_quit_handler,
+            print_internal_state_handler,
+            mouse_to_next_display,
+            resize_window,
+            command_center_window,
+            full_width_window,
+            to_next_display,
+            equalize_column,
+            manage_window,
+            stack_windows_handler,
+            command_move_focus,
+            command_swap_focus,
+        ),
+    );
+}
+
+fn filter_window_operations<'a, F: Fn(&Operation) -> bool>(
+    messages: &'a mut MessageReader<Event>,
+    filter: F,
+) -> impl Iterator<Item = &'a Operation> {
+    messages.read().filter_map(move |event| {
+        if let Event::Command {
+            command: Command::Window(op),
+        } = event
+            && filter(op)
+        {
+            Some(op)
+        } else {
+            None
+        }
+    })
 }
 
 /// Retrieves a window `Entity` in a specified direction relative to a `current_window_id` within a `LayoutStrip`.
@@ -133,21 +172,33 @@ fn get_window_in_direction(
 /// # Returns
 ///
 /// `Some(Entity)` with the entity of the newly focused window, otherwise `None`.
-#[instrument(level = Level::DEBUG, skip_all, fields(direction), ret)]
+#[instrument(level = Level::DEBUG, skip_all)]
+#[allow(clippy::needless_pass_by_value)]
 fn command_move_focus(
-    direction: &Direction,
-    strip: &LayoutStrip,
-    windows: &Windows,
-    apps: &Query<&Application>,
-) -> Option<Entity> {
-    let (_, entity) = windows.focused()?;
-    get_window_in_direction(direction, entity, strip).inspect(|entity| {
-        if let Some(window) = windows.get(*entity)
-            && let Some(psn) = windows.psn(window.id(), apps)
-        {
-            window.focus_with_raise(psn);
-        }
-    })
+    mut messages: MessageReader<Event>,
+    windows: Windows,
+    active_display: ActiveDisplay,
+    apps: Query<&Application>,
+    mut commands: Commands,
+) {
+    let Some(Operation::Focus(direction)) =
+        filter_window_operations(&mut messages, |op| matches!(op, Operation::Focus(_))).next()
+    else {
+        return;
+    };
+
+    let (_, entity) = windows.focused().unwrap();
+    if let Some(window) = get_window_in_direction(direction, entity, active_display.active_strip())
+        .inspect(|entity| {
+            if let Some(window) = windows.get(*entity)
+                && let Some(psn) = windows.psn(window.id(), &apps)
+            {
+                window.focus_with_raise(psn);
+            }
+        })
+    {
+        reshuffle_around(window, &mut commands);
+    }
 }
 
 /// Handles the "swap" command, swapping the positions of the current window with another window in a specified direction.
@@ -163,47 +214,60 @@ fn command_move_focus(
 /// # Returns
 ///
 /// `Some(Entity)` with the entity that was swapped with, otherwise `None`.
-#[instrument(level = Level::DEBUG, skip_all, fields(direction), ret)]
+#[instrument(level = Level::DEBUG, skip_all)]
+#[allow(clippy::needless_pass_by_value)]
 fn command_swap_focus(
-    direction: &Direction,
-    windows: &Windows,
-    active_display: &mut ActiveDisplayMut,
-    commands: &mut Commands,
-) -> Option<Entity> {
+    mut messages: MessageReader<Event>,
+    windows: Windows,
+    mut active_display: ActiveDisplayMut,
+    mut commands: Commands,
+) {
+    let Some(Operation::Swap(direction)) =
+        filter_window_operations(&mut messages, |op| matches!(op, Operation::Swap(_))).next()
+    else {
+        return;
+    };
+
     let display_bounds = active_display.bounds();
     let display_id = active_display.id();
     let active_strip = active_display.active_strip();
 
-    let (_, current) = windows.focused()?;
-    let index = active_strip.index_of(current).ok()?;
-    let other_window = get_window_in_direction(direction, current, active_strip)?;
-    let new_index = active_strip.index_of(other_window).ok()?;
-    let current_frame = windows.get(current)?.frame();
+    let mut handler = || {
+        let (_, current) = windows.focused()?;
+        let index = active_strip.index_of(current).ok()?;
+        let other_window = get_window_in_direction(direction, current, active_strip)?;
+        let new_index = active_strip.index_of(other_window).ok()?;
+        let current_frame = windows.get(current)?.frame();
 
-    let origin = if new_index == 0 {
-        // If reached far left, snap the window to left.
-        CGPoint::new(0.0, 0.0)
-    } else if new_index == (active_strip.len() - 1) {
-        // If reached full right, snap the window to right.
-        CGPoint::new(display_bounds.size.width - current_frame.size.width, 0.0)
-    } else {
-        active_strip
-            .get(new_index)
-            .ok()
-            .and_then(|column| column.top())
-            .and_then(|entity| windows.get(entity))?
-            .frame()
-            .origin
+        let origin = if new_index == 0 {
+            // If reached far left, snap the window to left.
+            CGPoint::new(0.0, 0.0)
+        } else if new_index == (active_strip.len() - 1) {
+            // If reached full right, snap the window to right.
+            CGPoint::new(display_bounds.size.width - current_frame.size.width, 0.0)
+        } else {
+            active_strip
+                .get(new_index)
+                .ok()
+                .and_then(|column| column.top())
+                .and_then(|entity| windows.get(entity))?
+                .frame()
+                .origin
+        };
+        reposition_entity(current, origin.x, origin.y, display_id, &mut commands);
+        if index < new_index {
+            (index..new_index).for_each(|idx| active_strip.swap(idx, idx + 1));
+        } else {
+            (new_index..index)
+                .rev()
+                .for_each(|idx| active_strip.swap(idx, idx + 1));
+        }
+        Some(current)
     };
-    reposition_entity(current, origin.x, origin.y, display_id, commands);
-    if index < new_index {
-        (index..new_index).for_each(|idx| active_strip.swap(idx, idx + 1));
-    } else {
-        (new_index..index)
-            .rev()
-            .for_each(|idx| active_strip.swap(idx, idx + 1));
+
+    if let Some(window) = handler() {
+        reshuffle_around(window, &mut commands);
     }
-    Some(other_window)
 }
 
 /// Centers the focused window on the active display.
@@ -215,24 +279,32 @@ fn command_swap_focus(
 /// * `window_manager` - The `WindowManager` resource.
 /// * `active_display` - The `ActiveDisplayMut` resource representing the active display.
 /// * `commands` - Bevy commands to trigger events.
+#[allow(clippy::needless_pass_by_value)]
 fn command_center_window(
-    windows: &Windows,
-    active_display: &ActiveDisplayMut,
-    window_manager: &WindowManager,
-    commands: &mut Commands,
+    mut messages: MessageReader<Event>,
+    current_focus: Single<(&Window, Entity), With<FocusedMarker>>,
+    active_display: ActiveDisplay,
+    window_manager: Res<WindowManager>,
+    mut commands: Commands,
 ) {
-    let Some((window, entity)) = windows.focused() else {
+    if filter_window_operations(&mut messages, |op| matches!(op, Operation::Center))
+        .next()
+        .is_none()
+    {
         return;
-    };
+    }
+
+    let (window, entity) = *current_focus;
     let frame = window.frame();
     reposition_entity(
         entity,
         (active_display.bounds().size.width - frame.size.width) / 2.0,
         frame.origin.y,
         active_display.id(),
-        commands,
+        &mut commands,
     );
     window_manager.center_mouse(Some(window), &active_display.bounds());
+    reshuffle_around(entity, &mut commands);
 }
 
 /// Resizes the focused window based on preset column widths.
@@ -244,15 +316,22 @@ fn command_center_window(
 /// * `windows` - A mutable query for all `Window` components.
 /// * `commands` - Bevy commands to trigger events.
 /// * `config` - The `Config` resource.
+#[allow(clippy::needless_pass_by_value)]
 fn resize_window(
-    windows: &Windows,
-    active_display: &mut ActiveDisplayMut,
-    commands: &mut Commands,
-    config: &Config,
+    mut messages: MessageReader<Event>,
+    current_focus: Single<(&Window, Entity), With<FocusedMarker>>,
+    active_display: ActiveDisplay,
+    config: Res<Config>,
+    mut commands: Commands,
 ) {
-    let Some((window, entity)) = windows.focused() else {
+    if filter_window_operations(&mut messages, |op| matches!(op, Operation::Resize))
+        .next()
+        .is_none()
+    {
         return;
-    };
+    }
+
+    let (window, entity) = *current_focus;
     let display_width = active_display.bounds().size.width;
     let current_ratio = window.frame().size.width / display_width;
     let next_ratio = config
@@ -266,8 +345,9 @@ fn resize_window(
     let x = (display_width - width).min(window.frame().origin.x);
     let y = window.frame().origin.y;
 
-    reposition_entity(entity, x, y, active_display.id(), commands);
-    resize_entity(entity, width, height, active_display.id(), commands);
+    reposition_entity(entity, x, y, active_display.id(), &mut commands);
+    resize_entity(entity, width, height, active_display.id(), &mut commands);
+    reshuffle_around(entity, &mut commands);
 }
 
 /// Toggles the focused window between full-width and a preset width.
@@ -279,15 +359,22 @@ fn resize_window(
 /// * `windows` - A mutable query for all `Window` components.
 /// * `commands` - Bevy commands to trigger events.
 /// * `config` - The `Config` resource.
+#[allow(clippy::needless_pass_by_value)]
 fn full_width_window(
-    windows: &Windows,
-    active_display: &mut ActiveDisplayMut,
-    commands: &mut Commands,
+    mut messages: MessageReader<Event>,
+    current_focus: Single<(&Window, Entity), With<FocusedMarker>>,
+    windows: Windows,
+    active_display: ActiveDisplay,
+    mut commands: Commands,
 ) {
-    let Some((window, entity)) = windows.focused() else {
+    if filter_window_operations(&mut messages, |op| matches!(op, Operation::FullWidth))
+        .next()
+        .is_none()
+    {
         return;
-    };
+    }
 
+    let (window, entity) = *current_focus;
     let display_width = active_display.bounds().size.width;
     let height = window.frame().size.height;
     let y = window.frame().origin.y;
@@ -304,8 +391,9 @@ fn full_width_window(
         (display_width - 1.0, 0.0)
     };
 
-    reposition_entity(entity, x, y, active_display.id(), commands);
-    resize_entity(entity, width, height, active_display.id(), commands);
+    reposition_entity(entity, x, y, active_display.id(), &mut commands);
+    resize_entity(entity, width, height, active_display.id(), &mut commands);
+    reshuffle_around(entity, &mut commands);
 }
 
 /// Toggles the managed state of the focused window.
@@ -316,7 +404,15 @@ fn full_width_window(
 /// * `focused_entity` - The `Entity` of the currently focused window.
 /// * `windows` - A mutable query for `Window` components, their `Entity`, and whether they have the `Unmanaged` marker.
 /// * `commands` - Bevy commands to modify entities.
-fn manage_window(windows: &Windows, commands: &mut Commands) {
+#[allow(clippy::needless_pass_by_value)]
+fn manage_window(mut messages: MessageReader<Event>, windows: Windows, mut commands: Commands) {
+    if filter_window_operations(&mut messages, |op| matches!(op, Operation::Manage))
+        .next()
+        .is_none()
+    {
+        return;
+    }
+
     let Some((window, entity, unmanaged)) = windows
         .focused()
         .and_then(|(_, entity)| windows.get_managed(entity))
@@ -333,6 +429,7 @@ fn manage_window(windows: &Windows, commands: &mut Commands) {
     } else {
         commands.entity(entity).try_insert(Unmanaged::Floating);
     }
+    reshuffle_around(entity, &mut commands);
 }
 
 /// Moves the focused window to the next available display.
@@ -344,12 +441,21 @@ fn manage_window(windows: &Windows, commands: &mut Commands) {
 /// * `windows` - A mutable query for `Window` components, their `Entity`, and whether they have the `Unmanaged` marker.
 /// * `active_display` - A mutable reference to the `ActiveDisplayMut` resource.
 /// * `commands` - Bevy commands to modify entities and trigger events.
+#[allow(clippy::needless_pass_by_value)]
 fn to_next_display(
-    windows: &Windows,
-    active_display: &mut ActiveDisplayMut,
-    window_manager: &WindowManager,
-    commands: &mut Commands,
+    mut messages: MessageReader<Event>,
+    windows: Windows,
+    mut active_display: ActiveDisplayMut,
+    window_manager: Res<WindowManager>,
+    mut commands: Commands,
 ) {
+    if filter_window_operations(&mut messages, |op| matches!(op, Operation::ToNextDisplay))
+        .next()
+        .is_none()
+    {
+        return;
+    }
+
     let Some((window, entity, unmanaged)) = windows
         .focused()
         .and_then(|(_, entity)| windows.get_managed(entity))
@@ -373,24 +479,37 @@ fn to_next_display(
         other.menubar_height,
     );
     let dest = CGPoint::new(other.bounds.size.width / 2.0, other.menubar_height);
-    reposition_entity(entity, dest.x, dest.y, other.id(), commands);
-    reshuffle_around(entity, commands);
+    reposition_entity(entity, dest.x, dest.y, other.id(), &mut commands);
+    reshuffle_around(entity, &mut commands);
 
     window_manager.center_mouse(None, &other.bounds);
 
     if let Some(neighbour) = active_display.active_strip().right_neighbour(entity) {
-        reshuffle_around(neighbour, commands);
+        reshuffle_around(neighbour, &mut commands);
     }
     active_display.active_strip().remove(entity);
 }
 
 /// Moves the mouse pointer to the next available display.
+#[allow(clippy::needless_pass_by_value)]
 fn mouse_to_next_display(
-    active_display: &mut ActiveDisplayMut,
-    window_manager: &WindowManager,
-    ffm_flag: &mut ResMut<FocusFollowsMouse>,
-    commands: &mut Commands,
+    mut messages: MessageReader<Event>,
+    mut active_display: ActiveDisplayMut,
+    window_manager: Res<WindowManager>,
+    mut ffm_flag: ResMut<FocusFollowsMouse>,
+    mut commands: Commands,
 ) {
+    if !messages.read().any(|event| {
+        matches!(
+            event,
+            Event::Command {
+                command: Command::Mouse(MouseMove::ToNextDisplay),
+            }
+        )
+    }) {
+        return;
+    }
+
     let Some(other) = active_display.other().next() else {
         debug!("no other display to move mouse to.");
         return;
@@ -406,14 +525,22 @@ fn mouse_to_next_display(
 }
 
 /// Distributes heights equally among all windows in the currently focused stack.
+#[allow(clippy::needless_pass_by_value)]
 fn equalize_column(
-    windows: &Windows,
-    active_display: &mut ActiveDisplayMut,
-    commands: &mut Commands,
+    mut messages: MessageReader<Event>,
+    current_focus: Single<(&Window, Entity), With<FocusedMarker>>,
+    windows: Windows,
+    active_display: ActiveDisplay,
+    mut commands: Commands,
 ) {
-    let Some((_, entity)) = windows.focused() else {
+    if filter_window_operations(&mut messages, |op| matches!(op, Operation::Equalize))
+        .next()
+        .is_none()
+    {
         return;
-    };
+    }
+
+    let (_, entity) = *current_focus;
     let active_strip = active_display.active_strip();
     let Ok(column) = active_strip
         .index_of(entity)
@@ -431,91 +558,46 @@ fn equalize_column(
         for &entity in &stack {
             if let Some(window) = windows.get(entity) {
                 let width = window.frame().size.width;
-                resize_entity(entity, width, equal_height, active_display.id(), commands);
+                resize_entity(
+                    entity,
+                    width,
+                    equal_height,
+                    active_display.id(),
+                    &mut commands,
+                );
             }
         }
     }
+    reshuffle_around(entity, &mut commands);
 }
 
-/// Handles various "window" commands, such as focus, swap, center, resize, manage, and stack.
-///
-/// # Arguments
-///
-/// * `operation` - The `Operation` to perform on the window.
-/// * `window_manager` - The `WindowManager` resource.
-/// * `active_display` - A mutable reference to the `ActiveDisplayMut` resource.
-/// * `focused_entity` - The `Entity` of the focused window.
-/// * `windows` - A mutable query for `Window` components, their `Entity`, and whether they have the `Unmanaged` marker.
-/// * `commands` - Bevy commands to trigger events.
-/// * `config` - The `Config` resource.
-///
-/// # Returns
-///
-/// `Ok(())` if the command is processed successfully, otherwise `Err(Error)`.
-#[instrument(level = Level::DEBUG, skip_all, fields(operation), err)]
-fn command_windows(
-    operation: &Operation,
-    windows: &Windows,
-    active_display: &mut ActiveDisplayMut,
-    apps: &Query<&Application>,
-    window_manager: &WindowManager,
-    commands: &mut Commands,
-    config: &Config,
-) -> Result<()> {
-    match operation {
-        Operation::Focus(direction) => {
-            command_move_focus(direction, active_display.active_strip(), windows, apps);
-        }
+#[instrument(level = Level::DEBUG, skip_all)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn stack_windows_handler(
+    mut messages: MessageReader<Event>,
+    windows: Windows,
+    mut active_display: ActiveDisplayMut,
+    mut commands: Commands,
+) {
+    let Some(Operation::Stack(stack)) =
+        filter_window_operations(&mut messages, |op| matches!(op, Operation::Stack(_))).next()
+    else {
+        return;
+    };
 
-        Operation::Swap(direction) => {
-            command_swap_focus(direction, windows, active_display, commands);
+    if let Some((_, entity, unmanaged)) = windows
+        .focused()
+        .and_then(|(_, entity)| windows.get_managed(entity))
+        && unmanaged.is_none()
+    {
+        let strip = active_display.active_strip();
+        if *stack {
+            _ = strip.stack(entity);
+        } else {
+            _ = strip.unstack(entity);
         }
-
-        Operation::Center => {
-            command_center_window(windows, active_display, window_manager, commands);
-        }
-
-        Operation::Resize => {
-            resize_window(windows, active_display, commands, config);
-        }
-
-        Operation::FullWidth => {
-            full_width_window(windows, active_display, commands);
-        }
-
-        Operation::ToNextDisplay => {
-            to_next_display(windows, active_display, window_manager, commands);
-        }
-
-        Operation::Equalize => {
-            equalize_column(windows, active_display, commands);
-        }
-
-        Operation::Manage => {
-            manage_window(windows, commands);
-        }
-
-        Operation::Stack(stack) => {
-            if let Some((_, entity, unmanaged)) = windows
-                .focused()
-                .and_then(|(_, entity)| windows.get_managed(entity))
-            {
-                if unmanaged.is_some() {
-                    return Ok(());
-                } else if *stack {
-                    active_display.active_strip().stack(entity)?;
-                } else {
-                    active_display.active_strip().unstack(entity)?;
-                }
-            } else {
-                return Ok(());
-            }
-        }
+        reshuffle_around(entity, &mut commands);
     }
-    if let Some((_, entity)) = windows.focused() {
-        reshuffle_around(entity, commands);
-    }
-    Ok(())
 }
 
 /// Dispatches a command based on the `CommandTrigger` event.
@@ -529,49 +611,101 @@ fn command_windows(
 /// * `window_manager` - The `WindowManager` resource for interacting with the window management logic.
 /// * `commands` - Bevy commands to trigger events and modify entities.
 /// * `config` - The `Config` resource, containing application settings.
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
-#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
-pub fn process_command_trigger(
-    trigger: On<CommandTrigger>,
-    windows: Windows,
-    mut active_display: ActiveDisplayMut,
-    apps: Query<&Application>,
+#[instrument(level = Level::DEBUG, skip_all)]
+#[allow(clippy::needless_pass_by_value)]
+pub fn command_quit_handler(
+    mut messages: MessageReader<Event>,
     window_manager: Res<WindowManager>,
-    config: Res<Config>,
-    mut ffm_flag: ResMut<FocusFollowsMouse>,
-    mut commands: Commands,
 ) {
-    let res = match &trigger.event().0 {
-        Command::Window(operation) => command_windows(
-            operation,
-            &windows,
-            &mut active_display,
-            &apps,
-            &window_manager,
-            &mut commands,
-            config.as_ref(),
-        ),
-        Command::Mouse(movement) => {
-            match movement {
-                MouseMove::ToNextDisplay => {
-                    mouse_to_next_display(
-                        &mut active_display,
-                        &window_manager,
-                        &mut ffm_flag,
-                        &mut commands,
-                    );
-                }
+    if messages.read().any(|event| {
+        matches!(
+            event,
+            Event::Command {
+                command: Command::Quit
             }
-            Ok(())
-        }
-        Command::PrintState => {
-            commands.trigger(WMEventTrigger(Event::PrintState));
-            Ok(())
-        }
-        Command::Quit => window_manager.quit(),
+        )
+    }) {
+        _ = window_manager.quit();
+    }
+}
+
+#[instrument(level = Level::DEBUG, skip_all)]
+#[allow(clippy::needless_pass_by_value)]
+fn print_internal_state_handler(
+    mut messages: MessageReader<Event>,
+    focused: Query<(&Window, Entity), With<FocusedMarker>>,
+    windows: Query<(&Window, Entity, &ChildOf, Option<&Unmanaged>)>,
+    workspaces: Query<(&LayoutStrip, Entity, &ChildOf)>,
+    displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
+) {
+    if !messages.read().any(|event| {
+        matches!(
+            event,
+            Event::Command {
+                command: Command::PrintState,
+            }
+        )
+    }) {
+        return;
+    }
+
+    let focused = focused.single().ok();
+    let print_window = |(window, entity, _, unmanaged): (&Window, Entity, &ChildOf, Option<_>)| {
+        format!(
+            "\tid: {}, {entity}, {:.0}:{:.0}, {:.0}x{:.0}{}{}, role: {}, subrole: {}, title: '{:.70}'",
+            window.id(),
+            window.frame().origin.x,
+            window.frame().origin.y,
+            window.frame().size.width,
+            window.frame().size.height,
+            if focused.is_some_and(|(_, focus)| focus == entity) {
+                ", focused"
+            } else {
+                ""
+            },
+            unmanaged.map(|m| format!(", {m:?}")).unwrap_or_default(),
+            window.role().unwrap_or_default(),
+            window.subrole().unwrap_or_default(),
+            window.title().unwrap_or_default()
+        )
     };
-    if let Err(err) = res {
-        error!("{err}");
+
+    let mut seen = EntityHashSet::new();
+
+    for (display, display_entity, active) in displays {
+        for (strip, _, _) in workspaces
+            .iter()
+            .filter(|(_, _, child)| child.parent() == display_entity)
+        {
+            let windows = strip
+                .all_windows()
+                .iter()
+                .filter_map(|entity| windows.get(*entity).ok())
+                .inspect(|(_, entity, _, _)| {
+                    seen.insert(*entity);
+                })
+                .map(print_window)
+                .collect::<Vec<_>>();
+
+            let display_id = display.id();
+            debug!(
+                "Display {display_id}{}, workspace id {}: {strip}:\n{}",
+                if active { ", active" } else { "" },
+                strip.id(),
+                windows.join("\n")
+            );
+        }
+    }
+
+    let remaining = windows
+        .iter()
+        .filter(|entity| !seen.contains(&entity.1))
+        .map(print_window)
+        .collect::<Vec<_>>();
+    debug!("Remaining:\n{}", remaining.join("\n"));
+
+    if let Some(pool) = bevy::tasks::ComputeTaskPool::try_get() {
+        debug!("Running with {} threads", pool.thread_num());
     }
 }
 

@@ -11,7 +11,7 @@ use stdext::function_name;
 use stdext::prelude::RwLockExt;
 use tracing::{Level, debug, instrument};
 
-use crate::commands::{Command, Direction, Operation, process_command_trigger};
+use crate::commands::{Command, Direction, Operation, register_commands};
 use crate::config::Config;
 use crate::ecs::{
     BProcess, ExistingMarker, FocusFollowsMouse, FocusedMarker, Initializing, MissionControlActive,
@@ -507,8 +507,7 @@ fn setup_world() -> App {
         .insert_resource(FocusFollowsMouse(None))
         .insert_resource(Config::default())
         .insert_resource(Initializing)
-        .add_observer(process_command_trigger)
-        .add_plugins((register_triggers, register_systems));
+        .add_plugins((register_triggers, register_systems, register_commands));
 
     bevy_app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
         100,

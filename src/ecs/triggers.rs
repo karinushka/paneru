@@ -1,4 +1,4 @@
-use bevy::ecs::entity::{Entity, EntityHashSet};
+use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::lifecycle::{Add, Remove};
 use bevy::ecs::message::MessageWriter;
@@ -1004,79 +1004,6 @@ pub(super) fn refresh_configuration_trigger(
         _ = config.reload_config(path.as_path()).inspect_err(|err| {
             error!("loading config '{}': {err}", path.display());
         });
-    }
-}
-
-#[allow(clippy::needless_pass_by_value)]
-#[instrument(level = Level::DEBUG, skip_all)]
-pub(super) fn print_internal_state_trigger(
-    trigger: On<WMEventTrigger>,
-    focused: Query<(&Window, Entity), With<FocusedMarker>>,
-    windows: Query<(&Window, Entity, &ChildOf, Option<&Unmanaged>)>,
-    workspaces: Query<(&LayoutStrip, Entity, &ChildOf)>,
-    displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
-) {
-    let Event::PrintState = &trigger.event().0 else {
-        return;
-    };
-
-    let focused = focused.single().ok();
-    let print_window = |(window, entity, _, unmanaged): (&Window, Entity, &ChildOf, Option<_>)| {
-        format!(
-            "\tid: {}, {entity}, {:.0}:{:.0}, {:.0}x{:.0}{}{}, role: {}, subrole: {}, title: '{:.70}'",
-            window.id(),
-            window.frame().origin.x,
-            window.frame().origin.y,
-            window.frame().size.width,
-            window.frame().size.height,
-            if focused.is_some_and(|(_, focus)| focus == entity) {
-                ", focused"
-            } else {
-                ""
-            },
-            unmanaged.map(|m| format!(", {m:?}")).unwrap_or_default(),
-            window.role().unwrap_or_default(),
-            window.subrole().unwrap_or_default(),
-            window.title().unwrap_or_default()
-        )
-    };
-
-    let mut seen = EntityHashSet::new();
-
-    for (display, display_entity, active) in displays {
-        for (strip, _, _) in workspaces
-            .iter()
-            .filter(|(_, _, child)| child.parent() == display_entity)
-        {
-            let windows = strip
-                .all_windows()
-                .iter()
-                .filter_map(|entity| windows.get(*entity).ok())
-                .inspect(|(_, entity, _, _)| {
-                    seen.insert(*entity);
-                })
-                .map(print_window)
-                .collect::<Vec<_>>();
-
-            let display_id = display.id();
-            debug!(
-                "Display {display_id}{}, workspace id {}: {strip}:\n{}",
-                if active { ", active" } else { "" },
-                strip.id(),
-                windows.join("\n")
-            );
-        }
-    }
-
-    let remaining = windows
-        .iter()
-        .filter(|entity| !seen.contains(&entity.1))
-        .map(print_window)
-        .collect::<Vec<_>>();
-    debug!("Remaining:\n{}", remaining.join("\n"));
-
-    if let Some(pool) = bevy::tasks::ComputeTaskPool::try_get() {
-        debug!("Running with {} threads", pool.thread_num());
     }
 }
 

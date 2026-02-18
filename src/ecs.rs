@@ -22,7 +22,7 @@ use objc2_core_foundation::CGPoint;
 use objc2_core_foundation::CGSize;
 use objc2_core_graphics::CGDirectDisplayID;
 
-use crate::commands::{Command, process_command_trigger};
+use crate::commands::register_commands;
 use crate::config::CONFIGURATION_FILE;
 use crate::errors::Result;
 use crate::events::{Event, EventSender};
@@ -114,7 +114,6 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::window_managed_trigger)
         .add_observer(triggers::spawn_window_trigger)
         .add_observer(triggers::refresh_configuration_trigger)
-        .add_observer(triggers::print_internal_state_trigger)
         .add_observer(triggers::stray_focus_observer)
         .add_observer(triggers::locate_dock_trigger)
         .add_observer(triggers::window_removal_observer);
@@ -256,10 +255,6 @@ pub struct Initializing;
 #[derive(BevyEvent)]
 pub struct WMEventTrigger(pub Event);
 
-/// Bevy event trigger for commands issued to the window manager.
-#[derive(BevyEvent)]
-pub struct CommandTrigger(pub Command);
-
 /// Bevy event trigger for spawning new windows.
 #[derive(BevyEvent)]
 pub struct SpawnWindowTrigger(pub Vec<Window>);
@@ -317,9 +312,8 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         .insert_resource(FocusFollowsMouse(None))
         .insert_resource(PollForNotifications)
         .insert_resource(Initializing)
-        .add_observer(process_command_trigger)
         .insert_non_send_resource(watcher)
-        .add_plugins((register_triggers, register_systems));
+        .add_plugins((register_triggers, register_systems, register_commands));
 
     let mut platform_callbacks = PlatformCallbacks::new(sender);
     platform_callbacks.setup_handlers()?;

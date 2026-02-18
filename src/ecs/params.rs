@@ -188,10 +188,6 @@ pub struct ActiveDisplayMut<'w, 's> {
 }
 
 impl ActiveDisplayMut<'_, '_> {
-    pub fn display(&self) -> &Display {
-        &self.display
-    }
-
     /// Returns the `CGDirectDisplayID` of the active display.
     pub fn id(&self) -> CGDirectDisplayID {
         self.display.id()

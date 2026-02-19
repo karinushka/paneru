@@ -427,8 +427,12 @@ pub(super) fn center_mouse_trigger(
         && !config.skip_reshuffle()
         && config.ffm_flag().is_none_or(|id| id != window.id())
     {
-        debug!("centering on {}.", window.id());
-        window_manager.center_mouse(Some(window), &active_display.bounds());
+        debug!("centering on {}", window.id());
+        window_manager.center_mouse(
+            // If auto-centering, then just warp the mouse to the center of screen.
+            (!config.auto_center()).then_some(window),
+            &active_display.bounds(),
+        );
     }
 }
 

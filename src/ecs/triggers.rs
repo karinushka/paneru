@@ -15,7 +15,8 @@ use tracing::{debug, error, info, trace, warn};
 
 use super::{
     ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, MissionControlActive,
-    SpawnWindowTrigger, StrayFocusEvent, Timeout, Unmanaged, WMEventTrigger, WindowDraggedMarker,
+    SpawnWindowTrigger, StrayFocusEvent, StrayFrontSwitchEvent, Timeout, Unmanaged,
+    WMEventTrigger, WindowDraggedMarker,
 };
 use crate::config::{Config, WindowParams};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration, Windows};
@@ -386,7 +387,10 @@ pub(super) fn front_switched_trigger(
     let Some((BProcess(process), children)) =
         processes.iter().find(|process| &process.0.psn() == psn)
     else {
-        error!("Unable to find process with PSN {psn:?}");
+        const STRAY_FRONT_SWITCH_RETRY_SEC: u64 = 5;
+        warn!("Process with PSN {psn:?} not yet available, will retry on spawn.");
+        let timeout = Timeout::new(Duration::from_secs(STRAY_FRONT_SWITCH_RETRY_SEC), None);
+        commands.spawn((timeout, StrayFrontSwitchEvent(*psn)));
         return;
     };
 
@@ -1085,6 +1089,35 @@ pub(super) fn stray_focus_observer(
         .for_each(|(timeout_entity, _)| {
             debug!("Re-queueing lost focus event for window id {window_id}.");
             messages.write(Event::WindowFocused { window_id });
+            commands.entity(timeout_entity).despawn();
+        });
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn stray_front_switch_observer(
+    trigger: On<Add, Application>,
+    child_of: Query<&ChildOf>,
+    processes: Query<&BProcess>,
+    stray_events: Populated<(Entity, &StrayFrontSwitchEvent)>,
+    mut messages: MessageWriter<Event>,
+    mut commands: Commands,
+) {
+    let entity = trigger.event().entity;
+    let Some(psn) = child_of
+        .get(entity)
+        .ok()
+        .and_then(|child| processes.get(child.parent()).ok())
+        .map(|process| process.0.psn())
+    else {
+        return;
+    };
+
+    stray_events
+        .iter()
+        .filter(|(_, stray)| stray.0 == psn)
+        .for_each(|(timeout_entity, _)| {
+            debug!("Re-queueing stray front-switch event for PSN {psn:?}.");
+            messages.write(Event::ApplicationFrontSwitched { psn });
             commands.entity(timeout_entity).despawn();
         });
 }

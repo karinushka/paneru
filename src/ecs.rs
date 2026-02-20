@@ -27,7 +27,7 @@ use crate::config::CONFIGURATION_FILE;
 use crate::errors::Result;
 use crate::events::{Event, EventSender};
 use crate::manager::{ProcessApi, Window, WindowManager, WindowManagerApi, WindowManagerOS};
-use crate::platform::{PlatformCallbacks, WinID};
+use crate::platform::{PlatformCallbacks, ProcessSerialNumber, WinID};
 
 pub mod params;
 mod systems;
@@ -116,6 +116,7 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::refresh_configuration_trigger)
         .add_observer(triggers::print_internal_state_trigger)
         .add_observer(triggers::stray_focus_observer)
+        .add_observer(triggers::stray_front_switch_observer)
         .add_observer(triggers::locate_dock_trigger)
         .add_observer(triggers::window_removal_observer);
 }
@@ -221,6 +222,11 @@ impl Timeout {
 /// Component used as a retry mechanism for stray focus events that arrive before the target window is fully created.
 #[derive(Component)]
 pub struct StrayFocusEvent(pub WinID);
+
+/// Component used as a retry mechanism for front-switch events that arrive before the target
+/// process and its application have been created in the ECS.
+#[derive(Component)]
+pub struct StrayFrontSwitchEvent(pub ProcessSerialNumber);
 
 #[derive(Component)]
 pub struct BruteforceWindows(Task<Vec<Window>>);

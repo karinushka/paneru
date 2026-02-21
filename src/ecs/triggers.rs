@@ -958,7 +958,7 @@ pub(super) fn spawn_window_trigger(
             debug!("Applying window properties for '{}'", window.id());
         }
 
-        apply_window_padding(&mut window, &mut active_display, &properties);
+        apply_window_defaults(&mut window, &mut active_display, &properties);
 
         // Insert the window into the internal Bevy state.
         let entity = commands.spawn((window, ChildOf(app_entity))).id();
@@ -975,7 +975,7 @@ pub(super) fn spawn_window_trigger(
     }
 }
 
-fn apply_window_padding(
+fn apply_window_defaults(
     window: &mut Window,
     active_display: &mut ActiveDisplayMut,
     properties: &[WindowParams],
@@ -995,6 +995,9 @@ fn apply_window_padding(
         && !floating
     {
         window.set_padding(WindowPadding::Horizontal(padding.clamp(0, 50)));
+    }
+    if let Some(width) = properties.iter().find_map(|props| props.width) {
+        window.set_width_ratio(width);
     }
 
     _ = window

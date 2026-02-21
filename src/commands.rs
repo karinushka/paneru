@@ -342,7 +342,7 @@ fn resize_window(
 
     let width = next_ratio * display_width;
     let height = window.frame().size.height;
-    let x = (display_width - width).min(window.frame().origin.x);
+    let x = (display_width - width - 1.0).min(window.frame().origin.x);
     let y = window.frame().origin.y;
 
     reposition_entity(entity, x, y, active_display.id(), &mut commands);

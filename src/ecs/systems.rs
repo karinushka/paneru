@@ -694,7 +694,7 @@ pub(super) fn animate_windows(
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn animate_resize_windows(
-    windows: Populated<(&mut Window, Entity, &ResizeMarker)>,
+    windows: Populated<(&mut Window, Entity, &ResizeMarker, Has<RepositionMarker>)>,
     displays: Query<&Display>,
     time: Res<Time>,
     config: Res<Config>,
@@ -702,7 +702,11 @@ pub(super) fn animate_resize_windows(
 ) {
     let move_ratio = config.animation_speed() * time.delta_secs_f64();
 
-    for (mut window, entity, ResizeMarker { size, display_id }) in windows {
+    for (mut window, entity, ResizeMarker { size, display_id }, moving) in windows {
+        if moving {
+            // Wait resizing a window which is moving.
+            continue;
+        }
         let Some(display) = displays.iter().find(|display| display.id() == *display_id) else {
             continue;
         };

@@ -5,6 +5,7 @@ use bevy::ecs::message::MessageWriter;
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Has, With};
 use bevy::ecs::system::{Commands, NonSend, NonSendMut, Populated, Query, Res, ResMut, Single};
+use bevy::math::IRect;
 use notify::event::{DataChange, MetadataKind, ModifyKind};
 use notify::{EventKind, Watcher};
 use objc2_app_kit::NSScreen;
@@ -26,7 +27,7 @@ use crate::ecs::{
 use crate::errors::Result;
 use crate::events::Event;
 use crate::manager::{
-    Application, Display, LayoutStrip, Process, Window, WindowManager, WindowPadding,
+    Application, Display, LayoutStrip, Process, Window, WindowManager, WindowPadding, irect_from,
 };
 use crate::platform::{PlatformCallbacks, WinID, WorkspaceId};
 use crate::util::symlink_target;
@@ -154,8 +155,8 @@ pub(super) fn mouse_down_trigger(
         return;
     };
 
-    if window.frame().origin.x < 0.0
-        || window.frame().origin.x > active_display.bounds().size.width - window.frame().size.width
+    if window.frame().min.x < 0
+        || window.frame().min.x > active_display.bounds().width() - window.frame().width()
     {
         reshuffle_around(entity, &mut commands);
     }
@@ -499,10 +500,11 @@ pub(super) fn window_focused_trigger(
         if config.auto_center()
             && let Some((_, _, None)) = windows.get_managed(entity)
         {
+            let center = active_display.bounds().center();
+            let origin = IRect::from_center_size(center, window.frame().size()).min;
             reposition_entity(
                 entity,
-                (active_display.bounds().size.width - window.frame().size.width) / 2.0,
-                window.frame().origin.y,
+                active_display.display().absolute_coords(origin),
                 active_display.id(),
                 &mut commands,
             );
@@ -545,7 +547,7 @@ pub(super) fn swipe_gesture_trigger(
     {
         return;
     }
-    let swipe_resolution = 1.0 / active_display.bounds().size.width;
+    let swipe_resolution = 1.0 / f64::from(active_display.bounds().width());
     let delta = deltas.iter().sum::<f64>();
     if delta.abs() < swipe_resolution {
         return;
@@ -1071,8 +1073,10 @@ pub(super) fn locate_dock_trigger(
             let dict = screen.deviceDescription();
             let numbers = unsafe { dict.cast_unchecked::<NSString, NSNumber>() };
             let id = numbers.objectForKey(ns_string!("NSScreenNumber"));
-            id.is_some_and(|id| id.as_u32() == display_id)
-                .then(|| display.locate_dock(&screen.visibleFrame()))
+            id.is_some_and(|id| id.as_u32() == display_id).then(|| {
+                let visible_frame = irect_from(screen.visibleFrame());
+                display.locate_dock(&visible_frame)
+            })
         })
     });
     if let Some(dock) = dock {

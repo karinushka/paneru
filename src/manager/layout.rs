@@ -1,6 +1,6 @@
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
-use objc2_core_foundation::CGRect;
+use bevy::math::IRect;
 use std::collections::VecDeque;
 use stdext::function_name;
 use tracing::debug;
@@ -300,11 +300,11 @@ impl LayoutStrip {
     pub fn absolute_positions<W>(
         &self,
         get_window_frame: &W,
-    ) -> impl Iterator<Item = (&Column, f64)>
+    ) -> impl Iterator<Item = (&Column, i32)>
     where
-        W: Fn(Entity) -> Option<CGRect>,
+        W: Fn(Entity) -> Option<IRect>,
     {
-        let mut left_edge = 0.0;
+        let mut left_edge = 0;
 
         self.all_columns()
             .into_iter()
@@ -318,22 +318,22 @@ impl LayoutStrip {
             })
             .map(move |(column, frame)| {
                 let temp = left_edge;
-                left_edge += frame.size.width;
+                left_edge += frame.width();
                 (column, temp)
             })
     }
 
     pub fn calculate_layout<W>(
         &self,
-        offset: f64,
-        viewport: &CGRect,
+        offset: i32,
+        viewport: &IRect,
         get_window_frame: &W,
-    ) -> impl Iterator<Item = (Entity, CGRect)>
+    ) -> impl Iterator<Item = (Entity, IRect)>
     where
-        W: Fn(Entity) -> Option<CGRect>,
+        W: Fn(Entity) -> Option<IRect>,
     {
-        const MIN_WINDOW_HEIGHT: f64 = 200.0;
-        const WINDOW_HIDDEN_THRESHOLD: f64 = 10.0;
+        const MIN_WINDOW_HEIGHT: i32 = 200;
+        const WINDOW_HIDDEN_THRESHOLD: i32 = 10;
 
         self.absolute_positions(get_window_frame)
             .filter_map(move |(column, position)| {
@@ -344,32 +344,32 @@ impl LayoutStrip {
                 let current_heights = windows
                     .iter()
                     .filter_map(|&entity| get_window_frame(entity))
-                    .map(|frame| frame.size.height)
+                    .map(|frame| frame.height())
                     .collect::<Vec<_>>();
                 let heights =
-                    binpack_heights(&current_heights, MIN_WINDOW_HEIGHT, viewport.size.height)?;
+                    binpack_heights(&current_heights, MIN_WINDOW_HEIGHT, viewport.height())?;
 
                 let column_width = windows
                     .first()
                     .and_then(|&entity| get_window_frame(entity))
-                    .map(|frame| frame.size.width)?;
-                let mut prev_y = 0.0;
+                    .map(|frame| frame.width())?;
+                let mut prev_y = 0;
                 let frames = windows
                     .into_iter()
                     .zip(heights)
                     .filter_map(|(entity, height)| {
                         let mut frame = get_window_frame(entity)?;
                         let top_left = position - offset;
-                        frame.origin.x = top_left.clamp(
+                        frame.min.x = top_left.clamp(
                             // Make sure a small sliver of a window is visible.
-                            WINDOW_HIDDEN_THRESHOLD - frame.size.width,
-                            viewport.size.width - WINDOW_HIDDEN_THRESHOLD,
+                            viewport.min.x + WINDOW_HIDDEN_THRESHOLD - column_width,
+                            viewport.width() - WINDOW_HIDDEN_THRESHOLD,
                         );
-                        frame.origin.y = prev_y;
+                        frame.min.y = prev_y;
 
                         prev_y += height;
-                        frame.size.height = height;
-                        frame.size.width = column_width;
+                        frame.max.x = frame.min.x + column_width;
+                        frame.max.y = frame.min.y + height;
 
                         Some((entity, frame))
                     })
@@ -393,7 +393,8 @@ impl std::fmt::Display for LayoutStrip {
     }
 }
 
-pub fn binpack_heights(heights: &[f64], min_height: f64, total_height: f64) -> Option<Vec<f64>> {
+#[allow(clippy::cast_possible_truncation)]
+pub fn binpack_heights(heights: &[i32], min_height: i32, total_height: i32) -> Option<Vec<i32>> {
     let mut count = heights.len();
     let mut output = vec![];
 
@@ -402,7 +403,7 @@ pub fn binpack_heights(heights: &[f64], min_height: f64, total_height: f64) -> O
 
         let mut remaining = total_height;
         while idx < count {
-            let remaining_windows = u32::try_from(heights.len() - idx).unwrap();
+            let remaining_windows = heights.len() - idx;
 
             if heights[idx] < remaining {
                 if idx + 1 == count {
@@ -411,9 +412,9 @@ pub fn binpack_heights(heights: &[f64], min_height: f64, total_height: f64) -> O
                     output.push(heights[idx]);
                 }
                 remaining -= heights[idx];
-            } else if remaining >= min_height * f64::from(remaining_windows) {
+            } else if remaining >= min_height * i32::try_from(remaining_windows).ok()? {
                 output.push(remaining);
-                remaining = 0.0;
+                remaining = 0;
             } else {
                 break;
             }
@@ -427,13 +428,12 @@ pub fn binpack_heights(heights: &[f64], min_height: f64, total_height: f64) -> O
         output.clear();
     }
 
-    let remaining = heights.len() - count;
+    let remaining = i32::try_from(heights.len() - count).ok()?;
     if remaining > 0 && count > 0 {
         count -= 1;
         output.truncate(count);
-        let sum = output.iter().fold(0.0, |acc, height| acc + height);
-        let avg_height =
-            ((total_height - sum) / f64::from(u32::try_from(remaining + 1).unwrap())).floor();
+        let sum = output.iter().sum::<i32>();
+        let avg_height = (f64::from(total_height - sum) / f64::from(remaining + 1)) as i32;
         if avg_height < min_height {
             return None;
         }
@@ -451,7 +451,6 @@ pub fn binpack_heights(heights: &[f64], min_height: f64, total_height: f64) -> O
 mod tests {
     use super::*;
     use bevy::prelude::*;
-    use objc2_core_foundation::{CGPoint, CGSize};
 
     fn setup_world_and_strip() -> (World, LayoutStrip, Vec<Entity>) {
         let mut world = World::new();
@@ -511,22 +510,22 @@ mod tests {
 
     #[test]
     fn test_binpack() {
-        const MIN_HEIGHT: f64 = 100.0;
-        let heights = [300.0, 300.0, 300.0, 300.0];
+        const MIN_HEIGHT: i32 = 100;
+        let heights = [300, 300, 300, 300];
 
-        let out = binpack_heights(&heights, MIN_HEIGHT, 1500.0).unwrap();
-        assert_eq!(out, vec![300.0, 300.0, 300.0, 600.0]);
+        let out = binpack_heights(&heights, MIN_HEIGHT, 1500).unwrap();
+        assert_eq!(out, vec![300, 300, 300, 600]);
 
-        let out = binpack_heights(&heights, MIN_HEIGHT, 1024.0).unwrap();
-        assert_eq!(out, vec![300.0, 300.0, 300.0, 124.0]);
+        let out = binpack_heights(&heights, MIN_HEIGHT, 1024).unwrap();
+        assert_eq!(out, vec![300, 300, 300, 124]);
 
-        let out = binpack_heights(&heights, MIN_HEIGHT, 800.0).unwrap();
-        assert_eq!(out, vec![300.0, 300.0, 100.0, 100.0]);
+        let out = binpack_heights(&heights, MIN_HEIGHT, 800).unwrap();
+        assert_eq!(out, vec![300, 300, 100, 100]);
 
-        let out = binpack_heights(&heights, MIN_HEIGHT, 440.0).unwrap();
-        assert_eq!(out, vec![110.0, 110.0, 110.0, 110.0]);
+        let out = binpack_heights(&heights, MIN_HEIGHT, 440).unwrap();
+        assert_eq!(out, vec![110, 110, 110, 110]);
 
-        let out = binpack_heights(&heights, MIN_HEIGHT, 390.0);
+        let out = binpack_heights(&heights, MIN_HEIGHT, 390);
         assert_eq!(out, None);
     }
 
@@ -537,10 +536,10 @@ mod tests {
             .spawn_batch(vec![(), (), (), ()])
             .collect::<Vec<Entity>>();
         let sizes = [
-            CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(300.0, 300.0)),
-            CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(300.0, 300.0)),
-            CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(300.0, 300.0)),
-            CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(300.0, 300.0)),
+            IRect::new(0, 0, 300, 300),
+            IRect::new(0, 0, 300, 300),
+            IRect::new(0, 0, 300, 300),
+            IRect::new(0, 0, 300, 300),
         ];
 
         let mut strip = LayoutStrip::default();
@@ -550,22 +549,19 @@ mod tests {
         strip.append(entities[3]);
 
         _ = strip.stack(entities[2]);
-        let viewport = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(600.0, 500.0));
+        let viewport = IRect::new(0, 0, 600, 500);
         let get_window_frame = |_| Some(sizes[0]);
         let out = strip
-            .calculate_layout(50.0, &viewport, &get_window_frame)
+            .calculate_layout(50, &viewport, &get_window_frame)
             .collect::<Vec<_>>();
 
-        let xpos = out
-            .iter()
-            .map(|(_, frame)| frame.origin.x)
-            .collect::<Vec<_>>();
-        assert_eq!(xpos, vec![-50.0, 250.0, 250.0, 550.0]);
+        let xpos = out.iter().map(|(_, frame)| frame.min.x).collect::<Vec<_>>();
+        assert_eq!(xpos, vec![-50, 250, 250, 550]);
 
         let height = out
             .iter()
-            .map(|(_, frame)| frame.size.height)
+            .map(|(_, frame)| frame.height())
             .collect::<Vec<_>>();
-        assert_eq!(height, vec![500.0, 300.0, 200.0, 500.0]);
+        assert_eq!(height, vec![500, 300, 200, 500]);
     }
 }

@@ -4,10 +4,10 @@ use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::query::{Has, Or, With, Without};
 use bevy::ecs::system::{Commands, Local, NonSend, NonSendMut, Populated, Query, Res};
+use bevy::math::IRect;
 use bevy::tasks::AsyncComputeTaskPool;
 use bevy::tasks::futures_lite::future;
 use bevy::time::Time;
-use objc2_core_foundation::CGRect;
 use objc2_core_graphics::CGDirectDisplayID;
 use std::collections::HashSet;
 use std::pin::Pin;
@@ -28,11 +28,12 @@ use crate::ecs::{
 };
 use crate::events::Event;
 use crate::manager::{
-    Application, Display, LayoutStrip, Process, Window, WindowManager, WindowOS, bruteforce_windows,
+    Application, Display, LayoutStrip, Origin, Process, Size, Window, WindowManager, WindowOS,
+    bruteforce_windows,
 };
 use crate::platform::{PlatformCallbacks, WorkspaceId};
 
-const WINDOW_HIDDEN_THRESHOLD: f64 = 10.0;
+const WINDOW_HIDDEN_THRESHOLD: i32 = 10;
 
 /// Processes a single incoming `Event`. It dispatches various event types to the `WindowManager` or other internal handlers.
 /// This system reads `Event` messages and triggers appropriate Bevy events or modifies resources based on the event type.
@@ -452,7 +453,7 @@ pub(super) fn timeout_ticker(
 /// * `orphaned_spaces` - A `Populated` query for `(Entity, &mut OrphanedStrip)` components.
 /// * `active_display` - A mutable `ActiveDisplayMut` system parameter for the currently active display.
 /// * `commands` - Bevy commands to despawn entities.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::cast_possible_truncation)]
 pub(super) fn find_orphaned_workspaces(
     orphans: Populated<(&LayoutStrip, Entity), Without<ChildOf>>,
     workspaces: Populated<(&LayoutStrip, Entity, &ChildOf), With<ChildOf>>,
@@ -504,8 +505,8 @@ pub(super) fn find_orphaned_workspaces(
         for entity in orphan.all_windows() {
             // Update window ratios on the new display.
             if let Some(window) = windows.get(entity) {
-                let width = display.bounds.size.width * window.width_ratio();
-                let height = display.bounds.size.height;
+                let width = f64::from(display.width()) * window.width_ratio();
+                let height = display.height();
                 debug!(
                     "refreshing ratio {:.1} for window {}: {:.0}x{:.0}",
                     window.width_ratio(),
@@ -513,7 +514,12 @@ pub(super) fn find_orphaned_workspaces(
                     width,
                     height,
                 );
-                resize_entity(entity, width, height, display.id(), &mut commands);
+                resize_entity(
+                    entity,
+                    Size::new(width as i32, height),
+                    display.id(),
+                    &mut commands,
+                );
 
                 in_workspace.retain(|window_id| *window_id != window.id());
             }
@@ -530,7 +536,12 @@ pub(super) fn find_orphaned_workspaces(
         });
         for window_entity in floating {
             debug!("repositioning floating window {window_entity}");
-            reposition_entity(window_entity, 0.0, 0.0, display.id(), &mut commands);
+            reposition_entity(
+                window_entity,
+                display.absolute_coords(Origin::default()),
+                display.id(),
+                &mut commands,
+            );
         }
     }
 }
@@ -631,7 +642,7 @@ pub(super) fn workspace_change_watcher(
 /// * `time` - The Bevy `Time` resource for calculating delta time.
 /// * `config` - The `Config` resource, used for animation speed.
 /// * `commands` - Bevy commands to remove the `RepositionMarker` when animation is complete.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::cast_possible_truncation)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn animate_windows(
     windows: Populated<(&mut Window, Entity, &RepositionMarker)>,
@@ -646,38 +657,23 @@ pub(super) fn animate_windows(
         let Some(display) = displays.iter().find(|display| display.id() == *display_id) else {
             continue;
         };
-        let move_delta = (move_ratio * display.bounds.size.width).ceil();
-        let current = window.frame().origin;
-        let mut delta_x = (origin.x - current.x).abs().min(move_delta);
-        let mut delta_y = (origin.y - current.y).abs().min(move_delta);
-        if delta_x < move_delta && delta_y < move_delta {
-            commands.entity(entity).try_remove::<RepositionMarker>();
-            window.reposition(
-                origin.x,
-                origin.y.max(display.menubar_height),
-                &display.bounds,
-            );
-            continue;
-        }
+        let move_delta = move_ratio * f64::from(display.width());
+        let delta = window
+            .frame()
+            .min
+            .as_vec2()
+            .move_towards(origin.as_vec2(), move_delta as f32)
+            .as_ivec2();
 
-        if origin.x < current.x {
-            delta_x = -delta_x;
-        }
-        if origin.y < current.y {
-            delta_y = -delta_y;
-        }
         trace!(
-            "window {} dest {:?} delta {move_delta:.0} moving to {:.0}:{:.0}",
+            "window {} source {} dest {origin} delta {move_delta} moving to {delta}",
             window.id(),
-            origin,
-            current.x + delta_x,
-            current.y + delta_y,
+            window.frame().min,
         );
-        window.reposition(
-            current.x + delta_x,
-            (current.y + delta_y).max(display.menubar_height),
-            &display.bounds,
-        );
+        window.reposition(delta);
+        if *origin == delta {
+            commands.entity(entity).try_remove::<RepositionMarker>();
+        }
     }
 }
 
@@ -691,7 +687,7 @@ pub(super) fn animate_windows(
 /// * `windows` - A `Populated` query for `(&mut Window, Entity, &ResizeMarker)` components.
 /// * `active_display` - An `ActiveDisplay` system parameter providing immutable access to the active display.
 /// * `commands` - Bevy commands to remove the `ResizeMarker` when resizing is complete.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::cast_possible_truncation)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn animate_resize_windows(
     windows: Populated<(&mut Window, Entity, &ResizeMarker, Has<RepositionMarker>)>,
@@ -710,38 +706,25 @@ pub(super) fn animate_resize_windows(
         let Some(display) = displays.iter().find(|display| display.id() == *display_id) else {
             continue;
         };
-        let move_delta = (move_ratio * display.bounds.size.width).ceil();
-        let current = window.frame().size;
-        let mut delta_x = (size.width - current.width).abs().min(move_delta);
-        let mut delta_y = (size.height - current.height).abs().min(move_delta);
-        if delta_x < move_delta && delta_y < move_delta {
-            commands.entity(entity).try_remove::<ResizeMarker>();
-            window.resize(size.width, size.height, &display.bounds);
-            continue;
-        }
+        let move_delta = move_ratio * f64::from(display.width());
+        let origin = window.frame().size();
+        let delta = origin
+            .as_vec2()
+            .move_towards(size.as_vec2(), move_delta as f32)
+            .as_ivec2();
 
-        if size.width < current.width {
-            delta_x = -delta_x;
-        }
-        if size.height < current.height {
-            delta_y = -delta_y;
-        }
         trace!(
-            "window {} size {:?} delta {move_delta:.0} resizing to {:.0}:{:.0}",
+            "window {} source {origin} dest {size} delta {move_delta} resizing to {delta}",
             window.id(),
-            size,
-            current.width + delta_x,
-            current.height + delta_y,
         );
-        window.resize(
-            current.width + delta_x,
-            current.height + delta_y,
-            &display.bounds,
-        );
+        window.resize(delta, display.width());
+        if *size == delta {
+            commands.entity(entity).try_remove::<ResizeMarker>();
+        }
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::cast_possible_truncation)]
 pub(super) fn window_swiper(
     sliding: Populated<(Entity, Has<Unmanaged>, &WindowSwipeMarker)>,
     windows: Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
@@ -750,22 +733,18 @@ pub(super) fn window_swiper(
 ) {
     let get_window_frame = |entity| get_moving_window_frame(entity, &active_display, &windows);
     let mut viewport = active_display.bounds();
-    viewport.size.height = get_display_height(&active_display);
+    viewport.max.y = viewport.min.y + get_display_height(&active_display);
 
     for (entity, unmanaged, WindowSwipeMarker(delta)) in sliding {
-        let shift = viewport.size.width * delta;
+        let shift = (f64::from(viewport.width()) * delta) as i32;
 
         commands.entity(entity).try_remove::<WindowSwipeMarker>();
 
         if unmanaged && let Some(frame) = get_window_frame(entity) {
             // Window is floating, just shift it directly.
-            reposition_entity(
-                entity,
-                frame.origin.x - shift,
-                frame.origin.y,
-                active_display.id(),
-                &mut commands,
-            );
+            let mut origin = frame.min;
+            origin.x -= shift;
+            reposition_entity(entity, origin, active_display.id(), &mut commands);
             continue;
         }
 
@@ -775,7 +754,7 @@ pub(super) fn window_swiper(
             .find_map(|(column, pos)| column.top().is_some_and(|col| col == entity).then_some(pos));
         let Some(viewport_offset) = absolute_position
             .zip(get_window_frame(entity))
-            .map(|(pos, frame)| pos - frame.origin.x)
+            .map(|(pos, frame)| pos - (frame.min.x - viewport.min.x))
         else {
             continue;
         };
@@ -791,50 +770,39 @@ pub(super) fn window_swiper(
 
 fn expose_window(
     entity: Entity,
-    frame: &CGRect,
+    windows: &Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
     active_display: &ActiveDisplay,
-    moving: Option<&RepositionMarker>,
-    resizing: Option<&ResizeMarker>,
     dock: Option<&DockPosition>,
-) -> CGRect {
-    // Check if window needs to be fully exposed
-    let (mut origin, display_bounds) =
-        moving.map_or((frame.origin, active_display.bounds()), |marker| {
-            (
-                marker.origin,
-                active_display
-                    .other()
-                    .find(|display| display.id() == marker.display_id)
-                    .map_or(active_display.bounds(), |display| display.bounds),
-            )
-        });
-    let size = resizing.map_or(frame.size, |marker| marker.size);
+) -> Option<IRect> {
+    let display_bounds = active_display.bounds();
+    let mut frame = get_moving_window_frame(entity, active_display, windows)?;
+    let size = frame.size();
 
-    if origin.x + size.width > display_bounds.size.width {
+    if frame.max.x > display_bounds.max.x {
         trace!("Bumped window {entity} to the left");
-        origin.x = display_bounds.size.width - size.width;
-    } else if origin.x < 0.0 {
+        frame.min.x = display_bounds.max.x - size.x;
+    } else if frame.min.x < display_bounds.min.x {
         trace!("Bumped window {entity} to the right");
-        origin.x = 0.0;
+        frame.min.x = display_bounds.min.x;
     }
 
     if let Some(dock) = dock {
         match dock {
             DockPosition::Left(offset) => {
-                if origin.x < *offset {
-                    origin.x = *offset;
+                if frame.min.x < display_bounds.min.x + *offset {
+                    frame.min.x = display_bounds.min.x + *offset;
                 }
             }
             DockPosition::Right(offset) => {
-                if origin.x + size.width > display_bounds.size.width - *offset {
-                    origin.x = display_bounds.size.width - *offset - size.width;
+                if frame.min.x + size.x > display_bounds.max.x - *offset {
+                    frame.min.x = display_bounds.min.x - size.x - *offset;
                 }
             }
             _ => (),
         }
     }
-
-    CGRect::new(origin, size)
+    frame.max.x = frame.min.x + size.x;
+    Some(frame)
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -851,18 +819,11 @@ pub(super) fn reshuffle_layout_strip(
         if let Ok(mut cmd) = commands.get_entity(entity) {
             cmd.try_remove::<ReshuffleAroundMarker>();
         }
-        let Ok((window, moving, resizing)) = windows.get(entity) else {
-            continue;
-        };
 
-        let frame = expose_window(
-            entity,
-            &window.frame(),
-            &active_display,
-            moving,
-            resizing,
-            active_display.dock(),
-        );
+        let Some(frame) = expose_window(entity, &windows, &active_display, active_display.dock())
+        else {
+            return;
+        };
 
         let layout_strip = active_display.active_strip();
 
@@ -873,7 +834,7 @@ pub(super) fn reshuffle_layout_strip(
         }) else {
             continue;
         };
-        let viewport_offset = abs_position - frame.origin.x;
+        let viewport_offset = abs_position - (frame.min.x - active_display.bounds().min.x);
 
         position_layout_windows(
             viewport_offset,
@@ -1119,22 +1080,23 @@ fn get_moving_window_frame(
     entity: Entity,
     active_display: &ActiveDisplay,
     windows: &Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
-) -> Option<CGRect> {
+) -> Option<IRect> {
     windows
         .get(entity)
         .map(|(window, reposition, resize)| {
             let mut frame = window.frame();
+            let size = window.frame().size();
 
             if let Some(reposition) = reposition
                 && reposition.display_id == active_display.id()
             {
-                frame.origin = reposition.origin;
+                frame.min = reposition.origin;
+                frame.max = frame.min + size;
             }
-
             if let Some(resize) = resize
                 && resize.display_id == active_display.id()
             {
-                frame.size = resize.size;
+                frame.max = frame.min + resize.size;
             }
             frame
         })
@@ -1142,48 +1104,53 @@ fn get_moving_window_frame(
         .ok()
 }
 
-fn get_display_height(active_display: &ActiveDisplay) -> f64 {
-    let dock_size = active_display.dock().map_or(0.0, |dock| {
+fn get_display_height(active_display: &ActiveDisplay) -> i32 {
+    let dock_size = active_display.dock().map_or(0, |dock| {
         if let DockPosition::Bottom(offset) = dock {
             *offset
         } else {
-            0.0
+            0
         }
     });
-    let menubar = active_display.display().menubar_height;
-    active_display.bounds().size.height - menubar - dock_size
+    active_display.bounds().height() - dock_size
 }
 
 fn position_layout_windows<W>(
-    viewport_offset: f64,
+    viewport_offset: i32,
     active_display: &ActiveDisplay,
     get_window_frame: &W,
     commands: &mut Commands,
 ) where
-    W: Fn(Entity) -> Option<CGRect>,
+    W: Fn(Entity) -> Option<IRect>,
 {
-    let mut display_bounds = active_display.bounds();
-    display_bounds.size.height = get_display_height(active_display);
+    let menubar_height = active_display.display().menubar_height();
+    let bounds = IRect::new(
+        0,
+        0,
+        active_display.bounds().width(),
+        get_display_height(active_display),
+    );
 
-    let display_width = active_display.bounds().size.width;
     let other_display = active_display.other().next();
-    let display_above = other_display.is_some_and(|other_display| {
-        active_display.bounds().origin.y > other_display.bounds.origin.y
-    });
+    let display_above = other_display
+        .is_some_and(|other_display| active_display.bounds().min.y > other_display.bounds().min.y);
 
     let layout_strip = active_display.active_strip();
-    for (entity, mut frame) in
-        layout_strip.calculate_layout(viewport_offset, &display_bounds, &get_window_frame)
+    for (entity, frame) in
+        layout_strip.calculate_layout(viewport_offset, &bounds, &get_window_frame)
     {
         let Some(old_frame) = get_window_frame(entity) else {
             continue;
         };
+        let mut frame = IRect::from_corners(
+            active_display.display().absolute_coords(frame.min),
+            active_display.display().absolute_coords(frame.max),
+        );
 
-        if old_frame.size != frame.size {
+        if old_frame.size() != frame.size() {
             resize_entity(
                 entity,
-                frame.size.width,
-                frame.size.height,
+                Size::new(frame.width(), frame.height()),
                 active_display.id(),
                 commands,
             );
@@ -1193,25 +1160,22 @@ fn position_layout_windows<W>(
         // that MacOS will bump the windows over to another display when moving them around.
         // To avoid that we nudge the off-screen windows slightly down.
         let visible_window = !display_above
-            || frame.origin.x + frame.size.width > WINDOW_HIDDEN_THRESHOLD
-                && frame.origin.x < display_width - WINDOW_HIDDEN_THRESHOLD;
+            || frame.max.x > WINDOW_HIDDEN_THRESHOLD
+                && frame.min.x < active_display.bounds().max.x - WINDOW_HIDDEN_THRESHOLD;
 
-        frame.origin.y += if visible_window {
-            active_display.display().menubar_height
+        if visible_window {
+            frame.min.y += menubar_height;
+            frame.max.y += menubar_height;
         } else {
             // NOTE: If the window is "off screen", move it down slightly
             // to avoid MacOS moving it over to another display
-            display_bounds.size.height / 4.0
-        };
+            let bump = bounds.height() / 4;
+            frame.min.y += bump;
+            frame.max.y += bump;
+        }
 
-        if old_frame.origin != frame.origin {
-            reposition_entity(
-                entity,
-                frame.origin.x,
-                frame.origin.y,
-                active_display.id(),
-                commands,
-            );
+        if old_frame.min != frame.min {
+            reposition_entity(entity, frame.min, active_display.id(), commands);
         }
     }
 }

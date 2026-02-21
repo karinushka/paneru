@@ -1,14 +1,14 @@
-use bevy::ecs::component::Component;
+use bevy::{ecs::component::Component, math::IRect};
 use core::ptr::NonNull;
-use objc2_core_foundation::{CFRetained, CFString, CFUUID, CGRect};
+use objc2_core_foundation::{CFRetained, CFString, CFUUID};
 use objc2_core_graphics::CGDirectDisplayID;
-use objc2_foundation::NSRect;
 use stdext::function_name;
 
 use super::skylight::{CGDisplayCreateUUIDFromDisplayID, CGDisplayGetDisplayIDFromUUID};
 use crate::{
     ecs::DockPosition,
     errors::{Error, Result},
+    manager::Origin,
 };
 
 /// `Display` represents a physical monitor and manages its associated workspaces and window panes.
@@ -18,9 +18,9 @@ pub struct Display {
     /// The unique identifier for this display provided by Core Graphics.
     id: CGDirectDisplayID,
     /// The physical bounds (origin and size) of the display.
-    pub bounds: CGRect,
+    bounds: IRect,
     /// The height of the menubar on this display.
-    pub menubar_height: f64,
+    menubar_height: i32,
 }
 
 impl Display {
@@ -36,11 +36,11 @@ impl Display {
     /// # Returns
     ///
     /// A new `Display` instance.
-    pub fn new(id: CGDirectDisplayID, bounds: CGRect, menubar_height: u32) -> Self {
+    pub fn new(id: CGDirectDisplayID, bounds: IRect, menubar_height: i32) -> Self {
         Self {
             id,
             bounds,
-            menubar_height: menubar_height.into(),
+            menubar_height,
         }
     }
 
@@ -96,17 +96,39 @@ impl Display {
         self.id
     }
 
-    pub fn locate_dock(&self, visible_frame: &NSRect) -> DockPosition {
-        if self.bounds.origin.x < visible_frame.origin.x {
-            DockPosition::Left(visible_frame.origin.x - self.bounds.origin.x)
-        } else if visible_frame.size.width < self.bounds.size.width {
-            DockPosition::Right(self.bounds.size.width - visible_frame.size.width)
-        } else if visible_frame.size.height < self.bounds.size.height - self.menubar_height {
+    pub fn locate_dock(&self, visible_frame: &IRect) -> DockPosition {
+        if self.bounds.min.x < visible_frame.min.x {
+            DockPosition::Left(visible_frame.min.x - self.bounds.min.x)
+        } else if visible_frame.width() < self.bounds.width() {
+            DockPosition::Right(self.bounds.max.x - visible_frame.max.x)
+        } else if visible_frame.height() < self.bounds.height() - self.menubar_height {
             DockPosition::Bottom(
-                self.bounds.size.height - visible_frame.size.height - self.menubar_height,
+                self.bounds.height() - visible_frame.height() - self.menubar_height,
             )
         } else {
             DockPosition::Hidden
         }
+    }
+
+    pub fn absolute_coords(&self, origin: Origin) -> Origin {
+        self.bounds.min + origin
+    }
+
+    pub fn bounds(&self) -> IRect {
+        let mut bounds = self.bounds;
+        bounds.min.y += self.menubar_height;
+        bounds
+    }
+
+    pub fn width(&self) -> i32 {
+        self.bounds().width()
+    }
+
+    pub fn height(&self) -> i32 {
+        self.bounds().height()
+    }
+
+    pub fn menubar_height(&self) -> i32 {
+        self.menubar_height
     }
 }

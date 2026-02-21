@@ -1,11 +1,12 @@
 use accessibility_sys::{AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt};
 use bevy::ecs::resource::Resource;
+use bevy::math::{IRect, IVec2};
 use core::ptr::NonNull;
 use derive_more::{DerefMut, with_trait::Deref};
 use notify::{RecursiveMode, Watcher};
 use objc2_core_foundation::{
     CFArray, CFDictionary, CFMutableData, CFNumber, CFNumberType, CFRetained, CFString, CGPoint,
-    CGRect, kCFBooleanTrue,
+    CGRect, CGSize, kCFBooleanTrue,
 };
 use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayBounds, CGError, CGGetActiveDisplayList, CGRectContainsPoint,
@@ -46,6 +47,28 @@ mod layout;
 mod process;
 mod skylight;
 mod windows;
+
+pub type Origin = IVec2;
+pub type Size = IVec2;
+
+#[allow(clippy::cast_possible_truncation)]
+pub fn origin_from(point: CGPoint) -> Origin {
+    Origin::new(point.x as i32, point.y as i32)
+}
+
+pub fn origin_to(point: Origin) -> CGPoint {
+    CGPoint::new(point.x.into(), point.y.into())
+}
+
+#[allow(clippy::cast_possible_truncation)]
+pub fn size_from(size: CGSize) -> Size {
+    Size::new(size.width as i32, size.height as i32)
+}
+
+pub fn irect_from(rect: CGRect) -> IRect {
+    let mid = rect.mid();
+    IRect::from_center_size(origin_from(mid), size_from(rect.size))
+}
 
 /// Defines the interface for a window manager, abstracting OS-specific operations.
 pub trait WindowManagerApi: Send + Sync {
@@ -97,7 +120,7 @@ pub trait WindowManagerApi: Send + Sync {
     ///
     /// * `window` - A reference to the `Window` to center the mouse on.
     /// * `display_bounds` - The `CGRect` representing the bounds of the display the window is on.
-    fn center_mouse(&self, window: Option<&Window>, display_bounds: &CGRect);
+    fn center_mouse(&self, window: Option<&Window>, display_bounds: &IRect);
     /// Adds existing windows for a given application, potentially resolving unresolved windows.
     ///
     /// # Arguments
@@ -361,7 +384,10 @@ impl WindowManagerApi for WindowManagerOS {
                 let workspaces = Display::uuid_from_id(id)
                     .and_then(|uuid| self.display_space_list(uuid.as_ref()))
                     .ok()?;
-                Some((Display::new(id, bounds, menubar_height), workspaces))
+                Some((
+                    Display::new(id, irect_from(bounds), menubar_height.cast_signed()),
+                    workspaces,
+                ))
             })
             .collect()
     }
@@ -389,7 +415,7 @@ impl WindowManagerApi for WindowManagerOS {
 
     /// Centers the mouse cursor on the window if it's not already within the window's bounds.
     #[instrument(level = Level::DEBUG, skip_all, fields(window))]
-    fn center_mouse(&self, window: Option<&Window>, display_bounds: &CGRect) {
+    fn center_mouse(&self, window: Option<&Window>, display_bounds: &IRect) {
         let center = if let Some(window) = window {
             let mut cursor = CGPoint::default();
             if unsafe {
@@ -398,29 +424,29 @@ impl WindowManagerApi for WindowManagerOS {
                 warn!("Unable to get current cursor position.");
                 return;
             }
-            let frame = window.frame();
+            let frame = CGRect::new(
+                CGPoint::new(window.frame().min.x.into(), window.frame().min.y.into()),
+                CGSize::new(
+                    window.frame().width().into(),
+                    window.frame().height().into(),
+                ),
+            );
             if CGRectContainsPoint(frame, cursor) {
                 return;
             }
 
-            let center = CGPoint::new(
-                display_bounds.origin.x + frame.origin.x + frame.size.width / 2.0,
-                display_bounds.origin.y + frame.origin.y + frame.size.height / 2.0,
-            );
+            let center = window.frame().center() + display_bounds.min;
             let display_id = self.display_id(window.id());
             #[allow(clippy::redundant_closure)]
             let bounds = display_id.map(|display_id| CGDisplayBounds(display_id));
-            if bounds.is_ok_and(|bounds| !CGRectContainsPoint(bounds, center)) {
+            if bounds.is_ok_and(|bounds| !CGRectContainsPoint(bounds, origin_to(center))) {
                 return;
             }
             center
         } else {
-            CGPoint::new(
-                display_bounds.origin.x + display_bounds.size.width / 2.0,
-                display_bounds.origin.y + display_bounds.size.height / 2.0,
-            )
+            display_bounds.center()
         };
-        CGWarpMouseCursorPosition(center);
+        CGWarpMouseCursorPosition(origin_to(center));
     }
 
     /// Adds existing windows for a given application, attempting to resolve any that are not yet found.

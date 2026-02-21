@@ -5,7 +5,7 @@ use super::*;
 use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, TaskPoolBuilder};
 use bevy::time::TimeUpdateStrategy;
-use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{CFRetained, CGPoint};
 use objc2_core_graphics::CGDirectDisplayID;
 use stdext::function_name;
 use stdext::prelude::RwLockExt;
@@ -20,8 +20,8 @@ use crate::ecs::{
 use crate::errors::{Error, Result};
 use crate::events::Event;
 use crate::manager::{
-    Application, ApplicationApi, Display, ProcessApi, Window, WindowApi, WindowManager,
-    WindowManagerApi,
+    Application, ApplicationApi, Display, Origin, ProcessApi, Size, Window, WindowApi,
+    WindowManager, WindowManagerApi,
 };
 use crate::platform::{ConnID, Pid, WinID, WorkspaceId};
 use crate::{platform::ProcessSerialNumber, util::AXUIWrapper};
@@ -235,14 +235,8 @@ impl WindowManagerApi for MockWindowManager {
     fn present_displays(&self) -> Vec<(Display, Vec<WorkspaceId>)> {
         let display = Display::new(
             TEST_DISPLAY_ID,
-            CGRect::new(
-                CGPoint::new(0.0, 0.0),
-                CGSize::new(
-                    f64::from(TEST_DISPLAY_WIDTH),
-                    f64::from(TEST_DISPLAY_HEIGHT),
-                ),
-            ),
-            TEST_MENUBAR_HEIGHT as u32,
+            IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
+            TEST_MENUBAR_HEIGHT,
         );
         vec![(display, vec![TEST_WORKSPACE_ID])]
     }
@@ -261,7 +255,7 @@ impl WindowManagerApi for MockWindowManager {
 
     /// Does nothing, as mouse centering is not tested at this level.
     #[instrument(level = Level::DEBUG, skip_all, ret)]
-    fn center_mouse(&self, _window: Option<&Window>, _display_bounds: &CGRect) {
+    fn center_mouse(&self, _window: Option<&Window>, _display_bounds: &IRect) {
         debug!("{}:", function_name!());
     }
 
@@ -321,7 +315,7 @@ impl WindowManagerApi for MockWindowManager {
 #[derive(Debug)]
 struct MockWindow {
     id: WinID,
-    frame: CGRect,
+    frame: IRect,
     app: MockApplication,
     event_queue: EventQueue,
     pub minimized: bool,
@@ -336,7 +330,7 @@ impl WindowApi for MockWindow {
 
     /// Returns the frame (`CGRect`) of the mock window.
     #[instrument(level = Level::TRACE, skip(self), ret)]
-    fn frame(&self) -> CGRect {
+    fn frame(&self) -> IRect {
         self.frame
     }
 
@@ -381,23 +375,23 @@ impl WindowApi for MockWindow {
 
     /// Repositions the mock window's frame to the given coordinates.
     #[instrument(level = Level::DEBUG, skip(self))]
-    fn reposition(&mut self, x: f64, y: f64, bounds: &CGRect) {
-        debug!("{}: id {} to {x:.02}:{y:.02}", function_name!(), self.id);
-        self.frame.origin.x = x;
-        self.frame.origin.y = y;
+    fn reposition(&mut self, origin: Origin) {
+        debug!("{}: id {} to {origin}", function_name!(), self.id);
+        let size = self.frame.size();
+        self.frame.min = origin;
+        self.frame.max = origin + size;
     }
 
     /// Resizes the mock window's frame to the given dimensions.
     #[instrument(level = Level::DEBUG, skip(self))]
-    fn resize(&mut self, width: f64, height: f64, bounds: &CGRect) {
-        debug!("{}: id {} to {width}x{height}", function_name!(), self.id);
-        self.frame.size.width = width;
-        self.frame.size.height = height;
+    fn resize(&mut self, size: Size, display_width: i32) {
+        debug!("{}: id {} to {size}", function_name!(), self.id);
+        self.frame.max = self.frame.min + size;
     }
 
     /// Always returns `Ok(())` for updating the frame.
     #[instrument(level = Level::DEBUG, skip(self), ret)]
-    fn update_frame(&mut self, bounds: &CGRect) -> Result<()> {
+    fn update_frame(&mut self, bounds: &IRect) -> Result<()> {
         debug!("{}:", function_name!());
         Ok(())
     }
@@ -462,7 +456,7 @@ impl MockWindow {
     /// * `frame` - The `CGRect` representing the window's initial frame.
     /// * `event_queue` - An optional reference to an `EventQueue` for simulating events.
     /// * `app` - A `MockApplication` instance associated with this window.
-    fn new(id: WinID, frame: CGRect, event_queue: EventQueue, app: MockApplication) -> Self {
+    fn new(id: WinID, frame: IRect, event_queue: EventQueue, app: MockApplication) -> Self {
         MockWindow {
             id,
             frame,
@@ -579,13 +573,14 @@ fn verify_window_positions(expected_positions: &[(WinID, (i32, i32))], world: &m
         if let Some((window_id, (x, y))) = expected_positions.iter().find(|id| id.0 == window.id())
         {
             debug!("WinID: {window_id}");
-            assert_eq!(*x, window.frame().origin.x as i32);
-            assert_eq!(*y, window.frame().origin.y as i32);
+            assert_eq!(*x, window.frame().min.x);
+            assert_eq!(*y, window.frame().min.y);
         }
     }
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn test_window_shuffle() {
     let commands = vec![
         Event::MenuOpened { window_id: 0 }, // Noop allowing everything to settle
@@ -676,10 +671,14 @@ fn test_window_shuffle() {
     let windows = Box::new(move |_| {
         (0..5)
             .map(|i| {
-                let size = CGSize::new(f64::from(TEST_WINDOW_WIDTH), f64::from(TEST_WINDOW_HEIGHT));
+                let origin = Origin::new(100 * i, 0);
+                let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
                 let window = MockWindow::new(
                     i,
-                    CGRect::new(CGPoint::new(100.0 * f64::from(i), 0.0), size),
+                    IRect {
+                        min: origin,
+                        max: origin + size,
+                    },
                     event_queue.clone(),
                     mock_app.clone(),
                 );
@@ -702,6 +701,12 @@ fn test_startup_windows() {
             command: Command::Window(Operation::Focus(Direction::East)),
         },
         Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::First)),
+        },
+        Event::Command {
             command: Command::PrintState,
         },
     ];
@@ -713,7 +718,7 @@ fn test_startup_windows() {
     ];
 
     let check = |iteration, world: &mut World| {
-        let iterations = [None, None, Some(expected_positions.as_slice())];
+        let iterations = [None, None, None, None, Some(expected_positions.as_slice())];
 
         if let Some(positions) = iterations[iteration] {
             debug!("Iteration: {iteration}");
@@ -729,10 +734,14 @@ fn test_startup_windows() {
     let windows = Box::new(move |_| {
         (0..5)
             .map(|i| {
-                let size = CGSize::new(f64::from(TEST_WINDOW_WIDTH), f64::from(TEST_WINDOW_HEIGHT));
+                let origin = Origin::new(100 * i, 0);
+                let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
                 let mut window = MockWindow::new(
                     i,
-                    CGRect::new(CGPoint::new(100.0 * f64::from(i), 0.0), size),
+                    IRect {
+                        min: origin,
+                        max: origin + size,
+                    },
                     event_queue.clone(),
                     mock_app.clone(),
                 );
@@ -782,10 +791,14 @@ fn test_dont_focus() {
     let windows = Box::new(move |_| {
         (0..3)
             .map(|i| {
-                let size = CGSize::new(f64::from(TEST_WINDOW_WIDTH), f64::from(TEST_WINDOW_HEIGHT));
+                let origin = Origin::new(100 * i, 0);
+                let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
                 let window = MockWindow::new(
                     i,
-                    CGRect::new(CGPoint::new(100.0 * f64::from(i), 0.0), size),
+                    IRect {
+                        min: origin,
+                        max: origin + size,
+                    },
                     event_queue.clone(),
                     mock_app.clone(),
                 );
@@ -815,10 +828,14 @@ fn test_dont_focus() {
         }
 
         if iteration == 1 {
-            let size = CGSize::new(f64::from(TEST_WINDOW_WIDTH), f64::from(TEST_WINDOW_HEIGHT));
+            let origin = Origin::new(0, 0);
+            let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
             let window = MockWindow::new(
                 3,
-                CGRect::new(CGPoint::new(0.0, 0.0), size),
+                IRect {
+                    min: origin,
+                    max: origin + size,
+                },
                 check_queue.clone(),
                 app.clone(),
             );

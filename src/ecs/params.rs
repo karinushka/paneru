@@ -1,11 +1,13 @@
-use bevy::ecs::{
-    entity::Entity,
-    hierarchy::ChildOf,
-    query::{With, Without},
-    system::{Query, Res, ResMut, Single, SystemParam},
-    world::Mut,
+use bevy::{
+    ecs::{
+        entity::Entity,
+        hierarchy::ChildOf,
+        query::{With, Without},
+        system::{Query, Res, ResMut, Single, SystemParam},
+        world::Mut,
+    },
+    math::IRect,
 };
-use objc2_core_foundation::CGRect;
 use objc2_core_graphics::CGDirectDisplayID;
 use tracing::warn;
 
@@ -167,8 +169,8 @@ impl ActiveDisplay<'_, '_> {
     }
 
     /// Returns the `CGRect` representing the bounds of the active display.
-    pub fn bounds(&self) -> CGRect {
-        self.display.0.bounds
+    pub fn bounds(&self) -> IRect {
+        self.display.0.bounds()
     }
 
     pub fn dock(&self) -> Option<&DockPosition> {
@@ -203,8 +205,8 @@ impl ActiveDisplayMut<'_, '_> {
     }
 
     /// Returns the `CGRect` representing the bounds of the active display.
-    pub fn bounds(&self) -> CGRect {
-        self.display.bounds
+    pub fn bounds(&self) -> IRect {
+        self.display.bounds()
     }
 }
 

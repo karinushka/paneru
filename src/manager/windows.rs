@@ -4,6 +4,7 @@ use accessibility_sys::{
     kAXValueTypeCGPoint, kAXValueTypeCGSize, kAXWindowRole,
 };
 use bevy::ecs::component::Component;
+use bevy::math::IRect;
 use core::ptr::NonNull;
 use derive_more::{DerefMut, with_trait::Deref};
 use objc2_core_foundation::{CFEqual, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize};
@@ -18,18 +19,19 @@ use super::skylight::{
     AXUIElementPerformAction, AXUIElementSetAttributeValue, SLPSPostEventRecordTo,
 };
 use crate::errors::{Error, Result};
+use crate::manager::{Origin, Size, irect_from};
 use crate::platform::{Pid, ProcessSerialNumber, WinID};
 use crate::util::{AXUIAttributes, AXUIWrapper, MacResult};
 
 #[derive(Debug)]
 pub enum WindowPadding {
-    Vertical(u16),
-    Horizontal(u16),
+    Vertical(i32),
+    Horizontal(i32),
 }
 
 pub trait WindowApi: Send + Sync {
     fn id(&self) -> WinID;
-    fn frame(&self) -> CGRect;
+    fn frame(&self) -> IRect;
     fn element(&self) -> Option<CFRetained<AXUIWrapper>>;
     fn title(&self) -> Result<String>;
     fn child_role(&self) -> Result<bool>;
@@ -37,9 +39,9 @@ pub trait WindowApi: Send + Sync {
     fn subrole(&self) -> Result<String>;
     fn is_root(&self) -> bool;
     fn is_minimized(&self) -> bool;
-    fn reposition(&mut self, x: f64, y: f64, display_bounds: &CGRect);
-    fn resize(&mut self, width: f64, height: f64, display_bounds: &CGRect);
-    fn update_frame(&mut self, display_bounds: &CGRect) -> Result<()>;
+    fn reposition(&mut self, origin: Origin);
+    fn resize(&mut self, size: Size, display_width: i32);
+    fn update_frame(&mut self, display_bounds: &IRect) -> Result<()>;
     fn focus_without_raise(
         &self,
         psn: ProcessSerialNumber,
@@ -94,9 +96,9 @@ const CPS_USER_GENERATED: u32 = 0x200;
 pub struct WindowOS {
     id: WinID,
     ax_element: CFRetained<AXUIWrapper>,
-    frame: CGRect,
-    vertical_padding: f64,
-    horizontal_padding: f64,
+    frame: IRect,
+    vertical_padding: i32,
+    horizontal_padding: i32,
     width_ratio: f64,
 }
 
@@ -115,9 +117,9 @@ impl WindowOS {
         let window = Self {
             id,
             ax_element: element.clone(),
-            frame: CGRect::default(),
-            vertical_padding: 0.0,
-            horizontal_padding: 0.0,
+            frame: IRect::default(),
+            vertical_padding: 0,
+            horizontal_padding: 0,
             width_ratio: 0.33,
         };
 
@@ -207,7 +209,7 @@ impl WindowApi for WindowOS {
     /// # Returns
     ///
     /// The window's frame as `CGRect`.
-    fn frame(&self) -> CGRect {
+    fn frame(&self) -> IRect {
         self.frame
     }
 
@@ -271,21 +273,14 @@ impl WindowApi for WindowOS {
         self.ax_element.minimized().is_ok_and(|minimized| minimized)
     }
 
-    /// Repositions the window to the specified x and y coordinates.
-    ///
-    /// # Arguments
-    ///
-    /// * `x` - The new x-coordinate for the window's origin.
-    /// * `y` - The new y-coordinate for the window's origin.
-    /// * `display_bounds` - The `CGRect` of the display.
-    fn reposition(&mut self, x: f64, y: f64, display_bounds: &CGRect) {
-        if (self.frame.origin.x - x).abs() < 0.1 && (self.frame.origin.y - y).abs() < 0.1 {
+    fn reposition(&mut self, origin: Origin) {
+        if self.frame.min == origin {
             trace!("already in position.");
             return;
         }
         let mut point = CGPoint::new(
-            x + display_bounds.origin.x + self.horizontal_padding,
-            y + display_bounds.origin.y + self.vertical_padding,
+            f64::from(origin.x + self.horizontal_padding),
+            f64::from(origin.y + self.vertical_padding),
         );
         let position_ref = unsafe {
             AXValueCreate(
@@ -301,30 +296,29 @@ impl WindowApi for WindowOS {
                     position.as_ref(),
                 )
             };
-            self.frame.origin.x = x;
-            self.frame.origin.y = y;
+            let size = self.frame.size();
+            self.frame.min = origin;
+            self.frame.max = origin + size;
         }
     }
 
-    /// Resizes the window to the specified width and height. It also updates the `width_ratio`.
-    ///
-    /// # Arguments
-    ///
-    /// * `width` - The new width of the window.
-    /// * `height` - The new height of the window.
-    /// * `display_bounds` - The `CGRect` representing the bounds of the display the window is on.
-    fn resize(&mut self, width: f64, height: f64, display_bounds: &CGRect) {
-        if (self.frame.size.width - width).abs() < 0.1
-            && (self.frame.size.height - height).abs() < 0.1
-        {
+    fn resize(&mut self, size: Size, display_width: i32) {
+        if self.frame.size() == size {
             trace!("already correct size.");
             return;
         }
-        let width_padding = 2.0 * self.horizontal_padding;
-        let height_padding = 2.0 * self.vertical_padding;
-        let mut size = CGSize::new(width - width_padding, height - height_padding);
-        let size_ref =
-            unsafe { AXValueCreate(kAXValueTypeCGSize, NonNull::from(&mut size).as_ptr().cast()) };
+        let width_padding = 2 * self.horizontal_padding;
+        let height_padding = 2 * self.vertical_padding;
+        let mut cgsize = CGSize::new(
+            f64::from(size.x - width_padding),
+            f64::from(size.y - height_padding),
+        );
+        let size_ref = unsafe {
+            AXValueCreate(
+                kAXValueTypeCGSize,
+                NonNull::from(&mut cgsize).as_ptr().cast(),
+            )
+        };
         if let Ok(position) = AXUIWrapper::retain(size_ref) {
             unsafe {
                 AXUIElementSetAttributeValue(
@@ -333,10 +327,8 @@ impl WindowApi for WindowOS {
                     position.as_ref(),
                 )
             };
-            size.width += width_padding;
-            size.height += height_padding;
-            self.frame.size = size;
-            self.width_ratio = size.width / display_bounds.size.width;
+            self.frame.max = self.frame.min + size;
+            self.width_ratio = f64::from(self.frame.width()) / f64::from(display_width);
         }
     }
 
@@ -350,7 +342,8 @@ impl WindowApi for WindowOS {
     /// # Returns
     ///
     /// `Ok(())` if the frame is updated successfully, otherwise `Err(Error)`.
-    fn update_frame(&mut self, display_bounds: &CGRect) -> Result<()> {
+    #[allow(clippy::cast_possible_truncation)]
+    fn update_frame(&mut self, display_bounds: &IRect) -> Result<()> {
         let window_ref = self.ax_element.as_ptr();
 
         let position = unsafe {
@@ -387,15 +380,17 @@ impl WindowApi for WindowOS {
                 NonNull::from(&mut frame.size).as_ptr().cast(),
             );
         }
-        frame.origin.x -= display_bounds.origin.x;
-        frame.origin.y -= display_bounds.origin.y;
+        // if (CGRectEqualToRect(new_frame, window->frame)) {
+        //     debug("%s:DEBOUNCED %s %d\n", __FUNCTION__, window->application->name, window->id);
+        // }
+        self.frame = irect_from(frame);
 
-        frame.size.width += 2.0 * self.horizontal_padding;
-        frame.size.height += 2.0 * self.vertical_padding;
-        frame.origin.x -= self.horizontal_padding;
-        frame.origin.y -= self.vertical_padding;
-        self.frame = frame;
-        self.width_ratio = frame.size.width / display_bounds.size.width;
+        self.frame.min.x -= self.horizontal_padding;
+        self.frame.min.y -= self.vertical_padding;
+        self.frame.max.x += self.horizontal_padding;
+        self.frame.max.y += self.vertical_padding;
+
+        self.width_ratio = f64::from(self.frame.width()) / f64::from(display_bounds.width());
         Ok(())
     }
 
@@ -470,8 +465,8 @@ impl WindowApi for WindowOS {
 
     fn set_padding(&mut self, padding: WindowPadding) {
         match padding {
-            WindowPadding::Vertical(padding) => self.vertical_padding = f64::from(padding),
-            WindowPadding::Horizontal(padding) => self.horizontal_padding = f64::from(padding),
+            WindowPadding::Vertical(padding) => self.vertical_padding = padding,
+            WindowPadding::Horizontal(padding) => self.horizontal_padding = padding,
         }
     }
 }

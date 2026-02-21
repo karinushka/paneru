@@ -4,7 +4,7 @@ use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::{Has, With};
 use bevy::ecs::system::{Commands, Query, Res, ResMut, Single};
-use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use bevy::math::IRect;
 use tracing::debug;
 use tracing::{Level, instrument};
 
@@ -15,7 +15,9 @@ use crate::ecs::{
     WMEventTrigger, reposition_entity, reshuffle_around, resize_entity,
 };
 use crate::events::Event;
-use crate::manager::{Application, Column, Display, LayoutStrip, Window, WindowManager};
+use crate::manager::{
+    Application, Column, Display, LayoutStrip, Origin, Size, Window, WindowManager, origin_to,
+};
 
 /// Represents a cardinal or directional choice for window manipulation.
 #[derive(Clone, Debug)]
@@ -241,10 +243,10 @@ fn command_swap_focus(
 
         let origin = if new_index == 0 {
             // If reached far left, snap the window to left.
-            CGPoint::new(0.0, 0.0)
+            Origin::new(0, 0)
         } else if new_index == (active_strip.len() - 1) {
             // If reached full right, snap the window to right.
-            CGPoint::new(display_bounds.size.width - current_frame.size.width, 0.0)
+            Origin::new(display_bounds.width() - current_frame.width(), 0)
         } else {
             active_strip
                 .get(new_index)
@@ -252,9 +254,9 @@ fn command_swap_focus(
                 .and_then(|column| column.top())
                 .and_then(|entity| windows.get(entity))?
                 .frame()
-                .origin
+                .min
         };
-        reposition_entity(current, origin.x, origin.y, display_id, &mut commands);
+        reposition_entity(current, origin, display_id, &mut commands);
         if index < new_index {
             (index..new_index).for_each(|idx| active_strip.swap(idx, idx + 1));
         } else {
@@ -295,15 +297,10 @@ fn command_center_window(
     }
 
     let (window, entity) = *current_focus;
-    let frame = window.frame();
-    reposition_entity(
-        entity,
-        (active_display.bounds().size.width - frame.size.width) / 2.0,
-        frame.origin.y,
-        active_display.id(),
-        &mut commands,
-    );
-    window_manager.center_mouse(Some(window), &active_display.bounds());
+    let center = active_display.bounds().center();
+    let origin = IRect::from_center_size(center, window.frame().size()).min;
+    reposition_entity(entity, origin, active_display.id(), &mut commands);
+    window_manager.center_mouse(None, &active_display.bounds());
     reshuffle_around(entity, &mut commands);
 }
 
@@ -316,7 +313,7 @@ fn command_center_window(
 /// * `windows` - A mutable query for all `Window` components.
 /// * `commands` - Bevy commands to trigger events.
 /// * `config` - The `Config` resource.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::cast_possible_truncation)]
 fn resize_window(
     mut messages: MessageReader<Event>,
     current_focus: Single<(&Window, Entity), With<FocusedMarker>>,
@@ -332,21 +329,26 @@ fn resize_window(
     }
 
     let (window, entity) = *current_focus;
-    let display_width = active_display.bounds().size.width;
-    let current_ratio = window.frame().size.width / display_width;
+    let display_width = active_display.bounds().width();
+    let current_ratio = f64::from(window.frame().width()) / f64::from(display_width);
     let next_ratio = config
         .preset_column_widths()
         .into_iter()
         .find(|&r| r > current_ratio + 0.05)
         .unwrap_or_else(|| *config.preset_column_widths().first().unwrap_or(&0.5));
 
-    let width = next_ratio * display_width;
-    let height = window.frame().size.height;
-    let x = (display_width - width - 1.0).min(window.frame().origin.x);
-    let y = window.frame().origin.y;
+    let size = Size::new(
+        (next_ratio * f64::from(display_width)) as i32,
+        window.frame().height(),
+    );
+    let mut frame = IRect::from_center_size(window.frame().center(), size);
 
-    reposition_entity(entity, x, y, active_display.id(), &mut commands);
-    resize_entity(entity, width, height, active_display.id(), &mut commands);
+    if frame.max.x > active_display.bounds().max.x {
+        frame.min.x = active_display.bounds().max.x - size.x;
+        reposition_entity(entity, frame.min, active_display.id(), &mut commands);
+    }
+
+    resize_entity(entity, size, active_display.id(), &mut commands);
     reshuffle_around(entity, &mut commands);
 }
 
@@ -359,7 +361,7 @@ fn resize_window(
 /// * `windows` - A mutable query for all `Window` components.
 /// * `commands` - Bevy commands to trigger events.
 /// * `config` - The `Config` resource.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::cast_possible_truncation)]
 fn full_width_window(
     mut messages: MessageReader<Event>,
     current_focus: Single<(&Window, Entity), With<FocusedMarker>>,
@@ -375,24 +377,34 @@ fn full_width_window(
     }
 
     let (window, entity) = *current_focus;
-    let display_width = active_display.bounds().size.width;
-    let height = window.frame().size.height;
-    let y = window.frame().origin.y;
+    let display_width = active_display.bounds().width();
+    let height = window.frame().height();
+    let y = window.frame().min.y;
 
     let (width, x) = if let Some(previous_ratio) = windows.full_width(entity) {
         commands.entity(entity).try_remove::<FullWidthMarker>();
-        let w = previous_ratio * display_width;
-        let x_pos = (display_width - w).min(window.frame().origin.x);
+        let w = (previous_ratio * f64::from(display_width)) as i32;
+        let x_pos = (display_width - w).min(window.frame().min.x);
         (w, x_pos)
     } else {
         commands
             .entity(entity)
             .try_insert(FullWidthMarker(window.width_ratio()));
-        (display_width - 1.0, 0.0)
+        (display_width - 1, 0)
     };
 
-    reposition_entity(entity, x, y, active_display.id(), &mut commands);
-    resize_entity(entity, width, height, active_display.id(), &mut commands);
+    reposition_entity(
+        entity,
+        active_display.display().absolute_coords(Origin::new(x, y)),
+        active_display.id(),
+        &mut commands,
+    );
+    resize_entity(
+        entity,
+        Size::new(width, height),
+        active_display.id(),
+        &mut commands,
+    );
     reshuffle_around(entity, &mut commands);
 }
 
@@ -472,17 +484,20 @@ fn to_next_display(
     };
 
     debug!(
-        "moving window (id {}, {entity}) to display {}: {}:{}.",
+        "moving window (id {}, {entity}) to display {}: {}.",
         window.id(),
         other.id(),
-        other.bounds.size.width / 2.0,
-        other.menubar_height,
+        other.width() / 2,
     );
-    let dest = CGPoint::new(other.bounds.size.width / 2.0, other.menubar_height);
-    reposition_entity(entity, dest.x, dest.y, other.id(), &mut commands);
+    let center = other.bounds().center().x;
+    let dest = other
+        .bounds()
+        .min
+        .with_x(center - window.frame().size().x / 2);
+    reposition_entity(entity, dest, other.id(), &mut commands);
     reshuffle_around(entity, &mut commands);
 
-    window_manager.center_mouse(None, &other.bounds);
+    window_manager.center_mouse(None, &other.bounds());
 
     if let Some(neighbour) = active_display.active_strip().right_neighbour(entity) {
         reshuffle_around(neighbour, &mut commands);
@@ -525,11 +540,7 @@ fn mouse_to_next_display(
         return;
     };
 
-    let visible_width = |window: &Window| {
-        window.frame().origin.x.min(0.0) + window.frame().size.width
-            - (window.frame().origin.x + window.frame().size.width - other.bounds.size.width)
-                .max(0.0)
-    };
+    let visible_width = |window: &Window| other.bounds().intersect(window.frame()).width();
     let Some(window) = other_strip
         .all_windows()
         .iter()
@@ -546,20 +557,11 @@ fn mouse_to_next_display(
         return;
     };
 
-    let visible_frame = CGRect::new(
-        CGPoint::new(
-            other.bounds.origin.x + window.frame().origin.x.max(0.0),
-            other.bounds.origin.y + window.frame().origin.y,
-        ),
-        CGSize::new(visible_width(window), window.frame().size.height),
-    );
+    let visible_frame = other.bounds().intersect(window.frame());
     debug!("warping mouse to {visible_frame:?}",);
     window_manager.center_mouse(None, &visible_frame);
 
-    let point = CGPoint::new(
-        visible_frame.origin.x + visible_width(window) / 2.0,
-        visible_frame.origin.y + window.frame().size.height / 2.0,
-    );
+    let point = origin_to(visible_frame.center());
     ffm_flag.as_mut().0 = None;
     commands.trigger(WMEventTrigger(Event::MouseMoved { point }));
 }
@@ -590,18 +592,15 @@ fn equalize_column(
     };
 
     if let Column::Stack(stack) = column {
-        let display_height =
-            active_display.bounds().size.height - active_display.display().menubar_height;
         #[allow(clippy::cast_precision_loss)]
-        let equal_height = (display_height / stack.len() as f64).floor();
+        let equal_height = active_display.bounds().height() / i32::try_from(stack.len()).unwrap();
 
         for &entity in &stack {
             if let Some(window) = windows.get(entity) {
-                let width = window.frame().size.width;
+                let width = window.frame().width();
                 resize_entity(
                     entity,
-                    width,
-                    equal_height,
+                    Size::new(width, equal_height),
                     active_display.id(),
                     &mut commands,
                 );
@@ -692,12 +691,12 @@ fn print_internal_state_handler(
     let focused = focused.single().ok();
     let print_window = |(window, entity, _, unmanaged): (&Window, Entity, &ChildOf, Option<_>)| {
         format!(
-            "\tid: {}, {entity}, {:.0}:{:.0}, {:.0}x{:.0}{}{}, role: {}, subrole: {}, title: '{:.70}'",
+            "\tid: {}, {entity}, {}:{}, {}x{}{}{}, role: {}, subrole: {}, title: '{:.70}'",
             window.id(),
-            window.frame().origin.x,
-            window.frame().origin.y,
-            window.frame().size.width,
-            window.frame().size.height,
+            window.frame().min.x,
+            window.frame().min.y,
+            window.frame().width(),
+            window.frame().height(),
             if focused.is_some_and(|(_, focus)| focus == entity) {
                 ", focused"
             } else {

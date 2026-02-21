@@ -18,15 +18,15 @@ use bevy::{
     ecs::{component::Component, entity::Entity, schedule::IntoScheduleConfigs},
 };
 use derive_more::{Deref, DerefMut};
-use objc2_core_foundation::CGPoint;
-use objc2_core_foundation::CGSize;
 use objc2_core_graphics::CGDirectDisplayID;
 
 use crate::commands::register_commands;
 use crate::config::CONFIGURATION_FILE;
 use crate::errors::Result;
 use crate::events::{Event, EventSender};
-use crate::manager::{ProcessApi, Window, WindowManager, WindowManagerApi, WindowManagerOS};
+use crate::manager::{
+    Origin, ProcessApi, Size, Window, WindowManager, WindowManagerApi, WindowManagerOS,
+};
 use crate::platform::{PlatformCallbacks, WinID};
 
 pub mod params;
@@ -143,7 +143,7 @@ pub struct ExistingMarker;
 #[derive(Component)]
 pub struct RepositionMarker {
     /// The new origin (x, y coordinates) for the window.
-    pub origin: CGPoint,
+    pub origin: Origin,
     /// The ID of the display the window should be moved to.
     pub display_id: CGDirectDisplayID,
 }
@@ -152,7 +152,7 @@ pub struct RepositionMarker {
 #[derive(Component)]
 pub struct ResizeMarker {
     /// The new size (width, height) for the window.
-    pub size: CGSize,
+    pub size: Size,
     pub display_id: CGDirectDisplayID,
 }
 
@@ -227,9 +227,9 @@ pub struct BruteforceWindows(Task<Vec<Window>>);
 
 #[derive(Component, Debug)]
 pub enum DockPosition {
-    Bottom(f64),
-    Left(f64),
-    Right(f64),
+    Bottom(i32),
+    Left(i32),
+    Right(i32),
     Hidden,
 }
 
@@ -265,31 +265,24 @@ pub struct LocateDockTrigger(pub Entity);
 
 pub fn reposition_entity(
     entity: Entity,
-    x: f64,
-    y: f64,
+    origin: Origin,
     display_id: CGDirectDisplayID,
     commands: &mut Commands,
 ) {
     if let Ok(mut entity_cmmands) = commands.get_entity(entity) {
-        entity_cmmands.try_insert(RepositionMarker {
-            origin: CGPoint { x, y },
-            display_id,
-        });
+        entity_cmmands.try_insert(RepositionMarker { origin, display_id });
     }
 }
 
 pub fn resize_entity(
     entity: Entity,
-    width: f64,
-    height: f64,
+    size: Size,
     display_id: CGDirectDisplayID,
     commands: &mut Commands,
 ) {
+    assert!(size.x > 0 && size.y > 0);
     if let Ok(mut entity_cmmands) = commands.get_entity(entity) {
-        entity_cmmands.try_insert(ResizeMarker {
-            size: CGSize { width, height },
-            display_id,
-        });
+        entity_cmmands.try_insert(ResizeMarker { size, display_id });
     }
 }
 

@@ -1164,7 +1164,7 @@ fn position_layout_windows<W>(
     let display_width = active_display.bounds().size.width;
     let other_display = active_display.other().next();
     let display_above = other_display.is_some_and(|other_display| {
-        active_display.bounds().origin.x < other_display.bounds.origin.x
+        active_display.bounds().origin.y > other_display.bounds.origin.y
     });
 
     let layout_strip = active_display.active_strip();

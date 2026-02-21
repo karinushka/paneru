@@ -52,6 +52,7 @@ pub trait WindowApi: Send + Sync {
     fn width_ratio(&self) -> f64;
     fn pid(&self) -> Result<Pid>;
     fn set_padding(&mut self, padding: WindowPadding);
+    fn horizontal_padding(&self) -> f64;
 }
 
 #[derive(Component, Deref, DerefMut)]
@@ -468,5 +469,9 @@ impl WindowApi for WindowOS {
             WindowPadding::Vertical(padding) => self.vertical_padding = padding,
             WindowPadding::Horizontal(padding) => self.horizontal_padding = padding,
         }
+    }
+
+    fn horizontal_padding(&self) -> f64 {
+        self.horizontal_padding.into()
     }
 }

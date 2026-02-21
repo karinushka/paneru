@@ -440,6 +440,10 @@ impl WindowApi for MockWindow {
         debug!("{}:", function_name!());
     }
 
+    fn horizontal_padding(&self) -> f64 {
+        0.0
+    }
+
     #[instrument(level = Level::TRACE, skip(self), ret)]
     fn is_minimized(&self) -> bool {
         self.minimized
@@ -610,8 +614,8 @@ fn test_window_shuffle() {
         },
     ];
 
-    let offscreen_left = 0 - TEST_WINDOW_WIDTH + 10;
-    let offscreen_right = TEST_DISPLAY_WIDTH - 10;
+    let offscreen_left = 0 - TEST_WINDOW_WIDTH + 5;
+    let offscreen_right = TEST_DISPLAY_WIDTH - 5;
 
     let expected_positions_last = [
         (4, (offscreen_left, TEST_MENUBAR_HEIGHT)),
@@ -774,7 +778,7 @@ fn test_dont_focus() {
         },
     ];
 
-    let offscreen_right = TEST_DISPLAY_WIDTH - 10;
+    let offscreen_right = TEST_DISPLAY_WIDTH - 5;
     let expected_positions = [
         (2, (0, TEST_MENUBAR_HEIGHT)),
         (1, (400, TEST_MENUBAR_HEIGHT)),

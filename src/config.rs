@@ -505,6 +505,9 @@ pub struct WindowParams {
     pub vertical_padding: Option<i32>,
     pub horizontal_padding: Option<i32>,
     pub dont_focus: Option<bool>,
+    /// An optional initial width ratio (0.0–1.0) relative to the display width.
+    /// Overrides the default column width when the window is first managed.
+    pub width: Option<f64>,
 }
 
 /// Deserializes a regular expression from a string for window titles.

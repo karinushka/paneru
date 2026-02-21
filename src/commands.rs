@@ -725,6 +725,7 @@ fn print_internal_state_handler(
     mut messages: MessageReader<Event>,
     focused: Query<(&Window, Entity), With<FocusedMarker>>,
     windows: Query<(&Window, Entity, &ChildOf, Option<&Unmanaged>)>,
+    apps: Query<&Application>,
     workspaces: Query<(&LayoutStrip, Entity, &ChildOf)>,
     displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
 ) {
@@ -740,9 +741,14 @@ fn print_internal_state_handler(
     }
 
     let focused = focused.single().ok();
-    let print_window = |(window, entity, _, unmanaged): (&Window, Entity, &ChildOf, Option<_>)| {
+    let print_window = |(window, entity, child, unmanaged): (&Window, Entity, &ChildOf, Option<_>)| {
+        let bundle_id = apps
+            .get(child.parent())
+            .ok()
+            .and_then(|app| app.bundle_id().map(str::to_owned))
+            .unwrap_or_default();
         format!(
-            "\tid: {}, {entity}, {}:{}, {}x{}{}{}, role: {}, subrole: {}, title: '{:.70}'",
+            "\tid: {}, {entity}, {}:{}, {}x{}{}{}, bundle: {}, role: {}, subrole: {}, title: '{:.70}'",
             window.id(),
             window.frame().min.x,
             window.frame().min.y,
@@ -754,6 +760,7 @@ fn print_internal_state_handler(
                 ""
             },
             unmanaged.map(|m| format!(", {m:?}")).unwrap_or_default(),
+            bundle_id,
             window.role().unwrap_or_default(),
             window.subrole().unwrap_or_default(),
             window.title().unwrap_or_default()

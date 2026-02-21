@@ -189,7 +189,9 @@ fn command_move_focus(
         return;
     };
 
-    let (_, entity) = windows.focused().unwrap();
+    let Some((_, entity)) = windows.focused() else {
+        return;
+    };
     if let Some(window) = get_window_in_direction(direction, entity, active_display.active_strip())
         .inspect(|entity| {
             if let Some(window) = windows.get(*entity)

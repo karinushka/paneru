@@ -21,8 +21,8 @@ use super::{
 use crate::config::{Config, WindowParams};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, LocateDockTrigger, SendMessageTrigger, WindowSwipeMarker,
-    reposition_entity, reshuffle_around,
+    ActiveWorkspaceMarker, FocusHistory, LocateDockTrigger, SendMessageTrigger,
+    WindowSwipeMarker, reposition_entity, reshuffle_around,
 };
 use crate::errors::Result;
 use crate::events::Event;
@@ -375,6 +375,7 @@ pub(super) fn front_switched_trigger(
     processes: Query<(&BProcess, &Children)>,
     applications: Query<&Application>,
     mut config: Configuration,
+    focus_history: Res<FocusHistory>,
     mut commands: Commands,
 ) {
     let Event::ApplicationFrontSwitched { ref psn } = trigger.event().0 else {
@@ -404,6 +405,11 @@ pub(super) fn front_switched_trigger(
     }) {
         commands.trigger(WMEventTrigger(Event::WindowFocused {
             window_id: focused_id,
+        }));
+    } else if let Some(target) = focus_history.managed.iter().find_map(|&e| windows.get(e)) {
+        debug!("restoring focus to managed window {}.", target.id());
+        commands.trigger(WMEventTrigger(Event::WindowFocused {
+            window_id: target.id(),
         }));
     } else if let Some((_, entity)) = windows.focused() {
         debug!("reseting focus.");
@@ -456,6 +462,7 @@ pub(super) fn window_focused_trigger(
     windows: Windows,
     active_display: ActiveDisplay,
     mut config: Configuration,
+    mut focus_history: ResMut<FocusHistory>,
     mut commands: Commands,
 ) {
     const STRAY_FOCUS_RETRY_SEC: u64 = 2;
@@ -495,6 +502,13 @@ pub(super) fn window_focused_trigger(
     }
 
     commands.entity(entity).try_insert(FocusedMarker);
+
+    focus_history.current = Some(entity);
+    if matches!(windows.get_managed(entity), Some((_, _, None))) {
+        focus_history.managed.retain(|&e| e != entity);
+        focus_history.managed.insert(0, entity);
+        focus_history.managed.truncate(5);
+    }
 
     if !config.skip_reshuffle() {
         if config.auto_center()
@@ -718,10 +732,15 @@ pub(super) fn window_unmanaged_trigger(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn window_managed_trigger(
     trigger: On<Remove, Unmanaged>,
+    has_window: Query<(), With<Window>>,
     mut active_display: ActiveDisplayMut,
     mut commands: Commands,
 ) {
     let entity = trigger.event().entity;
+    // Skip if entity is being despawned (Window component already removed).
+    if has_window.get(entity).is_err() {
+        return;
+    }
     debug!("Entity {entity} is managed again.");
 
     active_display.active_strip().append(entity);
@@ -742,6 +761,8 @@ pub(super) fn window_destroyed_trigger(
     trigger: On<WMEventTrigger>,
     windows: Windows,
     mut apps: Query<&mut Application>,
+    mut focus_history: ResMut<FocusHistory>,
+    mut workspaces: Query<&mut LayoutStrip>,
     mut commands: Commands,
 ) {
     let Event::WindowDestroyed { window_id } = trigger.event().0 else {
@@ -759,7 +780,35 @@ pub(super) fn window_destroyed_trigger(
     };
     app.unobserve_window(window);
 
-    commands.entity(entity).remove::<Unmanaged>().despawn();
+    // Handle strip removal and focus before despawning.
+    if let Some(mut strip) = workspaces
+        .iter_mut()
+        .find(|strip| strip.index_of(entity).is_ok())
+    {
+        give_away_focus(entity, &windows, &strip, &mut commands);
+        strip.remove(entity);
+    } else if focus_history.current == Some(entity) {
+        // Floating window was focused. Raise the last managed window directly
+        // (can't use WindowFocused trigger — is_frontmost guard blocks it while
+        // other floating windows may still be in front).
+        let mut app_lens = apps.transmute_lens::<&Application>();
+        if let Some(target) = focus_history.managed.iter().find_map(|&e| windows.get(e))
+            && let Some(psn) = windows.psn(target.id(), &app_lens.query())
+        {
+            debug!("Floating window destroyed, raising {}.", target.id());
+            target.focus_with_raise(psn);
+            commands.trigger(WMEventTrigger(Event::WindowFocused {
+                window_id: target.id(),
+            }));
+        }
+    }
+
+    if focus_history.current == Some(entity) {
+        focus_history.current = None;
+    }
+    focus_history.managed.retain(|&e| e != entity);
+
+    commands.entity(entity).despawn();
 }
 
 /// Moves the focus away to a neighbour window.
@@ -1041,17 +1090,15 @@ pub(super) fn stray_focus_observer(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn window_removal_observer(
     trigger: On<Remove, Window>,
-    windows: Windows,
     mut workspaces: Query<&mut LayoutStrip>,
-    mut commands: Commands,
 ) {
     let entity = trigger.event().entity;
 
+    // Safety net: ensure entity is removed from any strip it might still be in.
     if let Some(mut strip) = workspaces
         .iter_mut()
         .find(|strip| strip.index_of(entity).is_ok())
     {
-        give_away_focus(entity, &windows, &strip, &mut commands);
         strip.remove(entity);
     }
 }

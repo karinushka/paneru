@@ -14,8 +14,9 @@ use tracing::{Level, debug, instrument};
 use crate::commands::{Command, Direction, Operation, register_commands};
 use crate::config::Config;
 use crate::ecs::{
-    BProcess, ExistingMarker, FocusFollowsMouse, FocusedMarker, Initializing, MissionControlActive,
-    PollForNotifications, SkipReshuffle, SpawnWindowTrigger, register_systems, register_triggers,
+    BProcess, ExistingMarker, FocusFollowsMouse, FocusHistory, FocusedMarker, Initializing,
+    MissionControlActive, PollForNotifications, SkipReshuffle, SpawnWindowTrigger,
+    register_systems, register_triggers,
 };
 use crate::errors::{Error, Result};
 use crate::events::Event;
@@ -507,6 +508,7 @@ fn setup_world() -> App {
         .insert_resource(FocusFollowsMouse(None))
         .insert_resource(Config::default())
         .insert_resource(Initializing)
+        .init_resource::<FocusHistory>()
         .add_plugins((register_triggers, register_systems, register_commands));
 
     bevy_app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(

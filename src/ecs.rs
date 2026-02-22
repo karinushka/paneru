@@ -125,6 +125,15 @@ pub fn register_triggers(app: &mut bevy::app::App) {
 #[derive(Component)]
 pub struct FocusedMarker;
 
+/// Tracks focus history for restoring focus when floating windows close.
+#[derive(Resource, Default)]
+pub struct FocusHistory {
+    /// The entity that currently has focus (including floating windows).
+    pub current: Option<Entity>,
+    /// Recently focused managed (non-floating) window entities.
+    pub managed: Vec<Entity>,
+}
+
 #[derive(Component)]
 pub struct ActiveWorkspaceMarker;
 
@@ -310,6 +319,7 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         .insert_resource(FocusFollowsMouse(None))
         .insert_resource(PollForNotifications)
         .insert_resource(Initializing)
+        .init_resource::<FocusHistory>()
         .insert_non_send_resource(watcher)
         .add_plugins((register_triggers, register_systems, register_commands));
 

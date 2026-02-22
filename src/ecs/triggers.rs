@@ -27,7 +27,8 @@ use crate::ecs::{
 use crate::errors::Result;
 use crate::events::Event;
 use crate::manager::{
-    Application, Display, LayoutStrip, Process, Window, WindowManager, WindowPadding, irect_from,
+    Application, Display, LayoutStrip, Origin, Process, Size, Window, WindowManager, WindowPadding,
+    irect_from,
 };
 use crate::platform::{PlatformCallbacks, WinID, WorkspaceId};
 use crate::util::symlink_target;
@@ -944,8 +945,12 @@ fn apply_window_defaults(
     if floating {
         if let Some((rx, ry, rw, rh)) = properties.iter().find_map(|p| p.grid_ratios()) {
             let bounds = active_display.bounds();
-            window.reposition(bounds.size.width * rx, bounds.size.height * ry, &bounds);
-            window.resize(bounds.size.width * rw, bounds.size.height * rh, &bounds);
+            let x = (f64::from(bounds.width()) * rx) as i32;
+            let y = (f64::from(bounds.height()) * ry) as i32;
+            let w = (f64::from(bounds.width()) * rw) as i32;
+            let h = (f64::from(bounds.height()) * rh) as i32;
+            window.reposition(Origin::new(x, y));
+            window.resize(Size::new(w, h), bounds.width());
         }
         return;
     }

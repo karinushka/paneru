@@ -756,7 +756,7 @@ pub(super) fn window_swiper(
 
         let strip = active_display.active_strip();
         let mut absolute_position = None;
-        let mut total_strip_width = 0.0_f64;
+        let mut total_strip_width = 0_i32;
         for (column, pos) in strip.absolute_positions(&get_window_frame) {
             if column.top().is_some_and(|col| col == entity) {
                 absolute_position = Some(pos);
@@ -764,7 +764,7 @@ pub(super) fn window_swiper(
             if let Some(top) = column.top()
                 && let Some(frame) = get_window_frame(top)
             {
-                total_strip_width = pos + frame.size.width;
+                total_strip_width = pos + frame.width();
             }
         }
         let Some(viewport_offset) = absolute_position
@@ -775,7 +775,9 @@ pub(super) fn window_swiper(
         };
 
         let (_, pad_right, _, pad_left) = config.edge_padding();
-        let effective_width = viewport.size.width - pad_left - pad_right;
+        let pad_left = pad_left as i32;
+        let pad_right = pad_right as i32;
+        let effective_width = viewport.width() - pad_left - pad_right;
         let min_offset = -pad_left;
         let max_offset = (total_strip_width - effective_width - pad_left).max(min_offset);
         let clamped_offset = (viewport_offset + shift).clamp(min_offset, max_offset);
@@ -1229,13 +1231,14 @@ fn position_layout_windows<W, P>(
             // h_pad to the virtual x, so subtract it here so the OS window
             // lands exactly sliver_width pixels from the screen edge.
             let h_pad = get_window_h_pad(entity) as i32;
-            let window_center = frame.min.x + frame.width() / 2;
+            let width = frame.width();
+            let window_center = frame.min.x + width / 2;
             if window_center <= pad_left {
-                frame.min.x = sliver_width + h_pad - frame.width();
+                frame.min.x = sliver_width + h_pad - width;
                 frame.max.x = sliver_width + h_pad;
             } else {
                 frame.min.x = display_width - sliver_width - h_pad;
-                frame.max.x = frame.min.x + frame.width();
+                frame.max.x = frame.min.x + width;
             }
 
             let inset = (f64::from(bounds.height()) * (1.0 - config.sliver_height()) / 2.0) as i32;

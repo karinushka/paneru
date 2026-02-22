@@ -21,8 +21,8 @@ use super::{
 use crate::config::{Config, WindowParams};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, LocateDockTrigger, WindowSwipeMarker, reposition_entity,
-    reshuffle_around,
+    ActiveWorkspaceMarker, LocateDockTrigger, SendMessageTrigger, WindowSwipeMarker,
+    reposition_entity, reshuffle_around,
 };
 use crate::errors::Result;
 use crate::events::Event;
@@ -1018,7 +1018,6 @@ pub(super) fn stray_focus_observer(
     trigger: On<Add, Window>,
     focus_events: Populated<(Entity, &StrayFocusEvent)>,
     windows: Windows,
-    mut messages: MessageWriter<Event>,
     mut commands: Commands,
 ) {
     let entity = trigger.event().entity;
@@ -1031,7 +1030,7 @@ pub(super) fn stray_focus_observer(
         .filter(|(_, stray_focus)| stray_focus.0 == window_id)
         .for_each(|(timeout_entity, _)| {
             debug!("Re-queueing lost focus event for window id {window_id}.");
-            messages.write(Event::WindowFocused { window_id });
+            commands.trigger(SendMessageTrigger(Event::WindowFocused { window_id }));
             commands.entity(timeout_entity).despawn();
         });
 }
@@ -1085,4 +1084,13 @@ pub(super) fn locate_dock_trigger(
             entity_cmmands.try_insert(dock);
         }
     }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn send_message_trigger(
+    trigger: On<SendMessageTrigger>,
+    mut messages: MessageWriter<Event>,
+) {
+    let event = &trigger.event().0;
+    messages.write(event.clone());
 }

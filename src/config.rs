@@ -290,6 +290,24 @@ impl Config {
             .unwrap_or_default()
     }
 
+    pub fn sliver_height(&self) -> f64 {
+        self.options().sliver_height.unwrap_or(1.0).clamp(0.1, 1.0)
+    }
+
+    pub fn sliver_width(&self) -> f64 {
+        f64::from(self.options().sliver_width.unwrap_or(5)).max(1.0)
+    }
+
+    pub fn edge_padding(&self) -> (f64, f64, f64, f64) {
+        let o = self.options();
+        (
+            f64::from(o.padding_top.unwrap_or(0)),
+            f64::from(o.padding_right.unwrap_or(0)),
+            f64::from(o.padding_bottom.unwrap_or(0)),
+            f64::from(o.padding_left.unwrap_or(0)),
+        )
+    }
+
     pub fn preset_column_widths(&self) -> Vec<f64> {
         self.options().preset_column_widths
     }
@@ -417,6 +435,19 @@ pub struct MainOptions {
     pub animation_speed: Option<f64>,
     /// Automatically center the window when switching focus with keyboard.
     pub auto_center: Option<bool>,
+    /// Height of off-screen window slivers as a ratio (0.0–1.0) of the display height.
+    /// Lower values hide the window's corner radius at screen edges.
+    /// Default: 1.0 (full height).
+    pub sliver_height: Option<f64>,
+    /// Width of off-screen window slivers in pixels.
+    /// Default: 5 pixels.
+    pub sliver_width: Option<u16>,
+    /// Padding applied at screen edges (in pixels). Independent from between-window gaps.
+    /// Default: 0 on all sides.
+    pub padding_top: Option<u16>,
+    pub padding_bottom: Option<u16>,
+    pub padding_left: Option<u16>,
+    pub padding_right: Option<u16>,
 
     #[allow(dead_code)]
     pub continuous_swipe: Option<bool>, // Deprecated
@@ -490,6 +521,28 @@ pub struct WindowParams {
     pub vertical_padding: Option<i32>,
     pub horizontal_padding: Option<i32>,
     pub dont_focus: Option<bool>,
+    /// An optional initial width ratio (0.0–1.0) relative to the display width.
+    /// Overrides the default column width when the window is first managed.
+    pub width: Option<f64>,
+    /// Grid placement for floating windows: "cols:rows:x:y:w:h".
+    /// Divides the display into a grid and positions the window at the given cell/span.
+    pub grid: Option<String>,
+}
+
+impl WindowParams {
+    /// Parses the grid string into `(x_ratio, y_ratio, w_ratio, h_ratio)`, all 0.0–1.0.
+    pub fn grid_ratios(&self) -> Option<(f64, f64, f64, f64)> {
+        let grid = self.grid.as_ref()?;
+        let parts: Vec<f64> = grid.split(':').filter_map(|s| s.parse().ok()).collect();
+        if parts.len() != 6 {
+            return None;
+        }
+        let (cols, rows) = (parts[0], parts[1]);
+        if cols <= 0.0 || rows <= 0.0 {
+            return None;
+        }
+        Some((parts[2] / cols, parts[3] / rows, parts[4] / cols, parts[5] / rows))
+    }
 }
 
 /// Deserializes a regular expression from a string for window titles.

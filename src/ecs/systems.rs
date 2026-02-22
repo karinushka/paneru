@@ -3,7 +3,7 @@ use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::query::{Has, Or, With, Without};
-use bevy::ecs::system::{Commands, Local, NonSend, NonSendMut, Populated, Query, Res};
+use bevy::ecs::system::{Commands, Local, NonSend, NonSendMut, Populated, Query, Res, Single};
 use bevy::math::IRect;
 use bevy::tasks::AsyncComputeTaskPool;
 use bevy::tasks::futures_lite::future;
@@ -16,8 +16,9 @@ use std::time::Duration;
 use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
-    ActiveDisplayMarker, BProcess, ExistingMarker, FreshMarker, PollForNotifications,
-    RepositionMarker, ResizeMarker, SpawnWindowTrigger, Timeout, WMEventTrigger,
+    ActiveDisplayMarker, BProcess, ExistingMarker, FocusedMarker, FreshMarker,
+    PollForNotifications, RepositionMarker, ResizeMarker, SpawnWindowTrigger, Timeout,
+    WMEventTrigger,
 };
 use crate::config::Config;
 use crate::ecs::params::{ActiveDisplay, Windows};
@@ -32,8 +33,6 @@ use crate::manager::{
     bruteforce_windows,
 };
 use crate::platform::{PlatformCallbacks, WorkspaceId};
-
-const WINDOW_HIDDEN_THRESHOLD: i32 = 10;
 
 /// Processes a single incoming `Event`. It dispatches various event types to the `WindowManager` or other internal handlers.
 /// This system reads `Event` messages and triggers appropriate Bevy events or modifies resources based on the event type.
@@ -729,9 +728,16 @@ pub(super) fn window_swiper(
     sliding: Populated<(Entity, Has<Unmanaged>, &WindowSwipeMarker)>,
     windows: Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
     active_display: ActiveDisplay,
+    config: Res<Config>,
     mut commands: Commands,
 ) {
     let get_window_frame = |entity| get_moving_window_frame(entity, &active_display, &windows);
+    let get_window_h_pad = |entity: Entity| {
+        windows
+            .get(entity)
+            .map(|(w, _, _)| w.horizontal_padding())
+            .unwrap_or(0.0)
+    };
     let mut viewport = active_display.bounds();
     viewport.max.y = viewport.min.y + get_display_height(&active_display);
 
@@ -749,9 +755,18 @@ pub(super) fn window_swiper(
         }
 
         let strip = active_display.active_strip();
-        let absolute_position = strip
-            .absolute_positions(&get_window_frame)
-            .find_map(|(column, pos)| column.top().is_some_and(|col| col == entity).then_some(pos));
+        let mut absolute_position = None;
+        let mut total_strip_width = 0_i32;
+        for (column, pos) in strip.absolute_positions(&get_window_frame) {
+            if column.top().is_some_and(|col| col == entity) {
+                absolute_position = Some(pos);
+            }
+            if let Some(top) = column.top()
+                && let Some(frame) = get_window_frame(top)
+            {
+                total_strip_width = pos + frame.width();
+            }
+        }
         let Some(viewport_offset) = absolute_position
             .zip(get_window_frame(entity))
             .map(|(pos, frame)| pos - (frame.min.x - viewport.min.x))
@@ -759,10 +774,20 @@ pub(super) fn window_swiper(
             continue;
         };
 
+        let (_, pad_right, _, pad_left) = config.edge_padding();
+        let pad_left = pad_left as i32;
+        let pad_right = pad_right as i32;
+        let effective_width = viewport.width() - pad_left - pad_right;
+        let min_offset = -pad_left;
+        let max_offset = (total_strip_width - effective_width - pad_left).max(min_offset);
+        let clamped_offset = (viewport_offset + shift).clamp(min_offset, max_offset);
+
         position_layout_windows(
-            viewport_offset + shift,
+            clamped_offset,
             &active_display,
             &get_window_frame,
+            &get_window_h_pad,
+            &config,
             &mut commands,
         );
     }
@@ -773,17 +798,21 @@ fn expose_window(
     windows: &Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
     active_display: &ActiveDisplay,
     dock: Option<&DockPosition>,
+    edge_padding: (f64, f64, f64, f64),
 ) -> Option<IRect> {
+    let (_, pad_right, _, pad_left) = edge_padding;
+    let pad_left = pad_left as i32;
+    let pad_right = pad_right as i32;
     let display_bounds = active_display.bounds();
     let mut frame = get_moving_window_frame(entity, active_display, windows)?;
     let size = frame.size();
 
-    if frame.max.x > display_bounds.max.x {
+    if frame.max.x > display_bounds.max.x - pad_right {
         trace!("Bumped window {entity} to the left");
-        frame.min.x = display_bounds.max.x - size.x;
-    } else if frame.min.x < display_bounds.min.x {
+        frame.min.x = display_bounds.max.x - pad_right - size.x;
+    } else if frame.min.x < display_bounds.min.x + pad_left {
         trace!("Bumped window {entity} to the right");
-        frame.min.x = display_bounds.min.x;
+        frame.min.x = display_bounds.min.x + pad_left;
     }
 
     if let Some(dock) = dock {
@@ -811,16 +840,23 @@ pub(super) fn reshuffle_layout_strip(
     marker: Populated<Entity, With<ReshuffleAroundMarker>>,
     active_display: ActiveDisplay,
     windows: Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
+    config: Res<Config>,
     mut commands: Commands,
 ) {
     let get_window_frame = |entity| get_moving_window_frame(entity, &active_display, &windows);
+    let get_window_h_pad = |entity: Entity| {
+        windows
+            .get(entity)
+            .map(|(w, _, _)| w.horizontal_padding())
+            .unwrap_or(0.0)
+    };
 
     for entity in marker {
         if let Ok(mut cmd) = commands.get_entity(entity) {
             cmd.try_remove::<ReshuffleAroundMarker>();
         }
 
-        let Some(frame) = expose_window(entity, &windows, &active_display, active_display.dock())
+        let Some(frame) = expose_window(entity, &windows, &active_display, active_display.dock(), config.edge_padding())
         else {
             return;
         };
@@ -840,6 +876,8 @@ pub(super) fn reshuffle_layout_strip(
             viewport_offset,
             &active_display,
             &get_window_frame,
+            &get_window_h_pad,
+            &config,
             &mut commands,
         );
     }
@@ -885,6 +923,7 @@ pub(super) fn pump_events(
 pub(super) fn window_update_frame(
     mut messages: MessageReader<Event>,
     mut windows: Query<(&mut Window, Entity)>,
+    focused: Option<Single<Entity, With<FocusedMarker>>>,
     active_display: ActiveDisplay,
     mut commands: Commands,
 ) {
@@ -904,7 +943,12 @@ pub(super) fn window_update_frame(
                     }
 
                     if matches!(event, Event::WindowResized { window_id: _ }) {
-                        reshuffle_around(entity, &mut commands);
+                        // Reshuffle around the focused window, not the resized one.
+                        // Reshuffling around an off-screen sliver would call
+                        // expose_window on it, pulling it into view and causing a
+                        // feedback loop.
+                        let target = focused.as_deref().copied().unwrap_or(entity);
+                        reshuffle_around(target, &mut commands);
                     }
                 }
             }
@@ -1115,13 +1159,16 @@ fn get_display_height(active_display: &ActiveDisplay) -> i32 {
     active_display.bounds().height() - dock_size
 }
 
-fn position_layout_windows<W>(
+fn position_layout_windows<W, P>(
     viewport_offset: i32,
     active_display: &ActiveDisplay,
     get_window_frame: &W,
+    get_window_h_pad: &P,
+    config: &Config,
     commands: &mut Commands,
 ) where
     W: Fn(Entity) -> Option<IRect>,
+    P: Fn(Entity) -> f64,
 {
     let menubar_height = active_display.display().menubar_height();
     let bounds = IRect::new(
@@ -1131,10 +1178,28 @@ fn position_layout_windows<W>(
         get_display_height(active_display),
     );
 
+    // Shrink the layout viewport by global edge padding.
+    // calculate_layout only uses viewport.size (not origin), so we apply
+    // the origin offset to each frame after layout. We also adjust
+    // viewport_offset by pad_left because the caller computes it from
+    // current window positions (which already include pad_left from a
+    // previous layout pass).
+    let (pad_top, pad_right, pad_bottom, pad_left) = config.edge_padding();
+    let pad_top = pad_top as i32;
+    let pad_right = pad_right as i32;
+    let pad_bottom = pad_bottom as i32;
+    let pad_left = pad_left as i32;
+    let mut bounds = bounds;
+    bounds.max.x -= pad_left + pad_right;
+    bounds.max.y -= pad_top + pad_bottom;
+    let viewport_offset = viewport_offset + pad_left;
+
+    let display_width = active_display.bounds().width();
     let other_display = active_display.other().next();
     let display_above = other_display
         .is_some_and(|other_display| active_display.bounds().min.y > other_display.bounds().min.y);
 
+    let padded_right = display_width - pad_right;
     let layout_strip = active_display.active_strip();
     for (entity, frame) in
         layout_strip.calculate_layout(viewport_offset, &bounds, &get_window_frame)
@@ -1147,6 +1212,51 @@ fn position_layout_windows<W>(
             active_display.display().absolute_coords(frame.max),
         );
 
+        // Apply horizontal edge padding offset. calculate_layout returns
+        // positions relative to 0, so shift visible windows by pad_left.
+        frame.min.x += pad_left;
+        frame.max.x += pad_left;
+
+        // A window is a "sliver" if it has very little visible area within
+        // the padded viewport. Only push truly off-screen windows to show
+        // config.sliver_width() pixels from the screen edge.
+        let sliver_width = config.sliver_width() as i32;
+        let visible_left = frame.min.x.max(pad_left);
+        let visible_right = frame.max.x.min(padded_right);
+        let visible = (visible_right - visible_left).max(0);
+        let is_off_screen = visible <= 20;
+
+        if is_off_screen {
+            // Account for per-window horizontal_padding: reposition() adds
+            // h_pad to the virtual x, so subtract it here so the OS window
+            // lands exactly sliver_width pixels from the screen edge.
+            let h_pad = get_window_h_pad(entity) as i32;
+            let width = frame.width();
+            let window_center = frame.min.x + width / 2;
+            if window_center <= pad_left {
+                frame.min.x = sliver_width + h_pad - width;
+                frame.max.x = sliver_width + h_pad;
+            } else {
+                frame.min.x = display_width - sliver_width - h_pad;
+                frame.max.x = frame.min.x + width;
+            }
+
+            let inset = (f64::from(bounds.height()) * (1.0 - config.sliver_height()) / 2.0) as i32;
+            frame.min.y += menubar_height + pad_top + inset;
+            frame.max.y -= inset;
+
+            // Multi-display: nudge off-screen windows down to prevent macOS
+            // from relocating them to the other display.
+            if display_above {
+                let bump = bounds.height() / 4;
+                frame.min.y += bump;
+                frame.max.y += bump;
+            }
+        } else {
+            frame.min.y += menubar_height + pad_top;
+            frame.max.y += menubar_height + pad_top;
+        }
+
         if old_frame.size() != frame.size() {
             resize_entity(
                 entity,
@@ -1154,24 +1264,6 @@ fn position_layout_windows<W>(
                 active_display.id(),
                 commands,
             );
-        }
-
-        // If there are multiple displays and the other display is located above, there is a chance
-        // that MacOS will bump the windows over to another display when moving them around.
-        // To avoid that we nudge the off-screen windows slightly down.
-        let visible_window = !display_above
-            || frame.max.x > WINDOW_HIDDEN_THRESHOLD
-                && frame.min.x < active_display.bounds().max.x - WINDOW_HIDDEN_THRESHOLD;
-
-        if visible_window {
-            frame.min.y += menubar_height;
-            frame.max.y += menubar_height;
-        } else {
-            // NOTE: If the window is "off screen", move it down slightly
-            // to avoid MacOS moving it over to another display
-            let bump = bounds.height() / 4;
-            frame.min.y += bump;
-            frame.max.y += bump;
         }
 
         if old_frame.min != frame.min {

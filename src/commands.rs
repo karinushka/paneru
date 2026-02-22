@@ -189,7 +189,9 @@ fn command_move_focus(
         return;
     };
 
-    let (_, entity) = windows.focused().unwrap();
+    let Some((_, entity)) = windows.focused() else {
+        return;
+    };
     if let Some(window) = get_window_in_direction(direction, entity, active_display.active_strip())
         .inspect(|entity| {
             if let Some(window) = windows.get(*entity)
@@ -370,7 +372,11 @@ fn resize_window(
 
     let (window, entity) = *current_focus;
     let display_width = active_display.bounds().width();
-    let current_ratio = f64::from(window.frame().width()) / f64::from(display_width);
+    let (_, pad_right, _, pad_left) = config.edge_padding();
+    let pad_left = pad_left as i32;
+    let pad_right = pad_right as i32;
+    let padded_width = display_width - pad_left - pad_right;
+    let current_ratio = f64::from(window.frame().width()) / f64::from(padded_width);
     let next_ratio = config
         .preset_column_widths()
         .into_iter()
@@ -378,13 +384,13 @@ fn resize_window(
         .unwrap_or_else(|| *config.preset_column_widths().first().unwrap_or(&0.5));
 
     let size = Size::new(
-        (next_ratio * f64::from(display_width)) as i32,
+        (next_ratio * f64::from(padded_width)) as i32,
         window.frame().height(),
     );
     let mut frame = IRect::from_center_size(window.frame().center(), size);
 
-    if frame.max.x > active_display.bounds().max.x {
-        frame.min.x = active_display.bounds().max.x - size.x;
+    if frame.max.x > active_display.bounds().max.x - pad_right {
+        frame.min.x = active_display.bounds().max.x - pad_right - size.x;
         reposition_entity(entity, frame.min, active_display.id(), &mut commands);
     }
 
@@ -407,6 +413,7 @@ fn full_width_window(
     current_focus: Single<(&Window, Entity), With<FocusedMarker>>,
     windows: Windows,
     active_display: ActiveDisplay,
+    config: Res<Config>,
     mut commands: Commands,
 ) {
     if filter_window_operations(&mut messages, |op| matches!(op, Operation::FullWidth))
@@ -418,19 +425,23 @@ fn full_width_window(
 
     let (window, entity) = *current_focus;
     let display_width = active_display.bounds().width();
+    let (_, pad_right, _, pad_left) = config.edge_padding();
+    let pad_left = pad_left as i32;
+    let pad_right = pad_right as i32;
+    let padded_width = display_width - pad_left - pad_right;
     let height = window.frame().height();
     let y = window.frame().min.y;
 
     let (width, x) = if let Some(previous_ratio) = windows.full_width(entity) {
         commands.entity(entity).try_remove::<FullWidthMarker>();
-        let w = (previous_ratio * f64::from(display_width)) as i32;
-        let x_pos = (display_width - w).min(window.frame().min.x);
+        let w = (previous_ratio * f64::from(padded_width)) as i32;
+        let x_pos = (display_width - pad_right - w).min(window.frame().min.x);
         (w, x_pos)
     } else {
         commands
             .entity(entity)
             .try_insert(FullWidthMarker(window.width_ratio()));
-        (display_width - 1, 0)
+        (padded_width, pad_left)
     };
 
     reposition_entity(
@@ -714,6 +725,7 @@ fn print_internal_state_handler(
     mut messages: MessageReader<Event>,
     focused: Query<(&Window, Entity), With<FocusedMarker>>,
     windows: Query<(&Window, Entity, &ChildOf, Option<&Unmanaged>)>,
+    apps: Query<&Application>,
     workspaces: Query<(&LayoutStrip, Entity, &ChildOf)>,
     displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
 ) {
@@ -729,9 +741,14 @@ fn print_internal_state_handler(
     }
 
     let focused = focused.single().ok();
-    let print_window = |(window, entity, _, unmanaged): (&Window, Entity, &ChildOf, Option<_>)| {
+    let print_window = |(window, entity, child, unmanaged): (&Window, Entity, &ChildOf, Option<_>)| {
+        let bundle_id = apps
+            .get(child.parent())
+            .ok()
+            .and_then(|app| app.bundle_id().map(str::to_owned))
+            .unwrap_or_default();
         format!(
-            "\tid: {}, {entity}, {}:{}, {}x{}{}{}, role: {}, subrole: {}, title: '{:.70}'",
+            "\tid: {}, {entity}, {}:{}, {}x{}{}{}, bundle: {}, role: {}, subrole: {}, title: '{:.70}'",
             window.id(),
             window.frame().min.x,
             window.frame().min.y,
@@ -743,6 +760,7 @@ fn print_internal_state_handler(
                 ""
             },
             unmanaged.map(|m| format!(", {m:?}")).unwrap_or_default(),
+            bundle_id,
             window.role().unwrap_or_default(),
             window.subrole().unwrap_or_default(),
             window.title().unwrap_or_default()

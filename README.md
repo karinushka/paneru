@@ -220,6 +220,24 @@ animation_speed = 50
 # i.e. 'window_focus_west' or 'window_focus_east'.
 # auto_center = false
 
+# Height of off-screen window slivers as a ratio (0.0–1.0) of the display
+# height. Lower values hide the window's corner radius at screen edges.
+# Default: 1.0 (full height, no inset).
+# sliver_height = 0.8
+
+# Width of off-screen window slivers in pixels. Controls how much of an
+# off-screen window peeks from the screen edge.
+# Default: 5 pixels.
+# sliver_width = 5
+
+# Padding applied at screen edges (in pixels). Independent from the
+# between-window gaps set by per-window horizontal/vertical_padding.
+# Default: 0 on all sides.
+# padding_top = 0
+# padding_bottom = 0
+# padding_left = 5
+# padding_right = 5
+
 [bindings]
 # Moves the focus between windows.
 window_focus_west = ["cmd - h", "cmd - leftarrow"]
@@ -288,8 +306,26 @@ title = "Unimportant popup window"
 dont_focus = true
 index = 100
 
+[windows.neovide_width]
+# Sets a specific initial width for a window (as a ratio of display width).
+title = ".*"
+bundle_id = "com.neovide.neovide"
+width = 0.5
+
+[windows.passwords]
+# Floating window placed on a grid. The format is "cols:rows:x:y:w:h".
+# This divides the display into a 6x6 grid and places the window at cell (1,1)
+# spanning 4 columns and 4 rows — roughly centered covering 2/3 of the display.
+title = "Passwords.*"
+floating = true
+grid = "6:6:1:1:4:4"
+
 [windows.all]
 # Matches all windows and adds a few pixels of spacing to their borders.
+# Note: horizontal_padding and vertical_padding create gaps on all sides of
+# each window. At screen edges, the gap is cancelled out so padding only
+# appears between windows. Use the [options] padding_* settings above to
+# control screen edge margins independently.
 title = ".*"
 horizontal_padding = 4
 vertical_padding = 2

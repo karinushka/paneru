@@ -11,8 +11,8 @@ use tracing::{Level, instrument};
 use crate::config::Config;
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Windows};
 use crate::ecs::{
-    ActiveDisplayMarker, FocusFollowsMouse, FocusedMarker, FullWidthMarker, Unmanaged,
-    WMEventTrigger, reposition_entity, reshuffle_around, resize_entity,
+    ActiveDisplayMarker, FocusFollowsMouse, FocusedMarker, FullWidthMarker, SendMessageTrigger,
+    Unmanaged, WMEventTrigger, reposition_entity, reshuffle_around, resize_entity,
 };
 use crate::events::Event;
 use crate::manager::{
@@ -137,7 +137,7 @@ fn get_window_in_direction(
         Direction::Last => strip.last().ok().and_then(|column| column.top()),
 
         Direction::North => match strip.get(index).ok()? {
-            Column::Single(window) => Some(window),
+            Column::Single(_) => None,
             Column::Stack(stack) => stack
                 .iter()
                 .enumerate()
@@ -147,7 +147,7 @@ fn get_window_in_direction(
         },
 
         Direction::South => match strip.get(index).ok()? {
-            Column::Single(window) => Some(window),
+            Column::Single(_) => None,
             Column::Stack(stack) => stack
                 .iter()
                 .enumerate()
@@ -200,6 +200,23 @@ fn command_move_focus(
         })
     {
         reshuffle_around(window, &mut commands);
+        return;
+    }
+
+    // Check if the movement can switch to another display.
+    let Some(other_display) = active_display.other().next() else {
+        return;
+    };
+    let change_display = match direction {
+        Direction::North => active_display.bounds().min.y > other_display.bounds().min.y,
+        Direction::South => active_display.bounds().min.y < other_display.bounds().min.y,
+        _ => false,
+    };
+    debug!("moving focus to another display: {change_display}");
+    if change_display {
+        commands.trigger(SendMessageTrigger(Event::Command {
+            command: Command::Mouse(MouseMove::ToNextDisplay),
+        }));
     }
 }
 
@@ -269,6 +286,29 @@ fn command_swap_focus(
 
     if let Some(window) = handler() {
         reshuffle_around(window, &mut commands);
+    }
+
+    if windows
+        .focused()
+        .and_then(|(_, current)| get_window_in_direction(direction, current, active_strip))
+        .is_none()
+    {
+        // Check if the movement can swap to another display.
+        let bounds = active_display.bounds();
+        let Some(other_display) = active_display.other().next() else {
+            return;
+        };
+        let change_display = match direction {
+            Direction::North => bounds.min.y > other_display.bounds().min.y,
+            Direction::South => bounds.min.y < other_display.bounds().min.y,
+            _ => false,
+        };
+        debug!("swapping window to another display: {change_display}");
+        if change_display {
+            commands.trigger(SendMessageTrigger(Event::Command {
+                command: Command::Window(Operation::ToNextDisplay),
+            }));
+        }
     }
 }
 

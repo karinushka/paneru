@@ -941,6 +941,15 @@ fn apply_window_defaults(
         window.set_width_ratio(width);
     }
 
+    if floating {
+        if let Some((rx, ry, rw, rh)) = properties.iter().find_map(|p| p.grid_ratios()) {
+            let bounds = active_display.bounds();
+            window.reposition(bounds.size.width * rx, bounds.size.height * ry, &bounds);
+            window.resize(bounds.size.width * rw, bounds.size.height * rh, &bounds);
+        }
+        return;
+    }
+
     _ = window
         .update_frame(&active_display.bounds())
         .inspect_err(|err| error!("{err}"));

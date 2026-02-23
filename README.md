@@ -327,6 +327,14 @@ title = ".*"
 bundle_id = "com.neovide.neovide"
 width = 0.5
 
+[windows.passwords]
+# Floating window placed on a grid. The format is "cols:rows:x:y:w:h".
+# This divides the display into a 6x6 grid and places the window at cell (1,1)
+# spanning 4 columns and 4 rows — roughly centered covering 2/3 of the display.
+title = "Passwords.*"
+floating = true
+grid = "6:6:1:1:4:4"
+
 [windows.all]
 # Matches all windows and adds a few pixels of spacing to their borders.
 # Note: horizontal_padding and vertical_padding create gaps on all sides of

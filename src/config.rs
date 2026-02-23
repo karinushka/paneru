@@ -532,6 +532,30 @@ pub struct WindowParams {
     /// An optional initial width ratio (0.0–1.0) relative to the display width.
     /// Overrides the default column width when the window is first managed.
     pub width: Option<f64>,
+    /// Grid placement for floating windows: "cols:rows:x:y:w:h".
+    /// Divides the display into a grid and positions the window at the given cell/span.
+    pub grid: Option<String>,
+}
+
+impl WindowParams {
+    /// Parses the grid string into `(x_ratio, y_ratio, w_ratio, h_ratio)`, all 0.0–1.0.
+    pub fn grid_ratios(&self) -> Option<(i32, i32, i32, i32)> {
+        let grid = self.grid.as_ref()?;
+        let parts: Vec<f32> = grid.split(':').filter_map(|s| s.parse().ok()).collect();
+        if parts.len() != 6 {
+            return None;
+        }
+        let (cols, rows) = (parts[0], parts[1]);
+        if cols <= 0.0 || rows <= 0.0 {
+            return None;
+        }
+        Some((
+            (parts[2] / cols) as i32,
+            (parts[3] / rows) as i32,
+            (parts[4] / cols) as i32,
+            (parts[5] / rows) as i32,
+        ))
+    }
 }
 
 /// Deserializes a regular expression from a string for window titles.

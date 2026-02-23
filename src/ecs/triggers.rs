@@ -407,7 +407,7 @@ pub(super) fn front_switched_trigger(
             window_id: focused_id,
         }));
     } else if let Some((_, entity)) = windows.focused() {
-        debug!("reseting focus.");
+        warn!("front_switched: removing FocusedMarker from {entity} with no replacement!");
         config.set_ffm_flag(None);
         commands.entity(entity).try_remove::<FocusedMarker>();
     }
@@ -640,6 +640,7 @@ pub(super) fn dispatch_application_messages(
     trigger: On<WMEventTrigger>,
     windows: Windows,
     applications: Query<(&Application, &Children)>,
+    unmanaged_query: Query<&Unmanaged>,
     mut commands: Commands,
 ) {
     let find_window = |window_id| windows.find(window_id);
@@ -652,7 +653,9 @@ pub(super) fn dispatch_application_messages(
         }
 
         Event::WindowDeminimized { window_id } => {
-            if let Some((_, entity)) = find_window(*window_id) {
+            if let Some((_, entity)) = find_window(*window_id)
+                && matches!(unmanaged_query.get(entity), Ok(Unmanaged::Minimized))
+            {
                 commands.entity(entity).try_remove::<Unmanaged>();
             }
         }
@@ -663,7 +666,11 @@ pub(super) fn dispatch_application_messages(
                 return;
             };
             for entity in children {
-                commands.entity(*entity).try_insert(Unmanaged::Hidden);
+                // Only hide windows that are currently managed (no Unmanaged component).
+                // Preserve existing Floating, Minimized, and Hidden states.
+                if unmanaged_query.get(*entity).is_err() {
+                    commands.entity(*entity).try_insert(Unmanaged::Hidden);
+                }
             }
         }
 
@@ -673,7 +680,11 @@ pub(super) fn dispatch_application_messages(
                 return;
             };
             for entity in children {
-                commands.entity(*entity).try_remove::<Unmanaged>();
+                // Only restore windows that were hidden by the app hide/show cycle.
+                // Preserve Floating and Minimized states.
+                if matches!(unmanaged_query.get(*entity), Ok(Unmanaged::Hidden)) {
+                    commands.entity(*entity).try_remove::<Unmanaged>();
+                }
             }
         }
         _ => (),

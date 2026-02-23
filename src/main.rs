@@ -9,6 +9,7 @@ mod ecs;
 mod errors;
 mod events;
 mod manager;
+mod overlay;
 mod platform;
 mod reader;
 mod util;

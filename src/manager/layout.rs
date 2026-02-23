@@ -27,6 +27,22 @@ impl Column {
         }
         .copied()
     }
+
+    /// Returns the entity at the given stack index, or the last entity if the index exceeds the stack size.
+    pub fn at_or_last(&self, index: usize) -> Option<Entity> {
+        match self {
+            Column::Single(id) => Some(*id),
+            Column::Stack(stack) => stack.get(index).or_else(|| stack.last()).copied(),
+        }
+    }
+
+    /// Returns the position of an entity within this column (0 for Single, stack index for Stack).
+    pub fn position_of(&self, entity: Entity) -> Option<usize> {
+        match self {
+            Column::Single(id) => (*id == entity).then_some(0),
+            Column::Stack(stack) => stack.iter().position(|&e| e == entity),
+        }
+    }
 }
 
 /// `LayoutStrip` manages a horizontal strip of `Panel`s, where each panel can contain a single window or a stack of windows.
@@ -181,18 +197,20 @@ impl LayoutStrip {
 
     pub fn right_neighbour(&self, entity: Entity) -> Option<Entity> {
         let index = self.index_of(entity).ok()?;
+        let stack_pos = self.columns.get(index)?.position_of(entity)?;
         (index < self.columns.len())
             .then_some(index + 1)
-            .and_then(|index| self.columns.get(index))
-            .and_then(Column::top)
+            .and_then(|i| self.columns.get(i))
+            .and_then(|col| col.at_or_last(stack_pos))
     }
 
     pub fn left_neighbour(&self, entity: Entity) -> Option<Entity> {
         let index = self.index_of(entity).ok()?;
+        let stack_pos = self.columns.get(index)?.position_of(entity)?;
         (index > 0)
             .then(|| index - 1)
-            .and_then(|index| self.columns.get(index))
-            .and_then(Column::top)
+            .and_then(|i| self.columns.get(i))
+            .and_then(|col| col.at_or_last(stack_pos))
     }
 
     /// Stacks the window with the given ID onto the panel to its left.

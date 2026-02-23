@@ -867,4 +867,45 @@ mod tests {
         assert_eq!(get_window_in_direction(&north, e1, &strip), Some(e0));
         assert_eq!(get_window_in_direction(&south, e1, &strip), None);
     }
+
+    #[test]
+    fn test_get_window_in_direction_adjacent_stacks() {
+        // Layout: [Stack(e0, e1), Stack(e2, e3)]
+        let mut world = World::new();
+        let entities = world
+            .spawn_batch(vec![(), (), (), ()])
+            .collect::<Vec<Entity>>();
+
+        let mut strip = LayoutStrip::default();
+        strip.append(entities[0]);
+        strip.append(entities[1]);
+        strip.append(entities[2]);
+        strip.append(entities[3]);
+        strip.stack(entities[1]).unwrap(); // Stack e1 onto e0: [Stack(e0, e1), e2, e3]
+        strip.stack(entities[3]).unwrap(); // Stack e3 onto e2: [Stack(e0, e1), Stack(e2, e3)]
+
+        let east = Direction::East;
+        let west = Direction::West;
+
+        // From e0 (top-left), east should go to e2 (top-right)
+        assert_eq!(
+            get_window_in_direction(&east, entities[0], &strip),
+            Some(entities[2])
+        );
+        // From e1 (bottom-left), east should go to e3 (bottom-right)
+        assert_eq!(
+            get_window_in_direction(&east, entities[1], &strip),
+            Some(entities[3])
+        );
+        // From e2 (top-right), west should go to e0 (top-left)
+        assert_eq!(
+            get_window_in_direction(&west, entities[2], &strip),
+            Some(entities[0])
+        );
+        // From e3 (bottom-right), west should go to e1 (bottom-left)
+        assert_eq!(
+            get_window_in_direction(&west, entities[3], &strip),
+            Some(entities[1])
+        );
+    }
 }

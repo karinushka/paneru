@@ -430,8 +430,6 @@ impl WindowApi for MockWindow {
         0.5
     }
 
-    fn set_width_ratio(&mut self, _ratio: f64) {}
-
     #[instrument(level = Level::TRACE, skip(self), ret)]
     fn pid(&self) -> Result<Pid> {
         Ok(TEST_PROCESS_ID)

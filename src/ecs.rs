@@ -284,7 +284,9 @@ pub fn resize_entity(
     display_id: CGDirectDisplayID,
     commands: &mut Commands,
 ) {
-    assert!(size.x > 0 && size.y > 0);
+    if size.x <= 0 || size.y <= 0 {
+        return;
+    }
     if let Ok(mut entity_cmmands) = commands.get_entity(entity) {
         entity_cmmands.try_insert(ResizeMarker { size, display_id });
     }

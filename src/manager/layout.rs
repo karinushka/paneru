@@ -397,6 +397,17 @@ impl LayoutStrip {
             })
             .flatten()
     }
+
+    pub fn above(&self, entity: Entity) -> Option<Entity> {
+        let stack = self.index_of(entity).and_then(|idx| self.get(idx)).ok()?;
+        match stack {
+            Column::Single(_) => None,
+            Column::Stack(items) => {
+                let pos = items.iter().position(|&e| e == entity)?;
+                (pos > 0).then(|| items[pos - 1])
+            }
+        }
+    }
 }
 
 impl std::fmt::Display for LayoutStrip {

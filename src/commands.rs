@@ -410,7 +410,7 @@ fn full_width_window(
     mut messages: MessageReader<Event>,
     current_focus: Single<(&Window, Entity), With<FocusedMarker>>,
     windows: Windows,
-    active_display: ActiveDisplay,
+    mut active_display: ActiveDisplayMut,
     config: Res<Config>,
     mut commands: Commands,
 ) {
@@ -428,15 +428,30 @@ fn full_width_window(
     let height = window.frame().height();
     let y = window.frame().min.y;
 
-    let (width, x) = if let Some(previous_ratio) = windows.full_width(entity) {
+    let (width, x) = if let Some(marker) = windows.full_width(entity) {
+        let previous_ratio = marker.width_ratio;
+        let was_stacked = marker.was_stacked;
         commands.entity(entity).try_remove::<FullWidthMarker>();
         let w = (previous_ratio * f64::from(padded_width)).round() as i32;
         let x_pos = (display_width - pad_right - w).min(window.frame().min.x);
+        if was_stacked {
+            _ = active_display.active_strip().stack(entity);
+        }
         (w, x_pos)
     } else {
-        commands
-            .entity(entity)
-            .try_insert(FullWidthMarker(window.width_ratio()));
+        let strip = active_display.active_strip();
+        let was_stacked = strip
+            .index_of(entity)
+            .ok()
+            .and_then(|idx| strip.get(idx).ok())
+            .is_some_and(|col| matches!(col, Column::Stack(_)));
+        if was_stacked {
+            _ = strip.unstack(entity);
+        }
+        commands.entity(entity).try_insert(FullWidthMarker {
+            width_ratio: window.width_ratio(),
+            was_stacked,
+        });
         (padded_width, pad_left)
     };
 

@@ -194,6 +194,11 @@ pub struct ActiveDisplayMut<'w, 's> {
 }
 
 impl ActiveDisplayMut<'_, '_> {
+    /// Returns an immutable reference to the active `Display`.
+    pub fn display(&self) -> &Display {
+        &self.display
+    }
+
     /// Returns the `CGDirectDisplayID` of the active display.
     pub fn id(&self) -> CGDirectDisplayID {
         self.display.id()
@@ -278,10 +283,10 @@ impl Windows<'_, '_> {
             .map(|(window, entity, _, _)| (window, entity))
     }
 
-    pub fn full_width(&self, entity: Entity) -> Option<f64> {
+    pub fn full_width(&self, entity: Entity) -> Option<&FullWidthMarker> {
         self.previous_size
             .get(entity)
-            .map(|(_, _, width)| width.0)
+            .map(|(_, _, marker)| marker)
             .ok()
     }
 

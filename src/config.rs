@@ -312,8 +312,8 @@ impl Config {
         self.options().preset_column_widths
     }
 
-    pub fn free_slide(&self) -> bool {
-        self.options().free_slide.unwrap_or(false)
+    pub fn continuous_swipe(&self) -> bool {
+        self.options().continuous_swipe.unwrap_or(true)
     }
 }
 
@@ -453,12 +453,9 @@ pub struct MainOptions {
     pub padding_left: Option<u16>,
     pub padding_right: Option<u16>,
 
-    /// Allow swiping to slide windows when the strip is narrower than the screen.
-    /// Edge windows will stay on-screen. Default: false.
-    pub free_slide: Option<bool>,
-
-    #[allow(dead_code)]
-    pub continuous_swipe: Option<bool>, // Deprecated
+    /// Swiping keeps sliding windows until the first or last window.
+    /// Set to false to clamp so edge windows stay on-screen. Default: true.
+    pub continuous_swipe: Option<bool>,
 }
 
 /// Returns a default set of column widths.

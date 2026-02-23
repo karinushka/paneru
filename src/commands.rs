@@ -382,7 +382,7 @@ fn resize_window(
         .unwrap_or_else(|| *config.preset_column_widths().first().unwrap_or(&0.5));
 
     let size = Size::new(
-        (next_ratio * f64::from(padded_width)) as i32,
+        (next_ratio * f64::from(padded_width)).round() as i32,
         window.frame().height(),
     );
     let mut frame = IRect::from_center_size(window.frame().center(), size);
@@ -430,7 +430,7 @@ fn full_width_window(
 
     let (width, x) = if let Some(previous_ratio) = windows.full_width(entity) {
         commands.entity(entity).try_remove::<FullWidthMarker>();
-        let w = (previous_ratio * f64::from(padded_width)) as i32;
+        let w = (previous_ratio * f64::from(padded_width)).round() as i32;
         let x_pos = (display_width - pad_right - w).min(window.frame().min.x);
         (w, x_pos)
     } else {

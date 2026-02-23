@@ -50,7 +50,6 @@ pub trait WindowApi: Send + Sync {
     );
     fn focus_with_raise(&self, psn: ProcessSerialNumber);
     fn width_ratio(&self) -> f64;
-    fn set_width_ratio(&mut self, ratio: f64);
     fn pid(&self) -> Result<Pid>;
     fn set_padding(&mut self, padding: WindowPadding);
     fn horizontal_padding(&self) -> i32;
@@ -450,10 +449,6 @@ impl WindowApi for WindowOS {
 
     fn width_ratio(&self) -> f64 {
         self.width_ratio
-    }
-
-    fn set_width_ratio(&mut self, ratio: f64) {
-        self.width_ratio = ratio;
     }
 
     fn pid(&self) -> Result<Pid> {

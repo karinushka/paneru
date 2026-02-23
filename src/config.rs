@@ -298,6 +298,16 @@ impl Config {
         i32::from(self.options().sliver_width.unwrap_or(5)).max(1)
     }
 
+    pub fn edge_padding(&self) -> (i32, i32, i32, i32) {
+        let o = self.options();
+        (
+            i32::from(o.padding_top.unwrap_or(0)),
+            i32::from(o.padding_right.unwrap_or(0)),
+            i32::from(o.padding_bottom.unwrap_or(0)),
+            i32::from(o.padding_left.unwrap_or(0)),
+        )
+    }
+
     pub fn preset_column_widths(&self) -> Vec<f64> {
         self.options().preset_column_widths
     }
@@ -432,6 +442,12 @@ pub struct MainOptions {
     /// Width of off-screen window slivers in pixels.
     /// Default: 5 pixels.
     pub sliver_width: Option<u16>,
+    /// Padding applied at screen edges (in pixels). Independent from between-window gaps.
+    /// Default: 0 on all sides.
+    pub padding_top: Option<u16>,
+    pub padding_bottom: Option<u16>,
+    pub padding_left: Option<u16>,
+    pub padding_right: Option<u16>,
 
     #[allow(dead_code)]
     pub continuous_swipe: Option<bool>, // Deprecated

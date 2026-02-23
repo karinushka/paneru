@@ -29,8 +29,8 @@ use crate::ecs::{
 };
 use crate::events::Event;
 use crate::manager::{
-    Application, Display, LayoutStrip, Origin, Process, Size, Window, WindowManager, WindowOS,
-    bruteforce_windows,
+    Application, Column, Display, LayoutStrip, Origin, Process, Size, Window, WindowManager,
+    WindowOS, bruteforce_windows,
 };
 use crate::platform::{PlatformCallbacks, WorkspaceId};
 
@@ -1243,9 +1243,25 @@ fn position_layout_windows<W, P>(
                 frame.max.x = frame.min.x + width;
             }
 
-            let inset = (f64::from(bounds.height()) * (1.0 - config.sliver_height()) / 2.0) as i32;
-            frame.min.y += menubar_height + pad_top + inset;
-            frame.max.y -= inset;
+            let is_stacked = layout_strip
+                .index_of(entity)
+                .ok()
+                .and_then(|idx| layout_strip.get(idx).ok())
+                .is_some_and(|col| matches!(col, Column::Stack(_)));
+
+            if is_stacked {
+                // Don't compress stacked windows vertically when off-screen.
+                // The height reduction corrupts their proportions: when the
+                // column scrolls back on-screen, binpack_heights makes the
+                // last window absorb all remaining space.
+                frame.min.y += menubar_height + pad_top;
+                frame.max.y += menubar_height + pad_top;
+            } else {
+                let inset =
+                    (f64::from(bounds.height()) * (1.0 - config.sliver_height()) / 2.0) as i32;
+                frame.min.y += menubar_height + pad_top + inset;
+                frame.max.y -= inset;
+            }
 
             // Multi-display: nudge off-screen windows down to prevent macOS
             // from relocating them to the other display.

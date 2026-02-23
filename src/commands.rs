@@ -372,7 +372,9 @@ fn resize_window(
 
     let (window, entity) = *current_focus;
     let display_width = active_display.bounds().width();
-    let current_ratio = f64::from(window.frame().width()) / f64::from(display_width);
+    let (_, pad_right, _, pad_left) = config.edge_padding();
+    let padded_width = display_width - pad_left - pad_right;
+    let current_ratio = f64::from(window.frame().width()) / f64::from(padded_width);
     let next_ratio = config
         .preset_column_widths()
         .into_iter()
@@ -380,13 +382,13 @@ fn resize_window(
         .unwrap_or_else(|| *config.preset_column_widths().first().unwrap_or(&0.5));
 
     let size = Size::new(
-        (next_ratio * f64::from(display_width)) as i32,
+        (next_ratio * f64::from(padded_width)) as i32,
         window.frame().height(),
     );
     let mut frame = IRect::from_center_size(window.frame().center(), size);
 
-    if frame.max.x > active_display.bounds().max.x {
-        frame.min.x = active_display.bounds().max.x - size.x;
+    if frame.max.x > active_display.bounds().max.x - pad_right {
+        frame.min.x = active_display.bounds().max.x - pad_right - size.x;
         reposition_entity(entity, frame.min, active_display.id(), &mut commands);
     }
 
@@ -409,6 +411,7 @@ fn full_width_window(
     current_focus: Single<(&Window, Entity), With<FocusedMarker>>,
     windows: Windows,
     active_display: ActiveDisplay,
+    config: Res<Config>,
     mut commands: Commands,
 ) {
     if filter_window_operations(&mut messages, |op| matches!(op, Operation::FullWidth))
@@ -420,19 +423,21 @@ fn full_width_window(
 
     let (window, entity) = *current_focus;
     let display_width = active_display.bounds().width();
+    let (_, pad_right, _, pad_left) = config.edge_padding();
+    let padded_width = display_width - pad_left - pad_right;
     let height = window.frame().height();
     let y = window.frame().min.y;
 
     let (width, x) = if let Some(previous_ratio) = windows.full_width(entity) {
         commands.entity(entity).try_remove::<FullWidthMarker>();
-        let w = (previous_ratio * f64::from(display_width)) as i32;
-        let x_pos = (display_width - w).min(window.frame().min.x);
+        let w = (previous_ratio * f64::from(padded_width)) as i32;
+        let x_pos = (display_width - pad_right - w).min(window.frame().min.x);
         (w, x_pos)
     } else {
         commands
             .entity(entity)
             .try_insert(FullWidthMarker(window.width_ratio()));
-        (display_width - 1, 0)
+        (padded_width, pad_left)
     };
 
     reposition_entity(

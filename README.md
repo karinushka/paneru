@@ -212,9 +212,8 @@ preset_column_widths = [ 0.25, 0.33, 0.50, 0.66, 0.75 ]
 # but it is probably not that useful to use two hands :)
 swipe_gesture_fingers = 4
 
-# Swiping the windows left and right will keep sliding them until the first or
-# last window. Set to false to always keep the current window on screen and
-# fully exposed. Enabled by default.
+# Swiping keeps sliding windows until the first or last window.
+# Set to false to clamp so edge windows stay on-screen. Enabled by default.
 # continuous_swipe = true
 
 # Animation speed in 1/10th of display resolution per second.

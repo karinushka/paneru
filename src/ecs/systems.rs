@@ -774,7 +774,7 @@ pub(super) fn window_swiper(
             continue;
         };
 
-        let clamped_offset = if config.free_slide() {
+        let clamped_offset = if config.continuous_swipe() {
             viewport_offset + shift
         } else {
             let (_, pad_right, _, pad_left) = config.edge_padding();

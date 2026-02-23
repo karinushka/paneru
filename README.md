@@ -250,10 +250,43 @@ animation_speed = 50
 # padding_left = 0
 # padding_right = 0
 
-# When disabled, swiping of windows is clamped so you cannot scroll
-# past the first or last window.
-# When enabled (default) the strip slides freely, exposing the desktop behind.
-# free_slide = true
+# Swiping keeps sliding windows until the first or last window.
+# Set to false to clamp so edge windows stay on-screen. Enabled by default.
+# continuous_swipe = true
+
+# Override the system-reported menubar height (in pixels).
+# Useful when auto-hiding the menubar or when the detected value is wrong.
+# When unset, the height reported by macOS is used.
+# menubar_height = 25
+
+# Opacity of the dim overlay drawn on inactive windows (0.0–1.0).
+# 0.0 disables the overlay entirely. Higher values make inactive windows darker.
+# Default: 0.0 (disabled).
+# dim_inactive_windows = 0.3
+
+# Hex color for the dim overlay on inactive windows.
+# Default: "#000000" (black).
+# dim_inactive_color = "#000000"
+
+# Draw a border around the active (focused) window.
+# Default: false.
+# border_active_window = true
+
+# Hex color for the active window border.
+# Default: "#FFFFFF" (white).
+# border_color = "#89b4fa"
+
+# Opacity of the active window border (0.0–1.0).
+# Default: 1.0.
+# border_opacity = 1.0
+
+# Width of the active window border in pixels.
+# Default: 2.0.
+# border_width = 2.0
+
+# Corner radius of the active window border in pixels.
+# Default: 10.0.
+# border_radius = 10.0
 
 [bindings]
 # Moves the focus between windows. If there are no windows when moving up or
@@ -340,6 +373,14 @@ width = 0.5
 title = "Passwords.*"
 floating = true
 grid = "6:6:1:1:4:4"
+
+[windows.terminal]
+# Per-window border radius override. Some windows have different corner
+# rounding than the default. This overrides the global border_radius setting.
+# Dynamically updated on config reload (no restart needed).
+title = ".*"
+bundle_id = "com.apple.Terminal"
+border_radius = 12.0
 
 [windows.all]
 # Matches all windows and adds a few pixels of spacing to their borders.

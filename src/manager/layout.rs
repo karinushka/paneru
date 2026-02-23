@@ -592,4 +592,211 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(height, vec![500, 300, 200, 500]);
     }
+
+    /// Every single-column window must fill the full viewport height.
+    #[test]
+    fn test_layout_singles_get_full_viewport_height() {
+        let mut world = World::new();
+        let entities = world.spawn_batch(vec![(), (), ()]).collect::<Vec<Entity>>();
+
+        let mut strip = LayoutStrip::default();
+        for &e in &entities {
+            strip.append(e);
+        }
+
+        let viewport = IRect::new(0, 0, 900, 800);
+        let frame = |_| Some(IRect::new(0, 0, 300, 400));
+        let out: Vec<_> = strip.calculate_layout(0, &viewport, &frame).collect();
+
+        assert_eq!(out.len(), 3);
+        for (_, f) in &out {
+            assert_eq!(f.height(), 800, "single window should fill viewport height");
+            assert_eq!(f.min.y, 0);
+        }
+        // x positions: 0, 300, 600
+        let xs: Vec<_> = out.iter().map(|(_, f)| f.min.x).collect();
+        assert_eq!(xs, vec![0, 300, 600]);
+    }
+
+    /// Stacked windows share the viewport height; all use the top window's width.
+    #[test]
+    fn test_layout_stack_shares_height_and_width() {
+        let mut world = World::new();
+        let entities = world
+            .spawn_batch(vec![(), (), (), ()])
+            .collect::<Vec<Entity>>();
+
+        let mut strip = LayoutStrip::default();
+        for &e in &entities {
+            strip.append(e);
+        }
+        // Stack e1, e2 onto e0: [Stack(e0, e1, e2), Single(e3)]
+        strip.stack(entities[1]).unwrap();
+        strip.stack(entities[2]).unwrap();
+
+        let viewport = IRect::new(0, 0, 800, 600);
+        // Give different heights; top window (e0) is 400px wide, others 300px.
+        let frame = |e: Entity| {
+            if e == entities[0] {
+                Some(IRect::new(0, 0, 400, 200))
+            } else if e == entities[1] || e == entities[2] {
+                Some(IRect::new(0, 0, 300, 200))
+            } else {
+                Some(IRect::new(0, 0, 400, 500))
+            }
+        };
+
+        let out: Vec<_> = strip.calculate_layout(0, &viewport, &frame).collect();
+        assert_eq!(out.len(), 4);
+
+        // All stacked windows use the top window's width (400).
+        for &(e, ref f) in &out {
+            if e == entities[0] || e == entities[1] || e == entities[2] {
+                assert_eq!(
+                    f.width(),
+                    400,
+                    "stacked window should use top window's width"
+                );
+            }
+        }
+
+        // Stacked heights should sum to viewport height.
+        let stack_heights: i32 = out
+            .iter()
+            .filter(|(e, _)| *e != entities[3])
+            .map(|(_, f)| f.height())
+            .sum();
+        assert_eq!(stack_heights, 600, "stack heights must sum to viewport");
+
+        // Stacked y positions should be contiguous from 0.
+        let stack_frames: Vec<_> = out
+            .iter()
+            .filter(|(e, _)| *e != entities[3])
+            .map(|(_, f)| *f)
+            .collect();
+        assert_eq!(stack_frames[0].min.y, 0);
+        assert_eq!(stack_frames[0].max.y, stack_frames[1].min.y);
+        assert_eq!(stack_frames[1].max.y, stack_frames[2].min.y);
+        assert_eq!(stack_frames[2].max.y, 600);
+
+        // e3 (single) gets full viewport height.
+        let e3_frame = out.iter().find(|(e, _)| *e == entities[3]).unwrap().1;
+        assert_eq!(e3_frame.height(), 600);
+    }
+
+    /// Windows scrolled far off-screen are clamped to show a 10px sliver.
+    #[test]
+    fn test_layout_offscreen_sliver_clamping() {
+        let mut world = World::new();
+        let entities = world.spawn_batch(vec![(), (), ()]).collect::<Vec<Entity>>();
+
+        let mut strip = LayoutStrip::default();
+        for &e in &entities {
+            strip.append(e);
+        }
+
+        let viewport = IRect::new(0, 0, 600, 400);
+        let frame = |_| Some(IRect::new(0, 0, 300, 300));
+
+        // Large offset pushes leftmost windows off-screen.
+        let out: Vec<_> = strip.calculate_layout(5000, &viewport, &frame).collect();
+
+        for (_, f) in &out {
+            // Left clamp: min.x >= viewport.min.x + 10 - 300 = -290
+            assert!(
+                f.min.x >= -290,
+                "window should not be pushed further left than sliver allows: {}",
+                f.min.x
+            );
+            // Right clamp: min.x <= viewport.width() - 10 = 590
+            assert!(
+                f.min.x <= 590,
+                "window should not start past right sliver threshold: {}",
+                f.min.x
+            );
+        }
+
+        // Negative offset pushes rightmost windows off to the right.
+        let out: Vec<_> = strip.calculate_layout(-5000, &viewport, &frame).collect();
+
+        for (_, f) in &out {
+            assert!(f.min.x >= -290);
+            assert!(f.min.x <= 590);
+        }
+    }
+
+    /// Unstacking a window from a stack gives it its own column with full height.
+    #[test]
+    fn test_layout_unstack_gives_full_height() {
+        let mut world = World::new();
+        let entities = world.spawn_batch(vec![(), (), ()]).collect::<Vec<Entity>>();
+
+        let mut strip = LayoutStrip::default();
+        for &e in &entities {
+            strip.append(e);
+        }
+        // [Stack(e0, e1), Single(e2)]
+        strip.stack(entities[1]).unwrap();
+
+        let viewport = IRect::new(0, 0, 600, 500);
+        let frame = |_| Some(IRect::new(0, 0, 300, 250));
+
+        // Before unstack: e0 and e1 share 500px height.
+        let out: Vec<_> = strip.calculate_layout(0, &viewport, &frame).collect();
+        let e1_height = out
+            .iter()
+            .find(|(e, _)| *e == entities[1])
+            .unwrap()
+            .1
+            .height();
+        assert!(e1_height < 500, "stacked e1 should not have full height");
+
+        // Unstack e1: [Single(e0), Single(e1), Single(e2)]
+        strip.unstack(entities[1]).unwrap();
+        assert_eq!(strip.len(), 3);
+
+        let out: Vec<_> = strip.calculate_layout(0, &viewport, &frame).collect();
+        for (_, f) in &out {
+            assert_eq!(
+                f.height(),
+                500,
+                "after unstack every single column gets full viewport height"
+            );
+        }
+    }
+
+    /// Re-stacking after unstack restores shared height distribution.
+    #[test]
+    fn test_layout_restack_restores_shared_heights() {
+        let mut world = World::new();
+        let entities = world.spawn_batch(vec![(), ()]).collect::<Vec<Entity>>();
+
+        let mut strip = LayoutStrip::default();
+        strip.append(entities[0]);
+        strip.append(entities[1]);
+
+        let viewport = IRect::new(0, 0, 600, 500);
+        let frame = |_| Some(IRect::new(0, 0, 300, 250));
+
+        // Stack: [Stack(e0, e1)]
+        strip.stack(entities[1]).unwrap();
+        let out: Vec<_> = strip.calculate_layout(0, &viewport, &frame).collect();
+        let heights: Vec<_> = out.iter().map(|(_, f)| f.height()).collect();
+        assert_eq!(heights.iter().sum::<i32>(), 500);
+        assert_eq!(heights.len(), 2);
+
+        // Unstack: [Single(e0), Single(e1)]
+        strip.unstack(entities[1]).unwrap();
+        let out: Vec<_> = strip.calculate_layout(0, &viewport, &frame).collect();
+        for (_, f) in &out {
+            assert_eq!(f.height(), 500);
+        }
+
+        // Re-stack: [Stack(e0, e1)] — e1 stacks onto left neighbor e0
+        strip.stack(entities[1]).unwrap();
+        let out: Vec<_> = strip.calculate_layout(0, &viewport, &frame).collect();
+        let heights: Vec<_> = out.iter().map(|(_, f)| f.height()).collect();
+        assert_eq!(heights.iter().sum::<i32>(), 500);
+        assert_eq!(heights.len(), 2);
+    }
 }

@@ -170,6 +170,13 @@ pub struct WindowDraggedMarker {
 #[derive(Component)]
 pub struct ReshuffleAroundMarker;
 
+/// Marker component placed on a window that was resized internally to compensate
+/// for an adjacent stacked window's top-edge drag. When the OS echoes back a
+/// `WindowResized` event for this window, the reshuffle is skipped and the marker
+/// is removed to prevent a feedback loop.
+#[derive(Component)]
+pub struct StackAdjustedResize;
+
 #[derive(Component)]
 pub struct WindowSwipeMarker(pub f64);
 

@@ -19,8 +19,10 @@ pub struct Display {
     id: CGDirectDisplayID,
     /// The physical bounds (origin and size) of the display.
     bounds: IRect,
-    /// The height of the menubar on this display.
+    /// The height of the menubar on this display (from the system).
     menubar_height: i32,
+    /// Optional config override for the menubar height.
+    menubar_height_override: Option<i32>,
 }
 
 impl Display {
@@ -41,6 +43,7 @@ impl Display {
             id,
             bounds,
             menubar_height,
+            menubar_height_override: None,
         }
     }
 
@@ -101,9 +104,9 @@ impl Display {
             DockPosition::Left(visible_frame.min.x - self.bounds.min.x)
         } else if visible_frame.width() < self.bounds.width() {
             DockPosition::Right(self.bounds.max.x - visible_frame.max.x)
-        } else if visible_frame.height() < self.bounds.height() - self.menubar_height {
+        } else if visible_frame.height() < self.bounds.height() - self.menubar_height() {
             DockPosition::Bottom(
-                self.bounds.height() - visible_frame.height() - self.menubar_height,
+                self.bounds.height() - visible_frame.height() - self.menubar_height(),
             )
         } else {
             DockPosition::Hidden
@@ -116,7 +119,7 @@ impl Display {
 
     pub fn bounds(&self) -> IRect {
         let mut bounds = self.bounds;
-        bounds.min.y += self.menubar_height;
+        bounds.min.y += self.menubar_height();
         bounds
     }
 
@@ -129,6 +132,10 @@ impl Display {
     }
 
     pub fn menubar_height(&self) -> i32 {
-        self.menubar_height
+        self.menubar_height_override.unwrap_or(self.menubar_height)
+    }
+
+    pub fn set_menubar_height_override(&mut self, height: Option<i32>) {
+        self.menubar_height_override = height;
     }
 }

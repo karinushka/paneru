@@ -1,4 +1,5 @@
 use bevy::app::AppExit;
+use bevy::ecs::change_detection::DetectChanges;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::{MessageReader, MessageWriter};
@@ -17,8 +18,8 @@ use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
     ActiveDisplayMarker, BProcess, ExistingMarker, FocusedMarker, FreshMarker,
-    PollForNotifications, RepositionMarker, ResizeMarker, SpawnWindowTrigger, Timeout,
-    WMEventTrigger,
+    MissionControlActive, PollForNotifications, RepositionMarker, ResizeMarker,
+    SpawnWindowTrigger, Timeout, WMEventTrigger,
 };
 use crate::config::Config;
 use crate::ecs::params::{ActiveDisplay, Windows};
@@ -744,7 +745,7 @@ pub(super) fn window_swiper(
     let get_window_h_pad = |entity: Entity| {
         windows
             .get(entity)
-            .map(|(w, _, _)| w.horizontal_padding())
+            .map(|(w, _, _)| w.horizontal_padding() as i32)
             .unwrap_or(0)
     };
     let mut viewport = active_display.bounds();
@@ -856,7 +857,7 @@ pub(super) fn reshuffle_layout_strip(
     let get_window_h_pad = |entity: Entity| {
         windows
             .get(entity)
-            .map(|(w, _, _)| w.horizontal_padding())
+            .map(|(w, _, _)| w.horizontal_padding() as i32)
             .unwrap_or(0)
     };
 
@@ -1207,6 +1208,20 @@ fn get_moving_window_frame(
         .ok()
 }
 
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn sync_menubar_height(
+    config: Res<Config>,
+    mut displays: Query<&mut Display>,
+) {
+    if !config.is_changed() {
+        return;
+    }
+    let height = config.menubar_height();
+    for mut display in &mut displays {
+        display.set_menubar_height_override(height);
+    }
+}
+
 fn get_display_height(active_display: &ActiveDisplay) -> i32 {
     let dock_size = active_display.dock().map_or(0, |dock| {
         if let DockPosition::Bottom(offset) = dock {
@@ -1361,4 +1376,100 @@ pub(crate) fn reposition_dragged_window(
             reshuffle_around(*entity, &mut commands);
         }
     }
+}
+
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
+pub(super) fn update_overlays(
+    windows: Query<(
+        &Window,
+        Has<FocusedMarker>,
+        Option<&Unmanaged>,
+        Option<&ChildOf>,
+    )>,
+    applications: Query<&Application>,
+    config: Res<Config>,
+    mission_control: Res<MissionControlActive>,
+    overlay_mgr: Option<NonSendMut<crate::overlay::OverlayManager>>,
+) {
+    use crate::overlay::BorderParams;
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+
+    let Some(mut overlay_mgr) = overlay_mgr else {
+        return;
+    };
+
+    let dim_opacity = config.dim_inactive_opacity();
+    let border_enabled = config.border_active_window();
+
+    if mission_control.0 {
+        overlay_mgr.hide_all();
+        return;
+    }
+
+    if dim_opacity == 0.0 && !border_enabled {
+        overlay_mgr.remove_all();
+        return;
+    }
+
+    // Find the focused managed window's absolute CG frame.
+    // Skip floating/unmanaged windows — no overlay or border for those.
+    let mut focused_abs_cg: Option<NSRect> = None;
+    let mut focused_border_radius: Option<f64> = None;
+    let mut floating_focused = false;
+    for (window, is_focused, unmanaged, child_of) in &windows {
+        if !is_focused {
+            continue;
+        }
+        if unmanaged.is_some() {
+            floating_focused = true;
+            continue;
+        }
+
+        let frame = window.frame();
+        let h_pad = window.horizontal_padding();
+        let v_pad = window.vertical_padding();
+        focused_abs_cg = Some(NSRect::new(
+            NSPoint::new(
+                f64::from(frame.min.x) + h_pad,
+                f64::from(frame.min.y) + v_pad,
+            ),
+            NSSize::new(
+                f64::from(frame.width()) - 2.0 * h_pad,
+                f64::from(frame.height()) - 2.0 * v_pad,
+            ),
+        ));
+
+        // Look up per-window border_radius from config (dynamic, respects hot-reload).
+        let title = window.title().unwrap_or_default();
+        let bundle_id = child_of
+            .and_then(|c| applications.get(c.parent()).ok())
+            .map(|app| app.bundle_id().unwrap_or_default())
+            .unwrap_or_default();
+        let properties = config.find_window_properties(&title, bundle_id);
+        focused_border_radius = properties.iter().find_map(|p| p.border_radius);
+        break;
+    }
+
+    if floating_focused {
+        overlay_mgr.hide_all();
+        return;
+    }
+
+    if focused_abs_cg.is_none() {
+        // No managed window has focus — hide the overlay rather than
+        // dimming everything (e.g. during startup or when only floating
+        // windows exist).
+        overlay_mgr.hide_all();
+        return;
+    }
+
+    let border_params = border_enabled.then(|| BorderParams {
+        color: config.border_color(),
+        opacity: config.border_opacity(),
+        width: config.border_width(),
+        radius: focused_border_radius.unwrap_or_else(|| config.border_radius()),
+    });
+
+    let dim_color = config.dim_inactive_color();
+    overlay_mgr.update(dim_opacity, dim_color, focused_abs_cg, border_params.as_ref());
 }

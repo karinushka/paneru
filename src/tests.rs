@@ -440,8 +440,12 @@ impl WindowApi for MockWindow {
         debug!("{}:", function_name!());
     }
 
-    fn horizontal_padding(&self) -> i32 {
-        0
+    fn horizontal_padding(&self) -> f64 {
+        0.0
+    }
+
+    fn vertical_padding(&self) -> f64 {
+        0.0
     }
 
     #[instrument(level = Level::TRACE, skip(self), ret)]

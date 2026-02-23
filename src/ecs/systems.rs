@@ -755,9 +755,18 @@ pub(super) fn window_swiper(
         }
 
         let strip = active_display.active_strip();
-        let absolute_position = strip
-            .absolute_positions(&get_window_frame)
-            .find_map(|(column, pos)| column.top().is_some_and(|col| col == entity).then_some(pos));
+        let mut absolute_position = None;
+        let mut total_strip_width = 0_i32;
+        for (column, pos) in strip.absolute_positions(&get_window_frame) {
+            if column.top().is_some_and(|col| col == entity) {
+                absolute_position = Some(pos);
+            }
+            if let Some(top) = column.top()
+                && let Some(frame) = get_window_frame(top)
+            {
+                total_strip_width = pos + frame.width();
+            }
+        }
         let Some(viewport_offset) = absolute_position
             .zip(get_window_frame(entity))
             .map(|(pos, frame)| pos - (frame.min.x - viewport.min.x))
@@ -765,8 +774,18 @@ pub(super) fn window_swiper(
             continue;
         };
 
+        let clamped_offset = if config.free_slide() {
+            viewport_offset + shift
+        } else {
+            let (_, pad_right, _, pad_left) = config.edge_padding();
+            let effective_width = viewport.width() - pad_left - pad_right;
+            let left_aligned = -pad_left;
+            let right_aligned = total_strip_width - effective_width - pad_left;
+            (viewport_offset + shift).clamp(left_aligned, right_aligned.max(left_aligned))
+        };
+
         position_layout_windows(
-            viewport_offset + shift,
+            clamped_offset,
             &active_display,
             &get_window_frame,
             &get_window_h_pad,

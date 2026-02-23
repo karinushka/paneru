@@ -244,6 +244,12 @@ animation_speed = 50
 # padding_left = 5
 # padding_right = 5
 
+# When enabled, disables swipe clamping so the strip slides freely
+# (original unconstrained behavior). Useful for testing.
+# When disabled (default), swiping is clamped so you cannot scroll
+# past the first or last window.
+# free_slide = false
+
 [bindings]
 # Moves the focus between windows. If there are no windows when moving up or
 # down, will swtich focus to the display above or below.

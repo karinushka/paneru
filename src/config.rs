@@ -311,6 +311,10 @@ impl Config {
     pub fn preset_column_widths(&self) -> Vec<f64> {
         self.options().preset_column_widths
     }
+
+    pub fn free_slide(&self) -> bool {
+        self.options().free_slide.unwrap_or(false)
+    }
 }
 
 impl Default for Config {
@@ -448,6 +452,10 @@ pub struct MainOptions {
     pub padding_bottom: Option<u16>,
     pub padding_left: Option<u16>,
     pub padding_right: Option<u16>,
+
+    /// Allow swiping to slide windows when the strip is narrower than the screen.
+    /// Edge windows will stay on-screen. Default: false.
+    pub free_slide: Option<bool>,
 
     #[allow(dead_code)]
     pub continuous_swipe: Option<bool>, // Deprecated

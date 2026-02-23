@@ -975,6 +975,7 @@ pub(super) fn spawn_window_trigger(
     }
 }
 
+#[allow(clippy::cast_possible_truncation)]
 fn apply_window_defaults(
     window: &mut Window,
     active_display: &mut ActiveDisplayMut,
@@ -998,6 +999,19 @@ fn apply_window_defaults(
     }
     if let Some(width) = properties.iter().find_map(|props| props.width) {
         window.set_width_ratio(width);
+    }
+
+    if floating {
+        if let Some((rx, ry, rw, rh)) = properties.iter().find_map(WindowParams::grid_ratios) {
+            let bounds = active_display.bounds();
+            let x = bounds.width() * rx;
+            let y = bounds.height() * ry;
+            let w = bounds.width() * rw;
+            let h = bounds.height() * rh;
+            window.reposition(Origin::new(x, y));
+            window.resize(Size::new(w, h), bounds.width());
+        }
+        return;
     }
 
     _ = window

@@ -315,6 +315,62 @@ impl Config {
     pub fn continuous_swipe(&self) -> bool {
         self.options().continuous_swipe.unwrap_or(true)
     }
+
+    pub fn dim_inactive_opacity(&self) -> f64 {
+        self.options()
+            .dim_inactive_windows
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0)
+    }
+
+    pub fn dim_inactive_color(&self) -> (f64, f64, f64) {
+        self.options()
+            .dim_inactive_color
+            .as_deref()
+            .map_or((0.0, 0.0, 0.0), parse_hex_color)
+    }
+
+    pub fn border_active_window(&self) -> bool {
+        self.options().border_active_window.unwrap_or(false)
+    }
+
+    pub fn border_color(&self) -> (f64, f64, f64) {
+        self.options()
+            .border_color
+            .as_deref()
+            .map_or((1.0, 1.0, 1.0), parse_hex_color)
+    }
+
+    pub fn border_opacity(&self) -> f64 {
+        self.options().border_opacity.unwrap_or(1.0).clamp(0.0, 1.0)
+    }
+
+    pub fn border_width(&self) -> f64 {
+        self.options().border_width.unwrap_or(2.0).max(0.0)
+    }
+
+    pub fn border_radius(&self) -> f64 {
+        self.options().border_radius.unwrap_or(10.0).max(0.0)
+    }
+
+    pub fn menubar_height(&self) -> Option<i32> {
+        self.options().menubar_height.map(i32::from)
+    }
+}
+
+fn parse_hex_color(hex: &str) -> (f64, f64, f64) {
+    let hex = hex.strip_prefix('#').unwrap_or(hex);
+    if hex.len() != 6 {
+        return (1.0, 1.0, 1.0);
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(255);
+    let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(255);
+    let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(255);
+    (
+        f64::from(r) / 255.0,
+        f64::from(g) / 255.0,
+        f64::from(b) / 255.0,
+    )
 }
 
 impl Default for Config {
@@ -452,6 +508,30 @@ pub struct MainOptions {
     pub padding_bottom: Option<u16>,
     pub padding_left: Option<u16>,
     pub padding_right: Option<u16>,
+    /// Opacity of the dim overlay on inactive windows (0.0=off, 1.0=fully black).
+    /// Default: 0.0 (disabled).
+    pub dim_inactive_windows: Option<f64>,
+    /// Hex color for the dim overlay, e.g. "#000000".
+    /// Default: "#000000" (black).
+    pub dim_inactive_color: Option<String>,
+    /// Whether to draw a border around the active (focused) window.
+    /// Default: false.
+    pub border_active_window: Option<bool>,
+    /// Hex color for the active window border, e.g. "#FF0000".
+    /// Default: "#FFFFFF" (white).
+    pub border_color: Option<String>,
+    /// Opacity of the active window border (0.0–1.0).
+    /// Default: 1.0.
+    pub border_opacity: Option<f64>,
+    /// Width of the active window border in pixels.
+    /// Default: 2.0.
+    pub border_width: Option<f64>,
+    /// Corner radius of the active window border.
+    /// Default: 10.0.
+    pub border_radius: Option<f64>,
+    /// Override the system menubar height (in pixels).
+    /// When set, this value is used instead of the height reported by macOS.
+    pub menubar_height: Option<u16>,
 
     /// Swiping keeps sliding windows until the first or last window.
     /// Set to false to clamp so edge windows stay on-screen. Default: true.
@@ -532,6 +612,8 @@ pub struct WindowParams {
     /// Grid placement for floating windows: "cols:rows:x:y:w:h".
     /// Divides the display into a grid and positions the window at the given cell/span.
     pub grid: Option<String>,
+    /// Per-window override for the active window border corner radius.
+    pub border_radius: Option<f64>,
 }
 
 impl WindowParams {
@@ -964,6 +1046,7 @@ fn test_grid_ratios() {
         dont_focus: None,
         width: None,
         grid: grid.map(Into::into),
+        border_radius: None,
     };
 
     // Standard 2x2 grid, cell (1,1), span 1x1 → bottom-right quarter.
@@ -992,4 +1075,61 @@ fn test_grid_ratios() {
 
     // No grid set.
     assert_eq!(make(None).grid_ratios(), None);
+}
+
+#[test]
+fn test_parse_hex_color_valid() {
+    assert_eq!(
+        parse_hex_color("#89b4fa"),
+        (
+            f64::from(0x89) / 255.0,
+            f64::from(0xb4) / 255.0,
+            f64::from(0xfa) / 255.0
+        )
+    );
+    assert_eq!(parse_hex_color("#000000"), (0.0, 0.0, 0.0));
+    assert_eq!(parse_hex_color("#FFFFFF"), (1.0, 1.0, 1.0));
+    assert_eq!(parse_hex_color("#FF0000"), (1.0, 0.0, 0.0));
+}
+
+#[test]
+fn test_parse_hex_color_no_hash() {
+    assert_eq!(
+        parse_hex_color("89b4fa"),
+        (
+            f64::from(0x89) / 255.0,
+            f64::from(0xb4) / 255.0,
+            f64::from(0xfa) / 255.0
+        )
+    );
+    assert_eq!(parse_hex_color("FF0000"), (1.0, 0.0, 0.0));
+}
+
+#[test]
+fn test_parse_hex_color_invalid_length() {
+    // Short strings fall back to white.
+    assert_eq!(parse_hex_color("#FFF"), (1.0, 1.0, 1.0));
+    assert_eq!(parse_hex_color(""), (1.0, 1.0, 1.0));
+    assert_eq!(parse_hex_color("#FF"), (1.0, 1.0, 1.0));
+}
+
+#[test]
+fn test_parse_hex_color_malformed_hex() {
+    // Non-hex digits fall back to 255 per channel.
+    assert_eq!(parse_hex_color("ZZZZZZ"), (1.0, 1.0, 1.0));
+    assert_eq!(parse_hex_color("GG0000"), (1.0, 0.0, 0.0));
+}
+
+#[test]
+#[allow(clippy::float_cmp)]
+fn test_config_defaults() {
+    let config = Config::default();
+    assert_eq!(config.dim_inactive_opacity(), 0.0);
+    assert_eq!(config.dim_inactive_color(), (0.0, 0.0, 0.0));
+    assert!(!config.border_active_window());
+    assert_eq!(config.border_color(), (1.0, 1.0, 1.0));
+    assert_eq!(config.border_opacity(), 1.0);
+    assert_eq!(config.border_width(), 2.0);
+    assert_eq!(config.border_radius(), 10.0);
+    assert_eq!(config.menubar_height(), None);
 }

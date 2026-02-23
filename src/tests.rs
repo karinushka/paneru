@@ -444,6 +444,10 @@ impl WindowApi for MockWindow {
         0
     }
 
+    fn vertical_padding(&self) -> i32 {
+        0
+    }
+
     #[instrument(level = Level::TRACE, skip(self), ret)]
     fn is_minimized(&self) -> bool {
         self.minimized

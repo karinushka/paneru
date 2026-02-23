@@ -21,7 +21,7 @@ use derive_more::{Deref, DerefMut};
 use objc2_core_graphics::CGDirectDisplayID;
 
 use crate::commands::register_commands;
-use crate::config::CONFIGURATION_FILE;
+use crate::config::{CONFIGURATION_FILE, Config};
 use crate::errors::Result;
 use crate::events::{Event, EventSender};
 use crate::manager::{
@@ -67,6 +67,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::fresh_marker_cleanup,
             systems::timeout_ticker,
             systems::window_update_frame,
+            systems::sync_menubar_height,
             systems::displays_rearranged,
             systems::reposition_dragged_window,
             systems::find_orphaned_workspaces.run_if(on_timer(Duration::from_millis(
@@ -91,6 +92,14 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::reshuffle_layout_strip,
             systems::animate_windows.after(systems::reshuffle_layout_strip),
             systems::animate_resize_windows.after(systems::reshuffle_layout_strip),
+            systems::update_overlays
+                .after(systems::animate_windows)
+                .after(systems::animate_resize_windows)
+                .run_if(|config: Option<Res<Config>>| {
+                    config.is_some_and(|config| {
+                        config.dim_inactive_opacity() > 0.0 || config.border_active_window()
+                    })
+                }),
         ),
     );
 }
@@ -329,7 +338,10 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
 
     let mut platform_callbacks = PlatformCallbacks::new(sender);
     platform_callbacks.setup_handlers()?;
+    let overlay_manager =
+        crate::overlay::OverlayManager::new(platform_callbacks.main_thread_marker);
     app.insert_non_send_resource(platform_callbacks);
+    app.insert_non_send_resource(overlay_manager);
     app.insert_non_send_resource(receiver);
 
     Ok(app)

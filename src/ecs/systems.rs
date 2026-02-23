@@ -284,16 +284,15 @@ pub(crate) fn finish_setup(
         }
         debug!("space {}: after refresh {strip:?}", strip.id());
 
-        if active_strip
-            && let Some(window) = strip
-                .first()
-                .ok()
-                .and_then(|column| column.top())
-                .and_then(|entity| windows.get(entity))
-            && let Some(psn) = windows.psn(window.id(), &apps)
-        {
-            debug!("raising {}", window.id());
-            window.focus_with_raise(psn);
+        if active_strip && let Some(entity) = strip.first().ok().and_then(|column| column.top()) {
+            reshuffle_around(entity, &mut commands);
+            commands.entity(entity).try_insert(FocusedMarker);
+            if let Some(window) = windows.get(entity)
+                && let Some(psn) = windows.psn(window.id(), &apps)
+            {
+                debug!("raising {}", window.id());
+                window.focus_with_raise(psn);
+            }
         }
     }
 
@@ -930,6 +929,7 @@ pub(super) fn window_update_frame(
     mut windows: Query<(&mut Window, Entity)>,
     focused: Option<Single<Entity, With<FocusedMarker>>>,
     active_display: ActiveDisplay,
+    initializing: Option<Res<Initializing>>,
     mut commands: Commands,
 ) {
     for event in messages.read() {
@@ -947,7 +947,9 @@ pub(super) fn window_update_frame(
                         continue;
                     }
 
-                    if matches!(event, Event::WindowResized { window_id: _ }) {
+                    if matches!(event, Event::WindowResized { window_id: _ })
+                        && initializing.is_none()
+                    {
                         // Reshuffle around the focused window, not the resized one.
                         // Reshuffling around an off-screen sliver would call
                         // expose_window on it, pulling it into view and causing a

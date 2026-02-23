@@ -15,8 +15,9 @@ use std::time::Duration;
 use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
-    ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, MissionControlActive,
-    SpawnWindowTrigger, StrayFocusEvent, Timeout, Unmanaged, WMEventTrigger, WindowDraggedMarker,
+    ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, Initializing,
+    MissionControlActive, SpawnWindowTrigger, StrayFocusEvent, Timeout, Unmanaged,
+    WMEventTrigger, WindowDraggedMarker,
 };
 use crate::config::{Config, WindowParams};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration, Windows};
@@ -450,13 +451,14 @@ pub(super) fn center_mouse_trigger(
 /// * `focus_follows_mouse_id` - The resource to track focus follows mouse window ID.
 /// * `skip_reshuffle` - The resource to indicate if reshuffling should be skipped.
 /// * `commands` - Bevy commands to manage components and trigger events.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 pub(super) fn window_focused_trigger(
     trigger: On<WMEventTrigger>,
     applications: Query<&Application>,
     windows: Windows,
     active_display: ActiveDisplay,
     mut config: Configuration,
+    initializing: Option<Res<Initializing>>,
     mut commands: Commands,
 ) {
     const STRAY_FOCUS_RETRY_SEC: u64 = 2;
@@ -497,7 +499,7 @@ pub(super) fn window_focused_trigger(
 
     commands.entity(entity).try_insert(FocusedMarker);
 
-    if !config.skip_reshuffle() {
+    if !config.skip_reshuffle() && initializing.is_none() {
         if config.auto_center()
             && let Some((_, _, None)) = windows.get_managed(entity)
         {
@@ -914,14 +916,17 @@ fn give_away_focus(
 /// * `commands` - Bevy commands to manage components and trigger events.
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_window_trigger(
     mut trigger: On<SpawnWindowTrigger>,
     windows: Windows,
     mut apps: Query<(Entity, &mut Application)>,
     mut active_display: ActiveDisplayMut,
     mut config: Configuration,
+    initializing: Option<Res<Initializing>>,
     mut commands: Commands,
 ) {
+    let initializing = initializing.is_some();
     let new_windows = &mut trigger.event_mut().0;
 
     while let Some(mut window) = new_windows.pop() {
@@ -981,6 +986,7 @@ pub(super) fn spawn_window_trigger(
             &windows,
             &mut apps,
             &mut config,
+            initializing,
             &mut commands,
         );
     }
@@ -1043,6 +1049,7 @@ fn apply_window_defaults(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_window_properties(
     entity: Entity,
     properties: &[WindowParams],
@@ -1050,6 +1057,7 @@ fn apply_window_properties(
     windows: &Windows,
     apps: &mut Query<(Entity, &mut Application)>,
     config: &mut Configuration,
+    initializing: bool,
     commands: &mut Commands,
 ) {
     let floating = properties
@@ -1092,7 +1100,10 @@ fn apply_window_properties(
         None => strip.append(entity),
     }
 
-    if dont_focus {
+    if initializing {
+        // During init, skip per-window reshuffles. finish_setup does a single
+        // reshuffle after all windows are added.
+    } else if dont_focus {
         let mut lens = apps.transmute_lens::<&Application>();
         if let Some((focus, _)) = windows.focused()
             && let Some(psn) = windows.psn(focus.id(), &lens.query())

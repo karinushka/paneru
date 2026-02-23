@@ -290,6 +290,14 @@ impl Config {
             .unwrap_or_default()
     }
 
+    pub fn sliver_height(&self) -> f64 {
+        self.options().sliver_height.unwrap_or(1.0).clamp(0.1, 1.0)
+    }
+
+    pub fn sliver_width(&self) -> i32 {
+        i32::from(self.options().sliver_width.unwrap_or(5)).max(1)
+    }
+
     pub fn preset_column_widths(&self) -> Vec<f64> {
         self.options().preset_column_widths
     }
@@ -417,6 +425,13 @@ pub struct MainOptions {
     pub animation_speed: Option<f64>,
     /// Automatically center the window when switching focus with keyboard.
     pub auto_center: Option<bool>,
+    /// Height of off-screen window slivers as a ratio (0.0–1.0) of the display height.
+    /// Lower values hide the window's corner radius at screen edges.
+    /// Default: 1.0 (full height).
+    pub sliver_height: Option<f64>,
+    /// Width of off-screen window slivers in pixels.
+    /// Default: 5 pixels.
+    pub sliver_width: Option<u16>,
 
     #[allow(dead_code)]
     pub continuous_swipe: Option<bool>, // Deprecated

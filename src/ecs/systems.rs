@@ -3,7 +3,7 @@ use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::query::{Has, Or, With, Without};
-use bevy::ecs::system::{Commands, Local, NonSend, NonSendMut, Populated, Query, Res};
+use bevy::ecs::system::{Commands, Local, NonSend, NonSendMut, Populated, Query, Res, Single};
 use bevy::math::IRect;
 use bevy::tasks::AsyncComputeTaskPool;
 use bevy::tasks::futures_lite::future;
@@ -16,8 +16,9 @@ use std::time::Duration;
 use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
-    ActiveDisplayMarker, BProcess, ExistingMarker, FreshMarker, PollForNotifications,
-    RepositionMarker, ResizeMarker, SpawnWindowTrigger, Timeout, WMEventTrigger,
+    ActiveDisplayMarker, BProcess, ExistingMarker, FocusedMarker, FreshMarker,
+    PollForNotifications, RepositionMarker, ResizeMarker, SpawnWindowTrigger, Timeout,
+    WMEventTrigger,
 };
 use crate::config::Config;
 use crate::ecs::params::{ActiveDisplay, Windows};
@@ -32,8 +33,6 @@ use crate::manager::{
     bruteforce_windows,
 };
 use crate::platform::{PlatformCallbacks, WorkspaceId};
-
-const WINDOW_HIDDEN_THRESHOLD: i32 = 10;
 
 /// Processes a single incoming `Event`. It dispatches various event types to the `WindowManager` or other internal handlers.
 /// This system reads `Event` messages and triggers appropriate Bevy events or modifies resources based on the event type.
@@ -729,9 +728,16 @@ pub(super) fn window_swiper(
     sliding: Populated<(Entity, Has<Unmanaged>, &WindowSwipeMarker)>,
     windows: Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
     active_display: ActiveDisplay,
+    config: Res<Config>,
     mut commands: Commands,
 ) {
     let get_window_frame = |entity| get_moving_window_frame(entity, &active_display, &windows);
+    let get_window_h_pad = |entity: Entity| {
+        windows
+            .get(entity)
+            .map(|(w, _, _)| w.horizontal_padding())
+            .unwrap_or(0)
+    };
     let mut viewport = active_display.bounds();
     viewport.max.y = viewport.min.y + get_display_height(&active_display);
 
@@ -763,6 +769,8 @@ pub(super) fn window_swiper(
             viewport_offset + shift,
             &active_display,
             &get_window_frame,
+            &get_window_h_pad,
+            &config,
             &mut commands,
         );
     }
@@ -811,9 +819,16 @@ pub(super) fn reshuffle_layout_strip(
     marker: Populated<Entity, With<ReshuffleAroundMarker>>,
     active_display: ActiveDisplay,
     windows: Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
+    config: Res<Config>,
     mut commands: Commands,
 ) {
     let get_window_frame = |entity| get_moving_window_frame(entity, &active_display, &windows);
+    let get_window_h_pad = |entity: Entity| {
+        windows
+            .get(entity)
+            .map(|(w, _, _)| w.horizontal_padding())
+            .unwrap_or(0)
+    };
 
     for entity in marker {
         if let Ok(mut cmd) = commands.get_entity(entity) {
@@ -840,6 +855,8 @@ pub(super) fn reshuffle_layout_strip(
             viewport_offset,
             &active_display,
             &get_window_frame,
+            &get_window_h_pad,
+            &config,
             &mut commands,
         );
     }
@@ -885,6 +902,7 @@ pub(super) fn pump_events(
 pub(super) fn window_update_frame(
     mut messages: MessageReader<Event>,
     mut windows: Query<(&mut Window, Entity)>,
+    focused: Option<Single<Entity, With<FocusedMarker>>>,
     active_display: ActiveDisplay,
     mut commands: Commands,
 ) {
@@ -904,7 +922,12 @@ pub(super) fn window_update_frame(
                     }
 
                     if matches!(event, Event::WindowResized { window_id: _ }) {
-                        reshuffle_around(entity, &mut commands);
+                        // Reshuffle around the focused window, not the resized one.
+                        // Reshuffling around an off-screen sliver would call
+                        // expose_window on it, pulling it into view and causing a
+                        // feedback loop.
+                        let target = focused.as_deref().copied().unwrap_or(entity);
+                        reshuffle_around(target, &mut commands);
                     }
                 }
             }
@@ -1115,13 +1138,17 @@ fn get_display_height(active_display: &ActiveDisplay) -> i32 {
     active_display.bounds().height() - dock_size
 }
 
-fn position_layout_windows<W>(
+#[allow(clippy::cast_possible_truncation)]
+fn position_layout_windows<W, P>(
     viewport_offset: i32,
     active_display: &ActiveDisplay,
     get_window_frame: &W,
+    get_window_h_pad: &P,
+    config: &Config,
     commands: &mut Commands,
 ) where
     W: Fn(Entity) -> Option<IRect>,
+    P: Fn(Entity) -> i32,
 {
     let menubar_height = active_display.display().menubar_height();
     let bounds = IRect::new(
@@ -1147,6 +1174,47 @@ fn position_layout_windows<W>(
             active_display.display().absolute_coords(frame.max),
         );
 
+        // A window is a "sliver" if it has very little visible area.
+        // Push truly off-screen windows to show config.sliver_width() pixels
+        // from the screen edge.
+        let sliver_width = config.sliver_width();
+        let display_width = bounds.width();
+        let visible_left = frame.min.x.max(0);
+        let visible_right = frame.max.x.min(display_width);
+        let visible = (visible_right - visible_left).max(0);
+        let is_off_screen = visible <= 20;
+
+        if is_off_screen {
+            // Account for per-window horizontal_padding: reposition() adds
+            // h_pad to the virtual x, so subtract it here so the OS window
+            // lands exactly sliver_width pixels from the screen edge.
+            let h_pad = get_window_h_pad(entity);
+            let width = frame.width();
+            let window_center = frame.min.x + width / 2;
+            if window_center <= 0 {
+                frame.min.x = sliver_width + h_pad - width;
+                frame.max.x = sliver_width + h_pad;
+            } else {
+                frame.min.x = display_width - sliver_width - h_pad;
+                frame.max.x = frame.min.x + width;
+            }
+
+            let inset = (f64::from(bounds.height()) * (1.0 - config.sliver_height()) / 2.0) as i32;
+            frame.min.y += menubar_height + inset;
+            frame.max.y -= inset;
+
+            // Multi-display: nudge off-screen windows down to prevent macOS
+            // from relocating them to the other display.
+            if display_above {
+                let bump = bounds.height() / 4;
+                frame.min.y += bump;
+                frame.max.y += bump;
+            }
+        } else {
+            frame.min.y += menubar_height;
+            frame.max.y += menubar_height;
+        }
+
         if old_frame.size() != frame.size() {
             resize_entity(
                 entity,
@@ -1154,24 +1222,6 @@ fn position_layout_windows<W>(
                 active_display.id(),
                 commands,
             );
-        }
-
-        // If there are multiple displays and the other display is located above, there is a chance
-        // that MacOS will bump the windows over to another display when moving them around.
-        // To avoid that we nudge the off-screen windows slightly down.
-        let visible_window = !display_above
-            || frame.max.x > WINDOW_HIDDEN_THRESHOLD
-                && frame.min.x < active_display.bounds().max.x - WINDOW_HIDDEN_THRESHOLD;
-
-        if visible_window {
-            frame.min.y += menubar_height;
-            frame.max.y += menubar_height;
-        } else {
-            // NOTE: If the window is "off screen", move it down slightly
-            // to avoid MacOS moving it over to another display
-            let bump = bounds.height() / 4;
-            frame.min.y += bump;
-            frame.max.y += bump;
         }
 
         if old_frame.min != frame.min {

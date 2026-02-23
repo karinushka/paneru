@@ -67,6 +67,12 @@ inspired by [Niri] and [PaperWM.spoon].
   A [similar situation](https://nikitabobko.github.io/AeroSpace/guide#proper-monitor-arrangement)
   exists with Aerospace window manager.
 
+- **Off-screen window slivers**. Because macOS will forcibly relocate windows
+  that are moved fully off-screen, Paneru keeps a thin sliver of each
+  off-screen window visible at the screen edge. The `sliver_width` and
+  `sliver_height` options control the size of this sliver. This is a
+  workaround for a macOS limitation, not a design choice.
+
 ### Installing from Crates.io
 
 Paneru is built using Rust's `cargo`. It can be installed directly from

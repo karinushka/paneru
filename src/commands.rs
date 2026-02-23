@@ -359,6 +359,7 @@ fn command_center_window(
 fn resize_window(
     mut messages: MessageReader<Event>,
     current_focus: Single<(&Window, Entity), With<FocusedMarker>>,
+    windows: Windows,
     active_display: ActiveDisplay,
     config: Res<Config>,
     mut commands: Commands,
@@ -381,15 +382,34 @@ fn resize_window(
         .find(|&r| r > current_ratio + 0.05)
         .unwrap_or_else(|| *config.preset_column_widths().first().unwrap_or(&0.5));
 
-    let size = Size::new(
-        (next_ratio * f64::from(padded_width)).round() as i32,
-        window.frame().height(),
-    );
+    let new_width = (next_ratio * f64::from(padded_width)).round() as i32;
+    let size = Size::new(new_width, window.frame().height());
     let mut frame = IRect::from_center_size(window.frame().center(), size);
 
     if frame.max.x > active_display.bounds().max.x - pad_right {
         frame.min.x = active_display.bounds().max.x - pad_right - size.x;
         reposition_entity(entity, frame.min, active_display.id(), &mut commands);
+    }
+
+    // Resize all windows in the column so stacked siblings share the new width.
+    let strip = active_display.active_strip();
+    if let Some(Column::Stack(stack)) = strip
+        .index_of(entity)
+        .ok()
+        .and_then(|idx| strip.get(idx).ok())
+    {
+        for &sibling in &stack {
+            if sibling != entity
+                && let Some(w) = windows.get(sibling)
+            {
+                resize_entity(
+                    sibling,
+                    Size::new(new_width, w.frame().height()),
+                    active_display.id(),
+                    &mut commands,
+                );
+            }
+        }
     }
 
     resize_entity(entity, size, active_display.id(), &mut commands);

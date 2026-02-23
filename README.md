@@ -244,6 +244,11 @@ animation_speed = 50
 # padding_left = 0
 # padding_right = 0
 
+# When disabled, swiping of windows is clamped so you cannot scroll
+# past the first or last window.
+# When enabled (default) the strip slides freely, exposing the desktop behind.
+# free_slide = true
+
 [bindings]
 # Moves the focus between windows. If there are no windows when moving up or
 # down, will swtich focus to the display above or below.

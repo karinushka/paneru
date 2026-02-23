@@ -174,8 +174,13 @@ pub struct ReshuffleAroundMarker;
 pub struct WindowSwipeMarker(pub f64);
 
 /// Stores the width ratio of a window before it was made full-width.
+/// When a stacked window goes full-width, it is unstacked first;
+/// `was_stacked` records whether to restack on exit.
 #[derive(Component)]
-pub struct FullWidthMarker(pub f64);
+pub struct FullWidthMarker {
+    pub width_ratio: f64,
+    pub was_stacked: bool,
+}
 
 /// Enum component indicating the unmanaged state of a window.
 #[derive(Component, Debug)]

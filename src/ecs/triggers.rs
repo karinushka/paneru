@@ -969,7 +969,12 @@ pub(super) fn spawn_window_trigger(
             debug!("Applying window properties for '{}'", window.id());
         }
 
-        apply_window_defaults(&mut window, &mut active_display, &properties);
+        apply_window_defaults(
+            &mut window,
+            &mut active_display,
+            &properties,
+            config.edge_padding(),
+        );
 
         // Insert the window into the internal Bevy state.
         let entity = commands.spawn((window, ChildOf(app_entity))).id();
@@ -991,6 +996,7 @@ fn apply_window_defaults(
     window: &mut Window,
     active_display: &mut ActiveDisplayMut,
     properties: &[WindowParams],
+    edge_padding: (i32, i32, i32, i32),
 ) {
     let floating = properties
         .iter()
@@ -1008,10 +1014,6 @@ fn apply_window_defaults(
     {
         window.set_padding(WindowPadding::Horizontal(padding.clamp(0, 50)));
     }
-    if let Some(width) = properties.iter().find_map(|props| props.width) {
-        window.set_width_ratio(width);
-    }
-
     if floating {
         if let Some((rx, ry, rw, rh)) = properties.iter().find_map(WindowParams::grid_ratios) {
             let bounds = active_display.bounds();
@@ -1028,6 +1030,22 @@ fn apply_window_defaults(
     _ = window
         .update_frame(&active_display.bounds())
         .inspect_err(|err| error!("{err}"));
+
+    // Apply configured width AFTER update_frame so it isn't overwritten.
+    // Use padded display width (matching window_resize command behavior).
+    if let Some(width) = properties.iter().find_map(|props| props.width) {
+        let bounds = active_display.bounds();
+        let (_, pad_right, _, pad_left) = edge_padding;
+        let padded_width = bounds.width() - pad_left - pad_right;
+        let new_width = (f64::from(padded_width) * width).round() as i32;
+        let height = window.frame().height();
+        window.resize(Size::new(new_width, height), bounds.width());
+        // Re-read the actual OS size: the app may enforce a minimum width
+        // that differs from our request.
+        _ = window
+            .update_frame(&bounds)
+            .inspect_err(|err| error!("{err}"));
+    }
 }
 
 fn apply_window_properties(

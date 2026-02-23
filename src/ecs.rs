@@ -67,6 +67,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::fresh_marker_cleanup,
             systems::timeout_ticker,
             systems::window_update_frame,
+            systems::sync_menubar_height,
             systems::displays_rearranged,
             systems::reposition_dragged_window,
             systems::find_orphaned_workspaces.run_if(on_timer(Duration::from_millis(
@@ -91,6 +92,9 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::reshuffle_layout_strip,
             systems::animate_windows.after(systems::reshuffle_layout_strip),
             systems::animate_resize_windows.after(systems::reshuffle_layout_strip),
+            systems::update_overlays
+                .after(systems::animate_windows)
+                .after(systems::animate_resize_windows),
         ),
     );
 }
@@ -329,7 +333,10 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
 
     let mut platform_callbacks = PlatformCallbacks::new(sender);
     platform_callbacks.setup_handlers()?;
+    let overlay_manager =
+        crate::overlay::OverlayManager::new(platform_callbacks.main_thread_marker);
     app.insert_non_send_resource(platform_callbacks);
+    app.insert_non_send_resource(overlay_manager);
     app.insert_non_send_resource(receiver);
 
     Ok(app)

@@ -52,6 +52,19 @@ unsafe extern "C" {
     /// extern `CGError` SLSGetWindowBounds(int cid, `uint32_t` wid, `CGRect` *frame);
     pub fn SLSGetWindowBounds(cid: ConnID, window_id: WinID, frame: &mut CGRect) -> CGError;
 
+    /// Moves a window to a new position at the compositor level (no IPC to the app).
+    ///
+    /// # Arguments
+    ///
+    /// * `cid` - The `ConnID` of the connection.
+    /// * `wid` - The `WinID` of the window to move.
+    /// * `point` - A pointer to a `CGPoint` with the new origin.
+    ///
+    /// # Returns
+    ///
+    /// A `CGError` indicating success or failure.
+    pub fn SLSMoveWindow(cid: ConnID, wid: WinID, point: *const CGPoint) -> CGError;
+
     /// Copies the managed display identifier for a given window.
     /// This function returns a `CFStringRef` that identifies the display where the window is currently located.
     ///

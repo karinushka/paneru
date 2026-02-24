@@ -16,7 +16,7 @@ use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
     ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, Initializing,
-    MissionControlActive, SpawnWindowTrigger, StrayFocusEvent, Timeout, Unmanaged,
+    MissionControlActive, SpawnWindowTrigger, StrayFocusEvent, SwipeActive, Timeout, Unmanaged,
     WMEventTrigger, WindowDraggedMarker,
 };
 use crate::config::{Config, WindowParams};
@@ -459,6 +459,7 @@ pub(super) fn window_focused_trigger(
     active_display: ActiveDisplay,
     mut config: Configuration,
     initializing: Option<Res<Initializing>>,
+    swipe_active: Option<Res<SwipeActive>>,
     mut commands: Commands,
 ) {
     const STRAY_FOCUS_RETRY_SEC: u64 = 2;
@@ -499,7 +500,7 @@ pub(super) fn window_focused_trigger(
 
     commands.entity(entity).try_insert(FocusedMarker);
 
-    if !config.skip_reshuffle() && initializing.is_none() {
+    if !config.skip_reshuffle() && initializing.is_none() && swipe_active.is_none() {
         if config.auto_center()
             && let Some((_, _, None)) = windows.get_managed(entity)
         {

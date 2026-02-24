@@ -62,6 +62,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
                 .chain()
                 .run_if(resource_exists::<Initializing>),
             systems::window_swiper,
+            systems::swipe_idle_tracker.run_if(resource_exists::<SwipeActive>),
             systems::add_launched_process,
             systems::add_launched_application,
             systems::fresh_marker_cleanup,
@@ -189,6 +190,28 @@ pub struct StackAdjustedResize;
 #[derive(Component)]
 pub struct WindowSwipeMarker(pub f64);
 
+/// Resource indicating that a trackpad swipe gesture is active.
+/// While present, window repositioning uses fast compositor-level moves
+/// instead of slow AX API calls. When inertia ends, positions are committed
+/// to AX and a cooldown keeps the resource alive for a few more ticks
+/// so that all guard checks (`swipe_active.is_some()`) hold until macOS
+/// has settled.
+#[derive(Resource)]
+pub struct SwipeActive {
+    pub last_swipe: std::time::Instant,
+    pub velocity: f64,
+    pub viewport_offset: i32,
+    /// When >0, inertia has ended and the resource is counting down before
+    /// final removal.  Decremented once per tick in `swipe_idle_tracker`.
+    pub cooldown: u8,
+}
+
+/// Resource inserted when `SwipeActive` is removed.  Guards against
+/// stale drag markers (and other triggers) that fire after a swipe and
+/// would cause `reshuffle_layout_strip` to snap the viewport home.
+#[derive(Resource)]
+pub struct SwipeRecentlyEnded(pub std::time::Instant);
+
 /// Stores the width ratio of a window before it was made full-width.
 /// When a stacked window goes full-width, it is unstacked first;
 /// `was_stacked` records whether to restack on exit.
@@ -313,8 +336,11 @@ pub fn resize_entity(
     }
 }
 
+#[track_caller]
 pub fn reshuffle_around(entity: Entity, commands: &mut Commands) {
     if let Ok(mut entity_commands) = commands.get_entity(entity) {
+        let caller = std::panic::Location::caller();
+        tracing::debug!("reshuffle_around: entity {entity} from {caller}");
         entity_commands.try_insert(ReshuffleAroundMarker);
     }
 }

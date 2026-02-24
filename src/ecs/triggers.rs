@@ -22,12 +22,13 @@ use crate::config::{Config, WindowParams};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, LocateDockTrigger, SendMessageTrigger, WindowSwipeMarker,
-    reposition_entity, reshuffle_around,
+    reposition_entity, reshuffle_around, resize_entity,
 };
 use crate::errors::Result;
 use crate::events::Event;
 use crate::manager::{
-    Application, Display, LayoutStrip, Process, Window, WindowManager, WindowPadding, irect_from,
+    Application, Display, LayoutStrip, Process, Size, Window, WindowManager, WindowPadding,
+    irect_from,
 };
 use crate::platform::{PlatformCallbacks, WinID, WorkspaceId};
 use crate::util::symlink_target;
@@ -686,6 +687,45 @@ pub(super) fn window_unmanaged_trigger(
     mut active_display: ActiveDisplayMut,
     mut commands: Commands,
 ) {
+    const UNMANAGED_MAX_SCREEN_RATIO_NUM: i32 = 4;
+    const UNMANAGED_MAX_SCREEN_RATIO_DEN: i32 = 5;
+    const UNMANAGED_POP_OFFSET: i32 = 32;
+
+    fn clamp_origin_to_bounds(origin: IRect, size: bevy::math::IVec2, bounds: IRect) -> IRect {
+        let max = (bounds.max - size).max(bounds.min);
+        let min = origin.min.clamp(bounds.min, max);
+        IRect::from_corners(min, min + size)
+    }
+
+    fn offset_frame_within_bounds(frame: IRect, bounds: IRect, offset: i32) -> IRect {
+        let candidates = [
+            (offset, offset),
+            (offset, -offset),
+            (-offset, offset),
+            (-offset, -offset),
+            (offset, 0),
+            (-offset, 0),
+            (0, offset),
+            (0, -offset),
+        ];
+
+        for (dx, dy) in candidates {
+            let moved = IRect::from_corners(
+                bevy::math::IVec2::new(frame.min.x + dx, frame.min.y + dy),
+                bevy::math::IVec2::new(frame.max.x + dx, frame.max.y + dy),
+            );
+            if moved.min.x >= bounds.min.x
+                && moved.max.x <= bounds.max.x
+                && moved.min.y >= bounds.min.y
+                && moved.max.y <= bounds.max.y
+            {
+                return moved;
+            }
+        }
+
+        frame
+    }
+
     let entity = trigger.event().entity;
     let Some(marker) = windows
         .get_managed(trigger.event().entity)
@@ -693,11 +733,45 @@ pub(super) fn window_unmanaged_trigger(
     else {
         return;
     };
+    let display_bounds = active_display.bounds();
+    let display_id = active_display.id();
     let active_strip = active_display.active_strip();
 
     match marker {
         Unmanaged::Floating => {
             debug!("Entity {entity} is floating.");
+
+            if let Some(window) = windows.get(entity) {
+                let frame = window.frame();
+                let max_width =
+                    display_bounds.width() * UNMANAGED_MAX_SCREEN_RATIO_NUM / UNMANAGED_MAX_SCREEN_RATIO_DEN;
+                let max_height = display_bounds.height() * UNMANAGED_MAX_SCREEN_RATIO_NUM
+                    / UNMANAGED_MAX_SCREEN_RATIO_DEN;
+                let new_width = frame.width().min(max_width);
+                let new_height = frame.height().min(max_height);
+
+                let mut target_frame = IRect::from_corners(
+                    frame.min,
+                    frame.min + bevy::math::IVec2::new(new_width, new_height),
+                );
+                target_frame =
+                    clamp_origin_to_bounds(target_frame, target_frame.size(), display_bounds);
+                target_frame =
+                    offset_frame_within_bounds(target_frame, display_bounds, UNMANAGED_POP_OFFSET);
+
+                if target_frame.size() != frame.size() {
+                    resize_entity(
+                        entity,
+                        Size::new(target_frame.width(), target_frame.height()),
+                        display_id,
+                        &mut commands,
+                    );
+                }
+                if target_frame.min != frame.min {
+                    reposition_entity(entity, target_frame.min, display_id, &mut commands);
+                }
+            }
+
             if let Some(neighbour) = active_strip
                 .left_neighbour(entity)
                 .or_else(|| active_strip.right_neighbour(entity))

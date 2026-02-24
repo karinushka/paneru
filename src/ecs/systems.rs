@@ -698,8 +698,16 @@ pub(super) fn animate_resize_windows(
 
     for (mut window, entity, ResizeMarker { size, display_id }, moving) in windows {
         if moving {
-            // Wait resizing a window which is moving.
-            continue;
+            // Defer resize while the window is being repositioned so it
+            // doesn't extend past the screen edge before the move lands.
+            // Exception: when the resize *shrinks* the window (e.g.
+            // stacking), there is no risk of overshooting the screen, and
+            // deferring would leave the window at its old (full) height
+            // until the reposition finishes.
+            let current_size = window.frame().size();
+            if size.x > current_size.x || size.y > current_size.y {
+                continue;
+            }
         }
         let Some(display) = displays.iter().find(|display| display.id() == *display_id) else {
             continue;

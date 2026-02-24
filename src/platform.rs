@@ -23,7 +23,7 @@ pub use process::ProcessSerialNumber;
 pub use workspace::WorkspaceObserver;
 
 mod display;
-mod input;
+pub(crate) mod input;
 mod mission_control;
 mod process;
 pub mod service;

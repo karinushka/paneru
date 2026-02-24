@@ -12,8 +12,14 @@ use std::ffi::c_void;
 use std::marker::PhantomPinned;
 use std::pin::Pin;
 use std::ptr::null_mut;
+use std::sync::atomic::{AtomicBool, Ordering};
 use stdext::function_name;
 use tracing::{error, info};
+
+/// When `true`, `MouseMoved` events are intercepted at the `CGEvent` tap so
+/// they never reach window content (prevents hover effects, scroll-focus
+/// changes, etc. while windows are sliding during a swipe/inertia).
+pub static SUPPRESS_MOUSE_MOVES: AtomicBool = AtomicBool::new(false);
 
 use crate::config::Config;
 use crate::errors::{Error, Result};
@@ -35,7 +41,7 @@ pub(super) struct InputHandler {
     _pin: PhantomPinned,
 }
 
-pub type PinnedInputHandler =
+pub(super) type PinnedInputHandler =
     ScopeGuard<Pin<Box<InputHandler>>, Box<dyn FnOnce(Pin<Box<InputHandler>>)>>;
 
 impl InputHandler {
@@ -189,6 +195,9 @@ impl InputHandler {
                 events.send(Event::MouseDragged { point })
             }
             CGEventType::MouseMoved => {
+                if SUPPRESS_MOUSE_MOVES.load(Ordering::Relaxed) {
+                    return true;
+                }
                 let point = CGEvent::location(Some(event));
                 events.send(Event::MouseMoved { point })
             }

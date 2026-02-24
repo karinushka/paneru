@@ -41,7 +41,7 @@ use skylight::{
 };
 pub use windows::{Window, WindowApi, WindowOS, WindowPadding, ax_window_id};
 
-mod app;
+pub(crate) mod app;
 mod display;
 mod layout;
 mod process;
@@ -163,6 +163,10 @@ pub trait WindowManagerApi: Send + Sync {
     fn quit(&self) -> Result<()>;
 
     fn setup_config_watcher(&self, path: &Path) -> Result<Box<dyn Watcher>>;
+
+    /// Returns the current cursor position in absolute CG coordinates,
+    /// or `None` if the position cannot be determined.
+    fn cursor_position(&self) -> Option<CGPoint>;
 }
 
 /// `WindowManager` is a Bevy resource that holds a boxed `WindowManagerApi` trait object.
@@ -545,6 +549,14 @@ impl WindowManagerApi for WindowManagerOS {
 
     fn quit(&self) -> Result<()> {
         self.event_sender.send(Event::Exit)
+    }
+
+    fn cursor_position(&self) -> Option<CGPoint> {
+        let mut cursor = CGPoint::default();
+        if unsafe { CGError::Success != SLSGetCurrentCursorLocation(self.main_cid, &mut cursor) } {
+            return None;
+        }
+        Some(cursor)
     }
 
     fn setup_config_watcher(&self, path: &Path) -> Result<Box<dyn Watcher>> {

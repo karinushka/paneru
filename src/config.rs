@@ -361,6 +361,20 @@ impl Config {
     pub fn menubar_height(&self) -> Option<i32> {
         self.options().menubar_height.map(i32::from)
     }
+
+    pub fn swipe_sensitivity(&self) -> f64 {
+        self.options()
+            .swipe_sensitivity
+            .unwrap_or(0.35)
+            .clamp(0.1, 2.0)
+    }
+
+    pub fn swipe_deceleration(&self) -> f64 {
+        self.options()
+            .swipe_deceleration
+            .unwrap_or(4.0)
+            .clamp(1.0, 10.0)
+    }
 }
 
 fn parse_hex_color(hex: &str) -> (f64, f64, f64) {
@@ -549,6 +563,14 @@ pub struct MainOptions {
     /// Swiping keeps sliding windows until the first or last window.
     /// Set to false to clamp so edge windows stay on-screen. Default: true.
     pub continuous_swipe: Option<bool>,
+
+    /// Swipe sensitivity multiplier. Lower values = less distance per finger
+    /// movement. Range: 0.1–2.0. Default: 0.35.
+    pub swipe_sensitivity: Option<f64>,
+
+    /// Swipe inertia deceleration rate. Higher values = faster stop.
+    /// Range: 1.0–10.0. Default: 4.0.
+    pub swipe_deceleration: Option<f64>,
 }
 
 /// Returns a default set of column widths.
@@ -984,6 +1006,7 @@ fn generate_virtual_keymap() -> Vec<(String, u8)> {
 }
 
 #[test]
+#[allow(clippy::float_cmp)]
 fn test_config_parsing() {
     let input = r#"
 [options]
@@ -1042,6 +1065,10 @@ index = 1
     let props = config.find_window_properties("picture in picture", "com.something.apple");
     assert_eq!(props[0].floating, Some(true));
     assert_eq!(props[0].index, Some(1));
+
+    let defaults = Config::default();
+    assert_eq!(defaults.swipe_sensitivity(), 0.35);
+    assert_eq!(defaults.swipe_deceleration(), 4.0);
 }
 
 #[test]

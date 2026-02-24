@@ -13,6 +13,12 @@ use std::ffi::c_void;
 use std::pin::Pin;
 use std::ptr::null_mut;
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// When `true`, `kAXWindowMovedNotification` and `kAXWindowResizedNotification`
+/// callbacks are suppressed so that `ax_commit_position` calls (e.g. after
+/// swipe/inertia) do not produce echo-back events that trigger unwanted reshuffles.
+pub static SUPPRESS_AX_MOVED: AtomicBool = AtomicBool::new(false);
 use stdext::function_name;
 use tracing::{debug, error};
 
@@ -378,8 +384,18 @@ impl ObserverContext {
             accessibility_sys::kAXFocusedWindowChangedNotification => {
                 Event::WindowFocused { window_id }
             }
-            accessibility_sys::kAXWindowMovedNotification => Event::WindowMoved { window_id },
-            accessibility_sys::kAXWindowResizedNotification => Event::WindowResized { window_id },
+            accessibility_sys::kAXWindowMovedNotification => {
+                if SUPPRESS_AX_MOVED.load(Ordering::Relaxed) {
+                    return;
+                }
+                Event::WindowMoved { window_id }
+            }
+            accessibility_sys::kAXWindowResizedNotification => {
+                if SUPPRESS_AX_MOVED.load(Ordering::Relaxed) {
+                    return;
+                }
+                Event::WindowResized { window_id }
+            }
             accessibility_sys::kAXMenuOpenedNotification => Event::MenuOpened { window_id },
             accessibility_sys::kAXMenuClosedNotification => Event::MenuClosed { window_id },
             _ => {

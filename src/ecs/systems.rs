@@ -4,9 +4,7 @@ use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::query::{Has, Or, With, Without};
-use bevy::ecs::system::{
-    Commands, Local, NonSend, NonSendMut, Populated, Query, Res, ResMut, Single,
-};
+use bevy::ecs::system::{Commands, Local, NonSend, NonSendMut, Populated, Query, Res, Single};
 use bevy::math::IRect;
 use bevy::tasks::AsyncComputeTaskPool;
 use bevy::tasks::futures_lite::future;
@@ -24,7 +22,7 @@ use super::{
     WMEventTrigger,
 };
 use crate::config::{Config, SwipeGestureDirection};
-use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
+use crate::ecs::params::{ActiveDisplay, Configuration, SmoothSwipeTracking, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, BruteforceWindows, DockPosition, Initializing, LocateDockTrigger,
     ReshuffleAroundMarker, StackAdjustedResize, TrackpadSwipe, Unmanaged, WindowDraggedMarker,
@@ -44,14 +42,10 @@ use std::sync::atomic::Ordering;
 // ── Swipe-related timing constants ──────────────────────────────────
 /// Sub-pixel velocity threshold — stop inertia when below this.
 const MIN_VELOCITY_PX: f64 = 1.0;
-/// Ticks to keep `SwipeActive` alive after commit for echo-back suppression.
-const COOLDOWN_TICKS: u8 = 2;
 /// Grace period to suppress reshuffles after swipe (prevent snap-to-home).
 const RESHUFFLE_GRACE: Duration = Duration::from_millis(500);
 /// Grace period to suppress stale drag markers (covers 1s timeout + buffer).
 const DRAG_MARKER_GRACE: Duration = Duration::from_secs(2);
-/// Pixels of visibility below which a window is considered off-screen.
-const OFF_SCREEN_THRESHOLD: i32 = 20;
 
 /// Processes a single incoming `Event`. It dispatches various event types to the `WindowManager` or other internal handlers.
 /// This system reads `Event` messages and triggers appropriate Bevy events or modifies resources based on the event type.
@@ -664,13 +658,13 @@ pub(super) fn workspace_change_watcher(
 pub(super) fn animate_windows(
     windows: Populated<(&mut Window, Entity, &RepositionMarker)>,
     displays: Query<&Display>,
-    swipe_active: Option<Res<TrackpadSwipe>>,
+    swipe_tracker: SmoothSwipeTracking,
     time: Res<Time>,
     config: Res<Config>,
     mut commands: Commands,
 ) {
     let move_ratio = config.animation_speed() * time.delta_secs_f64();
-    let swiping = swipe_active.is_some();
+    let swiping = swipe_tracker.active();
 
     for (mut window, entity, RepositionMarker { origin, display_id }) in windows {
         if swiping {
@@ -719,12 +713,12 @@ pub(super) fn animate_windows(
 pub(super) fn animate_resize_windows(
     windows: Populated<(&mut Window, Entity, &ResizeMarker, Has<RepositionMarker>)>,
     displays: Query<&Display>,
-    swipe_active: Option<Res<TrackpadSwipe>>,
+    swipe_tracker: SmoothSwipeTracking,
     time: Res<Time>,
     config: Res<Config>,
     mut commands: Commands,
 ) {
-    let swiping = swipe_active.is_some();
+    let swiping = swipe_tracker.active();
 
     for (mut window, entity, ResizeMarker { size, display_id }, moving) in windows {
         if moving && !swiping {
@@ -777,7 +771,7 @@ pub(super) fn window_swiper(
     active_display: ActiveDisplay,
     config: Res<Config>,
     time: Res<Time>,
-    swipe_tracker: Option<Res<TrackpadSwipe>>,
+    swipe_tracker: SmoothSwipeTracking,
     mut commands: Commands,
 ) {
     let get_window_frame = |entity| get_moving_window_frame(entity, &active_display, &windows);
@@ -823,11 +817,8 @@ pub(super) fn window_swiper(
         // use its authoritative viewport_offset rather than re-deriving
         // from window frames, which may lag behind the SLS-scrolled
         // position and cause the viewport to snap back.
-        let viewport_offset = if let Some(TrackpadSwipe::Active {
-            viewport_offset, ..
-        }) = swipe_tracker.as_deref()
-        {
-            *viewport_offset
+        let viewport_offset = if let Some((_, viewport_offset)) = swipe_tracker.position() {
+            viewport_offset
         } else {
             let Some(offset) = strip
                 .absolute_positions(&get_window_frame)
@@ -866,13 +857,9 @@ pub(super) fn window_swiper(
         // EMA smoothing: 30% new + 70% old prevents jittery frames from dominating.
         let dt = time.delta_secs_f64();
         let new_velocity = if dt > 0.0 { delta / dt } else { 0.0 };
-        let old_velocity = swipe_tracker.as_ref().map_or(0.0, |s| {
-            if let TrackpadSwipe::Active { velocity, .. } = **s {
-                velocity
-            } else {
-                0.0
-            }
-        });
+        let old_velocity = swipe_tracker
+            .position()
+            .map_or(0.0, |(velocity, _)| velocity);
         let velocity = 0.3 * new_velocity + 0.7 * old_velocity;
 
         SUPPRESS_MOUSE_MOVES.store(true, Ordering::Relaxed);
@@ -895,13 +882,9 @@ pub(super) fn window_swiper(
 /// window positions). When the velocity drops below sub-pixel threshold,
 /// commits all window positions via AX, strips stale markers, and removes
 /// `SwipeActive`.
-#[allow(
-    clippy::needless_pass_by_value,
-    clippy::too_many_arguments,
-    clippy::too_many_lines
-)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 pub(super) fn swipe_idle_tracker(
-    mut swipe_tracker: ResMut<TrackpadSwipe>,
+    mut swipe: SmoothSwipeTracking,
     active_display: ActiveDisplay,
     windows: Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
     drag_markers: Query<Entity, With<WindowDraggedMarker>>,
@@ -910,41 +893,17 @@ pub(super) fn swipe_idle_tracker(
     time: Res<Time>,
     mut commands: Commands,
 ) {
-    const FINGER_LIFT_THRESHOLD: Duration = Duration::from_millis(50);
-    let decay_rate = config.swipe_deceleration();
-
-    let TrackpadSwipe::Active {
-        last_swipe,
-        velocity,
-        viewport_offset,
-        cooldown,
-    } = &mut *swipe_tracker
-    else {
-        return;
-    };
-    // Cooldown phase: inertia ended, we're keeping SwipeActive alive for
-    // a few more pump cycles so that all guard checks (animate_windows SLS
-    // snap, overlay hide, window_update_frame event eating) remain active
-    // while macOS settles.
-    if *cooldown > 0 {
-        *cooldown -= 1;
-        if *cooldown == 0 {
-            debug!("swipe_idle_tracker: cooldown done, removing SwipeActive");
-            // Despawn drag markers that arrived during cooldown.
-            for drag_entity in &drag_markers {
-                commands.entity(drag_entity).despawn();
-            }
-            SUPPRESS_MOUSE_MOVES.store(false, Ordering::Relaxed);
-            commands.insert_resource(TrackpadSwipe::RecentlyEnded(std::time::Instant::now()));
-        }
+    if swipe.on_cooldown(&mut commands) {
         return;
     }
-
-    if last_swipe.elapsed() < FINGER_LIFT_THRESHOLD {
+    if swipe.active() {
         return;
     }
 
     let display_width = f64::from(active_display.bounds().width());
+    let Some((velocity, viewport_offset)) = swipe.position() else {
+        return;
+    };
 
     // Sub-pixel velocity — stop inertia and commit.
     if velocity.abs() * display_width < MIN_VELOCITY_PX {
@@ -982,7 +941,7 @@ pub(super) fn swipe_idle_tracker(
                 .unwrap_or(0)
         };
         position_layout_windows(
-            *viewport_offset,
+            viewport_offset,
             &active_display,
             &get_window_frame,
             &get_window_h_pad,
@@ -1014,13 +973,13 @@ pub(super) fn swipe_idle_tracker(
         // Start cooldown — keep SwipeActive alive for 2 more pump cycles
         // (~33ms at 60fps) so echo-backs and macOS reconciliation events
         // are silenced before the resource is removed.
-        *cooldown = COOLDOWN_TICKS;
+        swipe.initiate_cooldown();
         return;
     }
 
     // Apply one frame of decaying velocity as a synthetic swipe.
     let dt = time.delta_secs_f64();
-    let frame_delta = *velocity * dt;
+    let frame_delta = velocity * dt;
 
     let get_window_frame = |entity| get_moving_window_frame(entity, &active_display, &windows);
     let get_window_h_pad = |entity: Entity| {
@@ -1034,7 +993,7 @@ pub(super) fn swipe_idle_tracker(
     // would give wrong results when edge windows have been sliver-clamped.
     let shift = (display_width * frame_delta) as i32;
     let new_offset = if config.continuous_swipe() {
-        *viewport_offset + shift
+        viewport_offset + shift
     } else {
         let strip = active_display.active_strip();
         let mut viewport = active_display.bounds();
@@ -1052,7 +1011,7 @@ pub(super) fn swipe_idle_tracker(
         let effective_width = viewport.width() - pad_left - pad_right;
         let left_aligned = -pad_left;
         let right_aligned = total_strip_width - effective_width - pad_left;
-        (*viewport_offset + shift).clamp(left_aligned, right_aligned.max(left_aligned))
+        (viewport_offset + shift).clamp(left_aligned, right_aligned.max(left_aligned))
     };
 
     position_layout_windows(
@@ -1065,8 +1024,8 @@ pub(super) fn swipe_idle_tracker(
         &mut commands,
     );
 
-    *viewport_offset = new_offset;
-    *velocity *= (-decay_rate * dt).exp();
+    let decay_rate = config.swipe_deceleration();
+    swipe.update_position((-decay_rate * dt).exp(), new_offset);
 }
 
 fn expose_window(
@@ -1115,14 +1074,14 @@ pub(super) fn reshuffle_layout_strip(
     active_display: ActiveDisplay,
     windows: Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
     config: Res<Config>,
-    swipe_ended: Option<Res<TrackpadSwipe>>,
+    swipe_tracker: SmoothSwipeTracking,
     mut commands: Commands,
 ) {
     // After a swipe, windows may be at their legitimate scrolled positions
     // (off-screen).  expose_window would bump them to the display edge,
     // resetting viewport_offset ≈ 0 and causing a visible snap-to-home.
     // Suppress reshuffles for a grace period after the swipe ends.
-    if let Some(TrackpadSwipe::RecentlyEnded(ended)) = swipe_ended.as_deref()
+    if let Some(ended) = swipe_tracker.recently_ended()
         && ended.elapsed() < RESHUFFLE_GRACE
     {
         for entity in &marker {
@@ -1187,7 +1146,7 @@ pub(super) fn pump_events(
     mut messages: MessageWriter<Event>,
     incoming_events: Option<NonSend<Receiver<Event>>>,
     platform: Option<NonSendMut<Pin<Box<PlatformCallbacks>>>>,
-    swipe_tracker: Option<Res<TrackpadSwipe>>,
+    swipe_tracker: SmoothSwipeTracking,
     mut timeout: Local<u32>,
 ) {
     // Cap the pump at one display frame so the first event after idle
@@ -1200,8 +1159,7 @@ pub(super) fn pump_events(
         return;
     };
 
-    let swipe_active =
-        swipe_tracker.is_some_and(|swipe| matches!(*swipe, TrackpadSwipe::Active { .. }));
+    let swipe_active = swipe_tracker.active();
     let effective_timeout = if swipe_active {
         (*timeout).min(1)
     } else {
@@ -1256,16 +1214,13 @@ pub(super) fn window_update_frame(
     mut windows: Query<(&mut Window, Entity, Has<StackAdjustedResize>)>,
     focused: Option<Single<Entity, With<FocusedMarker>>>,
     active_display: ActiveDisplay,
-    swipe_tracker: Option<Res<TrackpadSwipe>>,
+    swipe_tracker: SmoothSwipeTracking,
     config: Configuration,
     mut commands: Commands,
 ) {
     for event in messages.read() {
         match event {
-            Event::WindowMoved { .. } | Event::WindowResized { .. }
-                if swipe_tracker
-                    .as_ref()
-                    .is_some_and(|swipe| matches!(**swipe, TrackpadSwipe::Active { .. })) => {}
+            Event::WindowMoved { .. } | Event::WindowResized { .. } if swipe_tracker.active() => {}
             Event::WindowMoved { window_id } | Event::WindowResized { window_id } => {
                 // Find the window, update its frame, and extract info — releasing
                 // the mutable borrow on `windows` so we can access other entities.
@@ -1617,7 +1572,7 @@ fn position_layout_windows<W, P>(
         let visible_left = frame.min.x.max(pad_left);
         let visible_right = frame.max.x.min(padded_right);
         let visible = (visible_right - visible_left).max(0);
-        let is_off_screen = visible <= OFF_SCREEN_THRESHOLD;
+        let is_off_screen = visible <= sliver_width.max(20);
 
         if is_off_screen {
             // Account for per-window horizontal_padding: reposition() adds
@@ -1692,14 +1647,14 @@ fn position_layout_windows<W, P>(
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn reposition_dragged_window(
     markers: Populated<(&Timeout, &WindowDraggedMarker, Entity)>,
-    swipe_tracker: Option<Res<TrackpadSwipe>>,
+    swipe_tracker: SmoothSwipeTracking,
     mut commands: Commands,
 ) {
     // After a swipe, stale drag markers would cause reshuffle_layout_strip
     // to snap the viewport home (expose_window bumps off-screen entities
     // to the display edge, resetting viewport_offset ≈ 0).  Grace period
     // covers the 1s drag-marker timeout.
-    if let Some(TrackpadSwipe::RecentlyEnded(ended)) = swipe_tracker.as_deref() {
+    if let Some(ended) = swipe_tracker.recently_ended() {
         if ended.elapsed() < DRAG_MARKER_GRACE {
             for (_, _, marker_entity) in &markers {
                 commands.entity(marker_entity).despawn();

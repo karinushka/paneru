@@ -1,25 +1,30 @@
+use std::{
+    sync::atomic::Ordering,
+    time::{Duration, Instant},
+};
+
 use bevy::{
     ecs::{
         entity::Entity,
         hierarchy::ChildOf,
         query::{With, Without},
-        system::{Query, Res, ResMut, Single, SystemParam},
+        system::{Commands, Query, Res, ResMut, Single, SystemParam},
         world::Mut,
     },
     math::IRect,
 };
 use objc2_core_graphics::CGDirectDisplayID;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::{ActiveDisplayMarker, FocusFollowsMouse, MissionControlActive, SkipReshuffle};
 use crate::{
     config::{Config, WindowParams},
     ecs::{
         ActiveWorkspaceMarker, DockPosition, FocusedMarker, FullWidthMarker, Initializing,
-        Unmanaged,
+        TrackpadSwipe, Unmanaged, WindowDraggedMarker,
     },
     manager::{Application, Display, LayoutStrip, Window},
-    platform::{ProcessSerialNumber, WinID},
+    platform::{ProcessSerialNumber, WinID, input::SUPPRESS_MOUSE_MOVES},
 };
 
 /// A Bevy `SystemParam` that provides access to the application's configuration and related state.
@@ -307,5 +312,106 @@ impl Windows<'_, '_> {
         self.find_parent(window_id)
             .and_then(|(_, _, parent)| apps.get(parent).ok())
             .map(|app| app.psn())
+    }
+}
+
+#[derive(SystemParam)]
+pub struct SmoothSwipeTracking<'w, 's> {
+    swipe_tracker: Option<ResMut<'w, TrackpadSwipe>>,
+    drag_markers: Query<'w, 's, Entity, With<WindowDraggedMarker>>,
+}
+
+impl SmoothSwipeTracking<'_, '_> {
+    pub fn on_cooldown(&mut self, commands: &mut Commands) -> bool {
+        let Some(ref mut swipe_tracker) = self.swipe_tracker else {
+            return true;
+        };
+        let TrackpadSwipe::Active { cooldown, .. } = &mut **swipe_tracker else {
+            return true;
+        };
+        if *cooldown < 1 {
+            return false;
+        }
+
+        // Cooldown phase: inertia ended, we're keeping SwipeActive alive for
+        // a few more pump cycles so that all guard checks (animate_windows SLS
+        // snap, overlay hide, window_update_frame event eating) remain active
+        // while macOS settles.
+        *cooldown -= 1;
+        if *cooldown == 0 {
+            debug!("swipe_tracker: cooldown done, removing SwipeActive");
+            // Despawn drag markers that arrived during cooldown.
+            for drag_entity in self.drag_markers {
+                commands.entity(drag_entity).despawn();
+            }
+            SUPPRESS_MOUSE_MOVES.store(false, Ordering::Relaxed);
+            commands.insert_resource(TrackpadSwipe::RecentlyEnded(std::time::Instant::now()));
+        }
+        true
+    }
+
+    pub fn active(&self) -> bool {
+        const FINGER_LIFT_THRESHOLD: Duration = Duration::from_millis(50);
+        let Some(ref swipe_tracker) = self.swipe_tracker else {
+            return false;
+        };
+
+        if let TrackpadSwipe::Active { last_swipe, .. } = swipe_tracker.as_ref()
+            && last_swipe.elapsed() < FINGER_LIFT_THRESHOLD
+        {
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn position(&self) -> Option<(f64, i32)> {
+        let swipe_tracker = self.swipe_tracker.as_ref()?;
+        if let TrackpadSwipe::Active {
+            velocity,
+            viewport_offset,
+            ..
+        } = swipe_tracker.as_ref()
+        {
+            Some((*velocity, *viewport_offset))
+        } else {
+            None
+        }
+    }
+
+    pub fn update_position(&mut self, decay: f64, new_viewport_offset: i32) {
+        let Some(ref mut swipe_tracker) = self.swipe_tracker else {
+            return;
+        };
+        if let TrackpadSwipe::Active {
+            velocity,
+            viewport_offset,
+            ..
+        } = &mut **swipe_tracker
+        {
+            *velocity *= decay;
+            *viewport_offset = new_viewport_offset;
+        }
+    }
+
+    pub fn initiate_cooldown(&mut self) {
+        /// Ticks to keep `SwipeActive` alive after commit for echo-back suppression.
+        const COOLDOWN_TICKS: u8 = 2;
+
+        let Some(ref mut swipe_tracker) = self.swipe_tracker else {
+            return;
+        };
+        if let TrackpadSwipe::Active { cooldown, .. } = &mut **swipe_tracker {
+            *cooldown = COOLDOWN_TICKS;
+        }
+    }
+
+    pub fn recently_ended(&self) -> Option<Instant> {
+        let swipe_tracker = self.swipe_tracker.as_ref()?;
+        if let TrackpadSwipe::RecentlyEnded(ended) = swipe_tracker.as_ref() {
+            Some(*ended)
+        } else {
+            None
+        }
     }
 }

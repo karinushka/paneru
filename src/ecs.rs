@@ -27,6 +27,7 @@ use crate::events::{Event, EventSender};
 use crate::manager::{
     Origin, ProcessApi, Size, Window, WindowManager, WindowManagerApi, WindowManagerOS,
 };
+use crate::overlay::OverlayManager;
 use crate::platform::{PlatformCallbacks, WinID};
 
 pub mod params;
@@ -359,8 +360,7 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
 
     let mut platform_callbacks = PlatformCallbacks::new(sender);
     platform_callbacks.setup_handlers()?;
-    let overlay_manager =
-        crate::overlay::OverlayManager::new(platform_callbacks.main_thread_marker);
+    let overlay_manager = OverlayManager::new(platform_callbacks.main_thread_marker);
     app.insert_non_send_resource(platform_callbacks);
     app.insert_non_send_resource(overlay_manager);
     app.insert_non_send_resource(receiver);

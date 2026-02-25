@@ -1704,6 +1704,8 @@ pub(super) fn update_overlays(
     applications: Query<&Application>,
     config: Res<Config>,
     mission_control: Res<MissionControlActive>,
+    swipe_active: Option<Res<SwipeActive>>,
+    swipe_ended: Option<Res<SwipeRecentlyEnded>>,
     overlay_mgr: Option<NonSendMut<crate::overlay::OverlayManager>>,
 ) {
     use crate::overlay::BorderParams;
@@ -1716,7 +1718,12 @@ pub(super) fn update_overlays(
     let dim_opacity = config.dim_inactive_opacity();
     let border_enabled = config.border_active_window();
 
-    if mission_control.0 {
+    // Hide overlays during swipe and briefly after to prevent compositor flash.
+    let swiping = swipe_active.is_some()
+        || swipe_ended
+            .as_ref()
+            .is_some_and(|e| e.0.elapsed() < Duration::from_millis(150));
+    if swiping || mission_control.0 {
         overlay_mgr.hide_all();
         return;
     }

@@ -586,6 +586,28 @@ fn verify_window_positions(expected_positions: &[(WinID, (i32, i32))], world: &m
     }
 }
 
+fn verify_window_sizes(expected_sizes: &[(WinID, (i32, i32))], world: &mut World) {
+    let mut query = world.query::<&Window>();
+
+    for window in query.iter(world) {
+        if let Some((window_id, (w, h))) = expected_sizes.iter().find(|id| id.0 == window.id()) {
+            let frame = window.frame();
+            assert_eq!(
+                *w,
+                frame.width(),
+                "WinID {window_id}: expected width {w}, got {}",
+                frame.width()
+            );
+            assert_eq!(
+                *h,
+                frame.height(),
+                "WinID {window_id}: expected height {h}, got {}",
+                frame.height()
+            );
+        }
+    }
+}
+
 #[test]
 #[allow(clippy::too_many_lines)]
 fn test_window_shuffle() {
@@ -863,5 +885,64 @@ index = 100
     .try_into()
     .unwrap();
     bevy.insert_resource(config);
+    run_main_loop(&mut bevy, &internal_queue, &commands, check);
+}
+
+/// Off-screen windows should keep the same height as on-screen windows
+/// when `sliver_height` is 1.0 (the default). A previous bug subtracted
+/// `menubar_height` from off-screen window heights, causing a visible
+/// resize when they came into focus.
+#[test]
+fn test_offscreen_windows_preserve_height() {
+    let expected_height = TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT;
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 }, // Settle
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::First)),
+        },
+    ];
+
+    let expected_sizes = [
+        (4, (TEST_WINDOW_WIDTH, expected_height)),
+        (3, (TEST_WINDOW_WIDTH, expected_height)),
+        (2, (TEST_WINDOW_WIDTH, expected_height)),
+        (1, (TEST_WINDOW_WIDTH, expected_height)),
+        (0, (TEST_WINDOW_WIDTH, expected_height)),
+    ];
+
+    let check = |iteration, world: &mut World| {
+        if iteration == 1 {
+            verify_window_sizes(&expected_sizes, world);
+        }
+    };
+
+    let mut bevy = setup_world();
+    let mock_app = setup_process(bevy.world_mut());
+    let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
+    let event_queue = internal_queue.clone();
+
+    let windows = Box::new(move |_| {
+        (0..5)
+            .map(|i| {
+                let origin = Origin::new(100 * i, 0);
+                let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+                let window = MockWindow::new(
+                    i,
+                    IRect {
+                        min: origin,
+                        max: origin + size,
+                    },
+                    event_queue.clone(),
+                    mock_app.clone(),
+                );
+                Window::new(Box::new(window))
+            })
+            .collect::<Vec<_>>()
+    });
+    let window_manager = MockWindowManager { windows };
+    bevy.world_mut()
+        .insert_resource(WindowManager(Box::new(window_manager)));
+
     run_main_loop(&mut bevy, &internal_queue, &commands, check);
 }

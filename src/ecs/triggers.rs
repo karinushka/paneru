@@ -19,9 +19,11 @@ use super::{
     SpawnWindowTrigger, StrayFocusEvent, Timeout, Unmanaged, WMEventTrigger, WindowDraggedMarker,
 };
 use crate::config::{Config, WindowParams};
-use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration, Windows};
+use crate::ecs::params::{
+    ActiveDisplay, ActiveDisplayMut, Configuration, SmoothSwipeTracking, Windows,
+};
 use crate::ecs::{
-    ActiveWorkspaceMarker, LocateDockTrigger, SendMessageTrigger, TrackpadSwipe, WindowSwipeMarker,
+    ActiveWorkspaceMarker, LocateDockTrigger, SendMessageTrigger, WindowSwipeMarker,
     reposition_entity, reshuffle_around, resize_entity,
 };
 use crate::errors::Result;
@@ -456,7 +458,7 @@ pub(super) fn window_focused_trigger(
     applications: Query<&Application>,
     windows: Windows,
     active_display: ActiveDisplay,
-    swipe_tracker: Option<Res<TrackpadSwipe>>,
+    swipe_tracker: SmoothSwipeTracking,
     mut config: Configuration,
     mut commands: Commands,
 ) {
@@ -498,8 +500,7 @@ pub(super) fn window_focused_trigger(
 
     commands.entity(entity).try_insert(FocusedMarker);
 
-    let swipe_active =
-        swipe_tracker.is_some_and(|swipe| matches!(*swipe, TrackpadSwipe::Active { .. }));
+    let swipe_active = swipe_tracker.active();
     if !(config.skip_reshuffle() || config.initializing() || swipe_active) {
         if config.auto_center()
             && let Some((_, _, None)) = windows.get_managed(entity)

@@ -1329,7 +1329,7 @@ fn position_layout_windows<W, P>(
                 let inset =
                     (f64::from(bounds.height()) * (1.0 - config.sliver_height()) / 2.0) as i32;
                 frame.min.y += menubar_height + pad_top + inset;
-                frame.max.y -= inset;
+                frame.max.y += menubar_height + pad_top - inset;
             }
 
             // Multi-display: nudge off-screen windows down to prevent macOS

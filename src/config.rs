@@ -640,9 +640,9 @@ pub struct WindowParams {
 
 impl WindowParams {
     /// Parses the grid string into `(x_ratio, y_ratio, w_ratio, h_ratio)`, all 0.0–1.0.
-    pub fn grid_ratios(&self) -> Option<(i32, i32, i32, i32)> {
+    pub fn grid_ratios(&self) -> Option<(f64, f64, f64, f64)> {
         let grid = self.grid.as_ref()?;
-        let parts: Vec<f32> = grid.split(':').filter_map(|s| s.parse().ok()).collect();
+        let parts: Vec<f64> = grid.split(':').filter_map(|s| s.parse().ok()).collect();
         if parts.len() != 6 {
             return None;
         }
@@ -651,10 +651,10 @@ impl WindowParams {
             return None;
         }
         Some((
-            (parts[2] / cols) as i32,
-            (parts[3] / rows) as i32,
-            (parts[4] / cols) as i32,
-            (parts[5] / rows) as i32,
+            parts[2] / cols,
+            parts[3] / rows,
+            parts[4] / cols,
+            parts[5] / rows,
         ))
     }
 }
@@ -1113,4 +1113,50 @@ fn test_config_defaults() {
     assert_eq!(config.border_width(), 2.0);
     assert_eq!(config.border_radius(), 10.0);
     assert_eq!(config.menubar_height(), None);
+}
+
+#[test]
+#[allow(clippy::float_cmp)]
+fn test_grid_ratios() {
+    use regex::Regex;
+
+    let make = |grid: Option<&str>| WindowParams {
+        title: Regex::new(".*").unwrap(),
+        bundle_id: None,
+        floating: None,
+        index: None,
+        vertical_padding: None,
+        horizontal_padding: None,
+        dont_focus: None,
+        width: None,
+        grid: grid.map(Into::into),
+        border_radius: None,
+    };
+
+    // Standard 2x2 grid, cell (1,1), span 1x1 → bottom-right quarter.
+    assert_eq!(
+        make(Some("2:2:1:1:1:1")).grid_ratios(),
+        Some((0.5, 0.5, 0.5, 0.5))
+    );
+
+    // 3x3 grid, cell (0,0), span 2x1 → top-left, 2/3 width, 1/3 height.
+    assert_eq!(
+        make(Some("3:3:0:0:2:1")).grid_ratios(),
+        Some((0.0, 0.0, 2.0 / 3.0, 1.0 / 3.0))
+    );
+
+    // Full screen: 1x1 grid, cell (0,0), span 1x1.
+    assert_eq!(
+        make(Some("1:1:0:0:1:1")).grid_ratios(),
+        Some((0.0, 0.0, 1.0, 1.0))
+    );
+
+    // Invalid: too few parts.
+    assert_eq!(make(Some("2:2:1:1")).grid_ratios(), None);
+
+    // Invalid: zero columns.
+    assert_eq!(make(Some("0:2:0:0:1:1")).grid_ratios(), None);
+
+    // No grid set.
+    assert_eq!(make(None).grid_ratios(), None);
 }

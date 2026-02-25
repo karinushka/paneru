@@ -69,8 +69,6 @@ pub enum SubCmd {
     Restart,
 
     /// Sends a command via a Unix socket to the running `paneru` daemon.
-    /// This subcommand is hidden from normal `--help` output.
-    #[clap(hide = true)]
     SendCmd {
         #[arg(trailing_var_arg = true)]
         cmd: Vec<String>,

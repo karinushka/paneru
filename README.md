@@ -85,7 +85,7 @@ $ cargo install paneru
 ### Installing from Github
 
 ```shell
-$ git clone https://github.com/karinushka/paneru.git 
+$ git clone https://github.com/karinushka/paneru.git
 $ cd paneru
 $ cargo build --release
 $ cargo install --path .
@@ -180,9 +180,9 @@ Although we strongly recommend using home manager, the paneru flake also exposes
 
 Paneru checks for configuration in following locations:
 
-* `$HOME/.paneru`
-* `$HOME/.paneru.toml`
-* `$XDG_CONFIG_HOME/paneru/paneru.toml`
+- `$HOME/.paneru`
+- `$HOME/.paneru.toml`
+- `$XDG_CONFIG_HOME/paneru/paneru.toml`
 
 Additionally it allows overriding the location with `$PANERU_CONFIG` environment variable.
 
@@ -415,6 +415,71 @@ $ paneru start
 $ paneru
 ```
 
+### Sending Commands
+
+Paneru exposes a `send-cmd` subcommand that lets you control the running
+instance from the command line via a Unix socket (`/tmp/paneru.socket`). Any
+command that can be bound to a hotkey can also be sent programmatically:
+
+```shell
+$ paneru send-cmd <command> [args...]
+```
+
+#### Available commands
+
+| Command                    | Description                                      |
+| -------------------------- | ------------------------------------------------ |
+| `window focus <direction>` | Move focus to a window in the given direction    |
+| `window swap <direction>`  | Swap the focused window with a neighbour         |
+| `window center`            | Center the focused window on screen              |
+| `window resize`            | Cycle through `preset_column_widths`             |
+| `window fullwidth`         | Toggle full-width mode for the focused window    |
+| `window manage`            | Toggle managed/floating state                    |
+| `window equalize`          | Distribute equal heights in the focused stack    |
+| `window stack`             | Stack the focused window onto its left neighbour |
+| `window unstack`           | Unstack the focused window into its own column   |
+| `window nextdisplay`       | Move the focused window to the next display      |
+| `mouse nextdisplay`        | Warp the mouse pointer to the next display       |
+| `printstate`               | Print the internal ECS state to the debug log    |
+| `quit`                     | Quit Paneru                                      |
+
+Where `<direction>` is one of: `west`, `east`, `north`, `south`, `first`, `last`.
+
+#### Examples
+
+```shell
+# Move focus one window to the right.
+$ paneru send-cmd window focus east
+
+# Swap the current window to the left.
+$ paneru send-cmd window swap west
+
+# Center and resize in one shot (two separate calls).
+$ paneru send-cmd window center && paneru send-cmd window resize
+
+# Jump to the left-most window.
+$ paneru send-cmd window focus first
+```
+
+#### Scripting ideas
+
+Because `send-cmd` works over a Unix socket, you can drive Paneru from shell
+scripts, `cron` jobs, or other automation tools:
+
+- **Launch-and-arrange workflow.** Open an application and immediately position
+  it: `open -a Safari && sleep 0.5 && paneru send-cmd window resize`.
+- **One-key layout reset.** Bind a script that focuses the first window, resizes
+  it, then moves east and resizes the next one — recreating a preferred layout
+  after windows get shuffled.
+- **Integration with other tools.** Pipe focus events from tools like
+  [Hammerspoon](https://www.hammerspoon.org) or
+  [skhd](https://github.com/koekeishiya/skhd) into `paneru send-cmd` for
+  compound actions that go beyond a single hotkey.
+- **Multi-display orchestration.** Move a window to the next display and
+  immediately warp the mouse there:
+  ```shell
+  paneru send-cmd window nextdisplay && paneru send-cmd mouse nextdisplay
+  ```
 
 ## Future Enhancements
 
@@ -434,7 +499,7 @@ The system is decoupled into three primary layers:
 
 1.  **Platform Layer (`src/platform/`)**: Directly interfaces with macOS via `objc2` and Core Graphics. It runs the native Cocoa event loop and pumps OS events into a channel consumed by Bevy.
 2.  **Management Layer (`src/manager/`)**: Defines OS-agnostic traits (`WindowManagerApi`, `WindowApi`) that abstract window manipulation. The macOS-specific implementations (`WindowManagerOS`, `WindowOS`) bridge these traits to the Accessibility and SkyLight APIs.
-3.  **ECS Layer (`src/ecs/`)**: The "brain" of the application. Bevy systems process incoming events, handle input triggers, and manage animations. 
+3.  **ECS Layer (`src/ecs/`)**: The "brain" of the application. Bevy systems process incoming events, handle input triggers, and manage animations.
 
 ### Repository Structure
 

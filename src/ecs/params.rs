@@ -143,6 +143,10 @@ impl Configuration<'_> {
     pub fn initializing(&self) -> bool {
         self.initializing.is_some()
     }
+
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
 }
 
 /// A Bevy `SystemParam` that provides immutable access to the currently active `Display` and other displays.

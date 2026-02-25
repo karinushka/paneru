@@ -20,8 +20,8 @@ use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
     ActiveDisplayMarker, BProcess, ExistingMarker, FocusedMarker, FreshMarker,
-    MissionControlActive, PollForNotifications, RepositionMarker, ResizeMarker, SpawnWindowTrigger,
-    Timeout, WMEventTrigger,
+    PollForNotifications, RepositionMarker, ResizeMarker, SpawnWindowTrigger, Timeout,
+    WMEventTrigger,
 };
 use crate::config::{Config, SwipeGestureDirection};
 use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
@@ -36,6 +36,7 @@ use crate::manager::{
     Application, Column, Display, LayoutStrip, Origin, Process, Size, Window, WindowManager,
     WindowOS, bruteforce_windows,
 };
+use crate::overlay::OverlayManager;
 use crate::platform::input::SUPPRESS_MOUSE_MOVES;
 use crate::platform::{PlatformCallbacks, WorkspaceId};
 use std::sync::atomic::Ordering;
@@ -1699,20 +1700,14 @@ pub(crate) fn reposition_dragged_window(
     }
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
+#[allow(clippy::needless_pass_by_value)]
 pub(super) fn update_overlays(
-    windows: Query<(
-        &Window,
-        Has<FocusedMarker>,
-        Option<&Unmanaged>,
-        Option<&ChildOf>,
-    )>,
+    windows: Windows,
     applications: Query<&Application>,
-    config: Res<Config>,
-    mission_control: Res<MissionControlActive>,
     swipe_active: Option<Res<SwipeActive>>,
     swipe_ended: Option<Res<SwipeRecentlyEnded>>,
-    overlay_mgr: Option<NonSendMut<crate::overlay::OverlayManager>>,
+    overlay_mgr: Option<NonSendMut<OverlayManager>>,
+    config: Configuration,
 ) {
     use crate::overlay::BorderParams;
     use objc2_foundation::{NSPoint, NSRect, NSSize};
@@ -1721,15 +1716,15 @@ pub(super) fn update_overlays(
         return;
     };
 
-    let dim_opacity = config.dim_inactive_opacity();
-    let border_enabled = config.border_active_window();
+    let dim_opacity = config.config().dim_inactive_opacity();
+    let border_enabled = config.config().border_active_window();
 
     // Hide overlays during swipe and briefly after to prevent compositor flash.
     let swiping = swipe_active.is_some()
         || swipe_ended
             .as_ref()
             .is_some_and(|e| e.0.elapsed() < Duration::from_millis(150));
-    if swiping || mission_control.0 {
+    if swiping || config.mission_control_active() {
         overlay_mgr.hide_all();
         return;
     }
@@ -1741,22 +1736,15 @@ pub(super) fn update_overlays(
 
     // Find the focused managed window's absolute CG frame.
     // Skip floating/unmanaged windows — no overlay or border for those.
-    let mut focused_abs_cg: Option<NSRect> = None;
-    let mut focused_border_radius: Option<f64> = None;
-    let mut floating_focused = false;
-    for (window, is_focused, unmanaged, child_of) in &windows {
-        if !is_focused {
-            continue;
-        }
-        if unmanaged.is_some() {
-            floating_focused = true;
-            continue;
-        }
-
+    let (focused_abs_cg, focused_border_radius) = if let Some((window, _, unmanaged)) = windows
+        .focused()
+        .and_then(|(_, entity)| windows.get_managed(entity))
+        && unmanaged.is_none()
+    {
         let frame = window.frame();
         let h_pad = window.horizontal_padding();
         let v_pad = window.vertical_padding();
-        focused_abs_cg = Some(NSRect::new(
+        let focused_abs_cg = Some(NSRect::new(
             NSPoint::new(
                 f64::from(frame.min.x + h_pad),
                 f64::from(frame.min.y + v_pad),
@@ -1769,36 +1757,31 @@ pub(super) fn update_overlays(
 
         // Look up per-window border_radius from config (dynamic, respects hot-reload).
         let title = window.title().unwrap_or_default();
-        let bundle_id = child_of
-            .and_then(|c| applications.get(c.parent()).ok())
+        let bundle_id = windows
+            .find_parent(window.id())
+            .and_then(|(_, _, parent)| applications.get(parent).ok())
             .map(|app| app.bundle_id().unwrap_or_default())
             .unwrap_or_default();
         let properties = config.find_window_properties(&title, bundle_id);
-        focused_border_radius = properties.iter().find_map(|p| p.border_radius);
-        break;
-    }
+        let focused_border_radius = properties.iter().find_map(|p| p.border_radius);
 
-    if floating_focused {
-        overlay_mgr.hide_all();
-        return;
-    }
-
-    if focused_abs_cg.is_none() {
+        (focused_abs_cg, focused_border_radius)
+    } else {
         // No managed window has focus — hide the overlay rather than
         // dimming everything (e.g. during startup or when only floating
         // windows exist).
         overlay_mgr.hide_all();
         return;
-    }
+    };
 
     let border_params = border_enabled.then(|| BorderParams {
-        color: config.border_color(),
-        opacity: config.border_opacity(),
-        width: config.border_width(),
-        radius: focused_border_radius.unwrap_or_else(|| config.border_radius()),
+        color: config.config().border_color(),
+        opacity: config.config().border_opacity(),
+        width: config.config().border_width(),
+        radius: focused_border_radius.unwrap_or_else(|| config.config().border_radius()),
     });
 
-    let dim_color = config.dim_inactive_color();
+    let dim_color = config.config().dim_inactive_color();
     overlay_mgr.update(
         dim_opacity,
         dim_color,

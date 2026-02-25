@@ -24,7 +24,7 @@ use super::{
     Timeout, WMEventTrigger,
 };
 use crate::config::Config;
-use crate::ecs::params::{ActiveDisplay, Windows};
+use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, BruteforceWindows, DockPosition, Initializing, LocateDockTrigger,
     ReshuffleAroundMarker, StackAdjustedResize, SwipeActive, SwipeRecentlyEnded, Unmanaged,
@@ -1231,15 +1231,14 @@ pub(super) fn window_update_frame(
     mut windows: Query<(&mut Window, Entity, Has<StackAdjustedResize>)>,
     focused: Option<Single<Entity, With<FocusedMarker>>>,
     active_display: ActiveDisplay,
-    initializing: Option<Res<Initializing>>,
     swipe_active: Option<Res<SwipeActive>>,
+    config: Configuration,
     mut commands: Commands,
 ) {
     for event in messages.read() {
         match event {
             Event::WindowMoved { .. } | Event::WindowResized { .. } if swipe_active.is_some() => {}
             Event::WindowMoved { window_id } | Event::WindowResized { window_id } => {
-                warn!("window_update_frame: {event:?} (swipe_active=false)");
                 // Find the window, update its frame, and extract info — releasing
                 // the mutable borrow on `windows` so we can access other entities.
                 let info = {
@@ -1268,7 +1267,7 @@ pub(super) fn window_update_frame(
                     continue;
                 }
 
-                if matches!(event, Event::WindowResized { window_id: _ }) && initializing.is_none()
+                if matches!(event, Event::WindowResized { window_id: _ }) && !config.initializing()
                 {
                     // When the user drags the top edge of a stacked window, macOS
                     // changes both its origin.y and height while leaving its bottom

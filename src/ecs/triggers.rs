@@ -15,7 +15,7 @@ use std::time::Duration;
 use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
-    ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, Initializing, MissionControlActive,
+    ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, MissionControlActive,
     SpawnWindowTrigger, StrayFocusEvent, SwipeActive, Timeout, Unmanaged, WMEventTrigger,
     WindowDraggedMarker,
 };
@@ -457,9 +457,8 @@ pub(super) fn window_focused_trigger(
     applications: Query<&Application>,
     windows: Windows,
     active_display: ActiveDisplay,
-    mut config: Configuration,
-    initializing: Option<Res<Initializing>>,
     swipe_active: Option<Res<SwipeActive>>,
+    mut config: Configuration,
     mut commands: Commands,
 ) {
     const STRAY_FOCUS_RETRY_SEC: u64 = 2;
@@ -500,7 +499,7 @@ pub(super) fn window_focused_trigger(
 
     commands.entity(entity).try_insert(FocusedMarker);
 
-    if !config.skip_reshuffle() && initializing.is_none() && swipe_active.is_none() {
+    if !config.skip_reshuffle() && !config.initializing() && swipe_active.is_none() {
         if config.auto_center()
             && let Some((_, _, None)) = windows.get_managed(entity)
         {
@@ -947,10 +946,8 @@ pub(super) fn spawn_window_trigger(
     mut apps: Query<(Entity, &mut Application)>,
     mut active_display: ActiveDisplayMut,
     mut config: Configuration,
-    initializing: Option<Res<Initializing>>,
     mut commands: Commands,
 ) {
-    let initializing = initializing.is_some();
     let new_windows = &mut trigger.event_mut().0;
 
     while let Some(mut window) = new_windows.pop() {
@@ -1015,7 +1012,6 @@ pub(super) fn spawn_window_trigger(
             &windows,
             &mut apps,
             &mut config,
-            initializing,
             &mut commands,
         );
     }
@@ -1086,7 +1082,6 @@ fn apply_window_properties(
     windows: &Windows,
     apps: &mut Query<(Entity, &mut Application)>,
     config: &mut Configuration,
-    initializing: bool,
     commands: &mut Commands,
 ) {
     let floating = properties
@@ -1129,7 +1124,7 @@ fn apply_window_properties(
         None => strip.append(entity),
     }
 
-    if initializing {
+    if config.initializing() {
         // During init, skip per-window reshuffles. finish_setup does a single
         // reshuffle after all windows are added.
     } else if dont_focus {

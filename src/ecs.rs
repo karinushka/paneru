@@ -7,7 +7,7 @@ use bevy::app::{PostUpdate, PreUpdate, Startup};
 use bevy::ecs::message::Messages;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::common_conditions::resource_exists;
-use bevy::ecs::system::Commands;
+use bevy::ecs::system::{Commands, Res};
 use bevy::prelude::Event as BevyEvent;
 use bevy::tasks::Task;
 use bevy::time::Timer;
@@ -63,7 +63,9 @@ pub fn register_systems(app: &mut bevy::app::App) {
                 .chain()
                 .run_if(resource_exists::<Initializing>),
             systems::window_swiper,
-            systems::swipe_idle_tracker.run_if(resource_exists::<SwipeActive>),
+            systems::swipe_idle_tracker.run_if(|swipe: Option<Res<TrackpadSwipe>>| {
+                matches!(swipe.as_deref(), Some(TrackpadSwipe::Active { .. }))
+            }),
             systems::add_launched_process,
             systems::add_launched_application,
             systems::fresh_marker_cleanup,
@@ -191,27 +193,28 @@ pub struct StackAdjustedResize;
 #[derive(Component)]
 pub struct WindowSwipeMarker(pub f64);
 
-/// Resource indicating that a trackpad swipe gesture is active.
-/// While present, window repositioning uses fast compositor-level moves
-/// instead of slow AX API calls. When inertia ends, positions are committed
-/// to AX and a cooldown keeps the resource alive for a few more ticks
-/// so that all guard checks (`swipe_active.is_some()`) hold until macOS
-/// has settled.
 #[derive(Resource)]
-pub struct SwipeActive {
-    pub last_swipe: std::time::Instant,
-    pub velocity: f64,
-    pub viewport_offset: i32,
-    /// When >0, inertia has ended and the resource is counting down before
-    /// final removal.  Decremented once per tick in `swipe_idle_tracker`.
-    pub cooldown: u8,
-}
+pub enum TrackpadSwipe {
+    /// Resource indicating that a trackpad swipe gesture is active.
+    /// While present, window repositioning uses fast compositor-level moves
+    /// instead of slow AX API calls. When inertia ends, positions are committed
+    /// to AX and a cooldown keeps the resource alive for a few more ticks
+    /// so that all guard checks (`swipe_active.is_some()`) hold until macOS
+    /// has settled.
+    Active {
+        last_swipe: std::time::Instant,
+        velocity: f64,
+        viewport_offset: i32,
+        /// When >0, inertia has ended and the resource is counting down before
+        /// final removal.  Decremented once per tick in `swipe_idle_tracker`.
+        cooldown: u8,
+    },
 
-/// Resource inserted when `SwipeActive` is removed.  Guards against
-/// stale drag markers (and other triggers) that fire after a swipe and
-/// would cause `reshuffle_layout_strip` to snap the viewport home.
-#[derive(Resource)]
-pub struct SwipeRecentlyEnded(pub std::time::Instant);
+    /// Resource inserted when `SwipeActive` is removed.  Guards against
+    /// stale drag markers (and other triggers) that fire after a swipe and
+    /// would cause `reshuffle_layout_strip` to snap the viewport home.
+    RecentlyEnded(std::time::Instant),
+}
 
 /// Stores the width ratio of a window before it was made full-width.
 /// When a stacked window goes full-width, it is unstacked first;

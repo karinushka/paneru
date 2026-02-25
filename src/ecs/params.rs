@@ -14,7 +14,10 @@ use tracing::warn;
 use super::{ActiveDisplayMarker, FocusFollowsMouse, MissionControlActive, SkipReshuffle};
 use crate::{
     config::{Config, WindowParams},
-    ecs::{ActiveWorkspaceMarker, DockPosition, FocusedMarker, FullWidthMarker, Unmanaged},
+    ecs::{
+        ActiveWorkspaceMarker, DockPosition, FocusedMarker, FullWidthMarker, Initializing,
+        Unmanaged,
+    },
     manager::{Application, Display, LayoutStrip, Window},
     platform::{ProcessSerialNumber, WinID},
 };
@@ -31,6 +34,8 @@ pub struct Configuration<'w> {
     skip_reshuffle: ResMut<'w, SkipReshuffle>,
     /// Resource indicating whether Mission Control is currently active.
     mission_control_active: Res<'w, MissionControlActive>,
+
+    initializing: Option<Res<'w, Initializing>>,
 }
 
 impl Configuration<'_> {
@@ -133,6 +138,10 @@ impl Configuration<'_> {
     /// `true` if Mission Control is active, `false` otherwise.
     pub fn mission_control_active(&self) -> bool {
         self.mission_control_active.0
+    }
+
+    pub fn initializing(&self) -> bool {
+        self.initializing.is_some()
     }
 }
 

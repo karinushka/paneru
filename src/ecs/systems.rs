@@ -1577,7 +1577,7 @@ fn position_layout_windows<W, P>(
         let visible_left = frame.min.x.max(pad_left);
         let visible_right = frame.max.x.min(padded_right);
         let visible = (visible_right - visible_left).max(0);
-        let is_off_screen = visible <= config.sliver_width();
+        let is_off_screen = visible <= sliver_width.max(20);
 
         if is_off_screen {
             // Account for per-window horizontal_padding: reposition() adds

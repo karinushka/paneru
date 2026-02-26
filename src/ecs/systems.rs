@@ -1535,10 +1535,6 @@ fn position_layout_windows<W, P>(
     let viewport_offset = viewport_offset + pad_left;
 
     let display_width = active_display.bounds().width();
-    let other_display = active_display.other().next();
-    let display_above = other_display
-        .is_some_and(|other_display| active_display.bounds().min.y > other_display.bounds().min.y);
-
     let padded_right = display_width - pad_right;
     let layout_strip = active_display.active_strip();
     for (entity, frame) in layout_strip.calculate_layout(
@@ -1610,14 +1606,6 @@ fn position_layout_windows<W, P>(
                     frame.min.y += menubar_height + pad_top + inset;
                     frame.max.y += menubar_height + pad_top - inset;
                 }
-            }
-
-            // Multi-display: nudge off-screen windows down to prevent macOS
-            // from relocating them to the other display.
-            if display_above {
-                let bump = bounds.height() / 4;
-                frame.min.y += bump;
-                frame.max.y += bump;
             }
         } else {
             frame.min.y += menubar_height + pad_top;

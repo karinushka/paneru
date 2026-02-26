@@ -1126,7 +1126,7 @@ pub(super) fn window_update_frame(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn displays_rearranged(
     mut messages: MessageReader<Event>,
-    workspaces: Query<(&LayoutStrip, Entity, &ChildOf)>,
+    workspaces: Query<(&LayoutStrip, Entity, Option<&ChildOf>)>,
     mut displays: Query<(&mut Display, Entity)>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
@@ -1134,7 +1134,7 @@ pub(super) fn displays_rearranged(
     for event in messages.read() {
         match event {
             Event::DisplayAdded { display_id } => {
-                add_display(*display_id, &window_manager, &mut commands);
+                add_display(*display_id, &workspaces, &window_manager, &mut commands);
             }
             Event::DisplayRemoved { display_id } => {
                 remove_display(*display_id, &workspaces, &mut displays, &mut commands);
@@ -1150,6 +1150,7 @@ pub(super) fn displays_rearranged(
 
 fn add_display(
     display_id: CGDirectDisplayID,
+    existing_strips: &Query<(&LayoutStrip, Entity, Option<&ChildOf>)>,
     window_manager: &Res<WindowManager>,
     commands: &mut Commands,
 ) {
@@ -1168,18 +1169,31 @@ fn add_display(
     let display_entity = commands.spawn(display).id();
 
     for id in workspaces {
-        commands.spawn((
-            origin.clone(),
-            LayoutStrip::new(id),
-            Scrolling::default(),
-            ChildOf(display_entity),
-        ));
+        // Prefer re-parenting an existing strip (which has windows) over creating
+        // a new empty one. This handles the case where a display was disconnected,
+        // its strips were re-parented to the remaining display, and then the
+        // display reconnects.
+        if let Some((_, strip_entity, _)) = existing_strips
+            .iter()
+            .find(|(strip, _, parent)| strip.id() == id && parent.is_none())
+        {
+            debug!("Re-parenting existing strip {id} to new display {display_id}");
+            if let Ok(mut cmd) = commands.get_entity(strip_entity) {
+                cmd.try_insert(ChildOf(display_entity));
+            }
+        } else {
+            commands.spawn((
+                origin.clone(),
+                LayoutStrip::new(id),
+                ChildOf(display_entity),
+            ));
+        }
     }
 }
 
 fn remove_display(
     display_id: CGDirectDisplayID,
-    workspaces: &Query<(&LayoutStrip, Entity, &ChildOf)>,
+    workspaces: &Query<(&LayoutStrip, Entity, Option<&ChildOf>)>,
     displays: &mut Query<(&mut Display, Entity)>,
     commands: &mut Commands,
 ) {
@@ -1195,7 +1209,7 @@ fn remove_display(
 
     for (strip, entity, _) in workspaces
         .into_iter()
-        .filter(|(_, _, child)| child.parent() == display_entity)
+        .filter(|(_, _, child)| child.is_some_and(|child| child.parent() == display_entity))
     {
         if strip.len() == 0 {
             // There are no windows on the layout strip, don't bother orphaning them.

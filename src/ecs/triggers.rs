@@ -996,12 +996,7 @@ pub(super) fn spawn_window_trigger(
             debug!("Applying window properties for '{}'", window.id());
         }
 
-        apply_window_defaults(
-            &mut window,
-            &mut active_display,
-            &properties,
-            config.edge_padding(),
-        );
+        apply_window_defaults(&mut window, &mut active_display, &properties, config.edge_padding());
 
         // Insert the window into the internal Bevy state.
         let entity = commands.spawn((window, ChildOf(app_entity))).id();

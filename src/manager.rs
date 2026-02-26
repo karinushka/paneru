@@ -35,7 +35,8 @@ use skylight::{
     SLSCopyManagedDisplaySpaces, SLSCopyWindowsWithOptionsAndTags, SLSFindWindowAndOwner,
     SLSGetConnectionIDForPSN, SLSGetCurrentCursorLocation, SLSGetDisplayMenubarHeight,
     SLSGetSpaceManagementMode, SLSGetWindowBounds, SLSMainConnectionID,
-    SLSManagedDisplayGetCurrentSpace, SLSWindowIteratorAdvance, SLSWindowIteratorGetAttributes,
+    SLSManagedDisplayGetCurrentSpace, SLSSpaceGetType, SLSWindowIteratorAdvance,
+    SLSWindowIteratorGetAttributes,
     SLSWindowIteratorGetParentID, SLSWindowIteratorGetTags, SLSWindowIteratorGetWindowID,
     SLSWindowQueryResultCopyWindows, SLSWindowQueryWindows,
 };
@@ -112,6 +113,8 @@ pub trait WindowManagerApi: Send + Sync {
     ///
     /// `Ok(u64)` with the space ID if successful, otherwise `Err(Error)`.
     fn active_display_space(&self, display_id: CGDirectDisplayID) -> Result<WorkspaceId>;
+    /// Returns `true` if the current space on the given display is a native fullscreen space.
+    fn is_fullscreen_space(&self, display_id: CGDirectDisplayID) -> bool;
     /// Centers the mouse cursor on a given window within its display bounds if it's not already within the window.
     ///
     /// # Arguments
@@ -413,6 +416,12 @@ impl WindowManagerApi for WindowManagerOS {
         Display::uuid_from_id(display_id).map(|uuid| unsafe {
             SLSManagedDisplayGetCurrentSpace(self.main_cid, &raw const *uuid)
         })
+    }
+
+    fn is_fullscreen_space(&self, display_id: CGDirectDisplayID) -> bool {
+        self.active_display_space(display_id)
+            .map(|space_id| unsafe { SLSSpaceGetType(self.main_cid, space_id) } == 4)
+            .unwrap_or(false)
     }
 
     /// Centers the mouse cursor on the window if it's not already within the window's bounds.

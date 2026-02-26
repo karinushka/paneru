@@ -1289,9 +1289,8 @@ pub(super) fn window_update_frame(
                     // Reshuffling around an off-screen sliver would call
                     // expose_window on it, pulling it into view and causing a
                     // feedback loop.
-                    if let Some(focused) = &focused {
-                        reshuffle_around(**focused, &mut commands);
-                    }
+                    let target = focused.as_deref().copied().unwrap_or(entity);
+                    reshuffle_around(target, &mut commands);
                 }
             }
             _ => (),

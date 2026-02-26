@@ -253,6 +253,10 @@ impl WindowManagerApi for MockWindowManager {
         Ok(TEST_WORKSPACE_ID)
     }
 
+    fn is_fullscreen_space(&self, _display_id: CGDirectDisplayID) -> bool {
+        false
+    }
+
     /// Does nothing, as mouse centering is not tested at this level.
     #[instrument(level = Level::DEBUG, skip_all, ret)]
     fn center_mouse(&self, _window: Option<&Window>, _display_bounds: &IRect) {
@@ -461,6 +465,10 @@ impl WindowApi for MockWindow {
     #[instrument(level = Level::TRACE, skip(self), ret)]
     fn is_minimized(&self) -> bool {
         self.minimized
+    }
+
+    fn is_full_screen(&self) -> bool {
+        false
     }
 }
 

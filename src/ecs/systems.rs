@@ -1569,9 +1569,12 @@ fn position_layout_windows<W, P>(
 
     let padded_right = display_width - pad_right;
     let layout_strip = active_display.active_strip();
-    for (entity, frame) in
-        layout_strip.calculate_layout(viewport_offset, &bounds, &get_window_frame)
-    {
+    for (entity, frame) in layout_strip.calculate_layout(
+        viewport_offset,
+        &bounds,
+        config.sliver_width(),
+        &get_window_frame,
+    ) {
         let Some(old_frame) = get_window_frame(entity) else {
             continue;
         };
@@ -1600,7 +1603,7 @@ fn position_layout_windows<W, P>(
             // lands exactly sliver_width pixels from the screen edge.
             let h_pad = get_window_h_pad(entity);
             let width = frame.width();
-            let window_center = frame.min.x + width / 2;
+            let window_center = frame.center().x;
             if window_center <= pad_left {
                 frame.min.x = sliver_width + h_pad - width;
                 frame.max.x = sliver_width + h_pad;

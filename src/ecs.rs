@@ -118,7 +118,8 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::stray_focus_observer)
         .add_observer(triggers::locate_dock_trigger)
         .add_observer(triggers::send_message_trigger)
-        .add_observer(triggers::window_removal_trigger);
+        .add_observer(triggers::window_removal_trigger)
+        .add_observer(triggers::rescue_orphaned_windows_trigger);
 }
 
 /// Marker component for the currently focused window.
@@ -278,6 +279,10 @@ pub struct LocateDockTrigger(pub Entity);
 
 #[derive(BevyEvent)]
 pub struct SendMessageTrigger(pub Event);
+
+/// Trigger to rescue windows from an orphaned strip into the active workspace.
+#[derive(BevyEvent)]
+pub struct RescueOrphanedWindowsTrigger(pub Vec<Entity>);
 
 pub fn reposition_entity(
     entity: Entity,

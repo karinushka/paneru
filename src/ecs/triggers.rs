@@ -16,7 +16,8 @@ use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
     ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, Initializing, MissionControlActive,
-    SpawnWindowTrigger, StrayFocusEvent, Timeout, Unmanaged, WMEventTrigger, WindowDraggedMarker,
+    RescueOrphanedWindowsTrigger, SpawnWindowTrigger, StrayFocusEvent, Timeout, Unmanaged,
+    WMEventTrigger, WindowDraggedMarker,
 };
 use crate::config::{Config, WindowParams};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration, Windows};
@@ -812,6 +813,38 @@ pub(super) fn window_managed_trigger(
 
     active_display.active_strip().append(entity);
     reshuffle_around(entity, &mut commands);
+}
+
+/// Rescues windows from an orphaned strip into the active workspace.
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn rescue_orphaned_windows_trigger(
+    trigger: On<RescueOrphanedWindowsTrigger>,
+    mut active_display: ActiveDisplayMut,
+    windows: Windows,
+    mut commands: Commands,
+) {
+    let strip = active_display.active_strip();
+    for &entity in &trigger.event().0 {
+        if let Some(window) = windows.get(entity) {
+            if strip.index_of(entity).is_err() {
+                debug!(
+                    "rescued window {} ({entity}) into strip {}",
+                    window.id(),
+                    strip.id(),
+                );
+                strip.append(entity);
+                reshuffle_around(entity, &mut commands);
+            } else {
+                debug!(
+                    "window {} ({entity}) already in strip {}, skipping",
+                    window.id(),
+                    strip.id(),
+                );
+            }
+        } else {
+            warn!("cannot rescue entity {entity}: window no longer exists");
+        }
+    }
 }
 
 /// Handles the event when a window is destroyed. The windows itself is not removed from the layout

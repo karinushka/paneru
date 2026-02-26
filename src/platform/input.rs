@@ -295,6 +295,10 @@ impl InputHandler {
             }
         }
 
+        // On a native fullscreen space, keybindings are still intercepted so
+        // that paneru can actively switch back to the previous workspace.
+        // Non-paneru keys pass through naturally (find_keybind returns None).
+
         let keycode = keycode.try_into().ok();
         keycode
             .and_then(|keycode| self.config.find_keybind(keycode, &mask))

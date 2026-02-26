@@ -140,6 +140,16 @@ unsafe extern "C" {
     /// extern `uint64_t` SLSManagedDisplayGetCurrentSpace(int cid, `CFStringRef` uuid);
     pub fn SLSManagedDisplayGetCurrentSpace(cid: ConnID, uuid: CFStringRef) -> u64;
 
+    /// Returns the type of a space.
+    ///
+    /// # Returns
+    ///
+    /// `0` = user/desktop, `4` = fullscreen, `2` = system (e.g. dashboard).
+    ///
+    /// # Original signature
+    /// extern int SLSSpaceGetType(int cid, `uint64_t` `space_id`);
+    pub fn SLSSpaceGetType(cid: ConnID, space_id: u64) -> i32;
+
     /// Copies the active menu bar display identifier.
     /// This function returns a `CFStringRef` that identifies the display where the primary menu bar is currently active.
     ///

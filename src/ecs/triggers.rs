@@ -652,13 +652,12 @@ pub(super) fn swipe_gesture_trigger(
     focused_window: Single<(&Window, Entity), With<FocusedMarker>>,
     active_display: ActiveDisplay,
     config: Configuration,
-    mission_control: Res<MissionControlActive>,
     mut commands: Commands,
 ) {
     let Event::Swipe { ref deltas } = trigger.event().0 else {
         return;
     };
-    if mission_control.0 {
+    if config.mission_control_active() {
         return;
     }
     if config

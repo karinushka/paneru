@@ -25,7 +25,7 @@ use crate::config::Config;
 use crate::ecs::params::{ActiveDisplay, Configuration, SmoothSwipeTracking, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, BruteforceWindows, DockPosition, Initializing, LocateDockTrigger,
-    ReshuffleAroundMarker, StackAdjustedResize, TrackpadSwipe, Unmanaged,
+    ReshuffleAroundMarker, SpaceRecentlyChanged, StackAdjustedResize, TrackpadSwipe, Unmanaged,
     WindowDraggedMarker, WindowSwipeMarker, reposition_entity, reshuffle_around, resize_entity,
 };
 use crate::events::Event;
@@ -1691,6 +1691,7 @@ pub(super) fn update_overlays(
     applications: Query<&Application>,
     _active_display: ActiveDisplay,
     swipe_tracker: Option<Res<TrackpadSwipe>>,
+    space_changed: Option<Res<SpaceRecentlyChanged>>,
     overlay_mgr: Option<NonSendMut<OverlayManager>>,
     config: Configuration,
 ) {
@@ -1704,7 +1705,8 @@ pub(super) fn update_overlays(
     let dim_opacity = config.config().dim_inactive_opacity();
     let border_enabled = config.config().border_active_window();
 
-    // Hide overlays during swipe, mission control, or on fullscreen windows.
+    // Hide overlays during swipe, mission control, native fullscreen spaces,
+    // or briefly after a space change (macOS space-switch animation).
     let swiping = match swipe_tracker.as_deref() {
         Some(TrackpadSwipe::Active { .. }) => true,
         Some(TrackpadSwipe::RecentlyEnded(elapsed)) => {
@@ -1712,7 +1714,13 @@ pub(super) fn update_overlays(
         }
         None => false,
     };
-    if swiping || config.mission_control_active() {
+    let space_switching = space_changed
+        .as_ref()
+        .is_some_and(|s| s.0.elapsed() < Duration::from_millis(300));
+    // ON_FULLSCREEN_SPACE is set in workspace_change_trigger because this
+    // system cannot run when no LayoutStrip has ActiveWorkspaceMarker
+    // (which is the case on native fullscreen spaces).
+    if swiping || config.mission_control_active() || space_switching {
         overlay_mgr.hide_all();
         return;
     }

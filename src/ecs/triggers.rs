@@ -11,12 +11,14 @@ use notify::{EventKind, Watcher};
 use objc2_app_kit::NSScreen;
 use objc2_foundation::{NSNumber, NSString, ns_string};
 use std::pin::Pin;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
     ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, MissionControlActive,
-    SpawnWindowTrigger, StrayFocusEvent, Timeout, Unmanaged, WMEventTrigger, WindowDraggedMarker,
+    NativeFullscreenMarker, SpaceRecentlyChanged, SpawnWindowTrigger, StrayFocusEvent, Timeout,
+    Unmanaged, WMEventTrigger, WindowDraggedMarker,
 };
 use crate::config::{Config, WindowParams};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration, Windows};
@@ -245,7 +247,9 @@ fn windows_not_in_strip<F: Fn(WinID) -> Option<Entity>>(
 pub(super) fn workspace_change_trigger(
     trigger: On<WMEventTrigger>,
     active_display: Single<&Display, With<ActiveDisplayMarker>>,
-    workspaces: Query<(&LayoutStrip, Entity, Has<ActiveWorkspaceMarker>)>,
+    mut workspaces: Query<(&mut LayoutStrip, Entity, Has<ActiveWorkspaceMarker>)>,
+    windows: Windows,
+    fs_query: Query<&NativeFullscreenMarker>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
@@ -258,8 +262,53 @@ pub(super) fn workspace_change_trigger(
         return;
     };
 
+    let fullscreen = window_manager.is_fullscreen_space(active_display.id());
+    let was_fullscreen =
+        crate::platform::input::ON_FULLSCREEN_SPACE.swap(fullscreen, Ordering::Relaxed);
+    debug!("workspace_change: space={workspace_id} fullscreen={fullscreen}");
+
+    // Entering fullscreen → remove the focused window from the strip so there
+    // is no layout gap and mark it with NativeFullscreenMarker.
+    // Guard: the focused entity must not already carry the marker (which means
+    // we're just switching TO an existing fullscreen space, not a new one).
+    if !was_fullscreen && fullscreen {
+        if let Some((_, entity)) = windows.focused() {
+            if !fs_query.contains(entity) {
+                if let Some((mut strip, _, _)) =
+                    workspaces.iter_mut().find(|(_, _, active)| *active)
+                {
+                    let idx = strip.index_of(entity).ok().unwrap_or(strip.len());
+                    strip.remove(entity);
+                    let next_order = fs_query
+                        .iter()
+                        .map(|m| m.order + 1)
+                        .max()
+                        .unwrap_or(0);
+                    debug!("entering fullscreen: removed {entity} (idx={idx}), order={next_order}");
+                    commands
+                        .entity(entity)
+                        .insert(NativeFullscreenMarker { order: next_order });
+                    // Reshuffle around nearest remaining window to close the gap.
+                    if let Some(target) = strip
+                        .get(idx.saturating_sub(1))
+                        .ok()
+                        .and_then(|col| col.top())
+                    {
+                        reshuffle_around(target, &mut commands);
+                    }
+                }
+            }
+        }
+    }
+
+    // Dynamic fullscreen spaces (created by macOS when a window goes fullscreen)
+    // have no LayoutStrip entity.  Only remove the old ActiveWorkspaceMarker when
+    // a new strip exists to receive it, so that ActiveDisplay keeps resolving and
+    // command systems can raise a tiled window to switch back.
+    let has_matching_strip = workspaces.iter().any(|(strip, _, _)| strip.id() == workspace_id);
+
     for (strip, entity, active) in workspaces {
-        if active && strip.id() != workspace_id {
+        if active && strip.id() != workspace_id && has_matching_strip {
             debug!("Workspace id {} no longer active", strip.id());
             commands
                 .entity(entity)
@@ -270,6 +319,8 @@ pub(super) fn workspace_change_trigger(
             commands.entity(entity).try_insert(ActiveWorkspaceMarker);
         }
     }
+
+    commands.insert_resource(SpaceRecentlyChanged(std::time::Instant::now()));
 }
 
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
@@ -297,6 +348,7 @@ pub(super) fn active_workspace_trigger(
         return;
     };
 
+    let had_moved_windows = !moved_windows.is_empty();
     for entity in moved_windows {
         debug!("Window {entity} moved to workspace {workspace_id}.");
 
@@ -308,6 +360,28 @@ pub(super) fn active_workspace_trigger(
         });
 
         reshuffle_around(entity, &mut commands);
+    }
+
+    // Always reshuffle on workspace activation so that windows are
+    // re-laid-out after returning from a different space (e.g. native
+    // fullscreen) where they may have been positioned with stale data.
+    // Prefer the focused window so the viewport centres on what the user
+    // was looking at; fall back to the first column.
+    if !had_moved_windows {
+        let focused_entity = windows
+            .focused()
+            .map(|(_, entity)| entity)
+            .filter(|e| workspaces.get(trigger.entity).is_ok_and(|s| s.index_of(*e).is_ok()));
+        let fallback = || {
+            workspaces
+                .get(trigger.entity)
+                .ok()
+                .and_then(|s| s.get(0).ok())
+                .and_then(|col| col.top())
+        };
+        if let Some(entity) = focused_entity.or_else(fallback) {
+            reshuffle_around(entity, &mut commands);
+        }
     }
 }
 
@@ -540,11 +614,15 @@ pub(super) fn swipe_gesture_trigger(
     focused_window: Single<(&Window, Entity), With<FocusedMarker>>,
     active_display: ActiveDisplay,
     config: Configuration,
+    mission_control: Res<MissionControlActive>,
     mut commands: Commands,
 ) {
     let Event::Swipe { ref deltas } = trigger.event().0 else {
         return;
     };
+    if mission_control.0 {
+        return;
+    }
     if config
         .swipe_gesture_fingers()
         .is_none_or(|fingers| deltas.len() != fingers)
@@ -571,12 +649,20 @@ pub(super) fn swipe_gesture_trigger(
 pub(super) fn mission_control_trigger(
     trigger: On<WMEventTrigger>,
     mut mission_control_active: ResMut<MissionControlActive>,
+    mut commands: Commands,
 ) {
     match trigger.event().0 {
         Event::MissionControlShowAllWindows
         | Event::MissionControlShowFrontWindows
         | Event::MissionControlShowDesktop => {
             mission_control_active.as_mut().0 = true;
+            // The expose gesture may trigger swipe events before this AX
+            // notification arrives, setting SUPPRESS_MOUSE_MOVES = true.
+            // Reset suppression flags immediately so Mission Control is
+            // fully interactive.  SwipeActive cleanup continues normally.
+            crate::platform::input::SUPPRESS_MOUSE_MOVES.store(false, Ordering::Relaxed);
+            crate::manager::app::SUPPRESS_AX_MOVED.store(false, Ordering::Relaxed);
+            commands.remove_resource::<TrackpadSwipe>();
         }
         Event::MissionControlExit => {
             mission_control_active.as_mut().0 = false;

@@ -21,6 +21,11 @@ use tracing::{error, info};
 /// changes, etc. while windows are sliding during a swipe/inertia).
 pub static SUPPRESS_MOUSE_MOVES: AtomicBool = AtomicBool::new(false);
 
+/// When `true`, the active display is showing a native macOS fullscreen space.
+/// Keybindings are not intercepted so that macOS can handle native space
+/// switching (e.g. Ctrl+arrow, trackpad gestures).
+pub static ON_FULLSCREEN_SPACE: AtomicBool = AtomicBool::new(false);
+
 use crate::config::Config;
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
@@ -294,6 +299,10 @@ impl InputHandler {
                 mask |= modifier;
             }
         }
+
+        // On a native fullscreen space, keybindings are still intercepted so
+        // that paneru can actively switch back to the previous workspace.
+        // Non-paneru keys pass through naturally (find_keybind returns None).
 
         let keycode = keycode.try_into().ok();
         keycode

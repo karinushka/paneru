@@ -211,6 +211,20 @@ pub enum TrackpadSwipe {
     RecentlyEnded(std::time::Instant),
 }
 
+/// Inserted when the active space changes, so overlay drawing can be
+/// deferred until the macOS space-switch animation finishes.
+#[derive(Resource)]
+pub struct SpaceRecentlyChanged(pub std::time::Instant);
+
+/// Marks a window entity that is currently on a native macOS fullscreen space.
+/// The window has been removed from its tiled position in the strip.
+/// `order` gives the sequence in which windows went fullscreen (0, 1, 2, …)
+/// so they can be navigated left-to-right in that order after the tiled strip.
+#[derive(Component)]
+pub struct NativeFullscreenMarker {
+    pub order: u32,
+}
+
 /// Stores the width ratio of a window before it was made full-width.
 /// When a stacked window goes full-width, it is unstacked first;
 /// `was_stacked` records whether to restack on exit.

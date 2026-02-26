@@ -43,7 +43,7 @@ use std::sync::atomic::Ordering;
 /// Sub-pixel velocity threshold — stop inertia when below this.
 const MIN_VELOCITY_PX: f64 = 1.0;
 /// Grace period to suppress reshuffles after swipe (prevent snap-to-home).
-const RESHUFFLE_GRACE: Duration = Duration::from_millis(500);
+const RESHUFFLE_GRACE: Duration = Duration::from_millis(100);
 /// Grace period to suppress stale drag markers (covers 1s timeout + buffer).
 const DRAG_MARKER_GRACE: Duration = Duration::from_secs(2);
 
@@ -1684,6 +1684,7 @@ pub(crate) fn reposition_dragged_window(
 pub(super) fn update_overlays(
     windows: Windows,
     applications: Query<&Application>,
+    _: ActiveDisplay, // prevents this system from running without an active workspace
     swipe_tracker: Option<Res<TrackpadSwipe>>,
     overlay_mgr: Option<NonSendMut<OverlayManager>>,
     config: Configuration,
@@ -1698,7 +1699,7 @@ pub(super) fn update_overlays(
     let dim_opacity = config.config().dim_inactive_opacity();
     let border_enabled = config.config().border_active_window();
 
-    // Hide overlays during swipe and briefly after to prevent compositor flash.
+    // Hide overlays during swipe, mission control, or on fullscreen windows.
     let swiping = match swipe_tracker.as_deref() {
         Some(TrackpadSwipe::Active { .. }) => true,
         Some(TrackpadSwipe::RecentlyEnded(elapsed)) => {
@@ -1722,6 +1723,7 @@ pub(super) fn update_overlays(
         .focused()
         .and_then(|(_, entity)| windows.get_managed(entity))
         && unmanaged.is_none()
+        && !window.is_full_screen()
     {
         let frame = window.frame();
         let h_pad = window.horizontal_padding();

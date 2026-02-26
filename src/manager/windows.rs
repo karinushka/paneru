@@ -41,6 +41,7 @@ pub trait WindowApi: Send + Sync {
     fn subrole(&self) -> Result<String>;
     fn is_root(&self) -> bool;
     fn is_minimized(&self) -> bool;
+    fn is_full_screen(&self) -> bool;
     fn reposition(&mut self, origin: Origin);
     fn sls_reposition(&mut self, origin: Origin);
     fn ax_commit_position(&self);
@@ -284,6 +285,10 @@ impl WindowApi for WindowOS {
     #[instrument(level = Level::DEBUG, ret)]
     fn is_minimized(&self) -> bool {
         self.ax_element.minimized().is_ok_and(|minimized| minimized)
+    }
+
+    fn is_full_screen(&self) -> bool {
+        self.ax_element.full_screen().unwrap_or(false)
     }
 
     fn reposition(&mut self, origin: Origin) {

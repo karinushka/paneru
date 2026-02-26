@@ -1694,7 +1694,8 @@ pub(super) fn update_overlays(
     let dim_opacity = config.config().dim_inactive_opacity();
     let border_enabled = config.config().border_active_window();
 
-    // Hide overlays during swipe, mission control, or on fullscreen windows.
+    // Hide overlays during swipe, mission control, native fullscreen spaces,
+    // or briefly after a space change (macOS space-switch animation).
     let swiping = match swipe_tracker.as_deref() {
         Some(TrackpadSwipe::Active { .. }) => true,
         Some(TrackpadSwipe::RecentlyEnded(elapsed)) => {
@@ -1702,6 +1703,9 @@ pub(super) fn update_overlays(
         }
         None => false,
     };
+    // ON_FULLSCREEN_SPACE is set in workspace_change_trigger because this
+    // system cannot run when no LayoutStrip has ActiveWorkspaceMarker
+    // (which is the case on native fullscreen spaces).
     if swiping || config.mission_control_active() {
         overlay_mgr.hide_all();
         return;

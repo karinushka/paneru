@@ -36,7 +36,7 @@ objc2 = { version = "0.6.4", features = ["catch-all", "exception"] }
 objc2-app-kit = "0.3.2"
 objc2-core-foundation = { version = "0.3.2", features = ["CFRunLoop"] }
 objc2-core-graphics = "0.3.2"
-objc2-foundation = { version = "0.3.2", features = ["NSNotification"] }
+objc2-foundation = { version = "0.3.2", features = ["NSNotification", "NSProcessInfo"] }
 regex = "1.12.3"
 scopeguard = "1.2.0"
 serde = { version = "1.0.228", features = ["derive"] }

@@ -7,7 +7,9 @@ use bevy::ecs::component::Component;
 use bevy::math::IRect;
 use core::ptr::NonNull;
 use derive_more::{DerefMut, with_trait::Deref};
-use objc2_core_foundation::{CFEqual, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{
+    CFArray, CFEqual, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize,
+};
 use std::ptr::null_mut;
 use std::thread;
 use std::time::Duration;
@@ -16,8 +18,7 @@ use tracing::{Level, debug, instrument, trace};
 
 use super::skylight::{
     _AXUIElementGetWindow, _SLPSSetFrontProcessWithOptions, AXUIElementCopyAttributeValue,
-    AXUIElementPerformAction, AXUIElementSetAttributeValue, SLPSPostEventRecordTo,
-};
+    AXUIElementPerformAction, AXUIElementSetAttributeValue, SLPSPostEventRecordTo, SLSWindowIteratorAdvance, };
 use crate::errors::{Error, Result};
 use crate::manager::{Origin, Size, irect_from};
 use crate::platform::{Pid, ProcessSerialNumber, WinID, macos_major_version};
@@ -54,6 +55,7 @@ pub trait WindowApi: Send + Sync {
     fn set_padding(&mut self, padding: WindowPadding);
     fn horizontal_padding(&self) -> i32;
     fn vertical_padding(&self) -> i32;
+    fn border_radius(&self) -> Option<f64>;
 }
 
 #[derive(Component, Deref, DerefMut)]
@@ -491,5 +493,32 @@ impl WindowApi for WindowOS {
 
     fn vertical_padding(&self) -> i32 {
         self.vertical_padding
+    }
+    // Based on:
+    // - https://github.com/y3owk1n/rift/blob/cca067145f0282b532e848bb63d26a38c61f3c14/src/sys/window_server.rs#L175
+    // - https://github.com/FelixKratz/JankyBorders/blob/a56a76a8a6ed77325f03655b23fcf525144d120b/src/windows.c#L67
+    fn border_radius(&self) -> Option<f64> {
+        let iterator = super::window_iterator_for_id(self.id)?;
+        if !unsafe { SLSWindowIteratorAdvance(&raw const *iterator) } {
+            return None;
+        }
+
+        let radii_ref = unsafe {
+            let s = c"SLSWindowIteratorGetCornerRadii";
+            let p = libc::dlsym(libc::RTLD_DEFAULT, s.as_ptr());
+            if p.is_null() {
+                return None;
+            }
+            let f: unsafe extern "C" fn(*const CFType) -> *mut CFArray<CFNumber> =
+                std::mem::transmute(p);
+            f(&raw const *iterator)
+        };
+        let radii: CFRetained<CFArray<CFNumber>> =
+            unsafe { CFRetained::from_raw(NonNull::new(radii_ref)?) };
+        if radii.is_empty() {
+            return None;
+        }
+        // Get first corner radius (usually all corners are the same)
+        radii.get(0)?.as_i64().map(|v| v as f64)
     }
 }

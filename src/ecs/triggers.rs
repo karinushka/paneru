@@ -233,17 +233,21 @@ fn windows_not_in_strip<F: Fn(WinID) -> Option<Entity>>(
     find_window: F,
     strip: &LayoutStrip,
     window_manager: &WindowManager,
-) -> Result<Vec<Entity>> {
-    let moved_windows = window_manager
+) -> Result<(Vec<Entity>, Vec<WinID>)> {
+    window_manager
         .windows_in_workspace(workspace_id)
         .map(|ids| {
-            ids.into_iter()
-                .filter_map(find_window)
-                // Filter out the ones already in this workspace.
-                .filter(|entity| strip.index_of(*entity).is_err())
-                .collect::<Vec<_>>()
-        })?;
-    Ok(moved_windows)
+            let mut moved = Vec::new();
+            let mut unresolved = Vec::new();
+            for id in ids {
+                match find_window(id) {
+                    Some(entity) if strip.index_of(entity).is_err() => moved.push(entity),
+                    Some(_) => {}
+                    None => unresolved.push(id),
+                }
+            }
+            (moved, unresolved)
+        })
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -343,6 +347,7 @@ pub(super) fn active_workspace_trigger(
     trigger: On<Add, ActiveWorkspaceMarker>,
     windows: Windows,
     mut workspaces: Query<&mut LayoutStrip, With<ChildOf>>,
+    apps: Query<&mut Application>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
@@ -353,7 +358,7 @@ pub(super) fn active_workspace_trigger(
     debug!("workspace {workspace_id}");
 
     let find_window = |window_id| windows.find_managed(window_id).map(|(_, entity)| entity);
-    let Ok(moved_windows) =
+    let Ok((moved_windows, unresolved)) =
         windows_not_in_strip(workspace_id, find_window, active_strip, &window_manager).inspect_err(
             |err| {
                 warn!("unable to get windows in the current workspace: {err}");
@@ -362,6 +367,24 @@ pub(super) fn active_workspace_trigger(
     else {
         return;
     };
+
+    // Retry unresolved window IDs: during startup bruteforce, windows on
+    // inactive workspaces may have stale AX attributes (e.g. AXGroup instead
+    // of AXWindow).  Now that this workspace is active, re-query each app's
+    // window list — the AX data should be correct.
+    if !unresolved.is_empty() {
+        let mut retry_windows = Vec::new();
+        for app in &apps {
+            for window in app.window_list() {
+                if unresolved.contains(&window.id()) {
+                    retry_windows.push(window);
+                }
+            }
+        }
+        if !retry_windows.is_empty() {
+            commands.trigger(SpawnWindowTrigger(retry_windows));
+        }
+    }
 
     let had_moved_windows = !moved_windows.is_empty();
     for entity in moved_windows {

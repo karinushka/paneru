@@ -455,10 +455,8 @@ fn resize_window(
         .find(|&r| r > current_ratio + 0.05)
         .unwrap_or_else(|| *config.preset_column_widths().first().unwrap_or(&0.5));
 
-    let size = Size::new(
-        (next_ratio * f64::from(padded_width)).round() as i32,
-        window.frame().height(),
-    );
+    let new_width = (next_ratio * f64::from(padded_width)).round() as i32;
+    let size = Size::new(new_width, window.frame().height());
     let mut frame = IRect::from_center_size(window.frame().center(), size);
 
     if frame.max.x > active_display.bounds().max.x - pad_right {
@@ -479,7 +477,7 @@ fn resize_window(
             {
                 resize_entity(
                     sibling,
-                    Size::new(size.x, w.frame().height()),
+                    Size::new(new_width, w.frame().height()),
                     active_display.id(),
                     &mut commands,
                 );

@@ -460,6 +460,10 @@ impl WindowApi for MockWindow {
     fn is_full_screen(&self) -> bool {
         false
     }
+
+    fn border_radius(&self) -> Option<f64> {
+        None
+    }
 }
 
 impl MockWindow {

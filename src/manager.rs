@@ -5,8 +5,8 @@ use core::ptr::NonNull;
 use derive_more::{DerefMut, with_trait::Deref};
 use notify::{RecursiveMode, Watcher};
 use objc2_core_foundation::{
-    CFArray, CFDictionary, CFMutableData, CFNumber, CFNumberType, CFRetained, CFString, CGPoint,
-    CGRect, CGSize, kCFBooleanTrue,
+    CFArray, CFDictionary, CFMutableData, CFNumber, CFNumberType, CFRetained, CFString, CFType,
+    CGPoint, CGRect, CGSize, kCFBooleanTrue,
 };
 use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayBounds, CGError, CGGetActiveDisplayList, CGRectContainsPoint,
@@ -632,6 +632,31 @@ fn space_window_list_for_connection(
     cid: Option<ConnID>,
     also_minimized: bool,
 ) -> Result<Vec<WinID>> {
+    let iterator = window_iterator_for_connection(main_cid, spaces, cid, also_minimized)?;
+    let count = spaces.len();
+    let mut window_list = Vec::with_capacity(count);
+    while unsafe { SLSWindowIteratorAdvance(&raw const *iterator) } {
+        let tags = unsafe { SLSWindowIteratorGetTags(&raw const *iterator) };
+        let attributes = unsafe { SLSWindowIteratorGetAttributes(&raw const *iterator) };
+        let parent_wid: WinID = unsafe { SLSWindowIteratorGetParentID(&raw const *iterator) };
+        let window_id: WinID = unsafe { SLSWindowIteratorGetWindowID(&raw const *iterator) };
+
+        trace!(
+            "id: {window_id} parent: {parent_wid} tags: 0x{tags:x} attributes: 0x{attributes:x}",
+        );
+        if found_valid_window(parent_wid, attributes, tags) {
+            window_list.push(window_id);
+        }
+    }
+    Ok(window_list)
+}
+
+fn window_iterator_for_connection(
+    main_cid: ConnID,
+    spaces: &[WorkspaceId],
+    cid: Option<ConnID>,
+    also_minimized: bool,
+) -> Result<CFRetained<CFType>> {
     let space_list_ref = create_array(spaces, CFNumberType::SInt64Type)?;
 
     let mut set_tags = 0i64;
@@ -668,24 +693,14 @@ fn space_window_list_for_connection(
             count,
         ))
     };
-    let iterator =
-        unsafe { CFRetained::from_raw(SLSWindowQueryResultCopyWindows(query.deref().into())) };
+    Ok(unsafe { CFRetained::from_raw(SLSWindowQueryResultCopyWindows(query.deref().into())) })
+}
 
-    let mut window_list = Vec::with_capacity(count.try_into()?);
-    while unsafe { SLSWindowIteratorAdvance(&raw const *iterator) } {
-        let tags = unsafe { SLSWindowIteratorGetTags(&raw const *iterator) };
-        let attributes = unsafe { SLSWindowIteratorGetAttributes(&raw const *iterator) };
-        let parent_wid: WinID = unsafe { SLSWindowIteratorGetParentID(&raw const *iterator) };
-        let window_id: WinID = unsafe { SLSWindowIteratorGetWindowID(&raw const *iterator) };
-
-        trace!(
-            "id: {window_id} parent: {parent_wid} tags: 0x{tags:x} attributes: 0x{attributes:x}",
-        );
-        if found_valid_window(parent_wid, attributes, tags) {
-            window_list.push(window_id);
-        }
-    }
-    Ok(window_list)
+pub fn window_iterator_for_id(window_id: WinID) -> Option<CFRetained<CFType>> {
+    let cid = unsafe { SLSMainConnectionID() };
+    let windows = create_array(&[window_id], CFNumberType::SInt32Type).ok()?;
+    let query = unsafe { CFRetained::from_raw(SLSWindowQueryWindows(cid, &raw const *windows, 1)) };
+    Some(unsafe { CFRetained::from_raw(SLSWindowQueryResultCopyWindows(query.deref().into())) })
 }
 
 /// Determines if a window is valid based on its parent ID, attributes, and tags.

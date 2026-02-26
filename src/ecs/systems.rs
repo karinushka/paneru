@@ -377,22 +377,30 @@ pub(super) fn add_launched_process(
 /// * `commands` - Bevy commands to spawn entities and manage components.
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn add_launched_application(
-    app_query: Populated<(&mut Application, Entity), With<FreshMarker>>,
+    app_query: Populated<(&mut Application, Entity, Has<Children>), With<FreshMarker>>,
     windows: Windows,
     mut commands: Commands,
 ) {
     // TODO: maybe refactor this with add_existing_application_windows()
     let find_window = |window_id| windows.find(window_id);
 
-    for (app, entity) in app_query {
+    for (app, entity, has_children) in app_query {
         let mut create_windows = app.window_list();
         // Retain the non-existing windows, so they can be created.
         create_windows.retain(|window| find_window(window.id()).is_none());
 
         if !create_windows.is_empty() {
             commands.entity(entity).try_remove::<FreshMarker>();
-            debug!("spawn!");
+            debug!(
+                "spawn! (polling path found {} new windows for {entity})",
+                create_windows.len(),
+            );
             commands.trigger(SpawnWindowTrigger(create_windows));
+        } else if has_children {
+            // Windows were already created via AXCreated notification path.
+            // Remove FreshMarker so the Timeout gets cleaned up.
+            debug!("removing FreshMarker from {entity}: windows already created via AXCreated");
+            commands.entity(entity).try_remove::<FreshMarker>();
         }
     }
 }

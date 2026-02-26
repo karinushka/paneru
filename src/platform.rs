@@ -252,14 +252,20 @@ pub fn macos_major_version() -> u32 {
         let mut size: libc::size_t = 0;
         let name = c"kern.osproductversion";
         unsafe {
-            libc::sysctlbyname(name.as_ptr(), std::ptr::null_mut(), &mut size, std::ptr::null_mut(), 0);
+            libc::sysctlbyname(
+                name.as_ptr(),
+                std::ptr::null_mut(),
+                &raw mut size,
+                std::ptr::null_mut(),
+                0,
+            );
         }
         let mut buf = vec![0u8; size];
         unsafe {
             libc::sysctlbyname(
                 name.as_ptr(),
                 buf.as_mut_ptr().cast(),
-                &mut size,
+                &raw mut size,
                 std::ptr::null_mut(),
                 0,
             );

@@ -353,6 +353,7 @@ impl WindowManagerApi for WindowManagerOS {
     }
 
     /// Returns child windows of the main window.
+    #[instrument(level = Level::DEBUG, skip(self), ret)]
     fn get_associated_windows(&self, window_id: WinID) -> Vec<WinID> {
         trace!("for window {window_id}");
         let windows =
@@ -365,6 +366,7 @@ impl WindowManagerApi for WindowManagerOS {
     /// # Returns
     ///
     /// A `Vec<Self>` containing `Display` objects for all present displays.
+    #[instrument(level = Level::DEBUG, skip_all, ret)]
     fn present_displays(&self) -> Vec<(Display, Vec<WorkspaceId>)> {
         let mut count = 0u32;
         unsafe {
@@ -401,6 +403,7 @@ impl WindowManagerApi for WindowManagerOS {
     /// # Returns
     ///
     /// `Ok(u32)` with the display ID if successful, otherwise `Err(Error)`.
+    #[instrument(level = Level::TRACE, skip_all, ret)]
     fn active_display_id(&self) -> Result<u32> {
         let uuid = self.active_display_uuid()?;
         Display::id_from_uuid(&uuid)

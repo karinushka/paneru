@@ -359,15 +359,17 @@ pub(super) fn workspace_change_trigger(
 }
 
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
+#[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn active_workspace_trigger(
     trigger: On<Add, ActiveWorkspaceMarker>,
     windows: Windows,
-    mut workspaces: Query<&mut LayoutStrip, With<ChildOf>>,
+    mut workspaces: Query<(&mut LayoutStrip, &ChildOf), With<ChildOf>>,
+    active_display: Single<(Entity, &Display), With<ActiveDisplayMarker>>,
     apps: Query<&mut Application>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
-    let Ok(active_strip) = workspaces.get(trigger.entity) else {
+    let Ok((active_strip, _)) = workspaces.get(trigger.entity) else {
         return;
     };
     let workspace_id = active_strip.id();
@@ -398,6 +400,14 @@ pub(super) fn active_workspace_trigger(
             }
         }
         if !retry_windows.is_empty() {
+            debug!(
+                "retrying unresolved windows: {}",
+                retry_windows
+                    .iter()
+                    .map(|window| format!("{}", window.id()))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
             commands.trigger(SpawnWindowTrigger(retry_windows));
         }
     }
@@ -406,13 +416,12 @@ pub(super) fn active_workspace_trigger(
     for entity in moved_windows {
         debug!("Window {entity} moved to workspace {workspace_id}.");
 
-        workspaces.iter_mut().for_each(|mut strip| {
+        workspaces.iter_mut().for_each(|(mut strip, child)| {
             strip.remove(entity);
-            if strip.id() == workspace_id {
+            if strip.id() == workspace_id && child.parent() == active_display.0 {
                 strip.append(entity);
             }
         });
-
         reshuffle_around(entity, &mut commands);
     }
 
@@ -425,13 +434,13 @@ pub(super) fn active_workspace_trigger(
         let focused_entity = windows.focused().map(|(_, entity)| entity).filter(|e| {
             workspaces
                 .get(trigger.entity)
-                .is_ok_and(|s| s.index_of(*e).is_ok())
+                .is_ok_and(|(strip, _)| strip.index_of(*e).is_ok())
         });
         let fallback = || {
             workspaces
                 .get(trigger.entity)
                 .ok()
-                .and_then(|s| s.get(0).ok())
+                .and_then(|(strip, _)| strip.get(0).ok())
                 .and_then(|col| col.top())
         };
         if let Some(entity) = focused_entity.or_else(fallback) {

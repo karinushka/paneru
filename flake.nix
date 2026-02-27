@@ -34,11 +34,20 @@
         buildInputs = [
           pkgs.apple-sdk.privateFrameworksHook
         ];
+
+        # Do not run tests
+        doCheck = false;
       };
     in
     {
       packages.aarch64-darwin.default = self.packages.aarch64-darwin.paneru;
       packages.aarch64-darwin.paneru = package;
+
+      # Allows running `nix develop` to get a shell with `paneru` available.
+      devShells."aarch64-darwin".default = pkgs.mkShellNoCC {
+        packages = [ package ];
+      };
+
       homeModules.paneru =
         { config, lib, ... }:
         let

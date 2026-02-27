@@ -1,6 +1,6 @@
 [package]
 name = "paneru"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2024"
 rust-version = "1.89.0"
 description = "A sliding, tiling window manager for MacOS."

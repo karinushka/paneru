@@ -170,9 +170,9 @@ Although we strongly recommend using home manager, the paneru flake also exposes
 {
   # nix-darwin configuration (configuration.nix)
   # system-wide
-  environment.systemPackages = [ inputs.paneru.packages.paneru ]
+  environment.systemPackages = [ inputs.paneru.packages.${pkgs.system}.paneru ]
   # or per-user
-  users.users."<name>".packages = [ inputs.paneru.packages.paneru ]
+  users.users."<name>".packages = [ inputs.paneru.packages.${pkgs.system}.paneru ]
 }
 ```
 

@@ -43,6 +43,10 @@
       packages.aarch64-darwin.default = self.packages.aarch64-darwin.paneru;
       packages.aarch64-darwin.paneru = package;
 
+      overlays.default = final: prev: {
+        paneru = self.packages.aarch64-darwin.paneru;
+      };
+
       # Allows running `nix develop` to get a shell with `paneru` available.
       devShells."aarch64-darwin".default = pkgs.mkShellNoCC {
         packages = [ package ];

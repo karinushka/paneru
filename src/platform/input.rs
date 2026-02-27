@@ -21,10 +21,24 @@ use tracing::{error, info};
 /// changes, etc. while windows are sliding during a swipe/inertia).
 pub static SUPPRESS_MOUSE_MOVES: AtomicBool = AtomicBool::new(false);
 
+use arc_swap::ArcSwap;
+use std::sync::{Arc, LazyLock};
+
 use crate::config::Config;
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
 use crate::platform::Modifiers;
+
+/// The currently active set of passthrough keybindings, shared lock-free with
+/// the `CGEvent` tap callback thread via `ArcSwap`.
+static FOCUSED_PASSTHROUGH: LazyLock<ArcSwap<Vec<(u8, Modifiers)>>> =
+    LazyLock::new(|| ArcSwap::from_pointee(Vec::new()));
+
+/// Replace the passthrough keybinding set that the event tap checks on every
+/// key-down. Called from the ECS thread on focus change and config reload.
+pub fn set_focused_passthrough(keys: Vec<(u8, Modifiers)>) {
+    FOCUSED_PASSTHROUGH.store(Arc::new(keys));
+}
 
 /// `InputHandler` manages low-level input events from the macOS `CGEventTap`.
 /// It intercepts keyboard and mouse events, processes gestures, and dispatches them as higher-level `Event`s.
@@ -301,7 +315,13 @@ impl InputHandler {
 
         let keycode = keycode.try_into().ok();
         keycode
-            .and_then(|keycode| self.config.find_keybind(keycode, &mask))
+            .and_then(|keycode| {
+                let passthrough = FOCUSED_PASSTHROUGH.load();
+                if passthrough.iter().any(|(c, m)| *c == keycode && *m == mask) {
+                    return None;
+                }
+                self.config.find_keybind(keycode, &mask)
+            })
             .and_then(|command| {
                 events
                     .send(Event::Command { command })

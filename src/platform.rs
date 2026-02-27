@@ -43,7 +43,7 @@ pub type CFStringRef = *const CFString;
 pub type WorkspaceId = u64;
 
 bitflags::bitflags! {
-    #[derive(Debug, PartialEq)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct Modifiers: u8 {
         const ALT     = 1 << 0;
         const SHIFT   = 1 << 1;

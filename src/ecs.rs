@@ -203,9 +203,6 @@ pub struct TrackpadSwipe {
     last_swipe: std::time::Instant,
     velocity: f64,
     viewport_offset: i32,
-    /// When >0, inertia has ended and the resource is counting down before
-    /// final removal.  Decremented once per tick in `swipe_idle_tracker`.
-    cooldown: u8,
 }
 
 /// Marks a window entity that is currently on a native macOS fullscreen space.

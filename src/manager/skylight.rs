@@ -63,7 +63,7 @@ unsafe extern "C" {
     /// # Returns
     ///
     /// A `CGError` indicating success or failure.
-    pub fn SLSMoveWindow(cid: ConnID, wid: WinID, point: *const CGPoint) -> CGError;
+    // pub fn SLSMoveWindow(cid: ConnID, wid: WinID, point: *const CGPoint) -> CGError;
 
     /// Copies the managed display identifier for a given window.
     /// This function returns a `CFStringRef` that identifies the display where the window is currently located.

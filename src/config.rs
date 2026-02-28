@@ -316,8 +316,10 @@ impl Config {
         self.options().continuous_swipe.unwrap_or(true)
     }
 
-    pub fn natural_swipe(&self) -> bool {
-        self.options().natural_swipe.unwrap_or(true)
+    pub fn swipe_gesture_direction(&self) -> SwipeGestureDirection {
+        self.options()
+            .swipe_gesture_direction
+            .unwrap_or(SwipeGestureDirection::Natural)
     }
 }
 
@@ -426,6 +428,12 @@ impl InnerConfig {
     }
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub enum SwipeGestureDirection {
+    Natural,
+    Reversed,
+}
+
 /// `MainOptions` represents the primary configuration options for the window manager.
 /// These options control various behaviors such as mouse focus, gesture recognition, and window animation.
 #[derive(Deserialize, Clone, Debug, Default)]
@@ -436,8 +444,8 @@ pub struct MainOptions {
     pub mouse_follows_focus: Option<bool>,
     /// The number of fingers required for swipe gestures to move windows.
     pub swipe_gesture_fingers: Option<usize>,
-    /// Whether swipe gestures should move windows in a natural or reversed direction.
-    pub natural_swipe: Option<bool>,
+    /// Which direction swipe gestures should move windows.
+    pub swipe_gesture_direction: Option<SwipeGestureDirection>,
     /// A list of preset column widths (as ratios) used for resizing windows.
     #[serde(default = "default_preset_column_widths")]
     pub preset_column_widths: Vec<f64>,

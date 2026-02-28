@@ -546,10 +546,15 @@ pub(super) fn center_mouse_trigger(
     windows: Windows,
     window_manager: Res<WindowManager>,
     config: Configuration,
+    swipe_tracker: SmoothSwipeTracking,
 ) {
     let Some(window) = windows.get(trigger.event().entity) else {
         return;
     };
+    if swipe_tracker.active() {
+        debug!("Suppressing center mouse due to a swipe");
+        return;
+    }
 
     if config.mouse_follows_focus()
         && !config.skip_reshuffle()
@@ -582,7 +587,6 @@ pub(super) fn window_focused_trigger(
     applications: Query<&Application>,
     windows: Windows,
     active_display: ActiveDisplay,
-    swipe_tracker: SmoothSwipeTracking,
     mut config: Configuration,
     mut commands: Commands,
 ) {
@@ -627,8 +631,7 @@ pub(super) fn window_focused_trigger(
 
     commands.entity(entity).try_insert(FocusedMarker);
 
-    let swipe_active = swipe_tracker.active();
-    if !(config.skip_reshuffle() || config.initializing() || swipe_active) {
+    if !(config.skip_reshuffle() || config.initializing()) {
         if config.auto_center()
             && let Some((_, _, None)) = windows.get_managed(entity)
         {
@@ -668,13 +671,12 @@ pub(super) fn swipe_gesture_trigger(
     focused_window: Single<(&Window, Entity), With<FocusedMarker>>,
     active_display: ActiveDisplay,
     config: Configuration,
-    mission_control: Res<MissionControlActive>,
     mut commands: Commands,
 ) {
     let Event::Swipe { ref deltas } = trigger.event().0 else {
         return;
     };
-    if mission_control.0 {
+    if config.mission_control_active() {
         return;
     }
     if config
@@ -710,12 +712,6 @@ pub(super) fn mission_control_trigger(
         | Event::MissionControlShowFrontWindows
         | Event::MissionControlShowDesktop => {
             mission_control_active.as_mut().0 = true;
-            // The expose gesture may trigger swipe events before this AX
-            // notification arrives, setting SUPPRESS_MOUSE_MOVES = true.
-            // Reset suppression flags immediately so Mission Control is
-            // fully interactive.  SwipeActive cleanup continues normally.
-            crate::platform::input::SUPPRESS_MOUSE_MOVES.store(false, Ordering::Relaxed);
-            crate::manager::app::SUPPRESS_AX_MOVED.store(false, Ordering::Relaxed);
             commands.remove_resource::<TrackpadSwipe>();
         }
         Event::MissionControlExit => {

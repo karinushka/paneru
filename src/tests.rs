@@ -390,12 +390,6 @@ impl WindowApi for MockWindow {
         self.frame.max = origin + size;
     }
 
-    fn sls_reposition(&mut self, origin: Origin) {
-        self.reposition(origin);
-    }
-
-    fn ax_commit_position(&self) {}
-
     /// Resizes the mock window's frame to the given dimensions.
     #[instrument(level = Level::DEBUG, skip(self))]
     fn resize(&mut self, size: Size, display_width: i32) {

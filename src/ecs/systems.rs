@@ -29,23 +29,12 @@ use crate::ecs::{
     WindowSwipeMarker, reposition_entity, reshuffle_around, resize_entity,
 };
 use crate::events::Event;
-use crate::manager::app::SUPPRESS_AX_MOVED;
 use crate::manager::{
     Application, Column, Display, LayoutStrip, Origin, Process, Size, Window, WindowManager,
     WindowOS, bruteforce_windows,
 };
 use crate::overlay::OverlayManager;
-use crate::platform::input::SUPPRESS_MOUSE_MOVES;
 use crate::platform::{PlatformCallbacks, WorkspaceId};
-use std::sync::atomic::Ordering;
-
-// ── Swipe-related timing constants ──────────────────────────────────
-/// Sub-pixel velocity threshold — stop inertia when below this.
-const MIN_VELOCITY_PX: f64 = 1.0;
-/// Grace period to suppress reshuffles after swipe (prevent snap-to-home).
-const RESHUFFLE_GRACE: Duration = Duration::from_millis(100);
-/// Grace period to suppress stale drag markers (covers 1s timeout + buffer).
-const DRAG_MARKER_GRACE: Duration = Duration::from_secs(2);
 
 /// Processes a single incoming `Event`. It dispatches various event types to the `WindowManager` or other internal handlers.
 /// This system reads `Event` messages and triggers appropriate Bevy events or modifies resources based on the event type.
@@ -664,13 +653,11 @@ pub(super) fn animate_windows(
     mut commands: Commands,
 ) {
     let move_ratio = config.animation_speed() * time.delta_secs_f64();
-    let swiping = swipe_tracker.active();
+    let swiping = swipe_tracker.sliding();
 
     for (mut window, entity, RepositionMarker { origin, display_id }) in windows {
         if swiping {
-            // During a swipe: snap directly to the target using the fast
-            // compositor-level move — no interpolation.
-            window.sls_reposition(*origin);
+            window.reposition(*origin);
             commands.entity(entity).try_remove::<RepositionMarker>();
             continue;
         }
@@ -713,15 +700,12 @@ pub(super) fn animate_windows(
 pub(super) fn animate_resize_windows(
     windows: Populated<(&mut Window, Entity, &ResizeMarker, Has<RepositionMarker>)>,
     displays: Query<&Display>,
-    swipe_tracker: SmoothSwipeTracking,
     time: Res<Time>,
     config: Res<Config>,
     mut commands: Commands,
 ) {
-    let swiping = swipe_tracker.active();
-
     for (mut window, entity, ResizeMarker { size, display_id }, moving) in windows {
-        if moving && !swiping {
+        if moving {
             // Defer resize while the window is being repositioned so it
             // doesn't extend past the screen edge before the move lands.
             // Exception: when the resize *shrinks* the window (e.g.
@@ -736,14 +720,6 @@ pub(super) fn animate_resize_windows(
         let Some(display) = displays.iter().find(|display| display.id() == *display_id) else {
             continue;
         };
-
-        if swiping {
-            // During swipe, snap resize instantly — no interpolation.
-            // Echo-backs are suppressed by SUPPRESS_AX_MOVED.
-            window.resize(*size, display.width());
-            commands.entity(entity).try_remove::<ResizeMarker>();
-            continue;
-        }
 
         let move_ratio = config.animation_speed() * time.delta_secs_f64();
         let move_delta = move_ratio * f64::from(display.width());
@@ -857,14 +833,7 @@ pub(super) fn window_swiper(
             .map_or(0.0, |(velocity, _)| velocity);
         let velocity = 0.3 * new_velocity + 0.7 * old_velocity;
 
-        SUPPRESS_MOUSE_MOVES.store(true, Ordering::Relaxed);
-        SUPPRESS_AX_MOVED.store(true, Ordering::Relaxed);
-        commands.insert_resource(TrackpadSwipe::Active {
-            last_swipe: std::time::Instant::now(),
-            velocity,
-            viewport_offset: clamped_offset,
-            cooldown: 0,
-        });
+        SmoothSwipeTracking::refresh(velocity, clamped_offset, &mut commands);
     }
 }
 
@@ -882,16 +851,15 @@ pub(super) fn swipe_idle_tracker(
     mut swipe: SmoothSwipeTracking,
     active_display: ActiveDisplay,
     windows: Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
-    drag_markers: Query<Entity, With<WindowDraggedMarker>>,
     window_manager: Res<WindowManager>,
     config: Res<Config>,
     time: Res<Time>,
     mut commands: Commands,
 ) {
-    if swipe.on_cooldown(&mut commands) {
-        return;
-    }
-    if swipe.active() {
+    /// Sub-pixel velocity threshold — stop inertia when below this.
+    const MIN_VELOCITY_PX: f64 = 100.0;
+
+    if swipe.sliding() {
         return;
     }
 
@@ -902,61 +870,6 @@ pub(super) fn swipe_idle_tracker(
 
     // Sub-pixel velocity — stop inertia and commit.
     if velocity.abs() * display_width < MIN_VELOCITY_PX {
-        // Commit ALL windows to AX — not just visible ones.  Off-screen
-        // windows must also have their AX position updated so that any
-        // later `update_frame()` call (triggered by a stray WindowResized
-        // notification from macOS) reads back the correct scrolled position
-        // instead of the stale pre-swipe home position.  Echo-back
-        // notifications are suppressed at the AX observer callback
-        // (SUPPRESS_AX_MOVED) and kept suppressed until pump_events drains
-        // them.
-        SUPPRESS_AX_MOVED.store(true, Ordering::Relaxed);
-        let strip = active_display.active_strip();
-        for entity in strip.all_windows() {
-            if let Ok((window, _, _)) = windows.get(entity) {
-                window.ax_commit_position();
-            }
-            if let Ok(mut cmd) = commands.get_entity(entity) {
-                // Keep ResizeMarkers — animate_resize_windows defers during
-                // swipe, so windows that transitioned between on-screen (full
-                // height) and off-screen (sliver height) need resizing after
-                // SwipeActive is removed.
-                cmd.try_remove::<RepositionMarker>();
-            }
-        }
-        // Run a final non-swiping layout pass to generate correct
-        // ResizeMarkers (sliver heights for off-screen, full heights for
-        // on-screen). animate_resize_windows will apply them after
-        // SwipeActive is removed.
-        let get_window_frame = |entity| get_moving_window_frame(entity, &active_display, &windows);
-        let get_window_h_pad = |entity: Entity| {
-            windows
-                .get(entity)
-                .map(|(w, _, _)| w.horizontal_padding())
-                .unwrap_or(0)
-        };
-        position_layout_windows(
-            viewport_offset,
-            &active_display,
-            &get_window_frame,
-            &get_window_h_pad,
-            &config,
-            false,
-            &mut commands,
-        );
-        // Strip RepositionMarkers generated by the layout pass above —
-        // positions were already committed via AX.
-        for entity in strip.all_windows() {
-            if let Ok(mut cmd) = commands.get_entity(entity) {
-                cmd.try_remove::<RepositionMarker>();
-            }
-        }
-        // Despawn any stale drag markers — macOS may generate MouseDragged
-        // events during a trackpad swipe, and their 1s timeout would fire
-        // after SwipeActive is removed, causing a spurious reshuffle.
-        for drag_entity in &drag_markers {
-            commands.entity(drag_entity).despawn();
-        }
         // Focus the window under the cursor immediately so a subsequent
         // swipe anchors on the correct window.  Fires before cooldown so
         // there is no perceptible delay.
@@ -968,7 +881,8 @@ pub(super) fn swipe_idle_tracker(
         // Start cooldown — keep SwipeActive alive for 2 more pump cycles
         // (~33ms at 60fps) so echo-backs and macOS reconciliation events
         // are silenced before the resource is removed.
-        swipe.initiate_cooldown();
+        debug!("swipe cooldown done, removing SwipeActive");
+        commands.remove_resource::<TrackpadSwipe>();
         return;
     }
 
@@ -1072,22 +986,6 @@ pub(super) fn reshuffle_layout_strip(
     swipe_tracker: SmoothSwipeTracking,
     mut commands: Commands,
 ) {
-    // After a swipe, windows may be at their legitimate scrolled positions
-    // (off-screen).  expose_window would bump them to the display edge,
-    // resetting viewport_offset ≈ 0 and causing a visible snap-to-home.
-    // Suppress reshuffles for a grace period after the swipe ends.
-    if let Some(ended) = swipe_tracker.recently_ended()
-        && ended.elapsed() < RESHUFFLE_GRACE
-    {
-        for entity in &marker {
-            debug!("reshuffle_layout_strip: SUPPRESSED for entity {entity} (swipe grace period)");
-            if let Ok(mut cmd) = commands.get_entity(entity) {
-                cmd.try_remove::<ReshuffleAroundMarker>();
-            }
-        }
-        return;
-    }
-
     let get_window_frame = |entity| get_moving_window_frame(entity, &active_display, &windows);
     let get_window_h_pad = |entity: Entity| {
         windows
@@ -1100,6 +998,15 @@ pub(super) fn reshuffle_layout_strip(
         debug!("reshuffle_layout_strip: triggered for entity {entity}");
         if let Ok(mut cmd) = commands.get_entity(entity) {
             cmd.try_remove::<ReshuffleAroundMarker>();
+        }
+
+        // After a swipe, windows may be at their legitimate scrolled positions
+        // (off-screen).  expose_window would bump them to the display edge,
+        // resetting viewport_offset ≈ 0 and causing a visible snap-to-home.
+        // Suppress reshuffles for a grace period after the swipe ends.
+        if swipe_tracker.active() {
+            debug!("Suppressing reshuffle marker due to a swipe");
+            return;
         }
 
         let Some(frame) = expose_window(
@@ -1154,21 +1061,13 @@ pub(super) fn pump_events(
         return;
     };
 
-    let swipe_active = swipe_tracker.active();
+    let swipe_active = swipe_tracker.sliding();
     let effective_timeout = if swipe_active {
         (*timeout).min(1)
     } else {
         *timeout
     };
     platform.pump_cocoa_event_loop(f64::from(effective_timeout) / 1000.0);
-    // Clear the AX-moved suppression flag AFTER the Cocoa event loop has
-    // drained all pending AX notifications.  swipe_idle_tracker sets this
-    // flag before calling ax_commit_position(); the notification callback
-    // fires asynchronously when the run-loop is pumped above, so we must
-    // keep the flag set until that pump completes.
-    if swipe_active && SUPPRESS_AX_MOVED.load(Ordering::Relaxed) {
-        SUPPRESS_AX_MOVED.store(false, Ordering::Relaxed);
-    }
     let mut swipe_acc: Option<Vec<f64>> = None;
     loop {
         // Repeatedly drain the events until timeout.
@@ -1215,7 +1114,7 @@ pub(super) fn window_update_frame(
 ) {
     for event in messages.read() {
         match event {
-            Event::WindowMoved { .. } | Event::WindowResized { .. } if swipe_tracker.active() => {}
+            Event::WindowMoved { .. } | Event::WindowResized { .. } if swipe_tracker.sliding() => {}
             Event::WindowMoved { window_id } | Event::WindowResized { window_id } => {
                 // Find the window, update its frame, and extract info — releasing
                 // the mutable borrow on `windows` so we can access other entities.
@@ -1637,14 +1536,11 @@ pub(crate) fn reposition_dragged_window(
     // to snap the viewport home (expose_window bumps off-screen entities
     // to the display edge, resetting viewport_offset ≈ 0).  Grace period
     // covers the 1s drag-marker timeout.
-    if let Some(ended) = swipe_tracker.recently_ended() {
-        if ended.elapsed() < DRAG_MARKER_GRACE {
-            for (_, _, marker_entity) in &markers {
-                commands.entity(marker_entity).despawn();
-            }
-            return;
+    if swipe_tracker.active() {
+        for (_, _, marker_entity) in &markers {
+            commands.entity(marker_entity).despawn();
         }
-        commands.remove_resource::<TrackpadSwipe>();
+        return;
     }
 
     for (
@@ -1668,7 +1564,7 @@ pub(super) fn update_overlays(
     windows: Windows,
     applications: Query<&Application>,
     _: ActiveDisplay, // prevents this system from running without an active workspace
-    swipe_tracker: Option<Res<TrackpadSwipe>>,
+    swipe_tracker: SmoothSwipeTracking,
     overlay_mgr: Option<NonSendMut<OverlayManager>>,
     config: Configuration,
 ) {
@@ -1684,13 +1580,7 @@ pub(super) fn update_overlays(
 
     // Hide overlays during swipe, mission control, native fullscreen spaces,
     // or briefly after a space change (macOS space-switch animation).
-    let swiping = match swipe_tracker.as_deref() {
-        Some(TrackpadSwipe::Active { .. }) => true,
-        Some(TrackpadSwipe::RecentlyEnded(elapsed)) => {
-            elapsed.elapsed() < Duration::from_millis(150)
-        }
-        None => false,
-    };
+    let swiping = swipe_tracker.sliding() || swipe_tracker.active();
     // ON_FULLSCREEN_SPACE is set in workspace_change_trigger because this
     // system cannot run when no LayoutStrip has ActiveWorkspaceMarker
     // (which is the case on native fullscreen spaces).

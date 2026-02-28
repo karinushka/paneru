@@ -161,6 +161,9 @@ pub(super) fn mouse_down_trigger(
         return;
     };
 
+    // Stop any ongoing scroll.
+    commands.remove_resource::<TrackpadSwipe>();
+
     if window.frame().min.x < 0
         || window.frame().min.x > active_display.bounds().width() - window.frame().width()
     {
@@ -533,10 +536,15 @@ pub(super) fn center_mouse_trigger(
     windows: Windows,
     window_manager: Res<WindowManager>,
     config: Configuration,
+    swipe_tracker: SmoothSwipeTracking,
 ) {
     let Some(window) = windows.get(trigger.event().entity) else {
         return;
     };
+    if swipe_tracker.active() {
+        debug!("Suppressing center mouse due to a swipe");
+        return;
+    }
 
     if config.mouse_follows_focus()
         && !config.skip_reshuffle()
@@ -569,7 +577,6 @@ pub(super) fn window_focused_trigger(
     applications: Query<&Application>,
     windows: Windows,
     active_display: ActiveDisplay,
-    swipe_tracker: SmoothSwipeTracking,
     mut config: Configuration,
     mut commands: Commands,
 ) {
@@ -611,8 +618,7 @@ pub(super) fn window_focused_trigger(
 
     commands.entity(entity).try_insert(FocusedMarker);
 
-    let swipe_active = swipe_tracker.active();
-    if !(config.skip_reshuffle() || config.initializing() || swipe_active) {
+    if !(config.skip_reshuffle() || config.initializing()) {
         if config.auto_center()
             && let Some((_, _, None)) = windows.get_managed(entity)
         {

@@ -1,7 +1,4 @@
-use std::{
-    sync::atomic::Ordering,
-    time::{Duration, Instant},
-};
+use std::{sync::atomic::Ordering, time::Duration};
 
 use bevy::{
     ecs::{
@@ -21,7 +18,7 @@ use crate::{
     config::{Config, WindowParams},
     ecs::{
         ActiveWorkspaceMarker, DockPosition, FocusedMarker, FullWidthMarker, Initializing,
-        TrackpadSwipe, Unmanaged, WindowDraggedMarker,
+        TrackpadSwipe, Unmanaged,
     },
     manager::{Application, Display, LayoutStrip, Window},
     platform::{ProcessSerialNumber, WinID, input::SUPPRESS_MOUSE_MOVES},
@@ -316,102 +313,70 @@ impl Windows<'_, '_> {
 }
 
 #[derive(SystemParam)]
-pub struct SmoothSwipeTracking<'w, 's> {
-    swipe_tracker: Option<ResMut<'w, TrackpadSwipe>>,
-    drag_markers: Query<'w, 's, Entity, With<WindowDraggedMarker>>,
+pub struct SmoothSwipeTracking<'w> {
+    tracker: Option<ResMut<'w, TrackpadSwipe>>,
 }
 
-impl SmoothSwipeTracking<'_, '_> {
-    pub fn on_cooldown(&mut self, commands: &mut Commands) -> bool {
-        let Some(ref mut swipe_tracker) = self.swipe_tracker else {
-            return true;
-        };
-        let TrackpadSwipe::Active { cooldown, .. } = &mut **swipe_tracker else {
-            return true;
-        };
-        if *cooldown < 1 {
-            return false;
-        }
+/// Ticks to keep `SwipeActive` alive after commit for echo-back suppression.
+const COOLDOWN_TICKS: u8 = 2;
 
-        // Cooldown phase: inertia ended, we're keeping SwipeActive alive for
-        // a few more pump cycles so that all guard checks (animate_windows SLS
-        // snap, overlay hide, window_update_frame event eating) remain active
-        // while macOS settles.
-        *cooldown -= 1;
-        if *cooldown == 0 {
-            debug!("swipe_tracker: cooldown done, removing SwipeActive");
-            // Despawn drag markers that arrived during cooldown.
-            for drag_entity in self.drag_markers {
-                commands.entity(drag_entity).despawn();
+impl SmoothSwipeTracking<'_> {
+    pub fn on_cooldown(&mut self, commands: &mut Commands) -> bool {
+        let Some(ref mut tracker) = self.tracker else {
+            return true;
+        };
+        match tracker.cooldown {
+            0 => return false,
+            1 => {
+                // Cooldown phase: inertia ended, we're keeping SwipeActive alive for
+                // a few more pump cycles so that all guard checks (animate_windows SLS
+                // snap, overlay hide, window_update_frame event eating) remain active
+                // while macOS settles.
+                debug!("swipe_tracker: cooldown done, removing SwipeActive");
+                SUPPRESS_MOUSE_MOVES.store(false, Ordering::Relaxed);
+                commands.remove_resource::<TrackpadSwipe>();
             }
-            SUPPRESS_MOUSE_MOVES.store(false, Ordering::Relaxed);
-            commands.insert_resource(TrackpadSwipe::RecentlyEnded(std::time::Instant::now()));
+            _ => tracker.cooldown -= 1,
         }
         true
     }
 
-    pub fn active(&self) -> bool {
+    pub fn sliding(&self) -> bool {
         const FINGER_LIFT_THRESHOLD: Duration = Duration::from_millis(50);
-        let Some(ref swipe_tracker) = self.swipe_tracker else {
-            return false;
-        };
-
-        if let TrackpadSwipe::Active { last_swipe, .. } = swipe_tracker.as_ref()
-            && last_swipe.elapsed() < FINGER_LIFT_THRESHOLD
-        {
-            true
-        } else {
-            false
-        }
+        self.tracker
+            .as_ref()
+            .is_some_and(|tracker| tracker.last_swipe.elapsed() < FINGER_LIFT_THRESHOLD)
     }
 
     pub fn position(&self) -> Option<(f64, i32)> {
-        let swipe_tracker = self.swipe_tracker.as_ref()?;
-        if let TrackpadSwipe::Active {
-            velocity,
-            viewport_offset,
-            ..
-        } = swipe_tracker.as_ref()
-        {
-            Some((*velocity, *viewport_offset))
-        } else {
-            None
-        }
+        self.tracker
+            .as_ref()
+            .map(|tracker| (tracker.velocity, tracker.viewport_offset))
     }
 
-    pub fn update_position(&mut self, decay: f64, new_viewport_offset: i32) {
-        let Some(ref mut swipe_tracker) = self.swipe_tracker else {
-            return;
-        };
-        if let TrackpadSwipe::Active {
-            velocity,
-            viewport_offset,
-            ..
-        } = &mut **swipe_tracker
-        {
-            *velocity *= decay;
-            *viewport_offset = new_viewport_offset;
+    pub fn update_position(&mut self, decay: f64, viewport_offset: i32) {
+        if let Some(ref mut tracker) = self.tracker {
+            tracker.velocity *= decay;
+            tracker.viewport_offset = viewport_offset;
         }
     }
 
     pub fn initiate_cooldown(&mut self) {
-        /// Ticks to keep `SwipeActive` alive after commit for echo-back suppression.
-        const COOLDOWN_TICKS: u8 = 2;
-
-        let Some(ref mut swipe_tracker) = self.swipe_tracker else {
-            return;
-        };
-        if let TrackpadSwipe::Active { cooldown, .. } = &mut **swipe_tracker {
-            *cooldown = COOLDOWN_TICKS;
+        if let Some(ref mut tracker) = self.tracker {
+            tracker.cooldown = COOLDOWN_TICKS;
         }
     }
 
-    pub fn recently_ended(&self) -> Option<Instant> {
-        let swipe_tracker = self.swipe_tracker.as_ref()?;
-        if let TrackpadSwipe::RecentlyEnded(ended) = swipe_tracker.as_ref() {
-            Some(*ended)
-        } else {
-            None
-        }
+    pub fn active(&self) -> bool {
+        self.tracker.is_some()
+    }
+
+    pub fn refresh(velocity: f64, viewport_offset: i32, commands: &mut Commands) {
+        commands.insert_resource(TrackpadSwipe {
+            last_swipe: std::time::Instant::now(),
+            velocity,
+            viewport_offset,
+            cooldown: 0,
+        });
     }
 }

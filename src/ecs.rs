@@ -63,9 +63,8 @@ pub fn register_systems(app: &mut bevy::app::App) {
                 .chain()
                 .run_if(resource_exists::<Initializing>),
             systems::window_swiper,
-            systems::swipe_idle_tracker.run_if(|swipe: Option<Res<TrackpadSwipe>>| {
-                matches!(swipe.as_deref(), Some(TrackpadSwipe::Active { .. }))
-            }),
+            systems::swipe_idle_tracker
+                .run_if(|swipe_tracker: Option<Res<TrackpadSwipe>>| swipe_tracker.is_some()),
             systems::add_launched_process,
             systems::add_launched_application,
             systems::fresh_marker_cleanup,
@@ -194,26 +193,19 @@ pub struct StackAdjustedResize;
 pub struct WindowSwipeMarker(pub f64);
 
 #[derive(Resource)]
-pub enum TrackpadSwipe {
+pub struct TrackpadSwipe {
     /// Resource indicating that a trackpad swipe gesture is active.
     /// While present, window repositioning uses fast compositor-level moves
     /// instead of slow AX API calls. When inertia ends, positions are committed
     /// to AX and a cooldown keeps the resource alive for a few more ticks
     /// so that all guard checks (`swipe_active.is_some()`) hold until macOS
     /// has settled.
-    Active {
-        last_swipe: std::time::Instant,
-        velocity: f64,
-        viewport_offset: i32,
-        /// When >0, inertia has ended and the resource is counting down before
-        /// final removal.  Decremented once per tick in `swipe_idle_tracker`.
-        cooldown: u8,
-    },
-
-    /// Resource inserted when `SwipeActive` is removed.  Guards against
-    /// stale drag markers (and other triggers) that fire after a swipe and
-    /// would cause `reshuffle_layout_strip` to snap the viewport home.
-    RecentlyEnded(std::time::Instant),
+    last_swipe: std::time::Instant,
+    velocity: f64,
+    viewport_offset: i32,
+    /// When >0, inertia has ended and the resource is counting down before
+    /// final removal.  Decremented once per tick in `swipe_idle_tracker`.
+    cooldown: u8,
 }
 
 /// Marks a window entity that is currently on a native macOS fullscreen space.

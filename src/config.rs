@@ -315,6 +315,10 @@ impl Config {
     pub fn continuous_swipe(&self) -> bool {
         self.options().continuous_swipe.unwrap_or(true)
     }
+
+    pub fn natural_swipe(&self) -> bool {
+        self.options().natural_swipe.unwrap_or(true)
+    }
 }
 
 impl Default for Config {
@@ -432,6 +436,8 @@ pub struct MainOptions {
     pub mouse_follows_focus: Option<bool>,
     /// The number of fingers required for swipe gestures to move windows.
     pub swipe_gesture_fingers: Option<usize>,
+    /// Whether swipe gestures should move windows in a natural or reversed direction.
+    pub natural_swipe: Option<bool>,
     /// A list of preset column widths (as ratios) used for resizing windows.
     #[serde(default = "default_preset_column_widths")]
     pub preset_column_widths: Vec<f64>,

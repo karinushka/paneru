@@ -748,8 +748,14 @@ pub(super) fn window_swiper(
     let mut viewport = active_display.bounds();
     viewport.max.y = viewport.min.y + get_display_height(&active_display);
 
+    let natural_swipe_window_shift_modifier = match config.natural_swipe() {
+        true => 1.0,
+        false => -1.0,
+    };
+
     for (entity, unmanaged, WindowSwipeMarker(delta)) in sliding {
-        let shift = (f64::from(viewport.width()) * delta) as i32;
+        let shift =
+            (f64::from(viewport.width()) * delta * natural_swipe_window_shift_modifier) as i32;
 
         commands.entity(entity).try_remove::<WindowSwipeMarker>();
 

@@ -35,8 +35,21 @@ use crate::manager::{
     Application, Display, LayoutStrip, Origin, Process, Size, Window, WindowManager, WindowPadding,
     irect_from,
 };
-use crate::platform::{PlatformCallbacks, WinID, WorkspaceId};
+use crate::platform::{Modifiers, PlatformCallbacks, WinID, WorkspaceId};
 use crate::util::symlink_target;
+
+/// Computes the passthrough keybinding set for the given window/app and
+/// publishes it to the input thread. Called on focus change and config reload.
+fn update_passthrough(window: &Window, app: &Application, config: &Config) {
+    let bundle_id = app.bundle_id().unwrap_or_default();
+    let title = window.title().unwrap_or_default();
+    let keys: Vec<(u8, Modifiers)> = config
+        .find_window_properties(&title, bundle_id)
+        .into_iter()
+        .flat_map(|p| p.passthrough_keys().to_vec())
+        .collect();
+    crate::platform::input::set_focused_passthrough(keys);
+}
 
 /// Handles mouse moved events.
 ///
@@ -612,6 +625,9 @@ pub(super) fn window_focused_trigger(
         warn!("Unable to get parent for window {}.", window.id());
         return;
     };
+
+    update_passthrough(window, app, config.config());
+
     if !app.is_frontmost() {
         return;
     }
@@ -1270,6 +1286,8 @@ pub(super) fn refresh_configuration_trigger(
     window_manager: Res<WindowManager>,
     mut config: ResMut<Config>,
     watcher: Option<NonSendMut<Box<dyn Watcher>>>,
+    windows: Windows,
+    applications: Query<&Application>,
 ) {
     let Event::ConfigRefresh(event) = &trigger.event().0 else {
         return;
@@ -1314,6 +1332,15 @@ pub(super) fn refresh_configuration_trigger(
         _ = config.reload_config(path.as_path()).inspect_err(|err| {
             error!("loading config '{}': {err}", path.display());
         });
+    }
+
+    // Recompute passthrough keys for the currently focused window.
+    if let Some((window, _, parent)) = windows
+        .focused()
+        .and_then(|(w, e)| windows.find_parent(w.id()).map(|(w, _, p)| (w, e, p)))
+        && let Ok(app) = applications.get(parent)
+    {
+        update_passthrough(window, app, &config);
     }
 }
 

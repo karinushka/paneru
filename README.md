@@ -319,10 +319,15 @@ title = "Picture.*(in)?.*[Pp]icture"
 floating = true
 
 [windows.neovide]
-# Matches an editor and always inserts its window at index 1.
-title = ".*"
-bundle_id = "com.neovide.neovide"
+# Matches an editor by title and always inserts its window at index 1,
+# a specific initial width (as a ratio of display width),
+# and let some bindings pass through.
+# Note: bundle_id is optional. Some apps (e.g. plain binaries) do not
+# report one, so matching by title alone is often more reliable.
+title = "Neovide.*"
 index = 1
+width = 0.5
+bindings_passthrough = ["ctrl-h", "ctrl-l"]
 
 [windows.popup]
 # Matches a popup and silently appends it at the end.
@@ -330,11 +335,6 @@ title = "Unimportant popup window"
 dont_focus = true
 index = 100
 
-[windows.neovide_width]
-# Sets a specific initial width for a window (as a ratio of display width).
-title = ".*"
-bundle_id = "com.neovide.neovide"
-width = 0.5
 
 [windows.passwords]
 # Floating window placed on a grid. The format is "cols:rows:x:y:w:h".

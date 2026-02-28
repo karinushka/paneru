@@ -696,12 +696,6 @@ pub(super) fn mission_control_trigger(
         | Event::MissionControlShowFrontWindows
         | Event::MissionControlShowDesktop => {
             mission_control_active.as_mut().0 = true;
-            // The expose gesture may trigger swipe events before this AX
-            // notification arrives, setting SUPPRESS_MOUSE_MOVES = true.
-            // Reset suppression flags immediately so Mission Control is
-            // fully interactive.  SwipeActive cleanup continues normally.
-            crate::platform::input::SUPPRESS_MOUSE_MOVES.store(false, Ordering::Relaxed);
-            crate::manager::app::SUPPRESS_AX_MOVED.store(false, Ordering::Relaxed);
             commands.remove_resource::<TrackpadSwipe>();
         }
         Event::MissionControlExit => {

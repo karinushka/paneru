@@ -8,7 +8,6 @@ use bevy::math::IRect;
 use core::ptr::NonNull;
 use derive_more::{DerefMut, with_trait::Deref};
 use objc2_core_foundation::{CFEqual, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize};
-use objc2_core_graphics::CGError;
 use std::ptr::null_mut;
 use std::thread;
 use std::time::Duration;
@@ -18,7 +17,6 @@ use tracing::{Level, debug, instrument, trace};
 use super::skylight::{
     _AXUIElementGetWindow, _SLPSSetFrontProcessWithOptions, AXUIElementCopyAttributeValue,
     AXUIElementPerformAction, AXUIElementSetAttributeValue, SLPSPostEventRecordTo,
-    SLSMainConnectionID, SLSMoveWindow,
 };
 use crate::errors::{Error, Result};
 use crate::manager::{Origin, Size, irect_from};
@@ -43,8 +41,6 @@ pub trait WindowApi: Send + Sync {
     fn is_minimized(&self) -> bool;
     fn is_full_screen(&self) -> bool;
     fn reposition(&mut self, origin: Origin);
-    fn sls_reposition(&mut self, origin: Origin);
-    fn ax_commit_position(&self);
     fn resize(&mut self, size: Size, display_width: i32);
     fn update_frame(&mut self, display_bounds: &IRect) -> Result<()>;
     fn focus_without_raise(
@@ -317,52 +313,6 @@ impl WindowApi for WindowOS {
             let size = self.frame.size();
             self.frame.min = origin;
             self.frame.max = origin + size;
-        }
-    }
-
-    fn sls_reposition(&mut self, origin: Origin) {
-        if self.frame.min == origin {
-            return;
-        }
-        let point = CGPoint::new(
-            f64::from(origin.x + self.horizontal_padding),
-            f64::from(origin.y + self.vertical_padding),
-        );
-        let cid = unsafe { SLSMainConnectionID() };
-        let err = unsafe { SLSMoveWindow(cid, self.id, &raw const point) };
-        if err != CGError::Success {
-            // SLSMoveWindow failed — fall back to the AX API path.
-            trace!(
-                "SLSMoveWindow failed ({err:?}) for window {}, falling back to AX",
-                self.id
-            );
-            self.reposition(origin);
-            return;
-        }
-        let size = self.frame.size();
-        self.frame.min = origin;
-        self.frame.max = origin + size;
-    }
-
-    fn ax_commit_position(&self) {
-        let mut point = CGPoint::new(
-            f64::from(self.frame.min.x + self.horizontal_padding),
-            f64::from(self.frame.min.y + self.vertical_padding),
-        );
-        let position_ref = unsafe {
-            AXValueCreate(
-                kAXValueTypeCGPoint,
-                NonNull::from(&mut point).as_ptr().cast(),
-            )
-        };
-        if let Ok(position) = AXUIWrapper::retain(position_ref) {
-            unsafe {
-                AXUIElementSetAttributeValue(
-                    self.ax_element.as_ptr(),
-                    CFString::from_static_str(kAXPositionAttribute).as_ref(),
-                    position.as_ref(),
-                )
-            };
         }
     }
 

@@ -1,4 +1,4 @@
-use std::{sync::atomic::Ordering, time::Duration};
+use std::time::Duration;
 
 use bevy::{
     ecs::{
@@ -11,7 +11,7 @@ use bevy::{
     math::IRect,
 };
 use objc2_core_graphics::CGDirectDisplayID;
-use tracing::{debug, warn};
+use tracing::warn;
 
 use super::{ActiveDisplayMarker, FocusFollowsMouse, MissionControlActive, SkipReshuffle};
 use crate::{
@@ -21,7 +21,7 @@ use crate::{
         TrackpadSwipe, Unmanaged,
     },
     manager::{Application, Display, LayoutStrip, Window},
-    platform::{ProcessSerialNumber, WinID, input::SUPPRESS_MOUSE_MOVES},
+    platform::{ProcessSerialNumber, WinID},
 };
 
 /// A Bevy `SystemParam` that provides access to the application's configuration and related state.
@@ -317,30 +317,7 @@ pub struct SmoothSwipeTracking<'w> {
     tracker: Option<ResMut<'w, TrackpadSwipe>>,
 }
 
-/// Ticks to keep `SwipeActive` alive after commit for echo-back suppression.
-const COOLDOWN_TICKS: u8 = 2;
-
 impl SmoothSwipeTracking<'_> {
-    pub fn on_cooldown(&mut self, commands: &mut Commands) -> bool {
-        let Some(ref mut tracker) = self.tracker else {
-            return true;
-        };
-        match tracker.cooldown {
-            0 => return false,
-            1 => {
-                // Cooldown phase: inertia ended, we're keeping SwipeActive alive for
-                // a few more pump cycles so that all guard checks (animate_windows SLS
-                // snap, overlay hide, window_update_frame event eating) remain active
-                // while macOS settles.
-                debug!("swipe_tracker: cooldown done, removing SwipeActive");
-                SUPPRESS_MOUSE_MOVES.store(false, Ordering::Relaxed);
-                commands.remove_resource::<TrackpadSwipe>();
-            }
-            _ => tracker.cooldown -= 1,
-        }
-        true
-    }
-
     pub fn sliding(&self) -> bool {
         const FINGER_LIFT_THRESHOLD: Duration = Duration::from_millis(50);
         self.tracker
@@ -361,12 +338,6 @@ impl SmoothSwipeTracking<'_> {
         }
     }
 
-    pub fn initiate_cooldown(&mut self) {
-        if let Some(ref mut tracker) = self.tracker {
-            tracker.cooldown = COOLDOWN_TICKS;
-        }
-    }
-
     pub fn active(&self) -> bool {
         self.tracker.is_some()
     }
@@ -376,7 +347,6 @@ impl SmoothSwipeTracking<'_> {
             last_swipe: std::time::Instant::now(),
             velocity,
             viewport_offset,
-            cooldown: 0,
         });
     }
 }

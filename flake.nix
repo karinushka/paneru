@@ -112,6 +112,7 @@
                     0.75
                   ];
                   swipe_gesture_fingers = 4;
+                  natural_swipe = true;
                   animation_speed = 4000;
                 };
                 bindings = {

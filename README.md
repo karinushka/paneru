@@ -136,6 +136,7 @@ Paneru provides a home manager module to install and configure paneru.
           0.75
         ];
         swipe_gesture_fingers = 4;
+        natural_swipe = true;
         animation_speed = 4000;
       };
       bindings = {
@@ -211,6 +212,12 @@ preset_column_widths = [ 0.25, 0.33, 0.50, 0.66, 0.75 ]
 # Apple touchpads support gestures with more than five fingers (!),
 # but it is probably not that useful to use two hands :)
 swipe_gesture_fingers = 4
+
+# Should windows move in a natural direction with a swipe gesture.
+# Natural direction => Swipe fingers to the right, windows move to the right.
+# Non-natural direction => Swipe fingers to the right, windows move to the left.
+# Default: true
+natural_swipe = true
 
 # Swiping keeps sliding windows until the first or last window.
 # Set to false to clamp so edge windows stay on-screen. Enabled by default.

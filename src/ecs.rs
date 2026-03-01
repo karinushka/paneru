@@ -70,7 +70,6 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::fresh_marker_cleanup,
             systems::timeout_ticker,
             systems::window_update_frame,
-            systems::sync_menubar_height,
             systems::displays_rearranged,
             systems::reposition_dragged_window,
             systems::find_orphaned_workspaces.run_if(on_timer(Duration::from_millis(

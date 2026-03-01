@@ -1287,6 +1287,7 @@ pub(super) fn refresh_configuration_trigger(
     mut config: ResMut<Config>,
     watcher: Option<NonSendMut<Box<dyn Watcher>>>,
     windows: Windows,
+    mut displays: Query<&mut Display>,
     applications: Query<&Application>,
 ) {
     let Event::ConfigRefresh(event) = &trigger.event().0 else {
@@ -1332,6 +1333,11 @@ pub(super) fn refresh_configuration_trigger(
         _ = config.reload_config(path.as_path()).inspect_err(|err| {
             error!("loading config '{}': {err}", path.display());
         });
+    }
+
+    let height = config.menubar_height();
+    for mut display in &mut displays {
+        display.set_menubar_height_override(height);
     }
 
     // Recompute passthrough keys for the currently focused window.

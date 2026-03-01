@@ -217,7 +217,7 @@ swipe_gesture_fingers = 4
 # "Natural" => Swipe fingers to the right, windows move to the right.
 # "Reversed" => Swipe fingers to the right, windows move to the left.
 # Default: "Natural"
-swipe_gesture_direction = "Natural"
+# swipe_gesture_direction = "Natural"
 
 # Swiping keeps sliding windows until the first or last window.
 # Set to false to clamp so edge windows stay on-screen. Enabled by default.

@@ -20,7 +20,7 @@ use super::{
     PollForNotifications, RepositionMarker, ResizeMarker, SpawnWindowTrigger, Timeout,
     WMEventTrigger,
 };
-use crate::config::Config;
+use crate::config::{Config, SwipeGestureDirection};
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, BruteforceWindows, DockPosition, Initializing, LocateDockTrigger,
@@ -748,8 +748,13 @@ pub(super) fn window_swiper(
     let mut viewport = active_display.bounds();
     viewport.max.y = viewport.min.y + get_display_height(&active_display);
 
+    let swipe_direction_modifier = match config.swipe_gesture_direction() {
+        SwipeGestureDirection::Natural => 1.0,
+        SwipeGestureDirection::Reversed => -1.0,
+    };
+
     for (entity, unmanaged, WindowSwipeMarker(delta)) in sliding {
-        let shift = (f64::from(viewport.width()) * delta) as i32;
+        let shift = (f64::from(viewport.width()) * delta * swipe_direction_modifier) as i32;
 
         commands.entity(entity).try_remove::<WindowSwipeMarker>();
 

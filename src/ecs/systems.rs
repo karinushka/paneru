@@ -17,8 +17,8 @@ use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
     ActiveDisplayMarker, BProcess, ExistingMarker, FocusedMarker, FreshMarker,
-    PollForNotifications, RepositionMarker, ResizeMarker, SpawnWindowTrigger, Timeout,
-    WMEventTrigger,
+    PollForNotifications, RepositionMarker, RescueOrphanedWindowsTrigger, ResizeMarker,
+    SpawnWindowTrigger, Timeout, WMEventTrigger,
 };
 use crate::config::Config;
 use crate::ecs::params::{ActiveDisplay, Windows};
@@ -29,7 +29,7 @@ use crate::ecs::{
 };
 use crate::events::Event;
 use crate::manager::{
-    Application, Column, Display, LayoutStrip, Origin, Process, Size, Window, WindowManager,
+    Application, Column, Display, LayoutStrip, Process, Size, Window, WindowManager,
     WindowOS, bruteforce_windows,
 };
 use crate::platform::{PlatformCallbacks, WorkspaceId};
@@ -367,22 +367,30 @@ pub(super) fn add_launched_process(
 /// * `commands` - Bevy commands to spawn entities and manage components.
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn add_launched_application(
-    app_query: Populated<(&mut Application, Entity), With<FreshMarker>>,
+    app_query: Populated<(&mut Application, Entity, Has<Children>), With<FreshMarker>>,
     windows: Windows,
     mut commands: Commands,
 ) {
     // TODO: maybe refactor this with add_existing_application_windows()
     let find_window = |window_id| windows.find(window_id);
 
-    for (app, entity) in app_query {
+    for (app, entity, has_children) in app_query {
         let mut create_windows = app.window_list();
         // Retain the non-existing windows, so they can be created.
         create_windows.retain(|window| find_window(window.id()).is_none());
 
         if !create_windows.is_empty() {
             commands.entity(entity).try_remove::<FreshMarker>();
-            debug!("spawn!");
+            debug!(
+                "spawn! (polling path found {} new windows for {entity})",
+                create_windows.len(),
+            );
             commands.trigger(SpawnWindowTrigger(create_windows));
+        } else if has_children {
+            // Windows were already created via AXCreated notification path.
+            // Remove FreshMarker so the Timeout gets cleaned up.
+            debug!("removing FreshMarker from {entity}: windows already created via AXCreated");
+            commands.entity(entity).try_remove::<FreshMarker>();
         }
     }
 }
@@ -424,11 +432,24 @@ pub(super) fn fresh_marker_cleanup(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn timeout_ticker(
     timers: Populated<(Entity, &mut Timeout)>,
+    strips: Query<&LayoutStrip>,
     clock: Res<Time>,
     mut commands: Commands,
 ) {
     for (entity, mut timeout) in timers {
         if timeout.timer.is_finished() {
+            // Rescue windows from orphaned strips before despawning.
+            if let Ok(strip) = strips.get(entity) {
+                let windows = strip.all_windows();
+                if !windows.is_empty() {
+                    warn!(
+                        "rescuing {} windows from orphaned strip {} into active workspace",
+                        windows.len(),
+                        strip.id(),
+                    );
+                    commands.trigger(RescueOrphanedWindowsTrigger(windows));
+                }
+            }
             trace!("Despawning entity {entity} due to timeout.");
             if let Some(message) = &timeout.message {
                 debug!("{message}");
@@ -442,69 +463,63 @@ pub(super) fn timeout_ticker(
     }
 }
 
-/// A Bevy system that finds and re-assigns orphaned spaces to the active display.
-/// This system iterates through `OrphanedStrip` entities, attempts to merge their windows into an existing space on the active display,
-/// and then despawns the `OrphanedStrip` entity.
+/// Re-parents orphaned workspace strips to the display that currently owns their space.
+///
+/// When a display is removed, its strips are detached (orphaned). macOS moves the spaces
+/// to remaining displays. This system queries `present_displays()` to find which display
+/// now owns each orphaned space and re-parents the strip directly to that display.
 ///
 /// # Arguments
 ///
-/// * `orphaned_spaces` - A `Populated` query for `(Entity, &mut OrphanedStrip)` components.
-/// * `active_display` - A mutable `ActiveDisplayMut` system parameter for the currently active display.
-/// * `commands` - Bevy commands to despawn entities.
+/// * `orphans` - A `Populated` query for `LayoutStrip` entities without a parent display.
+/// * `displays` - A query for all `Display` entities.
+/// * `windows` - A `Windows` system parameter for accessing window components.
+/// * `window_manager` - The `WindowManager` resource for querying current display/space assignments.
+/// * `commands` - Bevy commands to re-parent entities and remove timeouts.
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn find_orphaned_workspaces(
     orphans: Populated<(&LayoutStrip, Entity), Without<ChildOf>>,
-    workspaces: Populated<(&LayoutStrip, Entity, &ChildOf), With<ChildOf>>,
+    displays: Query<(&Display, Entity)>,
     windows: Windows,
-    displays: Query<&Display>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
-    let matched_orphans = workspaces.into_iter().filter_map(|(strip, entity, child)| {
-        orphans.iter().find_map(|(orphan, orphan_entity)| {
-            (strip.id() == orphan.id()).then_some((
-                child.parent(),
-                strip,
-                entity,
-                orphan,
-                orphan_entity,
-            ))
-        })
-    });
+    let present = window_manager.present_displays();
 
-    for (parent_display, strip, entity, orphan, orphan_entity) in matched_orphans {
-        let Ok(display) = displays.get(parent_display) else {
-            continue;
+    for (orphan, orphan_entity) in orphans.iter() {
+        // Find which display now owns this space ID.
+        let target = present.iter().find_map(|(present_display, spaces)| {
+            if spaces.iter().any(|&id| id == orphan.id()) {
+                displays
+                    .iter()
+                    .find(|(d, _)| d.id() == present_display.id())
+            } else {
+                None
+            }
+        });
+
+        let Some((target_display, target_entity)) = target else {
+            continue; // No display owns this space yet; wait for next tick.
         };
-        let display_id = display.id();
+
         debug!(
-            "Re-inserting orphaned strip: {parent_display}, {}, {entity}, {}, {orphan_entity}, display {display_id}",
-            strip.id(),
+            "Re-parenting orphaned strip {} to display {}",
             orphan.id(),
+            target_display.id(),
         );
 
-        if let Ok(mut commands) = commands.get_entity(orphan_entity) {
-            commands.try_remove::<Timeout>();
+        if let Ok(mut cmd) = commands.get_entity(orphan_entity) {
+            cmd.try_remove::<Timeout>();
         }
-        if let Ok(mut commands) = commands.get_entity(orphan_entity) {
-            commands.try_insert(ChildOf(parent_display));
-        }
-        if let Ok(mut commands) = commands.get_entity(entity) {
-            commands.try_despawn();
+        if let Ok(mut cmd) = commands.get_entity(orphan_entity) {
+            cmd.try_insert(ChildOf(target_entity));
         }
 
-        let mut in_workspace = window_manager
-            .windows_in_workspace(strip.id())
-            .inspect_err(|err| {
-                warn!("getting windows in workspace: {err}");
-            })
-            .unwrap_or_default();
-
+        // Resize windows for the new display dimensions.
         for entity in orphan.all_windows() {
-            // Update window ratios on the new display.
             if let Some(window) = windows.get(entity) {
-                let width = f64::from(display.width()) * window.width_ratio();
-                let height = display.height();
+                let width = f64::from(target_display.width()) * window.width_ratio();
+                let height = target_display.height();
                 debug!(
                     "refreshing ratio {:.1} for window {}: {:.0}x{:.0}",
                     window.width_ratio(),
@@ -515,31 +530,10 @@ pub(super) fn find_orphaned_workspaces(
                 resize_entity(
                     entity,
                     Size::new(width as i32, height),
-                    display.id(),
+                    target_display.id(),
                     &mut commands,
                 );
-
-                in_workspace.retain(|window_id| *window_id != window.id());
             }
-        }
-
-        // Find remaining windows which are outside of the strip.
-        let floating = in_workspace.into_iter().filter_map(|window_id| {
-            windows
-                .find(window_id)
-                .and_then(|(_, entity)| windows.get_managed(entity))
-                .and_then(|(_, entity, unmanaged)| {
-                    matches!(unmanaged, Some(Unmanaged::Floating)).then_some(entity)
-                })
-        });
-        for window_entity in floating {
-            debug!("repositioning floating window {window_entity}");
-            reposition_entity(
-                window_entity,
-                display.absolute_coords(Origin::default()),
-                display.id(),
-                &mut commands,
-            );
         }
     }
 }
@@ -1025,7 +1019,7 @@ pub(super) fn displays_rearranged(
     for event in messages.read() {
         match event {
             Event::DisplayAdded { display_id } => {
-                add_display(*display_id, &window_manager, &mut commands);
+                add_display(*display_id, &workspaces, &window_manager, &mut commands);
             }
             Event::DisplayRemoved { display_id } => {
                 remove_display(*display_id, &workspaces, &mut displays, &mut commands);
@@ -1041,6 +1035,7 @@ pub(super) fn displays_rearranged(
 
 fn add_display(
     display_id: CGDirectDisplayID,
+    existing_strips: &Query<(&LayoutStrip, Entity, &ChildOf)>,
     window_manager: &Res<WindowManager>,
     commands: &mut Commands,
 ) {
@@ -1054,13 +1049,26 @@ fn add_display(
         error!("Unable to find added display id {display_id}!");
         return;
     };
-    // find_orphaned_spaces(&mut orphaned_spaces.0, &mut display, &mut windows);
 
-    let children = workspaces
-        .into_iter()
-        .map(|id| commands.spawn(LayoutStrip::new(id)).id())
-        .collect::<Vec<_>>();
-    commands.spawn(display).add_children(&children);
+    let display_entity = commands.spawn(display).id();
+
+    for id in workspaces {
+        // Prefer re-parenting an existing strip (which has windows) over creating
+        // a new empty one. This handles the case where a display was disconnected,
+        // its strips were re-parented to the remaining display, and then the
+        // display reconnects.
+        if let Some((_, strip_entity, _)) = existing_strips
+            .iter()
+            .find(|(strip, _, _)| strip.id() == id)
+        {
+            debug!("Re-parenting existing strip {id} to new display {display_id}");
+            if let Ok(mut cmd) = commands.get_entity(strip_entity) {
+                cmd.try_insert(ChildOf(display_entity));
+            }
+        } else {
+            commands.spawn((LayoutStrip::new(id), ChildOf(display_entity)));
+        }
+    }
 }
 
 fn remove_display(

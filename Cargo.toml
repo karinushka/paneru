@@ -1,6 +1,6 @@
 [package]
 name = "paneru"
-version = "0.3.5"
+version = "0.3.6"
 edition = "2024"
 rust-version = "1.89.0"
 description = "A sliding, tiling window manager for MacOS."
@@ -20,19 +20,19 @@ lto = true
 
 [dependencies]
 accessibility-sys = "0.2.0"
-arc-swap = "1.8.1"
-bevy = { version = "0.18.0", default-features = false, features = [
+arc-swap = "1.8.2"
+bevy = { version = "0.18.1", default-features = false, features = [
   "multi_threaded",
 ] }
-bitflags = "2.10.0"
-chrono = "0.4.43"
-clap = { version = "4.5.57", features = ["cargo", "derive"] }
+bitflags = "2.11.0"
+chrono = "0.4.44"
+clap = { version = "4.5.60", features = ["cargo", "derive"] }
 derive_more = { version = "2.1.1", features = ["deref", "deref_mut"] }
 embed_plist = "1.2.2"
 launchctl = "0.3.2"
-libc = "0.2.180"
+libc = "0.2.182"
 notify = { version = "8.2.0", features = ["macos_fsevent"] }
-objc2 = { version = "0.6.3", features = ["catch-all", "exception"] }
+objc2 = { version = "0.6.4", features = ["catch-all", "exception"] }
 objc2-app-kit = "0.3.2"
 objc2-core-foundation = { version = "0.3.2", features = ["CFRunLoop"] }
 objc2-core-graphics = "0.3.2"
@@ -41,6 +41,6 @@ regex = "1.12.3"
 scopeguard = "1.2.0"
 serde = { version = "1.0.228", features = ["derive"] }
 stdext = "0.3.3"
-toml = "1.0.3"
+toml = "1.0.6"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }

@@ -26,8 +26,8 @@ use crate::ecs::params::{
     ActiveDisplay, ActiveDisplayMut, Configuration, SmoothSwipeTracking, Windows,
 };
 use crate::ecs::{
-    ActiveWorkspaceMarker, LocateDockTrigger, SendMessageTrigger, TrackpadSwipe, WindowSwipeMarker,
-    reposition_entity, reshuffle_around, resize_entity,
+    ActiveWorkspaceMarker, Bounds, LocateDockTrigger, Position, SendMessageTrigger, TrackpadSwipe,
+    WindowSwipeMarker, reposition_entity, reshuffle_around, resize_entity,
 };
 use crate::errors::Result;
 use crate::events::Event;
@@ -165,8 +165,7 @@ pub(super) fn mouse_down_trigger(
     }
     trace!("{point:?}");
 
-    let Some((window, entity)) = window_manager
-        .0
+    let Some((_, entity)) = window_manager
         .find_window_at_point(&point)
         .ok()
         .and_then(|window_id| windows.find(window_id))
@@ -177,8 +176,8 @@ pub(super) fn mouse_down_trigger(
     // Stop any ongoing scroll.
     commands.remove_resource::<TrackpadSwipe>();
 
-    if window.frame().min.x < 0
-        || window.frame().min.x > active_display.bounds().width() - window.frame().width()
+    if let Some(frame) = windows.frame(entity)
+        && (frame.min.x < 0 || frame.min.x > active_display.bounds().width() - frame.width())
     {
         reshuffle_around(entity, &mut commands);
     }
@@ -637,9 +636,10 @@ pub(super) fn window_focused_trigger(
     if !(config.skip_reshuffle() || config.initializing()) {
         if config.auto_center()
             && let Some((_, _, None)) = windows.get_managed(entity)
+            && let Some(size) = windows.size(entity)
         {
             let center = active_display.bounds().center();
-            let origin = IRect::from_center_size(center, window.frame().size()).min;
+            let origin = IRect::from_center_size(center, size).min;
             reposition_entity(
                 entity,
                 active_display.display().absolute_coords(origin),
@@ -896,7 +896,7 @@ pub(super) fn window_unmanaged_trigger(
         Unmanaged::Floating => {
             debug!("Entity {entity} is floating.");
 
-            let Some(window) = windows.get(entity) else {
+            let Some((window, frame)) = windows.get(entity).zip(windows.frame(entity)) else {
                 return;
             };
 
@@ -916,7 +916,6 @@ pub(super) fn window_unmanaged_trigger(
                 reposition_entity(entity, Origin::new(x, y), display_id, &mut commands);
                 resize_entity(entity, Size::new(w, h), display_id, &mut commands);
             } else {
-                let frame = window.frame();
                 let max_width = display_bounds.width() * UNMANAGED_MAX_SCREEN_RATIO_NUM
                     / UNMANAGED_MAX_SCREEN_RATIO_DEN;
                 let max_height = display_bounds.height() * UNMANAGED_MAX_SCREEN_RATIO_NUM
@@ -1139,7 +1138,12 @@ pub(super) fn spawn_window_trigger(
         );
 
         // Insert the window into the internal Bevy state.
-        let entity = commands.spawn((window, ChildOf(app_entity))).id();
+        let frame = window.frame();
+        let position = Position(frame.min);
+        let bounds = Bounds(Size::new(frame.width(), frame.height()));
+        let entity = commands
+            .spawn((position, bounds, window, ChildOf(app_entity)))
+            .id();
 
         apply_window_properties(
             entity,

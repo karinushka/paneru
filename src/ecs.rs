@@ -92,16 +92,18 @@ pub fn register_systems(app: &mut bevy::app::App) {
         PostUpdate,
         (
             systems::reshuffle_layout_strip,
-            systems::animate_windows.after(systems::reshuffle_layout_strip),
-            systems::animate_resize_windows.after(systems::reshuffle_layout_strip),
+            systems::animate_entities.after(systems::reshuffle_layout_strip),
+            systems::animate_resize_entities.after(systems::reshuffle_layout_strip),
             systems::update_overlays
-                .after(systems::animate_windows)
-                .after(systems::animate_resize_windows)
+                .after(systems::animate_entities)
+                .after(systems::animate_resize_entities)
                 .run_if(|config: Option<Res<Config>>| {
                     config.is_some_and(|config| {
                         config.dim_inactive_opacity() > 0.0 || config.border_active_window()
                     })
                 }),
+            systems::commit_window_position.after(systems::animate_entities),
+            systems::commit_window_size.after(systems::animate_resize_entities),
         ),
     );
 }
@@ -190,6 +192,12 @@ pub struct StackAdjustedResize;
 
 #[derive(Component)]
 pub struct WindowSwipeMarker(pub f64);
+
+#[derive(Component, Debug, Deref, DerefMut)]
+pub struct Position(pub Origin);
+
+#[derive(Component, Debug, Deref, DerefMut)]
+pub struct Bounds(pub Size);
 
 #[derive(Resource)]
 pub struct TrackpadSwipe {

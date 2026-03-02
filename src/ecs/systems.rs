@@ -2,8 +2,10 @@ use bevy::app::AppExit;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::{MessageReader, MessageWriter};
-use bevy::ecs::query::{Has, Or, With, Without};
-use bevy::ecs::system::{Commands, Local, NonSend, NonSendMut, Populated, Query, Res, Single};
+use bevy::ecs::query::{Changed, Has, Or, With, Without};
+use bevy::ecs::system::{
+    Commands, Local, NonSend, NonSendMut, ParallelCommands, Populated, Query, Res, Single,
+};
 use bevy::math::IRect;
 use bevy::tasks::AsyncComputeTaskPool;
 use bevy::tasks::futures_lite::future;
@@ -23,9 +25,10 @@ use super::{
 use crate::config::{Config, SwipeGestureDirection};
 use crate::ecs::params::{ActiveDisplay, Configuration, SmoothSwipeTracking, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, BruteforceWindows, DockPosition, Initializing, LocateDockTrigger,
-    ReshuffleAroundMarker, StackAdjustedResize, TrackpadSwipe, Unmanaged, WindowDraggedMarker,
-    WindowSwipeMarker, reposition_entity, reshuffle_around, resize_entity,
+    ActiveWorkspaceMarker, Bounds, BruteforceWindows, DockPosition, Initializing,
+    LocateDockTrigger, Position, ReshuffleAroundMarker, StackAdjustedResize, TrackpadSwipe,
+    Unmanaged, WindowDraggedMarker, WindowSwipeMarker, reposition_entity, reshuffle_around,
+    resize_entity,
 };
 use crate::events::Event;
 use crate::manager::{
@@ -643,45 +646,45 @@ pub(super) fn workspace_change_watcher(
 /// * `commands` - Bevy commands to remove the `RepositionMarker` when animation is complete.
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
-pub(super) fn animate_windows(
-    windows: Populated<(&mut Window, Entity, &RepositionMarker)>,
+pub(super) fn animate_entities(
+    mut animate: Populated<(&mut Position, Entity, &RepositionMarker)>,
     displays: Query<&Display>,
     swipe_tracker: SmoothSwipeTracking,
     time: Res<Time>,
     config: Res<Config>,
-    mut commands: Commands,
+    commands: ParallelCommands,
 ) {
-    let move_ratio = config.animation_speed() * time.delta_secs_f64();
-    let swiping = swipe_tracker.sliding();
+    let move_ratio = if swipe_tracker.sliding() {
+        // Move things immediately during swiping.
+        100.0
+    } else {
+        config.animation_speed() * time.delta_secs_f64()
+    };
 
-    for (mut window, entity, RepositionMarker { origin, display_id }) in windows {
-        if swiping {
-            window.reposition(*origin);
-            commands.entity(entity).try_remove::<RepositionMarker>();
-            continue;
-        }
+    animate.par_iter_mut().for_each(
+        |(mut position, entity, RepositionMarker { origin, display_id })| {
+            let Some(display) = displays.iter().find(|display| display.id() == *display_id) else {
+                return;
+            };
+            let move_delta = move_ratio * f64::from(display.width());
+            let delta = position
+                .0
+                .as_vec2()
+                .move_towards(origin.as_vec2(), move_delta as f32)
+                .as_ivec2();
 
-        let Some(display) = displays.iter().find(|display| display.id() == *display_id) else {
-            continue;
-        };
-        let move_delta = move_ratio * f64::from(display.width());
-        let delta = window
-            .frame()
-            .min
-            .as_vec2()
-            .move_towards(origin.as_vec2(), move_delta as f32)
-            .as_ivec2();
-
-        trace!(
-            "window {} source {} dest {origin} delta {move_delta} moving to {delta}",
-            window.id(),
-            window.frame().min,
-        );
-        window.reposition(delta);
-        if *origin == delta {
-            commands.entity(entity).try_remove::<RepositionMarker>();
-        }
-    }
+            trace!(
+                "entity {entity} source {} dest {origin} delta {move_delta} moving to {delta}",
+                position.0,
+            );
+            position.0 = delta;
+            if *origin == delta {
+                commands.command_scope(|mut command| {
+                    command.entity(entity).try_remove::<RepositionMarker>();
+                });
+            }
+        },
+    );
 }
 
 /// Animates window resizing.
@@ -696,53 +699,57 @@ pub(super) fn animate_windows(
 /// * `commands` - Bevy commands to remove the `ResizeMarker` when resizing is complete.
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
-pub(super) fn animate_resize_windows(
-    windows: Populated<(&mut Window, Entity, &ResizeMarker, Has<RepositionMarker>)>,
+pub(super) fn animate_resize_entities(
+    mut animate: Populated<(&mut Bounds, Entity, &ResizeMarker, Has<RepositionMarker>)>,
     displays: Query<&Display>,
     time: Res<Time>,
     config: Res<Config>,
-    mut commands: Commands,
+    commands: ParallelCommands,
 ) {
-    for (mut window, entity, ResizeMarker { size, display_id }, moving) in windows {
-        if moving {
-            // Defer resize while the window is being repositioned so it
-            // doesn't extend past the screen edge before the move lands.
-            // Exception: when the resize *shrinks* the window (e.g.
-            // stacking), there is no risk of overshooting the screen, and
-            // deferring would leave the window at its old (full) height
-            // until the reposition finishes.
-            let current_size = window.frame().size();
-            if size.x > current_size.x || size.y > current_size.y {
-                continue;
+    let move_ratio = config.animation_speed() * time.delta_secs_f64();
+
+    animate.par_iter_mut().for_each(
+        |(mut bounds, entity, ResizeMarker { size, display_id }, moving)| {
+            if moving {
+                // Defer resize while the window is being repositioned so it doesn't extend past
+                // the screen edge before the move lands.
+                // Exception: when the resize *shrinks* the window (e.g. stacking), there is no
+                // risk of overshooting the screen, and deferring would leave the window at its old
+                // (full) height until the reposition finishes.
+                let current_size = bounds.0;
+                if size.x > current_size.x || size.y > current_size.y {
+                    return;
+                }
             }
-        }
-        let Some(display) = displays.iter().find(|display| display.id() == *display_id) else {
-            continue;
-        };
+            let Some(display) = displays.iter().find(|display| display.id() == *display_id) else {
+                return;
+            };
 
-        let move_ratio = config.animation_speed() * time.delta_secs_f64();
-        let move_delta = move_ratio * f64::from(display.width());
-        let origin = window.frame().size();
-        let delta = origin
-            .as_vec2()
-            .move_towards(size.as_vec2(), move_delta as f32)
-            .as_ivec2();
+            let move_delta = move_ratio * f64::from(display.width());
+            let delta = bounds
+                .0
+                .as_vec2()
+                .move_towards(size.as_vec2(), move_delta as f32)
+                .as_ivec2();
 
-        trace!(
-            "window {} source {origin} dest {size} delta {move_delta} resizing to {delta}",
-            window.id(),
-        );
-        window.resize(delta, display.width());
-        if *size == delta {
-            commands.entity(entity).try_remove::<ResizeMarker>();
-        }
-    }
+            trace!(
+                "entity {entity} source {} dest {size} delta {move_delta} resizing to {delta}",
+                bounds.0,
+            );
+            bounds.0 = delta;
+            if *size == delta {
+                commands.command_scope(|mut command| {
+                    command.entity(entity).try_remove::<ResizeMarker>();
+                });
+            }
+        },
+    );
 }
 
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn window_swiper(
     sliding: Populated<(Entity, Has<Unmanaged>, &WindowSwipeMarker)>,
-    windows: Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
+    windows: Windows,
     active_display: ActiveDisplay,
     config: Res<Config>,
     time: Res<Time>,
@@ -750,12 +757,8 @@ pub(super) fn window_swiper(
     mut commands: Commands,
 ) {
     let get_window_frame = |entity| get_moving_window_frame(entity, &active_display, &windows);
-    let get_window_h_pad = |entity: Entity| {
-        windows
-            .get(entity)
-            .map(|(w, _, _)| w.horizontal_padding())
-            .unwrap_or(0)
-    };
+    let get_window_h_pad =
+        |entity: Entity| windows.get(entity).map_or(0, |w| w.horizontal_padding());
     let mut viewport = active_display.bounds();
     viewport.max.y = viewport.min.y + get_display_height(&active_display);
 
@@ -854,7 +857,7 @@ pub(super) fn window_swiper(
 pub(super) fn swipe_idle_tracker(
     mut swipe: SmoothSwipeTracking,
     active_display: ActiveDisplay,
-    windows: Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
+    windows: Windows,
     window_manager: Res<WindowManager>,
     config: Res<Config>,
     time: Res<Time>,
@@ -895,12 +898,8 @@ pub(super) fn swipe_idle_tracker(
     let frame_delta = velocity * dt;
 
     let get_window_frame = |entity| get_moving_window_frame(entity, &active_display, &windows);
-    let get_window_h_pad = |entity: Entity| {
-        windows
-            .get(entity)
-            .map(|(w, _, _)| w.horizontal_padding())
-            .unwrap_or(0)
-    };
+    let get_window_h_pad =
+        |entity: Entity| windows.get(entity).map_or(0, |w| w.horizontal_padding());
 
     let swipe_direction_modifier = match config.swipe_gesture_direction() {
         SwipeGestureDirection::Natural => 1.0,
@@ -948,7 +947,7 @@ pub(super) fn swipe_idle_tracker(
 
 fn expose_window(
     entity: Entity,
-    windows: &Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
+    windows: &Windows,
     active_display: &ActiveDisplay,
     dock: Option<&DockPosition>,
     edge_padding: (i32, i32, i32, i32),
@@ -990,18 +989,14 @@ fn expose_window(
 pub(super) fn reshuffle_layout_strip(
     marker: Populated<Entity, With<ReshuffleAroundMarker>>,
     active_display: ActiveDisplay,
-    windows: Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
+    windows: Windows,
     config: Res<Config>,
     swipe_tracker: SmoothSwipeTracking,
     mut commands: Commands,
 ) {
     let get_window_frame = |entity| get_moving_window_frame(entity, &active_display, &windows);
-    let get_window_h_pad = |entity: Entity| {
-        windows
-            .get(entity)
-            .map(|(w, _, _)| w.horizontal_padding())
-            .unwrap_or(0)
-    };
+    let get_window_h_pad =
+        |entity: Entity| windows.get(entity).map_or(0, |w| w.horizontal_padding());
 
     for entity in marker {
         debug!("reshuffle_layout_strip: triggered for entity {entity}");
@@ -1369,13 +1364,13 @@ pub(crate) fn gather_initial_processes(
 fn get_moving_window_frame(
     entity: Entity,
     active_display: &ActiveDisplay,
-    windows: &Query<(&Window, Option<&RepositionMarker>, Option<&ResizeMarker>)>,
+    windows: &Windows,
 ) -> Option<IRect> {
     windows
-        .get(entity)
-        .map(|(window, reposition, resize)| {
-            let mut frame = window.frame();
-            let size = window.frame().size();
+        .positioning(entity)
+        .map(|(origin, size, reposition, resize)| {
+            let size = size.0;
+            let mut frame = IRect::from_corners(origin.0, origin.0 + size);
 
             if let Some(reposition) = reposition
                 && reposition.display_id == active_display.id()
@@ -1390,8 +1385,6 @@ fn get_moving_window_frame(
             }
             frame
         })
-        .inspect_err(|err| warn!("can not get frame of {entity}: {err}"))
-        .ok()
 }
 
 fn get_display_height(active_display: &ActiveDisplay) -> i32 {
@@ -1654,4 +1647,23 @@ pub(super) fn update_overlays(
         focused_abs_cg,
         border_params.as_ref(),
     );
+}
+
+pub(super) fn commit_window_position(
+    mut moved_windows: Populated<(&mut Window, &Position), Changed<Position>>,
+) {
+    moved_windows
+        .par_iter_mut()
+        .for_each(|(mut window, position)| window.reposition(position.0));
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn commit_window_size(
+    active_display: ActiveDisplay,
+    mut moved_windows: Populated<(&mut Window, &Bounds), Changed<Bounds>>,
+) {
+    let display_bounds = active_display.bounds();
+    moved_windows
+        .par_iter_mut()
+        .for_each(|(mut window, size)| window.resize(size.0, display_bounds.width()));
 }

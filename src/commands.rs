@@ -335,7 +335,7 @@ fn command_swap_focus(
         let index = active_strip.index_of(current).ok()?;
         let other_window = get_window_in_direction(direction, current, active_strip)?;
         let new_index = active_strip.index_of(other_window).ok()?;
-        let current_frame = windows.get(current)?.frame();
+        let current_width = windows.size(current)?.x;
         debug!(
             "swap {direction:?}: current={current} idx={index}, other={other_window} idx={new_index}, strip_len={}",
             active_strip.len()
@@ -346,15 +346,13 @@ fn command_swap_focus(
             Origin::new(0, 0)
         } else if new_index == (active_strip.len() - 1) {
             // If reached full right, snap the window to right.
-            Origin::new(display_bounds.width() - current_frame.width(), 0)
+            Origin::new(display_bounds.width() - current_width, 0)
         } else {
             active_strip
                 .get(new_index)
                 .ok()
                 .and_then(|column| column.top())
-                .and_then(|entity| windows.get(entity))?
-                .frame()
-                .min
+                .and_then(|entity| windows.origin(entity))?
         };
         debug!("swap {direction:?}: repositioning {current} to {origin:?}");
         reposition_entity(current, origin, display_id, &mut commands);
@@ -414,7 +412,7 @@ fn command_swap_focus(
 #[allow(clippy::needless_pass_by_value)]
 fn command_center_window(
     mut messages: MessageReader<Event>,
-    current_focus: Single<(&Window, Entity), With<FocusedMarker>>,
+    windows: Windows,
     active_display: ActiveDisplay,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
@@ -426,12 +424,15 @@ fn command_center_window(
         return;
     }
 
-    let (window, entity) = *current_focus;
-    let center = active_display.bounds().center();
-    let origin = IRect::from_center_size(center, window.frame().size()).min;
-    reposition_entity(entity, origin, active_display.id(), &mut commands);
-    window_manager.center_mouse(None, &active_display.bounds());
-    reshuffle_around(entity, &mut commands);
+    if let Some((_, entity)) = windows.focused()
+        && let Some(size) = windows.size(entity)
+    {
+        let center = active_display.bounds().center();
+        let origin = IRect::from_center_size(center, size).min;
+        reposition_entity(entity, origin, active_display.id(), &mut commands);
+        window_manager.center_mouse(None, &active_display.bounds());
+        reshuffle_around(entity, &mut commands);
+    }
 }
 
 /// Resizes the focused window based on preset column widths.
@@ -446,7 +447,6 @@ fn command_center_window(
 #[allow(clippy::needless_pass_by_value)]
 fn resize_window(
     mut messages: MessageReader<Event>,
-    current_focus: Single<(&Window, Entity), With<FocusedMarker>>,
     windows: Windows,
     active_display: ActiveDisplay,
     config: Res<Config>,
@@ -458,11 +458,17 @@ fn resize_window(
         return;
     };
 
-    let (window, entity) = *current_focus;
+    let Some((frame, entity)) = windows
+        .focused()
+        .and_then(|(_, entity)| windows.frame(entity).zip(Some(entity)))
+    else {
+        return;
+    };
+
     let display_width = active_display.bounds().width();
     let (_, pad_right, _, pad_left) = config.edge_padding();
     let padded_width = display_width - pad_left - pad_right;
-    let current_ratio = f64::from(window.frame().width()) / f64::from(padded_width);
+    let current_ratio = f64::from(frame.width()) / f64::from(padded_width);
     let widths = config.preset_column_widths();
     let fallback = *widths.first().unwrap_or(&0.5);
     let next_ratio = match direction {
@@ -480,8 +486,8 @@ fn resize_window(
     };
 
     let new_width = (next_ratio * f64::from(padded_width)).round() as i32;
-    let size = Size::new(new_width, window.frame().height());
-    let mut frame = IRect::from_center_size(window.frame().center(), size);
+    let size = Size::new(new_width, frame.height());
+    let mut frame = IRect::from_center_size(frame.center(), size);
 
     if frame.max.x > active_display.bounds().max.x - pad_right {
         frame.min.x = active_display.bounds().max.x - pad_right - size.x;
@@ -497,11 +503,11 @@ fn resize_window(
     {
         for &sibling in &stack {
             if sibling != entity
-                && let Some(w) = windows.get(sibling)
+                && let Some(size) = windows.size(sibling)
             {
                 resize_entity(
                     sibling,
-                    Size::new(new_width, w.frame().height()),
+                    size.with_x(new_width),
                     active_display.id(),
                     &mut commands,
                 );
@@ -525,7 +531,6 @@ fn resize_window(
 #[allow(clippy::needless_pass_by_value)]
 fn full_width_window(
     mut messages: MessageReader<Event>,
-    current_focus: Single<(&Window, Entity), With<FocusedMarker>>,
     windows: Windows,
     mut active_display: ActiveDisplayMut,
     config: Res<Config>,
@@ -538,19 +543,24 @@ fn full_width_window(
         return;
     }
 
-    let (window, entity) = *current_focus;
+    let Some((frame, (window, entity))) = windows
+        .focused()
+        .and_then(|(window, entity)| windows.frame(entity).zip(Some((window, entity))))
+    else {
+        return;
+    };
     let display_width = active_display.bounds().width();
     let (_, pad_right, _, pad_left) = config.edge_padding();
     let padded_width = display_width - pad_left - pad_right;
-    let height = window.frame().height();
-    let y = window.frame().min.y;
+    let height = frame.height();
+    let y = frame.min.y;
 
     let (width, x) = if let Some(marker) = windows.full_width(entity) {
         let previous_ratio = marker.width_ratio;
         let was_stacked = marker.was_stacked;
         commands.entity(entity).try_remove::<FullWidthMarker>();
         let w = (previous_ratio * f64::from(padded_width)).round() as i32;
-        let x_pos = (display_width - pad_right - w).min(window.frame().min.x);
+        let x_pos = (display_width - pad_right - w).min(frame.min.x);
         if was_stacked {
             _ = active_display.active_strip().stack(entity);
         }
@@ -669,10 +679,11 @@ fn to_next_display(
         other.width() / 2,
     );
     let center = other.bounds().center().x;
-    let dest = other
-        .bounds()
-        .min
-        .with_x(center - window.frame().size().x / 2);
+
+    let Some(size) = windows.size(entity) else {
+        return;
+    };
+    let dest = other.bounds().min.with_x(center - size.x / 2);
     reposition_entity(entity, dest, other.id(), &mut commands);
     reshuffle_around(entity, &mut commands);
 
@@ -719,13 +730,13 @@ fn mouse_to_next_display(
         return;
     };
 
-    let visible_width = |window: &Window| other.bounds().intersect(window.frame()).width();
-    let Some(window) = other_strip
+    let visible_width = |frame: IRect| other.bounds().intersect(frame).width();
+    let Some(frame) = other_strip
         .all_windows()
         .iter()
-        .filter_map(|entity| windows.get(*entity))
+        .filter_map(|entity| windows.frame(*entity))
         .max_by(|left, right| {
-            if visible_width(left) < visible_width(right) {
+            if visible_width(*left) < visible_width(*right) {
                 std::cmp::Ordering::Less
             } else {
                 std::cmp::Ordering::Greater
@@ -736,7 +747,7 @@ fn mouse_to_next_display(
         return;
     };
 
-    let visible_frame = other.bounds().intersect(window.frame());
+    let visible_frame = other.bounds().intersect(frame);
     debug!("warping mouse to {visible_frame:?}",);
     window_manager.center_mouse(None, &visible_frame);
 
@@ -775,11 +786,10 @@ fn equalize_column(
         let equal_height = active_display.bounds().height() / i32::try_from(stack.len()).unwrap();
 
         for &entity in &stack {
-            if let Some(window) = windows.get(entity) {
-                let width = window.frame().width();
+            if let Some(size) = windows.size(entity) {
                 resize_entity(
                     entity,
-                    Size::new(width, equal_height),
+                    size.with_y(equal_height),
                     active_display.id(),
                     &mut commands,
                 );

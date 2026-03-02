@@ -17,10 +17,10 @@ use super::{ActiveDisplayMarker, FocusFollowsMouse, MissionControlActive, SkipRe
 use crate::{
     config::{Config, WindowParams},
     ecs::{
-        ActiveWorkspaceMarker, DockPosition, FocusedMarker, FullWidthMarker, Initializing,
-        TrackpadSwipe, Unmanaged,
+        ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker, FullWidthMarker, Initializing,
+        Position, RepositionMarker, ResizeMarker, TrackpadSwipe, Unmanaged,
     },
-    manager::{Application, Display, LayoutStrip, Window},
+    manager::{Application, Display, LayoutStrip, Origin, Size, Window},
     platform::{ProcessSerialNumber, WinID},
 };
 
@@ -235,8 +235,8 @@ impl ActiveDisplayMut<'_, '_> {
 }
 
 #[derive(SystemParam)]
+#[allow(clippy::type_complexity)]
 pub struct Windows<'w, 's> {
-    #[allow(clippy::type_complexity)]
     all: Query<
         'w,
         's,
@@ -249,6 +249,17 @@ pub struct Windows<'w, 's> {
     >,
     focus: Query<'w, 's, (&'static Window, Entity), With<FocusedMarker>>,
     previous_size: Query<'w, 's, (&'static Window, Entity, &'static FullWidthMarker)>,
+    positions: Query<
+        'w,
+        's,
+        (
+            &'static Position,
+            &'static Bounds,
+            Option<&'static RepositionMarker>,
+            Option<&'static ResizeMarker>,
+        ),
+        With<Window>,
+    >,
 }
 
 impl Windows<'_, '_> {
@@ -309,6 +320,39 @@ impl Windows<'_, '_> {
         self.find_parent(window_id)
             .and_then(|(_, _, parent)| apps.get(parent).ok())
             .map(|app| app.psn())
+    }
+
+    pub fn origin(&self, entity: Entity) -> Option<Origin> {
+        self.positions
+            .get(entity)
+            .ok()
+            .map(|(origin, _, _, _)| origin.0)
+    }
+
+    pub fn size(&self, entity: Entity) -> Option<Size> {
+        self.positions
+            .get(entity)
+            .ok()
+            .map(|(_, size, _, _)| size.0)
+    }
+
+    pub fn frame(&self, entity: Entity) -> Option<IRect> {
+        self.positions
+            .get(entity)
+            .ok()
+            .map(|(origin, size, _, _)| IRect::from_corners(origin.0, origin.0 + size.0))
+    }
+
+    pub fn positioning(
+        &self,
+        entity: Entity,
+    ) -> Option<(
+        &Position,
+        &Bounds,
+        Option<&RepositionMarker>,
+        Option<&ResizeMarker>,
+    )> {
+        self.positions.get(entity).ok()
     }
 }
 

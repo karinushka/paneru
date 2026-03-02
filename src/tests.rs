@@ -11,7 +11,7 @@ use stdext::function_name;
 use stdext::prelude::RwLockExt;
 use tracing::{Level, debug, instrument};
 
-use crate::commands::{Command, Direction, Operation, register_commands};
+use crate::commands::{Command, Direction, Operation, ResizeDirection, register_commands};
 use crate::config::Config;
 use crate::ecs::{
     BProcess, ExistingMarker, FocusFollowsMouse, FocusedMarker, Initializing, MissionControlActive,
@@ -955,6 +955,81 @@ fn test_offscreen_windows_preserve_height() {
     let window_manager = MockWindowManager { windows };
     bevy.world_mut()
         .insert_resource(WindowManager(Box::new(window_manager)));
+
+    run_main_loop(&mut bevy, &internal_queue, &commands, check);
+}
+
+#[test]
+fn test_window_resize_grow_and_shrink_cycle() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 }, // Noop allowing everything to settle
+        Event::Command {
+            command: Command::Window(Operation::Resize(ResizeDirection::Grow)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Resize(ResizeDirection::Grow)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Resize(ResizeDirection::Grow)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Resize(ResizeDirection::Shrink)),
+        },
+    ];
+
+    let expected_widths = [None, Some(512), Some(768), Some(256), Some(768)];
+
+    let check = |iteration, world: &mut World| {
+        let Some(expected_width) = expected_widths[iteration] else {
+            return;
+        };
+        let mut query = world.query::<&Window>();
+        let window = query
+            .iter(world)
+            .find(|window| window.id() == 0)
+            .expect("expected window with id 0");
+        assert_eq!(
+            window.frame().width(),
+            expected_width,
+            "iteration {iteration}: expected width {expected_width}, got {}",
+            window.frame().width()
+        );
+    };
+
+    let mut bevy = setup_world();
+    let mock_app = setup_process(bevy.world_mut());
+    let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
+    let event_queue = internal_queue.clone();
+
+    let windows = Box::new(move |_| {
+        let origin = Origin::new(0, 0);
+        let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+        let window = MockWindow::new(
+            0,
+            IRect {
+                min: origin,
+                max: origin + size,
+            },
+            event_queue.clone(),
+            mock_app.clone(),
+        );
+        vec![Window::new(Box::new(window))]
+    });
+    let window_manager = MockWindowManager { windows };
+    bevy.world_mut()
+        .insert_resource(WindowManager(Box::new(window_manager)));
+
+    let config: Config = r#"
+[options]
+preset_column_widths = [0.25, 0.5, 0.75]
+
+[bindings]
+
+[windows]
+"#
+    .try_into()
+    .unwrap();
+    bevy.insert_resource(config);
 
     run_main_loop(&mut bevy, &internal_queue, &commands, check);
 }

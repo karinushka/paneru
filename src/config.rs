@@ -16,7 +16,7 @@ use stdext::function_name;
 use tracing::{error, info, warn};
 
 use crate::{
-    commands::{Command, Direction, MouseMove, Operation},
+    commands::{Command, Direction, MouseMove, Operation, ResizeDirection},
     platform::{Modifiers, OSStatus},
 };
 use crate::{
@@ -91,6 +91,20 @@ fn parse_direction(dir: &str) -> Result<Direction> {
     })
 }
 
+/// Parses a string into a `ResizeDirection` enum.
+fn parse_resize_direction(direction: &str) -> Result<ResizeDirection> {
+    Ok(match direction {
+        "grow" => ResizeDirection::Grow,
+        "shrink" => ResizeDirection::Shrink,
+        _ => {
+            return Err(Error::InvalidConfig(format!(
+                "{}: Unhandled resize direction {direction}",
+                function_name!()
+            )));
+        }
+    })
+}
+
 /// Parses a command argument vector into an `Operation` enum.
 ///
 /// # Arguments
@@ -109,7 +123,12 @@ fn parse_operation(argv: &[&str]) -> Result<Operation> {
         "focus" => Operation::Focus(parse_direction(argv.get(1).ok_or(err)?)?),
         "swap" => Operation::Swap(parse_direction(argv.get(1).ok_or(err)?)?),
         "center" => Operation::Center,
-        "resize" => Operation::Resize,
+        "resize" => Operation::Resize(
+            argv.get(1)
+                .map_or(Ok(ResizeDirection::Grow), |arg| parse_resize_direction(arg))?,
+        ),
+        "grow" => Operation::Resize(ResizeDirection::Grow),
+        "shrink" => Operation::Resize(ResizeDirection::Shrink),
         "fullwidth" => Operation::FullWidth,
         "manage" => Operation::Manage,
         "equalize" => Operation::Equalize,
@@ -1016,6 +1035,7 @@ focus_follows_mouse = true
 quit = "ctrl+alt-q"
 window_manage = "ctrl+alt-t"
 window_stack = ["ctrl-s", "alt-s"]
+window_shrink = "alt-d"
 
 [windows]
 
@@ -1062,6 +1082,12 @@ index = 1
         Some(Command::Window(Operation::Stack(true)))
     ));
 
+    let keycode = find_key('d');
+    assert!(matches!(
+        config.find_keybind(keycode, &Modifiers::ALT),
+        Some(Command::Window(Operation::Resize(ResizeDirection::Shrink)))
+    ));
+
     let props = config.find_window_properties("picture in picture", "com.something.apple");
     assert_eq!(props[0].floating, Some(true));
     assert_eq!(props[0].index, Some(1));
@@ -1069,6 +1095,26 @@ index = 1
     let defaults = Config::default();
     assert_eq!(defaults.swipe_sensitivity(), 0.35);
     assert_eq!(defaults.swipe_deceleration(), 4.0);
+}
+
+#[test]
+fn test_parse_resize_commands() {
+    assert!(matches!(
+        parse_command(&["window", "resize"]).unwrap(),
+        Command::Window(Operation::Resize(ResizeDirection::Grow))
+    ));
+    assert!(matches!(
+        parse_command(&["window", "grow"]).unwrap(),
+        Command::Window(Operation::Resize(ResizeDirection::Grow))
+    ));
+    assert!(matches!(
+        parse_command(&["window", "resize", "shrink"]).unwrap(),
+        Command::Window(Operation::Resize(ResizeDirection::Shrink))
+    ));
+    assert!(matches!(
+        parse_command(&["window", "shrink"]).unwrap(),
+        Command::Window(Operation::Resize(ResizeDirection::Shrink))
+    ));
 }
 
 #[test]

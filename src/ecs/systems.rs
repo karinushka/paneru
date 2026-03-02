@@ -903,9 +903,14 @@ pub(super) fn swipe_idle_tracker(
             .unwrap_or(0)
     };
 
+    let swipe_direction_modifier = match config.swipe_gesture_direction() {
+        SwipeGestureDirection::Natural => 1.0,
+        SwipeGestureDirection::Reversed => -1.0,
+    };
+
     // Use the stored viewport_offset — deriving it from window positions
     // would give wrong results when edge windows have been sliver-clamped.
-    let shift = (display_width * frame_delta) as i32;
+    let shift = (display_width * frame_delta * swipe_direction_modifier) as i32;
     let new_offset = if config.continuous_swipe() {
         viewport_offset + shift
     } else {

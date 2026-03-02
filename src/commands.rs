@@ -37,6 +37,13 @@ pub enum Direction {
     Last,
 }
 
+/// Direction used when cycling preset resize widths.
+#[derive(Clone, Copy, Debug)]
+pub enum ResizeDirection {
+    Grow,
+    Shrink,
+}
+
 /// Defines the various operations that can be performed on windows.
 #[derive(Clone, Debug)]
 pub enum Operation {
@@ -46,8 +53,8 @@ pub enum Operation {
     Swap(Direction),
     /// Centers the currently focused window on the display.
     Center,
-    /// Resizes the focused window.
-    Resize,
+    /// Resizes the focused window in the given direction.
+    Resize(ResizeDirection),
     /// Toggles the focused window to full width or a preset width.
     FullWidth,
     /// Moves the focused window to the next available display.
@@ -445,23 +452,32 @@ fn resize_window(
     config: Res<Config>,
     mut commands: Commands,
 ) {
-    if filter_window_operations(&mut messages, |op| matches!(op, Operation::Resize))
-        .next()
-        .is_none()
-    {
+    let Some(Operation::Resize(direction)) =
+        filter_window_operations(&mut messages, |op| matches!(op, Operation::Resize(_))).next()
+    else {
         return;
-    }
+    };
 
     let (window, entity) = *current_focus;
     let display_width = active_display.bounds().width();
     let (_, pad_right, _, pad_left) = config.edge_padding();
     let padded_width = display_width - pad_left - pad_right;
     let current_ratio = f64::from(window.frame().width()) / f64::from(padded_width);
-    let next_ratio = config
-        .preset_column_widths()
-        .into_iter()
-        .find(|&r| r > current_ratio + 0.05)
-        .unwrap_or_else(|| *config.preset_column_widths().first().unwrap_or(&0.5));
+    let widths = config.preset_column_widths();
+    let fallback = *widths.first().unwrap_or(&0.5);
+    let next_ratio = match direction {
+        ResizeDirection::Grow => widths
+            .iter()
+            .copied()
+            .find(|&r| r > current_ratio + 0.05)
+            .unwrap_or(fallback),
+        ResizeDirection::Shrink => widths
+            .iter()
+            .rev()
+            .copied()
+            .find(|&r| r < current_ratio - 0.05)
+            .unwrap_or_else(|| *widths.last().unwrap_or(&fallback)),
+    };
 
     let new_width = (next_ratio * f64::from(padded_width)).round() as i32;
     let size = Size::new(new_width, window.frame().height());

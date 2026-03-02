@@ -284,6 +284,9 @@ window_center = "alt - c"
 # Cycles between the window sizes defined in the `preset_column_widths` option.
 window_resize = "alt - r"
 
+# Cycles backwards through `preset_column_widths`.
+window_shrink = "alt + shift - r"
+
 # Toggle full width for the current focused window.
 window_fullwidth = "alt - f"
 
@@ -399,6 +402,8 @@ $ paneru send-cmd <command> [args...]
 | `window swap <direction>`  | Swap the focused window with a neighbour         |
 | `window center`            | Center the focused window on screen              |
 | `window resize`            | Cycle through `preset_column_widths`             |
+| `window grow`              | Grow to the next preset width                    |
+| `window shrink`            | Shrink to the previous preset width              |
 | `window fullwidth`         | Toggle full-width mode for the focused window    |
 | `window manage`            | Toggle managed/floating state                    |
 | `window equalize`          | Distribute equal heights in the focused stack    |
@@ -422,6 +427,9 @@ $ paneru send-cmd window swap west
 
 # Center and resize in one shot (two separate calls).
 $ paneru send-cmd window center && paneru send-cmd window resize
+
+# Cycle backward through preset widths.
+$ paneru send-cmd window shrink
 
 # Jump to the left-most window.
 $ paneru send-cmd window focus first

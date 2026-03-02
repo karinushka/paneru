@@ -42,7 +42,7 @@ pub trait WindowApi: Send + Sync {
     fn is_full_screen(&self) -> bool;
     fn reposition(&mut self, origin: Origin);
     fn resize(&mut self, size: Size, display_width: i32);
-    fn update_frame(&mut self, display_bounds: &IRect) -> Result<()>;
+    fn update_frame(&mut self, display_bounds: &IRect) -> Result<IRect>;
     fn focus_without_raise(
         &self,
         psn: ProcessSerialNumber,
@@ -363,7 +363,7 @@ impl WindowApi for WindowOS {
     /// # Returns
     ///
     /// `Ok(())` if the frame is updated successfully, otherwise `Err(Error)`.
-    fn update_frame(&mut self, display_bounds: &IRect) -> Result<()> {
+    fn update_frame(&mut self, display_bounds: &IRect) -> Result<IRect> {
         let window_ref = self.ax_element.as_ptr();
 
         let position = unsafe {
@@ -411,7 +411,7 @@ impl WindowApi for WindowOS {
         self.frame.max.y += self.vertical_padding;
 
         self.width_ratio = f64::from(self.frame.width()) / f64::from(display_bounds.width());
-        Ok(())
+        Ok(self.frame)
     }
 
     /// Focuses the window without raising it. This involves sending specific events to the process.

@@ -399,9 +399,9 @@ impl WindowApi for MockWindow {
 
     /// Always returns `Ok(())` for updating the frame.
     #[instrument(level = Level::DEBUG, skip(self), ret)]
-    fn update_frame(&mut self, bounds: &IRect) -> Result<()> {
+    fn update_frame(&mut self, bounds: &IRect) -> Result<IRect> {
         debug!("{}:", function_name!());
-        Ok(())
+        Ok(IRect::default())
     }
 
     /// Prints a debug message for focus without raise.

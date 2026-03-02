@@ -1109,7 +1109,13 @@ pub(super) fn pump_events(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn window_update_frame(
     mut messages: MessageReader<Event>,
-    mut windows: Query<(&mut Window, Entity, Has<StackAdjustedResize>)>,
+    mut windows: Query<(
+        &mut Window,
+        Entity,
+        &mut Position,
+        &mut Bounds,
+        Has<StackAdjustedResize>,
+    )>,
     focused: Option<Single<Entity, With<FocusedMarker>>>,
     active_display: ActiveDisplay,
     swipe_tracker: SmoothSwipeTracking,
@@ -1120,33 +1126,43 @@ pub(super) fn window_update_frame(
         match event {
             Event::WindowMoved { .. } | Event::WindowResized { .. } if swipe_tracker.sliding() => {}
             Event::WindowMoved { window_id } | Event::WindowResized { window_id } => {
-                // Find the window, update its frame, and extract info — releasing
-                // the mutable borrow on `windows` so we can access other entities.
-                let info = {
-                    let Some((mut window, entity, stack_adjusted)) = windows
-                        .iter_mut()
-                        .find(|(window, _, _)| window.id() == *window_id)
+                let (entity, old_frame, new_frame) = {
+                    let Some((mut window, entity, mut position, mut bounds, stack_adjusted)) =
+                        windows
+                            .iter_mut()
+                            .find(|(window, _, _, _, _)| window.id() == *window_id)
                     else {
                         continue;
                     };
-                    let old_frame = window.frame();
-                    _ = window.update_frame(&active_display.bounds());
-                    (entity, old_frame, window.frame(), stack_adjusted)
+                    let Ok(new_frame) = window.update_frame(&active_display.bounds()) else {
+                        continue;
+                    };
+
+                    // Skip reshuffle for resize events that we caused ourselves when
+                    // adjusting an adjacent stacked window's height (see below).
+                    if stack_adjusted {
+                        commands.entity(entity).try_remove::<StackAdjustedResize>();
+                        continue;
+                    }
+
+                    if active_display.active_strip().index_of(entity).is_err() {
+                        // Do not reshuffle for floating windows or on other displays or
+                        // workspaces.
+                        continue;
+                    }
+
+                    let old_frame = IRect::from_corners(position.0, position.0 + bounds.0);
+                    if matches!(event, Event::WindowMoved { window_id: _ })
+                        || old_frame.min != new_frame.min
+                    // Resized from the left, so the origin got moved.
+                    {
+                        position.0 = new_frame.min;
+                    }
+                    if matches!(event, Event::WindowResized { window_id: _ }) {
+                        bounds.0 = new_frame.size();
+                    }
+                    (entity, old_frame, new_frame)
                 };
-                let (entity, old_frame, new_frame, stack_adjusted) = info;
-
-                // Skip reshuffle for resize events that we caused ourselves when
-                // adjusting an adjacent stacked window's height (see below).
-                if stack_adjusted {
-                    commands.entity(entity).try_remove::<StackAdjustedResize>();
-                    continue;
-                }
-
-                if active_display.active_strip().index_of(entity).is_err() {
-                    // Do not reshuffle for floating windows or on other displays or
-                    // workspaces.
-                    continue;
-                }
 
                 if matches!(event, Event::WindowResized { window_id: _ }) && !config.initializing()
                 {
@@ -1162,14 +1178,11 @@ pub(super) fn window_update_frame(
                     if is_top_edge_drag
                         && let Some(above_entity) = active_display.active_strip().above(entity)
                     {
-                        if let Ok((mut above_window, _, _)) = windows.get_mut(above_entity) {
-                            let above_frame = above_window.frame();
-                            let new_height = new_frame.min.y - above_frame.min.y;
+                        if let Ok((_, _, above_pos, mut bounds, _)) = windows.get_mut(above_entity)
+                        {
+                            let new_height = new_frame.min.y - above_pos.0.y;
                             if new_height > 0 {
-                                above_window.resize(
-                                    Size::new(above_frame.width(), new_height),
-                                    active_display.bounds().width(),
-                                );
+                                bounds.0.y = new_height;
                             }
                         }
                         commands
@@ -1660,10 +1673,10 @@ pub(super) fn commit_window_position(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn commit_window_size(
     active_display: ActiveDisplay,
-    mut moved_windows: Populated<(&mut Window, &Bounds), Changed<Bounds>>,
+    mut resized_windows: Populated<(&mut Window, &Bounds), Changed<Bounds>>,
 ) {
     let display_bounds = active_display.bounds();
-    moved_windows
+    resized_windows
         .par_iter_mut()
         .for_each(|(mut window, size)| window.resize(size.0, display_bounds.width()));
 }

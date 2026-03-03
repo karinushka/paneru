@@ -669,6 +669,7 @@ pub(super) fn window_focused_trigger(
 /// * `config` - The optional configuration resource.
 /// * `commands` - Bevy commands to trigger events.
 #[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn swipe_gesture_trigger(
     trigger: On<WMEventTrigger>,
     focused_window: Single<(&Window, Entity), With<FocusedMarker>>,

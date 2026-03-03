@@ -72,6 +72,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::window_update_frame,
             systems::displays_rearranged,
             systems::reposition_dragged_window,
+            systems::position_layout_strip,
             systems::find_orphaned_workspaces.run_if(on_timer(Duration::from_millis(
                 DISPLAY_CHANGE_CHECK_FREQ_MS,
             ))),
@@ -193,10 +194,10 @@ pub struct StackAdjustedResize;
 #[derive(Component)]
 pub struct WindowSwipeMarker(pub f64);
 
-#[derive(Component, Debug, Deref, DerefMut)]
+#[derive(Component, Clone, Debug, Deref, DerefMut)]
 pub struct Position(pub Origin);
 
-#[derive(Component, Debug, Deref, DerefMut)]
+#[derive(Component, Clone, Debug, Deref, DerefMut)]
 pub struct Bounds(pub Size);
 
 #[derive(Resource)]

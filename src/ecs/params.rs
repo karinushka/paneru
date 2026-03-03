@@ -155,12 +155,12 @@ impl Configuration<'_> {
 /// It ensures that only one display is marked as active at any given time.
 #[derive(SystemParam)]
 pub struct ActiveDisplay<'w, 's> {
-    strip: Single<'w, 's, &'static LayoutStrip, With<ActiveWorkspaceMarker>>,
+    strip: Single<'w, 's, (&'static LayoutStrip, Entity), With<ActiveWorkspaceMarker>>,
     /// The single active `Display` component, marked with `ActiveDisplayMarker`.
     display: Single<
         'w,
         's,
-        (&'static Display, Option<&'static DockPosition>),
+        (&'static Display, Entity, Option<&'static DockPosition>),
         With<ActiveDisplayMarker>,
     >,
     /// A query for all other `Display` components that are not marked as active.
@@ -184,7 +184,11 @@ impl ActiveDisplay<'_, '_> {
     }
 
     pub fn active_strip(&self) -> &LayoutStrip {
-        *self.strip
+        self.strip.0
+    }
+
+    pub fn active_strip_entity(&self) -> Entity {
+        self.strip.1
     }
 
     /// Returns the `CGRect` representing the bounds of the active display.
@@ -193,7 +197,7 @@ impl ActiveDisplay<'_, '_> {
     }
 
     pub fn dock(&self) -> Option<&DockPosition> {
-        self.display.1
+        self.display.2
     }
 }
 

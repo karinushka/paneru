@@ -110,6 +110,7 @@ pub fn gather_displays(window_manager: Res<WindowManager>, mut commands: Command
         return;
     };
     for (display, workspaces) in window_manager.present_displays() {
+        let origin = Position(display.bounds().min);
         let entity = if display.id() == active_display_id {
             commands.spawn((display, ActiveDisplayMarker))
         } else {
@@ -126,9 +127,14 @@ pub fn gather_displays(window_manager: Res<WindowManager>, mut commands: Command
         for id in workspaces {
             let strip = LayoutStrip::new(id);
             if id == active_space {
-                commands.spawn((strip, ActiveWorkspaceMarker, ChildOf(entity)));
+                commands.spawn((
+                    strip,
+                    origin.clone(),
+                    ActiveWorkspaceMarker,
+                    ChildOf(entity),
+                ));
             } else {
-                commands.spawn((strip, ChildOf(entity)));
+                commands.spawn((strip, origin.clone(), ChildOf(entity)));
             }
         }
     }
@@ -746,102 +752,102 @@ pub(super) fn animate_resize_entities(
     );
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
+#[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn window_swiper(
     sliding: Populated<(Entity, Has<Unmanaged>, &WindowSwipeMarker)>,
+    mut active_strip: Single<
+        (&LayoutStrip, &mut Position),
+        (With<ActiveWorkspaceMarker>, Without<Window>),
+    >,
+    active_display: Single<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
     windows: Windows,
-    active_display: ActiveDisplay,
     config: Res<Config>,
     time: Res<Time>,
     swipe_tracker: SmoothSwipeTracking,
     mut commands: Commands,
 ) {
-    let get_window_frame = |entity| get_moving_window_frame(entity, &active_display, &windows);
-    let get_window_h_pad =
-        |entity: Entity| windows.get(entity).map_or(0, |w| w.horizontal_padding());
-    let mut viewport = active_display.bounds();
-    viewport.max.y = viewport.min.y + get_display_height(&active_display);
+    let Some((entity, unmanaged, WindowSwipeMarker(delta))) = sliding.into_iter().next() else {
+        return;
+    };
+    let get_window_frame = |entity| get_moving_window_frame(entity, active_display.0, &windows);
+    let viewport = get_actual_display_bounds(active_display.0, active_display.1, &config);
 
     let swipe_direction_modifier = match config.swipe_gesture_direction() {
         SwipeGestureDirection::Natural => 1.0,
         SwipeGestureDirection::Reversed => -1.0,
     };
 
-    for (entity, unmanaged, WindowSwipeMarker(delta)) in sliding {
-        let delta = delta * config.swipe_sensitivity();
-        let shift = (f64::from(viewport.width()) * delta * swipe_direction_modifier) as i32;
+    let delta = delta * config.swipe_sensitivity();
+    let shift = (f64::from(viewport.width()) * delta * swipe_direction_modifier) as i32;
 
-        commands.entity(entity).try_remove::<WindowSwipeMarker>();
+    commands.entity(entity).try_remove::<WindowSwipeMarker>();
 
-        if unmanaged && let Some(frame) = get_window_frame(entity) {
-            // Window is floating, just shift it directly.
-            let mut origin = frame.min;
-            origin.x -= shift;
-            reposition_entity(entity, origin, active_display.id(), &mut commands);
-            continue;
-        }
-
-        let strip = active_display.active_strip();
-        let mut total_strip_width = 0_i32;
-        for (column, pos) in strip.absolute_positions(&get_window_frame) {
-            if let Some(top) = column.top()
-                && let Some(frame) = get_window_frame(top)
-            {
-                total_strip_width = pos + frame.width();
-            }
-        }
-
-        // When a swipe is already active (e.g. restarting during inertia),
-        // use its authoritative viewport_offset rather than re-deriving
-        // from window frames, which may lag behind the SLS-scrolled
-        // position and cause the viewport to snap back.
-        let viewport_offset = if let Some((_, viewport_offset)) = swipe_tracker.position() {
-            viewport_offset
-        } else {
-            let Some(offset) = strip
-                .absolute_positions(&get_window_frame)
-                .find_map(|(column, pos)| {
-                    column.top().is_some_and(|col| col == entity).then_some(pos)
-                })
-                .zip(get_window_frame(entity))
-                .map(|(pos, frame)| pos - (frame.min.x - viewport.min.x))
-            else {
-                continue;
-            };
-            offset
-        };
-
-        let clamped_offset = if config.continuous_swipe() {
-            viewport_offset + shift
-        } else {
-            let (_, pad_right, _, pad_left) = config.edge_padding();
-            let effective_width = viewport.width() - pad_left - pad_right;
-            let left_aligned = -pad_left;
-            let right_aligned = total_strip_width - effective_width - pad_left;
-            (viewport_offset + shift).clamp(left_aligned, right_aligned.max(left_aligned))
-        };
-
-        position_layout_windows(
-            clamped_offset,
-            &active_display,
-            &get_window_frame,
-            &get_window_h_pad,
-            &config,
-            true,
-            &mut commands,
-        );
-
-        // Compute velocity (normalized units/sec) for inertia after finger-lift.
-        // EMA smoothing: 30% new + 70% old prevents jittery frames from dominating.
-        let dt = time.delta_secs_f64();
-        let new_velocity = if dt > 0.0 { delta / dt } else { 0.0 };
-        let old_velocity = swipe_tracker
-            .position()
-            .map_or(0.0, |(velocity, _)| velocity);
-        let velocity = 0.3 * new_velocity + 0.7 * old_velocity;
-
-        SmoothSwipeTracking::refresh(velocity, clamped_offset, &mut commands);
+    if unmanaged && let Some(frame) = get_window_frame(entity) {
+        // Window is floating, just shift it directly.
+        let mut origin = frame.min;
+        origin.x -= shift;
+        reposition_entity(entity, origin, active_display.0.id(), &mut commands);
+        return;
     }
+
+    let absolute_positions = active_strip
+        .0
+        .absolute_positions(&get_window_frame)
+        .collect::<Vec<_>>();
+    let Some(total_strip_width) = absolute_positions.last().and_then(|(column, offset)| {
+        column
+            .top()
+            .and_then(|entity| get_window_frame(entity).map(|frame| offset + frame.width()))
+    }) else {
+        return;
+    };
+
+    // When a swipe is already active (e.g. restarting during inertia),
+    // use its authoritative viewport_offset rather than re-deriving
+    // from window frames.
+    let viewport_offset = if let Some((_, viewport_offset)) = swipe_tracker.position() {
+        viewport_offset
+    } else {
+        let Some(offset) = absolute_positions
+            .iter()
+            .find_map(|(column, pos)| {
+                match column {
+                    Column::Single(e) => vec![*e],
+                    Column::Stack(stack) => stack.clone(),
+                }
+                .contains(&entity)
+                .then_some(pos)
+            })
+            .zip(get_window_frame(entity))
+            .map(|(pos, frame)| (frame.min.x - viewport.min.x) - pos)
+        else {
+            return;
+        };
+        offset
+    };
+
+    let clamped_offset = if config.continuous_swipe() {
+        viewport_offset - shift
+    } else {
+        (viewport_offset - shift).clamp(0, viewport.width() - total_strip_width)
+    };
+    active_strip.1.x = viewport_offset;
+
+    // Compute velocity (normalized units/sec) for inertia after finger-lift.
+    // EMA smoothing: 30% new + 70% old prevents jittery frames from dominating.
+    let dt = time.delta_secs_f64();
+    let new_velocity = if dt > 0.0 { delta / dt } else { 0.0 };
+    let old_velocity = swipe_tracker
+        .position()
+        .map_or(0.0, |(velocity, _)| velocity);
+    let velocity = 0.3 * new_velocity + 0.7 * old_velocity;
+
+    SmoothSwipeTracking::refresh(velocity, clamped_offset, &mut commands);
 }
 
 /// Applies inertia after finger-lift and eventually commits positions.
@@ -853,10 +859,19 @@ pub(super) fn window_swiper(
 /// window positions). When the velocity drops below sub-pixel threshold,
 /// commits all window positions via AX, strips stale markers, and removes
 /// `SwipeActive`.
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
+#[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn swipe_idle_tracker(
     mut swipe: SmoothSwipeTracking,
-    active_display: ActiveDisplay,
+    mut active_strip: Single<
+        (&LayoutStrip, &mut Position),
+        (With<ActiveWorkspaceMarker>, Without<Window>),
+    >,
+    active_display: Single<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
     windows: Windows,
     window_manager: Res<WindowManager>,
     config: Res<Config>,
@@ -870,7 +885,7 @@ pub(super) fn swipe_idle_tracker(
         return;
     }
 
-    let display_width = f64::from(active_display.bounds().width());
+    let display_width = f64::from(active_display.0.bounds().width());
     let Some((velocity, viewport_offset)) = swipe.position() else {
         return;
     };
@@ -897,9 +912,7 @@ pub(super) fn swipe_idle_tracker(
     let dt = time.delta_secs_f64();
     let frame_delta = velocity * dt;
 
-    let get_window_frame = |entity| get_moving_window_frame(entity, &active_display, &windows);
-    let get_window_h_pad =
-        |entity: Entity| windows.get(entity).map_or(0, |w| w.horizontal_padding());
+    let get_window_frame = |entity| get_moving_window_frame(entity, active_display.0, &windows);
 
     let swipe_direction_modifier = match config.swipe_gesture_direction() {
         SwipeGestureDirection::Natural => 1.0,
@@ -910,14 +923,12 @@ pub(super) fn swipe_idle_tracker(
     // would give wrong results when edge windows have been sliver-clamped.
     let shift = (display_width * frame_delta * swipe_direction_modifier) as i32;
     let new_offset = if config.continuous_swipe() {
-        viewport_offset + shift
+        viewport_offset - shift
     } else {
-        let strip = active_display.active_strip();
-        let mut viewport = active_display.bounds();
-        viewport.max.y = viewport.min.y + get_display_height(&active_display);
+        let viewport = get_actual_display_bounds(active_display.0, active_display.1, &config);
 
         let mut total_strip_width = 0_i32;
-        for (col, pos) in strip.absolute_positions(&get_window_frame) {
+        for (col, pos) in active_strip.0.absolute_positions(&get_window_frame) {
             if let Some(top) = col.top()
                 && let Some(frame) = get_window_frame(top)
             {
@@ -928,18 +939,10 @@ pub(super) fn swipe_idle_tracker(
         let effective_width = viewport.width() - pad_left - pad_right;
         let left_aligned = -pad_left;
         let right_aligned = total_strip_width - effective_width - pad_left;
-        (viewport_offset + shift).clamp(left_aligned, right_aligned.max(left_aligned))
+        (viewport_offset - shift).clamp(left_aligned, right_aligned.max(left_aligned))
     };
 
-    position_layout_windows(
-        new_offset,
-        &active_display,
-        &get_window_frame,
-        &get_window_h_pad,
-        &config,
-        true,
-        &mut commands,
-    );
+    active_strip.1.x = new_offset;
 
     let decay_rate = config.swipe_deceleration();
     swipe.update_position((-decay_rate * dt).exp(), new_offset);
@@ -949,12 +952,12 @@ fn expose_window(
     entity: Entity,
     windows: &Windows,
     active_display: &ActiveDisplay,
-    dock: Option<&DockPosition>,
-    edge_padding: (i32, i32, i32, i32),
+    config: &Res<Config>,
 ) -> Option<IRect> {
-    let (_, pad_right, _, pad_left) = edge_padding;
-    let display_bounds = active_display.bounds();
-    let mut frame = get_moving_window_frame(entity, active_display, windows)?;
+    let (_, pad_right, _, pad_left) = config.edge_padding();
+    let display_bounds =
+        get_actual_display_bounds(active_display.display(), active_display.dock(), config);
+    let mut frame = get_moving_window_frame(entity, active_display.display(), windows)?;
     let size = frame.size();
 
     if frame.max.x > display_bounds.max.x - pad_right {
@@ -963,22 +966,6 @@ fn expose_window(
     } else if frame.min.x < display_bounds.min.x + pad_left {
         trace!("Bumped window {entity} to the right");
         frame.min.x = display_bounds.min.x + pad_left;
-    }
-
-    if let Some(dock) = dock {
-        match dock {
-            DockPosition::Left(offset) => {
-                if frame.min.x < display_bounds.min.x + *offset {
-                    frame.min.x = display_bounds.min.x + *offset;
-                }
-            }
-            DockPosition::Right(offset) => {
-                if frame.min.x + size.x > display_bounds.max.x - *offset {
-                    frame.min.x = display_bounds.min.x - size.x - *offset;
-                }
-            }
-            _ => (),
-        }
     }
     frame.max.x = frame.min.x + size.x;
     Some(frame)
@@ -994,9 +981,8 @@ pub(super) fn reshuffle_layout_strip(
     swipe_tracker: SmoothSwipeTracking,
     mut commands: Commands,
 ) {
-    let get_window_frame = |entity| get_moving_window_frame(entity, &active_display, &windows);
-    let get_window_h_pad =
-        |entity: Entity| windows.get(entity).map_or(0, |w| w.horizontal_padding());
+    let get_window_frame =
+        |entity| get_moving_window_frame(entity, active_display.display(), &windows);
 
     for entity in marker {
         debug!("reshuffle_layout_strip: triggered for entity {entity}");
@@ -1013,13 +999,7 @@ pub(super) fn reshuffle_layout_strip(
             return;
         }
 
-        let Some(frame) = expose_window(
-            entity,
-            &windows,
-            &active_display,
-            active_display.dock(),
-            config.edge_padding(),
-        ) else {
+        let Some(frame) = expose_window(entity, &windows, &active_display, &config) else {
             return;
         };
 
@@ -1032,15 +1012,15 @@ pub(super) fn reshuffle_layout_strip(
         }) else {
             continue;
         };
-        let viewport_offset = abs_position - (frame.min.x - active_display.bounds().min.x);
+        let viewport_offset = Origin::new(
+            (frame.min.x - active_display.bounds().min.x) - abs_position,
+            0,
+        );
 
-        position_layout_windows(
+        reposition_entity(
+            active_display.active_strip_entity(),
             viewport_offset,
-            &active_display,
-            &get_window_frame,
-            &get_window_h_pad,
-            &config,
-            false,
+            active_display.id(),
             &mut commands,
         );
     }
@@ -1052,12 +1032,9 @@ pub(super) fn pump_events(
     mut messages: MessageWriter<Event>,
     incoming_events: Option<NonSend<Receiver<Event>>>,
     platform: Option<NonSendMut<Pin<Box<PlatformCallbacks>>>>,
-    swipe_tracker: SmoothSwipeTracking,
     mut timeout: Local<u32>,
 ) {
-    // Cap the pump at one display frame so the first event after idle
-    // (especially the first swipe gesture) is never delayed by more than ~16ms.
-    const LOOP_MAX_TIMEOUT_MS: u32 = 16;
+    const LOOP_MAX_TIMEOUT_MS: u32 = 500;
     const LOOP_TIMEOUT_STEP: u32 = 1;
 
     let Some((ref mut platform, incoming_events)) = platform.zip(incoming_events) else {
@@ -1065,31 +1042,13 @@ pub(super) fn pump_events(
         return;
     };
 
-    let swipe_active = swipe_tracker.sliding();
-    let effective_timeout = if swipe_active {
-        (*timeout).min(1)
-    } else {
-        *timeout
-    };
-    platform.pump_cocoa_event_loop(f64::from(effective_timeout) / 1000.0);
-    let mut swipe_acc: Option<Vec<f64>> = None;
+    platform.pump_cocoa_event_loop(f64::from(*timeout) / 1000.0);
     loop {
         // Repeatedly drain the events until timeout.
         match incoming_events.recv_timeout(Duration::from_millis(1)) {
             Ok(Event::Exit) | Err(RecvTimeoutError::Disconnected) => {
                 exit.write(AppExit::Success);
                 break;
-            }
-            Ok(Event::Swipe { deltas }) => {
-                match &mut swipe_acc {
-                    Some(acc) => {
-                        for (a, d) in acc.iter_mut().zip(&deltas) {
-                            *a += d;
-                        }
-                    }
-                    None => swipe_acc = Some(deltas),
-                }
-                *timeout = LOOP_TIMEOUT_STEP;
             }
             Ok(event) => {
                 messages.write(event);
@@ -1100,9 +1059,6 @@ pub(super) fn pump_events(
                 break;
             }
         }
-    }
-    if let Some(deltas) = swipe_acc {
-        messages.write(Event::Swipe { deltas });
     }
 }
 
@@ -1244,13 +1200,17 @@ fn add_display(
         error!("Unable to find added display id {display_id}!");
         return;
     };
-    // find_orphaned_spaces(&mut orphaned_spaces.0, &mut display, &mut windows);
 
-    let children = workspaces
-        .into_iter()
-        .map(|id| commands.spawn(LayoutStrip::new(id)).id())
-        .collect::<Vec<_>>();
-    commands.spawn(display).add_children(&children);
+    let origin = Position(display.bounds().min);
+    let display_entity = commands.spawn(display).id();
+
+    for id in workspaces {
+        commands.spawn((
+            origin.clone(),
+            LayoutStrip::new(id),
+            ChildOf(display_entity),
+        ));
+    }
 }
 
 fn remove_display(
@@ -1376,7 +1336,7 @@ pub(crate) fn gather_initial_processes(
 #[instrument(level = Level::TRACE, skip_all, fields(entity), ret)]
 fn get_moving_window_frame(
     entity: Entity,
-    active_display: &ActiveDisplay,
+    active_display: &Display,
     windows: &Windows,
 ) -> Option<IRect> {
     windows
@@ -1400,139 +1360,109 @@ fn get_moving_window_frame(
         })
 }
 
-fn get_display_height(active_display: &ActiveDisplay) -> i32 {
-    let dock_size = active_display.dock().map_or(0, |dock| {
-        if let DockPosition::Bottom(offset) = dock {
-            *offset
-        } else {
-            0
+fn get_actual_display_bounds(
+    active_display: &Display,
+    dock: Option<&DockPosition>,
+    config: &Res<Config>,
+) -> IRect {
+    let (pad_top, pad_right, pad_bottom, pad_left) = config.edge_padding();
+    let mut viewport = active_display.bounds();
+    viewport.min.x += pad_left;
+    viewport.min.y += pad_top;
+    viewport.max.x -= pad_left + pad_right;
+    viewport.max.y -= pad_top + pad_bottom;
+
+    match dock {
+        Some(DockPosition::Bottom(size)) => viewport.max.y -= size,
+        Some(DockPosition::Left(size)) => {
+            viewport.min.x += size;
+            viewport.max.x -= size;
         }
-    });
-    active_display.bounds().height() - dock_size
+        Some(DockPosition::Right(size)) => viewport.max.x -= size,
+        _ => (),
+    }
+    viewport
 }
 
-#[allow(clippy::cast_possible_truncation)]
-fn position_layout_windows<W, P>(
-    viewport_offset: i32,
-    active_display: &ActiveDisplay,
-    get_window_frame: &W,
-    get_window_h_pad: &P,
-    config: &Config,
-    swiping: bool,
-    commands: &mut Commands,
-) where
-    W: Fn(Entity) -> Option<IRect>,
-    P: Fn(Entity) -> i32,
-{
-    let menubar_height = active_display.display().menubar_height();
-    let bounds = IRect::new(
-        0,
-        0,
-        active_display.bounds().width(),
-        get_display_height(active_display),
-    );
+#[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all)]
+pub(super) fn position_layout_strip(
+    moved_strips: Populated<(&mut LayoutStrip, &Position), Changed<Position>>,
+    active_display: Single<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
+    windows: Windows,
+    config: Res<Config>,
+    swipe_tracker: SmoothSwipeTracking,
+    mut commands: Commands,
+) {
+    let (active_display, dock) = *active_display;
+    let viewport = get_actual_display_bounds(active_display, dock, &config);
+    let offscreen_sliver_width = config.sliver_width();
 
-    // Shrink the layout viewport by global edge padding.
-    // calculate_layout only uses viewport.size (not origin), so we apply
-    // the origin offset to each frame after layout. We also adjust
-    // viewport_offset by pad_left because the caller computes it from
-    // current window positions (which already include pad_left from a
-    // previous layout pass).
-    let (pad_top, pad_right, pad_bottom, pad_left) = config.edge_padding();
-    let mut bounds = bounds;
-    bounds.max.x -= pad_left + pad_right;
-    bounds.max.y -= pad_top + pad_bottom;
-    let viewport_offset = viewport_offset + pad_left;
+    let get_window_frame = |entity| get_moving_window_frame(entity, active_display, &windows);
+    let get_window_h_pad = |entity| windows.get(entity).map_or(0, |w| w.horizontal_padding());
 
-    let display_width = active_display.bounds().width();
-    let padded_right = display_width - pad_right;
-    let layout_strip = active_display.active_strip();
-    for (entity, frame) in layout_strip.calculate_layout(
-        viewport_offset,
-        &bounds,
-        config.sliver_width(),
-        &get_window_frame,
-    ) {
-        let Some(old_frame) = get_window_frame(entity) else {
-            continue;
-        };
-        let mut frame = IRect::from_corners(
-            active_display.display().absolute_coords(frame.min),
-            active_display.display().absolute_coords(frame.max),
-        );
+    for (layout_strip, position) in moved_strips {
+        let viewport_offset = position.0.x;
+        for (entity, mut frame) in layout_strip.layout_to_viewport(
+            viewport_offset,
+            &viewport,
+            offscreen_sliver_width,
+            &get_window_frame,
+        ) {
+            let Some(old_frame) = get_window_frame(entity) else {
+                continue;
+            };
 
-        // Apply horizontal edge padding offset. calculate_layout returns
-        // positions relative to 0, so shift visible windows by pad_left.
-        frame.min.x += pad_left;
-        frame.max.x += pad_left;
+            let offscreen_sliver = offscreen_sliver_width.max(20);
+            let hidden_left = frame.max.x <= viewport.min.x + offscreen_sliver;
+            let hidden_right = frame.min.x >= viewport.max.x - offscreen_sliver;
 
-        // A window is a "sliver" if it has very little visible area within
-        // the padded viewport. Only push truly off-screen windows to show
-        // config.sliver_width() pixels from the screen edge.
-        let sliver_width = config.sliver_width();
-        let visible_left = frame.min.x.max(pad_left);
-        let visible_right = frame.max.x.min(padded_right);
-        let visible = (visible_right - visible_left).max(0);
-        let is_off_screen = visible <= sliver_width.max(20);
-
-        if is_off_screen {
             // Account for per-window horizontal_padding: reposition() adds
             // h_pad to the virtual x, so subtract it here so the OS window
             // lands exactly sliver_width pixels from the screen edge.
             let h_pad = get_window_h_pad(entity);
             let width = frame.width();
-            let window_center = frame.center().x;
-            if window_center <= pad_left {
-                frame.min.x = sliver_width + h_pad - width;
-                frame.max.x = sliver_width + h_pad;
-            } else {
-                frame.min.x = display_width - sliver_width - h_pad;
+            if hidden_left {
+                frame.min.x = offscreen_sliver_width + h_pad - width;
+                frame.max.x = offscreen_sliver_width + h_pad;
+            } else if hidden_right {
+                frame.min.x = viewport.max.x - offscreen_sliver_width - h_pad;
                 frame.max.x = frame.min.x + width;
             }
 
-            if swiping {
-                // During swipe, keep full height — AX resize to sliver
-                // height can't be undone via SLS when the window scrolls
-                // back on-screen.
-                frame.min.y += menubar_height + pad_top;
-                frame.max.y += menubar_height + pad_top;
-            } else {
-                let is_stacked = layout_strip
+            // During swipe, keep full height.
+            let swiping = swipe_tracker.active();
+            if !swiping {
+                let stacked = layout_strip
                     .index_of(entity)
                     .ok()
                     .and_then(|idx| layout_strip.get(idx).ok())
                     .is_some_and(|col| matches!(col, Column::Stack(_)));
 
-                if is_stacked {
-                    // Don't compress stacked windows vertically when off-screen.
-                    // The height reduction corrupts their proportions: when the
-                    // column scrolls back on-screen, binpack_heights makes the
-                    // last window absorb all remaining space.
-                    frame.min.y += menubar_height + pad_top;
-                    frame.max.y += menubar_height + pad_top;
-                } else {
-                    let inset =
-                        (f64::from(bounds.height()) * (1.0 - config.sliver_height()) / 2.0) as i32;
-                    frame.min.y += menubar_height + pad_top + inset;
-                    frame.max.y += menubar_height + pad_top - inset;
+                // Don't compress stacked windows vertically when off-screen.
+                // The height reduction corrupts their proportions: when the
+                // column scrolls back on-screen, binpack_heights makes the
+                // last window absorb all remaining space.
+                if !stacked {
+                    let inset = (f64::from(viewport.height()) * (1.0 - config.sliver_height())
+                        / 2.0) as i32;
+                    frame.min.y += inset;
+                    frame.max.y += inset;
                 }
             }
-        } else {
-            frame.min.y += menubar_height + pad_top;
-            frame.max.y += menubar_height + pad_top;
-        }
 
-        if old_frame.size() != frame.size() {
-            resize_entity(
-                entity,
-                Size::new(frame.width(), frame.height()),
-                active_display.id(),
-                commands,
-            );
-        }
+            if old_frame.size() != frame.size() {
+                resize_entity(
+                    entity,
+                    Size::new(frame.width(), frame.height()),
+                    active_display.id(),
+                    &mut commands,
+                );
+            }
 
-        if old_frame.min != frame.min {
-            reposition_entity(entity, frame.min, active_display.id(), commands);
+            if old_frame.min != frame.min {
+                reposition_entity(entity, frame.min, active_display.id(), &mut commands);
+            }
         }
     }
 }

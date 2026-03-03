@@ -331,10 +331,6 @@ impl Config {
         self.options().preset_column_widths
     }
 
-    pub fn continuous_swipe(&self) -> bool {
-        self.options().continuous_swipe.unwrap_or(true)
-    }
-
     pub fn swipe_gesture_direction(&self) -> SwipeGestureDirection {
         self.options()
             .swipe_gesture_direction

@@ -777,13 +777,8 @@ pub(super) fn window_swiper(
     let get_window_frame = |entity| get_moving_window_frame(entity, active_display.0, &windows);
     let viewport = get_actual_display_bounds(active_display.0, active_display.1, &config);
 
-    let swipe_direction_modifier = match config.swipe_gesture_direction() {
-        SwipeGestureDirection::Natural => 1.0,
-        SwipeGestureDirection::Reversed => -1.0,
-    };
-
     let delta = delta * config.swipe_sensitivity();
-    let shift = (f64::from(viewport.width()) * delta * swipe_direction_modifier) as i32;
+    let shift = (f64::from(viewport.width()) * delta) as i32;
 
     commands.entity(entity).try_remove::<WindowSwipeMarker>();
 
@@ -799,13 +794,6 @@ pub(super) fn window_swiper(
         .0
         .absolute_positions(&get_window_frame)
         .collect::<Vec<_>>();
-    let Some(total_strip_width) = absolute_positions.last().and_then(|(column, offset)| {
-        column
-            .top()
-            .and_then(|entity| get_window_frame(entity).map(|frame| offset + frame.width()))
-    }) else {
-        return;
-    };
 
     // When a swipe is already active (e.g. restarting during inertia),
     // use its authoritative viewport_offset rather than re-deriving
@@ -831,13 +819,6 @@ pub(super) fn window_swiper(
         offset
     };
 
-    let clamped_offset = if config.continuous_swipe() {
-        viewport_offset - shift
-    } else {
-        (viewport_offset - shift).clamp(0, viewport.width() - total_strip_width)
-    };
-    active_strip.1.x = viewport_offset;
-
     // Compute velocity (normalized units/sec) for inertia after finger-lift.
     // EMA smoothing: 30% new + 70% old prevents jittery frames from dominating.
     let dt = time.delta_secs_f64();
@@ -847,7 +828,18 @@ pub(super) fn window_swiper(
         .map_or(0.0, |(velocity, _)| velocity);
     let velocity = 0.3 * new_velocity + 0.7 * old_velocity;
 
-    SmoothSwipeTracking::refresh(velocity, clamped_offset, &mut commands);
+    if let Some(clamped_offset) = clamp_viewport_offset(
+        viewport_offset,
+        shift,
+        &absolute_positions,
+        &get_window_frame,
+        &viewport,
+        &config,
+    ) && active_strip.1.x != clamped_offset
+    {
+        active_strip.1.x = clamped_offset;
+        SmoothSwipeTracking::refresh(velocity, clamped_offset, &mut commands);
+    }
 }
 
 /// Applies inertia after finger-lift and eventually commits positions.
@@ -914,38 +906,74 @@ pub(super) fn swipe_idle_tracker(
 
     let get_window_frame = |entity| get_moving_window_frame(entity, active_display.0, &windows);
 
-    let swipe_direction_modifier = match config.swipe_gesture_direction() {
-        SwipeGestureDirection::Natural => 1.0,
-        SwipeGestureDirection::Reversed => -1.0,
-    };
+    let viewport = get_actual_display_bounds(active_display.0, active_display.1, &config);
+    let shift = (f64::from(viewport.width()) * frame_delta) as i32;
 
-    // Use the stored viewport_offset — deriving it from window positions
-    // would give wrong results when edge windows have been sliver-clamped.
-    let shift = (display_width * frame_delta * swipe_direction_modifier) as i32;
-    let new_offset = if config.continuous_swipe() {
-        viewport_offset - shift
-    } else {
-        let viewport = get_actual_display_bounds(active_display.0, active_display.1, &config);
+    let absolute_positions = active_strip
+        .0
+        .absolute_positions(&get_window_frame)
+        .collect::<Vec<_>>();
 
-        let mut total_strip_width = 0_i32;
-        for (col, pos) in active_strip.0.absolute_positions(&get_window_frame) {
-            if let Some(top) = col.top()
-                && let Some(frame) = get_window_frame(top)
-            {
-                total_strip_width = pos + frame.width();
-            }
+    if let Some(clamped_offset) = clamp_viewport_offset(
+        viewport_offset,
+        shift,
+        &absolute_positions,
+        &get_window_frame,
+        &viewport,
+        &config,
+    ) {
+        if active_strip.1.x == clamped_offset {
+            swipe.update_position(0.0, clamped_offset);
+        } else {
+            active_strip.1.x = clamped_offset;
+
+            let decay_rate = config.swipe_deceleration();
+            swipe.update_position((-decay_rate * dt).exp(), clamped_offset);
         }
-        let (_, pad_right, _, pad_left) = config.edge_padding();
-        let effective_width = viewport.width() - pad_left - pad_right;
-        let left_aligned = -pad_left;
-        let right_aligned = total_strip_width - effective_width - pad_left;
-        (viewport_offset - shift).clamp(left_aligned, right_aligned.max(left_aligned))
+    }
+}
+
+fn clamp_viewport_offset<W>(
+    current_offset: i32,
+    shift: i32,
+    absolute_positions: &[(&Column, i32)],
+    get_window_frame: &W,
+    viewport: &IRect,
+    config: &Res<Config>,
+) -> Option<i32>
+where
+    W: Fn(Entity) -> Option<IRect>,
+{
+    let swipe_direction_modifier = match config.swipe_gesture_direction() {
+        SwipeGestureDirection::Natural => 1,
+        SwipeGestureDirection::Reversed => -1,
     };
+    let shift = shift * swipe_direction_modifier;
 
-    active_strip.1.x = new_offset;
+    let total_strip_width = absolute_positions.last().and_then(|(column, offset)| {
+        column
+            .top()
+            .and_then(|entity| get_window_frame(entity).map(|frame| offset + frame.width()))
+    })?;
 
-    let decay_rate = config.swipe_deceleration();
-    swipe.update_position((-decay_rate * dt).exp(), new_offset);
+    // Continous swipe is on by default.
+    let continuous_swipe = config.options().continuous_swipe.is_none_or(|swipe| swipe);
+    let snap_sides = absolute_positions
+        .last()
+        .map(|(_, pos)| pos)
+        .zip(absolute_positions.get(1).map(|(_, pos)| pos));
+    Some(
+        if continuous_swipe && let Some((left_snap, right_snap)) = snap_sides {
+            // Allow to scroll away until the last or first window snaps.
+            (current_offset - shift).clamp(viewport.min.x - left_snap, viewport.max.x - right_snap)
+        } else if viewport.width() < total_strip_width {
+            // Snap the strip directly to the edges.
+            (current_offset - shift).clamp(viewport.max.x - total_strip_width, viewport.min.x)
+        } else {
+            // Snap the strip directly to the edges.
+            (current_offset - shift).clamp(viewport.min.x, viewport.max.x - total_strip_width)
+        },
+    )
 }
 
 fn expose_window(

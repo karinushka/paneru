@@ -137,6 +137,9 @@
 
           config = lib.mkIf cfg.enable {
             assertions = [ (lib.hm.assertions.assertPlatform "services.paneru" pkgs lib.platforms.darwin) ];
+
+            home.packages = lib.mkIf (cfg.package != null) [ cfg.package ];
+
             launchd.agents.paneru = {
               enable = true;
               config = {

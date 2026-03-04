@@ -589,6 +589,7 @@ pub(super) fn center_mouse_trigger(
 /// * `skip_reshuffle` - The resource to indicate if reshuffling should be skipped.
 /// * `commands` - Bevy commands to manage components and trigger events.
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn window_focused_trigger(
     trigger: On<WMEventTrigger>,
     applications: Query<&Application>,
@@ -623,7 +624,7 @@ pub(super) fn window_focused_trigger(
         }
     }
 
-    debug!("window id {}", window.id());
+    debug!("focused window id {}", window.id());
 
     let Ok(app) = applications.get(parent) else {
         warn!("Unable to get parent for window {}.", window.id());
@@ -642,15 +643,11 @@ pub(super) fn window_focused_trigger(
         if config.auto_center()
             && let Some((_, _, None)) = windows.get_managed(entity)
             && let Some(size) = windows.size(entity)
+            && let Some(mut origin) = windows.origin(entity)
         {
             let center = active_display.bounds().center();
-            let origin = IRect::from_center_size(center, size).min;
-            reposition_entity(
-                entity,
-                active_display.display().absolute_coords(origin),
-                active_display.id(),
-                &mut commands,
-            );
+            origin.x = center.x - size.x / 2;
+            reposition_entity(entity, origin, active_display.id(), &mut commands);
         }
         reshuffle_around(entity, &mut commands);
     }

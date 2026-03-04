@@ -546,7 +546,7 @@ pub(super) fn find_orphaned_workspaces(
             debug!("repositioning floating window {window_entity}");
             reposition_entity(
                 window_entity,
-                display.absolute_coords(Origin::default()),
+                display.bounds().min,
                 display.id(),
                 &mut commands,
             );
@@ -1555,6 +1555,7 @@ pub(super) fn update_overlays(
     );
 }
 
+#[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn commit_window_position(
     mut moved_windows: Populated<(&mut Window, &Position), Changed<Position>>,
 ) {
@@ -1564,6 +1565,7 @@ pub(super) fn commit_window_position(
 }
 
 #[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn commit_window_size(
     active_display: ActiveDisplay,
     mut resized_windows: Populated<(&mut Window, &Bounds), Changed<Bounds>>,

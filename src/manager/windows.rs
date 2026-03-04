@@ -294,6 +294,7 @@ impl WindowApi for WindowOS {
         self.ax_element.full_screen().unwrap_or(false)
     }
 
+    #[instrument(level = Level::TRACE)]
     fn reposition(&mut self, origin: Origin) {
         if self.frame.min == origin {
             trace!("already in position.");
@@ -323,6 +324,7 @@ impl WindowApi for WindowOS {
         }
     }
 
+    #[instrument(level = Level::TRACE)]
     fn resize(&mut self, size: Size, display_width: i32) {
         if self.frame.size() == size {
             trace!("already correct size.");

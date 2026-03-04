@@ -584,7 +584,7 @@ fn full_width_window(
 
     reposition_entity(
         entity,
-        active_display.display().absolute_coords(Origin::new(x, y)),
+        active_display.bounds().min + Origin::new(x, y),
         active_display.id(),
         &mut commands,
     );

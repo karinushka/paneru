@@ -19,6 +19,7 @@ use bevy::{
 };
 use derive_more::{Deref, DerefMut};
 use objc2_core_graphics::CGDirectDisplayID;
+use tracing::{Level, instrument};
 
 use crate::commands::register_commands;
 use crate::config::{CONFIGURATION_FILE, Config};
@@ -70,7 +71,6 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::window_update_frame,
             systems::displays_rearranged,
             systems::reposition_dragged_window,
-            systems::position_layout_strip,
             systems::find_orphaned_workspaces.run_if(on_timer(Duration::from_millis(
                 DISPLAY_CHANGE_CHECK_FREQ_MS,
             ))),
@@ -93,6 +93,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::reshuffle_layout_strip,
             systems::animate_entities.after(systems::reshuffle_layout_strip),
             systems::animate_resize_entities.after(systems::reshuffle_layout_strip),
+            systems::position_layout_strip.after(systems::reshuffle_layout_strip),
             systems::update_overlays
                 .after(systems::animate_entities)
                 .after(systems::animate_resize_entities)
@@ -322,6 +323,7 @@ pub struct LocateDockTrigger(pub Entity);
 #[derive(BevyEvent)]
 pub struct SendMessageTrigger(pub Event);
 
+#[instrument(level = Level::TRACE, skip(commands))]
 pub fn reposition_entity(
     entity: Entity,
     origin: Origin,
@@ -333,6 +335,7 @@ pub fn reposition_entity(
     }
 }
 
+#[instrument(level = Level::TRACE, skip(commands))]
 pub fn resize_entity(
     entity: Entity,
     size: Size,
@@ -347,11 +350,9 @@ pub fn resize_entity(
     }
 }
 
-#[track_caller]
+#[instrument(level = Level::TRACE, skip(commands))]
 pub fn reshuffle_around(entity: Entity, commands: &mut Commands) {
     if let Ok(mut entity_commands) = commands.get_entity(entity) {
-        let caller = std::panic::Location::caller();
-        tracing::debug!("reshuffle_around: entity {entity} from {caller}");
         entity_commands.try_insert(ReshuffleAroundMarker);
     }
 }

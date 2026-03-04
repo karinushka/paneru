@@ -8,7 +8,6 @@ use super::skylight::{CGDisplayCreateUUIDFromDisplayID, CGDisplayGetDisplayIDFro
 use crate::{
     ecs::DockPosition,
     errors::{Error, Result},
-    manager::Origin,
 };
 
 /// `Display` represents a physical monitor and manages its associated workspaces and window panes.
@@ -111,10 +110,6 @@ impl Display {
         } else {
             DockPosition::Hidden
         }
-    }
-
-    pub fn absolute_coords(&self, origin: Origin) -> Origin {
-        self.bounds.min + origin
     }
 
     pub fn bounds(&self) -> IRect {

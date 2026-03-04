@@ -2,7 +2,7 @@ use arc_swap::{ArcSwap, Guard};
 use bevy::ecs::resource::Resource;
 use objc2_core_foundation::{CFData, CFString};
 use regex::Regex;
-use serde::{de, Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, de};
 use std::{
     collections::HashMap,
     env,

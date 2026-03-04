@@ -655,33 +655,33 @@ fn test_window_shuffle() {
     let offscreen_right = TEST_DISPLAY_WIDTH - 5;
 
     let expected_positions_last = [
-        (4, (offscreen_left, TEST_MENUBAR_HEIGHT)),
-        (3, (offscreen_left, TEST_MENUBAR_HEIGHT)),
-        (2, (-176, TEST_MENUBAR_HEIGHT)),
-        (1, (224, TEST_MENUBAR_HEIGHT)),
-        (0, (624, TEST_MENUBAR_HEIGHT)),
-    ];
-    let expected_positions_first = [
         (4, (0, TEST_MENUBAR_HEIGHT)),
         (3, (400, TEST_MENUBAR_HEIGHT)),
         (2, (800, TEST_MENUBAR_HEIGHT)),
         (1, (offscreen_right, TEST_MENUBAR_HEIGHT)),
         (0, (offscreen_right, TEST_MENUBAR_HEIGHT)),
     ];
+    let expected_positions_first = [
+        (4, (offscreen_left, TEST_MENUBAR_HEIGHT)),
+        (3, (offscreen_left, TEST_MENUBAR_HEIGHT)),
+        (2, (-176, TEST_MENUBAR_HEIGHT)),
+        (1, (224, TEST_MENUBAR_HEIGHT)),
+        (0, (624, TEST_MENUBAR_HEIGHT)),
+    ];
 
     let centered = (TEST_DISPLAY_WIDTH - TEST_WINDOW_WIDTH) / 2;
     let expected_positions_stacked = [
-        (4, (centered, TEST_MENUBAR_HEIGHT)),
-        (3, (centered, 374 + TEST_MENUBAR_HEIGHT)),
-        (2, (centered + TEST_WINDOW_WIDTH, TEST_MENUBAR_HEIGHT)),
-        (1, (offscreen_right, TEST_MENUBAR_HEIGHT)),
+        (4, (400, TEST_MENUBAR_HEIGHT)),
+        (3, (centered, 187 + TEST_MENUBAR_HEIGHT)),
+        (2, (400, 20)),
+        (1, (800, TEST_MENUBAR_HEIGHT)),
         (0, (offscreen_right, TEST_MENUBAR_HEIGHT)),
     ];
     let expected_positions_stacked2 = [
-        (4, (centered, TEST_MENUBAR_HEIGHT)),
-        (3, (centered, 249 + TEST_MENUBAR_HEIGHT)),
-        (2, (centered, 498 + TEST_MENUBAR_HEIGHT)),
-        (1, (712, TEST_MENUBAR_HEIGHT)),
+        (4, (624, TEST_MENUBAR_HEIGHT)),
+        (3, (624, 249 + TEST_MENUBAR_HEIGHT)),
+        (2, (centered, 250 + TEST_MENUBAR_HEIGHT)),
+        (1, (624, TEST_MENUBAR_HEIGHT)),
         (0, (offscreen_right, TEST_MENUBAR_HEIGHT)),
     ];
 
@@ -1082,9 +1082,9 @@ fn test_scrolling() {
     ];
 
     let expected = [
-        (2, (-128, TEST_MENUBAR_HEIGHT)),
-        (1, (272, TEST_MENUBAR_HEIGHT)),
-        (0, (672, TEST_MENUBAR_HEIGHT)),
+        (2, (-96, TEST_MENUBAR_HEIGHT)),
+        (1, (304, TEST_MENUBAR_HEIGHT)),
+        (0, (704, TEST_MENUBAR_HEIGHT)),
     ];
 
     let check = |iteration, world: &mut World| {

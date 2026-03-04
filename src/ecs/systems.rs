@@ -802,7 +802,9 @@ pub(super) fn apply_scroll_physics(
     }
 
     let get_window_frame = |entity| get_moving_window_frame(entity, active_display.0, &windows);
-    let viewport = get_actual_display_bounds(active_display.0, active_display.1, &config);
+    let viewport = active_display
+        .0
+        .actual_display_bounds(active_display.1, &config);
 
     let absolute_positions = strip
         .absolute_positions(&get_window_frame)
@@ -906,8 +908,9 @@ fn expose_window(
     config: &Res<Config>,
 ) -> Option<IRect> {
     let (_, pad_right, _, pad_left) = config.edge_padding();
-    let display_bounds =
-        get_actual_display_bounds(active_display.display(), active_display.dock(), config);
+    let display_bounds = active_display
+        .display()
+        .actual_display_bounds(active_display.dock(), config);
     let mut frame = get_moving_window_frame(entity, active_display.display(), windows)?;
     let size = frame.size();
 
@@ -1316,30 +1319,6 @@ fn get_moving_window_frame(
         })
 }
 
-fn get_actual_display_bounds(
-    active_display: &Display,
-    dock: Option<&DockPosition>,
-    config: &Res<Config>,
-) -> IRect {
-    let (pad_top, pad_right, pad_bottom, pad_left) = config.edge_padding();
-    let mut viewport = active_display.bounds();
-    viewport.min.x += pad_left;
-    viewport.min.y += pad_top;
-    viewport.max.x -= pad_left + pad_right;
-    viewport.max.y -= pad_top + pad_bottom;
-
-    match dock {
-        Some(DockPosition::Bottom(size)) => viewport.max.y -= size,
-        Some(DockPosition::Left(size)) => {
-            viewport.min.x += size;
-            viewport.max.x -= size;
-        }
-        Some(DockPosition::Right(size)) => viewport.max.x -= size,
-        _ => (),
-    }
-    viewport
-}
-
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn position_layout_strip(
@@ -1351,7 +1330,7 @@ pub(super) fn position_layout_strip(
     mut commands: Commands,
 ) {
     let (active_display, dock) = *active_display;
-    let viewport = get_actual_display_bounds(active_display, dock, &config);
+    let viewport = active_display.actual_display_bounds(dock, &config);
     let offscreen_sliver_width = config.sliver_width();
 
     let get_window_frame = |entity| get_moving_window_frame(entity, active_display, &windows);

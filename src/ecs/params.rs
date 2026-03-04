@@ -205,15 +205,28 @@ impl ActiveDisplay<'_, '_> {
 pub struct ActiveDisplayMut<'w, 's> {
     strip: Single<'w, 's, &'static mut LayoutStrip, With<ActiveWorkspaceMarker>>,
     /// The single active `Display` component, marked with `ActiveDisplayMarker`.
-    display: Single<'w, 's, &'static mut Display, With<ActiveDisplayMarker>>,
+    display: Single<
+        'w,
+        's,
+        (&'static mut Display, Entity, Option<&'static DockPosition>),
+        With<ActiveDisplayMarker>,
+    >,
     /// A query for all other `Display` components that are not marked as active.
     other_displays: Query<'w, 's, &'static mut Display, Without<ActiveDisplayMarker>>,
 }
 
 impl ActiveDisplayMut<'_, '_> {
+    pub fn display(&self) -> &Display {
+        &self.display.0
+    }
+
+    pub fn dock(&self) -> Option<&DockPosition> {
+        self.display.2
+    }
+
     /// Returns the `CGDirectDisplayID` of the active display.
     pub fn id(&self) -> CGDirectDisplayID {
-        self.display.id()
+        self.display().id()
     }
 
     /// Returns an iterator over mutable references to all other displays (non-active).
@@ -227,7 +240,7 @@ impl ActiveDisplayMut<'_, '_> {
 
     /// Returns the `CGRect` representing the bounds of the active display.
     pub fn bounds(&self) -> IRect {
-        self.display.bounds()
+        self.display().bounds()
     }
 }
 

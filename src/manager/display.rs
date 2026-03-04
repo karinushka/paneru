@@ -1,4 +1,7 @@
-use bevy::{ecs::component::Component, math::IRect};
+use bevy::{
+    ecs::{component::Component, system::Res},
+    math::IRect,
+};
 use core::ptr::NonNull;
 use objc2_core_foundation::{CFRetained, CFString, CFUUID};
 use objc2_core_graphics::CGDirectDisplayID;
@@ -6,6 +9,7 @@ use stdext::function_name;
 
 use super::skylight::{CGDisplayCreateUUIDFromDisplayID, CGDisplayGetDisplayIDFromUUID};
 use crate::{
+    config::Config,
     ecs::DockPosition,
     errors::{Error, Result},
 };
@@ -132,5 +136,29 @@ impl Display {
 
     pub fn set_menubar_height_override(&mut self, height: Option<i32>) {
         self.menubar_height_override = height;
+    }
+
+    pub fn actual_display_bounds(
+        &self,
+        dock: Option<&DockPosition>,
+        config: &Res<Config>,
+    ) -> IRect {
+        let (pad_top, pad_right, pad_bottom, pad_left) = config.edge_padding();
+        let mut viewport = self.bounds();
+        viewport.min.x += pad_left;
+        viewport.min.y += pad_top;
+        viewport.max.x -= pad_left + pad_right;
+        viewport.max.y -= pad_top + pad_bottom;
+
+        match dock {
+            Some(DockPosition::Bottom(size)) => viewport.max.y -= size,
+            Some(DockPosition::Left(size)) => {
+                viewport.min.x += size;
+                viewport.max.x -= size;
+            }
+            Some(DockPosition::Right(size)) => viewport.max.x -= size,
+            _ => (),
+        }
+        viewport
     }
 }

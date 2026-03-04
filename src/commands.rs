@@ -549,9 +549,10 @@ fn full_width_window(
     else {
         return;
     };
-    let display_width = active_display.bounds().width();
-    let (_, pad_right, _, pad_left) = config.edge_padding();
-    let padded_width = display_width - pad_left - pad_right;
+
+    let viewport = active_display
+        .display()
+        .actual_display_bounds(active_display.dock(), &config);
     let height = frame.height();
     let y = frame.min.y;
 
@@ -559,11 +560,11 @@ fn full_width_window(
         let previous_ratio = marker.width_ratio;
         let was_stacked = marker.was_stacked;
         commands.entity(entity).try_remove::<FullWidthMarker>();
-        let w = (previous_ratio * f64::from(padded_width)).round() as i32;
-        let x_pos = (display_width - pad_right - w).min(frame.min.x);
         if was_stacked {
             _ = active_display.active_strip().stack(entity);
         }
+        let w = (previous_ratio * f64::from(viewport.width())).round() as i32;
+        let x_pos = viewport.min.x.min(frame.min.x);
         (w, x_pos)
     } else {
         let strip = active_display.active_strip();
@@ -579,12 +580,13 @@ fn full_width_window(
             width_ratio: window.width_ratio(),
             was_stacked,
         });
-        (padded_width, pad_left)
+        (viewport.width(), viewport.min.x)
     };
 
+    dbg!(viewport.min);
     reposition_entity(
         entity,
-        active_display.bounds().min + Origin::new(x, y),
+        viewport.min + Origin::new(x, y),
         active_display.id(),
         &mut commands,
     );

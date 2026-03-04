@@ -12,7 +12,7 @@ use stdext::prelude::RwLockExt;
 use tracing::{Level, debug, instrument};
 
 use crate::commands::{Command, Direction, Operation, ResizeDirection, register_commands};
-use crate::config::Config;
+use crate::config::{Config, MainOptions, WindowParams};
 use crate::ecs::{
     BProcess, ExistingMarker, FocusFollowsMouse, FocusedMarker, Initializing, MissionControlActive,
     PollForNotifications, SkipReshuffle, SpawnWindowTrigger, register_systems, register_triggers,
@@ -885,18 +885,12 @@ fn test_dont_focus() {
         }
     };
 
-    let config: Config = r#"
-[options]
-[bindings]
-[windows]
-[windows.skipfocus]
-title = ".*"
-dont_focus = true
-index = 100
-"#
-    .try_into()
-    .unwrap();
+    let mut params = WindowParams::new(".*", None);
+    params.dont_focus = Some(true);
+    params.index = Some(100);
+    let config: Config = (MainOptions::default(), vec![params]).into();
     bevy.insert_resource(config);
+
     run_main_loop(&mut bevy, &internal_queue, &commands, check);
 }
 
@@ -1019,16 +1013,14 @@ fn test_window_resize_grow_and_shrink_cycle() {
     bevy.world_mut()
         .insert_resource(WindowManager(Box::new(window_manager)));
 
-    let config: Config = r#"
-[options]
-preset_column_widths = [0.25, 0.5, 0.75]
-
-[bindings]
-
-[windows]
-"#
-    .try_into()
-    .unwrap();
+    let config: Config = (
+        MainOptions {
+            preset_column_widths: vec![0.25, 0.5, 0.75],
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
     bevy.insert_resource(config);
 
     run_main_loop(&mut bevy, &internal_queue, &commands, check);

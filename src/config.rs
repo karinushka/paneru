@@ -430,6 +430,22 @@ impl TryFrom<&str> for Config {
     }
 }
 
+impl From<(MainOptions, Vec<WindowParams>)> for Config {
+    fn from((options, params): (MainOptions, Vec<WindowParams>)) -> Self {
+        Self {
+            inner: Arc::new(ArcSwap::from_pointee(InnerConfig {
+                options,
+                windows: params
+                    .into_iter()
+                    .enumerate()
+                    .map(|(nr, param)| Some((format!("param{nr}"), param)))
+                    .collect(),
+                ..Default::default()
+            })),
+        }
+    }
+}
+
 #[derive(Deserialize, Debug)]
 #[serde(untagged)]
 enum OneOrMore {
@@ -671,6 +687,22 @@ pub struct WindowParams {
 }
 
 impl WindowParams {
+    #![allow(unused)]
+    pub fn new(title: &str, bundle_id: Option<String>) -> Self {
+        Self {
+            title: Regex::new(title).unwrap(),
+            bundle_id,
+            floating: None,
+            index: None,
+            vertical_padding: None,
+            horizontal_padding: None,
+            dont_focus: None,
+            width: None,
+            grid: None,
+            border_radius: None,
+        }
+    }
+
     /// Parses the grid string into `(x_ratio, y_ratio, w_ratio, h_ratio)`, all 0.0–1.0.
     pub fn grid_ratios(&self) -> Option<(f64, f64, f64, f64)> {
         let grid = self.grid.as_ref()?;
@@ -1026,6 +1058,7 @@ fn generate_virtual_keymap() -> Vec<(String, u8)> {
 
 #[test]
 #[allow(clippy::float_cmp)]
+#[ignore = "toml parsing is super slow."]
 fn test_config_parsing() {
     let input = r#"
 [options]

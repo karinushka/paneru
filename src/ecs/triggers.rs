@@ -6,13 +6,14 @@ use bevy::ecs::observer::On;
 use bevy::ecs::query::{Has, With};
 use bevy::ecs::system::{Commands, NonSend, NonSendMut, Populated, Query, Res, ResMut, Single};
 use bevy::math::IRect;
+use bevy::time::Time;
 use notify::event::{DataChange, MetadataKind, ModifyKind};
 use notify::{EventKind, Watcher};
 use objc2_app_kit::NSScreen;
 use objc2_foundation::{NSNumber, NSString, ns_string};
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
@@ -22,12 +23,10 @@ use super::{
 };
 use crate::commands::ON_FULLSCREEN_SPACE;
 use crate::config::{Config, WindowParams};
-use crate::ecs::params::{
-    ActiveDisplay, ActiveDisplayMut, Configuration, SmoothSwipeTracking, Windows,
-};
+use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, Bounds, LocateDockTrigger, Position, SendMessageTrigger, TrackpadSwipe,
-    WindowSwipeMarker, reposition_entity, reshuffle_around, resize_entity,
+    ActiveWorkspaceMarker, Bounds, LocateDockTrigger, Position, Scrolling, SendMessageTrigger,
+    reposition_entity, reshuffle_around, resize_entity,
 };
 use crate::errors::Result;
 use crate::events::Event;
@@ -174,7 +173,9 @@ pub(super) fn mouse_down_trigger(
     };
 
     // Stop any ongoing scroll.
-    commands.remove_resource::<TrackpadSwipe>();
+    if let Ok(mut scroll) = commands.get_entity(active_display.active_strip_entity()) {
+        scroll.try_insert(Scrolling::default());
+    }
 
     if let Some(frame) = windows.frame(entity)
         && (frame.min.x < 0 || frame.min.x > active_display.bounds().width() - frame.width())
@@ -548,12 +549,16 @@ pub(super) fn center_mouse_trigger(
     windows: Windows,
     window_manager: Res<WindowManager>,
     config: Configuration,
-    swipe_tracker: SmoothSwipeTracking,
+    active_workspace: Query<&Scrolling, With<ActiveWorkspaceMarker>>,
 ) {
     let Some(window) = windows.get(trigger.event().entity) else {
         return;
     };
-    if swipe_tracker.active() {
+    if active_workspace
+        .iter()
+        .next()
+        .is_some_and(|scrolling| scrolling.is_user_swiping)
+    {
         debug!("Suppressing center mouse due to a swipe");
         return;
     }
@@ -672,10 +677,10 @@ pub(super) fn window_focused_trigger(
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn swipe_gesture_trigger(
     trigger: On<WMEventTrigger>,
-    focused_window: Single<(&Window, Entity), With<FocusedMarker>>,
     active_display: ActiveDisplay,
+    mut active_workspace: Single<&mut Scrolling, With<ActiveWorkspaceMarker>>,
+    time: Res<Time>,
     config: Configuration,
-    mut commands: Commands,
 ) {
     let Event::Swipe { ref deltas } = trigger.event().0 else {
         return;
@@ -695,8 +700,16 @@ pub(super) fn swipe_gesture_trigger(
         return;
     }
 
-    let (_, entity) = *focused_window;
-    commands.entity(entity).try_insert(WindowSwipeMarker(delta));
+    let dt = time.delta_secs_f64();
+    let new_velocity = if dt > 0.0 {
+        delta * config.config().swipe_sensitivity() / dt
+    } else {
+        0.0
+    };
+    let velocity = 0.3 * new_velocity + 0.7 * active_workspace.velocity;
+    active_workspace.velocity = velocity;
+    active_workspace.is_user_swiping = true;
+    active_workspace.last_event = Instant::now();
 }
 
 /// Handles Mission Control events, updating the `MissionControlActive` resource.
@@ -709,6 +722,7 @@ pub(super) fn swipe_gesture_trigger(
 pub(super) fn mission_control_trigger(
     trigger: On<WMEventTrigger>,
     mut mission_control_active: ResMut<MissionControlActive>,
+    active_display: ActiveDisplay,
     mut commands: Commands,
 ) {
     match trigger.event().0 {
@@ -716,7 +730,9 @@ pub(super) fn mission_control_trigger(
         | Event::MissionControlShowFrontWindows
         | Event::MissionControlShowDesktop => {
             mission_control_active.as_mut().0 = true;
-            commands.remove_resource::<TrackpadSwipe>();
+            if let Ok(mut scroll) = commands.get_entity(active_display.active_strip_entity()) {
+                scroll.try_insert(Scrolling::default());
+            }
         }
         Event::MissionControlExit => {
             mission_control_active.as_mut().0 = false;

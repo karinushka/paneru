@@ -1,11 +1,9 @@
-use std::time::Duration;
-
 use bevy::{
     ecs::{
         entity::Entity,
         hierarchy::ChildOf,
         query::{With, Without},
-        system::{Commands, Query, Res, ResMut, Single, SystemParam},
+        system::{Query, Res, ResMut, Single, SystemParam},
         world::Mut,
     },
     math::IRect,
@@ -18,7 +16,7 @@ use crate::{
     config::{Config, WindowParams},
     ecs::{
         ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker, FullWidthMarker, Initializing,
-        Position, RepositionMarker, ResizeMarker, TrackpadSwipe, Unmanaged,
+        Position, RepositionMarker, ResizeMarker, Unmanaged,
     },
     manager::{Application, Display, LayoutStrip, Origin, Size, Window},
     platform::{ProcessSerialNumber, WinID},
@@ -357,44 +355,5 @@ impl Windows<'_, '_> {
         Option<&ResizeMarker>,
     )> {
         self.positions.get(entity).ok()
-    }
-}
-
-#[derive(SystemParam)]
-pub struct SmoothSwipeTracking<'w> {
-    tracker: Option<ResMut<'w, TrackpadSwipe>>,
-}
-
-impl SmoothSwipeTracking<'_> {
-    pub fn sliding(&self) -> bool {
-        const FINGER_LIFT_THRESHOLD: Duration = Duration::from_millis(50);
-        self.tracker
-            .as_ref()
-            .is_some_and(|tracker| tracker.last_swipe.elapsed() < FINGER_LIFT_THRESHOLD)
-    }
-
-    pub fn position(&self) -> Option<(f64, i32)> {
-        self.tracker
-            .as_ref()
-            .map(|tracker| (tracker.velocity, tracker.viewport_offset))
-    }
-
-    pub fn update_position(&mut self, decay: f64, viewport_offset: i32) {
-        if let Some(ref mut tracker) = self.tracker {
-            tracker.velocity *= decay;
-            tracker.viewport_offset = viewport_offset;
-        }
-    }
-
-    pub fn active(&self) -> bool {
-        self.tracker.is_some()
-    }
-
-    pub fn refresh(velocity: f64, viewport_offset: i32, commands: &mut Commands) {
-        commands.insert_resource(TrackpadSwipe {
-            last_swipe: std::time::Instant::now(),
-            velocity,
-            viewport_offset,
-        });
     }
 }

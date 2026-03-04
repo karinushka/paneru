@@ -1,5 +1,5 @@
 use std::sync::mpsc::Receiver;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bevy::MinimalPlugins;
 use bevy::app::App as BevyApp;
@@ -62,9 +62,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
             )
                 .chain()
                 .run_if(resource_exists::<Initializing>),
-            systems::window_swiper,
-            systems::swipe_idle_tracker
-                .run_if(|swipe_tracker: Option<Res<TrackpadSwipe>>| swipe_tracker.is_some()),
+            systems::apply_scroll_physics,
             systems::add_launched_process,
             systems::add_launched_application,
             systems::fresh_marker_cleanup,
@@ -191,27 +189,30 @@ pub struct ReshuffleAroundMarker;
 #[derive(Component)]
 pub struct StackAdjustedResize;
 
-#[derive(Component)]
-pub struct WindowSwipeMarker(pub f64);
+#[derive(Component, Debug)]
+pub struct Scrolling {
+    pub velocity: f64,
+    /// When true, the user's fingers are on the trackpad.
+    pub is_user_swiping: bool,
+    /// Last time a physical swipe event was received.
+    pub last_event: Instant,
+}
+
+impl Default for Scrolling {
+    fn default() -> Self {
+        Self {
+            velocity: 0.0,
+            is_user_swiping: false,
+            last_event: Instant::now(),
+        }
+    }
+}
 
 #[derive(Component, Clone, Debug, Deref, DerefMut)]
 pub struct Position(pub Origin);
 
 #[derive(Component, Clone, Debug, Deref, DerefMut)]
 pub struct Bounds(pub Size);
-
-#[derive(Resource)]
-pub struct TrackpadSwipe {
-    /// Resource indicating that a trackpad swipe gesture is active.
-    /// While present, window repositioning uses fast compositor-level moves
-    /// instead of slow AX API calls. When inertia ends, positions are committed
-    /// to AX and a cooldown keeps the resource alive for a few more ticks
-    /// so that all guard checks (`swipe_active.is_some()`) hold until macOS
-    /// has settled.
-    last_swipe: std::time::Instant,
-    velocity: f64,
-    viewport_offset: i32,
-}
 
 /// Marks a window entity that is currently on a native macOS fullscreen space.
 /// The window has been removed from its tiled position in the strip.

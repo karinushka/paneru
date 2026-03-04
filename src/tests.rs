@@ -565,7 +565,7 @@ fn run_main_loop(
     for (iteration, command) in commands.iter().enumerate() {
         bevy_app.world_mut().write_message::<Event>(command.clone());
 
-        for _ in 0..5 {
+        for _ in 0..2 {
             bevy_app.update();
 
             // Flush the event queue with internally generated mock events.
@@ -1016,6 +1016,96 @@ fn test_window_resize_grow_and_shrink_cycle() {
     let config: Config = (
         MainOptions {
             preset_column_widths: vec![0.25, 0.5, 0.75],
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+    bevy.insert_resource(config);
+
+    run_main_loop(&mut bevy, &internal_queue, &commands, check);
+}
+
+#[test]
+fn test_scrolling() {
+    let mut bevy = setup_world();
+    let mock_app = setup_process(bevy.world_mut());
+    let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
+    let event_queue = internal_queue.clone();
+
+    let windows = Box::new(move |_| {
+        (0..3)
+            .map(|i| {
+                let origin = Origin::new(400 * i, 0);
+                let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+                let window = MockWindow::new(
+                    i,
+                    IRect {
+                        min: origin,
+                        max: origin + size,
+                    },
+                    event_queue.clone(),
+                    mock_app.clone(),
+                );
+                Window::new(Box::new(window))
+            })
+            .collect::<Vec<_>>()
+    });
+    let window_manager = MockWindowManager { windows };
+    bevy.world_mut()
+        .insert_resource(WindowManager(Box::new(window_manager)));
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 }, // Noop allowing everything to settle
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::Last)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::First)),
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Swipe {
+            deltas: vec![0.1, 0.1, 0.1],
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    // Verify initial positions
+    let expected_initial = [
+        (2, (0, TEST_MENUBAR_HEIGHT)),
+        (1, (400, TEST_MENUBAR_HEIGHT)),
+        (0, (800, TEST_MENUBAR_HEIGHT)),
+    ];
+
+    let expected = [
+        (2, (-128, TEST_MENUBAR_HEIGHT)),
+        (1, (272, TEST_MENUBAR_HEIGHT)),
+        (0, (672, TEST_MENUBAR_HEIGHT)),
+    ];
+
+    let check = |iteration, world: &mut World| {
+        let iterations = [
+            None,
+            None,
+            None,
+            Some(expected_initial.as_slice()),
+            None,
+            Some(expected.as_slice()),
+        ];
+
+        if let Some(positions) = iterations[iteration] {
+            debug!("Iteration: {iteration}");
+            verify_window_positions(positions, world);
+        }
+    };
+
+    let config: Config = (
+        MainOptions {
+            swipe_gesture_fingers: Some(3),
             ..Default::default()
         },
         vec![],

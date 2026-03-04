@@ -147,14 +147,13 @@ impl Display {
         let mut viewport = self.bounds();
         viewport.min.x += pad_left;
         viewport.min.y += pad_top;
-        viewport.max.x -= pad_left + pad_right;
-        viewport.max.y -= pad_top + pad_bottom;
+        viewport.max.x -= pad_right;
+        viewport.max.y -= pad_bottom;
 
         match dock {
             Some(DockPosition::Bottom(size)) => viewport.max.y -= size,
             Some(DockPosition::Left(size)) => {
                 viewport.min.x += size;
-                viewport.max.x -= size;
             }
             Some(DockPosition::Right(size)) => viewport.max.x -= size,
             _ => (),

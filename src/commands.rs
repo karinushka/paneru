@@ -555,6 +555,7 @@ fn full_width_window(
         .actual_display_bounds(active_display.dock(), &config);
     let height = frame.height();
     let y = frame.min.y;
+    let h_pad = window.horizontal_padding();
 
     let (width, x) = if let Some(marker) = windows.full_width(entity) {
         let previous_ratio = marker.width_ratio;
@@ -564,8 +565,7 @@ fn full_width_window(
             _ = active_display.active_strip().stack(entity);
         }
         let w = (previous_ratio * f64::from(viewport.width())).round() as i32;
-        let x_pos = viewport.min.x.min(frame.min.x);
-        (w, x_pos)
+        (w, viewport.min.x)
     } else {
         let strip = active_display.active_strip();
         let was_stacked = strip
@@ -580,13 +580,12 @@ fn full_width_window(
             width_ratio: window.width_ratio(),
             was_stacked,
         });
-        (viewport.width(), viewport.min.x)
+        (viewport.width() - 2 * h_pad, viewport.min.x)
     };
 
-    dbg!(viewport.min);
     reposition_entity(
         entity,
-        viewport.min + Origin::new(x, y),
+        Origin::new(x + h_pad, y),
         active_display.id(),
         &mut commands,
     );

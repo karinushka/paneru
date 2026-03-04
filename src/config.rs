@@ -1112,7 +1112,6 @@ fn generate_virtual_keymap() -> Vec<(String, u8)> {
 
 #[test]
 #[allow(clippy::float_cmp)]
-#[ignore = "toml parsing is super slow."]
 fn test_config_parsing() {
     let input = r#"
 [options]

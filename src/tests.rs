@@ -565,7 +565,7 @@ fn run_main_loop(
     for (iteration, command) in commands.iter().enumerate() {
         bevy_app.world_mut().write_message::<Event>(command.clone());
 
-        for _ in 0..2 {
+        for _ in 0..5 {
             bevy_app.update();
 
             // Flush the event queue with internally generated mock events.
@@ -623,6 +623,12 @@ fn verify_window_sizes(expected_sizes: &[(WinID, (i32, i32))], world: &mut World
 #[test]
 #[allow(clippy::too_many_lines)]
 fn test_window_shuffle() {
+    const PADDING_LEFT: u16 = 3;
+    const PADDING_RIGHT: u16 = 5;
+    const PADDING_TOP: u16 = 7;
+    const PADDING_BOTTOM: u16 = 9;
+    const SLIVER_WIDTH: u16 = 5;
+
     let commands = vec![
         Event::MenuOpened { window_id: 0 }, // Noop allowing everything to settle
         Event::Command {
@@ -649,40 +655,51 @@ fn test_window_shuffle() {
         Event::Command {
             command: Command::Window(Operation::Center),
         },
+        Event::Command {
+            command: Command::PrintState,
+        },
     ];
 
-    let offscreen_left = 0 - TEST_WINDOW_WIDTH + 5;
-    let offscreen_right = TEST_DISPLAY_WIDTH - 5;
+    let top_edge = TEST_MENUBAR_HEIGHT + i32::from(PADDING_TOP);
+    let left_edge = i32::from(PADDING_LEFT);
+    let right_edge = TEST_DISPLAY_WIDTH - i32::from(PADDING_RIGHT);
+    let offscreen_right = TEST_DISPLAY_WIDTH - i32::from(PADDING_RIGHT.max(SLIVER_WIDTH));
+    let offscreen_left = i32::from(PADDING_RIGHT.max(SLIVER_WIDTH)) - TEST_WINDOW_WIDTH;
 
     let expected_positions_last = [
-        (4, (0, TEST_MENUBAR_HEIGHT)),
-        (3, (400, TEST_MENUBAR_HEIGHT)),
-        (2, (800, TEST_MENUBAR_HEIGHT)),
-        (1, (offscreen_right, TEST_MENUBAR_HEIGHT)),
-        (0, (offscreen_right, TEST_MENUBAR_HEIGHT)),
+        (4, (offscreen_left, top_edge)),
+        (3, (offscreen_left, top_edge)),
+        (2, (right_edge - 3 * TEST_WINDOW_WIDTH, top_edge)),
+        (1, (right_edge - 2 * TEST_WINDOW_WIDTH, top_edge)),
+        (0, (right_edge - TEST_WINDOW_WIDTH, top_edge)),
     ];
     let expected_positions_first = [
-        (4, (offscreen_left, TEST_MENUBAR_HEIGHT)),
-        (3, (offscreen_left, TEST_MENUBAR_HEIGHT)),
-        (2, (-176, TEST_MENUBAR_HEIGHT)),
-        (1, (224, TEST_MENUBAR_HEIGHT)),
-        (0, (624, TEST_MENUBAR_HEIGHT)),
+        (4, (left_edge, top_edge)),
+        (3, (left_edge + TEST_WINDOW_WIDTH, top_edge)),
+        (2, (left_edge + 2 * TEST_WINDOW_WIDTH, top_edge)),
+        (1, (offscreen_right, top_edge)),
+        (0, (offscreen_right, top_edge)),
     ];
 
     let centered = (TEST_DISPLAY_WIDTH - TEST_WINDOW_WIDTH) / 2;
     let expected_positions_stacked = [
-        (4, (400, TEST_MENUBAR_HEIGHT)),
-        (3, (centered, 187 + TEST_MENUBAR_HEIGHT)),
-        (2, (400, 20)),
-        (1, (800, TEST_MENUBAR_HEIGHT)),
-        (0, (offscreen_right, TEST_MENUBAR_HEIGHT)),
+        // (4, (centered, top_edge)),
+        // (3, (centered, 374 + top_edge)),
+        // (2, (centered + TEST_WINDOW_WIDTH, top_edge)),
+        // (1, (offscreen_right, top_edge)),
+        // (0, (offscreen_right, top_edge)),
+        (4, (centered, top_edge)),
+        (3, (centered, 393)),
+        (2, (centered + TEST_WINDOW_WIDTH, top_edge)),
+        (1, (offscreen_right, top_edge)),
+        (0, (offscreen_right, top_edge)),
     ];
     let expected_positions_stacked2 = [
-        (4, (624, TEST_MENUBAR_HEIGHT)),
-        (3, (624, 249 + TEST_MENUBAR_HEIGHT)),
-        (2, (centered, 250 + TEST_MENUBAR_HEIGHT)),
-        (1, (624, TEST_MENUBAR_HEIGHT)),
-        (0, (offscreen_right, TEST_MENUBAR_HEIGHT)),
+        (4, (centered, top_edge)),
+        (3, (centered, 271)),
+        (2, (centered, 515)),
+        (1, (712, top_edge)),
+        (0, (offscreen_right, top_edge)),
     ];
 
     let check = |iteration, world: &mut World| {
@@ -693,6 +710,7 @@ fn test_window_shuffle() {
             None,
             None,
             Some(expected_positions_stacked.as_slice()),
+            None,
             None,
             None,
             Some(expected_positions_stacked2.as_slice()),
@@ -730,6 +748,22 @@ fn test_window_shuffle() {
     let window_manager = MockWindowManager { windows };
     bevy.world_mut()
         .insert_resource(WindowManager(Box::new(window_manager)));
+
+    let mut params = WindowParams::new(".*", None);
+    params.vertical_padding = Some(3);
+    params.horizontal_padding = Some(2);
+    let config: Config = (
+        MainOptions {
+            padding_left: Some(PADDING_LEFT),
+            padding_right: Some(PADDING_RIGHT),
+            padding_top: Some(PADDING_TOP),
+            padding_bottom: Some(PADDING_BOTTOM),
+            ..Default::default()
+        },
+        vec![params],
+    )
+        .into();
+    bevy.insert_resource(config);
 
     run_main_loop(&mut bevy, &internal_queue, &commands, check);
 }
@@ -1082,9 +1116,9 @@ fn test_scrolling() {
     ];
 
     let expected = [
-        (2, (-96, TEST_MENUBAR_HEIGHT)),
-        (1, (304, TEST_MENUBAR_HEIGHT)),
-        (0, (704, TEST_MENUBAR_HEIGHT)),
+        (2, (-320, TEST_MENUBAR_HEIGHT)),
+        (1, (80, TEST_MENUBAR_HEIGHT)),
+        (0, (480, TEST_MENUBAR_HEIGHT)),
     ];
 
     let check = |iteration, world: &mut World| {

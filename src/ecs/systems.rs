@@ -907,19 +907,18 @@ fn expose_window(
     active_display: &ActiveDisplay,
     config: &Res<Config>,
 ) -> Option<IRect> {
-    let (_, pad_right, _, pad_left) = config.edge_padding();
     let display_bounds = active_display
         .display()
         .actual_display_bounds(active_display.dock(), config);
     let mut frame = get_moving_window_frame(entity, active_display.display(), windows)?;
     let size = frame.size();
 
-    if frame.max.x > display_bounds.max.x - pad_right {
+    if frame.max.x > display_bounds.max.x {
         trace!("Bumped window {entity} to the left");
-        frame.min.x = display_bounds.max.x - pad_right - size.x;
-    } else if frame.min.x < display_bounds.min.x + pad_left {
+        frame.min.x = display_bounds.max.x - size.x;
+    } else if frame.min.x < display_bounds.min.x {
         trace!("Bumped window {entity} to the right");
-        frame.min.x = display_bounds.min.x + pad_left;
+        frame.min.x = display_bounds.min.x;
     }
     frame.max.x = frame.min.x + size.x;
     Some(frame)
@@ -966,14 +965,12 @@ pub(super) fn reshuffle_layout_strip(
         }) else {
             continue;
         };
-        let viewport_offset = Origin::new(
-            (frame.min.x - active_display.bounds().min.x) - abs_position,
-            0,
-        );
+        let viewport_position =
+            Origin::new(frame.min.x - abs_position, active_display.bounds().min.y);
 
         reposition_entity(
             active_display.active_strip_entity(),
-            viewport_offset,
+            viewport_position,
             active_display.id(),
             &mut commands,
         );
@@ -1332,38 +1329,34 @@ pub(super) fn position_layout_strip(
     let (active_display, dock) = *active_display;
     let viewport = active_display.actual_display_bounds(dock, &config);
     let offscreen_sliver_width = config.sliver_width();
+    let (_, pad_right, _, pad_left) = config.edge_padding();
 
     let get_window_frame = |entity| get_moving_window_frame(entity, active_display, &windows);
     let get_window_h_pad = |entity| windows.get(entity).map_or(0, |w| w.horizontal_padding());
 
     for (layout_strip, position) in moved_strips {
-        let viewport_offset = position.0.x;
-        for (entity, mut frame) in layout_strip.layout_to_viewport(
-            viewport_offset,
-            &viewport,
-            offscreen_sliver_width,
-            &get_window_frame,
-        ) {
+        for (entity, mut frame) in
+            layout_strip.layout_to_viewport(**position, &viewport, &get_window_frame)
+        {
             let Some(old_frame) = get_window_frame(entity) else {
                 continue;
             };
-
-            let offscreen_sliver = offscreen_sliver_width.max(20);
-            let hidden_left = frame.max.x <= viewport.min.x + offscreen_sliver;
-            let hidden_right = frame.min.x >= viewport.max.x - offscreen_sliver;
-
             // Account for per-window horizontal_padding: reposition() adds
             // h_pad to the virtual x, so subtract it here so the OS window
             // lands exactly sliver_width pixels from the screen edge.
             let h_pad = get_window_h_pad(entity);
+
             let width = frame.width();
-            if hidden_left {
-                frame.min.x = offscreen_sliver_width + h_pad - width;
-                frame.max.x = offscreen_sliver_width + h_pad;
-            } else if hidden_right {
-                frame.min.x = viewport.max.x - offscreen_sliver_width - h_pad;
-                frame.max.x = frame.min.x + width;
+            if frame.max.x <= viewport.min.x {
+                // Window hidden to the left
+                frame.min.x += offscreen_sliver_width.max(pad_left) - pad_left;
+                frame.min.x += h_pad;
+            } else if frame.min.x >= viewport.max.x {
+                // Window hidden to the right
+                frame.min.x -= offscreen_sliver_width.max(pad_right) - pad_right;
+                frame.min.x -= h_pad;
             }
+            frame.max.x = frame.min.x + width;
 
             // During swipe, keep full height.
             let swiping = active_workspace.is_user_swiping;

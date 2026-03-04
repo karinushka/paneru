@@ -74,6 +74,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::find_orphaned_workspaces.run_if(on_timer(Duration::from_millis(
                 DISPLAY_CHANGE_CHECK_FREQ_MS,
             ))),
+            systems::reshuffle_layout_strip,
         ),
     );
     app.add_systems(
@@ -90,10 +91,9 @@ pub fn register_systems(app: &mut bevy::app::App) {
     app.add_systems(
         PostUpdate,
         (
-            systems::reshuffle_layout_strip,
-            systems::animate_entities.after(systems::reshuffle_layout_strip),
-            systems::animate_resize_entities.after(systems::reshuffle_layout_strip),
-            systems::position_layout_strip.after(systems::reshuffle_layout_strip),
+            systems::position_layout_strip,
+            systems::animate_entities.after(systems::position_layout_strip),
+            systems::animate_resize_entities.after(systems::position_layout_strip),
             systems::update_overlays
                 .after(systems::animate_entities)
                 .after(systems::animate_resize_entities)

@@ -6,6 +6,7 @@ use stdext::function_name;
 use tracing::{Level, debug, instrument};
 
 use crate::errors::{Error, Result};
+use crate::manager::Origin;
 use crate::platform::WorkspaceId;
 
 /// Represents a single panel within a `LayoutStrip`, which can either hold a single window or a stack of windows.
@@ -345,9 +346,8 @@ impl LayoutStrip {
     #[instrument(level = Level::TRACE, skip_all, fields(offset))]
     pub fn layout_to_viewport<W>(
         &self,
-        offset: i32,
+        origin: Origin,
         viewport: &IRect,
-        hidden_threshold: i32,
         get_window_frame: &W,
     ) -> impl Iterator<Item = (Entity, IRect)>
     where
@@ -373,23 +373,21 @@ impl LayoutStrip {
                     .first()
                     .and_then(|&entity| get_window_frame(entity))
                     .map(|frame| frame.width())?;
-                let mut prev_y = viewport.min.y;
+
+                let top_left = origin.x + position;
+                let mut next_y = viewport.min.y;
                 let frames = windows
                     .into_iter()
                     .zip(heights)
                     .filter_map(|(entity, height)| {
                         let mut frame = get_window_frame(entity)?;
-                        let top_left = position + offset;
-                        frame.min.x = top_left.clamp(
-                            // Make sure a small sliver of a window is visible.
-                            viewport.min.x + hidden_threshold - column_width,
-                            viewport.width() - hidden_threshold,
-                        );
-                        frame.min.y = prev_y;
-
-                        prev_y += height;
+                        frame.min.x = top_left.clamp(viewport.min.x - column_width, viewport.max.x);
                         frame.max.x = frame.min.x + column_width;
+
+                        frame.min.y = next_y;
                         frame.max.y = frame.min.y + height;
+
+                        next_y = frame.max.y;
 
                         Some((entity, frame))
                     })
@@ -481,8 +479,6 @@ pub fn binpack_heights(heights: &[i32], min_height: i32, total_height: i32) -> O
 mod tests {
     use super::*;
     use bevy::prelude::*;
-
-    const WINDOW_HIDDEN_THRESHOLD: i32 = 10;
 
     fn setup_world_and_strip() -> (World, LayoutStrip, Vec<Entity>) {
         let mut world = World::new();
@@ -584,7 +580,7 @@ mod tests {
         let viewport = IRect::new(0, 0, 600, 500);
         let get_window_frame = |_| Some(sizes[0]);
         let out = strip
-            .layout_to_viewport(-50, &viewport, WINDOW_HIDDEN_THRESHOLD, &get_window_frame)
+            .layout_to_viewport(Origin::default().with_x(-50), &viewport, &get_window_frame)
             .collect::<Vec<_>>();
 
         let xpos = out.iter().map(|(_, frame)| frame.min.x).collect::<Vec<_>>();
@@ -611,7 +607,7 @@ mod tests {
         let viewport = IRect::new(0, 0, 900, 800);
         let frame = |_| Some(IRect::new(0, 0, 300, 400));
         let out: Vec<_> = strip
-            .layout_to_viewport(0, &viewport, WINDOW_HIDDEN_THRESHOLD, &frame)
+            .layout_to_viewport(Origin::default(), &viewport, &frame)
             .collect();
 
         assert_eq!(out.len(), 3);
@@ -653,7 +649,7 @@ mod tests {
         };
 
         let out: Vec<_> = strip
-            .layout_to_viewport(0, &viewport, WINDOW_HIDDEN_THRESHOLD, &frame)
+            .layout_to_viewport(Origin::default(), &viewport, &frame)
             .collect();
         assert_eq!(out.len(), 4);
 
@@ -706,34 +702,30 @@ mod tests {
         let viewport = IRect::new(0, 0, 600, 400);
         let frame = |_| Some(IRect::new(0, 0, 300, 300));
 
-        // Large offset pushes leftmost windows off-screen.
+        // Places the layout far to the right,
+        // windows should clamp to the right side of the display.
         let out: Vec<_> = strip
-            .layout_to_viewport(5000, &viewport, WINDOW_HIDDEN_THRESHOLD, &frame)
+            .layout_to_viewport(Origin::default().with_x(5000), &viewport, &frame)
             .collect();
 
         for (_, f) in &out {
-            // Left clamp: min.x >= viewport.min.x + 10 - 300 = -290
             assert!(
-                f.min.x >= -290,
-                "window should not be pushed further left than sliver allows: {}",
-                f.min.x
-            );
-            // Right clamp: min.x <= viewport.width() - 10 = 590
-            assert!(
-                f.min.x <= 590,
-                "window should not start past right sliver threshold: {}",
-                f.min.x
+                f.min.x >= viewport.max.x,
+                "window should be clamped to the right side",
             );
         }
 
-        // Negative offset pushes rightmost windows off to the right.
+        // Places the layout far to the left,
+        // windows should clamp to the left side of the display.
         let out: Vec<_> = strip
-            .layout_to_viewport(-5000, &viewport, WINDOW_HIDDEN_THRESHOLD, &frame)
+            .layout_to_viewport(Origin::default().with_x(-5000), &viewport, &frame)
             .collect();
 
         for (_, f) in &out {
-            assert!(f.min.x >= -290);
-            assert!(f.min.x <= 590);
+            assert!(
+                f.max.x <= viewport.min.x,
+                "window should be clamped to the right side",
+            );
         }
     }
 
@@ -755,7 +747,7 @@ mod tests {
 
         // Before unstack: e0 and e1 share 500px height.
         let out: Vec<_> = strip
-            .layout_to_viewport(0, &viewport, WINDOW_HIDDEN_THRESHOLD, &frame)
+            .layout_to_viewport(Origin::default(), &viewport, &frame)
             .collect();
         let e1_height = out
             .iter()
@@ -770,7 +762,7 @@ mod tests {
         assert_eq!(strip.len(), 3);
 
         let out: Vec<_> = strip
-            .layout_to_viewport(0, &viewport, WINDOW_HIDDEN_THRESHOLD, &frame)
+            .layout_to_viewport(Origin::default(), &viewport, &frame)
             .collect();
         for (_, f) in &out {
             assert_eq!(
@@ -797,7 +789,7 @@ mod tests {
         // Stack: [Stack(e0, e1)]
         strip.stack(entities[1]).unwrap();
         let out: Vec<_> = strip
-            .layout_to_viewport(0, &viewport, WINDOW_HIDDEN_THRESHOLD, &frame)
+            .layout_to_viewport(Origin::default(), &viewport, &frame)
             .collect();
         let heights: Vec<_> = out.iter().map(|(_, f)| f.height()).collect();
         assert_eq!(heights.iter().sum::<i32>(), 500);
@@ -806,7 +798,7 @@ mod tests {
         // Unstack: [Single(e0), Single(e1)]
         strip.unstack(entities[1]).unwrap();
         let out: Vec<_> = strip
-            .layout_to_viewport(0, &viewport, WINDOW_HIDDEN_THRESHOLD, &frame)
+            .layout_to_viewport(Origin::default(), &viewport, &frame)
             .collect();
         for (_, f) in &out {
             assert_eq!(f.height(), 500);
@@ -815,7 +807,7 @@ mod tests {
         // Re-stack: [Stack(e0, e1)] — e1 stacks onto left neighbor e0
         strip.stack(entities[1]).unwrap();
         let out: Vec<_> = strip
-            .layout_to_viewport(0, &viewport, WINDOW_HIDDEN_THRESHOLD, &frame)
+            .layout_to_viewport(Origin::default(), &viewport, &frame)
             .collect();
         let heights: Vec<_> = out.iter().map(|(_, f)| f.height()).collect();
         assert_eq!(heights.iter().sum::<i32>(), 500);

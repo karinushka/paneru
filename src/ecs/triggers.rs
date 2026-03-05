@@ -585,6 +585,54 @@ pub(super) fn center_mouse_trigger(
     }
 }
 
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn dim_window_trigger(
+    trigger: On<Add, FocusedMarker>,
+    windows: Windows,
+    window_manager: Res<WindowManager>,
+    active_workspace: Query<&Scrolling, With<ActiveWorkspaceMarker>>,
+    config: Res<Config>,
+) {
+    let Some(window) = windows.get(trigger.event().entity) else {
+        return;
+    };
+    if active_workspace
+        .iter()
+        .next()
+        .is_some_and(|scrolling| scrolling.is_user_swiping)
+    {
+        return;
+    }
+
+    if config.window_dim_ratio().is_some() {
+        window_manager.dim_windows(&[window.id()], 0.0);
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn dim_remove_window_trigger(
+    trigger: On<Remove, FocusedMarker>,
+    windows: Windows,
+    window_manager: Res<WindowManager>,
+    active_workspace: Query<&Scrolling, With<ActiveWorkspaceMarker>>,
+    config: Res<Config>,
+) {
+    let Some(window) = windows.get(trigger.event().entity) else {
+        return;
+    };
+    if active_workspace
+        .iter()
+        .next()
+        .is_some_and(|scrolling| scrolling.is_user_swiping)
+    {
+        return;
+    }
+
+    if let Some(dim_ratio) = config.window_dim_ratio() {
+        window_manager.dim_windows(&[window.id()], dim_ratio);
+    }
+}
+
 /// Handles the event when a window gains focus. It updates the focused window, PSN, and reshuffles windows.
 /// It also centers the mouse on the focused window if focus-follows-mouse is enabled.
 ///

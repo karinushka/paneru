@@ -317,6 +317,9 @@ impl WindowManagerApi for MockWindowManager {
     fn cursor_position(&self) -> Option<CGPoint> {
         None
     }
+
+    #[instrument(level = Level::DEBUG, skip(self))]
+    fn dim_windows(&self, windows: &[WinID], level: f32) {}
 }
 
 /// A mock implementation of the `WindowApi` trait for testing purposes.

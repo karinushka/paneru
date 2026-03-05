@@ -8,6 +8,7 @@ use objc2_core_foundation::{
     CFArray, CFBoolean, CFNumber, CFNumberType, CFRetained, CFRunLoop, CFRunLoopMode,
     CFRunLoopSource, CFString, CFType, Type, kCFTypeArrayCallBacks,
 };
+use objc2_core_graphics::CGError;
 use std::{
     ffi::{CStr, OsStr, c_int, c_void},
     os::unix::ffi::OsStrExt,
@@ -326,6 +327,15 @@ pub trait MacResult {
 impl MacResult for OSStatus {
     fn to_result(self, place: &str) -> Result<()> {
         match self {
+            0 => Ok(()),
+            err => Err(Error::Generic(format!("{place}: MacOS Error Code: {err}"))),
+        }
+    }
+}
+
+impl MacResult for CGError {
+    fn to_result(self, place: &str) -> Result<()> {
+        match self.0 {
             0 => Ok(()),
             err => Err(Error::Generic(format!("{place}: MacOS Error Code: {err}"))),
         }

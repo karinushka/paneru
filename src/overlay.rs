@@ -19,7 +19,7 @@ pub struct BorderParams {
 /// Parameters for the fullscreen dim + cutout overlay.
 #[derive(Clone, PartialEq)]
 pub struct DimParams {
-    pub opacity: f64,
+    pub opacity: f32,
     pub color: (f64, f64, f64),
     /// The focused window rect to cut out (in Cocoa screen coordinates).
     /// `None` means dim everything (no focused window).
@@ -31,7 +31,7 @@ pub struct DimParams {
 
 #[derive(Debug, Clone)]
 struct DimViewIvars {
-    opacity: f64,
+    opacity: f32,
     dim_r: f64,
     dim_g: f64,
     dim_b: f64,
@@ -70,7 +70,7 @@ define_class!(
                 ivars.dim_r as CGFloat,
                 ivars.dim_g as CGFloat,
                 ivars.dim_b as CGFloat,
-                ivars.opacity as CGFloat,
+                CGFloat::from(ivars.opacity),
             );
             dim_color.setFill();
             NSBezierPath::fillRect(bounds);
@@ -253,7 +253,7 @@ impl OverlayManager {
     /// or `None` if no window is focused.
     pub fn update(
         &mut self,
-        dim_opacity: f64,
+        dim_opacity: f32,
         dim_color: (f64, f64, f64),
         focused_abs_cg: Option<NSRect>,
         border: Option<&BorderParams>,

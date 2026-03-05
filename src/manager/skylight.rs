@@ -1,4 +1,4 @@
-use std::{ffi::c_void, ptr::NonNull};
+use std::{ffi::c_void, os::raw::c_float, ptr::NonNull};
 
 use accessibility_sys::AXUIElementRef;
 use objc2_core_foundation::{
@@ -533,4 +533,12 @@ unsafe extern "C" {
     /// # Original signature
     /// extern `AXUIElementRef` _AXUIElementCreateWithRemoteToken(CFDataRef data);
     pub fn _AXUIElementCreateWithRemoteToken(data: &CFMutableData) -> AXUIElementRef;
+
+    // The SLS version of the brightness function
+    pub fn SLSSetWindowListBrightness(
+        cid: ConnID,
+        window_list: *const WinID,
+        brightness_levels: *const c_float,
+        count: isize,
+    ) -> CGError;
 }

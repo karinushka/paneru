@@ -467,8 +467,24 @@ scripts, `cron` jobs, or other automation tools:
 
 ### Inactive window dimming
 
-Draws a translucent overlay on every inactive window to visually emphasise the
-focused one.
+For a macOS antive window dimming, set option `dim_inactive_windows` only. Do
+not set the other options, like inactive color.
+In this mode the option takes values between `-1.0` and `1.0`, where `-1.0` is
+completely dark and `1.0` is fully white. A reasonable option to start with is
+`-0.15`.
+
+```toml
+[options]
+# Setting this option only will toggle native macOS dimming.
+# -1.0 is fully black and 1.0 is fully white.
+# Default: 0.0 (disabled).
+dim_inactive_windows = -0.15
+```
+
+Another dimming option is drawing a translucent overlay on every inactive
+window to visually emphasise the focused one.
+To enable this option, set both the `dim_inactive_windows` and the `dim_inactive_color`:
+In this mode, the `dim_inactive_windows` range is from `0.0` to `1.0`.
 
 ```toml
 [options]
@@ -479,7 +495,7 @@ dim_inactive_windows = 0.3
 
 # Hex color for the dim overlay on inactive windows.
 # Default: "#000000" (black).
-# dim_inactive_color = "#000000"
+dim_inactive_color = "#000000"
 ```
 
 ### Active window border

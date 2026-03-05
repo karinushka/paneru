@@ -21,6 +21,7 @@ use tracing::{Level, debug, error, instrument, trace, warn};
 
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
+use crate::manager::skylight::SLSSetWindowListBrightness;
 use crate::platform::{ConnID, Pid, ProcessSerialNumber, WinID, WorkspaceId};
 use crate::util::{AXUIWrapper, MacResult, create_array, symlink_target};
 use app::ApplicationOS;
@@ -169,6 +170,8 @@ pub trait WindowManagerApi: Send + Sync {
     /// Returns the current cursor position in absolute CG coordinates,
     /// or `None` if the position cannot be determined.
     fn cursor_position(&self) -> Option<CGPoint>;
+
+    fn dim_windows(&self, windows: &[WinID], level: f32);
 }
 
 /// `WindowManager` is a Bevy resource that holds a boxed `WindowManagerApi` trait object.
@@ -593,6 +596,20 @@ impl WindowManagerApi for WindowManagerOS {
         debug!("watching config file {} for changes.", path.display());
         watcher.watch(path, RecursiveMode::NonRecursive)?;
         Ok(watcher)
+    }
+
+    /// level: 0.0 = normal, 1.0 = bright, -1.0 = dark
+    fn dim_windows(&self, windows: &[WinID], level: f32) {
+        let Ok(count) = isize::try_from(windows.len()) else {
+            return;
+        };
+        let levels = vec![level; windows.len()];
+
+        _ = unsafe {
+            SLSSetWindowListBrightness(self.main_cid, windows.as_ptr(), levels.as_ptr(), count)
+        }
+        .to_result(function_name!())
+        .inspect_err(|err| debug!("{err}"));
     }
 }
 

@@ -474,6 +474,7 @@ pub(super) fn timeout_ticker(
 /// * `window_manager` - The `WindowManager` resource for querying current display/space assignments.
 /// * `commands` - Bevy commands to re-parent entities and remove timeouts.
 #[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn find_orphaned_workspaces(
     orphans: Populated<(&LayoutStrip, Entity, &Timeout), Without<ChildOf>>,
     mut attached: Query<(&mut LayoutStrip, &ChildOf), With<ChildOf>>,
@@ -1642,4 +1643,19 @@ pub(super) fn commit_window_size(
     resized_windows
         .par_iter_mut()
         .for_each(|(mut window, size)| window.resize(size.0, display_bounds.width()));
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn cleanup_on_exit(
+    mut exit_events: MessageReader<AppExit>,
+    windows: Windows,
+    window_manager: Res<WindowManager>,
+) {
+    for _ in exit_events.read() {
+        let ids = windows
+            .iter()
+            .map(|(window, _)| window.id())
+            .collect::<Vec<_>>();
+        window_manager.dim_windows(&ids, 0.0);
+    }
 }

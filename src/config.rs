@@ -336,7 +336,10 @@ impl Config {
             .swipe_gesture_direction
             .unwrap_or(SwipeGestureDirection::Natural)
     }
-    pub fn dim_inactive_opacity(&self) -> f64 {
+    pub fn dim_inactive_opacity(&self) -> f32 {
+        if self.options().dim_inactive_color.is_none() {
+            return 0.0;
+        }
         self.options()
             .dim_inactive_windows
             .unwrap_or(0.0)
@@ -389,6 +392,14 @@ impl Config {
             .swipe_deceleration
             .unwrap_or(4.0)
             .clamp(1.0, 10.0)
+    }
+
+    pub fn window_dim_ratio(&self) -> Option<f32> {
+        if self.options().dim_inactive_color.is_some() {
+            // This is not our dimming - it's the color one.
+            return None;
+        }
+        self.options().dim_inactive_windows
     }
 }
 
@@ -581,7 +592,7 @@ pub struct MainOptions {
     pub padding_right: Option<u16>,
     /// Opacity of the dim overlay on inactive windows (0.0=off, 1.0=fully black).
     /// Default: 0.0 (disabled).
-    pub dim_inactive_windows: Option<f64>,
+    pub dim_inactive_windows: Option<f32>,
     /// Hex color for the dim overlay, e.g. "#000000".
     /// Default: "#000000" (black).
     pub dim_inactive_color: Option<String>,

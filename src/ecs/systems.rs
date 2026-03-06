@@ -822,9 +822,6 @@ pub(super) fn apply_scroll_physics(
 ) {
     const FINGER_LIFT_THRESHOLD: Duration = Duration::from_millis(50);
     const MIN_VELOCITY_PX: f64 = 200.0;
-    const CENTER_MAGNETIC_PULL: f64 = 0.75;
-    const CENTER_MAGNETIC_FORCE: f64 = 4.0;
-    const SNAP_DISPLAY_RATIO: f64 = 0.05;
 
     let (strip, ref mut position, ref mut scroll) = *active_workspace;
     let dt = time.delta_secs_f64();
@@ -864,42 +861,28 @@ pub(super) fn apply_scroll_physics(
         .absolute_positions(&get_window_frame)
         .collect::<Vec<_>>();
 
-    let mut next_x = position.x;
-
     // Apply soft-snap to center during inertia.
-    let auto_center = config.options().auto_center.is_some_and(|center| center);
-    if auto_center && !scroll.is_user_swiping {
-        // if !scroll.is_user_swiping && scroll.velocity.abs() < 1.5 {
-        let viewport_center = viewport.center().x;
-        let target_offset = absolute_positions
-            .iter()
-            .map(|(column, pos)| {
-                let col_width = column
-                    .top()
-                    .and_then(&get_window_frame)
-                    .map_or(0, |f| f.width());
-                viewport_center - (pos + col_width / 2)
-            })
-            .min_by_key(|target| (position.x - target).abs())
-            .unwrap_or(position.x);
-
-        // Use 5% of the display width as the snap threshold
-        let snap_threshold = SNAP_DISPLAY_RATIO * f64::from(viewport.width());
-        let dist_to_snap = f64::from(position.x - target_offset);
-
-        if dist_to_snap.abs() < snap_threshold {
-            // Magnetic pull: slow down and nudge towards center.
-            scroll.velocity *= CENTER_MAGNETIC_PULL;
-            let pull = dist_to_snap * dt * CENTER_MAGNETIC_FORCE;
-            next_x -= pull as i32;
-        }
+    if !scroll.is_user_swiping
+        && config.options().auto_center.is_some_and(|center| center)
+        && let Some((velocity, snap_offset)) = magnetic_snap_to_center(
+            dt,
+            &viewport,
+            position.x,
+            &absolute_positions,
+            &get_window_frame,
+            scroll,
+        )
+    {
+        scroll.velocity = velocity;
+        position.x -= snap_offset;
+        return;
     }
 
     let frame_delta = scroll.velocity * dt;
     let shift = (f64::from(viewport.width()) * frame_delta) as i32;
 
     if let Some(clamped_offset) = clamp_viewport_offset(
-        next_x,
+        position.x,
         shift,
         &absolute_positions,
         &get_window_frame,
@@ -912,6 +895,50 @@ pub(super) fn apply_scroll_physics(
     }
 }
 
+fn magnetic_snap_to_center<W>(
+    time_delta: f64,
+    viewport: &IRect,
+    current_position: i32,
+    absolute_positions: &[(&Column, i32)],
+    get_window_frame: &W,
+    scroll: &Scrolling,
+) -> Option<(f64, i32)>
+where
+    W: Fn(Entity) -> Option<IRect>,
+{
+    const CENTER_MAGNETIC_PULL: f64 = 0.8;
+    const CENTER_MAGNETIC_FORCE: f64 = 4.0;
+    // Use 5% of the display width as the snap threshold
+    const SNAP_DISPLAY_RATIO: f64 = 0.05;
+
+    let viewport_center = viewport.center().x;
+    let target_offset = absolute_positions
+        .iter()
+        .map(|(column, pos)| {
+            let col_width = column
+                .top()
+                .and_then(&get_window_frame)
+                .map_or(0, |f| f.width());
+            viewport_center - (pos + col_width / 2)
+        })
+        .min_by_key(|target| (current_position - target).abs())
+        .unwrap_or(current_position);
+
+    let snap_threshold = SNAP_DISPLAY_RATIO * f64::from(viewport.width());
+    let dist_to_snap = f64::from(current_position - target_offset);
+
+    if dist_to_snap.abs() > snap_threshold {
+        return None;
+    }
+
+    // Magnetic pull: slow down and nudge towards center.
+    Some((
+        scroll.velocity * CENTER_MAGNETIC_PULL,
+        (dist_to_snap * time_delta * CENTER_MAGNETIC_FORCE) as i32,
+    ))
+}
+
+#[instrument(level = Level::TRACE, skip_all, fields(current_offset, shift), ret)]
 fn clamp_viewport_offset<W>(
     current_offset: i32,
     shift: i32,

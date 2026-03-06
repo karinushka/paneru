@@ -326,8 +326,6 @@ fn command_swap_focus(
         return;
     }
 
-    let display_bounds = active_display.bounds();
-    let display_id = active_display.id();
     let active_strip = active_display.active_strip();
 
     let mut handler = || {
@@ -335,27 +333,11 @@ fn command_swap_focus(
         let index = active_strip.index_of(current).ok()?;
         let other_window = get_window_in_direction(direction, current, active_strip)?;
         let new_index = active_strip.index_of(other_window).ok()?;
-        let current_width = windows.size(current)?.x;
         debug!(
             "swap {direction:?}: current={current} idx={index}, other={other_window} idx={new_index}, strip_len={}",
             active_strip.len()
         );
 
-        let origin = if new_index == 0 {
-            // If reached far left, snap the window to left.
-            Origin::new(0, 0)
-        } else if new_index == (active_strip.len() - 1) {
-            // If reached full right, snap the window to right.
-            Origin::new(display_bounds.width() - current_width, 0)
-        } else {
-            active_strip
-                .get(new_index)
-                .ok()
-                .and_then(|column| column.top())
-                .and_then(|entity| windows.origin(entity))?
-        };
-        debug!("swap {direction:?}: repositioning {current} to {origin:?}");
-        reposition_entity(current, origin, display_id, &mut commands);
         if index < new_index {
             (index..new_index).for_each(|idx| active_strip.swap(idx, idx + 1));
         } else {
@@ -426,9 +408,10 @@ fn command_center_window(
 
     if let Some((_, entity)) = windows.focused()
         && let Some(size) = windows.size(entity)
+        && let Some(mut origin) = windows.origin(entity)
     {
-        let center = active_display.bounds().center();
-        let origin = IRect::from_center_size(center, size).min;
+        let center = active_display.bounds().center().x;
+        origin.x = center - size.x / 2;
         reposition_entity(entity, origin, active_display.id(), &mut commands);
         window_manager.center_mouse(None, &active_display.bounds());
         reshuffle_around(entity, &mut commands);

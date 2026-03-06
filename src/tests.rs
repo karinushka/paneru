@@ -668,6 +668,7 @@ fn test_window_shuffle() {
     let right_edge = TEST_DISPLAY_WIDTH - i32::from(PADDING_RIGHT);
     let offscreen_right = TEST_DISPLAY_WIDTH - i32::from(PADDING_RIGHT.max(SLIVER_WIDTH));
     let offscreen_left = i32::from(PADDING_RIGHT.max(SLIVER_WIDTH)) - TEST_WINDOW_WIDTH;
+    let centered = (TEST_DISPLAY_WIDTH - TEST_WINDOW_WIDTH) / 2;
 
     let expected_positions_last = [
         (4, (offscreen_left, top_edge)),
@@ -684,13 +685,7 @@ fn test_window_shuffle() {
         (0, (offscreen_right, top_edge)),
     ];
 
-    let centered = (TEST_DISPLAY_WIDTH - TEST_WINDOW_WIDTH) / 2;
     let expected_positions_stacked = [
-        // (4, (centered, top_edge)),
-        // (3, (centered, 374 + top_edge)),
-        // (2, (centered + TEST_WINDOW_WIDTH, top_edge)),
-        // (1, (offscreen_right, top_edge)),
-        // (0, (offscreen_right, top_edge)),
         (4, (centered, top_edge)),
         (3, (centered, 393)),
         (2, (centered + TEST_WINDOW_WIDTH, top_edge)),
@@ -701,7 +696,7 @@ fn test_window_shuffle() {
         (4, (centered, top_edge)),
         (3, (centered, 271)),
         (2, (centered, 515)),
-        (1, (712, top_edge)),
+        (1, (centered + TEST_WINDOW_WIDTH, top_edge)),
         (0, (offscreen_right, top_edge)),
     ];
 

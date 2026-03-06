@@ -14,7 +14,7 @@ use objc2_core_graphics::CGDirectDisplayID;
 use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
@@ -1691,5 +1691,48 @@ pub(super) fn cleanup_on_exit(
             .map(|(window, _)| window.id())
             .collect::<Vec<_>>();
         window_manager.dim_windows(&ids, 0.0);
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::TRACE, skip_all)]
+pub(super) fn swipe_gesture(
+    mut messages: MessageReader<Event>,
+    active_display: ActiveDisplay,
+    mut active_workspace: Single<&mut Scrolling, With<ActiveWorkspaceMarker>>,
+    time: Res<Time>,
+    config: Configuration,
+) {
+    if config.mission_control_active() {
+        return;
+    }
+
+    for event in messages.read() {
+        let Event::Swipe { deltas } = event else {
+            continue;
+        };
+
+        if config
+            .swipe_gesture_fingers()
+            .is_none_or(|fingers| deltas.len() != fingers)
+        {
+            return;
+        }
+        let swipe_resolution = 1.0 / f64::from(active_display.bounds().width());
+        let delta = deltas.iter().sum::<f64>();
+        if delta.abs() < swipe_resolution {
+            return;
+        }
+
+        let dt = time.delta_secs_f64();
+        let new_velocity = if dt > 0.0 {
+            delta * config.config().swipe_sensitivity() / dt
+        } else {
+            0.0
+        };
+        let velocity = 0.3 * new_velocity + 0.7 * active_workspace.velocity;
+        active_workspace.velocity = velocity;
+        active_workspace.is_user_swiping = true;
+        active_workspace.last_event = Instant::now();
     }
 }

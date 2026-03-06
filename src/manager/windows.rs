@@ -20,7 +20,7 @@ use super::skylight::{
 };
 use crate::errors::{Error, Result};
 use crate::manager::{Origin, Size, irect_from};
-use crate::platform::{Pid, ProcessSerialNumber, WinID};
+use crate::platform::{Pid, ProcessSerialNumber, WinID, macos_major_version};
 use crate::util::{AXUIAttributes, AXUIWrapper, MacResult};
 
 #[derive(Debug)]
@@ -186,6 +186,13 @@ impl WindowOS {
     ///
     /// * `psn` - The process serial number of the application.
     fn make_key_window(&self, psn: &ProcessSerialNumber) {
+        // Reason: On macOS 14 (Sonoma), CGSEncodeEventRecord serializes the raw event
+        // buffer via NSKeyedArchiver, misinterpreting 0xFF fill as an ObjC class pointer,
+        // causing SIGABRT. See https://github.com/karinushka/paneru/issues/123
+        if macos_major_version() == 14 {
+            debug!("make_key_window: skipped on macOS 14 (Sonoma) to prevent crash");
+            return;
+        }
         let window_id = self.id();
         let mut event_bytes = [0u8; 0xf8];
 

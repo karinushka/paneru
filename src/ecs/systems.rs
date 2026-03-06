@@ -715,17 +715,11 @@ pub(super) fn workspace_change_watcher(
 pub(super) fn animate_entities(
     mut animate: Populated<(&mut Position, Entity, &RepositionMarker)>,
     displays: Query<&Display>,
-    active_workspace: Single<&Scrolling, With<ActiveWorkspaceMarker>>,
     time: Res<Time>,
     config: Res<Config>,
     commands: ParallelCommands,
 ) {
-    let move_ratio = if active_workspace.is_user_swiping {
-        // Move things immediately during swiping.
-        100.0
-    } else {
-        config.animation_speed() * time.delta_secs_f64()
-    };
+    let move_ratio = config.animation_speed() * time.delta_secs_f64();
 
     animate.par_iter_mut().for_each(
         |(mut position, entity, RepositionMarker { origin, display_id })| {

@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use accessibility_sys::{AXError, AXObserverRef, AXUIElementRef};
 use objc2::MainThreadMarker;
 use objc2::rc::{Retained, autoreleasepool};
@@ -240,5 +242,41 @@ impl PlatformCallbacks {
             // Housekeeping for UI/Notifications
             self.cocoa_app.updateWindows();
         });
+    }
+}
+
+/// Cached macOS major version (e.g. 14 for Sonoma, 15 for Sequoia).
+pub fn macos_major_version() -> u32 {
+    static VERSION: OnceLock<u32> = OnceLock::new();
+    *VERSION.get_or_init(|| {
+        let mut size: libc::size_t = 0;
+        let name = c"kern.osproductversion";
+        unsafe {
+            libc::sysctlbyname(name.as_ptr(), std::ptr::null_mut(), &mut size, std::ptr::null_mut(), 0);
+        }
+        let mut buf = vec![0u8; size];
+        unsafe {
+            libc::sysctlbyname(
+                name.as_ptr(),
+                buf.as_mut_ptr().cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            );
+        }
+        String::from_utf8_lossy(&buf)
+            .split('.')
+            .next()
+            .and_then(|s| s.trim_matches('\0').parse().ok())
+            .unwrap_or(0)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn macos_major_version_returns_valid() {
+        let v = super::macos_major_version();
+        assert!(v >= 13, "expected macOS 13+, got {v}");
     }
 }

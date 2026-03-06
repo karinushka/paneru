@@ -6,14 +6,13 @@ use bevy::ecs::observer::On;
 use bevy::ecs::query::{Has, With};
 use bevy::ecs::system::{Commands, NonSend, NonSendMut, Populated, Query, Res, ResMut, Single};
 use bevy::math::IRect;
-use bevy::time::Time;
 use notify::event::{DataChange, MetadataKind, ModifyKind};
 use notify::{EventKind, Watcher};
 use objc2_app_kit::NSScreen;
 use objc2_foundation::{NSNumber, NSString, ns_string};
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
@@ -715,55 +714,6 @@ pub(super) fn window_focused_trigger(
         config.set_skip_reshuffle(false);
     }
     config.set_ffm_flag(None);
-}
-
-/// Handles swipe gesture events, potentially triggering window sliding.
-///
-/// # Arguments
-///
-/// * `trigger` - The Bevy event trigger containing the swipe event.
-/// * `active_display` - A query for the active display.
-/// * `focused_window` - A query for the focused window.
-/// * `main_cid` - The main connection ID resource.
-/// * `config` - The optional configuration resource.
-/// * `commands` - Bevy commands to trigger events.
-#[allow(clippy::needless_pass_by_value)]
-#[instrument(level = Level::TRACE, skip_all)]
-pub(super) fn swipe_gesture_trigger(
-    trigger: On<WMEventTrigger>,
-    active_display: ActiveDisplay,
-    mut active_workspace: Single<&mut Scrolling, With<ActiveWorkspaceMarker>>,
-    time: Res<Time>,
-    config: Configuration,
-) {
-    let Event::Swipe { ref deltas } = trigger.event().0 else {
-        return;
-    };
-    if config.mission_control_active() {
-        return;
-    }
-    if config
-        .swipe_gesture_fingers()
-        .is_none_or(|fingers| deltas.len() != fingers)
-    {
-        return;
-    }
-    let swipe_resolution = 1.0 / f64::from(active_display.bounds().width());
-    let delta = deltas.iter().sum::<f64>();
-    if delta.abs() < swipe_resolution {
-        return;
-    }
-
-    let dt = time.delta_secs_f64();
-    let new_velocity = if dt > 0.0 {
-        delta * config.config().swipe_sensitivity() / dt
-    } else {
-        0.0
-    };
-    let velocity = 0.3 * new_velocity + 0.7 * active_workspace.velocity;
-    active_workspace.velocity = velocity;
-    active_workspace.is_user_swiping = true;
-    active_workspace.last_event = Instant::now();
 }
 
 /// Handles Mission Control events, updating the `MissionControlActive` resource.

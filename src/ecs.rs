@@ -6,7 +6,7 @@ use bevy::app::App as BevyApp;
 use bevy::app::{PostUpdate, PreUpdate, Startup};
 use bevy::ecs::message::Messages;
 use bevy::ecs::resource::Resource;
-use bevy::ecs::schedule::common_conditions::resource_exists;
+use bevy::ecs::schedule::common_conditions::{resource_exists, resource_exists_and_equals};
 use bevy::ecs::system::{Commands, Res};
 use bevy::prelude::Event as BevyEvent;
 use bevy::tasks::Task;
@@ -78,6 +78,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
                     DISPLAY_CHANGE_CHECK_FREQ_MS,
                 ))),
             systems::cleanup_on_exit,
+            systems::swipe_gesture.run_if(resource_exists_and_equals(MissionControlActive(false))),
         ),
     );
     app.add_systems(
@@ -123,7 +124,6 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::front_switched_trigger)
         .add_observer(triggers::center_mouse_trigger)
         .add_observer(triggers::window_focused_trigger)
-        .add_observer(triggers::swipe_gesture_trigger)
         .add_observer(triggers::mission_control_trigger)
         .add_observer(triggers::application_event_trigger)
         .add_observer(triggers::dispatch_application_messages)
@@ -301,7 +301,7 @@ pub enum DockPosition {
 pub struct SkipReshuffle(pub bool);
 
 /// Resource indicating whether Mission Control is currently active.
-#[derive(Resource)]
+#[derive(PartialEq, Resource)]
 pub struct MissionControlActive(pub bool);
 
 /// Resource holding the `WinID` of a window that should gain focus when focus-follows-mouse is enabled.

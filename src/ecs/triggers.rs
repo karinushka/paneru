@@ -150,7 +150,7 @@ pub(super) fn mouse_moved_trigger(
 pub(super) fn mouse_down_trigger(
     trigger: On<WMEventTrigger>,
     windows: Windows,
-    active_display: ActiveDisplay,
+    active_workspace: Query<&mut Scrolling, With<ActiveWorkspaceMarker>>,
     window_manager: Res<WindowManager>,
     mission_control_active: Res<MissionControlActive>,
     mut commands: Commands,
@@ -172,15 +172,11 @@ pub(super) fn mouse_down_trigger(
     };
 
     // Stop any ongoing scroll.
-    if let Ok(mut scroll) = commands.get_entity(active_display.active_strip_entity()) {
-        scroll.try_insert(Scrolling::default());
+    for mut scroll in active_workspace {
+        *scroll = Scrolling::default();
     }
 
-    if let Some(frame) = windows.frame(entity)
-        && (frame.min.x < 0 || frame.min.x > active_display.bounds().width() - frame.width())
-    {
-        reshuffle_around(entity, &mut commands);
-    }
+    reshuffle_around(entity, &mut commands);
 }
 
 /// Handles mouse dragged events.
@@ -726,16 +722,15 @@ pub(super) fn window_focused_trigger(
 pub(super) fn mission_control_trigger(
     trigger: On<WMEventTrigger>,
     mut mission_control_active: ResMut<MissionControlActive>,
-    active_display: ActiveDisplay,
-    mut commands: Commands,
+    active_workspace: Query<&mut Scrolling, With<ActiveWorkspaceMarker>>,
 ) {
     match trigger.event().0 {
         Event::MissionControlShowAllWindows
         | Event::MissionControlShowFrontWindows
         | Event::MissionControlShowDesktop => {
             mission_control_active.as_mut().0 = true;
-            if let Ok(mut scroll) = commands.get_entity(active_display.active_strip_entity()) {
-                scroll.try_insert(Scrolling::default());
+            for mut scroll in active_workspace {
+                *scroll = Scrolling::default();
             }
         }
         Event::MissionControlExit => {

@@ -73,7 +73,7 @@ impl Configuration<'_> {
     ///
     /// An `Option<usize>` containing the number of fingers, or `None` if not configured.
     pub fn swipe_gesture_fingers(&self) -> Option<usize> {
-        self.config.options().swipe_gesture_fingers
+        self.config.swipe_gesture_fingers()
     }
 
     /// Finds window properties for a given `title` and `bundle_id` based on the application configuration.

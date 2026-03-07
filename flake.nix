@@ -103,7 +103,6 @@
               description = "Configuration to put in `~/.paneru.toml`.";
               example = {
                 options = {
-                  focus_follows_mouse = true;
                   preset_column_widths = [
                     0.25
                     0.33
@@ -111,9 +110,13 @@
                     0.66
                     0.75
                   ];
-                  swipe_gesture_fingers = 4;
-                  swipe_gesture_direction = "Natural";
                   animation_speed = 4000;
+                };
+                swipe = {
+                  gesture = {
+                    fingers_count = 4;
+                    direction = "Natural";
+                  };
                 };
                 bindings = {
                   window_focus_west = "cmd - h";
@@ -126,6 +129,7 @@
                   window_swap_last = "alt + shift - l";
                   window_center = "alt - c";
                   window_resize = "alt - r";
+                  window_fullwidth = "alt - f";
                   window_manage = "ctrl + alt - t";
                   window_stack = "alt - ]";
                   window_unstack = "alt + shift - ]";

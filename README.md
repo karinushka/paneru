@@ -135,9 +135,13 @@ Paneru provides a home manager module to install and configure paneru.
           0.66
           0.75
         ];
-        swipe_gesture_fingers = 4;
-        swipe_gesture_direction = "Natural";
         animation_speed = 4000;
+      };
+      swipe = {
+        gesture = {
+          fingers_count = 4;
+          direction = "Natural";
+        };
       };
       bindings = {
         window_focus_west = "cmd - h";
@@ -189,7 +193,7 @@ Additionally it allows overriding the location with `$PANERU_CONFIG` environment
 
 You can use the following example configuration as a starting point:
 
-```
+```toml
 # syntax=toml
 #
 # Example configuration for Paneru.
@@ -204,24 +208,6 @@ You can use the following example configuration as a starting point:
 # Array of widths used by the `window_resize` action to cycle between.
 # Defaults to 25%, 33%, 50%, 66% and 75%.
 preset_column_widths = [ 0.25, 0.33, 0.50, 0.66, 0.75 ]
-
-# How many fingers to use for moving windows left and right.
-# Make sure that it doesn't clash with OS setting for workspace switching.
-# Values lower than 3 will be ignored.
-# Remove the line to disable the gesture feature.
-# Apple touchpads support gestures with more than five fingers (!),
-# but it is probably not that useful to use two hands :)
-swipe_gesture_fingers = 4
-
-# Which direction should windows move with a swipe gesture.
-# "Natural" => Swipe fingers to the right, windows move to the right.
-# "Reversed" => Swipe fingers to the right, windows move to the left.
-# Default: "Natural"
-# swipe_gesture_direction = "Natural"
-
-# Swiping keeps sliding windows until the first or last window.
-# Set to false to clamp so edge windows stay on-screen. Enabled by default.
-# continuous_swipe = true
 
 # Animation speed in 1/10th of display resolution per second.
 # E.g. a value of 20 means: move at a speed of two display sizes per second.
@@ -242,18 +228,47 @@ animation_speed = 50
 # Default: 5 pixels.
 # sliver_width = 5
 
-# Padding applied at screen edges (in pixels). Independent from the
-# between-window gaps set by per-window horizontal/vertical_padding.
-# Default: 0 on all sides.
-# padding_top = 0
-# padding_bottom = 0
-# padding_left = 0
-# padding_right = 0
-
 # Override the system-reported menubar height (in pixels).
 # Useful when auto-hiding the menubar or when the detected value is wrong.
 # When unset, the height reported by macOS is used.
 # menubar_height = 25
+
+[swipe]
+# Swipe sensitivity multiplier. Lower values = less distance per finger movement.
+# Range: 0.1–2.0. Default: 0.35.
+# sensitivity = 0.35
+
+# Swipe inertia deceleration rate. Higher values = faster stop.
+# Range: 1.0–10.0. Default: 4.0.
+# deceleration = 4.0
+
+# Swiping keeps sliding windows until the first or last window.
+# Set to false to clamp so edge windows stay on-screen. Default: true.
+# continuous = true
+
+[swipe.gesture]
+# How many fingers to use for moving windows left and right.
+# Make sure that it doesn't clash with OS setting for workspace switching.
+# Values lower than 3 will be ignored.
+# Remove the line to disable the gesture feature.
+# Apple touchpads support gestures with more than five fingers (!),
+# but it is probably not that useful to use two hands :)
+fingers_count = 4
+
+# Which direction should windows move with a swipe gesture.
+# "Natural" => Swipe fingers to the right, windows move to the right.
+# "Reversed" => Swipe fingers to the right, windows move to the left.
+# Default: "Natural"
+# direction = "Natural"
+
+[padding]
+# Padding applied at screen edges (in pixels). Independent from the
+# between-window gaps set by per-window horizontal/vertical_padding.
+# Default: 0 on all sides.
+# top = 0
+# bottom = 0
+# left = 0
+# right = 0
 
 [bindings]
 # Moves the focus between windows. If there are no windows when moving up or
@@ -348,7 +363,7 @@ grid = "6:6:1:1:4:4"
 # Matches all windows and adds a few pixels of spacing to their borders.
 # Note: horizontal_padding and vertical_padding create gaps on all sides of
 # each window. At screen edges, the gap is cancelled out so padding only
-# appears between windows. Use the [options] padding_* settings above to
+# appears between windows. Use the [padding] settings above to
 # control screen edge margins independently.
 title = ".*"
 horizontal_padding = 4
@@ -467,35 +482,36 @@ scripts, `cron` jobs, or other automation tools:
 
 ### Inactive window dimming
 
-For a macOS antive window dimming, set option `dim_inactive_windows` only. Do
-not set the other options, like inactive color.
+For a macOS antive window dimming, set `opacity` only under
+`[decorations.inactive.dim]`. Do not set the other options, like inactive
+color.
 In this mode the option takes values between `-1.0` and `1.0`, where `-1.0` is
 completely dark and `1.0` is fully white. A reasonable option to start with is
 `-0.15`.
 
 ```toml
-[options]
+[decorations.inactive.dim]
 # Setting this option only will toggle native macOS dimming.
 # -1.0 is fully black and 1.0 is fully white.
 # Default: 0.0 (disabled).
-dim_inactive_windows = -0.15
+opacity = -0.15
 ```
 
 Another dimming option is drawing a translucent overlay on every inactive
 window to visually emphasise the focused one.
-To enable this option, set both the `dim_inactive_windows` and the `dim_inactive_color`:
-In this mode, the `dim_inactive_windows` range is from `0.0` to `1.0`.
+To enable this option, set both `opacity` and `color` under `[decorations.inactive.dim]`:
+In this mode, the `opacity` range is from `0.0` to `1.0`.
 
 ```toml
-[options]
+[decorations.inactive.dim]
 # Opacity of the dim overlay drawn on inactive windows (0.0–1.0).
 # 0.0 disables the overlay entirely. Higher values make inactive windows darker.
 # Default: 0.0 (disabled).
-dim_inactive_windows = 0.3
+opacity = 0.3
 
 # Hex color for the dim overlay on inactive windows.
 # Default: "#000000" (black).
-dim_inactive_color = "#000000"
+color = "#000000"
 ```
 
 ### Active window border
@@ -503,26 +519,26 @@ dim_inactive_color = "#000000"
 Draws a coloured border around the currently focused window.
 
 ```toml
-[options]
+[decorations.active.border]
 # Draw a border around the active (focused) window.
 # Default: false.
-border_active_window = true
+enabled = true
 
 # Hex color for the active window border.
 # Default: "#FFFFFF" (white).
-# border_color = "#89b4fa"
+# color = "#89b4fa"
 
 # Opacity of the active window border (0.0–1.0).
 # Default: 1.0.
-# border_opacity = 1.0
+# opacity = 1.0
 
 # Width of the active window border in pixels.
 # Default: 2.0.
-# border_width = 2.0
+# width = 2.0
 
 # Corner radius of the active window border in pixels.
 # Default: 10.0.
-# border_radius = 10.0
+# radius = 10.0
 ```
 
 Per-window border radius can be overridden in the `[windows]` section:

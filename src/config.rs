@@ -16,6 +16,8 @@ use std::{
 use stdext::function_name;
 use tracing::{error, info, warn};
 
+use self::decorations::BorderRadiusOption;
+use self::swipe::SwipeGestureDirection;
 use crate::{
     commands::{Command, Direction, MouseMove, Operation, ResizeDirection},
     platform::{Modifiers, OSStatus},
@@ -30,10 +32,21 @@ use crate::{platform::CFStringRef, util::AXUIWrapper};
 /// It checks the `PANERU_CONFIG` environment variable first, then standard XDG locations and user home directory.
 /// If no configuration file is found, the application will panic.
 pub static CONFIGURATION_FILE: LazyLock<PathBuf> = LazyLock::new(|| {
+    discover_configuration_file().unwrap_or_else(|| {
+        panic!(
+            "{}: Configuration file not found. Tried: $PANERU_CONFIG, $HOME/.paneru, $HOME/.paneru.toml, $XDG_CONFIG_HOME/paneru/paneru.toml",
+            function_name!()
+        )
+    })
+});
+
+/// Finds the first existing configuration file from supported locations.
+/// Unlike [`CONFIGURATION_FILE`], this does not panic when no file is found.
+pub fn discover_configuration_file() -> Option<PathBuf> {
     if let Ok(path_str) = env::var("PANERU_CONFIG") {
         let path = PathBuf::from(path_str);
         if path.exists() {
-            return path;
+            return Some(path);
         }
         warn!(
             "{}: $PANERU_CONFIG is set to {}, but the file does not exist. Falling back to default locations.",
@@ -58,13 +71,46 @@ pub static CONFIGURATION_FILE: LazyLock<PathBuf> = LazyLock::new(|| {
         .into_iter()
         .flatten()
         .find(|path| path.exists())
-        .unwrap_or_else(|| {
-            panic!(
-                "{}: Configuration file not found. Tried: $PANERU_CONFIG, $HOME/.paneru, $HOME/.paneru.toml, $XDG_CONFIG_HOME/paneru/paneru.toml",
-                function_name!()
-            )
-        })
-});
+}
+
+/// Returns the list of deprecated top-level `[options]` keys present in a TOML config.
+pub fn deprecated_options_in_input(input: &str) -> Result<Vec<String>> {
+    const DEPRECATED_KEYS: [&str; 16] = [
+        "padding_top",
+        "padding_bottom",
+        "padding_left",
+        "padding_right",
+        "dim_inactive_windows",
+        "dim_inactive_color",
+        "border_active_window",
+        "border_color",
+        "border_opacity",
+        "border_width",
+        "border_radius",
+        "swipe_gesture_fingers",
+        "swipe_gesture_direction",
+        "continuous_swipe",
+        "swipe_sensitivity",
+        "swipe_deceleration",
+    ];
+
+    let value: toml::Value = toml::from_str(input)?;
+    let Some(options) = value.get("options").and_then(toml::Value::as_table) else {
+        return Ok(Vec::new());
+    };
+
+    Ok(DEPRECATED_KEYS
+        .into_iter()
+        .filter(|key| options.contains_key(*key))
+        .map(str::to_string)
+        .collect())
+}
+
+/// Returns deprecated top-level `[options]` keys present in the config file.
+pub fn deprecated_options_in_file(path: &Path) -> Result<Vec<String>> {
+    let input = read_to_string(path)?;
+    deprecated_options_in_input(&input)
+}
 
 /// Parses a string into a `Direction` enum.
 ///
@@ -319,12 +365,14 @@ impl Config {
     }
 
     pub fn edge_padding(&self) -> (i32, i32, i32, i32) {
-        let o = self.options();
+        let config = self.inner();
+        let o = &config.options;
+        let p = config.padding.as_ref();
         (
-            i32::from(o.padding_top.unwrap_or(0)),
-            i32::from(o.padding_right.unwrap_or(0)),
-            i32::from(o.padding_bottom.unwrap_or(0)),
-            i32::from(o.padding_left.unwrap_or(0)),
+            i32::from(p.and_then(|p| p.top).or(o.padding_top).unwrap_or(0)),
+            i32::from(p.and_then(|p| p.right).or(o.padding_right).unwrap_or(0)),
+            i32::from(p.and_then(|p| p.bottom).or(o.padding_bottom).unwrap_or(0)),
+            i32::from(p.and_then(|p| p.left).or(o.padding_left).unwrap_or(0)),
         )
     }
 
@@ -333,51 +381,134 @@ impl Config {
     }
 
     pub fn swipe_gesture_direction(&self) -> SwipeGestureDirection {
-        self.options()
-            .swipe_gesture_direction
+        let config = self.inner();
+        config
+            .swipe
+            .as_ref()
+            .and_then(|swipe| swipe.gesture.as_ref())
+            .and_then(|gesture| gesture.direction.clone())
+            .clone()
+            .or(config.options.swipe_gesture_direction.clone())
             .unwrap_or(SwipeGestureDirection::Natural)
     }
+
+    pub fn swipe_gesture_fingers(&self) -> Option<usize> {
+        let config = self.inner();
+        config
+            .swipe
+            .as_ref()
+            .and_then(|swipe| swipe.gesture.as_ref())
+            .and_then(|gesture| gesture.fingers_count)
+            .or(config.options.swipe_gesture_fingers)
+    }
+
+    pub fn has_dim_inactive_color(&self) -> bool {
+        let config = self.inner();
+        config
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.inactive.as_ref())
+            .and_then(|inactive| inactive.dim.as_ref())
+            .and_then(|dim| dim.color.as_ref())
+            .is_some()
+            || config.options.dim_inactive_color.is_some()
+    }
+
     pub fn dim_inactive_opacity(&self) -> f32 {
-        if self.options().dim_inactive_color.is_none() {
+        let config = self.inner();
+        let color = config
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.inactive.as_ref())
+            .and_then(|inactive| inactive.dim.as_ref())
+            .and_then(|dim| dim.color.as_ref())
+            .or(config.options.dim_inactive_color.as_ref());
+        if color.is_none() {
             return 0.0;
         }
-        self.options()
-            .dim_inactive_windows
+        config
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.inactive.as_ref())
+            .and_then(|inactive| inactive.dim.as_ref())
+            .and_then(|dim| dim.opacity)
+            .or(config.options.dim_inactive_windows)
             .unwrap_or(0.0)
             .clamp(0.0, 1.0)
     }
 
     pub fn dim_inactive_color(&self) -> (f64, f64, f64) {
-        self.options()
-            .dim_inactive_color
-            .as_deref()
+        let config = self.inner();
+        config
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.inactive.as_ref())
+            .and_then(|inactive| inactive.dim.as_ref())
+            .and_then(|dim| dim.color.as_deref())
+            .or(config.options.dim_inactive_color.as_deref())
             .map_or((0.0, 0.0, 0.0), parse_hex_color)
     }
 
     pub fn border_active_window(&self) -> bool {
-        self.options().border_active_window.unwrap_or(false)
+        let config = self.inner();
+        config
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.active.as_ref())
+            .and_then(|active| active.border.as_ref())
+            .and_then(|border| border.enabled)
+            .or(config.options.border_active_window)
+            .unwrap_or(false)
     }
 
     pub fn border_color(&self) -> (f64, f64, f64) {
-        self.options()
-            .border_color
-            .as_deref()
+        let config = self.inner();
+        config
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.active.as_ref())
+            .and_then(|active| active.border.as_ref())
+            .and_then(|border| border.color.as_deref())
+            .or(config.options.border_color.as_deref())
             .map_or((1.0, 1.0, 1.0), parse_hex_color)
     }
 
     pub fn border_opacity(&self) -> f64 {
-        self.options().border_opacity.unwrap_or(1.0).clamp(0.0, 1.0)
+        let config = self.inner();
+        config
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.active.as_ref())
+            .and_then(|active| active.border.as_ref())
+            .and_then(|border| border.opacity)
+            .or(config.options.border_opacity)
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0)
     }
 
     pub fn border_width(&self) -> f64 {
-        self.options().border_width.unwrap_or(2.0).max(0.0)
+        let config = self.inner();
+        config
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.active.as_ref())
+            .and_then(|active| active.border.as_ref())
+            .and_then(|border| border.width)
+            .or(config.options.border_width)
+            .unwrap_or(2.0)
+            .max(0.0)
     }
 
     pub fn border_radius(&self) -> BorderRadiusOption {
         let version = NSProcessInfo::processInfo().operatingSystemVersion();
-        match self
-            .options()
-            .border_radius
+        let config = self.inner();
+        match config
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.active.as_ref())
+            .and_then(|active| active.border.as_ref())
+            .and_then(|border| border.radius.clone())
+            .or(config.options.border_radius.clone())
             .unwrap_or(BorderRadiusOption::Auto)
         {
             BorderRadiusOption::Auto if version.majorVersion == 26 => BorderRadiusOption::Auto,
@@ -391,25 +522,48 @@ impl Config {
     }
 
     pub fn swipe_sensitivity(&self) -> f64 {
-        self.options()
-            .swipe_sensitivity
+        let config = self.inner();
+        config
+            .swipe
+            .as_ref()
+            .and_then(|swipe| swipe.sensitivity)
+            .or(config.options.swipe_sensitivity)
             .unwrap_or(0.35)
             .clamp(0.1, 2.0)
     }
 
     pub fn swipe_deceleration(&self) -> f64 {
-        self.options()
-            .swipe_deceleration
+        let config = self.inner();
+        config
+            .swipe
+            .as_ref()
+            .and_then(|swipe| swipe.deceleration)
+            .or(config.options.swipe_deceleration)
             .unwrap_or(4.0)
             .clamp(1.0, 10.0)
     }
 
     pub fn window_dim_ratio(&self) -> Option<f32> {
-        if self.options().dim_inactive_color.is_some() {
+        let config = self.inner();
+        if config
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.inactive.as_ref())
+            .and_then(|inactive| inactive.dim.as_ref())
+            .and_then(|dim| dim.color.as_ref())
+            .is_some()
+            || config.options.dim_inactive_color.is_some()
+        {
             // This is not our dimming - it's the color one.
             return None;
         }
-        self.options().dim_inactive_windows
+        config
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.inactive.as_ref())
+            .and_then(|inactive| inactive.dim.as_ref())
+            .and_then(|dim| dim.opacity)
+            .or(config.options.dim_inactive_windows)
     }
 }
 
@@ -493,6 +647,9 @@ struct InnerConfig {
     options: MainOptions,
     bindings: HashMap<String, OneOrMore>,
     windows: Option<HashMap<String, WindowParams>>,
+    decorations: Option<decorations::DecorationsOptions>,
+    swipe: Option<swipe::SwipeOptions>,
+    padding: Option<padding::PaddingOptions>,
 }
 
 impl InnerConfig {
@@ -562,44 +719,6 @@ impl InnerConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
-pub enum SwipeGestureDirection {
-    Natural,
-    Reversed,
-}
-#[derive(Clone, Debug, PartialEq)]
-pub enum BorderRadiusOption {
-    Auto,
-    Value(f64),
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum BorderRadiusValue {
-    Number(f64),
-    Text(String),
-}
-
-fn deserialize_border_radius_option<'de, D>(
-    deserializer: D,
-) -> std::result::Result<Option<BorderRadiusOption>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let input = Option::<BorderRadiusValue>::deserialize(deserializer)?;
-    input
-        .map(|value| match value {
-            BorderRadiusValue::Number(radius) => Ok(BorderRadiusOption::Value(radius)),
-            BorderRadiusValue::Text(value) if value.eq_ignore_ascii_case("auto") => {
-                Ok(BorderRadiusOption::Auto)
-            }
-            BorderRadiusValue::Text(value) => Err(de::Error::custom(format!(
-                "invalid border_radius value: {value}. Expected a number or \"auto\"",
-            ))),
-        })
-        .transpose()
-}
-
 /// `MainOptions` represents the primary configuration options for the window manager.
 /// These options control various behaviors such as mouse focus, gesture recognition, and window animation.
 #[derive(Deserialize, Clone, Debug, Default)]
@@ -608,10 +727,6 @@ pub struct MainOptions {
     pub focus_follows_mouse: Option<bool>,
     /// Enables or disables mouse follows focus behavior.
     pub mouse_follows_focus: Option<bool>,
-    /// The number of fingers required for swipe gestures to move windows.
-    pub swipe_gesture_fingers: Option<usize>,
-    /// Which direction swipe gestures should move windows.
-    pub swipe_gesture_direction: Option<SwipeGestureDirection>,
     /// A list of preset column widths (as ratios) used for resizing windows.
     #[serde(default = "default_preset_column_widths")]
     pub preset_column_widths: Vec<f64>,
@@ -626,50 +741,40 @@ pub struct MainOptions {
     /// Width of off-screen window slivers in pixels.
     /// Default: 5 pixels.
     pub sliver_width: Option<u16>,
-    /// Padding applied at screen edges (in pixels). Independent from between-window gaps.
-    /// Default: 0 on all sides.
+    /// Legacy top-level padding (deprecated; use `[padding]`).
     pub padding_top: Option<u16>,
     pub padding_bottom: Option<u16>,
     pub padding_left: Option<u16>,
     pub padding_right: Option<u16>,
-    /// Opacity of the dim overlay on inactive windows (0.0=off, 1.0=fully black).
-    /// Default: 0.0 (disabled).
+    /// Legacy top-level dim options (deprecated; use `[decorations.inactive.dim]`).
     pub dim_inactive_windows: Option<f32>,
-    /// Hex color for the dim overlay, e.g. "#000000".
-    /// Default: "#000000" (black).
     pub dim_inactive_color: Option<String>,
-    /// Whether to draw a border around the active (focused) window.
-    /// Default: false.
+    /// Legacy top-level border options (deprecated; use `[decorations.active.border]`).
     pub border_active_window: Option<bool>,
-    /// Hex color for the active window border, e.g. "#FF0000".
-    /// Default: "#FFFFFF" (white).
     pub border_color: Option<String>,
-    /// Opacity of the active window border (0.0–1.0).
-    /// Default: 1.0.
     pub border_opacity: Option<f64>,
-    /// Width of the active window border in pixels.
-    /// Default: 2.0.
     pub border_width: Option<f64>,
-    /// Corner radius of the active window border.
-    /// Default: 10.0.
-    #[serde(default, deserialize_with = "deserialize_border_radius_option")]
+    #[serde(
+        default,
+        deserialize_with = "decorations::deserialize_border_radius_option"
+    )]
     pub border_radius: Option<BorderRadiusOption>,
+    /// Legacy top-level swipe options (deprecated; use `[swipe]`).
+    pub swipe_gesture_fingers: Option<usize>,
+    pub swipe_gesture_direction: Option<SwipeGestureDirection>,
+
+    #[allow(dead_code)]
+    pub continuous_swipe: Option<bool>,
+    pub swipe_sensitivity: Option<f64>,
+    pub swipe_deceleration: Option<f64>,
     /// Override the system menubar height (in pixels).
     /// When set, this value is used instead of the height reported by macOS.
     pub menubar_height: Option<u16>,
-
-    /// Swiping keeps sliding windows until the first or last window.
-    /// Set to false to clamp so edge windows stay on-screen. Default: true.
-    pub continuous_swipe: Option<bool>,
-
-    /// Swipe sensitivity multiplier. Lower values = less distance per finger
-    /// movement. Range: 0.1–2.0. Default: 0.35.
-    pub swipe_sensitivity: Option<f64>,
-
-    /// Swipe inertia deceleration rate. Higher values = faster stop.
-    /// Range: 1.0–10.0. Default: 4.0.
-    pub swipe_deceleration: Option<f64>,
 }
+
+pub mod decorations;
+pub mod padding;
+pub mod swipe;
 
 /// Returns a default set of column widths.
 pub fn default_preset_column_widths() -> Vec<f64> {

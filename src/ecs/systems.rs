@@ -22,7 +22,7 @@ use super::{
     PollForNotifications, RepositionMarker, ResizeMarker, SpawnWindowTrigger, Timeout,
     WMEventTrigger,
 };
-use crate::config::{BorderRadiusOption, Config, SwipeGestureDirection};
+use crate::config::{Config, decorations::BorderRadiusOption, swipe::SwipeGestureDirection};
 use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, BruteforceWindows, DockPosition, Initializing,

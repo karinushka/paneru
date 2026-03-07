@@ -103,8 +103,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
                 .after(systems::animate_resize_entities)
                 .run_if(|config: Option<Res<Config>>| {
                     config.is_some_and(|config| {
-                        config.options().dim_inactive_color.is_some()
-                            || config.border_active_window()
+                        config.has_dim_inactive_color() || config.border_active_window()
                     })
                 }),
             systems::commit_window_position.after(systems::animate_entities),

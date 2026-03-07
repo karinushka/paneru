@@ -150,7 +150,7 @@ pub(super) fn mouse_moved_trigger(
 pub(super) fn mouse_down_trigger(
     trigger: On<WMEventTrigger>,
     windows: Windows,
-    active_workspace: Query<&mut Scrolling, With<ActiveWorkspaceMarker>>,
+    active_workspace: Query<(Entity, Option<&Scrolling>), With<ActiveWorkspaceMarker>>,
     window_manager: Res<WindowManager>,
     mission_control_active: Res<MissionControlActive>,
     mut commands: Commands,
@@ -172,8 +172,10 @@ pub(super) fn mouse_down_trigger(
     };
 
     // Stop any ongoing scroll.
-    for mut scroll in active_workspace {
-        *scroll = Scrolling::default();
+    for (entity, scroll) in active_workspace {
+        if scroll.is_some() {
+            commands.entity(entity).try_remove::<Scrolling>();
+        }
     }
 
     reshuffle_around(entity, &mut commands);
@@ -722,15 +724,18 @@ pub(super) fn window_focused_trigger(
 pub(super) fn mission_control_trigger(
     trigger: On<WMEventTrigger>,
     mut mission_control_active: ResMut<MissionControlActive>,
-    active_workspace: Query<&mut Scrolling, With<ActiveWorkspaceMarker>>,
+    active_workspace: Query<(Entity, Option<&Scrolling>), With<ActiveWorkspaceMarker>>,
+    mut commands: Commands,
 ) {
     match trigger.event().0 {
         Event::MissionControlShowAllWindows
         | Event::MissionControlShowFrontWindows
         | Event::MissionControlShowDesktop => {
             mission_control_active.as_mut().0 = true;
-            for mut scroll in active_workspace {
-                *scroll = Scrolling::default();
+            for (entity, scroll) in active_workspace {
+                if scroll.is_some() {
+                    commands.entity(entity).try_remove::<Scrolling>();
+                }
             }
         }
         Event::MissionControlExit => {

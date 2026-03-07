@@ -1114,9 +1114,9 @@ fn test_scrolling() {
     ];
 
     let expected = [
-        (2, (-320, TEST_MENUBAR_HEIGHT)),
-        (1, (80, TEST_MENUBAR_HEIGHT)),
-        (0, (480, TEST_MENUBAR_HEIGHT)),
+        (2, (-395, TEST_MENUBAR_HEIGHT)),
+        (1, (-395, TEST_MENUBAR_HEIGHT)),
+        (0, (0, TEST_MENUBAR_HEIGHT)),
     ];
 
     let check = |iteration, world: &mut World| {

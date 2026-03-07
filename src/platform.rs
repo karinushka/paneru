@@ -5,7 +5,7 @@ use objc2::MainThreadMarker;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSEventMask};
 use objc2_core_foundation::CFString;
-use objc2_foundation::{NSDate, NSDefaultRunLoopMode};
+use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSProcessInfo};
 use std::ffi::c_void;
 use std::pin::Pin;
 use tracing::error;
@@ -249,32 +249,8 @@ impl PlatformCallbacks {
 pub fn macos_major_version() -> u32 {
     static VERSION: OnceLock<u32> = OnceLock::new();
     *VERSION.get_or_init(|| {
-        let mut size: libc::size_t = 0;
-        let name = c"kern.osproductversion";
-        unsafe {
-            libc::sysctlbyname(
-                name.as_ptr(),
-                std::ptr::null_mut(),
-                &raw mut size,
-                std::ptr::null_mut(),
-                0,
-            );
-        }
-        let mut buf = vec![0u8; size];
-        unsafe {
-            libc::sysctlbyname(
-                name.as_ptr(),
-                buf.as_mut_ptr().cast(),
-                &raw mut size,
-                std::ptr::null_mut(),
-                0,
-            );
-        }
-        String::from_utf8_lossy(&buf)
-            .split('.')
-            .next()
-            .and_then(|s| s.trim_matches('\0').parse().ok())
-            .unwrap_or(0)
+        let version = NSProcessInfo::processInfo().operatingSystemVersion();
+        return version.majorVersion as u32;
     })
 }
 

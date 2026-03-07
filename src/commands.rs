@@ -548,7 +548,7 @@ fn full_width_window(
             _ = active_display.active_strip().stack(entity);
         }
         let w = (previous_ratio * f64::from(viewport.width())).round() as i32;
-        (w, viewport.min.x)
+        (w, viewport.center().x - frame.width() / 2)
     } else {
         let strip = active_display.active_strip();
         let was_stacked = strip
@@ -559,8 +559,9 @@ fn full_width_window(
         if was_stacked {
             _ = strip.unstack(entity);
         }
+        let width_ratio = windows.width_ratio(entity).unwrap_or(0.5);
         commands.entity(entity).try_insert(FullWidthMarker {
-            width_ratio: window.width_ratio(),
+            width_ratio,
             was_stacked,
         });
         (viewport.width() - 2 * h_pad, viewport.min.x)

@@ -25,7 +25,7 @@ use crate::config::{Config, WindowParams};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, LocateDockTrigger, Position, Scrolling, SendMessageTrigger,
-    reposition_entity, reshuffle_around, resize_entity,
+    WidthRatio, reposition_entity, reshuffle_around, resize_entity,
 };
 use crate::errors::Result;
 use crate::events::Event;
@@ -1162,8 +1162,10 @@ pub(super) fn spawn_window_trigger(
         let frame = window.frame();
         let position = Position(frame.min);
         let bounds = Bounds(Size::new(frame.width(), frame.height()));
+        let width_ratio =
+            WidthRatio(f64::from(frame.width()) / f64::from(active_display.bounds().width()));
         let entity = commands
-            .spawn((position, bounds, window, ChildOf(app_entity)))
+            .spawn((position, bounds, width_ratio, window, ChildOf(app_entity)))
             .id();
 
         apply_window_properties(
@@ -1209,14 +1211,12 @@ fn apply_window_defaults(
             let w = (f64::from(bounds.width()) * rw) as i32;
             let h = (f64::from(bounds.height()) * rh) as i32;
             window.reposition(Origin::new(x, y));
-            window.resize(Size::new(w, h), bounds.width());
+            window.resize(Size::new(w, h));
         }
         return;
     }
 
-    _ = window
-        .update_frame(&active_display.bounds())
-        .inspect_err(|err| error!("{err}"));
+    _ = window.update_frame().inspect_err(|err| error!("{err}"));
 
     // Apply configured width AFTER update_frame so it isn't overwritten.
     // Use padded display width (matching window_resize command behavior).
@@ -1226,12 +1226,10 @@ fn apply_window_defaults(
         let padded_width = bounds.width() - pad_left - pad_right;
         let new_width = (f64::from(padded_width) * width).round() as i32;
         let height = window.frame().height();
-        window.resize(Size::new(new_width, height), bounds.width());
+        window.resize(Size::new(new_width, height));
         // Re-read the actual OS size: the app may enforce a minimum width
         // that differs from our request.
-        _ = window
-            .update_frame(&bounds)
-            .inspect_err(|err| error!("{err}"));
+        _ = window.update_frame().inspect_err(|err| error!("{err}"));
     }
 }
 

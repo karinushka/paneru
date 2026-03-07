@@ -221,6 +221,9 @@ pub struct Position(pub Origin);
 #[derive(Component, Clone, Debug, Deref, DerefMut)]
 pub struct Bounds(pub Size);
 
+#[derive(Component, Clone, Debug, Deref, DerefMut)]
+pub struct WidthRatio(pub f64);
+
 /// Marks a window entity that is currently on a native macOS fullscreen space.
 /// The window has been removed from its tiled position in the strip.
 /// `order` gives the sequence in which windows went fullscreen (0, 1, 2, …)

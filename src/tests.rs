@@ -395,14 +395,14 @@ impl WindowApi for MockWindow {
 
     /// Resizes the mock window's frame to the given dimensions.
     #[instrument(level = Level::DEBUG, skip(self))]
-    fn resize(&mut self, size: Size, display_width: i32) {
+    fn resize(&mut self, size: Size) {
         debug!("{}: id {} to {size}", function_name!(), self.id);
         self.frame.max = self.frame.min + size;
     }
 
     /// Always returns `Ok(())` for updating the frame.
     #[instrument(level = Level::DEBUG, skip(self), ret)]
-    fn update_frame(&mut self, bounds: &IRect) -> Result<IRect> {
+    fn update_frame(&mut self) -> Result<IRect> {
         debug!("{}:", function_name!());
         Ok(IRect::default())
     }
@@ -432,13 +432,6 @@ impl WindowApi for MockWindow {
             .unwrap()
             .push(Event::ApplicationFrontSwitched { psn });
         self.app.inner.force_write().focused_id = Some(self.id);
-    }
-
-    /// Does nothing for width ratio.
-    #[instrument(level = Level::DEBUG, skip(self), ret)]
-    fn width_ratio(&self) -> f64 {
-        debug!("{}:", function_name!());
-        0.5
     }
 
     #[instrument(level = Level::TRACE, skip(self), ret)]

@@ -41,8 +41,8 @@ pub trait WindowApi: Send + Sync {
     fn is_minimized(&self) -> bool;
     fn is_full_screen(&self) -> bool;
     fn reposition(&mut self, origin: Origin);
-    fn resize(&mut self, size: Size, display_width: i32);
-    fn update_frame(&mut self, display_bounds: &IRect) -> Result<IRect>;
+    fn resize(&mut self, size: Size);
+    fn update_frame(&mut self) -> Result<IRect>;
     fn focus_without_raise(
         &self,
         psn: ProcessSerialNumber,
@@ -50,7 +50,6 @@ pub trait WindowApi: Send + Sync {
         focused_psn: ProcessSerialNumber,
     );
     fn focus_with_raise(&self, psn: ProcessSerialNumber);
-    fn width_ratio(&self) -> f64;
     fn pid(&self) -> Result<Pid>;
     fn set_padding(&mut self, padding: WindowPadding);
     fn horizontal_padding(&self) -> i32;
@@ -102,7 +101,6 @@ pub struct WindowOS {
     frame: IRect,
     vertical_padding: i32,
     horizontal_padding: i32,
-    width_ratio: f64,
 }
 
 impl WindowOS {
@@ -124,7 +122,6 @@ impl WindowOS {
             frame: IRect::default(),
             vertical_padding: 0,
             horizontal_padding: 0,
-            width_ratio: 0.33,
         };
 
         if window.is_unknown() {
@@ -325,7 +322,7 @@ impl WindowApi for WindowOS {
     }
 
     #[instrument(level = Level::TRACE)]
-    fn resize(&mut self, size: Size, display_width: i32) {
+    fn resize(&mut self, size: Size) {
         if self.frame.size() == size {
             trace!("already correct size.");
             return;
@@ -351,7 +348,6 @@ impl WindowApi for WindowOS {
                 )
             };
             self.frame.max = self.frame.min + size;
-            self.width_ratio = f64::from(self.frame.width()) / f64::from(display_width);
         }
     }
 
@@ -365,7 +361,7 @@ impl WindowApi for WindowOS {
     /// # Returns
     ///
     /// `Ok(())` if the frame is updated successfully, otherwise `Err(Error)`.
-    fn update_frame(&mut self, display_bounds: &IRect) -> Result<IRect> {
+    fn update_frame(&mut self) -> Result<IRect> {
         let window_ref = self.ax_element.as_ptr();
 
         let position = unsafe {
@@ -412,7 +408,6 @@ impl WindowApi for WindowOS {
         self.frame.max.x += self.horizontal_padding;
         self.frame.max.y += self.vertical_padding;
 
-        self.width_ratio = f64::from(self.frame.width()) / f64::from(display_bounds.width());
         Ok(self.frame)
     }
 
@@ -469,10 +464,6 @@ impl WindowApi for WindowOS {
         let element_ref = self.ax_element.as_ptr();
         let action = CFString::from_static_str(kAXRaiseAction);
         unsafe { AXUIElementPerformAction(element_ref, &action) };
-    }
-
-    fn width_ratio(&self) -> f64 {
-        self.width_ratio
     }
 
     fn pid(&self) -> Result<Pid> {

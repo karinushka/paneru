@@ -1,6 +1,7 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use clap::{Parser, Subcommand};
+use tracing::warn;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 mod commands;
@@ -98,7 +99,10 @@ fn main() -> Result<()> {
 
     let service = || service::Service::try_new(service::ID);
 
-    match Paneru::parse().subcmd.unwrap_or_default() {
+    let subcmd = Paneru::parse().subcmd.unwrap_or_default();
+    maybe_warn_deprecated_options_for_service(&subcmd);
+
+    match subcmd {
         SubCmd::Launch => {
             let (sender, receiver) = EventSender::new();
             CommandReader::new(sender.clone()).start();
@@ -113,4 +117,39 @@ fn main() -> Result<()> {
         SubCmd::SendCmd { cmd } => CommandReader::send_command(cmd)?,
     }
     Ok(())
+}
+
+fn should_check_deprecated_options(subcmd: &SubCmd) -> bool {
+    matches!(
+        subcmd,
+        SubCmd::Install | SubCmd::Uninstall | SubCmd::Start | SubCmd::Stop | SubCmd::Restart
+    )
+}
+
+fn maybe_warn_deprecated_options_for_service(subcmd: &SubCmd) {
+    if !should_check_deprecated_options(subcmd) {
+        return;
+    }
+
+    let Some(path) = config::discover_configuration_file() else {
+        return;
+    };
+
+    match config::deprecated_options_in_file(&path) {
+        Ok(keys) if !keys.is_empty() => {
+            warn!(
+                "detected deprecated [options] keys in `{}` while running a service command: {}. \
+                 Please migrate to `[padding]`, `[swipe]`, and `[decorations.*]`.",
+                path.display(),
+                keys.join(", ")
+            );
+        }
+        Ok(_) => {}
+        Err(err) => {
+            warn!(
+                "could not inspect `{}` for deprecated options: {err}",
+                path.display()
+            );
+        }
+    }
 }

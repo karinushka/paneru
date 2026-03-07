@@ -11,7 +11,6 @@ use bevy::tasks::AsyncComputeTaskPool;
 use bevy::tasks::futures_lite::future;
 use bevy::time::Time;
 use objc2_core_graphics::CGDirectDisplayID;
-use objc2_foundation::{NSOperatingSystemVersion, NSProcessInfo};
 use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -23,7 +22,7 @@ use super::{
     PollForNotifications, RepositionMarker, ResizeMarker, SpawnWindowTrigger, Timeout,
     WMEventTrigger,
 };
-use crate::config::{BorderRadiusOption, Config, SwipeGestureDirection};
+use crate::config::{Config, decorations::BorderRadiusOption, swipe::SwipeGestureDirection};
 use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, BruteforceWindows, DockPosition, Initializing,

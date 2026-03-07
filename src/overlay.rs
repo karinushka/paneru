@@ -225,11 +225,13 @@ fn make_overlay_window(mtm: MainThreadMarker, cocoa_frame: NSRect) -> Retained<N
     window.setCollectionBehavior(
         NSWindowCollectionBehavior::Transient
             | NSWindowCollectionBehavior::IgnoresCycle
-            | NSWindowCollectionBehavior::CanJoinAllSpaces,
+            | NSWindowCollectionBehavior::CanJoinAllSpaces
+            | NSWindowCollectionBehavior::Stationary
+            | NSWindowCollectionBehavior::FullScreenNone,
     );
+
     window
 }
-
 // ── OverlayManager ──────────────────────────────────────────────────────
 
 pub struct OverlayManager {

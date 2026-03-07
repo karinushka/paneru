@@ -810,20 +810,21 @@ pub(super) fn animate_resize_entities(
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn apply_scroll_physics(
     mut active_workspace: Single<
-        (&LayoutStrip, &mut Position, &mut Scrolling),
+        (Entity, &LayoutStrip, &mut Position, &mut Scrolling),
         (With<ActiveWorkspaceMarker>, Without<Window>),
     >,
     active_display: Single<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
     windows: Windows,
     window_manager: Res<WindowManager>,
-    config: Res<Config>,
+    mut config: Configuration,
     time: Res<Time>,
     mut commands: Commands,
 ) {
+    const FOCUS_VELOCITY_RATIO: f64 = 0.3;
     const FINGER_LIFT_THRESHOLD: Duration = Duration::from_millis(50);
-    const MIN_VELOCITY_PX: f64 = 200.0;
+    const MIN_VELOCITY_PX: f64 = 100.0;
 
-    let (strip, ref mut position, ref mut scroll) = *active_workspace;
+    let (entity, strip, ref mut position, ref mut scroll) = *active_workspace;
     let dt = time.delta_secs_f64();
 
     // Finger lift detection
@@ -831,31 +832,35 @@ pub(super) fn apply_scroll_physics(
         scroll.is_user_swiping = false;
     }
 
-    if scroll.is_user_swiping {
-        // While user is swiping, velocity is directly applied in the trigger.
-        // We just need to update the position.
-    } else if scroll.velocity.abs() * f64::from(active_display.0.bounds().width()) < MIN_VELOCITY_PX
-    {
-        // Below threshold: stop and focus
-        if scroll.velocity != 0.0 {
-            if config.options().focus_follows_mouse.is_none_or(|ffm| ffm)
-                && let Some(point) = window_manager.cursor_position()
-            {
-                commands.trigger(WMEventTrigger(Event::MouseMoved { point }));
-            }
-            scroll.velocity = 0.0;
+    // While user is swiping, velocity is directly applied in the trigger.
+    // We just need to update the position.
+    let display_width = f64::from(active_display.0.bounds().width());
+    let scroll_velocity = scroll.velocity.abs() * display_width;
+    if !scroll.is_user_swiping {
+        if scroll_velocity < FOCUS_VELOCITY_RATIO * display_width
+            && config.focus_follows_mouse()
+            && let Some(point) = window_manager.cursor_position()
+        {
+            config.set_ffm_flag(None);
+            commands.trigger(WMEventTrigger(Event::MouseMoved { point }));
         }
-        return;
-    } else {
+
+        if scroll_velocity < MIN_VELOCITY_PX {
+            // Below threshold: stop and focus
+            if let Ok(mut cmd) = commands.get_entity(entity) {
+                cmd.try_remove::<Scrolling>();
+            }
+            return;
+        }
         // Apply inertia decay
-        let decay_rate = config.swipe_deceleration();
+        let decay_rate = config.config().swipe_deceleration();
         scroll.velocity *= (-decay_rate * dt).exp();
     }
 
     let get_window_frame = |entity| get_moving_window_frame(entity, active_display.0, &windows);
     let viewport = active_display
         .0
-        .actual_display_bounds(active_display.1, &config);
+        .actual_display_bounds(active_display.1, config.config());
 
     let absolute_positions = strip
         .absolute_positions(&get_window_frame)
@@ -863,7 +868,7 @@ pub(super) fn apply_scroll_physics(
 
     // Apply soft-snap to center during inertia.
     if !scroll.is_user_swiping
-        && config.options().auto_center.is_some_and(|center| center)
+        && config.auto_center()
         && let Some((velocity, snap_offset)) = magnetic_snap_to_center(
             dt,
             &viewport,
@@ -887,7 +892,7 @@ pub(super) fn apply_scroll_physics(
         &absolute_positions,
         &get_window_frame,
         &viewport,
-        &config,
+        config.config(),
     ) {
         position.x = clamped_offset;
     } else {
@@ -986,7 +991,7 @@ fn expose_window(
     entity: Entity,
     windows: &Windows,
     active_display: &ActiveDisplay,
-    config: &Res<Config>,
+    config: &Config,
 ) -> Option<IRect> {
     let display_bounds = active_display
         .display()
@@ -1452,7 +1457,7 @@ pub(super) fn position_layout_strip(
     mut windows: Query<(&Window, Entity, &mut Position, &mut Bounds), Without<LayoutStrip>>,
     position: Query<(Option<&RepositionMarker>, Option<&ResizeMarker>), With<Window>>,
     active_display: Single<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
-    active_workspace: Single<&Scrolling, With<ActiveWorkspaceMarker>>,
+    active_workspace: Query<&Scrolling, With<ActiveWorkspaceMarker>>,
     config: Res<Config>,
 ) {
     let (active_display, dock) = *active_display;
@@ -1505,7 +1510,10 @@ pub(super) fn position_layout_strip(
             frame.max.x = frame.min.x + width;
 
             // During swipe, keep full height.
-            let swiping = active_workspace.is_user_swiping;
+            let swiping = active_workspace
+                .iter()
+                .next()
+                .is_some_and(|scrolling| scrolling.is_user_swiping);
             if !swiping {
                 let stacked = layout_strip
                     .index_of(entity)
@@ -1720,9 +1728,10 @@ pub(super) fn cleanup_on_exit(
 pub(super) fn swipe_gesture(
     mut messages: MessageReader<Event>,
     active_display: ActiveDisplay,
-    mut active_workspace: Single<&mut Scrolling, With<ActiveWorkspaceMarker>>,
+    mut active_workspace: Single<(Entity, Option<&mut Scrolling>), With<ActiveWorkspaceMarker>>,
     time: Res<Time>,
     config: Configuration,
+    mut commands: Commands,
 ) {
     if config.mission_control_active() {
         return;
@@ -1751,9 +1760,19 @@ pub(super) fn swipe_gesture(
         } else {
             0.0
         };
-        let velocity = 0.3 * new_velocity + 0.7 * active_workspace.velocity;
-        active_workspace.velocity = velocity;
-        active_workspace.is_user_swiping = true;
-        active_workspace.last_event = Instant::now();
+
+        let (entity, scrolling) = &mut *active_workspace;
+        if let Some(scrolling) = scrolling.as_mut() {
+            let velocity = 0.3 * new_velocity + 0.7 * scrolling.velocity;
+            scrolling.velocity = velocity;
+            scrolling.is_user_swiping = true;
+            scrolling.last_event = Instant::now();
+        } else if let Ok(mut entity_cmmands) = commands.get_entity(*entity) {
+            entity_cmmands.try_insert(Scrolling {
+                velocity: new_velocity,
+                is_user_swiping: true,
+                ..Default::default()
+            });
+        }
     }
 }

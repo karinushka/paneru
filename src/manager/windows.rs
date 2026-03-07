@@ -7,9 +7,7 @@ use bevy::ecs::component::Component;
 use bevy::math::IRect;
 use core::ptr::NonNull;
 use derive_more::{DerefMut, with_trait::Deref};
-use objc2_core_foundation::{
-    CFArray, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize,
-};
+use objc2_core_foundation::{CFRetained, CFString, CFType, CGPoint, CGRect, CGSize};
 use std::ptr::null_mut;
 use std::sync::OnceLock;
 use std::thread;
@@ -20,9 +18,9 @@ use tracing::{Level, debug, instrument, trace};
 use super::skylight::{
     _AXUIElementGetWindow, _SLPSSetFrontProcessWithOptions, AXUIElementCopyAttributeValue,
     AXUIElementPerformAction, AXUIElementSetAttributeValue, SLPSPostEventRecordTo,
-    SLSWindowIteratorAdvance,
 };
 use crate::errors::{Error, Result};
+use crate::manager::skylight::{SLSMainConnectionID, SLSWindowQueryWindows};
 use crate::manager::{Origin, Size, irect_from};
 use crate::platform::{Pid, ProcessSerialNumber, WinID, macos_major_version};
 use crate::util::{AXUIAttributes, AXUIWrapper, MacResult};
@@ -492,29 +490,21 @@ impl WindowApi for WindowOS {
     #[allow(clippy::cast_precision_loss)]
     fn border_radius(&self) -> Option<f64> {
         *self.border_radius.get_or_init(|| {
-            let iterator = super::window_iterator_for_id(self.id)?;
-            if !unsafe { SLSWindowIteratorAdvance(&raw const *iterator) } {
+            let mut iterator = SLSWindowQueryWindows::from_window_list(
+                unsafe { SLSMainConnectionID() },
+                &[self.id],
+            )?;
+            if !iterator.advance() {
                 return None;
             }
 
-            let radii_ref = unsafe {
-                // Load the function dynamicaly, because it exists only on macOS 26.x
-                let s = c"SLSWindowIteratorGetCornerRadii";
-                let p = libc::dlsym(libc::RTLD_DEFAULT, s.as_ptr());
-                if p.is_null() {
-                    return None;
-                }
-                let f: unsafe extern "C" fn(*const CFType) -> *mut CFArray<CFNumber> =
-                    std::mem::transmute(p);
-                f(&raw const *iterator)
-            };
-            let radii: CFRetained<CFArray<CFNumber>> =
-                unsafe { CFRetained::from_raw(NonNull::new(radii_ref)?) };
-            if radii.is_empty() {
-                return None;
-            }
             // Get first corner radius (usually all corners are the same)
-            radii.get(0)?.as_i64().map(|v| v as f64)
+            iterator
+                .current()?
+                .resolved_corner_radii()?
+                .get(0)?
+                .as_i64()
+                .map(|v| v as f64)
         })
     }
 }

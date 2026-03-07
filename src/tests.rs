@@ -1530,10 +1530,7 @@ fn test_window_hidden_ratio_swap() {
 /// Verify that focus state is on the expected window.
 fn verify_focused_window(expected_id: WinID, world: &mut World) {
     let mut query = world.query::<(&Window, Has<FocusedMarker>)>();
-    let focused: Vec<_> = query
-        .iter(world)
-        .filter(|(_, focused)| *focused)
-        .collect();
+    let focused: Vec<_> = query.iter(world).filter(|(_, focused)| *focused).collect();
     assert_eq!(focused.len(), 1, "expected exactly one focused window");
     assert_eq!(
         focused[0].0.id(),

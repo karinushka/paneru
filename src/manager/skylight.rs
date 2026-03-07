@@ -7,7 +7,10 @@ use objc2_core_foundation::{
 use objc2_core_graphics::{CGDirectDisplayID, CGError};
 
 use crate::platform::{CFStringRef, ConnID, OSStatus, ProcessSerialNumber, WinID};
-
+mod query;
+mod transaction;
+pub use query::{SLSWindowQuery, SLSWindowQueryWindows};
+pub use transaction::SLSTransactionGroup;
 #[link(name = "SkyLight", kind = "framework")]
 unsafe extern "C" {
     /// Retrieves the window ID (`WinID`) associated with an Accessibility UI element.
@@ -177,33 +180,6 @@ unsafe extern "C" {
     /// A `CGError` indicating success or failure.
     pub fn SLSGetDisplayMenubarHeight(did: CGDirectDisplayID, height: *mut u32) -> CGError;
 
-    /// Copies a list of windows with specified options and tags.
-    /// This function is used to query windows based on their owner, associated spaces, and various options like including minimized windows.
-    ///
-    /// # Arguments
-    ///
-    /// * `cid` - The `ConnID` of the connection.
-    /// * `owner` - The owner connection ID (0 for all windows, or a specific application's `ConnID`).
-    /// * `spaces` - A raw pointer to a `CFArray` of space IDs to query within.
-    /// * `options` - An integer representing the query options (e.g., `0x2` for normal windows, `0x7` for normal + minimized).
-    /// * `set_tags` - A mutable reference to an `i64` to store tags that are set on the returned windows.
-    /// * `clear_tags` - A mutable reference to an `i64` to store tags that are cleared on the returned windows.
-    ///
-    /// # Returns
-    ///
-    /// A raw pointer to a `CFArray` of window information (dictionaries), or `NULL` if no windows are found or an error occurs.
-    ///
-    /// # Original signature
-    /// extern `CFArrayRef` SLSCopyWindowsWithOptionsAndTags(int cid, `uint32_t` owner, `CFArrayRef` spaces, `uint32_t` options, `uint64_t` *`set_tags`, `uint64_t` *`clear_tags`);
-    pub fn SLSCopyWindowsWithOptionsAndTags(
-        cid: ConnID,
-        owner: ConnID,
-        spaces: *const CFArray,
-        options: i32,
-        set_tags: &mut i64,
-        clear_tags: &mut i64,
-    ) -> *mut CFArray;
-
     /// Retrieves the space management mode for a connection ID.
     /// This function is typically used to check if "Displays have separate Spaces" is enabled.
     ///
@@ -251,110 +227,6 @@ unsafe extern "C" {
     /// # Original signature
     /// extern `CFArrayRef` SLSCopyAssociatedWindows(int cid, `uint32_t` wid);
     pub fn SLSCopyAssociatedWindows(cid: ConnID, window_id: WinID) -> NonNull<CFArray<CFNumber>>;
-
-    /// Queries windows based on a provided `CFArray` of window IDs.
-    ///
-    /// # Arguments
-    ///
-    /// * `cid` - The connection ID.
-    /// * `windows` - A raw pointer to a `CFArray` of window IDs.
-    /// * `count` - The number of windows in the array.
-    ///
-    /// # Returns
-    ///
-    /// A `NonNull<CFType>` representing the window query result.
-    ///
-    /// # Original signature
-    /// extern `CFTypeRef` SLSWindowQueryWindows(int cid, `CFArrayRef` windows, int count);
-    pub fn SLSWindowQueryWindows(
-        cid: ConnID,
-        windows: *const CFArray,
-        count: isize,
-    ) -> NonNull<CFType>;
-
-    /// Copies windows from a window query result.
-    ///
-    /// # Arguments
-    ///
-    /// * `type_ref` - A `NonNull<CFType>` representing the window query result.
-    ///
-    /// # Returns
-    ///
-    /// A `NonNull<CFType>` representing an iterator for the windows.
-    ///
-    /// # Original signature
-    /// extern `CFTypeRef` SLSWindowQueryResultCopyWindows(CFTypeRef `window_query`);
-    pub fn SLSWindowQueryResultCopyWindows(type_ref: NonNull<CFType>) -> NonNull<CFType>;
-
-    /// Advances the window iterator to the next window.
-    ///
-    /// # Arguments
-    ///
-    /// * `iterator` - A raw pointer to a `CFType` representing the window iterator.
-    ///
-    /// # Returns
-    ///
-    /// `true` if the iterator advanced successfully, `false` otherwise.
-    ///
-    /// # Original signature
-    /// extern bool SLSWindowIteratorAdvance(CFTypeRef iterator);
-    pub fn SLSWindowIteratorAdvance(iterator: *const CFType) -> bool;
-
-    /// Retrieves the parent window ID from a window iterator.
-    ///
-    /// # Arguments
-    ///
-    /// * `iterator` - A raw pointer to a `CFType` representing the window iterator.
-    ///
-    /// # Returns
-    ///
-    /// An `i32` representing the parent window ID.
-    ///
-    /// # Original signature
-    /// extern `uint32_t` SLSWindowIteratorGetParentID(CFTypeRef iterator);
-    pub fn SLSWindowIteratorGetParentID(iterator: *const CFType) -> i32;
-
-    /// Retrieves the window ID from a window iterator.
-    ///
-    /// # Arguments
-    ///
-    /// * `iterator` - A raw pointer to a `CFType` representing the window iterator.
-    ///
-    /// # Returns
-    ///
-    /// An `i32` representing the window ID.
-    ///
-    /// # Original signature
-    /// extern `uint32_t` SLSWindowIteratorGetWindowID(CFTypeRef iterator);
-    pub fn SLSWindowIteratorGetWindowID(iterator: *const CFType) -> i32;
-
-    /// Retrieves the tags from a window iterator.
-    ///
-    /// # Arguments
-    ///
-    /// * `iterator` - A raw pointer to a `CFType` representing the window iterator.
-    ///
-    /// # Returns
-    ///
-    /// An `i64` representing the tags.
-    ///
-    /// # Original signature
-    /// extern `uint64_t` SLSWindowIteratorGetTags(CFTypeRef iterator);
-    pub fn SLSWindowIteratorGetTags(iterator: *const CFType) -> i64;
-
-    /// Retrieves the attributes from a window iterator.
-    ///
-    /// # Arguments
-    ///
-    /// * `iterator` - A raw pointer to a `CFType` representing the window iterator.
-    ///
-    /// # Returns
-    ///
-    /// An `i64` representing the attributes.
-    ///
-    /// # Original signature
-    /// extern `uint64_t` SLSWindowIteratorGetAttributes(CFTypeRef iterator);
-    pub fn SLSWindowIteratorGetAttributes(iterator: *const CFType) -> i64;
 
     /// Retrieves the frontmost process's `ProcessSerialNumber`.
     ///
@@ -534,7 +406,6 @@ unsafe extern "C" {
     /// extern `AXUIElementRef` _AXUIElementCreateWithRemoteToken(CFDataRef data);
     pub fn _AXUIElementCreateWithRemoteToken(data: &CFMutableData) -> AXUIElementRef;
 
-    // The SLS version of the brightness function
     pub fn SLSSetWindowListBrightness(
         cid: ConnID,
         window_list: *const WinID,

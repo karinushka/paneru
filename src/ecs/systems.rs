@@ -27,7 +27,7 @@ use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, BruteforceWindows, DockPosition, Initializing,
     LocateDockTrigger, Position, ReshuffleAroundMarker, Scrolling, StackAdjustedResize, Unmanaged,
-    WindowDraggedMarker, reposition_entity, reshuffle_around, resize_entity,
+    WidthRatio, WindowDraggedMarker, reposition_entity, reshuffle_around, resize_entity,
 };
 use crate::events::Event;
 use crate::manager::{
@@ -580,21 +580,17 @@ fn refresh_workspace_window_sizes(
     // Resize windows for the new display dimensions.
     for &entity in orphans {
         if let Some(window) = windows.get(entity) {
-            let width = f64::from(viewport.width()) * window.width_ratio();
-            let height = viewport.height();
+            let width_ratio = windows.width_ratio(entity).unwrap_or(0.5);
+            let size = Size::new(
+                (f64::from(viewport.width()) * width_ratio) as i32,
+                viewport.height(),
+            );
             debug!(
-                "refreshing ratio {:.1} for window {}: {:.0}x{:.0}",
-                window.width_ratio(),
+                "refreshing ratio {:.1} for window {}: {size}",
+                width_ratio,
                 window.id(),
-                width,
-                height,
             );
-            resize_entity(
-                entity,
-                Size::new(width as i32, height),
-                display.id(),
-                commands,
-            );
+            resize_entity(entity, size, display.id(), commands);
             in_workspace.retain(|window_id| *window_id != window.id());
         }
     }
@@ -1138,11 +1134,11 @@ pub(super) fn window_update_frame(
                     let Some((mut window, entity, mut position, mut bounds, stack_adjusted)) =
                         windows
                             .iter_mut()
-                            .find(|(window, _, _, _, _)| window.id() == *window_id)
+                            .find(|window| window.0.id() == *window_id)
                     else {
                         continue;
                     };
-                    let Ok(new_frame) = window.update_frame(&active_display.bounds()) else {
+                    let Ok(new_frame) = window.update_frame() else {
                         continue;
                     };
 
@@ -1431,7 +1427,7 @@ fn get_moving_window_frame(
 ) -> Option<IRect> {
     windows
         .positioning(entity)
-        .map(|(origin, size, reposition, resize)| {
+        .map(|(origin, size, _, reposition, resize)| {
             let size = size.0;
             let mut frame = IRect::from_corners(origin.0, origin.0 + size);
 
@@ -1700,12 +1696,15 @@ pub(super) fn commit_window_position(
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn commit_window_size(
     active_display: ActiveDisplay,
-    mut resized_windows: Populated<(&mut Window, &Bounds), Changed<Bounds>>,
+    mut resized_windows: Populated<(&mut Window, &Bounds, &mut WidthRatio), Changed<Bounds>>,
 ) {
     let display_bounds = active_display.bounds();
     resized_windows
         .par_iter_mut()
-        .for_each(|(mut window, size)| window.resize(size.0, display_bounds.width()));
+        .for_each(|(mut window, size, mut width_ratio)| {
+            width_ratio.0 = f64::from(size.0.x) / f64::from(display_bounds.width());
+            window.resize(size.0);
+        });
 }
 
 #[allow(clippy::needless_pass_by_value)]

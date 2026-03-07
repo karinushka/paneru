@@ -356,7 +356,7 @@ impl WindowManagerApi for WindowManagerOS {
     }
 
     /// Returns child windows of the main window.
-    #[instrument(level = Level::DEBUG, skip(self), ret)]
+    #[instrument(level = Level::TRACE, skip(self), ret)]
     fn get_associated_windows(&self, window_id: WinID) -> Vec<WinID> {
         trace!("for window {window_id}");
         let windows =

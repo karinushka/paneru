@@ -1,7 +1,6 @@
 use arc_swap::{ArcSwap, Guard};
 use bevy::ecs::resource::Resource;
 use objc2_core_foundation::{CFData, CFString};
-use objc2_foundation::NSProcessInfo;
 use regex::Regex;
 use serde::{Deserialize, Deserializer, de};
 use std::{
@@ -20,7 +19,7 @@ use self::decorations::BorderRadiusOption;
 use self::swipe::SwipeGestureDirection;
 use crate::{
     commands::{Command, Direction, MouseMove, Operation, ResizeDirection},
-    platform::{Modifiers, OSStatus},
+    platform::{Modifiers, OSStatus, macos_major_version},
 };
 use crate::{
     errors::{Error, Result},
@@ -500,7 +499,6 @@ impl Config {
     }
 
     pub fn border_radius(&self) -> BorderRadiusOption {
-        let version = NSProcessInfo::processInfo().operatingSystemVersion();
         let config = self.inner();
         match config
             .decorations
@@ -511,7 +509,7 @@ impl Config {
             .or(config.options.border_radius.clone())
             .unwrap_or(BorderRadiusOption::Auto)
         {
-            BorderRadiusOption::Auto if version.majorVersion == 26 => BorderRadiusOption::Auto,
+            BorderRadiusOption::Auto if macos_major_version() == 26 => BorderRadiusOption::Auto,
             BorderRadiusOption::Value(value) => BorderRadiusOption::Value(value.max(0.0)),
             BorderRadiusOption::Auto => BorderRadiusOption::Value(10.0),
         }

@@ -11,6 +11,7 @@ use bevy::tasks::AsyncComputeTaskPool;
 use bevy::tasks::futures_lite::future;
 use bevy::time::Time;
 use objc2_core_graphics::CGDirectDisplayID;
+use objc2_foundation::{NSOperatingSystemVersion, NSProcessInfo};
 use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -22,7 +23,7 @@ use super::{
     PollForNotifications, RepositionMarker, ResizeMarker, SpawnWindowTrigger, Timeout,
     WMEventTrigger,
 };
-use crate::config::{Config, SwipeGestureDirection};
+use crate::config::{BorderRadiusOption, Config, SwipeGestureDirection};
 use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, BruteforceWindows, DockPosition, Initializing,
@@ -1628,50 +1629,60 @@ pub(super) fn update_overlays(
 
     // Find the focused managed window's absolute CG frame.
     // Skip floating/unmanaged windows — no overlay or border for those.
-    let (focused_abs_cg, focused_border_radius) = if let Some((window, _, unmanaged)) = windows
-        .focused()
-        .and_then(|(_, entity)| windows.get_managed(entity))
-        && unmanaged.is_none()
-        && !window.is_full_screen()
-    {
-        let frame = window.frame();
-        let h_pad = window.horizontal_padding();
-        let v_pad = window.vertical_padding();
-        let focused_abs_cg = Some(NSRect::new(
-            NSPoint::new(
-                f64::from(frame.min.x + h_pad),
-                f64::from(frame.min.y + v_pad),
-            ),
-            NSSize::new(
-                f64::from(frame.width() - 2 * h_pad),
-                f64::from(frame.height() - 2 * v_pad),
-            ),
-        ));
+    let (focused_abs_cg, focused_border_radius, detected_border_radius) =
+        if let Some((window, _, unmanaged)) = windows
+            .focused()
+            .and_then(|(_, entity)| windows.get_managed(entity))
+            && unmanaged.is_none()
+            && !window.is_full_screen()
+        {
+            let frame = window.frame();
+            let h_pad = window.horizontal_padding();
+            let v_pad = window.vertical_padding();
+            let focused_abs_cg = Some(NSRect::new(
+                NSPoint::new(
+                    f64::from(frame.min.x + h_pad),
+                    f64::from(frame.min.y + v_pad),
+                ),
+                NSSize::new(
+                    f64::from(frame.width() - 2 * h_pad),
+                    f64::from(frame.height() - 2 * v_pad),
+                ),
+            ));
 
-        // Look up per-window border_radius from config (dynamic, respects hot-reload).
-        let title = window.title().unwrap_or_default();
-        let bundle_id = windows
-            .find_parent(window.id())
-            .and_then(|(_, _, parent)| applications.get(parent).ok())
-            .map(|app| app.bundle_id().unwrap_or_default())
-            .unwrap_or_default();
-        let properties = config.find_window_properties(&title, bundle_id);
-        let focused_border_radius = properties.iter().find_map(|p| p.border_radius);
+            // Look up per-window border_radius from config (dynamic, respects hot-reload).
+            let title = window.title().unwrap_or_default();
+            let bundle_id = windows
+                .find_parent(window.id())
+                .and_then(|(_, _, parent)| applications.get(parent).ok())
+                .map(|app| app.bundle_id().unwrap_or_default())
+                .unwrap_or_default();
+            let properties = config.find_window_properties(&title, bundle_id);
+            let focused_border_radius = properties.iter().find_map(|p| p.border_radius);
 
-        (focused_abs_cg, focused_border_radius)
-    } else {
-        // No managed window has focus — hide the overlay rather than
-        // dimming everything (e.g. during startup or when only floating
-        // windows exist).
-        overlay_mgr.hide_all();
-        return;
+            (
+                focused_abs_cg,
+                focused_border_radius,
+                window.border_radius(),
+            )
+        } else {
+            // No managed window has focus — hide the overlay rather than
+            // dimming everything (e.g. during startup or when only floating
+            // windows exist).
+            overlay_mgr.hide_all();
+            return;
+        };
+
+    let calculated_radius = match config.config().border_radius() {
+        BorderRadiusOption::Auto => detected_border_radius.unwrap_or(10.0),
+        BorderRadiusOption::Value(value) => value.max(0.0),
     };
 
     let border_params = border_enabled.then(|| BorderParams {
         color: config.config().border_color(),
         opacity: config.config().border_opacity(),
         width: config.config().border_width(),
-        radius: focused_border_radius.unwrap_or_else(|| config.config().border_radius()),
+        radius: focused_border_radius.unwrap_or(calculated_radius),
     });
 
     let dim_color = config.config().dim_inactive_color();

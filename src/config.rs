@@ -1,6 +1,7 @@
 use arc_swap::{ArcSwap, Guard};
 use bevy::ecs::resource::Resource;
 use objc2_core_foundation::{CFData, CFString};
+use objc2_foundation::NSProcessInfo;
 use regex::Regex;
 use serde::{Deserialize, Deserializer, de};
 use std::{
@@ -372,8 +373,17 @@ impl Config {
         self.options().border_width.unwrap_or(2.0).max(0.0)
     }
 
-    pub fn border_radius(&self) -> f64 {
-        self.options().border_radius.unwrap_or(10.0).max(0.0)
+    pub fn border_radius(&self) -> BorderRadiusOption {
+        let version = NSProcessInfo::processInfo().operatingSystemVersion();
+        match self
+            .options()
+            .border_radius
+            .unwrap_or(BorderRadiusOption::Auto)
+        {
+            BorderRadiusOption::Auto if version.majorVersion == 26 => BorderRadiusOption::Auto,
+            BorderRadiusOption::Value(value) => BorderRadiusOption::Value(value.max(0.0)),
+            _ => BorderRadiusOption::Value(10.0),
+        }
     }
 
     pub fn menubar_height(&self) -> Option<i32> {
@@ -557,6 +567,38 @@ pub enum SwipeGestureDirection {
     Natural,
     Reversed,
 }
+#[derive(Clone, Debug, PartialEq)]
+pub enum BorderRadiusOption {
+    Auto,
+    Value(f64),
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum BorderRadiusValue {
+    Number(f64),
+    Text(String),
+}
+
+fn deserialize_border_radius_option<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<BorderRadiusOption>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let input = Option::<BorderRadiusValue>::deserialize(deserializer)?;
+    input
+        .map(|value| match value {
+            BorderRadiusValue::Number(radius) => Ok(BorderRadiusOption::Value(radius)),
+            BorderRadiusValue::Text(value) if value.eq_ignore_ascii_case("auto") => {
+                Ok(BorderRadiusOption::Auto)
+            }
+            BorderRadiusValue::Text(value) => Err(de::Error::custom(format!(
+                "invalid border_radius value: {value}. Expected a number or \"auto\"",
+            ))),
+        })
+        .transpose()
+}
 
 /// `MainOptions` represents the primary configuration options for the window manager.
 /// These options control various behaviors such as mouse focus, gesture recognition, and window animation.
@@ -610,7 +652,8 @@ pub struct MainOptions {
     pub border_width: Option<f64>,
     /// Corner radius of the active window border.
     /// Default: 10.0.
-    pub border_radius: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_border_radius_option")]
+    pub border_radius: Option<BorderRadiusOption>,
     /// Override the system menubar height (in pixels).
     /// When set, this value is used instead of the height reported by macOS.
     pub menubar_height: Option<u16>,
@@ -1315,6 +1358,6 @@ fn test_config_defaults() {
     assert_eq!(config.border_color(), (1.0, 1.0, 1.0));
     assert_eq!(config.border_opacity(), 1.0);
     assert_eq!(config.border_width(), 2.0);
-    assert_eq!(config.border_radius(), 10.0);
+    assert_eq!(config.border_radius(), BorderRadiusOption::Auto);
     assert_eq!(config.menubar_height(), None);
 }

@@ -37,6 +37,8 @@ use crate::manager::{
 use crate::overlay::OverlayManager;
 use crate::platform::{PlatformCallbacks, WorkspaceId};
 
+const ORPHANED_SPACES_TIMEOUT_SEC: u64 = 30;
+
 /// Processes a single incoming `Event`. It dispatches various event types to the `WindowManager` or other internal handlers.
 /// This system reads `Event` messages and triggers appropriate Bevy events or modifies resources based on the event type.
 ///
@@ -460,24 +462,11 @@ pub(super) fn timeout_ticker(
     }
 }
 
-/// Re-parents orphaned workspace strips to the display that currently owns their space.
-///
-/// When a display is removed, its strips are detached (orphaned). macOS moves the spaces
-/// to remaining displays. This system queries `present_displays()` to find which display
-/// now owns each orphaned space and re-parents the strip directly to that display.
-///
-/// # Arguments
-///
-/// * `orphans` - A `Populated` query for `LayoutStrip` entities without a parent display.
-/// * `displays` - A query for all `Display` entities.
-/// * `windows` - A `Windows` system parameter for accessing window components.
-/// * `window_manager` - The `WindowManager` resource for querying current display/space assignments.
-/// * `commands` - Bevy commands to re-parent entities and remove timeouts.
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn find_orphaned_workspaces(
-    orphans: Populated<(&LayoutStrip, Entity, &Timeout), Without<ChildOf>>,
-    mut attached: Query<(&mut LayoutStrip, &ChildOf), With<ChildOf>>,
+    orphans: Populated<(&LayoutStrip, Entity, &Timeout, Option<&ChildOf>), With<Timeout>>,
+    mut attached: Query<(&mut LayoutStrip, &ChildOf), Without<Timeout>>,
     displays: Query<(&Display, Entity)>,
     windows: Windows,
     window_manager: Res<WindowManager>,
@@ -485,7 +474,26 @@ pub(super) fn find_orphaned_workspaces(
 ) {
     let present = window_manager.present_displays();
 
-    for (orphan, orphan_entity, timeout) in orphans {
+    for (orphan, orphan_entity, timeout, child) in orphans {
+        if orphan.len() == 0 {
+            if let Ok(mut cmd) = commands.get_entity(orphan_entity) {
+                cmd.try_despawn();
+            }
+            debug!("despawning empty orphan workspace {}", orphan.id());
+            continue;
+        }
+        if child.is_some() {
+            // Was reparented, remove timer.
+            if let Ok(mut cmd) = commands.get_entity(orphan_entity) {
+                cmd.try_remove::<Timeout>();
+            }
+            debug!(
+                "layout strip {} was re-parented, removing timeout.",
+                orphan.id()
+            );
+            continue;
+        }
+
         if timeout.timer.is_finished() {
             // Rescue windows from orphaned strips before despawning by floating them.
             debug!("Rescue windows from timed out orphan {}.", orphan.id());
@@ -527,6 +535,7 @@ pub(super) fn find_orphaned_workspaces(
         );
 
         let all_windows = orphan.all_windows();
+
         if let Some((mut target_strip, _)) = attached
             .iter_mut()
             .find(|(strip, child)| child.parent() == target_entity && strip.id() == orphan.id())
@@ -550,7 +559,7 @@ pub(super) fn find_orphaned_workspaces(
             orphan.id(),
             &all_windows,
             &windows,
-            target_display,
+            &target_display.bounds(),
             &window_manager,
             &mut commands,
         );
@@ -565,7 +574,7 @@ fn refresh_workspace_window_sizes(
     space_id: WorkspaceId,
     orphans: &[Entity],
     windows: &Windows,
-    display: &Display,
+    viewport: &IRect,
     window_manager: &WindowManager,
     commands: &mut Commands,
 ) {
@@ -575,23 +584,21 @@ fn refresh_workspace_window_sizes(
             warn!("getting windows in workspace: {err}");
         })
         .unwrap_or_default();
-    let viewport = display.bounds();
 
     // Resize windows for the new display dimensions.
     for &entity in orphans {
         if let Some(window) = windows.get(entity) {
             let width_ratio = windows.width_ratio(entity).unwrap_or(0.5);
-            let size = Size::new(
-                (f64::from(viewport.width()) * width_ratio) as i32,
-                viewport.height(),
-            );
-            debug!(
-                "refreshing ratio {:.1} for window {}: {size}",
-                width_ratio,
-                window.id(),
-            );
-            resize_entity(entity, size, commands);
-            in_workspace.retain(|window_id| *window_id != window.id());
+            if let Some(mut size) = windows.size(entity) {
+                size.x = (f64::from(viewport.width()) * width_ratio) as i32;
+                debug!(
+                    "refreshing ratio {:.1} for window {}: {size}",
+                    width_ratio,
+                    window.id(),
+                );
+                resize_entity(entity, size, commands);
+                in_workspace.retain(|window_id| *window_id != window.id());
+            }
         }
     }
 
@@ -1213,7 +1220,14 @@ pub(super) fn displays_rearranged(
     for event in messages.read() {
         match event {
             Event::DisplayAdded { display_id } => {
-                add_display(*display_id, &window_manager, &config, &mut commands);
+                add_display(
+                    *display_id,
+                    &workspaces,
+                    &windows,
+                    &window_manager,
+                    &config,
+                    &mut commands,
+                );
             }
             Event::DisplayRemoved { display_id } => {
                 remove_display(*display_id, &workspaces, &mut displays, &mut commands);
@@ -1237,12 +1251,14 @@ pub(super) fn displays_rearranged(
 
 fn add_display(
     display_id: CGDirectDisplayID,
-    window_manager: &Res<WindowManager>,
+    existing_strips: &Query<(&LayoutStrip, Entity, Option<&ChildOf>)>,
+    windows: &Windows,
+    window_manager: &WindowManager,
     config: &Config,
     commands: &mut Commands,
 ) {
     debug!("Display Added: {display_id:?}");
-    let Some((mut display, workspaces)) = window_manager
+    let Some((mut display, workspace_ids)) = window_manager
         .0
         .present_displays()
         .into_iter()
@@ -1253,18 +1269,18 @@ fn add_display(
     };
 
     display.set_menubar_height_override(config.menubar_height());
-    let origin = Position(display.bounds().min);
+    let display_bounds = display.bounds();
     let display_entity = commands.spawn(display).id();
 
-    // Do not try to look for orphaned workspaces here,
-    // because they may still be attached to their display.
-    for id in workspaces {
-        commands.spawn((
-            origin.clone(),
-            LayoutStrip::new(id),
-            ChildOf(display_entity),
-        ));
-    }
+    reparent_existing_workspaces(
+        &workspace_ids,
+        display_entity,
+        &display_bounds,
+        window_manager,
+        existing_strips,
+        windows,
+        commands,
+    );
 }
 
 fn remove_display(
@@ -1273,7 +1289,6 @@ fn remove_display(
     displays: &mut Query<(&mut Display, Entity)>,
     commands: &mut Commands,
 ) {
-    const ORPHANED_SPACES_TIMEOUT_SEC: u64 = 30;
     debug!("Display Removed: {display_id:?}");
     let Some((display, display_entity)) = displays
         .into_iter()
@@ -1333,7 +1348,7 @@ fn move_display(
         error!("Unable to find moved display!");
         return;
     };
-    let Some((moved_display, workspaces)) = window_manager
+    let Some((moved_display, workspace_ids)) = window_manager
         .0
         .present_displays()
         .into_iter()
@@ -1344,23 +1359,59 @@ fn move_display(
     *display = moved_display;
     display.set_menubar_height_override(config.menubar_height());
 
-    let moved_workspaces = existing_strips
-        .iter()
-        .filter(|(workspace, _, _)| workspaces.iter().any(|id| workspace.id() == *id));
-    for (strip, entity, _) in moved_workspaces {
-        if let Ok(mut cmd) = commands.get_entity(entity) {
-            cmd.try_remove::<Timeout>()
-                .try_remove::<ChildOf>()
-                .insert(ChildOf(display_entity));
+    reparent_existing_workspaces(
+        &workspace_ids,
+        display_entity,
+        &display.bounds(),
+        window_manager,
+        existing_strips,
+        windows,
+        commands,
+    );
+}
+
+fn reparent_existing_workspaces(
+    workspace_ids: &[WorkspaceId],
+    display_entity: Entity,
+    display_bounds: &IRect,
+    window_manager: &WindowManager,
+    existing_strips: &Query<(&LayoutStrip, Entity, Option<&ChildOf>)>,
+    windows: &Windows,
+    commands: &mut Commands,
+) {
+    // Verifies that a moved display has all the workspaces which it owns.
+    for &id in workspace_ids {
+        if let Some((strip, entity, child)) = existing_strips
+            .iter()
+            .find(|(strip, _, _)| strip.id() == id)
+        {
+            if child.is_some_and(|child| child.parent() != display_entity) {
+                // Re-parent this workspace
+                if let Ok(mut cmd) = commands.get_entity(entity) {
+                    debug!("reparenting workspace {id} to display {display_entity}");
+                    cmd.try_remove::<Timeout>()
+                        .try_remove::<ChildOf>()
+                        .insert(ChildOf(display_entity));
+                    refresh_workspace_window_sizes(
+                        id,
+                        &strip.all_windows(),
+                        windows,
+                        display_bounds,
+                        window_manager,
+                        commands,
+                    );
+                }
+            }
+        } else {
+            // New workspace.
+            let origin = Position(display_bounds.min);
+            debug!("new workspace {id} on display {display_entity}");
+            commands.spawn((
+                origin.clone(),
+                LayoutStrip::new(id),
+                ChildOf(display_entity),
+            ));
         }
-        refresh_workspace_window_sizes(
-            strip.id(),
-            &strip.all_windows(),
-            windows,
-            &display,
-            window_manager,
-            commands,
-        );
     }
 }
 

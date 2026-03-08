@@ -663,8 +663,8 @@ fn test_window_shuffle() {
     let top_edge = TEST_MENUBAR_HEIGHT + i32::from(PADDING_TOP);
     let left_edge = i32::from(PADDING_LEFT);
     let right_edge = TEST_DISPLAY_WIDTH - i32::from(PADDING_RIGHT);
-    let offscreen_right = TEST_DISPLAY_WIDTH - i32::from(PADDING_RIGHT.max(SLIVER_WIDTH));
-    let offscreen_left = i32::from(PADDING_RIGHT.max(SLIVER_WIDTH)) - TEST_WINDOW_WIDTH;
+    let offscreen_right = TEST_DISPLAY_WIDTH - i32::from(SLIVER_WIDTH);
+    let offscreen_left = i32::from(SLIVER_WIDTH) - TEST_WINDOW_WIDTH;
     let centered = (TEST_DISPLAY_WIDTH - TEST_WINDOW_WIDTH) / 2;
 
     let expected_positions_last = [
@@ -978,6 +978,104 @@ fn test_offscreen_windows_preserve_height() {
     let window_manager = MockWindowManager { windows };
     bevy.world_mut()
         .insert_resource(WindowManager(Box::new(window_manager)));
+
+    run_main_loop(&mut bevy, &internal_queue, &commands, check);
+}
+
+/// When `sliver_width` is smaller than `edge_padding`, the off-screen
+/// sliver must still be exactly `sliver_width` pixels from the real
+/// display edge. A previous bug used `max(sliver, pad) - pad`, which
+/// collapsed the sliver to `edge_padding` pixels when `pad > sliver`.
+#[test]
+fn test_sliver_smaller_than_edge_padding() {
+    const PADDING: u16 = 8;
+    const SLIVER: u16 = 1;
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 }, // Settle
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::First)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::Last)),
+        },
+    ];
+
+    let top_edge = TEST_MENUBAR_HEIGHT + i32::from(PADDING);
+    let right_edge = TEST_DISPLAY_WIDTH - i32::from(PADDING);
+    // With sliver < padding, off-screen positions are measured from
+    // the real display edge, so they go *into* the padding zone.
+    let offscreen_right = TEST_DISPLAY_WIDTH - i32::from(SLIVER);
+    let offscreen_left = i32::from(SLIVER) - TEST_WINDOW_WIDTH;
+
+    let left_edge = i32::from(PADDING);
+
+    // Focus first: windows 4,3 on-screen, 2 partial, 1,0 off-screen right.
+    let expected_first = [
+        (4, (left_edge, top_edge)),
+        (3, (left_edge + TEST_WINDOW_WIDTH, top_edge)),
+        (2, (left_edge + 2 * TEST_WINDOW_WIDTH, top_edge)),
+        (1, (offscreen_right, top_edge)),
+        (0, (offscreen_right, top_edge)),
+    ];
+
+    // Focus last: windows 0,1 on-screen, 2 partial, 3,4 off-screen left.
+    let expected_last = [
+        (4, (offscreen_left, top_edge)),
+        (3, (offscreen_left, top_edge)),
+        (2, (right_edge - 3 * TEST_WINDOW_WIDTH, top_edge)),
+        (1, (right_edge - 2 * TEST_WINDOW_WIDTH, top_edge)),
+        (0, (right_edge - TEST_WINDOW_WIDTH, top_edge)),
+    ];
+
+    let check = |iteration, world: &mut World| {
+        if iteration == 1 {
+            verify_window_positions(&expected_first, world);
+        } else if iteration == 2 {
+            verify_window_positions(&expected_last, world);
+        }
+    };
+
+    let mut bevy = setup_world();
+    let mock_app = setup_process(bevy.world_mut());
+    let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
+    let event_queue = internal_queue.clone();
+
+    let windows = Box::new(move |_| {
+        (0..5)
+            .map(|i| {
+                let origin = Origin::new(100 * i, 0);
+                let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+                let window = MockWindow::new(
+                    i,
+                    IRect {
+                        min: origin,
+                        max: origin + size,
+                    },
+                    event_queue.clone(),
+                    mock_app.clone(),
+                );
+                Window::new(Box::new(window))
+            })
+            .collect::<Vec<_>>()
+    });
+    let window_manager = MockWindowManager { windows };
+    bevy.world_mut()
+        .insert_resource(WindowManager(Box::new(window_manager)));
+
+    let config: Config = (
+        MainOptions {
+            sliver_width: Some(SLIVER),
+            padding_top: Some(PADDING),
+            padding_bottom: Some(PADDING),
+            padding_left: Some(PADDING),
+            padding_right: Some(PADDING),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+    bevy.insert_resource(config);
 
     run_main_loop(&mut bevy, &internal_queue, &commands, check);
 }

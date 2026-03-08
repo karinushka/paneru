@@ -521,7 +521,7 @@ fn full_width_window(
         return;
     }
 
-    let Some((frame, (window, entity))) = windows
+    let Some((frame, (_window, entity))) = windows
         .focused()
         .and_then(|(window, entity)| windows.frame(entity).zip(Some((window, entity))))
     else {
@@ -533,7 +533,6 @@ fn full_width_window(
         .actual_display_bounds(active_display.dock(), &config);
     let height = frame.height();
     let y = frame.min.y;
-    let h_pad = window.horizontal_padding();
 
     let (width, x) = if let Some(marker) = windows.full_width(entity) {
         let previous_ratio = marker.width_ratio;
@@ -561,10 +560,12 @@ fn full_width_window(
             width_ratio,
             was_stacked,
         });
-        (viewport.width() - 2 * h_pad, viewport.min.x)
+        // Logical frame spans the full viewport; reposition() and
+        // resize() handle h_pad conversion to CG coordinates.
+        (viewport.width(), viewport.min.x)
     };
 
-    reposition_entity(entity, Origin::new(x + h_pad, y), &mut commands);
+    reposition_entity(entity, Origin::new(x, y), &mut commands);
     resize_entity(entity, Size::new(width, height), &mut commands);
     reshuffle_around(entity, &mut commands);
 }

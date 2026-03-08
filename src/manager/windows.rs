@@ -11,6 +11,7 @@ use objc2_core_foundation::{
     CFArray, CFEqual, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize,
 };
 use std::ptr::null_mut;
+use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
 use stdext::function_name;
@@ -18,7 +19,9 @@ use tracing::{Level, debug, instrument, trace};
 
 use super::skylight::{
     _AXUIElementGetWindow, _SLPSSetFrontProcessWithOptions, AXUIElementCopyAttributeValue,
-    AXUIElementPerformAction, AXUIElementSetAttributeValue, SLPSPostEventRecordTo, SLSWindowIteratorAdvance, };
+    AXUIElementPerformAction, AXUIElementSetAttributeValue, SLPSPostEventRecordTo,
+    SLSWindowIteratorAdvance,
+};
 use crate::errors::{Error, Result};
 use crate::manager::{Origin, Size, irect_from};
 use crate::platform::{Pid, ProcessSerialNumber, WinID, macos_major_version};
@@ -103,6 +106,7 @@ pub struct WindowOS {
     frame: IRect,
     vertical_padding: i32,
     horizontal_padding: i32,
+    border_radius: OnceLock<Option<f64>>,
 }
 
 impl WindowOS {
@@ -124,6 +128,7 @@ impl WindowOS {
             frame: IRect::default(),
             vertical_padding: 0,
             horizontal_padding: 0,
+            border_radius: OnceLock::new(),
         };
 
         if window.is_unknown() {
@@ -494,31 +499,36 @@ impl WindowApi for WindowOS {
     fn vertical_padding(&self) -> i32 {
         self.vertical_padding
     }
+
     // Based on:
     // - https://github.com/y3owk1n/rift/blob/cca067145f0282b532e848bb63d26a38c61f3c14/src/sys/window_server.rs#L175
     // - https://github.com/FelixKratz/JankyBorders/blob/a56a76a8a6ed77325f03655b23fcf525144d120b/src/windows.c#L67
+    #[allow(clippy::cast_precision_loss)]
     fn border_radius(&self) -> Option<f64> {
-        let iterator = super::window_iterator_for_id(self.id)?;
-        if !unsafe { SLSWindowIteratorAdvance(&raw const *iterator) } {
-            return None;
-        }
-
-        let radii_ref = unsafe {
-            let s = c"SLSWindowIteratorGetCornerRadii";
-            let p = libc::dlsym(libc::RTLD_DEFAULT, s.as_ptr());
-            if p.is_null() {
+        *self.border_radius.get_or_init(|| {
+            let iterator = super::window_iterator_for_id(self.id)?;
+            if !unsafe { SLSWindowIteratorAdvance(&raw const *iterator) } {
                 return None;
             }
-            let f: unsafe extern "C" fn(*const CFType) -> *mut CFArray<CFNumber> =
-                std::mem::transmute(p);
-            f(&raw const *iterator)
-        };
-        let radii: CFRetained<CFArray<CFNumber>> =
-            unsafe { CFRetained::from_raw(NonNull::new(radii_ref)?) };
-        if radii.is_empty() {
-            return None;
-        }
-        // Get first corner radius (usually all corners are the same)
-        radii.get(0)?.as_i64().map(|v| v as f64)
+
+            let radii_ref = unsafe {
+                // Load the function dynamicaly, because it exists only on macOS 26.x
+                let s = c"SLSWindowIteratorGetCornerRadii";
+                let p = libc::dlsym(libc::RTLD_DEFAULT, s.as_ptr());
+                if p.is_null() {
+                    return None;
+                }
+                let f: unsafe extern "C" fn(*const CFType) -> *mut CFArray<CFNumber> =
+                    std::mem::transmute(p);
+                f(&raw const *iterator)
+            };
+            let radii: CFRetained<CFArray<CFNumber>> =
+                unsafe { CFRetained::from_raw(NonNull::new(radii_ref)?) };
+            if radii.is_empty() {
+                return None;
+            }
+            // Get first corner radius (usually all corners are the same)
+            radii.get(0)?.as_i64().map(|v| v as f64)
+        })
     }
 }

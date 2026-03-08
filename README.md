@@ -320,8 +320,8 @@ scripts, `cron` jobs, or other automation tools:
 
 ## Future Enhancements
 
-- More commands for manipulating windows: fullscreen, finegrained size adjustments, etc.
-- Scriptability. A nice feature would be to use Lua for configuration and simple scripting,
+- More commands for manipulating windows: finegrained size adjustments, touchpad resizing, etc.
+- Scriptability. For example using Lua for configuration or automation of window handling,
   like triggering and positioning specific windows or applications.
 
 ## Communication

@@ -20,27 +20,30 @@ lto = true
 
 [dependencies]
 accessibility-sys = "0.2.0"
-arc-swap = "1.8.2"
+arc-swap = "1.9.0"
 bevy = { version = "0.18.1", default-features = false, features = [
   "multi_threaded",
 ] }
 bitflags = "2.11.0"
 chrono = "0.4.44"
-clap = { version = "4.5.60", features = ["cargo", "derive"] }
+clap = { version = "4.6.0", features = ["cargo", "derive"] }
 derive_more = { version = "2.1.1", features = ["deref", "deref_mut"] }
 embed_plist = "1.2.2"
 launchctl = "0.3.2"
-libc = "0.2.182"
+libc = "0.2.183"
 notify = { version = "8.2.0", features = ["macos_fsevent"] }
 objc2 = { version = "0.6.4", features = ["catch-all", "exception"] }
 objc2-app-kit = "0.3.2"
 objc2-core-foundation = { version = "0.3.2", features = ["CFRunLoop"] }
 objc2-core-graphics = "0.3.2"
-objc2-foundation = { version = "0.3.2", features = ["NSNotification", "NSProcessInfo"] }
+objc2-foundation = { version = "0.3.2", features = [
+  "NSNotification",
+  "NSProcessInfo",
+] }
 regex = "1.12.3"
 scopeguard = "1.2.0"
 serde = { version = "1.0.228", features = ["derive"] }
 stdext = "0.3.3"
-toml = "1.0.6"
+toml = "1.1.0"
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

@@ -224,11 +224,6 @@ impl ActiveDisplayMut<'_, '_> {
         self.display.2
     }
 
-    /// Returns the `CGDirectDisplayID` of the active display.
-    pub fn id(&self) -> CGDirectDisplayID {
-        self.display().id()
-    }
-
     /// Returns an iterator over mutable references to all other displays (non-active).
     pub fn other(&mut self) -> impl Iterator<Item = Mut<'_, Display>> {
         self.other_displays.iter_mut()

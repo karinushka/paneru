@@ -701,7 +701,7 @@ pub(super) fn window_focused_trigger(
         {
             let center = active_display.bounds().center();
             origin.x = center.x - size.x / 2;
-            reposition_entity(entity, origin, active_display.id(), &mut commands);
+            reposition_entity(entity, origin, &mut commands);
         }
         reshuffle_around(entity, &mut commands);
     }
@@ -910,7 +910,6 @@ pub(super) fn window_unmanaged_trigger(
         return;
     };
     let display_bounds = active_display.bounds();
-    let display_id = active_display.id();
     let active_strip = active_display.active_strip();
 
     match marker {
@@ -934,8 +933,8 @@ pub(super) fn window_unmanaged_trigger(
                 let y = (f64::from(display_bounds.height()) * ry) as i32;
                 let w = (f64::from(display_bounds.width()) * rw) as i32;
                 let h = (f64::from(display_bounds.height()) * rh) as i32;
-                reposition_entity(entity, Origin::new(x, y), display_id, &mut commands);
-                resize_entity(entity, Size::new(w, h), display_id, &mut commands);
+                reposition_entity(entity, Origin::new(x, y), &mut commands);
+                resize_entity(entity, Size::new(w, h), &mut commands);
             } else {
                 let max_width = display_bounds.width() * UNMANAGED_MAX_SCREEN_RATIO_NUM
                     / UNMANAGED_MAX_SCREEN_RATIO_DEN;
@@ -955,12 +954,11 @@ pub(super) fn window_unmanaged_trigger(
                     resize_entity(
                         entity,
                         Size::new(target_frame.width(), target_frame.height()),
-                        display_id,
                         &mut commands,
                     );
                 }
                 if target_frame.min != frame.min {
-                    reposition_entity(entity, target_frame.min, display_id, &mut commands);
+                    reposition_entity(entity, target_frame.min, &mut commands);
                 }
             }
 

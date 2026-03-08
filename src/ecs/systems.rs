@@ -590,7 +590,7 @@ fn refresh_workspace_window_sizes(
                 width_ratio,
                 window.id(),
             );
-            resize_entity(entity, size, display.id(), commands);
+            resize_entity(entity, size, commands);
             in_workspace.retain(|window_id| *window_id != window.id());
         }
     }
@@ -606,7 +606,7 @@ fn refresh_workspace_window_sizes(
     });
     for window_entity in floating {
         debug!("repositioning floating window {window_entity}");
-        reposition_entity(window_entity, viewport.min, display.id(), commands);
+        reposition_entity(window_entity, viewport.min, commands);
     }
 }
 
@@ -710,19 +710,17 @@ pub(super) fn workspace_change_watcher(
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn animate_entities(
     mut animate: Populated<(&mut Position, Entity, &RepositionMarker)>,
-    displays: Query<&Display>,
+    active_display: ActiveDisplay,
     time: Res<Time>,
     config: Res<Config>,
     commands: ParallelCommands,
 ) {
     let move_ratio = config.animation_speed() * time.delta_secs_f64();
+    let move_delta = move_ratio * f64::from(active_display.display().width());
 
-    animate.par_iter_mut().for_each(
-        |(mut position, entity, RepositionMarker { origin, display_id })| {
-            let Some(display) = displays.iter().find(|display| display.id() == *display_id) else {
-                return;
-            };
-            let move_delta = move_ratio * f64::from(display.width());
+    animate
+        .par_iter_mut()
+        .for_each(|(mut position, entity, RepositionMarker(origin))| {
             let delta = position
                 .0
                 .as_vec2()
@@ -739,8 +737,7 @@ pub(super) fn animate_entities(
                     command.entity(entity).try_remove::<RepositionMarker>();
                 });
             }
-        },
-    );
+        });
 }
 
 /// Animates window resizing.
@@ -757,15 +754,17 @@ pub(super) fn animate_entities(
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn animate_resize_entities(
     mut animate: Populated<(&mut Bounds, Entity, &ResizeMarker, Has<RepositionMarker>)>,
-    displays: Query<&Display>,
+    active_display: ActiveDisplay,
     time: Res<Time>,
     config: Res<Config>,
     commands: ParallelCommands,
 ) {
     let move_ratio = config.animation_speed() * time.delta_secs_f64();
+    let move_delta = move_ratio * f64::from(active_display.display().width());
 
-    animate.par_iter_mut().for_each(
-        |(mut bounds, entity, ResizeMarker { size, display_id }, moving)| {
+    animate
+        .par_iter_mut()
+        .for_each(|(mut bounds, entity, ResizeMarker(size), moving)| {
             if moving {
                 // Defer resize while the window is being repositioned so it doesn't extend past
                 // the screen edge before the move lands.
@@ -777,11 +776,7 @@ pub(super) fn animate_resize_entities(
                     return;
                 }
             }
-            let Some(display) = displays.iter().find(|display| display.id() == *display_id) else {
-                return;
-            };
 
-            let move_delta = move_ratio * f64::from(display.width());
             let delta = bounds
                 .0
                 .as_vec2()
@@ -798,8 +793,7 @@ pub(super) fn animate_resize_entities(
                     command.entity(entity).try_remove::<ResizeMarker>();
                 });
             }
-        },
-    );
+        });
 }
 
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
@@ -853,7 +847,7 @@ pub(super) fn apply_scroll_physics(
         scroll.velocity *= (-decay_rate * dt).exp();
     }
 
-    let get_window_frame = |entity| get_moving_window_frame(entity, active_display.0, &windows);
+    let get_window_frame = |entity| get_moving_window_frame(entity, &windows);
     let viewport = active_display
         .0
         .actual_display_bounds(active_display.1, config.config());
@@ -992,7 +986,7 @@ fn expose_window(
     let display_bounds = active_display
         .display()
         .actual_display_bounds(active_display.dock(), config);
-    let mut frame = get_moving_window_frame(entity, active_display.display(), windows)?;
+    let mut frame = get_moving_window_frame(entity, windows)?;
     let size = frame.size();
 
     if frame.max.x > display_bounds.max.x {
@@ -1015,8 +1009,7 @@ pub(super) fn reshuffle_layout_strip(
     config: Res<Config>,
     mut commands: Commands,
 ) {
-    let get_window_frame =
-        |entity| get_moving_window_frame(entity, active_display.display(), &windows);
+    let get_window_frame = |entity| get_moving_window_frame(entity, &windows);
 
     for entity in marker {
         debug!("reshuffle_layout_strip: triggered for entity {entity}");
@@ -1064,7 +1057,6 @@ pub(super) fn reshuffle_layout_strip(
         reposition_entity(
             active_display.active_strip_entity(),
             viewport_position.with_x(viewport_x),
-            active_display.id(),
             &mut commands,
         );
     }
@@ -1420,27 +1412,19 @@ pub(crate) fn gather_initial_processes(
 }
 
 #[instrument(level = Level::TRACE, skip_all, fields(entity), ret)]
-fn get_moving_window_frame(
-    entity: Entity,
-    active_display: &Display,
-    windows: &Windows,
-) -> Option<IRect> {
+fn get_moving_window_frame(entity: Entity, windows: &Windows) -> Option<IRect> {
     windows
         .positioning(entity)
         .map(|(origin, size, _, reposition, resize)| {
             let size = size.0;
             let mut frame = IRect::from_corners(origin.0, origin.0 + size);
 
-            if let Some(reposition) = reposition
-                && reposition.display_id == active_display.id()
-            {
-                frame.min = reposition.origin;
+            if let Some(reposition) = reposition {
+                frame.min = reposition.0;
                 frame.max = frame.min + size;
             }
-            if let Some(resize) = resize
-                && resize.display_id == active_display.id()
-            {
-                frame.max = frame.min + resize.size;
+            if let Some(resize) = resize {
+                frame.max = frame.min + resize.0;
             }
             frame
         })
@@ -1468,10 +1452,10 @@ pub(super) fn position_layout_strip(
             .ok()?;
         let (moving, sizing) = position.get(entity).ok()?;
         if let Some(moving) = moving {
-            frame.min = moving.origin;
+            frame.min = moving.0;
         }
         if let Some(sizing) = sizing {
-            frame.max = frame.min + sizing.size;
+            frame.max = frame.min + sizing.0;
         }
         Some(frame)
     };

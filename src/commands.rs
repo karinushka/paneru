@@ -412,7 +412,7 @@ fn command_center_window(
     {
         let center = active_display.bounds().center().x;
         origin.x = center - size.x / 2;
-        reposition_entity(entity, origin, active_display.id(), &mut commands);
+        reposition_entity(entity, origin, &mut commands);
         window_manager.center_mouse(None, &active_display.bounds());
         reshuffle_around(entity, &mut commands);
     }
@@ -474,7 +474,7 @@ fn resize_window(
 
     if frame.max.x > active_display.bounds().max.x - pad_right {
         frame.min.x = active_display.bounds().max.x - pad_right - size.x;
-        reposition_entity(entity, frame.min, active_display.id(), &mut commands);
+        reposition_entity(entity, frame.min, &mut commands);
     }
 
     // Resize all windows in the column so stacked siblings share the new width.
@@ -488,17 +488,12 @@ fn resize_window(
             if sibling != entity
                 && let Some(size) = windows.size(sibling)
             {
-                resize_entity(
-                    sibling,
-                    size.with_x(new_width),
-                    active_display.id(),
-                    &mut commands,
-                );
+                resize_entity(sibling, size.with_x(new_width), &mut commands);
             }
         }
     }
 
-    resize_entity(entity, size, active_display.id(), &mut commands);
+    resize_entity(entity, size, &mut commands);
     reshuffle_around(entity, &mut commands);
 }
 
@@ -567,18 +562,8 @@ fn full_width_window(
         (viewport.width() - 2 * h_pad, viewport.min.x)
     };
 
-    reposition_entity(
-        entity,
-        Origin::new(x + h_pad, y),
-        active_display.id(),
-        &mut commands,
-    );
-    resize_entity(
-        entity,
-        Size::new(width, height),
-        active_display.id(),
-        &mut commands,
-    );
+    reposition_entity(entity, Origin::new(x + h_pad, y), &mut commands);
+    resize_entity(entity, Size::new(width, height), &mut commands);
     reshuffle_around(entity, &mut commands);
 }
 
@@ -669,7 +654,7 @@ fn to_next_display(
         return;
     };
     let dest = other.bounds().min.with_x(center - size.x / 2);
-    reposition_entity(entity, dest, other.id(), &mut commands);
+    reposition_entity(entity, dest, &mut commands);
     reshuffle_around(entity, &mut commands);
 
     window_manager.center_mouse(None, &other.bounds());
@@ -772,12 +757,7 @@ fn equalize_column(
 
         for &entity in &stack {
             if let Some(size) = windows.size(entity) {
-                resize_entity(
-                    entity,
-                    size.with_y(equal_height),
-                    active_display.id(),
-                    &mut commands,
-                );
+                resize_entity(entity, size.with_y(equal_height), &mut commands);
             }
         }
     }

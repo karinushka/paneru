@@ -382,7 +382,7 @@ impl Config {
         {
             BorderRadiusOption::Auto if version.majorVersion == 26 => BorderRadiusOption::Auto,
             BorderRadiusOption::Value(value) => BorderRadiusOption::Value(value.max(0.0)),
-            _ => BorderRadiusOption::Value(10.0),
+            BorderRadiusOption::Auto => BorderRadiusOption::Value(10.0),
         }
     }
 

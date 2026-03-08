@@ -1534,14 +1534,19 @@ pub(super) fn position_layout_strip(
                 .unwrap_or(0);
 
             let width = frame.width();
-            if frame.max.x <= viewport.min.x {
-                // Window hidden to the left
-                frame.min.x += offscreen_sliver_width.max(pad_left) - pad_left;
-                frame.min.x += h_pad;
-            } else if frame.min.x >= viewport.max.x {
-                // Window hidden to the right
-                frame.min.x -= offscreen_sliver_width.max(pad_right) - pad_right;
-                frame.min.x -= h_pad;
+            if frame.max.x <= viewport.min.x + h_pad {
+                // Window hidden to the left — position so exactly
+                // sliver_width CG pixels are visible from the real
+                // display edge.  The +h_pad accounts for the gap that
+                // reposition() adds, which can leave a window just
+                // inside the viewport edge while its CG frame is fully
+                // past it.
+                frame.min.x = viewport.min.x - width
+                    + offscreen_sliver_width - pad_left + h_pad;
+            } else if frame.min.x >= viewport.max.x - h_pad {
+                // Window hidden to the right — mirror of above.
+                frame.min.x = viewport.max.x
+                    - offscreen_sliver_width + pad_right - h_pad;
             }
             frame.max.x = frame.min.x + width;
 

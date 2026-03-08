@@ -160,21 +160,12 @@ pub struct FreshMarker;
 pub struct ExistingMarker;
 
 /// Component representing a request to reposition a window.
-#[derive(Component)]
-pub struct RepositionMarker {
-    /// The new origin (x, y coordinates) for the window.
-    pub origin: Origin,
-    /// The ID of the display the window should be moved to.
-    pub display_id: CGDirectDisplayID,
-}
+#[derive(Component, Debug, Deref, DerefMut)]
+pub struct RepositionMarker(pub Origin);
 
 /// Component representing a request to resize a window.
-#[derive(Component)]
-pub struct ResizeMarker {
-    /// The new size (width, height) for the window.
-    pub size: Size,
-    pub display_id: CGDirectDisplayID,
-}
+#[derive(Component, Debug, Deref, DerefMut)]
+pub struct ResizeMarker(pub Size);
 
 /// Marker component indicating that a window is currently being dragged by the mouse.
 #[derive(Component)]
@@ -333,29 +324,19 @@ pub struct LocateDockTrigger(pub Entity);
 pub struct SendMessageTrigger(pub Event);
 
 #[instrument(level = Level::TRACE, skip(commands))]
-pub fn reposition_entity(
-    entity: Entity,
-    origin: Origin,
-    display_id: CGDirectDisplayID,
-    commands: &mut Commands,
-) {
+pub fn reposition_entity(entity: Entity, origin: Origin, commands: &mut Commands) {
     if let Ok(mut entity_cmmands) = commands.get_entity(entity) {
-        entity_cmmands.try_insert(RepositionMarker { origin, display_id });
+        entity_cmmands.try_insert(RepositionMarker(origin));
     }
 }
 
 #[instrument(level = Level::TRACE, skip(commands))]
-pub fn resize_entity(
-    entity: Entity,
-    size: Size,
-    display_id: CGDirectDisplayID,
-    commands: &mut Commands,
-) {
+pub fn resize_entity(entity: Entity, size: Size, commands: &mut Commands) {
     if size.x <= 0 || size.y <= 0 {
         return;
     }
     if let Ok(mut entity_cmmands) = commands.get_entity(entity) {
-        entity_cmmands.try_insert(ResizeMarker { size, display_id });
+        entity_cmmands.try_insert(ResizeMarker(size));
     }
 }
 

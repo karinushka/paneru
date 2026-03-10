@@ -6,7 +6,6 @@ use stdext::function_name;
 use tracing::{Level, debug, instrument};
 
 use crate::errors::{Error, Result};
-use crate::manager::Origin;
 use crate::platform::WorkspaceId;
 
 /// Represents a single panel within a `LayoutStrip`, which can either hold a single window or a stack of windows.
@@ -316,11 +315,61 @@ impl LayoutStrip {
         self.id
     }
 
-    #[instrument(level = Level::TRACE, skip_all)]
-    pub fn absolute_positions<W>(
+    #[instrument(level = Level::TRACE, skip_all, fields(offset))]
+    pub fn relative_positions<W>(
         &self,
+        layout_strip_height: i32,
         get_window_frame: &W,
-    ) -> impl Iterator<Item = (&Column, i32)>
+    ) -> impl Iterator<Item = (Entity, IRect)>
+    where
+        W: Fn(Entity) -> Option<IRect>,
+    {
+        const MIN_WINDOW_HEIGHT: i32 = 200;
+
+        self.column_positions(get_window_frame)
+            .filter_map(move |(column, position)| {
+                let windows = match column {
+                    Column::Single(entity) => vec![*entity],
+                    Column::Stack(stack) => stack.clone(),
+                };
+                let current_heights = windows
+                    .iter()
+                    .filter_map(|&entity| get_window_frame(entity))
+                    .map(|frame| frame.height())
+                    .collect::<Vec<_>>();
+                let heights =
+                    binpack_heights(&current_heights, MIN_WINDOW_HEIGHT, layout_strip_height)?;
+
+                let column_width = windows
+                    .first()
+                    .and_then(|&entity| get_window_frame(entity))
+                    .map(|frame| frame.width())?;
+
+                let mut next_y = 0;
+                let frames = windows
+                    .into_iter()
+                    .zip(heights)
+                    .filter_map(|(entity, height)| {
+                        let mut frame = get_window_frame(entity)?;
+                        frame.min.x = position;
+                        frame.max.x = frame.min.x + column_width;
+
+                        frame.min.y = next_y;
+                        frame.max.y = frame.min.y + height;
+
+                        next_y = frame.max.y;
+
+                        Some((entity, frame))
+                    })
+                    .collect::<Vec<_>>();
+
+                Some(frames)
+            })
+            .flatten()
+    }
+
+    #[instrument(level = Level::TRACE, skip_all)]
+    pub fn column_positions<W>(&self, get_window_frame: &W) -> impl Iterator<Item = (&Column, i32)>
     where
         W: Fn(Entity) -> Option<IRect>,
     {
@@ -341,61 +390,6 @@ impl LayoutStrip {
                 left_edge += frame.width();
                 (column, temp)
             })
-    }
-
-    #[instrument(level = Level::TRACE, skip_all, fields(offset))]
-    pub fn layout_to_viewport<W>(
-        &self,
-        origin: Origin,
-        viewport: &IRect,
-        get_window_frame: &W,
-    ) -> impl Iterator<Item = (Entity, IRect)>
-    where
-        W: Fn(Entity) -> Option<IRect>,
-    {
-        const MIN_WINDOW_HEIGHT: i32 = 200;
-
-        self.absolute_positions(get_window_frame)
-            .filter_map(move |(column, position)| {
-                let windows = match column {
-                    Column::Single(entity) => vec![*entity],
-                    Column::Stack(stack) => stack.clone(),
-                };
-                let current_heights = windows
-                    .iter()
-                    .filter_map(|&entity| get_window_frame(entity))
-                    .map(|frame| frame.height())
-                    .collect::<Vec<_>>();
-                let heights =
-                    binpack_heights(&current_heights, MIN_WINDOW_HEIGHT, viewport.height())?;
-
-                let column_width = windows
-                    .first()
-                    .and_then(|&entity| get_window_frame(entity))
-                    .map(|frame| frame.width())?;
-
-                let top_left = origin.x + position;
-                let mut next_y = viewport.min.y;
-                let frames = windows
-                    .into_iter()
-                    .zip(heights)
-                    .filter_map(|(entity, height)| {
-                        let mut frame = get_window_frame(entity)?;
-                        frame.min.x = top_left.clamp(viewport.min.x - column_width, viewport.max.x);
-                        frame.max.x = frame.min.x + column_width;
-
-                        frame.min.y = next_y;
-                        frame.max.y = frame.min.y + height;
-
-                        next_y = frame.max.y;
-
-                        Some((entity, frame))
-                    })
-                    .collect::<Vec<_>>();
-
-                Some(frames)
-            })
-            .flatten()
     }
 
     pub fn above(&self, entity: Entity) -> Option<Entity> {
@@ -577,14 +571,13 @@ mod tests {
         strip.append(entities[3]);
 
         _ = strip.stack(entities[2]);
-        let viewport = IRect::new(0, 0, 600, 500);
         let get_window_frame = |_| Some(sizes[0]);
         let out = strip
-            .layout_to_viewport(Origin::default().with_x(-50), &viewport, &get_window_frame)
+            .relative_positions(500, &get_window_frame)
             .collect::<Vec<_>>();
 
         let xpos = out.iter().map(|(_, frame)| frame.min.x).collect::<Vec<_>>();
-        assert_eq!(xpos, vec![-50, 250, 250, 550]);
+        assert_eq!(xpos, vec![0, 300, 300, 600]);
 
         let height = out
             .iter()
@@ -604,11 +597,8 @@ mod tests {
             strip.append(e);
         }
 
-        let viewport = IRect::new(0, 0, 900, 800);
-        let frame = |_| Some(IRect::new(0, 0, 300, 400));
-        let out: Vec<_> = strip
-            .layout_to_viewport(Origin::default(), &viewport, &frame)
-            .collect();
+        let get_window_frame = |_| Some(IRect::new(0, 0, 300, 400));
+        let out: Vec<_> = strip.relative_positions(800, &get_window_frame).collect();
 
         assert_eq!(out.len(), 3);
         for (_, f) in &out {
@@ -636,9 +626,8 @@ mod tests {
         strip.stack(entities[1]).unwrap();
         strip.stack(entities[2]).unwrap();
 
-        let viewport = IRect::new(0, 0, 800, 600);
         // Give different heights; top window (e0) is 400px wide, others 300px.
-        let frame = |e: Entity| {
+        let get_window_frame = |e: Entity| {
             if e == entities[0] {
                 Some(IRect::new(0, 0, 400, 200))
             } else if e == entities[1] || e == entities[2] {
@@ -648,9 +637,7 @@ mod tests {
             }
         };
 
-        let out: Vec<_> = strip
-            .layout_to_viewport(Origin::default(), &viewport, &frame)
-            .collect();
+        let out: Vec<_> = strip.relative_positions(600, &get_window_frame).collect();
         assert_eq!(out.len(), 4);
 
         // All stacked windows use the top window's width (400).
@@ -688,47 +675,6 @@ mod tests {
         assert_eq!(e3_frame.height(), 600);
     }
 
-    /// Windows scrolled far off-screen are clamped to show a 10px sliver.
-    #[test]
-    fn test_layout_offscreen_sliver_clamping() {
-        let mut world = World::new();
-        let entities = world.spawn_batch(vec![(), (), ()]).collect::<Vec<Entity>>();
-
-        let mut strip = LayoutStrip::default();
-        for &e in &entities {
-            strip.append(e);
-        }
-
-        let viewport = IRect::new(0, 0, 600, 400);
-        let frame = |_| Some(IRect::new(0, 0, 300, 300));
-
-        // Places the layout far to the right,
-        // windows should clamp to the right side of the display.
-        let out: Vec<_> = strip
-            .layout_to_viewport(Origin::default().with_x(5000), &viewport, &frame)
-            .collect();
-
-        for (_, f) in &out {
-            assert!(
-                f.min.x >= viewport.max.x,
-                "window should be clamped to the right side",
-            );
-        }
-
-        // Places the layout far to the left,
-        // windows should clamp to the left side of the display.
-        let out: Vec<_> = strip
-            .layout_to_viewport(Origin::default().with_x(-5000), &viewport, &frame)
-            .collect();
-
-        for (_, f) in &out {
-            assert!(
-                f.max.x <= viewport.min.x,
-                "window should be clamped to the right side",
-            );
-        }
-    }
-
     /// Unstacking a window from a stack gives it its own column with full height.
     #[test]
     fn test_layout_unstack_gives_full_height() {
@@ -742,13 +688,10 @@ mod tests {
         // [Stack(e0, e1), Single(e2)]
         strip.stack(entities[1]).unwrap();
 
-        let viewport = IRect::new(0, 0, 600, 500);
-        let frame = |_| Some(IRect::new(0, 0, 300, 250));
+        let get_window_frame = |_| Some(IRect::new(0, 0, 300, 250));
 
         // Before unstack: e0 and e1 share 500px height.
-        let out: Vec<_> = strip
-            .layout_to_viewport(Origin::default(), &viewport, &frame)
-            .collect();
+        let out: Vec<_> = strip.relative_positions(500, &get_window_frame).collect();
         let e1_height = out
             .iter()
             .find(|(e, _)| *e == entities[1])
@@ -761,9 +704,7 @@ mod tests {
         strip.unstack(entities[1]).unwrap();
         assert_eq!(strip.len(), 3);
 
-        let out: Vec<_> = strip
-            .layout_to_viewport(Origin::default(), &viewport, &frame)
-            .collect();
+        let out: Vec<_> = strip.relative_positions(500, &get_window_frame).collect();
         for (_, f) in &out {
             assert_eq!(
                 f.height(),
@@ -783,32 +724,25 @@ mod tests {
         strip.append(entities[0]);
         strip.append(entities[1]);
 
-        let viewport = IRect::new(0, 0, 600, 500);
-        let frame = |_| Some(IRect::new(0, 0, 300, 250));
+        let get_window_frame = |_| Some(IRect::new(0, 0, 300, 250));
 
         // Stack: [Stack(e0, e1)]
         strip.stack(entities[1]).unwrap();
-        let out: Vec<_> = strip
-            .layout_to_viewport(Origin::default(), &viewport, &frame)
-            .collect();
+        let out: Vec<_> = strip.relative_positions(500, &get_window_frame).collect();
         let heights: Vec<_> = out.iter().map(|(_, f)| f.height()).collect();
         assert_eq!(heights.iter().sum::<i32>(), 500);
         assert_eq!(heights.len(), 2);
 
         // Unstack: [Single(e0), Single(e1)]
         strip.unstack(entities[1]).unwrap();
-        let out: Vec<_> = strip
-            .layout_to_viewport(Origin::default(), &viewport, &frame)
-            .collect();
+        let out: Vec<_> = strip.relative_positions(500, &get_window_frame).collect();
         for (_, f) in &out {
             assert_eq!(f.height(), 500);
         }
 
         // Re-stack: [Stack(e0, e1)] — e1 stacks onto left neighbor e0
         strip.stack(entities[1]).unwrap();
-        let out: Vec<_> = strip
-            .layout_to_viewport(Origin::default(), &viewport, &frame)
-            .collect();
+        let out: Vec<_> = strip.relative_positions(500, &get_window_frame).collect();
         let heights: Vec<_> = out.iter().map(|(_, f)| f.height()).collect();
         assert_eq!(heights.iter().sum::<i32>(), 500);
         assert_eq!(heights.len(), 2);

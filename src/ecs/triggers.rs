@@ -24,8 +24,8 @@ use crate::commands::ON_FULLSCREEN_SPACE;
 use crate::config::{Config, WindowParams};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, Bounds, LocateDockTrigger, Position, Scrolling, SendMessageTrigger,
-    WidthRatio, reposition_entity, reshuffle_around, resize_entity,
+    ActiveWorkspaceMarker, Bounds, LayoutPosition, LocateDockTrigger, Position, Scrolling,
+    SendMessageTrigger, WidthRatio, reposition_entity, reshuffle_around, resize_entity,
 };
 use crate::errors::Result;
 use crate::events::Event;
@@ -1143,6 +1143,10 @@ pub(super) fn spawn_window_trigger(
             bundle_id,
         );
 
+        let Ok(frame) = window.update_frame().inspect_err(|err| error!("{err}")) else {
+            continue;
+        };
+
         let title = window.title().unwrap_or_default();
         let properties = config.find_window_properties(&title, bundle_id);
         if !properties.is_empty() {
@@ -1157,13 +1161,20 @@ pub(super) fn spawn_window_trigger(
         );
 
         // Insert the window into the internal Bevy state.
-        let frame = window.frame();
         let position = Position(frame.min);
         let bounds = Bounds(Size::new(frame.width(), frame.height()));
         let width_ratio =
             WidthRatio(f64::from(frame.width()) / f64::from(active_display.bounds().width()));
+        let layout_position = LayoutPosition::default();
         let entity = commands
-            .spawn((position, bounds, width_ratio, window, ChildOf(app_entity)))
+            .spawn((
+                position,
+                bounds,
+                width_ratio,
+                window,
+                layout_position,
+                ChildOf(app_entity),
+            ))
             .id();
 
         apply_window_properties(
@@ -1213,8 +1224,6 @@ fn apply_window_defaults(
         }
         return;
     }
-
-    _ = window.update_frame().inspect_err(|err| error!("{err}"));
 
     // Apply configured width AFTER update_frame so it isn't overwritten.
     // Use padded display width (matching window_resize command behavior).

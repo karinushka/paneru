@@ -71,7 +71,6 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::window_update_frame,
             systems::displays_rearranged,
             systems::reposition_dragged_window,
-            systems::reshuffle_layout_strip,
             systems::find_orphaned_workspaces
                 .after(systems::displays_rearranged)
                 .run_if(on_timer(Duration::from_millis(
@@ -79,6 +78,14 @@ pub fn register_systems(app: &mut bevy::app::App) {
                 ))),
             systems::cleanup_on_exit,
             systems::swipe_gesture.run_if(resource_exists_and_equals(MissionControlActive(false))),
+            systems::layout_sizes_changed,
+            (
+                systems::layout_strip_changed,
+                systems::reshuffle_layout_strip,
+                systems::position_layout_strips,
+                systems::position_layout_windows,
+            )
+                .chain(),
         ),
     );
     app.add_systems(
@@ -95,9 +102,8 @@ pub fn register_systems(app: &mut bevy::app::App) {
     app.add_systems(
         PostUpdate,
         (
-            systems::position_layout_strip,
-            systems::animate_entities.after(systems::position_layout_strip),
-            systems::animate_resize_entities.after(systems::position_layout_strip),
+            systems::animate_entities,
+            systems::animate_resize_entities.after(systems::position_layout_windows),
             systems::update_overlays
                 .after(systems::animate_entities)
                 .after(systems::animate_resize_entities)
@@ -204,6 +210,9 @@ impl Default for Scrolling {
         }
     }
 }
+
+#[derive(Component, Clone, Debug, Default, Deref, DerefMut)]
+pub struct LayoutPosition(pub Origin);
 
 #[derive(Component, Clone, Debug, Deref, DerefMut)]
 pub struct Position(pub Origin);

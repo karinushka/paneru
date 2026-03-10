@@ -1,4 +1,5 @@
 use bevy::app::AppExit;
+use bevy::ecs::change_detection::DetectChangesMut;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::{MessageReader, MessageWriter};
@@ -25,14 +26,14 @@ use super::{
 use crate::config::{Config, decorations::BorderRadiusOption, swipe::SwipeGestureDirection};
 use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, Bounds, BruteforceWindows, DockPosition, Initializing,
+    ActiveWorkspaceMarker, Bounds, BruteforceWindows, DockPosition, Initializing, LayoutPosition,
     LocateDockTrigger, Position, ReshuffleAroundMarker, Scrolling, StackAdjustedResize, Unmanaged,
     WidthRatio, WindowDraggedMarker, reposition_entity, reshuffle_around, resize_entity,
 };
 use crate::events::Event;
 use crate::manager::{
-    Application, Column, Display, LayoutStrip, Origin, Process, Size, Window, WindowManager,
-    WindowOS, bruteforce_windows,
+    Application, Column, Display, LayoutStrip, Process, Window, WindowManager, WindowOS,
+    bruteforce_windows,
 };
 use crate::overlay::OverlayManager;
 use crate::platform::{PlatformCallbacks, WorkspaceId};
@@ -860,7 +861,7 @@ pub(super) fn apply_scroll_physics(
         .actual_display_bounds(active_display.1, config.config());
 
     let absolute_positions = strip
-        .absolute_positions(&get_window_frame)
+        .column_positions(&get_window_frame)
         .collect::<Vec<_>>();
 
     // Apply soft-snap to center during inertia.
@@ -984,86 +985,46 @@ where
     )
 }
 
-fn expose_window(
-    entity: Entity,
-    windows: &Windows,
-    active_display: &ActiveDisplay,
-    config: &Config,
-) -> Option<IRect> {
-    let display_bounds = active_display
-        .display()
-        .actual_display_bounds(active_display.dock(), config);
-    let mut frame = get_moving_window_frame(entity, windows)?;
-    let size = frame.size();
-
-    if frame.max.x > display_bounds.max.x {
-        trace!("Bumped window {entity} to the left");
-        frame.min.x = display_bounds.max.x - size.x;
-    } else if frame.min.x < display_bounds.min.x {
-        trace!("Bumped window {entity} to the right");
-        frame.min.x = display_bounds.min.x;
-    }
-    frame.max.x = frame.min.x + size.x;
-    Some(frame)
-}
-
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn reshuffle_layout_strip(
-    marker: Populated<Entity, With<ReshuffleAroundMarker>>,
+    marker: Populated<(Entity, &LayoutPosition), With<ReshuffleAroundMarker>>,
     active_display: ActiveDisplay,
     windows: Windows,
     config: Res<Config>,
     mut commands: Commands,
 ) {
-    let get_window_frame = |entity| get_moving_window_frame(entity, &windows);
+    let display_bounds = active_display
+        .display()
+        .actual_display_bounds(active_display.dock(), &config);
 
-    for entity in marker {
-        debug!("reshuffle_layout_strip: triggered for entity {entity}");
+    for (entity, layout_position) in marker {
         if let Ok(mut cmd) = commands.get_entity(entity) {
             cmd.try_remove::<ReshuffleAroundMarker>();
         }
+        if active_display.active_strip().index_of(entity).is_err() {
+            continue;
+        }
 
-        let Some(frame) = expose_window(entity, &windows, &active_display, &config) else {
-            return;
-        };
-
-        let layout_strip = active_display.active_strip();
-
-        let Some((_, abs_position)) = layout_strip.index_of(entity).ok().and_then(|index| {
-            layout_strip
-                .absolute_positions(&get_window_frame)
-                .nth(index)
-        }) else {
+        let Some(mut frame) = get_moving_window_frame(entity, &windows) else {
             continue;
         };
-        let viewport_position =
-            Origin::new(frame.min.x - abs_position, active_display.bounds().min.y);
+        let size = frame.size();
 
-        let absolute_positions = active_display
-            .active_strip()
-            .absolute_positions(&get_window_frame)
-            .collect::<Vec<_>>();
-        let viewport = active_display
-            .display()
-            .actual_display_bounds(active_display.dock(), &config);
-        let viewport_x = if frame.center().x == viewport.center().x {
-            // Attempting to cente window, don't clamp.
-            viewport_position.x
-        } else {
-            clamp_viewport_offset(
-                viewport_position.x,
-                0,
-                &absolute_positions,
-                &get_window_frame,
-                &viewport,
-                &config,
-            )
-            .unwrap_or(viewport_position.x)
-        };
+        if frame.max.x > display_bounds.max.x {
+            trace!("Bumped window {entity} to the left");
+            frame.min.x = display_bounds.max.x - size.x;
+        } else if frame.min.x < display_bounds.min.x {
+            trace!("Bumped window {entity} to the right");
+            frame.min.x = display_bounds.min.x;
+        }
+        frame.max.x = frame.min.x + size.x;
+
+        let strip_position = frame.min - layout_position.0;
+        trace!("reshuffle_layout_strip: triggered for entity {entity}, offset {strip_position}");
         reposition_entity(
             active_display.active_strip_entity(),
-            viewport_position.with_x(viewport_x),
+            strip_position,
             &mut commands,
         );
     }
@@ -1161,7 +1122,9 @@ pub(super) fn window_update_frame(
                     {
                         position.0 = new_frame.min;
                     }
-                    if matches!(event, Event::WindowResized { window_id: _ }) {
+                    if matches!(event, Event::WindowResized { window_id: _ })
+                        && bounds.0 != new_frame.size()
+                    {
                         bounds.0 = new_frame.size();
                     }
                     (entity, old_frame, new_frame)
@@ -1481,117 +1444,100 @@ fn get_moving_window_frame(entity: Entity, windows: &Windows) -> Option<IRect> {
         })
 }
 
+/// Reacts to changes in the position of the `LayoutStrip` to Display, and if changed,
+/// marks all the windows in the strip as requiring re-positioning.
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
-pub(super) fn position_layout_strip(
-    moved_strips: Populated<(&mut LayoutStrip, &Position, &ChildOf), Changed<Position>>,
-    mut windows: Query<(&Window, Entity, &mut Position, &mut Bounds), Without<LayoutStrip>>,
-    position: Query<(Option<&RepositionMarker>, Option<&ResizeMarker>), With<Window>>,
-    active_display: Single<(&Display, Entity, Option<&DockPosition>), With<ActiveDisplayMarker>>,
-    active_workspace: Query<&Scrolling, With<ActiveWorkspaceMarker>>,
+pub(super) fn position_layout_strips(
+    moved_strips: Populated<&LayoutStrip, Changed<Position>>,
+    mut windows: Query<&mut LayoutPosition, (With<Window>, Without<LayoutStrip>)>,
+) {
+    for strip in moved_strips {
+        for entity in strip.all_windows() {
+            if let Ok(mut position) = windows.get_mut(entity) {
+                position.set_changed();
+            }
+        }
+    }
+}
+
+/// Reacts to changes of logical window layout in the strip and any have been changed, reposition
+/// the layout strip against the current display viewport.
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
+#[instrument(level = Level::DEBUG, skip_all)]
+pub(super) fn position_layout_windows(
+    positioned_windows: Populated<
+        (Entity, &Window, &LayoutPosition, &mut Position, &mut Bounds),
+        (Changed<LayoutPosition>, With<Window>),
+    >,
+    active_workspace: Single<
+        (&LayoutStrip, &Position, Has<Scrolling>),
+        (With<ActiveWorkspaceMarker>, Without<Window>),
+    >,
+    active_display: Single<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
     config: Res<Config>,
 ) {
-    let (active_display, display_entity, dock) = *active_display;
+    let (active_display, dock) = *active_display;
     let viewport = active_display.actual_display_bounds(dock, &config);
+    let (layout_strip, strip_position, swiping) = *active_workspace;
+    let strip_position = strip_position.0.with_y(viewport.min.y);
     let offscreen_sliver_width = config.sliver_width();
     let (_, pad_right, _, pad_left) = config.edge_padding();
 
-    let get_window_frame = |entity| {
-        let mut frame = windows
-            .get(entity)
-            .map(|(_, _, position, bounds)| IRect::from_corners(position.0, position.0 + bounds.0))
-            .ok()?;
-        let (moving, sizing) = position.get(entity).ok()?;
-        if let Some(moving) = moving {
-            frame.min = moving.0;
-        }
-        if let Some(sizing) = sizing {
-            frame.max = frame.min + sizing.0;
-        }
-        Some(frame)
-    };
-
-    let mut resized = Vec::new();
-    let mut moved = Vec::new();
-    for (layout_strip, position, child) in moved_strips {
-        if child.parent() != display_entity {
-            // Display was changed, but the workspace has not changed yet. Or vice-versa.
+    for (entity, window, layout_position, mut position, mut bounds) in positioned_windows {
+        if layout_strip.index_of(entity).is_err() {
             continue;
         }
 
-        for (entity, mut frame) in
-            layout_strip.layout_to_viewport(**position, &viewport, &get_window_frame)
-        {
-            let Some(old_frame) = get_window_frame(entity) else {
-                continue;
-            };
-            // Account for per-window horizontal_padding: reposition() adds
-            // h_pad to the virtual x, so subtract it here so the OS window
-            // lands exactly sliver_width pixels from the screen edge.
-            let h_pad = windows
-                .get(entity)
-                .map(|w| w.0.horizontal_padding())
-                .unwrap_or(0);
+        // Account for per-window horizontal_padding: reposition() adds
+        // h_pad to the virtual x, so subtract it here so the OS window
+        // lands exactly sliver_width pixels from the screen edge.
+        let h_pad = window.horizontal_padding();
+        let mut frame = IRect::from_corners(layout_position.0, layout_position.0 + bounds.0);
+        let width = frame.width();
+        frame.min += strip_position;
+        frame.max += strip_position;
 
-            let width = frame.width();
-            if frame.max.x <= viewport.min.x + h_pad {
-                // Window hidden to the left — position so exactly
-                // sliver_width CG pixels are visible from the real
-                // display edge.  The +h_pad accounts for the gap that
-                // reposition() adds, which can leave a window just
-                // inside the viewport edge while its CG frame is fully
-                // past it.
-                frame.min.x = viewport.min.x - width
-                    + offscreen_sliver_width - pad_left + h_pad;
-            } else if frame.min.x >= viewport.max.x - h_pad {
-                // Window hidden to the right — mirror of above.
-                frame.min.x = viewport.max.x
-                    - offscreen_sliver_width + pad_right - h_pad;
-            }
-            frame.max.x = frame.min.x + width;
+        if frame.max.x <= viewport.min.x + h_pad {
+            // Window hidden to the left — position so exactly
+            // sliver_width CG pixels are visible from the real
+            // display edge.  The +h_pad accounts for the gap that
+            // reposition() adds, which can leave a window just
+            // inside the viewport edge while its CG frame is fully
+            // past it.
+            frame.min.x = viewport.min.x - width + offscreen_sliver_width - pad_left + h_pad;
+        } else if frame.min.x >= viewport.max.x - h_pad {
+            // Window hidden to the right — mirror of above.
+            frame.min.x = viewport.max.x - offscreen_sliver_width + pad_right - h_pad;
+        }
+        frame.max.x = frame.min.x + width;
 
-            // During swipe, keep full height.
-            let swiping = active_workspace
-                .iter()
-                .next()
-                .is_some_and(|scrolling| scrolling.is_user_swiping);
-            if !swiping {
-                let stacked = layout_strip
-                    .index_of(entity)
-                    .ok()
-                    .and_then(|idx| layout_strip.get(idx).ok())
-                    .is_some_and(|col| matches!(col, Column::Stack(_)));
+        // During swipe, keep full height.
+        if !swiping {
+            let stacked = layout_strip
+                .index_of(entity)
+                .ok()
+                .and_then(|idx| layout_strip.get(idx).ok())
+                .is_some_and(|col| matches!(col, Column::Stack(_)));
 
-                // Don't compress stacked windows vertically when off-screen.
-                // The height reduction corrupts their proportions: when the
-                // column scrolls back on-screen, binpack_heights makes the
-                // last window absorb all remaining space.
-                if !stacked {
-                    let inset = (f64::from(viewport.height()) * (1.0 - config.sliver_height())
-                        / 2.0) as i32;
-                    frame.min.y += inset;
-                    frame.max.y += inset;
-                }
-            }
-
-            if old_frame.size() != frame.size() {
-                resized.push((entity, Size::new(frame.width(), frame.height())));
-            }
-
-            if old_frame.min != frame.min {
-                moved.push((entity, frame.min));
+            // Don't compress stacked windows vertically when off-screen.
+            // The height reduction corrupts their proportions: when the
+            // column scrolls back on-screen, binpack_heights makes the
+            // last window absorb all remaining space.
+            if !stacked {
+                let inset =
+                    (f64::from(viewport.height()) * (1.0 - config.sliver_height()) / 2.0) as i32;
+                frame.min.y += inset;
+                frame.max.y += inset;
             }
         }
-    }
 
-    for (entity, origin) in moved {
-        if let Ok((_, _, mut position, _)) = windows.get_mut(entity) {
-            position.0 = origin;
+        if bounds.0 != frame.size() {
+            bounds.0 = frame.size();
         }
-    }
-    for (entity, size) in resized {
-        if let Ok((_, _, _, mut bounds)) = windows.get_mut(entity) {
-            bounds.0 = size;
+
+        if position.0 != frame.min {
+            position.0 = frame.min;
         }
     }
 }
@@ -1829,4 +1775,102 @@ pub(super) fn swipe_gesture(
             });
         }
     }
+}
+
+/// Watches for changes to `LayoutStrip` (i.e. a window added or window order changed) and
+/// re-calculates the logical positions of all the windows in the layout strip.
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
+#[instrument(level = Level::DEBUG, skip_all)]
+pub(super) fn layout_strip_changed(
+    changed_strips: Populated<&LayoutStrip, Changed<LayoutStrip>>,
+    mut windows: Query<
+        (&Position, &mut Bounds, &mut LayoutPosition),
+        (Without<LayoutStrip>, With<Window>),
+    >,
+    moving_position: Query<(Option<&RepositionMarker>, Option<&ResizeMarker>), With<Window>>,
+    active_display: ActiveDisplay,
+    config: Res<Config>,
+) {
+    let viewport = active_display
+        .display()
+        .actual_display_bounds(active_display.dock(), &config);
+
+    let get_window_frame = |entity| {
+        let mut frame = windows
+            .get(entity)
+            .map(|(position, bounds, _)| IRect::from_corners(position.0, position.0 + bounds.0))
+            .ok()?;
+        let (moving, sizing) = moving_position.get(entity).ok()?;
+        if let Some(moving) = moving {
+            frame.min = moving.0;
+        }
+        if let Some(sizing) = sizing {
+            frame.max = frame.min + sizing.0;
+        }
+        Some(frame)
+    };
+
+    let changed = changed_strips
+        .into_iter()
+        .flat_map(|layout_strip| {
+            layout_strip.relative_positions(viewport.height(), &get_window_frame)
+        })
+        .collect::<Vec<_>>();
+
+    for (entity, frame) in changed {
+        if let Ok((_, mut bounds, mut layout_position)) = windows.get_mut(entity) {
+            layout_position.0 = frame.min;
+            if bounds.0 != frame.size() {
+                bounds.0 = frame.size();
+            }
+        }
+    }
+}
+
+/// Watches for size changes to windows and if they are changed, re-calculates the logical
+/// positions of all the windows in their layout strip.
+#[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all)]
+pub(super) fn layout_sizes_changed(
+    changed_sizes: Populated<Entity, Changed<Bounds>>,
+    windows: Query<(&Position, &Bounds, &Window), Without<LayoutStrip>>,
+    mut layout_position: Query<&mut LayoutPosition, With<Window>>,
+    moving_position: Query<(Option<&RepositionMarker>, Option<&ResizeMarker>), With<Window>>,
+    active_display: ActiveDisplay,
+    config: Res<Config>,
+) {
+    let viewport = active_display
+        .display()
+        .actual_display_bounds(active_display.dock(), &config);
+    let layout_strip = active_display.active_strip();
+
+    let get_window_frame = |entity| {
+        let mut frame = windows
+            .get(entity)
+            .map(|(position, bounds, _)| IRect::from_corners(position.0, position.0 + bounds.0))
+            .ok()?;
+        let (moving, sizing) = moving_position.get(entity).ok()?;
+        if let Some(moving) = moving {
+            frame.min = moving.0;
+        }
+        if let Some(sizing) = sizing {
+            frame.max = frame.min + sizing.0;
+        }
+        Some(frame)
+    };
+
+    changed_sizes
+        .into_iter()
+        .filter_map(|entity| {
+            layout_strip
+                .index_of(entity)
+                .is_ok()
+                .then_some(layout_strip.relative_positions(viewport.height(), &get_window_frame))
+        })
+        .flatten()
+        .for_each(|(entity, frame)| {
+            if let Ok(mut layout_position) = layout_position.get_mut(entity) {
+                layout_position.0 = frame.min;
+            }
+        });
 }

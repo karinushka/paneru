@@ -406,7 +406,7 @@ impl WindowApi for MockWindow {
     #[instrument(level = Level::DEBUG, skip(self), ret)]
     fn update_frame(&mut self) -> Result<IRect> {
         debug!("{}:", function_name!());
-        Ok(IRect::default())
+        Ok(self.frame)
     }
 
     /// Prints a debug message for focus without raise.

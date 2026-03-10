@@ -3,6 +3,7 @@ use core::ptr::NonNull;
 use objc2_core_foundation::{CFRetained, CFString, CFUUID};
 use objc2_core_graphics::CGDirectDisplayID;
 use stdext::function_name;
+use tracing::{Level, instrument};
 
 use super::skylight::{CGDisplayCreateUUIDFromDisplayID, CGDisplayGetDisplayIDFromUUID};
 use crate::{
@@ -131,6 +132,7 @@ impl Display {
         self.menubar_height_override = height;
     }
 
+    #[instrument(level = Level::TRACE, skip(self), ret)]
     pub fn actual_display_bounds(&self, dock: Option<&DockPosition>, config: &Config) -> IRect {
         let (pad_top, pad_right, pad_bottom, pad_left) = config.edge_padding();
         let mut viewport = self.bounds();

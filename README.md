@@ -189,7 +189,7 @@ Additionally it allows overriding the location with `$PANERU_CONFIG` environment
 
 You can use the following example configuration as a starting point:
 
-```
+```toml
 # syntax=toml
 #
 # Example configuration for Paneru.

@@ -24,6 +24,7 @@ use super::{
     WMEventTrigger,
 };
 use crate::config::{Config, decorations::BorderRadiusOption, swipe::SwipeGestureDirection};
+use crate::ecs::layout::{Column, LayoutStrip};
 use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, BruteforceWindows, DockPosition, Initializing, LayoutPosition,
@@ -32,8 +33,7 @@ use crate::ecs::{
 };
 use crate::events::Event;
 use crate::manager::{
-    Application, Column, Display, LayoutStrip, Process, Window, WindowManager, WindowOS,
-    bruteforce_windows,
+    Application, Display, Process, Window, WindowManager, WindowOS, bruteforce_windows,
 };
 use crate::overlay::OverlayManager;
 use crate::platform::{PlatformCallbacks, WorkspaceId};

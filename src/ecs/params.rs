@@ -16,9 +16,9 @@ use crate::{
     config::{Config, WindowParams},
     ecs::{
         ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker, FullWidthMarker, Initializing,
-        Position, RepositionMarker, ResizeMarker, Unmanaged, WidthRatio,
+        Position, RepositionMarker, ResizeMarker, Unmanaged, WidthRatio, layout::LayoutStrip,
     },
-    manager::{Application, Display, LayoutStrip, Origin, Size, Window},
+    manager::{Application, Display, Origin, Size, Window},
     platform::{ProcessSerialNumber, WinID},
 };
 

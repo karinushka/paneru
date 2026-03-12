@@ -31,6 +31,7 @@ use crate::manager::{
 use crate::overlay::OverlayManager;
 use crate::platform::{PlatformCallbacks, WinID};
 
+pub mod layout;
 pub mod params;
 mod systems;
 mod triggers;

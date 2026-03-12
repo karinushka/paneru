@@ -11,15 +11,14 @@ use tracing::{Level, instrument};
 use tracing::{debug, info};
 
 use crate::config::Config;
+use crate::ecs::layout::{Column, LayoutStrip};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Windows};
 use crate::ecs::{
     ActiveDisplayMarker, FocusFollowsMouse, FocusedMarker, FullWidthMarker, SendMessageTrigger,
     Unmanaged, WMEventTrigger, reposition_entity, reshuffle_around, resize_entity,
 };
 use crate::events::Event;
-use crate::manager::{
-    Application, Column, Display, LayoutStrip, Origin, Size, Window, WindowManager, origin_to,
-};
+use crate::manager::{Application, Display, Origin, Size, Window, WindowManager, origin_to};
 
 /// When `true`, the active display is showing a native macOS fullscreen space.
 /// Keybindings are not intercepted so that macOS can handle native space

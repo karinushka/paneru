@@ -22,6 +22,7 @@ use super::{
 };
 use crate::commands::ON_FULLSCREEN_SPACE;
 use crate::config::{Config, WindowParams};
+use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, LayoutPosition, LocateDockTrigger, Position, Scrolling,
@@ -30,8 +31,7 @@ use crate::ecs::{
 use crate::errors::Result;
 use crate::events::Event;
 use crate::manager::{
-    Application, Display, LayoutStrip, Origin, Process, Size, Window, WindowManager, WindowPadding,
-    irect_from,
+    Application, Display, Origin, Process, Size, Window, WindowManager, WindowPadding, irect_from,
 };
 use crate::platform::{Modifiers, PlatformCallbacks, WinID, WorkspaceId};
 use crate::util::symlink_target;

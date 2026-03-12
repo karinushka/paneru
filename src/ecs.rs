@@ -64,7 +64,6 @@ pub fn register_systems(app: &mut bevy::app::App) {
             )
                 .chain()
                 .run_if(resource_exists::<Initializing>),
-            systems::apply_scroll_physics,
             systems::add_launched_process,
             systems::add_launched_application,
             systems::fresh_marker_cleanup,
@@ -79,12 +78,13 @@ pub fn register_systems(app: &mut bevy::app::App) {
                 ))),
             systems::cleanup_on_exit,
             systems::swipe_gesture.run_if(resource_exists_and_equals(MissionControlActive(false))),
-            systems::layout_sizes_changed,
+            layout::apply_scroll_physics,
+            layout::layout_sizes_changed,
             (
-                systems::layout_strip_changed,
-                systems::reshuffle_layout_strip,
-                systems::position_layout_strips,
-                systems::position_layout_windows,
+                layout::layout_strip_changed,
+                layout::reshuffle_layout_strip,
+                layout::position_layout_strips,
+                layout::position_layout_windows,
             )
                 .chain(),
         ),
@@ -104,7 +104,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
         PostUpdate,
         (
             systems::animate_entities,
-            systems::animate_resize_entities.after(systems::position_layout_windows),
+            systems::animate_resize_entities,
             systems::update_overlays
                 .after(systems::animate_entities)
                 .after(systems::animate_resize_entities)

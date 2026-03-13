@@ -487,7 +487,8 @@ pub fn binpack_heights(heights: &[i32], min_height: i32, total_height: i32) -> O
 fn clamp_viewport_offset<W>(
     current_offset: i32,
     shift: i32,
-    absolute_positions: &[(&Column, i32)],
+    layout_strip: &LayoutStrip,
+    windows: &Windows,
     get_window_frame: &W,
     viewport: &IRect,
     config: &Config,
@@ -501,20 +502,30 @@ where
     };
     let shift = shift * swipe_direction_modifier;
 
-    let total_strip_width = absolute_positions.last().and_then(|(column, offset)| {
-        column
-            .top()
-            .and_then(|entity| get_window_frame(entity).map(|frame| offset + frame.width()))
-    })?;
+    let total_strip_width = layout_strip
+        .last()
+        .ok()
+        .and_then(|column| column.top())
+        .and_then(|entity| {
+            windows
+                .layout_position(entity)
+                .zip(get_window_frame(entity))
+        })
+        .map(|(position, frame)| position.x + frame.width())?;
 
     // Continous swipe is on by default.
     let continuous_swipe = config.options().continuous_swipe.is_none_or(|swipe| swipe);
-    let snap_sides = absolute_positions
-        .last()
-        .map(|(_, pos)| pos)
-        .zip(absolute_positions.get(1).map(|(_, pos)| pos));
+    let strip_position = |column: Result<Column>| {
+        column
+            .ok()
+            .and_then(|column| column.top())
+            .and_then(|entity| windows.layout_position(entity))
+            .map(|position| position.0.x)
+    };
+    let left_snap = strip_position(layout_strip.last());
+    let right_snap = strip_position(layout_strip.get(1));
     Some(
-        if continuous_swipe && let Some((left_snap, right_snap)) = snap_sides {
+        if continuous_swipe && let Some((left_snap, right_snap)) = left_snap.zip(right_snap) {
             // Allow to scroll away until the last or first window snaps.
             (current_offset - shift).clamp(viewport.min.x - left_snap, viewport.max.x - right_snap)
         } else if viewport.width() < total_strip_width {
@@ -531,7 +542,8 @@ fn magnetic_snap_to_center<W>(
     time_delta: f64,
     viewport: &IRect,
     current_position: i32,
-    absolute_positions: &[(&Column, i32)],
+    layout_strip: &LayoutStrip,
+    windows: &Windows,
     get_window_frame: &W,
     scroll: &Scrolling,
 ) -> Option<(f64, i32)>
@@ -544,14 +556,18 @@ where
     const SNAP_DISPLAY_RATIO: f64 = 0.05;
 
     let viewport_center = viewport.center().x;
-    let target_offset = absolute_positions
-        .iter()
-        .map(|(column, pos)| {
-            let col_width = column
-                .top()
-                .and_then(&get_window_frame)
-                .map_or(0, |f| f.width());
-            viewport_center - (pos + col_width / 2)
+    let target_offset = layout_strip
+        .all_columns()
+        .into_iter()
+        .filter_map(|entity| {
+            windows
+                .layout_position(entity)
+                .map(|p| p.0.x)
+                .zip(Some(entity))
+        })
+        .map(|(position, entity)| {
+            let col_width = get_window_frame(entity).map_or(0, |f| f.width());
+            viewport_center - (position + col_width / 2)
         })
         .min_by_key(|target| (current_position - target).abs())
         .unwrap_or(current_position);
@@ -574,7 +590,7 @@ where
 fn get_moving_window_frame(entity: Entity, windows: &Windows) -> Option<IRect> {
     windows
         .positioning(entity)
-        .map(|(origin, size, _, reposition, resize)| {
+        .map(|(_, origin, size, _, reposition, resize)| {
             let size = size.0;
             let mut frame = IRect::from_corners(origin.0, origin.0 + size);
 
@@ -645,10 +661,6 @@ pub(super) fn apply_scroll_physics(
         .0
         .actual_display_bounds(active_display.1, config.config());
 
-    let absolute_positions = strip
-        .column_positions(&get_window_frame)
-        .collect::<Vec<_>>();
-
     // Apply soft-snap to center during inertia.
     if !scroll.is_user_swiping
         && config.auto_center()
@@ -656,7 +668,8 @@ pub(super) fn apply_scroll_physics(
             dt,
             &viewport,
             position.x,
-            &absolute_positions,
+            strip,
+            &windows,
             &get_window_frame,
             scroll,
         )
@@ -672,7 +685,8 @@ pub(super) fn apply_scroll_physics(
     if let Some(clamped_offset) = clamp_viewport_offset(
         position.x,
         shift,
-        &absolute_positions,
+        strip,
+        &windows,
         &get_window_frame,
         &viewport,
         config.config(),

@@ -446,6 +446,9 @@ fn resize_window(
     else {
         return;
     };
+    if let Ok(mut cmds) = commands.get_entity(entity) {
+        cmds.try_remove::<FullWidthMarker>();
+    }
 
     let display_width = active_display.bounds().width();
     let (_, pad_right, _, pad_left) = config.edge_padding();

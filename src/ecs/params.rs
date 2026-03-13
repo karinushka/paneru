@@ -16,7 +16,8 @@ use crate::{
     config::{Config, WindowParams},
     ecs::{
         ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker, FullWidthMarker, Initializing,
-        Position, RepositionMarker, ResizeMarker, Unmanaged, WidthRatio, layout::LayoutStrip,
+        LayoutPosition, Position, RepositionMarker, ResizeMarker, Unmanaged, WidthRatio,
+        layout::LayoutStrip,
     },
     manager::{Application, Display, Origin, Size, Window},
     platform::{ProcessSerialNumber, WinID},
@@ -268,6 +269,7 @@ pub struct Windows<'w, 's> {
         'w,
         's,
         (
+            &'static LayoutPosition,
             &'static Position,
             &'static Bounds,
             &'static WidthRatio,
@@ -342,28 +344,28 @@ impl Windows<'_, '_> {
         self.positions
             .get(entity)
             .ok()
-            .map(|(origin, _, _, _, _)| origin.0)
+            .map(|(_, origin, _, _, _, _)| origin.0)
     }
 
     pub fn size(&self, entity: Entity) -> Option<Size> {
         self.positions
             .get(entity)
             .ok()
-            .map(|(_, size, _, _, _)| size.0)
+            .map(|(_, _, size, _, _, _)| size.0)
     }
 
     pub fn width_ratio(&self, entity: Entity) -> Option<f64> {
         self.positions
             .get(entity)
             .ok()
-            .map(|(_, _, ratio, _, _)| ratio.0)
+            .map(|(_, _, _, ratio, _, _)| ratio.0)
     }
 
     pub fn frame(&self, entity: Entity) -> Option<IRect> {
         self.positions
             .get(entity)
             .ok()
-            .map(|(origin, size, _, _, _)| IRect::from_corners(origin.0, origin.0 + size.0))
+            .map(|(_, origin, size, _, _, _)| IRect::from_corners(origin.0, origin.0 + size.0))
     }
 
     #[allow(clippy::type_complexity)]
@@ -371,6 +373,7 @@ impl Windows<'_, '_> {
         &self,
         entity: Entity,
     ) -> Option<(
+        &LayoutPosition,
         &Position,
         &Bounds,
         &WidthRatio,
@@ -378,5 +381,12 @@ impl Windows<'_, '_> {
         Option<&ResizeMarker>,
     )> {
         self.positions.get(entity).ok()
+    }
+
+    pub fn layout_position(&self, entity: Entity) -> Option<&LayoutPosition> {
+        self.positions
+            .get(entity)
+            .ok()
+            .map(|(layout_position, _, _, _, _, _)| layout_position)
     }
 }

@@ -15,8 +15,7 @@ use crate::config::swipe::SwipeGestureDirection;
 use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
 use crate::ecs::{
     ActiveDisplayMarker, ActiveWorkspaceMarker, Bounds, DockPosition, LayoutPosition, Position,
-    RepositionMarker, ReshuffleAroundMarker, ResizeMarker, Scrolling, WMEventTrigger,
-    reposition_entity,
+    ReshuffleAroundMarker, Scrolling, WMEventTrigger, reposition_entity,
 };
 use crate::errors::{Error, Result};
 use crate::events::Event;
@@ -692,7 +691,6 @@ pub(super) fn layout_sizes_changed(
     changed_sizes: Populated<Entity, Changed<Bounds>>,
     windows: Query<(&Position, &Bounds, &Window), Without<LayoutStrip>>,
     mut layout_position: Query<&mut LayoutPosition, With<Window>>,
-    moving_position: Query<(Option<&RepositionMarker>, Option<&ResizeMarker>), With<Window>>,
     active_display: ActiveDisplay,
     config: Res<Config>,
 ) {
@@ -702,18 +700,10 @@ pub(super) fn layout_sizes_changed(
     let layout_strip = active_display.active_strip();
 
     let get_window_frame = |entity| {
-        let mut frame = windows
+        windows
             .get(entity)
             .map(|(position, bounds, _)| IRect::from_corners(position.0, position.0 + bounds.0))
-            .ok()?;
-        let (moving, sizing) = moving_position.get(entity).ok()?;
-        if let Some(moving) = moving {
-            frame.min = moving.0;
-        }
-        if let Some(sizing) = sizing {
-            frame.max = frame.min + sizing.0;
-        }
-        Some(frame)
+            .ok()
     };
 
     changed_sizes
@@ -742,7 +732,6 @@ pub(super) fn layout_strip_changed(
         (&Position, &mut Bounds, &mut LayoutPosition),
         (Without<LayoutStrip>, With<Window>),
     >,
-    moving_position: Query<(Option<&RepositionMarker>, Option<&ResizeMarker>), With<Window>>,
     active_display: ActiveDisplay,
     config: Res<Config>,
 ) {
@@ -751,18 +740,10 @@ pub(super) fn layout_strip_changed(
         .actual_display_bounds(active_display.dock(), &config);
 
     let get_window_frame = |entity| {
-        let mut frame = windows
+        windows
             .get(entity)
             .map(|(position, bounds, _)| IRect::from_corners(position.0, position.0 + bounds.0))
-            .ok()?;
-        let (moving, sizing) = moving_position.get(entity).ok()?;
-        if let Some(moving) = moving {
-            frame.min = moving.0;
-        }
-        if let Some(sizing) = sizing {
-            frame.max = frame.min + sizing.0;
-        }
-        Some(frame)
+            .ok()
     };
 
     let changed = changed_strips

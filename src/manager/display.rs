@@ -132,7 +132,7 @@ impl Display {
         self.menubar_height_override = height;
     }
 
-    #[instrument(level = Level::TRACE, skip(self), ret)]
+    #[instrument(level = Level::TRACE, skip_all, ret)]
     pub fn actual_display_bounds(&self, dock: Option<&DockPosition>, config: &Config) -> IRect {
         let (pad_top, pad_right, pad_bottom, pad_left) = config.edge_padding();
         let mut viewport = self.bounds();

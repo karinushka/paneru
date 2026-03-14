@@ -4,22 +4,18 @@ use bevy::ecs::entity::Entity;
 use bevy::ecs::query::{Changed, Has, With, Without};
 use bevy::ecs::system::{Commands, Populated, Query, Res, Single};
 use bevy::math::IRect;
-use bevy::time::Time;
 use std::collections::VecDeque;
-use std::time::Duration;
 use stdext::function_name;
 use tracing::{Level, debug, instrument, trace};
 
 use crate::config::Config;
-use crate::config::swipe::SwipeGestureDirection;
-use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
+use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
     ActiveDisplayMarker, ActiveWorkspaceMarker, Bounds, DockPosition, LayoutPosition, Position,
-    ReshuffleAroundMarker, Scrolling, WMEventTrigger, reposition_entity,
+    ReshuffleAroundMarker, Scrolling, reposition_entity,
 };
 use crate::errors::{Error, Result};
-use crate::events::Event;
-use crate::manager::{Display, Window, WindowManager};
+use crate::manager::{Display, Window};
 use crate::platform::WorkspaceId;
 
 /// Represents a single panel within a `LayoutStrip`, which can either hold a single window or a stack of windows.
@@ -481,209 +477,6 @@ pub fn binpack_heights(heights: &[i32], min_height: i32, total_height: i32) -> O
     }
 
     Some(output)
-}
-
-#[instrument(level = Level::TRACE, skip_all, fields(current_offset, shift), ret)]
-fn clamp_viewport_offset<W>(
-    current_offset: i32,
-    shift: i32,
-    layout_strip: &LayoutStrip,
-    windows: &Windows,
-    get_window_frame: &W,
-    viewport: &IRect,
-    config: &Config,
-) -> Option<i32>
-where
-    W: Fn(Entity) -> Option<IRect>,
-{
-    let swipe_direction_modifier = match config.swipe_gesture_direction() {
-        SwipeGestureDirection::Natural => 1,
-        SwipeGestureDirection::Reversed => -1,
-    };
-    let shift = shift * swipe_direction_modifier;
-
-    let total_strip_width = layout_strip
-        .last()
-        .ok()
-        .and_then(|column| column.top())
-        .and_then(|entity| {
-            windows
-                .layout_position(entity)
-                .zip(get_window_frame(entity))
-        })
-        .map(|(position, frame)| position.x + frame.width())?;
-
-    // Continous swipe is on by default.
-    let continuous_swipe = config.options().continuous_swipe.is_none_or(|swipe| swipe);
-    let strip_position = |column: Result<Column>| {
-        column
-            .ok()
-            .and_then(|column| column.top())
-            .and_then(|entity| windows.layout_position(entity))
-            .map(|position| position.0.x)
-    };
-    let left_snap = strip_position(layout_strip.last());
-    let right_snap = strip_position(layout_strip.get(1));
-    Some(
-        if continuous_swipe && let Some((left_snap, right_snap)) = left_snap.zip(right_snap) {
-            // Allow to scroll away until the last or first window snaps.
-            (current_offset - shift).clamp(viewport.min.x - left_snap, viewport.max.x - right_snap)
-        } else if viewport.width() < total_strip_width {
-            // Snap the strip directly to the edges.
-            (current_offset - shift).clamp(viewport.max.x - total_strip_width, viewport.min.x)
-        } else {
-            // Snap the strip directly to the edges.
-            (current_offset - shift).clamp(viewport.min.x, viewport.max.x - total_strip_width)
-        },
-    )
-}
-
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
-#[instrument(level = Level::DEBUG, skip_all)]
-pub fn magnetic_snap_to_center(
-    mut active_workspace: Single<
-        (&LayoutStrip, &mut Position, &mut Scrolling),
-        (With<ActiveWorkspaceMarker>, Without<Window>),
-    >,
-    active_display: Single<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
-    windows: Windows,
-    config: Configuration,
-    time: Res<Time>,
-) {
-    const CENTER_MAGNETIC_PULL: f64 = 0.8;
-    const CENTER_MAGNETIC_FORCE: f64 = 4.0;
-    // Use 5% of the display width as the snap threshold
-    const SNAP_DISPLAY_RATIO: f64 = 0.05;
-
-    let (strip, ref mut position, ref mut scroll) = *active_workspace;
-    if scroll.is_user_swiping {
-        return;
-    }
-
-    let get_window_frame = |entity| windows.moving_frame(entity);
-    let viewport = active_display
-        .0
-        .actual_display_bounds(active_display.1, config.config());
-
-    let current_position = position.x;
-    let viewport_center = viewport.center().x;
-    let target_offset = strip
-        .all_columns()
-        .into_iter()
-        .filter_map(|entity| {
-            windows
-                .layout_position(entity)
-                .map(|p| p.0.x)
-                .zip(Some(entity))
-        })
-        .map(|(position, entity)| {
-            let col_width = get_window_frame(entity).map_or(0, |f| f.width());
-            viewport_center - (position + col_width / 2)
-        })
-        .min_by_key(|target| (current_position - target).abs())
-        .unwrap_or(current_position);
-
-    let snap_threshold = SNAP_DISPLAY_RATIO * f64::from(viewport.width());
-    let dist_to_snap = f64::from(current_position - target_offset);
-
-    if dist_to_snap.abs() < snap_threshold {
-        // Magnetic pull: slow down and nudge towards center.
-        let dt = time.delta_secs_f64();
-        scroll.velocity *= CENTER_MAGNETIC_PULL;
-        position.x -= (dist_to_snap * dt * CENTER_MAGNETIC_FORCE) as i32;
-    }
-}
-
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
-#[instrument(level = Level::DEBUG, skip_all)]
-pub(super) fn apply_scroll_physics(
-    mut active_workspace: Single<
-        (&LayoutStrip, &mut Position, &mut Scrolling),
-        (With<ActiveWorkspaceMarker>, Without<Window>),
-    >,
-    active_display: Single<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
-    windows: Windows,
-    config: Configuration,
-    time: Res<Time>,
-) {
-    const FINGER_LIFT_THRESHOLD: Duration = Duration::from_millis(50);
-
-    let (strip, ref mut position, ref mut scroll) = *active_workspace;
-
-    // Finger lift detection
-    if scroll.is_user_swiping && scroll.last_event.elapsed() > FINGER_LIFT_THRESHOLD {
-        scroll.is_user_swiping = false;
-        return;
-    }
-
-    let get_window_frame = |entity| windows.moving_frame(entity);
-    let viewport = active_display
-        .0
-        .actual_display_bounds(active_display.1, config.config());
-    let dt = time.delta_secs_f64();
-    let frame_delta = scroll.velocity * dt;
-    let shift = (f64::from(viewport.width()) * frame_delta) as i32;
-
-    if let Some(clamped_offset) = clamp_viewport_offset(
-        position.x,
-        shift,
-        strip,
-        &windows,
-        &get_window_frame,
-        &viewport,
-        config.config(),
-    ) {
-        position.x = clamped_offset;
-    } else {
-        scroll.velocity = 0.0;
-    }
-}
-
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
-#[instrument(level = Level::DEBUG, skip_all)]
-pub(super) fn apply_scroll_physics_post_swipe(
-    mut active_workspace: Single<
-        (Entity, &mut Scrolling),
-        (With<ActiveWorkspaceMarker>, Without<Window>),
-    >,
-    active_display: Single<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
-    window_manager: Res<WindowManager>,
-    mut config: Configuration,
-    time: Res<Time>,
-    mut commands: Commands,
-) {
-    const FOCUS_VELOCITY_RATIO: f64 = 0.3;
-    const MIN_VELOCITY_PX: f64 = 100.0;
-
-    let (entity, ref mut scroll) = *active_workspace;
-    if scroll.is_user_swiping {
-        return;
-    }
-
-    // While user is swiping, velocity is directly applied in the trigger.
-    // We just need to update the position.
-    let dt = time.delta_secs_f64();
-    let display_width = f64::from(active_display.0.bounds().width());
-    let scroll_velocity = scroll.velocity.abs() * display_width;
-
-    if scroll_velocity < FOCUS_VELOCITY_RATIO * display_width
-        && config.focus_follows_mouse()
-        && let Some(point) = window_manager.cursor_position()
-    {
-        config.set_ffm_flag(None);
-        commands.trigger(WMEventTrigger(Event::MouseMoved { point }));
-    }
-
-    if scroll_velocity < MIN_VELOCITY_PX {
-        // Below threshold: stop and focus
-        if let Ok(mut cmd) = commands.get_entity(entity) {
-            cmd.try_remove::<Scrolling>();
-        }
-        return;
-    }
-    // Apply inertia decay
-    let decay_rate = config.config().swipe_deceleration();
-    scroll.velocity *= (-decay_rate * dt).exp();
 }
 
 /// Watches for size changes to windows and if they are changed, re-calculates the logical

@@ -6,7 +6,7 @@ use bevy::app::App as BevyApp;
 use bevy::app::{PostUpdate, PreUpdate, Startup};
 use bevy::ecs::message::Messages;
 use bevy::ecs::resource::Resource;
-use bevy::ecs::schedule::common_conditions::{resource_exists, resource_exists_and_equals};
+use bevy::ecs::schedule::common_conditions::resource_exists;
 use bevy::ecs::system::{Commands, Res};
 use bevy::prelude::Event as BevyEvent;
 use bevy::tasks::Task;
@@ -33,6 +33,7 @@ use crate::platform::{PlatformCallbacks, WinID};
 
 pub mod layout;
 pub mod params;
+mod scroll;
 mod systems;
 mod triggers;
 
@@ -77,14 +78,15 @@ pub fn register_systems(app: &mut bevy::app::App) {
                     DISPLAY_CHANGE_CHECK_FREQ_MS,
                 ))),
             systems::cleanup_on_exit,
-            systems::swipe_gesture.run_if(resource_exists_and_equals(MissionControlActive(false))),
-            layout::apply_scroll_physics,
-            layout::apply_scroll_physics_post_swipe.after(layout::apply_scroll_physics),
-            layout::magnetic_snap_to_center
-                .after(layout::apply_scroll_physics_post_swipe)
-                .run_if(|config: Option<Res<Config>>| {
-                    config.is_some_and(|config| config.auto_center())
-                }),
+            (
+                scroll::swipe_gesture,
+                scroll::apply_inertia,
+                scroll::apply_snap_force,
+                scroll::scrolling_integrator,
+                scroll::apply_scrolling_constraints,
+                scroll::swiping_timeout,
+            )
+                .chain(),
             layout::layout_sizes_changed,
             (
                 layout::layout_strip_changed,
@@ -202,6 +204,7 @@ pub struct StackAdjustedResize;
 #[derive(Component, Debug)]
 pub struct Scrolling {
     pub velocity: f64,
+    pub position: f64,
     /// When true, the user's fingers are on the trackpad.
     pub is_user_swiping: bool,
     /// Last time a physical swipe event was received.
@@ -212,6 +215,7 @@ impl Default for Scrolling {
     fn default() -> Self {
         Self {
             velocity: 0.0,
+            position: 0.0,
             is_user_swiping: false,
             last_event: Instant::now(),
         }

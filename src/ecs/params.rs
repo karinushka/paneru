@@ -61,11 +61,7 @@ impl Configuration<'_> {
     }
 
     pub fn auto_center(&self) -> bool {
-        // Default is enabled.
-        self.config
-            .options()
-            .auto_center
-            .is_some_and(|centered| centered)
+        self.config.auto_center()
     }
 
     /// Returns the configured number of fingers for swipe gestures.

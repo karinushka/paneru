@@ -9,8 +9,7 @@ use objc2_core_foundation::{
     CGPoint, CGRect, CGSize, kCFBooleanTrue,
 };
 use objc2_core_graphics::{
-    CGDirectDisplayID, CGDisplayBounds, CGError, CGGetActiveDisplayList, CGRectContainsPoint,
-    CGWarpMouseCursorPosition,
+    CGDirectDisplayID, CGDisplayBounds, CGError, CGGetActiveDisplayList, CGWarpMouseCursorPosition,
 };
 use std::path::Path;
 use std::ptr::null_mut;
@@ -31,10 +30,9 @@ pub use process::{Process, ProcessApi};
 pub use skylight::AXUIElementCopyAttributeValue;
 use skylight::{
     _AXUIElementCreateWithRemoteToken, SLSCopyActiveMenuBarDisplayIdentifier,
-    SLSCopyAssociatedWindows, SLSCopyBestManagedDisplayForRect, SLSCopyManagedDisplayForWindow,
-    SLSCopyManagedDisplaySpaces, SLSCopyWindowsWithOptionsAndTags, SLSFindWindowAndOwner,
-    SLSGetConnectionIDForPSN, SLSGetCurrentCursorLocation, SLSGetDisplayMenubarHeight,
-    SLSGetSpaceManagementMode, SLSGetWindowBounds, SLSMainConnectionID,
+    SLSCopyAssociatedWindows, SLSCopyManagedDisplaySpaces, SLSCopyWindowsWithOptionsAndTags,
+    SLSFindWindowAndOwner, SLSGetConnectionIDForPSN, SLSGetCurrentCursorLocation,
+    SLSGetDisplayMenubarHeight, SLSGetSpaceManagementMode, SLSMainConnectionID,
     SLSManagedDisplayGetCurrentSpace, SLSSpaceGetType, SLSWindowIteratorAdvance,
     SLSWindowIteratorGetAttributes, SLSWindowIteratorGetParentID, SLSWindowIteratorGetTags,
     SLSWindowIteratorGetWindowID, SLSWindowQueryResultCopyWindows, SLSWindowQueryWindows,
@@ -119,7 +117,7 @@ pub trait WindowManagerApi: Send + Sync {
     ///
     /// * `window` - A reference to the `Window` to center the mouse on.
     /// * `display_bounds` - The `CGRect` representing the bounds of the display the window is on.
-    fn center_mouse(&self, window: Option<&Window>, display_bounds: &IRect);
+    fn warp_mouse(&self, origin: Origin);
     /// Adds existing windows for a given application, potentially resolving unresolved windows.
     ///
     /// # Arguments
@@ -286,50 +284,6 @@ impl WindowManagerOS {
         }
     }
 
-    /// Retrieves the UUID of the display a specific window is currently on.
-    /// It first tries `SLSCopyManagedDisplayForWindow` and then falls back to `SLSCopyBestManagedDisplayForRect`
-    /// using the window's bounds if the first call fails.
-    ///
-    /// # Arguments
-    ///
-    /// * `window_id` - The `WinID` of the window.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(CFRetained<CFString>)` with the display UUID if successful, otherwise `Err(Error)` if the display cannot be determined.
-    fn display_uuid(&self, window_id: WinID) -> Result<CFRetained<CFString>> {
-        let uuid = unsafe {
-            NonNull::new(SLSCopyManagedDisplayForWindow(self.main_cid, window_id).cast_mut())
-                .map(|uuid| CFRetained::from_raw(uuid))
-        };
-        uuid.or_else(|| {
-            let mut frame = CGRect::default();
-            unsafe {
-                SLSGetWindowBounds(self.main_cid, window_id, &mut frame);
-                NonNull::new(SLSCopyBestManagedDisplayForRect(self.main_cid, frame).cast_mut())
-                    .map(|uuid| CFRetained::from_raw(uuid))
-            }
-        })
-        .ok_or(Error::InvalidInput(format!(
-            "can not get display uuid for window {window_id}.",
-        )))
-    }
-
-    /// Retrieves the `CGDirectDisplayID` of the display a specific window is currently on.
-    /// It internally calls `display_uuid` and then converts the UUID to a display ID.
-    ///
-    /// # Arguments
-    ///
-    /// * `window_id` - The `WinID` of the window.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(u32)` with the display ID if successful, otherwise `Err(Error)`.
-    fn display_id(&self, window_id: WinID) -> Result<CGDirectDisplayID> {
-        let uuid = self.display_uuid(window_id);
-        uuid.and_then(|uuid| Display::id_from_uuid(&uuid))
-    }
-
     /// Returns the connection ID (`ConnID`) for a given process serial number (`PSN`).
     ///
     /// # Arguments
@@ -429,38 +383,8 @@ impl WindowManagerApi for WindowManagerOS {
 
     /// Centers the mouse cursor on the window if it's not already within the window's bounds.
     #[instrument(level = Level::DEBUG, skip_all, fields(window))]
-    fn center_mouse(&self, window: Option<&Window>, display_bounds: &IRect) {
-        let center = if let Some(window) = window {
-            let mut cursor = CGPoint::default();
-            if unsafe {
-                CGError::Success != SLSGetCurrentCursorLocation(self.main_cid, &mut cursor)
-            } {
-                warn!("Unable to get current cursor position.");
-                return;
-            }
-            let frame = CGRect::new(
-                CGPoint::new(window.frame().min.x.into(), window.frame().min.y.into()),
-                CGSize::new(
-                    window.frame().width().into(),
-                    window.frame().height().into(),
-                ),
-            );
-            if CGRectContainsPoint(frame, cursor) {
-                return;
-            }
-
-            let center = window.frame().center() + display_bounds.min;
-            let display_id = self.display_id(window.id());
-            #[allow(clippy::redundant_closure)]
-            let bounds = display_id.map(|display_id| CGDisplayBounds(display_id));
-            if bounds.is_ok_and(|bounds| !CGRectContainsPoint(bounds, origin_to(center))) {
-                return;
-            }
-            center
-        } else {
-            display_bounds.center()
-        };
-        CGWarpMouseCursorPosition(origin_to(center));
+    fn warp_mouse(&self, origin: Origin) {
+        CGWarpMouseCursorPosition(origin_to(origin));
     }
 
     /// Adds existing windows for a given application, attempting to resolve any that are not yet found.

@@ -2,7 +2,7 @@ use std::{ffi::c_void, os::raw::c_float, ptr::NonNull};
 
 use accessibility_sys::AXUIElementRef;
 use objc2_core_foundation::{
-    CFArray, CFDictionary, CFMutableData, CFNumber, CFString, CFType, CFUUID, CGPoint, CGRect,
+    CFArray, CFDictionary, CFMutableData, CFNumber, CFString, CFType, CFUUID, CGPoint,
 };
 use objc2_core_graphics::{CGDirectDisplayID, CGError};
 
@@ -50,7 +50,7 @@ unsafe extern "C" {
     ///
     /// # Original signature
     /// extern `CGError` SLSGetWindowBounds(int cid, `uint32_t` wid, `CGRect` *frame);
-    pub fn SLSGetWindowBounds(cid: ConnID, window_id: WinID, frame: &mut CGRect) -> CGError;
+    // pub fn SLSGetWindowBounds(cid: ConnID, window_id: WinID, frame: &mut CGRect) -> CGError;
 
     /// Moves a window to a new position at the compositor level (no IPC to the app).
     ///
@@ -79,7 +79,7 @@ unsafe extern "C" {
     ///
     /// # Original signature
     /// extern `CFStringRef` SLSCopyManagedDisplayForWindow(int cid, `uint32_t` wid);
-    pub fn SLSCopyManagedDisplayForWindow(cid: ConnID, window_id: WinID) -> CFStringRef;
+    // pub fn SLSCopyManagedDisplayForWindow(cid: ConnID, window_id: WinID) -> CFStringRef;
 
     /// Copies the best managed display identifier for a given rectangle.
     /// This function determines which display best contains or is intersected by the provided rectangle.
@@ -95,7 +95,7 @@ unsafe extern "C" {
     ///
     /// # Original signature
     /// extern `CFStringRef` SLSCopyBestManagedDisplayForRect(int cid, `CGRect` rect);
-    pub fn SLSCopyBestManagedDisplayForRect(cid: ConnID, frame: CGRect) -> CFStringRef;
+    // pub fn SLSCopyBestManagedDisplayForRect(cid: ConnID, frame: CGRect) -> CFStringRef;
 
     /// Creates a `CFUUIDRef` from a `CGDirectDisplayID`.
     ///

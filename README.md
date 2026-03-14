@@ -467,7 +467,7 @@ scripts, `cron` jobs, or other automation tools:
 
 ### Inactive window dimming
 
-For a macOS antive window dimming, set option `dim_inactive_windows` only. Do
+For a macOS native window dimming, set option `dim_inactive_windows` only. Do
 not set the other options, like inactive color.
 In this mode the option takes values between `-1.0` and `1.0`, where `-1.0` is
 completely dark and `1.0` is fully white. A reasonable option to start with is

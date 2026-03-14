@@ -118,9 +118,6 @@ pub enum Event {
 
     /// A command has been issued to the window manager.
     Command { command: Command },
-
-    /// Dump internal window manager state.
-    PrintState,
 }
 
 /// `EventSender` is a thin wrapper around a `std::sync::mpsc::Sender` for `Event`s.

@@ -7,8 +7,8 @@ use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::{Has, With};
 use bevy::ecs::system::{Commands, Query, Res, ResMut, Single};
 use bevy::math::IRect;
-use tracing::debug;
 use tracing::{Level, instrument};
+use tracing::{debug, info};
 
 use crate::config::Config;
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Windows};
@@ -929,7 +929,7 @@ fn print_internal_state_handler(
                 .collect::<Vec<_>>();
 
             let display_id = display.id();
-            debug!(
+            info!(
                 "Display {display_id}{}, workspace id {}: {strip}:\n{}",
                 if active { ", active" } else { "" },
                 strip.id(),
@@ -943,10 +943,10 @@ fn print_internal_state_handler(
         .filter(|entity| !seen.contains(&entity.1))
         .map(print_window)
         .collect::<Vec<_>>();
-    debug!("Remaining:\n{}", remaining.join("\n"));
+    info!("Remaining:\n{}", remaining.join("\n"));
 
     if let Some(pool) = bevy::tasks::ComputeTaskPool::try_get() {
-        debug!("Running with {} threads", pool.thread_num());
+        info!("Running with {} threads", pool.thread_num());
     }
 }
 

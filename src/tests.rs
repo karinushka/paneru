@@ -197,9 +197,11 @@ impl ApplicationApi for MockApplication {
     }
 }
 
+type TestWindowSpawner = Box<dyn Fn(WorkspaceId) -> Vec<Window> + Send + Sync + 'static>;
+
 /// A mock implementation of the `WindowManagerApi` trait for testing purposes.
 struct MockWindowManager {
-    windows: Box<dyn Fn(WorkspaceId) -> Vec<Window> + Send + Sync + 'static>,
+    windows: TestWindowSpawner,
 }
 
 impl std::fmt::Debug for MockWindowManager {
@@ -620,6 +622,31 @@ fn verify_window_sizes(expected_sizes: &[(WinID, (i32, i32))], world: &mut World
     }
 }
 
+fn window_spawner(
+    count: i32,
+    event_queue: EventQueue,
+    mock_app: MockApplication,
+) -> TestWindowSpawner {
+    Box::new(move |_| {
+        (0..count)
+            .map(|i| {
+                let origin = Origin::new(0, 0);
+                let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+                let window = MockWindow::new(
+                    i,
+                    IRect {
+                        min: origin,
+                        max: origin + size,
+                    },
+                    event_queue.clone(),
+                    mock_app.clone(),
+                );
+                Window::new(Box::new(window))
+            })
+            .collect::<Vec<_>>()
+    })
+}
+
 #[test]
 #[allow(clippy::too_many_lines)]
 fn test_window_shuffle() {
@@ -721,25 +748,7 @@ fn test_window_shuffle() {
     let mock_app = setup_process(bevy.world_mut());
     let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
     let event_queue = internal_queue.clone();
-
-    let windows = Box::new(move |_| {
-        (0..5)
-            .map(|i| {
-                let origin = Origin::new(100 * i, 0);
-                let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-                let window = MockWindow::new(
-                    i,
-                    IRect {
-                        min: origin,
-                        max: origin + size,
-                    },
-                    event_queue.clone(),
-                    mock_app.clone(),
-                );
-                Window::new(Box::new(window))
-            })
-            .collect::<Vec<_>>()
-    });
+    let windows = window_spawner(5, event_queue, mock_app);
     let window_manager = MockWindowManager { windows };
     bevy.world_mut()
         .insert_resource(WindowManager(Box::new(window_manager)));
@@ -800,28 +809,7 @@ fn test_startup_windows() {
     let mock_app = setup_process(bevy.world_mut());
     let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
     let event_queue = internal_queue.clone();
-
-    let windows = Box::new(move |_| {
-        (0..5)
-            .map(|i| {
-                let origin = Origin::new(100 * i, 0);
-                let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-                let mut window = MockWindow::new(
-                    i,
-                    IRect {
-                        min: origin,
-                        max: origin + size,
-                    },
-                    event_queue.clone(),
-                    mock_app.clone(),
-                );
-                if i < 2 {
-                    window.minimized = true;
-                }
-                Window::new(Box::new(window))
-            })
-            .collect::<Vec<_>>()
-    });
+    let windows = window_spawner(5, event_queue, mock_app);
     let window_manager = MockWindowManager { windows };
     bevy.world_mut()
         .insert_resource(WindowManager(Box::new(window_manager)));
@@ -857,25 +845,7 @@ fn test_dont_focus() {
     let mock_app = app.clone();
     let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
     let event_queue = internal_queue.clone();
-
-    let windows = Box::new(move |_| {
-        (0..3)
-            .map(|i| {
-                let origin = Origin::new(100 * i, 0);
-                let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-                let window = MockWindow::new(
-                    i,
-                    IRect {
-                        min: origin,
-                        max: origin + size,
-                    },
-                    event_queue.clone(),
-                    mock_app.clone(),
-                );
-                Window::new(Box::new(window))
-            })
-            .collect::<Vec<_>>()
-    });
+    let windows = window_spawner(3, event_queue, mock_app);
     let window_manager = MockWindowManager { windows };
     bevy.world_mut()
         .insert_resource(WindowManager(Box::new(window_manager)));
@@ -956,25 +926,7 @@ fn test_offscreen_windows_preserve_height() {
     let mock_app = setup_process(bevy.world_mut());
     let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
     let event_queue = internal_queue.clone();
-
-    let windows = Box::new(move |_| {
-        (0..5)
-            .map(|i| {
-                let origin = Origin::new(100 * i, 0);
-                let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-                let window = MockWindow::new(
-                    i,
-                    IRect {
-                        min: origin,
-                        max: origin + size,
-                    },
-                    event_queue.clone(),
-                    mock_app.clone(),
-                );
-                Window::new(Box::new(window))
-            })
-            .collect::<Vec<_>>()
-    });
+    let windows = window_spawner(5, event_queue, mock_app);
     let window_manager = MockWindowManager { windows };
     bevy.world_mut()
         .insert_resource(WindowManager(Box::new(window_manager)));
@@ -1040,25 +992,7 @@ fn test_sliver_smaller_than_edge_padding() {
     let mock_app = setup_process(bevy.world_mut());
     let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
     let event_queue = internal_queue.clone();
-
-    let windows = Box::new(move |_| {
-        (0..5)
-            .map(|i| {
-                let origin = Origin::new(100 * i, 0);
-                let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-                let window = MockWindow::new(
-                    i,
-                    IRect {
-                        min: origin,
-                        max: origin + size,
-                    },
-                    event_queue.clone(),
-                    mock_app.clone(),
-                );
-                Window::new(Box::new(window))
-            })
-            .collect::<Vec<_>>()
-    });
+    let windows = window_spawner(5, event_queue, mock_app);
     let window_manager = MockWindowManager { windows };
     bevy.world_mut()
         .insert_resource(WindowManager(Box::new(window_manager)));
@@ -1121,21 +1055,7 @@ fn test_window_resize_grow_and_shrink_cycle() {
     let mock_app = setup_process(bevy.world_mut());
     let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
     let event_queue = internal_queue.clone();
-
-    let windows = Box::new(move |_| {
-        let origin = Origin::new(0, 0);
-        let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-        let window = MockWindow::new(
-            0,
-            IRect {
-                min: origin,
-                max: origin + size,
-            },
-            event_queue.clone(),
-            mock_app.clone(),
-        );
-        vec![Window::new(Box::new(window))]
-    });
+    let windows = window_spawner(1, event_queue, mock_app);
     let window_manager = MockWindowManager { windows };
     bevy.world_mut()
         .insert_resource(WindowManager(Box::new(window_manager)));
@@ -1159,25 +1079,7 @@ fn test_scrolling() {
     let mock_app = setup_process(bevy.world_mut());
     let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
     let event_queue = internal_queue.clone();
-
-    let windows = Box::new(move |_| {
-        (0..3)
-            .map(|i| {
-                let origin = Origin::new(400 * i, 0);
-                let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-                let window = MockWindow::new(
-                    i,
-                    IRect {
-                        min: origin,
-                        max: origin + size,
-                    },
-                    event_queue.clone(),
-                    mock_app.clone(),
-                );
-                Window::new(Box::new(window))
-            })
-            .collect::<Vec<_>>()
-    });
+    let windows = window_spawner(3, event_queue, mock_app);
     let window_manager = MockWindowManager { windows };
     bevy.world_mut()
         .insert_resource(WindowManager(Box::new(window_manager)));

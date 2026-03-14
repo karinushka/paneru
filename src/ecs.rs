@@ -80,6 +80,11 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::swipe_gesture.run_if(resource_exists_and_equals(MissionControlActive(false))),
             layout::apply_scroll_physics,
             layout::apply_scroll_physics_post_swipe.after(layout::apply_scroll_physics),
+            layout::magnetic_snap_to_center
+                .after(layout::apply_scroll_physics_post_swipe)
+                .run_if(|config: Option<Res<Config>>| {
+                    config.is_some_and(|config| config.auto_center())
+                }),
             layout::layout_sizes_changed,
             (
                 layout::layout_strip_changed,

@@ -563,6 +563,10 @@ impl Config {
             .and_then(|dim| dim.opacity)
             .or(config.options.dim_inactive_windows)
     }
+
+    pub fn auto_center(&self) -> bool {
+        self.options().auto_center.is_some_and(|center| center)
+    }
 }
 
 fn parse_hex_color(hex: &str) -> (f64, f64, f64) {

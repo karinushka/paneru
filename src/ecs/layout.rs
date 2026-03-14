@@ -538,25 +538,36 @@ where
     )
 }
 
-fn magnetic_snap_to_center<W>(
-    time_delta: f64,
-    viewport: &IRect,
-    current_position: i32,
-    layout_strip: &LayoutStrip,
-    windows: &Windows,
-    get_window_frame: &W,
-    scroll: &Scrolling,
-) -> Option<(f64, i32)>
-where
-    W: Fn(Entity) -> Option<IRect>,
-{
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
+#[instrument(level = Level::DEBUG, skip_all)]
+pub fn magnetic_snap_to_center(
+    mut active_workspace: Single<
+        (&LayoutStrip, &mut Position, &mut Scrolling),
+        (With<ActiveWorkspaceMarker>, Without<Window>),
+    >,
+    active_display: Single<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
+    windows: Windows,
+    config: Configuration,
+    time: Res<Time>,
+) {
     const CENTER_MAGNETIC_PULL: f64 = 0.8;
     const CENTER_MAGNETIC_FORCE: f64 = 4.0;
     // Use 5% of the display width as the snap threshold
     const SNAP_DISPLAY_RATIO: f64 = 0.05;
 
+    let (strip, ref mut position, ref mut scroll) = *active_workspace;
+    if scroll.is_user_swiping {
+        return;
+    }
+
+    let get_window_frame = |entity| get_moving_window_frame(entity, &windows);
+    let viewport = active_display
+        .0
+        .actual_display_bounds(active_display.1, config.config());
+
+    let current_position = position.x;
     let viewport_center = viewport.center().x;
-    let target_offset = layout_strip
+    let target_offset = strip
         .all_columns()
         .into_iter()
         .filter_map(|entity| {
@@ -575,15 +586,12 @@ where
     let snap_threshold = SNAP_DISPLAY_RATIO * f64::from(viewport.width());
     let dist_to_snap = f64::from(current_position - target_offset);
 
-    if dist_to_snap.abs() > snap_threshold {
-        return None;
+    if dist_to_snap.abs() < snap_threshold {
+        // Magnetic pull: slow down and nudge towards center.
+        let dt = time.delta_secs_f64();
+        scroll.velocity *= CENTER_MAGNETIC_PULL;
+        position.x -= (dist_to_snap * dt * CENTER_MAGNETIC_FORCE) as i32;
     }
-
-    // Magnetic pull: slow down and nudge towards center.
-    Some((
-        scroll.velocity * CENTER_MAGNETIC_PULL,
-        (dist_to_snap * time_delta * CENTER_MAGNETIC_FORCE) as i32,
-    ))
 }
 
 #[instrument(level = Level::TRACE, skip_all, fields(entity), ret)]
@@ -654,11 +662,10 @@ pub(super) fn apply_scroll_physics(
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn apply_scroll_physics_post_swipe(
     mut active_workspace: Single<
-        (Entity, &LayoutStrip, &mut Position, &mut Scrolling),
+        (Entity, &mut Scrolling),
         (With<ActiveWorkspaceMarker>, Without<Window>),
     >,
     active_display: Single<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
-    windows: Windows,
     window_manager: Res<WindowManager>,
     mut config: Configuration,
     time: Res<Time>,
@@ -667,7 +674,7 @@ pub(super) fn apply_scroll_physics_post_swipe(
     const FOCUS_VELOCITY_RATIO: f64 = 0.3;
     const MIN_VELOCITY_PX: f64 = 100.0;
 
-    let (entity, strip, ref mut position, ref mut scroll) = *active_workspace;
+    let (entity, ref mut scroll) = *active_workspace;
     if scroll.is_user_swiping {
         return;
     }
@@ -696,27 +703,6 @@ pub(super) fn apply_scroll_physics_post_swipe(
     // Apply inertia decay
     let decay_rate = config.config().swipe_deceleration();
     scroll.velocity *= (-decay_rate * dt).exp();
-
-    let get_window_frame = |entity| get_moving_window_frame(entity, &windows);
-    let viewport = active_display
-        .0
-        .actual_display_bounds(active_display.1, config.config());
-
-    // Apply soft-snap to center during inertia.
-    if config.auto_center()
-        && let Some((velocity, snap_offset)) = magnetic_snap_to_center(
-            dt,
-            &viewport,
-            position.x,
-            strip,
-            &windows,
-            &get_window_frame,
-            scroll,
-        )
-    {
-        scroll.velocity = velocity;
-        position.x -= snap_offset;
-    }
 }
 
 /// Watches for size changes to windows and if they are changed, re-calculates the logical

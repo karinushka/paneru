@@ -609,76 +609,29 @@ fn get_moving_window_frame(entity: Entity, windows: &Windows) -> Option<IRect> {
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn apply_scroll_physics(
     mut active_workspace: Single<
-        (Entity, &LayoutStrip, &mut Position, &mut Scrolling),
+        (&LayoutStrip, &mut Position, &mut Scrolling),
         (With<ActiveWorkspaceMarker>, Without<Window>),
     >,
     active_display: Single<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
     windows: Windows,
-    window_manager: Res<WindowManager>,
-    mut config: Configuration,
+    config: Configuration,
     time: Res<Time>,
-    mut commands: Commands,
 ) {
-    const FOCUS_VELOCITY_RATIO: f64 = 0.3;
     const FINGER_LIFT_THRESHOLD: Duration = Duration::from_millis(50);
-    const MIN_VELOCITY_PX: f64 = 100.0;
 
-    let (entity, strip, ref mut position, ref mut scroll) = *active_workspace;
-    let dt = time.delta_secs_f64();
+    let (strip, ref mut position, ref mut scroll) = *active_workspace;
 
     // Finger lift detection
     if scroll.is_user_swiping && scroll.last_event.elapsed() > FINGER_LIFT_THRESHOLD {
         scroll.is_user_swiping = false;
-    }
-
-    // While user is swiping, velocity is directly applied in the trigger.
-    // We just need to update the position.
-    let display_width = f64::from(active_display.0.bounds().width());
-    let scroll_velocity = scroll.velocity.abs() * display_width;
-    if !scroll.is_user_swiping {
-        if scroll_velocity < FOCUS_VELOCITY_RATIO * display_width
-            && config.focus_follows_mouse()
-            && let Some(point) = window_manager.cursor_position()
-        {
-            config.set_ffm_flag(None);
-            commands.trigger(WMEventTrigger(Event::MouseMoved { point }));
-        }
-
-        if scroll_velocity < MIN_VELOCITY_PX {
-            // Below threshold: stop and focus
-            if let Ok(mut cmd) = commands.get_entity(entity) {
-                cmd.try_remove::<Scrolling>();
-            }
-            return;
-        }
-        // Apply inertia decay
-        let decay_rate = config.config().swipe_deceleration();
-        scroll.velocity *= (-decay_rate * dt).exp();
+        return;
     }
 
     let get_window_frame = |entity| get_moving_window_frame(entity, &windows);
     let viewport = active_display
         .0
         .actual_display_bounds(active_display.1, config.config());
-
-    // Apply soft-snap to center during inertia.
-    if !scroll.is_user_swiping
-        && config.auto_center()
-        && let Some((velocity, snap_offset)) = magnetic_snap_to_center(
-            dt,
-            &viewport,
-            position.x,
-            strip,
-            &windows,
-            &get_window_frame,
-            scroll,
-        )
-    {
-        scroll.velocity = velocity;
-        position.x -= snap_offset;
-        return;
-    }
-
+    let dt = time.delta_secs_f64();
     let frame_delta = scroll.velocity * dt;
     let shift = (f64::from(viewport.width()) * frame_delta) as i32;
 
@@ -694,6 +647,75 @@ pub(super) fn apply_scroll_physics(
         position.x = clamped_offset;
     } else {
         scroll.velocity = 0.0;
+    }
+}
+
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
+#[instrument(level = Level::DEBUG, skip_all)]
+pub(super) fn apply_scroll_physics_post_swipe(
+    mut active_workspace: Single<
+        (Entity, &LayoutStrip, &mut Position, &mut Scrolling),
+        (With<ActiveWorkspaceMarker>, Without<Window>),
+    >,
+    active_display: Single<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
+    windows: Windows,
+    window_manager: Res<WindowManager>,
+    mut config: Configuration,
+    time: Res<Time>,
+    mut commands: Commands,
+) {
+    const FOCUS_VELOCITY_RATIO: f64 = 0.3;
+    const MIN_VELOCITY_PX: f64 = 100.0;
+
+    let (entity, strip, ref mut position, ref mut scroll) = *active_workspace;
+    if scroll.is_user_swiping {
+        return;
+    }
+
+    // While user is swiping, velocity is directly applied in the trigger.
+    // We just need to update the position.
+    let dt = time.delta_secs_f64();
+    let display_width = f64::from(active_display.0.bounds().width());
+    let scroll_velocity = scroll.velocity.abs() * display_width;
+
+    if scroll_velocity < FOCUS_VELOCITY_RATIO * display_width
+        && config.focus_follows_mouse()
+        && let Some(point) = window_manager.cursor_position()
+    {
+        config.set_ffm_flag(None);
+        commands.trigger(WMEventTrigger(Event::MouseMoved { point }));
+    }
+
+    if scroll_velocity < MIN_VELOCITY_PX {
+        // Below threshold: stop and focus
+        if let Ok(mut cmd) = commands.get_entity(entity) {
+            cmd.try_remove::<Scrolling>();
+        }
+        return;
+    }
+    // Apply inertia decay
+    let decay_rate = config.config().swipe_deceleration();
+    scroll.velocity *= (-decay_rate * dt).exp();
+
+    let get_window_frame = |entity| get_moving_window_frame(entity, &windows);
+    let viewport = active_display
+        .0
+        .actual_display_bounds(active_display.1, config.config());
+
+    // Apply soft-snap to center during inertia.
+    if config.auto_center()
+        && let Some((velocity, snap_offset)) = magnetic_snap_to_center(
+            dt,
+            &viewport,
+            position.x,
+            strip,
+            &windows,
+            &get_window_frame,
+            scroll,
+        )
+    {
+        scroll.velocity = velocity;
+        position.x -= snap_offset;
     }
 }
 

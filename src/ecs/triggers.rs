@@ -510,6 +510,7 @@ pub(super) fn front_switched_trigger(
     windows: Windows,
     processes: Query<(&BProcess, &Children)>,
     applications: Query<&Application>,
+    window_manager: Res<WindowManager>,
     mut config: Configuration,
     mut commands: Commands,
 ) {
@@ -538,6 +539,16 @@ pub(super) fn front_switched_trigger(
     if let Ok(focused_id) = app.focused_window_id().inspect_err(|err| {
         warn!("can not get current focus: {err}");
     }) {
+        if let Some(point) = window_manager.cursor_position()
+            && window_manager
+                .find_window_at_point(&point)
+                .is_ok_and(|window_id| window_id != focused_id)
+        {
+            // Window got focus without mouse movement - probably with a Cmd-Tab.
+            // If so, bring it into view.
+            config.set_skip_reshuffle(false);
+            config.set_ffm_flag(None);
+        }
         commands.trigger(WMEventTrigger(Event::WindowFocused {
             window_id: focused_id,
         }));
@@ -551,13 +562,14 @@ pub(super) fn front_switched_trigger(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn center_mouse_trigger(
     trigger: On<Add, FocusedMarker>,
-    active_display: ActiveDisplay,
     windows: Windows,
-    window_manager: Res<WindowManager>,
     config: Configuration,
+    active_display: ActiveDisplay,
+    window_manager: Res<WindowManager>,
     active_workspace: Query<&Scrolling, With<ActiveWorkspaceMarker>>,
 ) {
-    let Some(window) = windows.get(trigger.event().entity) else {
+    let entity = trigger.event().entity;
+    let Some(window) = windows.get(entity) else {
         return;
     };
     if active_workspace
@@ -572,13 +584,19 @@ pub(super) fn center_mouse_trigger(
     if config.mouse_follows_focus()
         && !config.skip_reshuffle()
         && config.ffm_flag().is_none_or(|id| id != window.id())
+        && let Some(mut frame) = windows.moving_frame(entity)
     {
-        debug!("centering on {}", window.id());
-        window_manager.center_mouse(
-            // If auto-centering, then just warp the mouse to the center of screen.
-            (!config.auto_center()).then_some(window),
-            &active_display.bounds(),
-        );
+        let display_bounds = active_display.bounds();
+        // Expose the window if it's offscreen.
+        let size = frame.size();
+        frame.min = frame
+            .min
+            .clamp(display_bounds.min, display_bounds.max - size);
+        frame.max = frame.min + size;
+
+        let origin = frame.center() - display_bounds.min;
+        debug!("centering on {} {origin}", window.id());
+        window_manager.warp_mouse(origin);
     }
 }
 

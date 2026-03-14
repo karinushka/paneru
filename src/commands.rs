@@ -409,7 +409,7 @@ fn command_center_window(
         let center = active_display.bounds().center().x;
         origin.x = center - size.x / 2;
         reposition_entity(entity, origin, &mut commands);
-        window_manager.center_mouse(None, &active_display.bounds());
+        window_manager.warp_mouse(active_display.bounds().center());
         reshuffle_around(entity, &mut commands);
     }
 }
@@ -654,7 +654,7 @@ fn to_next_display(
     reposition_entity(entity, dest, &mut commands);
     reshuffle_around(entity, &mut commands);
 
-    window_manager.center_mouse(None, &other.bounds());
+    window_manager.warp_mouse(other.bounds().center());
 
     if let Some(neighbour) = active_display.active_strip().right_neighbour(entity) {
         reshuffle_around(neighbour, &mut commands);
@@ -716,7 +716,7 @@ fn mouse_to_next_display(
 
     let visible_frame = other.bounds().intersect(frame);
     debug!("warping mouse to {visible_frame:?}",);
-    window_manager.center_mouse(None, &visible_frame);
+    window_manager.warp_mouse(visible_frame.center());
 
     let point = origin_to(visible_frame.center());
     ffm_flag.as_mut().0 = None;

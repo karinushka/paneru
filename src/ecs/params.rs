@@ -364,19 +364,23 @@ impl Windows<'_, '_> {
             .map(|(_, origin, size, _, _, _)| IRect::from_corners(origin.0, origin.0 + size.0))
     }
 
-    #[allow(clippy::type_complexity)]
-    pub fn positioning(
-        &self,
-        entity: Entity,
-    ) -> Option<(
-        &LayoutPosition,
-        &Position,
-        &Bounds,
-        &WidthRatio,
-        Option<&RepositionMarker>,
-        Option<&ResizeMarker>,
-    )> {
-        self.positions.get(entity).ok()
+    pub fn moving_frame(&self, entity: Entity) -> Option<IRect> {
+        self.positions
+            .get(entity)
+            .ok()
+            .map(|(_, origin, size, _, reposition, resize)| {
+                let size = size.0;
+                let mut frame = IRect::from_corners(origin.0, origin.0 + size);
+
+                if let Some(reposition) = reposition {
+                    frame.min = reposition.0;
+                    frame.max = frame.min + size;
+                }
+                if let Some(resize) = resize {
+                    frame.max = frame.min + resize.0;
+                }
+                frame
+            })
     }
 
     pub fn layout_position(&self, entity: Entity) -> Option<&LayoutPosition> {

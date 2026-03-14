@@ -560,7 +560,7 @@ pub fn magnetic_snap_to_center(
         return;
     }
 
-    let get_window_frame = |entity| get_moving_window_frame(entity, &windows);
+    let get_window_frame = |entity| windows.moving_frame(entity);
     let viewport = active_display
         .0
         .actual_display_bounds(active_display.1, config.config());
@@ -594,25 +594,6 @@ pub fn magnetic_snap_to_center(
     }
 }
 
-#[instrument(level = Level::TRACE, skip_all, fields(entity), ret)]
-fn get_moving_window_frame(entity: Entity, windows: &Windows) -> Option<IRect> {
-    windows
-        .positioning(entity)
-        .map(|(_, origin, size, _, reposition, resize)| {
-            let size = size.0;
-            let mut frame = IRect::from_corners(origin.0, origin.0 + size);
-
-            if let Some(reposition) = reposition {
-                frame.min = reposition.0;
-                frame.max = frame.min + size;
-            }
-            if let Some(resize) = resize {
-                frame.max = frame.min + resize.0;
-            }
-            frame
-        })
-}
-
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn apply_scroll_physics(
@@ -635,7 +616,7 @@ pub(super) fn apply_scroll_physics(
         return;
     }
 
-    let get_window_frame = |entity| get_moving_window_frame(entity, &windows);
+    let get_window_frame = |entity| windows.moving_frame(entity);
     let viewport = active_display
         .0
         .actual_display_bounds(active_display.1, config.config());
@@ -806,7 +787,7 @@ pub(super) fn reshuffle_layout_strip(
             continue;
         }
 
-        let Some(mut frame) = get_moving_window_frame(entity, &windows) else {
+        let Some(mut frame) = windows.moving_frame(entity) else {
             continue;
         };
         let size = frame.size();

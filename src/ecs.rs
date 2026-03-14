@@ -79,6 +79,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::cleanup_on_exit,
             systems::swipe_gesture.run_if(resource_exists_and_equals(MissionControlActive(false))),
             layout::apply_scroll_physics,
+            layout::apply_scroll_physics_post_swipe.after(layout::apply_scroll_physics),
             layout::layout_sizes_changed,
             (
                 layout::layout_strip_changed,

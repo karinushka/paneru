@@ -983,13 +983,11 @@ pub(super) fn window_unmanaged_trigger(
 pub(super) fn window_managed_trigger(
     trigger: On<Remove, Unmanaged>,
     mut active_display: ActiveDisplayMut,
-    mut commands: Commands,
 ) {
     let entity = trigger.event().entity;
     debug!("Entity {entity} is managed again.");
 
     active_display.active_strip().append(entity);
-    reshuffle_around(entity, &mut commands);
 }
 
 /// Handles the event when a window is destroyed. The windows itself is not removed from the layout
@@ -1074,10 +1072,9 @@ fn give_away_focus(
             })
     };
 
-    if let Some((window_id, entity)) = other_window {
+    if let Some((window_id, _)) = other_window {
         config.set_ffm_flag(None);
         commands.trigger(WMEventTrigger(Event::WindowFocused { window_id }));
-        reshuffle_around(entity, commands);
     }
 }
 
@@ -1304,8 +1301,6 @@ fn apply_window_properties(
             );
             focus.focus_with_raise(psn);
         }
-    } else {
-        reshuffle_around(entity, commands);
     }
 }
 

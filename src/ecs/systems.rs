@@ -297,7 +297,6 @@ pub(crate) fn finish_setup(
         debug!("space {}: after refresh {strip:?}", strip.id());
 
         if active_strip && let Some(entity) = strip.first().ok().and_then(|column| column.top()) {
-            reshuffle_around(entity, &mut commands);
             commands.entity(entity).try_insert(FocusedMarker);
             if let Some(window) = windows.get(entity)
                 && let Some(psn) = windows.psn(window.id(), &apps)

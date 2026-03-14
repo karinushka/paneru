@@ -253,14 +253,11 @@ fn command_move_focus(
             .flatten()
     });
 
-    if let Some(window) = candidate.inspect(|entity| {
-        if let Some(window) = windows.get(*entity)
-            && let Some(psn) = windows.psn(window.id(), &apps)
-        {
-            window.focus_with_raise(psn);
-        }
-    }) {
-        reshuffle_around(window, &mut commands);
+    if let Some(entity) = candidate
+        && let Some(window) = windows.get(entity)
+        && let Some(psn) = windows.psn(window.id(), &apps)
+    {
+        window.focus_with_raise(psn);
         return;
     }
 
@@ -496,7 +493,6 @@ fn resize_window(
     }
 
     resize_entity(entity, size, &mut commands);
-    reshuffle_around(entity, &mut commands);
 }
 
 /// Toggles the focused window between full-width and a preset width.
@@ -602,7 +598,6 @@ fn manage_window(mut messages: MessageReader<Event>, windows: Windows, mut comma
     } else {
         commands.entity(entity).try_insert(Unmanaged::Floating);
     }
-    reshuffle_around(entity, &mut commands);
 }
 
 /// Moves the focused window to the next available display.
@@ -763,7 +758,6 @@ fn equalize_column(
             }
         }
     }
-    reshuffle_around(entity, &mut commands);
 }
 
 #[instrument(level = Level::DEBUG, skip_all)]
@@ -772,7 +766,6 @@ pub fn stack_windows_handler(
     mut messages: MessageReader<Event>,
     windows: Windows,
     mut active_display: ActiveDisplayMut,
-    mut commands: Commands,
 ) {
     let Some(Operation::Stack(stack)) =
         filter_window_operations(&mut messages, |op| matches!(op, Operation::Stack(_))).next()
@@ -791,7 +784,6 @@ pub fn stack_windows_handler(
         } else {
             _ = strip.unstack(entity);
         }
-        reshuffle_around(entity, &mut commands);
     }
 }
 

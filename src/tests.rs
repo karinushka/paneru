@@ -261,7 +261,7 @@ impl WindowManagerApi for MockWindowManager {
 
     /// Does nothing, as mouse centering is not tested at this level.
     #[instrument(level = Level::DEBUG, skip_all, ret)]
-    fn center_mouse(&self, _window: Option<&Window>, _display_bounds: &IRect) {
+    fn warp_mouse(&self, _origin: Origin) {
         debug!("{}:", function_name!());
     }
 

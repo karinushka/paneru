@@ -790,16 +790,13 @@ pub(super) fn reshuffle_layout_strip(
         let Some(mut frame) = windows.moving_frame(entity) else {
             continue;
         };
-        let size = frame.size();
 
-        if frame.max.x > display_bounds.max.x {
-            trace!("Bumped window {entity} to the left");
-            frame.min.x = display_bounds.max.x - size.x;
-        } else if frame.min.x < display_bounds.min.x {
-            trace!("Bumped window {entity} to the right");
-            frame.min.x = display_bounds.min.x;
-        }
-        frame.max.x = frame.min.x + size.x;
+        // Expose the window if it's offscreen.
+        let size = frame.size();
+        frame.min = frame
+            .min
+            .clamp(display_bounds.min, display_bounds.max - size);
+        frame.max = frame.min + size;
 
         let strip_position = frame.min - layout_position.0;
         trace!("reshuffle_layout_strip: triggered for entity {entity}, offset {strip_position}");

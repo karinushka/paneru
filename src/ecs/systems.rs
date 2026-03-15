@@ -517,15 +517,6 @@ pub(super) fn find_orphaned_workspaces(
             continue; // No display owns this space yet; wait for next tick.
         };
 
-        if !attached
-            .iter()
-            .any(|(_, child)| child.parent() == target_entity)
-        {
-            // This display has no spaces attached yet - so it may pick up the orphans in this
-            // tick. So wait until next tick.
-            continue;
-        }
-
         debug!(
             "Re-parenting orphaned strip {} to display {}",
             orphan.id(),
@@ -542,6 +533,9 @@ pub(super) fn find_orphaned_workspaces(
             debug!("moving windows into existing layout strip.");
             for entity in orphan.all_windows() {
                 target_strip.append(entity);
+            }
+            if let Ok(mut cmd) = commands.get_entity(orphan_entity) {
+                cmd.despawn();
             }
         } else {
             // Display does not have this strip, add it.
@@ -561,10 +555,6 @@ pub(super) fn find_orphaned_workspaces(
             &window_manager,
             &mut commands,
         );
-
-        if let Ok(mut cmd) = commands.get_entity(orphan_entity) {
-            cmd.despawn();
-        }
     }
 }
 

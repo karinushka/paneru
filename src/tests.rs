@@ -13,9 +13,11 @@ use tracing::{Level, debug, instrument};
 
 use crate::commands::{Command, Direction, Operation, ResizeDirection, register_commands};
 use crate::config::{Config, MainOptions, WindowParams};
+use crate::ecs::layout::LayoutStrip;
 use crate::ecs::{
     BProcess, ExistingMarker, FocusFollowsMouse, FocusedMarker, Initializing, MissionControlActive,
-    PollForNotifications, SkipReshuffle, SpawnWindowTrigger, register_systems, register_triggers,
+    PollForNotifications, SkipReshuffle, SpawnWindowTrigger, Timeout, register_systems,
+    register_triggers,
 };
 use crate::errors::{Error, Result};
 use crate::events::Event;
@@ -202,6 +204,7 @@ type TestWindowSpawner = Box<dyn Fn(WorkspaceId) -> Vec<Window> + Send + Sync + 
 /// A mock implementation of the `WindowManagerApi` trait for testing purposes.
 struct MockWindowManager {
     windows: TestWindowSpawner,
+    workspaces: Vec<WorkspaceId>,
 }
 
 impl std::fmt::Debug for MockWindowManager {
@@ -240,7 +243,7 @@ impl WindowManagerApi for MockWindowManager {
             IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
             TEST_MENUBAR_HEIGHT,
         );
-        vec![(display, vec![TEST_WORKSPACE_ID])]
+        vec![(display, self.workspaces.clone())]
     }
 
     /// Returns a predefined active display ID.
@@ -749,7 +752,10 @@ fn test_window_shuffle() {
     let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
     let event_queue = internal_queue.clone();
     let windows = window_spawner(5, event_queue, mock_app);
-    let window_manager = MockWindowManager { windows };
+    let window_manager = MockWindowManager {
+        windows,
+        workspaces: vec![TEST_WORKSPACE_ID],
+    };
     bevy.world_mut()
         .insert_resource(WindowManager(Box::new(window_manager)));
 
@@ -810,7 +816,10 @@ fn test_startup_windows() {
     let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
     let event_queue = internal_queue.clone();
     let windows = window_spawner(5, event_queue, mock_app);
-    let window_manager = MockWindowManager { windows };
+    let window_manager = MockWindowManager {
+        windows,
+        workspaces: vec![TEST_WORKSPACE_ID],
+    };
     bevy.world_mut()
         .insert_resource(WindowManager(Box::new(window_manager)));
 
@@ -846,7 +855,10 @@ fn test_dont_focus() {
     let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
     let event_queue = internal_queue.clone();
     let windows = window_spawner(3, event_queue, mock_app);
-    let window_manager = MockWindowManager { windows };
+    let window_manager = MockWindowManager {
+        windows,
+        workspaces: vec![TEST_WORKSPACE_ID],
+    };
     bevy.world_mut()
         .insert_resource(WindowManager(Box::new(window_manager)));
 
@@ -927,7 +939,10 @@ fn test_offscreen_windows_preserve_height() {
     let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
     let event_queue = internal_queue.clone();
     let windows = window_spawner(5, event_queue, mock_app);
-    let window_manager = MockWindowManager { windows };
+    let window_manager = MockWindowManager {
+        windows,
+        workspaces: vec![TEST_WORKSPACE_ID],
+    };
     bevy.world_mut()
         .insert_resource(WindowManager(Box::new(window_manager)));
 
@@ -993,7 +1008,10 @@ fn test_sliver_smaller_than_edge_padding() {
     let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
     let event_queue = internal_queue.clone();
     let windows = window_spawner(5, event_queue, mock_app);
-    let window_manager = MockWindowManager { windows };
+    let window_manager = MockWindowManager {
+        windows,
+        workspaces: vec![TEST_WORKSPACE_ID],
+    };
     bevy.world_mut()
         .insert_resource(WindowManager(Box::new(window_manager)));
 
@@ -1056,7 +1074,10 @@ fn test_window_resize_grow_and_shrink_cycle() {
     let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
     let event_queue = internal_queue.clone();
     let windows = window_spawner(1, event_queue, mock_app);
-    let window_manager = MockWindowManager { windows };
+    let window_manager = MockWindowManager {
+        windows,
+        workspaces: vec![TEST_WORKSPACE_ID],
+    };
     bevy.world_mut()
         .insert_resource(WindowManager(Box::new(window_manager)));
 
@@ -1080,7 +1101,10 @@ fn test_scrolling() {
     let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
     let event_queue = internal_queue.clone();
     let windows = window_spawner(3, event_queue, mock_app);
-    let window_manager = MockWindowManager { windows };
+    let window_manager = MockWindowManager {
+        windows,
+        workspaces: vec![TEST_WORKSPACE_ID],
+    };
     bevy.world_mut()
         .insert_resource(WindowManager(Box::new(window_manager)));
 
@@ -1141,6 +1165,173 @@ fn test_scrolling() {
     )
         .into();
     bevy.insert_resource(config);
+
+    run_main_loop(&mut bevy, &internal_queue, &commands, check);
+}
+
+#[test]
+fn test_multi_display_lifecycle() {
+    let mut bevy = setup_world();
+    let mock_app = setup_process(bevy.world_mut());
+    let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
+    let event_queue = internal_queue.clone();
+    let windows = window_spawner(1, event_queue, mock_app);
+    let window_manager = MockWindowManager {
+        windows,
+        workspaces: vec![TEST_WORKSPACE_ID],
+    };
+    bevy.insert_resource(WindowManager(Box::new(window_manager)));
+    bevy.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+        500,
+    )));
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 }, // Noop allowing everything to settle
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::DisplayRemoved {
+            display_id: TEST_DISPLAY_ID,
+        },
+        Event::DisplayAdded {
+            display_id: TEST_DISPLAY_ID,
+        },
+    ];
+
+    let check = |iteration, world: &mut World| {
+        match iteration {
+            1 => {
+                // Initial state check: 1 display, 1 workspace attached.
+                let _display_entity = {
+                    let mut query = world.query_filtered::<Entity, With<Display>>();
+                    query.single(world).expect("should have one display")
+                };
+            }
+
+            2 => {
+                // Verify the display is gone and the workspace is orphaned.
+                assert!(
+                    world
+                        .query_filtered::<Entity, With<Display>>()
+                        .single(world)
+                        .is_err(),
+                    "display should be despawned"
+                );
+
+                {
+                    let workspace_entity = {
+                        let mut query = world.query_filtered::<Entity, With<LayoutStrip>>();
+                        query.single(world).expect("should have one workspace")
+                    };
+                    let workspace = world.entity(workspace_entity);
+                    assert!(
+                        workspace.get::<Timeout>().is_some(),
+                        "orphaned workspace should have a timeout"
+                    );
+                    assert!(
+                        workspace.get::<ChildOf>().is_none(),
+                        "orphaned workspace should have no parent"
+                    );
+                }
+            }
+
+            3 => {
+                // Verify the display is back and the workspace is re-parented.
+                let new_display_entity = world
+                    .query_filtered::<Entity, With<Display>>()
+                    .single(world)
+                    .expect("display should be spawned again");
+
+                let workspace_entity = {
+                    let mut query = world.query_filtered::<Entity, With<LayoutStrip>>();
+                    query.single(world).expect("should have one workspace")
+                };
+                let workspace = world.entity(workspace_entity);
+                assert!(
+                    workspace.get::<Timeout>().is_none(),
+                    "re-parented workspace should no longer have a timeout"
+                );
+                let child_of = workspace
+                    .get::<ChildOf>()
+                    .expect("re-parented workspace should have a parent");
+                assert_eq!(
+                    child_of.parent(),
+                    new_display_entity,
+                    "workspace should be child of the new display"
+                );
+            }
+
+            _ => {}
+        }
+    };
+
+    run_main_loop(&mut bevy, &internal_queue, &commands, check);
+}
+
+#[test]
+fn test_multi_workspace_orphaning() {
+    let mut bevy = setup_world();
+    let mock_app = setup_process(bevy.world_mut());
+    let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
+    let event_queue = internal_queue.clone();
+    let windows = window_spawner(1, event_queue, mock_app);
+    let window_manager = MockWindowManager {
+        windows,
+        workspaces: vec![TEST_WORKSPACE_ID, TEST_WORKSPACE_ID + 1],
+    };
+    bevy.world_mut()
+        .insert_resource(WindowManager(Box::new(window_manager)));
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 }, // Noop allowing everything to settle
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::DisplayRemoved {
+            display_id: TEST_DISPLAY_ID,
+        },
+    ];
+
+    let check = |iteration, world: &mut World| {
+        let workspace_entities = world
+            .query_filtered::<Entity, With<LayoutStrip>>()
+            .iter(world)
+            .collect::<Vec<_>>();
+        match iteration {
+            1 => {
+                // Verify initial state: 1 display, 2 workspaces.
+                let display_entity = world
+                    .query_filtered::<Entity, With<Display>>()
+                    .single(world)
+                    .expect("should have one display");
+
+                assert_eq!(workspace_entities.len(), 2, "should have two workspaces");
+
+                for &ws in &workspace_entities {
+                    let child_of = world
+                        .entity(ws)
+                        .get::<ChildOf>()
+                        .expect("workspace should have parent");
+                    assert_eq!(child_of.parent(), display_entity);
+                }
+            }
+            2 => {
+                // Verify both workspaces are orphaned.
+                for &ws in &workspace_entities {
+                    let entity = world.entity(ws);
+                    assert!(
+                        entity.get::<Timeout>().is_some(),
+                        "each workspace should have a timeout"
+                    );
+                    assert!(
+                        entity.get::<ChildOf>().is_none(),
+                        "each workspace should have no parent"
+                    );
+                }
+            }
+            _ => {}
+        }
+    };
 
     run_main_loop(&mut bevy, &internal_queue, &commands, check);
 }

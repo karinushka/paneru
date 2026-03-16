@@ -47,6 +47,7 @@ mod triggers;
 /// * `app` - The Bevy application to register the systems with.
 pub fn register_systems(app: &mut bevy::app::App) {
     const DISPLAY_CHANGE_CHECK_FREQ_MS: u64 = 1000;
+    const REFRESH_WINDOW_CHECK_FREQ_MS: u64 = 1000;
     app.add_systems(
         Startup,
         (systems::gather_displays, systems::gather_initial_processes).chain(),
@@ -70,6 +71,9 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::fresh_marker_cleanup,
             systems::timeout_ticker,
             systems::window_update_frame,
+            systems::refresh_workspace_window_sizes.run_if(on_timer(Duration::from_millis(
+                REFRESH_WINDOW_CHECK_FREQ_MS,
+            ))),
             systems::displays_rearranged,
             systems::reposition_dragged_window,
             systems::find_orphaned_workspaces
@@ -307,6 +311,22 @@ pub enum DockPosition {
     Left(i32),
     Right(i32),
     Hidden,
+}
+
+#[derive(Component)]
+pub struct RefreshWindowSizes(pub Instant);
+
+impl Default for RefreshWindowSizes {
+    fn default() -> Self {
+        Self(Instant::now())
+    }
+}
+
+impl RefreshWindowSizes {
+    pub fn ready(&self) -> bool {
+        const REFRESH_WINDOW_SIZE_DELAY_SEC: u64 = 5;
+        self.0.elapsed() > Duration::from_secs(REFRESH_WINDOW_SIZE_DELAY_SEC)
+    }
 }
 
 /// Resource to control whether window reshuffling should be skipped.

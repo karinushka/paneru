@@ -1142,7 +1142,7 @@ pub(super) fn spawn_window_trigger(
             bundle_id,
         );
 
-        let Ok(frame) = window.update_frame().inspect_err(|err| error!("{err}")) else {
+        if window.update_frame().inspect_err(|err| error!("{err}")).is_err() {
             continue;
         };
 
@@ -1159,7 +1159,14 @@ pub(super) fn spawn_window_trigger(
             config.edge_padding(),
         );
 
-        // Insert the window into the internal Bevy state.
+        // Re-read the frame now that padding has been applied by
+        // apply_window_defaults. update_frame expands the OS rect by the
+        // per-window padding, so calling it *after* set_padding produces
+        // the correct logical frame for the ECS components below.
+        let frame = window
+            .update_frame()
+            .inspect_err(|err| error!("{err}"))
+            .unwrap_or_else(|_| window.frame());
         let position = Position(frame.min);
         let bounds = Bounds(Size::new(frame.width(), frame.height()));
         let width_ratio =

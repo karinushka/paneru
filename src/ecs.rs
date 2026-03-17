@@ -136,6 +136,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
 pub fn register_triggers(app: &mut bevy::app::App) {
     app.add_observer(triggers::mouse_moved_trigger)
         .add_observer(triggers::mouse_down_trigger)
+        .add_observer(triggers::mouse_up_trigger)
         .add_observer(triggers::mouse_dragged_trigger)
         .add_observer(triggers::workspace_change_trigger)
         .add_observer(triggers::active_workspace_trigger)
@@ -338,6 +339,11 @@ impl RefreshWindowSizes {
 /// Resource to control whether window reshuffling should be skipped.
 #[derive(Resource)]
 pub struct SkipReshuffle(pub bool);
+
+/// Component marking a deferred reshuffle while the mouse button is held down.
+/// Spawned with a `Timeout` so it auto-despawns if the mouse-up event is lost.
+#[derive(Component)]
+pub struct MouseHeldMarker(pub Entity);
 
 /// Resource indicating whether Mission Control is currently active.
 #[derive(PartialEq, Resource)]

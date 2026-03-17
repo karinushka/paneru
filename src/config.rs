@@ -181,6 +181,7 @@ fn parse_operation(argv: &[&str]) -> Result<Operation> {
         "stack" => Operation::Stack(true),
         "unstack" => Operation::Stack(false),
         "nextdisplay" => Operation::ToNextDisplay,
+        "snap" => Operation::Snap,
         _ => {
             return Err(err);
         }
@@ -530,6 +531,17 @@ impl Config {
             .clamp(0.1, 2.0)
     }
 
+    pub fn continuous_swipe(&self) -> bool {
+        let config = self.inner();
+        config
+            .swipe
+            .as_ref()
+            .and_then(|swipe| swipe.continuous)
+            .or(config.options.continuous_swipe)
+            // Default: true (enabled).
+            .unwrap_or(true)
+    }
+
     pub fn swipe_deceleration(&self) -> f64 {
         let config = self.inner();
         config
@@ -562,6 +574,16 @@ impl Config {
             .and_then(|inactive| inactive.dim.as_ref())
             .and_then(|dim| dim.opacity)
             .or(config.options.dim_inactive_windows)
+    }
+
+    /// Returns the allowed hidden fraction of a window before a focus change
+    /// forces it into view. 0.0 = always bring into view (eager),
+    /// 1.0 = never move unless fully invisible (lazy). Default: 0.0.
+    pub fn window_hidden_ratio(&self) -> f64 {
+        self.options()
+            .window_hidden_ratio
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0)
     }
 
     pub fn auto_center(&self) -> bool {
@@ -772,6 +794,10 @@ pub struct MainOptions {
     /// Override the system menubar height (in pixels).
     /// When set, this value is used instead of the height reported by macOS.
     pub menubar_height: Option<u16>,
+    /// How much of a window may be hidden before a focus change forces it into
+    /// view. 0.0 (default) = always bring into view. 1.0 = never move unless
+    /// fully invisible. E.g. 0.5 = tolerate up to 50% hidden.
+    pub window_hidden_ratio: Option<f64>,
 }
 
 pub mod decorations;

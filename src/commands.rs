@@ -64,6 +64,9 @@ pub enum Operation {
     Manage,
     /// Stacks or unstacks a window. The boolean indicates whether to stack (`true`) or unstack (`false`).
     Stack(bool),
+    /// Resizes and repositions the focused window to fit within the visible viewport
+    /// (including edge padding).
+    Snap,
 }
 
 /// Defines operations that can be performed on the mouse.
@@ -101,6 +104,7 @@ pub fn register_commands(app: &mut bevy::app::App) {
             stack_windows_handler,
             command_move_focus,
             command_swap_focus,
+            snap_window,
         ),
     );
 }
@@ -258,6 +262,10 @@ fn command_move_focus(
         && let Some(psn) = windows.psn(window.id(), &apps)
     {
         window.focus_with_raise(psn);
+        // Explicitly reshuffle so the target window is brought into view.
+        // This avoids a race where focus-follows-mouse leaves skip_reshuffle
+        // set, causing the WindowFocused handler to skip the reshuffle.
+        reshuffle_around(entity, &mut commands);
         return;
     }
 
@@ -403,14 +411,20 @@ fn command_center_window(
     }
 
     if let Some((_, entity)) = windows.focused()
+        && let Some(layout_position) = windows.layout_position(entity)
         && let Some(size) = windows.size(entity)
         && let Some(mut origin) = windows.origin(entity)
     {
         let center = active_display.bounds().center().x;
         origin.x = center - size.x / 2;
-        reposition_entity(entity, origin, &mut commands);
+        // Directly reposition the strip (bypasses hidden_ratio check).
+        let strip_position = origin - layout_position.0;
+        reposition_entity(
+            active_display.active_strip_entity(),
+            strip_position,
+            &mut commands,
+        );
         window_manager.warp_mouse(active_display.bounds().center());
-        reshuffle_around(entity, &mut commands);
     }
 }
 
@@ -758,6 +772,55 @@ fn equalize_column(
             }
         }
     }
+}
+
+/// Slides the strip so the focused window is fully visible, snapping to the
+/// nearest edge: left-aligned when the window overflows left, right-aligned
+/// when it overflows right. No resize — the window keeps its current size.
+/// Bypasses the lazy-viewport check since the user explicitly asked to reveal.
+#[allow(clippy::needless_pass_by_value)]
+fn snap_window(
+    mut messages: MessageReader<Event>,
+    windows: Windows,
+    active_display: ActiveDisplay,
+    config: Res<Config>,
+    mut commands: Commands,
+) {
+    if filter_window_operations(&mut messages, |op| matches!(op, Operation::Snap))
+        .next()
+        .is_none()
+    {
+        return;
+    }
+
+    let Some((_, entity)) = windows.focused() else {
+        return;
+    };
+    let Some(layout_position) = windows.layout_position(entity) else {
+        return;
+    };
+    let Some(mut frame) = windows.moving_frame(entity) else {
+        return;
+    };
+
+    let display_bounds = active_display
+        .display()
+        .actual_display_bounds(active_display.dock(), &config);
+
+    // Clamp the frame into the display and reposition the *strip* (not the
+    // window) so the layout stays consistent.
+    let size = frame.size();
+    frame.min = frame
+        .min
+        .clamp(display_bounds.min, display_bounds.max - size);
+    frame.max = frame.min + size;
+
+    let strip_position = frame.min - layout_position.0;
+    reposition_entity(
+        active_display.active_strip_entity(),
+        strip_position,
+        &mut commands,
+    );
 }
 
 #[instrument(level = Level::DEBUG, skip_all)]

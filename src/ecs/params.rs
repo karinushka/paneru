@@ -64,6 +64,10 @@ impl Configuration<'_> {
         self.config.auto_center()
     }
 
+    pub fn window_hidden_ratio(&self) -> f64 {
+        self.config.window_hidden_ratio()
+    }
+
     /// Returns the configured number of fingers for swipe gestures.
     ///
     /// # Returns

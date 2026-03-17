@@ -373,7 +373,8 @@ impl ObserverContext {
             return;
         };
         let event = match notification {
-            accessibility_sys::kAXFocusedWindowChangedNotification => {
+            accessibility_sys::kAXFocusedWindowChangedNotification
+            | accessibility_sys::kAXFocusedUIElementChangedNotification => {
                 Event::WindowFocused { window_id }
             }
             accessibility_sys::kAXWindowMovedNotification => Event::WindowMoved { window_id },

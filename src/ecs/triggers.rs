@@ -691,7 +691,7 @@ pub(super) fn window_focused_trigger(
     trigger: On<WMEventTrigger>,
     applications: Query<&Application>,
     windows: Windows,
-    active_display: ActiveDisplay,
+    mut active_display: ActiveDisplayMut,
     mut config: Configuration,
     mouse_held: Query<&MouseHeldMarker>,
     mut commands: Commands,
@@ -713,6 +713,14 @@ pub(super) fn window_focused_trigger(
         commands.spawn((timeout, StrayFocusEvent(window_id)));
         return;
     };
+
+    // Handle tab switching: if the focused window is a tab, make it the leader.
+    let layout_strip = active_display.active_strip();
+    if let Ok(index) = layout_strip.index_of(entity)
+        && let Some(column) = layout_strip.get_column_mut(index)
+    {
+        column.move_to_front(entity);
+    }
 
     let focus = windows.focused().map(|(_, entity)| entity);
     for (window, entity) in windows.iter() {
@@ -1110,6 +1118,11 @@ fn give_away_focus(
     config: &mut Configuration,
     commands: &mut Commands,
 ) {
+    if active_strip.tabbed(entity) {
+        // Do not give away focus for tabbed windows.
+        // Remaining tab gets the focus.
+        return;
+    }
     let display_center = viewport.center().x;
     let closest = active_strip
         .all_columns()
@@ -1221,15 +1234,40 @@ pub(super) fn spawn_window_trigger(
             WidthRatio(f64::from(frame.width()) / f64::from(active_display.bounds().width()));
         let layout_position = LayoutPosition::default();
 
+        // Overlapping Frame Strategy: check if this window overlaps exactly with an existing
+        // window from the same application. If so, it's likely a native tab.
+        let tabbed_entity = windows
+            .all_iter()
+            .find_map(|(existing_window, entity, parent)| {
+                (parent.parent() == app_entity && existing_window.frame() == window.frame())
+                    .then_some(entity)
+            });
+
         // Insert the window into the internal Bevy state.
-        commands.spawn((
-            position,
-            bounds,
-            width_ratio,
-            window,
-            layout_position,
-            ChildOf(app_entity),
-        ));
+        // This insertion triggers window attributes observer.
+        let entity = commands
+            .spawn((
+                position,
+                bounds,
+                width_ratio,
+                window,
+                layout_position,
+                ChildOf(app_entity),
+            ))
+            .id();
+
+        if let Some(leader) = tabbed_entity {
+            debug!(
+                "Adding window {window_id} as a tab follower for leader {leader:?} (overlapping frame)"
+            );
+            let layout_strip = active_display.active_strip();
+            if layout_strip.stacked(leader) {
+                _ = layout_strip.unstack(leader);
+            }
+            _ = layout_strip
+                .convert_to_tabs(leader, entity)
+                .inspect_err(|err| error!("Failed to convert to tabs: {err}"));
+        }
     }
 }
 
@@ -1295,6 +1333,12 @@ pub(super) fn apply_window_properties(
     mut commands: Commands,
 ) {
     let entity = trigger.event().entity;
+
+    if active_display.active_strip().tabbed(entity) {
+        debug!("Ignoring tabbed {entity} attributes.");
+        return;
+    }
+
     let Some((window, _, parent)) = windows
         .get(entity)
         .and_then(|window| windows.find_parent(window.id()))

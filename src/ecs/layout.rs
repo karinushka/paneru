@@ -25,32 +25,51 @@ pub enum Column {
     Single(Entity),
     /// A panel containing a stack of windows, ordered from top to bottom.
     Stack(Vec<Entity>),
+    /// A panel containing a group of native tabs, with the active "Leader" at the front.
+    Tabs(Vec<Entity>),
 }
 
 impl Column {
     /// Returns the top window entity in the panel.
-    /// For a `Single` panel, it's the contained window. For a `Stack`, it's the first window in the stack.
+    /// For a `Single` panel, it's the contained window.
+    /// For a `Stack` or `Tabs`, it's the first window in the vector.
     pub fn top(&self) -> Option<Entity> {
         match self {
             Column::Single(id) => Some(id),
             Column::Stack(stack) => stack.first(),
+            Column::Tabs(tabs) => tabs.first(),
         }
         .copied()
     }
 
-    /// Returns the entity at the given stack index, or the last entity if the index exceeds the stack size.
+    /// Returns the entity at the given index, or the last entity if the index exceeds the size.
     pub fn at_or_last(&self, index: usize) -> Option<Entity> {
         match self {
             Column::Single(id) => Some(*id),
             Column::Stack(stack) => stack.get(index).or_else(|| stack.last()).copied(),
+            Column::Tabs(tabs) => tabs.first().copied(),
         }
     }
 
-    /// Returns the position of an entity within this column (0 for Single, stack index for Stack).
+    /// Returns the position of an entity within this column (0 for Single, index for Stack/Tabs).
     pub fn position_of(&self, entity: Entity) -> Option<usize> {
         match self {
             Column::Single(id) => (*id == entity).then_some(0),
             Column::Stack(stack) => stack.iter().position(|&e| e == entity),
+            Column::Tabs(tabs) => (tabs.first()).is_some_and(|&id| id == entity).then_some(0),
+        }
+    }
+
+    /// Moves the specified entity to the front of the vector (index 0).
+    /// This is used to change the Leader of a Tab group.
+    pub fn move_to_front(&mut self, entity: Entity) {
+        match self {
+            Column::Single(_) | Column::Stack(_) => {}
+            Column::Tabs(tabs) => {
+                if let Some(pos) = tabs.iter().position(|&e| e == entity) {
+                    tabs.swap(0, pos);
+                }
+            }
         }
     }
 }
@@ -86,7 +105,7 @@ impl LayoutStrip {
             .iter()
             .position(|column| match column {
                 Column::Single(id) => *id == entity,
-                Column::Stack(stack) => stack.contains(&entity),
+                Column::Stack(stack) | Column::Tabs(stack) => stack.contains(&entity),
             })
             .ok_or(Error::NotFound(format!(
                 "{}: can not find window {entity} in the current pane.",
@@ -120,9 +139,33 @@ impl LayoutStrip {
         self.columns.push_back(Column::Single(entity));
     }
 
+    /// Converts a column containing `leader` to a `Tabs` column and adds `follower`.
+    pub fn convert_to_tabs(&mut self, leader: Entity, follower: Entity) -> Result<()> {
+        let index = self.index_of(leader)?;
+        let column = self.columns.remove(index).unwrap();
+        match column {
+            Column::Single(id) => {
+                self.columns.insert(index, Column::Tabs(vec![id, follower]));
+            }
+            Column::Stack(_) => {
+                // If it's in a stack, we probably shouldn't just convert the whole stack to tabs.
+                // For now, let's put it back and return an error or handle it.
+                self.columns.insert(index, column);
+                return Err(Error::Generic("Cannot convert Stack to Tabs".to_string()));
+            }
+            Column::Tabs(mut tabs) => {
+                if !tabs.contains(&follower) {
+                    tabs.push(follower);
+                }
+                self.columns.insert(index, Column::Tabs(tabs));
+            }
+        }
+        Ok(())
+    }
+
     /// Removes a window ID from the pane.
-    /// If the window is part of a stack, it is removed from the stack.
-    /// If the stack becomes empty or contains only one window, the panel type adjusts accordingly.
+    /// If the window is part of a stack or tabs, it is removed from the vector.
+    /// If the collection becomes empty or contains only one window, the panel type adjusts accordingly.
     ///
     /// # Arguments
     ///
@@ -133,12 +176,31 @@ impl LayoutStrip {
             .ok()
             .and_then(|index| self.columns.remove(index).zip(Some(index)));
 
-        if let Some((Column::Stack(mut stack), index)) = removed {
-            stack.retain(|id| *id != entity);
-            if stack.len() > 1 {
-                self.columns.insert(index, Column::Stack(stack));
-            } else if let Some(remaining_id) = stack.first() {
-                self.columns.insert(index, Column::Single(*remaining_id));
+        if let Some((column, index)) = removed {
+            match column {
+                Column::Single(id) if id == entity => {
+                    // Already removed from self.columns.
+                }
+                Column::Single(id) => {
+                    // Put it back, we removed the wrong one? (Should not happen)
+                    self.columns.insert(index, Column::Single(id));
+                }
+                Column::Stack(mut stack) => {
+                    stack.retain(|id| *id != entity);
+                    if stack.len() > 1 {
+                        self.columns.insert(index, Column::Stack(stack));
+                    } else if let Some(remaining_id) = stack.first() {
+                        self.columns.insert(index, Column::Single(*remaining_id));
+                    }
+                }
+                Column::Tabs(mut tabs) => {
+                    tabs.retain(|id| *id != entity);
+                    if tabs.len() > 1 {
+                        self.columns.insert(index, Column::Tabs(tabs));
+                    } else if let Some(remaining_id) = tabs.first() {
+                        self.columns.insert(index, Column::Single(*remaining_id));
+                    }
+                }
             }
         }
     }
@@ -239,7 +301,14 @@ impl LayoutStrip {
             // Can not stack to the left if left most window already.
             return Ok(());
         }
-        if let Column::Stack(_) = self.columns[index] {
+        match self.columns[index] {
+            Column::Stack(_) | Column::Tabs(_) => {
+                // Already in a stack, do nothing.
+                return Ok(());
+            }
+            Column::Single(_) => (),
+        }
+        if matches!(self.columns[index - 1], Column::Tabs(_)) {
             // Already in a stack, do nothing.
             return Ok(());
         }
@@ -253,6 +322,7 @@ impl LayoutStrip {
                     stack
                 }
                 Column::Single(id) => vec![id, entity],
+                Column::Tabs(_) => unreachable!(),
             };
 
             debug!("Stacked windows: {newstack:#?}");
@@ -290,7 +360,9 @@ impl LayoutStrip {
                         Column::Stack(stack)
                     }
                 }
-                Column::Single(_) => unreachable!("Is checked at the start of the function"),
+                Column::Single(_) | Column::Tabs(_) => {
+                    unreachable!("Is checked at the start of the function")
+                }
             };
             // Re-insert the unstacked window as a single panel
             self.columns.insert(index, Column::Single(entity));
@@ -312,9 +384,13 @@ impl LayoutStrip {
             .iter()
             .flat_map(|column| match column {
                 Column::Single(entity) => vec![*entity],
-                Column::Stack(ids) => ids.clone(),
+                Column::Stack(ids) | Column::Tabs(ids) => ids.clone(),
             })
             .collect()
+    }
+
+    pub fn get_column_mut(&mut self, index: usize) -> Option<&mut Column> {
+        self.columns.get_mut(index)
     }
 
     pub fn all_columns(&self) -> Vec<Entity> {
@@ -341,6 +417,7 @@ impl LayoutStrip {
                 let windows = match column {
                     Column::Single(entity) => vec![*entity],
                     Column::Stack(stack) => stack.clone(),
+                    Column::Tabs(stack) => vec![*stack.first()?],
                 };
                 let current_heights = windows
                     .iter()
@@ -405,12 +482,26 @@ impl LayoutStrip {
     pub fn above(&self, entity: Entity) -> Option<Entity> {
         let stack = self.index_of(entity).and_then(|idx| self.get(idx)).ok()?;
         match stack {
-            Column::Single(_) => None,
+            Column::Single(_) | Column::Tabs(_) => None,
             Column::Stack(items) => {
                 let pos = items.iter().position(|&e| e == entity)?;
                 (pos > 0).then(|| items[pos - 1])
             }
         }
+    }
+
+    pub fn tabbed(&self, entity: Entity) -> bool {
+        self.index_of(entity)
+            .and_then(|idx| self.get(idx))
+            .map(|col| matches!(col, Column::Tabs(_)))
+            .is_ok_and(|t| t)
+    }
+
+    pub fn stacked(&self, entity: Entity) -> bool {
+        self.index_of(entity)
+            .and_then(|idx| self.get(idx))
+            .map(|col| matches!(col, Column::Stack(_)))
+            .is_ok_and(|t| t)
     }
 }
 
@@ -426,7 +517,7 @@ impl std::fmt::Display for LayoutStrip {
     }
 }
 
-pub fn binpack_heights(heights: &[i32], min_height: i32, total_height: i32) -> Option<Vec<i32>> {
+fn binpack_heights(heights: &[i32], min_height: i32, total_height: i32) -> Option<Vec<i32>> {
     let mut count = heights.len();
     let mut output = vec![];
 
@@ -764,7 +855,7 @@ mod tests {
                 assert_eq!(stack[0], entities[0]);
                 assert_eq!(stack[1], entities[1]);
             }
-            Column::Single(_) => panic!("Expected a stack"),
+            Column::Single(_) | Column::Tabs(_) => panic!("Expected a stack"),
         }
 
         // Unstack [0]

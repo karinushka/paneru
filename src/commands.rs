@@ -154,7 +154,7 @@ fn get_window_in_direction(
         Direction::Last => strip.last().ok().and_then(|column| column.top()),
 
         Direction::North => match strip.get(index).ok()? {
-            Column::Single(_) => None,
+            Column::Single(_) | Column::Tabs(_) => None,
             Column::Stack(stack) => stack
                 .iter()
                 .enumerate()
@@ -164,7 +164,7 @@ fn get_window_in_direction(
         },
 
         Direction::South => match strip.get(index).ok()? {
-            Column::Single(_) => None,
+            Column::Single(_) | Column::Tabs(_) => None,
             Column::Stack(stack) => stack
                 .iter()
                 .enumerate()

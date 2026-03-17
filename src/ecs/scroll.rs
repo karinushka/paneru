@@ -80,24 +80,25 @@ pub(super) fn swipe_gesture(
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn swiping_timeout(
     mut strips: Populated<(Entity, &mut Scrolling), With<LayoutStrip>>,
+    active_display: ActiveDisplay,
+    time: Res<Time>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
     const FINGER_LIFT_THRESHOLD: Duration = Duration::from_millis(50);
-    const MIN_VELOCITY_PX: f64 = 100.0;
+    const MIN_VELOCITY_PX: f64 = 5.0;
+    let dt = time.delta_secs_f64();
+    let viewport_width = f64::from(active_display.bounds().width());
 
     for (entity, mut scroll) in &mut strips {
         if scroll.last_event.elapsed() > FINGER_LIFT_THRESHOLD {
             scroll.is_user_swiping = false;
 
-            if scroll.velocity.abs() < MIN_VELOCITY_PX
-                || scroll.last_event.elapsed() > 2 * FINGER_LIFT_THRESHOLD
-            {
+            if scroll.velocity.abs() * dt * viewport_width < MIN_VELOCITY_PX {
                 commands.entity(entity).remove::<Scrolling>();
-
-                if let Some(point) = window_manager.cursor_position() {
-                    commands.trigger(WMEventTrigger(Event::MouseMoved { point }));
-                }
+            }
+            if let Some(point) = window_manager.cursor_position() {
+                commands.trigger(WMEventTrigger(Event::MouseMoved { point }));
             }
         }
     }

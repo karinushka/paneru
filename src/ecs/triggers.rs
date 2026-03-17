@@ -1303,7 +1303,6 @@ fn apply_window_properties(
                 focus.title().unwrap_or_default()
             );
             focus.focus_with_raise(psn);
-            config.set_skip_reshuffle(true);
         }
     } else {
         reshuffle_around(entity, commands);

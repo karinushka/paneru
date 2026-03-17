@@ -526,15 +526,35 @@ fn test_set_padding_expands_frame() {
 
     // Setting horizontal padding should expand the frame by the padding on each side.
     window.set_padding(WindowPadding::Horizontal(8));
-    assert_eq!(window.frame().min.x, 92, "min.x should shift left by padding");
-    assert_eq!(window.frame().max.x, 508, "max.x should shift right by padding");
-    assert_eq!(window.frame().width(), 416, "width should grow by 2 * padding");
+    assert_eq!(
+        window.frame().min.x,
+        92,
+        "min.x should shift left by padding"
+    );
+    assert_eq!(
+        window.frame().max.x,
+        508,
+        "max.x should shift right by padding"
+    );
+    assert_eq!(
+        window.frame().width(),
+        416,
+        "width should grow by 2 * padding"
+    );
 
     // Setting vertical padding should expand the frame vertically.
     window.set_padding(WindowPadding::Vertical(5));
     assert_eq!(window.frame().min.y, 45, "min.y should shift up by padding");
-    assert_eq!(window.frame().max.y, 355, "max.y should shift down by padding");
-    assert_eq!(window.frame().height(), 310, "height should grow by 2 * padding");
+    assert_eq!(
+        window.frame().max.y,
+        355,
+        "max.y should shift down by padding"
+    );
+    assert_eq!(
+        window.frame().height(),
+        310,
+        "height should grow by 2 * padding"
+    );
 
     // Changing padding from 8 to 12 should only expand by the delta (4).
     window.set_padding(WindowPadding::Horizontal(12));
@@ -752,9 +772,8 @@ fn test_window_shuffle() {
     //   left:  viewport.min.x - width + sliver - pad_left + h_pad
     //   right: viewport.max.x - sliver + pad_right - h_pad
     let offscreen_right = right_edge - i32::from(SLIVER_WIDTH) + i32::from(PADDING_RIGHT) - H_PAD;
-    let offscreen_left = left_edge - logical_width + i32::from(SLIVER_WIDTH)
-        - i32::from(PADDING_LEFT)
-        + H_PAD;
+    let offscreen_left =
+        left_edge - logical_width + i32::from(SLIVER_WIDTH) - i32::from(PADDING_LEFT) + H_PAD;
     let centered = (TEST_DISPLAY_WIDTH - logical_width) / 2;
 
     let expected_positions_last = [

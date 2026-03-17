@@ -984,9 +984,7 @@ mod tests {
     #[test]
     fn test_column_positions_with_padded_frames() {
         let mut world = World::new();
-        let entities = world
-            .spawn_batch(vec![(), (), ()])
-            .collect::<Vec<Entity>>();
+        let entities = world.spawn_batch(vec![(), (), ()]).collect::<Vec<Entity>>();
 
         let mut strip = LayoutStrip::default();
         for &e in &entities {
@@ -1018,12 +1016,17 @@ mod tests {
 
         // Columns must be edge-to-edge: each column starts where the previous ends.
         let xs: Vec<_> = out.iter().map(|(_, f)| f.min.x).collect();
-        assert_eq!(xs, vec![0, 300, 700], "columns must be edge-to-edge using logical widths");
+        assert_eq!(
+            xs,
+            vec![0, 300, 700],
+            "columns must be edge-to-edge using logical widths"
+        );
 
         // Right edge of each window must equal left edge of the next.
         for i in 0..out.len() - 1 {
             assert_eq!(
-                out[i].1.max.x, out[i + 1].1.min.x,
+                out[i].1.max.x,
+                out[i + 1].1.min.x,
                 "window {} right edge must equal window {} left edge",
                 i,
                 i + 1
@@ -1035,9 +1038,7 @@ mod tests {
     #[test]
     fn test_column_positions_no_padding() {
         let mut world = World::new();
-        let entities = world
-            .spawn_batch(vec![(), (), ()])
-            .collect::<Vec<Entity>>();
+        let entities = world.spawn_batch(vec![(), (), ()]).collect::<Vec<Entity>>();
 
         let mut strip = LayoutStrip::default();
         for &e in &entities {

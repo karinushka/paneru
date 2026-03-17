@@ -975,7 +975,14 @@ pub(super) fn window_unmanaged_trigger(
 
         Unmanaged::Minimized | Unmanaged::Hidden => {
             debug!("Entity {entity} is minimized.");
-            give_away_focus(entity, &windows, active_strip, &mut config, &mut commands);
+            give_away_focus(
+                entity,
+                &windows,
+                active_strip,
+                &display_bounds,
+                &mut config,
+                &mut commands,
+            );
         }
     }
     active_strip.remove(entity);
@@ -985,11 +992,13 @@ pub(super) fn window_unmanaged_trigger(
 pub(super) fn window_managed_trigger(
     trigger: On<Remove, Unmanaged>,
     mut active_display: ActiveDisplayMut,
+    mut commands: Commands,
 ) {
     let entity = trigger.event().entity;
     debug!("Entity {entity} is managed again.");
 
     active_display.active_strip().append(entity);
+    reshuffle_around(entity, &mut commands);
 }
 
 /// Handles the event when a window is destroyed. The windows itself is not removed from the layout
@@ -1031,6 +1040,7 @@ pub(super) fn window_destroyed_trigger(
         entity,
         &windows,
         active_display.active_strip(),
+        &active_display.bounds(),
         &mut config,
         &mut commands,
     );
@@ -1048,35 +1058,32 @@ fn give_away_focus(
     entity: Entity,
     windows: &Windows,
     active_strip: &LayoutStrip,
+    viewport: &IRect,
     config: &mut Configuration,
     commands: &mut Commands,
 ) {
-    // Move focus to a left neighbour if the panel has more windows.
-    let other_window = if active_strip.len() > 1
-        && let Some((window, neighbour)) = active_strip
-            .left_neighbour(entity)
-            .or_else(|| active_strip.right_neighbour(entity))
-            .and_then(|e| windows.get(e).zip(Some(e)))
+    let display_center = viewport.center().x;
+    let closest = active_strip
+        .all_columns()
+        .into_iter()
+        .filter_map(|candidate| {
+            if candidate == entity {
+                return None;
+            }
+            let center = windows.moving_frame(candidate)?.center().x;
+            let distance = (center - display_center).abs();
+            Some((candidate, distance))
+        })
+        .min_by_key(|(_, dist)| *dist);
+
+    if let Some((neighbour, _)) = closest
+        && let Some(window) = windows.get(neighbour)
     {
         let window_id = window.id();
-        debug!("giving away focus to neighbour {neighbour} {window_id}");
-        Some((window_id, neighbour))
-    } else {
-        // Unmanaged window was despawned. Raise the first managed window in the workspace.
-        active_strip
-            .get(0)
-            .ok()
-            .and_then(|column| column.top())
-            .and_then(|entity| windows.get(entity).zip(Some(entity)))
-            .map(|(window, entity)| (window.id(), entity))
-            .inspect(|(window_id, entity)| {
-                debug!("giving away focus to first window {entity} {window_id}");
-            })
-    };
 
-    if let Some((window_id, _)) = other_window {
         config.set_ffm_flag(None);
         commands.trigger(WMEventTrigger(Event::WindowFocused { window_id }));
+        reshuffle_around(neighbour, commands);
     }
 }
 

@@ -1142,10 +1142,6 @@ pub(super) fn spawn_window_trigger(
             bundle_id,
         );
 
-        let Ok(frame) = window.update_frame().inspect_err(|err| error!("{err}")) else {
-            continue;
-        };
-
         let title = window.title().unwrap_or_default();
         let properties = config.find_window_properties(&title, bundle_id);
         if !properties.is_empty() {
@@ -1159,12 +1155,18 @@ pub(super) fn spawn_window_trigger(
             config.edge_padding(),
         );
 
-        // Insert the window into the internal Bevy state.
+        // update_frame expands the OS rect by the per-window padding, so calling it *after*
+        // set_padding produces the correct logical frame for the ECS components below.
+        let Ok(frame) = window.update_frame().inspect_err(|err| error!("{err}")) else {
+            continue;
+        };
         let position = Position(frame.min);
         let bounds = Bounds(Size::new(frame.width(), frame.height()));
         let width_ratio =
             WidthRatio(f64::from(frame.width()) / f64::from(active_display.bounds().width()));
         let layout_position = LayoutPosition::default();
+
+        // Insert the window into the internal Bevy state.
         let entity = commands
             .spawn((
                 position,

@@ -977,4 +977,82 @@ mod tests {
         assert_eq!(heights.iter().sum::<i32>(), 500);
         assert_eq!(heights.len(), 2);
     }
+
+    /// When window frames include padding (logical frame is wider than the visual
+    /// window), columns must be placed edge-to-edge using the full logical width.
+    /// This ensures the visual gap between windows equals the sum of their padding.
+    #[test]
+    fn test_column_positions_with_padded_frames() {
+        let mut world = World::new();
+        let entities = world
+            .spawn_batch(vec![(), (), ()])
+            .collect::<Vec<Entity>>();
+
+        let mut strip = LayoutStrip::default();
+        for &e in &entities {
+            strip.append(e);
+        }
+
+        // Simulate windows with padding=8: logical width = OS_width + 2*8.
+        // Window 0: OS width 284, logical width 300
+        // Window 1: OS width 384, logical width 400
+        // Window 2: OS width 484, logical width 500
+        let padded_frames = [
+            IRect::new(0, 0, 300, 600), // logical frame with padding included
+            IRect::new(0, 0, 400, 600),
+            IRect::new(0, 0, 500, 600),
+        ];
+
+        let get_window_frame = |e: Entity| {
+            if e == entities[0] {
+                Some(padded_frames[0])
+            } else if e == entities[1] {
+                Some(padded_frames[1])
+            } else {
+                Some(padded_frames[2])
+            }
+        };
+
+        let out: Vec<_> = strip.relative_positions(600, &get_window_frame).collect();
+        assert_eq!(out.len(), 3);
+
+        // Columns must be edge-to-edge: each column starts where the previous ends.
+        let xs: Vec<_> = out.iter().map(|(_, f)| f.min.x).collect();
+        assert_eq!(xs, vec![0, 300, 700], "columns must be edge-to-edge using logical widths");
+
+        // Right edge of each window must equal left edge of the next.
+        for i in 0..out.len() - 1 {
+            assert_eq!(
+                out[i].1.max.x, out[i + 1].1.min.x,
+                "window {} right edge must equal window {} left edge",
+                i,
+                i + 1
+            );
+        }
+    }
+
+    /// Frames with no padding (padding=0) should still produce edge-to-edge layout.
+    #[test]
+    fn test_column_positions_no_padding() {
+        let mut world = World::new();
+        let entities = world
+            .spawn_batch(vec![(), (), ()])
+            .collect::<Vec<Entity>>();
+
+        let mut strip = LayoutStrip::default();
+        for &e in &entities {
+            strip.append(e);
+        }
+
+        let get_window_frame = |_| Some(IRect::new(0, 0, 300, 600));
+
+        let out: Vec<_> = strip.relative_positions(600, &get_window_frame).collect();
+        let xs: Vec<_> = out.iter().map(|(_, f)| f.min.x).collect();
+        assert_eq!(xs, vec![0, 300, 600]);
+
+        // No gaps or overlaps.
+        for i in 0..out.len() - 1 {
+            assert_eq!(out[i].1.max.x, out[i + 1].1.min.x);
+        }
+    }
 }

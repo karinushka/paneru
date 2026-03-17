@@ -19,8 +19,8 @@ use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
     ActiveDisplayMarker, BProcess, ExistingMarker, FocusedMarker, FreshMarker,
-    PollForNotifications, RepositionMarker, ResizeMarker, SpawnWindowTrigger, Timeout,
-    WMEventTrigger,
+    PollForNotifications, RepositionMarker, ResizeMarker, RetryFrontSwitch, SpawnWindowTrigger,
+    Timeout, WMEventTrigger,
 };
 use crate::config::{Config, decorations::BorderRadiusOption};
 use crate::ecs::layout::LayoutStrip;
@@ -457,6 +457,31 @@ pub(super) fn timeout_ticker(
             trace!("Timer {}", timeout.timer.elapsed().as_secs_f32());
             timeout.timer.tick(clock.delta());
         }
+    }
+}
+
+/// Retries querying the focused window for applications that had a transient AX error
+/// during `ApplicationFrontSwitched`. Runs each frame until success or timeout.
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn retry_front_switch(
+    retries: Populated<(Entity, &RetryFrontSwitch)>,
+    applications: Query<&Application>,
+    mut commands: Commands,
+) {
+    for (entity, retry) in retries.iter() {
+        let Ok(app) = applications.get(retry.0) else {
+            // Application entity no longer exists, clean up.
+            commands.entity(entity).despawn();
+            continue;
+        };
+        if let Ok(focused_id) = app.focused_window_id() {
+            debug!("Front switch retry succeeded for window {focused_id}.");
+            commands.trigger(WMEventTrigger(Event::WindowFocused {
+                window_id: focused_id,
+            }));
+            commands.entity(entity).despawn();
+        }
+        // Otherwise, let timeout_ticker handle expiry.
     }
 }
 

@@ -17,8 +17,8 @@ use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
     ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, MissionControlActive,
-    NativeFullscreenMarker, SpawnWindowTrigger, StrayFocusEvent, Timeout, Unmanaged,
-    WMEventTrigger, WindowDraggedMarker,
+    NativeFullscreenMarker, RetryFrontSwitch, SpawnWindowTrigger, StrayFocusEvent, Timeout,
+    Unmanaged, WMEventTrigger, WindowDraggedMarker,
 };
 use crate::commands::ON_FULLSCREEN_SPACE;
 use crate::config::{Config, WindowParams};
@@ -507,13 +507,13 @@ pub(super) fn display_change_trigger(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn front_switched_trigger(
     trigger: On<WMEventTrigger>,
-    windows: Windows,
     processes: Query<(&BProcess, &Children)>,
     applications: Query<&Application>,
     window_manager: Res<WindowManager>,
     mut config: Configuration,
     mut commands: Commands,
 ) {
+    const FRONT_SWITCH_RETRY_SEC: u64 = 2;
     let Event::ApplicationFrontSwitched { ref psn } = trigger.event().0 else {
         return;
     };
@@ -527,10 +527,11 @@ pub(super) fn front_switched_trigger(
     if children.len() > 1 {
         warn!("Multiple apps registered to process '{}'.", process.name());
     }
-    let Some(app) = children
-        .first()
-        .and_then(|entity| applications.get(*entity).ok())
-    else {
+    let Some(&app_entity) = children.first() else {
+        error!("No application for process '{}'.", process.name());
+        return;
+    };
+    let Some(app) = applications.get(app_entity).ok() else {
         error!("No application for process '{}'.", process.name());
         return;
     };
@@ -552,10 +553,17 @@ pub(super) fn front_switched_trigger(
         commands.trigger(WMEventTrigger(Event::WindowFocused {
             window_id: focused_id,
         }));
-    } else if let Some((_, entity)) = windows.focused() {
-        warn!("front_switched: removing FocusedMarker from {entity} with no replacement!");
-        config.set_ffm_flag(None);
-        commands.entity(entity).try_remove::<FocusedMarker>();
+    } else {
+        // Transient AX error (e.g. kAXErrorCannotComplete during app transitions).
+        // Schedule a retry to query the focused window once the app is ready.
+        let timeout = Timeout::new(
+            Duration::from_secs(FRONT_SWITCH_RETRY_SEC),
+            Some(format!(
+                "Front switch retry for '{}' timed out.",
+                process.name()
+            )),
+        );
+        commands.spawn((timeout, RetryFrontSwitch(app_entity)));
     }
 }
 

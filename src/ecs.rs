@@ -70,6 +70,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::add_launched_application,
             systems::fresh_marker_cleanup,
             systems::timeout_ticker,
+            systems::retry_front_switch,
             systems::window_update_frame,
             systems::refresh_workspace_window_sizes.run_if(on_timer(Duration::from_millis(
                 REFRESH_WINDOW_CHECK_FREQ_MS,
@@ -301,6 +302,11 @@ impl Timeout {
 /// Component used as a retry mechanism for stray focus events that arrive before the target window is fully created.
 #[derive(Component)]
 pub struct StrayFocusEvent(pub WinID);
+
+/// Component used as a retry mechanism when `focused_window_id()` fails during
+/// an `ApplicationFrontSwitched` event (e.g. transient `kAXErrorCannotComplete`).
+#[derive(Component)]
+pub struct RetryFrontSwitch(pub Entity);
 
 #[derive(Component)]
 pub struct BruteforceWindows(Task<Vec<Window>>);

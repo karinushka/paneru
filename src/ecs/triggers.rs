@@ -17,8 +17,8 @@ use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
     ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, MissionControlActive,
-    NativeFullscreenMarker, RetryFrontSwitch, SpawnWindowTrigger, StrayFocusEvent, Timeout,
-    Unmanaged, WMEventTrigger, WindowDraggedMarker,
+    MouseHeldMarker, NativeFullscreenMarker, RetryFrontSwitch, SpawnWindowTrigger,
+    StrayFocusEvent, Timeout, Unmanaged, WMEventTrigger, WindowDraggedMarker,
 };
 use crate::commands::ON_FULLSCREEN_SPACE;
 use crate::config::{Config, WindowParams};
@@ -146,13 +146,15 @@ pub(super) fn mouse_moved_trigger(
 /// * `main_cid` - The main connection ID resource.
 /// * `mission_control_active` - A resource indicating if Mission Control is active.
 /// * `commands` - Bevy commands to trigger a reshuffle.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 pub(super) fn mouse_down_trigger(
     trigger: On<WMEventTrigger>,
     windows: Windows,
     active_workspace: Query<(Entity, Option<&Scrolling>), With<ActiveWorkspaceMarker>>,
     window_manager: Res<WindowManager>,
     mission_control_active: Res<MissionControlActive>,
+    config: Configuration,
+    mouse_held: Query<Entity, With<MouseHeldMarker>>,
     mut commands: Commands,
 ) {
     let Event::MouseDown { point } = trigger.event().0 else {
@@ -178,8 +180,39 @@ pub(super) fn mouse_down_trigger(
         }
     }
 
-    reshuffle_around(entity, &mut commands);
+    // Clean up any stale marker from a previous click.
+    for held in &mouse_held {
+        commands.entity(held).despawn();
+    }
+
+    if config.window_hidden_ratio() >= 1.0 {
+        // At max hidden ratio, never reshuffle on click.
+    } else {
+        // Defer reshuffle until mouse-up so the window doesn't shift
+        // mid-click. The Timeout auto-despawns if mouse-up is lost.
+        let timeout = Timeout::new(Duration::from_secs(5), None);
+        commands.spawn((MouseHeldMarker(entity), timeout));
+    }
 }
+
+/// Handles mouse-up events. Triggers the deferred reshuffle so the clicked
+/// window slides into view after the user releases the button.
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn mouse_up_trigger(
+    trigger: On<WMEventTrigger>,
+    mouse_held: Query<(Entity, &MouseHeldMarker)>,
+    mut commands: Commands,
+) {
+    let Event::MouseUp { .. } = trigger.event().0 else {
+        return;
+    };
+    for (held_entity, marker) in &mouse_held {
+        reshuffle_around(marker.0, &mut commands);
+        commands.entity(held_entity).despawn();
+    }
+}
+
+
 
 /// Handles mouse dragged events.
 ///
@@ -660,6 +693,7 @@ pub(super) fn window_focused_trigger(
     windows: Windows,
     active_display: ActiveDisplay,
     mut config: Configuration,
+    mouse_held: Query<&MouseHeldMarker>,
     mut commands: Commands,
 ) {
     const STRAY_FOCUS_RETRY_SEC: u64 = 2;
@@ -703,7 +737,7 @@ pub(super) fn window_focused_trigger(
 
     commands.entity(entity).try_insert(FocusedMarker);
 
-    if !(config.skip_reshuffle() || config.initializing()) {
+    if !(config.skip_reshuffle() || config.initializing() || !mouse_held.is_empty()) {
         if config.auto_center()
             && let Some((_, _, None)) = windows.get_managed(entity)
             && let Some(size) = windows.size(entity)

@@ -248,6 +248,14 @@ animation_speed = 50
 # When unset, the height reported by macOS is used.
 # menubar_height = 25
 
+# How much of a window may be hidden before a focus change forces it into view.
+# 0.0 (default) = always bring into view (eager).
+# 1.0 = never move unless fully invisible (lazy).
+# E.g. 0.5 = tolerate up to 50% hidden.
+# Clicking a window defers the scroll until mouse-up so content doesn't shift
+# mid-click. Use the window_snap binding to manually snap a window into view.
+# window_hidden_ratio = 0.0
+
 [swipe]
 # Swipe sensitivity multiplier. Lower values = less distance per finger movement.
 # Range: 0.1–2.0. Default: 0.35.
@@ -335,6 +343,11 @@ mouse_nextdisplay = "alt - n"
 
 # Size stacked windows in the column to equal heights.
 window_equalize = "alt + shift - e"
+
+# Snap the focused window into view by sliding the strip. Left-aligned when
+# the window overflows left, right-aligned when overflows right. No resize.
+# Useful in lazy viewport mode when a window is partially offscreen.
+# window_snap = "alt + shift - f"
 
 # Quits the window manager.
 quit = "ctrl + alt - q"
@@ -440,6 +453,7 @@ $ paneru send-cmd <command> [args...]
 | `window stack`             | Stack the focused window onto its left neighbour |
 | `window unstack`           | Unstack the focused window into its own column   |
 | `window nextdisplay`       | Move the focused window to the next display      |
+| `window snap`     | Snap the focused window into the visible viewport    |
 | `mouse nextdisplay`        | Warp the mouse pointer to the next display       |
 | `printstate`               | Print the internal ECS state to the debug log    |
 | `quit`                     | Quit Paneru                                      |

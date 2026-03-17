@@ -258,8 +258,7 @@ where
         })
         .map(|(position, frame)| position.x + frame.width())?;
 
-    // Continous swipe is on by default.
-    let continuous_swipe = config.options().continuous_swipe.is_none_or(|swipe| swipe);
+    let continuous_swipe = config.continuous_swipe();
     let strip_position = |column: Result<Column>| {
         column
             .ok()

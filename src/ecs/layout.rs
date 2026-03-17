@@ -584,8 +584,23 @@ pub(super) fn reshuffle_layout_strip(
             continue;
         };
 
-        // Expose the window if it's offscreen.
         let size = frame.size();
+
+        // Check how much of the window is hidden. Slivers don't count as
+        // meaningfully visible, so subtract sliver_width from the visible
+        // portion. If the hidden fraction is within the allowed ratio, skip.
+        let hidden_ratio = config.window_hidden_ratio();
+        if hidden_ratio > 0.0 {
+            let visible_width = display_bounds.intersect(frame).width();
+            let meaningful = (visible_width - config.sliver_width()).max(0);
+            let visible_fraction = f64::from(meaningful) / f64::from(frame.width().max(1));
+            let hidden_fraction = 1.0 - visible_fraction;
+            if hidden_fraction <= hidden_ratio {
+                continue;
+            }
+        }
+
+        // Expose the window by clamping it into the viewport.
         frame.min = frame
             .min
             .clamp(display_bounds.min, display_bounds.max - size);

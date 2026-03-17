@@ -119,7 +119,7 @@ impl WindowOS {
     /// # Returns
     ///
     /// `Ok(Window)` if the window is created successfully, otherwise `Err(Error)`.
-    #[instrument(level = Level::DEBUG, ret)]
+    #[instrument(level = Level::TRACE, ret)]
     pub fn new(element: &CFRetained<AXUIWrapper>) -> Result<Self> {
         let id = ax_window_id(element.as_ptr())?;
         let window = Self {

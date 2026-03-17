@@ -1,9 +1,5 @@
 use accessibility_sys::{
-    AXObserverRef, AXUIElementCreateApplication, AXUIElementRef, kAXCreatedNotification,
-    kAXErrorSuccess, kAXFocusedWindowChangedNotification, kAXMenuClosedNotification,
-    kAXMenuOpenedNotification, kAXTitleChangedNotification, kAXUIElementDestroyedNotification,
-    kAXWindowDeminiaturizedNotification, kAXWindowMiniaturizedNotification,
-    kAXWindowMovedNotification, kAXWindowResizedNotification,
+    AXObserverRef, AXUIElementCreateApplication, AXUIElementRef, kAXErrorSuccess,
 };
 use bevy::ecs::component::Component;
 use core::ptr::NonNull;
@@ -32,13 +28,14 @@ use crate::util::{AXUIAttributes, AXUIWrapper, MacResult, add_run_loop, remove_r
 /// such as a new window being created, the focused window changing, or a menu being opened/closed.
 pub static AX_NOTIFICATIONS: LazyLock<Vec<&str>> = LazyLock::new(|| {
     vec![
-        kAXCreatedNotification,
-        kAXFocusedWindowChangedNotification,
-        kAXWindowMovedNotification,
-        kAXWindowResizedNotification,
-        kAXTitleChangedNotification,
-        kAXMenuOpenedNotification,
-        kAXMenuClosedNotification,
+        accessibility_sys::kAXCreatedNotification,
+        accessibility_sys::kAXFocusedWindowChangedNotification,
+        accessibility_sys::kAXFocusedUIElementChangedNotification,
+        accessibility_sys::kAXWindowMovedNotification,
+        accessibility_sys::kAXWindowResizedNotification,
+        accessibility_sys::kAXTitleChangedNotification,
+        accessibility_sys::kAXMenuOpenedNotification,
+        accessibility_sys::kAXMenuClosedNotification,
     ]
 });
 
@@ -47,9 +44,9 @@ pub static AX_NOTIFICATIONS: LazyLock<Vec<&str>> = LazyLock::new(|| {
 /// such as a window being destroyed, miniaturized (minimized), or deminiaturized (restored).
 pub static AX_WINDOW_NOTIFICATIONS: LazyLock<Vec<&str>> = LazyLock::new(|| {
     vec![
-        kAXUIElementDestroyedNotification,
-        kAXWindowMiniaturizedNotification,
-        kAXWindowDeminiaturizedNotification,
+        accessibility_sys::kAXUIElementDestroyedNotification,
+        accessibility_sys::kAXWindowMiniaturizedNotification,
+        accessibility_sys::kAXWindowDeminiaturizedNotification,
     ]
 });
 

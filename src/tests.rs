@@ -729,6 +729,7 @@ fn test_window_shuffle() {
     const PADDING_TOP: u16 = 7;
     const PADDING_BOTTOM: u16 = 9;
     const SLIVER_WIDTH: u16 = 5;
+    const H_PAD: i32 = 2;
 
     let commands = vec![
         Event::MenuOpened { window_id: 0 }, // Noop allowing everything to settle
@@ -761,7 +762,6 @@ fn test_window_shuffle() {
         },
     ];
 
-    const H_PAD: i32 = 2;
     // Logical width includes padding expansion on each side.
     let logical_width = TEST_WINDOW_WIDTH + 2 * H_PAD;
     let top_edge = TEST_MENUBAR_HEIGHT + i32::from(PADDING_TOP);
@@ -1040,6 +1040,9 @@ fn test_sliver_smaller_than_edge_padding() {
     let commands = vec![
         Event::MenuOpened { window_id: 0 }, // Settle
         Event::Command {
+            command: Command::Window(Operation::Focus(Direction::Last)),
+        },
+        Event::Command {
             command: Command::Window(Operation::Focus(Direction::First)),
         },
         Event::Command {
@@ -1075,9 +1078,9 @@ fn test_sliver_smaller_than_edge_padding() {
     ];
 
     let check = |iteration, world: &mut World| {
-        if iteration == 1 {
+        if iteration == 2 {
             verify_window_positions(&expected_first, world);
-        } else if iteration == 2 {
+        } else if iteration == 3 {
             verify_window_positions(&expected_last, world);
         }
     };

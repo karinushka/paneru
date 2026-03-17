@@ -702,6 +702,12 @@ pub(super) fn window_focused_trigger(
         return;
     };
 
+    if let Some((window, _)) = windows.focused()
+        && window.id() == window_id
+    {
+        return;
+    }
+
     let Some((window, entity, parent)) = windows.find_parent(window_id) else {
         let timeout = Timeout::new(Duration::from_secs(STRAY_FOCUS_RETRY_SEC), None);
         commands.spawn((timeout, StrayFocusEvent(window_id)));

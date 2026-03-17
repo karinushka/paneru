@@ -1162,4 +1162,122 @@ mod tests {
             assert_eq!(out[i].1.max.x, out[i + 1].1.min.x);
         }
     }
+
+    #[test]
+    fn test_convert_to_tabs() {
+        let mut world = World::new();
+        let e1 = world.spawn_empty().id();
+        let e2 = world.spawn_empty().id();
+        let e3 = world.spawn_empty().id();
+
+        let mut strip = LayoutStrip::default();
+        strip.append(e1);
+        strip.append(e3);
+
+        // Convert e1 to a tab group with follower e2
+        strip.convert_to_tabs(e1, e2).unwrap();
+
+        assert_eq!(strip.len(), 2);
+        match strip.get(0).unwrap() {
+            Column::Tabs(tabs) => {
+                assert_eq!(tabs, vec![e1, e2]);
+            }
+            _ => panic!("Expected Tabs column"),
+        }
+
+        // Add another tab e4
+        let e4 = world.spawn_empty().id();
+        strip.convert_to_tabs(e1, e4).unwrap();
+        assert_eq!(strip.len(), 2);
+        match strip.get(0).unwrap() {
+            Column::Tabs(tabs) => {
+                assert_eq!(tabs, vec![e1, e2, e4]);
+            }
+            _ => panic!("Expected Tabs column"),
+        }
+    }
+
+    #[test]
+    fn test_tab_leader_rotation() {
+        let mut world = World::new();
+        let e1 = world.spawn_empty().id();
+        let e2 = world.spawn_empty().id();
+        let e3 = world.spawn_empty().id();
+
+        let mut column = Column::Tabs(vec![e1, e2, e3]);
+        assert_eq!(column.top(), Some(e1));
+
+        // Move e2 to front (new leader)
+        column.move_to_front(e2);
+        assert_eq!(column.top(), Some(e2));
+        match column {
+            Column::Tabs(ref tabs) => assert_eq!(tabs, &vec![e2, e1, e3]),
+            _ => panic!(),
+        }
+
+        // Move e3 to front
+        column.move_to_front(e3);
+        assert_eq!(column.top(), Some(e3));
+        match column {
+            Column::Tabs(ref tabs) => assert_eq!(tabs, &vec![e3, e1, e2]),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn test_remove_from_tabs() {
+        let mut world = World::new();
+        let e1 = world.spawn_empty().id();
+        let e2 = world.spawn_empty().id();
+        let e3 = world.spawn_empty().id();
+
+        let mut strip = LayoutStrip::default();
+        strip.append(e1);
+        strip.convert_to_tabs(e1, e2).unwrap();
+        strip.convert_to_tabs(e1, e3).unwrap();
+
+        assert_eq!(strip.len(), 1);
+
+        // Remove e2 (follower)
+        strip.remove(e2);
+        assert_eq!(strip.len(), 1);
+        match strip.get(0).unwrap() {
+            Column::Tabs(tabs) => assert_eq!(tabs, vec![e1, e3]),
+            _ => panic!(),
+        }
+
+        // Remove e1 (leader)
+        strip.remove(e1);
+        assert_eq!(strip.len(), 1);
+        // Should convert back to Single since only e3 remains
+        match strip.get(0).unwrap() {
+            Column::Single(id) => assert_eq!(id, e3),
+            _ => panic!("Expected Single column after removing all but one tab"),
+        }
+    }
+
+    #[test]
+    fn test_overlapping_frame_strategy_simulation() {
+        let mut world = World::new();
+        let e1 = world.spawn_empty().id();
+        let e2 = world.spawn_empty().id();
+
+        let mut strip = LayoutStrip::default();
+        strip.append(e1);
+
+        // Simulate detection logic from spawn_window_trigger
+        let leader_match = Some(e1); // Mocked match from frame comparison
+
+        if let Some(leader) = leader_match {
+            strip.convert_to_tabs(leader, e2).unwrap();
+        } else {
+            strip.append(e2);
+        }
+
+        assert_eq!(strip.len(), 1);
+        match strip.get(0).unwrap() {
+            Column::Tabs(tabs) => assert_eq!(tabs, vec![e1, e2]),
+            _ => panic!(),
+        }
+    }
 }

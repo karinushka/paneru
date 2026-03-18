@@ -1153,7 +1153,7 @@ pub(super) fn spawn_window_trigger(
     windows: Windows,
     mut apps: Query<(Entity, &mut Application)>,
     mut active_display: ActiveDisplayMut,
-    mut config: Configuration,
+    config: Configuration,
     mut commands: Commands,
 ) {
     let new_windows = &mut trigger.event_mut().0;
@@ -1222,26 +1222,14 @@ pub(super) fn spawn_window_trigger(
         let layout_position = LayoutPosition::default();
 
         // Insert the window into the internal Bevy state.
-        let entity = commands
-            .spawn((
-                position,
-                bounds,
-                width_ratio,
-                window,
-                layout_position,
-                ChildOf(app_entity),
-            ))
-            .id();
-
-        apply_window_properties(
-            entity,
-            &properties,
-            &mut active_display,
-            &windows,
-            &mut apps,
-            &mut config,
-            &mut commands,
-        );
+        commands.spawn((
+            position,
+            bounds,
+            width_ratio,
+            window,
+            layout_position,
+            ChildOf(app_entity),
+        ));
     }
 }
 
@@ -1296,16 +1284,34 @@ fn apply_window_defaults(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn apply_window_properties(
-    entity: Entity,
-    properties: &[WindowParams],
-    active_display: &mut ActiveDisplayMut,
-    windows: &Windows,
-    apps: &mut Query<(Entity, &mut Application)>,
-    config: &mut Configuration,
-    commands: &mut Commands,
+#[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
+pub(super) fn apply_window_properties(
+    trigger: On<Add, Window>,
+    mut active_display: ActiveDisplayMut,
+    windows: Windows,
+    apps: Query<&Application>,
+    config: Configuration,
+    mut commands: Commands,
 ) {
+    let entity = trigger.event().entity;
+    let Some((window, _, parent)) = windows
+        .get(entity)
+        .and_then(|window| windows.find_parent(window.id()))
+    else {
+        return;
+    };
+    let Ok(app) = apps.get(parent) else {
+        return;
+    };
+    let bundle_id = app.bundle_id().unwrap_or_default();
+
+    let title = window.title().unwrap_or_default();
+    let properties = config.find_window_properties(&title, bundle_id);
+    if !properties.is_empty() {
+        debug!("Applying window properties for '{}'", window.id());
+    }
+
     let floating = properties
         .iter()
         .find_map(|props| props.floating)
@@ -1346,20 +1352,18 @@ fn apply_window_properties(
         None => strip.append(entity),
     }
 
-    if config.initializing() {
-        // During init, skip per-window reshuffles. finish_setup does a single
-        // reshuffle after all windows are added.
-    } else if dont_focus {
-        let mut lens = apps.transmute_lens::<&Application>();
-        if let Some((focus, _)) = windows.focused()
-            && let Some(psn) = windows.psn(focus.id(), &lens.query())
-        {
-            debug!(
-                "Not focusing new window {entity}, keeping focus on '{}'",
-                focus.title().unwrap_or_default()
-            );
-            focus.focus_with_raise(psn);
-        }
+    // During init, skip per-window reshuffles. finish_setup does a single
+    // reshuffle after all windows are added.
+    if !config.initializing()
+        && dont_focus
+        && let Some((focus, _)) = windows.focused()
+        && let Some(psn) = windows.psn(focus.id(), &apps)
+    {
+        debug!(
+            "Not focusing new window {entity}, keeping focus on '{}'",
+            focus.title().unwrap_or_default()
+        );
+        focus.focus_with_raise(psn);
     }
 }
 

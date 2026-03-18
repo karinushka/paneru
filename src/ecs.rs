@@ -157,6 +157,7 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::send_message_trigger)
         .add_observer(triggers::window_removal_trigger)
         .add_observer(triggers::dim_window_trigger)
+        .add_observer(triggers::apply_window_properties)
         .add_observer(triggers::dim_remove_window_trigger);
 }
 

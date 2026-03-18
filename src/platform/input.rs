@@ -1,5 +1,6 @@
 use arc_swap::ArcSwap;
 use core::ptr::NonNull;
+use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2_app_kit::{NSEvent, NSEventType, NSTouch, NSTouchPhase};
 use objc2_core_foundation::{CFMachPort, CFRetained, CFRunLoop, kCFRunLoopCommonModes};
@@ -254,10 +255,20 @@ impl InputHandler {
         if fingers.iter().all(|f| f.phase() != NSTouchPhase::Began)
             && let Some(prev) = &self.finger_position
         {
-            let deltas = prev
+            // Match touches by identity rather than relying on NSSet
+            // iteration order, which is not guaranteed to be stable.
+            let deltas = fingers
                 .iter()
-                .zip(&fingers)
-                .map(|(p, c)| p.normalizedPosition().x - c.normalizedPosition().x)
+                .filter_map(|current| {
+                    let id = current.identity();
+                    prev.iter()
+                        .find(|p| {
+                            let p_id = p.identity();
+                            let equal: bool = unsafe { msg_send![&*p_id, isEqual: &*id] };
+                            equal
+                        })
+                        .map(|p| p.normalizedPosition().x - current.normalizedPosition().x)
+                })
                 .collect::<Vec<_>>();
             if deltas.iter().all(|p| p.abs() > SWIPE_THRESHOLD)
                 && let Some(events) = &self.events

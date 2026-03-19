@@ -28,7 +28,7 @@ use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, BruteforceWindows, Initializing, LocateDockTrigger, Position,
     RefreshWindowSizes, Scrolling, StackAdjustedResize, Unmanaged, WidthRatio, WindowDraggedMarker,
-    reposition_entity, reshuffle_around,
+    WindowPropoerties, reposition_entity, reshuffle_around,
 };
 use crate::events::Event;
 use crate::manager::{
@@ -1300,15 +1300,14 @@ pub(super) fn update_overlays(
             ));
 
             // Look up per-window border_radius from config (dynamic, respects hot-reload).
-            let title = window.title().unwrap_or_default();
-            let bundle_id = windows
+            let Some(app) = windows
                 .find_parent(window.id())
                 .and_then(|(_, _, parent)| applications.get(parent).ok())
-                .map(|app| app.bundle_id().unwrap_or_default())
-                .unwrap_or_default();
-            let properties = config.find_window_properties(&title, bundle_id);
-            let focused_border_radius = properties.iter().find_map(|p| p.border_radius);
-
+            else {
+                return;
+            };
+            let properties = WindowPropoerties::new(app, window, config.config());
+            let focused_border_radius = properties.border_radius();
             (
                 focused_abs_cg,
                 focused_border_radius,

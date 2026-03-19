@@ -26,27 +26,22 @@ use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, LayoutPosition, LocateDockTrigger, Position, Scrolling,
-    SendMessageTrigger, WidthRatio, reposition_entity, reshuffle_around, resize_entity,
+    SendMessageTrigger, WidthRatio, WindowPropoerties, reposition_entity, reshuffle_around,
+    resize_entity,
 };
 use crate::errors::Result;
 use crate::events::Event;
 use crate::manager::{
     Application, Display, Origin, Process, Size, Window, WindowManager, WindowPadding, irect_from,
 };
-use crate::platform::{Modifiers, PlatformCallbacks, WinID, WorkspaceId};
+use crate::platform::{PlatformCallbacks, WinID, WorkspaceId};
 use crate::util::symlink_target;
 
 /// Computes the passthrough keybinding set for the given window/app and
 /// publishes it to the input thread. Called on focus change and config reload.
 fn update_passthrough(window: &Window, app: &Application, config: &Config) {
-    let bundle_id = app.bundle_id().unwrap_or_default();
-    let title = window.title().unwrap_or_default();
-    let keys: Vec<(u8, Modifiers)> = config
-        .find_window_properties(&title, bundle_id)
-        .into_iter()
-        .flat_map(|p| p.passthrough_keys().to_vec())
-        .collect();
-    crate::platform::input::set_focused_passthrough(keys);
+    let properties = WindowPropoerties::new(app, window, config);
+    crate::platform::input::set_focused_passthrough(properties.passthrough_keys());
 }
 
 /// Handles mouse moved events.
@@ -976,15 +971,15 @@ pub(super) fn window_unmanaged_trigger(
                 return;
             };
 
-            let title = window.title().unwrap_or_default();
-            let grid_ratios = windows
+            let Some((_, app)) = windows
                 .find_parent(window.id())
                 .and_then(|(_, _, parent)| apps.get(parent).ok())
-                .and_then(|(_, app)| app.bundle_id())
-                .map(|bundle_id| config.find_window_properties(&title, bundle_id))
-                .and_then(|properties| properties.iter().find_map(WindowParams::grid_ratios));
+            else {
+                return;
+            };
+            let properties = WindowPropoerties::new(app, window, config.config());
 
-            if let Some((rx, ry, rw, rh)) = grid_ratios {
+            if let Some((rx, ry, rw, rh)) = properties.grid_ratios() {
                 let x = (f64::from(display_bounds.width()) * rx) as i32;
                 let y = (f64::from(display_bounds.height()) * ry) as i32;
                 let w = (f64::from(display_bounds.width()) * rw) as i32;
@@ -1199,19 +1194,21 @@ pub(super) fn spawn_window_trigger(
         if app.observe_window(&window).is_err() {
             warn!("Error observing window {window_id}.");
         }
-        let bundle_id = app.bundle_id().unwrap_or_default();
-        debug!("window {} bundle_id {}", window_id, bundle_id,);
+        debug!(
+            "window {} title: {}",
+            window_id,
+            window.title().unwrap_or_default()
+        );
 
-        let title = window.title().unwrap_or_default();
-        let properties = config.find_window_properties(&title, bundle_id);
-        if !properties.is_empty() {
+        let properties = WindowPropoerties::new(&app, &window, config.config());
+        if !properties.params.is_empty() {
             debug!("Applying window properties for '{}'", window.id());
         }
 
         apply_window_defaults(
             &mut window,
             &mut active_display,
-            &properties,
+            &properties.params,
             config.edge_padding(),
         );
 
@@ -1340,25 +1337,9 @@ pub(super) fn apply_window_properties(
     let Ok(app) = apps.get(parent) else {
         return;
     };
-    let bundle_id = app.bundle_id().unwrap_or_default();
+    let properties = WindowPropoerties::new(app, window, config.config());
 
-    let title = window.title().unwrap_or_default();
-    let properties = config.find_window_properties(&title, bundle_id);
-    if !properties.is_empty() {
-        debug!("Applying window properties for '{}'", window.id());
-    }
-
-    let floating = properties
-        .iter()
-        .find_map(|props| props.floating)
-        .unwrap_or(false);
-    let wanted_insertion = properties.iter().find_map(|props| props.index);
-    let dont_focus = properties
-        .iter()
-        .find_map(|props| props.dont_focus)
-        .unwrap_or(false);
-
-    if floating {
+    if properties.floating() {
         // Avoid managing window if it's floating.
         commands.entity(entity).try_insert(Unmanaged::Floating);
         return;
@@ -1367,7 +1348,7 @@ pub(super) fn apply_window_properties(
     let strip = active_display.active_strip();
 
     // Attempt inserting the window at a pre-defined position.
-    let insert_at = wanted_insertion.map_or_else(
+    let insert_at = properties.insertion().map_or_else(
         || {
             // Otherwise attempt inserting it after the current focus.
             let focused_window = windows.focused();
@@ -1391,7 +1372,7 @@ pub(super) fn apply_window_properties(
     // During init, skip per-window reshuffles. finish_setup does a single
     // reshuffle after all windows are added.
     if !config.initializing()
-        && dont_focus
+        && properties.dont_focus()
         && let Some((focus, _)) = windows.focused()
         && let Some(psn) = windows.psn(focus.id(), &apps)
     {

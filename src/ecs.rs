@@ -22,14 +22,14 @@ use objc2_core_graphics::CGDirectDisplayID;
 use tracing::{Level, instrument};
 
 use crate::commands::register_commands;
-use crate::config::{CONFIGURATION_FILE, Config};
+use crate::config::{CONFIGURATION_FILE, Config, WindowParams};
 use crate::errors::Result;
 use crate::events::{Event, EventSender};
 use crate::manager::{
-    Origin, ProcessApi, Size, Window, WindowManager, WindowManagerApi, WindowManagerOS,
+    Application, Origin, ProcessApi, Size, Window, WindowManager, WindowManagerApi, WindowManagerOS,
 };
 use crate::overlay::OverlayManager;
-use crate::platform::{PlatformCallbacks, WinID};
+use crate::platform::{Modifiers, PlatformCallbacks, WinID};
 
 pub mod layout;
 pub mod params;
@@ -424,4 +424,50 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
     app.insert_non_send_resource(receiver);
 
     Ok(app)
+}
+
+struct WindowPropoerties {
+    pub params: Vec<WindowParams>,
+}
+
+impl WindowPropoerties {
+    pub fn new(app: &Application, window: &Window, config: &Config) -> Self {
+        let bundle_id = app.bundle_id().unwrap_or_default();
+        let title = window.title().unwrap_or_default();
+        let params = config.find_window_properties(&title, bundle_id);
+        Self { params }
+    }
+
+    pub fn floating(&self) -> bool {
+        self.params
+            .iter()
+            .find_map(|props| props.floating)
+            .unwrap_or(false)
+    }
+
+    pub fn insertion(&self) -> Option<usize> {
+        self.params.iter().find_map(|props| props.index)
+    }
+
+    pub fn dont_focus(&self) -> bool {
+        self.params
+            .iter()
+            .find_map(|props| props.dont_focus)
+            .unwrap_or(false)
+    }
+
+    pub fn border_radius(&self) -> Option<f64> {
+        self.params.iter().find_map(|p| p.border_radius)
+    }
+
+    pub fn grid_ratios(&self) -> Option<(f64, f64, f64, f64)> {
+        self.params.iter().find_map(WindowParams::grid_ratios)
+    }
+
+    pub fn passthrough_keys(&self) -> Vec<(u8, Modifiers)> {
+        self.params
+            .iter()
+            .flat_map(|p| p.passthrough_keys().to_vec())
+            .collect::<Vec<_>>()
+    }
 }

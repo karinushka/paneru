@@ -13,7 +13,7 @@ use tracing::warn;
 
 use super::{ActiveDisplayMarker, FocusFollowsMouse, MissionControlActive, SkipReshuffle};
 use crate::{
-    config::{Config, WindowParams},
+    config::Config,
     ecs::{
         ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker, FullWidthMarker, Initializing,
         LayoutPosition, Position, RepositionMarker, ResizeMarker, Unmanaged, WidthRatio,
@@ -75,20 +75,6 @@ impl Configuration<'_> {
     /// An `Option<usize>` containing the number of fingers, or `None` if not configured.
     pub fn swipe_gesture_fingers(&self) -> Option<usize> {
         self.config.swipe_gesture_fingers()
-    }
-
-    /// Finds window properties for a given `title` and `bundle_id` based on the application configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `title` - The title of the window to match.
-    /// * `bundle_id` - The bundle identifier of the application owning the window.
-    ///
-    /// # Returns
-    ///
-    /// `Some(WindowParams)` if matching window properties are found, otherwise `None`.
-    pub fn find_window_properties(&self, title: &str, bundle_id: &str) -> Vec<WindowParams> {
-        self.config.find_window_properties(title, bundle_id)
     }
 
     /// Returns the `WinID` of the window currently marked for focus-follows-mouse.

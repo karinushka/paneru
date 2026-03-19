@@ -27,6 +27,10 @@ use crate::{
 };
 use crate::{platform::CFStringRef, util::AXUIWrapper};
 
+pub mod decorations;
+pub mod padding;
+pub mod swipe;
+
 /// A `LazyLock` that determines the path to the application's configuration file.
 /// It checks the `PANERU_CONFIG` environment variable first, then standard XDG locations and user home directory.
 /// If no configuration file is found, the application will panic.
@@ -799,10 +803,6 @@ pub struct MainOptions {
     /// fully invisible. E.g. 0.5 = tolerate up to 50% hidden.
     pub window_hidden_ratio: Option<f64>,
 }
-
-pub mod decorations;
-pub mod padding;
-pub mod swipe;
 
 /// Returns a default set of column widths.
 pub fn default_preset_column_widths() -> Vec<f64> {

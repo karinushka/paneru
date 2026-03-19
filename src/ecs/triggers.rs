@@ -905,13 +905,14 @@ pub(super) fn dispatch_application_messages(
     }
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
+#[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 pub(super) fn window_unmanaged_trigger(
     trigger: On<Add, Unmanaged>,
     windows: Windows,
     apps: Query<(Entity, &Application)>,
     mut active_display: ActiveDisplayMut,
-    mut config: Configuration,
+    config: Configuration,
     mut commands: Commands,
 ) {
     const UNMANAGED_MAX_SCREEN_RATIO_NUM: i32 = 4;
@@ -954,97 +955,121 @@ pub(super) fn window_unmanaged_trigger(
     }
 
     let entity = trigger.event().entity;
-    let Some(marker) = windows
-        .get_managed(trigger.event().entity)
-        .and_then(|(_, _, marker)| marker)
+    let Some((_, _, Some(Unmanaged::Floating))) = windows.get_managed(entity) else {
+        return;
+    };
+    let display_bounds = active_display
+        .display()
+        .actual_display_bounds(active_display.dock(), config.config());
+    let active_strip = active_display.active_strip();
+
+    debug!("Entity {entity} is floating.");
+
+    let Some((window, frame)) = windows.get(entity).zip(windows.frame(entity)) else {
+        return;
+    };
+    let Some((_, app)) = windows
+        .find_parent(window.id())
+        .and_then(|(_, _, parent)| apps.get(parent).ok())
     else {
         return;
     };
-    let display_bounds = active_display.bounds();
-    let active_strip = active_display.active_strip();
 
-    match marker {
-        Unmanaged::Floating => {
-            debug!("Entity {entity} is floating.");
+    let properties = WindowPropoerties::new(app, window, config.config());
 
-            let Some((window, frame)) = windows.get(entity).zip(windows.frame(entity)) else {
-                return;
-            };
+    if let Some((rx, ry, rw, rh)) = properties.grid_ratios() {
+        let x = (f64::from(display_bounds.width()) * rx) as i32;
+        let y = (f64::from(display_bounds.height()) * ry) as i32;
+        let w = (f64::from(display_bounds.width()) * rw) as i32;
+        let h = (f64::from(display_bounds.height()) * rh) as i32;
+        reposition_entity(entity, Origin::new(x, y), &mut commands);
+        resize_entity(entity, Size::new(w, h), &mut commands);
+    } else {
+        let max_width = display_bounds.width() * UNMANAGED_MAX_SCREEN_RATIO_NUM
+            / UNMANAGED_MAX_SCREEN_RATIO_DEN;
+        let max_height = display_bounds.height() * UNMANAGED_MAX_SCREEN_RATIO_NUM
+            / UNMANAGED_MAX_SCREEN_RATIO_DEN;
+        let new_width = frame.width().min(max_width);
+        let new_height = frame.height().min(max_height);
 
-            let Some((_, app)) = windows
-                .find_parent(window.id())
-                .and_then(|(_, _, parent)| apps.get(parent).ok())
-            else {
-                return;
-            };
-            let properties = WindowPropoerties::new(app, window, config.config());
+        let mut target_frame =
+            IRect::from_corners(frame.min, frame.min + Origin::new(new_width, new_height));
+        target_frame = clamp_origin_to_bounds(target_frame, target_frame.size(), display_bounds);
+        target_frame =
+            offset_frame_within_bounds(target_frame, display_bounds, UNMANAGED_POP_OFFSET);
 
-            if let Some((rx, ry, rw, rh)) = properties.grid_ratios() {
-                let x = (f64::from(display_bounds.width()) * rx) as i32;
-                let y = (f64::from(display_bounds.height()) * ry) as i32;
-                let w = (f64::from(display_bounds.width()) * rw) as i32;
-                let h = (f64::from(display_bounds.height()) * rh) as i32;
-                reposition_entity(entity, Origin::new(x, y), &mut commands);
-                resize_entity(entity, Size::new(w, h), &mut commands);
-            } else {
-                let max_width = display_bounds.width() * UNMANAGED_MAX_SCREEN_RATIO_NUM
-                    / UNMANAGED_MAX_SCREEN_RATIO_DEN;
-                let max_height = display_bounds.height() * UNMANAGED_MAX_SCREEN_RATIO_NUM
-                    / UNMANAGED_MAX_SCREEN_RATIO_DEN;
-                let new_width = frame.width().min(max_width);
-                let new_height = frame.height().min(max_height);
-
-                let mut target_frame =
-                    IRect::from_corners(frame.min, frame.min + Origin::new(new_width, new_height));
-                target_frame =
-                    clamp_origin_to_bounds(target_frame, target_frame.size(), display_bounds);
-                target_frame =
-                    offset_frame_within_bounds(target_frame, display_bounds, UNMANAGED_POP_OFFSET);
-
-                if target_frame.size() != frame.size() {
-                    resize_entity(
-                        entity,
-                        Size::new(target_frame.width(), target_frame.height()),
-                        &mut commands,
-                    );
-                }
-                if target_frame.min != frame.min {
-                    reposition_entity(entity, target_frame.min, &mut commands);
-                }
-            }
-
-            if let Some(neighbour) = active_strip
-                .left_neighbour(entity)
-                .or_else(|| active_strip.right_neighbour(entity))
-            {
-                debug!("Reshuffling around its neighbour {neighbour}.");
-                reshuffle_around(neighbour, &mut commands);
-            }
-        }
-
-        Unmanaged::Minimized | Unmanaged::Hidden => {
-            debug!("Entity {entity} is minimized.");
-            give_away_focus(
+        if target_frame.size() != frame.size() {
+            resize_entity(
                 entity,
-                &windows,
-                active_strip,
-                &display_bounds,
-                &mut config,
+                Size::new(target_frame.width(), target_frame.height()),
                 &mut commands,
             );
         }
+        if target_frame.min != frame.min {
+            reposition_entity(entity, target_frame.min, &mut commands);
+        }
+    }
+
+    if let Some(neighbour) = active_strip
+        .left_neighbour(entity)
+        .or_else(|| active_strip.right_neighbour(entity))
+    {
+        debug!("Reshuffling around its neighbour {neighbour}.");
+        reshuffle_around(neighbour, &mut commands);
     }
     active_strip.remove(entity);
+}
+
+#[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
+pub(super) fn window_minimized_trigger(
+    trigger: On<Add, Unmanaged>,
+    windows: Windows,
+    mut active_display: ActiveDisplayMut,
+    mut config: Configuration,
+    mut commands: Commands,
+) {
+    let entity = trigger.event().entity;
+    if let Some((_, _, Some(Unmanaged::Minimized | Unmanaged::Hidden))) =
+        windows.get_managed(entity)
+    {
+        debug!("Entity {entity} is minimized or hidden.");
+        let display_bounds = active_display.bounds();
+        let active_strip = active_display.active_strip();
+        give_away_focus(
+            entity,
+            &windows,
+            active_strip,
+            &display_bounds,
+            &mut config,
+            &mut commands,
+        );
+        active_strip.remove(entity);
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn window_managed_trigger(
     trigger: On<Remove, Unmanaged>,
     mut active_display: ActiveDisplayMut,
+    windows: Windows,
+    apps: Query<(Entity, &Application)>,
+    config: Configuration,
     mut commands: Commands,
 ) {
     let entity = trigger.event().entity;
     debug!("Entity {entity} is managed again.");
+
+    if let Some(window) = windows.get(entity)
+        && let Some((_, app)) = windows
+            .find_parent(window.id())
+            .and_then(|(_, _, parent)| apps.get(parent).ok())
+    {
+        let properties = WindowPropoerties::new(app, window, config.config());
+        if properties.floating() {
+            return;
+        }
+    }
 
     active_display.active_strip().append(entity);
     reshuffle_around(entity, &mut commands);

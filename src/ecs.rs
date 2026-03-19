@@ -150,6 +150,7 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::window_destroyed_trigger)
         .add_observer(triggers::window_unmanaged_trigger)
         .add_observer(triggers::window_managed_trigger)
+        .add_observer(triggers::window_minimized_trigger)
         .add_observer(triggers::spawn_window_trigger)
         .add_observer(triggers::refresh_configuration_trigger)
         .add_observer(triggers::stray_focus_observer)

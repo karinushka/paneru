@@ -654,6 +654,7 @@ pub(super) fn layout_strip_changed(
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn reshuffle_layout_strip(
     marker: Populated<(Entity, &LayoutPosition), With<ReshuffleAroundMarker>>,
+    active_strip: Single<&Position, With<ActiveWorkspaceMarker>>,
     active_display: ActiveDisplay,
     windows: Windows,
     config: Res<Config>,
@@ -676,20 +677,7 @@ pub(super) fn reshuffle_layout_strip(
         };
 
         let size = frame.size();
-
-        // Check how much of the window is hidden. Slivers don't count as
-        // meaningfully visible, so subtract sliver_width from the visible
-        // portion. If the hidden fraction is within the allowed ratio, skip.
-        let hidden_ratio = config.window_hidden_ratio();
-        if hidden_ratio > 0.0 {
-            let visible_width = display_bounds.intersect(frame).width();
-            let meaningful = (visible_width - config.sliver_width()).max(0);
-            let visible_fraction = f64::from(meaningful) / f64::from(frame.width().max(1));
-            let hidden_fraction = 1.0 - visible_fraction;
-            if hidden_fraction <= hidden_ratio {
-                continue;
-            }
-        }
+        let visible_width = display_bounds.intersect(frame).width();
 
         // Expose the window by clamping it into the viewport.
         frame.min = frame
@@ -698,6 +686,24 @@ pub(super) fn reshuffle_layout_strip(
         frame.max = frame.min + size;
 
         let strip_position = frame.min - layout_position.0;
+
+        // Check how much of the window is hidden. Slivers don't count as
+        // meaningfully visible, so subtract sliver_width from the visible
+        // portion. If the hidden fraction is within the allowed ratio, skip.
+        let hidden_ratio = config.window_hidden_ratio();
+        if hidden_ratio > 0.0 {
+            let meaningful = (visible_width - config.sliver_width()).max(0);
+            let visible_fraction = f64::from(meaningful) / f64::from(frame.width().max(1));
+            let hidden_fraction = 1.0 - visible_fraction;
+
+            // Do not move the window if the hidden fraction is lower than threshold
+            // or if the layout strip movement is shorter than the hidden width.
+            let strip_movement = (active_strip.0.x - strip_position.x).abs();
+            if hidden_fraction <= hidden_ratio && frame.width() - visible_width >= strip_movement {
+                continue;
+            }
+        }
+
         trace!("reshuffle_layout_strip: triggered for entity {entity}, offset {strip_position}");
         reposition_entity(
             active_display.active_strip_entity(),

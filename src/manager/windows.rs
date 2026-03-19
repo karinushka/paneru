@@ -8,7 +8,7 @@ use bevy::math::IRect;
 use core::ptr::NonNull;
 use derive_more::{DerefMut, with_trait::Deref};
 use objc2_core_foundation::{
-    CFArray, CFEqual, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize,
+    CFArray, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize,
 };
 use std::ptr::null_mut;
 use std::sync::OnceLock;
@@ -41,7 +41,6 @@ pub trait WindowApi: Send + Sync {
     fn child_role(&self) -> Result<bool>;
     fn role(&self) -> Result<String>;
     fn subrole(&self) -> Result<String>;
-    fn is_root(&self) -> bool;
     fn is_minimized(&self) -> bool;
     fn is_full_screen(&self) -> bool;
     fn reposition(&mut self, origin: Origin);
@@ -274,19 +273,6 @@ impl WindowApi for WindowOS {
     /// `Ok(String)` with the window subrole if successful, otherwise `Err(Error)`.
     fn subrole(&self) -> Result<String> {
         self.ax_element.subrole()
-    }
-
-    /// Checks if the window is a root window (i.e., not a child of another window).
-    ///
-    /// # Returns
-    ///
-    /// `true` if the window is a root window, `false` otherwise.
-    #[instrument(level = Level::DEBUG, ret)]
-    fn is_root(&self) -> bool {
-        let cftype = self.ax_element.as_ref();
-        self.ax_element
-            .parent()
-            .is_ok_and(|parent| !CFEqual(Some(&*parent), Some(cftype)))
     }
 
     #[instrument(level = Level::DEBUG, ret)]

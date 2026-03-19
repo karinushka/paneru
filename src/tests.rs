@@ -384,13 +384,6 @@ impl WindowApi for MockWindow {
         Ok(String::new())
     }
 
-    /// Always returns `true` for root status.
-    #[instrument(level = Level::DEBUG, skip(self), ret)]
-    fn is_root(&self) -> bool {
-        debug!("{}:", function_name!());
-        true
-    }
-
     /// Repositions the mock window's frame to the given coordinates.
     #[instrument(level = Level::DEBUG, skip(self))]
     fn reposition(&mut self, origin: Origin) {

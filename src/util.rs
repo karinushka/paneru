@@ -1,7 +1,6 @@
 use accessibility_sys::{
     AXObserverGetRunLoopSource, AXUIElementRef, kAXFocusedWindowAttribute, kAXMinimizedAttribute,
-    kAXParentAttribute, kAXRoleAttribute, kAXSubroleAttribute, kAXTitleAttribute,
-    kAXWindowsAttribute,
+    kAXRoleAttribute, kAXSubroleAttribute, kAXTitleAttribute, kAXWindowsAttribute,
 };
 use core::ptr::NonNull;
 use objc2_core_foundation::{
@@ -131,11 +130,6 @@ impl std::fmt::Display for AXUIWrapper {
 }
 
 pub trait AXUIAttributes {
-    fn parent(&self) -> Result<CFRetained<CFType>> {
-        let axname = CFString::from_static_str(kAXParentAttribute);
-        self.get_attribute::<CFType>(&axname)
-    }
-
     fn subrole(&self) -> Result<String> {
         let axname = CFString::from_static_str(kAXSubroleAttribute);
         self.get_attribute::<CFString>(&axname)

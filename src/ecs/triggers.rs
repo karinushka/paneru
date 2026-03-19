@@ -17,8 +17,8 @@ use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
     ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, MissionControlActive,
-    MouseHeldMarker, NativeFullscreenMarker, RetryFrontSwitch, SpawnWindowTrigger,
-    StrayFocusEvent, Timeout, Unmanaged, WMEventTrigger, WindowDraggedMarker,
+    MouseHeldMarker, NativeFullscreenMarker, RetryFrontSwitch, SpawnWindowTrigger, StrayFocusEvent,
+    Timeout, Unmanaged, WMEventTrigger, WindowDraggedMarker,
 };
 use crate::commands::ON_FULLSCREEN_SPACE;
 use crate::config::{Config, WindowParams};
@@ -211,8 +211,6 @@ pub(super) fn mouse_up_trigger(
         commands.entity(held_entity).despawn();
     }
 }
-
-
 
 /// Handles mouse dragged events.
 ///
@@ -685,7 +683,7 @@ pub(super) fn dim_remove_window_trigger(
 /// * `focus_follows_mouse_id` - The resource to track focus follows mouse window ID.
 /// * `skip_reshuffle` - The resource to indicate if reshuffling should be skipped.
 /// * `commands` - Bevy commands to manage components and trigger events.
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn window_focused_trigger(
     trigger: On<WMEventTrigger>,
@@ -1160,7 +1158,6 @@ fn give_away_focus(
 /// * `commands` - Bevy commands to manage components and trigger events.
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
-#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_window_trigger(
     mut trigger: On<SpawnWindowTrigger>,
     windows: Windows,
@@ -1203,12 +1200,7 @@ pub(super) fn spawn_window_trigger(
             warn!("Error observing window {window_id}.");
         }
         let bundle_id = app.bundle_id().unwrap_or_default();
-        debug!(
-            "window {} isroot {} bundle_id {}",
-            window_id,
-            window.is_root(),
-            bundle_id,
-        );
+        debug!("window {} bundle_id {}", window_id, bundle_id,);
 
         let title = window.title().unwrap_or_default();
         let properties = config.find_window_properties(&title, bundle_id);

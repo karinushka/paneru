@@ -431,6 +431,10 @@ impl WindowApi for MockWindow {
             .write()
             .unwrap()
             .push(Event::ApplicationFrontSwitched { psn });
+        self.event_queue
+            .write()
+            .unwrap()
+            .push(Event::WindowFocused { window_id: self.id });
         self.app.inner.force_write().focused_id = Some(self.id);
     }
 
@@ -1405,6 +1409,118 @@ fn test_multi_workspace_orphaning() {
                 }
             }
             _ => {}
+        }
+    };
+
+    run_main_loop(&mut bevy, &internal_queue, &commands, check);
+}
+
+#[test]
+fn test_window_hidden_ratio() {
+    let mut bevy = setup_world();
+    let mock_app = setup_process(bevy.world_mut());
+    let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
+    let event_queue = internal_queue.clone();
+    let windows = window_spawner(2, event_queue, mock_app);
+    let window_manager = MockWindowManager {
+        windows,
+        workspaces: vec![TEST_WORKSPACE_ID],
+    };
+    bevy.world_mut()
+        .insert_resource(WindowManager(Box::new(window_manager)));
+
+    // Set hidden ratio to 0.5 (tolerate up to 50% hidden)
+    let config: Config = (
+        MainOptions {
+            window_hidden_ratio: Some(0.5),
+            animation_speed: Some(10000.0),
+            swipe_gesture_fingers: Some(3),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+    bevy.insert_resource(config);
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 }, // Settle, window 1 is focused at x=0
+        // Swipe left slightly.
+        Event::Swipe {
+            deltas: vec![0.1, 0.1, 0.1],
+        },
+        // Now focus it again. It SHOULD NOT move back to x=0.
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::First)),
+        },
+    ];
+
+    let check = |iteration, world: &mut World| {
+        if iteration == 2 {
+            let mut query = world.query::<&Window>();
+            let window = query.iter(world).find(|w| w.id() == 1).unwrap();
+            // Should still be off-screen.
+            assert_ne!(window.frame().min.x, 0);
+            assert!(window.frame().min.x < 0);
+        }
+    };
+
+    run_main_loop(&mut bevy, &internal_queue, &commands, check);
+}
+
+#[test]
+fn test_window_hidden_ratio_swap() {
+    let mut bevy = setup_world();
+    let mock_app = setup_process(bevy.world_mut());
+    let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
+    let event_queue = internal_queue.clone();
+    let windows = window_spawner(5, event_queue, mock_app);
+    let window_manager = MockWindowManager {
+        windows,
+        workspaces: vec![TEST_WORKSPACE_ID],
+    };
+    bevy.world_mut()
+        .insert_resource(WindowManager(Box::new(window_manager)));
+
+    // Set hidden ratio to 1.0 (never move unless fully hidden)
+    // and high animation speed for instant results.
+    let config: Config = (
+        MainOptions {
+            window_hidden_ratio: Some(1.0),
+            animation_speed: Some(10000.0),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+    bevy.insert_resource(config);
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 }, // Settle, window 1 is focused at x=0
+        // Focus second window (id 0). It's at x=400 initially.
+        // It's 100% visible, so with hidden_ratio=1.0 it won't move.
+        Event::Command {
+            command: Command::Window(Operation::Center),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Swap(Direction::Last)),
+        },
+    ];
+
+    let check = |iteration, world: &mut World| {
+        let centered = (TEST_DISPLAY_WIDTH - TEST_WINDOW_WIDTH) / 2;
+        if iteration == 1 {
+            let mut query = world.query::<&Window>();
+            let window = query.iter(world).find(|w| w.id() == 4).unwrap();
+            // Should still be at 400 because 0% hidden < 1.0 ratio
+            assert_eq!(window.frame().min.x, centered);
+        }
+        if iteration == 2 {
+            let mut query = world.query::<&Window>();
+            let window = query.iter(world).find(|w| w.id() == 4).unwrap();
+            assert_eq!(window.frame().min.x, centered);
+            let window = query.iter(world).find(|w| w.id() == 0).unwrap();
+            // The tail of the strip (window 0) is now to the left of window 4.
+            assert_eq!(window.frame().min.x, centered - TEST_WINDOW_WIDTH);
         }
     };
 

@@ -38,6 +38,8 @@ pub struct GeneralDimOptions {
     /// Opacity of the dim overlay on inactive windows (0.0=off, 1.0=fully black).
     /// Default: 0.0 (disabled).
     pub opacity: Option<f32>,
+    /// Opacity of the dim overlay on inactive windows when in Dark Mode.
+    pub opacity_night: Option<f32>,
     /// Hex color for the dim overlay, e.g. "#000000".
     /// Default: "#000000" (black).
     pub color: Option<String>,

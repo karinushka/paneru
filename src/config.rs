@@ -567,7 +567,7 @@ impl Config {
             .unwrap_or(swipe::SwipeScrollModifier::Alt)
     }
 
-    pub fn window_dim_ratio(&self) -> Option<f32> {
+    pub fn window_dim_ratio(&self, is_dark: bool) -> Option<f32> {
         let config = self.inner();
         if config
             .decorations
@@ -581,13 +581,21 @@ impl Config {
             // This is not our dimming - it's the color one.
             return None;
         }
-        config
+
+        let dim = config
             .decorations
             .as_ref()
             .and_then(|decorations| decorations.inactive.as_ref())
-            .and_then(|inactive| inactive.dim.as_ref())
-            .and_then(|dim| dim.opacity)
-            .or(config.options.dim_inactive_windows)
+            .and_then(|inactive| inactive.dim.as_ref());
+
+        if is_dark {
+            dim.and_then(|d| d.opacity_night)
+                .or(dim.and_then(|d| d.opacity))
+                .or(config.options.dim_inactive_windows)
+        } else {
+            dim.and_then(|d| d.opacity)
+                .or(config.options.dim_inactive_windows)
+        }
     }
 
     /// Returns the allowed hidden fraction of a window before a focus change

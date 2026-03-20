@@ -3,11 +3,13 @@ use accessibility_sys::{
     kAXRoleAttribute, kAXSubroleAttribute, kAXTitleAttribute, kAXWindowsAttribute,
 };
 use core::ptr::NonNull;
+use objc2::rc::autoreleasepool;
 use objc2_core_foundation::{
     CFArray, CFBoolean, CFNumber, CFNumberType, CFRetained, CFRunLoop, CFRunLoopMode,
     CFRunLoopSource, CFString, CFType, Type, kCFTypeArrayCallBacks,
 };
 use objc2_core_graphics::CGError;
+use objc2_foundation::{NSUserDefaults, ns_string};
 use std::{
     ffi::{CStr, OsStr, c_int, c_void},
     os::unix::ffi::OsStrExt,
@@ -22,6 +24,16 @@ use crate::{
     manager::{AXUIElementCopyAttributeValue, ax_window_id},
     platform::{OSStatus, WinID},
 };
+
+/// Returns `true` if macOS is currently in Dark Mode.
+pub fn is_dark_mode() -> bool {
+    autoreleasepool(|_| {
+        let defaults = NSUserDefaults::standardUserDefaults();
+        let style = defaults.stringForKey(ns_string!("AppleInterfaceStyle"));
+        // For dark themes, this will contain Some("Dark");
+        style.is_some()
+    })
+}
 
 #[derive(Debug)]
 pub struct AXUIWrapper;

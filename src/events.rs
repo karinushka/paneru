@@ -119,6 +119,9 @@ pub enum Event {
     /// The system has woken from sleep.
     SystemWoke { msg: String },
 
+    /// The system appearance (Light/Dark mode) has changed.
+    ThemeChanged,
+
     /// A command has been issued to the window manager.
     Command { command: Command },
 }

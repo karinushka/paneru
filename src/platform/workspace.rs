@@ -141,6 +141,16 @@ define_class!(
             _ = self.ivars().events.send(msg);
         }
 
+        /// Called when the system theme (Light/Dark mode) changes.
+        ///
+        /// # Arguments
+        ///
+        /// * `_` - The notification object (unused).
+        #[unsafe(method(didChangeTheme:))]
+        fn theme_changed(&self, _: &NSNotification) {
+            _ = self.ivars().events.send(Event::ThemeChanged);
+        }
+
         /// Called when a key-value observed property changes for a process.
         ///
         /// # Arguments
@@ -258,6 +268,10 @@ impl WorkspaceObserver {
             (
                 sel!(didChangeMenuBarHiding:),
                 "AppleInterfaceMenuBarHidingChangedNotification",
+            ),
+            (
+                sel!(didChangeTheme:),
+                "AppleInterfaceThemeChangedNotification",
             ),
             (sel!(didChangeDockPref:), "com.apple.dock.prefchanged"),
         ];

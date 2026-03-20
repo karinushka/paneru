@@ -408,21 +408,33 @@ horizontal_padding = 4
 vertical_padding = 2
 ```
 
-Paste this into your terminal to create a default configuration file:
+#### Decorations
 
+For a macOS native window dimming, set `opacity` only under
+`[decorations.inactive.dim]`. Do not set the other options, like inactive
+color.
+In this mode the option takes values between `-1.0` and `1.0`, where `-1.0` is
+completely dark and `1.0` is fully white. A reasonable option to start with is
+`-0.15`.
+Paneru tracks the system theme color, so setting `opacity_night` will be the
+setting used if the system switches to the Dark mode. You can set it to
+something darker (i.e. `-0.25`) or maybe lighter.
+
+```toml
+[decorations.inactive.dim]
+# Setting this option only will toggle native macOS dimming.
+# -1.0 is fully black and 1.0 is fully white.
+# Default: 0.0 (disabled).
+opacity = -0.15
+opacity_night = -0.25
 ```
-$ cat > ~/.paneru <<EOF
 
-# ... paste the above configuration here ...
+### Live reloading
 
-EOF
-```
-
-**Live Reloading:** Configuration changes made to your `~/.paneru` file are
-automatically reloaded while Paneru is running. This is extremely useful for
-tweaking keyboard bindings and other settings without restarting the
-application. The settings can be changed while Paneru is running - they will
-be automatically reloaded.
+Configuration changes made to your `~/.paneru` file are automatically reloaded
+while Paneru is running. This is extremely useful for tweaking keyboard
+bindings and other settings without restarting the application. The settings
+can be changed while Paneru is running - they will be automatically reloaded.
 
 ### Running as a service
 
@@ -520,21 +532,6 @@ scripts, `cron` jobs, or other automation tools:
 > root cause of most edge-cases.
 
 ### Inactive window dimming
-
-For a macOS native window dimming, set `opacity` only under
-`[decorations.inactive.dim]`. Do not set the other options, like inactive
-color.
-In this mode the option takes values between `-1.0` and `1.0`, where `-1.0` is
-completely dark and `1.0` is fully white. A reasonable option to start with is
-`-0.15`.
-
-```toml
-[decorations.inactive.dim]
-# Setting this option only will toggle native macOS dimming.
-# -1.0 is fully black and 1.0 is fully white.
-# Default: 0.0 (disabled).
-opacity = -0.15
-```
 
 Another dimming option is drawing a translucent overlay on every inactive
 window to visually emphasise the focused one.

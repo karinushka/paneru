@@ -18,7 +18,7 @@ use tracing::{Level, debug, error, info, instrument, trace, warn};
 use super::{
     ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, MissionControlActive,
     MouseHeldMarker, NativeFullscreenMarker, RetryFrontSwitch, SpawnWindowTrigger, StrayFocusEvent,
-    Timeout, Unmanaged, WMEventTrigger, WindowDraggedMarker,
+    SystemTheme, Timeout, Unmanaged, WMEventTrigger, WindowDraggedMarker,
 };
 use crate::commands::ON_FULLSCREEN_SPACE;
 use crate::config::{Config, WindowParams};
@@ -640,12 +640,14 @@ pub(super) fn dim_window_trigger(
     windows: Windows,
     window_manager: Res<WindowManager>,
     config: Res<Config>,
+    theme: Option<Res<SystemTheme>>,
 ) {
     let Some(window) = windows.get(trigger.event().entity) else {
         return;
     };
 
-    if config.window_dim_ratio().is_some() {
+    let dark = theme.is_some_and(|theme| theme.is_dark);
+    if config.window_dim_ratio(dark).is_some() {
         window_manager.dim_windows(&[window.id()], 0.0);
     }
 }
@@ -656,13 +658,54 @@ pub(super) fn dim_remove_window_trigger(
     windows: Windows,
     window_manager: Res<WindowManager>,
     config: Res<Config>,
+    theme: Option<Res<SystemTheme>>,
 ) {
     let Some(window) = windows.get(trigger.event().entity) else {
         return;
     };
 
-    if let Some(dim_ratio) = config.window_dim_ratio() {
+    let dark = theme.is_some_and(|theme| theme.is_dark);
+    if let Some(dim_ratio) = config.window_dim_ratio(dark) {
         window_manager.dim_windows(&[window.id()], dim_ratio);
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn theme_change_trigger(
+    trigger: On<WMEventTrigger>,
+    windows: Windows,
+    window_manager: Res<WindowManager>,
+    config: Res<Config>,
+    mut theme: Option<ResMut<SystemTheme>>,
+) {
+    let Event::ThemeChanged = trigger.event().0 else {
+        return;
+    };
+    let Some(ref mut theme) = theme else {
+        return;
+    };
+
+    let is_dark = crate::util::is_dark_mode();
+    if theme.is_dark == is_dark {
+        return;
+    }
+    theme.is_dark = is_dark;
+    info!("System theme changed: dark_mode={is_dark}");
+
+    let Some(dim_ratio) = config.window_dim_ratio(is_dark) else {
+        return;
+    };
+
+    // Re-apply dimming to all windows that are NOT focused.
+    let focused_id = windows.focused().map(|(window, _)| window.id());
+    let windows_to_dim: Vec<WinID> = windows
+        .iter()
+        .filter(|(window, _)| Some(window.id()) != focused_id)
+        .map(|(window, _)| window.id())
+        .collect();
+
+    if !windows_to_dim.is_empty() {
+        window_manager.dim_windows(&windows_to_dim, dim_ratio);
     }
 }
 

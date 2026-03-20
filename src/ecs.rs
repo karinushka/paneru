@@ -158,6 +158,7 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::send_message_trigger)
         .add_observer(triggers::window_removal_trigger)
         .add_observer(triggers::dim_window_trigger)
+        .add_observer(triggers::theme_change_trigger)
         .add_observer(triggers::apply_window_properties)
         .add_observer(triggers::dim_remove_window_trigger);
 }
@@ -338,6 +339,11 @@ impl RefreshWindowSizes {
     }
 }
 
+#[derive(Resource)]
+pub struct SystemTheme {
+    pub is_dark: bool,
+}
+
 /// Resource to control whether window reshuffling should be skipped.
 #[derive(Resource)]
 pub struct SkipReshuffle(pub bool);
@@ -410,6 +416,9 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         .insert_resource(Time::<Virtual>::from_max_delta(Duration::from_secs(10)))
         .insert_resource(WindowManager(window_manager))
         .insert_resource(SkipReshuffle(false))
+        .insert_resource(SystemTheme {
+            is_dark: crate::util::is_dark_mode(),
+        })
         .insert_resource(MissionControlActive(false))
         .insert_resource(FocusFollowsMouse(None))
         .insert_resource(PollForNotifications)

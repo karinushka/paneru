@@ -11,7 +11,7 @@ use tracing::{Level, instrument};
 use tracing::{debug, info};
 
 use crate::config::Config;
-use crate::ecs::layout::{Column, LayoutStrip};
+use crate::ecs::layout::{Column, LayoutStrip, StackItem};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Windows};
 use crate::ecs::{
     ActiveDisplayMarker, FocusFollowsMouse, FocusedMarker, FullWidthMarker, SendMessageTrigger,
@@ -158,9 +158,9 @@ fn get_window_in_direction(
             Column::Stack(stack) => stack
                 .iter()
                 .enumerate()
-                .find(|(_, window_id)| entity == **window_id)
+                .find(|(_, item)| item.contains(entity))
                 .and_then(|(index, _)| (index > 0).then(|| stack.get(index - 1)).flatten())
-                .copied(),
+                .and_then(StackItem::top),
         },
 
         Direction::South => match strip.get(index).ok()? {
@@ -168,13 +168,13 @@ fn get_window_in_direction(
             Column::Stack(stack) => stack
                 .iter()
                 .enumerate()
-                .find(|(_, window_id)| entity == **window_id)
+                .find(|(_, item)| item.contains(entity))
                 .and_then(|(index, _)| {
                     (index < stack.len() - 1)
                         .then(|| stack.get(index + 1))
                         .flatten()
                 })
-                .copied(),
+                .and_then(StackItem::top),
         },
     }
 }
@@ -497,7 +497,7 @@ fn resize_window(
         .ok()
         .and_then(|idx| strip.get(idx).ok())
     {
-        for &sibling in &stack {
+        for sibling in stack.iter().flat_map(StackItem::all_windows) {
             if sibling != entity
                 && let Some(size) = windows.size(sibling)
             {
@@ -766,9 +766,11 @@ fn equalize_column(
         #[allow(clippy::cast_precision_loss)]
         let equal_height = active_display.bounds().height() / i32::try_from(stack.len()).unwrap();
 
-        for &entity in &stack {
-            if let Some(size) = windows.size(entity) {
-                resize_entity(entity, size.with_y(equal_height), &mut commands);
+        for item in &stack {
+            for entity in item.all_windows() {
+                if let Some(size) = windows.size(entity) {
+                    resize_entity(entity, size.with_y(equal_height), &mut commands);
+                }
             }
         }
     }

@@ -25,6 +25,8 @@ adjacent monitors.
   avoid an extra click.
 - **Sliding windows with touchpad:** Using a touchpad is quite natural for
   navigation of the window pane.
+- **Native macOS tabs support:** Applications like Ghostty use these, so
+  Paneru manages them on the layout strip like other windows.
 - **Optimal for Large Displays:** Standard tiling window managers can be
   suboptimal for large displays, often resulting in either huge maximized
   windows or numerous tiny, unusable windows. Paneru addresses this by

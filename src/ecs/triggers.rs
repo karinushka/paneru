@@ -1275,9 +1275,6 @@ pub(super) fn spawn_window_trigger(
                 "Adding window {window_id} as a tab follower for leader {leader:?} (overlapping frame)"
             );
             let layout_strip = active_display.active_strip();
-            if layout_strip.stacked(leader) {
-                _ = layout_strip.unstack(leader);
-            }
             _ = layout_strip
                 .convert_to_tabs(leader, entity)
                 .inspect_err(|err| error!("Failed to convert to tabs: {err}"));

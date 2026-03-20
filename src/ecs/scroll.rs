@@ -34,20 +34,35 @@ pub(super) fn swipe_gesture(
     }
 
     for event in messages.read() {
-        let Event::Swipe { deltas } = event else {
-            continue;
+        let delta = match event {
+            Event::Scroll { delta } => {
+                // Normalization: Touchpad deltas are typically small fractions.
+                // Scroll wheel deltas can be larger. We scale it down slightly
+                // to match the "feel" of a finger swipe.
+                const SCROLL_SCALE_UPPER: f64 = 0.15;
+                const SCROLL_SCALE_LOWER: f64 = 0.005;
+                const SCROLL_FULL_RANGE: f64 = 2.0;
+                let scroll_scale = SCROLL_SCALE_LOWER
+                    + ((SCROLL_SCALE_UPPER - SCROLL_SCALE_LOWER) / SCROLL_FULL_RANGE)
+                        * config.config().swipe_sensitivity();
+
+                *delta * scroll_scale
+            }
+            Event::Swipe { deltas } => {
+                if config
+                    .swipe_gesture_fingers()
+                    .is_none_or(|fingers| deltas.len() != fingers)
+                {
+                    continue;
+                }
+                deltas.iter().sum::<f64>()
+            }
+            _ => continue,
         };
 
-        if config
-            .swipe_gesture_fingers()
-            .is_none_or(|fingers| deltas.len() != fingers)
-        {
-            return;
-        }
         let swipe_resolution = 1.0 / f64::from(active_display.bounds().width());
-        let delta = deltas.iter().sum::<f64>();
         if delta.abs() < swipe_resolution {
-            return;
+            continue;
         }
 
         let dt = time.delta_secs_f64();

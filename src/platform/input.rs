@@ -19,6 +19,7 @@ use stdext::function_name;
 use tracing::{error, info};
 
 use crate::config::Config;
+use crate::config::swipe::SwipeScrollModifier;
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
 use crate::platform::Modifiers;
@@ -86,6 +87,7 @@ impl InputHandler {
             | (1 << CGEventType::RightMouseDown.0)
             | (1 << CGEventType::RightMouseUp.0)
             | (1 << CGEventType::RightMouseDragged.0)
+            | (1 << CGEventType::ScrollWheel.0)
             | (1 << NSEventType::Gesture.0)
             | (1 << CGEventType::KeyDown.0);
 
@@ -213,6 +215,9 @@ impl InputHandler {
                 // handle_keypress can intercept the event, so it may return true.
                 return self.handle_keypress(keycode, eventflags);
             }
+            CGEventType::ScrollWheel => {
+                return self.handle_scroll_wheel(event);
+            }
             _ => self.handle_swipe(event),
         };
         if let Err(err) = result {
@@ -222,6 +227,51 @@ impl InputHandler {
             self.events = None;
         }
         // Do not intercept this event, let it fall through.
+        false
+    }
+
+    /// Handles scroll wheel events. If configured modifier is held, it transforms the scroll into a swipe event.
+    fn handle_scroll_wheel(&mut self, event: &CGEvent) -> bool {
+        let flags = CGEvent::flags(Some(event));
+        let modifiers = get_modifiers(flags);
+
+        let target_modifier = match self.config.swipe_scroll_modifier() {
+            SwipeScrollModifier::Alt => Modifiers::ALT,
+            SwipeScrollModifier::Cmd => Modifiers::CMD,
+        };
+
+        // Only intercept if the configured modifier is held
+        if !modifiers.contains(target_modifier) {
+            return false;
+        }
+
+        if let Some(events) = &self.events {
+            // Horizontal scroll delta is Axis 2, Vertical is Axis 1.
+            // On macOS, horizontal scroll (holding shift + wheel or side-tilt) is often preferred for swiping between strips.
+            // We use the continuous scroll delta (Fixed) for smoother swiping.
+            let h_delta = CGEvent::double_value_field(
+                Some(event),
+                CGEventField::ScrollWheelEventFixedPtDeltaAxis2,
+            );
+            let v_delta = CGEvent::double_value_field(
+                Some(event),
+                CGEventField::ScrollWheelEventFixedPtDeltaAxis1,
+            );
+
+            // If we have any horizontal delta, or if there's only vertical delta, use it.
+            let delta = if h_delta.abs() > 0.001 {
+                h_delta
+            } else if v_delta.abs() > 0.001 {
+                v_delta
+            } else {
+                0.0
+            };
+
+            if delta.abs() > 0.001 {
+                _ = events.send(Event::Scroll { delta });
+                return true; // Intercept: don't let the window scroll
+            }
+        }
         false
     }
 
@@ -292,23 +342,11 @@ impl InputHandler {
     ///
     /// `true` if the key press was handled and should be intercepted, `false` otherwise.
     fn handle_keypress(&self, keycode: i64, eventflags: CGEventFlags) -> bool {
-        const MODIFIER_MASKS: [(Modifiers, [u64; 3]); 4] = [
-            (Modifiers::ALT, [0x0008_0000, 0x0000_0020, 0x0000_0040]),
-            (Modifiers::SHIFT, [0x0002_0000, 0x0000_0002, 0x0000_0004]),
-            (Modifiers::CMD, [0x0010_0000, 0x0000_0008, 0x0000_0010]),
-            (Modifiers::CTRL, [0x0004_0000, 0x0000_0001, 0x0000_2000]),
-        ];
         let Some(events) = &self.events else {
             return false;
         };
 
-        let mut mask = Modifiers::empty();
-        for (modifier, masks) in MODIFIER_MASKS {
-            #[allow(clippy::manual_contains)]
-            if masks.iter().any(|&m| m == (eventflags.0 & m)) {
-                mask |= modifier;
-            }
-        }
+        let mask = get_modifiers(eventflags);
 
         // On a native fullscreen space, keybindings are still intercepted so
         // that paneru can actively switch back to the previous workspace.
@@ -331,4 +369,22 @@ impl InputHandler {
             })
             .is_some()
     }
+}
+
+fn get_modifiers(eventflags: CGEventFlags) -> Modifiers {
+    const MODIFIER_MASKS: [(Modifiers, [u64; 3]); 4] = [
+        (Modifiers::ALT, [0x0008_0000, 0x0000_0020, 0x0000_0040]),
+        (Modifiers::SHIFT, [0x0002_0000, 0x0000_0002, 0x0000_0004]),
+        (Modifiers::CMD, [0x0010_0000, 0x0000_0008, 0x0000_0010]),
+        (Modifiers::CTRL, [0x0004_0000, 0x0000_0001, 0x0000_2000]),
+    ];
+
+    let mut mask = Modifiers::empty();
+    for (modifier, masks) in MODIFIER_MASKS {
+        #[allow(clippy::manual_contains)]
+        if masks.iter().any(|&m| m == (eventflags.0 & m)) {
+            mask |= modifier;
+        }
+    }
+    mask
 }

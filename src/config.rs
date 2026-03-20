@@ -557,6 +557,16 @@ impl Config {
             .clamp(1.0, 10.0)
     }
 
+    pub fn swipe_scroll_modifier(&self) -> swipe::SwipeScrollModifier {
+        let config = self.inner();
+        config
+            .swipe
+            .as_ref()
+            .and_then(|swipe| swipe.scroll.as_ref())
+            .and_then(|scroll| scroll.modifier.clone())
+            .unwrap_or(swipe::SwipeScrollModifier::Alt)
+    }
+
     pub fn window_dim_ratio(&self) -> Option<f32> {
         let config = self.inner();
         if config

@@ -5,6 +5,13 @@ pub enum SwipeGestureDirection {
     Natural,
     Reversed,
 }
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum SwipeScrollModifier {
+    Alt,
+    Cmd,
+}
+
 #[derive(Deserialize, Clone, Debug, Default)]
 pub struct SwipeOptions {
     /// Swipe sensitivity multiplier. Lower values = less distance per finger
@@ -21,6 +28,7 @@ pub struct SwipeOptions {
     pub continuous: Option<bool>,
 
     pub gesture: Option<GestureOptions>,
+    pub scroll: Option<ScrollOptions>,
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]
@@ -30,4 +38,10 @@ pub struct GestureOptions {
 
     /// Which direction swipe gestures should move windows.
     pub direction: Option<SwipeGestureDirection>,
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct ScrollOptions {
+    /// The modifier key required for scroll wheel swiping.
+    pub modifier: Option<SwipeScrollModifier>,
 }

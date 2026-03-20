@@ -286,6 +286,14 @@ fingers_count = 4
 # Default: "Natural"
 # direction = "Natural"
 
+[swipe.scroll]
+# The modifier key required for scroll wheel swiping.
+# "alt" => Holding Option/Alt and scrolling will swipe between windows.
+# "cmd" => Holding Command and scrolling will swipe between windows.
+# Sensitivity of the scroll is controlled by the general sensitivity
+# parameter in the [swipe] section. Default: "alt"
+# modifier = "alt"
+
 [padding]
 # Padding applied at screen edges (in pixels). Independent from the
 # between-window gaps set by per-window horizontal/vertical_padding.

@@ -94,6 +94,21 @@ $ cargo install --path .
 It can run directly from the command line or as a service.
 Note, that you will need to grant acessibility priviledge to the binary.
 
+### Installing with Homebrew
+
+If you are using Homebrew, you can install from the formula with:
+
+```shell
+$ brew install karinushka/paneru/paneru
+```
+
+Or by first adding the tap and then installing by name:
+
+```shell
+$ brew tap karinushka/paneru
+$ brew install paneru
+```
+
 ### Installing with Nix
 
 Add the paneru flake to your inputs.

@@ -208,233 +208,29 @@ Paneru checks for configuration in following locations:
 
 Additionally it allows overriding the location with `$PANERU_CONFIG` environment variable.
 
-You can use the following example configuration as a starting point:
+You can use the following basic configuration as a starting point. For a
+complete guide to all available options, keybindings, and window rules, see the
+**[Configuration Guide](./CONFIGURATION.md)**.
 
 ```toml
-# syntax=toml
-#
-# Example configuration for Paneru.
-#
+# basic .paneru.toml
 [options]
-# Enables focus follows mouse. Enabled by default, set to false to disable.
-# focus_follows_mouse = true
-
-# Enables mouse follows focus. Enabled by default, set to false to disable.
-# mouse_follows_focus = true
-
-# Array of widths used by the `window_resize` action to cycle between.
-# Defaults to 25%, 33%, 50%, 66% and 75%.
-preset_column_widths = [ 0.25, 0.33, 0.50, 0.66, 0.75 ]
-
-# Animation speed in 1/10th of display resolution per second.
-# E.g. a value of 20 means: move at a speed of two display sizes per second.
-# To disable animations, leave this unset or set to a very large value.
-animation_speed = 50
-
-# Automatically center the focused window when switching focus with keyboard,
-# i.e. 'window_focus_west' or 'window_focus_east'.
-# auto_center = false
-
-# Height of off-screen window slivers as a ratio (0.0–1.0) of the display
-# height. Lower values hide the window's corner radius at screen edges.
-# Default: 1.0 (full height, no inset).
-# sliver_height = 1.0
-
-# Width of off-screen window slivers in pixels. Controls how much of an
-# off-screen window peeks from the screen edge.
-# Default: 5 pixels.
-# sliver_width = 5
-
-# Override the system-reported menubar height (in pixels).
-# Useful when auto-hiding the menubar or when the detected value is wrong.
-# When unset, the height reported by macOS is used.
-# menubar_height = 25
-
-# How much of a window may be hidden before a focus change forces it into view.
-# 0.0 (default) = always bring into view (eager).
-# 1.0 = never move unless fully invisible (lazy).
-# E.g. 0.5 = tolerate up to 50% hidden.
-# Clicking a window defers the scroll until mouse-up so content doesn't shift
-# mid-click. Use the window_snap binding to manually snap a window into view.
-# window_hidden_ratio = 0.0
-
-[swipe]
-# Swipe sensitivity multiplier. Lower values = less distance per finger movement.
-# Range: 0.1–2.0. Default: 0.35.
-# sensitivity = 0.35
-
-# Swipe inertia deceleration rate. Higher values = faster stop.
-# Range: 1.0–10.0. Default: 4.0.
-# deceleration = 4.0
-
-# Swiping keeps sliding windows until the first or last window.
-# Set to false to clamp so edge windows stay on-screen. Default: true.
-# continuous = true
-
-[swipe.gesture]
-# How many fingers to use for moving windows left and right.
-# Make sure that it doesn't clash with OS setting for workspace switching.
-# Values lower than 3 will be ignored.
-# Remove the line to disable the gesture feature.
-# Apple touchpads support gestures with more than five fingers (!),
-# but it is probably not that useful to use two hands :)
-fingers_count = 4
-
-# Which direction should windows move with a swipe gesture.
-# "Natural" => Swipe fingers to the right, windows move to the right.
-# "Reversed" => Swipe fingers to the right, windows move to the left.
-# Default: "Natural"
-# direction = "Natural"
-
-[swipe.scroll]
-# The modifier key required for scroll wheel swiping.
-# "alt" => Holding Option/Alt and scrolling will swipe between windows.
-# "cmd" => Holding Command and scrolling will swipe between windows.
-# Sensitivity of the scroll is controlled by the general sensitivity
-# parameter in the [swipe] section. Default: "alt"
-# modifier = "alt"
-
-[padding]
-# Padding applied at screen edges (in pixels). Independent from the
-# between-window gaps set by per-window horizontal/vertical_padding.
-# Default: 0 on all sides.
-# top = 0
-# bottom = 0
-# left = 0
-# right = 0
+focus_follows_mouse = true
+mouse_follows_focus = true
 
 [bindings]
-# Moves the focus between windows. If there are no windows when moving up or
-# down, will swtich focus to the display above or below.
-window_focus_west = ["cmd - h", "cmd - leftarrow"]
-window_focus_east = ["cmd - l", "cmd - rightarrow"]
-window_focus_north = ["cmd - k", "cmd - uparrow"]
-window_focus_south = ["cmd - j", "cmd - downarrow"]
-
-# Swaps windows in chosen direction. If there are no windows to swap, will
-# move the window to a display above or below.
-window_swap_west = "alt - h"
-window_swap_east = "alt - l"
-window_swap_north = "alt - k"
-window_swap_south = "alt - j"
-
-# Jump to the left-most or right-most windows.
-window_focus_first = "cmd + shift - h"
-window_focus_last = "cmd + shift - l"
-
-# Move the current window into the left-most or right-most positions.
-window_swap_first = "alt + shift - h"
-window_swap_last = "alt + shift - l"
-
-# Centers the current window on screen.
-window_center = "alt - c"
-
-# Cycles between the window sizes defined in the `preset_column_widths` option.
+window_focus_west = "cmd - h"
+window_focus_east = "cmd - l"
 window_resize = "alt - r"
-
-# Cycles backwards through `preset_column_widths`.
-window_shrink = "alt + shift - r"
-
-# Toggle full width for the current focused window.
-window_fullwidth = "alt - f"
-
-# Toggles the window for management. If unmanaged, the window will be "floating".
-window_manage = "ctrl + alt - t"
-
-# Stacks and unstacks a window into the left column. Each window gets a 1/N of the height.
-window_stack = "alt - ]"
-window_unstack = "alt + shift - ]"
-
-# Moves currently focused window to the next display.
-window_nextdisplay = "alt + shift - n"
-
-# Moves the mouse pointer to the next display.
-mouse_nextdisplay = "alt - n"
-
-# Size stacked windows in the column to equal heights.
-window_equalize = "alt + shift - e"
-
-# Snap the focused window into view by sliding the strip. Left-aligned when
-# the window overflows left, right-aligned when overflows right. No resize.
-# Useful in lazy viewport mode when a window is partially offscreen.
-# window_snap = "alt + shift - f"
-
-# Quits the window manager.
+window_center = "alt - c"
 quit = "ctrl + alt - q"
-
-# Window properties, matched by a RegExp title string.
-[windows]
-
-[windows.pip]
-# Title RegExp pattern is required.
-title = "Picture.*(in)?.*[Pp]icture"
-# Do not manage this window, e.g. it will be floating.
-floating = true
-
-[windows.neovide]
-# Matches an editor by title and always inserts its window at index 1,
-# a specific initial width (as a ratio of display width),
-# and let some bindings pass through.
-# Note: bundle_id is optional. Some apps (e.g. plain binaries) do not
-# report one, so matching by title alone is often more reliable.
-title = "Neovide.*"
-index = 1
-width = 0.5
-bindings_passthrough = ["ctrl-h", "ctrl-l"]
-
-[windows.popup]
-# Matches a popup and silently appends it at the end.
-title = "Unimportant popup window"
-dont_focus = true
-index = 100
-
-
-[windows.passwords]
-# Floating window placed on a grid. The format is "cols:rows:x:y:w:h".
-# This divides the display into a 6x6 grid and places the window at cell (1,1)
-# spanning 4 columns and 4 rows — roughly centered covering 2/3 of the display.
-title = "Passwords.*"
-floating = true
-grid = "6:6:1:1:4:4"
-
-[windows.all]
-# Matches all windows and adds a few pixels of spacing to their borders.
-# Note: horizontal_padding and vertical_padding create gaps on all sides of
-# each window. At screen edges, the gap is cancelled out so padding only
-# appears between windows. Use the [padding] settings above to
-# control screen edge margins independently.
-title = ".*"
-horizontal_padding = 4
-vertical_padding = 2
-```
-
-#### Decorations
-
-For a macOS native window dimming, set `opacity` only under
-`[decorations.inactive.dim]`. Do not set the other options, like inactive
-color.
-In this mode the option takes values between `-1.0` and `1.0`, where `-1.0` is
-completely dark and `1.0` is fully white. A reasonable option to start with is
-`-0.15`.
-Paneru tracks the system theme color, so setting `opacity_night` will be the
-setting used if the system switches to the Dark mode. You can set it to
-something darker (i.e. `-0.25`) or maybe lighter.
-
-```toml
-[decorations.inactive.dim]
-# Setting this option only will toggle native macOS dimming.
-# -1.0 is fully black and 1.0 is fully white.
-# Default: 0.0 (disabled).
-opacity = -0.15
-opacity_night = -0.25
 ```
 
 ### Live reloading
 
 Configuration changes made to your `~/.paneru` file are automatically reloaded
-while Paneru is running. This is extremely useful for tweaking keyboard
-bindings and other settings without restarting the application. The settings
-can be changed while Paneru is running - they will be automatically reloaded.
+while Paneru is running. This is useful for tweaking keyboard bindings and
+other settings without restarting the application.
 
 ### Running as a service
 
@@ -475,7 +271,7 @@ $ paneru send-cmd <command> [args...]
 | `window stack`             | Stack the focused window onto its left neighbour |
 | `window unstack`           | Unstack the focused window into its own column   |
 | `window nextdisplay`       | Move the focused window to the next display      |
-| `window snap`     | Snap the focused window into the visible viewport    |
+| `window snap`              | Snap the focused window into the visible viewport |
 | `mouse nextdisplay`        | Warp the mouse pointer to the next display       |
 | `printstate`               | Print the internal ECS state to the debug log    |
 | `quit`                     | Quit Paneru                                      |
@@ -521,70 +317,6 @@ scripts, `cron` jobs, or other automation tools:
   paneru send-cmd window nextdisplay && paneru send-cmd mouse nextdisplay
   ```
 
-## Experimental Features
-
-> **Warning:** The features below rely on undocumented macOS window-server APIs
-> and have known issues — for example, overlay windows (like YouTube
-> Picture-in-Picture) may be partially shaded, and layer ordering can behave
-> unexpectedly. Both features are **disabled by default**. Enable them only if
-> you are comfortable with visual glitches. Disabling SIP is **not** required,
-> but without it Paneru has limited control over window layering, which is the
-> root cause of most edge-cases.
-
-### Inactive window dimming
-
-Another dimming option is drawing a translucent overlay on every inactive
-window to visually emphasise the focused one.
-To enable this option, set both `opacity` and `color` under `[decorations.inactive.dim]`:
-In this mode, the `opacity` range is from `0.0` to `1.0`.
-
-```toml
-[decorations.inactive.dim]
-# Opacity of the dim overlay drawn on inactive windows (0.0–1.0).
-# 0.0 disables the overlay entirely. Higher values make inactive windows darker.
-# Default: 0.0 (disabled).
-opacity = 0.3
-
-# Hex color for the dim overlay on inactive windows.
-# Default: "#000000" (black).
-color = "#000000"
-```
-
-### Active window border
-
-Draws a coloured border around the currently focused window.
-
-```toml
-[decorations.active.border]
-# Draw a border around the active (focused) window.
-# Default: false.
-enabled = true
-
-# Hex color for the active window border.
-# Default: "#FFFFFF" (white).
-# color = "#89b4fa"
-
-# Opacity of the active window border (0.0–1.0).
-# Default: 1.0.
-# opacity = 1.0
-
-# Width of the active window border in pixels.
-# Default: 2.0.
-# width = 2.0
-
-# Corner radius of the active window border in pixels.
-# Default: 10.0.
-# radius = 10.0
-```
-
-Per-window border radius can be overridden in the `[windows]` section:
-
-```toml
-[windows.terminal]
-title = ".*"
-bundle_id = "com.apple.Terminal"
-border_radius = 12.0
-```
 
 ## Future Enhancements
 
@@ -594,11 +326,18 @@ border_radius = 12.0
 
 ## Communication
 
-There is a public Matrix room [`#paneru:matrix.org`](https://matrix.to/#/%23paneru%3Amatrix.org). Join and ask any questions.
+There is a public Matrix room
+[`#paneru:matrix.org`](https://matrix.to/#/%23paneru%3Amatrix.org). Join and
+ask any questions.
 
 ## Architecture Overview
 
-Paneru's architecture is built around the **Bevy ECS (Entity Component System)**, which manages the window manager's state as a collection of entities (displays, workspaces, applications, and windows) and components.
+For a detailed high-level overview of Paneru's internal design, data flow, and
+ECS patterns, please refer to the **[Architecture Guide](./ARCHITECTURE.md)**.
+
+Paneru's architecture is built around the **Bevy ECS (Entity Component
+System)**, which manages the window manager's state as a collection of entities
+(displays, workspaces, applications, and windows) and components.
 
 The system is decoupled into three primary layers:
 

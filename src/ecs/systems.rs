@@ -474,6 +474,12 @@ pub(super) fn retry_front_switch(
             commands.entity(entity).despawn();
             continue;
         };
+        if !app.is_frontmost() {
+            // App is no longer frontmost — this retry is stale.
+            debug!("Discarding stale front switch retry (app no longer frontmost).");
+            commands.entity(entity).despawn();
+            continue;
+        }
         if let Ok(focused_id) = app.focused_window_id() {
             debug!("Front switch retry succeeded for window {focused_id}.");
             commands.trigger(WMEventTrigger(Event::WindowFocused {

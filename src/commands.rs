@@ -241,13 +241,13 @@ fn command_move_focus(
         return;
     }
 
-    let Some((_, entity)) = windows.focused() else {
+    let Some((_, focused_entity)) = windows.focused() else {
         return;
     };
 
     // At the right edge going East, enter the fullscreen chain (lowest order first).
-    let candidate = get_window_in_direction(direction, entity, strip).or_else(|| {
-        (matches!(direction, Direction::East) && strip.right_neighbour(entity).is_none())
+    let candidate = get_window_in_direction(direction, focused_entity, strip).or_else(|| {
+        (matches!(direction, Direction::East) && strip.right_neighbour(focused_entity).is_none())
             .then(|| {
                 fs_windows
                     .iter()
@@ -262,6 +262,10 @@ fn command_move_focus(
         && let Some(psn) = windows.psn(window.id(), &apps)
     {
         window.focus_with_raise(psn);
+        // Update FocusedMarker immediately so that rapid successive keypresses
+        // see the correct focused entity without waiting for the OS event round-trip.
+        commands.entity(focused_entity).try_remove::<FocusedMarker>();
+        commands.entity(entity).try_insert(FocusedMarker);
         // Explicitly reshuffle so the target window is brought into view.
         // This avoids a race where focus-follows-mouse leaves skip_reshuffle
         // set, causing the WindowFocused handler to skip the reshuffle.

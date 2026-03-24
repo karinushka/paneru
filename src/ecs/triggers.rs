@@ -750,6 +750,25 @@ pub(super) fn window_focused_trigger(
         return;
     };
 
+    let Ok(app) = applications.get(parent) else {
+        warn!("Unable to get parent for window {}.", window.id());
+        return;
+    };
+
+    // Guard against stale focus events. Without these checks, delayed
+    // events (e.g. from RetryFrontSwitch or dont_focus re-assertions)
+    // can pull FocusedMarker back to an old window after focus has moved on.
+    //
+    // 1. Cross-app: skip if the window's app is no longer frontmost.
+    // 2. Same-app: skip if the app's current focused window differs from
+    //    this event's window_id (the event is outdated).
+    if !app.is_frontmost() {
+        return;
+    }
+    if app.focused_window_id().is_ok_and(|id| id != window_id) {
+        return;
+    }
+
     // Handle tab switching: if the focused window is a tab, make it the leader.
     let layout_strip = active_display.active_strip();
     if let Ok(index) = layout_strip.index_of(entity)
@@ -774,16 +793,7 @@ pub(super) fn window_focused_trigger(
 
     debug!("focused window id {}", window.id());
 
-    let Ok(app) = applications.get(parent) else {
-        warn!("Unable to get parent for window {}.", window.id());
-        return;
-    };
-
     update_passthrough(window, app, config.config());
-
-    if !app.is_frontmost() {
-        return;
-    }
 
     commands.entity(entity).try_insert(FocusedMarker);
 

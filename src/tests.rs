@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
@@ -1641,6 +1642,231 @@ fn test_stale_focus_event_ignored() {
     };
     bevy.world_mut()
         .insert_resource(WindowManager(Box::new(window_manager)));
+
+    run_main_loop(&mut bevy, &internal_queue, &commands, check);
+}
+
+// ---------------------------------------------------------------------------
+// Multi-display: switching focus to a shorter display must not shrink windows
+// on the taller display.
+// ---------------------------------------------------------------------------
+
+const EXT_DISPLAY_ID: u32 = 2;
+const EXT_WORKSPACE_ID: u64 = 20;
+const EXT_DISPLAY_WIDTH: i32 = 1920;
+const EXT_DISPLAY_HEIGHT: i32 = 1200;
+
+/// Mock window manager with two displays of different heights.
+/// The active display can be switched via the shared `AtomicU32`.
+struct TwoDisplayMock {
+    windows: TestWindowSpawner,
+    active_display: Arc<AtomicU32>,
+}
+
+impl std::fmt::Debug for TwoDisplayMock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TwoDisplayMock").finish()
+    }
+}
+
+impl WindowManagerApi for TwoDisplayMock {
+    fn new_application(&self, process: &dyn ProcessApi) -> Result<Application> {
+        Ok(Application::new(Box::new(MockApplication {
+            inner: Arc::new(RwLock::new(InnerMockApplication {
+                psn: process.psn(),
+                pid: process.pid(),
+                focused_id: None,
+            })),
+        })))
+    }
+
+    fn get_associated_windows(&self, _window_id: WinID) -> Vec<WinID> {
+        vec![]
+    }
+
+    fn present_displays(&self) -> Vec<(Display, Vec<WorkspaceId>)> {
+        // External display sits above the internal one.
+        let ext = Display::new(
+            EXT_DISPLAY_ID,
+            IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+            TEST_MENUBAR_HEIGHT,
+        );
+        let int = Display::new(
+            TEST_DISPLAY_ID,
+            IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
+            TEST_MENUBAR_HEIGHT,
+        );
+        vec![
+            (ext, vec![EXT_WORKSPACE_ID]),
+            (int, vec![TEST_WORKSPACE_ID]),
+        ]
+    }
+
+    fn active_display_id(&self) -> Result<u32> {
+        Ok(self.active_display.load(Ordering::Relaxed))
+    }
+
+    fn active_display_space(&self, display_id: CGDirectDisplayID) -> Result<WorkspaceId> {
+        if display_id == EXT_DISPLAY_ID {
+            Ok(EXT_WORKSPACE_ID)
+        } else {
+            Ok(TEST_WORKSPACE_ID)
+        }
+    }
+
+    fn is_fullscreen_space(&self, _display_id: CGDirectDisplayID) -> bool {
+        false
+    }
+
+    fn warp_mouse(&self, _origin: Origin) {}
+
+    fn find_existing_application_windows(
+        &self,
+        _app: &mut Application,
+        spaces: &[WorkspaceId],
+    ) -> Result<(Vec<Window>, Vec<WinID>)> {
+        let windows = spaces
+            .iter()
+            .flat_map(|workspace_id| (self.windows)(*workspace_id))
+            .collect();
+        Ok((windows, vec![]))
+    }
+
+    fn find_window_at_point(&self, _point: &CGPoint) -> Result<WinID> {
+        Ok(0)
+    }
+
+    fn windows_in_workspace(&self, workspace_id: WorkspaceId) -> Result<Vec<WinID>> {
+        Ok((self.windows)(workspace_id)
+            .iter()
+            .map(|w| w.id())
+            .collect())
+    }
+
+    fn quit(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn setup_config_watcher(&self, _path: &std::path::Path) -> Result<Box<dyn notify::Watcher>> {
+        todo!()
+    }
+
+    fn cursor_position(&self) -> Option<CGPoint> {
+        None
+    }
+
+    fn dim_windows(&self, _windows: &[WinID], _level: f32) {}
+}
+
+/// Regression test: switching focus to a shorter (internal) display must not
+/// resize windows on the taller (external) display.  Before the fix,
+/// `layout_strip_changed` used the active display's viewport height for ALL
+/// strips, so the external strip's windows shrank to the internal height.
+#[test]
+fn test_multi_display_no_height_crosstalk() {
+    let mut bevy = setup_world();
+    let mock_app = setup_process(bevy.world_mut());
+    let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
+    let event_queue = internal_queue.clone();
+
+    let active_display = Arc::new(AtomicU32::new(EXT_DISPLAY_ID));
+
+    // External display gets one window (id 100), internal gets one (id 200).
+    let eq1 = event_queue.clone();
+    let eq2 = event_queue.clone();
+    let app1 = mock_app.clone();
+    let app2 = mock_app;
+    let windows: TestWindowSpawner = Box::new(move |workspace_id| {
+        if workspace_id == EXT_WORKSPACE_ID {
+            let origin = Origin::new(0, 0);
+            let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+            vec![Window::new(Box::new(MockWindow::new(
+                100,
+                IRect::from_corners(origin, origin + size),
+                eq1.clone(),
+                app1.clone(),
+            )))]
+        } else if workspace_id == TEST_WORKSPACE_ID {
+            let origin = Origin::new(0, 0);
+            let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+            vec![Window::new(Box::new(MockWindow::new(
+                200,
+                IRect::from_corners(origin, origin + size),
+                eq2.clone(),
+                app2.clone(),
+            )))]
+        } else {
+            vec![]
+        }
+    });
+
+    let window_manager = TwoDisplayMock {
+        windows,
+        active_display: active_display.clone(),
+    };
+    bevy.insert_resource(WindowManager(Box::new(window_manager)));
+
+    // Expected height on the external display = display height - menubar.
+    let ext_usable_height = EXT_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT;
+
+    let commands = vec![
+        // 0: Settle — let initialization complete.
+        Event::MenuOpened { window_id: 100 },
+        // 1: Print to verify initial layout.
+        Event::Command {
+            command: Command::PrintState,
+        },
+        // 2: Simulate switching focus to the internal display.
+        //    The mock's active_display_id will have been flipped in the
+        //    verifier at iteration 1, and DisplayChanged triggers the
+        //    ActiveDisplayMarker move + workspace switch.
+        Event::DisplayChanged,
+        // 3: Noop — the verifier for iteration 2 marks the external strip
+        //    as Changed, simulating any mutation (window add/remove/tab-switch)
+        //    that would touch the strip after a display switch.
+        //    This iteration's updates run layout_strip_changed on it.
+        Event::MenuOpened { window_id: 100 },
+        // 4: Print to verify final layout.
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    let ad = active_display.clone();
+    let check = move |iteration, world: &mut World| {
+        match iteration {
+            1 => {
+                // After settling, external window should have the external
+                // display's usable height.
+                verify_window_sizes(&[(100, (TEST_WINDOW_WIDTH, ext_usable_height))], world);
+
+                // Now switch the mock's active display so the next
+                // DisplayChanged event picks it up.
+                ad.store(TEST_DISPLAY_ID, Ordering::Relaxed);
+            }
+            2 => {
+                // After the display switch, simulate a strip mutation on
+                // the non-active (external) display.  In practice this
+                // happens when window_focused_trigger, window_removal, or
+                // active_workspace_trigger touch the strip via DerefMut.
+                use crate::ecs::ActiveWorkspaceMarker;
+                let mut strip_query =
+                    world.query_filtered::<&mut LayoutStrip, Without<ActiveWorkspaceMarker>>();
+                // `iter_mut` yields `Mut<LayoutStrip>` — dereferencing
+                // mutably triggers Bevy's `Changed` detection.
+                for mut strip in strip_query.iter_mut(world) {
+                    strip.set_changed();
+                }
+            }
+            4 => {
+                // After layout_strip_changed ran on the Changed external
+                // strip, window 100 must still have the external display's
+                // height — NOT the internal display's shorter height.
+                verify_window_sizes(&[(100, (TEST_WINDOW_WIDTH, ext_usable_height))], world);
+            }
+            _ => {}
+        }
+    };
 
     run_main_loop(&mut bevy, &internal_queue, &commands, check);
 }

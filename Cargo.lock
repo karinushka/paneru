@@ -2546,7 +2546,7 @@ dependencies = [
 
 [[package]]
 name = "paneru"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "accessibility-sys",
  "arc-swap",

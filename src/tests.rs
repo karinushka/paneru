@@ -1526,3 +1526,121 @@ fn test_window_hidden_ratio_swap() {
 
     run_main_loop(&mut bevy, &internal_queue, &commands, check);
 }
+
+/// Verify that focus state is on the expected window.
+fn verify_focused_window(expected_id: WinID, world: &mut World) {
+    let mut query = world.query::<(&Window, Has<FocusedMarker>)>();
+    let focused: Vec<_> = query
+        .iter(world)
+        .filter(|(_, focused)| *focused)
+        .collect();
+    assert_eq!(focused.len(), 1, "expected exactly one focused window");
+    assert_eq!(
+        focused[0].0.id(),
+        expected_id,
+        "expected window {expected_id} focused, got {}",
+        focused[0].0.id()
+    );
+}
+
+/// Rapid focus keypresses should not get swallowed. When pressing West
+/// three times from window 0 (rightmost), focus should land on window 3
+/// — each press should advance one step even when the OS event
+/// round-trip hasn't completed yet.
+///
+/// Simulates the race by writing all three commands as messages in one
+/// frame before any Bevy update runs, so `FocusedMarker` cannot catch
+/// up via mock events between presses.
+#[test]
+fn test_rapid_focus_not_swallowed() {
+    // Phase 1: settle + move focus to last window via normal loop.
+    let setup_commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::Last)),
+        },
+    ];
+
+    let check_setup = |iteration, world: &mut World| {
+        if iteration == 1 {
+            verify_focused_window(0, world);
+        }
+    };
+
+    let mut bevy = setup_world();
+    let mock_app = setup_process(bevy.world_mut());
+    let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
+    let event_queue = internal_queue.clone();
+    let windows = window_spawner(5, event_queue, mock_app);
+    let window_manager = MockWindowManager {
+        windows,
+        workspaces: vec![TEST_WORKSPACE_ID],
+    };
+    bevy.world_mut()
+        .insert_resource(WindowManager(Box::new(window_manager)));
+
+    run_main_loop(&mut bevy, &internal_queue, &setup_commands, check_setup);
+
+    // Phase 2: send three Focus(West) commands, one per frame, but do
+    // NOT flush mock events between frames. This simulates keypresses
+    // arriving faster than the OS event round-trip can deliver
+    // ApplicationFrontSwitched / WindowFocused back to the ECS.
+    // Without the immediate FocusedMarker update in command_move_focus,
+    // each press would re-target the same window (focus swallowed).
+    let focus_west = Event::Command {
+        command: Command::Window(Operation::Focus(Direction::West)),
+    };
+    for _ in 0..3 {
+        bevy.world_mut().write_message::<Event>(focus_west.clone());
+        bevy.update();
+        // Deliberately skip flushing internal_queue — mock events from
+        // focus_with_raise stay queued, simulating OS event delay.
+    }
+
+    // After three West presses from window 0 (strip order: [4,3,2,1,0]):
+    //   0 → 1 → 2 → 3. Focus should be on window 3.
+    verify_focused_window(3, bevy.world_mut());
+}
+
+/// A stale WindowFocused event arriving after focus has moved on should
+/// not pull FocusedMarker back to the old window.
+#[test]
+fn test_stale_focus_event_ignored() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 }, // Settle
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        // Inject a stale WindowFocused for window 4 (the old focused window)
+        // after focus has already moved to window 3.
+        Event::WindowFocused { window_id: 4 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    let check = |iteration, world: &mut World| {
+        if iteration == 1 {
+            // After Focus(East): strip is [4,3,2,1,0], started at 4, moved to 3.
+            verify_focused_window(3, world);
+        }
+        if iteration == 3 {
+            // After the stale event, focus should STILL be on window 3.
+            verify_focused_window(3, world);
+        }
+    };
+
+    let mut bevy = setup_world();
+    let mock_app = setup_process(bevy.world_mut());
+    let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
+    let event_queue = internal_queue.clone();
+    let windows = window_spawner(5, event_queue, mock_app);
+    let window_manager = MockWindowManager {
+        windows,
+        workspaces: vec![TEST_WORKSPACE_ID],
+    };
+    bevy.world_mut()
+        .insert_resource(WindowManager(Box::new(window_manager)));
+
+    run_main_loop(&mut bevy, &internal_queue, &commands, check);
+}

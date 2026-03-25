@@ -1,6 +1,7 @@
 use bevy::ecs::change_detection::DetectChangesMut as _;
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
+use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::query::{Changed, Has, With, Without};
 use bevy::ecs::system::{Commands, Populated, Query, Res, Single};
 use bevy::math::IRect;
@@ -703,18 +704,14 @@ pub(super) fn layout_sizes_changed(
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn layout_strip_changed(
-    changed_strips: Populated<&LayoutStrip, Changed<LayoutStrip>>,
+    changed_strips: Populated<(&LayoutStrip, &ChildOf), Changed<LayoutStrip>>,
     mut windows: Query<
         (&Position, &mut Bounds, &mut LayoutPosition),
         (Without<LayoutStrip>, With<Window>),
     >,
-    active_display: ActiveDisplay,
+    displays: Query<(&Display, Option<&DockPosition>)>,
     config: Res<Config>,
 ) {
-    let viewport = active_display
-        .display()
-        .actual_display_bounds(active_display.dock(), &config);
-
     let get_window_frame = |entity| {
         windows
             .get(entity)
@@ -724,8 +721,14 @@ pub(super) fn layout_strip_changed(
 
     let changed = changed_strips
         .into_iter()
-        .flat_map(|layout_strip| {
-            layout_strip.relative_positions(viewport.height(), &get_window_frame)
+        .flat_map(|(layout_strip, child_of)| {
+            let height = displays
+                .get(child_of.parent())
+                .map(|(display, dock)| {
+                    display.actual_display_bounds(dock, &config).height()
+                })
+                .unwrap_or(0);
+            layout_strip.relative_positions(height, &get_window_frame)
         })
         .collect::<Vec<_>>();
 

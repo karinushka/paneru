@@ -264,7 +264,9 @@ fn command_move_focus(
         window.focus_with_raise(psn);
         // Update FocusedMarker immediately so that rapid successive keypresses
         // see the correct focused entity without waiting for the OS event round-trip.
-        commands.entity(focused_entity).try_remove::<FocusedMarker>();
+        commands
+            .entity(focused_entity)
+            .try_remove::<FocusedMarker>();
         commands.entity(entity).try_insert(FocusedMarker);
         // Explicitly reshuffle so the target window is brought into view.
         // This avoids a race where focus-follows-mouse leaves skip_reshuffle

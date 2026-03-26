@@ -1531,10 +1531,7 @@ fn test_window_hidden_ratio_swap() {
 /// Verify that focus state is on the expected window.
 fn verify_focused_window(expected_id: WinID, world: &mut World) {
     let mut query = world.query::<(&Window, Has<FocusedMarker>)>();
-    let focused: Vec<_> = query
-        .iter(world)
-        .filter(|(_, focused)| *focused)
-        .collect();
+    let focused: Vec<_> = query.iter(world).filter(|(_, focused)| *focused).collect();
     assert_eq!(focused.len(), 1, "expected exactly one focused window");
     assert_eq!(
         focused[0].0.id(),
@@ -1603,8 +1600,8 @@ fn test_rapid_focus_not_swallowed() {
     verify_focused_window(3, bevy.world_mut());
 }
 
-/// A stale WindowFocused event arriving after focus has moved on should
-/// not pull FocusedMarker back to the old window.
+/// A stale `WindowFocused` event arriving after focus has moved on should
+/// not pull `FocusedMarker` back to the old window.
 #[test]
 fn test_stale_focus_event_ignored() {
     let commands = vec![

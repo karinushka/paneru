@@ -85,6 +85,7 @@ impl Service {
         let mut plist = fs::File::create(plist_path)?;
         plist.write_all(self.launchd_plist().as_bytes())?;
         info!("installed launch agent to `{}`", plist_path.display());
+        info!("check logfile /tmp/com.github.karinushka.paneru*.log for potential error messages");
         Ok(())
     }
 

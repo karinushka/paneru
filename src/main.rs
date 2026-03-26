@@ -1,7 +1,7 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use clap::{Parser, Subcommand};
-use tracing::warn;
+use tracing::{error, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 mod commands;
@@ -106,7 +106,17 @@ fn main() -> Result<()> {
         SubCmd::Launch => {
             let (sender, receiver) = EventSender::new();
             CommandReader::new(sender.clone()).start();
-            setup_bevy_app(sender, receiver)?.run();
+            match setup_bevy_app(sender, receiver) {
+                Ok(mut app) => {
+                    app.run();
+                }
+                Err(err) => {
+                    error!(
+                        "Error launching Paneru: {err}.\nStopping the service for now. You can restart it again with 'paneru restart'."
+                    );
+                    service()?.stop()?;
+                }
+            }
         }
         SubCmd::Install => service()?.install()?,
         SubCmd::Uninstall => service()?.uninstall()?,

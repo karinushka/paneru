@@ -327,7 +327,7 @@ impl Config {
             .values()
             .flat_map(|binds| binds.all())
             .find_map(|bind| {
-                (bind.code == keycode && bind.modifiers == mask).then_some(bind.command.clone())
+                (bind.code == keycode && bind.modifiers.matches(mask)).then_some(bind.command.clone())
             })
     }
 
@@ -1007,9 +1007,17 @@ fn parse_modifiers(input: &str) -> Result<Modifiers> {
     for modifier in &modifiers {
         out |= match *modifier {
             "alt" => Modifiers::ALT,
+            "lalt" => Modifiers::LALT,
+            "ralt" => Modifiers::RALT,
             "shift" => Modifiers::SHIFT,
+            "lshift" => Modifiers::LSHIFT,
+            "rshift" => Modifiers::RSHIFT,
             "cmd" => Modifiers::CMD,
+            "lcmd" => Modifiers::LCMD,
+            "rcmd" => Modifiers::RCMD,
             "ctrl" => Modifiers::CTRL,
+            "lctrl" => Modifiers::LCTRL,
+            "rctrl" => Modifiers::RCTRL,
             _ => {
                 return Err(Error::InvalidConfig(format!(
                     "{}: Invalid modifier: {modifier}",
@@ -1356,9 +1364,29 @@ index = 1
         Some(Command::Quit)
     ));
 
+    assert!(matches!(
+        config.find_keybind(keycode, Modifiers::LALT | Modifiers::LCTRL),
+        Some(Command::Quit)
+    ));
+
+    assert!(matches!(
+        config.find_keybind(keycode, Modifiers::RALT | Modifiers::RCTRL),
+        Some(Command::Quit)
+    ));
+
     let keycode = find_key('t');
     assert!(matches!(
         config.find_keybind(keycode, Modifiers::ALT | Modifiers::CTRL),
+        Some(Command::Window(Operation::Manage))
+    ));
+
+    assert!(matches!(
+        config.find_keybind(keycode, Modifiers::LALT | Modifiers::LCTRL),
+        Some(Command::Window(Operation::Manage))
+    ));
+
+    assert!(matches!(
+        config.find_keybind(keycode, Modifiers::RALT | Modifiers::RCTRL),
         Some(Command::Window(Operation::Manage))
     ));
 
@@ -1369,13 +1397,43 @@ index = 1
     ));
 
     assert!(matches!(
+        config.find_keybind(keycode, Modifiers::LCTRL),
+        Some(Command::Window(Operation::Stack(true)))
+    ));
+
+    assert!(matches!(
+        config.find_keybind(keycode, Modifiers::RCTRL),
+        Some(Command::Window(Operation::Stack(true)))
+    ));
+
+    assert!(matches!(
         config.find_keybind(keycode, Modifiers::ALT),
+        Some(Command::Window(Operation::Stack(true)))
+    ));
+
+    assert!(matches!(
+        config.find_keybind(keycode, Modifiers::LALT),
+        Some(Command::Window(Operation::Stack(true)))
+    ));
+
+    assert!(matches!(
+        config.find_keybind(keycode, Modifiers::RALT),
         Some(Command::Window(Operation::Stack(true)))
     ));
 
     let keycode = find_key('d');
     assert!(matches!(
         config.find_keybind(keycode, Modifiers::ALT),
+        Some(Command::Window(Operation::Resize(ResizeDirection::Shrink)))
+    ));
+
+    assert!(matches!(
+        config.find_keybind(keycode, Modifiers::LALT),
+        Some(Command::Window(Operation::Resize(ResizeDirection::Shrink)))
+    ));
+
+    assert!(matches!(
+        config.find_keybind(keycode, Modifiers::RALT),
         Some(Command::Window(Operation::Resize(ResizeDirection::Shrink)))
     ));
 

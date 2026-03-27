@@ -353,7 +353,10 @@ impl InputHandler {
         keycode
             .and_then(|keycode| {
                 let passthrough = FOCUSED_PASSTHROUGH.load();
-                if passthrough.iter().any(|(c, m)| *c == keycode && m.matches(mask)) {
+                if passthrough
+                    .iter()
+                    .any(|(c, m)| *c == keycode && m.matches(mask))
+                {
                     return None;
                 }
                 self.config.find_keybind(keycode, mask)
@@ -370,14 +373,14 @@ impl InputHandler {
 
 fn get_modifiers(eventflags: CGEventFlags) -> Modifiers {
     const MODIFIER_MASKS: [(Modifiers, u64); 8] = [
-        (Modifiers::LALT,   0x0000_0020),
-        (Modifiers::RALT,   0x0000_0040),
+        (Modifiers::LALT, 0x0000_0020),
+        (Modifiers::RALT, 0x0000_0040),
         (Modifiers::LSHIFT, 0x0000_0002),
         (Modifiers::RSHIFT, 0x0000_0004),
-        (Modifiers::LCMD,   0x0000_0008),
-        (Modifiers::RCMD,   0x0000_0010),
-        (Modifiers::LCTRL,  0x0000_0001),
-        (Modifiers::RCTRL,  0x0000_2000),
+        (Modifiers::LCMD, 0x0000_0008),
+        (Modifiers::RCMD, 0x0000_0010),
+        (Modifiers::LCTRL, 0x0000_0001),
+        (Modifiers::RCTRL, 0x0000_2000),
     ];
     let mut mask = Modifiers::empty();
     for (modifier, m) in MODIFIER_MASKS {
@@ -408,18 +411,42 @@ mod tests {
 
     #[test]
     fn single_left_modifier() {
-        assert_eq!(get_modifiers(CGEventFlags(NX_DEVICELALTKEYMASK)), Modifiers::LALT);
-        assert_eq!(get_modifiers(CGEventFlags(NX_DEVICELSHIFTKEYMASK)), Modifiers::LSHIFT);
-        assert_eq!(get_modifiers(CGEventFlags(NX_DEVICELCMDKEYMASK)), Modifiers::LCMD);
-        assert_eq!(get_modifiers(CGEventFlags(NX_DEVICELCTLKEYMASK)), Modifiers::LCTRL);
+        assert_eq!(
+            get_modifiers(CGEventFlags(NX_DEVICELALTKEYMASK)),
+            Modifiers::LALT
+        );
+        assert_eq!(
+            get_modifiers(CGEventFlags(NX_DEVICELSHIFTKEYMASK)),
+            Modifiers::LSHIFT
+        );
+        assert_eq!(
+            get_modifiers(CGEventFlags(NX_DEVICELCMDKEYMASK)),
+            Modifiers::LCMD
+        );
+        assert_eq!(
+            get_modifiers(CGEventFlags(NX_DEVICELCTLKEYMASK)),
+            Modifiers::LCTRL
+        );
     }
 
     #[test]
     fn single_right_modifier() {
-        assert_eq!(get_modifiers(CGEventFlags(NX_DEVICERALTKEYMASK)), Modifiers::RALT);
-        assert_eq!(get_modifiers(CGEventFlags(NX_DEVICERSHIFTKEYMASK)), Modifiers::RSHIFT);
-        assert_eq!(get_modifiers(CGEventFlags(NX_DEVICERCMDKEYMASK)), Modifiers::RCMD);
-        assert_eq!(get_modifiers(CGEventFlags(NX_DEVICERCTLKEYMASK)), Modifiers::RCTRL);
+        assert_eq!(
+            get_modifiers(CGEventFlags(NX_DEVICERALTKEYMASK)),
+            Modifiers::RALT
+        );
+        assert_eq!(
+            get_modifiers(CGEventFlags(NX_DEVICERSHIFTKEYMASK)),
+            Modifiers::RSHIFT
+        );
+        assert_eq!(
+            get_modifiers(CGEventFlags(NX_DEVICERCMDKEYMASK)),
+            Modifiers::RCMD
+        );
+        assert_eq!(
+            get_modifiers(CGEventFlags(NX_DEVICERCTLKEYMASK)),
+            Modifiers::RCTRL
+        );
     }
 
     #[test]
@@ -431,7 +458,10 @@ mod tests {
     #[test]
     fn multiple_different_modifiers() {
         let flags = NX_DEVICELCTLKEYMASK | NX_DEVICELALTKEYMASK;
-        assert_eq!(get_modifiers(CGEventFlags(flags)), Modifiers::LCTRL | Modifiers::LALT);
+        assert_eq!(
+            get_modifiers(CGEventFlags(flags)),
+            Modifiers::LCTRL | Modifiers::LALT
+        );
     }
 
     #[test]

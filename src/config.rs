@@ -327,7 +327,8 @@ impl Config {
             .values()
             .flat_map(|binds| binds.all())
             .find_map(|bind| {
-                (bind.code == keycode && bind.modifiers.matches(mask)).then_some(bind.command.clone())
+                (bind.code == keycode && bind.modifiers.matches(mask))
+                    .then_some(bind.command.clone())
             })
     }
 

@@ -375,7 +375,9 @@ mod tests {
     #[test]
     fn matches_all_four_groups() {
         let all = Modifiers::ALT | Modifiers::SHIFT | Modifiers::CMD | Modifiers::CTRL;
-        assert!(all.matches(Modifiers::LALT | Modifiers::RSHIFT | Modifiers::LCMD | Modifiers::RCTRL));
+        assert!(
+            all.matches(Modifiers::LALT | Modifiers::RSHIFT | Modifiers::LCMD | Modifiers::RCTRL)
+        );
         assert!(!all.matches(Modifiers::LALT | Modifiers::LSHIFT | Modifiers::LCMD));
     }
 }

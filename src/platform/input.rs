@@ -236,8 +236,9 @@ impl InputHandler {
 
         let target_modifier = self.config.swipe_scroll_modifier();
 
-        // Only intercept if the configured modifier is held
-        if !modifiers.contains(target_modifier) {
+        // Only intercept if the configured modifier is held.
+        // Intersect to allow for left OR right modifiers to match the target modifier.
+        if (modifiers & target_modifier).is_empty() {
             return false;
         }
 
@@ -352,7 +353,10 @@ impl InputHandler {
         keycode
             .and_then(|keycode| {
                 let passthrough = FOCUSED_PASSTHROUGH.load();
-                if passthrough.iter().any(|(c, m)| *c == keycode && *m == mask) {
+                if passthrough
+                    .iter()
+                    .any(|(c, m)| *c == keycode && m.matches(mask))
+                {
                     return None;
                 }
                 self.config.find_keybind(keycode, mask)
@@ -368,19 +372,110 @@ impl InputHandler {
 }
 
 fn get_modifiers(eventflags: CGEventFlags) -> Modifiers {
-    const MODIFIER_MASKS: [(Modifiers, [u64; 3]); 4] = [
-        (Modifiers::ALT, [0x0008_0000, 0x0000_0020, 0x0000_0040]),
-        (Modifiers::SHIFT, [0x0002_0000, 0x0000_0002, 0x0000_0004]),
-        (Modifiers::CMD, [0x0010_0000, 0x0000_0008, 0x0000_0010]),
-        (Modifiers::CTRL, [0x0004_0000, 0x0000_0001, 0x0000_2000]),
+    const MODIFIER_MASKS: [(Modifiers, u64); 8] = [
+        (Modifiers::LALT, 0x0000_0020),
+        (Modifiers::RALT, 0x0000_0040),
+        (Modifiers::LSHIFT, 0x0000_0002),
+        (Modifiers::RSHIFT, 0x0000_0004),
+        (Modifiers::LCMD, 0x0000_0008),
+        (Modifiers::RCMD, 0x0000_0010),
+        (Modifiers::LCTRL, 0x0000_0001),
+        (Modifiers::RCTRL, 0x0000_2000),
     ];
-
     let mut mask = Modifiers::empty();
-    for (modifier, masks) in MODIFIER_MASKS {
-        #[allow(clippy::manual_contains)]
-        if masks.iter().any(|&m| m == (eventflags.0 & m)) {
+    for (modifier, m) in MODIFIER_MASKS {
+        if eventflags.0 & m != 0 {
             mask |= modifier;
         }
     }
     mask
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NX_DEVICELALTKEYMASK: u64 = 0x0000_0020;
+    const NX_DEVICERALTKEYMASK: u64 = 0x0000_0040;
+    const NX_DEVICELSHIFTKEYMASK: u64 = 0x0000_0002;
+    const NX_DEVICERSHIFTKEYMASK: u64 = 0x0000_0004;
+    const NX_DEVICELCMDKEYMASK: u64 = 0x0000_0008;
+    const NX_DEVICERCMDKEYMASK: u64 = 0x0000_0010;
+    const NX_DEVICELCTLKEYMASK: u64 = 0x0000_0001;
+    const NX_DEVICERCTLKEYMASK: u64 = 0x0000_2000;
+
+    #[test]
+    fn no_modifiers() {
+        assert_eq!(get_modifiers(CGEventFlags(0)), Modifiers::empty());
+    }
+
+    #[test]
+    fn single_left_modifier() {
+        assert_eq!(
+            get_modifiers(CGEventFlags(NX_DEVICELALTKEYMASK)),
+            Modifiers::LALT
+        );
+        assert_eq!(
+            get_modifiers(CGEventFlags(NX_DEVICELSHIFTKEYMASK)),
+            Modifiers::LSHIFT
+        );
+        assert_eq!(
+            get_modifiers(CGEventFlags(NX_DEVICELCMDKEYMASK)),
+            Modifiers::LCMD
+        );
+        assert_eq!(
+            get_modifiers(CGEventFlags(NX_DEVICELCTLKEYMASK)),
+            Modifiers::LCTRL
+        );
+    }
+
+    #[test]
+    fn single_right_modifier() {
+        assert_eq!(
+            get_modifiers(CGEventFlags(NX_DEVICERALTKEYMASK)),
+            Modifiers::RALT
+        );
+        assert_eq!(
+            get_modifiers(CGEventFlags(NX_DEVICERSHIFTKEYMASK)),
+            Modifiers::RSHIFT
+        );
+        assert_eq!(
+            get_modifiers(CGEventFlags(NX_DEVICERCMDKEYMASK)),
+            Modifiers::RCMD
+        );
+        assert_eq!(
+            get_modifiers(CGEventFlags(NX_DEVICERCTLKEYMASK)),
+            Modifiers::RCTRL
+        );
+    }
+
+    #[test]
+    fn both_sides_of_same_modifier() {
+        let flags = NX_DEVICELALTKEYMASK | NX_DEVICERALTKEYMASK;
+        assert_eq!(get_modifiers(CGEventFlags(flags)), Modifiers::ALT);
+    }
+
+    #[test]
+    fn multiple_different_modifiers() {
+        let flags = NX_DEVICELCTLKEYMASK | NX_DEVICELALTKEYMASK;
+        assert_eq!(
+            get_modifiers(CGEventFlags(flags)),
+            Modifiers::LCTRL | Modifiers::LALT
+        );
+    }
+
+    #[test]
+    fn mixed_sides_across_groups() {
+        let flags = NX_DEVICELCMDKEYMASK | NX_DEVICERALTKEYMASK | NX_DEVICERSHIFTKEYMASK;
+        assert_eq!(
+            get_modifiers(CGEventFlags(flags)),
+            Modifiers::LCMD | Modifiers::RALT | Modifiers::RSHIFT
+        );
+    }
+
+    #[test]
+    fn device_independent_flags_ignored() {
+        let generic_alt: u64 = 0x0008_0000;
+        assert_eq!(get_modifiers(CGEventFlags(generic_alt)), Modifiers::empty());
+    }
 }

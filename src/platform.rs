@@ -47,10 +47,18 @@ pub type WorkspaceId = u64;
 bitflags::bitflags! {
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct Modifiers: u8 {
-        const ALT     = 1 << 0;
-        const SHIFT   = 1 << 1;
-        const CMD     = 1 << 2;
-        const CTRL    = 1 << 3;
+        const LALT   = 1 << 0;
+        const RALT   = 1 << 1;
+        const LSHIFT = 1 << 2;
+        const RSHIFT = 1 << 3;
+        const LCMD   = 1 << 4;
+        const RCMD   = 1 << 5;
+        const LCTRL  = 1 << 6;
+        const RCTRL  = 1 << 7;
+        const ALT   = Self::LALT.bits() | Self::RALT.bits();
+        const SHIFT = Self::LSHIFT.bits() | Self::RSHIFT.bits();
+        const CMD   = Self::LCMD.bits() | Self::RCMD.bits();
+        const CTRL  = Self::LCTRL.bits() | Self::RCTRL.bits();
     }
 }
 
@@ -245,6 +253,42 @@ impl PlatformCallbacks {
     }
 }
 
+impl Modifiers {
+    /// Returns true if `event` satisfies this binding's modifier requirements.
+    /// For each modifier group (alt, shift, cmd, ctrl):
+    ///   - If the binding requires the group, the event must have at least one matching side bit.
+    ///   - If the binding does NOT require the group, the event must not have any bits from that group.
+    pub fn matches(self, event: Modifiers) -> bool {
+        const GROUPS: [Modifiers; 4] = [
+            Modifiers::ALT,
+            Modifiers::SHIFT,
+            Modifiers::CMD,
+            Modifiers::CTRL,
+        ];
+
+        for group in GROUPS {
+            let bind_group = self & group;
+            let event_group = event & group;
+
+            if bind_group.is_empty() {
+                if !event_group.is_empty() {
+                    return false;
+                }
+            } else {
+                if (bind_group & event_group).is_empty() {
+                    return false;
+                }
+                // Ensure an an extra modifier from the opposite side is not included unless it matches,
+                // e.g. rcmd does not match `lcmd + <key>` while lcmd is also held.
+                if event_group | bind_group != bind_group {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+}
+
 /// Cached macOS major version (e.g. 14 for Sonoma, 15 for Sequoia).
 pub fn macos_major_version() -> u32 {
     static VERSION: OnceLock<u32> = OnceLock::new();
@@ -256,9 +300,84 @@ pub fn macos_major_version() -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use super::Modifiers;
+
     #[test]
     fn macos_major_version_returns_valid() {
         let v = super::macos_major_version();
         assert!(v >= 13, "expected macOS 13+, got {v}");
+    }
+
+    #[test]
+    fn matches_empty_binding_requires_no_modifiers() {
+        assert!(Modifiers::empty().matches(Modifiers::empty()));
+    }
+
+    #[test]
+    fn matches_empty_binding_rejects_any_modifier() {
+        assert!(!Modifiers::empty().matches(Modifiers::LALT));
+        assert!(!Modifiers::empty().matches(Modifiers::RSHIFT));
+        assert!(!Modifiers::empty().matches(Modifiers::LCMD));
+        assert!(!Modifiers::empty().matches(Modifiers::RCTRL));
+    }
+
+    #[test]
+    fn matches_group_binding_accepts_either_side() {
+        let alt_cmd = Modifiers::ALT | Modifiers::CMD;
+        assert!(alt_cmd.matches(Modifiers::LALT | Modifiers::LCMD));
+        assert!(alt_cmd.matches(Modifiers::RALT | Modifiers::RCMD));
+        assert!(alt_cmd.matches(Modifiers::LALT | Modifiers::RCMD));
+    }
+
+    #[test]
+    fn matches_group_binding_requires_all_groups() {
+        let alt_cmd = Modifiers::ALT | Modifiers::CMD;
+        assert!(!alt_cmd.matches(Modifiers::LALT));
+        assert!(!alt_cmd.matches(Modifiers::LCMD));
+        assert!(!alt_cmd.matches(Modifiers::LALT | Modifiers::LCMD | Modifiers::LSHIFT));
+    }
+
+    #[test]
+    fn matches_rejects_extra_unlisted_groups() {
+        let want_alt = Modifiers::ALT;
+        assert!(!want_alt.matches(Modifiers::LALT | Modifiers::LSHIFT));
+        assert!(!want_alt.matches(Modifiers::LALT | Modifiers::LCTRL));
+    }
+
+    #[test]
+    fn matches_specific_side_does_not_match_other_side() {
+        let left_alt = Modifiers::LALT;
+        assert!(left_alt.matches(Modifiers::LALT));
+        assert!(!left_alt.matches(Modifiers::RALT));
+    }
+
+    #[test]
+    fn matches_specific_side_rejects_both_sides_at_once() {
+        assert!(!Modifiers::RCMD.matches(Modifiers::LCMD | Modifiers::RCMD));
+        assert!(!Modifiers::LCTRL.matches(Modifiers::LCTRL | Modifiers::RCTRL));
+    }
+
+    #[test]
+    fn matches_right_specific_chord_rejects_left_modifier_in_same_group() {
+        let east = Modifiers::RCMD | Modifiers::RCTRL | Modifiers::RSHIFT | Modifiers::RALT;
+        assert!(
+            east.matches(Modifiers::RCMD | Modifiers::RCTRL | Modifiers::RSHIFT | Modifiers::RALT)
+        );
+        assert!(!east.matches(
+            Modifiers::LCMD
+                | Modifiers::RCMD
+                | Modifiers::RCTRL
+                | Modifiers::RSHIFT
+                | Modifiers::RALT
+        ));
+    }
+
+    #[test]
+    fn matches_all_four_groups() {
+        let all = Modifiers::ALT | Modifiers::SHIFT | Modifiers::CMD | Modifiers::CTRL;
+        assert!(
+            all.matches(Modifiers::LALT | Modifiers::RSHIFT | Modifiers::LCMD | Modifiers::RCTRL)
+        );
+        assert!(!all.matches(Modifiers::LALT | Modifiers::LSHIFT | Modifiers::LCMD));
     }
 }

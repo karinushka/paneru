@@ -89,7 +89,11 @@ opacity_night = -0.25
 ## 5. Keybindings (`[bindings]`)
 
 Bindings map a key combination to an action. A binding can be a single string or an array of strings.
-Format: `"[modifiers-]key"`. Modifiers: `alt`, `shift`, `cmd`, `ctrl`.
+Format: `"[modifiers-]key"`. Available modifiers are:
+- `alt`, `lalt`, `ralt`
+- `ctrl`, `lctrl`, `rctrl`
+- `cmd`, `lcmd`, `rcmd`
+- `shift`, `lshift`, `rshift`
 
 | Action | Description |
 | :--- | :--- |

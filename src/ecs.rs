@@ -160,6 +160,8 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::dim_window_trigger)
         .add_observer(triggers::theme_change_trigger)
         .add_observer(triggers::apply_window_properties)
+        .add_observer(triggers::window_to_native_fullscreen)
+        .add_observer(triggers::window_from_native_fullscreen)
         .add_observer(triggers::dim_remove_window_trigger);
 }
 
@@ -479,5 +481,9 @@ impl WindowProperties {
             .iter()
             .flat_map(|p| p.passthrough_keys().to_vec())
             .collect::<Vec<_>>()
+    }
+
+    pub fn width_ratio(&self) -> Option<f64> {
+        self.params.iter().find_map(|props| props.width)
     }
 }

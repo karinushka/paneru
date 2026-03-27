@@ -293,9 +293,9 @@ fn windows_not_in_strip<F: Fn(WinID) -> Option<Entity>>(
 pub(super) fn workspace_change_trigger(
     trigger: On<WMEventTrigger>,
     active_display: Single<&Display, With<ActiveDisplayMarker>>,
-    mut workspaces: Query<(&mut LayoutStrip, Entity, Has<ActiveWorkspaceMarker>)>,
+    workspaces: Query<(&LayoutStrip, Entity, Has<ActiveWorkspaceMarker>)>,
     windows: Windows,
-    fs_query: Query<&NativeFullscreenMarker>,
+    fullscreen_markers: Query<&NativeFullscreenMarker>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
@@ -319,38 +319,27 @@ pub(super) fn workspace_change_trigger(
     if !was_fullscreen
         && fullscreen
         && let Some((_, entity)) = windows.focused()
-        && !fs_query.contains(entity)
-        && let Some((mut strip, _, _)) = workspaces.iter_mut().find(|(_, _, active)| *active)
+        && !fullscreen_markers.contains(entity)
     {
-        let idx = strip.index_of(entity).ok().unwrap_or(strip.len());
-        strip.remove(entity);
-        let next_order = fs_query.iter().map(|m| m.order + 1).max().unwrap_or(0);
-        debug!("entering fullscreen: removed {entity} (idx={idx}), order={next_order}");
-        commands
-            .entity(entity)
-            .insert(NativeFullscreenMarker { order: next_order });
-        // Reshuffle around nearest remaining window to close the gap.
-        if let Some(target) = strip
-            .get(idx.saturating_sub(1))
-            .ok()
-            .and_then(|col| col.top())
-        {
-            reshuffle_around(target, &mut commands);
+        let next_order = fullscreen_markers
+            .iter()
+            .map(|m| m.order + 1)
+            .max()
+            .unwrap_or(0);
+        debug!("entering fullscreen: removed {entity} order={next_order}");
+        if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            entity_commands.try_insert(NativeFullscreenMarker { order: next_order });
         }
     }
 
-    // Exiting fullscreen → re-insert the window at the end of the strip.
+    // Exiting fullscreen → remove the marker.
     if was_fullscreen
         && !fullscreen
         && let Some((_, entity)) = windows.focused()
-        && fs_query.contains(entity)
-        && let Some((mut strip, _, _)) = workspaces.iter_mut().find(|(_, _, active)| *active)
+        && fullscreen_markers.contains(entity)
+        && let Ok(mut entity_commands) = commands.get_entity(entity)
     {
-        let end = strip.len();
-        strip.insert_at(end, entity);
-        debug!("exiting fullscreen: re-inserted {entity} at end of strip");
-        commands.entity(entity).remove::<NativeFullscreenMarker>();
-        reshuffle_around(entity, &mut commands);
+        entity_commands.try_remove::<NativeFullscreenMarker>();
     }
 
     // Dynamic fullscreen spaces (created by macOS when a window goes fullscreen)
@@ -373,12 +362,6 @@ pub(super) fn workspace_change_trigger(
             commands.entity(entity).try_insert(ActiveWorkspaceMarker);
         }
     }
-
-    // let timeout = Timeout::new(
-    //     Duration::from_millis(WORKSPACE_CHANGE_TIMEOUT),
-    //     Some("marker despawned".to_string()),
-    // );
-    // commands.spawn((SpaceRecentlyChanged, timeout));
 }
 
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
@@ -1111,26 +1094,57 @@ pub(super) fn window_managed_trigger(
     mut commands: Commands,
 ) {
     let entity = trigger.event().entity;
+
+    reinsert_window_into_layout(
+        entity,
+        &mut active_display,
+        &windows,
+        apps,
+        config.config(),
+        &mut commands,
+    );
+}
+
+#[instrument(level = Level::DEBUG, skip_all, fields(entity))]
+fn reinsert_window_into_layout(
+    entity: Entity,
+    active_display: &mut ActiveDisplayMut,
+    windows: &Windows,
+    apps: Query<(Entity, &Application)>,
+    config: &Config,
+    commands: &mut Commands,
+) {
     debug!("Entity {entity} is managed again.");
+    let display_bounds = active_display.bounds();
+    let active_strip = active_display.active_strip();
 
     if let Some(window) = windows.get(entity)
         && let Some((_, app)) = windows
             .find_parent(window.id())
             .and_then(|(_, _, parent)| apps.get(parent).ok())
     {
-        let properties = WindowProperties::new(app, window, config.config());
+        let properties = WindowProperties::new(app, window, config);
+
+        if let Some(width_ratio) = properties.width_ratio() {
+            let (_, pad_right, _, pad_left) = config.edge_padding();
+            let padded_width = display_bounds.width() - pad_left - pad_right;
+            let width = (f64::from(padded_width) * width_ratio).round() as i32;
+            let height = window.frame().height();
+            resize_entity(entity, Size::new(width, height), commands);
+        }
+
         if properties.floating() {
             return;
         }
         if let Some(index) = properties.insertion() {
-            active_display.active_strip().insert_at(index, entity);
-            reshuffle_around(entity, &mut commands);
+            active_strip.insert_at(index, entity);
+            reshuffle_around(entity, commands);
             return;
         }
     }
 
-    active_display.active_strip().append(entity);
-    reshuffle_around(entity, &mut commands);
+    active_strip.append(entity);
+    reshuffle_around(entity, commands);
 }
 
 /// Handles the event when a window is destroyed. The windows itself is not removed from the layout
@@ -1292,7 +1306,7 @@ pub(super) fn spawn_window_trigger(
             &mut window,
             &mut active_display,
             &properties.params,
-            config.edge_padding(),
+            config.config(),
         );
 
         // update_frame expands the OS rect by the per-window padding, so calling it *after*
@@ -1345,7 +1359,7 @@ fn apply_window_defaults(
     window: &mut Window,
     active_display: &mut ActiveDisplayMut,
     properties: &[WindowParams],
-    edge_padding: (i32, i32, i32, i32),
+    config: &Config,
 ) {
     let floating = properties
         .iter()
@@ -1380,7 +1394,7 @@ fn apply_window_defaults(
     // Use padded display width (matching window_resize command behavior).
     if let Some(width) = properties.iter().find_map(|props| props.width) {
         let bounds = active_display.bounds();
-        let (_, pad_right, _, pad_left) = edge_padding;
+        let (_, pad_right, _, pad_left) = config.edge_padding();
         let padded_width = bounds.width() - pad_left - pad_right;
         let new_width = (f64::from(padded_width) * width).round() as i32;
         let height = window.frame().height();
@@ -1611,4 +1625,37 @@ pub(super) fn send_message_trigger(
 ) {
     let event = &trigger.event().0;
     messages.write(event.clone());
+}
+
+#[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
+pub(super) fn window_to_native_fullscreen(
+    trigger: On<Add, NativeFullscreenMarker>,
+    mut active_display: ActiveDisplayMut,
+) {
+    let entity = trigger.event().entity;
+    let layout_strip = active_display.active_strip();
+    layout_strip.remove(entity);
+}
+
+#[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
+pub(super) fn window_from_native_fullscreen(
+    trigger: On<Remove, NativeFullscreenMarker>,
+    mut active_display: ActiveDisplayMut,
+    windows: Windows,
+    apps: Query<(Entity, &Application)>,
+    config: Configuration,
+    mut commands: Commands,
+) {
+    let entity = trigger.event().entity;
+
+    reinsert_window_into_layout(
+        entity,
+        &mut active_display,
+        &windows,
+        apps,
+        config.config(),
+        &mut commands,
+    );
 }

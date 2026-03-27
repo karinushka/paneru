@@ -114,10 +114,6 @@ impl Configuration<'_> {
         self.skip_reshuffle.0
     }
 
-    pub fn edge_padding(&self) -> (i32, i32, i32, i32) {
-        self.config.edge_padding()
-    }
-
     /// Returns `true` if Mission Control is currently active.
     ///
     /// # Returns

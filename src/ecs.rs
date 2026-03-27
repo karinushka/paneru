@@ -436,11 +436,11 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
     Ok(app)
 }
 
-struct WindowPropoerties {
+struct WindowProperties {
     pub params: Vec<WindowParams>,
 }
 
-impl WindowPropoerties {
+impl WindowProperties {
     pub fn new(app: &Application, window: &Window, config: &Config) -> Self {
         let bundle_id = app.bundle_id().unwrap_or_default();
         let title = window.title().unwrap_or_default();

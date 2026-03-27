@@ -28,7 +28,7 @@ use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, BruteforceWindows, Initializing, LocateDockTrigger, Position,
     RefreshWindowSizes, Scrolling, StackAdjustedResize, Unmanaged, WidthRatio, WindowDraggedMarker,
-    WindowPropoerties, reposition_entity, reshuffle_around,
+    WindowProperties, reposition_entity, reshuffle_around,
 };
 use crate::events::Event;
 use crate::manager::{
@@ -1312,7 +1312,7 @@ pub(super) fn update_overlays(
             else {
                 return;
             };
-            let properties = WindowPropoerties::new(app, window, config.config());
+            let properties = WindowProperties::new(app, window, config.config());
             let focused_border_radius = properties.border_radius();
             (
                 focused_abs_cg,

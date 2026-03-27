@@ -26,7 +26,7 @@ use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, LayoutPosition, LocateDockTrigger, Position, Scrolling,
-    SendMessageTrigger, WidthRatio, WindowPropoerties, reposition_entity, reshuffle_around,
+    SendMessageTrigger, WidthRatio, WindowProperties, reposition_entity, reshuffle_around,
     resize_entity,
 };
 use crate::errors::Result;
@@ -40,7 +40,7 @@ use crate::util::symlink_target;
 /// Computes the passthrough keybinding set for the given window/app and
 /// publishes it to the input thread. Called on focus change and config reload.
 fn update_passthrough(window: &Window, app: &Application, config: &Config) {
-    let properties = WindowPropoerties::new(app, window, config);
+    let properties = WindowProperties::new(app, window, config);
     crate::platform::input::set_focused_passthrough(properties.passthrough_keys());
 }
 
@@ -1028,7 +1028,7 @@ pub(super) fn window_unmanaged_trigger(
         return;
     };
 
-    let properties = WindowPropoerties::new(app, window, config.config());
+    let properties = WindowProperties::new(app, window, config.config());
 
     if let Some((rx, ry, rw, rh)) = properties.grid_ratios() {
         let x = (f64::from(display_bounds.width()) * rx) as i32;
@@ -1118,8 +1118,13 @@ pub(super) fn window_managed_trigger(
             .find_parent(window.id())
             .and_then(|(_, _, parent)| apps.get(parent).ok())
     {
-        let properties = WindowPropoerties::new(app, window, config.config());
+        let properties = WindowProperties::new(app, window, config.config());
         if properties.floating() {
+            return;
+        }
+        if let Some(index) = properties.insertion() {
+            active_display.active_strip().insert_at(index, entity);
+            reshuffle_around(entity, &mut commands);
             return;
         }
     }
@@ -1278,7 +1283,7 @@ pub(super) fn spawn_window_trigger(
             window.title().unwrap_or_default()
         );
 
-        let properties = WindowPropoerties::new(&app, &window, config.config());
+        let properties = WindowProperties::new(&app, &window, config.config());
         if !properties.params.is_empty() {
             debug!("Applying window properties for '{}'", window.id());
         }
@@ -1412,7 +1417,7 @@ pub(super) fn apply_window_properties(
     let Ok(app) = apps.get(parent) else {
         return;
     };
-    let properties = WindowPropoerties::new(app, window, config.config());
+    let properties = WindowProperties::new(app, window, config.config());
 
     if properties.floating() {
         // Avoid managing window if it's floating.

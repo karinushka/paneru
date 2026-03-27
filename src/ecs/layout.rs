@@ -168,8 +168,7 @@ impl LayoutStrip {
     /// * `after` - The index at which to insert the window. If `after` is greater than or equal to the entity length,
     ///   the window is appended to the end.
     /// * `entity` - Entity of the window to insert.
-    pub fn insert_at(&mut self, after: usize, entity: Entity) {
-        let index = after;
+    pub fn insert_at(&mut self, index: usize, entity: Entity) {
         if index >= self.len() {
             self.columns.push_back(Column::Single(entity));
         } else {

@@ -19,7 +19,6 @@ use stdext::function_name;
 use tracing::{error, info};
 
 use crate::config::Config;
-use crate::config::swipe::SwipeScrollModifier;
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
 use crate::platform::Modifiers;
@@ -235,10 +234,7 @@ impl InputHandler {
         let flags = CGEvent::flags(Some(event));
         let modifiers = get_modifiers(flags);
 
-        let target_modifier = match self.config.swipe_scroll_modifier() {
-            SwipeScrollModifier::Alt => Modifiers::ALT,
-            SwipeScrollModifier::Cmd => Modifiers::CMD,
-        };
+        let target_modifier = self.config.swipe_scroll_modifier();
 
         // Only intercept if the configured modifier is held
         if !modifiers.contains(target_modifier) {

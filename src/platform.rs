@@ -278,7 +278,7 @@ impl Modifiers {
                 if (bind_group & event_group).is_empty() {
                     return false;
                 }
-                // Ensure an an extra modifier from the opposite side is not included unless it matches,
+                // Reject extra bits in this group (e.g. `lcmd` still held when the binding only allows `rcmd`).
                 // e.g. rcmd does not match `lcmd + <key>` while lcmd is also held.
                 if event_group | bind_group != bind_group {
                     return false;

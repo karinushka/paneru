@@ -236,9 +236,9 @@ impl InputHandler {
 
         let target_modifier = self.config.swipe_scroll_modifier();
 
-        // Only intercept if the configured modifier is held.
-        // Intersect to allow for left OR right modifiers to match the target modifier.
-        if (modifiers & target_modifier).is_empty() {
+        // Same rules as keybindings: generic modifiers allow either side; L/R-specific
+        // modifiers reject the opposite side and extra modifier families.
+        if !target_modifier.matches(modifiers) {
             return false;
         }
 

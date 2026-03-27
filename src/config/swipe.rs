@@ -1,5 +1,6 @@
 use serde::Deserialize;
 
+use crate::errors::Error;
 use crate::platform::Modifiers;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -39,7 +40,7 @@ pub struct GestureOptions {
 #[derive(Deserialize, Clone, Debug, Default)]
 pub struct ScrollOptions {
     /// Modifier key(s) required for scroll wheel swiping.
-    /// Accepts the same format as keybindings: "alt", "cmd", "alt + cmd", etc.
+    /// Accepts the same format as keybindings: "alt", "cmd", "alt + cmd", "alt + rcmd" etc.
     #[serde(default, deserialize_with = "deserialize_modifier")]
     pub modifier: Option<Modifiers>,
 }
@@ -51,19 +52,7 @@ where
     let Some(s) = Option::<String>::deserialize(deserializer)? else {
         return Ok(None);
     };
-    let mut out = Modifiers::empty();
-    for part in s.split('+').map(str::trim) {
-        out |= match part {
-            "alt" => Modifiers::ALT,
-            "shift" => Modifiers::SHIFT,
-            "cmd" => Modifiers::CMD,
-            "ctrl" => Modifiers::CTRL,
-            other => {
-                return Err(serde::de::Error::custom(format!(
-                    "invalid modifier: {other}"
-                )));
-            }
-        };
-    }
-    Ok(Some(out))
+    super::parse_modifiers(&s)
+        .map(Some)
+        .map_err(|e: Error| serde::de::Error::custom(e.to_string()))
 }

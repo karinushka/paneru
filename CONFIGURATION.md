@@ -60,7 +60,7 @@ Configure trackpad gestures and scroll-wheel window sliding.
 ### `[swipe.scroll]`
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `modifier` | String | `"alt"` | Modifier key required to slide windows with the scroll wheel: `"alt"` or `"cmd"`. |
+| `modifier` | String | `"alt"` | Modifier key(s) required to slide windows with the scroll wheel: `"alt"`, `"cmd"`, `"alt + cmd"`, `"ctrl + alt + cmd"`, etc. |
 
 ---
 

@@ -16,6 +16,7 @@ use crate::events::{Event, EventSender};
 use crate::manager::{check_ax_privilege, check_separate_spaces};
 use crate::platform::display::PinnedDisplayHandler;
 use crate::platform::input::PinnedInputHandler;
+use crate::platform::notify::{NotifyHandler, PinnedNotifyHandler};
 use crate::platform::process::PinnedProcessHandler;
 use display::DisplayHandler;
 use input::InputHandler;
@@ -27,6 +28,7 @@ pub use workspace::WorkspaceObserver;
 mod display;
 pub(crate) mod input;
 mod mission_control;
+pub mod notify;
 mod process;
 pub mod service;
 mod workspace;
@@ -149,6 +151,7 @@ pub struct PlatformCallbacks {
     mission_control_observer: MissionControlHandler,
     /// Handler for Core Graphics display reconfiguration events.
     display_handler: Option<PinnedDisplayHandler>,
+    notify_handler: Option<PinnedNotifyHandler>,
 }
 
 impl PlatformCallbacks {
@@ -183,6 +186,7 @@ impl PlatformCallbacks {
             workspace_observer,
             mission_control_observer: MissionControlHandler::new(events.clone()),
             display_handler: None,
+            notify_handler: None,
             events,
         })
     }
@@ -218,6 +222,7 @@ impl PlatformCallbacks {
         self.events.send(Event::InitialConfig(config.clone()))?;
         self.event_handler = Some(InputHandler::new(self.events.clone(), config).start()?);
 
+        self.notify_handler = Some(NotifyHandler::new(self.events.clone()).start()?);
         self.display_handler = Some(DisplayHandler::new(self.events.clone()).start()?);
         self.process_handler = Some(
             ProcessHandler::new(self.events.clone(), self.workspace_observer.clone()).start()?,

@@ -2559,6 +2559,7 @@ dependencies = [
  "launchctl",
  "libc",
  "notify",
+ "num_enum",
  "objc2",
  "objc2-app-kit",
  "objc2-core-foundation",

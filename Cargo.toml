@@ -32,6 +32,7 @@ embed_plist = "1.2.2"
 launchctl = "0.3.2"
 libc = "0.2.183"
 notify = { version = "8.2.0", features = ["macos_fsevent"] }
+num_enum = "0.7.6"
 objc2 = { version = "0.6.4", features = ["catch-all", "exception"] }
 objc2-app-kit = "0.3.2"
 objc2-core-foundation = { version = "0.3.2", features = ["CFRunLoop"] }

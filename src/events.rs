@@ -7,7 +7,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use crate::commands::Command;
 use crate::config::Config;
 use crate::errors::Result;
-use crate::platform::{ProcessSerialNumber, WinID, WorkspaceObserver};
+use crate::platform::{ProcessSerialNumber, WinID, WorkspaceId, WorkspaceObserver};
 use crate::util::AXUIWrapper;
 
 /// `Event` represents various system-level and application-specific occurrences that the window manager reacts to.
@@ -77,9 +77,9 @@ pub enum Event {
     Scroll { delta: f64 },
 
     /// A new space (virtual desktop) has been created.
-    SpaceCreated,
+    SpaceCreated { space_id: WorkspaceId },
     /// A space has been destroyed.
-    SpaceDestroyed,
+    SpaceDestroyed { space_id: WorkspaceId },
     /// The active space has changed.
     SpaceChanged,
 

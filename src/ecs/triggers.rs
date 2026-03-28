@@ -1693,3 +1693,49 @@ pub(super) fn window_from_native_fullscreen(
         &mut commands,
     );
 }
+
+#[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
+pub(super) fn workspace_destroyed_trigger(
+    trigger: On<WMEventTrigger>,
+    workspaces: Populated<(&LayoutStrip, Entity)>,
+    mut commands: Commands,
+) {
+    let Event::SpaceDestroyed { space_id } = trigger.event().0 else {
+        return;
+    };
+
+    let Some((_, entity)) = workspaces
+        .iter()
+        .find(|(layout_strip, _)| layout_strip.id() == space_id)
+    else {
+        return;
+    };
+    if let Ok(mut entity_commands) = commands.get_entity(entity) {
+        debug!("Workspace destroyed {space_id} {entity}");
+        entity_commands.try_despawn();
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
+pub(super) fn workspace_created_trigger(
+    trigger: On<WMEventTrigger>,
+    active_display: Single<(&Display, Entity), With<ActiveDisplayMarker>>,
+    workspaces: Query<&LayoutStrip>,
+    mut commands: Commands,
+) {
+    let Event::SpaceCreated { space_id } = trigger.event().0 else {
+        return;
+    };
+
+    if workspaces.into_iter().any(|strip| strip.id() == space_id) {
+        warn!("Workspace {space_id} already exists!");
+        return;
+    }
+    debug!("Workspace create {space_id}");
+    let (active_display, display_entity) = *active_display;
+    let strip = LayoutStrip::new(space_id);
+    let origin = Position(active_display.bounds().min);
+    commands.spawn((strip, origin, ChildOf(display_entity)));
+}

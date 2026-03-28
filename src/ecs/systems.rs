@@ -471,13 +471,17 @@ pub(super) fn retry_front_switch(
     for (entity, retry) in retries.iter() {
         let Ok(app) = applications.get(retry.0) else {
             // Application entity no longer exists, clean up.
-            commands.entity(entity).despawn();
+            if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                entity_commands.try_despawn();
+            }
             continue;
         };
         if !app.is_frontmost() {
             // App is no longer frontmost — this retry is stale.
             debug!("Discarding stale front switch retry (app no longer frontmost).");
-            commands.entity(entity).despawn();
+            if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                entity_commands.try_despawn();
+            }
             continue;
         }
         if let Ok(focused_id) = app.focused_window_id() {
@@ -485,7 +489,9 @@ pub(super) fn retry_front_switch(
             commands.trigger(WMEventTrigger(Event::WindowFocused {
                 window_id: focused_id,
             }));
-            commands.entity(entity).despawn();
+            if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                entity_commands.try_despawn();
+            }
         }
         // Otherwise, let timeout_ticker handle expiry.
     }

@@ -382,7 +382,7 @@ pub(super) fn active_workspace_trigger(
     debug!("workspace {workspace_id}");
 
     let find_window = |window_id| windows.find_managed(window_id).map(|(_, entity)| entity);
-    let Ok((moved_windows, unresolved)) =
+    let Ok((moved_windows, mut unresolved)) =
         windows_not_in_strip(workspace_id, find_window, active_strip, &window_manager).inspect_err(
             |err| {
                 warn!("unable to get windows in the current workspace: {err}");
@@ -391,20 +391,22 @@ pub(super) fn active_workspace_trigger(
     else {
         return;
     };
+    // Skip known, but unmanaged windows.
+    unresolved.retain(|window_id| windows.find(*window_id).is_none());
 
-    // Retry unresolved window IDs: during startup bruteforce, windows on
-    // inactive workspaces may have stale AX attributes (e.g. AXGroup instead
-    // of AXWindow).  Now that this workspace is active, re-query each app's
-    // window list — the AX data should be correct.
     if !unresolved.is_empty() {
-        let mut retry_windows = Vec::new();
-        for app in &apps {
-            for window in app.window_list() {
-                if unresolved.contains(&window.id()) {
-                    retry_windows.push(window);
-                }
-            }
-        }
+        // Retry unresolved window IDs: during startup bruteforce, windows on
+        // inactive workspaces may have stale AX attributes (e.g. AXGroup instead
+        // of AXWindow).  Now that this workspace is active, re-query each app's
+        // window list — the AX data should be correct.
+        let retry_windows = apps
+            .into_iter()
+            .flat_map(|app| {
+                app.window_list()
+                    .into_iter()
+                    .filter(|window| unresolved.contains(&window.id()))
+            })
+            .collect::<Vec<_>>();
         if !retry_windows.is_empty() {
             debug!(
                 "retrying unresolved windows: {}",

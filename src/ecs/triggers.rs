@@ -808,10 +808,18 @@ pub(super) fn window_focused_trigger(
 /// * `trigger` - The Bevy event trigger containing the Mission Control event.
 /// * `mission_control_active` - The `MissionControlActive` resource.
 #[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 pub(super) fn mission_control_trigger(
     trigger: On<WMEventTrigger>,
+    windows: Windows,
+    mut workspaces: Query<(
+        Entity,
+        &mut LayoutStrip,
+        Has<ActiveWorkspaceMarker>,
+        Option<&Scrolling>,
+    )>,
     mut mission_control_active: ResMut<MissionControlActive>,
-    active_workspace: Query<(Entity, Option<&Scrolling>), With<ActiveWorkspaceMarker>>,
+    window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
     match trigger.event().0 {
@@ -819,7 +827,7 @@ pub(super) fn mission_control_trigger(
         | Event::MissionControlShowFrontWindows
         | Event::MissionControlShowDesktop => {
             mission_control_active.as_mut().0 = true;
-            for (entity, scroll) in active_workspace {
+            for (entity, _, _, scroll) in workspaces {
                 if scroll.is_some() {
                     commands.entity(entity).try_remove::<Scrolling>();
                 }
@@ -827,6 +835,30 @@ pub(super) fn mission_control_trigger(
         }
         Event::MissionControlExit => {
             mission_control_active.as_mut().0 = false;
+
+            // Check if some windows disappeared from the current workspace
+            // - e.g. they were moved away during mission control.
+            if let Some(mut active_strip) = workspaces
+                .iter_mut()
+                .find_map(|(_, strip, active, _)| active.then_some(strip))
+                && let Ok(present_windows) = window_manager.windows_in_workspace(active_strip.id())
+            {
+                let moved_windows = active_strip
+                    .all_windows()
+                    .into_iter()
+                    .filter_map(|entity| windows.get(entity).zip(Some(entity)))
+                    .filter(|(window, _)| !present_windows.contains(&window.id()));
+                for (window, entity) in moved_windows {
+                    debug!(
+                        "window {} {entity} moved, removing from workspace {}",
+                        window.id(),
+                        active_strip.id(),
+                    );
+                    // Simply removing them from the current strip is enough,
+                    // they will be re-detected during the workspace change.
+                    active_strip.remove(entity);
+                }
+            }
         }
         _ => (),
     }

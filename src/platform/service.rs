@@ -74,6 +74,11 @@ impl Service {
     /// `Ok(())` if the service is installed successfully or already exists, otherwise `Err(Error)` if a file system error occurs.
     pub fn install(&self) -> Result<()> {
         let plist_path = self.plist_path();
+        let dir = plist_path.parent().ok_or(Error::last_os_error())?;
+        if !dir.exists() {
+            fs::create_dir_all(dir)?;
+        }
+
         if self.is_installed() {
             warn!(
                 "existing launch agent detected at `{}`, skipping installation",

@@ -126,13 +126,15 @@ impl Column {
 #[derive(Component, Debug, Default)]
 pub struct LayoutStrip {
     id: WorkspaceId,
+    pub virtual_index: u32,
     columns: VecDeque<Column>,
 }
 
 impl LayoutStrip {
-    pub fn new(id: WorkspaceId) -> Self {
+    pub fn new(id: WorkspaceId, virtual_index: u32) -> Self {
         Self {
             id,
+            virtual_index,
             columns: VecDeque::new(),
         }
     }
@@ -140,7 +142,11 @@ impl LayoutStrip {
     pub fn fullscreen(id: WorkspaceId, entity: Entity) -> Self {
         let mut columns = VecDeque::new();
         columns.push_back(Column::Fullscren(entity));
-        Self { id, columns }
+        Self {
+            id,
+            virtual_index: 0,
+            columns,
+        }
     }
 
     /// Finds the index of a window within the pane.

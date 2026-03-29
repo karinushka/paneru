@@ -1,22 +1,35 @@
+use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
-use bevy::ecs::lifecycle::Add;
+use bevy::ecs::lifecycle::{Add, RemovedComponents};
+use bevy::ecs::message::MessageReader;
 use bevy::ecs::observer::On;
-use bevy::ecs::query::{Has, With, Without};
-use bevy::ecs::system::{Commands, Local, Populated, Query, Res, Single};
+use bevy::ecs::query::{Added, Has, With, Without};
+use bevy::ecs::system::{Commands, Local, ParallelCommands, Populated, Query, Res, Single};
 use tracing::{Level, debug, error, instrument, warn};
 
 use super::{ActiveDisplayMarker, SpawnWindowTrigger, WMEventTrigger};
+use crate::commands::{Direction, Operation, filter_window_operations};
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, Bounds, NativeFullscreenMarker, Position, RefreshWindowSizes, Timeout,
-    Unmanaged, reposition_entity, reshuffle_around,
+    ActiveWorkspaceMarker, Bounds, FocusedMarker, NativeFullscreenMarker, Position,
+    RefreshWindowSizes, SelectedVirtualMarker, Timeout, Unmanaged, reposition_entity,
+    reshuffle_around,
 };
 use crate::errors::Result;
 use crate::events::Event;
-use crate::manager::{Application, Display, Window, WindowManager};
+use crate::manager::{Application, Display, Origin, Window, WindowManager};
 use crate::platform::{WinID, WorkspaceId};
+
+/// Marker component to move a window to a specific virtual index on its current workspace.
+#[derive(Component)]
+pub(super) struct VirtualMoveMarker {
+    pub target_virtual_index: u32,
+}
+
+#[derive(Component, Debug)]
+pub(crate) struct PreviousPosition(pub Origin);
 
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
@@ -87,14 +100,16 @@ pub(super) fn workspace_change_trigger(
             entity_commands.try_remove::<ActiveWorkspaceMarker>();
         }
         if let Ok(mut entity_commands) = commands.get_entity(into) {
-            entity_commands.try_insert(ActiveWorkspaceMarker);
+            entity_commands
+                .try_insert(ActiveWorkspaceMarker)
+                .try_insert(SelectedVirtualMarker);
         }
     }
 }
 
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
-pub(super) fn active_workspace_trigger(
+pub(super) fn workspace_activated_trigger(
     trigger: On<Add, ActiveWorkspaceMarker>,
     windows: Windows,
     mut workspaces: Query<
@@ -112,9 +127,13 @@ pub(super) fn active_workspace_trigger(
     let workspace_id = active_strip.id();
     debug!("workspace {workspace_id}");
 
+    let strips = workspaces
+        .iter()
+        .filter_map(|(strip, _, _)| (strip.id() == active_strip.id()).then_some(strip))
+        .collect::<Vec<_>>();
     let find_window = |window_id| windows.find_managed(window_id).map(|(_, entity)| entity);
     let Ok((moved_windows, mut unresolved)) =
-        windows_not_in_strip(workspace_id, find_window, active_strip, &window_manager).inspect_err(
+        windows_not_in_strips(workspace_id, find_window, &strips, &window_manager).inspect_err(
             |err| {
                 warn!("unable to get windows in the current workspace: {err}");
             },
@@ -246,15 +265,15 @@ pub(super) fn workspace_created_trigger(
     }
     debug!("Workspace create {space_id}");
     let (active_display, display_entity) = *active_display;
-    let strip = LayoutStrip::new(space_id);
+    let strip = LayoutStrip::new(space_id, 0);
     let origin = Position(active_display.bounds().min);
     commands.spawn((strip, origin, ChildOf(display_entity)));
 }
 
-fn windows_not_in_strip<F: Fn(WinID) -> Option<Entity>>(
+fn windows_not_in_strips<F: Fn(WinID) -> Option<Entity>>(
     workspace_id: WorkspaceId,
     find_window: F,
-    strip: &LayoutStrip,
+    strips: &[&LayoutStrip],
     window_manager: &WindowManager,
 ) -> Result<(Vec<Entity>, Vec<WinID>)> {
     window_manager
@@ -263,10 +282,14 @@ fn windows_not_in_strip<F: Fn(WinID) -> Option<Entity>>(
             let mut moved = Vec::new();
             let mut unresolved = Vec::new();
             for id in ids {
-                match find_window(id) {
-                    Some(entity) if !strip.contains(entity) => moved.push(entity),
-                    Some(_) => {}
-                    None => unresolved.push(id),
+                if let Some(entity) = find_window(id) {
+                    // If window exists in any of the active workspace rows.
+                    if strips.iter().any(|strip| strip.contains(entity)) {
+                        continue;
+                    }
+                    moved.push(entity);
+                } else {
+                    unresolved.push(id);
                 }
             }
             (moved, unresolved)
@@ -455,5 +478,363 @@ pub(super) fn workspace_change_watcher(
         *current_space = space_id;
         debug!("workspace changed to {space_id}");
         commands.trigger(WMEventTrigger(Event::SpaceChanged));
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
+pub(super) fn virtual_strip_activated(
+    trigger: On<Add, FocusedMarker>,
+    workspaces: Query<(Entity, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    mut commands: Commands,
+) {
+    let Some((active_entity, active_strip, _)) = workspaces.iter().find(|(_, _, active)| *active)
+    else {
+        return;
+    };
+    if active_strip.contains(trigger.entity) {
+        return;
+    }
+
+    for (entity, strip, _) in workspaces {
+        if strip.contains(trigger.entity) {
+            if let Ok(mut entity_commands) = commands.get_entity(active_entity) {
+                entity_commands.try_remove::<ActiveWorkspaceMarker>();
+            }
+            if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                entity_commands
+                    .try_insert(ActiveWorkspaceMarker)
+                    .try_insert(SelectedVirtualMarker);
+            }
+        }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
+pub(super) fn cleanup_selected_space_marker(
+    trigger: On<Add, SelectedVirtualMarker>,
+    workspaces: Query<(Entity, &LayoutStrip, Has<SelectedVirtualMarker>)>,
+    commands: ParallelCommands,
+) {
+    let Ok(workspace_id) = workspaces
+        .get(trigger.entity)
+        .map(|(_, strip, _)| strip.id())
+    else {
+        return;
+    };
+    // Remove the marker from other strips on the same workspace.
+    workspaces.par_iter().for_each(|(entity, strip, marker)| {
+        if marker && entity != trigger.entity && strip.id() == workspace_id {
+            commands.command_scope(|mut command| {
+                if let Ok(mut entity_commands) = command.get_entity(entity) {
+                    entity_commands.try_remove::<SelectedVirtualMarker>();
+                }
+            });
+        }
+    });
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn cleanup_virtual_workspaces(
+    changed: Populated<Entity, Added<ActiveWorkspaceMarker>>,
+    mut strips: Populated<(Entity, &mut LayoutStrip)>,
+    mut commands: Commands,
+) {
+    let Some(workspace_id) = changed
+        .iter()
+        .next()
+        .and_then(|entity| strips.get(entity).ok())
+        .map(|(_, strip)| strip.id())
+    else {
+        return;
+    };
+    debug!("cleaning up virtual workspaces on space {workspace_id}");
+    let mut rows = strips
+        .iter_mut()
+        .filter(|(_, strip)| strip.id() == workspace_id)
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|(_, strip)| strip.virtual_index);
+
+    let mut next_idx = 0;
+    for (entity, mut strip) in rows {
+        if strip.virtual_index > 0 && strip.len() == 0 {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        if strip.virtual_index != next_idx {
+            strip.virtual_index = next_idx;
+        }
+        next_idx += 1;
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn handle_virtual_window_moves(
+    moved_windows: Populated<(Entity, &VirtualMoveMarker), With<Window>>,
+    mut workspaces: Query<(Entity, &mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    active_display: Single<(Entity, &Display), With<ActiveDisplayMarker>>,
+    mut commands: Commands,
+) {
+    let Some(workspace_id) = workspaces
+        .iter()
+        .find_map(|(_, strip, active)| active.then_some(strip.id()))
+    else {
+        return;
+    };
+
+    let (display_entity, active_display) = *active_display;
+    for (window_entity, move_marker) in &moved_windows {
+        let target_idx = move_marker.target_virtual_index;
+
+        let target = workspaces.iter().find_map(|(entity, strip, _)| {
+            (strip.id() == workspace_id && strip.virtual_index == target_idx).then_some(entity)
+        });
+
+        let target_entity = if let Some(entity) = target {
+            entity
+        } else {
+            let origin = Position(active_display.bounds().min);
+            debug!(
+                "Creating new virtual row {target_idx} on workspace {}",
+                workspace_id
+            );
+            let mut new_strip = LayoutStrip::new(workspace_id, target_idx);
+            // Append the window right away, otherwise it is not yet visible in the next for loop.
+            new_strip.append(window_entity);
+
+            commands
+                .spawn((
+                    new_strip,
+                    origin,
+                    SelectedVirtualMarker,
+                    ChildOf(display_entity),
+                ))
+                .id()
+        };
+
+        // Move the window first, before moving the markers -
+        // otherwise it would be detected as a moved window.
+        for (entity, mut strip, _) in &mut workspaces {
+            if entity == target_entity {
+                strip.append(window_entity);
+            } else {
+                strip.remove(window_entity);
+            }
+        }
+
+        // Remove old markers.
+        if let Some(old_entity) = workspaces
+            .iter()
+            .find_map(|(entity, _, active)| active.then_some(entity))
+            && let Ok(mut entity_commands) = commands.get_entity(old_entity)
+        {
+            entity_commands
+                .try_remove::<SelectedVirtualMarker>()
+                .try_remove::<ActiveWorkspaceMarker>();
+        }
+
+        // Insert new markers.
+        if let Ok(mut entity_commands) = commands.get_entity(target_entity) {
+            entity_commands
+                .try_insert(SelectedVirtualMarker)
+                .try_insert(ActiveWorkspaceMarker);
+        }
+
+        commands.entity(window_entity).remove::<VirtualMoveMarker>();
+        reshuffle_around(window_entity, &mut commands);
+        debug!(
+            "Moved window {} to virtual workspace {}",
+            window_entity, target_idx
+        );
+    }
+}
+
+/// Handles the keybinding for switching between virtual workspaces.
+#[instrument(level = Level::DEBUG, skip_all)]
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn switch_virtual_workspace_bind(
+    mut messages: MessageReader<Event>,
+    active_display: ActiveDisplay,
+    workspaces: Query<(Entity, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    mut commands: Commands,
+) {
+    let Some(Operation::Virtual(direction)) =
+        filter_window_operations(&mut messages, |op| matches!(op, Operation::Virtual(_))).next()
+    else {
+        return;
+    };
+
+    let workspace_id = active_display.active_strip().id();
+    let mut rows = workspaces
+        .iter()
+        .filter(|(_, strip, _)| strip.id() == workspace_id)
+        .collect::<Vec<_>>();
+
+    if rows.is_empty() {
+        return;
+    }
+    rows.sort_by_key(|(_, strip, _)| strip.virtual_index);
+
+    let current_index = rows.iter().position(|(_, _, active)| *active).unwrap_or(0);
+    let next_index = match direction {
+        Direction::South => (current_index + 1).clamp(0, rows.len() - 1),
+        Direction::North => current_index.saturating_sub(1),
+        _ => return,
+    };
+
+    if next_index == current_index {
+        return;
+    }
+
+    let old_entity = rows[current_index].0;
+    let new_entity = rows[next_index].0;
+    if let Ok(mut entity_commands) = commands.get_entity(old_entity) {
+        entity_commands
+            .try_remove::<SelectedVirtualMarker>()
+            .try_remove::<ActiveWorkspaceMarker>();
+    }
+    if let Ok(mut entity_commands) = commands.get_entity(new_entity) {
+        entity_commands
+            .try_insert(SelectedVirtualMarker)
+            .try_insert(ActiveWorkspaceMarker);
+    }
+    debug!(
+        "Switched virtual workspace on display {} from {} to {}",
+        active_display.id(),
+        rows[current_index].1.virtual_index,
+        rows[next_index].1.virtual_index
+    );
+}
+
+/// Handles the keybinding to move windows between virtual workspaces.
+#[instrument(level = Level::DEBUG, skip_all)]
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn move_virtual_workspace_bind(
+    mut messages: MessageReader<Event>,
+    windows: Windows,
+    active_display: ActiveDisplay,
+    mut commands: Commands,
+) {
+    let Some(Operation::VirtualMove(direction)) =
+        filter_window_operations(&mut messages, |op| matches!(op, Operation::VirtualMove(_)))
+            .next()
+    else {
+        return;
+    };
+
+    let Some((_, focused_entity)) = windows.focused() else {
+        return;
+    };
+
+    let current_virtual_index = active_display.active_strip().virtual_index;
+
+    let target_virtual_index = match direction {
+        Direction::South if active_display.active_strip().len() > 1 => current_virtual_index + 1,
+        Direction::North => {
+            if current_virtual_index == 0 {
+                return;
+            }
+            current_virtual_index - 1
+        }
+        _ => return,
+    };
+
+    commands.entity(focused_entity).insert(VirtualMoveMarker {
+        target_virtual_index,
+    });
+    debug!("Moving {focused_entity} to new virtual space {target_virtual_index}");
+}
+
+/// Hide windows on virtual workspaces which do not have an active marker.
+/// This is a system and not the usual trigger, because the event should come delayed in the next
+/// "frame" - so the active marker can be moved to another strip.
+#[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
+pub(super) fn hide_inactive_workspace_trigger(
+    mut removed: RemovedComponents<ActiveWorkspaceMarker>,
+    mut workspaces: Query<
+        (&mut Position, &LayoutStrip, Has<ActiveWorkspaceMarker>),
+        With<LayoutStrip>,
+    >,
+    active_display: ActiveDisplay,
+    mut commands: Commands,
+) {
+    for entity in removed.read() {
+        let Ok(workspace_id) = workspaces.get(entity).map(|(_, strip, _)| strip.id()) else {
+            continue;
+        };
+        let still_active = workspaces
+            .iter()
+            .filter_map(|(_, strip, active)| (strip.id() == workspace_id).then_some(active))
+            .any(|active| active);
+        if !still_active {
+            // This system checks whether any of the other virtual strips in the current workspace have an
+            // active marker - if not, the focus probably moved to another display, so don't hide.
+            return;
+        }
+
+        let Ok((mut position, _, _)) = workspaces.get_mut(entity) else {
+            return;
+        };
+
+        let bounds = active_display.bounds();
+        if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            entity_commands.try_insert(PreviousPosition(position.0));
+        }
+        position.0 = bounds.max - 10;
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
+pub(super) fn show_active_workspace_trigger(
+    trigger: On<Add, ActiveWorkspaceMarker>,
+    windows: Windows,
+    apps: Query<&Application>,
+    mut workspaces: Query<
+        (
+            &mut Position,
+            &LayoutStrip,
+            &ChildOf,
+            Option<&PreviousPosition>,
+        ),
+        Without<Window>,
+    >,
+    displays: Query<&Display>,
+    active_display: Single<&Display, With<ActiveDisplayMarker>>,
+    mut commands: Commands,
+) {
+    let Ok((mut position, strip, child, previous_position)) = workspaces.get_mut(trigger.entity)
+    else {
+        return;
+    };
+    // Use the strip's own parent display bounds if available, otherwise
+    // fall back to the active display. This prevents cross-display moves
+    // from positioning the target strip on the wrong display.
+    let bounds = displays
+        .get(child.parent())
+        .map_or(active_display.bounds(), Display::bounds);
+
+    if let Some(previous_position) = previous_position {
+        position.0 = previous_position.0;
+        if let Ok(mut entity_commands) = commands.get_entity(trigger.entity) {
+            entity_commands.try_remove::<PreviousPosition>();
+        }
+    } else {
+        position.0 = bounds.min;
+    }
+
+    // Find a window to focus on.
+    let focused = strip.all_windows().into_iter().find(|entity| {
+        windows
+            .moving_frame(*entity)
+            .is_some_and(|frame| frame.min.x >= bounds.min.x)
+    });
+    if let Some(entity) = focused
+        && let Some(window) = windows.get(entity)
+        && let Some(psn) = windows.psn(window.id(), &apps)
+    {
+        window.focus_with_raise(psn);
     }
 }

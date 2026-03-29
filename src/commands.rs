@@ -61,6 +61,10 @@ pub enum Operation {
     /// Resizes and repositions the focused window to fit within the visible viewport
     /// (including edge padding).
     Snap,
+    /// Cyclically selects the virtual strip for the current workspace.
+    Virtual(Direction),
+    /// Moves the focused window to the virtual strip.
+    VirtualMove(Direction),
 }
 
 /// Defines operations that can be performed on the mouse.
@@ -103,7 +107,7 @@ pub fn register_commands(app: &mut bevy::app::App) {
     );
 }
 
-fn filter_window_operations<'a, F: Fn(&Operation) -> bool>(
+pub fn filter_window_operations<'a, F: Fn(&Operation) -> bool>(
     messages: &'a mut MessageReader<Event>,
     filter: F,
 ) -> impl Iterator<Item = &'a Operation> {
@@ -851,13 +855,19 @@ pub fn command_quit_handler(
 }
 
 #[instrument(level = Level::DEBUG, skip_all)]
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 fn print_internal_state_handler(
     mut messages: MessageReader<Event>,
     focused: Query<(&Window, Entity), With<FocusedMarker>>,
     windows: Query<(&Window, Entity, &ChildOf, Option<&Unmanaged>)>,
     apps: Query<&Application>,
-    workspaces: Query<(&LayoutStrip, Entity, &ChildOf)>,
+    workspaces: Query<(
+        &ChildOf,
+        &LayoutStrip,
+        Entity,
+        Has<ActiveWorkspaceMarker>,
+        Has<SelectedVirtualMarker>,
+    )>,
     displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
 ) {
     if !messages.read().any(|event| {
@@ -906,9 +916,9 @@ fn print_internal_state_handler(
     let mut seen = EntityHashSet::new();
 
     for (display, display_entity, active) in displays {
-        for (strip, _, _) in workspaces
+        for (_, strip, strip_entity, active_workspace, selected) in workspaces
             .iter()
-            .filter(|(_, _, child)| child.parent() == display_entity)
+            .filter(|child| child.0.parent() == display_entity)
         {
             let windows = strip
                 .all_windows()
@@ -922,9 +932,11 @@ fn print_internal_state_handler(
 
             let display_id = display.id();
             info!(
-                "Display {display_id}{}, workspace id {}: {strip}:\n{}",
+                "Display {display_id}{}, workspace id {} ({strip_entity}){}{}: {strip}:\n{}",
                 if active { ", active" } else { "" },
                 strip.id(),
+                if active_workspace { ", active" } else { "" },
+                if selected { ", selected" } else { "" },
                 windows.join("\n")
             );
         }

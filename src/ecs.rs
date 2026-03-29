@@ -55,7 +55,12 @@ pub fn register_systems(app: &mut bevy::app::App) {
     );
     app.add_systems(
         PreUpdate,
-        (systems::dispatch_toplevel_triggers, systems::pump_events),
+        (
+            systems::dispatch_toplevel_triggers,
+            systems::pump_events,
+            workspace::switch_virtual_workspace_bind,
+            workspace::move_virtual_workspace_bind,
+        ),
     );
     app.add_systems(
         Update,
@@ -78,6 +83,9 @@ pub fn register_systems(app: &mut bevy::app::App) {
             ))),
             systems::displays_rearranged,
             systems::reposition_dragged_window,
+            workspace::hide_inactive_workspace_trigger,
+            workspace::cleanup_virtual_workspaces,
+            workspace::handle_virtual_window_moves,
             workspace::find_orphaned_workspaces
                 .after(systems::displays_rearranged)
                 .run_if(on_timer(Duration::from_millis(
@@ -139,8 +147,6 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::mouse_down_trigger)
         .add_observer(triggers::mouse_up_trigger)
         .add_observer(triggers::mouse_dragged_trigger)
-        .add_observer(workspace::workspace_change_trigger)
-        .add_observer(workspace::active_workspace_trigger)
         .add_observer(triggers::display_change_trigger)
         .add_observer(triggers::front_switched_trigger)
         .add_observer(triggers::center_mouse_trigger)
@@ -161,9 +167,14 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::dim_window_trigger)
         .add_observer(triggers::theme_change_trigger)
         .add_observer(triggers::apply_window_properties)
+        .add_observer(triggers::dim_remove_window_trigger)
         .add_observer(workspace::workspace_created_trigger)
         .add_observer(workspace::workspace_destroyed_trigger)
-        .add_observer(triggers::dim_remove_window_trigger);
+        .add_observer(workspace::workspace_change_trigger)
+        .add_observer(workspace::workspace_activated_trigger)
+        .add_observer(workspace::show_active_workspace_trigger)
+        .add_observer(workspace::virtual_strip_activated)
+        .add_observer(workspace::cleanup_selected_space_marker);
 }
 
 /// Marker component for the currently focused window.
@@ -172,6 +183,9 @@ pub struct FocusedMarker;
 
 #[derive(Component)]
 pub struct ActiveWorkspaceMarker;
+
+#[derive(Component)]
+pub struct SelectedVirtualMarker;
 
 /// Marker component for the currently active display.
 #[derive(Component)]

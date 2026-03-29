@@ -123,6 +123,41 @@ window_focus_west = "cmd - h"
 window_resize = ["alt - r", "ctrl - r"]
 ```
 
+### Virtual workspaces (Experimental)
+
+Paneru allows having virtual spaces inside of the native macOS workspace.
+Logically it can be thought of several strips of windows (rows) stacked on top
+of each other within the single workspace. Similar to how Niri implements the
+movement between the vertical workspaces.
+
+Shifting up or down goes to the previous or next strip of windows - wrapping
+around at the start or the end.
+
+Moving the last window out of the virtual row, will "collapse it".
+
+| Action | Description |
+| :--- | :--- |
+| `window_virtual_north` / `_south` | Switch to the previous/next virtual workspace (row of windows) |
+| `window_virtualmove_north` / `_south` | Move currently focused window to the previous/next virtual workspace (row of windows) |
+
+
+**Example:**
+```toml
+[bindings]
+window_virtual_north = "cmd + shift - k"
+window_virtual_south = "cmd + shift - j"
+window_virtualmove_north = "cmd + alt - k"
+window_virtualmove_south = "cmd + alt - j"
+```
+
+**Example command line:**
+```shell
+# Move to a the previous virtual workspace.
+$ paneru send-cmd window virtual north
+# Move the current window to the next virtual workspace.
+$ paneru send-cmd window virtualmove south
+```
+
 ---
 
 ## 6. Window Rules (`[windows]`)

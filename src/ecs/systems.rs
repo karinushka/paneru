@@ -22,13 +22,14 @@ use super::{
     PollForNotifications, RepositionMarker, ResizeMarker, RetryFrontSwitch, SpawnWindowTrigger,
     Timeout, WMEventTrigger,
 };
+
 use crate::config::{Config, decorations::BorderRadiusOption};
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, BruteforceWindows, Initializing, LocateDockTrigger, Position,
-    RefreshWindowSizes, Scrolling, StackAdjustedResize, Unmanaged, WidthRatio, WindowDraggedMarker,
-    WindowProperties, reshuffle_around,
+    RefreshWindowSizes, Scrolling, SelectedVirtualMarker, StackAdjustedResize, Unmanaged,
+    WidthRatio, WindowDraggedMarker, WindowProperties, reshuffle_around,
 };
 use crate::events::Event;
 use crate::manager::{
@@ -126,16 +127,22 @@ pub fn gather_displays(window_manager: Res<WindowManager>, mut commands: Command
         };
 
         for id in workspaces {
-            let strip = LayoutStrip::new(id);
+            let strip = LayoutStrip::new(id, 0);
             if id == active_space {
                 commands.spawn((
                     strip,
                     origin.clone(),
                     ActiveWorkspaceMarker,
+                    SelectedVirtualMarker,
                     ChildOf(entity),
                 ));
             } else {
-                commands.spawn((strip, origin.clone(), ChildOf(entity)));
+                commands.spawn((
+                    strip,
+                    origin.clone(),
+                    SelectedVirtualMarker,
+                    ChildOf(entity),
+                ));
             }
         }
     }
@@ -973,7 +980,7 @@ fn reparent_existing_workspaces(
             debug!("new workspace {id} on display {display_entity}");
             commands.spawn((
                 origin.clone(),
-                LayoutStrip::new(id),
+                LayoutStrip::new(id, 0),
                 ChildOf(display_entity),
             ));
         }

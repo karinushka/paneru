@@ -77,7 +77,9 @@ pub fn register_systems(app: &mut bevy::app::App) {
             ))),
             systems::displays_rearranged,
             systems::reposition_dragged_window,
+            systems::cleanup_virtual_workspaces,
             systems::handle_fullscreen_window_transitions,
+            systems::handle_virtual_window_moves,
             systems::find_orphaned_workspaces
                 .after(systems::displays_rearranged)
                 .run_if(on_timer(Duration::from_millis(
@@ -140,7 +142,7 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::mouse_up_trigger)
         .add_observer(triggers::mouse_dragged_trigger)
         .add_observer(triggers::workspace_change_trigger)
-        .add_observer(triggers::active_workspace_trigger)
+        .add_observer(triggers::workspace_activated_trigger)
         .add_observer(triggers::display_change_trigger)
         .add_observer(triggers::front_switched_trigger)
         .add_observer(triggers::center_mouse_trigger)
@@ -165,6 +167,9 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::window_from_native_fullscreen)
         .add_observer(triggers::workspace_created_trigger)
         .add_observer(triggers::workspace_destroyed_trigger)
+        .add_observer(triggers::hide_inactive_workspace_trigger)
+        .add_observer(triggers::show_active_workspace_trigger)
+        .add_observer(triggers::activate_virtual_row_trigger)
         .add_observer(triggers::dim_remove_window_trigger);
 }
 
@@ -174,6 +179,15 @@ pub struct FocusedMarker;
 
 #[derive(Component)]
 pub struct ActiveWorkspaceMarker;
+
+#[derive(Component)]
+pub struct SelectedVirtualMarker;
+
+/// Marker component to move a window to a specific virtual index on its current workspace.
+#[derive(Component)]
+pub struct VirtualMoveMarker {
+    pub target_virtual_index: u32,
+}
 
 /// Marker component for the currently active display.
 #[derive(Component)]

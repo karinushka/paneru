@@ -186,6 +186,8 @@ fn parse_operation(argv: &[&str]) -> Result<Operation> {
         "unstack" => Operation::Stack(false),
         "nextdisplay" => Operation::ToNextDisplay,
         "snap" => Operation::Snap,
+        "virtual" => Operation::Virtual(parse_direction(argv.get(1).ok_or(err)?)?),
+        "virtualmove" => Operation::VirtualMove(parse_direction(argv.get(1).ok_or(err)?)?),
         _ => {
             return Err(err);
         }

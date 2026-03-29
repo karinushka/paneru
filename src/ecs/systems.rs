@@ -2,7 +2,7 @@ use bevy::app::AppExit;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::{MessageReader, MessageWriter};
-use bevy::ecs::query::{Changed, Has, Or, With, Without};
+use bevy::ecs::query::{Added, Changed, Has, Or, With, Without};
 use bevy::ecs::system::{
     Commands, Local, NonSend, NonSendMut, ParallelCommands, Populated, Query, Res, Single,
 };
@@ -20,8 +20,9 @@ use tracing::{Level, debug, error, info, instrument, trace, warn};
 use super::{
     ActiveDisplayMarker, BProcess, ExistingMarker, FocusedMarker, FreshMarker,
     NativeFullscreenMarker, PollForNotifications, RepositionMarker, ResizeMarker, RetryFrontSwitch,
-    SpawnWindowTrigger, Timeout, WMEventTrigger,
+    SelectedVirtualMarker, SpawnWindowTrigger, Timeout, VirtualMoveMarker, WMEventTrigger,
 };
+
 use crate::config::{Config, decorations::BorderRadiusOption};
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
@@ -126,16 +127,22 @@ pub fn gather_displays(window_manager: Res<WindowManager>, mut commands: Command
         };
 
         for id in workspaces {
-            let strip = LayoutStrip::new(id);
+            let strip = LayoutStrip::new(id, 0);
             if id == active_space {
                 commands.spawn((
                     strip,
                     origin.clone(),
                     ActiveWorkspaceMarker,
+                    SelectedVirtualMarker,
                     ChildOf(entity),
                 ));
             } else {
-                commands.spawn((strip, origin.clone(), ChildOf(entity)));
+                commands.spawn((
+                    strip,
+                    origin.clone(),
+                    SelectedVirtualMarker,
+                    ChildOf(entity),
+                ));
             }
         }
     }
@@ -1159,7 +1166,8 @@ fn reparent_existing_workspaces(
             debug!("new workspace {id} on display {display_entity}");
             commands.spawn((
                 origin.clone(),
-                LayoutStrip::new(id),
+                LayoutStrip::new(id, 0),
+                SelectedVirtualMarker,
                 ChildOf(display_entity),
             ));
         }
@@ -1392,6 +1400,40 @@ pub(super) fn cleanup_on_exit(
 }
 
 #[allow(clippy::needless_pass_by_value)]
+pub(super) fn cleanup_virtual_workspaces(
+    changed: Populated<Entity, Added<ActiveWorkspaceMarker>>,
+    mut strips: Populated<(Entity, &mut LayoutStrip)>,
+    mut commands: Commands,
+) {
+    let Some(workspace_id) = changed
+        .iter()
+        .next()
+        .and_then(|entity| strips.get(entity).ok())
+        .map(|(_, strip)| strip.id())
+    else {
+        return;
+    };
+    debug!("cleaning up virtual workspaces on space {workspace_id}");
+    let mut rows = strips
+        .iter_mut()
+        .filter(|(_, strip)| strip.id() == workspace_id)
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|(_, strip)| strip.virtual_index);
+
+    let mut next_idx = 0;
+    for (entity, mut strip) in rows {
+        if strip.virtual_index > 0 && strip.len() == 0 {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        if strip.virtual_index != next_idx {
+            strip.virtual_index = next_idx;
+        }
+        next_idx += 1;
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
 pub(super) fn handle_fullscreen_window_transitions(
     changed_displays: Populated<&Display, (With<ActiveDisplayMarker>, Changed<Display>)>,
     windows: Windows,
@@ -1422,5 +1464,86 @@ pub(super) fn handle_fullscreen_window_transitions(
                 .entity(focused_entity)
                 .remove::<NativeFullscreenMarker>();
         }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn handle_virtual_window_moves(
+    moved_windows: Populated<(Entity, &VirtualMoveMarker), With<Window>>,
+    mut workspaces: Query<(Entity, &mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    active_display: Single<(Entity, &Display), With<ActiveDisplayMarker>>,
+    mut commands: Commands,
+) {
+    let Some(workspace_id) = workspaces
+        .iter()
+        .find_map(|(_, strip, active)| active.then_some(strip.id()))
+    else {
+        return;
+    };
+
+    let (display_entity, active_display) = *active_display;
+    for (window_entity, move_marker) in &moved_windows {
+        let target_idx = move_marker.target_virtual_index;
+
+        let target = workspaces.iter().find_map(|(entity, strip, _)| {
+            (strip.id() == workspace_id && strip.virtual_index == target_idx).then_some(entity)
+        });
+
+        let target_entity = if let Some(entity) = target {
+            entity
+        } else {
+            let origin = Position(active_display.bounds().min);
+            debug!(
+                "Creating new virtual row {target_idx} on workspace {}",
+                workspace_id
+            );
+            let mut new_strip = LayoutStrip::new(workspace_id, target_idx);
+            // Append the window right away, otherwise it is not yet visible in the next for loop.
+            new_strip.append(window_entity);
+
+            commands
+                .spawn((
+                    new_strip,
+                    origin,
+                    SelectedVirtualMarker,
+                    ChildOf(display_entity),
+                ))
+                .id()
+        };
+
+        // Move the window first, before moving the markers -
+        // otherwise it would be detected as a moved window.
+        for (entity, mut strip, _) in &mut workspaces {
+            if entity == target_entity {
+                strip.append(window_entity);
+            } else {
+                strip.remove(window_entity);
+            }
+        }
+
+        // Remove old markers.
+        if let Some(old_entity) = workspaces
+            .iter()
+            .find_map(|(entity, _, active)| active.then_some(entity))
+            && let Ok(mut entity_cmmands) = commands.get_entity(old_entity)
+        {
+            entity_cmmands
+                .try_remove::<SelectedVirtualMarker>()
+                .try_remove::<ActiveWorkspaceMarker>();
+        }
+
+        // Insert new markers.
+        if let Ok(mut entity_cmmands) = commands.get_entity(target_entity) {
+            entity_cmmands
+                .try_insert(SelectedVirtualMarker)
+                .try_insert(ActiveWorkspaceMarker);
+        }
+
+        commands.entity(window_entity).remove::<VirtualMoveMarker>();
+        reshuffle_around(window_entity, &mut commands);
+        debug!(
+            "Moved window {} to virtual workspace {}",
+            window_entity, target_idx
+        );
     }
 }

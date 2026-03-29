@@ -3,7 +3,7 @@ use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::lifecycle::{Add, Remove};
 use bevy::ecs::message::MessageWriter;
 use bevy::ecs::observer::On;
-use bevy::ecs::query::{Has, With};
+use bevy::ecs::query::{Has, With, Without};
 use bevy::ecs::system::{Commands, NonSend, NonSendMut, Populated, Query, Res, ResMut, Single};
 use bevy::math::IRect;
 use notify::event::{DataChange, MetadataKind, ModifyKind};
@@ -16,8 +16,9 @@ use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
     ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, MissionControlActive,
-    MouseHeldMarker, NativeFullscreenMarker, RetryFrontSwitch, SpawnWindowTrigger, StrayFocusEvent,
-    SystemTheme, Timeout, Unmanaged, WMEventTrigger, WindowDraggedMarker,
+    MouseHeldMarker, NativeFullscreenMarker, RetryFrontSwitch, SelectedVirtualMarker,
+    SpawnWindowTrigger, StrayFocusEvent, SystemTheme, Timeout, Unmanaged, WMEventTrigger,
+    WindowDraggedMarker,
 };
 use crate::config::{Config, WindowParams};
 use crate::ecs::layout::LayoutStrip;
@@ -265,10 +266,10 @@ pub(super) fn mouse_dragged_trigger(
     }
 }
 
-fn windows_not_in_strip<F: Fn(WinID) -> Option<Entity>>(
+fn windows_not_in_strips<F: Fn(WinID) -> Option<Entity>>(
     workspace_id: WorkspaceId,
     find_window: F,
-    strip: &LayoutStrip,
+    strips: &[&LayoutStrip],
     window_manager: &WindowManager,
 ) -> Result<(Vec<Entity>, Vec<WinID>)> {
     window_manager
@@ -277,10 +278,14 @@ fn windows_not_in_strip<F: Fn(WinID) -> Option<Entity>>(
             let mut moved = Vec::new();
             let mut unresolved = Vec::new();
             for id in ids {
-                match find_window(id) {
-                    Some(entity) if strip.index_of(entity).is_err() => moved.push(entity),
-                    Some(_) => {}
-                    None => unresolved.push(id),
+                if let Some(entity) = find_window(id) {
+                    // If window exists in any of the active workspace rows.
+                    if strips.iter().any(|strip| strip.index_of(entity).is_ok()) {
+                        continue;
+                    }
+                    moved.push(entity);
+                } else {
+                    unresolved.push(id);
                 }
             }
             (moved, unresolved)
@@ -308,9 +313,9 @@ pub(super) fn workspace_change_trigger(
     active_display.is_fullscreen = fullscreen;
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
-#[instrument(level = Level::DEBUG, skip_all)]
-pub(super) fn active_workspace_trigger(
+#[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
+pub(super) fn workspace_activated_trigger(
     trigger: On<Add, ActiveWorkspaceMarker>,
     windows: Windows,
     mut workspaces: Query<(&mut LayoutStrip, &ChildOf), With<ChildOf>>,
@@ -325,9 +330,13 @@ pub(super) fn active_workspace_trigger(
     let workspace_id = active_strip.id();
     debug!("workspace {workspace_id}");
 
+    let strips = workspaces
+        .iter()
+        .filter_map(|(strip, _)| (strip.id() == active_strip.id()).then_some(strip))
+        .collect::<Vec<_>>();
     let find_window = |window_id| windows.find_managed(window_id).map(|(_, entity)| entity);
     let Ok((moved_windows, mut unresolved)) =
-        windows_not_in_strip(workspace_id, find_window, active_strip, &window_manager).inspect_err(
+        windows_not_in_strips(workspace_id, find_window, &strips, &window_manager).inspect_err(
             |err| {
                 warn!("unable to get windows in the current workspace: {err}");
             },
@@ -397,6 +406,47 @@ pub(super) fn active_workspace_trigger(
         };
         if let Some(entity) = focused_entity.or_else(fallback) {
             reshuffle_around(entity, &mut commands);
+        }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
+pub(super) fn hide_inactive_workspace_trigger(
+    trigger: On<Remove, ActiveWorkspaceMarker>,
+    mut workspaces: Query<&mut Position, With<LayoutStrip>>,
+    active_display: ActiveDisplay,
+) {
+    let bounds = active_display.bounds();
+    if let Ok(mut position) = workspaces.get_mut(trigger.entity) {
+        position.0.y = bounds.max.y - 10;
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
+pub(super) fn show_active_workspace_trigger(
+    trigger: On<Add, ActiveWorkspaceMarker>,
+    windows: Windows,
+    apps: Query<&Application>,
+    mut workspaces: Query<(&mut Position, &LayoutStrip), Without<Window>>,
+    active_display: Single<&Display, With<ActiveDisplayMarker>>,
+) {
+    let bounds = active_display.bounds();
+    if let Ok((mut position, strip)) = workspaces.get_mut(trigger.entity) {
+        position.0.y = bounds.min.y;
+
+        // Find a window to focus on.
+        let focused = strip.all_windows().into_iter().find(|entity| {
+            windows
+                .moving_frame(*entity)
+                .is_some_and(|frame| frame.min.x >= bounds.min.x)
+        });
+        if let Some(entity) = focused
+            && let Some(window) = windows.get(entity)
+            && let Some(psn) = windows.psn(window.id(), &apps)
+        {
+            window.focus_with_raise(psn);
         }
     }
 }
@@ -560,6 +610,33 @@ pub(super) fn center_mouse_trigger(
         let origin = frame.center() - display_bounds.min;
         debug!("centering on {} {origin}", window.id());
         window_manager.warp_mouse(origin);
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
+pub(super) fn activate_virtual_row_trigger(
+    trigger: On<Add, FocusedMarker>,
+    workspaces: Query<(Entity, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    mut commands: Commands,
+) {
+    let Some((active_entity, active_strip, _)) = workspaces.iter().find(|(_, _, active)| *active)
+    else {
+        return;
+    };
+    if active_strip.index_of(trigger.entity).is_ok() {
+        return;
+    }
+
+    for (entity, strip, _) in workspaces {
+        if strip.index_of(trigger.entity).is_ok() {
+            if let Ok(mut entity_commands) = commands.get_entity(active_entity) {
+                entity_commands.try_remove::<ActiveWorkspaceMarker>();
+            }
+            if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                entity_commands.try_insert(ActiveWorkspaceMarker);
+            }
+        }
     }
 }
 
@@ -1679,7 +1756,12 @@ pub(super) fn workspace_created_trigger(
     }
     debug!("Workspace create {space_id}");
     let (active_display, display_entity) = *active_display;
-    let strip = LayoutStrip::new(space_id);
+    let strip = LayoutStrip::new(space_id, 0);
     let origin = Position(active_display.bounds().min);
-    commands.spawn((strip, origin, ChildOf(display_entity)));
+    commands.spawn((
+        strip,
+        origin,
+        SelectedVirtualMarker,
+        ChildOf(display_entity),
+    ));
 }

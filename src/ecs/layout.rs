@@ -2,7 +2,7 @@ use bevy::ecs::change_detection::DetectChangesMut as _;
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
-use bevy::ecs::query::{Changed, Has, With, Without};
+use bevy::ecs::query::{Changed, Has, Or, With, Without};
 use bevy::ecs::system::{Commands, Populated, Query, Res, Single};
 use bevy::math::IRect;
 use std::collections::VecDeque;
@@ -125,13 +125,15 @@ impl Column {
 #[derive(Component, Debug, Default)]
 pub struct LayoutStrip {
     id: WorkspaceId,
+    pub virtual_index: u32,
     columns: VecDeque<Column>,
 }
 
 impl LayoutStrip {
-    pub fn new(id: WorkspaceId) -> Self {
+    pub fn new(id: WorkspaceId, virtual_index: u32) -> Self {
         Self {
             id,
+            virtual_index,
             columns: VecDeque::new(),
         }
     }
@@ -824,28 +826,32 @@ pub(super) fn position_layout_strips(
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn position_layout_windows(
-    positioned_windows: Populated<
+    positioned_windows: Query<
         (Entity, &Window, &LayoutPosition, &mut Position, &mut Bounds),
-        (Changed<LayoutPosition>, With<Window>),
+        (
+            Or<(Changed<LayoutPosition>, Changed<Position>)>,
+            With<Window>,
+            Without<LayoutStrip>,
+        ),
     >,
-    active_workspace: Single<
-        (&LayoutStrip, &Position, Has<Scrolling>),
-        (With<ActiveWorkspaceMarker>, Without<Window>),
-    >,
-    active_display: Single<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
+
+    workspaces: Query<(&LayoutStrip, &Position, Has<Scrolling>, &ChildOf), With<LayoutStrip>>,
+    active_display: Single<(Entity, &Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
     config: Res<Config>,
 ) {
-    let (active_display, dock) = *active_display;
+    let (display_entity, active_display, dock) = *active_display;
     let viewport = active_display.actual_display_bounds(dock, &config);
-    let (layout_strip, strip_position, swiping) = *active_workspace;
-    let strip_position = strip_position.0.with_y(viewport.min.y);
     let offscreen_sliver_width = config.sliver_width();
     let (_, pad_right, _, pad_left) = config.edge_padding();
 
     for (entity, window, layout_position, mut position, mut bounds) in positioned_windows {
-        if layout_strip.index_of(entity).is_err() {
+        let window: &Window = window;
+        let Some((layout_strip, strip_position, swiping, _)) = workspaces
+            .iter()
+            .find(|(s, _, _, c)| c.parent() == display_entity && s.index_of(entity).is_ok())
+        else {
             continue;
-        }
+        };
 
         // Account for per-window horizontal_padding: reposition() adds
         // h_pad to the virtual x, so subtract it here so the OS window
@@ -853,8 +859,8 @@ pub(super) fn position_layout_windows(
         let h_pad = window.horizontal_padding();
         let mut frame = IRect::from_corners(layout_position.0, layout_position.0 + bounds.0);
         let width = frame.width();
-        frame.min += strip_position;
-        frame.max += strip_position;
+        frame.min += strip_position.0;
+        frame.max += strip_position.0;
 
         if frame.max.x <= viewport.min.x + h_pad {
             // Window hidden to the left — position so exactly

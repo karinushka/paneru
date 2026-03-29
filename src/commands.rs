@@ -12,9 +12,9 @@ use crate::config::Config;
 use crate::ecs::layout::{Column, LayoutStrip, StackItem};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Windows};
 use crate::ecs::{
-    ActiveDisplayMarker, FocusFollowsMouse, FocusedMarker, FullWidthMarker, NativeFullscreenMarker,
-    SendMessageTrigger, Unmanaged, WMEventTrigger, reposition_entity, reshuffle_around,
-    resize_entity,
+    ActiveDisplayMarker, ActiveWorkspaceMarker, FocusFollowsMouse, FocusedMarker, FullWidthMarker,
+    SelectedVirtualMarker, SendMessageTrigger, Unmanaged, VirtualMoveMarker, WMEventTrigger,
+    reposition_entity, reshuffle_around, resize_entity,
 };
 use crate::events::Event;
 use crate::manager::{Application, Display, Origin, Size, Window, WindowManager, origin_to};
@@ -61,6 +61,10 @@ pub enum Operation {
     /// Resizes and repositions the focused window to fit within the visible viewport
     /// (including edge padding).
     Snap,
+    /// Cyclically selects the virtual strip for the current workspace.
+    Virtual(Direction),
+    /// Moves the focused window to the virtual strip.
+    VirtualMove(Direction),
 }
 
 /// Defines operations that can be performed on the mouse.
@@ -99,6 +103,8 @@ pub fn register_commands(app: &mut bevy::app::App) {
             command_move_focus,
             command_swap_focus,
             snap_window,
+            virtual_workspace_handler,
+            virtual_window_move_handler,
         ),
     );
 }
@@ -118,6 +124,100 @@ fn filter_window_operations<'a, F: Fn(&Operation) -> bool>(
             None
         }
     })
+}
+
+#[instrument(level = Level::DEBUG, skip_all)]
+#[allow(clippy::needless_pass_by_value)]
+fn virtual_workspace_handler(
+    mut messages: MessageReader<Event>,
+    active_display: ActiveDisplay,
+    workspaces: Query<(Entity, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    mut commands: Commands,
+) {
+    let Some(Operation::Virtual(direction)) =
+        filter_window_operations(&mut messages, |op| matches!(op, Operation::Virtual(_))).next()
+    else {
+        return;
+    };
+
+    let workspace_id = active_display.active_strip().id();
+    let mut rows = workspaces
+        .iter()
+        .filter(|(_, strip, _)| strip.id() == workspace_id)
+        .collect::<Vec<_>>();
+
+    if rows.is_empty() {
+        return;
+    }
+    rows.sort_by_key(|(_, strip, _)| strip.virtual_index);
+
+    let current_index = rows.iter().position(|(_, _, active)| *active).unwrap_or(0);
+    let next_index = match direction {
+        Direction::South => (current_index + 1) % rows.len(),
+        Direction::North => (current_index + rows.len() - 1) % rows.len(),
+        _ => return,
+    };
+
+    if next_index == current_index {
+        return;
+    }
+
+    let old_entity = rows[current_index].0;
+    let new_entity = rows[next_index].0;
+    if let Ok(mut entity_cmmands) = commands.get_entity(old_entity) {
+        entity_cmmands
+            .try_remove::<SelectedVirtualMarker>()
+            .try_remove::<ActiveWorkspaceMarker>();
+    }
+    if let Ok(mut entity_cmmands) = commands.get_entity(new_entity) {
+        entity_cmmands
+            .try_insert(SelectedVirtualMarker)
+            .try_insert(ActiveWorkspaceMarker);
+    }
+    debug!(
+        "Switched virtual workspace on display {} from {} to {}",
+        active_display.id(),
+        rows[current_index].1.virtual_index,
+        rows[next_index].1.virtual_index
+    );
+}
+
+#[instrument(level = Level::DEBUG, skip_all)]
+#[allow(clippy::needless_pass_by_value)]
+fn virtual_window_move_handler(
+    mut messages: MessageReader<Event>,
+    windows: Windows,
+    active_display: ActiveDisplay,
+    mut commands: Commands,
+) {
+    let Some(Operation::VirtualMove(direction)) =
+        filter_window_operations(&mut messages, |op| matches!(op, Operation::VirtualMove(_)))
+            .next()
+    else {
+        return;
+    };
+
+    let Some((_, focused_entity)) = windows.focused() else {
+        return;
+    };
+
+    let current_virtual_index = active_display.active_strip().virtual_index;
+
+    let target_virtual_index = match direction {
+        Direction::South if active_display.active_strip().len() > 1 => current_virtual_index + 1,
+        Direction::North => {
+            if current_virtual_index == 0 {
+                return;
+            }
+            current_virtual_index - 1
+        }
+        _ => return,
+    };
+
+    commands.entity(focused_entity).insert(VirtualMoveMarker {
+        target_virtual_index,
+    });
+    debug!("Moving {focused_entity} to new virtual space {target_virtual_index}");
 }
 
 /// Retrieves a window `Entity` in a specified direction relative to a `current_window_id` within a `LayoutStrip`.
@@ -192,7 +292,7 @@ fn command_move_focus(
     windows: Windows,
     active_display: ActiveDisplay,
     apps: Query<&Application>,
-    fs_windows: Query<(Entity, &NativeFullscreenMarker)>,
+    fs_windows: Query<(Entity, &crate::ecs::NativeFullscreenMarker)>,
     mut commands: Commands,
 ) {
     let Some(Operation::Focus(direction)) =

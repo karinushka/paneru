@@ -24,6 +24,8 @@ pub struct Display {
     menubar_height: i32,
     /// Optional config override for the menubar height.
     menubar_height_override: Option<i32>,
+
+    pub is_fullscreen: bool,
 }
 
 impl Display {
@@ -32,19 +34,25 @@ impl Display {
     /// # Arguments
     ///
     /// * `id` - The `CGDirectDisplayID` of the display.
-    /// * `spaces` - A vector of space IDs associated with this display.
     /// * `bounds` - The `CGRect` representing the bounds of the display.
     /// * `menubar_height` - The height of the menubar on this display.
+    /// * `is_fullscreen` - Whether the display is currently showing a native fullscreen space.
     ///
     /// # Returns
     ///
     /// A new `Display` instance.
-    pub fn new(id: CGDirectDisplayID, bounds: IRect, menubar_height: i32) -> Self {
+    pub fn new(
+        id: CGDirectDisplayID,
+        bounds: IRect,
+        menubar_height: i32,
+        is_fullscreen: bool,
+    ) -> Self {
         Self {
             id,
             bounds,
             menubar_height,
             menubar_height_override: None,
+            is_fullscreen,
         }
     }
 

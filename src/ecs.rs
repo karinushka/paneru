@@ -77,6 +77,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
             ))),
             systems::displays_rearranged,
             systems::reposition_dragged_window,
+            systems::handle_fullscreen_window_transitions,
             systems::find_orphaned_workspaces
                 .after(systems::displays_rearranged)
                 .run_if(on_timer(Duration::from_millis(

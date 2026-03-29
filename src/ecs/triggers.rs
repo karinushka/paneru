@@ -11,7 +11,6 @@ use notify::{EventKind, Watcher};
 use objc2_app_kit::NSScreen;
 use objc2_foundation::{NSNumber, NSString, ns_string};
 use std::pin::Pin;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tracing::{Level, debug, error, info, instrument, trace, warn};
 
@@ -20,7 +19,6 @@ use super::{
     MouseHeldMarker, NativeFullscreenMarker, RetryFrontSwitch, SpawnWindowTrigger, StrayFocusEvent,
     SystemTheme, Timeout, Unmanaged, WMEventTrigger, WindowDraggedMarker,
 };
-use crate::commands::ON_FULLSCREEN_SPACE;
 use crate::config::{Config, WindowParams};
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration, Windows};
@@ -292,12 +290,8 @@ fn windows_not_in_strip<F: Fn(WinID) -> Option<Entity>>(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn workspace_change_trigger(
     trigger: On<WMEventTrigger>,
-    active_display: Single<&Display, With<ActiveDisplayMarker>>,
-    workspaces: Query<(&LayoutStrip, Entity, Has<ActiveWorkspaceMarker>)>,
-    windows: Windows,
-    fullscreen_markers: Query<&NativeFullscreenMarker>,
+    mut active_display: Single<&mut Display, With<ActiveDisplayMarker>>,
     window_manager: Res<WindowManager>,
-    mut commands: Commands,
 ) {
     let Event::SpaceChanged = trigger.event().0 else {
         return;
@@ -309,59 +303,9 @@ pub(super) fn workspace_change_trigger(
     };
 
     let fullscreen = window_manager.is_fullscreen_space(active_display.id());
-    let was_fullscreen = ON_FULLSCREEN_SPACE.swap(fullscreen, Ordering::Relaxed);
     debug!("workspace_change: space={workspace_id} fullscreen={fullscreen}");
 
-    // Entering fullscreen → remove the focused window from the strip so there
-    // is no layout gap and mark it with NativeFullscreenMarker.
-    // Guard: the focused entity must not already carry the marker (which means
-    // we're just switching TO an existing fullscreen space, not a new one).
-    if !was_fullscreen
-        && fullscreen
-        && let Some((_, entity)) = windows.focused()
-        && !fullscreen_markers.contains(entity)
-    {
-        let next_order = fullscreen_markers
-            .iter()
-            .map(|m| m.order + 1)
-            .max()
-            .unwrap_or(0);
-        debug!("entering fullscreen: removed {entity} order={next_order}");
-        if let Ok(mut entity_commands) = commands.get_entity(entity) {
-            entity_commands.try_insert(NativeFullscreenMarker { order: next_order });
-        }
-    }
-
-    // Exiting fullscreen → remove the marker.
-    if was_fullscreen
-        && !fullscreen
-        && let Some((_, entity)) = windows.focused()
-        && fullscreen_markers.contains(entity)
-        && let Ok(mut entity_commands) = commands.get_entity(entity)
-    {
-        entity_commands.try_remove::<NativeFullscreenMarker>();
-    }
-
-    // Dynamic fullscreen spaces (created by macOS when a window goes fullscreen)
-    // have no LayoutStrip entity.  Only remove the old ActiveWorkspaceMarker when
-    // a new strip exists to receive it, so that ActiveDisplay keeps resolving and
-    // command systems can raise a tiled window to switch back.
-    let has_matching_strip = workspaces
-        .iter()
-        .any(|(strip, _, _)| strip.id() == workspace_id);
-
-    for (strip, entity, active) in workspaces {
-        if active && strip.id() != workspace_id && has_matching_strip {
-            debug!("Workspace id {} no longer active", strip.id());
-            commands
-                .entity(entity)
-                .try_remove::<ActiveWorkspaceMarker>();
-        }
-        if !active && strip.id() == workspace_id {
-            debug!("Workspace id {} is active", strip.id());
-            commands.entity(entity).try_insert(ActiveWorkspaceMarker);
-        }
-    }
+    active_display.is_fullscreen = fullscreen;
 }
 
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]

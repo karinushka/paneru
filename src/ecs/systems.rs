@@ -19,8 +19,8 @@ use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
     ActiveDisplayMarker, BProcess, ExistingMarker, FocusedMarker, FreshMarker,
-    PollForNotifications, RepositionMarker, ResizeMarker, RetryFrontSwitch, SpawnWindowTrigger,
-    Timeout, WMEventTrigger,
+    NativeFullscreenMarker, PollForNotifications, RepositionMarker, ResizeMarker, RetryFrontSwitch,
+    SpawnWindowTrigger, Timeout, WMEventTrigger,
 };
 use crate::config::{Config, decorations::BorderRadiusOption};
 use crate::ecs::layout::LayoutStrip;
@@ -1254,7 +1254,7 @@ pub(crate) fn reposition_dragged_window(
 pub(super) fn update_overlays(
     windows: Windows,
     applications: Query<&Application>,
-    _: ActiveDisplay, // prevents this system from running without an active workspace
+    active_display: ActiveDisplay,
     active_workspace: Query<&Scrolling, With<ActiveWorkspaceMarker>>,
     overlay_mgr: Option<NonSendMut<OverlayManager>>,
     config: Configuration,
@@ -1275,10 +1275,8 @@ pub(super) fn update_overlays(
         .iter()
         .next()
         .is_some_and(|marker| marker.is_user_swiping);
-    // ON_FULLSCREEN_SPACE is set in workspace_change_trigger because this
-    // system cannot run when no LayoutStrip has ActiveWorkspaceMarker
-    // (which is the case on native fullscreen spaces).
-    if swiping || config.mission_control_active() {
+
+    if swiping || config.mission_control_active() || active_display.display().is_fullscreen {
         overlay_mgr.hide_all();
         return;
     }
@@ -1390,5 +1388,39 @@ pub(super) fn cleanup_on_exit(
             .map(|(window, _)| window.id())
             .collect::<Vec<_>>();
         window_manager.dim_windows(&ids, 0.0);
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn handle_fullscreen_window_transitions(
+    changed_displays: Populated<&Display, (With<ActiveDisplayMarker>, Changed<Display>)>,
+    windows: Windows,
+    fullscreen_markers: Query<&NativeFullscreenMarker>,
+    mut commands: Commands,
+) {
+    for display in &changed_displays {
+        let fullscreen = display.is_fullscreen;
+        let Some((_, focused_entity)) = windows.focused() else {
+            continue;
+        };
+
+        let has_marker = fullscreen_markers.contains(focused_entity);
+
+        if fullscreen && !has_marker {
+            let next_order = fullscreen_markers
+                .iter()
+                .map(|m| m.order + 1)
+                .max()
+                .unwrap_or(0);
+            debug!("Transition to fullscreen: marking {focused_entity} order={next_order}");
+            commands
+                .entity(focused_entity)
+                .insert(NativeFullscreenMarker { order: next_order });
+        } else if !fullscreen && has_marker {
+            debug!("Transition from fullscreen: unmarking {focused_entity}");
+            commands
+                .entity(focused_entity)
+                .remove::<NativeFullscreenMarker>();
+        }
     }
 }

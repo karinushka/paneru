@@ -243,6 +243,7 @@ impl WindowManagerApi for MockWindowManager {
             TEST_DISPLAY_ID,
             IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
             TEST_MENUBAR_HEIGHT,
+            false,
         );
         vec![(display, self.workspaces.clone())]
     }
@@ -1687,11 +1688,13 @@ impl WindowManagerApi for TwoDisplayMock {
             EXT_DISPLAY_ID,
             IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
             TEST_MENUBAR_HEIGHT,
+            false,
         );
         let int = Display::new(
             TEST_DISPLAY_ID,
             IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
             TEST_MENUBAR_HEIGHT,
+            false,
         );
         vec![
             (ext, vec![EXT_WORKSPACE_ID]),

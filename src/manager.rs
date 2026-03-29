@@ -345,8 +345,15 @@ impl WindowManagerApi for WindowManagerOS {
                 let workspaces = Display::uuid_from_id(id)
                     .and_then(|uuid| self.display_space_list(uuid.as_ref()))
                     .ok()?;
+                let is_fullscreen = self.is_fullscreen_space(id);
+
                 Some((
-                    Display::new(id, irect_from(bounds), menubar_height.cast_signed()),
+                    Display::new(
+                        id,
+                        irect_from(bounds),
+                        menubar_height.cast_signed(),
+                        is_fullscreen,
+                    ),
                     workspaces,
                 ))
             })

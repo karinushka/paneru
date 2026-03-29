@@ -1,5 +1,3 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use bevy::app::PreUpdate;
 use bevy::ecs::entity::{Entity, EntityHashSet};
 use bevy::ecs::hierarchy::ChildOf;
@@ -14,16 +12,12 @@ use crate::config::Config;
 use crate::ecs::layout::{Column, LayoutStrip, StackItem};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Windows};
 use crate::ecs::{
-    ActiveDisplayMarker, FocusFollowsMouse, FocusedMarker, FullWidthMarker, SendMessageTrigger,
-    Unmanaged, WMEventTrigger, reposition_entity, reshuffle_around, resize_entity,
+    ActiveDisplayMarker, FocusFollowsMouse, FocusedMarker, FullWidthMarker, NativeFullscreenMarker,
+    SendMessageTrigger, Unmanaged, WMEventTrigger, reposition_entity, reshuffle_around,
+    resize_entity,
 };
 use crate::events::Event;
 use crate::manager::{Application, Display, Origin, Size, Window, WindowManager, origin_to};
-
-/// When `true`, the active display is showing a native macOS fullscreen space.
-/// Keybindings are not intercepted so that macOS can handle native space
-/// switching (e.g. Ctrl+arrow, trackpad gestures).
-pub static ON_FULLSCREEN_SPACE: AtomicBool = AtomicBool::new(false);
 
 /// Represents a cardinal or directional choice for window manipulation.
 #[derive(Clone, Debug)]
@@ -198,7 +192,7 @@ fn command_move_focus(
     windows: Windows,
     active_display: ActiveDisplay,
     apps: Query<&Application>,
-    fs_windows: Query<(Entity, &crate::ecs::NativeFullscreenMarker)>,
+    fs_windows: Query<(Entity, &NativeFullscreenMarker)>,
     mut commands: Commands,
 ) {
     let Some(Operation::Focus(direction)) =
@@ -212,7 +206,7 @@ fn command_move_focus(
     // Fullscreen windows are ordered after the tiled strip:
     //   [tiled…] [fs order=0] [fs order=1] …
     // West → previous in chain (or last tiled).  East → next in chain.
-    if ON_FULLSCREEN_SPACE.load(Ordering::Relaxed) {
+    if active_display.display().is_fullscreen {
         let Some(cur) = windows
             .focused()
             .and_then(|(_, e)| fs_windows.get(e).ok())
@@ -321,7 +315,7 @@ fn command_swap_focus(
     };
 
     // On a fullscreen space, swap just raises the last tiled window.
-    if ON_FULLSCREEN_SPACE.load(Ordering::Relaxed) {
+    if active_display.display().is_fullscreen {
         let strip = active_display.active_strip();
         if let Some(entity) = strip
             .get(strip.len().wrapping_sub(1))

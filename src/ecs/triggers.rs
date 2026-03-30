@@ -1447,8 +1447,8 @@ pub(super) fn locate_dock_trigger(
     });
     if let Some(dock) = dock {
         debug!("dock on display {display_id}: {:?}", dock);
-        if let Ok(mut entity_cmmands) = commands.get_entity(entity) {
-            entity_cmmands.try_insert(dock);
+        if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            entity_commands.try_insert(dock);
         }
     }
 }

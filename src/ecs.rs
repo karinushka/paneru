@@ -389,8 +389,8 @@ pub struct SendMessageTrigger(pub Event);
 
 #[instrument(level = Level::TRACE, skip(commands))]
 pub fn reposition_entity(entity: Entity, origin: Origin, commands: &mut Commands) {
-    if let Ok(mut entity_cmmands) = commands.get_entity(entity) {
-        entity_cmmands.try_insert(RepositionMarker(origin));
+    if let Ok(mut entity_commands) = commands.get_entity(entity) {
+        entity_commands.try_insert(RepositionMarker(origin));
     }
 }
 
@@ -399,8 +399,8 @@ pub fn resize_entity(entity: Entity, size: Size, commands: &mut Commands) {
     if size.x <= 0 || size.y <= 0 {
         return;
     }
-    if let Ok(mut entity_cmmands) = commands.get_entity(entity) {
-        entity_cmmands.try_insert(ResizeMarker(size));
+    if let Ok(mut entity_commands) = commands.get_entity(entity) {
+        entity_commands.try_insert(ResizeMarker(size));
     }
 }
 

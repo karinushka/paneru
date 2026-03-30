@@ -78,8 +78,8 @@ pub(super) fn swipe_gesture(
             scrolling.velocity = velocity;
             scrolling.is_user_swiping = true;
             scrolling.last_event = Instant::now();
-        } else if let Ok(mut entity_cmmands) = commands.get_entity(*entity) {
-            entity_cmmands.try_insert(Scrolling {
+        } else if let Ok(mut entity_commands) = commands.get_entity(*entity) {
+            entity_commands.try_insert(Scrolling {
                 velocity: new_velocity,
                 position: f64::from(position.0.x),
                 is_user_swiping: true,

@@ -454,7 +454,6 @@ pub(super) fn timeout_ticker(
             trace!("Removing timer {entity}");
             commands.entity(entity).despawn();
         } else {
-            trace!("Timer {}", timeout.timer.elapsed().as_secs_f32());
             timeout.timer.tick(clock.delta());
         }
     }

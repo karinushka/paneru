@@ -1500,6 +1500,7 @@ pub(super) fn handle_virtual_window_moves(
             let mut new_strip = LayoutStrip::new(workspace_id, target_idx);
             // Append the window right away, otherwise it is not yet visible in the next for loop.
             new_strip.append(window_entity);
+            new_strip.set_last_focused_window(window_entity);
 
             commands
                 .spawn((
@@ -1516,6 +1517,7 @@ pub(super) fn handle_virtual_window_moves(
         for (entity, mut strip, _) in &mut workspaces {
             if entity == target_entity {
                 strip.append(window_entity);
+                strip.set_last_focused_window(window_entity);
             } else {
                 strip.remove(window_entity);
             }

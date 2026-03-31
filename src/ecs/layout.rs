@@ -127,6 +127,7 @@ pub struct LayoutStrip {
     id: WorkspaceId,
     pub virtual_index: u32,
     columns: VecDeque<Column>,
+    last_focused_window: Option<Entity>,
 }
 
 impl LayoutStrip {
@@ -135,6 +136,7 @@ impl LayoutStrip {
             id,
             virtual_index,
             columns: VecDeque::new(),
+            last_focused_window: None,
         }
     }
 
@@ -278,6 +280,10 @@ impl LayoutStrip {
                     }
                 }
             }
+        }
+
+        if self.last_focused_window == Some(entity) {
+            self.last_focused_window = None;
         }
     }
 
@@ -476,6 +482,19 @@ impl LayoutStrip {
 
     pub fn id(&self) -> WorkspaceId {
         self.id
+    }
+
+    pub fn validated_last_focused_window(&self) -> Option<Entity> {
+        self.last_focused_window
+            .filter(|entity| self.index_of(*entity).is_ok())
+    }
+
+    pub fn set_last_focused_window(&mut self, entity: Entity) {
+        debug_assert!(
+            self.index_of(entity).is_ok(),
+            "set_last_focused_window called with entity not in strip"
+        );
+        self.last_focused_window = Some(entity);
     }
 
     #[instrument(level = Level::TRACE, skip_all, fields(offset))]

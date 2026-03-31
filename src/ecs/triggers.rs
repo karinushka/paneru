@@ -392,20 +392,16 @@ pub(super) fn workspace_activated_trigger(
     // Prefer the focused window so the viewport centres on what the user
     // was looking at; fall back to the first column.
     if !had_moved_windows {
-        let focused_entity = windows.focused().map(|(_, entity)| entity).filter(|e| {
-            workspaces
-                .get(trigger.entity)
-                .is_ok_and(|(strip, _)| strip.index_of(*e).is_ok())
-        });
-        let fallback = || {
-            workspaces
-                .get(trigger.entity)
-                .ok()
-                .and_then(|(strip, _)| strip.get(0).ok())
-                .and_then(|col| col.top())
-        };
-        if let Some(entity) = focused_entity.or_else(fallback) {
-            reshuffle_around(entity, &mut commands);
+        if let Ok((strip, _)) = workspaces.get(trigger.entity) {
+            let focused_entity = windows
+                .focused()
+                .map(|(_, entity)| entity)
+                .filter(|e| strip.index_of(*e).is_ok());
+            let last_focused = || strip.validated_last_focused_window();
+            let fallback = || strip.get(0).ok().and_then(|col| col.top());
+            if let Some(entity) = focused_entity.or_else(last_focused).or_else(fallback) {
+                reshuffle_around(entity, &mut commands);
+            }
         }
     }
 }
@@ -436,12 +432,9 @@ pub(super) fn show_active_workspace_trigger(
     if let Ok((mut position, strip)) = workspaces.get_mut(trigger.entity) {
         position.0.y = bounds.min.y;
 
-        // Find a window to focus on.
-        let focused = strip.all_windows().into_iter().find(|entity| {
-            windows
-                .moving_frame(*entity)
-                .is_some_and(|frame| frame.min.x >= bounds.min.x)
-        });
+        let focused = strip
+            .validated_last_focused_window()
+            .or_else(|| strip.first().ok().and_then(|col| col.top()));
         if let Some(entity) = focused
             && let Some(window) = windows.get(entity)
             && let Some(psn) = windows.psn(window.id(), &apps)
@@ -617,23 +610,30 @@ pub(super) fn center_mouse_trigger(
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 pub(super) fn activate_virtual_row_trigger(
     trigger: On<Add, FocusedMarker>,
-    workspaces: Query<(Entity, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    mut workspaces: Query<(Entity, &mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     mut commands: Commands,
 ) {
-    let Some((active_entity, active_strip, _)) = workspaces.iter().find(|(_, _, active)| *active)
-    else {
-        return;
-    };
-    if active_strip.index_of(trigger.entity).is_ok() {
-        return;
+    let mut active_entity = None;
+    let mut target_entity = None;
+
+    for (entity, mut strip, is_active) in &mut workspaces {
+        if strip.index_of(trigger.entity).is_ok() {
+            strip.set_last_focused_window(trigger.entity);
+            target_entity = Some(entity);
+        }
+        if is_active {
+            active_entity = Some(entity);
+        }
     }
 
-    for (entity, strip, _) in workspaces {
-        if strip.index_of(trigger.entity).is_ok() {
-            if let Ok(mut entity_commands) = commands.get_entity(active_entity) {
+    // If the focused window is on a different strip than the active one,
+    // move ActiveWorkspaceMarker to the strip containing the focused window.
+    if let (Some(active), Some(target)) = (active_entity, target_entity) {
+        if active != target {
+            if let Ok(mut entity_commands) = commands.get_entity(active) {
                 entity_commands.try_remove::<ActiveWorkspaceMarker>();
             }
-            if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            if let Ok(mut entity_commands) = commands.get_entity(target) {
                 entity_commands.try_insert(ActiveWorkspaceMarker);
             }
         }

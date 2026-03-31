@@ -1870,3 +1870,80 @@ fn test_multi_display_no_height_crosstalk() {
 
     run_main_loop(&mut bevy, &internal_queue, &commands, check);
 }
+
+#[test]
+fn test_virtual_workspace_focus_persistence() {
+    // Move two windows to a new virtual workspace south. The second moved
+    // window becomes last_focused_window (appended at the east end of the
+    // strip, not the first column). Switch away and back: last_focused_window
+    // must be restored, not the first-column fallback.
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 }, // Settle (0)
+        // Focus east to reach the next window.
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        }, // (1)
+        // Move it to virtual workspace south.
+        Event::Command {
+            command: Command::Window(Operation::VirtualMove(Direction::South)),
+        }, // (2) South strip: [win_A]. Focus follows.
+        // Switch back north.
+        Event::Command {
+            command: Command::Window(Operation::Virtual(Direction::North)),
+        }, // (3)
+        // Focus east again to pick another window.
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        }, // (4)
+        // Move it south too. It is appended after win_A.
+        Event::Command {
+            command: Command::Window(Operation::VirtualMove(Direction::South)),
+        }, // (5) South strip: [win_A, win_B]. last_focused = win_B.
+        // Switch north, then south. Focus must return to win_B, not win_A.
+        Event::Command {
+            command: Command::Window(Operation::Virtual(Direction::North)),
+        }, // (6)
+        Event::Command {
+            command: Command::Window(Operation::Virtual(Direction::South)),
+        }, // (7)
+    ];
+
+    // Capture the focused WinID after VirtualMove(South) at iteration 5
+    // (this is win_B) and verify it is restored at iteration 7.
+    let expected_id = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let expected_id_clone = expected_id.clone();
+
+    let check = move |iteration, world: &mut World| {
+        let mut focused_query = world.query_filtered::<&Window, With<FocusedMarker>>();
+        let focused: Vec<_> = focused_query.iter(world).collect();
+
+        if iteration == 5 {
+            // Record which window is focused after the second VirtualMove.
+            assert_eq!(focused.len(), 1);
+            expected_id_clone.store(focused[0].id() as u32, std::sync::atomic::Ordering::SeqCst);
+        }
+        if iteration == 7 {
+            assert_eq!(focused.len(), 1, "Expected exactly one focused window");
+            let expected = expected_id_clone.load(std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(
+                focused[0].id() as u32, expected,
+                "Expected last-focused window to be restored, not the first-column fallback"
+            );
+        }
+    };
+
+    let mut bevy = setup_world();
+    let mock_app = setup_process(bevy.world_mut());
+    let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
+    let event_queue = internal_queue.clone();
+    let windows = window_spawner(4, event_queue, mock_app);
+    let window_manager = MockWindowManager {
+        windows,
+        workspaces: vec![TEST_WORKSPACE_ID],
+    };
+    bevy.world_mut()
+        .insert_resource(WindowManager(Box::new(window_manager)));
+    bevy.insert_resource(Config::default());
+
+    run_main_loop(&mut bevy, &internal_queue, &commands, check);
+}

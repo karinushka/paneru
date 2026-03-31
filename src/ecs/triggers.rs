@@ -603,17 +603,11 @@ pub(super) fn center_mouse_trigger(
     if config.mouse_follows_focus()
         && !config.skip_reshuffle()
         && config.ffm_flag().is_none_or(|id| id != window.id())
-        && let Some(mut frame) = windows.moving_frame(entity)
+        && let Some(frame) = windows.moving_frame(entity)
     {
         let display_bounds = active_display.bounds();
-        // Expose the window if it's offscreen.
-        let size = frame.size();
-        frame.min = frame
-            .min
-            .clamp(display_bounds.min, display_bounds.max - size);
-        frame.max = frame.min + size;
-
-        let origin = frame.center() - display_bounds.min;
+        let visible = display_bounds.intersect(frame);
+        let origin = visible.center();
         debug!("centering on {} {origin}", window.id());
         window_manager.warp_mouse(origin);
     }

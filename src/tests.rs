@@ -1931,7 +1931,7 @@ fn test_next_display_inserts_into_target_strip() {
                 let mut strip_query = world.query::<&LayoutStrip>();
                 let in_ext = strip_query
                     .iter(world)
-                    .any(|strip| strip.id() == EXT_WORKSPACE_ID && strip.index_of(entity).is_ok());
+                    .any(|strip| strip.id() == EXT_WORKSPACE_ID && strip.contains(entity));
                 assert!(
                     in_ext,
                     "window 100 should be in the external strip before move"
@@ -1943,10 +1943,10 @@ fn test_next_display_inserts_into_target_strip() {
                 let mut strip_query = world.query::<&LayoutStrip>();
                 let in_target = strip_query
                     .iter(world)
-                    .any(|strip| strip.id() == TEST_WORKSPACE_ID && strip.index_of(entity).is_ok());
+                    .any(|strip| strip.id() == TEST_WORKSPACE_ID && strip.contains(entity));
                 let in_source = strip_query
                     .iter(world)
-                    .any(|strip| strip.id() == EXT_WORKSPACE_ID && strip.index_of(entity).is_ok());
+                    .any(|strip| strip.id() == EXT_WORKSPACE_ID && strip.contains(entity));
                 assert!(
                     in_target,
                     "window 100 should be in the target (internal) strip after nextdisplay"
@@ -1970,4 +1970,89 @@ fn find_window_entity(window_id: WinID, world: &mut World) -> Entity {
         .find(|(w, _)| w.id() == window_id)
         .map(|(_, e)| e)
         .unwrap_or_else(|| panic!("window {window_id} not found"))
+}
+
+/// Verify that focusing a window on a non-active display does NOT move
+/// ActiveWorkspaceMarker cross-display (which would panic ActiveDisplayMut).
+#[test]
+fn test_cross_display_focus_keeps_workspace_marker() {
+    use crate::ecs::ActiveWorkspaceMarker;
+
+    let mut bevy = setup_world();
+    let mock_app = setup_process(bevy.world_mut());
+    let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
+    let event_queue = internal_queue.clone();
+
+    let active_display = Arc::new(AtomicU32::new(EXT_DISPLAY_ID));
+
+    // One window per display.
+    let eq1 = event_queue.clone();
+    let eq2 = event_queue.clone();
+    let app1 = mock_app.clone();
+    let app2 = mock_app;
+    let windows: TestWindowSpawner = Box::new(move |workspace_id| {
+        if workspace_id == EXT_WORKSPACE_ID {
+            let origin = Origin::new(0, 0);
+            let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+            vec![Window::new(Box::new(MockWindow::new(
+                100,
+                IRect::from_corners(origin, origin + size),
+                eq1.clone(),
+                app1.clone(),
+            )))]
+        } else if workspace_id == TEST_WORKSPACE_ID {
+            let origin = Origin::new(0, 0);
+            let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+            vec![Window::new(Box::new(MockWindow::new(
+                200,
+                IRect::from_corners(origin, origin + size),
+                eq2.clone(),
+                app2.clone(),
+            )))]
+        } else {
+            vec![]
+        }
+    });
+
+    let window_manager = TwoDisplayMock {
+        windows,
+        active_display: active_display.clone(),
+    };
+    bevy.insert_resource(WindowManager(Box::new(window_manager)));
+
+    let commands = vec![
+        // 0: Settle.
+        Event::MenuOpened { window_id: 100 },
+        // 1: Move window 100 to the internal display.
+        Event::Command {
+            command: Command::Window(Operation::ToNextDisplay),
+        },
+        // 2: Focus window 100 (now on internal display) to trigger
+        // activate_virtual_row_trigger. ActiveWorkspaceMarker must stay
+        // on the external display's strip (the active display).
+        Event::WindowFocused { window_id: 100 },
+        // 3: Send a command that uses ActiveDisplayMut. If the marker
+        // moved cross-display, this would panic.
+        Event::Command {
+            command: Command::Window(Operation::Center),
+        },
+    ];
+
+    let check = move |iteration, world: &mut World| {
+        if iteration >= 2 {
+            // ActiveWorkspaceMarker must remain on the external display's strip.
+            let mut marker_query =
+                world.query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>();
+            let strip = marker_query
+                .single(world)
+                .expect("exactly one ActiveWorkspaceMarker");
+            assert_eq!(
+                strip.id(),
+                EXT_WORKSPACE_ID,
+                "ActiveWorkspaceMarker should stay on the active display's strip, not move cross-display"
+            );
+        }
+    };
+
+    run_main_loop(&mut bevy, &internal_queue, &commands, check);
 }

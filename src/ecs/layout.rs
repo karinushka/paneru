@@ -3,16 +3,16 @@ use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::query::{Changed, Has, Or, With, Without};
-use bevy::ecs::system::{Commands, Populated, Query, Res, Single};
+use bevy::ecs::system::{Commands, Populated, Query, Res};
 use bevy::math::IRect;
 use std::collections::VecDeque;
 use stdext::function_name;
 use tracing::{Level, instrument, trace};
 
 use crate::config::Config;
-use crate::ecs::params::{ActiveDisplay, Windows};
+use crate::ecs::params::Windows;
 use crate::ecs::{
-    ActiveDisplayMarker, ActiveWorkspaceMarker, Bounds, DockPosition, LayoutPosition, Position,
+    Bounds, DockPosition, LayoutPosition, Position,
     ReshuffleAroundMarker, Scrolling, reposition_entity,
 };
 use crate::errors::{Error, Result};
@@ -160,6 +160,15 @@ impl LayoutStrip {
                 "{}: can not find window {entity} in the current pane.",
                 function_name!()
             )))
+    }
+
+    /// Returns `true` if the strip contains the given entity.
+    pub fn contains(&self, entity: Entity) -> bool {
+        self.columns.iter().any(|column| match column {
+            Column::Single(id) => *id == entity,
+            Column::Stack(stack) => stack.iter().any(|item| item.contains(entity)),
+            Column::Tabs(stack) => stack.contains(&entity),
+        })
     }
 
     /// Inserts a window ID into the pane at a specified position.
@@ -669,14 +678,10 @@ pub(super) fn layout_sizes_changed(
     changed_sizes: Populated<Entity, Changed<Bounds>>,
     windows: Query<(&Position, &Bounds, &Window), Without<LayoutStrip>>,
     mut layout_position: Query<&mut LayoutPosition, With<Window>>,
-    active_display: ActiveDisplay,
+    strips: Query<(&LayoutStrip, &ChildOf), With<LayoutStrip>>,
+    displays: Query<(&Display, Option<&DockPosition>)>,
     config: Res<Config>,
 ) {
-    let viewport = active_display
-        .display()
-        .actual_display_bounds(active_display.dock(), &config);
-    let layout_strip = active_display.active_strip();
-
     let get_window_frame = |entity| {
         windows
             .get(entity)
@@ -687,10 +692,12 @@ pub(super) fn layout_sizes_changed(
     changed_sizes
         .into_iter()
         .filter_map(|entity| {
-            layout_strip
-                .index_of(entity)
-                .is_ok()
-                .then_some(layout_strip.relative_positions(viewport.height(), &get_window_frame))
+            let (layout_strip, child_of) = strips
+                .iter()
+                .find(|(s, _)| s.contains(entity))?;
+            let (display, dock) = displays.get(child_of.parent()).ok()?;
+            let viewport = display.actual_display_bounds(dock, &config);
+            Some(layout_strip.relative_positions(viewport.height(), &get_window_frame))
         })
         .flatten()
         .for_each(|(entity, frame)| {
@@ -745,23 +752,26 @@ pub(super) fn layout_strip_changed(
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn reshuffle_layout_strip(
     marker: Populated<(Entity, &LayoutPosition), With<ReshuffleAroundMarker>>,
-    active_strip: Single<&Position, With<ActiveWorkspaceMarker>>,
-    active_display: ActiveDisplay,
+    strip_query: Query<(&LayoutStrip, &Position, Entity, &ChildOf), With<LayoutStrip>>,
+    displays: Query<(&Display, Option<&DockPosition>)>,
     windows: Windows,
     config: Res<Config>,
     mut commands: Commands,
 ) {
-    let display_bounds = active_display
-        .display()
-        .actual_display_bounds(active_display.dock(), &config);
-
     for (entity, layout_position) in marker {
         if let Ok(mut cmd) = commands.get_entity(entity) {
             cmd.try_remove::<ReshuffleAroundMarker>();
         }
-        if active_display.active_strip().index_of(entity).is_err() {
+        let Some((_, strip_position, strip_entity, child_of)) = strip_query
+            .iter()
+            .find(|(s, _, _, _)| s.contains(entity))
+        else {
             continue;
-        }
+        };
+        let Ok((display, dock)) = displays.get(child_of.parent()) else {
+            continue;
+        };
+        let display_bounds = display.actual_display_bounds(dock, &config);
 
         let Some(mut frame) = windows.moving_frame(entity) else {
             continue;
@@ -776,7 +786,7 @@ pub(super) fn reshuffle_layout_strip(
             .clamp(display_bounds.min, display_bounds.max - size);
         frame.max = frame.min + size;
 
-        let strip_position = frame.min - layout_position.0;
+        let new_strip_position = frame.min - layout_position.0;
 
         // Check how much of the window is hidden. Slivers don't count as
         // meaningfully visible, so subtract sliver_width from the visible
@@ -789,16 +799,16 @@ pub(super) fn reshuffle_layout_strip(
 
             // Do not move the window if the hidden fraction is lower than threshold
             // or if the layout strip movement is shorter than the hidden width.
-            let strip_movement = (active_strip.0.x - strip_position.x).abs();
+            let strip_movement = (strip_position.0.x - new_strip_position.x).abs();
             if hidden_fraction <= hidden_ratio && frame.width() - visible_width >= strip_movement {
                 continue;
             }
         }
 
-        trace!("reshuffle_layout_strip: triggered for entity {entity}, offset {strip_position}");
+        trace!("reshuffle_layout_strip: triggered for entity {entity}, offset {new_strip_position}");
         reposition_entity(
-            active_display.active_strip_entity(),
-            strip_position,
+            strip_entity,
+            new_strip_position,
             &mut commands,
         );
     }
@@ -836,22 +846,23 @@ pub(super) fn position_layout_windows(
     >,
 
     workspaces: Query<(&LayoutStrip, &Position, Has<Scrolling>, &ChildOf), With<LayoutStrip>>,
-    active_display: Single<(Entity, &Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
+    displays: Query<(&Display, Option<&DockPosition>)>,
     config: Res<Config>,
 ) {
-    let (display_entity, active_display, dock) = *active_display;
-    let viewport = active_display.actual_display_bounds(dock, &config);
-    let offscreen_sliver_width = config.sliver_width();
-    let (_, pad_right, _, pad_left) = config.edge_padding();
-
     for (entity, window, layout_position, mut position, mut bounds) in positioned_windows {
         let window: &Window = window;
-        let Some((layout_strip, strip_position, swiping, _)) = workspaces
+        let Some((layout_strip, strip_position, swiping, child_of)) = workspaces
             .iter()
-            .find(|(s, _, _, c)| c.parent() == display_entity && s.index_of(entity).is_ok())
+            .find(|(s, _, _, _)| s.contains(entity))
         else {
             continue;
         };
+        let Ok((display, dock)) = displays.get(child_of.parent()) else {
+            continue;
+        };
+        let viewport = display.actual_display_bounds(dock, &config);
+        let offscreen_sliver_width = config.sliver_width();
+        let (_, pad_right, _, pad_left) = config.edge_padding();
 
         // Account for per-window horizontal_padding: reposition() adds
         // h_pad to the virtual x, so subtract it here so the OS window

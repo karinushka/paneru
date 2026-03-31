@@ -280,7 +280,7 @@ fn windows_not_in_strips<F: Fn(WinID) -> Option<Entity>>(
             for id in ids {
                 if let Some(entity) = find_window(id) {
                     // If window exists in any of the active workspace rows.
-                    if strips.iter().any(|strip| strip.index_of(entity).is_ok()) {
+                    if strips.iter().any(|strip| strip.contains(entity)) {
                         continue;
                     }
                     moved.push(entity);
@@ -373,6 +373,20 @@ pub(super) fn workspace_activated_trigger(
         }
     }
 
+    // Filter out windows that are already placed in a strip on another display.
+    // This happens when to_next_display physically moves a window but macOS still
+    // reports it in the source workspace (stale space assignment). Without this
+    // guard, switching back to the source display would reclaim the window.
+    let moved_windows: Vec<_> = moved_windows
+        .into_iter()
+        .filter(|&entity| {
+            let in_other_display_strip = workspaces.iter().any(|(strip, child)| {
+                child.parent() != active_display.0 && strip.contains(entity)
+            });
+            !in_other_display_strip
+        })
+        .collect();
+
     let had_moved_windows = !moved_windows.is_empty();
     for entity in moved_windows {
         debug!("Window {entity} moved to workspace {workspace_id}.");
@@ -414,13 +428,21 @@ pub(super) fn workspace_activated_trigger(
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 pub(super) fn hide_inactive_workspace_trigger(
     trigger: On<Remove, ActiveWorkspaceMarker>,
-    mut workspaces: Query<&mut Position, With<LayoutStrip>>,
+    mut workspaces: Query<(&mut Position, Option<&ChildOf>), With<LayoutStrip>>,
     active_display: ActiveDisplay,
 ) {
-    let bounds = active_display.bounds();
-    if let Ok(mut position) = workspaces.get_mut(trigger.entity) {
-        position.0.y = bounds.max.y - 10;
+    let Ok((mut position, parent)) = workspaces.get_mut(trigger.entity) else {
+        return;
+    };
+    // Only hide strips on the active display (virtual workspace switching).
+    // Cross-display strips should stay visible on their own display.
+    let active_display_entity = active_display.display_entity();
+    let strip_display = parent.map(|p| p.parent());
+    if strip_display.is_some_and(|d| d != active_display_entity) {
+        return;
     }
+    let bounds = active_display.bounds();
+    position.0.y = bounds.max.y - 10;
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -429,25 +451,33 @@ pub(super) fn show_active_workspace_trigger(
     trigger: On<Add, ActiveWorkspaceMarker>,
     windows: Windows,
     apps: Query<&Application>,
-    mut workspaces: Query<(&mut Position, &LayoutStrip), Without<Window>>,
+    mut workspaces: Query<(&mut Position, &LayoutStrip, Option<&ChildOf>), Without<Window>>,
+    displays: Query<&Display>,
     active_display: Single<&Display, With<ActiveDisplayMarker>>,
 ) {
-    let bounds = active_display.bounds();
-    if let Ok((mut position, strip)) = workspaces.get_mut(trigger.entity) {
-        position.0.y = bounds.min.y;
+    let Ok((mut position, strip, parent)) = workspaces.get_mut(trigger.entity) else {
+        return;
+    };
+    // Use the strip's own parent display bounds if available, otherwise
+    // fall back to the active display. This prevents cross-display moves
+    // from positioning the target strip on the wrong display.
+    let bounds = parent
+        .and_then(|p| displays.get(p.parent()).ok())
+        .map(|d| d.bounds())
+        .unwrap_or_else(|| active_display.bounds());
+    position.0.y = bounds.min.y;
 
-        // Find a window to focus on.
-        let focused = strip.all_windows().into_iter().find(|entity| {
-            windows
-                .moving_frame(*entity)
-                .is_some_and(|frame| frame.min.x >= bounds.min.x)
-        });
-        if let Some(entity) = focused
-            && let Some(window) = windows.get(entity)
-            && let Some(psn) = windows.psn(window.id(), &apps)
-        {
-            window.focus_with_raise(psn);
-        }
+    // Find a window to focus on.
+    let focused = strip.all_windows().into_iter().find(|entity| {
+        windows
+            .moving_frame(*entity)
+            .is_some_and(|frame| frame.min.x >= bounds.min.x)
+    });
+    if let Some(entity) = focused
+        && let Some(window) = windows.get(entity)
+        && let Some(psn) = windows.psn(window.id(), &apps)
+    {
+        window.focus_with_raise(psn);
     }
 }
 
@@ -469,6 +499,7 @@ pub(super) fn show_active_workspace_trigger(
 pub(super) fn display_change_trigger(
     trigger: On<WMEventTrigger>,
     displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
+    workspaces: Query<(Entity, &ChildOf, Has<ActiveWorkspaceMarker>), With<SelectedVirtualMarker>>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
@@ -481,7 +512,8 @@ pub(super) fn display_change_trigger(
         return;
     };
 
-    for (display, entity, focused) in displays {
+    let mut new_active_display_entity = None;
+    for (display, entity, focused) in &displays {
         let display_id = display.id();
         if focused && display_id != active_id {
             debug!("Display id {display_id} no longer active");
@@ -494,8 +526,30 @@ pub(super) fn display_change_trigger(
             if let Ok(mut cmd) = commands.get_entity(entity) {
                 cmd.try_insert(ActiveDisplayMarker);
             }
+            new_active_display_entity = Some(entity);
         }
     }
+
+    // When the active display changes, move ActiveWorkspaceMarker to the
+    // new display's selected strip so ActiveDisplayMut can find it.
+    if let Some(new_display) = new_active_display_entity {
+        for (entity, _, has_marker) in &workspaces {
+            if has_marker {
+                if let Ok(mut cmd) = commands.get_entity(entity) {
+                    cmd.try_remove::<ActiveWorkspaceMarker>();
+                }
+            }
+        }
+        if let Some((entity, _, _)) = workspaces
+            .iter()
+            .find(|(_, child_of, _)| child_of.parent() == new_display)
+        {
+            if let Ok(mut cmd) = commands.get_entity(entity) {
+                cmd.try_insert(ActiveWorkspaceMarker);
+            }
+        }
+    }
+
     commands.trigger(WMEventTrigger(Event::SpaceChanged));
 }
 
@@ -617,10 +671,11 @@ pub(super) fn center_mouse_trigger(
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 pub(super) fn activate_virtual_row_trigger(
     trigger: On<Add, FocusedMarker>,
-    workspaces: Query<(Entity, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    workspaces: Query<(Entity, &LayoutStrip, Has<ActiveWorkspaceMarker>, Option<&ChildOf>)>,
     mut commands: Commands,
 ) {
-    let Some((active_entity, active_strip, _)) = workspaces.iter().find(|(_, _, active)| *active)
+    let Some((active_entity, active_strip, _, active_parent)) =
+        workspaces.iter().find(|(_, _, active, _)| *active)
     else {
         return;
     };
@@ -628,8 +683,18 @@ pub(super) fn activate_virtual_row_trigger(
         return;
     }
 
-    for (entity, strip, _) in workspaces {
+    let active_display = active_parent.map(|p| p.parent());
+
+    for (entity, strip, _, parent) in workspaces {
         if strip.index_of(trigger.entity).is_ok() {
+            // Only move ActiveWorkspaceMarker between strips on the same
+            // display (virtual row switching). Cross-display moves would
+            // break ActiveDisplayMut which requires the marker on the
+            // active display.
+            let target_display = parent.map(|p| p.parent());
+            if active_display != target_display {
+                return;
+            }
             if let Ok(mut entity_commands) = commands.get_entity(active_entity) {
                 entity_commands.try_remove::<ActiveWorkspaceMarker>();
             }
@@ -1634,7 +1699,7 @@ pub(super) fn window_removal_trigger(
 
     if let Some(mut strip) = workspaces
         .iter_mut()
-        .find(|strip| strip.index_of(entity).is_ok())
+        .find(|strip| strip.contains(entity))
     {
         strip.remove(entity);
     }

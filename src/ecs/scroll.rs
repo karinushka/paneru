@@ -1,7 +1,8 @@
 use bevy::ecs::entity::Entity;
+use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::{With, Without};
-use bevy::ecs::system::{Commands, Populated, Res, Single};
+use bevy::ecs::system::{Commands, Populated, Query, Res, Single};
 use bevy::math::IRect;
 use bevy::time::Time;
 use std::time::{Duration, Instant};
@@ -11,7 +12,7 @@ use crate::config::Config;
 use crate::config::swipe::SwipeGestureDirection;
 use crate::ecs::layout::{Column, LayoutStrip};
 use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
-use crate::ecs::{ActiveWorkspaceMarker, Position, Scrolling, WMEventTrigger};
+use crate::ecs::{ActiveDisplayMarker, Position, Scrolling, SelectedVirtualMarker, WMEventTrigger};
 use crate::errors::Result;
 use crate::events::Event;
 use crate::manager::{Window, WindowManager};
@@ -21,10 +22,11 @@ use crate::manager::{Window, WindowManager};
 pub(super) fn swipe_gesture(
     mut messages: MessageReader<Event>,
     active_display: ActiveDisplay,
-    mut active_workspace: Single<
-        (Entity, &Position, Option<&mut Scrolling>),
-        With<ActiveWorkspaceMarker>,
+    mut strips: Query<
+        (Entity, &Position, Option<&mut Scrolling>, &ChildOf),
+        With<SelectedVirtualMarker>,
     >,
+    active_display_entity: Single<Entity, With<ActiveDisplayMarker>>,
     time: Res<Time>,
     config: Configuration,
     mut commands: Commands,
@@ -32,6 +34,16 @@ pub(super) fn swipe_gesture(
     if config.mission_control_active() {
         return;
     }
+
+    let Some((entity, position, mut scrolling)) = strips
+        .iter_mut()
+        .find(|(_, _, _, c)| c.parent() == *active_display_entity)
+        .map(|(e, p, s, _)| (e, p, s))
+    else {
+        return;
+    };
+
+    let position_x = position.0.x;
 
     for event in messages.read() {
         let delta = match event {
@@ -72,16 +84,15 @@ pub(super) fn swipe_gesture(
             0.0
         };
 
-        let (entity, position, scrolling) = &mut *active_workspace;
         if let Some(scrolling) = scrolling.as_mut() {
             let velocity = 0.3 * new_velocity + 0.7 * scrolling.velocity;
             scrolling.velocity = velocity;
             scrolling.is_user_swiping = true;
             scrolling.last_event = Instant::now();
-        } else if let Ok(mut entity_cmmands) = commands.get_entity(*entity) {
+        } else if let Ok(mut entity_cmmands) = commands.get_entity(entity) {
             entity_cmmands.try_insert(Scrolling {
                 velocity: new_velocity,
-                position: f64::from(position.0.x),
+                position: f64::from(position_x),
                 is_user_swiping: true,
                 ..Default::default()
             });
@@ -221,18 +232,25 @@ pub(super) fn scrolling_integrator(
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn apply_scrolling_constraints(
-    mut strip: Single<
-        (&LayoutStrip, &mut Position, &mut Scrolling),
-        (With<ActiveWorkspaceMarker>, Without<Window>),
+    mut strips: Query<
+        (&LayoutStrip, &mut Position, &mut Scrolling, &ChildOf),
+        (With<SelectedVirtualMarker>, Without<Window>),
     >,
+    active_display_entity: Single<Entity, With<ActiveDisplayMarker>>,
     active_display: ActiveDisplay,
     windows: Windows,
     config: Configuration,
 ) {
+    let Some((strip, mut position, mut scroll, _)) = strips
+        .iter_mut()
+        .find(|(_, _, _, c)| c.parent() == *active_display_entity)
+    else {
+        return;
+    };
+
     let viewport = active_display
         .display()
         .actual_display_bounds(active_display.dock(), config.config());
-    let (strip, ref mut position, ref mut scroll) = *strip;
 
     let get_window_frame = |entity| windows.moving_frame(entity);
     if let Some(clamped_offset) = clamp_viewport_offset(

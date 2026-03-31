@@ -2,7 +2,7 @@ use bevy::app::PreUpdate;
 use bevy::ecs::entity::{Entity, EntityHashSet};
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::message::MessageReader;
-use bevy::ecs::query::{Has, With, Without};
+use bevy::ecs::query::{Has, With};
 use bevy::ecs::system::{Commands, Query, Res, ResMut, Single};
 use bevy::math::IRect;
 use tracing::{Level, instrument};
@@ -727,11 +727,8 @@ fn manage_window(mut messages: MessageReader<Event>, windows: Windows, mut comma
 fn to_next_display(
     mut messages: MessageReader<Event>,
     windows: Windows,
-    mut active_display: ActiveDisplayMut,
-    mut other_workspaces: Query<
-        (&mut LayoutStrip, Has<SelectedVirtualMarker>),
-        Without<ActiveWorkspaceMarker>,
-    >,
+    displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
+    mut workspaces: Query<(&mut LayoutStrip, &ChildOf, Has<SelectedVirtualMarker>)>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
@@ -752,7 +749,10 @@ fn to_next_display(
         return;
     }
 
-    let Some(other) = active_display.other().next() else {
+    let Some((_, active_entity, _)) = displays.iter().find(|(_, _, active)| *active) else {
+        return;
+    };
+    let Some((other, other_entity, _)) = displays.iter().find(|(_, _, active)| !*active) else {
         debug!("no other display to move window to.");
         return;
     };
@@ -774,23 +774,29 @@ fn to_next_display(
 
     window_manager.warp_mouse(other.bounds().center());
 
-    // Remove the window from the source strip.
-    let source_neighbour = active_display.active_strip().right_neighbour(entity);
-    active_display.active_strip().remove(entity);
-    if let Some(neighbour) = source_neighbour {
-        reshuffle_around(neighbour, &mut commands);
-    }
+    // Get the target workspace ID before mutating strips.
+    let target_space_id = window_manager.active_display_space(target_display_id).ok();
 
-    // Insert into the target display's selected strip.
-    if let Ok(target_space_id) = window_manager.active_display_space(target_display_id) {
-        if let Some((mut target_strip, _)) = other_workspaces
-            .iter_mut()
-            .find(|(strip, selected)| *selected && strip.id() == target_space_id)
+    // Remove from source strip, insert into target strip.
+    for (mut strip, child_of, selected) in &mut workspaces {
+        let parent = child_of.parent();
+        if parent == active_entity && strip.contains(entity) {
+            if let Some(neighbour) = strip.right_neighbour(entity) {
+                reshuffle_around(neighbour, &mut commands);
+            }
+            strip.remove(entity);
+        }
+        if parent == other_entity
+            && selected
+            && target_space_id.is_some_and(|id| strip.id() == id)
         {
-            target_strip.append(entity);
-            reshuffle_around(entity, &mut commands);
+            strip.append(entity);
         }
     }
+
+    // Force display change detection so ActiveDisplayMarker moves to the
+    // target display immediately instead of waiting for the polling system.
+    commands.trigger(WMEventTrigger(Event::DisplayChanged));
 }
 
 /// Moves the mouse pointer to the next available display.

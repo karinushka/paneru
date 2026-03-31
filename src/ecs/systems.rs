@@ -2,7 +2,7 @@ use bevy::app::AppExit;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::{MessageReader, MessageWriter};
-use bevy::ecs::query::{Changed, Has, Or, With, Without};
+use bevy::ecs::query::{Changed, Has, Or, With};
 use bevy::ecs::system::{
     Commands, Local, NonSend, NonSendMut, ParallelCommands, Populated, Query, Res, Single,
 };
@@ -28,7 +28,7 @@ use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, BruteforceWindows, Initializing, LocateDockTrigger, Position,
     RefreshWindowSizes, Scrolling, StackAdjustedResize, Unmanaged, WidthRatio, WindowDraggedMarker,
-    WindowProperties, reposition_entity, reshuffle_around,
+    WindowProperties, reshuffle_around,
 };
 use crate::events::Event;
 use crate::manager::{
@@ -497,158 +497,6 @@ pub(super) fn retry_front_switch(
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
-#[instrument(level = Level::DEBUG, skip_all)]
-pub(super) fn find_orphaned_workspaces(
-    orphans: Populated<(&LayoutStrip, Entity, &Timeout, Option<&ChildOf>), With<Timeout>>,
-    mut attached: Query<(&mut LayoutStrip, Entity, &ChildOf), Without<Timeout>>,
-    displays: Query<(&Display, Entity)>,
-    window_manager: Res<WindowManager>,
-    mut commands: Commands,
-) {
-    let present = window_manager.present_displays();
-
-    for (orphan, orphan_entity, timeout, child) in orphans {
-        if orphan.len() == 0 {
-            if let Ok(mut cmd) = commands.get_entity(orphan_entity) {
-                cmd.try_despawn();
-            }
-            debug!("despawning empty orphan workspace {}", orphan.id());
-            continue;
-        }
-        if child.is_some() {
-            // Was reparented, remove timer.
-            if let Ok(mut cmd) = commands.get_entity(orphan_entity) {
-                cmd.try_remove::<Timeout>();
-                cmd.insert(RefreshWindowSizes::default());
-            }
-            debug!(
-                "layout strip {} was re-parented, removing timeout.",
-                orphan.id()
-            );
-            continue;
-        }
-
-        if timeout.timer.is_finished() {
-            // Rescue windows from orphaned strips before despawning by floating them.
-            debug!("Rescue windows from timed out orphan {}.", orphan.id());
-            for lost_window in orphan.all_windows() {
-                if let Ok(mut cmd) = commands.get_entity(lost_window) {
-                    cmd.try_insert(Unmanaged::Floating);
-                }
-            }
-            continue;
-        }
-
-        // Find which display now owns this space ID.
-        let target = present.iter().find_map(|(present_display, spaces)| {
-            if spaces.iter().any(|&id| id == orphan.id()) {
-                displays
-                    .iter()
-                    .find(|(d, _)| d.id() == present_display.id())
-            } else {
-                None
-            }
-        });
-        let Some((target_display, target_entity)) = target else {
-            continue; // No display owns this space yet; wait for next tick.
-        };
-
-        debug!(
-            "Re-parenting orphaned strip {} to display {}",
-            orphan.id(),
-            target_display.id(),
-        );
-
-        let refresh_entity = if let Some((mut target_strip, strip_entity, _)) = attached
-            .iter_mut()
-            .find(|(strip, _, child)| child.parent() == target_entity && strip.id() == orphan.id())
-        {
-            // Move windows into existing workspace strip.
-            debug!("moving windows into existing layout strip.");
-            for entity in orphan.all_windows() {
-                target_strip.append(entity);
-            }
-            if let Ok(mut cmd) = commands.get_entity(orphan_entity) {
-                cmd.despawn();
-            }
-            strip_entity
-        } else {
-            // Display does not have this strip, add it.
-            debug!("adding the layout strip directly.");
-            if let Ok(mut commands) = commands.get_entity(orphan_entity) {
-                commands
-                    .try_remove::<Timeout>()
-                    .insert(ChildOf(target_entity));
-            }
-            orphan_entity
-        };
-
-        if let Ok(mut cmd) = commands.get_entity(refresh_entity) {
-            cmd.insert(RefreshWindowSizes::default());
-        }
-    }
-}
-
-#[allow(clippy::needless_pass_by_value)]
-pub(crate) fn refresh_workspace_window_sizes(
-    layout_strip: Single<(&LayoutStrip, Entity, &RefreshWindowSizes), With<ActiveWorkspaceMarker>>,
-    mut windows: Query<(Entity, &mut Window, &mut Bounds, Option<&Unmanaged>)>,
-    active_display: ActiveDisplay,
-    window_manager: Res<WindowManager>,
-    mut commands: Commands,
-) {
-    let (strip, strip_entity, marker) = *layout_strip;
-    if !marker.ready() {
-        return;
-    }
-
-    debug!("refreshing workspace {} sizes", strip.id());
-    let mut in_workspace = window_manager
-        .windows_in_workspace(strip.id())
-        .inspect_err(|err| {
-            warn!("getting windows in workspace: {err}");
-        })
-        .unwrap_or_default();
-
-    // Resize windows for the new display dimensions.
-    for entity in strip.all_windows() {
-        let Ok((_, ref mut window, ref mut bounds, _)) = windows.get_mut(entity) else {
-            continue;
-        };
-        let Ok(frame) = window.update_frame() else {
-            continue;
-        };
-        bounds.0 = frame.size();
-        debug!("refreshing window {} frame {:?}", window.id(), frame);
-
-        in_workspace.retain(|window_id| *window_id != window.id());
-    }
-
-    // Find remaining windows which are outside of the strip.                                                  ...
-    let floating = in_workspace
-        .into_iter()
-        .filter_map(|window_id| {
-            windows
-                .iter()
-                .find_map(|(entity, window, _, unmanaged)| {
-                    (window_id == window.id()).then_some(unmanaged.zip(Some(entity)))
-                })
-                .flatten()
-        })
-        .filter_map(|(unmanaged, entity)| {
-            matches!(unmanaged, Unmanaged::Floating).then_some(entity)
-        });
-    for window_entity in floating {
-        debug!("repositioning floating window {window_entity}");
-        reposition_entity(window_entity, active_display.bounds().min, &mut commands);
-    }
-
-    if let Ok(mut cmds) = commands.get_entity(strip_entity) {
-        cmds.try_remove::<RefreshWindowSizes>();
-    }
-}
-
 /// Periodically checks for displays added and removed, as well as changes in the active display.
 /// This system acts as a workaround for inconsistent display change notifications on some macOS versions.
 /// It uses `ThrottledSystem` to limit its execution frequency.
@@ -697,39 +545,6 @@ pub(super) fn display_changes_watcher(
             }));
         }
     });
-}
-
-/// Periodically checks for changes in the active workspace (space) on the active display.
-/// This system acts as a workaround for inconsistent workspace change notifications on some macOS versions.
-/// If a change is detected, it triggers an `Event::SpaceChanged` event.
-///
-/// # Arguments
-///
-/// * `active_display` - An `ActiveDisplay` system parameter providing immutable access to the active display.
-/// * `window_manager` - The `WindowManager` resource for querying active space information.
-/// * `throttle` - A `ThrottledSystem` to control the execution rate of this system.
-/// * `current_space` - A `Local` resource storing the ID of the currently observed space.
-/// * `commands` - Bevy commands to trigger `WMEventTrigger` events for space changes.
-#[allow(clippy::needless_pass_by_value)]
-pub(super) fn workspace_change_watcher(
-    active_display: ActiveDisplay,
-    window_manager: Res<WindowManager>,
-    mut current_space: Local<WorkspaceId>,
-    mut commands: Commands,
-) {
-    let Ok(space_id) = window_manager
-        .0
-        .active_display_space(active_display.id())
-        .inspect_err(|err| warn!("{err}"))
-    else {
-        return;
-    };
-
-    if *current_space != space_id {
-        *current_space = space_id;
-        debug!("workspace changed to {space_id}");
-        commands.trigger(WMEventTrigger(Event::SpaceChanged));
-    }
 }
 
 /// Animates window movement.

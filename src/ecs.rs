@@ -36,6 +36,7 @@ pub mod params;
 mod scroll;
 mod systems;
 mod triggers;
+mod workspace;
 
 /// Registers the Bevy systems for the `WindowManager`.
 /// This function adds various systems to the `Update` schedule, including event dispatchers,
@@ -72,12 +73,12 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::timeout_ticker,
             systems::retry_front_switch,
             systems::window_update_frame,
-            systems::refresh_workspace_window_sizes.run_if(on_timer(Duration::from_millis(
+            workspace::refresh_workspace_window_sizes.run_if(on_timer(Duration::from_millis(
                 REFRESH_WINDOW_CHECK_FREQ_MS,
             ))),
             systems::displays_rearranged,
             systems::reposition_dragged_window,
-            systems::find_orphaned_workspaces
+            workspace::find_orphaned_workspaces
                 .after(systems::displays_rearranged)
                 .run_if(on_timer(Duration::from_millis(
                     DISPLAY_CHANGE_CHECK_FREQ_MS,
@@ -106,7 +107,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
         Update,
         (
             systems::display_changes_watcher,
-            systems::workspace_change_watcher,
+            workspace::workspace_change_watcher,
         )
             .run_if(resource_exists::<PollForNotifications>)
             .run_if(on_timer(Duration::from_millis(
@@ -138,8 +139,8 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::mouse_down_trigger)
         .add_observer(triggers::mouse_up_trigger)
         .add_observer(triggers::mouse_dragged_trigger)
-        .add_observer(triggers::workspace_change_trigger)
-        .add_observer(triggers::active_workspace_trigger)
+        .add_observer(workspace::workspace_change_trigger)
+        .add_observer(workspace::active_workspace_trigger)
         .add_observer(triggers::display_change_trigger)
         .add_observer(triggers::front_switched_trigger)
         .add_observer(triggers::center_mouse_trigger)
@@ -162,8 +163,8 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::apply_window_properties)
         .add_observer(triggers::window_to_native_fullscreen)
         .add_observer(triggers::window_from_native_fullscreen)
-        .add_observer(triggers::workspace_created_trigger)
-        .add_observer(triggers::workspace_destroyed_trigger)
+        .add_observer(workspace::workspace_created_trigger)
+        .add_observer(workspace::workspace_destroyed_trigger)
         .add_observer(triggers::dim_remove_window_trigger);
 }
 

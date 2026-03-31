@@ -4,14 +4,13 @@ use bevy::ecs::lifecycle::{Add, Remove};
 use bevy::ecs::message::MessageWriter;
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Has, With};
-use bevy::ecs::system::{Commands, NonSend, NonSendMut, Populated, Query, Res, ResMut, Single};
+use bevy::ecs::system::{Commands, NonSend, NonSendMut, Populated, Query, Res, ResMut};
 use bevy::math::IRect;
 use notify::event::{DataChange, MetadataKind, ModifyKind};
 use notify::{EventKind, Watcher};
 use objc2_app_kit::NSScreen;
 use objc2_foundation::{NSNumber, NSString, ns_string};
 use std::pin::Pin;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tracing::{Level, debug, error, info, instrument, trace, warn};
 
@@ -20,7 +19,6 @@ use super::{
     MouseHeldMarker, NativeFullscreenMarker, RetryFrontSwitch, SpawnWindowTrigger, StrayFocusEvent,
     SystemTheme, Timeout, Unmanaged, WMEventTrigger, WindowDraggedMarker,
 };
-use crate::commands::ON_FULLSCREEN_SPACE;
 use crate::config::{Config, WindowParams};
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration, Windows};
@@ -29,12 +27,11 @@ use crate::ecs::{
     SendMessageTrigger, WidthRatio, WindowProperties, reposition_entity, reshuffle_around,
     resize_entity,
 };
-use crate::errors::Result;
 use crate::events::Event;
 use crate::manager::{
     Application, Display, Origin, Process, Size, Window, WindowManager, WindowPadding, irect_from,
 };
-use crate::platform::{PlatformCallbacks, WinID, WorkspaceId};
+use crate::platform::{PlatformCallbacks, WinID};
 use crate::util::symlink_target;
 
 /// Computes the passthrough keybinding set for the given window/app and
@@ -264,196 +261,6 @@ pub(super) fn mouse_dragged_trigger(
                 display_id: active_display.id(),
             },
         ));
-    }
-}
-
-fn windows_not_in_strip<F: Fn(WinID) -> Option<Entity>>(
-    workspace_id: WorkspaceId,
-    find_window: F,
-    strip: &LayoutStrip,
-    window_manager: &WindowManager,
-) -> Result<(Vec<Entity>, Vec<WinID>)> {
-    window_manager
-        .windows_in_workspace(workspace_id)
-        .map(|ids| {
-            let mut moved = Vec::new();
-            let mut unresolved = Vec::new();
-            for id in ids {
-                match find_window(id) {
-                    Some(entity) if strip.index_of(entity).is_err() => moved.push(entity),
-                    Some(_) => {}
-                    None => unresolved.push(id),
-                }
-            }
-            (moved, unresolved)
-        })
-}
-
-#[allow(clippy::needless_pass_by_value)]
-pub(super) fn workspace_change_trigger(
-    trigger: On<WMEventTrigger>,
-    active_display: Single<&Display, With<ActiveDisplayMarker>>,
-    workspaces: Query<(&LayoutStrip, Entity, Has<ActiveWorkspaceMarker>)>,
-    windows: Windows,
-    fullscreen_markers: Query<&NativeFullscreenMarker>,
-    window_manager: Res<WindowManager>,
-    mut commands: Commands,
-) {
-    let Event::SpaceChanged = trigger.event().0 else {
-        return;
-    };
-
-    let Ok(workspace_id) = window_manager.active_display_space(active_display.id()) else {
-        error!("Unable to get active workspace id!");
-        return;
-    };
-
-    let fullscreen = window_manager.is_fullscreen_space(active_display.id());
-    let was_fullscreen = ON_FULLSCREEN_SPACE.swap(fullscreen, Ordering::Relaxed);
-    debug!("workspace_change: space={workspace_id} fullscreen={fullscreen}");
-
-    // Entering fullscreen → remove the focused window from the strip so there
-    // is no layout gap and mark it with NativeFullscreenMarker.
-    // Guard: the focused entity must not already carry the marker (which means
-    // we're just switching TO an existing fullscreen space, not a new one).
-    if !was_fullscreen
-        && fullscreen
-        && let Some((_, entity)) = windows.focused()
-        && !fullscreen_markers.contains(entity)
-    {
-        let next_order = fullscreen_markers
-            .iter()
-            .map(|m| m.order + 1)
-            .max()
-            .unwrap_or(0);
-        debug!("entering fullscreen: removed {entity} order={next_order}");
-        if let Ok(mut entity_commands) = commands.get_entity(entity) {
-            entity_commands.try_insert(NativeFullscreenMarker { order: next_order });
-        }
-    }
-
-    // Exiting fullscreen → remove the marker.
-    if was_fullscreen
-        && !fullscreen
-        && let Some((_, entity)) = windows.focused()
-        && fullscreen_markers.contains(entity)
-        && let Ok(mut entity_commands) = commands.get_entity(entity)
-    {
-        entity_commands.try_remove::<NativeFullscreenMarker>();
-    }
-
-    // Dynamic fullscreen spaces (created by macOS when a window goes fullscreen)
-    // have no LayoutStrip entity.  Only remove the old ActiveWorkspaceMarker when
-    // a new strip exists to receive it, so that ActiveDisplay keeps resolving and
-    // command systems can raise a tiled window to switch back.
-    let has_matching_strip = workspaces
-        .iter()
-        .any(|(strip, _, _)| strip.id() == workspace_id);
-
-    for (strip, entity, active) in workspaces {
-        if active && strip.id() != workspace_id && has_matching_strip {
-            debug!("Workspace id {} no longer active", strip.id());
-            commands
-                .entity(entity)
-                .try_remove::<ActiveWorkspaceMarker>();
-        }
-        if !active && strip.id() == workspace_id {
-            debug!("Workspace id {} is active", strip.id());
-            commands.entity(entity).try_insert(ActiveWorkspaceMarker);
-        }
-    }
-}
-
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
-#[instrument(level = Level::DEBUG, skip_all)]
-pub(super) fn active_workspace_trigger(
-    trigger: On<Add, ActiveWorkspaceMarker>,
-    windows: Windows,
-    mut workspaces: Query<(&mut LayoutStrip, &ChildOf), With<ChildOf>>,
-    active_display: Single<(Entity, &Display), With<ActiveDisplayMarker>>,
-    apps: Query<&mut Application>,
-    window_manager: Res<WindowManager>,
-    mut commands: Commands,
-) {
-    let Ok((active_strip, _)) = workspaces.get(trigger.entity) else {
-        return;
-    };
-    let workspace_id = active_strip.id();
-    debug!("workspace {workspace_id}");
-
-    let find_window = |window_id| windows.find_managed(window_id).map(|(_, entity)| entity);
-    let Ok((moved_windows, mut unresolved)) =
-        windows_not_in_strip(workspace_id, find_window, active_strip, &window_manager).inspect_err(
-            |err| {
-                warn!("unable to get windows in the current workspace: {err}");
-            },
-        )
-    else {
-        return;
-    };
-    // Skip known, but unmanaged windows.
-    unresolved.retain(|window_id| windows.find(*window_id).is_none());
-
-    if !unresolved.is_empty() {
-        // Retry unresolved window IDs: during startup bruteforce, windows on
-        // inactive workspaces may have stale AX attributes (e.g. AXGroup instead
-        // of AXWindow).  Now that this workspace is active, re-query each app's
-        // window list — the AX data should be correct.
-        let retry_windows = apps
-            .into_iter()
-            .flat_map(|app| {
-                app.window_list()
-                    .into_iter()
-                    .filter(|window| unresolved.contains(&window.id()))
-            })
-            .collect::<Vec<_>>();
-        if !retry_windows.is_empty() {
-            debug!(
-                "retrying unresolved windows: {}",
-                retry_windows
-                    .iter()
-                    .map(|window| format!("{}", window.id()))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            );
-            commands.trigger(SpawnWindowTrigger(retry_windows));
-        }
-    }
-
-    let had_moved_windows = !moved_windows.is_empty();
-    for entity in moved_windows {
-        debug!("Window {entity} moved to workspace {workspace_id}.");
-
-        workspaces.iter_mut().for_each(|(mut strip, child)| {
-            strip.remove(entity);
-            if strip.id() == workspace_id && child.parent() == active_display.0 {
-                strip.append(entity);
-            }
-        });
-        reshuffle_around(entity, &mut commands);
-    }
-
-    // Always reshuffle on workspace activation so that windows are
-    // re-laid-out after returning from a different space (e.g. native
-    // fullscreen) where they may have been positioned with stale data.
-    // Prefer the focused window so the viewport centres on what the user
-    // was looking at; fall back to the first column.
-    if !had_moved_windows {
-        let focused_entity = windows.focused().map(|(_, entity)| entity).filter(|e| {
-            workspaces
-                .get(trigger.entity)
-                .is_ok_and(|(strip, _)| strip.index_of(*e).is_ok())
-        });
-        let fallback = || {
-            workspaces
-                .get(trigger.entity)
-                .ok()
-                .and_then(|(strip, _)| strip.get(0).ok())
-                .and_then(|col| col.top())
-        };
-        if let Some(entity) = focused_entity.or_else(fallback) {
-            reshuffle_around(entity, &mut commands);
-        }
     }
 }
 
@@ -1686,50 +1493,4 @@ pub(super) fn window_from_native_fullscreen(
         config.config(),
         &mut commands,
     );
-}
-
-#[allow(clippy::needless_pass_by_value)]
-#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
-pub(super) fn workspace_destroyed_trigger(
-    trigger: On<WMEventTrigger>,
-    workspaces: Populated<(&LayoutStrip, Entity)>,
-    mut commands: Commands,
-) {
-    let Event::SpaceDestroyed { space_id } = trigger.event().0 else {
-        return;
-    };
-
-    let Some((_, entity)) = workspaces
-        .iter()
-        .find(|(layout_strip, _)| layout_strip.id() == space_id)
-    else {
-        return;
-    };
-    if let Ok(mut entity_commands) = commands.get_entity(entity) {
-        debug!("Workspace destroyed {space_id} {entity}");
-        entity_commands.try_despawn();
-    }
-}
-
-#[allow(clippy::needless_pass_by_value)]
-#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
-pub(super) fn workspace_created_trigger(
-    trigger: On<WMEventTrigger>,
-    active_display: Single<(&Display, Entity), With<ActiveDisplayMarker>>,
-    workspaces: Query<&LayoutStrip>,
-    mut commands: Commands,
-) {
-    let Event::SpaceCreated { space_id } = trigger.event().0 else {
-        return;
-    };
-
-    if workspaces.into_iter().any(|strip| strip.id() == space_id) {
-        warn!("Workspace {space_id} already exists!");
-        return;
-    }
-    debug!("Workspace create {space_id}");
-    let (active_display, display_entity) = *active_display;
-    let strip = LayoutStrip::new(space_id);
-    let origin = Position(active_display.bounds().min);
-    commands.spawn((strip, origin, ChildOf(display_entity)));
 }

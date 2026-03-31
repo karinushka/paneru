@@ -16,8 +16,8 @@ use crate::{
     config::Config,
     ecs::{
         ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker, FullWidthMarker, Initializing,
-        LayoutPosition, Position, RepositionMarker, ResizeMarker, Unmanaged, WidthRatio,
-        layout::LayoutStrip,
+        LayoutPosition, NativeFullscreenMarker, Position, RepositionMarker, ResizeMarker,
+        Unmanaged, WidthRatio, layout::LayoutStrip,
     },
     manager::{Application, Display, Origin, Size, Window},
     platform::{ProcessSerialNumber, WinID},
@@ -136,7 +136,16 @@ impl Configuration<'_> {
 /// It ensures that only one display is marked as active at any given time.
 #[derive(SystemParam)]
 pub struct ActiveDisplay<'w, 's> {
-    strip: Single<'w, 's, (&'static LayoutStrip, Entity), With<ActiveWorkspaceMarker>>,
+    strip: Single<
+        'w,
+        's,
+        (
+            &'static LayoutStrip,
+            Entity,
+            Option<&'static NativeFullscreenMarker>,
+        ),
+        With<ActiveWorkspaceMarker>,
+    >,
     /// The single active `Display` component, marked with `ActiveDisplayMarker`.
     display: Single<
         'w,
@@ -170,6 +179,10 @@ impl ActiveDisplay<'_, '_> {
 
     pub fn active_strip_entity(&self) -> Entity {
         self.strip.1
+    }
+
+    pub fn fullscreen(&self) -> Option<&NativeFullscreenMarker> {
+        self.strip.2
     }
 
     /// Returns the `CGRect` representing the bounds of the active display.

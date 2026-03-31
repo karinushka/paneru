@@ -1068,8 +1068,7 @@ pub(crate) fn reposition_dragged_window(
 pub(super) fn update_overlays(
     windows: Windows,
     applications: Query<&Application>,
-    _: ActiveDisplay, // prevents this system from running without an active workspace
-    active_workspace: Query<&Scrolling, With<ActiveWorkspaceMarker>>,
+    active_workspace: Query<(Has<Scrolling>, &LayoutStrip), With<ActiveWorkspaceMarker>>,
     overlay_mgr: Option<NonSendMut<OverlayManager>>,
     config: Configuration,
 ) {
@@ -1085,14 +1084,11 @@ pub(super) fn update_overlays(
 
     // Hide overlays during swipe, mission control, native fullscreen spaces,
     // or briefly after a space change (macOS space-switch animation).
-    let swiping = active_workspace
-        .iter()
-        .next()
-        .is_some_and(|marker| marker.is_user_swiping);
-    // ON_FULLSCREEN_SPACE is set in workspace_change_trigger because this
-    // system cannot run when no LayoutStrip has ActiveWorkspaceMarker
-    // (which is the case on native fullscreen spaces).
-    if swiping || config.mission_control_active() {
+    let Some((swiping, active_strip)) = active_workspace.iter().next() else {
+        return;
+    };
+
+    if swiping || config.mission_control_active() || active_strip.is_fullscreen() {
         overlay_mgr.hide_all();
         return;
     }

@@ -1,5 +1,3 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use bevy::app::PreUpdate;
 use bevy::ecs::entity::{Entity, EntityHashSet};
 use bevy::ecs::hierarchy::ChildOf;
@@ -14,16 +12,12 @@ use crate::config::Config;
 use crate::ecs::layout::{Column, LayoutStrip, StackItem};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Windows};
 use crate::ecs::{
-    ActiveDisplayMarker, FocusFollowsMouse, FocusedMarker, FullWidthMarker, SendMessageTrigger,
-    Unmanaged, WMEventTrigger, reposition_entity, reshuffle_around, resize_entity,
+    ActiveDisplayMarker, FocusFollowsMouse, FocusedMarker, FullWidthMarker, NativeFullscreenMarker,
+    SendMessageTrigger, Unmanaged, WMEventTrigger, reposition_entity, reshuffle_around,
+    resize_entity,
 };
 use crate::events::Event;
 use crate::manager::{Application, Display, Origin, Size, Window, WindowManager, origin_to};
-
-/// When `true`, the active display is showing a native macOS fullscreen space.
-/// Keybindings are not intercepted so that macOS can handle native space
-/// switching (e.g. Ctrl+arrow, trackpad gestures).
-pub static ON_FULLSCREEN_SPACE: AtomicBool = AtomicBool::new(false);
 
 /// Represents a cardinal or directional choice for window manipulation.
 #[derive(Clone, Debug)]
@@ -154,7 +148,7 @@ fn get_window_in_direction(
         Direction::Last => strip.last().ok().and_then(|column| column.top()),
 
         Direction::North => match strip.get(index).ok()? {
-            Column::Single(_) | Column::Tabs(_) => None,
+            Column::Single(_) | Column::Tabs(_) | Column::Fullscren(_) => None,
             Column::Stack(stack) => stack
                 .iter()
                 .enumerate()
@@ -164,7 +158,7 @@ fn get_window_in_direction(
         },
 
         Direction::South => match strip.get(index).ok()? {
-            Column::Single(_) | Column::Tabs(_) => None,
+            Column::Single(_) | Column::Tabs(_) | Column::Fullscren(_) => None,
             Column::Stack(stack) => stack
                 .iter()
                 .enumerate()
@@ -191,14 +185,13 @@ fn get_window_in_direction(
 /// # Returns
 ///
 /// `Some(Entity)` with the entity of the newly focused window, otherwise `None`.
-#[instrument(level = Level::DEBUG, skip_all)]
 #[allow(clippy::needless_pass_by_value)]
 fn command_move_focus(
     mut messages: MessageReader<Event>,
     windows: Windows,
+    workspaces: Query<(&LayoutStrip, Option<&NativeFullscreenMarker>)>,
     active_display: ActiveDisplay,
     apps: Query<&Application>,
-    fs_windows: Query<(Entity, &crate::ecs::NativeFullscreenMarker)>,
     mut commands: Commands,
 ) {
     let Some(Operation::Focus(direction)) =
@@ -207,37 +200,21 @@ fn command_move_focus(
         return;
     };
 
-    let strip = active_display.active_strip();
+    let active_strip = active_display.active_strip();
 
-    // Fullscreen windows are ordered after the tiled strip:
-    //   [tiled…] [fs order=0] [fs order=1] …
-    // West → previous in chain (or last tiled).  East → next in chain.
-    if ON_FULLSCREEN_SPACE.load(Ordering::Relaxed) {
-        let Some(cur) = windows
-            .focused()
-            .and_then(|(_, e)| fs_windows.get(e).ok())
-            .map(|(_, m)| m.order)
-        else {
-            return;
-        };
-        let mut sorted: Vec<_> = fs_windows.iter().collect();
-        sorted.sort_by_key(|(_, m)| m.order);
-        let pos = sorted.iter().position(|(_, m)| m.order == cur);
-        let target = match direction {
-            Direction::West => pos
-                .and_then(|p| p.checked_sub(1))
-                .map(|p| sorted[p].0)
-                .or_else(|| strip.get(strip.len().wrapping_sub(1)).ok()?.top()),
-            Direction::East => pos.and_then(|p| sorted.get(p + 1)).map(|(e, _)| *e),
-            _ => None,
-        };
-        if let Some(entity) = target
-            && let Some(window) = windows.get(entity)
-            && let Some(psn) = windows.psn(window.id(), &apps)
-        {
-            debug!("fullscreen: raising {entity}");
-            window.focus_with_raise(psn);
-        }
+    // On a fullscreen space, swap to the previous stack.
+    if let Some(fullscreen) = active_display.fullscreen()
+        && matches!(direction, Direction::West)
+        && let Some(strip) = workspaces
+            .into_iter()
+            .find_map(|(strip, _)| (strip.id() == fullscreen.previous_strip).then_some(strip))
+        && let Ok(column) = strip.get(fullscreen.previous_index.saturating_sub(1))
+        && let Some(entity) = column.top()
+        && let Some(window) = windows.get(entity)
+        && let Some(psn) = windows.psn(window.id(), &apps)
+    {
+        debug!("fullscreen: swap raising {entity}");
+        window.focus_with_raise(psn);
         return;
     }
 
@@ -245,17 +222,21 @@ fn command_move_focus(
         return;
     };
 
-    // At the right edge going East, enter the fullscreen chain (lowest order first).
-    let candidate = get_window_in_direction(direction, focused_entity, strip).or_else(|| {
-        (matches!(direction, Direction::East) && strip.right_neighbour(focused_entity).is_none())
+    // At the right edge going East, enter the fullscreen workspaces.
+    let candidate =
+        get_window_in_direction(direction, focused_entity, active_strip).or_else(|| {
+            (matches!(direction, Direction::East)
+                && active_strip.right_neighbour(focused_entity).is_none())
             .then(|| {
-                fs_windows
+                workspaces
                     .iter()
-                    .min_by_key(|(_, m)| m.order)
-                    .map(|(e, _)| e)
+                    .find(|(strip, fullscreen)| {
+                        fullscreen.is_some() && strip.id() != active_strip.id()
+                    })
+                    .and_then(|(strip, _)| strip.get(0).ok().and_then(|col| col.top()))
             })
             .flatten()
-    });
+        });
 
     if let Some(entity) = candidate
         && let Some(window) = windows.get(entity)
@@ -310,7 +291,6 @@ fn command_move_focus(
 fn command_swap_focus(
     mut messages: MessageReader<Event>,
     windows: Windows,
-    apps: Query<&Application>,
     mut active_display: ActiveDisplayMut,
     mut commands: Commands,
 ) {
@@ -320,24 +300,7 @@ fn command_swap_focus(
         return;
     };
 
-    // On a fullscreen space, swap just raises the last tiled window.
-    if ON_FULLSCREEN_SPACE.load(Ordering::Relaxed) {
-        let strip = active_display.active_strip();
-        if let Some(entity) = strip
-            .get(strip.len().wrapping_sub(1))
-            .ok()
-            .and_then(|c| c.top())
-            && let Some(window) = windows.get(entity)
-            && let Some(psn) = windows.psn(window.id(), &apps)
-        {
-            debug!("fullscreen: swap raising {entity}");
-            window.focus_with_raise(psn);
-        }
-        return;
-    }
-
     let active_strip = active_display.active_strip();
-
     let mut handler = || {
         let (_, current) = windows.focused()?;
         let index = active_strip.index_of(current).ok()?;

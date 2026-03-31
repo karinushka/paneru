@@ -16,8 +16,8 @@ use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
     ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, MissionControlActive,
-    MouseHeldMarker, NativeFullscreenMarker, RetryFrontSwitch, SpawnWindowTrigger, StrayFocusEvent,
-    SystemTheme, Timeout, Unmanaged, WMEventTrigger, WindowDraggedMarker,
+    MouseHeldMarker, RetryFrontSwitch, SpawnWindowTrigger, StrayFocusEvent, SystemTheme, Timeout,
+    Unmanaged, WMEventTrigger, WindowDraggedMarker,
 };
 use crate::config::{Config, WindowParams};
 use crate::ecs::layout::LayoutStrip;
@@ -1460,37 +1460,4 @@ pub(super) fn send_message_trigger(
 ) {
     let event = &trigger.event().0;
     messages.write(event.clone());
-}
-
-#[allow(clippy::needless_pass_by_value)]
-#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
-pub(super) fn window_to_native_fullscreen(
-    trigger: On<Add, NativeFullscreenMarker>,
-    mut active_display: ActiveDisplayMut,
-) {
-    let entity = trigger.event().entity;
-    let layout_strip = active_display.active_strip();
-    layout_strip.remove(entity);
-}
-
-#[allow(clippy::needless_pass_by_value)]
-#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
-pub(super) fn window_from_native_fullscreen(
-    trigger: On<Remove, NativeFullscreenMarker>,
-    mut active_display: ActiveDisplayMut,
-    windows: Windows,
-    apps: Query<(Entity, &Application)>,
-    config: Configuration,
-    mut commands: Commands,
-) {
-    let entity = trigger.event().entity;
-
-    reinsert_window_into_layout(
-        entity,
-        &mut active_display,
-        &windows,
-        apps,
-        config.config(),
-        &mut commands,
-    );
 }

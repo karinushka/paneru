@@ -63,6 +63,7 @@ pub enum Column {
     Stack(Vec<StackItem>),
     /// A panel containing a group of native tabs, with the active "Leader" at the front.
     Tabs(Vec<Entity>),
+    Fullscren(Entity),
 }
 
 impl Column {
@@ -71,7 +72,7 @@ impl Column {
     /// For a `Stack` or `Tabs`, it's the first window in the vector.
     pub fn top(&self) -> Option<Entity> {
         match self {
-            Column::Single(id) => Some(*id),
+            Column::Single(id) | Column::Fullscren(id) => Some(*id),
             Column::Stack(stack) => stack.first().and_then(StackItem::top),
             Column::Tabs(tabs) => tabs.first().copied(),
         }
@@ -80,7 +81,7 @@ impl Column {
     /// Returns the entity at the given index, or the last entity if the index exceeds the size.
     pub fn at_or_last(&self, index: usize) -> Option<Entity> {
         match self {
-            Column::Single(id) => Some(*id),
+            Column::Single(id) | Column::Fullscren(id) => Some(*id),
             Column::Stack(stack) => stack
                 .get(index)
                 .or_else(|| stack.last())
@@ -92,7 +93,7 @@ impl Column {
     /// Returns the position of an entity within this column (0 for Single/Tabs, index for Stack).
     pub fn position_of(&self, entity: Entity) -> Option<usize> {
         match self {
-            Column::Single(id) => (*id == entity).then_some(0),
+            Column::Single(id) | Column::Fullscren(id) => (*id == entity).then_some(0),
             Column::Stack(stack) => stack.iter().position(|item| item.contains(entity)),
             Column::Tabs(tabs) => tabs.contains(&entity).then_some(0),
         }
@@ -102,7 +103,7 @@ impl Column {
     /// This is used to change the Leader of a Tab group.
     pub fn move_to_front(&mut self, entity: Entity) {
         match self {
-            Column::Single(_) => {}
+            Column::Single(_) | Column::Fullscren(_) => {}
             Column::Stack(stack) => {
                 if let Some(StackItem::Tabs(tabs)) =
                     stack.iter_mut().find(|item| item.contains(entity))
@@ -136,6 +137,12 @@ impl LayoutStrip {
         }
     }
 
+    pub fn fullscreen(id: WorkspaceId, entity: Entity) -> Self {
+        let mut columns = VecDeque::new();
+        columns.push_back(Column::Fullscren(entity));
+        Self { id, columns }
+    }
+
     /// Finds the index of a window within the pane.
     /// If the window is part of a stack, it returns the index of the panel containing the stack.
     ///
@@ -150,7 +157,7 @@ impl LayoutStrip {
         self.columns
             .iter()
             .position(|column| match column {
-                Column::Single(id) => *id == entity,
+                Column::Single(id) | Column::Fullscren(id) => *id == entity,
                 Column::Stack(stack) => stack.iter().any(|item| item.contains(entity)),
                 Column::Tabs(stack) => stack.contains(&entity),
             })
@@ -190,7 +197,7 @@ impl LayoutStrip {
         let index = self.index_of(leader)?;
         let column = self.columns.remove(index).unwrap();
         match column {
-            Column::Single(id) => {
+            Column::Single(id) | Column::Fullscren(id) => {
                 self.columns.insert(index, Column::Tabs(vec![id, follower]));
             }
             Column::Stack(mut items) => {
@@ -234,12 +241,8 @@ impl LayoutStrip {
 
         if let Some((column, index)) = removed {
             match column {
-                Column::Single(id) if id == entity => {
+                Column::Single(_) | Column::Fullscren(_) => {
                     // Already removed from self.columns.
-                }
-                Column::Single(id) => {
-                    // Put it back, we removed the wrong one? (Should not happen)
-                    self.columns.insert(index, Column::Single(id));
                 }
                 Column::Stack(mut stack) => {
                     for item in &mut stack {
@@ -378,6 +381,7 @@ impl LayoutStrip {
 
         let column_to_stack = self.columns.remove(index).unwrap();
         let items_to_stack = match column_to_stack {
+            Column::Fullscren(_) => return Ok(()),
             Column::Single(id) => vec![StackItem::Single(id)],
             Column::Tabs(tabs) => vec![StackItem::Tabs(tabs)],
             Column::Stack(items) => items,
@@ -385,6 +389,7 @@ impl LayoutStrip {
 
         let target_column = self.columns.remove(index - 1).unwrap();
         let new_column = match target_column {
+            Column::Fullscren(_) => return Ok(()),
             Column::Single(id) => {
                 Column::Stack([vec![StackItem::Single(id)], items_to_stack].concat())
             }
@@ -457,7 +462,7 @@ impl LayoutStrip {
         self.columns
             .iter()
             .flat_map(|column| match column {
-                Column::Single(entity) => vec![*entity],
+                Column::Single(entity) | Column::Fullscren(entity) => vec![*entity],
                 Column::Stack(items) => items.iter().flat_map(StackItem::all_windows).collect(),
                 Column::Tabs(ids) => ids.clone(),
             })
@@ -490,7 +495,9 @@ impl LayoutStrip {
         self.column_positions(get_window_frame)
             .filter_map(move |(column, position)| {
                 let items: Vec<StackItem> = match column {
-                    Column::Single(entity) => vec![StackItem::Single(*entity)],
+                    Column::Single(entity) | Column::Fullscren(entity) => {
+                        vec![StackItem::Single(*entity)]
+                    }
                     Column::Stack(stack) => stack.clone(),
                     Column::Tabs(tabs) => vec![StackItem::Tabs(tabs.clone())],
                 };
@@ -568,7 +575,7 @@ impl LayoutStrip {
         let index = self.index_of(entity).ok()?;
         let column = self.get(index).ok()?;
         match column {
-            Column::Single(_) | Column::Tabs(_) => None,
+            Column::Single(_) | Column::Tabs(_) | Column::Fullscren(_) => None,
             Column::Stack(items) => {
                 let pos = items.iter().position(|item| item.contains(entity))?;
                 (pos > 0).then(|| items[pos - 1].top()).flatten()
@@ -588,9 +595,15 @@ impl LayoutStrip {
                         false
                     }
                 }),
-                Column::Single(_) => false,
+                Column::Single(_) | Column::Fullscren(_) => false,
             })
             .is_ok_and(|t| t)
+    }
+
+    pub fn is_fullscreen(&self) -> bool {
+        self.columns
+            .front()
+            .is_some_and(|column| matches!(column, Column::Fullscren(_)))
     }
 }
 
@@ -950,7 +963,9 @@ mod tests {
                 assert_eq!(stack[0], StackItem::Single(entities[0]));
                 assert_eq!(stack[1], StackItem::Single(entities[1]));
             }
-            Column::Single(_) | Column::Tabs(_) => panic!("Expected a stack"),
+            Column::Single(_) | Column::Fullscren(_) | Column::Tabs(_) => {
+                panic!("Expected a stack")
+            }
         }
 
         // Unstack [0]

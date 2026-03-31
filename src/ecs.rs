@@ -29,7 +29,7 @@ use crate::manager::{
     Application, Origin, ProcessApi, Size, Window, WindowManager, WindowManagerApi, WindowManagerOS,
 };
 use crate::overlay::OverlayManager;
-use crate::platform::{Modifiers, PlatformCallbacks, WinID};
+use crate::platform::{Modifiers, PlatformCallbacks, WinID, WorkspaceId};
 
 pub mod layout;
 pub mod params;
@@ -161,8 +161,6 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::dim_window_trigger)
         .add_observer(triggers::theme_change_trigger)
         .add_observer(triggers::apply_window_properties)
-        .add_observer(triggers::window_to_native_fullscreen)
-        .add_observer(triggers::window_from_native_fullscreen)
         .add_observer(workspace::workspace_created_trigger)
         .add_observer(workspace::workspace_destroyed_trigger)
         .add_observer(triggers::dim_remove_window_trigger);
@@ -252,9 +250,10 @@ pub struct WidthRatio(pub f64);
 /// The window has been removed from its tiled position in the strip.
 /// `order` gives the sequence in which windows went fullscreen (0, 1, 2, …)
 /// so they can be navigated left-to-right in that order after the tiled strip.
-#[derive(Component)]
+#[derive(Clone, Component, Debug)]
 pub struct NativeFullscreenMarker {
-    pub order: u32,
+    pub previous_strip: WorkspaceId,
+    pub previous_index: usize,
 }
 
 /// Stores the width ratio of a window before it was made full-width.

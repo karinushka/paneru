@@ -43,6 +43,11 @@ pub struct ScrollOptions {
     /// Accepts the same format as keybindings: "alt", "cmd", "alt + cmd", "alt + rcmd" etc.
     #[serde(default, deserialize_with = "deserialize_modifier")]
     pub modifier: Option<Modifiers>,
+
+    /// Additional modifier key(s) that, combined with the scroll modifier,
+    /// switches virtual workspaces vertically instead of scrolling horizontally.
+    #[serde(default, deserialize_with = "deserialize_modifier")]
+    pub vertical_modifier: Option<Modifiers>,
 }
 
 fn deserialize_modifier<'de, D>(deserializer: D) -> Result<Option<Modifiers>, D::Error>

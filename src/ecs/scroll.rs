@@ -1,17 +1,18 @@
 use bevy::ecs::entity::Entity;
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::{With, Without};
-use bevy::ecs::system::{Commands, Populated, Res, Single};
+use bevy::ecs::system::{Commands, Local, Populated, Res, Single};
 use bevy::math::IRect;
 use bevy::time::Time;
 use std::time::{Duration, Instant};
 use tracing::{Level, instrument};
 
+use crate::commands::{Command, Direction, Operation};
 use crate::config::Config;
 use crate::config::swipe::SwipeGestureDirection;
 use crate::ecs::layout::{Column, LayoutStrip};
 use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
-use crate::ecs::{ActiveWorkspaceMarker, Position, Scrolling, WMEventTrigger};
+use crate::ecs::{ActiveWorkspaceMarker, Position, Scrolling, SendMessageTrigger, WMEventTrigger};
 use crate::errors::Result;
 use crate::events::Event;
 use crate::manager::{Window, WindowManager};
@@ -297,4 +298,74 @@ where
             current_offset.clamp(viewport.min.x, viewport.max.x - total_strip_width)
         },
     )
+}
+
+#[derive(Default)]
+pub(super) struct VerticalGestureState {
+    accumulated: f64,
+    last_event: Option<Instant>,
+    fired: bool,
+}
+
+#[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::TRACE, skip_all)]
+pub(super) fn vertical_swipe_gesture(
+    mut messages: MessageReader<Event>,
+    active_display: ActiveDisplay,
+    config: Configuration,
+    mut commands: Commands,
+    mut state: Local<VerticalGestureState>,
+) {
+    if config.mission_control_active() || active_display.fullscreen().is_some() {
+        return;
+    }
+
+    const GESTURE_TIMEOUT: Duration = Duration::from_millis(150);
+
+    // Reset state when the gesture times out (fingers lifted).
+    if let Some(last) = state.last_event {
+        if last.elapsed() > GESTURE_TIMEOUT {
+            state.accumulated = 0.0;
+            state.fired = false;
+        }
+    }
+
+    // Already fired for this gesture. Drain the reader to advance its cursor
+    // but only update timing so the timeout tracks the real gesture end.
+    if state.fired {
+        for event in messages.read() {
+            if matches!(event, Event::VerticalSwipe { .. }) {
+                state.last_event = Some(Instant::now());
+            }
+        }
+        return;
+    }
+
+    // Threshold for triggering a virtual workspace switch.
+    // Needs to be high enough that incidental vertical movement during
+    // horizontal swipes doesn't trigger a workspace switch.
+    let threshold = 0.15 / config.config().swipe_sensitivity();
+
+    for event in messages.read() {
+        let delta = match event {
+            Event::VerticalSwipe { delta } => *delta,
+            _ => continue,
+        };
+
+        state.accumulated += delta;
+        state.last_event = Some(Instant::now());
+    }
+
+    if state.accumulated.abs() >= threshold {
+        let direction = if state.accumulated > 0.0 {
+            Direction::South
+        } else {
+            Direction::North
+        };
+        commands.trigger(SendMessageTrigger(Event::Command {
+            command: Command::Window(Operation::Virtual(direction)),
+        }));
+        state.accumulated = 0.0;
+        state.fired = true;
+    }
 }

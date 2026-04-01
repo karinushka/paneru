@@ -217,7 +217,11 @@ impl InputHandler {
             CGEventType::ScrollWheel => {
                 return self.handle_scroll_wheel(event);
             }
-            _ => self.handle_swipe(event),
+            // Returns directly: handle_swipe returns bool (intercept flag)
+            // rather than Result like the other arms.
+            _ => {
+                return self.handle_swipe(event);
+            }
         };
         if let Err(err) = result {
             error!("error sending event: {err}");
@@ -244,8 +248,6 @@ impl InputHandler {
 
         if let Some(events) = &self.events {
             // Horizontal scroll delta is Axis 2, Vertical is Axis 1.
-            // On macOS, horizontal scroll (holding shift + wheel or side-tilt) is often preferred for swiping between strips.
-            // We use the continuous scroll delta (Fixed) for smoother swiping.
             let h_delta = CGEvent::double_value_field(
                 Some(event),
                 CGEventField::ScrollWheelEventFixedPtDeltaAxis2,
@@ -254,6 +256,15 @@ impl InputHandler {
                 Some(event),
                 CGEventField::ScrollWheelEventFixedPtDeltaAxis1,
             );
+
+            // Check if the vertical modifier is also held for vertical workspace switching.
+            // Combine both modifiers so matches() doesn't reject the base modifier as "extra".
+            if let Some(vertical_mod) = self.config.swipe_scroll_vertical_modifier() {
+                if (target_modifier | vertical_mod).matches(modifiers) && v_delta.abs() > 0.001 {
+                    _ = events.send(Event::VerticalSwipe { delta: v_delta });
+                    return true;
+                }
+            }
 
             // If we have any horizontal delta, or if there's only vertical delta, use it.
             let delta = if h_delta.abs() > 0.001 {
@@ -272,39 +283,30 @@ impl InputHandler {
         false
     }
 
-    /// Handles swipe gesture events.
-    /// It calculates the delta of the swipe and sends a `Swipe` event.
-    ///
-    /// # Arguments
-    ///
-    /// * `event` - A reference to the `CGEvent`.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` if the event is processed successfully, otherwise `Err(Error)`.
-    fn handle_swipe(&mut self, event: &CGEvent) -> Result<()> {
+    /// Handles swipe gesture events. Routes to horizontal `Swipe` or vertical
+    /// `VerticalSwipe` based on axis dominance. Returns true to intercept the event.
+    fn handle_swipe(&mut self, event: &CGEvent) -> bool {
         const SWIPE_THRESHOLD: f64 = 0.001;
         const GESTURE_MINIMAL_FINGERS: usize = 3;
         let Some(ns_event) = NSEvent::eventWithCGEvent(event) else {
-            return Err(Error::InvalidInput(format!(
-                "{}: Unable to convert {event:?} to NSEvent.",
-                function_name!()
-            )));
+            error!("{}: Unable to convert CGEvent to NSEvent", function_name!());
+            return false;
         };
         if ns_event.r#type() != NSEventType::Gesture {
-            return Ok(());
+            return false;
         }
         let fingers = ns_event.allTouches();
         if fingers.len() < GESTURE_MINIMAL_FINGERS {
-            return Ok(());
+            return false;
         }
 
+        let mut intercept = false;
         if fingers.iter().all(|f| f.phase() != NSTouchPhase::Began)
             && let Some(prev) = &self.finger_position
         {
             // Match touches by identity rather than relying on NSSet
             // iteration order, which is not guaranteed to be stable.
-            let deltas = fingers
+            let (x_deltas, y_deltas): (Vec<f64>, Vec<f64>) = fingers
                 .iter()
                 .filter_map(|current| {
                     let id = current.identity();
@@ -314,17 +316,32 @@ impl InputHandler {
                             let equal: bool = unsafe { msg_send![&*p_id, isEqual: &*id] };
                             equal
                         })
-                        .map(|p| p.normalizedPosition().x - current.normalizedPosition().x)
+                        .map(|p| {
+                            let dx = p.normalizedPosition().x - current.normalizedPosition().x;
+                            let dy = p.normalizedPosition().y - current.normalizedPosition().y;
+                            (dx, dy)
+                        })
                 })
-                .collect::<Vec<_>>();
-            if deltas.iter().all(|p| p.abs() > SWIPE_THRESHOLD)
-                && let Some(events) = &self.events
-            {
-                _ = events.send(Event::Swipe { deltas });
+                .unzip();
+
+            if let Some(events) = &self.events {
+                let x_sum: f64 = x_deltas.iter().sum();
+                let y_sum: f64 = y_deltas.iter().sum();
+
+                if x_sum.abs() >= y_sum.abs() {
+                    // Horizontal dominant: use existing swipe path
+                    if x_deltas.iter().all(|p| p.abs() > SWIPE_THRESHOLD) {
+                        _ = events.send(Event::Swipe { deltas: x_deltas });
+                    }
+                } else if y_deltas.iter().all(|p| p.abs() > SWIPE_THRESHOLD) {
+                    // Vertical dominant: send vertical swipe, intercept the event
+                    _ = events.send(Event::VerticalSwipe { delta: y_sum });
+                    intercept = true;
+                }
             }
         }
         self.finger_position = Some(fingers);
-        Ok(())
+        intercept
     }
 
     /// Handles key press events. It determines the modifier mask and attempts to find a matching keybinding in the configuration.

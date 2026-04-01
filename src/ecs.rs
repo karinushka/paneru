@@ -92,6 +92,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
                     DISPLAY_CHANGE_CHECK_FREQ_MS,
                 ))),
             systems::cleanup_on_exit,
+            scroll::vertical_swipe_gesture,
             (
                 scroll::swipe_gesture,
                 scroll::apply_inertia,

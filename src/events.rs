@@ -73,6 +73,9 @@ pub enum Event {
     /// A swipe gesture has been detected.
     Swipe { deltas: Vec<f64> },
 
+    /// A vertical swipe gesture has been detected.
+    VerticalSwipe { delta: f64 },
+
     /// A mouse scroll has been detected.
     Scroll { delta: f64 },
 

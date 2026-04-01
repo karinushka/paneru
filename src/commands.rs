@@ -2,7 +2,7 @@ use bevy::app::PreUpdate;
 use bevy::ecs::entity::{Entity, EntityHashSet};
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::message::MessageReader;
-use bevy::ecs::query::{Has, With};
+use bevy::ecs::query::{Has, With, Without};
 use bevy::ecs::system::{Commands, Query, Res, ResMut, Single};
 use bevy::math::IRect;
 use tracing::{Level, instrument};
@@ -12,9 +12,9 @@ use crate::config::Config;
 use crate::ecs::layout::{Column, LayoutStrip, StackItem};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Windows};
 use crate::ecs::{
-    ActiveDisplayMarker, FocusFollowsMouse, FocusedMarker, FullWidthMarker, NativeFullscreenMarker,
-    SendMessageTrigger, Unmanaged, WMEventTrigger, reposition_entity, reshuffle_around,
-    resize_entity,
+    ActiveDisplayMarker, ActiveWorkspaceMarker, FocusFollowsMouse, FocusedMarker, FullWidthMarker,
+    NativeFullscreenMarker, SelectedVirtualMarker, SendMessageTrigger, Unmanaged, WMEventTrigger,
+    reposition_entity, reshuffle_around, resize_entity,
 };
 use crate::events::Event;
 use crate::manager::{Application, Display, Origin, Size, Window, WindowManager, origin_to};
@@ -601,6 +601,10 @@ fn to_next_display(
     mut messages: MessageReader<Event>,
     windows: Windows,
     mut active_display: ActiveDisplayMut,
+    mut other_workspaces: Query<
+        (&mut LayoutStrip, Has<SelectedVirtualMarker>),
+        Without<ActiveWorkspaceMarker>,
+    >,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
@@ -633,20 +637,32 @@ fn to_next_display(
         other.width() / 2,
     );
     let center = other.bounds().center().x;
+    let target_display_id = other.id();
 
     let Some(size) = windows.size(entity) else {
         return;
     };
     let dest = other.bounds().min.with_x(center - size.x / 2);
     reposition_entity(entity, dest, &mut commands);
-    reshuffle_around(entity, &mut commands);
 
     window_manager.warp_mouse(other.bounds().center());
 
-    if let Some(neighbour) = active_display.active_strip().right_neighbour(entity) {
+    // Remove the window from the source strip.
+    let source_neighbour = active_display.active_strip().left_neighbour(entity);
+    active_display.active_strip().remove(entity);
+    if let Some(neighbour) = source_neighbour {
         reshuffle_around(neighbour, &mut commands);
     }
-    active_display.active_strip().remove(entity);
+
+    // Insert into the target display's selected strip.
+    if let Ok(target_space_id) = window_manager.active_display_space(target_display_id)
+        && let Some((mut target_strip, _)) = other_workspaces
+            .iter_mut()
+            .find(|(strip, selected)| *selected && strip.id() == target_space_id)
+    {
+        target_strip.append(entity);
+        reshuffle_around(entity, &mut commands);
+    }
 }
 
 /// Moves the mouse pointer to the next available display.

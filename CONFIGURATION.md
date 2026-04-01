@@ -61,6 +61,7 @@ Configure trackpad gestures and scroll-wheel window sliding.
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `modifier` | String | `"alt"` | Modifier key(s) required to slide windows with the scroll wheel: `"alt"`, `"rcmd"`, `"ralt + cmd"`, `"lctrl + lalt + cmd"`, etc. |
+| `vertical_modifier` | String | *None* | Additional modifier key that, when held together with `modifier`, switches virtual workspaces vertically instead of scrolling horizontally. For example, if `modifier = "alt"` and `vertical_modifier = "shift"`, then `alt + scroll` slides windows horizontally and `alt + shift + scroll` switches virtual workspace rows. |
 
 ---
 
@@ -134,6 +135,8 @@ Shifting up or down goes to the previous or next strip of windows - wrapping
 around at the start or the end.
 
 Moving the last window out of the virtual row, will "collapse it".
+
+Virtual workspaces can also be navigated using trackpad gestures. If `[swipe.gesture]` is configured, a vertical 3/4-finger swipe will switch between virtual workspace rows, while horizontal swipes continue to scroll the strip as usual. For mouse users, see the `vertical_modifier` option under `[swipe.scroll]`.
 
 | Action | Description |
 | :--- | :--- |

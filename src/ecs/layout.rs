@@ -12,8 +12,8 @@ use tracing::{Level, instrument, trace};
 use crate::config::Config;
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
-    ActiveDisplayMarker, ActiveWorkspaceMarker, Bounds, DockPosition, LayoutPosition, Position,
-    ReshuffleAroundMarker, Scrolling, reposition_entity,
+    ActiveWorkspaceMarker, Bounds, DockPosition, LayoutPosition, Position, ReshuffleAroundMarker,
+    Scrolling, reposition_entity,
 };
 use crate::errors::{Error, Result};
 use crate::manager::{Display, Window};
@@ -846,80 +846,81 @@ pub(super) fn position_layout_strips(
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn position_layout_windows(
-    positioned_windows: Populated<
+    mut positioned_windows: Populated<
         (Entity, &Window, &LayoutPosition, &mut Position, &mut Bounds),
-        (Changed<LayoutPosition>, With<Window>),
+        (Changed<LayoutPosition>, With<Window>, Without<LayoutStrip>),
     >,
-    active_workspace: Single<
-        (&LayoutStrip, &Position, Has<Scrolling>),
-        (With<ActiveWorkspaceMarker>, Without<Window>),
-    >,
-    active_display: Single<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
+    workspaces: Query<(&LayoutStrip, &Position, Has<Scrolling>, &ChildOf), With<LayoutStrip>>,
+    displays: Query<(&Display, Option<&DockPosition>)>,
     config: Res<Config>,
 ) {
-    let (active_display, dock) = *active_display;
-    let viewport = active_display.actual_display_bounds(dock, &config);
-    let (layout_strip, strip_position, swiping) = *active_workspace;
-    let strip_position = strip_position.0.with_y(viewport.min.y);
     let offscreen_sliver_width = config.sliver_width();
     let (_, pad_right, _, pad_left) = config.edge_padding();
 
-    for (entity, window, layout_position, mut position, mut bounds) in positioned_windows {
-        if !layout_strip.contains(entity) {
-            continue;
-        }
+    positioned_windows.par_iter_mut().for_each(
+        |(entity, window, layout_position, mut position, mut bounds)| {
+            let Some((layout_strip, Position(strip_position), swiping, child_of)) =
+                workspaces.iter().find(|strip| strip.0.contains(entity))
+            else {
+                return;
+            };
+            let Ok((display, dock)) = displays.get(child_of.parent()) else {
+                return;
+            };
+            let viewport = display.actual_display_bounds(dock, &config);
 
-        // Account for per-window horizontal_padding: reposition() adds
-        // h_pad to the virtual x, so subtract it here so the OS window
-        // lands exactly sliver_width pixels from the screen edge.
-        let h_pad = window.horizontal_padding();
-        let mut frame = IRect::from_corners(layout_position.0, layout_position.0 + bounds.0);
-        let width = frame.width();
-        frame.min += strip_position;
-        frame.max += strip_position;
+            // Account for per-window horizontal_padding: reposition() adds
+            // h_pad to the virtual x, so subtract it here so the OS window
+            // lands exactly sliver_width pixels from the screen edge.
+            let h_pad = window.horizontal_padding();
+            let mut frame = IRect::from_corners(layout_position.0, layout_position.0 + bounds.0);
+            let width = frame.width();
+            frame.min += strip_position;
+            frame.max += strip_position;
 
-        if frame.max.x <= viewport.min.x + h_pad {
-            // Window hidden to the left — position so exactly
-            // sliver_width CG pixels are visible from the real
-            // display edge.  The +h_pad accounts for the gap that
-            // reposition() adds, which can leave a window just
-            // inside the viewport edge while its CG frame is fully
-            // past it.
-            frame.min.x = viewport.min.x - width + offscreen_sliver_width - pad_left + h_pad;
-        } else if frame.min.x >= viewport.max.x - h_pad {
-            // Window hidden to the right — mirror of above.
-            frame.min.x = viewport.max.x - offscreen_sliver_width + pad_right - h_pad;
-        }
-        frame.max.x = frame.min.x + width;
-
-        // During swipe, keep full height.
-        if !swiping {
-            let stacked = layout_strip
-                .index_of(entity)
-                .ok()
-                .and_then(|idx| layout_strip.get(idx).ok())
-                .is_some_and(|col| matches!(col, Column::Stack(_)));
-
-            // Don't compress stacked windows vertically when off-screen.
-            // The height reduction corrupts their proportions: when the
-            // column scrolls back on-screen, binpack_heights makes the
-            // last window absorb all remaining space.
-            if !stacked {
-                let inset =
-                    (f64::from(viewport.height()) * (1.0 - config.sliver_height()) / 2.0) as i32;
-                frame.min.y += inset;
-                frame.max.y += inset;
+            if frame.max.x <= viewport.min.x + h_pad {
+                // Window hidden to the left — position so exactly
+                // sliver_width CG pixels are visible from the real
+                // display edge.  The +h_pad accounts for the gap that
+                // reposition() adds, which can leave a window just
+                // inside the viewport edge while its CG frame is fully
+                // past it.
+                frame.min.x = viewport.min.x - width + offscreen_sliver_width - pad_left + h_pad;
+            } else if frame.min.x >= viewport.max.x - h_pad {
+                // Window hidden to the right — mirror of above.
+                frame.min.x = viewport.max.x - offscreen_sliver_width + pad_right - h_pad;
             }
-        }
+            frame.max.x = frame.min.x + width;
 
-        if bounds.0 != frame.size() {
-            bounds.0 = frame.size();
-        }
+            // During swipe, keep full height.
+            if !swiping {
+                let stacked = layout_strip
+                    .index_of(entity)
+                    .ok()
+                    .and_then(|idx| layout_strip.get(idx).ok())
+                    .is_some_and(|col| matches!(col, Column::Stack(_)));
 
-        if position.0 != frame.min {
-            position.0 = frame.min;
-        }
-    }
+                // Don't compress stacked windows vertically when off-screen.
+                // The height reduction corrupts their proportions: when the
+                // column scrolls back on-screen, binpack_heights makes the
+                // last window absorb all remaining space.
+                if !stacked {
+                    let inset = (f64::from(viewport.height()) * (1.0 - config.sliver_height())
+                        / 2.0) as i32;
+                    frame.min.y += inset;
+                    frame.max.y += inset;
+                }
+            }
+
+            if bounds.0 != frame.size() {
+                bounds.0 = frame.size();
+            }
+
+            if position.0 != frame.min {
+                position.0 = frame.min;
+            }
+        },
+    );
 }
 
 #[cfg(test)]

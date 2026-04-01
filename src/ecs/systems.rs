@@ -289,7 +289,7 @@ pub(crate) fn finish_setup(
             }
         }
         for (_, entity) in workspace_windows {
-            if strip.index_of(entity).is_err() {
+            if !strip.contains(entity) {
                 strip.append(entity);
             }
         }
@@ -728,7 +728,7 @@ pub(super) fn window_update_frame(
                         continue;
                     }
 
-                    if active_display.active_strip().index_of(entity).is_err() {
+                    if !active_display.active_strip().contains(entity) {
                         // Do not reshuffle for floating windows or on other displays or
                         // workspaces.
                         continue;

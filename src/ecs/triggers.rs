@@ -1412,10 +1412,11 @@ pub(super) fn window_removal_trigger(
 ) {
     let entity = trigger.event().entity;
 
-    if let Some(mut strip) = workspaces
-        .iter_mut()
-        .find(|strip| strip.index_of(entity).is_ok())
-    {
+    if let Some(mut strip) = workspaces.iter_mut().find(|strip| strip.contains(entity)) {
+        debug!(
+            "Removing despawned entity {entity} from strip {}",
+            strip.id()
+        );
         strip.remove(entity);
     }
 }

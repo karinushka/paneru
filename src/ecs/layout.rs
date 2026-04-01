@@ -167,6 +167,15 @@ impl LayoutStrip {
             )))
     }
 
+    /// Returns `true` if the strip contains the given entity.
+    pub fn contains(&self, entity: Entity) -> bool {
+        self.columns.iter().any(|column| match column {
+            Column::Single(id) | Column::Fullscren(id) => *id == entity,
+            Column::Stack(stack) => stack.iter().any(|item| item.contains(entity)),
+            Column::Tabs(stack) => stack.contains(&entity),
+        })
+    }
+
     /// Inserts a window ID into the pane at a specified position.
     /// The new window will be placed as a `Single` panel.
     ///
@@ -770,7 +779,7 @@ pub(super) fn reshuffle_layout_strip(
         if let Ok(mut cmd) = commands.get_entity(entity) {
             cmd.try_remove::<ReshuffleAroundMarker>();
         }
-        if active_display.active_strip().index_of(entity).is_err() {
+        if !active_display.active_strip().contains(entity) {
             continue;
         }
 
@@ -856,7 +865,7 @@ pub(super) fn position_layout_windows(
     let (_, pad_right, _, pad_left) = config.edge_padding();
 
     for (entity, window, layout_position, mut position, mut bounds) in positioned_windows {
-        if layout_strip.index_of(entity).is_err() {
+        if !layout_strip.contains(entity) {
             continue;
         }
 

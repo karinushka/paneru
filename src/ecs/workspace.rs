@@ -189,7 +189,7 @@ pub(super) fn active_workspace_trigger(
         let focused_entity = windows.focused().map(|(_, entity)| entity).filter(|e| {
             workspaces
                 .get(trigger.entity)
-                .is_ok_and(|(strip, _, _)| strip.index_of(*e).is_ok())
+                .is_ok_and(|(strip, _, _)| strip.contains(*e))
         });
         let fallback = || {
             workspaces
@@ -264,7 +264,7 @@ fn windows_not_in_strip<F: Fn(WinID) -> Option<Entity>>(
             let mut unresolved = Vec::new();
             for id in ids {
                 match find_window(id) {
-                    Some(entity) if strip.index_of(entity).is_err() => moved.push(entity),
+                    Some(entity) if !strip.contains(entity) => moved.push(entity),
                     Some(_) => {}
                     None => unresolved.push(id),
                 }

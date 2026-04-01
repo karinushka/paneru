@@ -13,6 +13,7 @@ use scopeguard::ScopeGuard;
 use std::ffi::c_void;
 use std::marker::PhantomPinned;
 use std::pin::Pin;
+use std::time::{Duration, Instant};
 use std::ptr::null_mut;
 use std::sync::{Arc, LazyLock};
 use stdext::function_name;
@@ -34,6 +35,10 @@ pub fn set_focused_passthrough(keys: Vec<(u8, Modifiers)>) {
     FOCUSED_PASSTHROUGH.store(Arc::new(keys));
 }
 
+/// How long to suppress scroll wheel events after a vertical swipe gesture,
+/// covering macOS momentum scroll that continues after finger lift.
+const VERTICAL_GESTURE_SCROLL_SUPPRESS: Duration = Duration::from_millis(500);
+
 /// `InputHandler` manages low-level input events from the macOS `CGEventTap`.
 /// It intercepts keyboard and mouse events, processes gestures, and dispatches them as higher-level `Event`s.
 pub(super) struct InputHandler {
@@ -45,6 +50,10 @@ pub(super) struct InputHandler {
     finger_position: Option<Retained<NSSet<NSTouch>>>,
     /// The `CFMachPort` representing the `CGEventTap`.
     tap_port: Option<CFRetained<CFMachPort>>,
+    /// Timestamp of the last vertical swipe gesture event. Scroll wheel events
+    /// are suppressed for a short window after this to prevent the OS from
+    /// scrolling windows underneath (including momentum scroll after finger lift).
+    last_vertical_gesture: Option<Instant>,
     // Prevents from being Unpin automatically
     _pin: PhantomPinned,
 }
@@ -69,6 +78,7 @@ impl InputHandler {
             config,
             finger_position: None,
             tap_port: None,
+            last_vertical_gesture: None,
             _pin: PhantomPinned,
         }
     }
@@ -235,6 +245,16 @@ impl InputHandler {
 
     /// Handles scroll wheel events. If configured modifier is held, it transforms the scroll into a swipe event.
     fn handle_scroll_wheel(&mut self, event: &CGEvent) -> bool {
+        // Suppress scroll events shortly after a vertical swipe gesture to prevent
+        // the OS from scrolling windows underneath, including momentum scroll events
+        // that arrive after finger lift.
+        if self
+            .last_vertical_gesture
+            .is_some_and(|t| t.elapsed() < VERTICAL_GESTURE_SCROLL_SUPPRESS)
+        {
+            return true;
+        }
+
         let flags = CGEvent::flags(Some(event));
         let modifiers = get_modifiers(flags);
 
@@ -336,6 +356,7 @@ impl InputHandler {
                 } else if y_deltas.iter().all(|p| p.abs() > SWIPE_THRESHOLD) {
                     // Vertical dominant: send vertical swipe, intercept the event
                     _ = events.send(Event::VerticalSwipe { delta: y_sum });
+                    self.last_vertical_gesture = Some(Instant::now());
                     intercept = true;
                 }
             }

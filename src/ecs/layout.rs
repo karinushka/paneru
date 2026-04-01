@@ -3,7 +3,7 @@ use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::query::{Changed, Has, With, Without};
-use bevy::ecs::system::{Commands, Populated, Query, Res, Single};
+use bevy::ecs::system::{ParallelCommands, Populated, Query, Res};
 use bevy::math::IRect;
 use std::collections::VecDeque;
 use stdext::function_name;
@@ -12,8 +12,8 @@ use tracing::{Level, instrument, trace};
 use crate::config::Config;
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, Bounds, DockPosition, LayoutPosition, Position, ReshuffleAroundMarker,
-    Scrolling, reposition_entity,
+    Bounds, DockPosition, LayoutPosition, Position, RepositionMarker, ReshuffleAroundMarker,
+    Scrolling,
 };
 use crate::errors::{Error, Result};
 use crate::manager::{Display, Window};
@@ -764,27 +764,30 @@ pub(super) fn layout_strip_changed(
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn reshuffle_layout_strip(
-    marker: Populated<(Entity, &LayoutPosition), With<ReshuffleAroundMarker>>,
-    active_strip: Single<&Position, With<ActiveWorkspaceMarker>>,
-    active_display: ActiveDisplay,
+    markers: Populated<(Entity, &LayoutPosition), With<ReshuffleAroundMarker>>,
+    strips: Query<(&LayoutStrip, Entity, &Position, &ChildOf)>,
+    displays: Query<(&Display, Option<&DockPosition>)>,
     windows: Windows,
     config: Res<Config>,
-    mut commands: Commands,
+    commands: ParallelCommands,
 ) {
-    let display_bounds = active_display
-        .display()
-        .actual_display_bounds(active_display.dock(), &config);
-
-    for (entity, layout_position) in marker {
-        if let Ok(mut cmd) = commands.get_entity(entity) {
-            cmd.try_remove::<ReshuffleAroundMarker>();
-        }
-        if !active_display.active_strip().contains(entity) {
-            continue;
-        }
-
+    markers.par_iter().for_each(|(entity, layout_position)| {
+        commands.command_scope(|mut command| {
+            if let Ok(mut cmd) = command.get_entity(entity) {
+                cmd.try_remove::<ReshuffleAroundMarker>();
+            }
+        });
+        let Some((_, strip_entity, active_strip, child)) =
+            strips.into_iter().find(|strip| strip.0.contains(entity))
+        else {
+            return;
+        };
+        let Ok((active_display, dock)) = displays.get(child.parent()) else {
+            return;
+        };
+        let display_bounds = active_display.actual_display_bounds(dock, &config);
         let Some(mut frame) = windows.moving_frame(entity) else {
-            continue;
+            return;
         };
 
         let size = frame.size();
@@ -809,19 +812,19 @@ pub(super) fn reshuffle_layout_strip(
 
             // Do not move the window if the hidden fraction is lower than threshold
             // or if the layout strip movement is shorter than the hidden width.
-            let strip_movement = (active_strip.0.x - strip_position.x).abs();
+            let strip_movement = (active_strip.x - strip_position.x).abs();
             if hidden_fraction <= hidden_ratio && frame.width() - visible_width >= strip_movement {
-                continue;
+                return;
             }
         }
 
         trace!("reshuffle_layout_strip: triggered for entity {entity}, offset {strip_position}");
-        reposition_entity(
-            active_display.active_strip_entity(),
-            strip_position,
-            &mut commands,
-        );
-    }
+        commands.command_scope(|mut command| {
+            if let Ok(mut cmd) = command.get_entity(strip_entity) {
+                cmd.try_insert(RepositionMarker(strip_position));
+            }
+        });
+    });
 }
 
 /// Reacts to changes in the position of the `LayoutStrip` to Display, and if changed,

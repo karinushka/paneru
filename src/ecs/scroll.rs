@@ -359,11 +359,6 @@ pub(super) fn vertical_swipe_gesture(
         return;
     }
 
-    // Threshold for triggering a virtual workspace switch.
-    // Needs to be high enough that incidental vertical movement during
-    // horizontal swipes doesn't trigger a workspace switch.
-    let threshold = 0.15 / config.config().swipe_sensitivity();
-
     for event in messages.read() {
         match event {
             Event::VerticalScrollTick { delta } => {
@@ -377,9 +372,14 @@ pub(super) fn vertical_swipe_gesture(
         }
     }
 
-    if state.accumulated.abs() >= threshold {
-        switch_virtual(state.accumulated, &mut commands);
-        state.accumulated = 0.0;
-        state.fired = true;
+    if state.accumulated != 0.0 {
+        // Threshold needs to be high enough that incidental vertical movement
+        // during horizontal swipes doesn't trigger a workspace switch.
+        let threshold = 0.15 / config.config().swipe_sensitivity();
+        if state.accumulated.abs() >= threshold {
+            switch_virtual(state.accumulated, &mut commands);
+            state.accumulated = 0.0;
+            state.fired = true;
+        }
     }
 }

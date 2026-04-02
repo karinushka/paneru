@@ -199,25 +199,19 @@ pub(super) fn workspace_activated_trigger(
         reshuffle_around(entity, &mut commands);
     }
 
-    // Always reshuffle on workspace activation so that windows are
-    // re-laid-out after returning from a different space (e.g. native
-    // fullscreen) where they may have been positioned with stale data.
-    // Prefer the focused window so the viewport centres on what the user
-    // was looking at; fall back to the first column.
+    // Reshuffle around the focused window if it belongs to this strip.
+    // Don't fall back to strip.get(0): during cross-display switches,
+    // FocusedMarker hasn't moved yet, so the fallback would scroll the
+    // strip to the wrong window (causing a visual flash). The incoming
+    // window_focused_trigger will handle the reshuffle once FocusedMarker
+    // lands on the correct window.
     if !had_moved_windows {
         let focused_entity = windows.focused().map(|(_, entity)| entity).filter(|e| {
             workspaces
                 .get(trigger.entity)
                 .is_ok_and(|(strip, _, _)| strip.contains(*e))
         });
-        let fallback = || {
-            workspaces
-                .get(trigger.entity)
-                .ok()
-                .and_then(|(strip, _, _)| strip.get(0).ok())
-                .and_then(|col| col.top())
-        };
-        if let Some(entity) = focused_entity.or_else(fallback) {
+        if let Some(entity) = focused_entity {
             reshuffle_around(entity, &mut commands);
         }
     }
@@ -821,8 +815,6 @@ pub(super) fn show_active_workspace_trigger(
         if let Ok(mut entity_commands) = commands.get_entity(trigger.entity) {
             entity_commands.try_remove::<PreviousPosition>();
         }
-    } else {
-        position.0 = bounds.min;
     }
 
     // Find a window to focus on.

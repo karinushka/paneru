@@ -285,7 +285,7 @@ impl InputHandler {
             // Don't set last_vertical_gesture here: the suppress timer is for
             // trackpad momentum scroll, not discrete wheel ticks.
             if combined_match && v_delta.abs() > 0.001 {
-                _ = events.send(Event::VerticalSwipe { delta: v_delta, discrete: true });
+                _ = events.send(Event::VerticalScrollTick { delta: v_delta });
                 return true;
             }
 
@@ -358,7 +358,7 @@ impl InputHandler {
                     }
                 } else if y_deltas.iter().all(|p| p.abs() > SWIPE_THRESHOLD) {
                     // Vertical dominant: send vertical swipe, intercept the event
-                    _ = events.send(Event::VerticalSwipe { delta: y_sum, discrete: false });
+                    _ = events.send(Event::VerticalSwipe { delta: y_sum });
                     self.last_vertical_gesture = Some(Instant::now());
                     intercept = true;
                 }

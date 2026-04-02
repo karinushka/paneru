@@ -282,9 +282,10 @@ impl InputHandler {
             );
 
             // Vertical workspace switching when vertical modifier is also held.
+            // Don't set last_vertical_gesture here: the suppress timer is for
+            // trackpad momentum scroll, not discrete wheel ticks.
             if combined_match && v_delta.abs() > 0.001 {
                 _ = events.send(Event::VerticalSwipe { delta: v_delta, discrete: true });
-                self.last_vertical_gesture = Some(Instant::now());
                 return true;
             }
 

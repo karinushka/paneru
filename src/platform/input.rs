@@ -37,7 +37,7 @@ pub fn set_focused_passthrough(keys: Vec<(u8, Modifiers)>) {
 
 /// How long to suppress scroll wheel events after a vertical swipe gesture,
 /// covering macOS momentum scroll that continues after finger lift.
-const VERTICAL_GESTURE_SCROLL_SUPPRESS: Duration = Duration::from_millis(500);
+const VERTICAL_GESTURE_SCROLL_SUPPRESS: Duration = Duration::from_millis(1200);
 
 /// `InputHandler` manages low-level input events from the macOS `CGEventTap`.
 /// It intercepts keyboard and mouse events, processes gestures, and dispatches them as higher-level `Event`s.
@@ -259,15 +259,19 @@ impl InputHandler {
         let modifiers = get_modifiers(flags);
 
         let target_modifier = self.config.swipe_scroll_modifier();
+        let vertical_mod = self.config.swipe_scroll_vertical_modifier();
 
-        // Same rules as keybindings: generic modifiers allow either side; L/R-specific
-        // modifiers reject the opposite side and extra modifier families.
-        if !target_modifier.matches(modifiers) {
+        // Check the combined modifier (base + vertical) first, then fall back to
+        // base-only. matches() rejects extra modifier groups, so cmd+shift held
+        // would fail a cmd-only check. We need to accept both.
+        let base_match = target_modifier.matches(modifiers);
+        let combined_match = vertical_mod
+            .is_some_and(|vm| (target_modifier | vm).matches(modifiers));
+        if !combined_match && !base_match {
             return false;
         }
 
         if let Some(events) = &self.events {
-            // Horizontal scroll delta is Axis 2, Vertical is Axis 1.
             let h_delta = CGEvent::double_value_field(
                 Some(event),
                 CGEventField::ScrollWheelEventFixedPtDeltaAxis2,
@@ -277,13 +281,10 @@ impl InputHandler {
                 CGEventField::ScrollWheelEventFixedPtDeltaAxis1,
             );
 
-            // Check if the vertical modifier is also held for vertical workspace switching.
-            // Combine both modifiers so matches() doesn't reject the base modifier as "extra".
-            if let Some(vertical_mod) = self.config.swipe_scroll_vertical_modifier()
-                && (target_modifier | vertical_mod).matches(modifiers)
-                && v_delta.abs() > 0.001
-            {
-                _ = events.send(Event::VerticalSwipe { delta: v_delta });
+            // Vertical workspace switching when vertical modifier is also held.
+            if combined_match && v_delta.abs() > 0.001 {
+                _ = events.send(Event::VerticalSwipe { delta: v_delta, discrete: true });
+                self.last_vertical_gesture = Some(Instant::now());
                 return true;
             }
 
@@ -356,7 +357,7 @@ impl InputHandler {
                     }
                 } else if y_deltas.iter().all(|p| p.abs() > SWIPE_THRESHOLD) {
                     // Vertical dominant: send vertical swipe, intercept the event
-                    _ = events.send(Event::VerticalSwipe { delta: y_sum });
+                    _ = events.send(Event::VerticalSwipe { delta: y_sum, discrete: false });
                     self.last_vertical_gesture = Some(Instant::now());
                     intercept = true;
                 }

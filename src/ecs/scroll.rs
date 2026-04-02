@@ -320,6 +320,13 @@ pub(super) fn vertical_swipe_gesture(
         return;
     }
 
+    let switch_virtual = |delta: f64, commands: &mut Commands| {
+        let direction = if delta > 0.0 { Direction::South } else { Direction::North };
+        commands.trigger(SendMessageTrigger(Event::Command {
+            command: Command::Window(Operation::Virtual(direction)),
+        }));
+    };
+
     const GESTURE_TIMEOUT: Duration = Duration::from_millis(150);
 
     // Reset state when the gesture times out (fingers lifted).
@@ -332,10 +339,17 @@ pub(super) fn vertical_swipe_gesture(
 
     // Already fired for this gesture. Drain the reader to advance its cursor
     // but only update timing so the timeout tracks the real gesture end.
+    // Discrete (scroll wheel) events skip the latch since each tick is independent.
     if state.fired {
         for event in messages.read() {
-            if matches!(event, Event::VerticalSwipe { .. }) {
-                state.last_event = Some(Instant::now());
+            match event {
+                Event::VerticalSwipe { discrete: true, delta } => {
+                    switch_virtual(*delta, &mut commands);
+                }
+                Event::VerticalSwipe { .. } => {
+                    state.last_event = Some(Instant::now());
+                }
+                _ => {}
             }
         }
         return;
@@ -347,24 +361,23 @@ pub(super) fn vertical_swipe_gesture(
     let threshold = 0.15 / config.config().swipe_sensitivity();
 
     for event in messages.read() {
-        let delta = match event {
-            Event::VerticalSwipe { delta } => *delta,
+        let (delta, discrete) = match event {
+            Event::VerticalSwipe { delta, discrete } => (*delta, *discrete),
             _ => continue,
         };
+
+        // Scroll wheel ticks fire immediately, one switch per tick.
+        if discrete {
+            switch_virtual(delta, &mut commands);
+            continue;
+        }
 
         state.accumulated += delta;
         state.last_event = Some(Instant::now());
     }
 
     if state.accumulated.abs() >= threshold {
-        let direction = if state.accumulated > 0.0 {
-            Direction::South
-        } else {
-            Direction::North
-        };
-        commands.trigger(SendMessageTrigger(Event::Command {
-            command: Command::Window(Operation::Virtual(direction)),
-        }));
+        switch_virtual(state.accumulated, &mut commands);
         state.accumulated = 0.0;
         state.fired = true;
     }

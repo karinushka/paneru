@@ -2,7 +2,7 @@ use bevy::app::PreUpdate;
 use bevy::ecs::entity::{Entity, EntityHashSet};
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::message::MessageReader;
-use bevy::ecs::query::{Has, With, Without};
+use bevy::ecs::query::{Has, With};
 use bevy::ecs::system::{Commands, Query, Res, ResMut, Single};
 use bevy::math::IRect;
 use tracing::{Level, instrument};
@@ -600,11 +600,8 @@ fn manage_window(mut messages: MessageReader<Event>, windows: Windows, mut comma
 fn to_next_display(
     mut messages: MessageReader<Event>,
     windows: Windows,
-    mut active_display: ActiveDisplayMut,
-    mut other_workspaces: Query<
-        (&mut LayoutStrip, Has<SelectedVirtualMarker>),
-        Without<ActiveWorkspaceMarker>,
-    >,
+    displays: Query<(&Display, Has<ActiveDisplayMarker>)>,
+    mut all_strips: Query<(&mut LayoutStrip, &ChildOf, Has<SelectedVirtualMarker>)>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
@@ -625,7 +622,11 @@ fn to_next_display(
         return;
     }
 
-    let Some(other) = active_display.other().next() else {
+    let Some(other) = displays
+        .iter()
+        .find(|(_, active)| !active)
+        .map(|(display, _)| display)
+    else {
         debug!("no other display to move window to.");
         return;
     };
@@ -648,17 +649,22 @@ fn to_next_display(
     window_manager.warp_mouse(other.bounds().center());
 
     // Remove the window from the source strip.
-    let source_neighbour = active_display.active_strip().left_neighbour(entity);
-    active_display.active_strip().remove(entity);
+    let source_neighbour = all_strips
+        .iter()
+        .find(|(strip, _, _)| strip.contains(entity))
+        .and_then(|(strip, _, _)| strip.left_neighbour(entity));
+    for (mut strip, _, _) in all_strips.iter_mut() {
+        strip.remove(entity);
+    }
     if let Some(neighbour) = source_neighbour {
         reshuffle_around(neighbour, &mut commands);
     }
 
     // Insert into the target display's selected strip.
     if let Ok(target_space_id) = window_manager.active_display_space(target_display_id)
-        && let Some((mut target_strip, _)) = other_workspaces
+        && let Some((mut target_strip, _, _)) = all_strips
             .iter_mut()
-            .find(|(strip, selected)| *selected && strip.id() == target_space_id)
+            .find(|(strip, _, selected)| *selected && strip.id() == target_space_id)
     {
         target_strip.append(entity);
         reshuffle_around(entity, &mut commands);

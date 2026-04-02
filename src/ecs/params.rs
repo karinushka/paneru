@@ -11,11 +11,14 @@ use bevy::{
 use objc2_core_graphics::CGDirectDisplayID;
 use tracing::warn;
 
-use super::{ActiveDisplayMarker, FocusFollowsMouse, MissionControlActive, SkipReshuffle};
+use super::{
+    ActiveDisplayMarker, FocusFollowsMouse, MissionControlActive, SelectedVirtualMarker,
+    SkipReshuffle,
+};
 use crate::{
     config::Config,
     ecs::{
-        ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker, FullWidthMarker, Initializing,
+        Bounds, DockPosition, FocusedMarker, FullWidthMarker, Initializing,
         LayoutPosition, NativeFullscreenMarker, Position, RepositionMarker, ResizeMarker,
         Unmanaged, WidthRatio, layout::LayoutStrip,
     },
@@ -136,15 +139,16 @@ impl Configuration<'_> {
 /// It ensures that only one display is marked as active at any given time.
 #[derive(SystemParam)]
 pub struct ActiveDisplay<'w, 's> {
-    strip: Single<
+    strips: Query<
         'w,
         's,
         (
             &'static LayoutStrip,
             Entity,
             Option<&'static NativeFullscreenMarker>,
+            &'static ChildOf,
         ),
-        With<ActiveWorkspaceMarker>,
+        With<SelectedVirtualMarker>,
     >,
     /// The single active `Display` component, marked with `ActiveDisplayMarker`.
     display: Single<
@@ -174,15 +178,29 @@ impl ActiveDisplay<'_, '_> {
     }
 
     pub fn active_strip(&self) -> &LayoutStrip {
-        self.strip.0
+        let display_entity = self.display.1;
+        self.strips
+            .iter()
+            .find(|(_, _, _, child_of)| child_of.parent() == display_entity)
+            .map(|(strip, _, _, _)| strip)
+            .expect("active display has no selected strip")
     }
 
     pub fn active_strip_entity(&self) -> Entity {
-        self.strip.1
+        let display_entity = self.display.1;
+        self.strips
+            .iter()
+            .find(|(_, _, _, child_of)| child_of.parent() == display_entity)
+            .map(|(_, entity, _, _)| entity)
+            .expect("active display has no selected strip")
     }
 
     pub fn fullscreen(&self) -> Option<&NativeFullscreenMarker> {
-        self.strip.2
+        let display_entity = self.display.1;
+        self.strips
+            .iter()
+            .find(|(_, _, _, child_of)| child_of.parent() == display_entity)
+            .and_then(|(_, _, marker, _)| marker)
     }
 
     /// Returns the `CGRect` representing the bounds of the active display.
@@ -199,7 +217,12 @@ impl ActiveDisplay<'_, '_> {
 /// It allows systems to modify the active display and its associated `LayoutStrip`s.
 #[derive(SystemParam)]
 pub struct ActiveDisplayMut<'w, 's> {
-    strip: Single<'w, 's, &'static mut LayoutStrip, With<ActiveWorkspaceMarker>>,
+    strips: Query<
+        'w,
+        's,
+        (&'static mut LayoutStrip, &'static ChildOf),
+        With<SelectedVirtualMarker>,
+    >,
     /// The single active `Display` component, marked with `ActiveDisplayMarker`.
     display: Single<
         'w,
@@ -226,7 +249,12 @@ impl ActiveDisplayMut<'_, '_> {
     }
 
     pub fn active_strip(&mut self) -> &mut LayoutStrip {
-        &mut self.strip
+        let display_entity = self.display.1;
+        self.strips
+            .iter_mut()
+            .find(|(_, child_of)| child_of.parent() == display_entity)
+            .map(|(strip, _)| strip.into_inner())
+            .expect("active display has no selected strip")
     }
 
     /// Returns the `CGRect` representing the bounds of the active display.

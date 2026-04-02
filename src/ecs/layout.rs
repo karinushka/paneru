@@ -10,7 +10,7 @@ use stdext::function_name;
 use tracing::{Level, instrument, trace};
 
 use crate::config::Config;
-use crate::ecs::params::{ActiveDisplay, Windows};
+use crate::ecs::params::Windows;
 use crate::ecs::{
     Bounds, DockPosition, LayoutPosition, Position, RepositionMarker, ReshuffleAroundMarker,
     Scrolling,
@@ -695,14 +695,10 @@ pub(super) fn layout_sizes_changed(
     changed_sizes: Populated<Entity, Changed<Bounds>>,
     windows: Query<(&Position, &Bounds, &Window), Without<LayoutStrip>>,
     mut layout_position: Query<&mut LayoutPosition, With<Window>>,
-    active_display: ActiveDisplay,
+    strips: Query<(&LayoutStrip, &ChildOf), With<LayoutStrip>>,
+    displays: Query<(&Display, Option<&DockPosition>)>,
     config: Res<Config>,
 ) {
-    let viewport = active_display
-        .display()
-        .actual_display_bounds(active_display.dock(), &config);
-    let layout_strip = active_display.active_strip();
-
     let get_window_frame = |entity| {
         windows
             .get(entity)
@@ -710,20 +706,25 @@ pub(super) fn layout_sizes_changed(
             .ok()
     };
 
-    changed_sizes
-        .into_iter()
-        .filter_map(|entity| {
-            layout_strip
-                .index_of(entity)
-                .is_ok()
-                .then_some(layout_strip.relative_positions(viewport.height(), &get_window_frame))
-        })
-        .flatten()
-        .for_each(|(entity, frame)| {
+    for entity in changed_sizes.into_iter() {
+        let Some((layout_strip, child_of)) = strips
+            .iter()
+            .find(|(s, _)| s.index_of(entity).is_ok())
+        else {
+            continue;
+        };
+        let Ok((display, dock)) = displays.get(child_of.parent()) else {
+            continue;
+        };
+        let viewport = display.actual_display_bounds(dock, &config);
+
+        for (entity, frame) in layout_strip.relative_positions(viewport.height(), &get_window_frame)
+        {
             if let Ok(mut layout_position) = layout_position.get_mut(entity) {
                 layout_position.0 = frame.min;
             }
-        });
+        }
+    }
 }
 
 /// Watches for changes to `LayoutStrip` (i.e. a window added or window order changed) and

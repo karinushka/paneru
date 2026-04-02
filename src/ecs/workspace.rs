@@ -385,13 +385,22 @@ pub(super) fn find_orphaned_workspaces(
 
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn refresh_workspace_window_sizes(
-    layout_strip: Single<(&LayoutStrip, Entity, &RefreshWindowSizes), With<ActiveWorkspaceMarker>>,
+    layout_strips: Query<
+        (&LayoutStrip, Entity, &RefreshWindowSizes, &ChildOf),
+        With<SelectedVirtualMarker>,
+    >,
+    active_display_entity: Single<Entity, With<ActiveDisplayMarker>>,
     mut windows: Query<(Entity, &mut Window, &mut Bounds, Option<&Unmanaged>)>,
     active_display: ActiveDisplay,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
-    let (strip, strip_entity, marker) = *layout_strip;
+    let Some((strip, strip_entity, marker, _)) = layout_strips
+        .iter()
+        .find(|(_, _, _, c)| c.parent() == *active_display_entity)
+    else {
+        return;
+    };
     if !marker.ready() {
         return;
     }

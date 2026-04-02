@@ -84,7 +84,8 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::displays_rearranged,
             systems::reposition_dragged_window,
             workspace::detect_moved_windows.run_if(not(resource_exists::<Initializing>)),
-            workspace::hide_inactive_workspace_trigger,
+            workspace::hide_inactive_workspace,
+            workspace::show_active_workspace,
             workspace::cleanup_virtual_workspaces,
             workspace::handle_virtual_window_moves,
             workspace::find_orphaned_workspaces
@@ -93,6 +94,11 @@ pub fn register_systems(app: &mut bevy::app::App) {
                     DISPLAY_CHANGE_CHECK_FREQ_MS,
                 ))),
             systems::cleanup_on_exit,
+        ),
+    );
+    app.add_systems(
+        Update,
+        (
             scroll::vertical_swipe_gesture,
             (
                 scroll::swipe_gesture,
@@ -173,7 +179,6 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(workspace::workspace_created_trigger)
         .add_observer(workspace::workspace_destroyed_trigger)
         .add_observer(workspace::workspace_change_trigger)
-        .add_observer(workspace::show_active_workspace_trigger)
         .add_observer(workspace::virtual_strip_activated)
         .add_observer(workspace::cleanup_active_workspace_marker)
         .add_observer(workspace::cleanup_selected_space_marker);

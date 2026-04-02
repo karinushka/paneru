@@ -175,6 +175,7 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(workspace::workspace_change_trigger)
         .add_observer(workspace::show_active_workspace_trigger)
         .add_observer(workspace::virtual_strip_activated)
+        .add_observer(workspace::cleanup_active_workspace_marker)
         .add_observer(workspace::cleanup_selected_space_marker);
 }
 

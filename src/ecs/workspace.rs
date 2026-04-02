@@ -97,15 +97,12 @@ pub(super) fn workspace_change_trigger(
         insert_into = Some(entity);
     }
 
-    if let Some((from, into)) = remove_from.zip(insert_into) {
-        if let Ok(mut entity_commands) = commands.get_entity(from) {
-            entity_commands.try_remove::<ActiveWorkspaceMarker>();
-        }
-        if let Ok(mut entity_commands) = commands.get_entity(into) {
-            entity_commands
-                .try_insert(ActiveWorkspaceMarker)
-                .try_insert(SelectedVirtualMarker);
-        }
+    if let Some(into) = insert_into
+        && let Ok(mut entity_commands) = commands.get_entity(into)
+    {
+        entity_commands
+            .try_insert(ActiveWorkspaceMarker)
+            .try_insert(SelectedVirtualMarker);
     }
 }
 
@@ -472,8 +469,7 @@ pub(super) fn virtual_strip_activated(
     workspaces: Query<(Entity, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     mut commands: Commands,
 ) {
-    let Some((active_entity, active_strip, _)) = workspaces.iter().find(|(_, _, active)| *active)
-    else {
+    let Some((_, active_strip, _)) = workspaces.iter().find(|(_, _, active)| *active) else {
         return;
     };
     if active_strip.contains(trigger.entity) {
@@ -481,19 +477,35 @@ pub(super) fn virtual_strip_activated(
     }
 
     for (entity, strip, _) in workspaces {
-        if strip.contains(trigger.entity) {
-            if let Ok(mut entity_commands) = commands.get_entity(active_entity) {
-                entity_commands.try_remove::<ActiveWorkspaceMarker>();
-            }
-            if let Ok(mut entity_commands) = commands.get_entity(entity) {
-                entity_commands
-                    .try_insert(ActiveWorkspaceMarker)
-                    .try_insert(SelectedVirtualMarker);
-            }
+        if strip.contains(trigger.entity)
+            && let Ok(mut entity_commands) = commands.get_entity(entity)
+        {
+            entity_commands
+                .try_insert(ActiveWorkspaceMarker)
+                .try_insert(SelectedVirtualMarker);
         }
     }
 }
 
+/// Removes previuos `ActiveWorkspaceMarker`'s when a new one is inserted.
+#[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
+pub(super) fn cleanup_active_workspace_marker(
+    trigger: On<Add, ActiveWorkspaceMarker>,
+    workspaces: Query<(Entity, Has<ActiveWorkspaceMarker>), With<LayoutStrip>>,
+    mut commands: Commands,
+) {
+    workspaces.iter().for_each(|(entity, marker)| {
+        if marker
+            && entity != trigger.entity
+            && let Ok(mut entity_commands) = commands.get_entity(entity)
+        {
+            entity_commands.try_remove::<ActiveWorkspaceMarker>();
+        }
+    });
+}
+
+/// Removes previuos `SelectedVirtualMarker`'s when a new one is inserted.
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 pub(super) fn cleanup_selected_space_marker(
@@ -607,17 +619,6 @@ pub(super) fn handle_virtual_window_moves(
             }
         }
 
-        // Remove old markers.
-        if let Some(old_entity) = workspaces
-            .iter()
-            .find_map(|(entity, _, active)| active.then_some(entity))
-            && let Ok(mut entity_commands) = commands.get_entity(old_entity)
-        {
-            entity_commands
-                .try_remove::<SelectedVirtualMarker>()
-                .try_remove::<ActiveWorkspaceMarker>();
-        }
-
         // Insert new markers.
         if let Ok(mut entity_commands) = commands.get_entity(target_entity) {
             entity_commands
@@ -671,13 +672,7 @@ pub(crate) fn switch_virtual_workspace_bind(
         return;
     }
 
-    let old_entity = rows[current_index].0;
     let new_entity = rows[next_index].0;
-    if let Ok(mut entity_commands) = commands.get_entity(old_entity) {
-        entity_commands
-            .try_remove::<SelectedVirtualMarker>()
-            .try_remove::<ActiveWorkspaceMarker>();
-    }
     if let Ok(mut entity_commands) = commands.get_entity(new_entity) {
         entity_commands
             .try_insert(SelectedVirtualMarker)

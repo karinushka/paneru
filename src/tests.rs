@@ -1844,8 +1844,8 @@ fn test_multi_display_no_height_crosstalk() {
             2 => {
                 // After the display switch, simulate a strip mutation on
                 // the non-active (external) display.  In practice this
-                // happens when window_focused_trigger, window_removal, or
-                // workspace_activated_trigger touch the strip via DerefMut.
+                // happens when window_focused_trigger or window_removal
+                // touch the strip via DerefMut.
                 use crate::ecs::ActiveWorkspaceMarker;
                 let mut strip_query =
                     world.query_filtered::<&mut LayoutStrip, Without<ActiveWorkspaceMarker>>();

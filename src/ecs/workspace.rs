@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
@@ -107,10 +109,10 @@ pub(super) fn workspace_change_trigger(
     }
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
-pub(super) fn workspace_activated_trigger(
-    trigger: On<Add, ActiveWorkspaceMarker>,
+pub(super) fn detect_moved_windows(
+    activated_workspace: Single<Entity, Added<ActiveWorkspaceMarker>>,
     windows: Windows,
     mut workspaces: Query<
         (&mut LayoutStrip, &ChildOf, Option<&NativeFullscreenMarker>),
@@ -119,9 +121,10 @@ pub(super) fn workspace_activated_trigger(
     active_display: Single<(Entity, &Display), With<ActiveDisplayMarker>>,
     apps: Query<&mut Application>,
     window_manager: Res<WindowManager>,
+    mut ignored_windows: Local<HashSet<WinID>>,
     mut commands: Commands,
 ) {
-    let Ok((active_strip, _, _)) = workspaces.get(trigger.entity) else {
+    let Ok((active_strip, _, _)) = workspaces.get(*activated_workspace) else {
         return;
     };
     let workspace_id = active_strip.id();
@@ -142,7 +145,9 @@ pub(super) fn workspace_activated_trigger(
         return;
     };
     // Skip known, but unmanaged windows.
-    unresolved.retain(|window_id| windows.find(*window_id).is_none());
+    unresolved.retain(|window_id| {
+        !ignored_windows.contains(window_id) && windows.find(*window_id).is_none()
+    });
 
     if !unresolved.is_empty() {
         // Retry unresolved window IDs: during startup bruteforce, windows on
@@ -157,7 +162,11 @@ pub(super) fn workspace_activated_trigger(
                     .filter(|window| unresolved.contains(&window.id()))
             })
             .collect::<Vec<_>>();
-        if !retry_windows.is_empty() {
+        if retry_windows.is_empty() {
+            for id in unresolved {
+                ignored_windows.insert(id);
+            }
+        } else {
             debug!(
                 "retrying unresolved windows: {}",
                 retry_windows
@@ -170,7 +179,6 @@ pub(super) fn workspace_activated_trigger(
         }
     }
 
-    let had_moved_windows = !moved_windows.is_empty();
     let fullscreened = workspaces
         .iter()
         .filter_map(|(_, _, marker)| marker)
@@ -196,30 +204,6 @@ pub(super) fn workspace_activated_trigger(
                 }
             }
         });
-        reshuffle_around(entity, &mut commands);
-    }
-
-    // Always reshuffle on workspace activation so that windows are
-    // re-laid-out after returning from a different space (e.g. native
-    // fullscreen) where they may have been positioned with stale data.
-    // Prefer the focused window so the viewport centres on what the user
-    // was looking at; fall back to the first column.
-    if !had_moved_windows {
-        let focused_entity = windows.focused().map(|(_, entity)| entity).filter(|e| {
-            workspaces
-                .get(trigger.entity)
-                .is_ok_and(|(strip, _, _)| strip.contains(*e))
-        });
-        let fallback = || {
-            workspaces
-                .get(trigger.entity)
-                .ok()
-                .and_then(|(strip, _, _)| strip.get(0).ok())
-                .and_then(|col| col.top())
-        };
-        if let Some(entity) = focused_entity.or_else(fallback) {
-            reshuffle_around(entity, &mut commands);
-        }
     }
 }
 

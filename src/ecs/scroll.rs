@@ -341,13 +341,13 @@ pub(super) fn vertical_swipe_gesture(
         state.fired = false;
     }
 
-    // Already fired for this gesture. Drain the reader to advance its cursor
-    // but only update timing so the timeout tracks the real gesture end.
-    // Discrete (scroll wheel) events skip the latch since each tick is independent.
+    // Already fired for this trackpad gesture. Drain the reader to advance
+    // its cursor but only update timing so the timeout tracks the real gesture end.
+    // Scroll wheel ticks still fire since each tick is independent.
     if state.fired {
         for event in messages.read() {
             match event {
-                Event::VerticalSwipe { discrete: true, delta } => {
+                Event::VerticalScrollTick { delta } => {
                     switch_virtual(*delta, &mut commands);
                 }
                 Event::VerticalSwipe { .. } => {
@@ -365,19 +365,16 @@ pub(super) fn vertical_swipe_gesture(
     let threshold = 0.15 / config.config().swipe_sensitivity();
 
     for event in messages.read() {
-        let (delta, discrete) = match event {
-            Event::VerticalSwipe { delta, discrete } => (*delta, *discrete),
-            _ => continue,
-        };
-
-        // Scroll wheel ticks fire immediately, one switch per tick.
-        if discrete {
-            switch_virtual(delta, &mut commands);
-            continue;
+        match event {
+            Event::VerticalScrollTick { delta } => {
+                switch_virtual(*delta, &mut commands);
+            }
+            Event::VerticalSwipe { delta } => {
+                state.accumulated += delta;
+                state.last_event = Some(Instant::now());
+            }
+            _ => {}
         }
-
-        state.accumulated += delta;
-        state.last_event = Some(Instant::now());
     }
 
     if state.accumulated.abs() >= threshold {

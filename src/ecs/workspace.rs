@@ -290,7 +290,6 @@ fn windows_not_in_strips<F: Fn(WinID) -> Option<Entity>>(
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn find_orphaned_workspaces(
     orphans: Populated<(&LayoutStrip, Entity, &Timeout, Option<&ChildOf>), With<Timeout>>,
-    mut attached: Query<(&mut LayoutStrip, Entity, &ChildOf), Without<Timeout>>,
     displays: Query<(&Display, Entity)>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
@@ -349,32 +348,10 @@ pub(super) fn find_orphaned_workspaces(
             target_display.id(),
         );
 
-        let refresh_entity = if let Some((mut target_strip, strip_entity, _)) = attached
-            .iter_mut()
-            .find(|(strip, _, child)| child.parent() == target_entity && strip.id() == orphan.id())
-        {
-            // Move windows into existing workspace strip.
-            debug!("moving windows into existing layout strip.");
-            for entity in orphan.all_windows() {
-                target_strip.append(entity);
-            }
-            if let Ok(mut cmd) = commands.get_entity(orphan_entity) {
-                cmd.despawn();
-            }
-            strip_entity
-        } else {
-            // Display does not have this strip, add it.
-            debug!("adding the layout strip directly.");
-            if let Ok(mut commands) = commands.get_entity(orphan_entity) {
-                commands
-                    .try_remove::<Timeout>()
-                    .insert(ChildOf(target_entity));
-            }
-            orphan_entity
-        };
-
-        if let Ok(mut cmd) = commands.get_entity(refresh_entity) {
-            cmd.insert(RefreshWindowSizes::default());
+        if let Ok(mut cmd) = commands.get_entity(orphan_entity) {
+            cmd.try_remove::<Timeout>()
+                .insert(ChildOf(target_entity))
+                .insert(RefreshWindowSizes::default());
         }
     }
 }

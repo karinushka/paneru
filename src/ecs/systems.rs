@@ -885,10 +885,6 @@ fn remove_display(
         .into_iter()
         .filter(|(_, _, child)| child.is_some_and(|child| child.parent() == display_entity))
     {
-        if strip.len() == 0 {
-            // There are no windows on the layout strip, don't bother orphaning them.
-            continue;
-        }
         let display_id = display.id();
         debug!(
             "orphaning strip {} after removal of display {display_id}.",
@@ -959,22 +955,25 @@ fn reparent_existing_workspaces(
 ) {
     // Verifies that a moved display has all the workspaces which it owns.
     for &id in workspace_ids {
-        if let Some((_, entity, child)) = existing_strips
-            .iter()
-            .find(|(strip, _, _)| strip.id() == id)
-        {
-            if child.is_some_and(|child| child.parent() != display_entity) {
-                // Re-parent this workspace
-                if let Ok(mut cmd) = commands.get_entity(entity) {
-                    debug!("reparenting workspace {id} to display {display_entity}");
-                    cmd.try_remove::<Timeout>()
-                        .try_remove::<ChildOf>()
-                        .insert(ChildOf(display_entity));
+        let mut found = false;
+        for (strip, entity, child) in existing_strips {
+            if strip.id() == id {
+                found = true;
+                if child.is_none() || child.is_some_and(|child| child.parent() != display_entity) {
+                    // Re-parent this workspace
+                    if let Ok(mut cmd) = commands.get_entity(entity) {
+                        debug!("reparenting workspace {id} to display {display_entity}");
+                        cmd.try_remove::<Timeout>()
+                            .try_remove::<ChildOf>()
+                            .insert(ChildOf(display_entity));
 
-                    cmd.insert(RefreshWindowSizes::default());
+                        cmd.insert(RefreshWindowSizes::default());
+                    }
                 }
             }
-        } else {
+        }
+
+        if !found {
             // New workspace.
             let origin = Position(display_bounds.min);
             debug!("new workspace {id} on display {display_entity}");

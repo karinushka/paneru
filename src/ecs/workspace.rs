@@ -656,7 +656,9 @@ pub(super) fn handle_virtual_window_moves(
             && let Ok(mut entity_commands) = commands.get_entity(source_entity)
             && let Ok((_, source_strip, position, _)) = workspaces.get(source_entity)
         {
-            let focus = source_strip.left_neighbour(window_entity);
+            let focus = source_strip
+                .left_neighbour(window_entity)
+                .or_else(|| source_strip.right_neighbour(window_entity));
             entity_commands.try_insert(PreviousStripPosition {
                 origin: position.0,
                 focus,

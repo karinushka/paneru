@@ -75,6 +75,15 @@ pub(super) fn workspace_change_trigger(
         }
     }
 
+    if insert_into.is_none() {
+        // Fallback: find any strip for this workspace, preferably the one with virtual_index 0.
+        insert_into = workspaces
+            .iter()
+            .filter(|(strip, _, _, _)| strip.id() == workspace_id)
+            .min_by_key(|(strip, _, _, _)| strip.virtual_index)
+            .map(|(_, entity, _, _)| entity);
+    }
+
     if insert_into.is_none()
         && let Some(old_space) = remove_from
         && window_manager.is_fullscreen_space(active_display.id())
@@ -257,7 +266,12 @@ pub(super) fn workspace_created_trigger(
     let (active_display, display_entity) = *active_display;
     let strip = LayoutStrip::new(space_id, 0);
     let origin = Position(active_display.bounds().min);
-    commands.spawn((strip, origin, ChildOf(display_entity)));
+    commands.spawn((
+        strip,
+        origin,
+        SelectedVirtualMarker,
+        ChildOf(display_entity),
+    ));
 }
 
 fn windows_not_in_strips<F: Fn(WinID) -> Option<Entity>>(
@@ -524,7 +538,8 @@ pub(super) fn cleanup_virtual_workspaces(
     mut strips: Populated<(Entity, &mut LayoutStrip)>,
     mut commands: Commands,
 ) {
-    let Some(workspace_id) = strips.get(*changed).ok().map(|(_, strip)| strip.id()) else {
+    let changed_entity = *changed;
+    let Some(workspace_id) = strips.get(changed_entity).ok().map(|(_, strip)| strip.id()) else {
         return;
     };
     debug!("cleaning up virtual workspaces on space {workspace_id}");
@@ -534,9 +549,21 @@ pub(super) fn cleanup_virtual_workspaces(
         .collect::<Vec<_>>();
     rows.sort_by_key(|(_, strip)| strip.virtual_index);
 
+    if rows.is_empty() {
+        return;
+    }
+
+    let primary_entity = rows[0].0;
     let mut next_idx = 0;
     for (entity, mut strip) in rows {
         if strip.virtual_index > 0 && strip.len() == 0 {
+            if entity == changed_entity {
+                debug!("moving markers from despawned virtual workspace to primary");
+                commands
+                    .entity(primary_entity)
+                    .try_insert(ActiveWorkspaceMarker)
+                    .try_insert(SelectedVirtualMarker);
+            }
             commands.entity(entity).despawn();
             continue;
         }

@@ -980,6 +980,7 @@ fn reparent_existing_workspaces(
             commands.spawn((
                 origin.clone(),
                 LayoutStrip::new(id, 0),
+                SelectedVirtualMarker,
                 ChildOf(display_entity),
             ));
         }

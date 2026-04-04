@@ -18,7 +18,7 @@ use tracing::{error, info, warn};
 use self::decorations::BorderRadiusOption;
 use self::swipe::SwipeGestureDirection;
 use crate::{
-    commands::{Command, Direction, MouseMove, Operation, ResizeDirection},
+    commands::{Command, Direction, MouseMove, MoveFocus, Operation, ResizeDirection},
     platform::{Modifiers, OSStatus, macos_major_version},
 };
 use crate::{
@@ -184,10 +184,12 @@ fn parse_operation(argv: &[&str]) -> Result<Operation> {
         "equalize" => Operation::Equalize,
         "stack" => Operation::Stack(true),
         "unstack" => Operation::Stack(false),
-        "nextdisplay" => Operation::ToNextDisplay,
+        "nextdisplay" => Operation::ToNextDisplay(MoveFocus::Follow),
+        "nextdisplaysend" => Operation::ToNextDisplay(MoveFocus::Stay),
         "snap" => Operation::Snap,
         "virtual" => Operation::Virtual(parse_direction(argv.get(1).ok_or(err)?)?),
-        "virtualmove" => Operation::VirtualMove(parse_direction(argv.get(1).ok_or(err)?)?),
+        "virtualmove" => Operation::VirtualMove(parse_direction(argv.get(1).ok_or(err)?)?, MoveFocus::Follow),
+        "virtualsend" => Operation::VirtualMove(parse_direction(argv.get(1).ok_or(err)?)?, MoveFocus::Stay),
         _ => {
             return Err(err);
         }

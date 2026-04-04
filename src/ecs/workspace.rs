@@ -11,7 +11,7 @@ use bevy::ecs::system::{Commands, Local, Populated, Query, Res, Single};
 use tracing::{Level, debug, error, instrument, warn};
 
 use super::{ActiveDisplayMarker, SpawnWindowTrigger, WMEventTrigger};
-use crate::commands::{Direction, Operation, filter_window_operations};
+use crate::commands::{Direction, MoveFocus, Operation, filter_window_operations};
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
@@ -28,6 +28,7 @@ use crate::platform::{WinID, WorkspaceId};
 #[derive(Component)]
 pub(super) struct VirtualMoveMarker {
     pub target_virtual_index: u32,
+    pub move_focus: MoveFocus,
 }
 
 #[derive(Component, Debug)]
@@ -591,47 +592,72 @@ pub(super) fn handle_virtual_window_moves(
     let (display_entity, active_display) = *active_display;
     for (window_entity, move_marker) in &moved_windows {
         commands.entity(window_entity).remove::<VirtualMoveMarker>();
+        let follow = matches!(move_marker.move_focus, MoveFocus::Follow);
 
         let target_idx = move_marker.target_virtual_index;
         let target = workspaces.iter().find_map(|(entity, strip, _, _)| {
             (strip.id() == workspace_id && strip.virtual_index == target_idx).then_some(entity)
         });
 
+        // Must be captured before strip.remove below.
+        let source_neighbour = workspaces.get(source_entity).ok().and_then(|(_, strip, _, _)| {
+            strip
+                .left_neighbour(window_entity)
+                .or_else(|| strip.right_neighbour(window_entity))
+        });
+        // If source will be empty after the move, Stay becomes Follow
+        // since there's nothing left to look at.
+        let stay = !follow && source_neighbour.is_some();
+
         let target_entity = if let Some(entity) = target {
             entity
         } else {
-            let origin = Position(active_display.bounds().min);
+            // Stay: spawn offscreen with PreviousStripPosition for later restoration.
+            // Follow (or empty source): spawn visible, user is switching to it.
+            let visible_origin = active_display.bounds().min;
+            let origin = if stay {
+                active_display.bounds().max - 10
+            } else {
+                visible_origin
+            };
             debug!(
                 "Creating new virtual row {target_idx} on workspace {}",
                 workspace_id
             );
             let mut new_strip = LayoutStrip::new(workspace_id, target_idx);
-            // Append the window right away, otherwise it is not yet visible in the next for loop.
             new_strip.append(window_entity);
 
-            commands
-                .spawn((
-                    new_strip,
-                    origin,
-                    SelectedVirtualMarker,
-                    ChildOf(display_entity),
-                ))
-                .id()
+            let mut spawned = commands.spawn((
+                new_strip,
+                Position(origin),
+                SelectedVirtualMarker,
+                ChildOf(display_entity),
+            ));
+            if stay {
+                // show_active_workspace needs this to restore the strip
+                // onscreen when the user later switches to this workspace.
+                spawned.insert(PreviousStripPosition {
+                    origin: visible_origin,
+                    focus: Some(window_entity),
+                });
+            }
+            spawned.id()
         };
 
-        // Preserve the focus of the current layout strip.
-        if let Ok(mut entity_commands) = commands.get_entity(source_entity)
-            && let Ok((_, source_strip, position, _)) = workspaces.get(source_entity)
-        {
-            let focus = source_strip.left_neighbour(window_entity);
-            entity_commands.try_insert(PreviousStripPosition {
-                origin: position.0,
-                focus,
-            });
+        // Preserve the source strip's scroll position for when the user returns.
+        if !stay {
+            if let Ok(mut entity_commands) = commands.get_entity(source_entity)
+                && let Ok((_, source_strip, position, _)) = workspaces.get(source_entity)
+            {
+                let focus = source_strip.left_neighbour(window_entity);
+                entity_commands.try_insert(PreviousStripPosition {
+                    origin: position.0,
+                    focus,
+                });
+            }
         }
 
-        // Move the window first, before moving the markers -
-        // otherwise it would be detected as a moved window.
+        // Move the window before moving markers to avoid being detected as a moved window.
         for (entity, mut strip, _, _) in &mut workspaces {
             if entity == target_entity {
                 strip.append(window_entity);
@@ -640,14 +666,22 @@ pub(super) fn handle_virtual_window_moves(
             }
         }
 
-        // Insert new markers.
+        // Insert new markers. ActiveWorkspaceMarker switches the view.
         if let Ok(mut entity_commands) = commands.get_entity(target_entity) {
-            entity_commands
-                .try_insert(SelectedVirtualMarker)
-                .try_insert(ActiveWorkspaceMarker);
+            entity_commands.try_insert(SelectedVirtualMarker);
+            if !stay {
+                entity_commands.try_insert(ActiveWorkspaceMarker);
+            }
         }
 
-        reshuffle_around(window_entity, &mut commands);
+        if stay && let Some(neighbour) = source_neighbour {
+            // Layout chain repositions the window offscreen with its hidden strip.
+            reshuffle_around(neighbour, &mut commands);
+            commands.entity(window_entity).remove::<FocusedMarker>();
+            commands.entity(neighbour).try_insert(FocusedMarker);
+        } else {
+            reshuffle_around(window_entity, &mut commands);
+        }
         debug!(
             "Moved window {} to virtual workspace {}",
             window_entity, target_idx
@@ -715,8 +749,8 @@ pub(crate) fn move_virtual_workspace_bind(
     active_display: ActiveDisplay,
     mut commands: Commands,
 ) {
-    let Some(Operation::VirtualMove(direction)) =
-        filter_window_operations(&mut messages, |op| matches!(op, Operation::VirtualMove(_)))
+    let Some(Operation::VirtualMove(direction, move_focus)) =
+        filter_window_operations(&mut messages, |op| matches!(op, Operation::VirtualMove(_, _)))
             .next()
     else {
         return;
@@ -741,6 +775,7 @@ pub(crate) fn move_virtual_workspace_bind(
 
     commands.entity(focused_entity).insert(VirtualMoveMarker {
         target_virtual_index,
+        move_focus: *move_focus,
     });
     debug!("Moving {focused_entity} to new virtual space {target_virtual_index}");
 }

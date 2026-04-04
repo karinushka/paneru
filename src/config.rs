@@ -188,8 +188,12 @@ fn parse_operation(argv: &[&str]) -> Result<Operation> {
         "nextdisplaysend" => Operation::ToNextDisplay(MoveFocus::Stay),
         "snap" => Operation::Snap,
         "virtual" => Operation::Virtual(parse_direction(argv.get(1).ok_or(err)?)?),
-        "virtualmove" => Operation::VirtualMove(parse_direction(argv.get(1).ok_or(err)?)?, MoveFocus::Follow),
-        "virtualsend" => Operation::VirtualMove(parse_direction(argv.get(1).ok_or(err)?)?, MoveFocus::Stay),
+        "virtualmove" => {
+            Operation::VirtualMove(parse_direction(argv.get(1).ok_or(err)?)?, MoveFocus::Follow)
+        }
+        "virtualsend" => {
+            Operation::VirtualMove(parse_direction(argv.get(1).ok_or(err)?)?, MoveFocus::Stay)
+        }
         _ => {
             return Err(err);
         }

@@ -600,11 +600,14 @@ pub(super) fn handle_virtual_window_moves(
         });
 
         // Must be captured before strip.remove below.
-        let source_neighbour = workspaces.get(source_entity).ok().and_then(|(_, strip, _, _)| {
-            strip
-                .left_neighbour(window_entity)
-                .or_else(|| strip.right_neighbour(window_entity))
-        });
+        let source_neighbour = workspaces
+            .get(source_entity)
+            .ok()
+            .and_then(|(_, strip, _, _)| {
+                strip
+                    .left_neighbour(window_entity)
+                    .or_else(|| strip.right_neighbour(window_entity))
+            });
         // If source will be empty after the move, Stay becomes Follow
         // since there's nothing left to look at.
         let stay = !follow && source_neighbour.is_some();
@@ -645,16 +648,15 @@ pub(super) fn handle_virtual_window_moves(
         };
 
         // Preserve the source strip's scroll position for when the user returns.
-        if !stay {
-            if let Ok(mut entity_commands) = commands.get_entity(source_entity)
-                && let Ok((_, source_strip, position, _)) = workspaces.get(source_entity)
-            {
-                let focus = source_strip.left_neighbour(window_entity);
-                entity_commands.try_insert(PreviousStripPosition {
-                    origin: position.0,
-                    focus,
-                });
-            }
+        if !stay
+            && let Ok(mut entity_commands) = commands.get_entity(source_entity)
+            && let Ok((_, source_strip, position, _)) = workspaces.get(source_entity)
+        {
+            let focus = source_strip.left_neighbour(window_entity);
+            entity_commands.try_insert(PreviousStripPosition {
+                origin: position.0,
+                focus,
+            });
         }
 
         // Move the window before moving markers to avoid being detected as a moved window.
@@ -750,8 +752,10 @@ pub(crate) fn move_virtual_workspace_bind(
     mut commands: Commands,
 ) {
     let Some(Operation::VirtualMove(direction, move_focus)) =
-        filter_window_operations(&mut messages, |op| matches!(op, Operation::VirtualMove(_, _)))
-            .next()
+        filter_window_operations(&mut messages, |op| {
+            matches!(op, Operation::VirtualMove(_, _))
+        })
+        .next()
     else {
         return;
     };

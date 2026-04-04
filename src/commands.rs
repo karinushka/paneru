@@ -616,8 +616,10 @@ fn to_next_display(
     mut commands: Commands,
 ) {
     let Some(Operation::ToNextDisplay(move_focus)) =
-        filter_window_operations(&mut messages, |op| matches!(op, Operation::ToNextDisplay(_)))
-            .next()
+        filter_window_operations(&mut messages, |op| {
+            matches!(op, Operation::ToNextDisplay(_))
+        })
+        .next()
     else {
         return;
     };
@@ -666,11 +668,11 @@ fn to_next_display(
         reshuffle_around(neighbour, &mut commands);
     }
 
-    if matches!(move_focus, MoveFocus::Stay) {
-        if let Some(neighbour) = source_neighbour {
-            commands.entity(entity).remove::<FocusedMarker>();
-            commands.entity(neighbour).try_insert(FocusedMarker);
-        }
+    if matches!(move_focus, MoveFocus::Stay)
+        && let Some(neighbour) = source_neighbour
+    {
+        commands.entity(entity).remove::<FocusedMarker>();
+        commands.entity(neighbour).try_insert(FocusedMarker);
     }
 
     // Insert into the target display's selected strip.

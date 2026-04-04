@@ -37,6 +37,13 @@ pub enum ResizeDirection {
     Shrink,
 }
 
+/// Controls whether focus follows the window after a move operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MoveFocus {
+    Follow,
+    Stay,
+}
+
 /// Defines the various operations that can be performed on windows.
 #[derive(Clone, Debug)]
 pub enum Operation {
@@ -51,7 +58,7 @@ pub enum Operation {
     /// Toggles the focused window to full width or a preset width.
     FullWidth,
     /// Moves the focused window to the next available display.
-    ToNextDisplay,
+    ToNextDisplay(MoveFocus),
     /// Distributes heights equally among windows in the focused stack.
     Equalize,
     /// Toggles the managed state of the focused window.
@@ -64,7 +71,7 @@ pub enum Operation {
     /// Cyclically selects the virtual strip for the current workspace.
     Virtual(Direction),
     /// Moves the focused window to the virtual strip.
-    VirtualMove(Direction),
+    VirtualMove(Direction, MoveFocus),
 }
 
 /// Defines operations that can be performed on the mouse.
@@ -353,7 +360,7 @@ fn command_swap_focus(
         debug!("swapping window to another display: {change_display}");
         if change_display {
             commands.trigger(SendMessageTrigger(Event::Command {
-                command: Command::Window(Operation::ToNextDisplay),
+                command: Command::Window(Operation::ToNextDisplay(MoveFocus::Follow)),
             }));
         }
     }
@@ -608,12 +615,12 @@ fn to_next_display(
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
-    if filter_window_operations(&mut messages, |op| matches!(op, Operation::ToNextDisplay))
-        .next()
-        .is_none()
-    {
+    let Some(Operation::ToNextDisplay(move_focus)) =
+        filter_window_operations(&mut messages, |op| matches!(op, Operation::ToNextDisplay(_)))
+            .next()
+    else {
         return;
-    }
+    };
 
     let Some((window, entity, unmanaged)) = windows
         .focused()
@@ -645,13 +652,25 @@ fn to_next_display(
     let dest = other.bounds().min.with_x(center - size.x / 2);
     reposition_entity(entity, dest, &mut commands);
 
-    window_manager.warp_mouse(other.bounds().center());
+    if matches!(move_focus, MoveFocus::Follow) {
+        window_manager.warp_mouse(other.bounds().center());
+    }
 
     // Remove the window from the source strip.
-    let source_neighbour = active_display.active_strip().left_neighbour(entity);
+    let source_neighbour = active_display
+        .active_strip()
+        .left_neighbour(entity)
+        .or_else(|| active_display.active_strip().right_neighbour(entity));
     active_display.active_strip().remove(entity);
     if let Some(neighbour) = source_neighbour {
         reshuffle_around(neighbour, &mut commands);
+    }
+
+    if matches!(move_focus, MoveFocus::Stay) {
+        if let Some(neighbour) = source_neighbour {
+            commands.entity(entity).remove::<FocusedMarker>();
+            commands.entity(neighbour).try_insert(FocusedMarker);
+        }
     }
 
     // Insert into the target display's selected strip.

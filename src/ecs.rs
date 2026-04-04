@@ -181,6 +181,7 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(focus::dim_window_trigger)
         .add_observer(focus::maintain_focus_singleton)
         .add_observer(focus::virtual_strip_activated)
+        .add_observer(focus::focus_window_trigger)
         .add_observer(workspace::cleanup_active_workspace_marker)
         .add_observer(workspace::cleanup_selected_space_marker)
         .add_observer(workspace::workspace_change_trigger)
@@ -432,6 +433,13 @@ pub fn resize_entity(entity: Entity, size: Size, commands: &mut Commands) {
 pub fn reshuffle_around(entity: Entity, commands: &mut Commands) {
     if let Ok(mut entity_commands) = commands.get_entity(entity) {
         entity_commands.try_insert(ReshuffleAroundMarker);
+    }
+}
+
+pub fn focus_entity(entity: Entity, raise: bool, commands: &mut Commands) {
+    if let Ok(mut entity_commands) = commands.get_entity(entity) {
+        entity_commands.try_insert(FocusedMarker);
+        commands.trigger(focus::FocusWindow { entity, raise });
     }
 }
 

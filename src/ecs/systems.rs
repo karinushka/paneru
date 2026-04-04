@@ -29,7 +29,7 @@ use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, BruteforceWindows, Initializing, LocateDockTrigger, Position,
     RefreshWindowSizes, Scrolling, SelectedVirtualMarker, StackAdjustedResize, Unmanaged,
-    WidthRatio, WindowDraggedMarker, WindowProperties, reshuffle_around,
+    WidthRatio, WindowDraggedMarker, WindowProperties, focus_entity, reshuffle_around,
 };
 use crate::events::Event;
 use crate::manager::{
@@ -235,7 +235,6 @@ pub(crate) fn add_existing_application(
 pub(crate) fn finish_setup(
     process_query: Query<Entity, With<ExistingMarker>>,
     windows: Windows,
-    apps: Query<&Application>,
     mut bruteforce_tasks: Query<(Entity, &mut BruteforceWindows)>,
     mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     window_manager: Res<WindowManager>,
@@ -303,13 +302,7 @@ pub(crate) fn finish_setup(
         debug!("space {}: after refresh {strip:?}", strip.id());
 
         if active_strip && let Some(entity) = strip.first().ok().and_then(|column| column.top()) {
-            commands.entity(entity).try_insert(FocusedMarker);
-            if let Some(window) = windows.get(entity)
-                && let Some(psn) = windows.psn(window.id(), &apps)
-            {
-                debug!("raising {}", window.id());
-                window.focus_with_raise(psn);
-            }
+            focus_entity(entity, true, &mut commands);
         }
     }
 

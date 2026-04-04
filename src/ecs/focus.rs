@@ -3,6 +3,7 @@ use bevy::ecs::lifecycle::{Add, Remove};
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Has, With};
 use bevy::ecs::system::{Commands, Query, Res};
+use bevy::prelude::Event as BevyEvent;
 use tracing::{Level, debug, instrument, warn};
 
 use super::{FocusedMarker, MouseHeldMarker, SystemTheme};
@@ -12,7 +13,13 @@ use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Scrolling, SelectedVirtualMarker, reposition_entity, reshuffle_around,
 };
-use crate::manager::{Window, WindowManager};
+use crate::manager::{Application, Window, WindowManager};
+
+#[derive(BevyEvent)]
+pub(super) struct FocusWindow {
+    pub entity: Entity,
+    pub raise: bool,
+}
 
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
@@ -169,5 +176,28 @@ pub(super) fn virtual_strip_activated(
                 .try_insert(ActiveWorkspaceMarker)
                 .try_insert(SelectedVirtualMarker);
         }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn focus_window_trigger(
+    trigger: On<FocusWindow>,
+    windows: Windows,
+    apps: Query<&Application>,
+) {
+    let FocusWindow { entity, raise } = *trigger.event();
+    let Some(window) = windows.get(entity) else {
+        return;
+    };
+    let Some(psn) = windows.psn(window.id(), &apps) else {
+        return;
+    };
+    if !raise
+        && let Some((focused_window, _)) = windows.focused()
+        && let Some(focused_psn) = windows.psn(focused_window.id(), &apps)
+    {
+        window.focus_without_raise(psn, focused_window, focused_psn);
+    } else {
+        window.focus_with_raise(psn);
     }
 }

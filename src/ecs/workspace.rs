@@ -14,9 +14,8 @@ use crate::commands::{Direction, MoveFocus, Operation, filter_window_operations}
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, Bounds, FocusedMarker, NativeFullscreenMarker, Position,
-    RefreshWindowSizes, SelectedVirtualMarker, Timeout, Unmanaged, reposition_entity,
-    reshuffle_around,
+    ActiveWorkspaceMarker, Bounds, NativeFullscreenMarker, Position, RefreshWindowSizes,
+    SelectedVirtualMarker, Timeout, Unmanaged, focus_entity, reposition_entity, reshuffle_around,
 };
 use crate::errors::Result;
 use crate::events::Event;
@@ -664,8 +663,8 @@ pub(super) fn handle_virtual_window_moves(
 
         if stay && let Some(neighbour) = source_neighbour {
             // Layout chain repositions the window offscreen with its hidden strip.
+            focus_entity(neighbour, false, &mut commands);
             reshuffle_around(neighbour, &mut commands);
-            commands.entity(neighbour).try_insert(FocusedMarker);
         } else {
             reshuffle_around(window_entity, &mut commands);
         }
@@ -827,7 +826,6 @@ pub(super) fn hide_inactive_workspace(
 pub(super) fn show_active_workspace(
     activated: Single<Entity, Added<ActiveWorkspaceMarker>>,
     windows: Windows,
-    apps: Query<&Application>,
     mut workspaces: Query<
         (&mut Position, &LayoutStrip, Option<&PreviousStripPosition>),
         Without<Window>,
@@ -845,15 +843,17 @@ pub(super) fn show_active_workspace(
         }
         position.0 = *origin;
 
+        if let Some((_, current_focus)) = windows.focused()
+            && strip.contains(current_focus)
+        {
+            return;
+        }
+
         // Focus on the previous window
         if let Some(entity) = focus
             && strip.contains(*entity)
-            && let Some(window) = windows.get(*entity)
-            && let Some(psn) = windows.psn(window.id(), &apps)
-            && let Some((previous_focus, _)) = windows.focused()
-            && let Some(previous_psn) = windows.psn(previous_focus.id(), &apps)
         {
-            window.focus_without_raise(psn, previous_focus, previous_psn);
+            focus_entity(*entity, false, &mut commands);
         }
     }
 }

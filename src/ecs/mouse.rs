@@ -7,9 +7,9 @@ use tracing::{debug, trace, warn};
 
 use super::{MissionControlActive, MouseHeldMarker, Timeout, WMEventTrigger, WindowDraggedMarker};
 use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
-use crate::ecs::{ActiveWorkspaceMarker, Scrolling, reshuffle_around};
+use crate::ecs::{ActiveWorkspaceMarker, Scrolling, focus_entity, reshuffle_around};
 use crate::events::Event;
-use crate::manager::{Application, WindowManager};
+use crate::manager::WindowManager;
 
 /// Handles mouse moved events.
 ///
@@ -28,9 +28,9 @@ use crate::manager::{Application, WindowManager};
 pub(super) fn mouse_moved_trigger(
     trigger: On<WMEventTrigger>,
     windows: Windows,
-    apps: Query<&Application>,
     window_manager: Res<WindowManager>,
     mut config: Configuration,
+    mut commands: Commands,
 ) {
     let Event::MouseMoved { point } = trigger.event().0 else {
         return;
@@ -57,7 +57,7 @@ pub(super) fn mouse_moved_trigger(
         trace!("allready focused {window_id}");
         return;
     }
-    let Some((window, _)) = windows.find(window_id) else {
+    let Some((window, entity)) = windows.find(window_id) else {
         trace!("can not find focused window: {window_id}");
         return;
     };
@@ -81,19 +81,9 @@ pub(super) fn mouse_moved_trigger(
     }
 
     // Do not reshuffle windows due to moved mouse focus.
-    // window_manager.skip_reshuffle = true;
     config.set_skip_reshuffle(true);
     config.set_ffm_flag(Some(window.id()));
-
-    if let Some(psn) = windows.psn(window.id(), &apps) {
-        if let Some((focused_window, _)) = windows.focused()
-            && let Some(focused_psn) = windows.psn(focused_window.id(), &apps)
-        {
-            window.focus_without_raise(psn, focused_window, focused_psn);
-        } else {
-            window.focus_with_raise(psn);
-        }
-    }
+    focus_entity(entity, false, &mut commands);
 }
 
 /// Handles mouse down events.

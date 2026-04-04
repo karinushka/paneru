@@ -24,8 +24,8 @@ use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, LayoutPosition, LocateDockTrigger, Position, Scrolling,
-    SendMessageTrigger, WidthRatio, WindowProperties, reposition_entity, reshuffle_around,
-    resize_entity,
+    SendMessageTrigger, WidthRatio, WindowProperties, focus_entity, reposition_entity,
+    reshuffle_around, resize_entity,
 };
 use crate::events::Event;
 use crate::manager::{
@@ -961,14 +961,13 @@ pub(super) fn apply_window_properties(
     // reshuffle after all windows are added.
     if !config.initializing()
         && properties.dont_focus()
-        && let Some((focus, _)) = windows.focused()
-        && let Some(psn) = windows.psn(focus.id(), &apps)
+        && let Some((focus, entity)) = windows.focused()
     {
         debug!(
             "Not focusing new window {entity}, keeping focus on '{}'",
             focus.title().unwrap_or_default()
         );
-        focus.focus_with_raise(psn);
+        focus_entity(entity, true, &mut commands);
     }
 }
 

@@ -14,7 +14,7 @@ use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Windows};
 use crate::ecs::{
     ActiveDisplayMarker, ActiveWorkspaceMarker, FocusFollowsMouse, FocusedMarker, FullWidthMarker,
     NativeFullscreenMarker, SelectedVirtualMarker, SendMessageTrigger, Unmanaged, WMEventTrigger,
-    reposition_entity, reshuffle_around, resize_entity,
+    focus_entity, reposition_entity, reshuffle_around, resize_entity,
 };
 use crate::events::Event;
 use crate::manager::{Application, Display, Origin, Size, Window, WindowManager, origin_to};
@@ -202,7 +202,6 @@ fn command_move_focus(
     windows: Windows,
     workspaces: Query<(&LayoutStrip, Option<&NativeFullscreenMarker>)>,
     active_display: ActiveDisplay,
-    apps: Query<&Application>,
     mut commands: Commands,
 ) {
     let Some(Operation::Focus(direction)) =
@@ -221,11 +220,9 @@ fn command_move_focus(
             .find_map(|(strip, _)| (strip.id() == fullscreen.previous_strip).then_some(strip))
         && let Ok(column) = strip.get(fullscreen.previous_index.saturating_sub(1))
         && let Some(entity) = column.top()
-        && let Some(window) = windows.get(entity)
-        && let Some(psn) = windows.psn(window.id(), &apps)
     {
         debug!("fullscreen: swap raising {entity}");
-        window.focus_with_raise(psn);
+        focus_entity(entity, true, &mut commands);
         return;
     }
 
@@ -249,14 +246,8 @@ fn command_move_focus(
             .flatten()
         });
 
-    if let Some(entity) = candidate
-        && let Some(window) = windows.get(entity)
-        && let Some(psn) = windows.psn(window.id(), &apps)
-    {
-        window.focus_with_raise(psn);
-        // Update FocusedMarker immediately so that rapid successive keypresses
-        // see the correct focused entity without waiting for the OS event round-trip.
-        commands.entity(entity).try_insert(FocusedMarker);
+    if let Some(entity) = candidate {
+        focus_entity(entity, true, &mut commands);
         // Explicitly reshuffle so the target window is brought into view.
         // This avoids a race where focus-follows-mouse leaves skip_reshuffle
         // set, causing the WindowFocused handler to skip the reshuffle.
@@ -668,7 +659,7 @@ fn to_next_display(
     if matches!(move_focus, MoveFocus::Stay)
         && let Some(neighbour) = source_neighbour
     {
-        commands.entity(neighbour).try_insert(FocusedMarker);
+        focus_entity(neighbour, false, &mut commands);
     }
 
     // Insert into the target display's selected strip.

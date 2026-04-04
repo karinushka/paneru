@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
@@ -8,6 +6,7 @@ use bevy::ecs::message::MessageReader;
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Added, Has, With, Without};
 use bevy::ecs::system::{Commands, Local, Populated, Query, Res, Single};
+use std::collections::HashSet;
 use tracing::{Level, debug, error, instrument, warn};
 
 use super::{ActiveDisplayMarker, SpawnWindowTrigger, WMEventTrigger};
@@ -468,31 +467,6 @@ pub(super) fn workspace_change_watcher(
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
-#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
-pub(super) fn virtual_strip_activated(
-    trigger: On<Add, FocusedMarker>,
-    workspaces: Query<(Entity, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
-    mut commands: Commands,
-) {
-    let Some((_, active_strip, _)) = workspaces.iter().find(|(_, _, active)| *active) else {
-        return;
-    };
-    if active_strip.contains(trigger.entity) {
-        return;
-    }
-
-    for (entity, strip, _) in workspaces {
-        if strip.contains(trigger.entity)
-            && let Ok(mut entity_commands) = commands.get_entity(entity)
-        {
-            entity_commands
-                .try_insert(ActiveWorkspaceMarker)
-                .try_insert(SelectedVirtualMarker);
-        }
-    }
-}
-
 /// Removes previuos `ActiveWorkspaceMarker`'s when a new one is inserted.
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
@@ -691,7 +665,6 @@ pub(super) fn handle_virtual_window_moves(
         if stay && let Some(neighbour) = source_neighbour {
             // Layout chain repositions the window offscreen with its hidden strip.
             reshuffle_around(neighbour, &mut commands);
-            commands.entity(window_entity).remove::<FocusedMarker>();
             commands.entity(neighbour).try_insert(FocusedMarker);
         } else {
             reshuffle_around(window_entity, &mut commands);

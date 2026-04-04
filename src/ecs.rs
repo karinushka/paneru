@@ -31,6 +31,7 @@ use crate::manager::{
 use crate::overlay::OverlayManager;
 use crate::platform::{Modifiers, PlatformCallbacks, WinID, WorkspaceId};
 
+mod focus;
 pub mod layout;
 pub mod params;
 mod scroll;
@@ -157,7 +158,6 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::mouse_dragged_trigger)
         .add_observer(triggers::display_change_trigger)
         .add_observer(triggers::front_switched_trigger)
-        .add_observer(triggers::center_mouse_trigger)
         .add_observer(triggers::window_focused_trigger)
         .add_observer(triggers::mission_control_trigger)
         .add_observer(triggers::application_event_trigger)
@@ -172,16 +172,19 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::locate_dock_trigger)
         .add_observer(triggers::send_message_trigger)
         .add_observer(triggers::window_removal_trigger)
-        .add_observer(triggers::dim_window_trigger)
         .add_observer(triggers::theme_change_trigger)
         .add_observer(triggers::apply_window_properties)
-        .add_observer(triggers::dim_remove_window_trigger)
-        .add_observer(workspace::workspace_created_trigger)
-        .add_observer(workspace::workspace_destroyed_trigger)
-        .add_observer(workspace::workspace_change_trigger)
-        .add_observer(workspace::virtual_strip_activated)
+        .add_observer(focus::autocenter_on_focus)
+        .add_observer(focus::center_mouse_trigger)
+        .add_observer(focus::dim_remove_window_trigger)
+        .add_observer(focus::dim_window_trigger)
+        .add_observer(focus::maintain_focus_singleton)
+        .add_observer(focus::virtual_strip_activated)
         .add_observer(workspace::cleanup_active_workspace_marker)
-        .add_observer(workspace::cleanup_selected_space_marker);
+        .add_observer(workspace::cleanup_selected_space_marker)
+        .add_observer(workspace::workspace_change_trigger)
+        .add_observer(workspace::workspace_created_trigger)
+        .add_observer(workspace::workspace_destroyed_trigger);
 }
 
 /// Marker component for the currently focused window.

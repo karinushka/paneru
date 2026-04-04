@@ -331,23 +331,23 @@ impl OverlayManager {
     }
 }
 
-// ── WorkspaceIndicator ──────────────────────────────────────────────────
+// ── FlashMessage ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
-struct WorkspaceIndicatorViewIvars {
+struct FlashMessageViewIvars {
     opacity: f32,
-    number: u32,
+    message: Retained<NSString>,
 }
 
 define_class!(
     #[unsafe(super(NSView))]
     #[thread_kind = MainThreadOnly]
-    #[name = "PaneruWorkspaceIndicatorView"]
-    #[ivars = WorkspaceIndicatorViewIvars]
+    #[name = "PaneruFlashMessageView"]
+    #[ivars = FlashMessageViewIvars]
     #[derive(Debug)]
-    struct WorkspaceIndicatorView;
+    struct FlashMessageView;
 
-    impl WorkspaceIndicatorView {
+    impl FlashMessageView {
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty_rect: NSRect) {
             let ivars = self.ivars();
@@ -365,11 +365,8 @@ define_class!(
             );
             path.fill();
 
-            // 2. Draw text (Workspace number)
-            let text = format!("{}", ivars.number);
-            let ns_text = NSString::from_str(&text);
-
-            let font_size = bounds.size.height * 0.6; // Scale font with bezel
+            // 2. Draw text
+            let font_size = bounds.size.height * 0.8; // Scale font with bezel
             let font = NSFont::systemFontOfSize(font_size);
             let color = NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, CGFloat::from(ivars.opacity));
 
@@ -396,7 +393,7 @@ define_class!(
 
                 // Using raw msg_send as the high-level wrapper might have trait bound issues
                 let alloc = NSAttributedString::alloc();
-                msg_send![alloc, initWithString: &*ns_text, attributes: &*attributes]
+                msg_send![alloc, initWithString: &*ivars.message, attributes: &*attributes]
             };
 
             let text_size = unsafe {
@@ -419,41 +416,45 @@ define_class!(
     }
 );
 
-impl WorkspaceIndicatorView {
-    fn new(mtm: MainThreadMarker, frame: NSRect, number: u32, opacity: f32) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(WorkspaceIndicatorViewIvars { opacity, number });
+impl FlashMessageView {
+    fn new(mtm: MainThreadMarker, frame: NSRect, message: &str, opacity: f32) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(FlashMessageViewIvars {
+            opacity,
+            message: NSString::from_str(message),
+        });
         unsafe { msg_send![super(this), initWithFrame: frame] }
     }
 }
 
-pub struct WorkspaceIndicatorManager {
+pub struct FlashMessageManager {
     mtm: MainThreadMarker,
     window: Option<Retained<NSWindow>>,
 }
 
-impl WorkspaceIndicatorManager {
+impl FlashMessageManager {
     pub fn new(mtm: MainThreadMarker) -> Self {
         Self { mtm, window: None }
     }
 
-    pub fn show(&mut self, number: u32, opacity: f32, top_right_abs_cg: NSPoint) {
-        const INDICATOR_SIZE: f64 = 200.0;
-        let size = NSSize::new(INDICATOR_SIZE, INDICATOR_SIZE);
+    #[allow(clippy::cast_precision_loss)]
+    pub fn show(&mut self, message: &str, opacity: f32, top_right_abs_cg: NSPoint) {
+        const INDICATOR_BOX_RATIO: f64 = 0.2;
+        let screen_h = primary_screen_height(self.mtm);
+        let indicator_size = screen_h * INDICATOR_BOX_RATIO;
+        let width = (message.len() as f64 * 15.0).clamp(indicator_size, 3.0 * indicator_size);
+        let size = NSSize::new(width, indicator_size);
         let padding = 20.0;
 
-        let screen_h = primary_screen_height(self.mtm);
-        // top_right_abs_cg is top-left y-down.
-        // We want the window to be at (top_right_abs_cg.x - size.width - padding, top_right_abs_cg.y + padding)
         let cocoa_origin_x = top_right_abs_cg.x - size.width - padding;
         let cocoa_origin_y = screen_h - (top_right_abs_cg.y + size.height + padding);
 
         let frame = NSRect::new(NSPoint::new(cocoa_origin_x, cocoa_origin_y), size);
 
         if let Some(window) = &self.window {
-            let view = WorkspaceIndicatorView::new(
+            let view = FlashMessageView::new(
                 self.mtm,
                 NSRect::new(NSPoint::new(0.0, 0.0), size),
-                number,
+                message,
                 opacity,
             );
             window.setContentView(Some(&view));
@@ -461,12 +462,11 @@ impl WorkspaceIndicatorManager {
             window.orderFront(None::<&AnyObject>);
         } else {
             let window = make_overlay_window(self.mtm, frame);
-            // Ensure it's even higher than normal overlays if needed
             window.setLevel(NSFloatingWindowLevel + 1);
-            let view = WorkspaceIndicatorView::new(
+            let view = FlashMessageView::new(
                 self.mtm,
                 NSRect::new(NSPoint::new(0.0, 0.0), size),
-                number,
+                message,
                 opacity,
             );
             window.setContentView(Some(&view));

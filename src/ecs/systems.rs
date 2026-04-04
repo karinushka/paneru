@@ -11,6 +11,7 @@ use bevy::tasks::AsyncComputeTaskPool;
 use bevy::tasks::futures_lite::future;
 use bevy::time::Time;
 use objc2_core_graphics::CGDirectDisplayID;
+use objc2_foundation::NSPoint;
 use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -27,16 +28,16 @@ use crate::config::{Config, decorations::BorderRadiusOption};
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, Bounds, BruteforceWindows, Initializing, LocateDockTrigger, Position,
-    RefreshWindowSizes, Scrolling, SelectedVirtualMarker, StackAdjustedResize, Unmanaged,
-    WidthRatio, WindowDraggedMarker, WindowProperties, WorkspaceIndicator, focus_entity,
-    reshuffle_around,
+    ActiveWorkspaceMarker, Bounds, BruteforceWindows, FlashMessage, Initializing,
+    LocateDockTrigger, Position, RefreshWindowSizes, Scrolling, SelectedVirtualMarker,
+    StackAdjustedResize, Unmanaged, WidthRatio, WindowDraggedMarker, WindowProperties,
+    focus_entity, reshuffle_around,
 };
 use crate::events::Event;
 use crate::manager::{
     Application, Display, Process, Window, WindowManager, WindowOS, bruteforce_windows,
 };
-use crate::overlay::{OverlayManager, WorkspaceIndicatorManager};
+use crate::overlay::{FlashMessageManager, OverlayManager};
 use crate::platform::{PlatformCallbacks, WorkspaceId};
 
 const ORPHANED_SPACES_TIMEOUT_SEC: u64 = 30;
@@ -1205,36 +1206,32 @@ pub(super) fn cleanup_on_exit(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-pub(crate) fn update_workspace_indicator(
-    mut commands: Commands,
-    time: Res<Time>,
+pub(crate) fn update_flash_messages(
+    messages: Populated<(Entity, &FlashMessage, &Timeout)>,
     active_display: Single<(&Display, Entity), With<ActiveDisplayMarker>>,
-    indicator_mgr: Option<NonSendMut<WorkspaceIndicatorManager>>,
-    mut indicators: Query<(Entity, &mut WorkspaceIndicator)>,
+    flash_mgr: Option<NonSendMut<FlashMessageManager>>,
+    mut commands: Commands,
 ) {
-    let Some(mut indicator_mgr) = indicator_mgr else {
+    let Some(mut flash_manager) = flash_mgr else {
         return;
     };
 
-    if indicators.is_empty() {
-        indicator_mgr.remove();
+    if messages.is_empty() {
+        flash_manager.remove();
         return;
     }
 
     let (display, _) = *active_display;
     let bounds = display.bounds();
-    let top_right =
-        objc2_foundation::NSPoint::new(f64::from(bounds.max.x), f64::from(bounds.min.y));
+    let top_right = NSPoint::new(f64::from(bounds.max.x), f64::from(bounds.min.y));
 
-    for (entity, mut indicator) in &mut indicators {
-        indicator.timer.tick(time.delta());
-
-        if indicator.timer.is_finished() {
-            indicator_mgr.remove();
+    for (entity, FlashMessage(flash), timeout) in messages {
+        if timeout.timer.is_finished() {
+            flash_manager.remove();
             commands.entity(entity).despawn();
         } else {
-            let opacity = indicator.timer.fraction_remaining();
-            indicator_mgr.show(indicator.number, opacity, top_right);
+            let opacity = timeout.timer.fraction_remaining();
+            flash_manager.show(flash, opacity, top_right);
         }
     }
 }

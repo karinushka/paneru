@@ -28,7 +28,7 @@ use crate::events::{Event, EventSender};
 use crate::manager::{
     Application, Origin, ProcessApi, Size, Window, WindowManager, WindowManagerApi, WindowManagerOS,
 };
-use crate::overlay::{OverlayManager, WorkspaceIndicatorManager};
+use crate::overlay::{FlashMessageManager, OverlayManager};
 use crate::platform::{Modifiers, PlatformCallbacks, WinID, WorkspaceId};
 
 mod focus;
@@ -146,7 +146,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
                         config.has_dim_inactive_color() || config.border_active_window()
                     })
                 }),
-            systems::update_workspace_indicator.after(systems::update_overlays),
+            systems::update_flash_messages.after(systems::update_overlays),
             systems::commit_window_position.after(systems::animate_entities),
             systems::commit_window_size.after(systems::animate_resize_entities),
         ),
@@ -202,10 +202,7 @@ pub struct ActiveWorkspaceMarker;
 pub struct SelectedVirtualMarker;
 
 #[derive(Component)]
-pub struct WorkspaceIndicator {
-    pub number: u32,
-    pub timer: Timer,
-}
+pub struct FlashMessage(pub String);
 
 /// Marker component for the currently active display.
 #[derive(Component)]
@@ -451,6 +448,11 @@ pub fn focus_entity(entity: Entity, raise: bool, commands: &mut Commands) {
     }
 }
 
+pub fn flash_message(message: String, duration: f32, commands: &mut Commands) {
+    let timeout = Timeout::new(Duration::from_secs_f32(duration), None);
+    commands.spawn((timeout, FlashMessage(message)));
+}
+
 pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<BevyApp> {
     let window_manager: Box<dyn WindowManagerApi> = Box::new(WindowManagerOS::new(sender.clone()));
     let watcher = window_manager.setup_config_watcher(CONFIGURATION_FILE.as_path())?;
@@ -475,10 +477,10 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
     platform_callbacks.setup_handlers()?;
     let mtm = platform_callbacks.main_thread_marker;
     let overlay_manager = OverlayManager::new(mtm);
-    let workspace_indicator_manager = WorkspaceIndicatorManager::new(mtm);
+    let flash_message_manager = FlashMessageManager::new(mtm);
     app.insert_non_send_resource(platform_callbacks);
     app.insert_non_send_resource(overlay_manager);
-    app.insert_non_send_resource(workspace_indicator_manager);
+    app.insert_non_send_resource(flash_message_manager);
     app.insert_non_send_resource(receiver);
 
     Ok(app)

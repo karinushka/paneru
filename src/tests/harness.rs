@@ -1,10 +1,10 @@
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, TaskPoolBuilder};
 use bevy::time::TimeUpdateStrategy;
-use tracing::debug;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use crate::commands::register_commands;
@@ -14,12 +14,84 @@ use crate::ecs::{
     PollForNotifications, SkipReshuffle, register_systems, register_triggers,
 };
 use crate::events::Event;
-use crate::manager::{Application, Origin, Size, Window};
+use crate::manager::{Application, Origin, Size, Window, WindowManager, WindowManagerApi};
 use crate::platform::ProcessSerialNumber;
 use crate::platform::WinID;
 
-use super::mocks::{MockApplication, MockProcess, MockWindow};
+use super::mocks::{MockApplication, MockProcess, MockWindow, MockWindowManager};
 use super::*;
+
+type Verifiers = HashMap<usize, Box<dyn FnMut(&mut World)>>;
+
+pub(crate) struct TestHarness {
+    pub(crate) app: App,
+    pub(crate) internal_queue: EventQueue,
+    pub(crate) verifiers: Verifiers,
+}
+
+impl TestHarness {
+    pub(crate) fn new() -> Self {
+        let app = setup_world();
+        let internal_queue = Arc::new(RwLock::new(Vec::new()));
+        Self {
+            app,
+            internal_queue,
+            verifiers: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn with_windows(mut self, count: i32) -> Self {
+        let mock_app = setup_process(self.app.world_mut());
+        let spawner = window_spawner(count, self.internal_queue.clone(), mock_app);
+        let wm = MockWindowManager {
+            windows: spawner,
+            workspaces: vec![TEST_WORKSPACE_ID],
+        };
+        self.app
+            .world_mut()
+            .insert_resource(WindowManager(Box::new(wm)));
+        self
+    }
+
+    pub(crate) fn with_wm<T: WindowManagerApi + 'static>(mut self, wm: T) -> Self {
+        self.app
+            .world_mut()
+            .insert_resource(WindowManager(Box::new(wm)));
+        self
+    }
+
+    pub(crate) fn with_config(mut self, config: Config) -> Self {
+        self.app.world_mut().insert_resource(config);
+        self
+    }
+
+    pub(crate) fn on_iteration<F>(mut self, iteration: usize, verifier: F) -> Self
+    where
+        F: FnMut(&mut World) + 'static,
+    {
+        self.verifiers.insert(iteration, Box::new(verifier));
+        self
+    }
+
+    pub(crate) fn run(&mut self, commands: Vec<Event>) {
+        for (iteration, command) in commands.into_iter().enumerate() {
+            self.app.world_mut().write_message::<Event>(command);
+
+            for _ in 0..5 {
+                self.app.update();
+
+                // Flush the event queue with internally generated mock events.
+                while let Some(event) = self.internal_queue.write().unwrap().pop() {
+                    self.app.world_mut().write_message::<Event>(event);
+                }
+            }
+
+            if let Some(verifier) = self.verifiers.get_mut(&iteration) {
+                verifier(self.app.world_mut());
+            }
+        }
+    }
+}
 
 pub(crate) fn setup_world() -> App {
     static DONE: OnceLock<()> = OnceLock::new();
@@ -78,66 +150,6 @@ pub(crate) fn setup_process(world: &mut World) -> MockApplication {
     application
 }
 
-pub(crate) fn run_main_loop(
-    bevy_app: &mut App,
-    event_queue: &EventQueue,
-    commands: &[Event],
-    mut verifier: impl FnMut(usize, &mut World),
-) {
-    for (iteration, command) in commands.iter().enumerate() {
-        bevy_app.world_mut().write_message::<Event>(command.clone());
-
-        for _ in 0..5 {
-            bevy_app.update();
-
-            // Flush the event queue with internally generated mock events.
-            while let Some(event) = event_queue.write().unwrap().pop() {
-                bevy_app.world_mut().write_message::<Event>(event);
-            }
-        }
-
-        verifier(iteration, bevy_app.world_mut());
-    }
-}
-
-pub(crate) fn verify_window_positions(
-    expected_positions: &[(WinID, (i32, i32))],
-    world: &mut World,
-) {
-    let mut query = world.query::<&Window>();
-
-    for window in query.iter(world) {
-        if let Some((window_id, (x, y))) = expected_positions.iter().find(|id| id.0 == window.id())
-        {
-            debug!("WinID: {window_id}");
-            assert_eq!(*x, window.frame().min.x);
-            assert_eq!(*y, window.frame().min.y);
-        }
-    }
-}
-
-pub(crate) fn verify_window_sizes(expected_sizes: &[(WinID, (i32, i32))], world: &mut World) {
-    let mut query = world.query::<&Window>();
-
-    for window in query.iter(world) {
-        if let Some((window_id, (w, h))) = expected_sizes.iter().find(|id| id.0 == window.id()) {
-            let frame = window.frame();
-            assert_eq!(
-                *w,
-                frame.width(),
-                "WinID {window_id}: expected width {w}, got {}",
-                frame.width()
-            );
-            assert_eq!(
-                *h,
-                frame.height(),
-                "WinID {window_id}: expected height {h}, got {}",
-                frame.height()
-            );
-        }
-    }
-}
-
 pub(crate) fn window_spawner(
     count: i32,
     event_queue: EventQueue,
@@ -181,4 +193,88 @@ pub(crate) fn verify_focused_window(expected_id: WinID, world: &mut World) {
         "expected window {expected_id} focused, got {}",
         focused[0].0.id()
     );
+}
+
+#[macro_export]
+macro_rules! assert_window_at {
+    ($world:expr, $id:expr, $x:expr, $y:expr) => {{
+        let mut query = $world.query::<&$crate::manager::Window>();
+        let window = query
+            .iter($world)
+            .find(|w| w.id() == $id)
+            .expect("window not found");
+        assert_eq!(
+            window.frame().min.x,
+            $x,
+            "window {} x position mismatch",
+            $id
+        );
+        assert_eq!(
+            window.frame().min.y,
+            $y,
+            "window {} y position mismatch",
+            $id
+        );
+    }};
+}
+
+#[macro_export]
+macro_rules! assert_window_size {
+    ($world:expr, $id:expr, $w:expr, $h:expr) => {{
+        let mut query = $world.query::<&$crate::manager::Window>();
+        let window = query
+            .iter($world)
+            .find(|w| w.id() == $id)
+            .expect("window not found");
+        let frame = window.frame();
+        assert_eq!(frame.width(), $w, "window {} width mismatch", $id);
+        assert_eq!(frame.height(), $h, "window {} height mismatch", $id);
+    }};
+}
+
+#[macro_export]
+macro_rules! assert_focused {
+    ($world:expr, $id:expr) => {{
+        let mut query = $world.query::<(
+            &$crate::manager::Window,
+            bevy::ecs::query::Has<$crate::ecs::FocusedMarker>,
+        )>();
+        let (_, focused) = query
+            .iter($world)
+            .find(|(w, _)| w.id() == $id)
+            .expect("window not found");
+        assert!(focused, "window {} should be focused", $id);
+    }};
+}
+
+#[macro_export]
+macro_rules! assert_on_workspace {
+    ($world:expr, $window_id:expr, $workspace_id:expr) => {{
+        let entity = $crate::tests::harness::find_window_entity($window_id, $world);
+        let mut query = $world.query::<&$crate::ecs::layout::LayoutStrip>();
+        let found = query
+            .iter($world)
+            .any(|strip| strip.id() == $workspace_id && strip.index_of(entity).is_ok());
+        assert!(
+            found,
+            "window {} should be on workspace {}",
+            $window_id, $workspace_id
+        );
+    }};
+}
+
+#[macro_export]
+macro_rules! assert_not_on_workspace {
+    ($world:expr, $window_id:expr, $workspace_id:expr) => {{
+        let entity = $crate::tests::harness::find_window_entity($window_id, $world);
+        let mut query = $world.query::<&$crate::ecs::layout::LayoutStrip>();
+        let found = query
+            .iter($world)
+            .any(|strip| strip.id() == $workspace_id && strip.index_of(entity).is_ok());
+        assert!(
+            !found,
+            "window {} should NOT be on workspace {}",
+            $window_id, $workspace_id
+        );
+    }};
 }

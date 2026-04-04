@@ -1,13 +1,12 @@
 use std::sync::{Arc, RwLock};
 
-use bevy::prelude::*;
-use tracing::debug;
-
 use crate::commands::{Command, Direction, Operation, ResizeDirection};
 use crate::config::{Config, MainOptions, WindowParams};
 use crate::events::Event;
-use crate::manager::{WindowApi, WindowManager, WindowPadding};
+use crate::manager::{WindowApi, WindowPadding};
 use crate::platform::ProcessSerialNumber;
+use crate::{assert_window_at, assert_window_size};
+use bevy::prelude::*;
 
 use super::*;
 
@@ -74,34 +73,34 @@ fn test_window_shuffle() {
     const H_PAD: i32 = 2;
 
     let commands = vec![
-        Event::MenuOpened { window_id: 0 }, // Noop allowing everything to settle
+        Event::MenuOpened { window_id: 0 }, // 0
         Event::Command {
             command: Command::Window(Operation::Focus(Direction::Last)),
-        },
+        }, // 1
         Event::Command {
             command: Command::Window(Operation::Focus(Direction::First)),
-        },
+        }, // 2
         Event::Command {
             command: Command::Window(Operation::Focus(Direction::East)),
-        },
+        }, // 3
         Event::Command {
             command: Command::Window(Operation::Stack(true)),
-        },
+        }, // 4
         Event::Command {
             command: Command::Window(Operation::Center),
-        },
+        }, // 5
         Event::Command {
             command: Command::Window(Operation::Focus(Direction::East)),
-        },
+        }, // 6
         Event::Command {
             command: Command::Window(Operation::Stack(true)),
-        },
+        }, // 7
         Event::Command {
             command: Command::Window(Operation::Center),
-        },
+        }, // 8
         Event::Command {
             command: Command::PrintState,
-        },
+        }, // 9
     ];
 
     // Logical width includes padding expansion on each side.
@@ -113,68 +112,6 @@ fn test_window_shuffle() {
     let offscreen_left =
         left_edge - logical_width + i32::from(SLIVER_WIDTH) - i32::from(PADDING_LEFT) + H_PAD;
     let centered = (TEST_DISPLAY_WIDTH - logical_width) / 2;
-
-    let expected_positions_last = [
-        (4, (offscreen_left, top_edge)),
-        (3, (offscreen_left, top_edge)),
-        (2, (right_edge - 3 * logical_width, top_edge)),
-        (1, (right_edge - 2 * logical_width, top_edge)),
-        (0, (right_edge - logical_width, top_edge)),
-    ];
-    let expected_positions_first = [
-        (4, (left_edge, top_edge)),
-        (3, (left_edge + logical_width, top_edge)),
-        (2, (left_edge + 2 * logical_width, top_edge)),
-        (1, (offscreen_right, top_edge)),
-        (0, (offscreen_right, top_edge)),
-    ];
-
-    let expected_positions_stacked = [
-        (4, (centered, top_edge)),
-        (3, (centered, 393)),
-        (2, (centered + logical_width, top_edge)),
-        (1, (offscreen_right, top_edge)),
-        (0, (offscreen_right, top_edge)),
-    ];
-    let expected_positions_stacked2 = [
-        (4, (centered, top_edge)),
-        (3, (centered, 271)),
-        (2, (centered, 515)),
-        (1, (centered + logical_width, top_edge)),
-        (0, (offscreen_right, top_edge)),
-    ];
-
-    let check = |iteration, world: &mut World| {
-        let iterations = [
-            None,
-            Some(expected_positions_last.as_slice()),
-            Some(expected_positions_first.as_slice()),
-            None,
-            None,
-            Some(expected_positions_stacked.as_slice()),
-            None,
-            None,
-            None,
-            Some(expected_positions_stacked2.as_slice()),
-        ];
-
-        if let Some(positions) = iterations[iteration] {
-            debug!("Iteration: {iteration}");
-            verify_window_positions(positions, world);
-        }
-    };
-
-    let mut bevy = setup_world();
-    let mock_app = setup_process(bevy.world_mut());
-    let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
-    let event_queue = internal_queue.clone();
-    let windows = window_spawner(5, event_queue, mock_app);
-    let window_manager = MockWindowManager {
-        windows,
-        workspaces: vec![TEST_WORKSPACE_ID],
-    };
-    bevy.world_mut()
-        .insert_resource(WindowManager(Box::new(window_manager)));
 
     let mut params = WindowParams::new(".*", None);
     params.vertical_padding = Some(3);
@@ -190,15 +127,45 @@ fn test_window_shuffle() {
         vec![params],
     )
         .into();
-    bevy.insert_resource(config);
 
-    run_main_loop(&mut bevy, &internal_queue, &commands, check);
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(5)
+        .on_iteration(1, move |world| {
+            assert_window_at!(world, 4, offscreen_left, top_edge);
+            assert_window_at!(world, 3, offscreen_left, top_edge);
+            assert_window_at!(world, 2, right_edge - 3 * logical_width, top_edge);
+            assert_window_at!(world, 1, right_edge - 2 * logical_width, top_edge);
+            assert_window_at!(world, 0, right_edge - logical_width, top_edge);
+        })
+        .on_iteration(2, move |world| {
+            assert_window_at!(world, 4, left_edge, top_edge);
+            assert_window_at!(world, 3, left_edge + logical_width, top_edge);
+            assert_window_at!(world, 2, left_edge + 2 * logical_width, top_edge);
+            assert_window_at!(world, 1, offscreen_right, top_edge);
+            assert_window_at!(world, 0, offscreen_right, top_edge);
+        })
+        .on_iteration(5, move |world| {
+            assert_window_at!(world, 4, centered, top_edge);
+            assert_window_at!(world, 3, centered, 393);
+            assert_window_at!(world, 2, centered + logical_width, top_edge);
+            assert_window_at!(world, 1, offscreen_right, top_edge);
+            assert_window_at!(world, 0, offscreen_right, top_edge);
+        })
+        .on_iteration(9, move |world| {
+            assert_window_at!(world, 4, centered, top_edge);
+            assert_window_at!(world, 3, centered, 271);
+            assert_window_at!(world, 2, centered, 515);
+            assert_window_at!(world, 1, centered + logical_width, top_edge);
+            assert_window_at!(world, 0, offscreen_right, top_edge);
+        })
+        .run(commands);
 }
 
 #[test]
 fn test_startup_windows() {
     let commands = vec![
-        Event::MenuOpened { window_id: 0 }, // Noop allowing everything to settle
+        Event::MenuOpened { window_id: 0 },
         Event::Command {
             command: Command::Window(Operation::Focus(Direction::East)),
         },
@@ -213,40 +180,20 @@ fn test_startup_windows() {
         },
     ];
 
-    let expected_positions = [
-        (4, (0, TEST_MENUBAR_HEIGHT)),
-        (3, (400, TEST_MENUBAR_HEIGHT)),
-        (2, (800, TEST_MENUBAR_HEIGHT)),
-    ];
-
-    let check = |iteration, world: &mut World| {
-        let iterations = [None, None, None, None, Some(expected_positions.as_slice())];
-
-        if let Some(positions) = iterations[iteration] {
-            debug!("Iteration: {iteration}");
-            verify_window_positions(positions, world);
-        }
-    };
-
-    let mut bevy = setup_world();
-    let mock_app = setup_process(bevy.world_mut());
-    let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
-    let event_queue = internal_queue.clone();
-    let windows = window_spawner(5, event_queue, mock_app);
-    let window_manager = MockWindowManager {
-        windows,
-        workspaces: vec![TEST_WORKSPACE_ID],
-    };
-    bevy.world_mut()
-        .insert_resource(WindowManager(Box::new(window_manager)));
-
-    run_main_loop(&mut bevy, &internal_queue, &commands, check);
+    TestHarness::new()
+        .with_windows(5)
+        .on_iteration(4, |world| {
+            assert_window_at!(world, 4, 0, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 3, 400, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 2, 800, TEST_MENUBAR_HEIGHT);
+        })
+        .run(commands);
 }
 
 #[test]
 fn test_window_resize_grow_and_shrink_cycle() {
     let commands = vec![
-        Event::MenuOpened { window_id: 0 }, // Noop allowing everything to settle
+        Event::MenuOpened { window_id: 0 },
         Event::Command {
             command: Command::Window(Operation::Resize(ResizeDirection::Grow)),
         },
@@ -261,37 +208,6 @@ fn test_window_resize_grow_and_shrink_cycle() {
         },
     ];
 
-    let expected_widths = [None, Some(512), Some(768), Some(256), Some(768)];
-
-    let check = |iteration, world: &mut World| {
-        let Some(expected_width) = expected_widths[iteration] else {
-            return;
-        };
-        let mut query = world.query::<&Window>();
-        let window = query
-            .iter(world)
-            .find(|window| window.id() == 0)
-            .expect("expected window with id 0");
-        assert_eq!(
-            window.frame().width(),
-            expected_width,
-            "iteration {iteration}: expected width {expected_width}, got {}",
-            window.frame().width()
-        );
-    };
-
-    let mut bevy = setup_world();
-    let mock_app = setup_process(bevy.world_mut());
-    let internal_queue = Arc::new(RwLock::new(Vec::<Event>::new()));
-    let event_queue = internal_queue.clone();
-    let windows = window_spawner(1, event_queue, mock_app);
-    let window_manager = MockWindowManager {
-        windows,
-        workspaces: vec![TEST_WORKSPACE_ID],
-    };
-    bevy.world_mut()
-        .insert_resource(WindowManager(Box::new(window_manager)));
-
     let config: Config = (
         MainOptions {
             preset_column_widths: vec![0.25, 0.5, 0.75],
@@ -300,7 +216,21 @@ fn test_window_resize_grow_and_shrink_cycle() {
         vec![],
     )
         .into();
-    bevy.insert_resource(config);
 
-    run_main_loop(&mut bevy, &internal_queue, &commands, check);
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(1)
+        .on_iteration(1, |world| {
+            assert_window_size!(world, 0, 512, 748);
+        })
+        .on_iteration(2, |world| {
+            assert_window_size!(world, 0, 768, 748);
+        })
+        .on_iteration(3, |world| {
+            assert_window_size!(world, 0, 256, 748);
+        })
+        .on_iteration(4, |world| {
+            assert_window_size!(world, 0, 768, 748);
+        })
+        .run(commands);
 }

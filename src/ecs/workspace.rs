@@ -15,7 +15,8 @@ use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, NativeFullscreenMarker, Position, RefreshWindowSizes,
-    SelectedVirtualMarker, Timeout, Unmanaged, focus_entity, reposition_entity, reshuffle_around,
+    SelectedVirtualMarker, Timeout, Unmanaged, WorkspaceIndicator, focus_entity, reposition_entity,
+    reshuffle_around,
 };
 use crate::errors::Result;
 use crate::events::Event;
@@ -682,6 +683,7 @@ pub(crate) fn switch_virtual_workspace_bind(
     mut messages: MessageReader<Event>,
     active_display: ActiveDisplay,
     workspaces: Query<(Entity, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    indicators: Query<Entity, With<WorkspaceIndicator>>,
     mut commands: Commands,
 ) {
     let Some(Operation::Virtual(direction)) =
@@ -713,10 +715,20 @@ pub(crate) fn switch_virtual_workspace_bind(
     }
 
     let new_entity = rows[next_index].0;
+    let next_virtual_index = rows[next_index].1.virtual_index;
     if let Ok(mut entity_commands) = commands.get_entity(new_entity) {
         entity_commands
             .try_insert(SelectedVirtualMarker)
             .try_insert(ActiveWorkspaceMarker);
+
+        // Flash workspace number
+        for indicator_entity in &indicators {
+            commands.entity(indicator_entity).despawn();
+        }
+        commands.spawn(WorkspaceIndicator {
+            number: next_virtual_index + 1,
+            timer: bevy::time::Timer::from_seconds(1.0, bevy::time::TimerMode::Once),
+        });
     }
     debug!(
         "Switched virtual workspace on display {} from {} to {}",
@@ -733,6 +745,7 @@ pub(crate) fn move_virtual_workspace_bind(
     mut messages: MessageReader<Event>,
     windows: Windows,
     active_display: ActiveDisplay,
+    indicators: Query<Entity, With<WorkspaceIndicator>>,
     mut commands: Commands,
 ) {
     let Some(Operation::VirtualMove(direction, move_focus)) =
@@ -765,6 +778,17 @@ pub(crate) fn move_virtual_workspace_bind(
         target_virtual_index,
         move_focus: *move_focus,
     });
+
+    if *move_focus == MoveFocus::Follow {
+        for indicator_entity in &indicators {
+            commands.entity(indicator_entity).despawn();
+        }
+        commands.spawn(WorkspaceIndicator {
+            number: target_virtual_index + 1,
+            timer: bevy::time::Timer::from_seconds(1.0, bevy::time::TimerMode::Once),
+        });
+    }
+
     debug!("Moving {focused_entity} to new virtual space {target_virtual_index}");
 }
 

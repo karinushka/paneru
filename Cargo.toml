@@ -34,12 +34,27 @@ libc = "0.2.183"
 notify = { version = "8.2.0", features = ["macos_fsevent"] }
 num_enum = "0.7.6"
 objc2 = { version = "0.6.4", features = ["catch-all", "exception"] }
-objc2-app-kit = "0.3.2"
+objc2-app-kit = { version = "0.3.2", features = [
+  "NSBezierPath",
+  "NSColor",
+  "NSGraphics",
+  "NSGraphicsContext",
+  "NSScreen",
+  "NSView",
+  "NSWindow",
+  "NSFont",
+  "NSAttributedString",
+  "NSParagraphStyle",
+  "NSStringDrawing",
+] }
 objc2-core-foundation = { version = "0.3.2", features = ["CFRunLoop"] }
 objc2-core-graphics = "0.3.2"
 objc2-foundation = { version = "0.3.2", features = [
   "NSNotification",
   "NSProcessInfo",
+  "NSAttributedString",
+  "NSDictionary",
+  "NSBundle",
 ] }
 regex = "1.12.3"
 scopeguard = "1.2.0"

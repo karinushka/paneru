@@ -28,7 +28,7 @@ use crate::events::{Event, EventSender};
 use crate::manager::{
     Application, Origin, ProcessApi, Size, Window, WindowManager, WindowManagerApi, WindowManagerOS,
 };
-use crate::overlay::OverlayManager;
+use crate::overlay::{OverlayManager, WorkspaceIndicatorManager};
 use crate::platform::{Modifiers, PlatformCallbacks, WinID, WorkspaceId};
 
 mod focus;
@@ -48,6 +48,7 @@ mod workspace;
 /// # Arguments
 ///
 /// * `app` - The Bevy application to register the systems with.
+#[allow(clippy::too_many_lines)]
 pub fn register_systems(app: &mut bevy::app::App) {
     const DISPLAY_CHANGE_CHECK_FREQ_MS: u64 = 1000;
     const REFRESH_WINDOW_CHECK_FREQ_MS: u64 = 1000;
@@ -145,6 +146,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
                         config.has_dim_inactive_color() || config.border_active_window()
                     })
                 }),
+            systems::update_workspace_indicator.after(systems::update_overlays),
             systems::commit_window_position.after(systems::animate_entities),
             systems::commit_window_size.after(systems::animate_resize_entities),
         ),
@@ -198,6 +200,12 @@ pub struct ActiveWorkspaceMarker;
 
 #[derive(Component)]
 pub struct SelectedVirtualMarker;
+
+#[derive(Component)]
+pub struct WorkspaceIndicator {
+    pub number: u32,
+    pub timer: Timer,
+}
 
 /// Marker component for the currently active display.
 #[derive(Component)]
@@ -465,9 +473,12 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
 
     let mut platform_callbacks = PlatformCallbacks::new(sender);
     platform_callbacks.setup_handlers()?;
-    let overlay_manager = OverlayManager::new(platform_callbacks.main_thread_marker);
+    let mtm = platform_callbacks.main_thread_marker;
+    let overlay_manager = OverlayManager::new(mtm);
+    let workspace_indicator_manager = WorkspaceIndicatorManager::new(mtm);
     app.insert_non_send_resource(platform_callbacks);
     app.insert_non_send_resource(overlay_manager);
+    app.insert_non_send_resource(workspace_indicator_manager);
     app.insert_non_send_resource(receiver);
 
     Ok(app)

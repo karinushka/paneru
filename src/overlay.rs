@@ -1,12 +1,15 @@
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSBackingStoreType, NSBezierPath, NSColor, NSCompositingOperation, NSFloatingWindowLevel,
-    NSGraphicsContext, NSScreen, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSFont, NSGraphicsContext, NSParagraphStyle, NSScreen, NSView, NSWindow,
+    NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_core_foundation::CGFloat;
-use objc2_foundation::{NSPoint, NSRect, NSSize};
+use objc2_foundation::{
+    NSAttributedString, NSDictionary, NSMutableCopying, NSPoint, NSRect, NSSize, NSString,
+};
 
 #[derive(Clone, PartialEq)]
 pub struct BorderParams {
@@ -325,5 +328,156 @@ impl OverlayManager {
             window.orderOut(None::<&AnyObject>);
         }
         self.hidden = true;
+    }
+}
+
+// ── WorkspaceIndicator ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+struct WorkspaceIndicatorViewIvars {
+    opacity: f32,
+    number: u32,
+}
+
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PaneruWorkspaceIndicatorView"]
+    #[ivars = WorkspaceIndicatorViewIvars]
+    #[derive(Debug)]
+    struct WorkspaceIndicatorView;
+
+    impl WorkspaceIndicatorView {
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _dirty_rect: NSRect) {
+            let ivars = self.ivars();
+            let bounds = self.bounds();
+
+            // 1. Draw semi-transparent bezel (dark gray/black)
+            let bezel_color = NSColor::colorWithSRGBRed_green_blue_alpha(
+                0.1, 0.1, 0.1,
+                CGFloat::from(ivars.opacity * 0.8),
+            );
+            bezel_color.setFill();
+            let radius = 12.0;
+            let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+                bounds, radius, radius,
+            );
+            path.fill();
+
+            // 2. Draw text (Workspace number)
+            let text = format!("{}", ivars.number);
+            let ns_text = NSString::from_str(&text);
+
+            let font_size = bounds.size.height * 0.6; // Scale font with bezel
+            let font = NSFont::systemFontOfSize(font_size);
+            let color = NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, CGFloat::from(ivars.opacity));
+
+            let paragraph_style = unsafe {
+                let style = NSParagraphStyle::defaultParagraphStyle().mutableCopy();
+                let _: () = msg_send![&style, setAlignment: 1isize]; // Center (NSTextAlignmentCenter = 1)
+                style
+            };
+
+            // Using manual attribute keys as they might be missing from the crate's high-level API
+            let attr_str: Retained<NSAttributedString> = unsafe {
+                let font_key = NSString::from_str("NSFont");
+                let color_key = NSString::from_str("NSColor");
+                let para_key = NSString::from_str("NSParagraphStyle");
+
+                let keys = [&*font_key, &*color_key, &*para_key];
+                let objects = [
+                    &*font as &AnyObject,
+                    &*color as &AnyObject,
+                    &*paragraph_style as &AnyObject,
+                ];
+
+                let attributes = NSDictionary::from_slices(&keys, &objects);
+
+                // Using raw msg_send as the high-level wrapper might have trait bound issues
+                let alloc = NSAttributedString::alloc();
+                msg_send![alloc, initWithString: &*ns_text, attributes: &*attributes]
+            };
+
+            let text_size = unsafe {
+                let size: NSSize = msg_send![&attr_str, size];
+                size
+            };
+
+            let text_rect = NSRect::new(
+                NSPoint::new(
+                    bounds.origin.x + (bounds.size.width - text_size.width) / 2.0,
+                    bounds.origin.y + (bounds.size.height - text_size.height) / 2.0,
+                ),
+                text_size
+            );
+
+            unsafe {
+                let _: () = msg_send![&attr_str, drawInRect: text_rect];
+            };
+        }
+    }
+);
+
+impl WorkspaceIndicatorView {
+    fn new(mtm: MainThreadMarker, frame: NSRect, number: u32, opacity: f32) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(WorkspaceIndicatorViewIvars { opacity, number });
+        unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+}
+
+pub struct WorkspaceIndicatorManager {
+    mtm: MainThreadMarker,
+    window: Option<Retained<NSWindow>>,
+}
+
+impl WorkspaceIndicatorManager {
+    pub fn new(mtm: MainThreadMarker) -> Self {
+        Self { mtm, window: None }
+    }
+
+    pub fn show(&mut self, number: u32, opacity: f32, top_right_abs_cg: NSPoint) {
+        const INDICATOR_SIZE: f64 = 200.0;
+        let size = NSSize::new(INDICATOR_SIZE, INDICATOR_SIZE);
+        let padding = 20.0;
+
+        let screen_h = primary_screen_height(self.mtm);
+        // top_right_abs_cg is top-left y-down.
+        // We want the window to be at (top_right_abs_cg.x - size.width - padding, top_right_abs_cg.y + padding)
+        let cocoa_origin_x = top_right_abs_cg.x - size.width - padding;
+        let cocoa_origin_y = screen_h - (top_right_abs_cg.y + size.height + padding);
+
+        let frame = NSRect::new(NSPoint::new(cocoa_origin_x, cocoa_origin_y), size);
+
+        if let Some(window) = &self.window {
+            let view = WorkspaceIndicatorView::new(
+                self.mtm,
+                NSRect::new(NSPoint::new(0.0, 0.0), size),
+                number,
+                opacity,
+            );
+            window.setContentView(Some(&view));
+            window.setFrame_display(frame, true);
+            window.orderFront(None::<&AnyObject>);
+        } else {
+            let window = make_overlay_window(self.mtm, frame);
+            // Ensure it's even higher than normal overlays if needed
+            window.setLevel(NSFloatingWindowLevel + 1);
+            let view = WorkspaceIndicatorView::new(
+                self.mtm,
+                NSRect::new(NSPoint::new(0.0, 0.0), size),
+                number,
+                opacity,
+            );
+            window.setContentView(Some(&view));
+            window.orderFront(None::<&AnyObject>);
+            self.window = Some(window);
+        }
+    }
+
+    pub fn remove(&mut self) {
+        if let Some(window) = self.window.take() {
+            window.orderOut(None::<&AnyObject>);
+        }
     }
 }

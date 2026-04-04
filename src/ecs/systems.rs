@@ -29,13 +29,14 @@ use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, BruteforceWindows, Initializing, LocateDockTrigger, Position,
     RefreshWindowSizes, Scrolling, SelectedVirtualMarker, StackAdjustedResize, Unmanaged,
-    WidthRatio, WindowDraggedMarker, WindowProperties, focus_entity, reshuffle_around,
+    WidthRatio, WindowDraggedMarker, WindowProperties, WorkspaceIndicator, focus_entity,
+    reshuffle_around,
 };
 use crate::events::Event;
 use crate::manager::{
     Application, Display, Process, Window, WindowManager, WindowOS, bruteforce_windows,
 };
-use crate::overlay::OverlayManager;
+use crate::overlay::{OverlayManager, WorkspaceIndicatorManager};
 use crate::platform::{PlatformCallbacks, WorkspaceId};
 
 const ORPHANED_SPACES_TIMEOUT_SEC: u64 = 30;
@@ -1200,5 +1201,40 @@ pub(super) fn cleanup_on_exit(
             .map(|(window, _)| window.id())
             .collect::<Vec<_>>();
         window_manager.dim_windows(&ids, 0.0);
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn update_workspace_indicator(
+    mut commands: Commands,
+    time: Res<Time>,
+    active_display: Single<(&Display, Entity), With<ActiveDisplayMarker>>,
+    indicator_mgr: Option<NonSendMut<WorkspaceIndicatorManager>>,
+    mut indicators: Query<(Entity, &mut WorkspaceIndicator)>,
+) {
+    let Some(mut indicator_mgr) = indicator_mgr else {
+        return;
+    };
+
+    if indicators.is_empty() {
+        indicator_mgr.remove();
+        return;
+    }
+
+    let (display, _) = *active_display;
+    let bounds = display.bounds();
+    let top_right =
+        objc2_foundation::NSPoint::new(f64::from(bounds.max.x), f64::from(bounds.min.y));
+
+    for (entity, mut indicator) in &mut indicators {
+        indicator.timer.tick(time.delta());
+
+        if indicator.timer.is_finished() {
+            indicator_mgr.remove();
+            commands.entity(entity).despawn();
+        } else {
+            let opacity = indicator.timer.fraction_remaining();
+            indicator_mgr.show(indicator.number, opacity, top_right);
+        }
     }
 }

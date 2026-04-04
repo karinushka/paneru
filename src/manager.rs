@@ -5,8 +5,8 @@ use core::ptr::NonNull;
 use derive_more::{DerefMut, with_trait::Deref};
 use notify::{RecursiveMode, Watcher};
 use objc2_core_foundation::{
-    CFArray, CFDictionary, CFMutableData, CFNumber, CFNumberType, CFRetained, CFString, CFType,
-    CGPoint, CGRect, CGSize, kCFBooleanTrue,
+    CFArray, CFDictionary, CFMutableData, CFNumber, CFRetained, CFString, CGPoint, CGRect, CGSize,
+    kCFBooleanTrue,
 };
 use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayBounds, CGError, CGGetActiveDisplayList, CGWarpMouseCursorPosition,
@@ -20,9 +20,11 @@ use tracing::{Level, debug, error, instrument, trace, warn};
 
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
-use crate::manager::skylight::SLSSetWindowListBrightness;
+use crate::manager::skylight::{
+    SLSSetWindowListBrightness, SLSTransactionGroup, SLSWindowQuery, SLSWindowQueryWindows,
+};
 use crate::platform::{ConnID, Pid, ProcessSerialNumber, WinID, WorkspaceId};
-use crate::util::{AXUIWrapper, MacResult, create_array, symlink_target};
+use crate::util::{AXUIWrapper, MacResult, symlink_target};
 use app::ApplicationOS;
 pub use app::{Application, ApplicationApi};
 pub use display::Display;
@@ -30,12 +32,10 @@ pub use process::{Process, ProcessApi};
 pub use skylight::AXUIElementCopyAttributeValue;
 use skylight::{
     _AXUIElementCreateWithRemoteToken, SLSCopyActiveMenuBarDisplayIdentifier,
-    SLSCopyAssociatedWindows, SLSCopyManagedDisplaySpaces, SLSCopyWindowsWithOptionsAndTags,
-    SLSFindWindowAndOwner, SLSGetConnectionIDForPSN, SLSGetCurrentCursorLocation,
-    SLSGetDisplayMenubarHeight, SLSGetSpaceManagementMode, SLSMainConnectionID,
-    SLSManagedDisplayGetCurrentSpace, SLSSpaceGetType, SLSWindowIteratorAdvance,
-    SLSWindowIteratorGetAttributes, SLSWindowIteratorGetParentID, SLSWindowIteratorGetTags,
-    SLSWindowIteratorGetWindowID, SLSWindowQueryResultCopyWindows, SLSWindowQueryWindows,
+    SLSCopyAssociatedWindows, SLSCopyManagedDisplaySpaces, SLSFindWindowAndOwner,
+    SLSGetConnectionIDForPSN, SLSGetCurrentCursorLocation, SLSGetDisplayMenubarHeight,
+    SLSGetSpaceManagementMode, SLSMainConnectionID, SLSManagedDisplayGetCurrentSpace,
+    SLSSpaceGetType,
 };
 pub use windows::{Window, WindowApi, WindowOS, WindowPadding, ax_window_id};
 
@@ -520,8 +520,6 @@ impl WindowManagerApi for WindowManagerOS {
         watcher.watch(path, RecursiveMode::NonRecursive)?;
         Ok(watcher)
     }
-
-    /// level: 0.0 = normal, 1.0 = bright, -1.0 = dark
     fn dim_windows(&self, windows: &[WinID], level: f32) {
         let Ok(count) = isize::try_from(windows.len()) else {
             return;
@@ -555,14 +553,17 @@ fn space_window_list_for_connection(
     cid: Option<ConnID>,
     also_minimized: bool,
 ) -> Result<Vec<WinID>> {
-    let iterator = window_iterator_for_connection(main_cid, spaces, cid, also_minimized)?;
+    let mut iterator = window_iterator_for_connection(main_cid, spaces, cid, also_minimized)?;
     let count = spaces.len();
     let mut window_list = Vec::with_capacity(count);
-    while unsafe { SLSWindowIteratorAdvance(&raw const *iterator) } {
-        let tags = unsafe { SLSWindowIteratorGetTags(&raw const *iterator) };
-        let attributes = unsafe { SLSWindowIteratorGetAttributes(&raw const *iterator) };
-        let parent_wid: WinID = unsafe { SLSWindowIteratorGetParentID(&raw const *iterator) };
-        let window_id: WinID = unsafe { SLSWindowIteratorGetWindowID(&raw const *iterator) };
+    while iterator.advance() {
+        let Some(window) = iterator.current() else {
+            continue;
+        };
+        let tags = window.tags();
+        let attributes = window.attributes();
+        let parent_wid = window.parent_id();
+        let window_id = window.window_id();
 
         trace!(
             "id: {window_id} parent: {parent_wid} tags: 0x{tags:x} attributes: 0x{attributes:x}",
@@ -579,51 +580,27 @@ fn window_iterator_for_connection(
     spaces: &[WorkspaceId],
     cid: Option<ConnID>,
     also_minimized: bool,
-) -> Result<CFRetained<CFType>> {
-    let space_list_ref = create_array(spaces, CFNumberType::SInt64Type)?;
-
-    let mut set_tags = 0i64;
-    let mut clear_tags = 0i64;
+) -> Result<SLSWindowQueryWindows> {
     let options = if also_minimized { 0x7 } else { 0x2 };
-    let ptr = NonNull::new(unsafe {
-        SLSCopyWindowsWithOptionsAndTags(
-            main_cid,
-            cid.unwrap_or(0),
-            &raw const *space_list_ref,
-            options,
-            &mut set_tags,
-            &mut clear_tags,
-        )
-    })
-    .ok_or(Error::InvalidInput(format!(
-        "{}: nullptr returned from SLSCopyWindowsWithOptionsAndTags.",
+    let query = SLSWindowQuery::new()
+        .ok_or(Error::InvalidInput(format!(
+            "{}: nullptr returned from SLSWindowQueryCreate.",
+            function_name!()
+        )))?
+        .with_owner(cid.unwrap_or(0))
+        .with_workspace_window_list_options(options)
+        .with_spaces(spaces)?;
+    let result = query.run(main_cid).ok_or(Error::InvalidInput(format!(
+        "{}: nullptr returned from SLSWindowQueryRun.",
         function_name!()
     )))?;
-    let window_list_ref = unsafe { CFRetained::from_raw(ptr) };
-
-    let count = window_list_ref.count();
-    if count == 0 {
+    if result.window_count() == 0 {
         return Err(Error::NotFound(format!(
             "{}: zero windows returned",
             function_name!()
         )));
     }
-
-    let query = unsafe {
-        CFRetained::from_raw(SLSWindowQueryWindows(
-            main_cid,
-            &raw const *window_list_ref,
-            count,
-        ))
-    };
-    Ok(unsafe { CFRetained::from_raw(SLSWindowQueryResultCopyWindows(query.deref().into())) })
-}
-
-pub fn window_iterator_for_id(window_id: WinID) -> Option<CFRetained<CFType>> {
-    let cid = unsafe { SLSMainConnectionID() };
-    let windows = create_array(&[window_id], CFNumberType::SInt32Type).ok()?;
-    let query = unsafe { CFRetained::from_raw(SLSWindowQueryWindows(cid, &raw const *windows, 1)) };
-    Some(unsafe { CFRetained::from_raw(SLSWindowQueryResultCopyWindows(query.deref().into())) })
+    Ok(result.windows())
 }
 
 /// Determines if a window is valid based on its parent ID, attributes, and tags.

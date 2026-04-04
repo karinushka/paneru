@@ -33,6 +33,7 @@ use crate::platform::{Modifiers, PlatformCallbacks, WinID, WorkspaceId};
 
 mod focus;
 pub mod layout;
+mod mouse;
 pub mod params;
 mod scroll;
 mod systems;
@@ -152,10 +153,10 @@ pub fn register_systems(app: &mut bevy::app::App) {
 
 /// Registers all the event triggers for the window manager.
 pub fn register_triggers(app: &mut bevy::app::App) {
-    app.add_observer(triggers::mouse_moved_trigger)
-        .add_observer(triggers::mouse_down_trigger)
-        .add_observer(triggers::mouse_up_trigger)
-        .add_observer(triggers::mouse_dragged_trigger)
+    app.add_observer(mouse::mouse_moved_trigger)
+        .add_observer(mouse::mouse_down_trigger)
+        .add_observer(mouse::mouse_up_trigger)
+        .add_observer(mouse::mouse_dragged_trigger)
         .add_observer(triggers::display_change_trigger)
         .add_observer(triggers::front_switched_trigger)
         .add_observer(triggers::window_focused_trigger)

@@ -29,9 +29,9 @@ use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, BruteforceWindows, FlashMessage, Initializing,
-    LocateDockTrigger, Position, RefreshWindowSizes, Scrolling, SelectedVirtualMarker,
-    StackAdjustedResize, Unmanaged, WidthRatio, WindowDraggedMarker, WindowProperties,
-    focus_entity, reshuffle_around,
+    LocateDockTrigger, Position, RefreshWindowSizes, RestoreWindowState, Scrolling,
+    SelectedVirtualMarker, StackAdjustedResize, Unmanaged, WidthRatio, WindowDraggedMarker,
+    WindowProperties, focus_entity, reshuffle_around,
 };
 use crate::events::Event;
 use crate::manager::{
@@ -238,7 +238,7 @@ pub(crate) fn finish_setup(
     process_query: Query<Entity, With<ExistingMarker>>,
     windows: Windows,
     mut bruteforce_tasks: Query<(Entity, &mut BruteforceWindows)>,
-    mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>, &ChildOf)>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
@@ -264,7 +264,7 @@ pub(crate) fn finish_setup(
         windows.iter().size_hint()
     );
 
-    for (mut strip, active_strip) in &mut workspaces {
+    for (mut strip, active_strip, _) in &mut workspaces {
         debug!("space {}: before refresh {strip:?}", strip.id());
         let workspace_windows = window_manager
             .windows_in_workspace(strip.id())
@@ -309,6 +309,7 @@ pub(crate) fn finish_setup(
     }
 
     commands.remove_resource::<Initializing>();
+    commands.trigger(RestoreWindowState);
 }
 
 /// Handles the event when a new application is launched. It creates a `Process` and `Application` object,

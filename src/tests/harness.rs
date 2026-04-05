@@ -138,10 +138,11 @@ pub(crate) fn setup_world() -> App {
 
 pub(crate) fn setup_process(world: &mut World) -> MockApplication {
     let psn = ProcessSerialNumber { high: 1, low: 2 };
+    let bundle_id = "test".to_string();
     let mock_process = MockProcess { psn };
     let process = world.spawn(BProcess(Box::new(mock_process))).id();
 
-    let application = MockApplication::new(psn, TEST_PROCESS_ID);
+    let application = MockApplication::new(psn, TEST_PROCESS_ID, bundle_id);
     world.spawn((
         ExistingMarker,
         ChildOf(process),

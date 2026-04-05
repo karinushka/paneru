@@ -47,6 +47,7 @@ pub trait WindowApi: Send + Sync {
     fn frame(&self) -> IRect;
     fn element(&self) -> Option<CFRetained<AXUIWrapper>>;
     fn title(&self) -> Result<String>;
+    fn identifier(&self) -> Result<String>;
     fn child_role(&self) -> Result<bool>;
     fn role(&self) -> Result<String>;
     fn subrole(&self) -> Result<String>;
@@ -285,7 +286,6 @@ impl WindowOS {
         }
         let window_id = self.id();
         let mut event_bytes = [0u8; 0xf8];
-
         event_bytes[0x04] = 0xf8;
         event_bytes[0x3a] = 0x10;
         event_bytes[0x3c..0x40].copy_from_slice(&window_id.to_ne_bytes());
@@ -334,6 +334,10 @@ impl WindowApi for WindowOS {
     /// `Ok(String)` with the window title if successful, otherwise `Err(Error)`.
     fn title(&self) -> Result<String> {
         self.ax_element.title()
+    }
+
+    fn identifier(&self) -> Result<String> {
+        self.ax_element.identifier()
     }
 
     /// Returns true if the window has a child role.

@@ -2569,6 +2569,7 @@ dependencies = [
  "regex",
  "scopeguard",
  "serde",
+ "serde_json",
  "stdext",
  "toml",
  "tracing",

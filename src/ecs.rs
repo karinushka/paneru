@@ -86,6 +86,8 @@ pub fn register_systems(app: &mut bevy::app::App) {
             ))),
             systems::displays_rearranged,
             systems::reposition_dragged_window,
+            focus::mouse_follows_focus,
+            focus::autocenter_window_on_focus,
             workspace::detect_moved_windows.run_if(not(resource_exists::<Initializing>)),
             workspace::hide_inactive_workspace,
             workspace::show_active_workspace,
@@ -177,8 +179,6 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::window_removal_trigger)
         .add_observer(triggers::theme_change_trigger)
         .add_observer(triggers::apply_window_properties)
-        .add_observer(focus::autocenter_on_focus)
-        .add_observer(focus::center_mouse_trigger)
         .add_observer(focus::dim_remove_window_trigger)
         .add_observer(focus::dim_window_trigger)
         .add_observer(focus::maintain_focus_singleton)

@@ -1,10 +1,10 @@
 use bevy::ecs::entity::Entity;
 use bevy::ecs::lifecycle::{Add, Remove};
 use bevy::ecs::observer::On;
-use bevy::ecs::query::{Has, With};
-use bevy::ecs::system::{Commands, Query, Res};
+use bevy::ecs::query::{Added, Has, With};
+use bevy::ecs::system::{Commands, Query, Res, Single};
 use bevy::prelude::Event as BevyEvent;
-use tracing::{Level, debug, instrument, warn};
+use tracing::{Level, debug, instrument, trace, warn};
 
 use super::{FocusedMarker, MouseHeldMarker, SystemTheme};
 use crate::config::Config;
@@ -51,15 +51,15 @@ pub(super) fn maintain_focus_singleton(
 
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
-pub(super) fn autocenter_on_focus(
-    trigger: On<Add, FocusedMarker>,
+pub(super) fn autocenter_window_on_focus(
+    focused: Single<Entity, Added<FocusedMarker>>,
     mouse_held: Query<&MouseHeldMarker>,
     windows: Windows,
     config: Configuration,
     active_display: ActiveDisplay,
     mut commands: Commands,
 ) {
-    let entity = trigger.event().entity;
+    let entity = *focused;
 
     if config.skip_reshuffle() || config.initializing() || !mouse_held.is_empty() {
         return;
@@ -78,15 +78,15 @@ pub(super) fn autocenter_on_focus(
 
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
-pub(super) fn center_mouse_trigger(
-    trigger: On<Add, FocusedMarker>,
+pub(super) fn mouse_follows_focus(
+    focused: Single<Entity, Added<FocusedMarker>>,
     windows: Windows,
     config: Configuration,
     active_display: ActiveDisplay,
     window_manager: Res<WindowManager>,
     active_workspace: Query<&Scrolling, With<ActiveWorkspaceMarker>>,
 ) {
-    let entity = trigger.event().entity;
+    let entity = *focused;
     let Some(window) = windows.get(entity) else {
         return;
     };
@@ -99,7 +99,7 @@ pub(super) fn center_mouse_trigger(
         return;
     }
 
-    debug!(
+    trace!(
         "window {}, skip_reshuffle {}, ffm flag {:?}.",
         window.id(),
         config.skip_reshuffle(),

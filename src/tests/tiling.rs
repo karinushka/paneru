@@ -13,7 +13,7 @@ use super::*;
 #[test]
 fn test_set_padding_expands_frame() {
     let psn = ProcessSerialNumber { high: 0, low: 0 };
-    let app = MockApplication::new(psn, 1);
+    let app = MockApplication::new(psn, 1, "test".to_string());
     let event_queue = Arc::new(RwLock::new(Vec::new()));
 
     // Window at (100, 50) with size (400, 300).

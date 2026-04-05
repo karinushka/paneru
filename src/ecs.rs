@@ -23,6 +23,7 @@ use tracing::{Level, instrument};
 
 use crate::commands::register_commands;
 use crate::config::{CONFIGURATION_FILE, Config, WindowParams};
+use crate::ecs::state::PaneruState;
 use crate::errors::Result;
 use crate::events::{Event, EventSender};
 use crate::manager::{
@@ -36,6 +37,7 @@ pub mod layout;
 mod mouse;
 pub mod params;
 mod scroll;
+pub mod state;
 mod systems;
 mod triggers;
 mod workspace;
@@ -81,21 +83,28 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::timeout_ticker,
             systems::retry_front_switch,
             systems::window_update_frame,
-            workspace::refresh_workspace_window_sizes.run_if(on_timer(Duration::from_millis(
-                REFRESH_WINDOW_CHECK_FREQ_MS,
-            ))),
             systems::displays_rearranged,
             systems::reposition_dragged_window,
             workspace::show_active_workspace,
             workspace::cleanup_virtual_workspaces,
             workspace::handle_virtual_window_moves,
             workspace::detect_moved_windows.run_if(not(resource_exists::<Initializing>)),
+            workspace::refresh_workspace_window_sizes.run_if(on_timer(Duration::from_millis(
+                REFRESH_WINDOW_CHECK_FREQ_MS,
+            ))),
             workspace::find_orphaned_workspaces
                 .after(systems::displays_rearranged)
                 .run_if(on_timer(Duration::from_millis(
                     DISPLAY_CHANGE_CHECK_FREQ_MS,
                 ))),
             systems::cleanup_on_exit,
+        ),
+    );
+    app.add_systems(
+        Update,
+        (
+            state::periodic_state_save.run_if(on_timer(Duration::from_secs(300))),
+            state::cleanup_on_exit,
         ),
     );
     app.add_systems(
@@ -183,6 +192,7 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::window_removal_trigger)
         .add_observer(triggers::theme_change_trigger)
         .add_observer(triggers::apply_window_properties)
+        .add_observer(triggers::restore_window_state)
         .add_observer(focus::dim_remove_window_trigger)
         .add_observer(focus::dim_window_trigger)
         .add_observer(focus::maintain_focus_singleton)
@@ -421,6 +431,9 @@ pub struct LocateDockTrigger(pub Entity);
 #[derive(BevyEvent)]
 pub struct SendMessageTrigger(pub Event);
 
+#[derive(BevyEvent)]
+pub struct RestoreWindowState;
+
 #[instrument(level = Level::TRACE, skip(commands))]
 pub fn reposition_entity(entity: Entity, origin: Origin, commands: &mut Commands) {
     if let Ok(mut entity_commands) = commands.get_entity(entity) {
@@ -462,6 +475,7 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
     let watcher = window_manager.setup_config_watcher(CONFIGURATION_FILE.as_path())?;
 
     let mut app = BevyApp::new();
+
     app.add_plugins(MinimalPlugins)
         .init_resource::<Messages<Event>>()
         .insert_resource(Time::<Virtual>::from_max_delta(Duration::from_secs(10)))
@@ -486,6 +500,10 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
     app.insert_non_send_resource(overlay_manager);
     app.insert_non_send_resource(flash_message_manager);
     app.insert_non_send_resource(receiver);
+
+    if let Some(previous_state) = PaneruState::load_from_file(state::STATE_FILE_PATH) {
+        app.insert_resource(previous_state);
+    }
 
     Ok(app)
 }

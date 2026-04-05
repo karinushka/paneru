@@ -204,6 +204,9 @@ impl LayoutStrip {
     ///
     /// * `entity` - Entity of the window to append.
     pub fn append(&mut self, entity: Entity) {
+        if self.contains(entity) {
+            return;
+        }
         self.columns.push_back(Column::Single(entity));
     }
 
@@ -494,6 +497,10 @@ impl LayoutStrip {
 
     pub fn id(&self) -> WorkspaceId {
         self.id
+    }
+
+    pub fn columns(&self) -> impl Iterator<Item = &Column> {
+        self.columns.iter()
     }
 
     #[instrument(level = Level::TRACE, skip_all, fields(offset))]

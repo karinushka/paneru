@@ -12,10 +12,11 @@ use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
 use crate::platform::OSStatus;
 use crate::util::MacResult;
+use serde::{Deserialize, Serialize};
 
 /// Represents a process serial number (PSN), a unique identifier for a running process on macOS.
 /// It is used by the Carbon APIs to identify applications.
-#[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(C)]
 pub struct ProcessSerialNumber {
     /// The high-order 32 bits of the process serial number.

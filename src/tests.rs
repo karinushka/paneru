@@ -6,6 +6,7 @@ mod display;
 mod harness;
 mod interaction;
 mod mocks;
+mod state;
 mod tiling;
 
 pub(crate) use harness::*;

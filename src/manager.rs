@@ -154,6 +154,7 @@ pub trait WindowManagerApi: Send + Sync {
     ///
     /// `Ok(Vec<WinID>)` containing the list of window IDs, otherwise `Err(Error)`.
     fn windows_in_workspace(&self, space_id: WorkspaceId) -> Result<Vec<WinID>>;
+
     /// Sends an `Event::Exit` to the event loop, signaling the application to quit.
     ///
     /// # Returns

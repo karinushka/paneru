@@ -32,8 +32,8 @@ pub(super) struct VirtualMoveMarker {
 
 #[derive(Component, Debug)]
 pub(crate) struct PreviousStripPosition {
-    origin: Origin,
-    focus: Option<Entity>,
+    pub origin: Origin,
+    pub focus: Option<Entity>,
 }
 
 #[allow(clippy::needless_pass_by_value)]

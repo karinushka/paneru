@@ -81,17 +81,19 @@ pub(crate) struct InnerMockApplication {
     pub(crate) psn: ProcessSerialNumber,
     pub(crate) pid: Pid,
     pub(crate) focused_id: Option<WinID>,
+    pub(crate) bundle_id: String,
 }
 
 impl MockApplication {
     /// Creates a new `MockApplication` instance.
     #[instrument(level = Level::DEBUG, ret)]
-    pub(crate) fn new(psn: ProcessSerialNumber, pid: Pid) -> Self {
+    pub(crate) fn new(psn: ProcessSerialNumber, pid: Pid, bundle_id: String) -> Self {
         MockApplication {
             inner: Arc::new(RwLock::new(InnerMockApplication {
                 psn,
                 pid,
                 focused_id: None,
+                bundle_id,
             })),
         }
     }
@@ -167,11 +169,14 @@ impl ApplicationApi for MockApplication {
         true
     }
 
-    /// Always returns `Some("test")` for the bundle ID.
+    /// Returns the bundle identifier of the application.
     #[instrument(level = Level::DEBUG, skip(self), ret)]
     fn bundle_id(&self) -> Option<&str> {
         debug!("{}:", function_name!());
-        Some("test")
+        // unsafe leak for testing.
+        Some(Box::leak(
+            self.inner.force_read().bundle_id.clone().into_boxed_str(),
+        ))
     }
 }
 
@@ -198,6 +203,7 @@ impl WindowManagerApi for MockWindowManager {
                 psn: process.psn(),
                 pid: process.pid(),
                 focused_id: None,
+                bundle_id: "test".to_string(),
             })),
         })))
     }
@@ -311,6 +317,10 @@ pub(crate) struct MockWindow {
     pub(crate) app: MockApplication,
     pub(crate) event_queue: EventQueue,
     pub(crate) minimized: bool,
+    pub(crate) title: String,
+    pub(crate) identifier: String,
+    pub(crate) role: String,
+    pub(crate) subrole: String,
 }
 
 impl WindowApi for MockWindow {
@@ -333,10 +343,16 @@ impl WindowApi for MockWindow {
         None
     }
 
-    /// Always returns an empty string for the window title.
+    /// Returns the title of the mock window.
     #[instrument(level = Level::TRACE, skip(self), ret)]
     fn title(&self) -> Result<String> {
-        Ok(String::new())
+        Ok(self.title.clone())
+    }
+
+    /// Returns the identifier of the mock window.
+    #[instrument(level = Level::TRACE, skip(self), ret)]
+    fn identifier(&self) -> Result<String> {
+        Ok(self.identifier.clone())
     }
 
     /// Always returns `Ok(true)` for valid role.
@@ -346,16 +362,16 @@ impl WindowApi for MockWindow {
         Ok(true)
     }
 
-    /// Always returns an empty string for the window role.
+    /// Returns the role of the mock window.
     #[instrument(level = Level::TRACE, skip(self), ret)]
     fn role(&self) -> Result<String> {
-        Ok(String::new())
+        Ok(self.role.clone())
     }
 
-    /// Always returns an empty string for the window subrole.
+    /// Returns the subrole of the mock window.
     #[instrument(level = Level::TRACE, skip(self), ret)]
     fn subrole(&self) -> Result<String> {
-        Ok(String::new())
+        Ok(self.subrole.clone())
     }
 
     /// Repositions the mock window's frame to the given coordinates.
@@ -473,6 +489,10 @@ impl MockWindow {
             app,
             event_queue,
             minimized: false,
+            title: String::new(),
+            identifier: String::new(),
+            role: "AXWindow".to_string(),
+            subrole: "AXStandardWindow".to_string(),
         }
     }
 }
@@ -501,6 +521,7 @@ impl WindowManagerApi for TwoDisplayMock {
                 psn: process.psn(),
                 pid: process.pid(),
                 focused_id: None,
+                bundle_id: "test".to_string(),
             })),
         })))
     }

@@ -123,8 +123,7 @@ pub(super) fn workspace_change_trigger(
 pub(super) fn detect_moved_windows(
     activated_workspace: Single<Entity, Added<ActiveWorkspaceMarker>>,
     windows: Windows,
-    mut workspaces: Query<(&mut LayoutStrip, &ChildOf, Has<NativeFullscreenMarker>), With<ChildOf>>,
-    active_display: Single<(Entity, &Display), With<ActiveDisplayMarker>>,
+    mut workspaces: Query<(&mut LayoutStrip, Entity, Has<NativeFullscreenMarker>)>,
     apps: Query<&mut Application>,
     window_manager: Res<WindowManager>,
     mut ignored_windows: Local<HashSet<WinID>>,
@@ -140,7 +139,7 @@ pub(super) fn detect_moved_windows(
 
     let strips = workspaces
         .iter()
-        .filter_map(|(strip, _, _)| (strip.id() == workspace_id).then_some(strip))
+        .filter_map(|strip| (strip.0.id() == workspace_id).then_some(strip.0))
         .collect::<Vec<_>>();
     let find_window = |window_id| windows.find_managed(window_id).map(|(_, entity)| entity);
     let Ok((moved_windows, mut unresolved)) =
@@ -198,11 +197,11 @@ pub(super) fn detect_moved_windows(
         }
 
         debug!("Window {entity} moved to workspace {workspace_id}.");
-        for (mut strip, child, _) in &mut workspaces {
-            strip.remove(entity);
-
-            if strip.id() == workspace_id && child.parent() == active_display.0 {
+        for (mut strip, strip_entity, _) in &mut workspaces {
+            if strip_entity == *activated_workspace {
                 strip.append(entity);
+            } else {
+                strip.remove(entity);
             }
         }
     }

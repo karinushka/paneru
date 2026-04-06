@@ -604,7 +604,9 @@ pub(super) fn window_managed_trigger(
     let entity = trigger.event().entity;
 
     debug!("Entity {entity} is managed again.");
-    let display_bounds = active_display.bounds();
+    let display_bounds = active_display
+        .display()
+        .actual_display_bounds(active_display.dock(), &config);
     let active_strip = active_display.active_strip();
 
     if let Some(window) = windows.get(entity)
@@ -618,7 +620,7 @@ pub(super) fn window_managed_trigger(
             let (_, pad_right, _, pad_left) = config.edge_padding();
             let padded_width = display_bounds.width() - pad_left - pad_right;
             let width = (f64::from(padded_width) * width_ratio).round() as i32;
-            let height = window.frame().height();
+            let height = display_bounds.height();
             resize_entity(entity, Size::new(width, height), &mut commands);
         }
 

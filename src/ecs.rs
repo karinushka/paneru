@@ -85,7 +85,6 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::window_update_frame,
             systems::displays_rearranged,
             systems::reposition_dragged_window,
-            focus::autocenter_window_on_focus,
             workspace::detect_moved_windows.run_if(not(resource_exists::<Initializing>)),
             workspace::hide_inactive_workspace,
             workspace::show_active_workspace,
@@ -147,6 +146,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
     app.add_systems(
         PostUpdate,
         (
+            focus::autocenter_window_on_focus,
             focus::mouse_follows_focus,
             systems::animate_entities,
             systems::animate_resize_entities,

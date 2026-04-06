@@ -360,8 +360,8 @@ impl InputHandler {
                     // Vertical dominant: send vertical swipe, intercept the event
                     _ = events.send(Event::VerticalSwipe { delta: y_sum });
                     self.last_vertical_gesture = Some(Instant::now());
-                    intercept = true;
                 }
+                intercept = true;
             }
         }
         self.finger_position = Some(fingers);

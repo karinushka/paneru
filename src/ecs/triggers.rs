@@ -3,8 +3,8 @@ use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::lifecycle::{Add, Remove};
 use bevy::ecs::message::MessageWriter;
 use bevy::ecs::observer::On;
-use bevy::ecs::query::Has;
-use bevy::ecs::system::{Commands, NonSend, NonSendMut, Populated, Query, Res, ResMut};
+use bevy::ecs::query::{Has, With};
+use bevy::ecs::system::{Commands, NonSend, NonSendMut, Populated, Query, Res, ResMut, Single};
 use bevy::math::IRect;
 use notify::event::{DataChange, MetadataKind, ModifyKind};
 use notify::{EventKind, Watcher};
@@ -23,8 +23,8 @@ use crate::config::{Config, WindowParams};
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, Bounds, LayoutPosition, LocateDockTrigger, Position, Scrolling,
-    SendMessageTrigger, WidthRatio, WindowProperties, focus_entity, reposition_entity,
+    ActiveWorkspaceMarker, Bounds, DockPosition, LayoutPosition, LocateDockTrigger, Position,
+    Scrolling, SendMessageTrigger, WidthRatio, WindowProperties, focus_entity, reposition_entity,
     reshuffle_around, resize_entity,
 };
 use crate::events::Event;
@@ -454,7 +454,8 @@ pub(super) fn window_unmanaged_trigger(
     trigger: On<Add, Unmanaged>,
     windows: Windows,
     apps: Query<(Entity, &Application)>,
-    mut active_display: ActiveDisplayMut,
+    mut workspaces: Query<&mut LayoutStrip>,
+    active_display: Single<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
     config: Configuration,
     mut commands: Commands,
 ) {
@@ -501,10 +502,10 @@ pub(super) fn window_unmanaged_trigger(
     let Some((_, _, Some(Unmanaged::Floating))) = windows.get_managed(entity) else {
         return;
     };
-    let display_bounds = active_display
-        .display()
-        .actual_display_bounds(active_display.dock(), config.config());
-    let active_strip = active_display.active_strip();
+    let display_bounds = {
+        let (display, dock) = *active_display;
+        display.actual_display_bounds(dock, config.config())
+    };
 
     debug!("Entity {entity} is floating.");
 
@@ -553,14 +554,11 @@ pub(super) fn window_unmanaged_trigger(
         }
     }
 
-    if let Some(neighbour) = active_strip
-        .left_neighbour(entity)
-        .or_else(|| active_strip.right_neighbour(entity))
-    {
-        debug!("Reshuffling around its neighbour {neighbour}.");
-        reshuffle_around(neighbour, &mut commands);
-    }
-    active_strip.remove(entity);
+    workspaces.par_iter_mut().for_each(|mut strip| {
+        if strip.contains(entity) {
+            strip.remove(entity);
+        }
+    });
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -568,7 +566,8 @@ pub(super) fn window_unmanaged_trigger(
 pub(super) fn window_minimized_trigger(
     trigger: On<Add, Unmanaged>,
     windows: Windows,
-    mut active_display: ActiveDisplayMut,
+    workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    active_display: Single<&Display, With<ActiveDisplayMarker>>,
     mut config: Configuration,
     mut commands: Commands,
 ) {
@@ -578,16 +577,22 @@ pub(super) fn window_minimized_trigger(
     {
         debug!("Entity {entity} is minimized or hidden.");
         let display_bounds = active_display.bounds();
-        let active_strip = active_display.active_strip();
-        give_away_focus(
-            entity,
-            &windows,
-            active_strip,
-            &display_bounds,
-            &mut config,
-            &mut commands,
-        );
-        active_strip.remove(entity);
+
+        for (mut strip, active) in workspaces {
+            if active {
+                give_away_focus(
+                    entity,
+                    &windows,
+                    &strip,
+                    &display_bounds,
+                    &mut config,
+                    &mut commands,
+                );
+            }
+            if strip.contains(entity) {
+                strip.remove(entity);
+            }
+        }
     }
 }
 

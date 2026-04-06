@@ -268,12 +268,7 @@ pub(super) fn window_focused_trigger(
         column.move_to_front(entity);
     }
 
-    if windows
-        .focused()
-        .is_some_and(|(window, _)| window.id() != window_id)
-        && let Some((_, entity)) = windows.find(window_id)
-        && let Ok(mut entity_commands) = commands.get_entity(entity)
-    {
+    if let Ok(mut entity_commands) = commands.get_entity(entity) {
         entity_commands.try_insert(FocusedMarker);
         debug!("window {} ({entity}) focused.", window.id());
     }

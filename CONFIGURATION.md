@@ -50,6 +50,7 @@ Configure trackpad gestures and scroll-wheel window sliding.
 | :--- | :--- | :--- | :--- |
 | `sensitivity` | Float (0.1–2.0) | `0.35` | Multiplier for swipe distance. |
 | `deceleration` | Float (1.0–10.0) | `4.0` | Rate at which inertia slows down after a swipe. |
+| `continuous` | Boolean | `true` | If enabled, the swipe gesture moves windows smoothly with the fingers. If disabled, it snaps to windows as you swipe. |
 
 ### `[swipe.gesture]`
 | Option | Type | Default | Description |
@@ -106,13 +107,15 @@ Format: `"[modifiers-]key"`. Available modifiers are:
 | `window_swap_first` / `_last` | Move current window to start/end of strip. |
 | `window_center` | Center the current window in the viewport. |
 | `window_resize` | Cycle through preset widths (Grow). |
+| `window_grow` | Alias for `window_resize`. |
 | `window_shrink` | Cycle through preset widths (Shrink). |
 | `window_fullwidth` | Toggle full-width mode. |
 | `window_manage` | Toggle between tiled and floating state. |
 | `window_stack` | Stack the current window into the column on the left. |
 | `window_unstack` | Pull a window out of a stack into its own column. |
 | `window_equalize` | Make all windows in a stack equal height. |
-| `window_nextdisplay` | Move focused window to the next monitor. |
+| `window_nextdisplay` | Move focused window to the next monitor and follow it. |
+| `window_nextdisplaysend` | Move focused window to the next monitor but stay on current. |
 | `mouse_nextdisplay` | Warp mouse cursor to the next monitor. |
 | `window_snap` | Snap an overflowing window into the viewport. |
 | `quit` | Exit Paneru. |
@@ -140,8 +143,9 @@ Virtual workspaces can also be navigated using trackpad gestures. If `[swipe.ges
 
 | Action | Description |
 | :--- | :--- |
-| `window_virtual_north` / `_south` | Switch to the previous/next virtual workspace (row of windows) |
-| `window_virtualmove_north` / `_south` | Move currently focused window to the previous/next virtual workspace (row of windows) |
+| `window_virtual_north` / `_south` | Switch to the previous/next virtual workspace (row of windows). |
+| `window_virtualmove_north` / `_south` | Move currently focused window to the previous/next virtual workspace and follow it. |
+| `window_virtualsend_north` / `_south` | Move currently focused window to the previous/next virtual workspace but stay on the current one. |
 
 
 **Example:**

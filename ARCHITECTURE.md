@@ -36,7 +36,11 @@ Bevy is typically used for games, so Paneru implements a custom bridge to intera
 | `src/ecs/systems.rs` | Bevy systems for lifecycle management, event pumping, and state syncing. |
 | `src/ecs/params.rs` | High-level Bevy `SystemParam` abstractions for querying the World. |
 | `src/ecs/triggers.rs` | Reactive event handlers (Observers) for OS and internal events. |
-| `src/manager/` | OS-agnostic traits (`WindowApi`, `ProcessApi`) and their macOS implementations. |
+| `src/ecs/workspace.rs` | Management of virtual workspaces, display changes, and window movement between spaces. |
+| `src/ecs/scroll.rs` | Input handling for trackpad swipe gestures, inertia, and snapping. |
+| `src/ecs/focus.rs` | Focus management logic, including focus-follows-mouse and mouse-follows-focus. |
+| `src/ecs/state.rs` | Persistence of window layout and workspace state across restarts. |
+| `src/manager/` | OS-agnostic traits (`WindowApi`, `ProcessApi`) and their macOS implementations (`WindowOS`). |
 | `src/platform/` | Low-level macOS FFI, event loop integration, and workspace/input hooks. |
 | `src/config/` | Configuration parsing, validation, and hot-reloading logic. |
 | `src/commands.rs` | Implementation of CLI subcommands and Unix socket communication. |
@@ -50,12 +54,17 @@ Bevy is typically used for games, so Paneru implements a custom bridge to intera
 - **`LayoutStrip`:** A component attached to a Workspace/Display that manages the ordered list of `Column`s.
 - **`LayoutPosition` / `Position`:** The intended (layout) vs. actual (on-screen) coordinates.
 - **`Bounds` / `WidthRatio`:** The size of the window and its relative width in the tiling strip.
-- **`FocusedMarker`:** A marker component identifying the currently focused window.
+- **`FocusedMarker`:** Identifies the currently focused window.
+- **`ActiveWorkspaceMarker`**: Identifies the currently active workspace.
+- **`SelectedVirtualMarker`**: Marks a virtual workspace that is currently selected by the user.
+- **`NativeFullscreenMarker`**: Marks a window that is in macOS native fullscreen mode.
 - **`Unmanaged`:** An enum identifying windows that are `Floating`, `Minimized`, or `Hidden`.
+- **`RepositionMarker` / `ResizeMarker`**: Used to signal that a window needs to be moved or resized.
 
 ### Resources
 - **`WindowManager`:** A wrapper for the global window management state and OS bridge.
 - **`Config`:** The current user configuration.
+- **`PaneruState`**: The persisted state of the window manager, used for recovery after restarts.
 - **`MissionControlActive`:** A flag indicating if macOS Mission Control is visible (disabling tiling).
 - **`FocusFollowsMouse`:** Tracks which window should gain focus based on mouse position.
 
@@ -78,6 +87,7 @@ graph TD
     F -->|Set RepositionMarker| E
     E -->|PostUpdate| G(commit_window_position)
     G -->|FFI Call| A
+    H[CommandReader] -->|Unix Socket| C
 ```
 
 ## 7. Testing Strategy
@@ -85,3 +95,4 @@ graph TD
 1.  **Pure Unit Tests:** Located in `src/tests.rs` and alongside modules. These test layout math and configuration parsing without requiring a macOS environment.
 2.  **ECS Integration Tests:** Use Bevy's `App` or `World` to drive systems in isolation. macOS APIs are typically mocked via the `WindowApi` and `WindowManagerApi` traits.
 3.  **FFI Verification:** Manual or semi-automated tests on macOS to ensure the Accessibility API calls behave as expected with native windows.
+4.  **Agent Support:** The `AGENTS.md` file provides project-specific guidance for AI agents to ensure contributions follow these architectural patterns.

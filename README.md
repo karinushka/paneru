@@ -21,6 +21,10 @@ adjacent monitors.
 - **Works with MacOS workspaces:** You can use existing workspaces and switch
   between them with keyboard or touchpad gestures - with a separate window strip
   on each. Drag and dropping windows between them works as well.
+- **Virtual Workspaces (Experimental):** Group your windows into tasks by
+  stacking multiple horizontal strips (rows) within a single space. Use native
+  macOS workspaces for broad segregation (e.g., 'Work', 'Personal') and virtual
+  workspaces to stay organized within each context.
 - **Focus follows mouse on MacOS:** Very useful for people who would like to
   avoid an extra click.
 - **Sliding windows with touchpad:** Using a touchpad is quite natural for
@@ -271,6 +275,10 @@ $ paneru send-cmd <command> [args...]
 | `window stack`             | Stack the focused window onto its left neighbour |
 | `window unstack`           | Unstack the focused window into its own column   |
 | `window nextdisplay`       | Move the focused window to the next display      |
+| `window nextdisplaysend`   | Move the window to the next display but stay here |
+| `window virtual <dir>`     | Switch to the previous/next virtual workspace     |
+| `window virtualmove <dir>` | Move the window to a different virtual workspace  |
+| `window virtualsend <dir>` | Send the window to a virtual workspace but stay  |
 | `window snap`              | Snap the focused window into the visible viewport |
 | `mouse nextdisplay`        | Warp the mouse pointer to the next display       |
 | `printstate`               | Print the internal ECS state to the debug log    |

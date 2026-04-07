@@ -20,7 +20,7 @@
           to grant accessibilty permissions item in System Settings.
 
           After granting permissions you may have to manually restart the service:
-          `launchctl start paneru`
+          `launchctl start com.github.karinushka.paneru`
 
           You can verify the service is running correctly from your terminal.
           Run: `launchctl list | grep paneru`

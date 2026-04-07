@@ -118,6 +118,11 @@
               conf=`<"$confPath" toml2json`
               echo $conf | jq -e ".options.focus_follows_mouse == true"
               echo $conf | jq -e ".options.mouse_follows_focus == true"
+              echo $conf | jq -e ".bindings.window_focus_west == \"cmd - h\""
+              echo $conf | jq -e ".bindings.window_focus_east == \"cmd - l\""
+              echo $conf | jq -e ".bindings.window_resize == \"alt - r\""
+              echo $conf | jq -e ".bindings.window_center == \"alt - c\""
+              echo $conf | jq -e ".bindings.quit == \"ctrl + alt - q\""
             '';
         }
       );

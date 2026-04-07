@@ -117,7 +117,7 @@ $ brew install paneru
 
 ### Installing with Nix
 
-See [`nix/README.md`].
+See [`nix/README.md`](/nix/README.md).
 
 ### Configuration
 

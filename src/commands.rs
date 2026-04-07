@@ -475,6 +475,7 @@ fn resize_window(
     }
 
     resize_entity(entity, size, &mut commands);
+    reshuffle_around(entity, &mut commands);
 }
 
 /// Toggles the focused window between full-width and a preset width.
@@ -545,6 +546,7 @@ fn full_width_window(
 
     reposition_entity(entity, Origin::new(x, y), &mut commands);
     resize_entity(entity, Size::new(width, height), &mut commands);
+    reshuffle_around(entity, &mut commands);
 }
 
 /// Toggles the managed state of the focused window.

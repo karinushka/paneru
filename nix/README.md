@@ -32,7 +32,7 @@ expose the same following options:
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
-| `services.paneru.enable` | `boolean` | `false` | Generate and enable the launchd agent (`~/Library/LaunchAgents/com.github.karinushka.paneru.plist`) |
+| `services.paneru.enable` | `boolean` | `false` | Generate and enable the launchd agent |
 | `services.paneru.package` | `package` | `self.packages.<system>.paneru` | Package to use |
 | `services.paneru.settings` | `null` or `attribute set` | `null` | Paneru configuration (See [`CONFIGURATION.md`](/CONFIGURATION.md)) |
 

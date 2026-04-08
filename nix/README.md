@@ -14,12 +14,12 @@ inputs.paneru = {
 
 - [nix-darwin](#nix-darwin-or-home-manager)
 - [Home Manager](#nix-darwin-or-home-manager)
-- [Standalone](#standalone)
+- [Other](#other)
 
 ### [nix-darwin](https://github.com/nix-darwin/nix-darwin) or [Home Manager](https://github.com/nix-community/home-manager)
 
 Instead of manually installing and configuring paneru, you can use either
-nix-darwin or home-manager to configure paneru and setup a launchd agent entirely with nix.
+nix-darwin or Home Manager to configure paneru and setup a launchd agent entirely with nix.
 
 Which one you use is entirely up to preference, but **do not** use both at the same time.
 
@@ -79,30 +79,14 @@ expose the same following options:
 > launchctl start com.github.karinushka.paneru
 > ```
 
-### Standalone
+### Other
 
-This flake provides the following packages:
+If neither nix-darwin nor Home Manager suites your usecase the flake provides the following packages:
 
 - `packages.<system>.paneru`
 - `packages.<system>.default` *(alias for `packages.<system>.paneru`)*
 
-#### Usage
-
-##### Install
-
-```nix
-{ inputs, ... }:
-
-{
-  # nix-darwin configuration (configuration.nix)
-  # system-wide
-  environment.systemPackages = [ inputs.paneru.packages.${pkgs.system}.paneru ]
-  # or per-user
-  users.users."<name>".packages = [ inputs.paneru.packages.${pkgs.system}.paneru ]
-}
-```
-
-##### Run without installing
+#### Run without installing
 
 > [!NOTE]
 > Running paneru requires a configuration to be present (See [`CONFIGURATION.md`](/CONFIGURATION.md))

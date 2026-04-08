@@ -32,7 +32,7 @@
         settings = lib.mkOption {
           type = lib.types.nullOr lib.types.attrs;
           default = null;
-          description = "Configuration to put in `/etc/paneru.toml`.";
+          description = "Paneru configuration";
           example = {
             options = {
               focus_follows_mouse = true;

@@ -231,12 +231,6 @@ pub(super) fn window_focused_trigger(
         return;
     };
 
-    if let Some((window, _)) = windows.focused()
-        && window.id() == window_id
-    {
-        return;
-    }
-
     let Some((window, entity, parent)) = windows.find_parent(window_id) else {
         let timeout = Timeout::new(Duration::from_secs(STRAY_FOCUS_RETRY_SEC), None);
         commands.spawn((timeout, StrayFocusEvent(window_id)));
@@ -247,6 +241,17 @@ pub(super) fn window_focused_trigger(
         warn!("Unable to get parent for window {}.", window.id());
         return;
     };
+
+    // Always keep passthrough in sync. An internal focus_entity call races
+    // with the OS WindowFocused event; without this the passthrough keys
+    // remain stale from a previously focused window.
+    update_passthrough(window, app, config.config());
+
+    if let Some((focused, _)) = windows.focused()
+        && focused.id() == window_id
+    {
+        return;
+    }
 
     // Guard against stale focus events. Without these checks, delayed
     // events (e.g. from RetryFrontSwitch or dont_focus re-assertions)
@@ -274,8 +279,6 @@ pub(super) fn window_focused_trigger(
         entity_commands.try_insert(FocusedMarker);
         debug!("window {} ({entity}) focused.", window.id());
     }
-
-    update_passthrough(window, app, config.config());
 }
 
 /// Handles Mission Control events, updating the `MissionControlActive` resource.

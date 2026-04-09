@@ -882,6 +882,7 @@ fn apply_window_defaults(
     // Apply configured width AFTER update_frame so it isn't overwritten.
     // Use padded display width (matching window_resize command behavior).
     if let Some(width) = properties.iter().find_map(|props| props.width) {
+        _ = window.update_frame().inspect_err(|err| error!("{err}"));
         let bounds = active_display.bounds();
         let (_, pad_right, _, pad_left) = config.edge_padding();
         let padded_width = bounds.width() - pad_left - pad_right;

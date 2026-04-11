@@ -67,6 +67,7 @@ pub fn discover_configuration_file() -> Option<PathBuf> {
             .map(|h| PathBuf::from(h).join(".paneru.toml")),
         env::var("XDG_CONFIG_HOME")
             .ok()
+            .or_else(|| env::var("HOME").ok().map(|h| format!("{h}/.config")))
             .map(|x| PathBuf::from(x).join("paneru/paneru.toml")),
     ];
 

@@ -21,6 +21,8 @@
     <dict>
       <key>NO_COLOR</key>
       <string>1</string>
+      <key>XDG_CONFIG_HOME</key>
+      <string>{xdg_config_home}</string>
     </dict>
     <key>RunAtLoad</key>
     <true />

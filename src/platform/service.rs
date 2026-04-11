@@ -19,6 +19,8 @@ pub struct Service {
     pub raw: launchctl::Service,
     /// The absolute path to the `paneru` executable.
     pub bin_path: PathBuf,
+    /// The user's home directory.
+    home_dir: PathBuf,
 }
 
 impl Service {
@@ -33,6 +35,10 @@ impl Service {
     ///
     /// `Ok(Self)` if the service is created successfully, otherwise `Err(Error)` if the executable path or home directory cannot be found.
     pub fn try_new(name: &str) -> Result<Self> {
+        let home_dir = env::home_dir().ok_or(Error::new(
+            ErrorKind::NotFound,
+            "Cannot find home directory.",
+        ))?;
         Ok(Self {
             bin_path: exe_path().ok_or(Error::new(
                 ErrorKind::NotFound,
@@ -43,14 +49,10 @@ impl Service {
                 .uid(unsafe { libc::getuid() }.to_string())
                 .plist_path(format!(
                     "{home}/Library/LaunchAgents/{name}.plist",
-                    home = env::home_dir()
-                        .ok_or(Error::new(
-                            ErrorKind::NotFound,
-                            "Cannot find home directory.",
-                        ))?
-                        .display()
+                    home = home_dir.display()
                 ))
                 .build(),
+            home_dir,
         })
     }
 
@@ -175,12 +177,15 @@ impl Service {
     /// This string is formatted with the service name, executable path, and log paths.
     #[must_use]
     pub fn launchd_plist(&self) -> String {
+        let xdg_config_home = env::var("XDG_CONFIG_HOME")
+            .unwrap_or_else(|_| format!("{}/.config", self.home_dir.display()));
         format!(
             include_str!("../../assets/launchd.plist"),
             name = self.raw.name,
             bin_path = self.bin_path.display(),
             out_log_path = self.raw.out_log_path,
             error_log_path = self.raw.error_log_path,
+            xdg_config_home = xdg_config_home,
         )
     }
 }

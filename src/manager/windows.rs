@@ -1,17 +1,20 @@
 use accessibility_sys::{
-    AXUIElementRef, AXValueCreate, AXValueGetValue, kAXFloatingWindowSubrole, kAXPositionAttribute,
-    kAXRaiseAction, kAXSizeAttribute, kAXStandardWindowSubrole, kAXUnknownSubrole,
-    kAXValueTypeCGPoint, kAXValueTypeCGSize, kAXWindowRole,
+    AXUIElementCreateApplication, AXUIElementRef, AXValueCreate, AXValueGetValue,
+    kAXFloatingWindowSubrole, kAXPositionAttribute, kAXRaiseAction, kAXSizeAttribute,
+    kAXStandardWindowSubrole, kAXUnknownSubrole, kAXValueTypeCGPoint, kAXValueTypeCGSize,
+    kAXWindowRole,
 };
 use bevy::ecs::component::Component;
 use bevy::math::IRect;
 use core::ptr::NonNull;
 use derive_more::{DerefMut, with_trait::Deref};
 use objc2_core_foundation::{
-    CFArray, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize,
+    CFArray, CFBoolean, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize,
+    kCFBooleanFalse, kCFBooleanTrue,
 };
+use std::collections::HashMap;
 use std::ptr::null_mut;
-use std::sync::OnceLock;
+use std::sync::{LazyLock, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 use stdext::function_name;
@@ -26,6 +29,12 @@ use crate::errors::{Error, Result};
 use crate::manager::{Origin, Size, irect_from};
 use crate::platform::{Pid, ProcessSerialNumber, WinID, macos_major_version};
 use crate::util::{AXUIAttributes, AXUIWrapper, MacResult};
+
+/// Per-PID ref-count for the `AXEnhancedUserInterface` workaround. Tracks how many
+/// concurrent window operations are in-flight for each app so the attribute is only
+/// re-enabled after the last one completes (safe under `par_iter_mut`).
+static ENHANCED_UI_REFCOUNT: LazyLock<Mutex<HashMap<Pid, usize>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug)]
 pub enum WindowPadding {
@@ -184,6 +193,70 @@ impl WindowOS {
                 && subrole.as_deref() == Some(kAXFloatingWindowSubrole))
     }
 
+    /// Disables `AXEnhancedUserInterface` on this window's app if it is currently enabled.
+    ///
+    /// Uses a per-PID ref-count so that concurrent operations on windows of the same app
+    /// (via `par_iter_mut`) keep the attribute disabled until the last caller re-enables it.
+    ///
+    /// This avoids animated move/resize that breaks window management for apps like Chrome,
+    /// Firefox, and Zen Browser when accessibility clients (e.g. Kindavim) enable enhanced UI.
+    fn disable_enhanced_ui(&self) {
+        let Ok(pid) = self.pid() else { return };
+        let mut counts = ENHANCED_UI_REFCOUNT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(count) = counts.get_mut(&pid) {
+            *count += 1;
+            return;
+        }
+        let app_ref = unsafe { AXUIElementCreateApplication(pid) };
+        let Ok(app_element) = AXUIWrapper::from_retained(app_ref) else {
+            return;
+        };
+        let attr = CFString::from_static_str("AXEnhancedUserInterface");
+        let enabled = app_element
+            .get_attribute::<CFBoolean>(&attr)
+            .is_ok_and(|v| CFBoolean::value(&v));
+        if enabled {
+            unsafe {
+                AXUIElementSetAttributeValue(
+                    app_element.as_ptr(),
+                    attr.as_ref(),
+                    kCFBooleanFalse.unwrap(),
+                );
+            }
+            counts.insert(pid, 1);
+        }
+    }
+
+    /// Re-enables `AXEnhancedUserInterface` on this window's app once the last concurrent
+    /// caller has finished. Pairs with [`disable_enhanced_ui`].
+    fn reenable_enhanced_ui(&self) {
+        let Ok(pid) = self.pid() else { return };
+        let mut counts = ENHANCED_UI_REFCOUNT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(count) = counts.get_mut(&pid) else {
+            return;
+        };
+        *count -= 1;
+        if *count > 0 {
+            return;
+        }
+        counts.remove(&pid);
+        let app_ref = unsafe { AXUIElementCreateApplication(pid) };
+        if let Ok(app_element) = AXUIWrapper::from_retained(app_ref) {
+            let attr = CFString::from_static_str("AXEnhancedUserInterface");
+            unsafe {
+                AXUIElementSetAttributeValue(
+                    app_element.as_ptr(),
+                    attr.as_ref(),
+                    kCFBooleanTrue.unwrap(),
+                );
+            }
+        }
+    }
+
     /// Makes the window the key window for its application by sending synthesized events.
     ///
     /// # Arguments
@@ -294,6 +367,7 @@ impl WindowApi for WindowOS {
             trace!("already in position.");
             return;
         }
+        self.disable_enhanced_ui();
         let mut point = CGPoint::new(
             f64::from(origin.x + self.horizontal_padding),
             f64::from(origin.y + self.vertical_padding),
@@ -316,6 +390,7 @@ impl WindowApi for WindowOS {
             self.frame.min = origin;
             self.frame.max = origin + size;
         }
+        self.reenable_enhanced_ui();
     }
 
     #[instrument(level = Level::TRACE)]
@@ -324,6 +399,7 @@ impl WindowApi for WindowOS {
             trace!("already correct size.");
             return;
         }
+        self.disable_enhanced_ui();
         let width_padding = 2 * self.horizontal_padding;
         let height_padding = 2 * self.vertical_padding;
         let mut cgsize = CGSize::new(
@@ -346,6 +422,7 @@ impl WindowApi for WindowOS {
             };
             self.frame.max = self.frame.min + size;
         }
+        self.reenable_enhanced_ui();
     }
 
     /// Updates the internal `frame` of the window by querying its current position and size from the Accessibility API.

@@ -18,7 +18,7 @@ use std::sync::{LazyLock, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 use stdext::function_name;
-use tracing::{Level, debug, instrument, trace};
+use tracing::{Level, debug, instrument, trace, warn};
 
 use super::skylight::{
     _AXUIElementGetWindow, _SLPSSetFrontProcessWithOptions, AXUIElementCopyAttributeValue,
@@ -115,6 +115,8 @@ pub struct WindowOS {
     vertical_padding: i32,
     horizontal_padding: i32,
     border_radius: OnceLock<Option<f64>>,
+    pid: OnceLock<Result<Pid>>,
+    app_reference: OnceLock<Option<CFRetained<AXUIWrapper>>>,
 }
 
 impl WindowOS {
@@ -137,6 +139,8 @@ impl WindowOS {
             vertical_padding: 0,
             horizontal_padding: 0,
             border_radius: OnceLock::new(),
+            pid: OnceLock::new(),
+            app_reference: OnceLock::new(),
         };
 
         if window.is_unknown() {
@@ -192,6 +196,18 @@ impl WindowOS {
                 && subrole.as_deref() == Some(kAXFloatingWindowSubrole))
     }
 
+    fn app_reference(&self) -> Option<CFRetained<AXUIWrapper>> {
+        self.app_reference
+            .get_or_init(|| {
+                self.pid()
+                    .map(|pid| unsafe { AXUIElementCreateApplication(pid) })
+                    .and_then(AXUIWrapper::from_retained)
+                    .inspect_err(|err| warn!("error getting app reference: {err}"))
+                    .ok()
+            })
+            .clone()
+    }
+
     /// Disables `AXEnhancedUserInterface` on this window's app if it is currently enabled.
     ///
     /// Uses a per-PID ref-count so that concurrent operations on windows of the same app
@@ -208,8 +224,7 @@ impl WindowOS {
             *count += 1;
             return;
         }
-        let app_ref = unsafe { AXUIElementCreateApplication(pid) };
-        let Ok(app_element) = AXUIWrapper::from_retained(app_ref) else {
+        let Some(app_element) = self.app_reference() else {
             return;
         };
         let attr = CFString::from_static_str("AXEnhancedUserInterface");
@@ -243,8 +258,7 @@ impl WindowOS {
             return;
         }
         counts.remove(&pid);
-        let app_ref = unsafe { AXUIElementCreateApplication(pid) };
-        if let Ok(app_element) = AXUIWrapper::from_retained(app_ref) {
+        if let Some(app_element) = self.app_reference() {
             let attr = CFString::from_static_str("AXEnhancedUserInterface");
             unsafe {
                 AXUIElementSetAttributeValue(
@@ -537,15 +551,19 @@ impl WindowApi for WindowOS {
     }
 
     fn pid(&self) -> Result<Pid> {
-        let pid: Pid = unsafe {
-            NonNull::new_unchecked(self.ax_element.as_ptr::<Pid>())
-                .byte_add(0x10)
-                .read()
-        };
-        (pid != 0).then_some(pid).ok_or(Error::InvalidInput(format!(
-            "can not get pid from {:?}.",
-            self.ax_element
-        )))
+        self.pid
+            .get_or_init(|| {
+                let pid: Pid = unsafe {
+                    NonNull::new_unchecked(self.ax_element.as_ptr::<Pid>())
+                        .byte_add(0x10)
+                        .read()
+                };
+                (pid != 0).then_some(pid).ok_or(Error::InvalidInput(format!(
+                    "can not get pid from {:?}.",
+                    self.ax_element
+                )))
+            })
+            .clone()
     }
 
     fn set_padding(&mut self, padding: WindowPadding) {

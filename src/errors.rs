@@ -5,7 +5,7 @@ use tracing::debug;
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Represents the various types of errors that can occur within the application.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Error {
     /// Indicates an invalid window operation or state.
     InvalidWindow,

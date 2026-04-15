@@ -1197,6 +1197,7 @@ pub(super) fn cleanup_on_exit(
     window_manager: Res<WindowManager>,
 ) {
     for _ in exit_events.read() {
+        info!("Cleaning up before exit");
         let ids = windows
             .iter()
             .map(|(window, _)| window.id())

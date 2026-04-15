@@ -86,11 +86,10 @@ pub fn register_systems(app: &mut bevy::app::App) {
             ))),
             systems::displays_rearranged,
             systems::reposition_dragged_window,
-            workspace::detect_moved_windows.run_if(not(resource_exists::<Initializing>)),
-            workspace::hide_inactive_workspace,
             workspace::show_active_workspace,
             workspace::cleanup_virtual_workspaces,
             workspace::handle_virtual_window_moves,
+            workspace::detect_moved_windows.run_if(not(resource_exists::<Initializing>)),
             workspace::find_orphaned_workspaces
                 .after(systems::displays_rearranged)
                 .run_if(on_timer(Duration::from_millis(

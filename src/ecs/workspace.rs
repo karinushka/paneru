@@ -1,7 +1,7 @@
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
-use bevy::ecs::lifecycle::{Add, RemovedComponents};
+use bevy::ecs::lifecycle::Add;
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Added, Has, With, Without};
@@ -64,6 +64,10 @@ pub(super) fn workspace_change_trigger(
     let mut remove_from = None;
     let mut insert_into = None;
     for (strip, entity, active, selected) in &workspaces {
+        if active && strip.id() == workspace_id {
+            debug!("Workspace id {} already active", strip.id());
+            return;
+        }
         if active && strip.id() != workspace_id {
             debug!("Workspace id {} no longer active", strip.id());
             remove_from = Some(entity);
@@ -777,19 +781,16 @@ pub(crate) fn move_virtual_workspace_bind(
     debug!("Moving {focused_entity} to new virtual space {target_virtual_index}");
 }
 
-/// Hide windows on virtual workspaces which do not have an active marker.
-/// This is a system and not the usual trigger, because the event should come delayed in the next
-/// "frame" - so the active marker can be moved to another strip.
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
+#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
-pub(super) fn hide_inactive_workspace(
-    mut removed: RemovedComponents<ActiveWorkspaceMarker>,
+pub(super) fn show_active_workspace(
+    activated: Single<Entity, Added<ActiveWorkspaceMarker>>,
     windows: Windows,
     mut workspaces: Query<
         (
+            Entity,
             &mut Position,
             &LayoutStrip,
-            Has<ActiveWorkspaceMarker>,
             Option<&PreviousStripPosition>,
         ),
         Without<Window>,
@@ -797,26 +798,39 @@ pub(super) fn hide_inactive_workspace(
     active_display: Single<&Display, With<ActiveDisplayMarker>>,
     mut commands: Commands,
 ) {
-    for entity in removed.read() {
-        let Ok(workspace_id) = workspaces.get(entity).map(|(_, strip, _, _)| strip.id()) else {
-            continue;
-        };
-        let still_active = workspaces
-            .iter()
-            .filter_map(|(_, strip, active, _)| (strip.id() == workspace_id).then_some(active))
-            .any(|active| active);
-        if !still_active {
-            // This system checks whether any of the other virtual strips in the current workspace have an
-            // active marker - if not, the focus probably moved to another display, so don't hide.
-            continue;
-        }
+    let Some(workspace_id) = workspaces
+        .iter()
+        .find_map(|(entity, _, strip, _)| (entity == *activated).then_some(strip.id()))
+    else {
+        return;
+    };
 
-        let Ok((mut position, _, _, previous)) = workspaces.get_mut(entity) else {
-            continue;
-        };
+    // Hide other strips on the current workspace
+    let current_focus = windows.focused();
+    let current_workspace = workspaces
+        .iter_mut()
+        .filter(|(entity, _, strip, _)| strip.id() == workspace_id && *entity != *activated);
 
+    for (entity, mut position, strip, previous) in current_workspace {
         if previous.is_none() {
-            let focus = windows.focused().map(|(_, entity)| entity);
+            let mut focus =
+                current_focus.and_then(|(_, entity)| strip.contains(entity).then_some(entity));
+            if focus.is_none() {
+                let display_center = active_display.bounds().center().x;
+                let closest = strip
+                    .all_columns()
+                    .into_iter()
+                    .filter_map(|candidate| {
+                        let center = windows.moving_frame(candidate)?.center().x;
+                        let distance = (center - display_center).abs();
+                        Some((candidate, distance))
+                    })
+                    .min_by_key(|(_, dist)| *dist)
+                    .map(|min| min.0);
+                focus = closest;
+                debug!("No previous focus, taking centered one {focus:?}.");
+            }
+
             if let Ok(mut entity_commands) = commands.get_entity(entity) {
                 entity_commands.try_insert(PreviousStripPosition {
                     origin: position.0,
@@ -828,22 +842,11 @@ pub(super) fn hide_inactive_workspace(
         let bounds = active_display.bounds();
         position.0 = bounds.max - 10;
     }
-}
 
-#[allow(clippy::needless_pass_by_value)]
-#[instrument(level = Level::DEBUG, skip_all)]
-pub(super) fn show_active_workspace(
-    activated: Single<Entity, Added<ActiveWorkspaceMarker>>,
-    windows: Windows,
-    mut workspaces: Query<
-        (&mut Position, &LayoutStrip, Option<&PreviousStripPosition>),
-        Without<Window>,
-    >,
-    mut commands: Commands,
-) {
-    let Ok((mut position, strip, previous_position)) = workspaces.get_mut(*activated) else {
+    let Ok((_, mut position, strip, previous_position)) = workspaces.get_mut(*activated) else {
         return;
     };
+    debug!("showing virtual workspace {} ({})", strip.id(), *activated);
 
     // If no previous strip position exists, then the workspace was not hidden.
     if let Some(PreviousStripPosition { origin, focus }) = previous_position {

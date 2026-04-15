@@ -739,14 +739,9 @@ fn give_away_focus(
         })
         .min_by_key(|(_, dist)| *dist);
 
-    if let Some((neighbour, _)) = closest
-        && let Some(window) = windows.get(neighbour)
-    {
-        let window_id = window.id();
-
+    if let Some((neighbour, _)) = closest {
         config.set_ffm_flag(None);
-        commands.trigger(WMEventTrigger(Event::WindowFocused { window_id }));
-        reshuffle_around(neighbour, commands);
+        focus_entity(neighbour, false, commands);
     }
 }
 

@@ -2554,6 +2554,7 @@ dependencies = [
  "bitflags 2.11.0",
  "chrono",
  "clap",
+ "ctrlc",
  "derive_more",
  "embed_plist",
  "launchctl",

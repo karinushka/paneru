@@ -105,6 +105,12 @@ fn main() -> Result<()> {
     match subcmd {
         SubCmd::Launch => {
             let (sender, receiver) = EventSender::new();
+            let sender_c = sender.clone();
+            // bevy's `TerminalCtrlCHandlerPlugin` was not fast enough. maybe because of its use of `Relaxed` atomic variable?
+            ctrlc::set_handler(move || {
+                let _ = sender_c.send(events::Event::Exit); // just drop the err. we are exiting anyway.
+            })
+            .expect("setting Ctrl-C handler should succeed");
             CommandReader::new(sender.clone()).start();
             match setup_bevy_app(sender, receiver) {
                 Ok(mut app) => {

@@ -136,21 +136,26 @@ pub fn register_systems(app: &mut bevy::app::App) {
     app.add_systems(
         PostUpdate,
         (
-            focus::autocenter_window_on_focus,
-            focus::mouse_follows_focus,
-            systems::animate_entities,
-            systems::animate_resize_entities,
-            systems::update_overlays
-                .after(systems::animate_entities)
-                .after(systems::animate_resize_entities)
-                .run_if(|config: Option<Res<Config>>| {
-                    config.is_some_and(|config| {
-                        config.has_dim_inactive_color() || config.border_active_window()
-                    })
-                }),
-            systems::update_flash_messages.after(systems::update_overlays),
-            systems::commit_window_position.after(systems::animate_entities),
-            systems::commit_window_size.after(systems::animate_resize_entities),
+            (systems::animate_entities, systems::commit_window_position).chain(),
+            (
+                systems::animate_resize_entities,
+                systems::commit_window_size,
+            )
+                .chain(),
+            (
+                systems::update_overlays
+                    .after(systems::animate_entities)
+                    .after(systems::animate_resize_entities)
+                    .run_if(|config: Option<Res<Config>>| {
+                        config.is_some_and(|config| {
+                            config.has_dim_inactive_color() || config.border_active_window()
+                        })
+                    }),
+                systems::update_flash_messages,
+            )
+                .chain(),
+            focus::autocenter_window_on_focus.after(systems::animate_resize_entities),
+            focus::mouse_follows_focus.after(systems::animate_resize_entities),
         ),
     );
 }

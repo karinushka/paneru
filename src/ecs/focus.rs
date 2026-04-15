@@ -140,6 +140,7 @@ pub(super) fn dim_window_trigger(
 pub(super) fn dim_remove_window_trigger(
     trigger: On<Remove, FocusedMarker>,
     windows: Windows,
+    active_display: ActiveDisplay,
     window_manager: Res<WindowManager>,
     config: Res<Config>,
     theme: Option<Res<SystemTheme>>,
@@ -147,6 +148,14 @@ pub(super) fn dim_remove_window_trigger(
     let Some(window) = windows.get(trigger.event().entity) else {
         return;
     };
+
+    let same_display = active_display
+        .active_strip()
+        .contains(trigger.event().entity);
+    if !same_display {
+        // Do not dim the window loosing focus on another display.
+        return;
+    }
 
     let dark = theme.is_some_and(|theme| theme.is_dark);
     if let Some(dim_ratio) = config.window_dim_ratio(dark) {

@@ -856,17 +856,17 @@ pub fn stack_windows_handler(
 ///
 /// # Arguments
 ///
-/// * `trigger` - The `On<CommandTrigger>` event trigger containing the command to process.
+/// * `messages` - Bevy's `MessageReader`, containing events to process.
 /// * `windows` - A query for `Window` components, their `Entity`, and whether they have the `Unmanaged` marker.
-/// * `active_display` - A mutable reference to the `ActiveDisplayMut` resource.
 /// * `window_manager` - The `WindowManager` resource for interacting with the window management logic.
-/// * `commands` - Bevy commands to trigger events and modify entities.
 /// * `config` - The `Config` resource, containing application settings.
 #[instrument(level = Level::DEBUG, skip_all)]
 #[allow(clippy::needless_pass_by_value)]
 pub fn command_quit_handler(
     mut messages: MessageReader<Event>,
+    windows: Windows,
     window_manager: Res<WindowManager>,
+    config: Res<Config>,
 ) {
     if messages.read().any(|event| {
         matches!(
@@ -876,6 +876,14 @@ pub fn command_quit_handler(
             }
         )
     }) {
+        let window_list = windows
+            .all_iter()
+            .map(|(window, _, _)| window.id())
+            .collect::<Vec<_>>();
+        if config.window_dim_ratio(false).is_some() {
+            // we don't need dim ratio since dimming is just set as 0.0
+            window_manager.dim_windows(&window_list, 0.0);
+        }
         _ = window_manager.quit();
     }
 }

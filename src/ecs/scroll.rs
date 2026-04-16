@@ -321,10 +321,14 @@ pub(super) fn vertical_swipe_gesture(
     }
 
     let switch_virtual = |delta: f64, commands: &mut Commands| {
-        let direction = if delta > 0.0 {
+        let physical_finger_direction = if delta > 0.0 {
             Direction::South
         } else {
             Direction::North
+        };
+        let direction = match config.config().swipe_gesture_direction() {
+            SwipeGestureDirection::Natural => physical_finger_direction.reverse(),
+            SwipeGestureDirection::Reversed => physical_finger_direction,
         };
         commands.trigger(SendMessageTrigger(Event::Command {
             command: Command::Window(Operation::Virtual(direction)),

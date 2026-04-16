@@ -105,7 +105,7 @@ Note, that you will need to grant acessibility priviledge to the binary.
 If you are using Homebrew, you can install from the formula with:
 
 ```shell
-$ brew install karinushka/paneru/paneru
+$ brew install paneru
 ```
 
 Or by first adding the tap and then installing by name:

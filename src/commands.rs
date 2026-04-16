@@ -30,6 +30,19 @@ pub enum Direction {
     Last,
 }
 
+impl Direction {
+    pub fn reverse(&self) -> Self {
+        match self {
+            Direction::North => Direction::South,
+            Direction::South => Direction::North,
+            Direction::West => Direction::East,
+            Direction::East => Direction::West,
+            Direction::First => Direction::Last,
+            Direction::Last => Direction::First,
+        }
+    }
+}
+
 /// Direction used when cycling preset resize widths.
 #[derive(Clone, Copy, Debug)]
 pub enum ResizeDirection {

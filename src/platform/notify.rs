@@ -50,6 +50,7 @@ impl NotifyHandler {
             KnownCGSEvent::SpaceCreated,
             KnownCGSEvent::SpaceCurrentChanged,
             KnownCGSEvent::SpaceDestroyed,
+            KnownCGSEvent::SpaceWindowDestroyed,
         ];
         for event in events {
             unsafe {
@@ -116,6 +117,7 @@ impl NotifyHandler {
                     )
                 {
                     debug!("{event} space = {space}, window_id = {window_id}");
+                    _ = self.events.send(Event::WindowDestroyed { window_id });
                 }
             }
 

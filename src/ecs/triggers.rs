@@ -682,9 +682,13 @@ pub(super) fn window_destroyed_trigger(
     };
 
     let Some((window, entity, parent)) = windows.find_parent(window_id) else {
-        error!("Trying to destroy non-existing window {window_id}.");
+        debug!("Duplicate event: window {window_id} already destroyed.");
         return;
     };
+    if window.role().is_ok() {
+        debug!("Window still present, this was SLS workspace change.");
+        return;
+    }
 
     let Ok(mut app) = apps.get_mut(parent) else {
         error!("Window {} has no parent!", window.id());

@@ -368,7 +368,7 @@ impl ObserverContext {
         }
 
         let Ok(window_id) =
-            ax_window_id(element).inspect_err(|err| error!("notification {notification}: {err}"))
+            ax_window_id(element).inspect_err(|err| debug!("notification {notification}: {err}"))
         else {
             return;
         };

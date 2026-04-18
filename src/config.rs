@@ -14,6 +14,7 @@ use std::{
 };
 use stdext::function_name;
 use tracing::{error, info, warn};
+use xdg;
 
 use self::decorations::BorderRadiusOption;
 use self::swipe::SwipeGestureDirection;
@@ -65,15 +66,15 @@ pub fn discover_configuration_file() -> Option<PathBuf> {
         env::var("HOME")
             .ok()
             .map(|h| PathBuf::from(h).join(".paneru.toml")),
-        env::var("XDG_CONFIG_HOME")
-            .ok()
-            .or_else(|| env::var("HOME").ok().map(|h| format!("{h}/.config")))
-            .map(|x| PathBuf::from(x).join("paneru/paneru.toml")),
     ];
+
+    let xdg_dirs = xdg::BaseDirectories::with_prefix("paneru");
+    let xdg_config_paths = xdg_dirs.find_config_files("paneru.toml");
 
     standard_paths
         .into_iter()
         .flatten()
+        .chain(xdg_config_paths)
         .find(|path| path.exists())
 }
 

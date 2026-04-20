@@ -306,17 +306,17 @@ impl Config {
         self.inner().options.clone()
     }
 
-    // Returns the animation speed in 1/10th of screen size per second.
-    // E.g. a value of 20 means: move at a speed of two screen sizes per second.
-    // If a screen is 1920px, the calculated speed would be 3840 pixels/second.
+    // Exponential ease-out decay rate (per second) consumed by the animation
+    // systems as `t = 1 - e^(-rate*dt)`. Higher values feel snappier; very large
+    // values collapse to an instant snap.
+    // Suggested range: 8..20 for a fluid feel. Unset = instant (no animation),
     pub fn animation_speed(&self) -> f64 {
         self.options()
             .animation_speed
             // If unset, set it to something high, so the move happens immediately,
             // effectively disabling animation.
             .unwrap_or(1_000_000.0)
-            .max(5.0)
-            / 10.0
+            .max(0.0)
     }
 
     /// Finds a keybinding matching the given `keycode` and `modifier` mask.

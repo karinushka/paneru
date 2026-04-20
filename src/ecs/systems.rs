@@ -39,6 +39,7 @@ use crate::overlay::{FlashMessageManager, OverlayManager};
 use crate::platform::{PlatformCallbacks, WorkspaceId};
 
 const ORPHANED_SPACES_TIMEOUT_SEC: u64 = 30;
+const ANIAMTE_SNAP_THRESHOLD: f32 = 5.0;
 
 /// Processes a single incoming `Event`. It dispatches various event types to the `WindowManager` or other internal handlers.
 /// This system reads `Event` messages and triggers appropriate Bevy events or modifies resources based on the event type.
@@ -564,29 +565,38 @@ pub(super) fn display_changes_watcher(
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn animate_entities(
     mut animate: Populated<(&mut Position, Entity, &RepositionMarker)>,
-    active_display: ActiveDisplay,
     time: Res<Time>,
     config: Res<Config>,
     commands: ParallelCommands,
 ) {
-    let move_ratio = config.animation_speed() * time.delta_secs_f64();
-    let move_delta = move_ratio * f64::from(active_display.display().width());
+    // Frame-rate-independent exponential smoothing (ease-out).
+    // `animation_speed` is the decay rate (per second); higher = snappier.
+    // t = 1 - e^(-rate*dt) is the fraction of remaining distance consumed this frame.
+    let rate = config.animation_speed();
+    let t = (1.0 - (-rate * time.delta_secs_f64()).exp()).clamp(0.0, 1.0) as f32;
 
     animate
         .par_iter_mut()
         .for_each(|(mut position, entity, RepositionMarker(origin))| {
-            let delta = position
-                .0
-                .as_vec2()
-                .move_towards(origin.as_vec2(), move_delta as f32)
-                .as_ivec2();
+            let target = origin.as_vec2();
+            let current = position.0.as_vec2();
+            let lerped = current.lerp(target, t);
+
+            // Snap once we're within a pixel of the target (or after one effectively-
+            // complete tick), so the marker is dropped promptly.
+            let finished = (target - lerped).length() <= ANIAMTE_SNAP_THRESHOLD;
+            let new_pos = if finished {
+                *origin
+            } else {
+                lerped.round().as_ivec2()
+            };
 
             trace!(
-                "entity {entity} source {} dest {origin} delta {move_delta} moving to {delta}",
+                "entity {entity} source {} dest {origin} t {t:.3} moving to {new_pos}",
                 position.0,
             );
-            position.0 = delta;
-            if *origin == delta {
+            position.0 = new_pos;
+            if finished {
                 commands.command_scope(|mut command| {
                     command.entity(entity).try_remove::<RepositionMarker>();
                 });
@@ -608,29 +618,34 @@ pub(super) fn animate_entities(
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn animate_resize_entities(
     mut animate: Populated<(&mut Bounds, Entity, &ResizeMarker)>,
-    active_display: ActiveDisplay,
     time: Res<Time>,
     config: Res<Config>,
     commands: ParallelCommands,
 ) {
-    let move_ratio = config.animation_speed() * time.delta_secs_f64();
-    let move_delta = move_ratio * f64::from(active_display.display().width());
+    // Matches animate_entities: exponential ease-out, frame-rate independent.
+    let rate = config.animation_speed();
+    let t = (1.0 - (-rate * time.delta_secs_f64()).exp()).clamp(0.0, 1.0) as f32;
 
     animate
         .par_iter_mut()
         .for_each(|(mut bounds, entity, ResizeMarker(size))| {
-            let delta = bounds
-                .0
-                .as_vec2()
-                .move_towards(size.as_vec2(), move_delta as f32)
-                .as_ivec2();
+            let target = size.as_vec2();
+            let current = bounds.0.as_vec2();
+            let lerped = current.lerp(target, t);
+
+            let finished = (target - lerped).length() <= ANIAMTE_SNAP_THRESHOLD;
+            let new_size = if finished {
+                *size
+            } else {
+                lerped.round().as_ivec2()
+            };
 
             trace!(
-                "entity {entity} source {} dest {size} delta {move_delta} resizing to {delta}",
+                "entity {entity} source {} dest {size} t {t:.3} resizing to {new_size}",
                 bounds.0,
             );
-            bounds.0 = delta;
-            if *size == delta {
+            bounds.0 = new_size;
+            if finished {
                 commands.command_scope(|mut command| {
                     command.entity(entity).try_remove::<ResizeMarker>();
                 });

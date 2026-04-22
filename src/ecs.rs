@@ -177,6 +177,7 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(mouse::mouse_down_trigger)
         .add_observer(mouse::mouse_up_trigger)
         .add_observer(mouse::mouse_dragged_trigger)
+        .add_observer(mouse::horizontal_warp_mouse_trigger)
         .add_observer(triggers::display_change_trigger)
         .add_observer(triggers::front_switched_trigger)
         .add_observer(triggers::window_focused_trigger)

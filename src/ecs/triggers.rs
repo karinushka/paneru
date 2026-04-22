@@ -365,18 +365,16 @@ pub(super) fn application_event_trigger(
     };
 
     match &trigger.event().0 {
-        Event::ApplicationLaunched { psn, observer } => {
-            if find_process(psn).is_none() {
-                let process: BProcess = Process::new(psn, observer.clone()).into();
-                let timeout = Timeout::new(
-                    Duration::from_secs(PROCESS_READY_TIMEOUT_SEC),
-                    Some(format!(
-                        "Process '{}' did not become ready in {PROCESS_READY_TIMEOUT_SEC}s.",
-                        process.name()
-                    )),
-                );
-                commands.spawn((FreshMarker, timeout, process));
-            }
+        Event::ApplicationLaunched { psn, observer } if find_process(psn).is_none() => {
+            let process: BProcess = Process::new(psn, observer.clone()).into();
+            let timeout = Timeout::new(
+                Duration::from_secs(PROCESS_READY_TIMEOUT_SEC),
+                Some(format!(
+                    "Process '{}' did not become ready in {PROCESS_READY_TIMEOUT_SEC}s.",
+                    process.name()
+                )),
+            );
+            commands.spawn((FreshMarker, timeout, process));
         }
 
         Event::ApplicationTerminated { psn } => {

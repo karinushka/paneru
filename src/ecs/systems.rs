@@ -955,7 +955,7 @@ fn reparent_existing_workspaces(
         for (strip, entity, child) in existing_strips {
             if strip.id() == id {
                 found = true;
-                if child.is_none() || child.is_some_and(|child| child.parent() != display_entity) {
+                if child.is_none_or(|child| child.parent() != display_entity) {
                     // Re-parent this workspace
                     if let Ok(mut cmd) = commands.get_entity(entity) {
                         debug!("reparenting workspace {id} to display {display_entity}");

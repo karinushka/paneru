@@ -758,8 +758,9 @@ pub(super) fn layout_strip_changed(
         .flat_map(|(layout_strip, child_of)| {
             let height = displays
                 .get(child_of.parent())
-                .map(|(display, dock)| display.actual_display_bounds(dock, &config).height())
-                .unwrap_or(0);
+                .map_or(0, |(display, dock)| {
+                    display.actual_display_bounds(dock, &config).height()
+                });
             layout_strip.relative_positions(height, &get_window_frame)
         })
         .collect::<Vec<_>>();

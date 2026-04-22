@@ -347,9 +347,11 @@ impl MacResult for OSStatus {
 
 impl MacResult for CGError {
     fn to_result(self, place: &str) -> Result<()> {
-        match self.0 {
-            0 => Ok(()),
-            err => Err(Error::Generic(format!("{place}: MacOS Error Code: {err}"))),
+        match self {
+            CGError::Success => Ok(()),
+            err => Err(Error::Generic(format!(
+                "{place}: MacOS Error Code: {err:?}"
+            ))),
         }
     }
 }

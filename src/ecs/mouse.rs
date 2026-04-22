@@ -6,10 +6,11 @@ use std::time::Duration;
 use tracing::{debug, trace, warn};
 
 use super::{MissionControlActive, MouseHeldMarker, Timeout, WMEventTrigger, WindowDraggedMarker};
+use crate::config::Config;
 use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
 use crate::ecs::{ActiveWorkspaceMarker, Scrolling, focus_entity, reshuffle_around};
 use crate::events::Event;
-use crate::manager::WindowManager;
+use crate::manager::{Display, WindowManager, origin_from};
 
 /// Handles mouse moved events.
 ///
@@ -222,5 +223,66 @@ pub(super) fn mouse_dragged_trigger(
                 display_id: active_display.id(),
             },
         ));
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn horizontal_warp_mouse_trigger(
+    trigger: On<WMEventTrigger>,
+    displays: Query<&Display>,
+    window_manager: Res<WindowManager>,
+    config: Res<Config>,
+) {
+    const EDGE_THRESHOLD: i32 = 3;
+    let Event::MouseMoved { point } = trigger.event().0 else {
+        return;
+    };
+    let Some(warp_direction) = config.horizontal_mouse_warp() else {
+        return;
+    };
+    if displays.count() < 2 {
+        return;
+    }
+
+    let point = origin_from(point);
+    let Some(current_display) = displays
+        .iter()
+        .find(|display| display.bounds().contains(point))
+    else {
+        return;
+    };
+
+    let mut target_displays = if (point.x - current_display.bounds().min.x).abs() < EDGE_THRESHOLD {
+        // Left edge of the screen.
+        displays
+            .iter()
+            .filter(|display| {
+                if warp_direction > 0 {
+                    display.bounds().min.y > current_display.bounds().min.y
+                } else {
+                    display.bounds().min.y < current_display.bounds().min.y
+                }
+            })
+            .collect::<Vec<_>>()
+    } else if (current_display.bounds().max.x - point.x).abs() < EDGE_THRESHOLD {
+        // Right edge of the screen.
+        displays
+            .iter()
+            .filter(|display| {
+                if warp_direction > 0 {
+                    display.bounds().min.y < current_display.bounds().min.y
+                } else {
+                    display.bounds().min.y > current_display.bounds().min.y
+                }
+            })
+            .collect::<Vec<_>>()
+    } else {
+        return;
+    };
+
+    target_displays
+        .sort_by_key(|display| (display.bounds().min.y - current_display.bounds().min.y).abs());
+    if let Some(warp_to) = target_displays.first() {
+        window_manager.warp_mouse(warp_to.bounds().center());
     }
 }

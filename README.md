@@ -72,6 +72,8 @@ inspired by [Niri] and [PaperWM.spoon].
   display.
   A [similar situation](https://nikitabobko.github.io/AeroSpace/guide#proper-monitor-arrangement)
   exists with Aerospace window manager.
+  An option exists (`horizontal_mouse_warp`) which can make a vertical
+  arrangement of displays "feel" horizontal.
 
 - **Off-screen window slivers**. Because macOS will forcibly relocate windows
   that are moved fully off-screen, Paneru keeps a thin sliver of each

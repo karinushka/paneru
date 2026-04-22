@@ -631,6 +631,10 @@ impl Config {
     pub fn auto_center(&self) -> bool {
         self.options().auto_center.is_some_and(|center| center)
     }
+
+    pub fn horizontal_mouse_warp(&self) -> Option<i16> {
+        self.options().horizontal_mouse_warp
+    }
 }
 
 fn parse_hex_color(hex: &str) -> (f64, f64, f64) {
@@ -793,6 +797,8 @@ pub struct MainOptions {
     pub focus_follows_mouse: Option<bool>,
     /// Enables or disables mouse follows focus behavior.
     pub mouse_follows_focus: Option<bool>,
+    /// Warps the mouse to the closest screen when at the edge.
+    pub horizontal_mouse_warp: Option<i16>,
     /// A list of preset column widths (as ratios) used for resizing windows.
     #[serde(default = "default_preset_column_widths")]
     pub preset_column_widths: Vec<f64>,

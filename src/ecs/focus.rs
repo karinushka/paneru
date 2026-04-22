@@ -206,6 +206,7 @@ pub(super) fn focus_window_trigger(
     }
 }
 
+#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn recover_lost_focus(
     windows: Windows,

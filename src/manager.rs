@@ -9,7 +9,7 @@ use objc2_core_foundation::{
     CGPoint, CGRect, CGSize, kCFBooleanTrue,
 };
 use objc2_core_graphics::{
-    CGDirectDisplayID, CGDisplayBounds, CGError, CGGetActiveDisplayList, CGWarpMouseCursorPosition,
+    CGDirectDisplayID, CGDisplayBounds, CGGetActiveDisplayList, CGWarpMouseCursorPosition,
 };
 use std::path::Path;
 use std::ptr::null_mut;
@@ -379,8 +379,7 @@ impl WindowManagerApi for WindowManagerOS {
 
     fn is_fullscreen_space(&self, display_id: CGDirectDisplayID) -> bool {
         self.active_display_space(display_id)
-            .map(|space_id| unsafe { SLSSpaceGetType(self.main_cid, space_id) } == 4)
-            .unwrap_or(false)
+            .is_ok_and(|space_id| unsafe { SLSSpaceGetType(self.main_cid, space_id) } == 4)
     }
 
     /// Centers the mouse cursor on the window if it's not already within the window's bounds.
@@ -491,9 +490,9 @@ impl WindowManagerApi for WindowManagerOS {
 
     fn cursor_position(&self) -> Option<CGPoint> {
         let mut cursor = CGPoint::default();
-        if unsafe { CGError::Success != SLSGetCurrentCursorLocation(self.main_cid, &mut cursor) } {
-            return None;
-        }
+        unsafe { SLSGetCurrentCursorLocation(self.main_cid, &mut cursor) }
+            .to_result(function_name!())
+            .ok()?;
         Some(cursor)
     }
 

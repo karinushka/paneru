@@ -14,7 +14,6 @@ use std::{
 };
 use stdext::function_name;
 use tracing::{error, info, warn};
-use xdg;
 
 use self::decorations::BorderRadiusOption;
 use self::swipe::SwipeGestureDirection;

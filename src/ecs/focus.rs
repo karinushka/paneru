@@ -4,14 +4,15 @@ use bevy::ecs::observer::On;
 use bevy::ecs::query::{Added, Has, With};
 use bevy::ecs::system::{Commands, Query, Res, Single};
 use bevy::prelude::Event as BevyEvent;
-use tracing::{Level, debug, instrument, trace, warn};
+use tracing::{Level, debug, error, instrument, trace, warn};
 
 use super::{FocusedMarker, MouseHeldMarker, SystemTheme};
 use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, Scrolling, SelectedVirtualMarker, reposition_entity, reshuffle_around,
+    ActiveWorkspaceMarker, Scrolling, SelectedVirtualMarker, focus_entity, reposition_entity,
+    reshuffle_around,
 };
 use crate::manager::{Application, Window, WindowManager};
 
@@ -202,5 +203,24 @@ pub(super) fn focus_window_trigger(
         window.focus_without_raise(psn, focused_window, focused_psn);
     } else {
         window.focus_with_raise(psn);
+    }
+}
+
+#[instrument(level = Level::DEBUG, skip_all)]
+pub(super) fn recover_lost_focus(
+    windows: Windows,
+    active_workspace: Query<&LayoutStrip, With<ActiveWorkspaceMarker>>,
+    mut commands: Commands,
+) {
+    if windows.focused().is_some() {
+        return;
+    }
+    error!("Lost focus marker, recovering!");
+    if let Ok(strip) = active_workspace
+        .single()
+        .inspect_err(|err| error!("Unable to get current workspace: {err}"))
+        && let Some(entity) = strip.first().ok().and_then(|col| col.top())
+    {
+        focus_entity(entity, false, &mut commands);
     }
 }

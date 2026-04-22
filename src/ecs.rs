@@ -164,6 +164,9 @@ pub fn register_systems(app: &mut bevy::app::App) {
                 .chain(),
             focus::autocenter_window_on_focus.after(systems::animate_resize_entities),
             focus::mouse_follows_focus.after(systems::animate_resize_entities),
+            focus::recover_lost_focus.run_if(on_timer(Duration::from_millis(
+                REFRESH_WINDOW_CHECK_FREQ_MS,
+            ))),
         ),
     );
 }

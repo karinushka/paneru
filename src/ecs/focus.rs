@@ -146,7 +146,7 @@ pub(super) fn dim_remove_window_trigger(
     config: Res<Config>,
     theme: Option<Res<SystemTheme>>,
 ) {
-    let Some(window) = windows.get(trigger.event().entity) else {
+    let Some((window, _, None)) = windows.get_managed(trigger.event().entity) else {
         return;
     };
 

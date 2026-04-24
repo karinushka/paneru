@@ -197,6 +197,7 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::theme_change_trigger)
         .add_observer(triggers::apply_window_properties)
         .add_observer(triggers::restore_window_state)
+        .add_observer(triggers::cleanup_active_display_marker)
         .add_observer(focus::dim_remove_window_trigger)
         .add_observer(focus::dim_window_trigger)
         .add_observer(focus::maintain_focus_singleton)

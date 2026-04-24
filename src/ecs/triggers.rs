@@ -43,6 +43,24 @@ fn update_passthrough(window: &Window, app: &Application, config: &Config) {
     crate::platform::input::set_focused_passthrough(properties.passthrough_keys());
 }
 
+#[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
+pub(super) fn cleanup_active_display_marker(
+    trigger: On<Add, ActiveDisplayMarker>,
+    displays: Query<(Entity, Has<ActiveDisplayMarker>), With<Display>>,
+    mut commands: Commands,
+) {
+    for (entity, active) in displays {
+        if active
+            && entity != trigger.entity
+            && let Ok(mut cmd) = commands.get_entity(entity)
+        {
+            debug!("Display id {entity} lost active marker.");
+            cmd.try_remove::<ActiveDisplayMarker>();
+        }
+    }
+}
+
 /// Handles display change events.
 ///
 /// When the active display or space changes, this function ensures that the window manager's
@@ -75,17 +93,12 @@ pub(super) fn display_change_trigger(
 
     for (display, entity, focused) in displays {
         let display_id = display.id();
-        if focused && display_id != active_id {
-            debug!("Display id {display_id} no longer active");
-            if let Ok(mut cmd) = commands.get_entity(entity) {
-                cmd.try_remove::<ActiveDisplayMarker>();
-            }
-        }
-        if !focused && display_id == active_id {
+        if !focused
+            && display_id == active_id
+            && let Ok(mut cmd) = commands.get_entity(entity)
+        {
             debug!("Display id {display_id} is active");
-            if let Ok(mut cmd) = commands.get_entity(entity) {
-                cmd.try_insert(ActiveDisplayMarker);
-            }
+            cmd.try_insert(ActiveDisplayMarker);
         }
     }
     commands.trigger(WMEventTrigger(Event::SpaceChanged));

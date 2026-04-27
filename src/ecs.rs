@@ -111,14 +111,20 @@ pub fn register_systems(app: &mut bevy::app::App) {
                 scroll::swiping_timeout,
             )
                 .chain(),
-            layout::layout_sizes_changed,
+            // Wait for finish_setup before tiling: until then every window
+            // sits in the active strip regardless of its real display.
             (
-                layout::layout_strip_changed,
-                layout::reshuffle_layout_strip,
-                layout::position_layout_strips,
-                layout::position_layout_windows,
+                layout::layout_sizes_changed,
+                (
+                    layout::layout_strip_changed,
+                    layout::reshuffle_layout_strip,
+                    layout::position_layout_strips,
+                    layout::position_layout_windows,
+                )
+                    .chain(),
             )
-                .chain(),
+                .after(systems::finish_setup)
+                .run_if(not(resource_exists::<Initializing>)),
         ),
     );
     app.add_systems(
@@ -135,10 +141,14 @@ pub fn register_systems(app: &mut bevy::app::App) {
     app.add_systems(
         PostUpdate,
         (
-            (systems::animate_entities, systems::commit_window_position).chain(),
+            (
+                systems::animate_entities,
+                systems::commit_window_position.run_if(not(resource_exists::<Initializing>)),
+            )
+                .chain(),
             (
                 systems::animate_resize_entities,
-                systems::commit_window_size,
+                systems::commit_window_size.run_if(not(resource_exists::<Initializing>)),
             )
                 .chain(),
             (

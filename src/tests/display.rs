@@ -10,7 +10,7 @@ use crate::ecs::Timeout;
 use crate::ecs::layout::LayoutStrip;
 use crate::events::Event;
 use crate::manager::{Display, Origin, Size, Window};
-use crate::{assert_not_on_workspace, assert_on_workspace, assert_window_size};
+use crate::{assert_not_on_workspace, assert_on_workspace, assert_window_at, assert_window_size};
 
 use super::*;
 
@@ -349,6 +349,74 @@ fn test_send_next_display_stays_on_source() {
                 EXT_DISPLAY_ID,
                 "active display should still be the external display after sendnextdisplay"
             );
+        })
+        .run(commands);
+}
+
+/// Regression test: paneru's init pass must not drag windows that live on
+/// inactive displays onto the active display. `apply_window_properties`
+/// initially appends every observed window to the active strip; if the
+/// layout writers run before `finish_setup` has reassigned them, they
+/// cache active-display coordinates into `Position` and `commit_window_position`
+/// later pushes those to macOS, moving the windows.
+#[test]
+fn test_init_keeps_windows_on_their_real_displays() {
+    // Internal (test) display is active. Window 100 lives on the external
+    // display's space, window 200 lives on the active display's space.
+    let active_display = Arc::new(AtomicU32::new(TEST_DISPLAY_ID));
+
+    let mut harness = TestHarness::new();
+    let mock_app = setup_process(harness.app.world_mut());
+    let internal_queue = harness.internal_queue.clone();
+
+    let eq1 = internal_queue.clone();
+    let eq2 = internal_queue.clone();
+    let app1 = mock_app.clone();
+    let app2 = mock_app;
+    let ext_origin = Origin::new(0, -EXT_DISPLAY_HEIGHT + TEST_MENUBAR_HEIGHT);
+    let int_origin = Origin::new(0, TEST_MENUBAR_HEIGHT);
+    let windows: TestWindowSpawner = Box::new(move |workspace_id| {
+        if workspace_id == EXT_WORKSPACE_ID {
+            let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+            vec![Window::new(Box::new(MockWindow::new(
+                100,
+                IRect::from_corners(ext_origin, ext_origin + size),
+                eq1.clone(),
+                app1.clone(),
+            )))]
+        } else if workspace_id == TEST_WORKSPACE_ID {
+            let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+            vec![Window::new(Box::new(MockWindow::new(
+                200,
+                IRect::from_corners(int_origin, int_origin + size),
+                eq2.clone(),
+                app2.clone(),
+            )))]
+        } else {
+            vec![]
+        }
+    });
+
+    let wm = TwoDisplayMock {
+        windows,
+        active_display,
+    };
+    harness = harness.with_wm(wm);
+
+    let commands = vec![Event::Command {
+        command: Command::PrintState,
+    }];
+
+    harness
+        .on_iteration(0, move |world| {
+            assert_on_workspace!(world, 100, EXT_WORKSPACE_ID);
+            assert_not_on_workspace!(world, 100, TEST_WORKSPACE_ID);
+            assert_on_workspace!(world, 200, TEST_WORKSPACE_ID);
+            assert_not_on_workspace!(world, 200, EXT_WORKSPACE_ID);
+            // The OS frame for window 100 must stay within the external
+            // display's vertical bounds (negative y); if init moved it
+            // onto the active display the frame would land at y >= 0.
+            assert_window_at!(world, 100, ext_origin.x, ext_origin.y);
         })
         .run(commands);
 }

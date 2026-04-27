@@ -524,36 +524,41 @@ pub(super) fn window_unmanaged_trigger(
 
     let properties = WindowProperties::new(app, window, config.config());
 
-    if let Some((rx, ry, rw, rh)) = properties.grid_ratios() {
-        let x = (f64::from(display_bounds.width()) * rx) as i32;
-        let y = (f64::from(display_bounds.height()) * ry) as i32;
-        let w = (f64::from(display_bounds.width()) * rw) as i32;
-        let h = (f64::from(display_bounds.height()) * rh) as i32;
-        reposition_entity(entity, Origin::new(x, y), &mut commands);
-        resize_entity(entity, Size::new(w, h), &mut commands);
-    } else {
-        let max_width = display_bounds.width() * UNMANAGED_MAX_SCREEN_RATIO_NUM
-            / UNMANAGED_MAX_SCREEN_RATIO_DEN;
-        let max_height = display_bounds.height() * UNMANAGED_MAX_SCREEN_RATIO_NUM
-            / UNMANAGED_MAX_SCREEN_RATIO_DEN;
-        let new_width = frame.width().min(max_width);
-        let new_height = frame.height().min(max_height);
+    // Skip the active-display reposition/resize during init; the strip
+    // removal below still has to run.
+    if !config.initializing() {
+        if let Some((rx, ry, rw, rh)) = properties.grid_ratios() {
+            let x = (f64::from(display_bounds.width()) * rx) as i32;
+            let y = (f64::from(display_bounds.height()) * ry) as i32;
+            let w = (f64::from(display_bounds.width()) * rw) as i32;
+            let h = (f64::from(display_bounds.height()) * rh) as i32;
+            reposition_entity(entity, Origin::new(x, y), &mut commands);
+            resize_entity(entity, Size::new(w, h), &mut commands);
+        } else {
+            let max_width = display_bounds.width() * UNMANAGED_MAX_SCREEN_RATIO_NUM
+                / UNMANAGED_MAX_SCREEN_RATIO_DEN;
+            let max_height = display_bounds.height() * UNMANAGED_MAX_SCREEN_RATIO_NUM
+                / UNMANAGED_MAX_SCREEN_RATIO_DEN;
+            let new_width = frame.width().min(max_width);
+            let new_height = frame.height().min(max_height);
 
-        let mut target_frame =
-            IRect::from_corners(frame.min, frame.min + Origin::new(new_width, new_height));
-        target_frame = clamp_origin_to_bounds(target_frame, target_frame.size(), display_bounds);
-        target_frame =
-            offset_frame_within_bounds(target_frame, display_bounds, UNMANAGED_POP_OFFSET);
+            let mut target_frame =
+                IRect::from_corners(frame.min, frame.min + Origin::new(new_width, new_height));
+            target_frame =
+                clamp_origin_to_bounds(target_frame, target_frame.size(), display_bounds);
+            target_frame =
+                offset_frame_within_bounds(target_frame, display_bounds, UNMANAGED_POP_OFFSET);
 
-        if target_frame.size() != frame.size() {
-            resize_entity(
-                entity,
-                Size::new(target_frame.width(), target_frame.height()),
-                &mut commands,
-            );
-        }
-        if target_frame.min != frame.min {
-            reposition_entity(entity, target_frame.min, &mut commands);
+            if target_frame.size() != frame.size() {
+                resize_entity(
+                    entity,
+                    Size::new(target_frame.width(), target_frame.height()),
+                    &mut commands,
+                );
+            }
+            if target_frame.min != frame.min {
+                reposition_entity(entity, target_frame.min, &mut commands);
+            }
         }
     }
 
@@ -606,15 +611,19 @@ pub(super) fn window_managed_trigger(
     mut active_display: ActiveDisplayMut,
     windows: Windows,
     apps: Query<(Entity, &Application)>,
-    config: Res<Config>,
+    config: Configuration,
     mut commands: Commands,
 ) {
+    // finish_setup handles the initial strip assignment during init.
+    if config.initializing() {
+        return;
+    }
     let entity = trigger.event().entity;
 
     debug!("Entity {entity} is managed again.");
     let display_bounds = active_display
         .display()
-        .actual_display_bounds(active_display.dock(), &config);
+        .actual_display_bounds(active_display.dock(), config.config());
     let active_strip = active_display.active_strip();
 
     if let Some(window) = windows.get(entity)
@@ -622,10 +631,10 @@ pub(super) fn window_managed_trigger(
             .find_parent(window.id())
             .and_then(|(_, _, parent)| apps.get(parent).ok())
     {
-        let properties = WindowProperties::new(app, window, &config);
+        let properties = WindowProperties::new(app, window, config.config());
 
         if let Some(width_ratio) = properties.width_ratio() {
-            let (_, pad_right, _, pad_left) = config.edge_padding();
+            let (_, pad_right, _, pad_left) = config.config().edge_padding();
             let padded_width = display_bounds.width() - pad_left - pad_right;
             let width = (f64::from(padded_width) * width_ratio).round() as i32;
             let height = display_bounds.height();
@@ -805,7 +814,7 @@ pub(super) fn spawn_window_trigger(
             &mut window,
             &mut active_display,
             &properties.params,
-            config.config(),
+            &config,
         );
 
         // update_frame expands the OS rect by the per-window padding, so calling it *after*
@@ -858,7 +867,7 @@ fn apply_window_defaults(
     window: &mut Window,
     active_display: &mut ActiveDisplayMut,
     properties: &[WindowParams],
-    config: &Config,
+    config: &Configuration,
 ) {
     let floating = properties
         .iter()
@@ -877,7 +886,10 @@ fn apply_window_defaults(
         window.set_padding(WindowPadding::Horizontal(padding.clamp(0, 50)));
     }
     if floating {
-        if let Some((rx, ry, rw, rh)) = properties.iter().find_map(WindowParams::grid_ratios) {
+        // Skip grid_ratios during init: we don't know this window's display.
+        if !config.initializing()
+            && let Some((rx, ry, rw, rh)) = properties.iter().find_map(WindowParams::grid_ratios)
+        {
             let bounds = active_display.bounds();
             let x = (f64::from(bounds.width()) * rx) as i32;
             let y = (f64::from(bounds.height()) * ry) as i32;
@@ -891,10 +903,12 @@ fn apply_window_defaults(
 
     // Apply configured width AFTER update_frame so it isn't overwritten.
     // Use padded display width (matching window_resize command behavior).
+    // Safe during init: this only resizes, it doesn't reposition, so a
+    // window on an inactive display stays put.
     if let Some(width) = properties.iter().find_map(|props| props.width) {
         _ = window.update_frame().inspect_err(|err| error!("{err}"));
         let bounds = active_display.bounds();
-        let (_, pad_right, _, pad_left) = config.edge_padding();
+        let (_, pad_right, _, pad_left) = config.config().edge_padding();
         let padded_width = bounds.width() - pad_left - pad_right;
         let new_width = (f64::from(padded_width) * width).round() as i32;
         let height = window.frame().height();

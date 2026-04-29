@@ -82,6 +82,9 @@ pub enum Event {
     /// A mouse scroll has been detected.
     Scroll { delta: f64 },
 
+    /// Fingers have been placed on the touchpad.
+    TouchpadDown,
+
     /// A new space (virtual desktop) has been created.
     SpaceCreated { space_id: WorkspaceId },
     /// A space has been destroyed.

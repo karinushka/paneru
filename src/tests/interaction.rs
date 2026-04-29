@@ -189,6 +189,38 @@ fn test_scrolling() {
 }
 
 #[test]
+fn test_scrolling_stop() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Swipe {
+            deltas: vec![0.1, 0.1, 0.1],
+        },
+        Event::TouchpadDown,
+    ];
+
+    let config: Config = (
+        MainOptions {
+            swipe_gesture_fingers: Some(3),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(3)
+        .on_iteration(2, |world| {
+            use crate::ecs::Scrolling;
+            let mut query = world.query::<&Scrolling>();
+            let scroll = query.single(world).unwrap();
+            assert_eq!(scroll.velocity, 0.0);
+            assert!(scroll.is_user_swiping);
+        })
+        .run(commands);
+}
+
+#[test]
 fn test_window_hidden_ratio() {
     let commands = vec![
         Event::MenuOpened { window_id: 0 },

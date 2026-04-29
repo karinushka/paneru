@@ -36,6 +36,15 @@ pub(super) fn swipe_gesture(
 
     for event in messages.read() {
         let delta = match event {
+            Event::TouchpadDown => {
+                let (_, _, scrolling) = &mut *active_workspace;
+                if let Some(scrolling) = scrolling.as_mut() {
+                    scrolling.velocity = 0.0;
+                    scrolling.is_user_swiping = true;
+                    scrolling.last_event = Instant::now();
+                }
+                continue;
+            }
             Event::Scroll { delta } => {
                 // Normalization: Touchpad deltas are typically small fractions.
                 // Scroll wheel deltas can be larger. We scale it down slightly
@@ -164,7 +173,7 @@ pub(super) fn apply_snap_force(
     let snap_threshold = SNAP_DISPLAY_RATIO * f64::from(viewport.width());
 
     let (strip, position, ref mut scroll) = *strip;
-    if scroll.velocity.abs() > 0.5 {
+    if scroll.is_user_swiping || scroll.velocity.abs() > 0.5 {
         return;
     }
 

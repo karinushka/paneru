@@ -321,6 +321,12 @@ impl InputHandler {
         }
 
         let fingers = ns_event.allTouches();
+        if fingers.iter().any(|f| f.phase() == NSTouchPhase::Began)
+            && let Some(events) = &self.events
+        {
+            _ = events.send(Event::TouchpadDown);
+        }
+
         if fingers.len() < GESTURE_MINIMAL_FINGERS {
             return false;
         }

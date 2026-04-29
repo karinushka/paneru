@@ -39,6 +39,9 @@ pub fn set_focused_passthrough(keys: Vec<(u8, Modifiers)>) {
 /// covering macOS momentum scroll that continues after finger lift.
 const VERTICAL_GESTURE_SCROLL_SUPPRESS: Duration = Duration::from_millis(1200);
 
+const SWIPE_THRESHOLD: f64 = 0.001;
+const GESTURE_MINIMAL_FINGERS: usize = 3;
+
 /// `InputHandler` manages low-level input events from the macOS `CGEventTap`.
 /// It intercepts keyboard and mouse events, processes gestures, and dispatches them as higher-level `Event`s.
 pub(super) struct InputHandler {
@@ -50,10 +53,10 @@ pub(super) struct InputHandler {
     finger_position: Option<Retained<NSSet<NSTouch>>>,
     /// The `CFMachPort` representing the `CGEventTap`.
     tap_port: Option<CFRetained<CFMachPort>>,
-    /// Timestamp of the last vertical swipe gesture event. Scroll wheel events
+    /// Timestamp of the last swipe gesture event. Scroll wheel events
     /// are suppressed for a short window after this to prevent the OS from
     /// scrolling windows underneath (including momentum scroll after finger lift).
-    last_vertical_gesture: Option<Instant>,
+    last_swipe_time: Option<Instant>,
     // Prevents from being Unpin automatically
     _pin: PhantomPinned,
 }
@@ -78,7 +81,7 @@ impl InputHandler {
             config,
             finger_position: None,
             tap_port: None,
-            last_vertical_gesture: None,
+            last_swipe_time: None,
             _pin: PhantomPinned,
         }
     }
@@ -245,11 +248,11 @@ impl InputHandler {
 
     /// Handles scroll wheel events. If configured modifier is held, it transforms the scroll into a swipe event.
     fn handle_scroll_wheel(&mut self, event: &CGEvent) -> bool {
-        // Suppress scroll events shortly after a vertical swipe gesture to prevent
+        // Suppress scroll events shortly after a swipe gesture to prevent
         // the OS from scrolling windows underneath, including momentum scroll events
         // that arrive after finger lift.
         if self
-            .last_vertical_gesture
+            .last_swipe_time
             .is_some_and(|t| t.elapsed() < VERTICAL_GESTURE_SCROLL_SUPPRESS)
         {
             return true;
@@ -309,8 +312,6 @@ impl InputHandler {
     /// Handles swipe gesture events. Routes to horizontal `Swipe` or vertical
     /// `VerticalSwipe` based on axis dominance. Returns true to intercept the event.
     fn handle_swipe(&mut self, event: &CGEvent) -> bool {
-        const SWIPE_THRESHOLD: f64 = 0.001;
-        const GESTURE_MINIMAL_FINGERS: usize = 3;
         let Some(ns_event) = NSEvent::eventWithCGEvent(event) else {
             error!("{}: Unable to convert CGEvent to NSEvent", function_name!());
             return false;
@@ -318,12 +319,12 @@ impl InputHandler {
         if ns_event.r#type() != NSEventType::Gesture {
             return false;
         }
+
         let fingers = ns_event.allTouches();
         if fingers.len() < GESTURE_MINIMAL_FINGERS {
             return false;
         }
 
-        let mut intercept = false;
         if fingers.iter().all(|f| f.phase() != NSTouchPhase::Began)
             && let Some(prev) = &self.finger_position
         {
@@ -355,17 +356,20 @@ impl InputHandler {
                     // Horizontal dominant: use existing swipe path
                     if x_deltas.iter().all(|p| p.abs() > SWIPE_THRESHOLD) {
                         _ = events.send(Event::Swipe { deltas: x_deltas });
+                        self.last_swipe_time = Some(Instant::now());
                     }
                 } else if y_deltas.iter().all(|p| p.abs() > SWIPE_THRESHOLD) {
                     // Vertical dominant: send vertical swipe, intercept the event
                     _ = events.send(Event::VerticalSwipe { delta: y_sum });
-                    self.last_vertical_gesture = Some(Instant::now());
+                    self.last_swipe_time = Some(Instant::now());
                 }
-                intercept = true;
             }
         }
         self.finger_position = Some(fingers);
-        intercept
+
+        // If we have 3 or more fingers on the trackpad, we intercept the event
+        // to prevent it from being interpreted as a scroll by the OS.
+        true
     }
 
     /// Handles key press events. It determines the modifier mask and attempts to find a matching keybinding in the configuration.

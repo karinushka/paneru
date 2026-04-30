@@ -5,9 +5,9 @@ use bevy::ecs::system::{Commands, Local, Query, Res};
 use std::time::{Duration, Instant};
 use tracing::{debug, trace, warn};
 
-use super::{MissionControlActive, MouseHeldMarker, Timeout, WMEventTrigger, WindowDraggedMarker};
+use super::{MissionControlActive, MouseHeldMarker, Timeout, WMEventTrigger};
 use crate::config::Config;
-use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
+use crate::ecs::params::{Configuration, Windows};
 use crate::ecs::{ActiveWorkspaceMarker, Scrolling, focus_entity, reshuffle_around};
 use crate::events::Event;
 use crate::manager::{Display, Origin, WindowManager, origin_from};
@@ -163,66 +163,6 @@ pub(super) fn mouse_up_trigger(
     for (held_entity, marker) in &mouse_held {
         reshuffle_around(marker.0, &mut commands);
         commands.entity(held_entity).despawn();
-    }
-}
-
-/// Handles mouse dragged events.
-///
-/// This function is currently a placeholder and only logs the drag event.
-///
-/// # Arguments
-///
-/// * `trigger` - The Bevy event trigger containing the mouse dragged event.
-/// * `mission_control_active` - A resource indicating if Mission Control is active.
-#[allow(clippy::needless_pass_by_value)]
-pub(super) fn mouse_dragged_trigger(
-    trigger: On<WMEventTrigger>,
-    active_display: ActiveDisplay,
-    windows: Windows,
-    mut drag_marker: Query<(&mut Timeout, &mut WindowDraggedMarker)>,
-    window_manager: Res<WindowManager>,
-    mission_control_active: Res<MissionControlActive>,
-    mut commands: Commands,
-) {
-    const DRAG_MARKER_TIMEOUT_MS: u64 = 1000;
-    let Event::MouseDragged { point } = trigger.event().0 else {
-        return;
-    };
-    if mission_control_active.0 {
-        return;
-    }
-
-    let Some((window, entity)) = window_manager
-        .0
-        .find_window_at_point(&point)
-        .ok()
-        .and_then(|window_id| windows.find(window_id))
-    else {
-        return;
-    };
-
-    if let Ok((mut timeout, mut marker)) = drag_marker.single_mut() {
-        // Change the current marker contents and refresh the timer.
-        if entity != marker.entity {
-            let marker = marker.as_mut();
-            marker.entity = entity;
-            marker.display_id = active_display.id();
-            timeout.timer.reset();
-        }
-    } else {
-        debug!(
-            "Adding a drag marker ({entity}, {}) to window id {}.",
-            active_display.id(),
-            window.id(),
-        );
-        let timeout = Timeout::new(Duration::from_millis(DRAG_MARKER_TIMEOUT_MS), None);
-        commands.spawn((
-            timeout,
-            WindowDraggedMarker {
-                entity,
-                display_id: active_display.id(),
-            },
-        ));
     }
 }
 

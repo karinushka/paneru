@@ -18,7 +18,6 @@ use bevy::{
     ecs::{component::Component, entity::Entity, schedule::IntoScheduleConfigs},
 };
 use derive_more::{Deref, DerefMut};
-use objc2_core_graphics::CGDirectDisplayID;
 use tracing::{Level, instrument};
 
 use crate::commands::register_commands;
@@ -84,7 +83,6 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::retry_front_switch,
             systems::window_update_frame,
             systems::displays_rearranged,
-            systems::reposition_dragged_window,
             workspace::show_active_workspace,
             workspace::cleanup_virtual_workspaces,
             workspace::handle_virtual_window_moves,
@@ -185,7 +183,6 @@ pub fn register_triggers(app: &mut bevy::app::App) {
     app.add_observer(mouse::mouse_moved_trigger)
         .add_observer(mouse::mouse_down_trigger)
         .add_observer(mouse::mouse_up_trigger)
-        .add_observer(mouse::mouse_dragged_trigger)
         .add_observer(mouse::horizontal_warp_mouse_trigger)
         .add_observer(triggers::display_change_trigger)
         .add_observer(triggers::front_switched_trigger)
@@ -251,15 +248,6 @@ pub struct RepositionMarker(pub Origin);
 /// Component representing a request to resize a window.
 #[derive(Component, Debug, Deref, DerefMut)]
 pub struct ResizeMarker(pub Size);
-
-/// Marker component indicating that a window is currently being dragged by the mouse.
-#[derive(Component)]
-pub struct WindowDraggedMarker {
-    /// The entity ID of the dragged window.
-    pub entity: Entity,
-    /// The ID of the display the window is being dragged on.
-    pub display_id: CGDirectDisplayID,
-}
 
 /// Marker component indicating that windows around the marked entity need to be reshuffled.
 #[derive(Component)]

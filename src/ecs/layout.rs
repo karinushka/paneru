@@ -790,7 +790,6 @@ pub(super) fn reshuffle_layout_strip(
         };
 
         let size = frame.size();
-        let visible_width = display_bounds.intersect(frame).width();
 
         // Expose the window by clamping it into the viewport.
         frame.min = frame
@@ -798,11 +797,12 @@ pub(super) fn reshuffle_layout_strip(
             .clamp(display_bounds.min, display_bounds.max - size);
         frame.max = frame.min + size;
 
-        let strip_position = frame.min - layout_position.0;
+        let strip_position = (frame.min - layout_position.0).with_y(display_bounds.min.y);
 
         // Check how much of the window is hidden. Slivers don't count as
         // meaningfully visible, so subtract sliver_width from the visible
         // portion. If the hidden fraction is within the allowed ratio, skip.
+        let visible_width = display_bounds.intersect(frame).width();
         let hidden_ratio = config.window_hidden_ratio();
         if hidden_ratio > 0.0 {
             let meaningful = (visible_width - config.sliver_width()).max(0);

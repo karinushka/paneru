@@ -45,6 +45,14 @@ pub(super) fn swipe_gesture(
                 }
                 continue;
             }
+            Event::TouchpadUp => {
+                let (_, _, scrolling) = &mut *active_workspace;
+                if let Some(scrolling) = scrolling.as_mut() {
+                    scrolling.is_user_swiping = false;
+                    scrolling.last_event = Instant::now();
+                }
+                continue;
+            }
             Event::Scroll { delta } => {
                 // Normalization: Touchpad deltas are typically small fractions.
                 // Scroll wheel deltas can be larger. We scale it down slightly
@@ -70,7 +78,8 @@ pub(super) fn swipe_gesture(
             _ => continue,
         };
 
-        let swipe_resolution = 1.0 / f64::from(active_display.bounds().width());
+        let viewport_width = f64::from(active_display.bounds().width());
+        let swipe_resolution = 1.0 / viewport_width;
         if delta.abs() < swipe_resolution {
             continue;
         }
@@ -82,16 +91,22 @@ pub(super) fn swipe_gesture(
             0.0
         };
 
+        let direction_modifier = match config.config().swipe_gesture_direction() {
+            SwipeGestureDirection::Natural => -1.0,
+            SwipeGestureDirection::Reversed => 1.0,
+        };
+
         let (entity, position, scrolling) = &mut *active_workspace;
         if let Some(scrolling) = scrolling.as_mut() {
-            let velocity = 0.3 * new_velocity + 0.7 * scrolling.velocity;
-            scrolling.velocity = velocity;
+            scrolling.velocity = 0.3 * new_velocity + 0.7 * scrolling.velocity;
             scrolling.is_user_swiping = true;
             scrolling.last_event = Instant::now();
+            scrolling.position +=
+                delta * viewport_width * direction_modifier * config.config().swipe_sensitivity();
         } else if let Ok(mut entity_commands) = commands.get_entity(*entity) {
             entity_commands.try_insert(Scrolling {
                 velocity: new_velocity,
-                position: f64::from(position.0.x),
+                position: f64::from(position.0.x) + delta * viewport_width * direction_modifier,
                 is_user_swiping: true,
                 ..Default::default()
             });
@@ -104,27 +119,27 @@ pub(super) fn swipe_gesture(
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn swiping_timeout(
-    mut strips: Populated<(Entity, &mut Scrolling), With<LayoutStrip>>,
+    strips: Populated<(Entity, &Scrolling), With<LayoutStrip>>,
     active_display: ActiveDisplay,
     time: Res<Time>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
-    const FINGER_LIFT_THRESHOLD: Duration = Duration::from_millis(50);
+    const SWIPE_FOCUS_TIMEOUT: Duration = Duration::from_millis(500);
     const MIN_VELOCITY_PX: f64 = 5.0;
     let dt = time.delta_secs_f64();
     let viewport_width = f64::from(active_display.bounds().width());
 
-    for (entity, mut scroll) in &mut strips {
-        if scroll.last_event.elapsed() > FINGER_LIFT_THRESHOLD {
-            scroll.is_user_swiping = false;
+    for (entity, scroll) in strips {
+        if !scroll.is_user_swiping && scroll.velocity.abs() * dt * viewport_width < MIN_VELOCITY_PX
+        {
+            commands.entity(entity).remove::<Scrolling>();
+        }
 
-            if scroll.velocity.abs() * dt * viewport_width < MIN_VELOCITY_PX {
-                commands.entity(entity).remove::<Scrolling>();
-            }
-            if let Some(point) = window_manager.cursor_position() {
-                commands.trigger(WMEventTrigger(Event::MouseMoved { point }));
-            }
+        if scroll.last_event.elapsed() > SWIPE_FOCUS_TIMEOUT
+            && let Some(point) = window_manager.cursor_position()
+        {
+            commands.trigger(WMEventTrigger(Event::MouseMoved { point }));
         }
     }
 }
@@ -223,9 +238,11 @@ pub(super) fn scrolling_integrator(
     };
 
     let scroll = &mut *strip;
-    if scroll.velocity.abs() > 0.0001 {
-        scroll.position += scroll.velocity * dt * viewport_width * direction_modifier;
+    if scroll.is_user_swiping || scroll.velocity.abs() <= 0.0001 {
+        return;
     }
+
+    scroll.position += scroll.velocity * dt * viewport_width * direction_modifier;
 }
 
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]

@@ -312,12 +312,23 @@ impl InputHandler {
     /// Handles swipe gesture events. Routes to horizontal `Swipe` or vertical
     /// `VerticalSwipe` based on axis dominance. Returns true to intercept the event.
     fn handle_swipe(&mut self, event: &CGEvent) -> bool {
+        const NS_EVENT_PHASE_ENDED: usize = 1 << 3; // 8
+        const NS_EVENT_PHASE_CANCELLED: usize = 1 << 4; // 16
+
         let Some(ns_event) = NSEvent::eventWithCGEvent(event) else {
             error!("{}: Unable to convert CGEvent to NSEvent", function_name!());
             return false;
         };
         if ns_event.r#type() != NSEventType::Gesture {
             return false;
+        }
+
+        // Fingers lifted off touchpad.
+        let phase = ns_event.phase();
+        if (phase.0 & NS_EVENT_PHASE_CANCELLED != 0 || phase.0 & NS_EVENT_PHASE_ENDED != 0)
+            && let Some(events) = &self.events
+        {
+            _ = events.send(Event::TouchpadUp);
         }
 
         let fingers = ns_event.allTouches();

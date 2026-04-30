@@ -124,15 +124,14 @@ pub fn register_systems(app: &mut bevy::app::App) {
             // sits in the active strip regardless of its real display.
             (
                 layout::layout_sizes_changed,
-                (
-                    layout::layout_strip_changed,
-                    layout::reshuffle_layout_strip,
-                    layout::position_layout_strips,
-                    layout::position_layout_windows,
-                )
-                    .chain(),
+                layout::layout_strip_changed,
+                layout::reshuffle_layout_strip,
+                layout::position_layout_strips,
+                layout::position_layout_windows,
             )
+                .chain()
                 .after(systems::finish_setup)
+                .after(systems::window_update_frame)
                 .run_if(not(resource_exists::<Initializing>)),
         ),
     );

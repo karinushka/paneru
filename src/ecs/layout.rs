@@ -798,7 +798,7 @@ pub(super) fn reshuffle_layout_strip(
             .clamp(display_bounds.min, display_bounds.max - size);
         frame.max = frame.min + size;
 
-        let strip_position = frame.min - layout_position.0;
+        let strip_position = (frame.min - layout_position.0).with_y(display_bounds.min.y);
 
         // Check how much of the window is hidden. Slivers don't count as
         // meaningfully visible, so subtract sliver_width from the visible

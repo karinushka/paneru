@@ -5,9 +5,10 @@ use bevy::MinimalPlugins;
 use bevy::app::App as BevyApp;
 use bevy::app::{PostUpdate, PreUpdate, Startup};
 use bevy::ecs::message::Messages;
+use bevy::ecs::query::With;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::common_conditions::{not, resource_exists};
-use bevy::ecs::system::{Commands, Res};
+use bevy::ecs::system::{Commands, Query, Res};
 use bevy::prelude::Event as BevyEvent;
 use bevy::tasks::Task;
 use bevy::time::Timer;
@@ -53,6 +54,18 @@ mod workspace;
 pub fn register_systems(app: &mut bevy::app::App) {
     const DISPLAY_CHANGE_CHECK_FREQ_MS: u64 = 1000;
     const REFRESH_WINDOW_CHECK_FREQ_MS: u64 = 1000;
+
+    let not_swiping = |scrolling: Query<&Scrolling, With<ActiveWorkspaceMarker>>| {
+        scrolling
+            .iter()
+            .next()
+            .is_none_or(|marker| !marker.is_user_swiping)
+    };
+    let dimming_enabled = |config: Option<Res<Config>>| {
+        config
+            .is_some_and(|config| config.has_dim_inactive_color() || config.border_active_window())
+    };
+
     app.add_systems(
         Startup,
         (systems::gather_displays, systems::gather_initial_processes).chain(),
@@ -81,7 +94,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::fresh_marker_cleanup,
             systems::timeout_ticker,
             systems::retry_front_switch,
-            systems::window_update_frame,
+            systems::window_update_frame.run_if(not_swiping),
             systems::displays_rearranged,
             workspace::show_active_workspace,
             workspace::cleanup_virtual_workspaces,
@@ -161,11 +174,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
                 systems::update_overlays
                     .after(systems::animate_entities)
                     .after(systems::animate_resize_entities)
-                    .run_if(|config: Option<Res<Config>>| {
-                        config.is_some_and(|config| {
-                            config.has_dim_inactive_color() || config.border_active_window()
-                        })
-                    }),
+                    .run_if(dimming_enabled),
                 systems::update_flash_messages,
             )
                 .chain(),

@@ -2,7 +2,7 @@ use bevy::ecs::change_detection::DetectChangesMut as _;
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
-use bevy::ecs::query::{Changed, Has, With, Without};
+use bevy::ecs::query::{Changed, Has, Or, With, Without};
 use bevy::ecs::system::{ParallelCommands, Populated, Query, Res};
 use bevy::math::IRect;
 use std::collections::VecDeque;
@@ -10,7 +10,7 @@ use stdext::function_name;
 use tracing::{Level, instrument, trace};
 
 use crate::config::Config;
-use crate::ecs::params::{ActiveDisplay, Windows};
+use crate::ecs::params::Windows;
 use crate::ecs::{
     Bounds, DockPosition, LayoutPosition, Position, RepositionMarker, ReshuffleAroundMarker,
     Scrolling,
@@ -694,43 +694,24 @@ fn binpack_heights(heights: &[i32], min_height: i32, total_height: i32) -> Optio
     Some(output)
 }
 
-/// Watches for size changes to windows and if they are changed, re-calculates the logical
-/// positions of all the windows in their layout strip.
-#[allow(clippy::needless_pass_by_value)]
+/// Watches for size changes to windows and if they are changed, signals to the layout strip.
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn layout_sizes_changed(
-    changed_sizes: Populated<Entity, Changed<Bounds>>,
-    windows: Query<(&Position, &Bounds, &Window), Without<LayoutStrip>>,
-    mut layout_position: Query<&mut LayoutPosition, With<Window>>,
-    active_display: ActiveDisplay,
-    config: Res<Config>,
+    changed_sizes: Populated<
+        Entity,
+        Or<(
+            (Changed<Bounds>, With<Window>),
+            (Changed<Position>, With<Window>),
+        )>,
+    >,
+    mut workspaces: Query<&mut LayoutStrip>,
 ) {
-    let viewport = active_display
-        .display()
-        .actual_display_bounds(active_display.dock(), &config);
-    let layout_strip = active_display.active_strip();
-
-    let get_window_frame = |entity| {
-        windows
-            .get(entity)
-            .map(|(position, bounds, _)| IRect::from_corners(position.0, position.0 + bounds.0))
-            .ok()
-    };
-
-    changed_sizes
-        .into_iter()
-        .filter_map(|entity| {
-            layout_strip
-                .index_of(entity)
-                .is_ok()
-                .then_some(layout_strip.relative_positions(viewport.height(), &get_window_frame))
-        })
-        .flatten()
-        .for_each(|(entity, frame)| {
-            if let Ok(mut layout_position) = layout_position.get_mut(entity) {
-                layout_position.0 = frame.min;
-            }
-        });
+    workspaces.par_iter_mut().for_each(|mut strip| {
+        if changed_sizes.iter().any(|entity| strip.contains(entity)) {
+            strip.set_changed();
+        }
+    });
 }
 
 /// Watches for changes to `LayoutStrip` (i.e. a window added or window order changed) and
@@ -755,19 +736,23 @@ pub(super) fn layout_strip_changed(
 
     let changed = changed_strips
         .into_iter()
-        .flat_map(|(layout_strip, child_of)| {
-            let height = displays
+        .filter_map(|(layout_strip, child_of)| {
+            displays
                 .get(child_of.parent())
-                .map_or(0, |(display, dock)| {
-                    display.actual_display_bounds(dock, &config).height()
-                });
-            layout_strip.relative_positions(height, &get_window_frame)
+                .map(|(display, dock)| {
+                    let height = display.actual_display_bounds(dock, &config).height();
+                    layout_strip.relative_positions(height, &get_window_frame)
+                })
+                .ok()
         })
+        .flatten()
         .collect::<Vec<_>>();
 
     for (entity, frame) in changed {
         if let Ok((_, mut bounds, mut layout_position)) = windows.get_mut(entity) {
-            layout_position.0 = frame.min;
+            if layout_position.0 != frame.min {
+                layout_position.0 = frame.min;
+            }
             if bounds.0 != frame.size() {
                 bounds.0 = frame.size();
             }

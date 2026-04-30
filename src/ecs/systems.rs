@@ -2,7 +2,7 @@ use bevy::app::AppExit;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::{MessageReader, MessageWriter};
-use bevy::ecs::query::{Changed, Has, Or, With};
+use bevy::ecs::query::{Changed, Has, Or, With, Without};
 use bevy::ecs::system::{
     Commands, Local, NonSend, NonSendMut, ParallelCommands, Populated, Query, Res, Single,
 };
@@ -19,9 +19,8 @@ use std::time::Duration;
 use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
-    ActiveDisplayMarker, BProcess, ExistingMarker, FocusedMarker, FreshMarker,
-    PollForNotifications, RepositionMarker, ResizeMarker, RetryFrontSwitch, SpawnWindowTrigger,
-    Timeout, WMEventTrigger,
+    ActiveDisplayMarker, BProcess, ExistingMarker, FreshMarker, PollForNotifications,
+    RepositionMarker, ResizeMarker, RetryFrontSwitch, SpawnWindowTrigger, Timeout, WMEventTrigger,
 };
 
 use crate::config::{Config, decorations::BorderRadiusOption};
@@ -30,8 +29,7 @@ use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, BruteforceWindows, FlashMessage, Initializing,
     LocateDockTrigger, Position, RefreshWindowSizes, RestoreWindowState, Scrolling,
-    SelectedVirtualMarker, StackAdjustedResize, Unmanaged, WidthRatio, WindowProperties,
-    focus_entity, reshuffle_around,
+    SelectedVirtualMarker, Unmanaged, WidthRatio, WindowProperties, focus_entity,
 };
 use crate::events::Event;
 use crate::manager::{
@@ -689,105 +687,77 @@ pub(super) fn pump_events(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-pub(super) fn window_update_frame(
+#[instrument(level = Level::TRACE, skip_all)]
+pub(super) fn window_resized_update_frame(
     mut messages: MessageReader<Event>,
-    mut windows: Query<(
-        &mut Window,
-        Entity,
-        &mut Position,
-        &mut Bounds,
-        Has<StackAdjustedResize>,
-    )>,
-    focused: Option<Single<Entity, With<FocusedMarker>>>,
-    active_display: ActiveDisplay,
-    active_workspace: Query<&Scrolling, With<ActiveWorkspaceMarker>>,
-    config: Configuration,
-    mut commands: Commands,
+    mut windows: Query<(&mut Window, Entity, &Position, &mut Bounds), Without<LayoutStrip>>,
+    mut active_workspace: Single<(&LayoutStrip, &mut Position), With<ActiveWorkspaceMarker>>,
 ) {
     for event in messages.read() {
-        match event {
-            Event::WindowMoved { .. } | Event::WindowResized { .. }
-                if active_workspace
-                    .iter()
-                    .next()
-                    .is_some_and(|marker| marker.is_user_swiping) => {}
-            Event::WindowMoved { window_id } | Event::WindowResized { window_id } => {
-                let (entity, old_frame, new_frame) = {
-                    let Some((mut window, entity, mut position, mut bounds, stack_adjusted)) =
-                        windows
-                            .iter_mut()
-                            .find(|window| window.0.id() == *window_id)
-                    else {
-                        continue;
-                    };
-                    let Ok(new_frame) = window.update_frame() else {
-                        continue;
-                    };
+        let Event::WindowResized { window_id } = event else {
+            continue;
+        };
 
-                    // Skip reshuffle for resize events that we caused ourselves when
-                    // adjusting an adjacent stacked window's height (see below).
-                    if stack_adjusted {
-                        commands.entity(entity).try_remove::<StackAdjustedResize>();
-                        continue;
-                    }
+        let Some((mut window, entity, position, mut bounds)) = windows
+            .iter_mut()
+            .find(|window| window.0.id() == *window_id)
+        else {
+            continue;
+        };
+        let Ok(new_frame) = window.update_frame() else {
+            continue;
+        };
 
-                    if !active_display.active_strip().contains(entity) {
-                        // Do not reshuffle for floating windows or on other displays or
-                        // workspaces.
-                        continue;
-                    }
+        let old_frame = IRect::from_corners(position.0, position.0 + bounds.0);
+        if old_frame.size() != new_frame.size() {
+            bounds.0 = new_frame.size();
+        }
 
-                    let old_frame = IRect::from_corners(position.0, position.0 + bounds.0);
-                    if matches!(event, Event::WindowMoved { window_id: _ })
-                        || old_frame.min != new_frame.min
-                    // Resized from the left, so the origin got moved.
-                    {
-                        position.0 = new_frame.min;
-                    }
-                    if matches!(event, Event::WindowResized { window_id: _ })
-                        && bounds.0 != new_frame.size()
-                    {
-                        bounds.0 = new_frame.size();
-                    }
-                    (entity, old_frame, new_frame)
-                };
+        // If the window was resized, shift LayoutStrip slightly to avoid moving right corner.
+        let (active_strip, ref mut strip_position) = *active_workspace;
+        if old_frame.min.x != new_frame.min.x {
+            let shift = (old_frame.size() - new_frame.size()).with_y(0);
+            // Search marke: reposition_entity - Updating position directly to reduce jitter.
+            strip_position.0.x += shift.x;
+        }
 
-                if matches!(event, Event::WindowResized { window_id: _ }) && !config.initializing()
-                {
-                    // When the user drags the top edge of a stacked window, macOS
-                    // changes both its origin.y and height while leaving its bottom
-                    // edge unchanged.  The window above hasn't been resized, so its
-                    // stored height + this window's new height > viewport, causing
-                    // binpack to fight the drag.  Fix: resize the window above so
-                    // that A.height = gap between their origins.
-                    let is_top_edge_drag = old_frame.min.y != new_frame.min.y
-                        && old_frame.max.y.abs_diff(new_frame.max.y) <= 2;
+        // When the user drags the top edge of a stacked window, we adjust the window above to
+        // accomodate.
+        let diff = old_frame.min.y - new_frame.min.y;
+        if diff.abs() > 0
+            && let Some(above_entity) = active_strip.above(entity)
+            && let Ok((_, _, _, mut above_bounds)) = windows.get_mut(above_entity)
+            && above_bounds.0.y - diff > 200
+        {
+            above_bounds.0.y -= diff;
+        }
+    }
+}
 
-                    if is_top_edge_drag
-                        && let Some(above_entity) = active_display.active_strip().above(entity)
-                    {
-                        if let Ok((_, _, above_pos, mut bounds, _)) = windows.get_mut(above_entity)
-                        {
-                            let new_height = new_frame.min.y - above_pos.0.y;
-                            if new_height > 0 {
-                                bounds.0.y = new_height;
-                            }
-                        }
-                        commands
-                            .entity(above_entity)
-                            .try_insert(StackAdjustedResize);
-                    }
+#[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::TRACE, skip_all)]
+pub(super) fn window_moved_update_frame(
+    mut messages: MessageReader<Event>,
+    mut windows: Query<(&mut Window, &mut Position, &Bounds), Without<LayoutStrip>>,
+) {
+    for event in messages.read() {
+        let Event::WindowMoved { window_id } = event else {
+            continue;
+        };
 
-                    // Reshuffle around the focused window, not the resized one.
-                    // Reshuffling around an off-screen sliver would call
-                    // expose_window on it, pulling it into view and causing a
-                    // feedback loop.
-                    if let Some(focused) = &focused {
-                        reshuffle_around(**focused, &mut commands);
-                    }
-                }
-            }
-            _ => (),
+        let Some((mut window, mut position, bounds)) = windows
+            .iter_mut()
+            .find(|window| window.0.id() == *window_id)
+        else {
+            continue;
+        };
+        let Ok(new_frame) = window.update_frame() else {
+            continue;
+        };
+
+        let old_frame = IRect::from_corners(position.0, position.0 + bounds.0);
+        if old_frame.min != new_frame.min {
+            position.0 = new_frame.min;
         }
     }
 }

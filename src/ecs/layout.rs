@@ -12,8 +12,8 @@ use tracing::{Level, instrument, trace};
 use crate::config::Config;
 use crate::ecs::params::Windows;
 use crate::ecs::{
-    Bounds, DockPosition, LayoutPosition, Position, RepositionMarker, ReshuffleAroundMarker,
-    Scrolling,
+    Bounds, DockPosition, LayoutPosition, Position, ReshuffleAroundMarker, Scrolling,
+    reposition_entity,
 };
 use crate::errors::{Error, Result};
 use crate::manager::{Display, Window};
@@ -819,9 +819,7 @@ pub(super) fn reshuffle_layout_strip(
 
         trace!("reshuffle_layout_strip: triggered for entity {entity}, offset {strip_position}");
         commands.command_scope(|mut command| {
-            if let Ok(mut cmd) = command.get_entity(strip_entity) {
-                cmd.try_insert(RepositionMarker(strip_position));
-            }
+            reposition_entity(strip_entity, strip_position, &mut command);
         });
     });
 }

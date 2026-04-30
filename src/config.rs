@@ -627,6 +627,10 @@ impl Config {
             .clamp(0.0, 1.0)
     }
 
+    pub fn window_resize_cycle(&self) -> bool {
+        self.options().window_resize_cycle.unwrap_or(true)
+    }
+
     pub fn auto_center(&self) -> bool {
         self.options().auto_center.is_some_and(|center| center)
     }
@@ -845,6 +849,10 @@ pub struct MainOptions {
     /// view. 0.0 (default) = always bring into view. 1.0 = never move unless
     /// fully invisible. E.g. 0.5 = tolerate up to 50% hidden.
     pub window_hidden_ratio: Option<f64>,
+
+    /// Whether grow/shrink cycles back when reaching the end of presets.
+    /// Default: true (cycles). Set to false to stop at the limits.
+    pub window_resize_cycle: Option<bool>,
 }
 
 /// Returns a default set of column widths.

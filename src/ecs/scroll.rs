@@ -191,8 +191,8 @@ pub(super) fn apply_snap_force(
     config: Configuration,
     time: Res<Time>,
 ) {
-    const CENTER_MAGNETIC_FORCE: f64 = 4.0;
-    const SNAP_DISPLAY_RATIO: f64 = 0.1;
+    const CENTER_MAGNETIC_FORCE: f64 = 10.0;
+    const SNAP_DISPLAY_RATIO: f64 = 0.45;
 
     if !config.config().auto_center() {
         return;
@@ -226,10 +226,8 @@ pub(super) fn apply_snap_force(
         .unwrap_or(position.x);
 
     let dist_to_snap = f64::from(position.x - target_offset);
-    let magnetic_pull = dist_to_snap.abs() / f64::from(viewport.width());
     if dist_to_snap.abs() < snap_threshold {
         let dt = time.delta_secs_f64();
-        scroll.velocity *= magnetic_pull.powf(3.0);
         scroll.position -= dist_to_snap * dt * CENTER_MAGNETIC_FORCE;
     }
 }

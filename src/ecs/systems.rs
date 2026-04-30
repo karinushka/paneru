@@ -30,8 +30,8 @@ use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, BruteforceWindows, FlashMessage, Initializing,
     LocateDockTrigger, Position, RefreshWindowSizes, RestoreWindowState, Scrolling,
-    SelectedVirtualMarker, StackAdjustedResize, Unmanaged, WidthRatio, WindowDraggedMarker,
-    WindowProperties, focus_entity, reshuffle_around,
+    SelectedVirtualMarker, StackAdjustedResize, Unmanaged, WidthRatio, WindowProperties,
+    focus_entity, reshuffle_around,
 };
 use crate::events::Event;
 use crate::manager::{
@@ -1026,43 +1026,6 @@ pub(crate) fn gather_initial_processes(
                 "Existing application '{}' is not observable, ignoring it.",
                 process.name(),
             );
-        }
-    }
-}
-
-#[allow(clippy::needless_pass_by_value)]
-pub(crate) fn reposition_dragged_window(
-    markers: Populated<(&Timeout, &WindowDraggedMarker, Entity)>,
-    active_workspace: Query<&Scrolling, With<ActiveWorkspaceMarker>>,
-    mut commands: Commands,
-) {
-    // After a swipe, stale drag markers would cause reshuffle_layout_strip
-    // to snap the viewport home (expose_window bumps off-screen entities
-    // to the display edge, resetting viewport_offset ≈ 0).  Grace period
-    // covers the 1s drag-marker timeout.
-    if active_workspace
-        .iter()
-        .next()
-        .is_some_and(|marker| marker.is_user_swiping)
-    {
-        for (_, _, marker_entity) in &markers {
-            commands.entity(marker_entity).despawn();
-        }
-        return;
-    }
-
-    for (
-        timeout,
-        WindowDraggedMarker {
-            entity,
-            display_id: _,
-        },
-        _,
-    ) in markers
-    {
-        if timeout.timer.is_finished() {
-            debug!("Window {entity} dragged, refreshing layout.");
-            reshuffle_around(*entity, &mut commands);
         }
     }
 }

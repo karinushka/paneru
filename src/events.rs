@@ -84,6 +84,8 @@ pub enum Event {
 
     /// Fingers have been placed on the touchpad.
     TouchpadDown,
+    /// All fingers are up from the touchpad.
+    TouchpadUp,
 
     /// A new space (virtual desktop) has been created.
     SpaceCreated { space_id: WorkspaceId },

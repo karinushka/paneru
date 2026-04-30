@@ -448,18 +448,31 @@ fn resize_window(
     let current_ratio = f64::from(frame.width()) / f64::from(padded_width);
     let widths = config.preset_column_widths();
     let fallback = *widths.first().unwrap_or(&0.5);
+    let cycle = config.window_resize_cycle();
     let next_ratio = match direction {
         ResizeDirection::Grow => widths
             .iter()
             .copied()
             .find(|&r| r > current_ratio + 0.05)
-            .unwrap_or(fallback),
+            .unwrap_or_else(|| {
+                if cycle {
+                    fallback
+                } else {
+                    *widths.last().unwrap_or(&fallback)
+                }
+            }),
         ResizeDirection::Shrink => widths
             .iter()
             .rev()
             .copied()
             .find(|&r| r < current_ratio - 0.05)
-            .unwrap_or_else(|| *widths.last().unwrap_or(&fallback)),
+            .unwrap_or_else(|| {
+                if cycle {
+                    *widths.last().unwrap_or(&fallback)
+                } else {
+                    fallback
+                }
+            }),
     };
 
     let new_width = (next_ratio * f64::from(padded_width)).round() as i32;

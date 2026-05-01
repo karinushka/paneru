@@ -7,7 +7,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use crate::commands::Command;
 use crate::config::Config;
 use crate::errors::Result;
-use crate::platform::{ProcessSerialNumber, WinID, WorkspaceId, WorkspaceObserver};
+use crate::platform::{Modifiers, ProcessSerialNumber, WinID, WorkspaceId, WorkspaceObserver};
 use crate::util::AXUIWrapper;
 
 /// `Event` represents various system-level and application-specific occurrences that the window manager reacts to.
@@ -62,13 +62,25 @@ pub enum Event {
     WindowTitleChanged { window_id: WinID },
 
     /// A mouse down event has occurred.
-    MouseDown { point: CGPoint },
+    MouseDown {
+        point: CGPoint,
+        modifiers: Modifiers,
+    },
     /// A mouse up event has occurred.
-    MouseUp { point: CGPoint },
+    MouseUp {
+        point: CGPoint,
+        modifiers: Modifiers,
+    },
     /// A mouse drag event has occurred.
-    MouseDragged { point: CGPoint },
+    MouseDragged {
+        point: CGPoint,
+        modifiers: Modifiers,
+    },
     /// A mouse move event has occurred.
-    MouseMoved { point: CGPoint },
+    MouseMoved {
+        point: CGPoint,
+        modifiers: Modifiers,
+    },
 
     /// A swipe gesture has been detected.
     Swipe { deltas: Vec<f64> },

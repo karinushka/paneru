@@ -16,6 +16,7 @@ use crate::ecs::{ActiveWorkspaceMarker, Position, Scrolling, SendMessageTrigger,
 use crate::errors::Result;
 use crate::events::Event;
 use crate::manager::{Window, WindowManager};
+use crate::platform::Modifiers;
 
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
@@ -139,7 +140,10 @@ pub(super) fn swiping_timeout(
         if scroll.last_event.elapsed() > SWIPE_FOCUS_TIMEOUT
             && let Some(point) = window_manager.cursor_position()
         {
-            commands.trigger(WMEventTrigger(Event::MouseMoved { point }));
+            commands.trigger(WMEventTrigger(Event::MouseMoved {
+                point,
+                modifiers: Modifiers::empty(),
+            }));
         }
     }
 }

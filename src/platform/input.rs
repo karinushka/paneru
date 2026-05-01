@@ -196,6 +196,10 @@ impl InputHandler {
         let Some(events) = &self.events else {
             return false;
         };
+
+        let flags = CGEvent::flags(Some(event));
+        let modifiers = get_modifiers(flags);
+
         let result = match event_type {
             CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
                 info!("Tap Disabled");
@@ -206,26 +210,25 @@ impl InputHandler {
             }
             CGEventType::LeftMouseDown | CGEventType::RightMouseDown => {
                 let point = CGEvent::location(Some(event));
-                events.send(Event::MouseDown { point })
+                events.send(Event::MouseDown { point, modifiers })
             }
             CGEventType::LeftMouseUp | CGEventType::RightMouseUp => {
                 let point = CGEvent::location(Some(event));
-                events.send(Event::MouseUp { point })
+                events.send(Event::MouseUp { point, modifiers })
             }
             CGEventType::LeftMouseDragged | CGEventType::RightMouseDragged => {
                 let point = CGEvent::location(Some(event));
-                events.send(Event::MouseDragged { point })
+                events.send(Event::MouseDragged { point, modifiers })
             }
             CGEventType::MouseMoved => {
                 let point = CGEvent::location(Some(event));
-                events.send(Event::MouseMoved { point })
+                events.send(Event::MouseMoved { point, modifiers })
             }
             CGEventType::KeyDown => {
                 let keycode =
                     CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode);
-                let eventflags = CGEvent::flags(Some(event));
                 // handle_keypress can intercept the event, so it may return true.
-                return self.handle_keypress(keycode, eventflags);
+                return self.handle_keypress(keycode, flags);
             }
             CGEventType::ScrollWheel => {
                 return self.handle_scroll_wheel(event);

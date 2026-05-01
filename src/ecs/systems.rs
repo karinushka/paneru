@@ -25,11 +25,11 @@ use super::{
 
 use crate::config::{Config, decorations::BorderRadiusOption};
 use crate::ecs::layout::LayoutStrip;
-use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
+use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, BruteforceWindows, FlashMessage, Initializing,
-    LocateDockTrigger, Position, RefreshWindowSizes, RestoreWindowState, Scrolling,
-    SelectedVirtualMarker, Unmanaged, WidthRatio, WindowProperties, focus_entity,
+    LocateDockTrigger, MissionControlActive, Position, RefreshWindowSizes, RestoreWindowState,
+    Scrolling, SelectedVirtualMarker, Unmanaged, WidthRatio, WindowProperties, focus_entity,
 };
 use crate::events::Event;
 use crate::manager::{
@@ -994,7 +994,8 @@ pub(super) fn update_overlays(
     applications: Query<&Application>,
     active_workspace: Query<(Has<Scrolling>, &LayoutStrip), With<ActiveWorkspaceMarker>>,
     overlay_mgr: Option<NonSendMut<OverlayManager>>,
-    config: Configuration,
+    mission_control_active: Res<MissionControlActive>,
+    config: Res<Config>,
 ) {
     use crate::overlay::BorderParams;
     use objc2_foundation::{NSPoint, NSRect, NSSize};
@@ -1003,8 +1004,8 @@ pub(super) fn update_overlays(
         return;
     };
 
-    let dim_opacity = config.config().dim_inactive_opacity();
-    let border_enabled = config.config().border_active_window();
+    let dim_opacity = config.dim_inactive_opacity();
+    let border_enabled = config.border_active_window();
 
     // Hide overlays during swipe, mission control, native fullscreen spaces,
     // or briefly after a space change (macOS space-switch animation).
@@ -1012,7 +1013,7 @@ pub(super) fn update_overlays(
         return;
     };
 
-    if swiping || config.mission_control_active() || active_strip.is_fullscreen() {
+    if swiping || mission_control_active.0 || active_strip.is_fullscreen() {
         overlay_mgr.hide_all();
         return;
     }
@@ -1052,7 +1053,7 @@ pub(super) fn update_overlays(
             else {
                 return;
             };
-            let properties = WindowProperties::new(app, window, config.config());
+            let properties = WindowProperties::new(app, window, &config);
             let focused_border_radius = properties.border_radius();
             (
                 focused_abs_cg,
@@ -1067,19 +1068,19 @@ pub(super) fn update_overlays(
             return;
         };
 
-    let calculated_radius = match config.config().border_radius() {
+    let calculated_radius = match config.border_radius() {
         BorderRadiusOption::Auto => detected_border_radius.unwrap_or(10.0),
         BorderRadiusOption::Value(value) => value.max(0.0),
     };
 
     let border_params = border_enabled.then(|| BorderParams {
-        color: config.config().border_color(),
-        opacity: config.config().border_opacity(),
-        width: config.config().border_width(),
+        color: config.border_color(),
+        opacity: config.border_opacity(),
+        width: config.border_width(),
         radius: focused_border_radius.unwrap_or(calculated_radius),
     });
 
-    let dim_color = config.config().dim_inactive_color();
+    let dim_color = config.dim_inactive_color();
     overlay_mgr.update(
         dim_opacity,
         dim_color,

@@ -20,7 +20,7 @@ use crate::{
         Unmanaged, WidthRatio, layout::LayoutStrip,
     },
     manager::{Application, Display, Origin, Size, Window},
-    platform::{ProcessSerialNumber, WinID},
+    platform::{Modifiers, ProcessSerialNumber, WinID},
 };
 
 /// A Bevy `SystemParam` that provides access to the application's configuration and related state.
@@ -75,6 +75,11 @@ impl Configuration<'_> {
     /// An `Option<usize>` containing the number of fingers, or `None` if not configured.
     pub fn swipe_gesture_fingers(&self) -> Option<usize> {
         self.config.swipe_gesture_fingers()
+    }
+
+    /// Returns the configured modifier for mouse-based resizing.
+    pub fn mouse_resize_modifier(&self) -> Option<Modifiers> {
+        self.config.mouse_resize_modifier()
     }
 
     /// Returns the `WinID` of the window currently marked for focus-follows-mouse.

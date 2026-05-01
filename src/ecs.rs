@@ -194,6 +194,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
 /// Registers all the event triggers for the window manager.
 pub fn register_triggers(app: &mut bevy::app::App) {
     app.add_observer(mouse::mouse_moved_trigger)
+        .add_observer(mouse::mouse_resize_trigger)
         .add_observer(mouse::mouse_down_trigger)
         .add_observer(mouse::mouse_up_trigger)
         .add_observer(mouse::horizontal_warp_mouse_trigger)

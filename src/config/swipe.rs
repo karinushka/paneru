@@ -1,7 +1,6 @@
 use serde::Deserialize;
 
-use crate::errors::Error;
-use crate::platform::Modifiers;
+use crate::{config::deserialize_modifier, platform::Modifiers};
 
 #[derive(Clone, Debug, Deserialize)]
 pub enum SwipeGestureDirection {
@@ -48,16 +47,4 @@ pub struct ScrollOptions {
     /// switches virtual workspaces vertically instead of scrolling horizontally.
     #[serde(default, deserialize_with = "deserialize_modifier")]
     pub vertical_modifier: Option<Modifiers>,
-}
-
-fn deserialize_modifier<'de, D>(deserializer: D) -> Result<Option<Modifiers>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let Some(s) = Option::<String>::deserialize(deserializer)? else {
-        return Ok(None);
-    };
-    super::parse_modifiers(&s)
-        .map(Some)
-        .map_err(|e: Error| serde::de::Error::custom(e.to_string()))
 }

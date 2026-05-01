@@ -1,16 +1,21 @@
 use bevy::ecs::entity::Entity;
 use bevy::ecs::observer::On;
 use bevy::ecs::query::With;
-use bevy::ecs::system::{Commands, Query, Res};
+use bevy::ecs::system::{Commands, Local, Query, Res, Single};
 use std::time::Duration;
 use tracing::{debug, trace, warn};
 
 use super::{MissionControlActive, MouseHeldMarker, Timeout, WMEventTrigger};
 use crate::config::Config;
+use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{Configuration, Windows};
-use crate::ecs::{ActiveWorkspaceMarker, Scrolling, focus_entity, reshuffle_around};
+use crate::ecs::{
+    ActiveWorkspaceMarker, Position, Scrolling, focus_entity, reposition_entity, reshuffle_around,
+    resize_entity,
+};
 use crate::events::Event;
-use crate::manager::{Display, WindowManager, origin_from};
+use crate::manager::{Display, Origin, WindowManager, origin_from};
+use crate::platform::WinID;
 
 /// Handles mouse moved events.
 ///
@@ -33,13 +38,18 @@ pub(super) fn mouse_moved_trigger(
     mut config: Configuration,
     mut commands: Commands,
 ) {
-    let Event::MouseMoved {
-        point,
-        modifiers: _,
-    } = trigger.event().0
-    else {
+    let Event::MouseMoved { point, modifiers } = trigger.event().0 else {
         return;
     };
+
+    if config
+        .mouse_resize_modifier()
+        .is_some_and(|modifier| modifier.matches(modifiers))
+    {
+        // Resizing is handled by a separate trigger or logic.
+        // For now, let's just intercept it here to prevent focus changes during resize.
+        return;
+    }
 
     if !config.focus_follows_mouse() {
         return;
@@ -176,6 +186,80 @@ pub(super) fn mouse_up_trigger(
         reshuffle_around(marker.0, &mut commands);
         commands.entity(held_entity).despawn();
     }
+}
+
+#[derive(Default)]
+pub(super) struct MouseResizeState {
+    last_point: Option<Origin>,
+    window_id: Option<WinID>,
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn mouse_resize_trigger(
+    trigger: On<WMEventTrigger>,
+    windows: Windows,
+    active_workspace: Single<(Entity, &LayoutStrip, &Position), With<ActiveWorkspaceMarker>>,
+    window_manager: Res<WindowManager>,
+    config: Configuration,
+    mut state: Local<MouseResizeState>,
+    mut commands: Commands,
+) {
+    let Event::MouseMoved { point, modifiers } = trigger.event().0 else {
+        return;
+    };
+
+    if config
+        .mouse_resize_modifier()
+        .is_none_or(|modifier| !modifier.matches(modifiers))
+    {
+        state.last_point = None;
+        state.window_id = None;
+        return;
+    }
+    let pointer = origin_from(point);
+
+    let Some(last_point) = state.last_point else {
+        state.last_point = Some(pointer);
+        return;
+    };
+    state.last_point = Some(pointer);
+
+    let dx = (pointer.x - last_point.x) * 5;
+    if dx.abs() < 1 {
+        return;
+    }
+
+    let Ok(window_id) = window_manager.find_window_at_point(&point) else {
+        return;
+    };
+    if state.window_id.is_some_and(|id| window_id != id) {
+        return;
+    }
+    state.window_id = Some(window_id);
+
+    let Some((window, entity)) = windows.find(window_id) else {
+        return;
+    };
+    let (strip_entity, strip, strip_position) = *active_workspace;
+    if !strip.contains(entity) {
+        return;
+    }
+
+    let mut frame = window.frame();
+    let center = frame.center();
+
+    if pointer.x < center.x {
+        // Resize Left Edge: increase/decrease width AND shift the strip so the right edge stays
+        // anchored.
+        let mut origin = strip_position.0;
+        origin.x += dx;
+        reposition_entity(strip_entity, origin, &mut commands);
+
+        frame.min.x += dx;
+    } else {
+        frame.max.x += dx;
+    }
+    resize_entity(entity, frame.size(), &mut commands);
 }
 
 #[allow(clippy::needless_pass_by_value)]

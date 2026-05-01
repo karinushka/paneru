@@ -31,10 +31,6 @@ pub(super) fn swipe_gesture(
     config: Configuration,
     mut commands: Commands,
 ) {
-    if config.mission_control_active() {
-        return;
-    }
-
     for event in messages.read() {
         let delta = match event {
             Event::TouchpadDown => {
@@ -344,7 +340,7 @@ pub(super) fn vertical_swipe_gesture(
     mut commands: Commands,
     mut state: Local<VerticalGestureState>,
 ) {
-    if config.mission_control_active() || active_display.fullscreen().is_some() {
+    if active_display.fullscreen().is_some() {
         return;
     }
 

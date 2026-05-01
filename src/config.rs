@@ -630,7 +630,12 @@ impl Config {
     pub fn window_resize_cycle(&self) -> bool {
         self.options().window_resize_cycle.unwrap_or(true)
     }
-
+    pub fn resize_modifier(&self) -> String {
+    self.options()
+        .resize_modifier
+        .unwrap_or_else(|| "cmd+ctrl".to_string())
+    }
+    
     pub fn auto_center(&self) -> bool {
         self.options().auto_center.is_some_and(|center| center)
     }
@@ -853,6 +858,9 @@ pub struct MainOptions {
     /// Whether grow/shrink cycles back when reaching the end of presets.
     /// Default: true (cycles). Set to false to stop at the limits.
     pub window_resize_cycle: Option<bool>,
+    /// Modifier key(s) for the drag-to-resize feature.
+    /// Format: "cmd+ctrl" | "alt" | "ctrl+shift" vs. Default: "cmd+ctrl".
+    pub resize_modifier: Option<String>,
 }
 
 /// Returns a default set of column widths.

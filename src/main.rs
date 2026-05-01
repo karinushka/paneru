@@ -13,6 +13,7 @@ mod manager;
 mod overlay;
 mod platform;
 mod reader;
+mod resize;
 mod util;
 
 #[cfg(test)]
@@ -112,6 +113,13 @@ fn main() -> Result<()> {
             })
             .expect("setting Ctrl-C handler should succeed");
             CommandReader::new(sender.clone()).start();
+            // ── easy-resize entegrasyonu ──────────────────────────────
+            if let Some(path) = config::discover_configuration_file() {
+            if let Ok(cfg) = config::Config::new(&path) {
+            resize::set_resize_modifier(&cfg.resize_modifier());
+            }
+            }
+            resize::start_resize_listener();
             match setup_bevy_app(sender, receiver) {
                 Ok(mut app) => {
                     app.run();

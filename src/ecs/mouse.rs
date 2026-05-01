@@ -33,7 +33,11 @@ pub(super) fn mouse_moved_trigger(
     mut config: Configuration,
     mut commands: Commands,
 ) {
-    let Event::MouseMoved { point } = trigger.event().0 else {
+    let Event::MouseMoved {
+        point,
+        modifiers: _,
+    } = trigger.event().0
+    else {
         return;
     };
 
@@ -111,7 +115,11 @@ pub(super) fn mouse_down_trigger(
     mouse_held: Query<Entity, With<MouseHeldMarker>>,
     mut commands: Commands,
 ) {
-    let Event::MouseDown { point } = trigger.event().0 else {
+    let Event::MouseDown {
+        point,
+        modifiers: _,
+    } = trigger.event().0
+    else {
         return;
     };
     if mission_control_active.0 {
@@ -157,7 +165,11 @@ pub(super) fn mouse_up_trigger(
     mouse_held: Query<(Entity, &MouseHeldMarker)>,
     mut commands: Commands,
 ) {
-    let Event::MouseUp { .. } = trigger.event().0 else {
+    let Event::MouseUp {
+        point: _,
+        modifiers: _,
+    } = trigger.event().0
+    else {
         return;
     };
     for (held_entity, marker) in &mouse_held {
@@ -174,7 +186,11 @@ pub(super) fn horizontal_warp_mouse_trigger(
     config: Res<Config>,
 ) {
     const EDGE_THRESHOLD: i32 = 3;
-    let Event::MouseMoved { point } = trigger.event().0 else {
+    let Event::MouseMoved {
+        point,
+        modifiers: _,
+    } = trigger.event().0
+    else {
         return;
     };
     let Some(warp_direction) = config.horizontal_mouse_warp() else {

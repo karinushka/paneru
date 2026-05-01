@@ -18,6 +18,7 @@ use crate::ecs::{
 };
 use crate::events::Event;
 use crate::manager::{Application, Display, Origin, Size, Window, WindowManager, origin_to};
+use crate::platform::Modifiers;
 
 /// Represents a cardinal or directional choice for window manipulation.
 #[derive(Clone, Debug)]
@@ -759,7 +760,10 @@ fn mouse_to_next_display(
 
     let point = origin_to(visible_frame.center());
     ffm_flag.as_mut().0 = None;
-    commands.trigger(WMEventTrigger(Event::MouseMoved { point }));
+    commands.trigger(WMEventTrigger(Event::MouseMoved {
+        point,
+        modifiers: Modifiers::empty(),
+    }));
 }
 
 /// Distributes heights equally among all windows in the currently focused stack.

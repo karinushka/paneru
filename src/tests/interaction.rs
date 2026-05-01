@@ -189,6 +189,7 @@ fn test_scrolling() {
 }
 
 #[test]
+#[allow(clippy::float_cmp)]
 fn test_scrolling_stop() {
     let commands = vec![
         Event::MenuOpened { window_id: 0 },

@@ -66,3 +66,5 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 ctrlc = { version = "3.5.2", features = ["termination"] }
 xdg = "^3"
+core-graphics = { version = "0.23", features = ["highsierra"] }
+core-foundation = "0.9"

@@ -96,11 +96,12 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::retry_front_switch,
             systems::displays_rearranged,
             (
-                systems::window_resized_update_frame,
-                systems::window_moved_update_frame,
+            systems::window_resized_update_frame,
+            systems::window_moved_update_frame,
             )
                 .chain()
-                .run_if(not_swiping),
+                .run_if(not_swiping)
+                .run_if(|| !crate::resize::is_dragging()),
             workspace::show_active_workspace,
             workspace::cleanup_virtual_workspaces,
             workspace::handle_virtual_window_moves,
@@ -166,12 +167,16 @@ pub fn register_systems(app: &mut bevy::app::App) {
         (
             (
                 systems::animate_entities,
-                systems::commit_window_position.run_if(not(resource_exists::<Initializing>)),
+                systems::commit_window_position
+    .run_if(not(resource_exists::<Initializing>))
+    .run_if(|| !crate::resize::is_dragging()),
             )
                 .chain(),
             (
                 systems::animate_resize_entities,
-                systems::commit_window_size.run_if(not(resource_exists::<Initializing>)),
+                systems::commit_window_size
+    .run_if(not(resource_exists::<Initializing>))
+    .run_if(|| !crate::resize::is_dragging()),
             )
                 .chain(),
             (

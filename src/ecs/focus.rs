@@ -9,7 +9,7 @@ use tracing::{Level, debug, error, instrument, trace, warn};
 use super::{FocusedMarker, MouseHeldMarker, SystemTheme};
 use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
-use crate::ecs::params::{ActiveDisplay, Configuration, Windows};
+use crate::ecs::params::{ActiveDisplay, GlobalState, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Scrolling, SelectedVirtualMarker, focus_entity, reposition_entity,
     reshuffle_around,
@@ -27,7 +27,7 @@ pub(super) struct FocusWindow {
 pub(super) fn maintain_focus_singleton(
     trigger: On<Add, FocusedMarker>,
     windows: Query<(Entity, Has<FocusedMarker>), With<Window>>,
-    mut config: Configuration,
+    mut config: GlobalState,
     mut commands: Commands,
 ) {
     let focused_entity = trigger.event().entity;
@@ -56,13 +56,14 @@ pub(super) fn autocenter_window_on_focus(
     focused: Single<Entity, Added<FocusedMarker>>,
     mouse_held: Query<&MouseHeldMarker>,
     windows: Windows,
-    config: Configuration,
+    global_state: GlobalState,
     active_display: ActiveDisplay,
+    config: Res<Config>,
     mut commands: Commands,
 ) {
     let entity = *focused;
 
-    if config.skip_reshuffle() || config.initializing() || !mouse_held.is_empty() {
+    if global_state.skip_reshuffle() || global_state.initializing() || !mouse_held.is_empty() {
         return;
     }
     if config.auto_center()
@@ -82,8 +83,9 @@ pub(super) fn autocenter_window_on_focus(
 pub(super) fn mouse_follows_focus(
     focused: Single<Entity, Added<FocusedMarker>>,
     windows: Windows,
-    config: Configuration,
     active_display: ActiveDisplay,
+    global_state: GlobalState,
+    config: Res<Config>,
     window_manager: Res<WindowManager>,
     active_workspace: Query<&Scrolling, With<ActiveWorkspaceMarker>>,
 ) {
@@ -103,12 +105,12 @@ pub(super) fn mouse_follows_focus(
     trace!(
         "window {}, skip_reshuffle {}, ffm flag {:?}.",
         window.id(),
-        config.skip_reshuffle(),
-        config.ffm_flag()
+        global_state.skip_reshuffle(),
+        global_state.ffm_flag()
     );
     if config.mouse_follows_focus()
-        && !config.skip_reshuffle()
-        && config.ffm_flag().is_none_or(|id| id != window.id())
+        && !global_state.skip_reshuffle()
+        && global_state.ffm_flag().is_none_or(|id| id != window.id())
         && let Some(frame) = windows.moving_frame(entity)
     {
         let display_bounds = active_display.bounds();

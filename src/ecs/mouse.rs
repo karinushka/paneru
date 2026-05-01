@@ -8,7 +8,7 @@ use tracing::{debug, trace, warn};
 use super::{MissionControlActive, MouseHeldMarker, Timeout, WMEventTrigger};
 use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
-use crate::ecs::params::{Configuration, Windows};
+use crate::ecs::params::{GlobalState, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Position, Scrolling, focus_entity, reposition_entity, reshuffle_around,
     resize_entity,
@@ -35,7 +35,8 @@ pub(super) fn mouse_moved_trigger(
     trigger: On<WMEventTrigger>,
     windows: Windows,
     window_manager: Res<WindowManager>,
-    mut config: Configuration,
+    config: Res<Config>,
+    mut global_state: GlobalState,
     mut commands: Commands,
 ) {
     let Event::MouseMoved { point, modifiers } = trigger.event().0 else {
@@ -54,10 +55,10 @@ pub(super) fn mouse_moved_trigger(
     if !config.focus_follows_mouse() {
         return;
     }
-    if config.mission_control_active() {
+    if global_state.mission_control_active() {
         return;
     }
-    if config.ffm_flag().is_some() {
+    if global_state.ffm_flag().is_some() {
         trace!("ffm_window_id > 0");
         return;
     }
@@ -96,8 +97,8 @@ pub(super) fn mouse_moved_trigger(
     }
 
     // Do not reshuffle windows due to moved mouse focus.
-    config.set_skip_reshuffle(true);
-    config.set_ffm_flag(Some(window.id()));
+    global_state.set_skip_reshuffle(true);
+    global_state.set_ffm_flag(Some(window.id()));
     focus_entity(entity, false, &mut commands);
 }
 
@@ -121,7 +122,7 @@ pub(super) fn mouse_down_trigger(
     active_workspace: Query<(Entity, Option<&Scrolling>), With<ActiveWorkspaceMarker>>,
     window_manager: Res<WindowManager>,
     mission_control_active: Res<MissionControlActive>,
-    config: Configuration,
+    config: Res<Config>,
     mouse_held: Query<Entity, With<MouseHeldMarker>>,
     mut commands: Commands,
 ) {
@@ -200,7 +201,7 @@ pub(super) fn mouse_resize_trigger(
     windows: Windows,
     active_workspace: Single<(Entity, &LayoutStrip, &Position), With<ActiveWorkspaceMarker>>,
     window_manager: Res<WindowManager>,
-    config: Configuration,
+    config: Res<Config>,
     mut state: Local<MouseResizeState>,
     mut commands: Commands,
 ) {

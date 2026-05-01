@@ -643,6 +643,20 @@ impl Config {
         self.options().horizontal_mouse_warp
     }
 
+    /// Returns `true` if focus should follow the mouse based on the current configuration.
+    /// If the configuration option is not set, it defaults to `true`.
+    pub fn focus_follows_mouse(&self) -> bool {
+        // Default is enabled.
+        self.options().focus_follows_mouse.is_none_or(|ffm| ffm)
+    }
+
+    /// Returns `true` if the mouse cursor should follow the focused window based on the current configuration.
+    /// If the configuration option is not set, it defaults to `true`.
+    pub fn mouse_follows_focus(&self) -> bool {
+        // Default is enabled.
+        self.options().mouse_follows_focus.is_none_or(|mff| mff)
+    }
+
     pub fn horizontal_mouse_warp_offset(&self) -> i32 {
         self.options().horizontal_mouse_warp_offset.unwrap_or(0)
     }

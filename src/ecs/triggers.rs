@@ -21,13 +21,13 @@ use super::{
 };
 use crate::config::{Config, WindowParams};
 use crate::ecs::layout::LayoutStrip;
-use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Configuration, Windows};
+use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, GlobalState, Windows};
 use crate::ecs::state::PaneruState;
 use crate::ecs::workspace::PreviousStripPosition;
 use crate::ecs::{
-    ActiveWorkspaceMarker, Bounds, DockPosition, LayoutPosition, LocateDockTrigger, Position,
-    RestoreWindowState, Scrolling, SendMessageTrigger, WidthRatio, WindowProperties, focus_entity,
-    reposition_entity, reshuffle_around, resize_entity,
+    ActiveWorkspaceMarker, Bounds, DockPosition, Initializing, LayoutPosition, LocateDockTrigger,
+    Position, RestoreWindowState, Scrolling, SendMessageTrigger, WidthRatio, WindowProperties,
+    focus_entity, reposition_entity, reshuffle_around, resize_entity,
 };
 use crate::events::Event;
 use crate::manager::{
@@ -120,7 +120,7 @@ pub(super) fn front_switched_trigger(
     processes: Query<(&BProcess, &Children)>,
     applications: Query<&Application>,
     window_manager: Res<WindowManager>,
-    mut config: Configuration,
+    mut config: GlobalState,
     mut commands: Commands,
 ) {
     const FRONT_SWITCH_RETRY_SEC: u64 = 2;
@@ -235,7 +235,7 @@ pub(super) fn window_focused_trigger(
     applications: Query<&Application>,
     windows: Windows,
     mut active_display: ActiveDisplayMut,
-    config: Configuration,
+    config: Res<Config>,
     mut commands: Commands,
 ) {
     const STRAY_FOCUS_RETRY_SEC: u64 = 2;
@@ -258,7 +258,7 @@ pub(super) fn window_focused_trigger(
     // Always keep passthrough in sync. An internal focus_entity call races
     // with the OS WindowFocused event; without this the passthrough keys
     // remain stale from a previously focused window.
-    update_passthrough(window, app, config.config());
+    update_passthrough(window, app, &config);
 
     if let Some((focused, _)) = windows.focused()
         && focused.id() == window_id
@@ -464,7 +464,7 @@ pub(super) fn dispatch_application_messages(
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 pub(super) fn window_unmanaged_trigger(
     trigger: On<Add, Unmanaged>,
@@ -472,7 +472,8 @@ pub(super) fn window_unmanaged_trigger(
     apps: Query<(Entity, &Application)>,
     mut workspaces: Query<&mut LayoutStrip>,
     active_display: Single<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
-    config: Configuration,
+    config: Res<Config>,
+    initializing: Option<Res<Initializing>>,
     mut commands: Commands,
 ) {
     const UNMANAGED_MAX_SCREEN_RATIO_NUM: i32 = 4;
@@ -520,7 +521,7 @@ pub(super) fn window_unmanaged_trigger(
     };
     let display_bounds = {
         let (display, dock) = *active_display;
-        display.actual_display_bounds(dock, config.config())
+        display.actual_display_bounds(dock, &config)
     };
 
     debug!("Entity {entity} is floating.");
@@ -535,11 +536,11 @@ pub(super) fn window_unmanaged_trigger(
         return;
     };
 
-    let properties = WindowProperties::new(app, window, config.config());
+    let properties = WindowProperties::new(app, window, &config);
 
     // Skip the active-display reposition/resize during init; the strip
     // removal below still has to run.
-    if !config.initializing() {
+    if initializing.is_none() {
         if let Some((rx, ry, rw, rh)) = properties.grid_ratios() {
             let x = (f64::from(display_bounds.width()) * rx) as i32;
             let y = (f64::from(display_bounds.height()) * ry) as i32;
@@ -589,7 +590,7 @@ pub(super) fn window_minimized_trigger(
     windows: Windows,
     workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     active_display: Single<&Display, With<ActiveDisplayMarker>>,
-    mut config: Configuration,
+    mut config: GlobalState,
     mut commands: Commands,
 ) {
     let entity = trigger.event().entity;
@@ -624,11 +625,12 @@ pub(super) fn window_managed_trigger(
     mut active_display: ActiveDisplayMut,
     windows: Windows,
     apps: Query<(Entity, &Application)>,
-    config: Configuration,
+    config: Res<Config>,
+    initializing: Option<Res<Initializing>>,
     mut commands: Commands,
 ) {
     // finish_setup handles the initial strip assignment during init.
-    if config.initializing() {
+    if initializing.is_some() {
         return;
     }
     let entity = trigger.event().entity;
@@ -636,7 +638,7 @@ pub(super) fn window_managed_trigger(
     debug!("Entity {entity} is managed again.");
     let display_bounds = active_display
         .display()
-        .actual_display_bounds(active_display.dock(), config.config());
+        .actual_display_bounds(active_display.dock(), &config);
     let active_strip = active_display.active_strip();
 
     if let Some(window) = windows.get(entity)
@@ -644,10 +646,10 @@ pub(super) fn window_managed_trigger(
             .find_parent(window.id())
             .and_then(|(_, _, parent)| apps.get(parent).ok())
     {
-        let properties = WindowProperties::new(app, window, config.config());
+        let properties = WindowProperties::new(app, window, &config);
 
         if let Some(width_ratio) = properties.width_ratio() {
-            let (_, pad_right, _, pad_left) = config.config().edge_padding();
+            let (_, pad_right, _, pad_left) = config.edge_padding();
             let padded_width = display_bounds.width() - pad_left - pad_right;
             let width = (f64::from(padded_width) * width_ratio).round() as i32;
             let height = display_bounds.height();
@@ -685,7 +687,7 @@ pub(super) fn window_destroyed_trigger(
     windows: Windows,
     active_display: ActiveDisplay,
     mut apps: Query<&mut Application>,
-    mut config: Configuration,
+    mut config: GlobalState,
     mut commands: Commands,
 ) {
     let Event::WindowDestroyed { window_id } = trigger.event().0 else {
@@ -730,7 +732,7 @@ fn give_away_focus(
     windows: &Windows,
     active_strip: &LayoutStrip,
     viewport: &IRect,
-    config: &mut Configuration,
+    config: &mut GlobalState,
     commands: &mut Commands,
 ) {
     if active_strip.tabbed(entity) {
@@ -775,7 +777,8 @@ pub(super) fn spawn_window_trigger(
     windows: Windows,
     mut apps: Query<(Entity, &mut Application)>,
     mut active_display: ActiveDisplayMut,
-    config: Configuration,
+    config: Res<Config>,
+    initializing: Option<Res<Initializing>>,
     mut commands: Commands,
 ) {
     let new_windows = &mut trigger.event_mut().0;
@@ -817,7 +820,7 @@ pub(super) fn spawn_window_trigger(
             window.title().unwrap_or_default()
         );
 
-        let properties = WindowProperties::new(&app, &window, config.config());
+        let properties = WindowProperties::new(&app, &window, &config);
         if !properties.params.is_empty() {
             debug!("Applying window properties for '{}'", window.id());
         }
@@ -827,6 +830,7 @@ pub(super) fn spawn_window_trigger(
             &mut active_display,
             &properties.params,
             &config,
+            initializing.is_some(),
         );
 
         // update_frame expands the OS rect by the per-window padding, so calling it *after*
@@ -879,7 +883,8 @@ fn apply_window_defaults(
     window: &mut Window,
     active_display: &mut ActiveDisplayMut,
     properties: &[WindowParams],
-    config: &Configuration,
+    config: &Config,
+    initializing: bool,
 ) {
     let floating = properties
         .iter()
@@ -899,7 +904,7 @@ fn apply_window_defaults(
     }
     if floating {
         // Skip grid_ratios during init: we don't know this window's display.
-        if !config.initializing()
+        if !initializing
             && let Some((rx, ry, rw, rh)) = properties.iter().find_map(WindowParams::grid_ratios)
         {
             let bounds = active_display.bounds();
@@ -920,7 +925,7 @@ fn apply_window_defaults(
     if let Some(width) = properties.iter().find_map(|props| props.width) {
         _ = window.update_frame().inspect_err(|err| error!("{err}"));
         let bounds = active_display.bounds();
-        let (_, pad_right, _, pad_left) = config.config().edge_padding();
+        let (_, pad_right, _, pad_left) = config.edge_padding();
         let padded_width = bounds.width() - pad_left - pad_right;
         let new_width = (f64::from(padded_width) * width).round() as i32;
         let height = window.frame().height();
@@ -938,7 +943,8 @@ pub(super) fn apply_window_properties(
     mut active_display: ActiveDisplayMut,
     windows: Windows,
     apps: Query<&Application>,
-    config: Configuration,
+    config: Res<Config>,
+    initializing: Option<Res<Initializing>>,
     mut commands: Commands,
 ) {
     let entity = trigger.event().entity;
@@ -957,7 +963,7 @@ pub(super) fn apply_window_properties(
     let Ok(app) = apps.get(parent) else {
         return;
     };
-    let properties = WindowProperties::new(app, window, config.config());
+    let properties = WindowProperties::new(app, window, &config);
 
     if properties.floating() {
         // Avoid managing window if it's floating.
@@ -991,7 +997,7 @@ pub(super) fn apply_window_properties(
 
     // During init, skip per-window reshuffles. finish_setup does a single
     // reshuffle after all windows are added.
-    if !config.initializing()
+    if initializing.is_none()
         && properties.dont_focus()
         && let Some((focus, entity)) = windows.focused()
     {

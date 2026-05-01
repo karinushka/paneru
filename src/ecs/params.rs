@@ -13,22 +13,19 @@ use tracing::warn;
 
 use super::{ActiveDisplayMarker, FocusFollowsMouse, MissionControlActive, SkipReshuffle};
 use crate::{
-    config::Config,
     ecs::{
         ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker, FullWidthMarker, Initializing,
         LayoutPosition, NativeFullscreenMarker, Position, RepositionMarker, ResizeMarker,
         Unmanaged, WidthRatio, layout::LayoutStrip,
     },
     manager::{Application, Display, Origin, Size, Window},
-    platform::{Modifiers, ProcessSerialNumber, WinID},
+    platform::{ProcessSerialNumber, WinID},
 };
 
 /// A Bevy `SystemParam` that provides access to the application's configuration and related state.
 /// It allows systems to query various configuration options and modify flags like `FocusFollowsMouse` or `SkipReshuffle`.
 #[derive(SystemParam)]
-pub struct Configuration<'w> {
-    /// The main application `Config` resource.
-    config: Res<'w, Config>,
+pub struct GlobalState<'w> {
     /// Resource to manage the window ID for focus-follows-mouse behavior.
     focus_follows_mouse_id: ResMut<'w, FocusFollowsMouse>,
     /// Resource to determine if window reshuffling should be skipped.
@@ -39,49 +36,7 @@ pub struct Configuration<'w> {
     initializing: Option<Res<'w, Initializing>>,
 }
 
-impl Configuration<'_> {
-    /// Returns `true` if focus should follow the mouse based on the current configuration.
-    /// If the configuration option is not set, it defaults to `true`.
-    pub fn focus_follows_mouse(&self) -> bool {
-        // Default is enabled.
-        self.config
-            .options()
-            .focus_follows_mouse
-            .is_none_or(|ffm| ffm)
-    }
-
-    /// Returns `true` if the mouse cursor should follow the focused window based on the current configuration.
-    /// If the configuration option is not set, it defaults to `true`.
-    pub fn mouse_follows_focus(&self) -> bool {
-        // Default is enabled.
-        self.config
-            .options()
-            .mouse_follows_focus
-            .is_none_or(|mff| mff)
-    }
-
-    pub fn auto_center(&self) -> bool {
-        self.config.auto_center()
-    }
-
-    pub fn window_hidden_ratio(&self) -> f64 {
-        self.config.window_hidden_ratio()
-    }
-
-    /// Returns the configured number of fingers for swipe gestures.
-    ///
-    /// # Returns
-    ///
-    /// An `Option<usize>` containing the number of fingers, or `None` if not configured.
-    pub fn swipe_gesture_fingers(&self) -> Option<usize> {
-        self.config.swipe_gesture_fingers()
-    }
-
-    /// Returns the configured modifier for mouse-based resizing.
-    pub fn mouse_resize_modifier(&self) -> Option<Modifiers> {
-        self.config.mouse_resize_modifier()
-    }
-
+impl GlobalState<'_> {
     /// Returns the `WinID` of the window currently marked for focus-follows-mouse.
     ///
     /// # Returns
@@ -130,10 +85,6 @@ impl Configuration<'_> {
 
     pub fn initializing(&self) -> bool {
         self.initializing.is_some()
-    }
-
-    pub fn config(&self) -> &Config {
-        &self.config
     }
 }
 

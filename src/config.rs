@@ -567,6 +567,10 @@ impl Config {
             .clamp(1.0, 10.0)
     }
 
+    pub fn mouse_resize_modifier(&self) -> Option<Modifiers> {
+        self.options().mouse_resize_modifier
+    }
+
     pub fn swipe_scroll_modifier(&self) -> Modifiers {
         let config = self.inner();
         config
@@ -852,6 +856,9 @@ pub struct MainOptions {
     pub continuous_swipe: Option<bool>,
     pub swipe_sensitivity: Option<f64>,
     pub swipe_deceleration: Option<f64>,
+    /// The modifier key used for mouse-based window resizing.
+    #[serde(default, deserialize_with = "deserialize_modifier")]
+    pub mouse_resize_modifier: Option<Modifiers>,
     /// Override the system menubar height (in pixels).
     /// When set, this value is used instead of the height reported by macOS.
     pub menubar_height: Option<u16>,
@@ -1002,6 +1009,18 @@ where
 {
     let s = String::deserialize(deserializer)?;
     Regex::new(&s).map_err(de::Error::custom)
+}
+
+fn deserialize_modifier<'de, D>(deserializer: D) -> std::result::Result<Option<Modifiers>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let Some(s) = Option::<String>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    parse_modifiers(&s)
+        .map(Some)
+        .map_err(|e: Error| serde::de::Error::custom(e.to_string()))
 }
 
 /// Resolves a keybinding string like `"ctrl+alt-h"` into a `(keycode, Modifiers)` pair.

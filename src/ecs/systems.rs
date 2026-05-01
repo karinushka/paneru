@@ -607,7 +607,7 @@ pub(super) fn animate_entities(
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn animate_resize_entities(
-    mut animate: Populated<(&mut Bounds, Entity, &ResizeMarker, Has<RepositionMarker>)>,
+    mut animate: Populated<(&mut Bounds, Entity, &ResizeMarker)>,
     active_display: ActiveDisplay,
     time: Res<Time>,
     config: Res<Config>,
@@ -618,19 +618,7 @@ pub(super) fn animate_resize_entities(
 
     animate
         .par_iter_mut()
-        .for_each(|(mut bounds, entity, ResizeMarker(size), moving)| {
-            if moving {
-                // Defer resize while the window is being repositioned so it doesn't extend past
-                // the screen edge before the move lands.
-                // Exception: when the resize *shrinks* the window (e.g. stacking), there is no
-                // risk of overshooting the screen, and deferring would leave the window at its old
-                // (full) height until the reposition finishes.
-                let current_size = bounds.0;
-                if size.x > current_size.x || size.y > current_size.y {
-                    return;
-                }
-            }
-
+        .for_each(|(mut bounds, entity, ResizeMarker(size))| {
             let delta = bounds
                 .0
                 .as_vec2()

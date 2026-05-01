@@ -65,6 +65,9 @@ pub fn register_systems(app: &mut bevy::app::App) {
         config
             .is_some_and(|config| config.has_dim_inactive_color() || config.border_active_window())
     };
+    let mission_control_inactive = |mission_control: Option<Res<MissionControlActive>>| {
+        mission_control.is_none_or(|active| !active.0)
+    };
 
     app.add_systems(
         Startup,
@@ -126,9 +129,9 @@ pub fn register_systems(app: &mut bevy::app::App) {
     app.add_systems(
         Update,
         (
-            scroll::vertical_swipe_gesture,
+            scroll::vertical_swipe_gesture.run_if(mission_control_inactive),
             (
-                scroll::swipe_gesture,
+                scroll::swipe_gesture.run_if(mission_control_inactive),
                 scroll::apply_inertia,
                 scroll::apply_snap_force,
                 scroll::scrolling_integrator,

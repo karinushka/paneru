@@ -361,7 +361,7 @@ pub(super) fn vertical_swipe_gesture(
     mut commands: Commands,
     mut state: Local<VerticalGestureState>,
 ) {
-    if config.mission_control_active() || active_display.fullscreen().is_some() {
+    if active_display.fullscreen().is_some() {
         return;
     }
 

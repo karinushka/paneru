@@ -1,3 +1,4 @@
+use bevy::app::{App, Plugin, PreUpdate, Update};
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
@@ -5,8 +6,12 @@ use bevy::ecs::lifecycle::Add;
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Added, Has, With, Without};
+use bevy::ecs::schedule::IntoScheduleConfigs as _;
+use bevy::ecs::schedule::common_conditions::{not, resource_exists};
 use bevy::ecs::system::{Commands, Local, Populated, Query, Res, Single};
+use bevy::time::common_conditions::on_timer;
 use std::collections::HashSet;
+use std::time::Duration;
 use tracing::{Level, debug, error, instrument, warn};
 
 use super::{ActiveDisplayMarker, SpawnWindowTrigger, WMEventTrigger};
@@ -14,18 +19,55 @@ use crate::commands::{Direction, MoveFocus, Operation, filter_window_operations}
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, Bounds, NativeFullscreenMarker, Position, RefreshWindowSizes,
-    SelectedVirtualMarker, Timeout, Unmanaged, flash_message, focus_entity, reposition_entity,
-    reshuffle_around,
+    ActiveWorkspaceMarker, Bounds, Initializing, NativeFullscreenMarker, Position,
+    RefreshWindowSizes, SelectedVirtualMarker, Timeout, Unmanaged, flash_message, focus_entity,
+    reposition_entity, reshuffle_around,
 };
 use crate::errors::Result;
 use crate::events::Event;
 use crate::manager::{Application, Display, Origin, Window, WindowManager};
 use crate::platform::{WinID, WorkspaceId};
 
+pub struct WorkspaceEventsPlugin;
+
+impl Plugin for WorkspaceEventsPlugin {
+    fn build(&self, app: &mut App) {
+        const REFRESH_WINDOW_CHECK_FREQ_MS: u64 = 1000;
+        const DISPLAY_CHANGE_CHECK_FREQ_MS: u64 = 1000;
+
+        app.add_systems(
+            PreUpdate,
+            (switch_virtual_workspace_bind, move_virtual_workspace_bind),
+        );
+        app.add_systems(
+            Update,
+            (
+                show_active_workspace,
+                cleanup_virtual_workspaces,
+                handle_virtual_window_moves,
+                detect_moved_windows.run_if(not(resource_exists::<Initializing>)),
+                refresh_workspace_window_sizes.run_if(on_timer(Duration::from_millis(
+                    REFRESH_WINDOW_CHECK_FREQ_MS,
+                ))),
+                find_orphaned_workspaces
+                    .after(crate::ecs::systems::displays_rearranged)
+                    .run_if(on_timer(Duration::from_millis(
+                        DISPLAY_CHANGE_CHECK_FREQ_MS,
+                    ))),
+            ),
+        );
+
+        app.add_observer(cleanup_active_workspace_marker)
+            .add_observer(cleanup_selected_space_marker)
+            .add_observer(workspace_change_trigger)
+            .add_observer(workspace_created_trigger)
+            .add_observer(workspace_destroyed_trigger);
+    }
+}
+
 /// Marker component to move a window to a specific virtual index on its current workspace.
 #[derive(Component)]
-pub(super) struct VirtualMoveMarker {
+struct VirtualMoveMarker {
     pub target_virtual_index: u32,
     pub move_focus: MoveFocus,
 }
@@ -38,7 +80,7 @@ pub(crate) struct PreviousStripPosition {
 
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
-pub(super) fn workspace_change_trigger(
+fn workspace_change_trigger(
     trigger: On<WMEventTrigger>,
     windows: Windows,
     mut workspaces: Query<(
@@ -124,7 +166,7 @@ pub(super) fn workspace_change_trigger(
 
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
-pub(super) fn detect_moved_windows(
+fn detect_moved_windows(
     activated_workspace: Single<Entity, Added<ActiveWorkspaceMarker>>,
     windows: Windows,
     mut workspaces: Query<(&mut LayoutStrip, Entity, Has<NativeFullscreenMarker>)>,
@@ -213,7 +255,7 @@ pub(super) fn detect_moved_windows(
 
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
-pub(super) fn workspace_destroyed_trigger(
+fn workspace_destroyed_trigger(
     trigger: On<WMEventTrigger>,
     mut workspaces: Populated<(&mut LayoutStrip, Entity, Option<&NativeFullscreenMarker>)>,
     mut commands: Commands,
@@ -256,7 +298,7 @@ pub(super) fn workspace_destroyed_trigger(
 
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
-pub(super) fn workspace_created_trigger(
+fn workspace_created_trigger(
     trigger: On<WMEventTrigger>,
     active_display: Single<(&Display, Entity), With<ActiveDisplayMarker>>,
     workspaces: Query<&LayoutStrip>,
@@ -310,7 +352,7 @@ fn windows_not_in_strips<F: Fn(WinID) -> Option<Entity>>(
 
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
-pub(super) fn find_orphaned_workspaces(
+fn find_orphaned_workspaces(
     orphans: Populated<(&LayoutStrip, Entity, &Timeout, Option<&ChildOf>), With<Timeout>>,
     displays: Query<(&Display, Entity)>,
     window_manager: Res<WindowManager>,
@@ -379,7 +421,7 @@ pub(super) fn find_orphaned_workspaces(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-pub(crate) fn refresh_workspace_window_sizes(
+fn refresh_workspace_window_sizes(
     layout_strip: Single<(&LayoutStrip, Entity, &RefreshWindowSizes), With<ActiveWorkspaceMarker>>,
     mut windows: Query<(Entity, &mut Window, &mut Bounds, Option<&Unmanaged>)>,
     active_display: ActiveDisplay,
@@ -449,7 +491,7 @@ pub(crate) fn refresh_workspace_window_sizes(
 /// * `current_space` - A `Local` resource storing the ID of the currently observed space.
 /// * `commands` - Bevy commands to trigger `WMEventTrigger` events for space changes.
 #[allow(clippy::needless_pass_by_value)]
-pub(super) fn workspace_change_watcher(
+pub(crate) fn workspace_change_watcher(
     active_display: ActiveDisplay,
     window_manager: Res<WindowManager>,
     mut current_space: Local<WorkspaceId>,
@@ -473,7 +515,7 @@ pub(super) fn workspace_change_watcher(
 /// Removes previuos `ActiveWorkspaceMarker`'s when a new one is inserted.
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
-pub(super) fn cleanup_active_workspace_marker(
+fn cleanup_active_workspace_marker(
     trigger: On<Add, ActiveWorkspaceMarker>,
     workspaces: Query<(Entity, Has<ActiveWorkspaceMarker>), With<LayoutStrip>>,
     mut commands: Commands,
@@ -491,7 +533,7 @@ pub(super) fn cleanup_active_workspace_marker(
 /// Removes previuos `SelectedVirtualMarker`'s when a new one is inserted.
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
-pub(super) fn cleanup_selected_space_marker(
+fn cleanup_selected_space_marker(
     trigger: On<Add, SelectedVirtualMarker>,
     workspaces: Query<(Entity, &LayoutStrip, Has<SelectedVirtualMarker>)>,
     mut commands: Commands,
@@ -516,7 +558,7 @@ pub(super) fn cleanup_selected_space_marker(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-pub(super) fn cleanup_virtual_workspaces(
+fn cleanup_virtual_workspaces(
     changed: Single<Entity, Added<ActiveWorkspaceMarker>>,
     mut strips: Populated<(Entity, &mut LayoutStrip)>,
     mut commands: Commands,
@@ -558,7 +600,7 @@ pub(super) fn cleanup_virtual_workspaces(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-pub(super) fn handle_virtual_window_moves(
+fn handle_virtual_window_moves(
     moved_windows: Populated<(Entity, &VirtualMoveMarker), With<Window>>,
     mut workspaces: Query<(
         Entity,
@@ -682,7 +724,7 @@ pub(super) fn handle_virtual_window_moves(
 /// Handles the keybinding for switching between virtual workspaces.
 #[instrument(level = Level::DEBUG, skip_all)]
 #[allow(clippy::needless_pass_by_value)]
-pub(crate) fn switch_virtual_workspace_bind(
+fn switch_virtual_workspace_bind(
     mut messages: MessageReader<Event>,
     active_display: ActiveDisplay,
     workspaces: Query<(Entity, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
@@ -737,7 +779,7 @@ pub(crate) fn switch_virtual_workspace_bind(
 /// Handles the keybinding to move windows between virtual workspaces.
 #[instrument(level = Level::DEBUG, skip_all)]
 #[allow(clippy::needless_pass_by_value)]
-pub(crate) fn move_virtual_workspace_bind(
+fn move_virtual_workspace_bind(
     mut messages: MessageReader<Event>,
     windows: Windows,
     active_display: ActiveDisplay,
@@ -783,7 +825,7 @@ pub(crate) fn move_virtual_workspace_bind(
 
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
-pub(super) fn show_active_workspace(
+fn show_active_workspace(
     activated: Single<Entity, Added<ActiveWorkspaceMarker>>,
     windows: Windows,
     mut workspaces: Query<

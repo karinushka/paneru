@@ -1,6 +1,8 @@
+use bevy::app::{App, Plugin, Update};
 use bevy::ecs::entity::Entity;
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::With;
+use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::system::{Commands, Local, Query, Res, Single};
 use std::time::Duration;
 use tracing::{debug, trace, warn};
@@ -10,12 +12,36 @@ use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{GlobalState, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, Position, Scrolling, focus_entity, reposition_entity, reshuffle_around,
-    resize_entity,
+    ActiveWorkspaceMarker, MissionControlActive, Position, Scrolling, focus_entity,
+    reposition_entity, reshuffle_around, resize_entity,
 };
 use crate::events::Event;
 use crate::manager::{Display, Origin, WindowManager, origin_from};
 use crate::platform::WinID;
+
+pub struct MouseEventsPlugin;
+
+impl Plugin for MouseEventsPlugin {
+    fn build(&self, app: &mut App) {
+        let mission_control_inactive = |mission_control: Option<Res<MissionControlActive>>| {
+            mission_control.is_none_or(|active| !active.0)
+        };
+
+        app.add_systems(
+            Update,
+            (
+                (
+                    mouse_moved_trigger,
+                    mouse_resize_trigger,
+                    mouse_down_trigger,
+                )
+                    .run_if(mission_control_inactive),
+                mouse_up_trigger,
+                horizontal_warp_mouse_trigger,
+            ),
+        );
+    }
+}
 
 /// Handles mouse moved events.
 ///
@@ -31,7 +57,7 @@ use crate::platform::WinID;
 /// * `main_cid` - The main connection ID resource.
 /// * `config` - The optional configuration resource.
 #[allow(clippy::needless_pass_by_value)]
-pub(super) fn mouse_moved_trigger(
+fn mouse_moved_trigger(
     mut messages: MessageReader<Event>,
     windows: Windows,
     window_manager: Res<WindowManager>,
@@ -114,7 +140,7 @@ pub(super) fn mouse_moved_trigger(
 /// * `main_cid` - The main connection ID resource.
 /// * `commands` - Bevy commands to trigger a reshuffle.
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
-pub(super) fn mouse_down_trigger(
+fn mouse_down_trigger(
     mut messages: MessageReader<Event>,
     windows: Windows,
     active_workspace: Query<(Entity, Option<&Scrolling>), With<ActiveWorkspaceMarker>>,
@@ -163,7 +189,7 @@ pub(super) fn mouse_down_trigger(
 /// Handles mouse-up events. Triggers the deferred reshuffle so the clicked
 /// window slides into view after the user releases the button.
 #[allow(clippy::needless_pass_by_value)]
-pub(super) fn mouse_up_trigger(
+fn mouse_up_trigger(
     mut messages: MessageReader<Event>,
     mouse_held: Query<(Entity, &MouseHeldMarker)>,
     mut commands: Commands,
@@ -187,7 +213,7 @@ pub(super) struct MouseResizeState {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-pub(super) fn mouse_resize_trigger(
+fn mouse_resize_trigger(
     mut messages: MessageReader<Event>,
     windows: Windows,
     active_workspace: Single<(Entity, &LayoutStrip, &Position), With<ActiveWorkspaceMarker>>,
@@ -257,7 +283,7 @@ pub(super) fn mouse_resize_trigger(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-pub(super) fn horizontal_warp_mouse_trigger(
+fn horizontal_warp_mouse_trigger(
     mut messages: MessageReader<Event>,
     displays: Query<&Display>,
     window_manager: Res<WindowManager>,

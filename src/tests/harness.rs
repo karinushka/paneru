@@ -9,6 +9,10 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use crate::commands::register_commands;
 use crate::config::Config;
+use crate::ecs::layout::LayoutEventsPlugin;
+use crate::ecs::mouse::MouseEventsPlugin;
+use crate::ecs::scroll::ScrollEventsPlugin;
+use crate::ecs::workspace::WorkspaceEventsPlugin;
 use crate::ecs::{
     BProcess, ExistingMarker, FocusFollowsMouse, FocusedMarker, Initializing, MissionControlActive,
     PollForNotifications, SkipReshuffle, register_systems, register_triggers,
@@ -127,6 +131,10 @@ pub(crate) fn setup_world() -> App {
         .insert_resource(FocusFollowsMouse(None))
         .insert_resource(Config::default())
         .insert_resource(Initializing)
+        .add_plugins(MouseEventsPlugin)
+        .add_plugins(ScrollEventsPlugin)
+        .add_plugins(WorkspaceEventsPlugin)
+        .add_plugins(LayoutEventsPlugin)
         .add_plugins((register_triggers, register_systems, register_commands));
 
     bevy_app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(

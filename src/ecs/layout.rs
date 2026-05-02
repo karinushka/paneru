@@ -1,8 +1,11 @@
+use bevy::app::{App, Plugin, Update};
 use bevy::ecs::change_detection::DetectChangesMut as _;
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::query::{Changed, Has, Or, With, Without};
+use bevy::ecs::schedule::IntoScheduleConfigs as _;
+use bevy::ecs::schedule::common_conditions::{not, resource_exists};
 use bevy::ecs::system::{ParallelCommands, Populated, Query, Res};
 use bevy::math::IRect;
 use std::collections::VecDeque;
@@ -12,12 +15,36 @@ use tracing::{Level, instrument, trace};
 use crate::config::Config;
 use crate::ecs::params::Windows;
 use crate::ecs::{
-    Bounds, DockPosition, LayoutPosition, Position, ReshuffleAroundMarker, Scrolling,
+    Bounds, DockPosition, Initializing, LayoutPosition, Position, ReshuffleAroundMarker, Scrolling,
     reposition_entity,
 };
 use crate::errors::{Error, Result};
 use crate::manager::{Display, Window};
 use crate::platform::WorkspaceId;
+
+pub struct LayoutEventsPlugin;
+
+impl Plugin for LayoutEventsPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            Update,
+            (
+                // Wait for finish_setup before tiling: until then every window
+                // sits in the active strip regardless of its real display.
+                (
+                    layout_sizes_changed,
+                    layout_strip_changed,
+                    reshuffle_layout_strip,
+                    position_layout_strips,
+                    position_layout_windows,
+                )
+                    .chain()
+                    .after(super::systems::finish_setup)
+                    .run_if(not(resource_exists::<Initializing>)),
+            ),
+        );
+    }
+}
 
 /// Represents an item within a stack, which can either be a single window or a group of tabs.
 #[derive(Clone, Debug, PartialEq)]
@@ -697,7 +724,7 @@ fn binpack_heights(heights: &[i32], min_height: i32, total_height: i32) -> Optio
 /// Watches for size changes to windows and if they are changed, signals to the layout strip.
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all)]
-pub(super) fn layout_sizes_changed(
+fn layout_sizes_changed(
     changed_sizes: Populated<
         Entity,
         Or<(
@@ -718,7 +745,7 @@ pub(super) fn layout_sizes_changed(
 /// re-calculates the logical positions of all the windows in the layout strip.
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all)]
-pub(super) fn layout_strip_changed(
+fn layout_strip_changed(
     changed_strips: Populated<(&LayoutStrip, &ChildOf), Changed<LayoutStrip>>,
     mut windows: Query<
         (&Position, &mut Bounds, &mut LayoutPosition),
@@ -762,7 +789,7 @@ pub(super) fn layout_strip_changed(
 
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
-pub(super) fn reshuffle_layout_strip(
+fn reshuffle_layout_strip(
     markers: Populated<(Entity, &LayoutPosition), With<ReshuffleAroundMarker>>,
     strips: Query<(&LayoutStrip, Entity, &Position, &ChildOf)>,
     displays: Query<(&Display, Option<&DockPosition>)>,
@@ -828,7 +855,7 @@ pub(super) fn reshuffle_layout_strip(
 /// marks all the windows in the strip as requiring re-positioning.
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
-pub(super) fn position_layout_strips(
+fn position_layout_strips(
     moved_strips: Populated<&LayoutStrip, Changed<Position>>,
     mut windows: Query<&mut LayoutPosition, (With<Window>, Without<LayoutStrip>)>,
 ) {
@@ -845,7 +872,7 @@ pub(super) fn position_layout_strips(
 /// the layout strip against the current display viewport.
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all)]
-pub(super) fn position_layout_windows(
+fn position_layout_windows(
     mut positioned_windows: Populated<
         (Entity, &Window, &LayoutPosition, &mut Position, &mut Bounds),
         (Changed<LayoutPosition>, With<Window>, Without<LayoutStrip>),

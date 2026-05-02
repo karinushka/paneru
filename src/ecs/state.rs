@@ -197,7 +197,6 @@ impl PaneruState {
         serde_json::from_str(&data).ok()
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn find_match(
         &self,
         window_id: WinID,

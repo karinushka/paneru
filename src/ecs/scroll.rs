@@ -1,6 +1,8 @@
+use bevy::app::{App, Plugin, Update};
 use bevy::ecs::entity::Entity;
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::{With, Without};
+use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::system::{Commands, Local, Populated, Res, Single};
 use bevy::math::IRect;
 use bevy::time::Time;
@@ -12,15 +14,44 @@ use crate::config::Config;
 use crate::config::swipe::SwipeGestureDirection;
 use crate::ecs::layout::{Column, LayoutStrip};
 use crate::ecs::params::{ActiveDisplay, Windows};
-use crate::ecs::{ActiveWorkspaceMarker, Position, Scrolling, SendMessageTrigger, WMEventTrigger};
+use crate::ecs::{
+    ActiveWorkspaceMarker, MissionControlActive, Position, Scrolling, SendMessageTrigger,
+    WMEventTrigger,
+};
 use crate::errors::Result;
 use crate::events::Event;
 use crate::manager::{Window, WindowManager};
 use crate::platform::Modifiers;
 
+pub struct ScrollEventsPlugin;
+
+impl Plugin for ScrollEventsPlugin {
+    fn build(&self, app: &mut App) {
+        let mission_control_inactive = |mission_control: Option<Res<MissionControlActive>>| {
+            mission_control.is_none_or(|active| !active.0)
+        };
+
+        app.add_systems(
+            Update,
+            (
+                vertical_swipe_gesture.run_if(mission_control_inactive),
+                (
+                    swipe_gesture.run_if(mission_control_inactive),
+                    apply_inertia,
+                    apply_snap_force,
+                    scrolling_integrator,
+                    apply_scrolling_constraints,
+                    swiping_timeout,
+                )
+                    .chain(),
+            ),
+        );
+    }
+}
+
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
-pub(super) fn swipe_gesture(
+fn swipe_gesture(
     mut messages: MessageReader<Event>,
     active_display: ActiveDisplay,
     mut active_workspace: Single<
@@ -115,7 +146,7 @@ pub(super) fn swipe_gesture(
 
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
-pub(super) fn swiping_timeout(
+fn swiping_timeout(
     strips: Populated<(Entity, &Scrolling), With<LayoutStrip>>,
     active_display: ActiveDisplay,
     time: Res<Time>,
@@ -146,7 +177,7 @@ pub(super) fn swiping_timeout(
 
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
-pub(super) fn apply_inertia(
+fn apply_inertia(
     mut strips: Populated<(Entity, &mut Scrolling), With<LayoutStrip>>,
     time: Res<Time>,
     config: Res<Config>,
@@ -167,7 +198,7 @@ pub(super) fn apply_inertia(
 
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
-pub(super) fn apply_snap_force(
+fn apply_snap_force(
     mut strip: Single<(&LayoutStrip, &Position, &mut Scrolling)>,
     active_display: ActiveDisplay,
     windows: Windows,
@@ -217,7 +248,7 @@ pub(super) fn apply_snap_force(
 
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
-pub(super) fn scrolling_integrator(
+fn scrolling_integrator(
     mut strip: Single<&mut Scrolling, With<LayoutStrip>>,
     time: Res<Time>,
     active_display: ActiveDisplay,
@@ -245,7 +276,7 @@ pub(super) fn scrolling_integrator(
 
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::TRACE, skip_all)]
-pub(super) fn apply_scrolling_constraints(
+fn apply_scrolling_constraints(
     mut strip: Single<
         (&LayoutStrip, &mut Position, &mut Scrolling),
         (With<ActiveWorkspaceMarker>, Without<Window>),
@@ -325,7 +356,7 @@ where
 }
 
 #[derive(Default)]
-pub(super) struct VerticalGestureState {
+struct VerticalGestureState {
     accumulated: f64,
     last_event: Option<Instant>,
     fired: bool,
@@ -333,7 +364,7 @@ pub(super) struct VerticalGestureState {
 
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
-pub(super) fn vertical_swipe_gesture(
+fn vertical_swipe_gesture(
     mut messages: MessageReader<Event>,
     active_display: ActiveDisplay,
     config: Res<Config>,

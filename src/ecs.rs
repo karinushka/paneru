@@ -34,13 +34,13 @@ use crate::platform::{Modifiers, PlatformCallbacks, WinID, WorkspaceId};
 
 mod focus;
 pub mod layout;
-mod mouse;
+pub mod mouse;
 pub mod params;
-mod scroll;
+pub mod scroll;
 pub mod state;
 mod systems;
 mod triggers;
-mod workspace;
+pub mod workspace;
 
 /// Registers the Bevy systems for the `WindowManager`.
 /// This function adds various systems to the `Update` schedule, including event dispatchers,
@@ -65,9 +65,6 @@ pub fn register_systems(app: &mut bevy::app::App) {
         config
             .is_some_and(|config| config.has_dim_inactive_color() || config.border_active_window())
     };
-    let mission_control_inactive = |mission_control: Option<Res<MissionControlActive>>| {
-        mission_control.is_none_or(|active| !active.0)
-    };
 
     app.add_systems(
         Startup,
@@ -75,25 +72,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
     );
     app.add_systems(
         PreUpdate,
-        (
-            systems::dispatch_toplevel_triggers,
-            systems::pump_events,
-            workspace::switch_virtual_workspace_bind,
-            workspace::move_virtual_workspace_bind,
-        ),
-    );
-    app.add_systems(
-        Update,
-        (
-            (
-                mouse::mouse_moved_trigger,
-                mouse::mouse_resize_trigger,
-                mouse::mouse_down_trigger,
-            )
-                .run_if(mission_control_inactive),
-            mouse::mouse_up_trigger,
-            mouse::horizontal_warp_mouse_trigger,
-        ),
+        (systems::dispatch_toplevel_triggers, systems::pump_events),
     );
     app.add_systems(
         Update,
@@ -117,53 +96,9 @@ pub fn register_systems(app: &mut bevy::app::App) {
             )
                 .chain()
                 .run_if(not_swiping),
-            workspace::show_active_workspace,
-            workspace::cleanup_virtual_workspaces,
-            workspace::handle_virtual_window_moves,
-            workspace::detect_moved_windows.run_if(not(resource_exists::<Initializing>)),
-            workspace::refresh_workspace_window_sizes.run_if(on_timer(Duration::from_millis(
-                REFRESH_WINDOW_CHECK_FREQ_MS,
-            ))),
-            workspace::find_orphaned_workspaces
-                .after(systems::displays_rearranged)
-                .run_if(on_timer(Duration::from_millis(
-                    DISPLAY_CHANGE_CHECK_FREQ_MS,
-                ))),
             systems::cleanup_on_exit,
-        ),
-    );
-    app.add_systems(
-        Update,
-        (
             state::periodic_state_save.run_if(on_timer(Duration::from_secs(300))),
             state::cleanup_on_exit,
-        ),
-    );
-    app.add_systems(
-        Update,
-        (
-            scroll::vertical_swipe_gesture.run_if(mission_control_inactive),
-            (
-                scroll::swipe_gesture.run_if(mission_control_inactive),
-                scroll::apply_inertia,
-                scroll::apply_snap_force,
-                scroll::scrolling_integrator,
-                scroll::apply_scrolling_constraints,
-                scroll::swiping_timeout,
-            )
-                .chain(),
-            // Wait for finish_setup before tiling: until then every window
-            // sits in the active strip regardless of its real display.
-            (
-                layout::layout_sizes_changed,
-                layout::layout_strip_changed,
-                layout::reshuffle_layout_strip,
-                layout::position_layout_strips,
-                layout::position_layout_windows,
-            )
-                .chain()
-                .after(systems::finish_setup)
-                .run_if(not(resource_exists::<Initializing>)),
         ),
     );
     app.add_systems(
@@ -233,12 +168,7 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(focus::dim_window_trigger)
         .add_observer(focus::maintain_focus_singleton)
         .add_observer(focus::virtual_strip_activated)
-        .add_observer(focus::focus_window_trigger)
-        .add_observer(workspace::cleanup_active_workspace_marker)
-        .add_observer(workspace::cleanup_selected_space_marker)
-        .add_observer(workspace::workspace_change_trigger)
-        .add_observer(workspace::workspace_created_trigger)
-        .add_observer(workspace::workspace_destroyed_trigger);
+        .add_observer(focus::focus_window_trigger);
 }
 
 /// Marker component for the currently focused window.
@@ -509,6 +439,10 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         .insert_resource(PollForNotifications)
         .insert_resource(Initializing)
         .insert_non_send_resource(watcher)
+        .add_plugins(mouse::MouseEventsPlugin)
+        .add_plugins(scroll::ScrollEventsPlugin)
+        .add_plugins(workspace::WorkspaceEventsPlugin)
+        .add_plugins(layout::LayoutEventsPlugin)
         .add_plugins((register_triggers, register_systems, register_commands));
 
     let mut platform_callbacks = PlatformCallbacks::new(sender);

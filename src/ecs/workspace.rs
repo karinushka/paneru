@@ -122,7 +122,7 @@ pub(super) fn workspace_change_trigger(
     }
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 pub(super) fn detect_moved_windows(
     activated_workspace: Single<Entity, Added<ActiveWorkspaceMarker>>,

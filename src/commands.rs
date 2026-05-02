@@ -484,12 +484,13 @@ fn resize_window(
 
     let new_width = (next_ratio * f64::from(padded_width)).round() as i32;
     let size = Size::new(new_width, frame.height());
-    let mut frame = IRect::from_center_size(frame.center(), size);
 
-    if frame.max.x > active_display.bounds().max.x - pad_right {
-        frame.min.x = active_display.bounds().max.x - pad_right - size.x;
-        reposition_entity(entity, frame.min, &mut commands);
-    }
+    let mut origin = IRect::from_center_size(frame.center(), size).min;
+    origin.x = origin.x.clamp(
+        active_display.bounds().min.x + pad_left,
+        active_display.bounds().max.x - pad_right - size.x,
+    );
+    reposition_entity(entity, origin, &mut commands);
 
     // Resize all windows in the column so stacked siblings share the new width.
     let strip = active_display.active_strip();

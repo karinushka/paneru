@@ -85,11 +85,19 @@ pub fn register_systems(app: &mut bevy::app::App) {
     app.add_systems(
         Update,
         (
-            mouse::mouse_moved_trigger,
-            mouse::mouse_resize_trigger,
-            mouse::mouse_down_trigger,
+            (
+                mouse::mouse_moved_trigger,
+                mouse::mouse_resize_trigger,
+                mouse::mouse_down_trigger,
+            )
+                .run_if(mission_control_inactive),
             mouse::mouse_up_trigger,
             mouse::horizontal_warp_mouse_trigger,
+        ),
+    );
+    app.add_systems(
+        Update,
+        (
             (
                 systems::add_existing_process,
                 systems::add_existing_application,

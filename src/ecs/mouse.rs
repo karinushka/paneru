@@ -5,7 +5,7 @@ use bevy::ecs::system::{Commands, Local, Query, Res, Single};
 use std::time::{Duration, Instant};
 use tracing::{debug, trace, warn};
 
-use super::{MissionControlActive, MouseHeldMarker, Timeout};
+use super::{MouseHeldMarker, Timeout};
 use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{GlobalState, Windows};
@@ -54,9 +54,6 @@ pub(super) fn mouse_moved_trigger(
         }
 
         if !config.focus_follows_mouse() {
-            continue;
-        }
-        if global_state.mission_control_active() {
             continue;
         }
         if global_state.ffm_flag().is_some() {
@@ -115,7 +112,6 @@ pub(super) fn mouse_moved_trigger(
 /// * `windows` - A query for all windows.
 /// * `active_display` - A query for the active display.
 /// * `main_cid` - The main connection ID resource.
-/// * `mission_control_active` - A resource indicating if Mission Control is active.
 /// * `commands` - Bevy commands to trigger a reshuffle.
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 pub(super) fn mouse_down_trigger(
@@ -123,7 +119,6 @@ pub(super) fn mouse_down_trigger(
     windows: Windows,
     active_workspace: Query<(Entity, Option<&Scrolling>), With<ActiveWorkspaceMarker>>,
     window_manager: Res<WindowManager>,
-    mission_control_active: Res<MissionControlActive>,
     config: Res<Config>,
     mouse_held: Query<Entity, With<MouseHeldMarker>>,
     mut commands: Commands,
@@ -132,9 +127,6 @@ pub(super) fn mouse_down_trigger(
         let Event::MouseDown { point, .. } = event else {
             continue;
         };
-        if mission_control_active.0 {
-            continue;
-        }
         trace!("{point:?}");
 
         let Some((_, entity)) = window_manager

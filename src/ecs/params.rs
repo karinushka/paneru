@@ -11,7 +11,7 @@ use bevy::{
 use objc2_core_graphics::CGDirectDisplayID;
 use tracing::warn;
 
-use super::{ActiveDisplayMarker, FocusFollowsMouse, MissionControlActive, SkipReshuffle};
+use super::{ActiveDisplayMarker, FocusFollowsMouse, SkipReshuffle};
 use crate::{
     ecs::{
         ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker, FullWidthMarker, Initializing,
@@ -30,8 +30,6 @@ pub struct GlobalState<'w> {
     focus_follows_mouse_id: ResMut<'w, FocusFollowsMouse>,
     /// Resource to determine if window reshuffling should be skipped.
     skip_reshuffle: ResMut<'w, SkipReshuffle>,
-    /// Resource indicating whether Mission Control is currently active.
-    mission_control_active: Res<'w, MissionControlActive>,
 
     initializing: Option<Res<'w, Initializing>>,
 }
@@ -72,15 +70,6 @@ impl GlobalState<'_> {
     /// `true` if reshuffling is skipped, `false` otherwise.
     pub fn skip_reshuffle(&self) -> bool {
         self.skip_reshuffle.0
-    }
-
-    /// Returns `true` if Mission Control is currently active.
-    ///
-    /// # Returns
-    ///
-    /// `true` if Mission Control is active, `false` otherwise.
-    pub fn mission_control_active(&self) -> bool {
-        self.mission_control_active.0
     }
 
     pub fn initializing(&self) -> bool {

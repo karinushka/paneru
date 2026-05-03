@@ -1,6 +1,6 @@
 [package]
 name = "paneru"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2024"
 rust-version = "1.89.0"
 description = "A sliding, tiling window manager for MacOS."
@@ -19,22 +19,22 @@ codegen-units = 1
 lto = true
 
 [dependencies]
-accessibility-sys = "0.2.0"
-arc-swap = "1.9.1"
+accessibility-sys = "0.2"
+arc-swap = "1.9"
 bevy = { version = "0.18.1", default-features = false, features = [
   "multi_threaded",
 ] }
-bitflags = "2.11.1"
-chrono = "0.4.44"
-clap = { version = "4.6.1", features = ["cargo", "derive"] }
-derive_more = { version = "2.1.1", features = ["deref", "deref_mut"] }
-embed_plist = "1.2.2"
-launchctl = "0.3.2"
-libc = "0.2.186"
-notify = { version = "8.2.0", features = ["macos_fsevent"] }
-num_enum = "0.7.6"
-objc2 = { version = "0.6.4", features = ["catch-all", "exception"] }
-objc2-app-kit = { version = "0.3.2", features = [
+bitflags = "2.13"
+chrono = "0.4"
+clap = { version = "4.6", features = ["cargo", "derive"] }
+derive_more = { version = "2.1", features = ["deref", "deref_mut"] }
+embed_plist = "1.2"
+launchctl = "0.3"
+libc = "0.2"
+notify = { version = "8.2", features = ["macos_fsevent"] }
+num_enum = "0.7"
+objc2 = { version = "0.6", features = ["catch-all", "exception"] }
+objc2-app-kit = { version = "0.3", features = [
   "NSBezierPath",
   "NSColor",
   "NSGraphics",
@@ -47,28 +47,28 @@ objc2-app-kit = { version = "0.3.2", features = [
   "NSParagraphStyle",
   "NSStringDrawing",
 ] }
-objc2-core-foundation = { version = "0.3.2", features = ["CFRunLoop"] }
-objc2-core-graphics = "0.3.2"
-objc2-quartz-core = { version = "0.3.2", features = [
+objc2-core-foundation = { version = "0.3", features = ["CFRunLoop"] }
+objc2-core-graphics = "0.3"
+objc2-quartz-core = { version = "0.3", features = [
   "CALayer",
   "objc2-core-foundation",
   "objc2-core-graphics",
 ] }
-objc2-foundation = { version = "0.3.2", features = [
+objc2-foundation = { version = "0.3", features = [
   "NSNotification",
   "NSProcessInfo",
   "NSAttributedString",
   "NSDictionary",
   "NSBundle",
 ] }
-regex = "1.12.3"
-scopeguard = "1.2.0"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
-stdext = "0.3.3"
-toml = "1.1.2"
-tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-ctrlc = { version = "3.5.2", features = ["termination"] }
-xdg = "^3"
-mockall = "0.14.0"
+regex = "1.12"
+scopeguard = "1.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+stdext = "0.3"
+toml = "1.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ctrlc = { version = "3.5", features = ["termination"] }
+xdg = "3.0"
+mockall = "0.14"

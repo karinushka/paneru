@@ -5,7 +5,7 @@
     <key>CFBundleIdentifier</key>
     <string>com.github.karinushka.paneru</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>0.4.4</string>
     <key>CFBundlePackageType</key>
     <string>BNDL</string>
     <key>NSHumanReadableCopyright</key>

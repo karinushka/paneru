@@ -1,6 +1,6 @@
 [package]
 name = "paneru"
-version = "0.4.3"
+version = "0.4.4"
 edition = "2024"
 rust-version = "1.89.0"
 description = "A sliding, tiling window manager for MacOS."
@@ -21,7 +21,7 @@ lto = true
 [dependencies]
 accessibility-sys = "0.2"
 arc-swap = "1.9"
-bevy = { version = "0.18.1", default-features = false, features = [
+bevy = { version = "0.18", default-features = false, features = [
   "multi_threaded",
 ] }
 bitflags = "2.13"
@@ -72,4 +72,4 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ctrlc = { version = "3.5", features = ["termination"] }
 xdg = "3.0"
-mockall = "0.14"
+mockall = "0.15"

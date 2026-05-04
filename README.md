@@ -1,5 +1,8 @@
-# Paneru
+<div align="center">
+  <img src="./images/paneru.png" alt="Paneru" width="600"/>
+</div>
 
+##
 A sliding, tiling window manager for MacOS.
 
 ## About

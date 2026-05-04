@@ -905,6 +905,7 @@ fn position_layout_windows(
             frame.min += strip_position;
             frame.max += strip_position;
 
+            let mut offscreen = false;
             if frame.max.x <= viewport.min.x + h_pad {
                 // Window hidden to the left — position so exactly
                 // sliver_width CG pixels are visible from the real
@@ -913,14 +914,19 @@ fn position_layout_windows(
                 // inside the viewport edge while its CG frame is fully
                 // past it.
                 frame.min.x = viewport.min.x - width + offscreen_sliver_width - pad_left + h_pad;
+                offscreen = true;
             } else if frame.min.x >= viewport.max.x - h_pad {
                 // Window hidden to the right — mirror of above.
                 frame.min.x = viewport.max.x - offscreen_sliver_width + pad_right - h_pad;
+                offscreen = true;
             }
             frame.max.x = frame.min.x + width;
 
-            // During swipe, keep full height.
-            if !swiping {
+            // During swipe, keep full height. The vertical sliver inset only
+            // applies to horizontally off-screen windows, so they expose just
+            // a `sliver_height` fraction of their height at the viewport's
+            // vertical center.
+            if !swiping && offscreen {
                 let stacked = layout_strip
                     .index_of(entity)
                     .ok()

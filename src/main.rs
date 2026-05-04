@@ -10,6 +10,7 @@ mod ecs;
 mod errors;
 mod events;
 mod manager;
+mod menubar;
 mod overlay;
 mod platform;
 mod reader;

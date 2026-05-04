@@ -29,6 +29,7 @@ use crate::events::{Event, EventSender};
 use crate::manager::{
     Application, Origin, ProcessApi, Size, Window, WindowManager, WindowManagerApi, WindowManagerOS,
 };
+use crate::menubar::MenuBarManager;
 use crate::overlay::{FlashMessageManager, OverlayManager};
 use crate::platform::{Modifiers, PlatformCallbacks, WinID, WorkspaceId};
 
@@ -133,6 +134,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
                 systems::update_flash_messages,
             )
                 .chain(),
+            crate::menubar::update_virtual_workspace_status_item,
             focus::autocenter_window_on_focus.after(systems::animate_resize_entities),
             focus::mouse_follows_focus.after(systems::animate_resize_entities),
             focus::recover_lost_focus.run_if(on_timer(Duration::from_millis(
@@ -450,9 +452,11 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
     let mtm = platform_callbacks.main_thread_marker;
     let overlay_manager = OverlayManager::new(mtm);
     let flash_message_manager = FlashMessageManager::new(mtm);
+    let menu_bar_manager = MenuBarManager::new(mtm);
     app.insert_non_send_resource(platform_callbacks);
     app.insert_non_send_resource(overlay_manager);
     app.insert_non_send_resource(flash_message_manager);
+    app.insert_non_send_resource(menu_bar_manager);
     app.insert_non_send_resource(receiver);
 
     if let Some(previous_state) = PaneruState::load_from_file(state::STATE_FILE_PATH) {

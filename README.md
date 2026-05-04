@@ -28,6 +28,8 @@ adjacent monitors.
   stacking multiple horizontal strips (rows) within a single space. Use native
   macOS workspaces for broad segregation (e.g., 'Work', 'Personal') and virtual
   workspaces to stay organized within each context.
+- **Menu bar workspace indicator:** Shows the currently active virtual
+  workspace in the macOS menu bar.
 - **Focus follows mouse on MacOS:** Very useful for people who would like to
   avoid an extra click.
 - **Sliding windows with touchpad:** Using a touchpad is quite natural for

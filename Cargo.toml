@@ -49,6 +49,11 @@ objc2-app-kit = { version = "0.3.2", features = [
 ] }
 objc2-core-foundation = { version = "0.3.2", features = ["CFRunLoop"] }
 objc2-core-graphics = "0.3.2"
+objc2-quartz-core = { version = "0.3.2", features = [
+  "CALayer",
+  "objc2-core-foundation",
+  "objc2-core-graphics",
+] }
 objc2-foundation = { version = "0.3.2", features = [
   "NSNotification",
   "NSProcessInfo",

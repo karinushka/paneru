@@ -84,8 +84,12 @@ pub enum Operation {
     Snap,
     /// Cyclically selects the virtual strip for the current workspace.
     Virtual(Direction),
+    /// Selects a virtual strip by its zero-based index for the current workspace.
+    VirtualNumber(u32),
     /// Moves the focused window to the virtual strip.
     VirtualMove(Direction, MoveFocus),
+    /// Moves the focused window to a virtual strip by its zero-based index.
+    VirtualMoveNumber(u32, MoveFocus),
 }
 
 /// Defines operations that can be performed on the mouse.

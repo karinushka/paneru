@@ -148,8 +148,11 @@ Virtual workspaces can also be navigated using trackpad gestures. If `[swipe.ges
 | Action | Description |
 | :--- | :--- |
 | `window_virtual_north` / `_south` | Switch to the previous/next virtual workspace (row of windows). |
+| `window_virtualnum_<number>` | Switch directly to the numbered virtual workspace. |
 | `window_virtualmove_north` / `_south` | Move currently focused window to the previous/next virtual workspace and follow it. |
 | `window_virtualsend_north` / `_south` | Move currently focused window to the previous/next virtual workspace but stay on the current one. |
+| `window_virtualmovenum_<number>` | Move currently focused window to the numbered virtual workspace and follow it. |
+| `window_virtualsendnum_<number>` | Move currently focused window to the numbered virtual workspace but stay on the current one. |
 
 
 **Example:**
@@ -159,6 +162,15 @@ window_virtual_north = "cmd + shift - k"
 window_virtual_south = "cmd + shift - j"
 window_virtualmove_north = "cmd + alt - k"
 window_virtualmove_south = "cmd + alt - j"
+window_virtualnum_1 = "cmd + alt - 1"
+window_virtualnum_2 = "cmd + alt - 2"
+window_virtualnum_3 = "cmd + alt - 3"
+window_virtualmovenum_1 = "cmd + alt + ctrl - 1"
+window_virtualmovenum_2 = "cmd + alt + ctrl - 2"
+window_virtualmovenum_3 = "cmd + alt + ctrl - 3"
+window_virtualsendnum_1 = "cmd + alt + shift - 1"
+window_virtualsendnum_2 = "cmd + alt + shift - 2"
+window_virtualsendnum_3 = "cmd + alt + shift - 3"
 ```
 
 **Example command line:**
@@ -167,6 +179,12 @@ window_virtualmove_south = "cmd + alt - j"
 $ paneru send-cmd window virtual north
 # Move the current window to the next virtual workspace.
 $ paneru send-cmd window virtualmove south
+# Move directly to virtual workspace 3.
+$ paneru send-cmd window virtualnum 3
+# Move the current window to virtual workspace 3 and follow it.
+$ paneru send-cmd window virtualmovenum 3
+# Send the current window to virtual workspace 3 and stay here.
+$ paneru send-cmd window virtualsendnum 3
 ```
 
 ---

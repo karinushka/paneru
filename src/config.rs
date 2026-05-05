@@ -142,6 +142,22 @@ fn parse_direction(dir: &str) -> Result<Direction> {
     })
 }
 
+fn parse_virtual_workspace_number(input: &str) -> Result<u32> {
+    let number = input.parse::<u32>().map_err(|_| {
+        Error::InvalidConfig(format!(
+            "{}: Unhandled virtual workspace {input}",
+            function_name!()
+        ))
+    })?;
+    if number == 0 {
+        return Err(Error::InvalidConfig(format!(
+            "{}: Virtual workspace numbers start at 1",
+            function_name!()
+        )));
+    }
+    Ok(number - 1)
+}
+
 /// Parses a string into a `ResizeDirection` enum.
 fn parse_resize_direction(direction: &str) -> Result<ResizeDirection> {
     Ok(match direction {
@@ -188,13 +204,47 @@ fn parse_operation(argv: &[&str]) -> Result<Operation> {
         "nextdisplay" => Operation::ToNextDisplay(MoveFocus::Follow),
         "nextdisplaysend" => Operation::ToNextDisplay(MoveFocus::Stay),
         "snap" => Operation::Snap,
-        "virtual" => Operation::Virtual(parse_direction(argv.get(1).ok_or(err)?)?),
+        "virtual" => {
+            let target = argv.get(1).ok_or(err)?;
+            target.parse::<u32>().map_or_else(
+                |_| parse_direction(target).map(Operation::Virtual),
+                |_| parse_virtual_workspace_number(target).map(Operation::VirtualNumber),
+            )?
+        }
+        "virtualnum" => {
+            Operation::VirtualNumber(parse_virtual_workspace_number(argv.get(1).ok_or(err)?)?)
+        }
         "virtualmove" => {
-            Operation::VirtualMove(parse_direction(argv.get(1).ok_or(err)?)?, MoveFocus::Follow)
+            let target = argv.get(1).ok_or(err)?;
+            target.parse::<u32>().map_or_else(
+                |_| {
+                    parse_direction(target)
+                        .map(|dir| Operation::VirtualMove(dir, MoveFocus::Follow))
+                },
+                |_| {
+                    parse_virtual_workspace_number(target)
+                        .map(|index| Operation::VirtualMoveNumber(index, MoveFocus::Follow))
+                },
+            )?
         }
+        "virtualmovenum" => Operation::VirtualMoveNumber(
+            parse_virtual_workspace_number(argv.get(1).ok_or(err)?)?,
+            MoveFocus::Follow,
+        ),
         "virtualsend" => {
-            Operation::VirtualMove(parse_direction(argv.get(1).ok_or(err)?)?, MoveFocus::Stay)
+            let target = argv.get(1).ok_or(err)?;
+            target.parse::<u32>().map_or_else(
+                |_| parse_direction(target).map(|dir| Operation::VirtualMove(dir, MoveFocus::Stay)),
+                |_| {
+                    parse_virtual_workspace_number(target)
+                        .map(|index| Operation::VirtualMoveNumber(index, MoveFocus::Stay))
+                },
+            )?
         }
+        "virtualsendnum" => Operation::VirtualMoveNumber(
+            parse_virtual_workspace_number(argv.get(1).ok_or(err)?)?,
+            MoveFocus::Stay,
+        ),
         _ => {
             return Err(err);
         }
@@ -773,6 +823,13 @@ impl InnerConfig {
     /// `Ok(InnerConfig)` if the parsing is successful, otherwise `Err(Error)` with an error message.
     fn parse_config(input: &str) -> Result<InnerConfig> {
         let virtual_keys = generate_virtual_keymap();
+        Self::parse_config_with_virtual_keys(input, &virtual_keys)
+    }
+
+    fn parse_config_with_virtual_keys(
+        input: &str,
+        virtual_keys: &[(String, u8)],
+    ) -> Result<InnerConfig> {
         let mut config: InnerConfig = toml::from_str(input)?;
 
         for (command, bindings) in &mut config.bindings {
@@ -802,7 +859,7 @@ impl InnerConfig {
         if let Some(windows) = &mut config.windows {
             for params in windows.values_mut() {
                 for input in &params.bindings_passthrough {
-                    match resolve_keybinding_str(input, &virtual_keys) {
+                    match resolve_keybinding_str(input, virtual_keys) {
                         Ok(pair) => params.parsed_passthrough.push(pair),
                         Err(err) => error!("passthrough: {err}"),
                     }
@@ -1399,6 +1456,13 @@ fn generate_virtual_keymap() -> Vec<(String, u8)> {
         .collect()
 }
 
+#[cfg(test)]
+fn test_virtual_keymap() -> Vec<(String, u8)> {
+    virtual_keycode()
+        .map(|(key, code)| ((*key).to_string(), *code))
+        .collect()
+}
+
 #[test]
 #[allow(clippy::float_cmp)]
 fn test_config_parsing() {
@@ -1420,9 +1484,11 @@ bundle_id = "com.something.apple"
 floating = true
 index = 1
 "#;
+    let virtual_keys = test_virtual_keymap();
     let config = Config {
         inner: Arc::new(ArcSwap::from_pointee(
-            InnerConfig::parse_config(input).expect("Failed to parse config"),
+            InnerConfig::parse_config_with_virtual_keys(input, &virtual_keys)
+                .expect("Failed to parse config"),
         )),
     };
     let find_key = |k| {
@@ -1523,6 +1589,41 @@ index = 1
 }
 
 #[test]
+fn test_config_parsing_absolute_virtual_workspace_bindings() {
+    let input = r#"
+[options]
+
+[bindings]
+window_virtualnum_3 = "cmd + alt - 3"
+window_virtualsendnum_3 = "cmd + alt + shift - 3"
+"#;
+    let virtual_keys = test_virtual_keymap();
+    let config = Config {
+        inner: Arc::new(ArcSwap::from_pointee(
+            InnerConfig::parse_config_with_virtual_keys(input, &virtual_keys)
+                .expect("Failed to parse config"),
+        )),
+    };
+    let find_key = |k| {
+        virtual_keycode()
+            .find_map(|(s, v)| (format!("{k}") == *s).then_some(*v))
+            .unwrap()
+    };
+    let keycode = find_key('3');
+    assert!(matches!(
+        config.find_keybind(keycode, Modifiers::CMD | Modifiers::ALT),
+        Some(Command::Window(Operation::VirtualNumber(2)))
+    ));
+    assert!(matches!(
+        config.find_keybind(keycode, Modifiers::CMD | Modifiers::ALT | Modifiers::SHIFT),
+        Some(Command::Window(Operation::VirtualMoveNumber(
+            2,
+            MoveFocus::Stay
+        )))
+    ));
+}
+
+#[test]
 fn test_parse_resize_commands() {
     assert!(matches!(
         parse_command(&["window", "resize"]).unwrap(),
@@ -1539,6 +1640,31 @@ fn test_parse_resize_commands() {
     assert!(matches!(
         parse_command(&["window", "shrink"]).unwrap(),
         Command::Window(Operation::Resize(ResizeDirection::Shrink))
+    ));
+}
+
+#[test]
+fn test_parse_absolute_virtual_workspace_commands() {
+    assert!(matches!(
+        parse_command(&["window", "virtualnum", "3"]).unwrap(),
+        Command::Window(Operation::VirtualNumber(2))
+    ));
+    assert!(parse_command(&["workspace", "virtual", "3"]).is_err());
+    assert!(matches!(
+        parse_command(&["window", "virtualmove", "3"]).unwrap(),
+        Command::Window(Operation::VirtualMoveNumber(2, MoveFocus::Follow))
+    ));
+    assert!(matches!(
+        parse_command(&["window", "virtualsend", "3"]).unwrap(),
+        Command::Window(Operation::VirtualMoveNumber(2, MoveFocus::Stay))
+    ));
+    assert!(matches!(
+        parse_command(&["window", "virtualmovenum", "3"]).unwrap(),
+        Command::Window(Operation::VirtualMoveNumber(2, MoveFocus::Follow))
+    ));
+    assert!(matches!(
+        parse_command(&["window", "virtualsendnum", "3"]).unwrap(),
+        Command::Window(Operation::VirtualMoveNumber(2, MoveFocus::Stay))
     ));
 }
 

@@ -1,9 +1,13 @@
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::mpsc::channel;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use std::{fs, thread};
 use tracing::{debug, error};
 
 use crate::config::parse_command;
+use crate::ecs::state::StateQueryKind;
 use crate::errors::Result;
 use crate::events::{Event, EventSender};
 
@@ -29,6 +33,30 @@ impl CommandReader {
     ///
     /// `Ok(())` if the command is sent successfully, otherwise `Err(Error)` if an I/O error occurs or the connection fails.
     pub fn send_command(params: impl IntoIterator<Item = String>) -> Result<()> {
+        let _stream = Self::send_socket_request(params)?;
+        Ok(())
+    }
+
+    pub fn send_query(kind: StateQueryKind) -> Result<String> {
+        let args = match kind {
+            StateQueryKind::State => ["query", "state", "--json"],
+            StateQueryKind::VirtualWorkspaces => ["query", "virtual-workspaces", "--json"],
+            StateQueryKind::Active => ["query", "active", "--json"],
+        };
+        let mut stream = Self::send_socket_request(args.into_iter().map(str::to_string))?;
+        let mut output = String::new();
+        stream.read_to_string(&mut output)?;
+        Ok(output)
+    }
+
+    pub fn subscribe_json() -> Result<()> {
+        let mut stream =
+            Self::send_socket_request(["subscribe", "--json"].into_iter().map(str::to_string))?;
+        std::io::copy(&mut stream, &mut std::io::stdout())?;
+        Ok(())
+    }
+
+    fn send_socket_request(params: impl IntoIterator<Item = String>) -> Result<UnixStream> {
         let output = params
             .into_iter()
             .flat_map(|param| [param.as_bytes(), &[0]].concat())
@@ -39,7 +67,7 @@ impl CommandReader {
         let mut stream = UnixStream::connect(CommandReader::SOCKET_PATH)?;
         stream.write_all(&size.to_le_bytes())?;
         stream.write_all(&output)?;
-        Ok(())
+        Ok(stream)
     }
 
     /// Creates a new `CommandReader` instance.
@@ -99,6 +127,45 @@ impl CommandReader {
                 .collect::<Vec<_>>();
             let argv_ref = argv.iter().map(String::as_str).collect::<Vec<_>>();
 
+            if let Some(kind) = parse_query_request(&argv_ref) {
+                let (tx, rx) = channel();
+                _ = self
+                    .events
+                    .send(Event::StateQuery {
+                        kind,
+                        respond_to: tx,
+                    })
+                    .inspect_err(|err| {
+                        error!("sending state query: {err}");
+                    });
+
+                match rx.recv_timeout(Duration::from_secs(2)) {
+                    Ok(response) => {
+                        _ = stream.write_all(response.as_bytes());
+                        _ = stream.write_all(b"\n");
+                    }
+                    Err(err) => error!("waiting for state query response: {err}"),
+                }
+                continue;
+            }
+
+            if is_subscribe_request(&argv_ref) {
+                match stream.try_clone() {
+                    Ok(clone) => {
+                        _ = self
+                            .events
+                            .send(Event::StateSubscribe {
+                                stream: Arc::new(Mutex::new(clone)),
+                            })
+                            .inspect_err(|err| {
+                                error!("registering state subscriber: {err}");
+                            });
+                    }
+                    Err(err) => error!("cloning subscriber stream: {err}"),
+                }
+                continue;
+            }
+
             if let Ok(command) =
                 parse_command(&argv_ref).inspect_err(|err| error!("parsing command: {err}"))
             {
@@ -112,6 +179,21 @@ impl CommandReader {
         }
         Ok(())
     }
+}
+
+fn parse_query_request(argv: &[&str]) -> Option<StateQueryKind> {
+    match argv {
+        ["query", "state", "--json"] | ["query", "state"] => Some(StateQueryKind::State),
+        ["query", "virtual-workspaces", "--json"] | ["query", "virtual-workspaces"] => {
+            Some(StateQueryKind::VirtualWorkspaces)
+        }
+        ["query", "active", "--json"] | ["query", "active"] => Some(StateQueryKind::Active),
+        _ => None,
+    }
+}
+
+fn is_subscribe_request(argv: &[&str]) -> bool {
+    matches!(argv, ["subscribe", "--json"] | ["subscribe"])
 }
 
 fn full_read(stream: &mut UnixStream, expected: usize, buffer: &mut [u8]) -> bool {

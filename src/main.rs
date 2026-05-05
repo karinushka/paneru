@@ -23,6 +23,7 @@ embed_plist::embed_info_plist!("../assets/Info.plist");
 
 use events::EventSender;
 
+use ecs::state::StateQueryKind;
 use errors::Result;
 use platform::service;
 use reader::CommandReader;
@@ -74,6 +75,37 @@ pub enum SubCmd {
     SendCmd {
         #[arg(trailing_var_arg = true)]
         cmd: Vec<String>,
+    },
+
+    /// Queries structured state from the running daemon.
+    Query {
+        #[clap(subcommand)]
+        query: QueryCmd,
+    },
+
+    /// Subscribes to structured state events from the running daemon.
+    Subscribe {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum QueryCmd {
+    /// Prints the complete state document.
+    State {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Prints the virtual workspace list.
+    VirtualWorkspaces {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Prints the active focus/workspace state.
+    Active {
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -132,8 +164,23 @@ fn main() -> Result<()> {
         SubCmd::Stop => service()?.stop()?,
         SubCmd::Restart => service()?.restart()?,
         SubCmd::SendCmd { cmd } => CommandReader::send_command(cmd)?,
+        SubCmd::Query { query } => {
+            let output = CommandReader::send_query(query.kind())?;
+            print!("{output}");
+        }
+        SubCmd::Subscribe { json: _ } => CommandReader::subscribe_json()?,
     }
     Ok(())
+}
+
+impl QueryCmd {
+    fn kind(&self) -> StateQueryKind {
+        match self {
+            QueryCmd::State { json: _ } => StateQueryKind::State,
+            QueryCmd::VirtualWorkspaces { json: _ } => StateQueryKind::VirtualWorkspaces,
+            QueryCmd::Active { json: _ } => StateQueryKind::Active,
+        }
+    }
 }
 
 fn should_check_deprecated_options(subcmd: &SubCmd) -> bool {

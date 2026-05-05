@@ -186,6 +186,9 @@ $ paneru send-cmd window virtualmovenum 3
 $ paneru send-cmd window virtualsendnum 3
 ```
 
+See [QUERY_AND_SUBSCRIBE_FORMAT.md](QUERY_AND_SUBSCRIBE_FORMAT.md) for the
+structured `paneru query` responses and `paneru subscribe` event stream.
+
 ---
 
 ## 6. Window Rules (`[windows]`)

@@ -73,6 +73,7 @@ impl ProcessApi for MockProcess {
 #[derive(Clone, Debug)]
 pub(crate) struct MockApplication {
     pub(crate) inner: Arc<RwLock<InnerMockApplication>>,
+    pub(crate) name: String,
 }
 
 /// The inner state of `MockApplication`, containing process serial number, PID, and focused window ID.
@@ -95,6 +96,7 @@ impl MockApplication {
                 focused_id: None,
                 bundle_id,
             })),
+            name: "test".to_string(),
         }
     }
 }
@@ -178,6 +180,10 @@ impl ApplicationApi for MockApplication {
             self.inner.force_read().bundle_id.clone().into_boxed_str(),
         ))
     }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 /// A mock implementation of the `WindowManagerApi` trait for testing purposes.
@@ -205,6 +211,7 @@ impl WindowManagerApi for MockWindowManager {
                 focused_id: None,
                 bundle_id: "test".to_string(),
             })),
+            name: "test".to_string(),
         })))
     }
 
@@ -523,6 +530,7 @@ impl WindowManagerApi for TwoDisplayMock {
                 focused_id: None,
                 bundle_id: "test".to_string(),
             })),
+            name: "test".to_string(),
         })))
     }
 

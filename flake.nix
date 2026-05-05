@@ -36,6 +36,8 @@
                 self.packages.aarch64-darwin.default
                 pkgs.rustc
                 pkgs.cargo
+                pkgs.rustfmt
+                pkgs.clippy
               ];
             };
           };

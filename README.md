@@ -238,6 +238,24 @@ $ paneru send-cmd window virtualnum 3
 $ paneru send-cmd window virtualsendnum 3
 ```
 
+### Querying and Subscribing to State
+
+Paneru also exposes structured JSON state for scripts and status bars:
+
+```shell
+$ paneru query state --json
+$ paneru query virtual-workspaces --json
+$ paneru query active --json
+$ paneru subscribe --json
+```
+
+`query` prints a JSON snapshot and exits. `subscribe --json` keeps the socket
+open and emits line-delimited JSON events for changes that integrations usually
+care about, including focus changes, virtual workspace changes, window-list
+changes, title changes, and display changes. See
+[`QUERY_AND_SUBSCRIBE_FORMAT.md`](./QUERY_AND_SUBSCRIBE_FORMAT.md) for the
+full payload contract.
+
 #### Scripting ideas
 
 Because `send-cmd` works over a Unix socket, you can drive Paneru from shell
@@ -257,6 +275,8 @@ scripts, `cron` jobs, or other automation tools:
   ```shell
   paneru send-cmd window nextdisplay && paneru send-cmd mouse nextdisplay
   ```
+- **Status bar integration.** Use `paneru query state --json` to render the
+  initial workspace labels, then keep them current with `paneru subscribe --json`.
 
 
 ## Future Enhancements

@@ -423,10 +423,27 @@ fn get_modifiers(eventflags: CGEventFlags) -> Modifiers {
         (Modifiers::LCTRL, 0x0000_0001),
         (Modifiers::RCTRL, 0x0000_2000),
     ];
+    // Device-independent fallbacks (kCGEventFlagMask*). Used by software
+    // that synthesizes keystrokes without setting the device-dependent
+    // L/R bits (e.g. Better Mouse mapping a button to ⌥→). The flag
+    // does not say which side, so we mark both — this matches generic
+    // `alt - …` bindings and naturally fails `lalt`/`ralt`-specific ones,
+    // which a sideless synthetic event can't satisfy anyway.
+    const GENERIC_MASKS: [(Modifiers, u64); 4] = [
+        (Modifiers::ALT, 0x0008_0000),
+        (Modifiers::SHIFT, 0x0002_0000),
+        (Modifiers::CMD, 0x0010_0000),
+        (Modifiers::CTRL, 0x0004_0000),
+    ];
     let mut mask = Modifiers::empty();
     for (modifier, m) in MODIFIER_MASKS {
         if eventflags.0 & m != 0 {
             mask |= modifier;
+        }
+    }
+    for (group, m) in GENERIC_MASKS {
+        if eventflags.0 & m != 0 && !mask.intersects(group) {
+            mask |= group;
         }
     }
     mask
@@ -444,6 +461,11 @@ mod tests {
     const NX_DEVICERCMDKEYMASK: u64 = 0x0000_0010;
     const NX_DEVICELCTLKEYMASK: u64 = 0x0000_0001;
     const NX_DEVICERCTLKEYMASK: u64 = 0x0000_2000;
+
+    const KCG_EVENT_FLAG_MASK_ALTERNATE: u64 = 0x0008_0000;
+    const KCG_EVENT_FLAG_MASK_SHIFT: u64 = 0x0002_0000;
+    const KCG_EVENT_FLAG_MASK_COMMAND: u64 = 0x0010_0000;
+    const KCG_EVENT_FLAG_MASK_CONTROL: u64 = 0x0004_0000;
 
     #[test]
     fn no_modifiers() {
@@ -515,8 +537,49 @@ mod tests {
     }
 
     #[test]
-    fn device_independent_flags_ignored() {
-        let generic_alt: u64 = 0x0008_0000;
-        assert_eq!(get_modifiers(CGEventFlags(generic_alt)), Modifiers::empty());
+    fn device_independent_alt_falls_back_to_both_sides() {
+        // Synthetic keystrokes (e.g. Better Mouse mapping a button to ⌥→)
+        // set only the device-independent flag with no L/R bits.
+        assert_eq!(
+            get_modifiers(CGEventFlags(KCG_EVENT_FLAG_MASK_ALTERNATE)),
+            Modifiers::ALT
+        );
+    }
+
+    #[test]
+    fn device_independent_other_modifiers_fall_back() {
+        assert_eq!(
+            get_modifiers(CGEventFlags(KCG_EVENT_FLAG_MASK_SHIFT)),
+            Modifiers::SHIFT
+        );
+        assert_eq!(
+            get_modifiers(CGEventFlags(KCG_EVENT_FLAG_MASK_COMMAND)),
+            Modifiers::CMD
+        );
+        assert_eq!(
+            get_modifiers(CGEventFlags(KCG_EVENT_FLAG_MASK_CONTROL)),
+            Modifiers::CTRL
+        );
+    }
+
+    #[test]
+    fn device_independent_combined_falls_back() {
+        let flags = KCG_EVENT_FLAG_MASK_ALTERNATE | KCG_EVENT_FLAG_MASK_COMMAND;
+        assert_eq!(
+            get_modifiers(CGEventFlags(flags)),
+            Modifiers::ALT | Modifiers::CMD
+        );
+    }
+
+    #[test]
+    fn device_dependent_takes_precedence_over_independent() {
+        // Real key events set both the device-independent and the
+        // device-dependent L/R bits. The L/R bit must win so we don't
+        // wrongly report the other side as also held.
+        let flags = NX_DEVICELALTKEYMASK | KCG_EVENT_FLAG_MASK_ALTERNATE;
+        assert_eq!(get_modifiers(CGEventFlags(flags)), Modifiers::LALT);
+
+        let flags = NX_DEVICERCMDKEYMASK | KCG_EVENT_FLAG_MASK_COMMAND;
+        assert_eq!(get_modifiers(CGEventFlags(flags)), Modifiers::RCMD);
     }
 }

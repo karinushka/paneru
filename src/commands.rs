@@ -8,6 +8,8 @@ use bevy::math::IRect;
 use tracing::{Level, instrument};
 use tracing::{debug, info};
 
+mod query;
+
 use crate::config::Config;
 use crate::ecs::layout::{Column, LayoutStrip, StackItem};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Windows};
@@ -112,6 +114,7 @@ pub enum Command {
 }
 
 pub fn register_commands(app: &mut bevy::app::App) {
+    query::register_query_commands(app);
     app.add_systems(
         PreUpdate,
         (

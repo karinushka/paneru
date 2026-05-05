@@ -43,7 +43,6 @@ impl Plugin for WorkspaceEventsPlugin {
             Update,
             (
                 show_active_workspace,
-                cleanup_virtual_workspaces,
                 handle_virtual_window_moves,
                 detect_moved_windows.run_if(not(resource_exists::<Initializing>)),
                 refresh_workspace_window_sizes.run_if(on_timer(Duration::from_millis(
@@ -558,48 +557,6 @@ fn cleanup_selected_space_marker(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn cleanup_virtual_workspaces(
-    changed: Single<Entity, Added<ActiveWorkspaceMarker>>,
-    mut strips: Populated<(Entity, &mut LayoutStrip)>,
-    mut commands: Commands,
-) {
-    let changed_entity = *changed;
-    let Some(workspace_id) = strips.get(changed_entity).ok().map(|(_, strip)| strip.id()) else {
-        return;
-    };
-    debug!("cleaning up virtual workspaces on space {workspace_id}");
-    let mut rows = strips
-        .iter_mut()
-        .filter(|(_, strip)| strip.id() == workspace_id)
-        .collect::<Vec<_>>();
-    rows.sort_by_key(|(_, strip)| strip.virtual_index);
-
-    if rows.is_empty() {
-        return;
-    }
-
-    let primary_entity = rows[0].0;
-    let mut next_idx = 0;
-    for (entity, mut strip) in rows {
-        if strip.virtual_index > 0 && strip.len() == 0 {
-            if entity == changed_entity {
-                debug!("moving markers from despawned virtual workspace to primary");
-                commands
-                    .entity(primary_entity)
-                    .try_insert(ActiveWorkspaceMarker)
-                    .try_insert(SelectedVirtualMarker);
-            }
-            commands.entity(entity).despawn();
-            continue;
-        }
-        if strip.virtual_index != next_idx {
-            strip.virtual_index = next_idx;
-        }
-        next_idx += 1;
-    }
-}
-
-#[allow(clippy::needless_pass_by_value)]
 fn handle_virtual_window_moves(
     moved_windows: Populated<(Entity, &VirtualMoveMarker), With<Window>>,
     mut workspaces: Query<(
@@ -730,9 +687,10 @@ fn switch_virtual_workspace_bind(
     workspaces: Query<(Entity, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     mut commands: Commands,
 ) {
-    let Some(Operation::Virtual(direction)) =
-        filter_window_operations(&mut messages, |op| matches!(op, Operation::Virtual(_))).next()
-    else {
+    let Some(operation) = filter_window_operations(&mut messages, |op| {
+        matches!(op, Operation::Virtual(_) | Operation::VirtualNumber(_))
+    })
+    .next() else {
         return;
     };
 
@@ -748,9 +706,30 @@ fn switch_virtual_workspace_bind(
     rows.sort_by_key(|(_, strip, _)| strip.virtual_index);
 
     let current_index = rows.iter().position(|(_, _, active)| *active).unwrap_or(0);
-    let next_index = match direction {
-        Direction::South => (current_index + 1).clamp(0, rows.len() - 1),
-        Direction::North => current_index.saturating_sub(1),
+    let next_index = match operation {
+        Operation::Virtual(Direction::South) => (current_index + 1).clamp(0, rows.len() - 1),
+        Operation::Virtual(Direction::North) => current_index.saturating_sub(1),
+        Operation::VirtualNumber(target_virtual_index) => {
+            let Some(index) = rows
+                .iter()
+                .position(|(_, strip, _)| strip.virtual_index == *target_virtual_index)
+            else {
+                if *target_virtual_index == 0 {
+                    return;
+                }
+                let strip = LayoutStrip::new(workspace_id, *target_virtual_index);
+                commands.spawn((
+                    strip,
+                    Position(active_display.bounds().min),
+                    ChildOf(active_display.entity()),
+                    SelectedVirtualMarker,
+                    ActiveWorkspaceMarker,
+                ));
+                flash_message(format!("{}", *target_virtual_index + 1), 1.0, &mut commands);
+                return;
+            };
+            index
+        }
         _ => return,
     };
 
@@ -785,12 +764,13 @@ fn move_virtual_workspace_bind(
     active_display: ActiveDisplay,
     mut commands: Commands,
 ) {
-    let Some(Operation::VirtualMove(direction, move_focus)) =
-        filter_window_operations(&mut messages, |op| {
-            matches!(op, Operation::VirtualMove(_, _))
-        })
-        .next()
-    else {
+    let Some(operation) = filter_window_operations(&mut messages, |op| {
+        matches!(
+            op,
+            Operation::VirtualMove(_, _) | Operation::VirtualMoveNumber(_, _)
+        )
+    })
+    .next() else {
         return;
     };
 
@@ -800,23 +780,33 @@ fn move_virtual_workspace_bind(
 
     let current_virtual_index = active_display.active_strip().virtual_index;
 
-    let target_virtual_index = match direction {
-        Direction::South if active_display.active_strip().len() > 1 => current_virtual_index + 1,
-        Direction::North => {
+    let (target_virtual_index, move_focus) = match operation {
+        Operation::VirtualMove(Direction::South, move_focus)
+            if active_display.active_strip().len() > 1 =>
+        {
+            (current_virtual_index + 1, *move_focus)
+        }
+        Operation::VirtualMove(Direction::North, move_focus) => {
             if current_virtual_index == 0 {
                 return;
             }
-            current_virtual_index - 1
+            (current_virtual_index - 1, *move_focus)
+        }
+        Operation::VirtualMoveNumber(target_virtual_index, move_focus) => {
+            if *target_virtual_index == current_virtual_index {
+                return;
+            }
+            (*target_virtual_index, *move_focus)
         }
         _ => return,
     };
 
     commands.entity(focused_entity).insert(VirtualMoveMarker {
         target_virtual_index,
-        move_focus: *move_focus,
+        move_focus,
     });
 
-    if *move_focus == MoveFocus::Follow {
+    if move_focus == MoveFocus::Follow {
         flash_message(format!("{}", target_virtual_index + 1), 1.0, &mut commands);
     }
 

@@ -201,8 +201,11 @@ $ paneru send-cmd <command> [args...]
 | `window nextdisplay`       | Move the focused window to the next display      |
 | `window nextdisplaysend`   | Move the window to the next display but stay here |
 | `window virtual <dir>`     | Switch to the previous/next virtual workspace     |
+| `window virtualnum <n>`    | Switch directly to numbered virtual workspace    |
 | `window virtualmove <dir>` | Move the window to a different virtual workspace  |
+| `window virtualmovenum <n>` | Move the window to numbered virtual workspace and follow it |
 | `window virtualsend <dir>` | Send the window to a virtual workspace but stay  |
+| `window virtualsendnum <n>` | Send the window to numbered virtual workspace but stay |
 | `window snap`              | Snap the focused window into the visible viewport |
 | `mouse nextdisplay`        | Warp the mouse pointer to the next display       |
 | `printstate`               | Print the internal ECS state to the debug log    |
@@ -227,6 +230,12 @@ $ paneru send-cmd window shrink
 
 # Jump to the left-most window.
 $ paneru send-cmd window focus first
+
+# Switch directly to virtual workspace 3.
+$ paneru send-cmd window virtualnum 3
+
+# Send the focused window to virtual workspace 3 without following it.
+$ paneru send-cmd window virtualsendnum 3
 ```
 
 #### Scripting ideas

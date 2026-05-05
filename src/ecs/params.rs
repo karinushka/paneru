@@ -113,6 +113,10 @@ impl ActiveDisplay<'_, '_> {
         self.display.0.id()
     }
 
+    pub fn entity(&self) -> Entity {
+        self.display.1
+    }
+
     /// Returns an iterator over immutable references to all other displays (non-active).
     pub fn other(&self) -> impl Iterator<Item = &Display> {
         self.other_displays.iter()

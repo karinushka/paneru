@@ -1,4 +1,5 @@
 use bevy::ecs::entity::Entity;
+use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::lifecycle::{Add, Remove};
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Added, Has, With};
@@ -14,7 +15,7 @@ use crate::ecs::{
     ActiveWorkspaceMarker, Scrolling, SelectedVirtualMarker, focus_entity, reposition_entity,
     reshuffle_around,
 };
-use crate::manager::{Application, Window, WindowManager};
+use crate::manager::{Application, Display, Window, WindowManager};
 
 #[derive(BevyEvent)]
 pub(super) struct FocusWindow {
@@ -83,19 +84,24 @@ pub(super) fn autocenter_window_on_focus(
 pub(super) fn mouse_follows_focus(
     focused: Single<Entity, Added<FocusedMarker>>,
     windows: Windows,
-    active_display: ActiveDisplay,
     global_state: GlobalState,
     config: Res<Config>,
     window_manager: Res<WindowManager>,
-    active_workspace: Query<&Scrolling, With<ActiveWorkspaceMarker>>,
+    displays: Query<&Display>,
+    workspaces: Query<(
+        &LayoutStrip,
+        &ChildOf,
+        Option<&Scrolling>,
+        Has<ActiveWorkspaceMarker>,
+    )>,
 ) {
     let entity = *focused;
     let Some(window) = windows.get(entity) else {
         return;
     };
-    if active_workspace
+    if workspaces
         .iter()
-        .next()
+        .find_map(|(_, _, scrolling, active)| if active { scrolling } else { None })
         .is_some_and(|scrolling| scrolling.is_user_swiping)
     {
         debug!("Suppressing center mouse due to a swipe");
@@ -112,8 +118,12 @@ pub(super) fn mouse_follows_focus(
         && !global_state.skip_reshuffle()
         && global_state.ffm_flag().is_none_or(|id| id != window.id())
         && let Some(frame) = windows.moving_frame(entity)
+        && let Some(display_bounds) = workspaces
+            .into_iter()
+            .find_map(|(strip, child, _, _)| strip.contains(entity).then_some(child))
+            .and_then(|child| displays.get(child.parent()).ok())
+            .map(Display::bounds)
     {
-        let display_bounds = active_display.bounds();
         let visible = display_bounds.intersect(frame);
         let origin = visible.center();
         debug!("centering on {} {origin}", window.id());

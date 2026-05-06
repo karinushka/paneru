@@ -379,6 +379,10 @@ impl InputHandler {
                         self.last_swipe_time = Some(Instant::now());
                     }
                 } else if y_deltas.iter().all(|p| p.abs() > SWIPE_THRESHOLD) {
+                    if !self.config.swipe_vertical() {
+                        // Do not intercept the vertical swipe
+                        return false;
+                    }
                     // Vertical dominant: send vertical swipe, intercept the event
                     _ = events.send(Event::VerticalSwipe { delta: y_sum });
                     self.last_swipe_time = Some(Instant::now());

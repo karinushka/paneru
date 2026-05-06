@@ -466,6 +466,17 @@ impl Config {
             .or(config.options.swipe_gesture_fingers)
     }
 
+    pub fn swipe_vertical(&self) -> bool {
+        let config = self.inner();
+        config
+            .swipe
+            .as_ref()
+            .and_then(|swipe| swipe.gesture.as_ref())
+            .and_then(|gesture| gesture.vertical)
+            // Enabled by default
+            .is_none_or(|vertical| vertical)
+    }
+
     pub fn has_dim_inactive_color(&self) -> bool {
         let config = self.inner();
         config

@@ -34,6 +34,9 @@ pub struct GestureOptions {
 
     /// Which direction swipe gestures should move windows.
     pub direction: Option<SwipeGestureDirection>,
+
+    /// Whether to intercept vertical swipes.
+    pub vertical: Option<bool>,
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]

@@ -55,6 +55,7 @@ pub mod workspace;
 pub fn register_systems(app: &mut bevy::app::App) {
     const DISPLAY_CHANGE_CHECK_FREQ_MS: u64 = 1000;
     const REFRESH_WINDOW_CHECK_FREQ_MS: u64 = 1000;
+    const LOW_POWER_MODE_CHECK_SEC: u64 = 60;
 
     let not_swiping = |scrolling: Query<&Scrolling, With<ActiveWorkspaceMarker>>| {
         scrolling
@@ -91,6 +92,9 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::timeout_ticker,
             systems::retry_front_switch,
             systems::displays_rearranged,
+            systems::update_low_power_state
+                .run_if(resource_exists::<LowPowerMode>)
+                .run_if(on_timer(Duration::from_secs(LOW_POWER_MODE_CHECK_SEC))),
             (
                 systems::window_resized_update_frame,
                 systems::window_moved_update_frame,
@@ -340,6 +344,9 @@ impl RefreshWindowSizes {
     }
 }
 
+#[derive(Deref, DerefMut, Resource)]
+pub struct LowPowerMode(pub bool);
+
 #[derive(Resource)]
 pub struct SystemTheme {
     pub is_dark: bool,
@@ -453,15 +460,18 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
     let overlay_manager = OverlayManager::new(mtm);
     let flash_message_manager = FlashMessageManager::new(mtm);
     let menu_bar_manager = MenuBarManager::new(mtm);
-    app.insert_non_send_resource(platform_callbacks);
-    app.insert_non_send_resource(overlay_manager);
-    app.insert_non_send_resource(flash_message_manager);
-    app.insert_non_send_resource(menu_bar_manager);
-    app.insert_non_send_resource(receiver);
+    app.insert_non_send_resource(platform_callbacks)
+        .insert_non_send_resource(overlay_manager)
+        .insert_non_send_resource(flash_message_manager)
+        .insert_non_send_resource(menu_bar_manager)
+        .insert_non_send_resource(receiver);
 
     if let Some(previous_state) = PaneruState::load_from_file(state::STATE_FILE_PATH) {
         app.insert_resource(previous_state);
     }
+
+    // Do not insert this in mocks.
+    app.insert_resource(LowPowerMode(false));
 
     Ok(app)
 }

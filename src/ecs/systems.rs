@@ -4,7 +4,7 @@ use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::query::{Changed, Has, Or, With, Without};
 use bevy::ecs::system::{
-    Commands, Local, NonSend, NonSendMut, ParallelCommands, Populated, Query, Res, Single,
+    Commands, Local, NonSend, NonSendMut, ParallelCommands, Populated, Query, Res, ResMut, Single,
 };
 use bevy::math::IRect;
 use bevy::tasks::AsyncComputeTaskPool;
@@ -28,8 +28,9 @@ use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, BruteforceWindows, FlashMessage, Initializing,
-    LocateDockTrigger, MissionControlActive, Position, RefreshWindowSizes, RestoreWindowState,
-    Scrolling, SelectedVirtualMarker, Unmanaged, WidthRatio, WindowProperties, focus_entity,
+    LocateDockTrigger, LowPowerMode, MissionControlActive, Position, RefreshWindowSizes,
+    RestoreWindowState, Scrolling, SelectedVirtualMarker, Unmanaged, WidthRatio, WindowProperties,
+    focus_entity,
 };
 use crate::events::Event;
 use crate::manager::{
@@ -657,11 +658,13 @@ pub(super) fn animate_resize_entities(
 pub(super) fn pump_events(
     mut exit: MessageWriter<AppExit>,
     mut messages: MessageWriter<Event>,
+    low_power_mode: Option<Res<LowPowerMode>>,
     incoming_events: Option<NonSend<Receiver<Event>>>,
     platform: Option<NonSendMut<Pin<Box<PlatformCallbacks>>>>,
     mut timeout: Local<u32>,
 ) {
-    const LOOP_MAX_TIMEOUT_MS: u32 = 500;
+    const LOOP_MAX_TIMEOUT_LOWPOWER_MS: u32 = 500;
+    const LOOP_MAX_TIMEOUT_MS: u32 = 50;
     const LOOP_TIMEOUT_STEP: u32 = 1;
 
     let Some((ref mut platform, incoming_events)) = platform.zip(incoming_events) else {
@@ -682,7 +685,12 @@ pub(super) fn pump_events(
                 *timeout = LOOP_TIMEOUT_STEP;
             }
             Err(RecvTimeoutError::Timeout) => {
-                *timeout = timeout.min(LOOP_MAX_TIMEOUT_MS) + LOOP_TIMEOUT_STEP;
+                let timeout_limit = if low_power_mode.is_some_and(|low_power| low_power.0) {
+                    LOOP_MAX_TIMEOUT_LOWPOWER_MS
+                } else {
+                    LOOP_MAX_TIMEOUT_MS
+                };
+                *timeout = timeout.min(timeout_limit) + LOOP_TIMEOUT_STEP;
                 break;
             }
         }
@@ -1173,4 +1181,12 @@ pub(crate) fn update_flash_messages(
             flash_manager.show(flash, opacity, top_right);
         }
     }
+}
+
+pub(crate) fn update_low_power_state(low_power_mode: Option<ResMut<LowPowerMode>>) {
+    let Some(mut state) = low_power_mode else {
+        return;
+    };
+    let process_info = objc2_foundation::NSProcessInfo::processInfo();
+    state.0 = process_info.isLowPowerModeEnabled();
 }

@@ -49,7 +49,6 @@ pub(super) fn swipe_gesture(
                 let (_, _, scrolling) = &mut *active_workspace;
                 if let Some(scrolling) = scrolling.as_mut() {
                     scrolling.is_user_swiping = false;
-                    scrolling.last_event = Instant::now();
                 }
                 continue;
             }
@@ -119,27 +118,29 @@ pub(super) fn swipe_gesture(
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn swiping_timeout(
-    strips: Populated<(Entity, &Scrolling), With<LayoutStrip>>,
+    strips: Populated<(Entity, &mut Scrolling), With<LayoutStrip>>,
     active_display: ActiveDisplay,
     time: Res<Time>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
-    const SWIPE_FOCUS_TIMEOUT: Duration = Duration::from_millis(500);
+    const FINGER_LIFT_THRESHOLD: Duration = Duration::from_millis(50);
     const MIN_VELOCITY_PX: f64 = 5.0;
     let dt = time.delta_secs_f64();
     let viewport_width = f64::from(active_display.bounds().width());
 
-    for (entity, scroll) in strips {
-        if !scroll.is_user_swiping && scroll.velocity.abs() * dt * viewport_width < MIN_VELOCITY_PX
-        {
-            commands.entity(entity).remove::<Scrolling>();
-        }
+    for (entity, ref mut scroll) in strips {
+        if !scroll.is_user_swiping || scroll.last_event.elapsed() > FINGER_LIFT_THRESHOLD {
+            scroll.is_user_swiping = false;
 
-        if scroll.last_event.elapsed() > SWIPE_FOCUS_TIMEOUT
-            && let Some(point) = window_manager.cursor_position()
-        {
-            commands.trigger(WMEventTrigger(Event::MouseMoved { point }));
+            let speed = scroll.velocity.abs() * dt * viewport_width;
+            if speed < MIN_VELOCITY_PX {
+                commands.entity(entity).remove::<Scrolling>();
+            }
+
+            if let Some(point) = window_manager.cursor_position() {
+                commands.trigger(WMEventTrigger(Event::MouseMoved { point }));
+            }
         }
     }
 }
@@ -153,9 +154,6 @@ pub(super) fn apply_inertia(
 ) {
     let dt = time.delta_secs_f64();
     for (_, mut scroll) in &mut strips {
-        if scroll.is_user_swiping {
-            continue;
-        }
         if scroll.velocity.abs() > 0.001 {
             let decay_rate = config.config().swipe_deceleration();
             scroll.velocity *= (-decay_rate * dt).exp();

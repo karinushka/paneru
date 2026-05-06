@@ -4,7 +4,8 @@ use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::{Added, Has};
 use bevy::ecs::resource::Resource;
-use bevy::ecs::system::{Query, ResMut};
+use bevy::ecs::schedule::IntoScheduleConfigs;
+use bevy::ecs::system::{Query, Res, ResMut};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -76,10 +77,17 @@ struct StateBroadcastSignals {
 }
 
 pub(super) fn register_query_commands(app: &mut App) {
+    let active_subscribers = |subscribers: Option<Res<StateSubscribers>>| {
+        subscribers.is_some_and(|subscribers| !subscribers.streams.is_empty())
+    };
+
     app.init_resource::<StateSubscribers>();
     app.init_resource::<StateBroadcastCache>();
     app.add_systems(PreUpdate, (state_subscribe_handler, state_query_handler));
-    app.add_systems(PostUpdate, state_event_broadcast_handler);
+    app.add_systems(
+        PostUpdate,
+        state_event_broadcast_handler.run_if(active_subscribers),
+    );
 }
 
 #[allow(clippy::needless_pass_by_value)]

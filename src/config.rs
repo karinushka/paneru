@@ -638,6 +638,10 @@ impl Config {
     pub fn horizontal_mouse_warp(&self) -> Option<i16> {
         self.options().horizontal_mouse_warp
     }
+
+    pub fn horizontal_mouse_warp_offset(&self) -> i32 {
+        self.options().horizontal_mouse_warp_offset.unwrap_or(0)
+    }
 }
 
 fn parse_hex_color(hex: &str) -> (f64, f64, f64) {
@@ -802,6 +806,12 @@ pub struct MainOptions {
     pub mouse_follows_focus: Option<bool>,
     /// Warps the mouse to the closest screen when at the edge.
     pub horizontal_mouse_warp: Option<i16>,
+    /// Vertical pixel offset applied to the warp landing position, signed by
+    /// warp direction. Use to compensate for physical desk arrangement
+    /// differing from the macOS arrangement (e.g. portrait monitor sitting
+    /// higher or lower than the laptop). When warping downward (target below
+    /// source) the offset is added; when warping upward, subtracted.
+    pub horizontal_mouse_warp_offset: Option<i32>,
     /// A list of preset column widths (as ratios) used for resizing windows.
     #[serde(default = "default_preset_column_widths")]
     pub preset_column_widths: Vec<f64>,

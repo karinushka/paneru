@@ -233,14 +233,13 @@ fn command_move_focus(
 
     let active_strip = active_display.active_strip();
 
-    // On a fullscreen space, swap to the previous stack.
+    // On a fullscreen space, swap to the last column in the workspace.
     if let Some(fullscreen) = active_display.fullscreen()
         && matches!(direction, Direction::West)
-        && let Some(strip) = workspaces
+        && let Some(entity) = workspaces
             .into_iter()
             .find_map(|(strip, _)| (strip.id() == fullscreen.previous_strip).then_some(strip))
-        && let Ok(column) = strip.get(fullscreen.previous_index.saturating_sub(1))
-        && let Some(entity) = column.top()
+            .and_then(|strip| strip.last().ok().and_then(|col| col.top()))
     {
         debug!("fullscreen: swap raising {entity}");
         focus_entity(entity, true, &mut commands);

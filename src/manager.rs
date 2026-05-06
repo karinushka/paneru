@@ -10,7 +10,7 @@ use objc2_core_foundation::{
 };
 use objc2_core_graphics::{
     CGAssociateMouseAndMouseCursorPosition, CGDirectDisplayID, CGDisplayBounds,
-    CGGetActiveDisplayList, CGSetLocalEventsSuppressionInterval, CGWarpMouseCursorPosition,
+    CGGetActiveDisplayList, CGWarpMouseCursorPosition,
 };
 use std::path::Path;
 use std::ptr::null_mut;
@@ -390,7 +390,8 @@ impl WindowManagerApi for WindowManagerOS {
         // events resume immediately after the warp. The default 250ms
         // interval drops physical mouse motion in that window, making the
         // cursor feel "stuck" at the warped position.
-        CGSetLocalEventsSuppressionInterval(0.0);
+        #[allow(deprecated)]
+        objc2_core_graphics::CGSetLocalEventsSuppressionInterval(0.0);
         CGWarpMouseCursorPosition(origin_to(origin));
         // Re-associate the mouse and cursor so HID input continues to drive
         // the cursor immediately after the warp.

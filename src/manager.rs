@@ -9,7 +9,8 @@ use objc2_core_foundation::{
     CGPoint, CGRect, CGSize, kCFBooleanTrue,
 };
 use objc2_core_graphics::{
-    CGDirectDisplayID, CGDisplayBounds, CGGetActiveDisplayList, CGWarpMouseCursorPosition,
+    CGAssociateMouseAndMouseCursorPosition, CGDirectDisplayID, CGDisplayBounds,
+    CGGetActiveDisplayList, CGSetLocalEventsSuppressionInterval, CGWarpMouseCursorPosition,
 };
 use std::path::Path;
 use std::ptr::null_mut;
@@ -385,7 +386,15 @@ impl WindowManagerApi for WindowManagerOS {
     /// Centers the mouse cursor on the window if it's not already within the window's bounds.
     #[instrument(level = Level::DEBUG, skip_all, fields(window))]
     fn warp_mouse(&self, origin: Origin) {
+        // Drop the local-event suppression interval to zero so HID mouse
+        // events resume immediately after the warp. The default 250ms
+        // interval drops physical mouse motion in that window, making the
+        // cursor feel "stuck" at the warped position.
+        CGSetLocalEventsSuppressionInterval(0.0);
         CGWarpMouseCursorPosition(origin_to(origin));
+        // Re-associate the mouse and cursor so HID input continues to drive
+        // the cursor immediately after the warp.
+        CGAssociateMouseAndMouseCursorPosition(true);
     }
 
     /// Adds existing windows for a given application, attempting to resolve any that are not yet found.

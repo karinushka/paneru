@@ -388,10 +388,6 @@ pub struct PollForNotifications;
 #[derive(PartialEq, Resource)]
 pub struct Initializing;
 
-/// Bevy event trigger for general window manager events.
-#[derive(BevyEvent)]
-pub struct WMEventTrigger(pub Event);
-
 /// Bevy event trigger for spawning new windows.
 #[derive(BevyEvent)]
 pub struct SpawnWindowTrigger(pub Vec<Window>);

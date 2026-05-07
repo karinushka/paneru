@@ -16,7 +16,6 @@ use crate::ecs::layout::{Column, LayoutStrip};
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, MissionControlActive, Position, Scrolling, SendMessageTrigger,
-    WMEventTrigger,
 };
 use crate::errors::Result;
 use crate::events::Event;
@@ -182,7 +181,7 @@ pub(super) fn swiping_timeout(
                 commands.entity(entity).remove::<Scrolling>();
 
                 if let Some(point) = window_manager.cursor_position() {
-                    commands.trigger(WMEventTrigger(Event::MouseMoved {
+                    commands.trigger(SendMessageTrigger(Event::MouseMoved {
                         point,
                         modifiers: Modifiers::empty(),
                     }));

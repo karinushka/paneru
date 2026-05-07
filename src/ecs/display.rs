@@ -14,8 +14,8 @@ use tracing::{Level, debug, error, instrument};
 use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::{
-    ActiveDisplayMarker, Position, RefreshWindowSizes, SelectedVirtualMarker, Timeout,
-    WMEventTrigger,
+    ActiveDisplayMarker, Position, RefreshWindowSizes, SelectedVirtualMarker, SendMessageTrigger,
+    Timeout,
 };
 use crate::events::Event;
 use crate::manager::{Display, WindowManager};
@@ -27,8 +27,7 @@ pub struct DisplayEventsPlugin;
 
 impl Plugin for DisplayEventsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, displays_rearranged)
-            .add_observer(display_change_trigger)
+        app.add_systems(Update, (displays_rearranged, display_change_trigger))
             .add_observer(cleanup_active_display_marker);
     }
 }
@@ -55,14 +54,17 @@ fn cleanup_active_display_marker(
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn display_change_trigger(
-    trigger: On<WMEventTrigger>,
+    mut messages: MessageReader<Event>,
     displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
-    let Event::DisplayChanged = trigger.event().0 else {
+    if !messages
+        .read()
+        .any(|event| matches!(event, Event::DisplayChanged))
+    {
         return;
-    };
+    }
 
     let Ok(active_id) = window_manager.active_display_id() else {
         error!("Unable to get active display id!");
@@ -79,7 +81,7 @@ fn display_change_trigger(
             cmd.try_insert(ActiveDisplayMarker);
         }
     }
-    commands.trigger(WMEventTrigger(Event::SpaceChanged));
+    commands.trigger(SendMessageTrigger(Event::SpaceChanged));
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -117,7 +119,7 @@ pub(crate) fn displays_rearranged(
             }
             _ => continue,
         }
-        commands.trigger(WMEventTrigger(Event::DisplayChanged));
+        commands.trigger(SendMessageTrigger(Event::DisplayChanged));
     }
 }
 

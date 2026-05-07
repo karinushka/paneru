@@ -435,7 +435,7 @@ pub(super) fn window_unmanaged_trigger(
     trigger: On<Add, Unmanaged>,
     windows: Windows,
     apps: Query<(Entity, &Application)>,
-    mut workspaces: Query<&mut LayoutStrip>,
+    workspaces: Query<&mut LayoutStrip>,
     active_display: Single<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
     config: Res<Config>,
     initializing: Option<Res<Initializing>>,
@@ -541,7 +541,7 @@ pub(super) fn window_unmanaged_trigger(
         }
     }
 
-    workspaces.par_iter_mut().for_each(|mut strip| {
+    workspaces.into_iter().for_each(|mut strip| {
         if strip.contains(entity) {
             strip.remove(entity);
         }

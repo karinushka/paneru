@@ -610,10 +610,12 @@ fn manage_window(mut messages: MessageReader<Event>, windows: Windows, mut comma
         window.id(),
         unmanaged.is_some()
     );
-    if unmanaged.is_some() {
-        commands.entity(entity).try_remove::<Unmanaged>();
-    } else {
-        commands.entity(entity).try_insert(Unmanaged::Floating);
+    if let Ok(mut entity_commands) = commands.get_entity(entity) {
+        if unmanaged.is_some() {
+            entity_commands.try_remove::<Unmanaged>();
+        } else {
+            entity_commands.try_insert(Unmanaged::Floating);
+        }
     }
 }
 

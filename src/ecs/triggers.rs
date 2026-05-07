@@ -387,8 +387,9 @@ pub(super) fn dispatch_application_messages(
             Event::WindowDeminimized { window_id } => {
                 if let Some((_, entity)) = find_window(*window_id)
                     && matches!(unmanaged_query.get(entity), Ok(Unmanaged::Minimized))
+                    && let Ok(mut entity_commands) = commands.get_entity(entity)
                 {
-                    commands.entity(entity).try_remove::<Unmanaged>();
+                    entity_commands.try_remove::<Unmanaged>();
                 }
             }
 
@@ -416,8 +417,10 @@ pub(super) fn dispatch_application_messages(
                 for entity in children {
                     // Only restore windows that were hidden by the app hide/show cycle.
                     // Preserve Floating and Minimized states.
-                    if matches!(unmanaged_query.get(*entity), Ok(Unmanaged::Hidden)) {
-                        commands.entity(*entity).try_remove::<Unmanaged>();
+                    if matches!(unmanaged_query.get(*entity), Ok(Unmanaged::Hidden))
+                        && let Ok(mut entity_commands) = commands.get_entity(*entity)
+                    {
+                        entity_commands.try_remove::<Unmanaged>();
                     }
                 }
             }
@@ -681,10 +684,9 @@ pub(super) fn window_destroyed_trigger(
             &mut commands,
         );
 
-        // NOTE: If the entity had an Unmanaged marker, despawning it will cause it to be re-inserted
-        // into the strip again. Therefore we do it just before despawning the entity itself, so it
-        // then can be properly removed again in the main entity despawn trigger.
-        commands.entity(entity).remove::<Unmanaged>().despawn();
+        if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            entity_commands.try_despawn();
+        }
 
         // The window entity will be removed from the layout strip in the On<Remove> trigger.
     }

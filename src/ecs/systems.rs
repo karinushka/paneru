@@ -357,6 +357,7 @@ pub(super) fn add_launched_process(
                 Some(format!(
                     "{app} did not become observable in {APP_OBSERVABLE_TIMEOUT_SEC}s.",
                 )),
+                &mut commands,
             );
             commands.spawn((app, FreshMarker, timeout, ChildOf(entity)));
         } else {
@@ -448,8 +449,9 @@ pub(super) fn timeout_ticker(
     for (entity, mut timeout) in timers {
         if timeout.timer.is_finished() {
             trace!("Despawning entity {entity} due to timeout.");
-            if let Some(message) = &timeout.message {
-                debug!("{message}");
+            if let Some(system_id) = timeout.system_id {
+                commands.run_system(system_id);
+                commands.unregister_system(system_id);
             }
             trace!("Removing timer {entity}");
             commands.entity(entity).despawn();

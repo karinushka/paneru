@@ -135,6 +135,7 @@ pub(crate) fn setup_world() -> App {
         .add_plugins(ScrollEventsPlugin)
         .add_plugins(WorkspaceEventsPlugin)
         .add_plugins(LayoutEventsPlugin)
+        .add_plugins(MouseEventsPlugin)
         .add_plugins((register_triggers, register_systems, register_commands));
 
     bevy_app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(

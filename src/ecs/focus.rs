@@ -1,10 +1,15 @@
+use std::time::Duration;
+
+use bevy::app::{App, Plugin, PostUpdate};
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::lifecycle::{Add, Remove};
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Added, Has, With};
-use bevy::ecs::system::{Commands, Query, Res, Single};
+use bevy::ecs::schedule::IntoScheduleConfigs as _;
+use bevy::ecs::system::{Commands, Populated, Query, Res, Single};
 use bevy::prelude::Event as BevyEvent;
+use bevy::time::common_conditions::on_timer;
 use tracing::{Level, debug, error, instrument, trace, warn};
 
 use super::{FocusedMarker, MouseHeldMarker, SystemTheme};
@@ -12,10 +17,35 @@ use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, GlobalState, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, Scrolling, SelectedVirtualMarker, focus_entity, reposition_entity,
-    reshuffle_around,
+    ActiveWorkspaceMarker, Scrolling, SelectedVirtualMarker, SendMessageTrigger, StrayFocusEvent,
+    focus_entity, reposition_entity, reshuffle_around,
 };
+use crate::events::Event;
 use crate::manager::{Application, Display, Window, WindowManager};
+
+const REFRESH_WINDOW_CHECK_FREQ_MS: u64 = 1000;
+pub struct FocusEventsPlugin;
+
+impl Plugin for FocusEventsPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            PostUpdate,
+            (
+                autocenter_window_on_focus.after(super::systems::animate_resize_entities),
+                mouse_follows_focus.after(super::systems::animate_resize_entities),
+                recover_lost_focus.run_if(on_timer(Duration::from_millis(
+                    REFRESH_WINDOW_CHECK_FREQ_MS,
+                ))),
+            ),
+        );
+        app.add_observer(dim_remove_window_trigger)
+            .add_observer(dim_window_trigger)
+            .add_observer(maintain_focus_singleton)
+            .add_observer(virtual_strip_activated)
+            .add_observer(stray_focus_observer)
+            .add_observer(focus_window_trigger);
+    }
+}
 
 #[derive(BevyEvent)]
 pub(super) struct FocusWindow {
@@ -25,7 +55,7 @@ pub(super) struct FocusWindow {
 
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
-pub(super) fn maintain_focus_singleton(
+fn maintain_focus_singleton(
     trigger: On<Add, FocusedMarker>,
     windows: Query<(Entity, Has<FocusedMarker>), With<Window>>,
     mut config: GlobalState,
@@ -53,7 +83,7 @@ pub(super) fn maintain_focus_singleton(
 
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
-pub(super) fn autocenter_window_on_focus(
+fn autocenter_window_on_focus(
     focused: Single<Entity, Added<FocusedMarker>>,
     mouse_held: Query<&MouseHeldMarker>,
     windows: Windows,
@@ -81,7 +111,7 @@ pub(super) fn autocenter_window_on_focus(
 
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
-pub(super) fn mouse_follows_focus(
+fn mouse_follows_focus(
     focused: Single<Entity, Added<FocusedMarker>>,
     windows: Windows,
     global_state: GlobalState,
@@ -132,7 +162,7 @@ pub(super) fn mouse_follows_focus(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-pub(super) fn dim_window_trigger(
+fn dim_window_trigger(
     trigger: On<Add, FocusedMarker>,
     windows: Windows,
     window_manager: Res<WindowManager>,
@@ -150,7 +180,7 @@ pub(super) fn dim_window_trigger(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-pub(super) fn dim_remove_window_trigger(
+fn dim_remove_window_trigger(
     trigger: On<Remove, FocusedMarker>,
     windows: Windows,
     active_display: ActiveDisplay,
@@ -178,7 +208,7 @@ pub(super) fn dim_remove_window_trigger(
 
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
-pub(super) fn virtual_strip_activated(
+fn virtual_strip_activated(
     trigger: On<Add, FocusedMarker>,
     workspaces: Query<(Entity, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     mut commands: Commands,
@@ -196,11 +226,7 @@ pub(super) fn virtual_strip_activated(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-pub(super) fn focus_window_trigger(
-    trigger: On<FocusWindow>,
-    windows: Windows,
-    apps: Query<&Application>,
-) {
+fn focus_window_trigger(trigger: On<FocusWindow>, windows: Windows, apps: Query<&Application>) {
     let FocusWindow { entity, raise } = *trigger.event();
     let Some(window) = windows.get(entity) else {
         return;
@@ -220,7 +246,7 @@ pub(super) fn focus_window_trigger(
 
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
-pub(super) fn recover_lost_focus(
+fn recover_lost_focus(
     windows: Windows,
     active_workspace: Query<&LayoutStrip, With<ActiveWorkspaceMarker>>,
     mut commands: Commands,
@@ -236,4 +262,26 @@ pub(super) fn recover_lost_focus(
     {
         focus_entity(entity, false, &mut commands);
     }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn stray_focus_observer(
+    trigger: On<Add, Window>,
+    focus_events: Populated<(Entity, &StrayFocusEvent)>,
+    windows: Windows,
+    mut commands: Commands,
+) {
+    let entity = trigger.event().entity;
+    let Some(window_id) = windows.get(entity).map(|window| window.id()) else {
+        return;
+    };
+
+    focus_events
+        .iter()
+        .filter(|(_, stray_focus)| stray_focus.0 == window_id)
+        .for_each(|(timeout_entity, _)| {
+            debug!("Re-queueing lost focus event for window id {window_id}.");
+            commands.trigger(SendMessageTrigger(Event::WindowFocused { window_id }));
+            commands.entity(timeout_entity).despawn();
+        });
 }

@@ -54,7 +54,6 @@ pub mod workspace;
 #[allow(clippy::too_many_lines)]
 pub fn register_systems(app: &mut bevy::app::App) {
     const DISPLAY_CHANGE_CHECK_FREQ_MS: u64 = 1000;
-    const REFRESH_WINDOW_CHECK_FREQ_MS: u64 = 1000;
     const LOW_POWER_MODE_CHECK_SEC: u64 = 60;
 
     let not_swiping = |scrolling: Query<&Scrolling, With<ActiveWorkspaceMarker>>| {
@@ -139,11 +138,6 @@ pub fn register_systems(app: &mut bevy::app::App) {
             )
                 .chain(),
             crate::menubar::update_virtual_workspace_status_item,
-            focus::autocenter_window_on_focus.after(systems::animate_resize_entities),
-            focus::mouse_follows_focus.after(systems::animate_resize_entities),
-            focus::recover_lost_focus.run_if(on_timer(Duration::from_millis(
-                REFRESH_WINDOW_CHECK_FREQ_MS,
-            ))),
         ),
     );
 }
@@ -162,19 +156,13 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::window_minimized_trigger)
         .add_observer(triggers::spawn_window_trigger)
         .add_observer(triggers::refresh_configuration_trigger)
-        .add_observer(triggers::stray_focus_observer)
         .add_observer(triggers::locate_dock_trigger)
         .add_observer(triggers::send_message_trigger)
         .add_observer(triggers::window_removal_trigger)
         .add_observer(triggers::theme_change_trigger)
         .add_observer(triggers::apply_window_properties)
         .add_observer(triggers::restore_window_state)
-        .add_observer(triggers::cleanup_active_display_marker)
-        .add_observer(focus::dim_remove_window_trigger)
-        .add_observer(focus::dim_window_trigger)
-        .add_observer(focus::maintain_focus_singleton)
-        .add_observer(focus::virtual_strip_activated)
-        .add_observer(focus::focus_window_trigger);
+        .add_observer(triggers::cleanup_active_display_marker);
 }
 
 /// Marker component for the currently focused window.
@@ -452,6 +440,7 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         .add_plugins(scroll::ScrollEventsPlugin)
         .add_plugins(workspace::WorkspaceEventsPlugin)
         .add_plugins(layout::LayoutEventsPlugin)
+        .add_plugins(focus::FocusEventsPlugin)
         .add_plugins((register_triggers, register_systems, register_commands));
 
     let mut platform_callbacks = PlatformCallbacks::new(sender);

@@ -1,7 +1,7 @@
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::lifecycle::{Add, Remove};
-use bevy::ecs::message::MessageWriter;
+use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Has, With};
 use bevy::ecs::system::{Commands, NonSend, NonSendMut, Query, Res, ResMut, Single};
@@ -17,7 +17,6 @@ use tracing::{Level, debug, error, info, instrument, trace, warn};
 use super::{
     ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, MissionControlActive,
     RetryFrontSwitch, SpawnWindowTrigger, StrayFocusEvent, SystemTheme, Timeout, Unmanaged,
-    WMEventTrigger,
 };
 use crate::config::{Config, WindowParams};
 use crate::ecs::layout::LayoutStrip;
@@ -55,7 +54,7 @@ fn update_passthrough(window: &Window, app: &Application, config: &Config) {
 /// * `commands` - Bevy commands to trigger events and manage components.
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn front_switched_trigger(
-    trigger: On<WMEventTrigger>,
+    mut messages: MessageReader<Event>,
     processes: Query<(&BProcess, &Children)>,
     applications: Query<&Application>,
     window_manager: Res<WindowManager>,
@@ -63,95 +62,102 @@ pub(super) fn front_switched_trigger(
     mut commands: Commands,
 ) {
     const FRONT_SWITCH_RETRY_SEC: u64 = 2;
-    let Event::ApplicationFrontSwitched { ref psn } = trigger.event().0 else {
-        return;
-    };
-    let Some((BProcess(process), children)) =
-        processes.iter().find(|process| &process.0.psn() == psn)
-    else {
-        error!("Unable to find process with PSN {psn:?}");
-        return;
-    };
+    for event in messages.read() {
+        let Event::ApplicationFrontSwitched { psn } = event else {
+            continue;
+        };
 
-    if children.len() > 1 {
-        warn!("Multiple apps registered to process '{}'.", process.name());
-    }
-    let Some(&app_entity) = children.first() else {
-        error!("No application for process '{}'.", process.name());
-        return;
-    };
-    let Some(app) = applications.get(app_entity).ok() else {
-        error!("No application for process '{}'.", process.name());
-        return;
-    };
-    debug!("front switching process: {}", process.name());
+        let Some((BProcess(process), children)) =
+            processes.iter().find(|process| &process.0.psn() == psn)
+        else {
+            error!("Unable to find process with PSN {psn:?}");
+            continue;
+        };
 
-    if let Ok(focused_id) = app.focused_window_id().inspect_err(|err| {
-        warn!("can not get current focus: {err}");
-    }) {
-        if let Some(point) = window_manager.cursor_position()
-            && window_manager
-                .find_window_at_point(&point)
-                .is_ok_and(|window_id| window_id != focused_id)
-        {
-            // Window got focus without mouse movement - probably with a Cmd-Tab.
-            // If so, bring it into view.
-            config.set_skip_reshuffle(false);
-            config.set_ffm_flag(None);
+        if children.len() > 1 {
+            warn!("Multiple apps registered to process '{}'.", process.name());
         }
-        commands.trigger(WMEventTrigger(Event::WindowFocused {
-            window_id: focused_id,
-        }));
-    } else {
-        // Transient AX error (e.g. kAXErrorCannotComplete during app transitions).
-        // Schedule a retry to query the focused window once the app is ready.
-        let timeout = Timeout::new(
-            Duration::from_secs(FRONT_SWITCH_RETRY_SEC),
-            Some(format!(
-                "Front switch retry for '{}' timed out.",
-                process.name()
-            )),
-        );
-        commands.spawn((timeout, RetryFrontSwitch(app_entity)));
+        let Some(&app_entity) = children.first() else {
+            error!("No application for process '{}'.", process.name());
+            continue;
+        };
+        let Some(app) = applications.get(app_entity).ok() else {
+            error!("No application for process '{}'.", process.name());
+            continue;
+        };
+
+        debug!("front switching process: {}", process.name());
+
+        if let Ok(focused_id) = app.focused_window_id().inspect_err(|err| {
+            warn!("can not get current focus: {err}");
+        }) {
+            if let Some(point) = window_manager.cursor_position()
+                && window_manager
+                    .find_window_at_point(&point)
+                    .is_ok_and(|window_id| window_id != focused_id)
+            {
+                // Window got focus without mouse movement - probably with a Cmd-Tab.
+                // If so, bring it into view.
+                config.set_skip_reshuffle(false);
+                config.set_ffm_flag(None);
+            }
+            commands.trigger(SendMessageTrigger(Event::WindowFocused {
+                window_id: focused_id,
+            }));
+        } else {
+            // Transient AX error (e.g. kAXErrorCannotComplete during app transitions).
+            // Schedule a retry to query the focused window once the app is ready.
+            let timeout = Timeout::new(
+                Duration::from_secs(FRONT_SWITCH_RETRY_SEC),
+                Some(format!(
+                    "Front switch retry for '{}' timed out.",
+                    process.name()
+                )),
+            );
+            commands.spawn((timeout, RetryFrontSwitch(app_entity)));
+        }
     }
 }
 
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn theme_change_trigger(
-    trigger: On<WMEventTrigger>,
+    mut messages: MessageReader<Event>,
     windows: Windows,
     window_manager: Res<WindowManager>,
     config: Res<Config>,
     mut theme: Option<ResMut<SystemTheme>>,
 ) {
-    let Event::ThemeChanged = trigger.event().0 else {
-        return;
-    };
-    let Some(ref mut theme) = theme else {
-        return;
-    };
+    for event in messages.read() {
+        let Event::ThemeChanged = event else {
+            continue;
+        };
 
-    let is_dark = crate::util::is_dark_mode();
-    if theme.is_dark == is_dark {
-        return;
-    }
-    theme.is_dark = is_dark;
-    info!("System theme changed: dark_mode={is_dark}");
+        let Some(ref mut theme) = theme else {
+            continue;
+        };
 
-    let Some(dim_ratio) = config.window_dim_ratio(is_dark) else {
-        return;
-    };
+        let is_dark = crate::util::is_dark_mode();
+        if theme.is_dark == is_dark {
+            continue;
+        }
+        theme.is_dark = is_dark;
+        info!("System theme changed: dark_mode={is_dark}");
 
-    // Re-apply dimming to all windows that are NOT focused.
-    let focused_id = windows.focused().map(|(window, _)| window.id());
-    let windows_to_dim: Vec<WinID> = windows
-        .iter()
-        .filter(|(window, _)| Some(window.id()) != focused_id)
-        .map(|(window, _)| window.id())
-        .collect();
+        let Some(dim_ratio) = config.window_dim_ratio(is_dark) else {
+            continue;
+        };
 
-    if !windows_to_dim.is_empty() {
-        window_manager.dim_windows(&windows_to_dim, dim_ratio);
+        // Re-apply dimming to all windows that are NOT focused.
+        let focused_id = windows.focused().map(|(window, _)| window.id());
+        let windows_to_dim: Vec<WinID> = windows
+            .iter()
+            .filter(|(window, _)| Some(window.id()) != focused_id)
+            .map(|(window, _)| window.id())
+            .collect();
+
+        if !windows_to_dim.is_empty() {
+            window_manager.dim_windows(&windows_to_dim, dim_ratio);
+        }
     }
 }
 
@@ -170,7 +176,7 @@ pub(super) fn theme_change_trigger(
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn window_focused_trigger(
-    trigger: On<WMEventTrigger>,
+    mut messages: MessageReader<Event>,
     applications: Query<&Application>,
     windows: Windows,
     mut active_display: ActiveDisplayMut,
@@ -179,57 +185,59 @@ pub(super) fn window_focused_trigger(
 ) {
     const STRAY_FOCUS_RETRY_SEC: u64 = 2;
 
-    let Event::WindowFocused { window_id } = trigger.event().0 else {
-        return;
-    };
+    for event in messages.read() {
+        let Event::WindowFocused { window_id } = *event else {
+            continue;
+        };
 
-    let Some((window, entity, parent)) = windows.find_parent(window_id) else {
-        let timeout = Timeout::new(Duration::from_secs(STRAY_FOCUS_RETRY_SEC), None);
-        commands.spawn((timeout, StrayFocusEvent(window_id)));
-        return;
-    };
+        let Some((window, entity, parent)) = windows.find_parent(window_id) else {
+            let timeout = Timeout::new(Duration::from_secs(STRAY_FOCUS_RETRY_SEC), None);
+            commands.spawn((timeout, StrayFocusEvent(window_id)));
+            continue;
+        };
 
-    let Ok(app) = applications.get(parent) else {
-        warn!("Unable to get parent for window {}.", window.id());
-        return;
-    };
+        let Ok(app) = applications.get(parent) else {
+            warn!("Unable to get parent for window {}.", window.id());
+            continue;
+        };
 
-    // Always keep passthrough in sync. An internal focus_entity call races
-    // with the OS WindowFocused event; without this the passthrough keys
-    // remain stale from a previously focused window.
-    update_passthrough(window, app, &config);
+        // Always keep passthrough in sync. An internal focus_entity call races
+        // with the OS WindowFocused event; without this the passthrough keys
+        // remain stale from a previously focused window.
+        update_passthrough(window, app, &config);
 
-    if let Some((focused, _)) = windows.focused()
-        && focused.id() == window_id
-    {
-        return;
-    }
+        if let Some((focused, _)) = windows.focused()
+            && focused.id() == window_id
+        {
+            continue;
+        }
 
-    // Guard against stale focus events. Without these checks, delayed
-    // events (e.g. from RetryFrontSwitch or dont_focus re-assertions)
-    // can pull FocusedMarker back to an old window after focus has moved on.
-    //
-    // 1. Cross-app: skip if the window's app is no longer frontmost.
-    // 2. Same-app: skip if the app's current focused window differs from
-    //    this event's window_id (the event is outdated).
-    if !app.is_frontmost() {
-        return;
-    }
-    if app.focused_window_id().is_ok_and(|id| id != window_id) {
-        return;
-    }
+        // Guard against stale focus events. Without these checks, delayed
+        // events (e.g. from RetryFrontSwitch or dont_focus re-assertions)
+        // can pull FocusedMarker back to an old window after focus has moved on.
+        //
+        // 1. Cross-app: skip if the window's app is no longer frontmost.
+        // 2. Same-app: skip if the app's current focused window differs from
+        //    this event's window_id (the event is outdated).
+        if !app.is_frontmost() {
+            continue;
+        }
+        if app.focused_window_id().is_ok_and(|id| id != window_id) {
+            continue;
+        }
 
-    // Handle tab switching: if the focused window is a tab, make it the leader.
-    let layout_strip = active_display.active_strip();
-    if let Ok(index) = layout_strip.index_of(entity)
-        && let Some(column) = layout_strip.get_column_mut(index)
-    {
-        column.move_to_front(entity);
-    }
+        // Handle tab switching: if the focused window is a tab, make it the leader.
+        let layout_strip = active_display.active_strip();
+        if let Ok(index) = layout_strip.index_of(entity)
+            && let Some(column) = layout_strip.get_column_mut(index)
+        {
+            column.move_to_front(entity);
+        }
 
-    if let Ok(mut entity_commands) = commands.get_entity(entity) {
-        entity_commands.try_insert(FocusedMarker);
-        debug!("window {} ({entity}) focused.", window.id());
+        if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            entity_commands.try_insert(FocusedMarker);
+            debug!("window {} ({entity}) focused.", window.id());
+        }
     }
 }
 
@@ -242,7 +250,7 @@ pub(super) fn window_focused_trigger(
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 pub(super) fn mission_control_trigger(
-    trigger: On<WMEventTrigger>,
+    mut messages: MessageReader<Event>,
     windows: Windows,
     mut workspaces: Query<(
         Entity,
@@ -254,45 +262,48 @@ pub(super) fn mission_control_trigger(
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
-    match trigger.event().0 {
-        Event::MissionControlShowAllWindows
-        | Event::MissionControlShowFrontWindows
-        | Event::MissionControlShowDesktop => {
-            mission_control_active.as_mut().0 = true;
-            for (entity, _, _, scroll) in workspaces {
-                if scroll.is_some() {
-                    commands.entity(entity).try_remove::<Scrolling>();
+    for event in messages.read() {
+        match event {
+            Event::MissionControlShowAllWindows
+            | Event::MissionControlShowFrontWindows
+            | Event::MissionControlShowDesktop => {
+                mission_control_active.as_mut().0 = true;
+                for (entity, _, _, scroll) in &workspaces {
+                    if scroll.is_some() {
+                        commands.entity(entity).try_remove::<Scrolling>();
+                    }
                 }
             }
-        }
-        Event::MissionControlExit => {
-            mission_control_active.as_mut().0 = false;
+            Event::MissionControlExit => {
+                mission_control_active.as_mut().0 = false;
 
-            // Check if some windows disappeared from the current workspace
-            // - e.g. they were moved away during mission control.
-            if let Some(mut active_strip) = workspaces
-                .iter_mut()
-                .find_map(|(_, strip, active, _)| active.then_some(strip))
-                && let Ok(present_windows) = window_manager.windows_in_workspace(active_strip.id())
-            {
-                let moved_windows = active_strip
-                    .all_windows()
-                    .into_iter()
-                    .filter_map(|entity| windows.get(entity).zip(Some(entity)))
-                    .filter(|(window, _)| !present_windows.contains(&window.id()));
-                for (window, entity) in moved_windows {
-                    debug!(
-                        "window {} {entity} moved, removing from workspace {}",
-                        window.id(),
-                        active_strip.id(),
-                    );
-                    // Simply removing them from the current strip is enough,
-                    // they will be re-detected during the workspace change.
-                    active_strip.remove(entity);
+                // Check if some windows disappeared from the current workspace
+                // - e.g. they were moved away during mission control.
+                if let Some(mut active_strip) = workspaces
+                    .iter_mut()
+                    .find_map(|(_, strip, active, _)| active.then_some(strip))
+                    && let Ok(present_windows) =
+                        window_manager.windows_in_workspace(active_strip.id())
+                {
+                    let moved_windows = active_strip
+                        .all_windows()
+                        .into_iter()
+                        .filter_map(|entity| windows.get(entity).zip(Some(entity)))
+                        .filter(|(window, _)| !present_windows.contains(&window.id()));
+                    for (window, entity) in moved_windows {
+                        debug!(
+                            "window {} {entity} moved, removing from workspace {}",
+                            window.id(),
+                            active_strip.id(),
+                        );
+                        // Simply removing them from the current strip is enough,
+                        // they will be re-detected during the workspace change.
+                        active_strip.remove(entity);
+                    }
                 }
             }
+            _ => (),
         }
-        _ => (),
     }
 }
 
@@ -305,7 +316,7 @@ pub(super) fn mission_control_trigger(
 /// * `commands` - Bevy commands to spawn or despawn entities.
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn application_event_trigger(
-    trigger: On<WMEventTrigger>,
+    mut messages: MessageReader<Event>,
     processes: Query<(&BProcess, Entity)>,
     mut commands: Commands,
 ) {
@@ -313,28 +324,30 @@ pub(super) fn application_event_trigger(
     let find_process = |psn| {
         processes
             .iter()
-            .find(|(BProcess(process), _)| &process.psn() == psn)
+            .find(|(BProcess(process), _)| process.psn() == psn)
     };
 
-    match &trigger.event().0 {
-        Event::ApplicationLaunched { psn, observer } if find_process(psn).is_none() => {
-            let process: BProcess = Process::new(psn, observer.clone()).into();
-            let timeout = Timeout::new(
-                Duration::from_secs(PROCESS_READY_TIMEOUT_SEC),
-                Some(format!(
-                    "Process '{}' did not become ready in {PROCESS_READY_TIMEOUT_SEC}s.",
-                    process.name()
-                )),
-            );
-            commands.spawn((FreshMarker, timeout, process));
-        }
-
-        Event::ApplicationTerminated { psn } => {
-            if let Some((_, entity)) = find_process(psn) {
-                commands.entity(entity).despawn();
+    for event in messages.read() {
+        match event {
+            Event::ApplicationLaunched { psn, observer } if find_process(*psn).is_none() => {
+                let process: BProcess = Process::new(psn, observer.clone()).into();
+                let timeout = Timeout::new(
+                    Duration::from_secs(PROCESS_READY_TIMEOUT_SEC),
+                    Some(format!(
+                        "Process '{}' did not become ready in {PROCESS_READY_TIMEOUT_SEC}s.",
+                        process.name()
+                    )),
+                );
+                commands.spawn((FreshMarker, timeout, process));
             }
+
+            Event::ApplicationTerminated { psn } => {
+                if let Some((_, entity)) = find_process(*psn) {
+                    commands.entity(entity).despawn();
+                }
+            }
+            _ => (),
         }
-        _ => (),
     }
 }
 
@@ -349,7 +362,7 @@ pub(super) fn application_event_trigger(
 /// * `commands` - Bevy commands to spawn or despawn entities.
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn dispatch_application_messages(
-    trigger: On<WMEventTrigger>,
+    mut messages: MessageReader<Event>,
     windows: Windows,
     applications: Query<(&Application, &Children)>,
     unmanaged_query: Query<&Unmanaged>,
@@ -357,49 +370,53 @@ pub(super) fn dispatch_application_messages(
 ) {
     let find_window = |window_id| windows.find(window_id);
 
-    match &trigger.event().0 {
-        Event::WindowMinimized { window_id } => {
-            if let Some((_, entity)) = find_window(*window_id) {
-                commands.entity(entity).try_insert(Unmanaged::Minimized);
-            }
-        }
-
-        Event::WindowDeminimized { window_id } => {
-            if let Some((_, entity)) = find_window(*window_id)
-                && matches!(unmanaged_query.get(entity), Ok(Unmanaged::Minimized))
-            {
-                commands.entity(entity).try_remove::<Unmanaged>();
-            }
-        }
-
-        Event::ApplicationHidden { pid } => {
-            let Some((_, children)) = applications.iter().find(|(app, _)| app.pid() == *pid) else {
-                warn!("Unable to find with pid {pid}");
-                return;
-            };
-            for entity in children {
-                // Only hide windows that are currently managed (no Unmanaged component).
-                // Preserve existing Floating, Minimized, and Hidden states.
-                if unmanaged_query.get(*entity).is_err() {
-                    commands.entity(*entity).try_insert(Unmanaged::Hidden);
+    for event in messages.read() {
+        match event {
+            Event::WindowMinimized { window_id } => {
+                if let Some((_, entity)) = find_window(*window_id) {
+                    commands.entity(entity).try_insert(Unmanaged::Minimized);
                 }
             }
-        }
 
-        Event::ApplicationVisible { pid } => {
-            let Some((_, children)) = applications.iter().find(|(app, _)| app.pid() == *pid) else {
-                warn!("Unable to find application with pid {pid}");
-                return;
-            };
-            for entity in children {
-                // Only restore windows that were hidden by the app hide/show cycle.
-                // Preserve Floating and Minimized states.
-                if matches!(unmanaged_query.get(*entity), Ok(Unmanaged::Hidden)) {
-                    commands.entity(*entity).try_remove::<Unmanaged>();
+            Event::WindowDeminimized { window_id } => {
+                if let Some((_, entity)) = find_window(*window_id)
+                    && matches!(unmanaged_query.get(entity), Ok(Unmanaged::Minimized))
+                {
+                    commands.entity(entity).try_remove::<Unmanaged>();
                 }
             }
+
+            Event::ApplicationHidden { pid } => {
+                let Some((_, children)) = applications.iter().find(|(app, _)| app.pid() == *pid)
+                else {
+                    warn!("Unable to find with pid {pid}");
+                    continue;
+                };
+                for entity in children {
+                    // Only hide windows that are currently managed (no Unmanaged component).
+                    // Preserve existing Floating, Minimized, and Hidden states.
+                    if unmanaged_query.get(*entity).is_err() {
+                        commands.entity(*entity).try_insert(Unmanaged::Hidden);
+                    }
+                }
+            }
+
+            Event::ApplicationVisible { pid } => {
+                let Some((_, children)) = applications.iter().find(|(app, _)| app.pid() == *pid)
+                else {
+                    warn!("Unable to find application with pid {pid}");
+                    continue;
+                };
+                for entity in children {
+                    // Only restore windows that were hidden by the app hide/show cycle.
+                    // Preserve Floating and Minimized states.
+                    if matches!(unmanaged_query.get(*entity), Ok(Unmanaged::Hidden)) {
+                        commands.entity(*entity).try_remove::<Unmanaged>();
+                    }
+                }
+            }
+            _ => (),
         }
-        _ => (),
     }
 }
 
@@ -622,47 +639,49 @@ pub(super) fn window_managed_trigger(
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn window_destroyed_trigger(
-    trigger: On<WMEventTrigger>,
+    mut messages: MessageReader<Event>,
     windows: Windows,
     active_display: ActiveDisplay,
     mut apps: Query<&mut Application>,
     mut config: GlobalState,
     mut commands: Commands,
 ) {
-    let Event::WindowDestroyed { window_id } = trigger.event().0 else {
-        return;
-    };
+    for event in messages.read() {
+        let Event::WindowDestroyed { window_id } = event else {
+            continue;
+        };
 
-    let Some((window, entity, parent)) = windows.find_parent(window_id) else {
-        debug!("Duplicate event: window {window_id} already destroyed.");
-        return;
-    };
-    if window.role().is_ok() {
-        debug!("Window still present, this was SLS workspace change.");
-        return;
+        let Some((window, entity, parent)) = windows.find_parent(*window_id) else {
+            debug!("Duplicate event: window {window_id} already destroyed.");
+            continue;
+        };
+        if window.role().is_ok() {
+            debug!("Window still present, this was SLS workspace change.");
+            continue;
+        }
+
+        let Ok(mut app) = apps.get_mut(parent) else {
+            error!("Window {} has no parent!", window.id());
+            continue;
+        };
+        app.unobserve_window(window);
+
+        give_away_focus(
+            entity,
+            &windows,
+            active_display.active_strip(),
+            &active_display.bounds(),
+            &mut config,
+            &mut commands,
+        );
+
+        // NOTE: If the entity had an Unmanaged marker, despawning it will cause it to be re-inserted
+        // into the strip again. Therefore we do it just before despawning the entity itself, so it
+        // then can be properly removed again in the main entity despawn trigger.
+        commands.entity(entity).remove::<Unmanaged>().despawn();
+
+        // The window entity will be removed from the layout strip in the On<Remove> trigger.
     }
-
-    let Ok(mut app) = apps.get_mut(parent) else {
-        error!("Window {} has no parent!", window.id());
-        return;
-    };
-    app.unobserve_window(window);
-
-    give_away_focus(
-        entity,
-        &windows,
-        active_display.active_strip(),
-        &active_display.bounds(),
-        &mut config,
-        &mut commands,
-    );
-
-    // NOTE: If the entity had an Unmanaged marker, despawning it will cause it to be re-inserted
-    // into the strip again. Therefore we do it just before despawning the entity itself, so it
-    // then can be properly removed again in the main entity despawn trigger.
-    commands.entity(entity).remove::<Unmanaged>().despawn();
-
-    // The window entity will be removed from the layout strip in the On<Remove> trigger.
 }
 
 /// Moves the focus away to a neighbour window.
@@ -966,71 +985,76 @@ pub(super) fn apply_window_properties(
 
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn refresh_configuration_trigger(
-    trigger: On<WMEventTrigger>,
+    mut messages: MessageReader<Event>,
     window_manager: Res<WindowManager>,
     mut config: ResMut<Config>,
-    watcher: Option<NonSendMut<Box<dyn Watcher>>>,
+    mut watcher: Option<NonSendMut<Box<dyn Watcher>>>,
     windows: Windows,
     mut displays: Query<&mut Display>,
     applications: Query<&Application>,
 ) {
-    let Event::ConfigRefresh(event) = &trigger.event().0 else {
-        return;
-    };
-    let Some(mut watcher) = watcher else {
-        return;
-    };
+    for event in messages.read() {
+        let Event::ConfigRefresh(event) = event else {
+            continue;
+        };
 
-    match &event.kind {
-        EventKind::Modify(
-            // When using the RecommendedWatcher, the event triggers on file data.
-            // When using PollWatcher, it triggers on modification time.
-            ModifyKind::Metadata(MetadataKind::WriteTime) | ModifyKind::Data(DataChange::Content),
-        ) => (),
-        EventKind::Remove(_) => {
-            for path in &event.paths {
-                _ = watcher.unwatch(path).inspect_err(|err| {
-                    error!("unwatching the config '{}': {err}", path.display());
-                });
+        let Some(ref mut watcher) = watcher else {
+            continue;
+        };
+
+        match &event.kind {
+            EventKind::Modify(
+                // When using the RecommendedWatcher, the event triggers on file data.
+                // When using PollWatcher, it triggers on modification time.
+                ModifyKind::Metadata(MetadataKind::WriteTime)
+                | ModifyKind::Data(DataChange::Content),
+            ) => (),
+            EventKind::Remove(_) => {
+                for path in &event.paths {
+                    _ = watcher.unwatch(path).inspect_err(|err| {
+                        error!("unwatching the config '{}': {err}", path.display());
+                    });
+                }
+                continue;
             }
-            return;
+            _ => continue,
         }
-        _ => return,
-    }
 
-    for path in &event.paths {
-        if let Some(symlink) = symlink_target(path) {
-            debug!(
-                "symlink '{}' changed, replacing the watcher.",
-                symlink.display()
-            );
-            if let Ok(new_watcher) = window_manager
-                .setup_config_watcher(path)
-                .inspect_err(|err| {
-                    error!("watching the config '{}': {err}", path.display());
-                })
-            {
-                *watcher = new_watcher;
+        for path in &event.paths {
+            if let Some(symlink) = symlink_target(path) {
+                debug!(
+                    "symlink '{}' changed, replacing the watcher.",
+                    symlink.display()
+                );
+                if let Ok(new_watcher) =
+                    window_manager
+                        .setup_config_watcher(path)
+                        .inspect_err(|err| {
+                            error!("watching the config '{}': {err}", path.display());
+                        })
+                {
+                    **watcher = new_watcher;
+                }
             }
+            info!("Reloading configuration file; {}", path.display());
+            _ = config.reload_config(path.as_path()).inspect_err(|err| {
+                error!("loading config '{}': {err}", path.display());
+            });
         }
-        info!("Reloading configuration file; {}", path.display());
-        _ = config.reload_config(path.as_path()).inspect_err(|err| {
-            error!("loading config '{}': {err}", path.display());
-        });
-    }
 
-    let height = config.menubar_height();
-    for mut display in &mut displays {
-        display.set_menubar_height_override(height);
-    }
+        let height = config.menubar_height();
+        for mut display in &mut displays {
+            display.set_menubar_height_override(height);
+        }
 
-    // Recompute passthrough keys for the currently focused window.
-    if let Some((window, _, parent)) = windows
-        .focused()
-        .and_then(|(w, e)| windows.find_parent(w.id()).map(|(w, _, p)| (w, e, p)))
-        && let Ok(app) = applications.get(parent)
-    {
-        update_passthrough(window, app, &config);
+        // Recompute passthrough keys for the currently focused window.
+        if let Some((window, _, parent)) = windows
+            .focused()
+            .and_then(|(w, e)| windows.find_parent(w.id()).map(|(w, _, p)| (w, e, p)))
+            && let Ok(app) = applications.get(parent)
+        {
+            update_passthrough(window, app, &config);
+        }
     }
 }
 

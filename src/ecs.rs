@@ -144,21 +144,26 @@ pub fn register_systems(app: &mut bevy::app::App) {
 
 /// Registers all the event triggers for the window manager.
 pub fn register_triggers(app: &mut bevy::app::App) {
-    app.add_observer(triggers::front_switched_trigger)
-        .add_observer(triggers::window_focused_trigger)
-        .add_observer(triggers::mission_control_trigger)
-        .add_observer(triggers::application_event_trigger)
-        .add_observer(triggers::dispatch_application_messages)
-        .add_observer(triggers::window_destroyed_trigger)
-        .add_observer(triggers::window_unmanaged_trigger)
+    app.add_systems(
+        Update,
+        (
+            triggers::front_switched_trigger,
+            triggers::window_focused_trigger,
+            triggers::mission_control_trigger,
+            triggers::application_event_trigger,
+            triggers::dispatch_application_messages,
+            triggers::window_destroyed_trigger,
+            triggers::refresh_configuration_trigger,
+            triggers::theme_change_trigger,
+        ),
+    );
+    app.add_observer(triggers::window_unmanaged_trigger)
         .add_observer(triggers::window_managed_trigger)
         .add_observer(triggers::window_minimized_trigger)
         .add_observer(triggers::spawn_window_trigger)
-        .add_observer(triggers::refresh_configuration_trigger)
         .add_observer(triggers::locate_dock_trigger)
         .add_observer(triggers::send_message_trigger)
         .add_observer(triggers::window_removal_trigger)
-        .add_observer(triggers::theme_change_trigger)
         .add_observer(triggers::apply_window_properties)
         .add_observer(triggers::restore_window_state);
 }

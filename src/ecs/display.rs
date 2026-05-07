@@ -2,7 +2,7 @@ use bevy::app::{App, Plugin, Update};
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::lifecycle::Add;
-use bevy::ecs::message::MessageReader;
+use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Has, With};
 use bevy::ecs::system::{Commands, Query, Res};
@@ -137,6 +137,12 @@ fn add_display(
         .find(|(display, _)| display.id() == display_id)
     else {
         error!("Unable to find added display id {display_id}!");
+        let retry_display = move |mut messages: MessageWriter<Event>| {
+            debug!("Retrying to add display {display_id}");
+            messages.write(Event::DisplayAdded { display_id });
+        };
+        let system_id = commands.register_system(retry_display);
+        Timeout::callback(Duration::from_secs(5), system_id, commands);
         return;
     };
 

@@ -353,7 +353,7 @@ fn windows_not_in_strips<F: Fn(WinID) -> Option<Entity>>(
 #[instrument(level = Level::DEBUG, skip_all)]
 fn find_orphaned_workspaces(
     orphans: Populated<(&LayoutStrip, Entity, &Timeout, Option<&ChildOf>), With<Timeout>>,
-    displays: Query<(&Display, Entity)>,
+    displays: Populated<(&Display, Entity)>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {

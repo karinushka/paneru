@@ -2,11 +2,12 @@ use bevy::app::{App, Plugin, Update};
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::lifecycle::Add;
-use bevy::ecs::message::MessageReader;
+use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Has, With};
-use bevy::ecs::system::{Commands, Query, Res};
+use bevy::ecs::system::{Commands, Local, Query, Res};
 use bevy::math::IRect;
+use bevy::platform::collections::HashSet;
 use objc2_core_graphics::CGDirectDisplayID;
 use std::time::Duration;
 use tracing::{Level, debug, error, instrument};
@@ -89,6 +90,7 @@ pub(crate) fn displays_rearranged(
     mut displays: Query<(&mut Display, Entity)>,
     window_manager: Res<WindowManager>,
     config: Res<Config>,
+    mut retries: Local<HashSet<CGDirectDisplayID>>,
     mut commands: Commands,
 ) {
     for event in messages.read() {
@@ -99,6 +101,7 @@ pub(crate) fn displays_rearranged(
                     &workspaces,
                     &window_manager,
                     &config,
+                    &mut retries,
                     &mut commands,
                 );
             }
@@ -127,6 +130,7 @@ fn add_display(
     existing_strips: &Query<(&LayoutStrip, Entity, Option<&ChildOf>)>,
     window_manager: &WindowManager,
     config: &Config,
+    retries: &mut HashSet<CGDirectDisplayID>,
     commands: &mut Commands,
 ) {
     debug!("Display Added: {display_id:?}");
@@ -137,6 +141,16 @@ fn add_display(
         .find(|(display, _)| display.id() == display_id)
     else {
         error!("Unable to find added display id {display_id}!");
+        if retries.insert(display_id) {
+            let retry_display = move |mut messages: MessageWriter<Event>| {
+                debug!("Retrying to add display {display_id}");
+                messages.write(Event::DisplayAdded { display_id });
+            };
+            let system_id = commands.register_system(retry_display);
+            Timeout::callback(Duration::from_secs(5), system_id, commands);
+        } else {
+            retries.remove(&display_id);
+        }
         return;
     };
 

@@ -19,7 +19,7 @@ use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
     ActiveDisplayMarker, BProcess, ExistingMarker, FreshMarker, PollForNotifications,
-    RepositionMarker, ResizeMarker, RetryFrontSwitch, SpawnWindowTrigger, Timeout, WMEventTrigger,
+    RepositionMarker, ResizeMarker, RetryFrontSwitch, SpawnWindowTrigger, Timeout,
 };
 
 use crate::config::{Config, decorations::BorderRadiusOption};
@@ -28,7 +28,8 @@ use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, BruteforceWindows, FlashMessage, Initializing,
     LocateDockTrigger, LowPowerMode, MissionControlActive, Position, RestoreWindowState, Scrolling,
-    SelectedVirtualMarker, Unmanaged, WidthRatio, WindowProperties, focus_entity,
+    SelectedVirtualMarker, SendMessageTrigger, Unmanaged, WidthRatio, WindowProperties,
+    focus_entity,
 };
 use crate::events::Event;
 use crate::manager::{
@@ -66,14 +67,11 @@ pub(super) fn dispatch_toplevel_triggers(
                 }
             }
 
-            Event::SpaceChanged => {
-                if broken_notifications.is_some() {
-                    info!(
-                        "Workspace and display notifications arriving correctly. Disabling the polling.",
-                    );
-                    commands.remove_resource::<PollForNotifications>();
-                }
-                commands.trigger(WMEventTrigger(event.clone()));
+            Event::SpaceChanged if broken_notifications.is_some() => {
+                info!(
+                    "Workspace and display notifications arriving correctly. Disabling the polling.",
+                );
+                commands.remove_resource::<PollForNotifications>();
             }
 
             Event::WindowTitleChanged { window_id } => {
@@ -92,7 +90,7 @@ pub(super) fn dispatch_toplevel_triggers(
                 debug!("system woke: {msg:?}");
             }
 
-            _ => commands.trigger(WMEventTrigger(event.clone())),
+            _ => (),
         }
     }
 }
@@ -487,7 +485,7 @@ pub(super) fn retry_front_switch(
         }
         if let Ok(focused_id) = app.focused_window_id() {
             debug!("Front switch retry succeeded for window {focused_id}.");
-            commands.trigger(WMEventTrigger(Event::WindowFocused {
+            commands.trigger(SendMessageTrigger(Event::WindowFocused {
                 window_id: focused_id,
             }));
             if let Ok(mut entity_commands) = commands.get_entity(entity) {
@@ -501,13 +499,6 @@ pub(super) fn retry_front_switch(
 /// Periodically checks for displays added and removed, as well as changes in the active display.
 /// This system acts as a workaround for inconsistent display change notifications on some macOS versions.
 /// It uses `ThrottledSystem` to limit its execution frequency.
-///
-/// # Arguments
-///
-/// * `displays` - A query for all `Display` entities, including whether they have the `ActiveDisplayMarker`.
-/// * `window_manager` - The `WindowManager` resource for querying active display information.
-/// * `throttle` - A `ThrottledSystem` to control the execution rate of this system.
-/// * `commands` - Bevy commands to trigger `WMEventTrigger` events for display changes.
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn display_changes_watcher(
     displays: Query<(&Display, Has<ActiveDisplayMarker>)>,
@@ -525,10 +516,10 @@ pub(super) fn display_changes_watcher(
             return;
         }
         debug!("detected dislay change from {current_display_id}.");
-        commands.trigger(WMEventTrigger(Event::DisplayChanged));
+        commands.trigger(SendMessageTrigger(Event::DisplayChanged));
     } else {
         debug!("new display {current_display_id} detected.");
-        commands.trigger(WMEventTrigger(Event::DisplayAdded {
+        commands.trigger(SendMessageTrigger(Event::DisplayAdded {
             display_id: current_display_id,
         }));
     }
@@ -541,7 +532,7 @@ pub(super) fn display_changes_watcher(
         {
             let display_id = display.id();
             debug!("detected removal of display {display_id}");
-            commands.trigger(WMEventTrigger(Event::DisplayRemoved {
+            commands.trigger(SendMessageTrigger(Event::DisplayRemoved {
                 display_id: display.id(),
             }));
         }

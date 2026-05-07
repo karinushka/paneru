@@ -14,14 +14,14 @@ use std::collections::HashSet;
 use std::time::Duration;
 use tracing::{Level, debug, error, instrument, warn};
 
-use super::{ActiveDisplayMarker, SpawnWindowTrigger, WMEventTrigger};
+use super::{ActiveDisplayMarker, SpawnWindowTrigger};
 use crate::commands::{Direction, MoveFocus, Operation, filter_window_operations};
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, Initializing, NativeFullscreenMarker, Position,
-    RefreshWindowSizes, SelectedVirtualMarker, Timeout, Unmanaged, flash_message, focus_entity,
-    reposition_entity, reshuffle_around,
+    RefreshWindowSizes, SelectedVirtualMarker, SendMessageTrigger, Timeout, Unmanaged,
+    flash_message, focus_entity, reposition_entity, reshuffle_around,
 };
 use crate::errors::Result;
 use crate::events::Event;
@@ -42,6 +42,9 @@ impl Plugin for WorkspaceEventsPlugin {
         app.add_systems(
             Update,
             (
+                workspace_change_trigger,
+                workspace_created_trigger,
+                workspace_destroyed_trigger,
                 show_active_workspace,
                 handle_virtual_window_moves,
                 detect_moved_windows.run_if(not(resource_exists::<Initializing>)),
@@ -55,12 +58,8 @@ impl Plugin for WorkspaceEventsPlugin {
                     ))),
             ),
         );
-
         app.add_observer(cleanup_active_workspace_marker)
-            .add_observer(cleanup_selected_space_marker)
-            .add_observer(workspace_change_trigger)
-            .add_observer(workspace_created_trigger)
-            .add_observer(workspace_destroyed_trigger);
+            .add_observer(cleanup_selected_space_marker);
     }
 }
 
@@ -80,7 +79,7 @@ pub(crate) struct PreviousStripPosition {
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn workspace_change_trigger(
-    trigger: On<WMEventTrigger>,
+    mut messages: MessageReader<Event>,
     windows: Windows,
     mut workspaces: Query<(
         &mut LayoutStrip,
@@ -92,9 +91,12 @@ fn workspace_change_trigger(
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
-    let Event::SpaceChanged = trigger.event().0 else {
+    if !messages
+        .read()
+        .any(|event| matches!(event, Event::SpaceChanged))
+    {
         return;
-    };
+    }
     let (active_display, display_entity) = *active_display;
 
     let Ok(workspace_id) = window_manager.active_display_space(active_display.id()) else {
@@ -255,72 +257,78 @@ fn detect_moved_windows(
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn workspace_destroyed_trigger(
-    trigger: On<WMEventTrigger>,
+    mut messages: MessageReader<Event>,
     mut workspaces: Populated<(&mut LayoutStrip, Entity, Option<&NativeFullscreenMarker>)>,
     mut commands: Commands,
 ) {
-    let Event::SpaceDestroyed { space_id } = trigger.event().0 else {
-        return;
-    };
+    for event in messages.read() {
+        let Event::SpaceDestroyed { space_id } = event else {
+            continue;
+        };
 
-    let Some((entity, fullscreen)) = workspaces.iter().find_map(|(strip, entity, fullscreen)| {
-        let window = strip.first().ok().and_then(|col| col.top());
-        (strip.id() == space_id).then_some((entity, window.zip(fullscreen.cloned())))
-    }) else {
-        return;
-    };
+        let Some((entity, fullscreen)) =
+            workspaces.iter().find_map(|(strip, entity, fullscreen)| {
+                let window = strip.first().ok().and_then(|col| col.top());
+                (strip.id() == *space_id).then_some((entity, window.zip(fullscreen.cloned())))
+            })
+        else {
+            continue;
+        };
 
-    if let Some((
-        window,
-        NativeFullscreenMarker {
-            previous_strip,
-            previous_index,
-        },
-    )) = fullscreen
-        && let Some((mut strip, _, _)) = workspaces
-            .iter_mut()
-            .find(|(strip, _, _)| strip.id() == previous_strip)
-    {
-        debug!(
-            "previously fullscreened window {entity} inserted at {}",
-            previous_index
-        );
-        strip.insert_at(previous_index, window);
-        reshuffle_around(window, &mut commands);
-    }
+        if let Some((
+            window,
+            NativeFullscreenMarker {
+                previous_strip,
+                previous_index,
+            },
+        )) = fullscreen
+            && let Some((mut strip, _, _)) = workspaces
+                .iter_mut()
+                .find(|(strip, _, _)| strip.id() == previous_strip)
+        {
+            debug!(
+                "previously fullscreened window {entity} inserted at {}",
+                previous_index
+            );
+            strip.insert_at(previous_index, window);
+            reshuffle_around(window, &mut commands);
+        }
 
-    if let Ok(mut entity_commands) = commands.get_entity(entity) {
-        debug!("Workspace destroyed {space_id} {entity}");
-        entity_commands.try_despawn();
+        if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            debug!("Workspace destroyed {space_id} {entity}");
+            entity_commands.try_despawn();
+        }
     }
 }
 
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn workspace_created_trigger(
-    trigger: On<WMEventTrigger>,
+    mut messages: MessageReader<Event>,
     active_display: Single<(&Display, Entity), With<ActiveDisplayMarker>>,
     workspaces: Query<&LayoutStrip>,
     mut commands: Commands,
 ) {
-    let Event::SpaceCreated { space_id } = trigger.event().0 else {
-        return;
-    };
+    for event in messages.read() {
+        let Event::SpaceCreated { space_id } = event else {
+            continue;
+        };
 
-    if workspaces.into_iter().any(|strip| strip.id() == space_id) {
-        warn!("Workspace {space_id} already exists!");
-        return;
+        if workspaces.into_iter().any(|strip| strip.id() == *space_id) {
+            warn!("Workspace {space_id} already exists!");
+            continue;
+        }
+        debug!("Workspace create {space_id}");
+        let (active_display, display_entity) = *active_display;
+        let strip = LayoutStrip::new(*space_id, 0);
+        let origin = Position(active_display.bounds().min);
+        commands.spawn((
+            strip,
+            origin,
+            SelectedVirtualMarker,
+            ChildOf(display_entity),
+        ));
     }
-    debug!("Workspace create {space_id}");
-    let (active_display, display_entity) = *active_display;
-    let strip = LayoutStrip::new(space_id, 0);
-    let origin = Position(active_display.bounds().min);
-    commands.spawn((
-        strip,
-        origin,
-        SelectedVirtualMarker,
-        ChildOf(display_entity),
-    ));
 }
 
 fn windows_not_in_strips<F: Fn(WinID) -> Option<Entity>>(
@@ -481,14 +489,6 @@ fn refresh_workspace_window_sizes(
 /// Periodically checks for changes in the active workspace (space) on the active display.
 /// This system acts as a workaround for inconsistent workspace change notifications on some macOS versions.
 /// If a change is detected, it triggers an `Event::SpaceChanged` event.
-///
-/// # Arguments
-///
-/// * `active_display` - An `ActiveDisplay` system parameter providing immutable access to the active display.
-/// * `window_manager` - The `WindowManager` resource for querying active space information.
-/// * `throttle` - A `ThrottledSystem` to control the execution rate of this system.
-/// * `current_space` - A `Local` resource storing the ID of the currently observed space.
-/// * `commands` - Bevy commands to trigger `WMEventTrigger` events for space changes.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn workspace_change_watcher(
     active_display: ActiveDisplay,
@@ -507,7 +507,7 @@ pub(crate) fn workspace_change_watcher(
     if *current_space != space_id {
         *current_space = space_id;
         debug!("workspace changed to {space_id}");
-        commands.trigger(WMEventTrigger(Event::SpaceChanged));
+        commands.trigger(SendMessageTrigger(Event::SpaceChanged));
     }
 }
 

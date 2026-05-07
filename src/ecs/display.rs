@@ -184,6 +184,7 @@ fn remove_display(
                 "Orphaned strip {} ({strip}) could not be re-inserted after {ORPHANED_SPACES_TIMEOUT_SEC}s.",
                 strip.id()
             )),
+            commands,
         );
         if let Ok(mut commands) = commands.get_entity(entity) {
             commands.try_insert(timeout);

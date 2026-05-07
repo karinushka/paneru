@@ -6,7 +6,7 @@ use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::query::{Changed, Has, Or, With, Without};
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::schedule::common_conditions::{not, resource_exists};
-use bevy::ecs::system::{ParallelCommands, Populated, Query, Res};
+use bevy::ecs::system::{Commands, Populated, Query, Res};
 use bevy::math::IRect;
 use std::collections::VecDeque;
 use stdext::function_name;
@@ -732,9 +732,9 @@ fn layout_sizes_changed(
             (Changed<Position>, With<Window>),
         )>,
     >,
-    mut workspaces: Query<&mut LayoutStrip>,
+    workspaces: Query<&mut LayoutStrip>,
 ) {
-    workspaces.par_iter_mut().for_each(|mut strip| {
+    workspaces.into_iter().for_each(|mut strip| {
         if changed_sizes.iter().any(|entity| strip.contains(entity)) {
             strip.set_changed();
         }
@@ -795,14 +795,12 @@ fn reshuffle_layout_strip(
     displays: Query<(&Display, Option<&DockPosition>)>,
     windows: Windows,
     config: Res<Config>,
-    commands: ParallelCommands,
+    mut commands: Commands,
 ) {
-    markers.par_iter().for_each(|(entity, layout_position)| {
-        commands.command_scope(|mut command| {
-            if let Ok(mut cmd) = command.get_entity(entity) {
-                cmd.try_remove::<ReshuffleAroundMarker>();
-            }
-        });
+    markers.into_iter().for_each(|(entity, layout_position)| {
+        if let Ok(mut cmd) = commands.get_entity(entity) {
+            cmd.try_remove::<ReshuffleAroundMarker>();
+        }
         let Some((_, strip_entity, active_strip, child)) =
             strips.into_iter().find(|strip| strip.0.contains(entity))
         else {
@@ -845,9 +843,7 @@ fn reshuffle_layout_strip(
         }
 
         trace!("reshuffle_layout_strip: triggered for entity {entity}, offset {strip_position}");
-        commands.command_scope(|mut command| {
-            reposition_entity(strip_entity, strip_position, &mut command);
-        });
+        reposition_entity(strip_entity, strip_position, &mut commands);
     });
 }
 
@@ -873,7 +869,7 @@ fn position_layout_strips(
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all)]
 fn position_layout_windows(
-    mut positioned_windows: Populated<
+    positioned_windows: Populated<
         (Entity, &Window, &LayoutPosition, &mut Position, &mut Bounds),
         (Changed<LayoutPosition>, With<Window>, Without<LayoutStrip>),
     >,
@@ -884,7 +880,7 @@ fn position_layout_windows(
     let offscreen_sliver_width = config.sliver_width();
     let (_, pad_right, _, pad_left) = config.edge_padding();
 
-    positioned_windows.par_iter_mut().for_each(
+    positioned_windows.into_iter().for_each(
         |(entity, window, layout_position, mut position, mut bounds)| {
             let Some((layout_strip, Position(strip_position), swiping, child_of)) =
                 workspaces.iter().find(|strip| strip.0.contains(entity))

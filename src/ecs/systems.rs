@@ -555,7 +555,7 @@ pub(super) fn display_changes_watcher(
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn animate_entities(
-    mut animate: Populated<(&mut Position, Entity, &RepositionMarker)>,
+    animate: Populated<(&mut Position, Entity, &RepositionMarker)>,
     time: Res<Time>,
     config: Res<Config>,
     commands: ParallelCommands,
@@ -567,7 +567,7 @@ pub(super) fn animate_entities(
     let t = (1.0 - (-rate * time.delta_secs_f64()).exp()).clamp(0.0, 1.0) as f32;
 
     animate
-        .par_iter_mut()
+        .into_iter()
         .for_each(|(mut position, entity, RepositionMarker(origin))| {
             let target = origin.as_vec2();
             let current = position.0.as_vec2();
@@ -608,7 +608,7 @@ pub(super) fn animate_entities(
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn animate_resize_entities(
-    mut animate: Populated<(&mut Bounds, Entity, &ResizeMarker)>,
+    animate: Populated<(&mut Bounds, Entity, &ResizeMarker)>,
     time: Res<Time>,
     config: Res<Config>,
     commands: ParallelCommands,
@@ -618,7 +618,7 @@ pub(super) fn animate_resize_entities(
     let t = (1.0 - (-rate * time.delta_secs_f64()).exp()).clamp(0.0, 1.0) as f32;
 
     animate
-        .par_iter_mut()
+        .into_iter()
         .for_each(|(mut bounds, entity, ResizeMarker(size))| {
             let target = size.as_vec2();
             let current = bounds.0.as_vec2();

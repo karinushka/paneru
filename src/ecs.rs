@@ -33,7 +33,8 @@ use crate::menubar::MenuBarManager;
 use crate::overlay::{FlashMessageManager, OverlayManager};
 use crate::platform::{Modifiers, PlatformCallbacks, WinID, WorkspaceId};
 
-mod focus;
+pub mod display;
+pub mod focus;
 pub mod layout;
 pub mod mouse;
 pub mod params;
@@ -90,7 +91,6 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::fresh_marker_cleanup,
             systems::timeout_ticker,
             systems::retry_front_switch,
-            systems::displays_rearranged,
             systems::update_low_power_state
                 .run_if(resource_exists::<LowPowerMode>)
                 .run_if(on_timer(Duration::from_secs(LOW_POWER_MODE_CHECK_SEC))),
@@ -144,8 +144,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
 
 /// Registers all the event triggers for the window manager.
 pub fn register_triggers(app: &mut bevy::app::App) {
-    app.add_observer(triggers::display_change_trigger)
-        .add_observer(triggers::front_switched_trigger)
+    app.add_observer(triggers::front_switched_trigger)
         .add_observer(triggers::window_focused_trigger)
         .add_observer(triggers::mission_control_trigger)
         .add_observer(triggers::application_event_trigger)
@@ -161,8 +160,7 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::window_removal_trigger)
         .add_observer(triggers::theme_change_trigger)
         .add_observer(triggers::apply_window_properties)
-        .add_observer(triggers::restore_window_state)
-        .add_observer(triggers::cleanup_active_display_marker);
+        .add_observer(triggers::restore_window_state);
 }
 
 /// Marker component for the currently focused window.
@@ -441,6 +439,7 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         .add_plugins(workspace::WorkspaceEventsPlugin)
         .add_plugins(layout::LayoutEventsPlugin)
         .add_plugins(focus::FocusEventsPlugin)
+        .add_plugins(display::DisplayEventsPlugin)
         .add_plugins((register_triggers, register_systems, register_commands));
 
     let mut platform_callbacks = PlatformCallbacks::new(sender);

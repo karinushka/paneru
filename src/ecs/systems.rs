@@ -10,7 +10,6 @@ use bevy::math::IRect;
 use bevy::tasks::AsyncComputeTaskPool;
 use bevy::tasks::futures_lite::future;
 use bevy::time::Time;
-use objc2_core_graphics::CGDirectDisplayID;
 use objc2_foundation::NSPoint;
 use std::collections::HashSet;
 use std::pin::Pin;
@@ -28,18 +27,16 @@ use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, BruteforceWindows, FlashMessage, Initializing,
-    LocateDockTrigger, LowPowerMode, MissionControlActive, Position, RefreshWindowSizes,
-    RestoreWindowState, Scrolling, SelectedVirtualMarker, Unmanaged, WidthRatio, WindowProperties,
-    focus_entity,
+    LocateDockTrigger, LowPowerMode, MissionControlActive, Position, RestoreWindowState, Scrolling,
+    SelectedVirtualMarker, Unmanaged, WidthRatio, WindowProperties, focus_entity,
 };
 use crate::events::Event;
 use crate::manager::{
     Application, Display, Process, Window, WindowManager, WindowOS, bruteforce_windows,
 };
 use crate::overlay::{FlashMessageManager, OverlayManager};
-use crate::platform::{PlatformCallbacks, WorkspaceId};
+use crate::platform::PlatformCallbacks;
 
-const ORPHANED_SPACES_TIMEOUT_SEC: u64 = 30;
 const ANIAMTE_SNAP_THRESHOLD: f32 = 5.0;
 
 /// Processes a single incoming `Event`. It dispatches various event types to the `WindowManager` or other internal handlers.
@@ -769,197 +766,6 @@ pub(super) fn window_moved_update_frame(
         let old_frame = IRect::from_corners(position.0, position.0 + bounds.0);
         if old_frame.min != new_frame.min {
             position.0 = new_frame.min;
-        }
-    }
-}
-
-#[allow(clippy::needless_pass_by_value)]
-pub(super) fn displays_rearranged(
-    mut messages: MessageReader<Event>,
-    workspaces: Query<(&LayoutStrip, Entity, Option<&ChildOf>)>,
-    mut displays: Query<(&mut Display, Entity)>,
-    window_manager: Res<WindowManager>,
-    config: Res<Config>,
-    mut commands: Commands,
-) {
-    for event in messages.read() {
-        match event {
-            Event::DisplayAdded { display_id } => {
-                add_display(
-                    *display_id,
-                    &workspaces,
-                    &window_manager,
-                    &config,
-                    &mut commands,
-                );
-            }
-            Event::DisplayRemoved { display_id } => {
-                remove_display(*display_id, &workspaces, &mut displays, &mut commands);
-            }
-            Event::DisplayMoved { display_id } => {
-                move_display(
-                    *display_id,
-                    &mut displays,
-                    &window_manager,
-                    &workspaces,
-                    &config,
-                    &mut commands,
-                );
-            }
-            _ => continue,
-        }
-        commands.trigger(WMEventTrigger(Event::DisplayChanged));
-    }
-}
-
-fn add_display(
-    display_id: CGDirectDisplayID,
-    existing_strips: &Query<(&LayoutStrip, Entity, Option<&ChildOf>)>,
-    window_manager: &WindowManager,
-    config: &Config,
-    commands: &mut Commands,
-) {
-    debug!("Display Added: {display_id:?}");
-    let Some((mut display, workspace_ids)) = window_manager
-        .0
-        .present_displays()
-        .into_iter()
-        .find(|(display, _)| display.id() == display_id)
-    else {
-        error!("Unable to find added display id {display_id}!");
-        return;
-    };
-
-    display.set_menubar_height_override(config.menubar_height());
-    let display_bounds = display.bounds();
-    let display_entity = commands.spawn(display).id();
-
-    reparent_existing_workspaces(
-        &workspace_ids,
-        display_entity,
-        &display_bounds,
-        existing_strips,
-        commands,
-    );
-}
-
-fn remove_display(
-    display_id: CGDirectDisplayID,
-    workspaces: &Query<(&LayoutStrip, Entity, Option<&ChildOf>)>,
-    displays: &mut Query<(&mut Display, Entity)>,
-    commands: &mut Commands,
-) {
-    debug!("Display Removed: {display_id:?}");
-    let Some((display, display_entity)) = displays
-        .into_iter()
-        .find(|(display, _)| display.id() == display_id)
-    else {
-        error!("Unable to find removed display!");
-        return;
-    };
-
-    for (strip, entity, _) in workspaces
-        .into_iter()
-        .filter(|(_, _, child)| child.is_some_and(|child| child.parent() == display_entity))
-    {
-        let display_id = display.id();
-        debug!(
-            "orphaning strip {} after removal of display {display_id}.",
-            strip.id(),
-        );
-        let timeout = Timeout::new(
-            Duration::from_secs(ORPHANED_SPACES_TIMEOUT_SEC),
-            Some(format!(
-                "Orphaned strip {} ({strip}) could not be re-inserted after {ORPHANED_SPACES_TIMEOUT_SEC}s.",
-                strip.id()
-            )),
-        );
-        if let Ok(mut commands) = commands.get_entity(entity) {
-            commands.try_insert(timeout);
-        }
-        if let Ok(mut commands) = commands.get_entity(display_entity) {
-            commands.detach_child(entity);
-        }
-    }
-
-    if let Ok(mut commands) = commands.get_entity(display_entity) {
-        commands.despawn();
-    }
-}
-
-fn move_display(
-    display_id: CGDirectDisplayID,
-    displays: &mut Query<(&mut Display, Entity)>,
-    window_manager: &Res<WindowManager>,
-    existing_strips: &Query<(&LayoutStrip, Entity, Option<&ChildOf>)>,
-    config: &Config,
-    commands: &mut Commands,
-) {
-    debug!("Display Moved: {display_id:?}");
-    let Some((mut display, display_entity)) = displays
-        .iter_mut()
-        .find(|(display, _)| display.id() == display_id)
-    else {
-        error!("Unable to find moved display!");
-        return;
-    };
-    let Some((moved_display, workspace_ids)) = window_manager
-        .0
-        .present_displays()
-        .into_iter()
-        .find(|(display, _)| display.id() == display_id)
-    else {
-        return;
-    };
-    *display = moved_display;
-    display.set_menubar_height_override(config.menubar_height());
-
-    reparent_existing_workspaces(
-        &workspace_ids,
-        display_entity,
-        &display.bounds(),
-        existing_strips,
-        commands,
-    );
-}
-
-fn reparent_existing_workspaces(
-    workspace_ids: &[WorkspaceId],
-    display_entity: Entity,
-    display_bounds: &IRect,
-    existing_strips: &Query<(&LayoutStrip, Entity, Option<&ChildOf>)>,
-    commands: &mut Commands,
-) {
-    // Verifies that a moved display has all the workspaces which it owns.
-    for &id in workspace_ids {
-        let mut found = false;
-        for (strip, entity, child) in existing_strips {
-            if strip.id() == id {
-                found = true;
-                if child.is_none_or(|child| child.parent() != display_entity) {
-                    // Re-parent this workspace
-                    if let Ok(mut cmd) = commands.get_entity(entity) {
-                        debug!("reparenting workspace {id} to display {display_entity}");
-                        cmd.try_remove::<Timeout>()
-                            .try_remove::<ChildOf>()
-                            .insert(ChildOf(display_entity));
-
-                        cmd.insert(RefreshWindowSizes::default());
-                    }
-                }
-            }
-        }
-
-        if !found {
-            // New workspace.
-            let origin = Position(display_bounds.min);
-            debug!("new workspace {id} on display {display_entity}");
-            commands.spawn((
-                origin.clone(),
-                LayoutStrip::new(id, 0),
-                SelectedVirtualMarker,
-                ChildOf(display_entity),
-            ));
         }
     }
 }

@@ -9,6 +9,8 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use crate::commands::register_commands;
 use crate::config::Config;
+use crate::ecs::display::DisplayEventsPlugin;
+use crate::ecs::focus::FocusEventsPlugin;
 use crate::ecs::layout::LayoutEventsPlugin;
 use crate::ecs::mouse::MouseEventsPlugin;
 use crate::ecs::scroll::ScrollEventsPlugin;
@@ -135,7 +137,8 @@ pub(crate) fn setup_world() -> App {
         .add_plugins(ScrollEventsPlugin)
         .add_plugins(WorkspaceEventsPlugin)
         .add_plugins(LayoutEventsPlugin)
-        .add_plugins(MouseEventsPlugin)
+        .add_plugins(FocusEventsPlugin)
+        .add_plugins(DisplayEventsPlugin)
         .add_plugins((register_triggers, register_systems, register_commands));
 
     bevy_app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(

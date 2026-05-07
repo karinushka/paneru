@@ -72,7 +72,7 @@ expose the same following options:
 ```
 
 > [!NOTE]
-> After installing/updating paneru, macOS will prompt you to grant accessibilty permissions item in System Settings.
+> After installing/updating paneru, macOS will prompt you to grant accessibility permissions in System Settings.
 > You may have to manually restart the paneru service using `launchctl`:
 >
 > ```shell
@@ -81,7 +81,7 @@ expose the same following options:
 
 ### Other
 
-If neither nix-darwin nor Home Manager suites your usecase the flake provides the following packages:
+If neither nix-darwin nor Home Manager suits your use case, the flake provides the following packages:
 
 - `packages.<system>.paneru`
 - `packages.<system>.default` *(alias for `packages.<system>.paneru`)*

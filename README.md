@@ -100,7 +100,7 @@ $ cargo install --path .
 ```
 
 It can run directly from the command line or as a service.
-Note, that you will need to grant acessibility priviledge to the binary.
+Note that you will need to grant accessibility privileges to the binary.
 
 ### Installing with Homebrew
 

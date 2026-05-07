@@ -8,7 +8,7 @@ use bevy::ecs::message::Messages;
 use bevy::ecs::query::With;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::common_conditions::{not, resource_exists};
-use bevy::ecs::system::{Commands, Query, Res};
+use bevy::ecs::system::{Commands, Query, Res, SystemId};
 use bevy::prelude::Event as BevyEvent;
 use bevy::tasks::Task;
 use bevy::time::Timer;
@@ -277,8 +277,8 @@ pub struct BProcess(pub Box<dyn ProcessApi>);
 pub struct Timeout {
     /// The Bevy timer instance.
     pub timer: Timer,
-    /// An optional message associated with the timeout.
-    pub message: Option<String>,
+    /// An optional system to execute on timeout.
+    pub system_id: Option<SystemId>,
 }
 
 impl Timeout {
@@ -293,9 +293,30 @@ impl Timeout {
     /// # Returns
     ///
     /// A new `Timeout` instance.
-    pub fn new(duration: Duration, message: Option<String>) -> Self {
+    pub fn new(duration: Duration, message: Option<String>, commands: &mut Commands) -> Self {
         let timer = Timer::from_seconds(duration.as_secs_f32(), bevy::time::TimerMode::Once);
-        Self { timer, message }
+        if let Some(message) = message {
+            let callback = move || {
+                tracing::debug!("{message}");
+            };
+            let system_id = Some(commands.register_system(callback));
+
+            Self { timer, system_id }
+        } else {
+            Self {
+                timer,
+                system_id: None,
+            }
+        }
+    }
+
+    /// Creates an action timeout, which oneshots a provided system id.
+    pub fn callback(duration: Duration, system_id: SystemId, commands: &mut Commands) {
+        let timer = Timer::from_seconds(duration.as_secs_f32(), bevy::time::TimerMode::Once);
+        commands.spawn(Self {
+            timer,
+            system_id: Some(system_id),
+        });
     }
 }
 
@@ -416,7 +437,7 @@ pub fn focus_entity(entity: Entity, raise: bool, commands: &mut Commands) {
 }
 
 pub fn flash_message(message: String, duration: f32, commands: &mut Commands) {
-    let timeout = Timeout::new(Duration::from_secs_f32(duration), None);
+    let timeout = Timeout::new(Duration::from_secs_f32(duration), None, commands);
     commands.spawn((timeout, FlashMessage(message)));
 }
 

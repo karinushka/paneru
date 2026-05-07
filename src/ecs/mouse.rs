@@ -180,7 +180,7 @@ fn mouse_down_trigger(
         } else {
             // Defer reshuffle until mouse-up so the window doesn't shift
             // mid-click. The Timeout auto-despawns if mouse-up is lost.
-            let timeout = Timeout::new(Duration::from_secs(5), None);
+            let timeout = Timeout::new(Duration::from_secs(5), None, &mut commands);
             commands.spawn((MouseHeldMarker(entity), timeout));
         }
     }

@@ -113,6 +113,7 @@ pub(super) fn front_switched_trigger(
                     "Front switch retry for '{}' timed out.",
                     process.name()
                 )),
+                &mut commands,
             );
             commands.spawn((timeout, RetryFrontSwitch(app_entity)));
         }
@@ -191,7 +192,11 @@ pub(super) fn window_focused_trigger(
         };
 
         let Some((window, entity, parent)) = windows.find_parent(window_id) else {
-            let timeout = Timeout::new(Duration::from_secs(STRAY_FOCUS_RETRY_SEC), None);
+            let timeout = Timeout::new(
+                Duration::from_secs(STRAY_FOCUS_RETRY_SEC),
+                None,
+                &mut commands,
+            );
             commands.spawn((timeout, StrayFocusEvent(window_id)));
             continue;
         };
@@ -337,6 +342,7 @@ pub(super) fn application_event_trigger(
                         "Process '{}' did not become ready in {PROCESS_READY_TIMEOUT_SEC}s.",
                         process.name()
                     )),
+                    &mut commands,
                 );
                 commands.spawn((FreshMarker, timeout, process));
             }

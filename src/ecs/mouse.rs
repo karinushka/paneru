@@ -260,19 +260,23 @@ fn mouse_resize_trigger(
             continue;
         };
         let (strip_entity, strip, strip_position) = *active_workspace;
-        if !strip.contains(entity) {
-            continue;
-        }
+        let floating = !strip.contains(entity);
 
         let mut frame = window.frame();
         let center = frame.center();
 
         if pointer.x < center.x {
-            // Resize Left Edge: increase/decrease width AND shift the strip so the right edge stays
-            // anchored.
-            let mut origin = strip_position.0;
-            origin.x += dx;
-            reposition_entity(strip_entity, origin, &mut commands);
+            if floating && let Some(mut origin) = windows.origin(entity) {
+                // For floating windows, move the window itself.
+                origin.x += dx;
+                reposition_entity(entity, origin, &mut commands);
+            } else {
+                // Resize Left Edge: increase/decrease width AND shift the strip so the right edge stays
+                // anchored.
+                let mut origin = strip_position.0;
+                origin.x += dx;
+                reposition_entity(strip_entity, origin, &mut commands);
+            }
 
             frame.min.x += dx;
         } else {

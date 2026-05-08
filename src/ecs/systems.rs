@@ -940,19 +940,67 @@ pub(super) fn commit_window_size(
         });
 }
 
+/// Restores user-visible window state before Paneru shuts down: clears any
+/// brightness dim, removes the dim/border overlay window, and centers every
+/// managed window on the display its frame center falls in.
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn cleanup_on_exit(
     mut exit_events: MessageReader<AppExit>,
-    windows: Windows,
+    mut all_windows: Query<&mut Window>,
+    displays: Query<&Display>,
     window_manager: Res<WindowManager>,
+    mut overlay_mgr: Option<NonSendMut<OverlayManager>>,
 ) {
     for _ in exit_events.read() {
-        info!("Cleaning up before exit");
-        let ids = windows
-            .iter()
-            .map(|(window, _)| window.id())
-            .collect::<Vec<_>>();
+        let ids = all_windows.iter().map(|w| w.id()).collect::<Vec<_>>();
+        info!("exit cleanup: restoring {} window(s)", ids.len());
         window_manager.dim_windows(&ids, 0.0);
+
+        if let Some(ref mut overlay_mgr) = overlay_mgr {
+            overlay_mgr.remove_all();
+        }
+
+        let display_bounds = displays.iter().map(Display::bounds).collect::<Vec<_>>();
+        if display_bounds.is_empty() {
+            return;
+        }
+
+        for mut window in &mut all_windows {
+            let frame = window.frame();
+            let center = frame.center();
+            let bounds = display_bounds
+                .iter()
+                .find(|b| {
+                    center.x >= b.min.x
+                        && center.x <= b.max.x
+                        && center.y >= b.min.y
+                        && center.y <= b.max.y
+                })
+                .copied()
+                .unwrap_or(display_bounds[0]);
+
+            let mut size = frame.size();
+            if size.x > bounds.width() || size.y > bounds.height() {
+                let new_size = bevy::math::IVec2::new(
+                    size.x.min(bounds.width() * 9 / 10),
+                    size.y.min(bounds.height() * 9 / 10),
+                );
+                window.resize(new_size);
+                size = new_size;
+            }
+
+            let origin = bevy::math::IVec2::new(
+                bounds.min.x + (bounds.width() - size.x) / 2,
+                bounds.min.y + (bounds.height() - size.y) / 2,
+            );
+            info!(
+                "exit cleanup: window {} -> origin {:?}, size {:?}",
+                window.id(),
+                origin,
+                size
+            );
+            window.reposition(origin);
+        }
     }
 }
 

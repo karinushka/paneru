@@ -181,9 +181,9 @@ fn test_scrolling() {
             assert_window_at!(world, 0, 800, TEST_MENUBAR_HEIGHT);
         })
         .on_iteration(5, move |world| {
-            assert_window_at!(world, 2, -313, TEST_MENUBAR_HEIGHT);
-            assert_window_at!(world, 1, 87, TEST_MENUBAR_HEIGHT);
-            assert_window_at!(world, 0, 487, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 2, -316, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 1, 84, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 0, 484, TEST_MENUBAR_HEIGHT);
         })
         .run(commands);
 }

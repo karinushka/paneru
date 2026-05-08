@@ -848,7 +848,7 @@ impl InnerConfig {
             for binding in bindings.all_mut() {
                 binding.command = parse_command(&argv)?;
 
-                if let Some(code) = keycode_for_key_name(&binding.key, &virtual_keys) {
+                if let Some(code) = keycode_for_key_name(&binding.key, virtual_keys) {
                     binding.code = code;
                     info!("bind: {binding:?}");
                 } else {

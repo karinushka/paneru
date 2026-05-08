@@ -341,6 +341,7 @@ impl InputHandler {
             && let Some(events) = &self.events
         {
             _ = events.send(Event::TouchpadUp);
+            return false;
         }
 
         let fingers = ns_event.allTouches();

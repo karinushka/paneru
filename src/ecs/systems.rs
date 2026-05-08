@@ -716,6 +716,11 @@ pub(super) fn window_resized_update_frame(
 
         // If the window was resized, shift LayoutStrip slightly to avoid moving right corner.
         let (active_strip, ref mut strip_position) = *active_workspace;
+        if !active_strip.contains(entity) {
+            // Floating window, don't nudge the strip.
+            continue;
+        }
+
         if old_frame.min.x != new_frame.min.x {
             let shift = (old_frame.size() - new_frame.size()).with_y(0);
             // Search marke: reposition_entity - Updating position directly to reduce jitter.

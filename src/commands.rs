@@ -380,14 +380,6 @@ fn command_swap_focus(
 }
 
 /// Centers the focused window on the active display.
-///
-/// # Arguments
-///
-/// * `focused_entity` - The `Entity` of the currently focused window.
-/// * `windows` - A mutable query for all `Window` components.
-/// * `window_manager` - The `WindowManager` resource.
-/// * `active_display` - The `ActiveDisplayMut` resource representing the active display.
-/// * `commands` - Bevy commands to trigger events.
 #[allow(clippy::needless_pass_by_value)]
 fn command_center_window(
     mut messages: MessageReader<Event>,
@@ -404,19 +396,26 @@ fn command_center_window(
     }
 
     if let Some((_, entity)) = windows.focused()
-        && let Some(layout_position) = windows.layout_position(entity)
         && let Some(size) = windows.size(entity)
         && let Some(mut origin) = windows.origin(entity)
     {
         let center = active_display.bounds().center().x;
         origin.x = center - size.x / 2;
-        // Directly reposition the strip (bypasses hidden_ratio check).
-        let strip_position = origin - layout_position.0;
-        reposition_entity(
-            active_display.active_strip_entity(),
-            strip_position,
-            &mut commands,
-        );
+
+        if active_display.active_strip().contains(entity)
+            && let Some(layout_position) = windows.layout_position(entity)
+        {
+            // Directly reposition the strip (bypasses hidden_ratio check).
+            let strip_position = origin - layout_position.0;
+            reposition_entity(
+                active_display.active_strip_entity(),
+                strip_position,
+                &mut commands,
+            );
+        } else {
+            reposition_entity(entity, origin, &mut commands);
+        }
+
         window_manager.warp_mouse(active_display.bounds().center());
     }
 }

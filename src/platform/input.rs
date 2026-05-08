@@ -326,6 +326,15 @@ impl InputHandler {
             return false;
         }
 
+        if self
+            .config
+            .swipe_gesture_fingers()
+            .is_some_and(|fingers| fingers < GESTURE_MINIMAL_FINGERS)
+        {
+            // Swipe is disabled, do not intercept the event.
+            return false;
+        }
+
         // Fingers lifted off touchpad.
         let phase = ns_event.phase();
         if (phase.0 & NS_EVENT_PHASE_CANCELLED != 0 || phase.0 & NS_EVENT_PHASE_ENDED != 0)

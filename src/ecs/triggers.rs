@@ -548,7 +548,7 @@ pub(super) fn window_unmanaged_trigger(
             let h = (f64::from(display_bounds.height()) * rh) as i32;
             reposition_entity(entity, Origin::new(x, y), &mut commands);
             resize_entity(entity, Size::new(w, h), &mut commands);
-        } else {
+        } else if !properties.floating() {
             let max_width = display_bounds.width() * UNMANAGED_MAX_SCREEN_RATIO_NUM
                 / UNMANAGED_MAX_SCREEN_RATIO_DEN;
             let max_height = display_bounds.height() * UNMANAGED_MAX_SCREEN_RATIO_NUM

@@ -324,7 +324,13 @@ fn command_swap_focus(
             active_strip.len()
         );
 
-        if index < new_index {
+        if index == new_index {
+            if let Some(Column::Stack(stack)) = active_strip.get_column_mut(index) {
+                let pos_a = stack.iter().position(|i| i.contains(current))?;
+                let pos_b = stack.iter().position(|i| i.contains(other_window))?;
+                stack.swap(pos_a, pos_b);
+            }
+        } else if index < new_index {
             (index..new_index).for_each(|idx| active_strip.swap(idx, idx + 1));
         } else {
             (new_index..index)

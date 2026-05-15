@@ -267,6 +267,13 @@ pub enum Unmanaged {
     Hidden,
 }
 
+#[derive(Clone, Component, Copy, Debug)]
+pub struct PreviousManagedStrip {
+    pub workspace_id: WorkspaceId,
+    pub virtual_index: u32,
+    pub index: usize,
+}
+
 /// Wrapper component for a `ProcessApi` trait object, enabling dynamic dispatch for process-related operations within Bevy.
 #[derive(Component, Deref, DerefMut)]
 pub struct BProcess(pub Box<dyn ProcessApi>);

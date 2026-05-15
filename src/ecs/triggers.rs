@@ -989,15 +989,21 @@ pub(super) fn apply_window_properties(
 
     // During init, skip per-window reshuffles. finish_setup does a single
     // reshuffle after all windows are added.
-    if initializing.is_none()
-        && properties.dont_focus()
-        && let Some((focus, entity)) = windows.focused()
-    {
-        debug!(
-            "Not focusing new window {entity}, keeping focus on '{}'",
-            focus.title().unwrap_or_default()
-        );
-        focus_entity(entity, true, &mut commands);
+    if initializing.is_none() {
+        if properties.dont_focus() {
+            if let Some((focus, prev)) = windows.focused() {
+                debug!(
+                    "Not focusing new window {entity}, keeping focus on '{}'",
+                    focus.title().unwrap_or_default()
+                );
+                focus_entity(prev, true, &mut commands);
+            }
+        } else {
+            debug!("Synthesizing WindowFocused for newly spawned window {entity}");
+            commands.trigger(SendMessageTrigger(Event::WindowFocused {
+                window_id: window.id(),
+            }));
+        }
     }
 }
 

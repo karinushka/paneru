@@ -16,7 +16,8 @@ use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
     ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, MissionControlActive,
-    RetryFrontSwitch, SpawnWindowTrigger, StrayFocusEvent, SystemTheme, Timeout, Unmanaged,
+    PreviousManagedStrip, RetryFrontSwitch, SelectedVirtualMarker, SpawnWindowTrigger,
+    StrayFocusEvent, SystemTheme, Timeout, Unmanaged,
 };
 use crate::config::{Config, WindowParams};
 use crate::ecs::layout::LayoutStrip;
@@ -179,7 +180,7 @@ pub(super) fn window_focused_trigger(
     mut messages: MessageReader<Event>,
     applications: Query<&Application>,
     windows: Windows,
-    mut active_display: ActiveDisplayMut,
+    mut workspaces: Query<(Entity, &mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     config: Res<Config>,
     mut commands: Commands,
 ) {
@@ -210,11 +211,9 @@ pub(super) fn window_focused_trigger(
         // remain stale from a previously focused window.
         update_passthrough(window, app, &config);
 
-        if let Some((focused, _)) = windows.focused()
-            && focused.id() == window_id
-        {
-            continue;
-        }
+        let already_focused = windows
+            .focused()
+            .is_some_and(|(focused, _)| focused.id() == window_id);
 
         // Guard against stale focus events. Without these checks, delayed
         // events (e.g. from RetryFrontSwitch or dont_focus re-assertions)
@@ -231,11 +230,33 @@ pub(super) fn window_focused_trigger(
         }
 
         // Handle tab switching: if the focused window is a tab, make it the leader.
-        let layout_strip = active_display.active_strip();
-        if let Ok(index) = layout_strip.index_of(entity)
-            && let Some(column) = layout_strip.get_column_mut(index)
+        // Also reactivate the owning virtual strip before treating duplicate
+        // focus as a no-op; the focus marker can be stale on a hidden strip.
+        let mut owner = None;
+        for (strip_entity, mut strip, active) in &mut workspaces {
+            if !strip.contains(entity) {
+                continue;
+            }
+            if let Ok(index) = strip.index_of(entity)
+                && let Some(column) = strip.get_column_mut(index)
+            {
+                column.move_to_front(entity);
+            }
+            owner = Some((strip_entity, active));
+            break;
+        }
+
+        if let Some((strip_entity, active)) = owner
+            && !active
+            && let Ok(mut entity_commands) = commands.get_entity(strip_entity)
         {
-            column.move_to_front(entity);
+            entity_commands
+                .try_insert(ActiveWorkspaceMarker)
+                .try_insert(SelectedVirtualMarker);
+        }
+
+        if already_focused {
+            continue;
         }
 
         if let Ok(mut entity_commands) = commands.get_entity(entity) {
@@ -576,19 +597,28 @@ pub(super) fn window_minimized_trigger(
                 );
             }
             if strip.contains(entity) {
+                if let Ok(index) = strip.index_of(entity) {
+                    commands.entity(entity).try_insert(PreviousManagedStrip {
+                        workspace_id: strip.id(),
+                        virtual_index: strip.virtual_index,
+                        index,
+                    });
+                }
                 strip.remove(entity);
             }
         }
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 pub(super) fn window_managed_trigger(
     trigger: On<Remove, Unmanaged>,
-    mut active_display: ActiveDisplayMut,
+    active_display: Single<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
     windows: Windows,
     apps: Query<(Entity, &Application)>,
+    mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    previous_strips: Query<&PreviousManagedStrip>,
     config: Res<Config>,
     initializing: Option<Res<Initializing>>,
     mut commands: Commands,
@@ -600,10 +630,12 @@ pub(super) fn window_managed_trigger(
     let entity = trigger.event().entity;
 
     debug!("Entity {entity} is managed again.");
-    let display_bounds = active_display
-        .display()
-        .actual_display_bounds(active_display.dock(), &config);
-    let active_strip = active_display.active_strip();
+    let (display, dock) = *active_display;
+    let display_bounds = display.actual_display_bounds(dock, &config);
+    let mut insert_at = previous_strips
+        .get(entity)
+        .ok()
+        .map(|previous| previous.index);
 
     if let Some(window) = windows.get(entity)
         && let Some((_, app)) = windows
@@ -621,26 +653,52 @@ pub(super) fn window_managed_trigger(
         }
 
         if properties.floating() {
+            commands.entity(entity).try_remove::<PreviousManagedStrip>();
             return;
         }
-        if let Some(index) = properties.insertion() {
-            active_strip.insert_at(index, entity);
-            reshuffle_around(entity, &mut commands);
-            return;
+
+        insert_at = properties.insertion().or(insert_at);
+    }
+
+    let previous = previous_strips.get(entity).ok().copied();
+    for (mut strip, _) in &mut workspaces {
+        strip.remove(entity);
+    }
+
+    let mut restored = false;
+    if let Some(previous) = previous {
+        for (mut strip, _) in &mut workspaces {
+            if strip.id() == previous.workspace_id && strip.virtual_index == previous.virtual_index
+            {
+                strip.insert_at(insert_at.unwrap_or(previous.index), entity);
+                restored = true;
+                break;
+            }
         }
     }
 
-    // Insert at the column the floating window visually overlaps so the
-    // strip doesn't have to scroll to the end to expose the new column.
-    let insertion = windows.frame(entity).and_then(|frame| {
-        let center_x = frame.center().x;
-        active_strip.all_columns().into_iter().position(|top| {
-            windows
-                .frame(top)
-                .is_some_and(|col| col.center().x > center_x)
-        })
-    });
-    active_strip.insert_at(insertion.unwrap_or(active_strip.len()), entity);
+    if !restored
+        && let Some((mut active_strip, _)) = workspaces.iter_mut().find(|(_, active)| *active)
+    {
+        if let Some(index) = insert_at {
+            active_strip.insert_at(index, entity);
+        } else {
+            // Insert at the column the floating window visually overlaps so the
+            // strip doesn't have to scroll to the end to expose the new column.
+            let insertion = windows.frame(entity).and_then(|frame| {
+                let center_x = frame.center().x;
+                active_strip.all_columns().into_iter().position(|top| {
+                    windows
+                        .frame(top)
+                        .is_some_and(|col| col.center().x > center_x)
+                })
+            });
+            let insertion = insertion.unwrap_or(active_strip.len());
+            active_strip.insert_at(insertion, entity);
+        }
+    }
+
+    commands.entity(entity).try_remove::<PreviousManagedStrip>();
     reshuffle_around(entity, &mut commands);
 }
 

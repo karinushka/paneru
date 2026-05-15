@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use crate::commands::{Command, Direction, Operation};
 use crate::config::{Config, MainOptions, WindowParams};
 use crate::ecs::SpawnWindowTrigger;
+use crate::ecs::{ActiveWorkspaceMarker, layout::LayoutStrip};
 use crate::events::Event;
 use crate::manager::{Origin, Size, Window};
 use crate::{assert_focused, assert_window_at, assert_window_size};
@@ -339,6 +340,89 @@ fn test_stale_focus_event_ignored() {
         })
         .on_iteration(3, |world| {
             assert_focused!(world, 3);
+        })
+        .run(commands);
+}
+
+#[test]
+fn test_external_focus_reactivates_hidden_virtual_strip_when_marker_is_stale() {
+    let commands = vec![
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::Window(Operation::VirtualNumber(1)),
+        },
+        Event::WindowFocused { window_id: 0 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    TestHarness::new()
+        .with_windows(1)
+        .on_iteration(1, |world| {
+            let mut query = world.query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>();
+            let active = query
+                .iter(world)
+                .find_map(|(strip, active)| active.then_some(strip.virtual_index))
+                .expect("an active virtual strip");
+            assert_eq!(active, 1);
+            assert_focused!(world, 0);
+        })
+        .on_iteration(3, |world| {
+            let mut query = world.query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>();
+            let active = query
+                .iter(world)
+                .find_map(|(strip, active)| active.then_some(strip.virtual_index))
+                .expect("an active virtual strip");
+            assert_eq!(active, 0);
+            assert_window_at!(world, 0, 0, TEST_MENUBAR_HEIGHT);
+            assert_focused!(world, 0);
+        })
+        .run(commands);
+}
+
+#[test]
+fn test_external_focus_restores_app_hidden_window_to_original_virtual_strip() {
+    let commands = vec![
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::ApplicationHidden {
+            pid: TEST_PROCESS_ID,
+        },
+        Event::Command {
+            command: Command::Window(Operation::VirtualNumber(1)),
+        },
+        Event::ApplicationVisible {
+            pid: TEST_PROCESS_ID,
+        },
+        Event::WindowFocused { window_id: 0 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    TestHarness::new()
+        .with_windows(1)
+        .on_iteration(2, |world| {
+            let mut query = world.query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>();
+            let active = query
+                .iter(world)
+                .find_map(|(strip, active)| active.then_some(strip.virtual_index))
+                .expect("an active virtual strip");
+            assert_eq!(active, 1);
+        })
+        .on_iteration(5, |world| {
+            let mut query = world.query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>();
+            let active = query
+                .iter(world)
+                .find_map(|(strip, active)| active.then_some(strip.virtual_index))
+                .expect("an active virtual strip");
+            assert_eq!(active, 0);
+            assert_window_at!(world, 0, 0, TEST_MENUBAR_HEIGHT);
+            assert_focused!(world, 0);
         })
         .run(commands);
 }

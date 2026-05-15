@@ -30,6 +30,9 @@ adjacent monitors.
   workspaces to stay organized within each context.
 - **Menu bar workspace indicator:** Shows the currently active virtual
   workspace in the macOS menu bar.
+- **Startup session restore:** Restores managed window layouts, virtual
+  workspaces, and display assignments from the last saved state when Paneru
+  starts.
 - **Focus follows mouse on MacOS:** Very useful for people who would like to
   avoid an extra click.
 - **Sliding windows with touchpad:** Using a touchpad is quite natural for
@@ -159,6 +162,23 @@ quit = "ctrl + alt - q"
 Configuration changes made to your `~/.paneru` file are automatically reloaded
 while Paneru is running. This is useful for tweaking keyboard bindings and
 other settings without restarting the application.
+
+### Startup session restore
+
+Paneru saves managed window layout state to the user state directory
+(`$XDG_STATE_HOME/paneru/state.json`, usually
+`~/.local/state/paneru/state.json`) and loads it when Paneru starts. During the
+startup restore window, Paneru matches reopened windows to the saved session and
+restores their layout placement, virtual workspace row, and display assignment
+where possible.
+
+Restore is startup-only. After the configured startup grace period expires, new
+or unmatched windows follow the normal configuration and window-rule behavior.
+Saved windows that are not present are ignored by default and the restored
+layout is compacted around the windows that were found. The behavior is
+configured with `[restore]`; see the
+**[Session Restore](./CONFIGURATION.md#session-restore)** section in the
+configuration guide.
 
 ### Running as a service
 

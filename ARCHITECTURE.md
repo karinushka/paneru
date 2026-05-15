@@ -19,7 +19,7 @@ Bevy is typically used for games, so Paneru implements a custom bridge to intera
 1.  **Platform Layer:** `src/platform/` uses `objc2` and AppKit to interface with macOS. It runs a native event loop or hooks into OS notifications.
 2.  **Event Channel:** macOS events (mouse moves, window creations, space changes) are sent via a thread-safe `mpsc` channel.
 3.  **Pump System:** The `pump_events` system (in `src/ecs/systems.rs`) reads from this channel during the `PreUpdate` phase and writes Bevy `Message`s or triggers `Observer`s.
-4.  **Observers:** Bevy Observers (in `src/ecs/triggers.rs`) react to these events to update the ECS World (e.g., spawning new `Window` entities or updating `FocusedMarker`).
+4.  **Observers:** Bevy Observers (primarily in `src/ecs/triggers.rs`, with focused domains such as session restore in `src/ecs/restore.rs`) react to these events to update the ECS World (e.g., spawning new `Window` entities or updating `FocusedMarker`).
 
 ### State Synchronization (ECS -> macOS)
 1.  **Systems:** Bevy systems (like `layout::position_layout_windows`) calculate the intended positions and sizes of windows based on the tiling logic.
@@ -36,6 +36,7 @@ Bevy is typically used for games, so Paneru implements a custom bridge to intera
 | `src/ecs/systems.rs` | Bevy systems for lifecycle management, event pumping, and state syncing. |
 | `src/ecs/params.rs` | High-level Bevy `SystemParam` abstractions for querying the World. |
 | `src/ecs/triggers.rs` | Reactive event handlers (Observers) for OS and internal events. |
+| `src/ecs/restore.rs` | Startup session restore planning and application, including window matching, layout rebuilding, and restore grace-period handling. |
 | `src/ecs/workspace.rs` | Management of virtual workspaces, display changes, and window movement between spaces. |
 | `src/ecs/scroll.rs` | Input handling for trackpad swipe gestures, inertia, and snapping. |
 | `src/ecs/focus.rs` | Focus management logic, including focus-follows-mouse and mouse-follows-focus. |
@@ -64,7 +65,8 @@ Bevy is typically used for games, so Paneru implements a custom bridge to intera
 ### Resources
 - **`WindowManager`:** A wrapper for the global window management state and OS bridge.
 - **`Config`:** The current user configuration.
-- **`PaneruState`**: The persisted state of the window manager, used for recovery after restarts.
+- **`PaneruState`**: The durable snapshot of managed layout, display, native workspace, and virtual workspace state used for recovery after restarts.
+- **`SessionRestore`**: A short-lived startup resource that keeps loaded state and restore timing active until the startup grace period expires.
 - **`MissionControlActive`:** A flag indicating if macOS Mission Control is visible (disabling tiling).
 - **`FocusFollowsMouse`:** Tracks which window should gain focus based on mouse position.
 
@@ -73,9 +75,37 @@ Bevy is typically used for games, so Paneru implements a custom bridge to intera
 - **Main Thread Only:** Any interaction with `objc2`, `AppKit`, or `Accessibility` APIs **must** occur on the main thread.
 - **ECS as Source of Truth:** Tiling logic must operate on ECS components (`WidthRatio`, `LayoutStrip`). The physical macOS window state should be a reflection of the ECS state, not the other way around.
 - **Pure Layout:** Layout math (in `layout.rs`) should remain as pure as possible, operating on coordinates and ratios rather than directly calling OS APIs.
+- **Bounded Restore:** Saved session state is only consulted during startup restore. After `SessionRestore` expires, normal config and window-rule placement owns newly discovered windows.
 - **Reactive Power Saving:** Systems should use Bevy's reactive scheduling to avoid CPU usage when no windows are moving or events are occurring.
 
-## 6. Data Flow Diagram
+## 6. Session Restore
+
+`src/ecs/state.rs` extracts and persists the restart snapshot. The state file is
+written atomically to `paneru/state.json` in the XDG state directory
+(`~/.local/state/paneru/state.json` on a default macOS setup) and is loaded
+during Bevy app setup.
+
+`src/ecs/restore.rs` owns startup restore. It keeps the loaded `PaneruState`
+alive in `SessionRestore` for the configured grace period so applications have
+time to reopen their windows. As windows arrive, `restore_window_state` builds a
+restore plan from the saved state and the currently managed ECS windows.
+
+Window matching prefers stable identity (`window_id`, `pid`, and `bundle_id`)
+and uses the conservative fallback identity only when it can do so
+unambiguously. The fallback includes `bundle_id`, window title when available,
+window identifier, role, and subrole. Saved windows that are missing at startup
+are ignored by default, and the restored layout is compacted around the matched
+windows.
+
+Restore rebuilds `LayoutStrip`s, virtual workspace rows, selected virtual
+workspace markers, and display associations. When the current macOS workspace
+to display mapping conflicts with saved display data, the current mapping is
+preferred; otherwise restore falls back to the saved display, then the active
+display, then any available display. Matched startup windows skip static
+`[windows]` placement so the saved session wins, while unmatched windows and
+post-grace windows follow normal config behavior.
+
+## 7. Data Flow Diagram
 
 ```mermaid
 graph TD
@@ -88,11 +118,15 @@ graph TD
     E -->|PostUpdate| G(commit_window_position)
     G -->|FFI Call| A
     H[CommandReader] -->|Unix Socket| C
+    S[PaneruState file] -->|Startup load| R(session restore)
+    R -->|Rebuild saved strips| E
+    E -->|Periodic / exit save| S
 ```
 
-## 7. Testing Strategy
+## 8. Testing Strategy
 
 1.  **Pure Unit Tests:** Located in `src/tests.rs` and alongside modules. These test layout math and configuration parsing without requiring a macOS environment.
 2.  **ECS Integration Tests:** Use Bevy's `App` or `World` to drive systems in isolation. macOS APIs are typically mocked via the `WindowApi` and `WindowManagerApi` traits.
-3.  **FFI Verification:** Manual or semi-automated tests on macOS to ensure the Accessibility API calls behave as expected with native windows.
-4.  **Agent Support:** The `AGENTS.md` file provides project-specific guidance for AI agents to ensure contributions follow these architectural patterns.
+3.  **Session Restore Tests:** `src/tests/session_restore.rs` covers restore planning, missing-window compaction, startup grace behavior, config precedence, virtual workspace restoration, and multi-display fallback.
+4.  **FFI Verification:** Manual or semi-automated tests on macOS to ensure the Accessibility API calls behave as expected with native windows.
+5.  **Agent Support:** The `AGENTS.md` file provides project-specific guidance for AI agents to ensure contributions follow these architectural patterns.

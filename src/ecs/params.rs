@@ -277,6 +277,14 @@ impl Windows<'_, '_> {
             .map(|(window, entity, childof, _)| (window, entity, childof))
     }
 
+    pub fn managed_iter(&self) -> impl Iterator<Item = (&Window, Entity, &ChildOf)> {
+        self.all
+            .iter()
+            .filter_map(|(window, entity, childof, unmanaged)| {
+                unmanaged.is_none().then_some((window, entity, childof))
+            })
+    }
+
     pub fn full_width(&self, entity: Entity) -> Option<&FullWidthMarker> {
         self.previous_size
             .get(entity)

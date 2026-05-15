@@ -219,6 +219,73 @@ horizontal_padding = 5
 bindings_passthrough = ["ctrl-h", "ctrl-l"]
 ```
 
+### Session Restore
+
+Paneru saves its managed window layout and can restore it the next time it
+starts. Restore is a startup-only phase: Paneru loads the saved session, applies
+it after initial window discovery, keeps matching open for a short grace period,
+then stops consulting the saved state until the next Paneru process start.
+
+The saved session includes:
+
+- native workspace ids
+- virtual workspace rows and the selected row per native workspace
+- layout structure: singles, stacks, tabs, and fullscreen strips
+- display/screen association
+- window identity for matching across restarts
+
+Matched startup windows use the saved session before static `[windows]` rules.
+That means saved layout, virtual workspace, display, and managed/floating state
+win over configured `index`, `floating`, `width`, and `grid` rules during
+restore. Unmatched startup windows, and all windows created after the restore
+grace period ends, keep normal `[windows]` behavior.
+
+| Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `enabled` | Boolean | `true` | Enables session restore on startup. |
+| `startup_grace_ms` | Integer (ms) | `2000` | How long Paneru keeps restore matching active after startup. This gives apps a chance to create windows shortly after Paneru starts. |
+| `missing_windows` | String | `"ignore"` | Behavior when a saved window is not present during restore. Currently only `"ignore"` is supported, which drops the missing window and compacts the restored layout. |
+
+**Example:**
+```toml
+[restore]
+enabled = true
+startup_grace_ms = 2000
+missing_windows = "ignore"
+```
+
+Restore matches windows first by stable startup identity:
+
+- window id
+- process id
+- bundle id
+
+If an application has restarted and those ids changed, Paneru can use a
+conservative fallback match:
+
+- bundle id
+- non-empty window title
+- window identifier
+- accessibility role
+- accessibility subrole
+
+Fallback matching is only used when it is unambiguous. If multiple current
+windows could match the same saved window, Paneru skips that saved window rather
+than moving the wrong one.
+
+If a saved app or window is missing, the default `"ignore"` policy simply drops
+it from the restored layout. Empty stacks, tab groups, columns, and virtual rows
+are removed. If the previously selected virtual row is removed because all of
+its windows are missing, Paneru selects the nearest remaining restored row for
+that native workspace. If no restored row remains, the normal startup workspace
+selection is kept.
+
+For screens, Paneru prefers the current macOS workspace-to-display mapping when
+the workspace is already present on a display. Otherwise it restores to the
+saved display id when that screen is still connected, then falls back to the
+current active display, then the first available display by id. Paneru does not
+create placeholder displays or off-screen state for disconnected monitors.
+
 ---
 
 ## 7. Experimental Features

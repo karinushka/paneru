@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bevy::app::AppExit;
@@ -9,6 +10,7 @@ use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::Has;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::system::Query;
+use bevy::math::IRect;
 use objc2_core_graphics::CGDirectDisplayID;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
@@ -16,22 +18,44 @@ use tracing::{debug, error, info, warn};
 use crate::ecs::layout::{Column, LayoutStrip, StackItem};
 use crate::ecs::params::Windows;
 use crate::ecs::{ActiveDisplayMarker, ActiveWorkspaceMarker};
+use crate::manager::Application;
 use crate::manager::Display;
-use crate::manager::{Application, Window};
 use crate::platform::{Pid, ProcessSerialNumber, WinID, WorkspaceId};
 
-pub const STATE_FILE_PATH: &str = "/tmp/paneru-state.json";
+pub const STATE_FILE_NAME: &str = "state.json";
+const SUPPORTED_STATE_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Resource)]
 pub struct PaneruState {
     pub version: u32,
     pub timestamp: u64,
+    pub active_display_id: Option<CGDirectDisplayID>,
+    #[serde(default)]
+    pub displays: Vec<SavedDisplay>,
     pub workspaces: Vec<SavedWorkspace>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SavedDisplay {
+    pub display_id: CGDirectDisplayID,
+    pub bounds: SavedRect,
+    pub active: bool,
+    pub workspace_ids: Vec<WorkspaceId>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SavedRect {
+    pub min_x: i32,
+    pub min_y: i32,
+    pub max_x: i32,
+    pub max_y: i32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct SavedWorkspace {
     pub workspace_id: WorkspaceId,
+    pub display_id: Option<CGDirectDisplayID>,
+    pub active_virtual_index: Option<u32>,
     pub strips: Vec<SavedStrip>,
 }
 
@@ -64,6 +88,7 @@ pub struct SavedWindow {
 
     // Heuristic matching (if IDs change or apps restarted)
     pub bundle_id: String,
+    pub title: String,
     pub identifier: String,
     pub role: String,
     pub subrole: String,
@@ -113,6 +138,17 @@ pub struct PaneruWindowState {
     pub floating: bool,
 }
 
+impl From<IRect> for SavedRect {
+    fn from(rect: IRect) -> Self {
+        Self {
+            min_x: rect.min.x,
+            min_y: rect.min.y,
+            max_x: rect.max.x,
+            max_y: rect.max.y,
+        }
+    }
+}
+
 impl SavedWindow {
     pub fn from_entity(
         entity: Entity,
@@ -128,6 +164,7 @@ impl SavedWindow {
             pid: window.pid().ok()?,
             psn: app.psn(),
             bundle_id: app.bundle_id().unwrap_or_default().to_string(),
+            title: window.title().unwrap_or_default(),
             identifier: window.identifier().unwrap_or_default(),
             role: window.role().unwrap_or_default(),
             subrole: window.subrole().unwrap_or_default(),
@@ -141,14 +178,37 @@ impl SavedWindow {
 }
 
 impl PaneruState {
+    #[allow(clippy::type_complexity, clippy::too_many_lines)]
     pub fn extract(
-        workspaces: &Query<&LayoutStrip>,
+        workspaces: &Query<(Option<&ChildOf>, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+        displays: &Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
         windows: &Windows,
         apps: &Query<&Application>,
     ) -> Self {
-        let mut workspace_map: HashMap<WorkspaceId, Vec<SavedStrip>> = HashMap::new();
+        let mut display_entity_ids = HashMap::new();
+        let mut display_workspace_ids: HashMap<Entity, Vec<WorkspaceId>> = HashMap::new();
+        let mut workspace_map: HashMap<WorkspaceId, SavedWorkspaceBuilder> = HashMap::new();
+        let active_display_id = displays
+            .iter()
+            .find(|(_, _, active)| *active)
+            .map(|(display, _, _)| display.id());
 
-        for strip in workspaces {
+        for (display, entity, _) in displays {
+            display_entity_ids.insert(entity, display.id());
+            display_workspace_ids.insert(entity, Vec::new());
+        }
+
+        for (child, strip, active_workspace) in workspaces {
+            let display_entity = child.map(ChildOf::parent);
+            let display_id =
+                display_entity.and_then(|entity| display_entity_ids.get(&entity).copied());
+            if let Some(entity) = display_entity
+                && let Some(workspace_ids) = display_workspace_ids.get_mut(&entity)
+                && !workspace_ids.contains(&strip.id())
+            {
+                workspace_ids.push(strip.id());
+            }
+
             let mut saved_columns = Vec::new();
             for col in strip.columns() {
                 let saved_col = match col {
@@ -202,47 +262,84 @@ impl PaneruState {
                 }
             }
 
-            workspace_map
-                .entry(strip.id())
-                .or_default()
-                .push(SavedStrip {
-                    virtual_index: strip.virtual_index,
-                    columns: saved_columns,
-                });
+            let workspace =
+                workspace_map
+                    .entry(strip.id())
+                    .or_insert_with(|| SavedWorkspaceBuilder {
+                        display_id,
+                        active_virtual_index: None,
+                        strips: Vec::new(),
+                    });
+            if workspace.display_id.is_none() {
+                workspace.display_id = display_id;
+            }
+            if active_workspace {
+                workspace.active_virtual_index = Some(strip.virtual_index);
+            }
+            workspace.strips.push(SavedStrip {
+                virtual_index: strip.virtual_index,
+                columns: saved_columns,
+            });
         }
 
         let workspaces = workspace_map
             .into_iter()
-            .map(|(workspace_id, mut strips)| {
-                strips.sort_by_key(|s| s.virtual_index);
+            .map(|(workspace_id, mut workspace)| {
+                workspace.strips.sort_by_key(|s| s.virtual_index);
                 SavedWorkspace {
                     workspace_id,
-                    strips,
+                    display_id: workspace.display_id,
+                    active_virtual_index: workspace.active_virtual_index,
+                    strips: workspace.strips,
                 }
+            })
+            .collect();
+        let displays = displays
+            .iter()
+            .map(|(display, entity, active)| SavedDisplay {
+                display_id: display.id(),
+                bounds: display.bounds().into(),
+                active,
+                workspace_ids: display_workspace_ids.remove(&entity).unwrap_or_default(),
             })
             .collect();
 
         Self {
-            version: 1,
+            version: SUPPORTED_STATE_VERSION,
             timestamp: now_timestamp(),
+            active_display_id,
+            displays,
             workspaces,
         }
     }
 
-    pub fn save_to_file(&self, path: &str) -> Result<(), std::io::Error> {
+    pub fn save_to_file(&self, path: &Path) -> Result<(), std::io::Error> {
         let json = serde_json::to_string_pretty(self).map_err(|e| {
             error!("Failed to serialize state: {e}");
             std::io::Error::other(e)
         })?;
-        fs::write(path, json)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let tmp_path = path.with_extension("json.tmp");
+        fs::write(&tmp_path, json)?;
+        fs::rename(tmp_path, path)?;
         Ok(())
     }
 
-    pub fn load_from_file(path: &str) -> Option<Self> {
+    pub fn load_from_file(path: &Path) -> Option<Self> {
         let data = fs::read_to_string(path).ok()?;
-        serde_json::from_str(&data).ok()
+        let state: Self = serde_json::from_str(&data).ok()?;
+        (state.version == SUPPORTED_STATE_VERSION).then_some(state)
     }
 
+    pub fn default_state_file_path() -> PathBuf {
+        xdg::BaseDirectories::with_prefix("paneru")
+            .get_state_file(STATE_FILE_NAME)
+            .expect("XDG state directory should be available")
+    }
+
+    #[cfg(test)]
     pub fn find_match(
         &self,
         window_id: WinID,
@@ -316,16 +413,13 @@ impl PaneruState {
         }
         None
     }
+}
 
-    pub fn match_window(
-        &self,
-        window: &Window,
-        bundle_id: &str,
-    ) -> Option<(WorkspaceId, u32, usize)> {
-        let (workspace_id, virtual_index, col_idx, _) =
-            self.find_match(window.id(), window.pid().ok()?, bundle_id)?;
-        Some((workspace_id, virtual_index, col_idx))
-    }
+#[derive(Default)]
+struct SavedWorkspaceBuilder {
+    display_id: Option<CGDirectDisplayID>,
+    active_virtual_index: Option<u32>,
+    strips: Vec<SavedStrip>,
 }
 
 impl PaneruQueryState {
@@ -453,29 +547,33 @@ fn now_timestamp() -> u64 {
 
 #[allow(clippy::needless_pass_by_value)]
 pub fn periodic_state_save(
-    workspaces: Query<&LayoutStrip>,
+    workspaces: Query<(Option<&ChildOf>, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
     windows: Windows,
     apps: Query<&Application>,
 ) {
-    let state = PaneruState::extract(&workspaces, &windows, &apps);
-    if let Err(e) = state.save_to_file(STATE_FILE_PATH) {
+    let state = PaneruState::extract(&workspaces, &displays, &windows, &apps);
+    let path = PaneruState::default_state_file_path();
+    if let Err(e) = state.save_to_file(&path) {
         warn!("Failed to save state: {e}");
     } else {
-        debug!("State saved to {STATE_FILE_PATH}");
+        debug!("State saved to {}", path.display());
     }
 }
 
 #[allow(clippy::needless_pass_by_value)]
 pub fn cleanup_on_exit(
     mut exit_events: MessageReader<AppExit>,
-    workspaces: Query<&LayoutStrip>,
+    workspaces: Query<(Option<&ChildOf>, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
     windows: Windows,
     apps: Query<&Application>,
 ) {
     if exit_events.read().next().is_some() {
         info!("Exiting, saving state...");
-        let state = PaneruState::extract(&workspaces, &windows, &apps);
-        if let Err(e) = state.save_to_file(STATE_FILE_PATH) {
+        let state = PaneruState::extract(&workspaces, &displays, &windows, &apps);
+        let path = PaneruState::default_state_file_path();
+        if let Err(e) = state.save_to_file(&path) {
             error!("Failed to save state on exit: {e}");
         }
     }

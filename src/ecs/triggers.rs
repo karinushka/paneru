@@ -631,7 +631,17 @@ pub(super) fn window_managed_trigger(
         }
     }
 
-    active_strip.append(entity);
+    // Insert at the column the floating window visually overlaps so the
+    // strip doesn't have to scroll to the end to expose the new column.
+    let insertion = windows.frame(entity).and_then(|frame| {
+        let center_x = frame.center().x;
+        active_strip.all_columns().into_iter().position(|top| {
+            windows
+                .frame(top)
+                .is_some_and(|col| col.center().x > center_x)
+        })
+    });
+    active_strip.insert_at(insertion.unwrap_or(active_strip.len()), entity);
     reshuffle_around(entity, &mut commands);
 }
 

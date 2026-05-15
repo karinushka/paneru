@@ -12,9 +12,9 @@ use crate::config::Config;
 use crate::ecs::layout::{Column, LayoutStrip, StackItem};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Windows};
 use crate::ecs::{
-    ActiveDisplayMarker, ActiveWorkspaceMarker, FocusFollowsMouse, FocusedMarker, FullWidthMarker,
-    NativeFullscreenMarker, SelectedVirtualMarker, SendMessageTrigger, Unmanaged, WMEventTrigger,
-    focus_entity, reposition_entity, reshuffle_around, resize_entity,
+    ActiveDisplayMarker, ActiveWorkspaceMarker, Bounds, FocusFollowsMouse, FocusedMarker,
+    FullWidthMarker, NativeFullscreenMarker, SelectedVirtualMarker, SendMessageTrigger, Unmanaged,
+    WMEventTrigger, focus_entity, reposition_entity, reshuffle_around, resize_entity,
 };
 use crate::events::Event;
 use crate::manager::{Application, Display, Origin, Size, Window, WindowManager, origin_to};
@@ -514,6 +514,18 @@ fn resize_window(
 /// * `windows` - A mutable query for all `Window` components.
 /// * `commands` - Bevy commands to trigger events.
 /// * `config` - The `Config` resource.
+fn exit_full_width(
+    entity: Entity,
+    marker: &FullWidthMarker,
+    viewport: IRect,
+    commands: &mut Commands,
+) {
+    let w = (marker.width_ratio * f64::from(viewport.width())).round() as i32;
+    let h = (marker.height_ratio * f64::from(viewport.height())).round() as i32;
+    commands.entity(entity).try_remove::<FullWidthMarker>();
+    commands.entity(entity).try_insert(Bounds(Size::new(w, h)));
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn full_width_window(
     mut messages: MessageReader<Event>,
@@ -539,41 +551,29 @@ fn full_width_window(
     let viewport = active_display
         .display()
         .actual_display_bounds(active_display.dock(), &config);
-    let height = frame.height();
-    let y = frame.min.y;
 
-    let (width, x) = if let Some(marker) = windows.full_width(entity) {
-        let previous_ratio = marker.width_ratio;
-        let was_stacked = marker.was_stacked;
-        commands.entity(entity).try_remove::<FullWidthMarker>();
-        if was_stacked {
-            _ = active_display.active_strip().stack(entity);
-        }
-        let w = (previous_ratio * f64::from(viewport.width())).round() as i32;
-        (w, viewport.center().x - w / 2)
+    if let Some(marker) = windows.full_width(entity) {
+        exit_full_width(entity, marker, viewport, &mut commands);
+        reshuffle_around(entity, &mut commands);
     } else {
         let strip = active_display.active_strip();
-        let was_stacked = strip
+        if strip
             .index_of(entity)
             .ok()
             .and_then(|idx| strip.get(idx).ok())
-            .is_some_and(|col| matches!(col, Column::Stack(_)));
-        if was_stacked {
+            .is_some_and(|col| matches!(col, Column::Stack(_)))
+        {
             _ = strip.unstack(entity);
         }
         let width_ratio = windows.width_ratio(entity).unwrap_or(0.5);
-        commands.entity(entity).try_insert(FullWidthMarker {
-            width_ratio,
-            was_stacked,
-        });
-        // Logical frame spans the full viewport; reposition() and
-        // resize() handle h_pad conversion to CG coordinates.
-        (viewport.width(), viewport.min.x)
-    };
-
-    reposition_entity(entity, Origin::new(x, y), &mut commands);
-    resize_entity(entity, Size::new(width, height), &mut commands);
-    reshuffle_around(entity, &mut commands);
+        let height_ratio = f64::from(frame.height()) / f64::from(viewport.height());
+        commands
+            .entity(entity)
+            .try_insert(FullWidthMarker { width_ratio, height_ratio });
+        reposition_entity(entity, Origin::new(viewport.min.x, viewport.min.y), &mut commands);
+        resize_entity(entity, Size::new(viewport.width(), viewport.height()), &mut commands);
+        reshuffle_around(entity, &mut commands);
+    }
 }
 
 /// Toggles the managed state of the focused window.
@@ -860,6 +860,8 @@ pub fn stack_windows_handler(
     mut messages: MessageReader<Event>,
     windows: Windows,
     mut active_display: ActiveDisplayMut,
+    config: Res<Config>,
+    mut commands: Commands,
 ) {
     let Some(Operation::Stack(stack)) =
         filter_window_operations(&mut messages, |op| matches!(op, Operation::Stack(_))).next()
@@ -872,11 +874,23 @@ pub fn stack_windows_handler(
         .and_then(|(_, entity)| windows.get_managed(entity))
         && unmanaged.is_none()
     {
+        let was_full_width = if let Some(marker) = windows.full_width(entity) {
+            let viewport = active_display
+                .display()
+                .actual_display_bounds(active_display.dock(), &config);
+            exit_full_width(entity, marker, viewport, &mut commands);
+            true
+        } else {
+            false
+        };
         let strip = active_display.active_strip();
         if *stack {
             _ = strip.stack(entity);
         } else {
             _ = strip.unstack(entity);
+        }
+        if was_full_width {
+            reshuffle_around(entity, &mut commands);
         }
     }
 }

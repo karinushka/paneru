@@ -251,13 +251,10 @@ pub struct NativeFullscreenMarker {
     pub previous_index: usize,
 }
 
-/// Stores the width ratio of a window before it was made full-width.
-/// When a stacked window goes full-width, it is unstacked first;
-/// `was_stacked` records whether to restack on exit.
 #[derive(Component)]
 pub struct FullWidthMarker {
     pub width_ratio: f64,
-    pub was_stacked: bool,
+    pub height_ratio: f64,
 }
 
 /// Enum component indicating the unmanaged state of a window.

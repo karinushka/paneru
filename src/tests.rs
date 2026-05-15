@@ -6,6 +6,7 @@ mod display;
 mod harness;
 mod interaction;
 mod mocks;
+mod session_restore;
 mod state;
 mod tiling;
 

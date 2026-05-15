@@ -22,7 +22,6 @@ use crate::config::{Config, WindowParams};
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, GlobalState, Windows};
 use crate::ecs::state::PaneruState;
-use crate::ecs::workspace::PreviousStripPosition;
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, DockPosition, Initializing, LayoutPosition, LocateDockTrigger,
     Position, RestoreWindowState, Scrolling, SendMessageTrigger, WidthRatio, WindowProperties,
@@ -762,7 +761,7 @@ fn give_away_focus(
 /// * `active_display` - A query for the active display.
 /// * `main_cid` - The main connection ID resource.
 /// * `commands` - Bevy commands to manage components and trigger events.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn spawn_window_trigger(
     mut trigger: On<SpawnWindowTrigger>,
@@ -771,6 +770,8 @@ pub(super) fn spawn_window_trigger(
     mut active_display: ActiveDisplayMut,
     config: Res<Config>,
     initializing: Option<Res<Initializing>>,
+    restore: Option<Res<crate::ecs::restore::SessionRestore>>,
+    restoration: Option<Res<PaneruState>>,
     mut commands: Commands,
 ) {
     let new_windows = &mut trigger.event_mut().0;
@@ -819,9 +820,12 @@ pub(super) fn spawn_window_trigger(
 
         apply_window_defaults(
             &mut window,
+            &app,
             &mut active_display,
             &properties.params,
             &config,
+            restore.as_deref(),
+            restoration.as_deref(),
             initializing.is_some(),
         );
 
@@ -868,16 +872,28 @@ pub(super) fn spawn_window_trigger(
                 .inspect_err(|err| error!("Failed to convert to tabs: {err}"));
         }
     }
+
+    if initializing.is_none() && restore.is_some() {
+        commands.trigger(RestoreWindowState);
+    }
 }
 
-#[allow(clippy::cast_possible_truncation)]
+#[allow(clippy::cast_possible_truncation, clippy::too_many_arguments)]
 fn apply_window_defaults(
     window: &mut Window,
+    app: &Application,
     active_display: &mut ActiveDisplayMut,
     properties: &[WindowParams],
     config: &Config,
+    restore: Option<&crate::ecs::restore::SessionRestore>,
+    restoration: Option<&PaneruState>,
     initializing: bool,
 ) {
+    if crate::ecs::restore::matches_startup_restore_state(window, app, restore, restoration, config)
+    {
+        return;
+    }
+
     let floating = properties
         .iter()
         .find_map(|props| props.floating)
@@ -928,7 +944,7 @@ fn apply_window_defaults(
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 pub(super) fn apply_window_properties(
     trigger: On<Add, Window>,
@@ -937,6 +953,8 @@ pub(super) fn apply_window_properties(
     apps: Query<&Application>,
     config: Res<Config>,
     initializing: Option<Res<Initializing>>,
+    restore: Option<Res<crate::ecs::restore::SessionRestore>>,
+    restoration: Option<Res<PaneruState>>,
     mut commands: Commands,
 ) {
     let entity = trigger.event().entity;
@@ -955,6 +973,17 @@ pub(super) fn apply_window_properties(
     let Ok(app) = apps.get(parent) else {
         return;
     };
+
+    if crate::ecs::restore::matches_startup_restore_state(
+        window,
+        app,
+        restore.as_deref(),
+        restoration.as_deref(),
+        &config,
+    ) {
+        return;
+    }
+
     let properties = WindowProperties::new(app, window, &config);
 
     if properties.floating() {
@@ -1132,107 +1161,6 @@ pub(super) fn send_message_trigger(
 ) {
     let event = &trigger.event().0;
     messages.write(event.clone());
-}
-
-#[allow(clippy::needless_pass_by_value)]
-#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
-pub(super) fn restore_window_state(
-    _: On<RestoreWindowState>,
-    windows: Windows,
-    mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>, &ChildOf)>,
-    displays: Query<(Entity, &Display)>,
-    apps: Query<&Application>,
-    restoration: Option<Res<PaneruState>>,
-    mut commands: Commands,
-) {
-    let Some(restore) = restoration else {
-        return;
-    };
-
-    let mut new_strips: Vec<(LayoutStrip, Entity)> = Vec::new();
-    for (mut strip, _, child) in &mut workspaces {
-        let restore = strip
-            .all_windows()
-            .into_iter()
-            .filter_map(|entity| {
-                let window = windows.get(entity)?;
-                let bundle_id = windows
-                    .find_parent(window.id())
-                    .and_then(|(_, _, parent)| apps.get(parent).ok())
-                    .map(|app| app.bundle_id().unwrap_or_default().to_string())?;
-                Some(entity).zip(restore.match_window(window, &bundle_id))
-            })
-            .collect::<Vec<_>>();
-
-        for index in 0u32..restore.len() as u32 {
-            let mut entities = restore
-                .iter()
-                .filter(|(_, (_, previous_virt_id, _))| *previous_virt_id == index)
-                .collect::<Vec<_>>();
-            if entities.is_empty() {
-                break;
-            }
-            entities.sort_by_key(|(_, (_, _, previous_idx))| *previous_idx);
-
-            if index == 0 {
-                let mut last_idx = 1000;
-
-                for (entity, (_, _, previous_idx)) in entities {
-                    strip.remove(*entity);
-
-                    if last_idx == *previous_idx {
-                        debug!("Stacking window {entity}");
-                        strip.insert_at(last_idx + 1, *entity);
-                        _ = strip.stack(*entity);
-                    } else {
-                        strip.insert_at(*previous_idx, *entity);
-                    }
-                    last_idx = *previous_idx;
-                }
-            } else {
-                let mut new_strip = new_strips.iter_mut().find_map(|(new_strip, _)| {
-                    (new_strip.id() == strip.id() && new_strip.virtual_index == index)
-                        .then_some(new_strip)
-                });
-                if new_strip.is_none() {
-                    debug!("Creating new virtual strip {index}");
-                    new_strips.push((LayoutStrip::new(strip.id(), index), child.parent()));
-                    new_strip = new_strips.last_mut().map(|(strip, _)| strip);
-                }
-
-                if let Some(new_strip) = new_strip {
-                    let mut last_idx = 1000;
-
-                    for (entity, (_, _, previous_idx)) in entities {
-                        strip.remove(*entity);
-                        debug!("Inserting {} into new strip", *entity);
-
-                        if last_idx == *previous_idx {
-                            debug!("Stacking window {entity}");
-                            new_strip.insert_at(last_idx + 1, *entity);
-                            _ = new_strip.stack(*entity);
-                        } else {
-                            new_strip.insert_at(*previous_idx, *entity);
-                        }
-                        last_idx = *previous_idx;
-                    }
-                }
-            }
-        }
-    }
-
-    for (strip, parent) in new_strips {
-        let Ok(bounds) = displays.get(parent).map(|(_, display)| display.bounds()) else {
-            continue;
-        };
-
-        let previous = PreviousStripPosition {
-            origin: bounds.min,
-            focus: strip.all_windows().first().copied(),
-        };
-        let hidden_origin = Position(bounds.max - 10);
-        commands.spawn((strip, hidden_origin, previous, ChildOf(parent)));
-    }
 }
 
 #[allow(clippy::needless_pass_by_value)]

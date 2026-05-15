@@ -38,6 +38,7 @@ pub mod focus;
 pub mod layout;
 pub mod mouse;
 pub mod params;
+pub(crate) mod restore;
 pub mod scroll;
 pub mod state;
 mod systems;
@@ -101,6 +102,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
                 .chain()
                 .run_if(not_swiping),
             systems::cleanup_on_exit,
+            restore::tick_restore_grace,
             state::periodic_state_save.run_if(on_timer(Duration::from_secs(300))),
             state::cleanup_on_exit,
         ),
@@ -166,7 +168,7 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::window_removal_trigger)
         .add_observer(triggers::apply_window_properties)
         .add_observer(triggers::cleanup_timeout_trigger)
-        .add_observer(triggers::restore_window_state);
+        .add_observer(restore::restore_window_state);
 }
 
 /// Marker component for the currently focused window.
@@ -474,7 +476,9 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         .insert_non_send_resource(menu_bar_manager)
         .insert_non_send_resource(receiver);
 
-    if let Some(previous_state) = PaneruState::load_from_file(state::STATE_FILE_PATH) {
+    if let Some(previous_state) =
+        PaneruState::load_from_file(&PaneruState::default_state_file_path())
+    {
         app.insert_resource(previous_state);
     }
 

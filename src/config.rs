@@ -11,6 +11,7 @@ use std::{
     path::{Path, PathBuf},
     ptr::NonNull,
     sync::{Arc, LazyLock},
+    time::Duration,
 };
 use stdext::function_name;
 use tracing::{error, info, warn};
@@ -632,6 +633,32 @@ impl Config {
         self.options().mouse_resize_modifier
     }
 
+    pub fn restore_enabled(&self) -> bool {
+        self.inner()
+            .restore
+            .as_ref()
+            .and_then(|restore| restore.enabled)
+            .unwrap_or(true)
+    }
+
+    pub fn restore_startup_grace(&self) -> Duration {
+        Duration::from_millis(
+            self.inner()
+                .restore
+                .as_ref()
+                .and_then(|restore| restore.startup_grace_ms)
+                .unwrap_or(2000),
+        )
+    }
+
+    pub fn restore_missing_windows(&self) -> MissingWindowBehavior {
+        self.inner()
+            .restore
+            .as_ref()
+            .and_then(|restore| restore.missing_windows)
+            .unwrap_or(MissingWindowBehavior::Ignore)
+    }
+
     pub fn swipe_scroll_modifier(&self) -> Modifiers {
         let config = self.inner();
         config
@@ -806,6 +833,7 @@ struct InnerConfig {
     decorations: Option<decorations::DecorationsOptions>,
     swipe: Option<swipe::SwipeOptions>,
     padding: Option<padding::PaddingOptions>,
+    restore: Option<RestoreOptions>,
 }
 
 impl InnerConfig {
@@ -833,6 +861,11 @@ impl InnerConfig {
     ///
     /// `Ok(InnerConfig)` if the parsing is successful, otherwise `Err(Error)` with an error message.
     fn parse_config(input: &str) -> Result<InnerConfig> {
+        let config: InnerConfig = toml::from_str(input)?;
+        if !config.needs_virtual_keys() {
+            return Ok(config);
+        }
+
         let virtual_keys = generate_virtual_keymap();
         Self::parse_config_with_virtual_keys(input, &virtual_keys)
     }
@@ -871,6 +904,28 @@ impl InnerConfig {
 
         Ok(config)
     }
+
+    fn needs_virtual_keys(&self) -> bool {
+        !self.bindings.is_empty()
+            || self.windows.as_ref().is_some_and(|windows| {
+                windows
+                    .values()
+                    .any(|params| !params.bindings_passthrough.is_empty())
+            })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MissingWindowBehavior {
+    Ignore,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+pub struct RestoreOptions {
+    pub enabled: Option<bool>,
+    pub startup_grace_ms: Option<u64>,
+    pub missing_windows: Option<MissingWindowBehavior>,
 }
 
 /// `MainOptions` represents the primary configuration options for the window manager.
@@ -1777,6 +1832,59 @@ fn test_config_defaults() {
     assert_eq!(config.border_width(), 2.0);
     assert_eq!(config.border_radius(), BorderRadiusOption::Auto);
     assert_eq!(config.menubar_height(), None);
+}
+
+#[test]
+fn test_restore_config_defaults() {
+    let config = Config::try_from("[options]\n\n[bindings]\n").expect("config should parse");
+
+    assert!(config.restore_enabled());
+    assert_eq!(config.restore_startup_grace(), Duration::from_millis(2000));
+    assert_eq!(
+        config.restore_missing_windows(),
+        MissingWindowBehavior::Ignore
+    );
+}
+
+#[test]
+fn test_restore_config_explicit_values() {
+    let config = Config::try_from(
+        r#"
+[options]
+
+[restore]
+enabled = false
+startup_grace_ms = 750
+missing_windows = "ignore"
+
+[bindings]
+"#,
+    )
+    .expect("config should parse");
+
+    assert!(!config.restore_enabled());
+    assert_eq!(config.restore_startup_grace(), Duration::from_millis(750));
+    assert_eq!(
+        config.restore_missing_windows(),
+        MissingWindowBehavior::Ignore
+    );
+}
+
+#[test]
+fn test_restore_config_rejects_unsupported_missing_window_policy() {
+    let err = Config::try_from(
+        r#"
+[options]
+
+[restore]
+missing_windows = "reserve"
+
+[bindings]
+"#,
+    )
+    .expect_err("unsupported restore missing-window policy should fail");
+
+    assert!(err.to_string().contains("unknown variant"));
 }
 
 #[test]

@@ -15,7 +15,12 @@ Each monitor operates with its own independent window strip, ensuring that
 windows remain confined to their respective displays and do not "overflow" onto
 adjacent monitors.
 
-<video src="https://github.com/user-attachments/assets/cbc2e820-635f-408b-923a-6cb47c44704c"></video>
+https://github.com/user-attachments/assets/cbc2e820-635f-408b-923a-6cb47c44704c
+
+(Video by @emreekici3 - https://github.com/emreekici3/dotfiles)
+
+https://github.com/user-attachments/assets/793e7eaa-7909-4086-8380-1fb7861f8780
+
 
 ## Why Paneru?
 

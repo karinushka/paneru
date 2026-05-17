@@ -19,7 +19,7 @@ use super::{
     PreviousManagedStrip, RetryFrontSwitch, SelectedVirtualMarker, SpawnWindowTrigger,
     StrayFocusEvent, SystemTheme, Timeout, Unmanaged,
 };
-use crate::config::{Config, WindowParams};
+use crate::config::Config;
 use crate::ecs::focus::FocusHistory;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, GlobalState, Windows};
@@ -899,7 +899,7 @@ pub(super) fn spawn_window_trigger(
         apply_window_defaults(
             &mut window,
             &mut active_display,
-            &properties.params,
+            &properties,
             &config,
             initializing.is_some(),
         );
@@ -957,31 +957,14 @@ pub(super) fn spawn_window_trigger(
 fn apply_window_defaults(
     window: &mut Window,
     active_display: &mut ActiveDisplayMut,
-    properties: &[WindowParams],
+    properties: &WindowProperties,
     config: &Config,
     initializing: bool,
 ) {
-    let floating = properties
-        .iter()
-        .find_map(|props| props.floating)
-        .unwrap_or(false);
-
     // Do not add padding to floating windows.
-    if let Some(padding) = properties.iter().find_map(|props| props.vertical_padding)
-        && !floating
-    {
-        window.set_padding(WindowPadding::Vertical(padding.clamp(0, 50)));
-    }
-    if let Some(padding) = properties.iter().find_map(|props| props.horizontal_padding)
-        && !floating
-    {
-        window.set_padding(WindowPadding::Horizontal(padding.clamp(0, 50)));
-    }
-    if floating {
+    if properties.floating() {
         // Skip grid_ratios during init: we don't know this window's display.
-        if !initializing
-            && let Some((rx, ry, rw, rh)) = properties.iter().find_map(WindowParams::grid_ratios)
-        {
+        if !initializing && let Some((rx, ry, rw, rh)) = properties.grid_ratios() {
             let bounds = active_display.bounds();
             let x = (f64::from(bounds.width()) * rx) as i32;
             let y = (f64::from(bounds.height()) * ry) as i32;
@@ -993,11 +976,16 @@ fn apply_window_defaults(
         return;
     }
 
+    let vpadding = properties.vertical_padding();
+    let hpadding = properties.horizontal_padding();
+    window.set_padding(WindowPadding::Vertical(vpadding.clamp(0, 50)));
+    window.set_padding(WindowPadding::Horizontal(hpadding.clamp(0, 50)));
+
     // Apply configured width AFTER update_frame so it isn't overwritten.
     // Use padded display width (matching window_resize command behavior).
     // Safe during init: this only resizes, it doesn't reposition, so a
     // window on an inactive display stays put.
-    if let Some(width) = properties.iter().find_map(|props| props.width) {
+    if let Some(width) = properties.width_ratio() {
         _ = window.update_frame().inspect_err(|err| error!("{err}"));
         let bounds = active_display.bounds();
         let (_, pad_right, _, pad_left) = config.edge_padding();

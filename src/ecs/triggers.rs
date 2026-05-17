@@ -829,7 +829,6 @@ pub(super) fn spawn_window_trigger(
     config: Res<Config>,
     initializing: Option<Res<Initializing>>,
     restore: Option<Res<crate::ecs::restore::SessionRestore>>,
-    restoration: Option<Res<PaneruState>>,
     mut commands: Commands,
 ) {
     let new_windows = &mut trigger.event_mut().0;
@@ -878,12 +877,9 @@ pub(super) fn spawn_window_trigger(
 
         apply_window_defaults(
             &mut window,
-            &app,
             &mut active_display,
             &properties.params,
             &config,
-            restore.as_deref(),
-            restoration.as_deref(),
             initializing.is_some(),
         );
 
@@ -936,22 +932,14 @@ pub(super) fn spawn_window_trigger(
     }
 }
 
-#[allow(clippy::cast_possible_truncation, clippy::too_many_arguments)]
+#[allow(clippy::cast_possible_truncation)]
 fn apply_window_defaults(
     window: &mut Window,
-    app: &Application,
     active_display: &mut ActiveDisplayMut,
     properties: &[WindowParams],
     config: &Config,
-    restore: Option<&crate::ecs::restore::SessionRestore>,
-    restoration: Option<&PaneruState>,
     initializing: bool,
 ) {
-    if crate::ecs::restore::matches_startup_restore_state(window, app, restore, restoration, config)
-    {
-        return;
-    }
-
     let floating = properties
         .iter()
         .find_map(|props| props.floating)

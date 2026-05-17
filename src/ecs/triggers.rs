@@ -3,8 +3,8 @@ use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::lifecycle::{Add, Remove};
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::observer::On;
-use bevy::ecs::query::{Has, With};
-use bevy::ecs::system::{Commands, NonSend, NonSendMut, Query, Res, ResMut, Single};
+use bevy::ecs::query::{Added, Has, With};
+use bevy::ecs::system::{Commands, NonSend, NonSendMut, Populated, Query, Res, ResMut, Single};
 use bevy::math::IRect;
 use notify::event::{DataChange, MetadataKind, ModifyKind};
 use notify::{EventKind, Watcher};
@@ -1012,10 +1012,10 @@ fn apply_window_defaults(
 }
 
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
-#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
+#[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn apply_window_properties(
-    trigger: On<Add, Window>,
-    mut active_display: ActiveDisplayMut,
+    added: Populated<Entity, Added<Window>>,
+    mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     windows: Windows,
     apps: Query<&Application>,
     config: Res<Config>,
@@ -1024,81 +1024,94 @@ pub(super) fn apply_window_properties(
     restoration: Option<Res<PaneruState>>,
     mut commands: Commands,
 ) {
-    let entity = trigger.event().entity;
-
-    if active_display.active_strip().tabbed(entity) {
-        debug!("Ignoring tabbed {entity} attributes.");
-        return;
-    }
-
-    let Some((window, _, parent)) = windows
-        .get(entity)
-        .and_then(|window| windows.find_parent(window.id()))
-    else {
-        return;
-    };
-    let Ok(app) = apps.get(parent) else {
-        return;
-    };
-
-    if crate::ecs::restore::matches_startup_restore_state(
-        window,
-        app,
-        restore.as_deref(),
-        restoration.as_deref(),
-        &config,
-    ) {
-        return;
-    }
-
-    let properties = WindowProperties::new(app, window, &config);
-
-    if properties.floating() {
-        // Avoid managing window if it's floating.
-        commands.entity(entity).try_insert(Unmanaged::Floating);
-        return;
-    }
-
-    let strip = active_display.active_strip();
-
-    // Attempt inserting the window at a pre-defined position.
-    let insert_at = properties.insertion().map_or_else(
-        || {
-            // Otherwise attempt inserting it after the current focus.
-            let focused_window = windows.focused();
-            // Insert to the right of the currently focused window
-            focused_window
-                .and_then(|(_, entity)| strip.index_of(entity).ok())
-                .and_then(|insert_at| (insert_at + 1 < strip.len()).then_some(insert_at + 1))
-        },
-        Some,
-    );
-
-    debug!("New window adding at {strip}");
-    match insert_at {
-        Some(after) => {
-            debug!("New window inserted at {after}");
-            strip.insert_at(after, entity);
+    for entity in added {
+        if workspaces.iter().any(|(strip, _)| strip.tabbed(entity)) {
+            debug!("Ignoring tabbed {entity} attributes.");
+            continue;
         }
-        None => strip.append(entity),
-    }
 
-    // During init, skip per-window reshuffles. finish_setup does a single
-    // reshuffle after all windows are added.
-    if initializing.is_none() {
-        if properties.dont_focus() {
-            if let Some((focus, prev)) = windows.focused() {
-                debug!(
-                    "Not focusing new window {entity}, keeping focus on '{}'",
-                    focus.title().unwrap_or_default()
-                );
-                focus_entity(prev, true, &mut commands);
+        let Some((window, _, parent)) = windows
+            .get(entity)
+            .and_then(|window| windows.find_parent(window.id()))
+        else {
+            continue;
+        };
+        let Ok(app) = apps.get(parent) else {
+            continue;
+        };
+
+        if crate::ecs::restore::matches_startup_restore_state(
+            window,
+            app,
+            restore.as_deref(),
+            restoration.as_deref(),
+            &config,
+        ) {
+            continue;
+        }
+
+        // During startup, the window is already inserted into some strip.
+        let allready_inserted = workspaces
+            .iter_mut()
+            .find_map(|(strip, _)| strip.contains(entity).then_some(strip));
+        let properties = WindowProperties::new(app, window, &config);
+
+        if properties.floating() {
+            // Avoid managing window if it's floating.
+            commands.entity(entity).try_insert(Unmanaged::Floating);
+            if let Some(mut strip) = allready_inserted {
+                strip.remove(entity);
             }
-        } else {
-            debug!("Synthesizing WindowFocused for newly spawned window {entity}");
-            commands.trigger(SendMessageTrigger(Event::WindowFocused {
-                window_id: window.id(),
-            }));
+            continue;
+        }
+
+        if allready_inserted.is_none()
+            && let Some(mut strip) = workspaces
+                .iter_mut()
+                .find_map(|(strip, active)| active.then_some(strip))
+        {
+            // Attempt inserting the window at a pre-defined position.
+            let insert_at = properties.insertion().map_or_else(
+                || {
+                    // Otherwise attempt inserting it after the current focus.
+                    let focused_window = windows.focused();
+                    // Insert to the right of the currently focused window
+                    focused_window
+                        .and_then(|(_, entity)| strip.index_of(entity).ok())
+                        .and_then(|insert_at| {
+                            (insert_at + 1 < strip.len()).then_some(insert_at + 1)
+                        })
+                },
+                Some,
+            );
+
+            debug!("New window {entity} adding at {}", *strip);
+            match insert_at {
+                Some(after) => {
+                    debug!("New window inserted at {after}");
+                    strip.insert_at(after, entity);
+                }
+                None => strip.append(entity),
+            }
+        }
+
+        // During init, skip per-window reshuffles. finish_setup does a single
+        // reshuffle after all windows are added.
+        if initializing.is_none() {
+            if properties.dont_focus() {
+                if let Some((focus, prev)) = windows.focused() {
+                    debug!(
+                        "Not focusing new window {entity}, keeping focus on '{}'",
+                        focus.title().unwrap_or_default()
+                    );
+                    focus_entity(prev, true, &mut commands);
+                }
+            } else {
+                debug!("Synthesizing WindowFocused for newly spawned window {entity}");
+                commands.trigger(SendMessageTrigger(Event::WindowFocused {
+                    window_id: window.id(),
+                }));
+            }
         }
     }
 }

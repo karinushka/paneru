@@ -774,6 +774,9 @@ fn test_rapid_focus_not_swallowed() {
         Event::Command {
             command: Command::PrintState,
         },
+        Event::Command {
+            command: Command::PrintState,
+        },
     ]);
 
     verify_focused_window(0, harness.app.world_mut());

@@ -321,6 +321,10 @@ impl WindowManagerApi for MockWindowManager {
     fn windows_on_screen(&self) -> Option<Vec<WinID>> {
         None
     }
+    #[instrument(level = Level::DEBUG, skip(self))]
+    fn visible_on_screen(&self, window_id: WinID) -> Option<Vec<WinID>> {
+        None
+    }
 }
 
 /// A mock implementation of the `WindowApi` trait for testing purposes.
@@ -643,6 +647,9 @@ impl WindowManagerApi for TwoDisplayMock {
     fn dim_windows(&self, _windows: &[WinID], _level: f32) {}
 
     fn windows_on_screen(&self) -> Option<Vec<WinID>> {
+        None
+    }
+    fn visible_on_screen(&self, _window_id: WinID) -> Option<Vec<WinID>> {
         None
     }
 }

@@ -73,7 +73,11 @@ pub fn register_systems(app: &mut bevy::app::App) {
     );
     app.add_systems(
         PreUpdate,
-        (systems::window_creation_event, systems::pump_events),
+        (
+            systems::window_creation_event,
+            systems::detect_tabbed_windows,
+            systems::pump_events,
+        ),
     );
     app.add_systems(
         Update,

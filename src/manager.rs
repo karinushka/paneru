@@ -10,7 +10,8 @@ use objc2_core_foundation::{
 };
 use objc2_core_graphics::{
     CGAssociateMouseAndMouseCursorPosition, CGDirectDisplayID, CGDisplayBounds,
-    CGGetActiveDisplayList, CGWarpMouseCursorPosition,
+    CGGetActiveDisplayList, CGWarpMouseCursorPosition, CGWindowListCopyWindowInfo,
+    CGWindowListOption, kCGNullWindowID, kCGWindowNumber,
 };
 use std::path::Path;
 use std::ptr::null_mut;
@@ -170,6 +171,8 @@ pub trait WindowManagerApi: Send + Sync {
     fn cursor_position(&self) -> Option<CGPoint>;
 
     fn dim_windows(&self, windows: &[WinID], level: f32);
+
+    fn windows_on_screen(&self) -> Option<Vec<WinID>>;
 }
 
 /// `WindowManager` is a Bevy resource that holds a boxed `WindowManagerApi` trait object.
@@ -543,6 +546,22 @@ impl WindowManagerApi for WindowManagerOS {
         }
         .to_result(function_name!())
         .inspect_err(|err| debug!("{err}"));
+    }
+
+    fn windows_on_screen(&self) -> Option<Vec<WinID>> {
+        let options =
+            CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements;
+        let window_list_info = CGWindowListCopyWindowInfo(options, kCGNullWindowID);
+        window_list_info.map(|window_info| {
+            let array = unsafe { window_info.cast_unchecked::<CFDictionary<CFString, CFNumber>>() };
+            array
+                .iter()
+                .filter_map(|dict| {
+                    dict.get(unsafe { kCGWindowNumber })
+                        .and_then(|id| id.as_i32())
+                })
+                .collect::<Vec<_>>()
+        })
     }
 }
 

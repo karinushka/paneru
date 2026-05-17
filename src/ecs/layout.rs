@@ -243,6 +243,7 @@ impl LayoutStrip {
     pub fn convert_to_tabs(&mut self, leader: Entity, follower: Entity) -> Result<()> {
         let index = self.index_of(leader)?;
         let column = self.columns.remove(index).unwrap();
+        self.remove(follower);
         match column {
             Column::Single(id) | Column::Fullscren(id) => {
                 self.columns.insert(index, Column::Tabs(vec![id, follower]));

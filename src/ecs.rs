@@ -80,6 +80,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
     app.add_systems(
         Update,
         (
+            triggers::apply_window_properties,
             (
                 systems::add_existing_process,
                 systems::add_existing_application,
@@ -166,7 +167,6 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::locate_dock_trigger)
         .add_observer(triggers::send_message_trigger)
         .add_observer(triggers::window_removal_trigger)
-        .add_observer(triggers::apply_window_properties)
         .add_observer(restore::restore_window_state);
 }
 

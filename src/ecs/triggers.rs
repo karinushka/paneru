@@ -899,18 +899,13 @@ pub(super) fn spawn_window_trigger(
 
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn apply_window_defaults(
-    added: Populated<(&mut Window, Entity, &ChildOf), Added<Window>>,
+    added: Populated<(&mut Window, &ChildOf), Added<Window>>,
     apps: Query<(Entity, &Application)>,
     active_display: ActiveDisplay,
     config: Res<Config>,
     initializing: Option<Res<Initializing>>,
 ) {
-    for (ref mut window, entity, child) in added {
-        if active_display.active_strip().tabbed(entity) {
-            debug!("Ignoring tabbed {entity} attributes.");
-            continue;
-        }
-
+    for (ref mut window, child) in added {
         let Ok((_, app)) = apps.get(child.parent()) else {
             continue;
         };

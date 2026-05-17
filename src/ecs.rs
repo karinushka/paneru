@@ -94,6 +94,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::fresh_marker_cleanup,
             systems::timeout_ticker,
             systems::retry_front_switch,
+            systems::detect_tabbed_windows.before(triggers::apply_window_positions),
             systems::update_low_power_state
                 .run_if(resource_exists::<LowPowerMode>)
                 .run_if(on_timer(Duration::from_secs(LOW_POWER_MODE_CHECK_SEC))),

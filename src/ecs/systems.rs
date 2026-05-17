@@ -2,11 +2,11 @@ use bevy::app::AppExit;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::{MessageReader, MessageWriter};
-use bevy::ecs::query::{Changed, Has, Or, With, Without};
+use bevy::ecs::query::{Added, Changed, Has, Or, With, Without};
 use bevy::ecs::system::{
     Commands, Local, NonSend, NonSendMut, ParallelCommands, Populated, Query, Res, ResMut, Single,
 };
-use bevy::math::IRect;
+use bevy::math::{IRect, IVec2};
 use bevy::tasks::AsyncComputeTaskPool;
 use bevy::tasks::futures_lite::future;
 use bevy::time::Time;
@@ -1041,4 +1041,57 @@ pub(crate) fn update_low_power_state(low_power_mode: Option<ResMut<LowPowerMode>
     };
     let process_info = objc2_foundation::NSProcessInfo::processInfo();
     state.0 = process_info.isLowPowerModeEnabled();
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn detect_tabbed_windows(
+    created: Populated<(&Window, Entity, &ChildOf), Added<Window>>,
+    windows: Query<(&Window, Entity, &ChildOf)>,
+    mut workspaces: Query<&mut LayoutStrip, With<ActiveWorkspaceMarker>>,
+    apps: Query<(Entity, &Application)>,
+    config: Res<Config>,
+) {
+    for (window, entity, child) in created {
+        let Ok((app_entity, app)) = apps.get(child.parent()) else {
+            continue;
+        };
+
+        // A tabbed window will be inserted with the same size as the leader.
+        // So compensate for the potential frame padding.
+        let properties = WindowProperties::new(app, window, &config);
+        let padding = IVec2::new(
+            properties.horizontal_padding(),
+            properties.vertical_padding(),
+        );
+        let mut frame = window.frame();
+        frame.min -= padding;
+        frame.max += padding;
+
+        // Overlapping Frame Strategy: check if this window overlaps exactly with an existing
+        // window from the same application. If so, it's likely a native tab.
+        let tabbed_entity = windows
+            .iter()
+            .find_map(|(existing_window, leader, parent)| {
+                (leader != entity
+                    && parent.parent() == app_entity
+                    // && strip.contains(leader)
+                    && existing_window.frame() == frame)
+                    .then_some(leader)
+            });
+
+        if let Some(leader) = tabbed_entity {
+            debug!(
+                "Adding window {} as a tab follower for leader {leader:?} (overlapping frame)",
+                window.id()
+            );
+            // strip.remove(entity);
+            let Some(ref mut strip) = workspaces.iter_mut().find(|strip| strip.contains(leader))
+            else {
+                continue;
+            };
+            _ = strip
+                .convert_to_tabs(leader, entity)
+                .inspect_err(|err| error!("Failed to convert to tabs: {err}"));
+        }
+    }
 }

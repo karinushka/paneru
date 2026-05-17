@@ -301,13 +301,13 @@ fn test_send_next_display_stays_on_source() {
             let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
             vec![
                 Window::new(Box::new(MockWindow::new(
-                    100,
+                    101,
                     IRect::from_corners(origin, origin + size),
                     eq.clone(),
                     app.clone(),
                 ))),
                 Window::new(Box::new(MockWindow::new(
-                    101,
+                    100,
                     IRect::from_corners(origin, origin + size),
                     eq.clone(),
                     app.clone(),

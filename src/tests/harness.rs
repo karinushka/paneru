@@ -169,7 +169,7 @@ pub(crate) fn window_spawner(
     mock_app: MockApplication,
 ) -> TestWindowSpawner {
     Box::new(move |_| {
-        (0..count)
+        let mut windows = (0..count)
             .map(|i| {
                 let origin = Origin::new(0, 0);
                 let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
@@ -184,7 +184,9 @@ pub(crate) fn window_spawner(
                 );
                 Window::new(Box::new(window))
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        windows.reverse();
+        windows
     })
 }
 

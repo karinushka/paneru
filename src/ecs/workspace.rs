@@ -16,6 +16,7 @@ use tracing::{Level, debug, error, instrument, warn};
 
 use super::{ActiveDisplayMarker, SpawnWindowTrigger};
 use crate::commands::{Direction, MoveFocus, Operation, filter_window_operations};
+use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
@@ -35,6 +36,10 @@ impl Plugin for WorkspaceEventsPlugin {
         const REFRESH_WINDOW_CHECK_FREQ_MS: u64 = 1000;
         const DISPLAY_CHANGE_CHECK_FREQ_MS: u64 = 1000;
 
+        let reap_workspaces = |config: Option<Res<Config>>| {
+            config.is_some_and(|config| config.reap_empty_workspaces())
+        };
+
         app.add_systems(
             PreUpdate,
             (switch_virtual_workspace_bind, move_virtual_workspace_bind),
@@ -42,6 +47,7 @@ impl Plugin for WorkspaceEventsPlugin {
         app.add_systems(
             Update,
             (
+                reap_empty_virtual_workspaces.run_if(reap_workspaces),
                 workspace_change_trigger,
                 workspace_created_trigger,
                 workspace_destroyed_trigger,
@@ -899,5 +905,47 @@ fn show_active_workspace(
         {
             focus_entity(*entity, false, &mut commands);
         }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn reap_empty_virtual_workspaces(
+    changed: Single<Entity, Added<ActiveWorkspaceMarker>>,
+    mut strips: Populated<(Entity, &mut LayoutStrip)>,
+    mut commands: Commands,
+) {
+    let changed_entity = *changed;
+    let Some(workspace_id) = strips.get(changed_entity).ok().map(|(_, strip)| strip.id()) else {
+        return;
+    };
+    debug!("cleaning up virtual workspaces on space {workspace_id}");
+    let mut rows = strips
+        .iter_mut()
+        .filter(|(_, strip)| strip.id() == workspace_id)
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|(_, strip)| strip.virtual_index);
+
+    if rows.is_empty() {
+        return;
+    }
+
+    let primary_entity = rows[0].0;
+    let mut next_idx = 0;
+    for (entity, mut strip) in rows {
+        if strip.virtual_index > 0 && strip.len() == 0 {
+            if entity == changed_entity {
+                debug!("moving markers from despawned virtual workspace to primary");
+                commands
+                    .entity(primary_entity)
+                    .try_insert(ActiveWorkspaceMarker)
+                    .try_insert(SelectedVirtualMarker);
+            }
+            commands.entity(entity).despawn();
+            continue;
+        }
+        if strip.virtual_index != next_idx {
+            strip.virtual_index = next_idx;
+        }
+        next_idx += 1;
     }
 }

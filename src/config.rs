@@ -748,6 +748,13 @@ impl Config {
     pub fn horizontal_mouse_warp_offset(&self) -> i32 {
         self.options().horizontal_mouse_warp_offset.unwrap_or(0)
     }
+
+    pub fn reap_empty_workspaces(&self) -> bool {
+        // Default is disabled..
+        self.options()
+            .reap_empty_workspaces
+            .is_some_and(|reap| reap)
+    }
 }
 
 fn parse_hex_color(hex: &str) -> (f64, f64, f64) {
@@ -998,6 +1005,10 @@ pub struct MainOptions {
     /// Whether grow/shrink cycles back when reaching the end of presets.
     /// Default: true (cycles). Set to false to stop at the limits.
     pub window_resize_cycle: Option<bool>,
+
+    /// If enabled, an empty virtual workspace will be removed.
+    /// Default: true.
+    pub reap_empty_workspaces: Option<bool>,
 }
 
 /// Returns a default set of column widths.

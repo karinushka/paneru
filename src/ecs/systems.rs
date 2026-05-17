@@ -3,7 +3,7 @@ use bevy::ecs::change_detection::DetectChanges;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::{MessageReader, MessageWriter};
-use bevy::ecs::query::{Changed, Has, Or, With, Without};
+use bevy::ecs::query::{Added, Changed, Has, Or, With, Without};
 use bevy::ecs::system::{
     Commands, Local, NonSend, NonSendMut, ParallelCommands, Populated, Query, Res, ResMut, Single,
 };
@@ -31,7 +31,7 @@ use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, BruteforceWindows, FlashMessage, Initializing,
     LocateDockTrigger, LowPowerMode, MissionControlActive, Position, RestoreWindowState, Scrolling,
     SelectedVirtualMarker, SendMessageTrigger, Unmanaged, WidthRatio, WindowProperties,
-    focus_entity,
+    focus_entity, reposition_entity, reshuffle_around,
 };
 use crate::events::Event;
 use crate::manager::{
@@ -1023,6 +1023,7 @@ pub(crate) fn update_low_power_state(low_power_mode: Option<ResMut<LowPowerMode>
     state.0 = process_info.isLowPowerModeEnabled();
 }
 
+#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(crate) fn window_creation_event(mut messages: MessageReader<Event>, mut commands: Commands) {
     for event in messages.read() {
@@ -1037,6 +1038,54 @@ pub(crate) fn window_creation_event(mut messages: MessageReader<Event>, mut comm
             .map(|window| Window::new(Box::new(window)))
         {
             commands.trigger(SpawnWindowTrigger(vec![window]));
+        }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn detect_tabbed_windows(
+    created: Populated<(Entity, &Bounds, &ChildOf), Added<Window>>,
+    windows: Query<(Entity, &Window, &Position, &Bounds, &ChildOf), With<Window>>,
+    apps: Query<Entity, With<Application>>,
+    mut workspaces: Query<&mut LayoutStrip>,
+    window_manager: Res<WindowManager>,
+    mut commands: Commands,
+) {
+    for (entity, Bounds(bounds), child) in created {
+        let Ok(app_entity) = apps.get(child.parent()) else {
+            continue;
+        };
+
+        // Overlapping Frame Strategy: check if this window overlaps exactly with an existing
+        // window from the same application. If so, it's likely a native tab.
+        let tabbed = windows.iter().find_map(
+            |(leader, window, Position(leader_position), Bounds(leader_bounds), parent)| {
+                (leader != entity && parent.parent() == app_entity && leader_bounds.x == bounds.x)
+                    .then_some((leader, window.id(), leader_position))
+            },
+        );
+
+        // Tab detection heuristics:
+        // If the two windows are overlapping, and the previous window is suddenly not visible on
+        // the scren - it's a tab stack.
+        if let Some((leader, leader_id, leader_position)) = tabbed
+            && window_manager
+                .windows_on_screen()
+                .is_some_and(|ids| !ids.contains(&leader_id))
+            && let Some(mut strip) = workspaces.iter_mut().find(|strip| strip.contains(entity))
+            && strip.contains(leader)
+        {
+            debug!("Tabbed window detected: adding {entity} to leader {leader}");
+            if strip
+                .convert_to_tabs(leader, entity)
+                .inspect_err(|err| error!("Failed to convert to tabs: {err}"))
+                .is_ok()
+            {
+                // Reposition and reshuffle - otherwise the window will attempt to where the new
+                // tab was previously added.
+                reposition_entity(entity, *leader_position, &mut commands);
+                reshuffle_around(entity, &mut commands);
+            }
         }
     }
 }

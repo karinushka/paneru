@@ -104,7 +104,7 @@ fn test_window_shuffle() {
     ];
 
     // Logical width includes padding expansion on each side.
-    let logical_width = TEST_WINDOW_WIDTH + 2 * H_PAD;
+    let logical_width = TEST_WINDOW_WIDTH;
     let top_edge = TEST_MENUBAR_HEIGHT + i32::from(PADDING_TOP);
     let left_edge = i32::from(PADDING_LEFT);
     let right_edge = TEST_DISPLAY_WIDTH - i32::from(PADDING_RIGHT);

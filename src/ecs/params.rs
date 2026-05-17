@@ -271,12 +271,6 @@ impl Windows<'_, '_> {
             .map(|(window, entity, _, _)| (window, entity))
     }
 
-    pub fn all_iter(&self) -> impl Iterator<Item = (&Window, Entity, &ChildOf)> {
-        self.all
-            .iter()
-            .map(|(window, entity, childof, _)| (window, entity, childof))
-    }
-
     pub fn managed_iter(&self) -> impl Iterator<Item = (&Window, Entity, &ChildOf)> {
         self.all
             .iter()

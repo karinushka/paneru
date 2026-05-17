@@ -819,14 +819,13 @@ fn give_away_focus(
 /// * `active_display` - A query for the active display.
 /// * `main_cid` - The main connection ID resource.
 /// * `commands` - Bevy commands to manage components and trigger events.
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn spawn_window_trigger(
     mut trigger: On<SpawnWindowTrigger>,
-    windows: Windows,
+    windows: Query<(&Window, Entity, &ChildOf)>,
     mut apps: Query<(Entity, &mut Application)>,
-    mut active_display: ActiveDisplayMut,
-    config: Res<Config>,
+    active_display: ActiveDisplayMut,
     initializing: Option<Res<Initializing>>,
     restore: Option<Res<crate::ecs::restore::SessionRestore>>,
     mut commands: Commands,
@@ -836,7 +835,7 @@ pub(super) fn spawn_window_trigger(
     while let Some(mut window) = new_windows.pop() {
         let window_id = window.id();
 
-        if windows.find(window_id).is_some() {
+        if windows.iter().any(|window| window.0.id() == window_id) {
             continue;
         }
 
@@ -870,19 +869,6 @@ pub(super) fn spawn_window_trigger(
             window.title().unwrap_or_default()
         );
 
-        let properties = WindowProperties::new(&app, &window, &config);
-        if !properties.params.is_empty() {
-            debug!("Applying window properties for '{}'", window.id());
-        }
-
-        apply_window_defaults(
-            &mut window,
-            &mut active_display,
-            &properties,
-            &config,
-            initializing.is_some(),
-        );
-
         // update_frame expands the OS rect by the per-window padding, so calling it *after*
         // set_padding produces the correct logical frame for the ECS components below.
         let Ok(frame) = window.update_frame().inspect_err(|err| error!("{err}")) else {
@@ -894,37 +880,16 @@ pub(super) fn spawn_window_trigger(
             WidthRatio(f64::from(frame.width()) / f64::from(active_display.bounds().width()));
         let layout_position = LayoutPosition::default();
 
-        // Overlapping Frame Strategy: check if this window overlaps exactly with an existing
-        // window from the same application. If so, it's likely a native tab.
-        let tabbed_entity = windows
-            .all_iter()
-            .find_map(|(existing_window, entity, parent)| {
-                (parent.parent() == app_entity && existing_window.frame() == window.frame())
-                    .then_some(entity)
-            });
-
         // Insert the window into the internal Bevy state.
         // This insertion triggers window attributes observer.
-        let entity = commands
-            .spawn((
-                position,
-                bounds,
-                width_ratio,
-                window,
-                layout_position,
-                ChildOf(app_entity),
-            ))
-            .id();
-
-        if let Some(leader) = tabbed_entity {
-            debug!(
-                "Adding window {window_id} as a tab follower for leader {leader:?} (overlapping frame)"
-            );
-            let layout_strip = active_display.active_strip();
-            _ = layout_strip
-                .convert_to_tabs(leader, entity)
-                .inspect_err(|err| error!("Failed to convert to tabs: {err}"));
-        }
+        commands.spawn((
+            position,
+            bounds,
+            width_ratio,
+            window,
+            layout_position,
+            ChildOf(app_entity),
+        ));
     }
 
     if initializing.is_none() && restore.is_some() {
@@ -932,55 +897,73 @@ pub(super) fn spawn_window_trigger(
     }
 }
 
-#[allow(clippy::cast_possible_truncation)]
-fn apply_window_defaults(
-    window: &mut Window,
-    active_display: &mut ActiveDisplayMut,
-    properties: &WindowProperties,
-    config: &Config,
-    initializing: bool,
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn apply_window_defaults(
+    added: Populated<(&mut Window, Entity, &ChildOf), Added<Window>>,
+    apps: Query<(Entity, &Application)>,
+    active_display: ActiveDisplay,
+    config: Res<Config>,
+    initializing: Option<Res<Initializing>>,
 ) {
-    // Do not add padding to floating windows.
-    if properties.floating() {
-        // Skip grid_ratios during init: we don't know this window's display.
-        if !initializing && let Some((rx, ry, rw, rh)) = properties.grid_ratios() {
-            let bounds = active_display.bounds();
-            let x = (f64::from(bounds.width()) * rx) as i32;
-            let y = (f64::from(bounds.height()) * ry) as i32;
-            let w = (f64::from(bounds.width()) * rw) as i32;
-            let h = (f64::from(bounds.height()) * rh) as i32;
-            window.reposition(Origin::new(x, y));
-            window.resize(Size::new(w, h));
+    for (ref mut window, entity, child) in added {
+        if active_display.active_strip().tabbed(entity) {
+            debug!("Ignoring tabbed {entity} attributes.");
+            continue;
         }
-        return;
-    }
 
-    let vpadding = properties.vertical_padding();
-    let hpadding = properties.horizontal_padding();
-    window.set_padding(WindowPadding::Vertical(vpadding.clamp(0, 50)));
-    window.set_padding(WindowPadding::Horizontal(hpadding.clamp(0, 50)));
+        let Ok((_, app)) = apps.get(child.parent()) else {
+            continue;
+        };
 
-    // Apply configured width AFTER update_frame so it isn't overwritten.
-    // Use padded display width (matching window_resize command behavior).
-    // Safe during init: this only resizes, it doesn't reposition, so a
-    // window on an inactive display stays put.
-    if let Some(width) = properties.width_ratio() {
-        _ = window.update_frame().inspect_err(|err| error!("{err}"));
-        let bounds = active_display.bounds();
-        let (_, pad_right, _, pad_left) = config.edge_padding();
-        let padded_width = bounds.width() - pad_left - pad_right;
-        let new_width = (f64::from(padded_width) * width).round() as i32;
-        let height = window.frame().height();
-        window.resize(Size::new(new_width, height));
-        // Re-read the actual OS size: the app may enforce a minimum width
-        // that differs from our request.
-        _ = window.update_frame().inspect_err(|err| error!("{err}"));
+        let properties = WindowProperties::new(app, window, &config);
+        if !properties.params.is_empty() {
+            debug!("Applying window defaults for '{}'", window.id());
+        }
+
+        let initializing = initializing.is_some();
+        let floating = properties.floating();
+
+        // Do not add padding to floating windows.
+        if floating {
+            // Skip grid_ratios during init: we don't know this window's display.
+            if !initializing && let Some((rx, ry, rw, rh)) = properties.grid_ratios() {
+                let bounds = active_display.bounds();
+                let x = (f64::from(bounds.width()) * rx) as i32;
+                let y = (f64::from(bounds.height()) * ry) as i32;
+                let w = (f64::from(bounds.width()) * rw) as i32;
+                let h = (f64::from(bounds.height()) * rh) as i32;
+                window.reposition(Origin::new(x, y));
+                window.resize(Size::new(w, h));
+            }
+            continue;
+        }
+        let vpadding = properties.vertical_padding();
+        let hpadding = properties.horizontal_padding();
+        window.set_padding(WindowPadding::Vertical(vpadding.clamp(0, 50)));
+        window.set_padding(WindowPadding::Horizontal(hpadding.clamp(0, 50)));
+
+        // Apply configured width AFTER update_frame so it isn't overwritten.
+        // Use padded display width (matching window_resize command behavior).
+        // Safe during init: this only resizes, it doesn't reposition, so a
+        // window on an inactive display stays put.
+        if let Some(width) = properties.width_ratio() {
+            _ = window.update_frame().inspect_err(|err| error!("{err}"));
+            let bounds = active_display.bounds();
+            let (_, pad_right, _, pad_left) = config.edge_padding();
+            let padded_width = bounds.width() - pad_left - pad_right;
+            let new_width = (f64::from(padded_width) * width).round() as i32;
+            let height = window.frame().height();
+            window.resize(Size::new(new_width, height));
+            // Re-read the actual OS size: the app may enforce a minimum width
+            // that differs from our request.
+            _ = window.update_frame().inspect_err(|err| error!("{err}"));
+        }
     }
 }
 
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 #[instrument(level = Level::DEBUG, skip_all)]
-pub(super) fn apply_window_properties(
+pub(super) fn apply_window_positions(
     added: Populated<Entity, Added<Window>>,
     mut active_display: ActiveDisplayMut,
     windows: Windows,

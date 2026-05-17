@@ -82,7 +82,8 @@ pub fn register_systems(app: &mut bevy::app::App) {
     app.add_systems(
         Update,
         (
-            triggers::apply_window_properties,
+            triggers::apply_window_defaults,
+            triggers::apply_window_positions,
             (
                 systems::add_existing_process,
                 systems::add_existing_application,

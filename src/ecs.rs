@@ -495,7 +495,7 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
 }
 
 struct WindowProperties {
-    pub params: Vec<WindowParams>,
+    params: Vec<WindowParams>,
 }
 
 impl WindowProperties {
@@ -541,5 +541,19 @@ impl WindowProperties {
 
     pub fn width_ratio(&self) -> Option<f64> {
         self.params.iter().find_map(|props| props.width)
+    }
+
+    pub fn vertical_padding(&self) -> i32 {
+        self.params
+            .iter()
+            .find_map(|props| props.vertical_padding)
+            .unwrap_or(0)
+    }
+
+    pub fn horizontal_padding(&self) -> i32 {
+        self.params
+            .iter()
+            .find_map(|props| props.horizontal_padding)
+            .unwrap_or(0)
     }
 }

@@ -171,7 +171,7 @@ pub(crate) fn window_spawner(
         let mut windows = (0..count)
             .map(|i| {
                 let origin = Origin::new(0, 0);
-                let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+                let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT - i);
                 let window = MockWindow::new(
                     i,
                     IRect {

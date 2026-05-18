@@ -7,7 +7,7 @@ use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs;
 use bevy::ecs::system::{Query, Res, ResMut};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
@@ -76,6 +76,80 @@ struct StateBroadcastSignals {
     window_focused: bool,
 }
 
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Debug, Default, PartialEq)]
+struct StateBroadcastIntent {
+    virtual_workspace_changed: bool,
+    windows_changed: bool,
+    window_focused: bool,
+    title_changes: BTreeSet<WinID>,
+    display_changes: Vec<Option<u32>>,
+    active_display_changed: bool,
+}
+
+impl StateBroadcastIntent {
+    fn from_events<'a>(
+        events: impl IntoIterator<Item = &'a Event>,
+        signals: StateBroadcastSignals,
+    ) -> Self {
+        let mut intent = Self {
+            virtual_workspace_changed: signals.virtual_workspace_changed,
+            window_focused: signals.window_focused,
+            ..Self::default()
+        };
+
+        for event in events {
+            match event {
+                Event::SpaceChanged
+                | Event::Command {
+                    command: Command::Window(Operation::Virtual(_) | Operation::VirtualNumber(_)),
+                } => intent.virtual_workspace_changed = true,
+                Event::WindowCreated { .. }
+                | Event::WindowDestroyed { .. }
+                | Event::WindowMinimized { .. }
+                | Event::WindowDeminimized { .. }
+                | Event::Command {
+                    command:
+                        Command::Window(
+                            Operation::VirtualMove(_, _) | Operation::VirtualMoveNumber(_, _),
+                        ),
+                } => intent.windows_changed = true,
+                Event::WindowFocused { .. } => intent.window_focused = true,
+                Event::WindowTitleChanged { window_id } => {
+                    intent.title_changes.insert(*window_id);
+                }
+                Event::DisplayAdded { display_id }
+                | Event::DisplayRemoved { display_id }
+                | Event::DisplayMoved { display_id }
+                | Event::DisplayResized { display_id }
+                | Event::DisplayConfigured { display_id } => {
+                    let display_id = Some(*display_id);
+                    if !intent.display_changes.contains(&display_id) {
+                        intent.display_changes.push(display_id);
+                    }
+                }
+                Event::DisplayChanged => {
+                    intent.active_display_changed = true;
+                }
+                _ => {}
+            }
+        }
+
+        intent
+    }
+
+    fn requires_state(&self) -> bool {
+        self.virtual_workspace_changed
+            || self.windows_changed
+            || self.window_focused
+            || self.active_display_changed
+    }
+
+    fn is_empty(&self) -> bool {
+        !self.requires_state() && self.title_changes.is_empty() && self.display_changes.is_empty()
+    }
+}
+
 pub(super) fn register_query_commands(app: &mut App) {
     let active_subscribers = |subscribers: Option<Res<StateSubscribers>>| {
         subscribers.is_some_and(|subscribers| !subscribers.streams.is_empty())
@@ -124,6 +198,7 @@ fn state_subscribe_handler(
     }
 }
 
+#[cfg(test)]
 fn collect_state_broadcast_events<'a>(
     events: impl IntoIterator<Item = &'a Event>,
     state: &PaneruQueryState,
@@ -131,50 +206,54 @@ fn collect_state_broadcast_events<'a>(
     title_for_window: impl Fn(WinID) -> Option<String>,
     signals: StateBroadcastSignals,
 ) -> Vec<Value> {
-    let mut virtual_workspace_changed = signals.virtual_workspace_changed;
-    let mut windows_changed = false;
-    let mut window_focused = signals.window_focused;
-    let mut title_changes = BTreeMap::new();
-    let mut display_changes = Vec::new();
+    let intent = StateBroadcastIntent::from_events(events, signals);
+    collect_state_broadcast_events_for_intent(&intent, Some(state), cache, title_for_window)
+}
 
-    for event in events {
-        match event {
-            Event::SpaceChanged
-            | Event::Command {
-                command: Command::Window(Operation::Virtual(_) | Operation::VirtualNumber(_)),
-            } => virtual_workspace_changed = true,
-            Event::WindowCreated { .. }
-            | Event::WindowDestroyed { .. }
-            | Event::WindowMinimized { .. }
-            | Event::WindowDeminimized { .. }
-            | Event::Command {
-                command:
-                    Command::Window(Operation::VirtualMove(_, _) | Operation::VirtualMoveNumber(_, _)),
-            } => windows_changed = true,
-            Event::WindowFocused { .. } => window_focused = true,
-            Event::WindowTitleChanged { window_id } => {
-                title_changes.insert(*window_id, title_for_window(*window_id).unwrap_or_default());
-            }
-            Event::DisplayAdded { display_id }
-            | Event::DisplayRemoved { display_id }
-            | Event::DisplayMoved { display_id }
-            | Event::DisplayResized { display_id }
-            | Event::DisplayConfigured { display_id } => {
-                let display_id = Some(*display_id);
-                if !display_changes.contains(&display_id) {
-                    display_changes.push(display_id);
-                }
-            }
-            Event::DisplayChanged if !display_changes.contains(&state.active.display_id) => {
-                display_changes.push(state.active.display_id);
-            }
-            _ => {}
-        }
+fn collect_state_broadcast_events_for_intent(
+    intent: &StateBroadcastIntent,
+    state: Option<&PaneruQueryState>,
+    cache: &mut StateBroadcastCache,
+    title_for_window: impl Fn(WinID) -> Option<String>,
+) -> Vec<Value> {
+    let mut display_changes = intent.display_changes.clone();
+    if intent.active_display_changed
+        && let Some(state) = state
+        && !display_changes.contains(&state.active.display_id)
+    {
+        display_changes.push(state.active.display_id);
     }
+
+    let mut title_changes = BTreeMap::new();
+    for window_id in &intent.title_changes {
+        title_changes.insert(*window_id, title_for_window(*window_id).unwrap_or_default());
+    }
+
+    let Some(state) = state else {
+        let mut outgoing = Vec::new();
+        for (window_id, title) in title_changes {
+            if cache.titles.get(&window_id) == Some(&title) {
+                continue;
+            }
+            outgoing.push(json!({
+                "event": "window_title_changed",
+                "window_id": window_id,
+                "title": title,
+            }));
+            cache.titles.insert(window_id, title);
+        }
+        for display_id in display_changes {
+            outgoing.push(json!({
+                "event": "display_changed",
+                "display_id": display_id,
+            }));
+        }
+        return outgoing;
+    };
 
     let mut outgoing = Vec::new();
 
-    if virtual_workspace_changed {
+    if intent.virtual_workspace_changed {
         let workspace = WorkspaceBroadcastSnapshot::from(&state.active);
         if cache.workspace.as_ref() != Some(&workspace)
             && (workspace.native_workspace_id.is_some()
@@ -188,7 +267,9 @@ fn collect_state_broadcast_events<'a>(
         }
     }
 
-    if windows_changed && cache.virtual_workspaces.as_ref() != Some(&state.virtual_workspaces) {
+    if intent.windows_changed
+        && cache.virtual_workspaces.as_ref() != Some(&state.virtual_workspaces)
+    {
         outgoing.push(json!({
             "event": "windows_changed",
             "virtual_workspace_number": state.active.virtual_workspace_number,
@@ -197,7 +278,7 @@ fn collect_state_broadcast_events<'a>(
         cache.virtual_workspaces = Some(state.virtual_workspaces.clone());
     }
 
-    if window_focused {
+    if intent.window_focused {
         let focus = FocusBroadcastSnapshot::from(&state.active);
         if focus.window_id.is_some() && cache.focus.as_ref() != Some(&focus) {
             outgoing.push(json!({
@@ -251,21 +332,27 @@ fn state_event_broadcast_handler(
         return;
     }
 
-    let state = PaneruQueryState::extract(&workspaces, &displays, &windows, &apps);
     let signals = StateBroadcastSignals {
         virtual_workspace_changed: !active_workspace_changes.is_empty(),
         window_focused: !focused_changes.is_empty(),
     };
-    let outgoing = collect_state_broadcast_events(
-        events,
-        &state,
+    let intent = StateBroadcastIntent::from_events(events, signals);
+    if intent.is_empty() {
+        return;
+    }
+
+    let state = intent
+        .requires_state()
+        .then(|| PaneruQueryState::extract(&workspaces, &displays, &windows, &apps));
+    let outgoing = collect_state_broadcast_events_for_intent(
+        &intent,
+        state.as_ref(),
         &mut cache,
         |window_id| {
             windows
                 .find(window_id)
                 .and_then(|(window, _)| window.title().ok())
         },
-        signals,
     );
 
     if outgoing.is_empty() {
@@ -454,5 +541,50 @@ mod tests {
         assert_eq!(outgoing[0]["window_id"], 26_262);
         assert_eq!(outgoing[0]["bundle_id"], "com.openai.codex");
         assert_eq!(outgoing[0]["title"], "Codex");
+    }
+
+    #[test]
+    fn test_state_broadcast_intent_skips_state_for_empty_or_unrelated_events() {
+        let empty =
+            StateBroadcastIntent::from_events(std::iter::empty(), StateBroadcastSignals::default());
+        assert!(empty.is_empty());
+        assert!(!empty.requires_state());
+
+        let unrelated = StateBroadcastIntent::from_events(
+            [
+                PaneruEvent::ThemeChanged,
+                PaneruEvent::MouseUp {
+                    point: Default::default(),
+                    modifiers: crate::platform::Modifiers::empty(),
+                },
+            ]
+            .iter(),
+            StateBroadcastSignals::default(),
+        );
+        assert!(unrelated.is_empty());
+        assert!(!unrelated.requires_state());
+    }
+
+    #[test]
+    fn test_state_broadcast_intent_classifies_relevant_events() {
+        let intent = StateBroadcastIntent::from_events(
+            [
+                PaneruEvent::SpaceChanged,
+                PaneruEvent::WindowMinimized { window_id: 10 },
+                PaneruEvent::WindowFocused { window_id: 11 },
+                PaneruEvent::WindowTitleChanged { window_id: 12 },
+                PaneruEvent::DisplayResized { display_id: 2 },
+            ]
+            .iter(),
+            StateBroadcastSignals::default(),
+        );
+
+        assert!(intent.virtual_workspace_changed);
+        assert!(intent.windows_changed);
+        assert!(intent.window_focused);
+        assert_eq!(intent.title_changes, [12].into());
+        assert_eq!(intent.display_changes, vec![Some(2)]);
+        assert!(intent.requires_state());
+        assert!(!intent.is_empty());
     }
 }

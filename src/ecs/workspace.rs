@@ -210,6 +210,7 @@ fn detect_moved_windows(
     });
 
     if !unresolved.is_empty() {
+        let unresolved_ids = unresolved.iter().copied().collect::<HashSet<_>>();
         // Retry unresolved window IDs: during startup bruteforce, windows on
         // inactive workspaces may have stale AX attributes (e.g. AXGroup instead
         // of AXWindow).  Now that this workspace is active, re-query each app's
@@ -219,11 +220,11 @@ fn detect_moved_windows(
             .flat_map(|app| {
                 app.window_list()
                     .into_iter()
-                    .filter(|window| unresolved.contains(&window.id()))
+                    .filter(|window| unresolved_ids.contains(&window.id()))
             })
             .collect::<Vec<_>>();
         if retry_windows.is_empty() {
-            for id in unresolved {
+            for id in unresolved_ids {
                 ignored_windows.insert(id);
             }
         } else {

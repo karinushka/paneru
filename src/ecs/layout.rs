@@ -1,7 +1,7 @@
 use bevy::app::{App, Plugin, Update};
 use bevy::ecs::change_detection::{DetectChanges as _, DetectChangesMut as _};
 use bevy::ecs::component::Component;
-use bevy::ecs::entity::Entity;
+use bevy::ecs::entity::{Entity, EntityHashMap, EntityHashSet};
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::query::{Changed, Has, Or, With, Without};
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
@@ -20,7 +20,7 @@ use crate::ecs::{
     Position, RepositionMarker, ReshuffleAroundMarker, Scrolling, reposition_entity,
 };
 use crate::errors::{Error, Result};
-use crate::manager::{Display, Window};
+use crate::manager::{Display, Origin, Window};
 use crate::platform::WorkspaceId;
 
 pub struct LayoutEventsPlugin;
@@ -736,11 +736,40 @@ fn layout_sizes_changed(
     >,
     workspaces: Query<&mut LayoutStrip>,
 ) {
+    let changed_entities = changed_sizes.iter().collect::<EntityHashSet>();
     workspaces.into_iter().for_each(|mut strip| {
-        if changed_sizes.iter().any(|entity| strip.contains(entity)) {
+        if strip_has_changed_window(&strip, &changed_entities) {
             strip.set_changed();
         }
     });
+}
+
+fn strip_has_changed_window(strip: &LayoutStrip, changed_entities: &EntityHashSet) -> bool {
+    strip
+        .columns
+        .iter()
+        .any(|column| column_has_changed_window(column, changed_entities))
+}
+
+fn column_has_changed_window(column: &Column, changed_entities: &EntityHashSet) -> bool {
+    match column {
+        Column::Single(entity) | Column::Fullscren(entity) => changed_entities.contains(entity),
+        Column::Stack(stack) => stack
+            .iter()
+            .any(|item| stack_item_has_changed_window(item, changed_entities)),
+        Column::Tabs(entities) => entities
+            .iter()
+            .any(|entity| changed_entities.contains(entity)),
+    }
+}
+
+fn stack_item_has_changed_window(item: &StackItem, changed_entities: &EntityHashSet) -> bool {
+    match item {
+        StackItem::Single(entity) => changed_entities.contains(entity),
+        StackItem::Tabs(entities) => entities
+            .iter()
+            .any(|entity| changed_entities.contains(entity)),
+    }
 }
 
 /// Watches for changes to `LayoutStrip` (i.e. a window added or window order changed) and
@@ -923,6 +952,129 @@ fn position_layout_strips(
     }
 }
 
+#[derive(Clone, Copy)]
+struct StripWindowContext {
+    strip_position: Origin,
+    swiping: bool,
+    // Cached per strip so parallel window updates keep the same snap/animate
+    // decision that would have been made while iterating the strip directly.
+    workspace_switching: bool,
+    display_entity: Entity,
+    stacked: bool,
+}
+
+fn insert_strip_window_contexts(
+    contexts: &mut EntityHashMap<StripWindowContext>,
+    strip: &LayoutStrip,
+    strip_position: Origin,
+    swiping: bool,
+    workspace_switching: bool,
+    display_entity: Entity,
+) {
+    for column in &strip.columns {
+        insert_column_window_contexts(
+            contexts,
+            column,
+            strip_position,
+            swiping,
+            workspace_switching,
+            display_entity,
+            matches!(column, Column::Stack(_)),
+        );
+    }
+}
+
+fn insert_column_window_contexts(
+    contexts: &mut EntityHashMap<StripWindowContext>,
+    column: &Column,
+    strip_position: Origin,
+    swiping: bool,
+    workspace_switching: bool,
+    display_entity: Entity,
+    stacked: bool,
+) {
+    match column {
+        Column::Single(entity) | Column::Fullscren(entity) => {
+            contexts.insert(
+                *entity,
+                StripWindowContext {
+                    strip_position,
+                    swiping,
+                    workspace_switching,
+                    display_entity,
+                    stacked,
+                },
+            );
+        }
+        Column::Stack(items) => {
+            for item in items {
+                insert_stack_item_window_contexts(
+                    contexts,
+                    item,
+                    strip_position,
+                    swiping,
+                    workspace_switching,
+                    display_entity,
+                    stacked,
+                );
+            }
+        }
+        Column::Tabs(entities) => {
+            for entity in entities {
+                contexts.insert(
+                    *entity,
+                    StripWindowContext {
+                        strip_position,
+                        swiping,
+                        workspace_switching,
+                        display_entity,
+                        stacked,
+                    },
+                );
+            }
+        }
+    }
+}
+
+fn insert_stack_item_window_contexts(
+    contexts: &mut EntityHashMap<StripWindowContext>,
+    item: &StackItem,
+    strip_position: Origin,
+    swiping: bool,
+    workspace_switching: bool,
+    display_entity: Entity,
+    stacked: bool,
+) {
+    match item {
+        StackItem::Single(entity) => {
+            contexts.insert(
+                *entity,
+                StripWindowContext {
+                    strip_position,
+                    swiping,
+                    workspace_switching,
+                    display_entity,
+                    stacked,
+                },
+            );
+        }
+        StackItem::Tabs(entities) => {
+            for entity in entities {
+                contexts.insert(
+                    *entity,
+                    StripWindowContext {
+                        strip_position,
+                        swiping,
+                        workspace_switching,
+                        display_entity,
+                        stacked,
+                    },
+                );
+            }
+        }
+    }
+}
+
 /// Reacts to changes of logical window layout in the strip and any have been changed, reposition
 /// the layout strip against the current display viewport.
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
@@ -955,26 +1107,35 @@ fn position_layout_windows(
 ) {
     let offscreen_sliver_width = config.sliver_width();
     let (_, pad_right, _, pad_left) = config.edge_padding();
+    let mut strip_contexts = EntityHashMap::default();
+    for (layout_strip, strip_pos, swiping, strip_animating, child_of) in &workspaces {
+        let strip_position = strip_pos.0;
+        // Workspace switch: show_active_workspace directly mutates the
+        // strip's Position to slide the strip on/off-screen - no
+        // RepositionMarker, no Scrolling. We snap windows in lockstep so
+        // they don't animate the long jump from off-screen storage into
+        // view.
+        // TODO: Adjust this if workspaces need to be animated later.
+        let workspace_switching = strip_pos.is_changed() && !swiping && !strip_animating;
+        insert_strip_window_contexts(
+            &mut strip_contexts,
+            layout_strip,
+            strip_position,
+            swiping,
+            workspace_switching,
+            child_of.parent(),
+        );
+    }
 
     positioned_windows.par_iter_mut().for_each(
         |(entity, window, layout_position, mut position, mut bounds, full_width)| {
             if full_width {
                 return;
             }
-            let Some((layout_strip, strip_pos, swiping, strip_animating, child_of)) =
-                workspaces.iter().find(|strip| strip.0.contains(entity))
-            else {
+            let Some(context) = strip_contexts.get(&entity) else {
                 return;
             };
-            let strip_position = strip_pos.0;
-            // Workspace switch: show_active_workspace directly mutates the
-            // strip's Position to slide the strip on/off-screen — no
-            // RepositionMarker, no Scrolling. We snap windows in lockstep so
-            // they don't animate the long jump from off-screen storage into
-            // view.
-            // TODO: Adjust this if workspaces need to be animated later.
-            let workspace_switching = strip_pos.is_changed() && !swiping && !strip_animating;
-            let Ok((display, dock)) = displays.get(child_of.parent()) else {
+            let Ok((display, dock)) = displays.get(context.display_entity) else {
                 return;
             };
             let viewport = display.actual_display_bounds(dock, &config);
@@ -985,8 +1146,8 @@ fn position_layout_windows(
             let h_pad = window.horizontal_padding();
             let mut frame = IRect::from_corners(layout_position.0, layout_position.0 + bounds.0);
             let width = frame.width();
-            frame.min += strip_position;
-            frame.max += strip_position;
+            frame.min += context.strip_position;
+            frame.max += context.strip_position;
 
             let mut offscreen = false;
             if frame.max.x <= viewport.min.x + h_pad {
@@ -1009,18 +1170,12 @@ fn position_layout_windows(
             // applies to horizontally off-screen windows, so they expose just
             // a `sliver_height` fraction of their height at the viewport's
             // vertical center.
-            if !swiping && offscreen {
-                let stacked = layout_strip
-                    .index_of(entity)
-                    .ok()
-                    .and_then(|idx| layout_strip.get(idx).ok())
-                    .is_some_and(|col| matches!(col, Column::Stack(_)));
-
+            if !context.swiping && offscreen {
                 // Don't compress stacked windows vertically when off-screen.
                 // The height reduction corrupts their proportions: when the
                 // column scrolls back on-screen, binpack_heights makes the
                 // last window absorb all remaining space.
-                if !stacked {
+                if !context.stacked {
                     let inset = (f64::from(viewport.height()) * (1.0 - config.sliver_height())
                         / 2.0) as i32;
                     frame.min.y += inset;
@@ -1046,7 +1201,7 @@ fn position_layout_windows(
                 // motions compose: e.g., on swap, the focused window's target
                 // converges back to its old visual position as the strip
                 // settles, while the other window slides past.
-                if swiping || workspace_switching {
+                if context.swiping || context.workspace_switching {
                     position.0 = frame.min;
                     commands.command_scope(|mut command| {
                         if let Ok(mut entity_commands) = command.get_entity(entity) {
@@ -1078,6 +1233,53 @@ mod tests {
         strip.append(entities[2]);
 
         (world, strip, entities)
+    }
+
+    #[test]
+    fn strip_has_changed_window_matches_nested_entities() {
+        let (mut world, mut strip, entities) = setup_world_and_strip();
+        strip.stack(entities[1]).unwrap();
+        strip.convert_to_tabs(entities[0], entities[1]).unwrap();
+
+        let mut changed = EntityHashSet::default();
+        changed.insert(entities[1]);
+
+        assert!(strip_has_changed_window(&strip, &changed));
+
+        changed.clear();
+        changed.insert(world.spawn_empty().id());
+
+        assert!(!strip_has_changed_window(&strip, &changed));
+    }
+
+    #[test]
+    fn strip_window_contexts_capture_stack_membership_once() {
+        let (mut world, mut strip, entities) = setup_world_and_strip();
+        strip.stack(entities[1]).unwrap();
+        let display_entity = world.spawn_empty().id();
+        let strip_position = Origin::new(10, 20);
+        let mut contexts = EntityHashMap::default();
+
+        insert_strip_window_contexts(
+            &mut contexts,
+            &strip,
+            strip_position,
+            true,
+            false,
+            display_entity,
+        );
+
+        let stacked_leader = contexts.get(&entities[0]).unwrap();
+        let stacked_follower = contexts.get(&entities[1]).unwrap();
+        let single_window = contexts.get(&entities[2]).unwrap();
+
+        assert_eq!(stacked_leader.strip_position, strip_position);
+        assert_eq!(stacked_leader.display_entity, display_entity);
+        assert!(stacked_leader.swiping);
+        assert!(!stacked_leader.workspace_switching);
+        assert!(stacked_leader.stacked);
+        assert!(stacked_follower.stacked);
+        assert!(!single_window.stacked);
     }
 
     #[test]

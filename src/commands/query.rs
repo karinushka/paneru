@@ -554,7 +554,7 @@ mod tests {
             [
                 PaneruEvent::ThemeChanged,
                 PaneruEvent::MouseUp {
-                    point: Default::default(),
+                    point: objc2_core_foundation::CGPoint::default(),
                     modifiers: crate::platform::Modifiers::empty(),
                 },
             ]

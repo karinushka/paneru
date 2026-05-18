@@ -1,5 +1,5 @@
 use bevy::app::{App, Plugin, Update};
-use bevy::ecs::change_detection::DetectChangesMut as _;
+use bevy::ecs::change_detection::{DetectChanges as _, DetectChangesMut as _};
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
@@ -7,6 +7,7 @@ use bevy::ecs::query::{Changed, Has, Or, With, Without};
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::schedule::common_conditions::{not, resource_exists};
 use bevy::ecs::system::{ParallelCommands, Populated, Query, Res};
+use bevy::ecs::world::Ref;
 use bevy::math::IRect;
 use std::collections::VecDeque;
 use stdext::function_name;
@@ -944,7 +945,16 @@ fn position_layout_windows(
         ),
         (Changed<LayoutPosition>, With<Window>, Without<LayoutStrip>),
     >,
-    workspaces: Query<(&LayoutStrip, &Position, Has<Scrolling>, &ChildOf), With<LayoutStrip>>,
+    workspaces: Query<
+        (
+            &LayoutStrip,
+            Ref<Position>,
+            Has<Scrolling>,
+            Has<RepositionMarker>,
+            &ChildOf,
+        ),
+        With<LayoutStrip>,
+    >,
     displays: Query<(&Display, Option<&DockPosition>)>,
     config: Res<Config>,
     commands: ParallelCommands,
@@ -957,11 +967,19 @@ fn position_layout_windows(
             if full_width {
                 return;
             }
-            let Some((layout_strip, Position(strip_position), swiping, child_of)) =
+            let Some((layout_strip, strip_pos, swiping, strip_animating, child_of)) =
                 workspaces.iter().find(|strip| strip.0.contains(entity))
             else {
                 return;
             };
+            let strip_position = strip_pos.0;
+            // Workspace switch: show_active_workspace directly mutates the
+            // strip's Position to slide the strip on/off-screen — no
+            // RepositionMarker, no Scrolling. We snap windows in lockstep so
+            // they don't animate the long jump from off-screen storage into
+            // view. (See CLAUDE.md "Reverting the workspace-switch snap" if
+            // you want to make this animate later.)
+            let workspace_switching = strip_pos.is_changed() && !swiping && !strip_animating;
             let Ok((display, dock)) = displays.get(child_of.parent()) else {
                 return;
             };
@@ -1021,9 +1039,11 @@ fn position_layout_windows(
             }
 
             if position.0 != frame.min {
-                // While the user is actively swiping, each window must track
-                // the strip in lockstep — snap directly so the windows follow
-                // the finger and clear any in-flight per-window animation.
+                // Direct-assign (snap) when:
+                //   - The user is actively swiping: windows must track the
+                //     finger in lockstep.
+                //   - A workspace switch just moved the strip: jumping the
+                //     full off-screen distance should be instantaneous.
                 // Otherwise (programmatic strip animation, or pure layout
                 // change), animate toward the new position so layout changes
                 // (swap/add/remove) slide instead of teleport. When the strip
@@ -1032,7 +1052,7 @@ fn position_layout_windows(
                 // motions compose: e.g., on swap, the focused window's target
                 // converges back to its old visual position as the strip
                 // settles, while the other window slides past.
-                if swiping {
+                if swiping || workspace_switching {
                     position.0 = frame.min;
                     commands.command_scope(|mut command| {
                         if let Ok(mut entity_commands) = command.get_entity(entity) {

@@ -15,8 +15,8 @@ use tracing::{Level, instrument, trace};
 use crate::config::Config;
 use crate::ecs::params::Windows;
 use crate::ecs::{
-    Bounds, DockPosition, FullWidthMarker, Initializing, LayoutPosition, Position,
-    ReshuffleAroundMarker, Scrolling, reposition_entity,
+    Bounds, DockPosition, EnsureVisibleMarker, FullWidthMarker, Initializing, LayoutPosition,
+    Position, RepositionMarker, ReshuffleAroundMarker, Scrolling, reposition_entity,
 };
 use crate::errors::{Error, Result};
 use crate::manager::{Display, Window};
@@ -35,6 +35,7 @@ impl Plugin for LayoutEventsPlugin {
                     layout_sizes_changed,
                     layout_strip_changed,
                     reshuffle_layout_strip,
+                    ensure_visible_in_strip,
                     position_layout_strips,
                     position_layout_windows,
                 )
@@ -859,6 +860,57 @@ fn reshuffle_layout_strip(
     });
 }
 
+/// Scrolls the strip the minimum amount needed to keep `EnsureVisibleMarker`
+/// entities on-screen at their new layout position. If the entity already fits
+/// inside the viewport with the strip where it is, the strip is left alone and
+/// the per-window animator slides the entity into its slot. Only when the new
+/// slot would fall past an edge does the strip translate, and only by the
+/// shortfall — never to anchor the entity to a particular position.
+#[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all)]
+fn ensure_visible_in_strip(
+    markers: Populated<(Entity, &LayoutPosition), With<EnsureVisibleMarker>>,
+    strips: Query<(&LayoutStrip, Entity, &Position, &ChildOf)>,
+    displays: Query<(&Display, Option<&DockPosition>)>,
+    windows: Windows,
+    config: Res<Config>,
+    commands: ParallelCommands,
+) {
+    markers.par_iter().for_each(|(entity, layout_position)| {
+        commands.command_scope(|mut command| {
+            if let Ok(mut cmd) = command.get_entity(entity) {
+                cmd.try_remove::<EnsureVisibleMarker>();
+            }
+        });
+        let Some((_, strip_entity, strip_position, child)) =
+            strips.into_iter().find(|s| s.0.contains(entity))
+        else {
+            return;
+        };
+        let Ok((display, dock)) = displays.get(child.parent()) else {
+            return;
+        };
+        let Some(size) = windows.size(entity) else {
+            return;
+        };
+        let viewport = display.actual_display_bounds(dock, &config);
+
+        // Where the entity would appear if the strip stays put.
+        let candidate_min = layout_position.0 + strip_position.0;
+        // Clamp into the viewport. If already on-screen, this is a no-op and
+        // the strip target equals its current position — no movement.
+        let clamped_min = candidate_min.clamp(viewport.min, viewport.max - size);
+        if clamped_min == candidate_min {
+            return;
+        }
+        let strip_target = (clamped_min - layout_position.0).with_y(strip_position.0.y);
+        trace!("ensure_visible_in_strip: entity {entity}, scroll strip to {strip_target}");
+        commands.command_scope(|mut command| {
+            reposition_entity(strip_entity, strip_target, &mut command);
+        });
+    });
+}
+
 /// Reacts to changes in the position of the `LayoutStrip` to Display, and if changed,
 /// marks all the windows in the strip as requiring re-positioning.
 #[allow(clippy::needless_pass_by_value)]
@@ -895,6 +947,7 @@ fn position_layout_windows(
     workspaces: Query<(&LayoutStrip, &Position, Has<Scrolling>, &ChildOf), With<LayoutStrip>>,
     displays: Query<(&Display, Option<&DockPosition>)>,
     config: Res<Config>,
+    commands: ParallelCommands,
 ) {
     let offscreen_sliver_width = config.sliver_width();
     let (_, pad_right, _, pad_left) = config.edge_padding();
@@ -968,7 +1021,29 @@ fn position_layout_windows(
             }
 
             if position.0 != frame.min {
-                position.0 = frame.min;
+                // While the user is actively swiping, each window must track
+                // the strip in lockstep — snap directly so the windows follow
+                // the finger and clear any in-flight per-window animation.
+                // Otherwise (programmatic strip animation, or pure layout
+                // change), animate toward the new position so layout changes
+                // (swap/add/remove) slide instead of teleport. When the strip
+                // is also being animated, the per-window target is recomputed
+                // each tick from the strip's current position, so the two
+                // motions compose: e.g., on swap, the focused window's target
+                // converges back to its old visual position as the strip
+                // settles, while the other window slides past.
+                if swiping {
+                    position.0 = frame.min;
+                    commands.command_scope(|mut command| {
+                        if let Ok(mut entity_commands) = command.get_entity(entity) {
+                            entity_commands.try_remove::<RepositionMarker>();
+                        }
+                    });
+                } else {
+                    commands.command_scope(|mut command| {
+                        reposition_entity(entity, frame.min, &mut command);
+                    });
+                }
             }
         },
     );

@@ -920,26 +920,19 @@ pub(super) fn spawn_window_trigger(
 
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn apply_window_defaults(
-    added: Populated<(&mut Window, Entity, &ChildOf), Added<Window>>,
+    added: Populated<(&mut Window, &mut Position, &mut Bounds, &ChildOf), Added<Window>>,
     apps: Query<(Entity, &Application)>,
     active_display: ActiveDisplay,
     config: Res<Config>,
     initializing: Option<Res<Initializing>>,
 ) {
-    for (ref mut window, entity, child) in added {
-        if active_display.active_strip().tabbed(entity) {
-            debug!("Ignoring tabbed {entity} attributes.");
-            continue;
-        }
-
+    for (ref mut window, mut position, mut bounds, child) in added {
         let Ok((_, app)) = apps.get(child.parent()) else {
             continue;
         };
 
         let properties = WindowProperties::new(app, window, &config);
-        if !properties.params.is_empty() {
-            debug!("Applying window defaults for '{}'", window.id());
-        }
+        debug!("Applying window defaults for '{}'", window.id());
 
         let initializing = initializing.is_some();
         let floating = properties.floating();
@@ -962,6 +955,10 @@ pub(super) fn apply_window_defaults(
         let hpadding = properties.horizontal_padding();
         window.set_padding(WindowPadding::Vertical(vpadding.clamp(0, 50)));
         window.set_padding(WindowPadding::Horizontal(hpadding.clamp(0, 50)));
+        if let Ok(frame) = window.update_frame() {
+            position.0 = frame.min;
+            bounds.0 = frame.size();
+        }
 
         // Apply configured width AFTER update_frame so it isn't overwritten.
         // Use padded display width (matching window_resize command behavior).

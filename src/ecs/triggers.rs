@@ -26,7 +26,8 @@ use crate::ecs::state::PaneruState;
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, DockPosition, Initializing, LayoutPosition, LocateDockTrigger,
     Position, RestoreWindowState, Scrolling, SendMessageTrigger, VerifyWindowPosition, WidthRatio,
-    WindowProperties, focus_entity, reposition_entity, reshuffle_around, resize_entity,
+    WindowProperties, despawn_timeout_entity, focus_entity, reposition_entity, reshuffle_around,
+    resize_entity,
 };
 use crate::events::Event;
 use crate::manager::{
@@ -357,14 +358,14 @@ pub(super) fn mission_control_trigger(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn application_event_trigger(
     mut messages: MessageReader<Event>,
-    processes: Query<(&BProcess, Entity)>,
+    processes: Query<(&BProcess, Entity, Has<Timeout>)>,
     mut commands: Commands,
 ) {
     const PROCESS_READY_TIMEOUT_SEC: u64 = 5;
     let find_process = |psn| {
         processes
             .iter()
-            .find(|(BProcess(process), _)| process.psn() == psn)
+            .find(|(BProcess(process), _, _)| process.psn() == psn)
     };
 
     for event in messages.read() {
@@ -383,8 +384,12 @@ pub(super) fn application_event_trigger(
             }
 
             Event::ApplicationTerminated { psn } => {
-                if let Some((_, entity)) = find_process(*psn) {
-                    commands.entity(entity).despawn();
+                if let Some((_, entity, has_timeout)) = find_process(*psn) {
+                    if has_timeout {
+                        despawn_timeout_entity(entity, &mut commands);
+                    } else {
+                        commands.entity(entity).despawn();
+                    }
                 }
             }
             _ => (),

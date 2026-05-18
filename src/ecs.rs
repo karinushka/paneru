@@ -156,7 +156,7 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::locate_dock_trigger)
         .add_observer(triggers::send_message_trigger)
         .add_observer(triggers::window_removal_trigger)
-        .add_observer(triggers::cleanup_timeout_trigger)
+        .add_observer(systems::cleanup_timeout)
         .add_observer(restore::restore_window_state);
 }
 
@@ -463,6 +463,18 @@ pub fn flash_message(message: String, duration: f32, commands: &mut Commands) {
     commands.spawn((timeout, FlashMessage(message)));
 }
 
+pub fn remove_timeout(entity: Entity, commands: &mut Commands) {
+    if let Ok(mut entity_commands) = commands.get_entity(entity) {
+        entity_commands.try_remove::<Timeout>();
+    }
+}
+
+pub fn despawn_timeout_entity(entity: Entity, commands: &mut Commands) {
+    if let Ok(mut entity_commands) = commands.get_entity(entity) {
+        entity_commands.try_despawn();
+    }
+}
+
 pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<BevyApp> {
     let window_manager: Box<dyn WindowManagerApi> = Box::new(WindowManagerOS::new(sender.clone()));
     let watcher = window_manager.setup_config_watcher(CONFIGURATION_FILE.as_path())?;
@@ -574,5 +586,64 @@ impl WindowProperties {
             .iter()
             .find_map(|props| props.horizontal_padding)
             .unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use bevy::app::App;
+    use bevy::ecs::resource::Resource;
+    use bevy::ecs::system::ResMut;
+    use bevy::time::TimerMode;
+
+    #[derive(Default, Resource)]
+    struct TimeoutTestRuns(u32);
+
+    fn count_timeout_run(mut runs: ResMut<TimeoutTestRuns>) {
+        runs.0 += 1;
+    }
+
+    fn registered_timeout(app: &mut App) -> (Entity, SystemId) {
+        let system_id = app.world_mut().register_system(count_timeout_run);
+        let timer = Timer::from_seconds(1.0, TimerMode::Once);
+        let entity = app
+            .world_mut()
+            .spawn(Timeout {
+                timer,
+                system_id: Some(system_id),
+            })
+            .id();
+        (entity, system_id)
+    }
+
+    fn timeout_cleanup_app() -> App {
+        let mut app = App::new();
+        app.init_resource::<TimeoutTestRuns>()
+            .add_observer(systems::cleanup_timeout);
+        app
+    }
+
+    #[test]
+    fn timeout_unregisters_system_when_removed() {
+        let mut app = timeout_cleanup_app();
+        let (entity, system_id) = registered_timeout(&mut app);
+
+        app.world_mut().entity_mut(entity).remove::<Timeout>();
+        app.world_mut().flush();
+
+        assert!(app.world_mut().run_system(system_id).is_err());
+    }
+
+    #[test]
+    fn timeout_unregisters_system_when_despawned() {
+        let mut app = timeout_cleanup_app();
+        let (entity, system_id) = registered_timeout(&mut app);
+
+        app.world_mut().entity_mut(entity).despawn();
+        app.world_mut().flush();
+
+        assert!(app.world_mut().run_system(system_id).is_err());
     }
 }

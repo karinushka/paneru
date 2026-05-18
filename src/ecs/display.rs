@@ -16,7 +16,7 @@ use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::{
     ActiveDisplayMarker, Position, RefreshWindowSizes, SelectedVirtualMarker, SendMessageTrigger,
-    Timeout,
+    Timeout, remove_timeout,
 };
 use crate::events::Event;
 use crate::manager::{Display, WindowManager};
@@ -88,7 +88,7 @@ fn display_change_trigger(
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn displays_rearranged(
     mut messages: MessageReader<Event>,
-    workspaces: Query<(&LayoutStrip, Entity, Option<&ChildOf>)>,
+    workspaces: Query<(&LayoutStrip, Entity, Option<&ChildOf>, Has<Timeout>)>,
     mut displays: Query<(&mut Display, Entity)>,
     window_manager: Res<WindowManager>,
     config: Res<Config>,
@@ -129,7 +129,7 @@ pub(crate) fn displays_rearranged(
 #[instrument(level = Level::DEBUG, skip_all, fields(display_id))]
 fn add_display(
     display_id: CGDirectDisplayID,
-    existing_strips: &Query<(&LayoutStrip, Entity, Option<&ChildOf>)>,
+    existing_strips: &Query<(&LayoutStrip, Entity, Option<&ChildOf>, Has<Timeout>)>,
     window_manager: &WindowManager,
     config: &Config,
     retries: &mut HashSet<CGDirectDisplayID>,
@@ -172,7 +172,7 @@ fn add_display(
 #[instrument(level = Level::DEBUG, skip_all, fields(display_id))]
 fn remove_display(
     display_id: CGDirectDisplayID,
-    workspaces: &Query<(&LayoutStrip, Entity, Option<&ChildOf>)>,
+    workspaces: &Query<(&LayoutStrip, Entity, Option<&ChildOf>, Has<Timeout>)>,
     displays: &mut Query<(&mut Display, Entity)>,
     commands: &mut Commands,
 ) {
@@ -185,9 +185,9 @@ fn remove_display(
         return;
     };
 
-    for (strip, entity, _) in workspaces
+    for (strip, entity, _, _) in workspaces
         .into_iter()
-        .filter(|(_, _, child)| child.is_some_and(|child| child.parent() == display_entity))
+        .filter(|(_, _, child, _)| child.is_some_and(|child| child.parent() == display_entity))
     {
         let display_id = display.id();
         debug!(
@@ -220,7 +220,7 @@ fn move_display(
     display_id: CGDirectDisplayID,
     displays: &mut Query<(&mut Display, Entity)>,
     window_manager: &Res<WindowManager>,
-    existing_strips: &Query<(&LayoutStrip, Entity, Option<&ChildOf>)>,
+    existing_strips: &Query<(&LayoutStrip, Entity, Option<&ChildOf>, Has<Timeout>)>,
     config: &Config,
     commands: &mut Commands,
 ) {
@@ -256,24 +256,25 @@ fn reparent_existing_workspaces(
     workspace_ids: &[WorkspaceId],
     display_entity: Entity,
     display_bounds: &IRect,
-    existing_strips: &Query<(&LayoutStrip, Entity, Option<&ChildOf>)>,
+    existing_strips: &Query<(&LayoutStrip, Entity, Option<&ChildOf>, Has<Timeout>)>,
     commands: &mut Commands,
 ) {
     // Verifies that a moved display has all the workspaces which it owns.
     for &id in workspace_ids {
         let mut found = false;
-        for (strip, entity, child) in existing_strips {
+        for (strip, entity, child, has_timeout) in existing_strips {
             if strip.id() == id {
                 found = true;
                 if child.is_none_or(|child| child.parent() != display_entity) {
                     // Re-parent this workspace
                     if let Ok(mut cmd) = commands.get_entity(entity) {
                         debug!("reparenting workspace {id} to display {display_entity}");
-                        cmd.try_remove::<Timeout>()
-                            .try_remove::<ChildOf>()
-                            .insert(ChildOf(display_entity));
+                        cmd.try_remove::<ChildOf>().insert(ChildOf(display_entity));
 
                         cmd.insert(RefreshWindowSizes::default());
+                    }
+                    if has_timeout {
+                        remove_timeout(entity, commands);
                     }
                 }
             }

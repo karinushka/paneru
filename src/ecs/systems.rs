@@ -2,7 +2,9 @@ use bevy::app::AppExit;
 use bevy::ecs::change_detection::{DetectChanges, Ref};
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
+use bevy::ecs::lifecycle::Remove;
 use bevy::ecs::message::{MessageReader, MessageWriter};
+use bevy::ecs::observer::On;
 use bevy::ecs::query::{Added, Changed, Has, Or, With, Without};
 use bevy::ecs::system::{
     Commands, Local, NonSend, NonSendMut, ParallelCommands, Populated, Query, Res, ResMut, Single,
@@ -30,7 +32,7 @@ use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, BruteforceWindows, FlashMessage, Initializing,
     LocateDockTrigger, LowPowerMode, MissionControlActive, Position, RestoreWindowState, Scrolling,
     SelectedVirtualMarker, SendMessageTrigger, Unmanaged, WidthRatio, WindowProperties,
-    focus_entity, reposition_entity, reshuffle_around,
+    despawn_timeout_entity, focus_entity, reposition_entity, reshuffle_around, remove_timeout,
 };
 use crate::events::Event;
 use crate::manager::{
@@ -358,20 +360,20 @@ pub(super) fn add_launched_application(
 ///
 /// # Arguments
 ///
-/// * `cleanup` - A `Populated` query for `(Entity, Has<FreshMarker>, &Timeout)` components, targeting `BProcess` or `Application` entities.
+/// * `cleanup` - A `Populated` query for fresh `BProcess` or `Application` entities with timeouts.
 /// * `commands` - Bevy commands to remove components.
 #[allow(clippy::type_complexity)]
 pub(super) fn fresh_marker_cleanup(
     cleanup: Populated<
-        (Entity, Has<FreshMarker>, &Timeout),
-        Or<(With<BProcess>, With<Application>)>,
+        (Entity, Has<FreshMarker>),
+        (Or<(With<BProcess>, With<Application>)>, With<Timeout>),
     >,
     mut commands: Commands,
 ) {
-    for (entity, fresh, _) in cleanup {
+    for (entity, fresh) in cleanup {
         if !fresh {
             // Process was ready before the timer finished.
-            commands.entity(entity).try_remove::<Timeout>();
+            remove_timeout(entity, &mut commands);
         }
     }
 }
@@ -395,7 +397,6 @@ pub(super) fn timeout_ticker(
             trace!("Despawning entity {entity} due to timeout.");
             if let Some(system_id) = timeout.system_id.take() {
                 commands.run_system(system_id);
-                commands.unregister_system(system_id);
             }
             trace!("Removing timer {entity}");
             commands.entity(entity).despawn();
@@ -405,28 +406,38 @@ pub(super) fn timeout_ticker(
     }
 }
 
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn cleanup_timeout(
+    trigger: On<Remove, Timeout>,
+    timeouts: Query<&Timeout>,
+    mut commands: Commands,
+) {
+    let Ok(timeout) = timeouts.get(trigger.event().entity) else {
+        return;
+    };
+    if let Some(system_id) = timeout.system_id {
+        commands.unregister_system(system_id);
+    }
+}
+
 /// Retries querying the focused window for applications that had a transient AX error
 /// during `ApplicationFrontSwitched`. Runs each frame until success or timeout.
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn retry_front_switch(
-    retries: Populated<(Entity, &RetryFrontSwitch)>,
+    retries: Populated<(Entity, &RetryFrontSwitch), With<Timeout>>,
     applications: Query<&Application>,
     mut commands: Commands,
 ) {
     for (entity, retry) in retries.iter() {
         let Ok(app) = applications.get(retry.0) else {
             // Application entity no longer exists, clean up.
-            if let Ok(mut entity_commands) = commands.get_entity(entity) {
-                entity_commands.try_despawn();
-            }
+            despawn_timeout_entity(entity, &mut commands);
             continue;
         };
         if !app.is_frontmost() {
             // App is no longer frontmost — this retry is stale.
             debug!("Discarding stale front switch retry (app no longer frontmost).");
-            if let Ok(mut entity_commands) = commands.get_entity(entity) {
-                entity_commands.try_despawn();
-            }
+            despawn_timeout_entity(entity, &mut commands);
             continue;
         }
         if let Ok(focused_id) = app.focused_window_id() {
@@ -434,9 +445,7 @@ pub(super) fn retry_front_switch(
             commands.trigger(SendMessageTrigger(Event::WindowFocused {
                 window_id: focused_id,
             }));
-            if let Ok(mut entity_commands) = commands.get_entity(entity) {
-                entity_commands.try_despawn();
-            }
+            despawn_timeout_entity(entity, &mut commands);
         }
         // Otherwise, let timeout_ticker handle expiry.
     }

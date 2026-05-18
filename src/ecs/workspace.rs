@@ -21,7 +21,7 @@ use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, Initializing, NativeFullscreenMarker, Position,
-    RefreshWindowSizes, SelectedVirtualMarker, Timeout, Unmanaged, flash_message, focus_entity,
+    RefreshWindowSizes, SelectedVirtualMarker, Timeout, Unmanaged, flash_message, focus_entity, remove_timeout,
     reposition_entity, reshuffle_around,
 };
 use crate::errors::Result;
@@ -385,9 +385,9 @@ fn find_orphaned_workspaces(
         if child.is_some() {
             // Was reparented, remove timer.
             if let Ok(mut cmd) = commands.get_entity(orphan_entity) {
-                cmd.try_remove::<Timeout>();
                 cmd.insert(RefreshWindowSizes::default());
             }
+            remove_timeout(orphan_entity, &mut commands);
             debug!(
                 "layout strip {} was re-parented, removing timeout.",
                 orphan.id()
@@ -427,10 +427,10 @@ fn find_orphaned_workspaces(
         );
 
         if let Ok(mut cmd) = commands.get_entity(orphan_entity) {
-            cmd.try_remove::<Timeout>()
-                .insert(ChildOf(target_entity))
+            cmd.insert(ChildOf(target_entity))
                 .insert(RefreshWindowSizes::default());
         }
+        remove_timeout(orphan_entity, &mut commands);
     }
 }
 

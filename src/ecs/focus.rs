@@ -18,7 +18,7 @@ use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, GlobalState, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Scrolling, SelectedVirtualMarker, SendMessageTrigger, StrayFocusEvent,
-    focus_entity, reposition_entity, reshuffle_around,
+    Timeout, despawn_timeout_entity, focus_entity, reposition_entity, reshuffle_around,
 };
 use crate::events::Event;
 use crate::manager::{Application, Display, Window, WindowManager};
@@ -267,7 +267,7 @@ fn recover_lost_focus(
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn stray_focus_observer(
     trigger: On<Add, Window>,
-    focus_events: Populated<(Entity, &StrayFocusEvent)>,
+    focus_events: Populated<(Entity, &StrayFocusEvent), With<Timeout>>,
     windows: Windows,
     mut commands: Commands,
 ) {
@@ -282,6 +282,6 @@ pub(super) fn stray_focus_observer(
         .for_each(|(timeout_entity, _)| {
             debug!("Re-queueing lost focus event for window id {window_id}.");
             commands.trigger(SendMessageTrigger(Event::WindowFocused { window_id }));
-            commands.entity(timeout_entity).despawn();
+            despawn_timeout_entity(timeout_entity, &mut commands);
         });
 }

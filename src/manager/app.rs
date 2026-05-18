@@ -494,43 +494,47 @@ impl AxObserverHandler {
             which,
         });
         let context_ptr = NonNull::from_ref(&*context).as_ptr();
-        self.contexts.push(context);
 
         // TODO: retry re-registering these.
         let mut retry = vec![];
-        let added = notifications
-            .iter()
-            .filter_map(|name| {
-                debug!("adding {name} {element:x?} {observer:?}");
-                let notification = CFString::from_static_str(name);
-                match unsafe {
-                    AXObserverAddNotification(
-                        observer,
-                        element.as_ptr(),
-                        &notification,
-                        context_ptr.cast(),
-                    )
-                } {
-                    accessibility_sys::kAXErrorSuccess
-                    | accessibility_sys::kAXErrorNotificationAlreadyRegistered => Some(*name),
-                    accessibility_sys::kAXErrorCannotComplete => {
-                        retry.push(*name);
-                        None
-                    }
-                    result => {
-                        error!("error adding {name} {element:x?} {observer:?}: {result}");
-                        None
-                    }
+        let mut registered_any = false;
+        let mut context_used = false;
+        for name in notifications {
+            debug!("adding {name} {element:x?} {observer:?}");
+            let notification = CFString::from_static_str(name);
+            match unsafe {
+                AXObserverAddNotification(
+                    observer,
+                    element.as_ptr(),
+                    &notification,
+                    context_ptr.cast(),
+                )
+            } {
+                accessibility_sys::kAXErrorSuccess => {
+                    registered_any = true;
+                    context_used = true;
                 }
-            })
-            .collect::<Vec<_>>();
-        if added.is_empty() {
+                accessibility_sys::kAXErrorNotificationAlreadyRegistered => {
+                    registered_any = true;
+                }
+                accessibility_sys::kAXErrorCannotComplete => {
+                    retry.push(*name);
+                }
+                result => {
+                    error!("error adding {name} {element:x?} {observer:?}: {result}");
+                }
+            }
+        }
+        if context_used {
+            self.contexts.push(context);
+        }
+        if registered_any {
+            Ok(retry)
+        } else {
             Err(Error::PermissionDenied(format!(
                 "{}: unable to register any observers!",
                 function_name!()
             )))
-        } else {
-            Ok(retry)
         }
     }
 

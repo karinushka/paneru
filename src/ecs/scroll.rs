@@ -24,6 +24,18 @@ use crate::platform::Modifiers;
 
 pub struct ScrollEventsPlugin;
 
+const FINGER_LIFT_THRESHOLD: Duration = Duration::from_millis(50);
+const MIN_VELOCITY_PX: f64 = 5.0;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SwipeTimeoutAction {
+    Pending,
+    KeepScrolling,
+    RefreshMouse,
+    RemoveScrolling,
+    RemoveScrollingAndRefreshMouse,
+}
+
 impl Plugin for ScrollEventsPlugin {
     fn build(&self, app: &mut App) {
         let mission_control_inactive = |mission_control: Option<Res<MissionControlActive>>| {
@@ -151,25 +163,54 @@ pub(super) fn swiping_timeout(
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
-    const FINGER_LIFT_THRESHOLD: Duration = Duration::from_millis(50);
-    const MIN_VELOCITY_PX: f64 = 5.0;
     let dt = time.delta_secs_f64();
     let viewport_width = f64::from(active_display.bounds().width());
 
     for (entity, mut scroll) in strips {
-        if scroll.last_event.elapsed() > FINGER_LIFT_THRESHOLD {
-            scroll.is_user_swiping = false;
-
-            if scroll.velocity.abs() * dt * viewport_width < MIN_VELOCITY_PX {
+        match swiping_timeout_step(&mut scroll, dt, viewport_width) {
+            SwipeTimeoutAction::Pending | SwipeTimeoutAction::KeepScrolling => {}
+            SwipeTimeoutAction::RefreshMouse => {
+                if let Some(point) = window_manager.cursor_position() {
+                    commands.trigger(SendMessageTrigger(Event::MouseMoved {
+                        point,
+                        modifiers: Modifiers::empty(),
+                    }));
+                }
+            }
+            SwipeTimeoutAction::RemoveScrolling => {
                 commands.entity(entity).remove::<Scrolling>();
             }
-            if let Some(point) = window_manager.cursor_position() {
-                commands.trigger(SendMessageTrigger(Event::MouseMoved {
-                    point,
-                    modifiers: Modifiers::empty(),
-                }));
+            SwipeTimeoutAction::RemoveScrollingAndRefreshMouse => {
+                commands.entity(entity).remove::<Scrolling>();
+                if let Some(point) = window_manager.cursor_position() {
+                    commands.trigger(SendMessageTrigger(Event::MouseMoved {
+                        point,
+                        modifiers: Modifiers::empty(),
+                    }));
+                }
             }
         }
+    }
+}
+
+fn swiping_timeout_step(
+    scroll: &mut Scrolling,
+    dt: f64,
+    viewport_width: f64,
+) -> SwipeTimeoutAction {
+    if scroll.last_event.elapsed() <= FINGER_LIFT_THRESHOLD {
+        return SwipeTimeoutAction::Pending;
+    }
+
+    let was_user_swiping = scroll.is_user_swiping;
+    scroll.is_user_swiping = false;
+
+    let slow_enough_to_stop = scroll.velocity.abs() * dt * viewport_width < MIN_VELOCITY_PX;
+    match (slow_enough_to_stop, was_user_swiping) {
+        (true, true) => SwipeTimeoutAction::RemoveScrollingAndRefreshMouse,
+        (true, false) => SwipeTimeoutAction::RemoveScrolling,
+        (false, true) => SwipeTimeoutAction::RefreshMouse,
+        (false, false) => SwipeTimeoutAction::KeepScrolling,
     }
 }
 
@@ -223,8 +264,7 @@ fn apply_snap_force(
     }
 
     let target_offset = strip
-        .all_columns()
-        .into_iter()
+        .column_tops()
         .filter_map(|entity| {
             windows
                 .layout_position(entity)
@@ -437,5 +477,30 @@ fn vertical_swipe_gesture(
             state.accumulated = 0.0;
             state.fired = true;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn swipe_timeout_requests_mouse_refresh_only_on_lift_transition() {
+        let now = Instant::now();
+        let mut scroll = Scrolling {
+            velocity: 100.0,
+            position: 0.0,
+            is_user_swiping: true,
+            last_event: now.checked_sub(Duration::from_millis(100)).unwrap_or(now),
+        };
+
+        assert_eq!(
+            swiping_timeout_step(&mut scroll, 1.0 / 60.0, 1440.0),
+            SwipeTimeoutAction::RefreshMouse
+        );
+        assert_eq!(
+            swiping_timeout_step(&mut scroll, 1.0 / 60.0, 1440.0),
+            SwipeTimeoutAction::KeepScrolling
+        );
     }
 }

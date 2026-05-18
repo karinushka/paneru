@@ -59,6 +59,15 @@ pub trait WindowApi: Send + Sync {
         self.reposition(origin);
         self.resize(size);
     }
+    fn set_frame_for_commit(
+        &mut self,
+        origin: Origin,
+        size: Size,
+        _defer_enhanced_ui_restore: bool,
+    ) {
+        self.set_frame(origin, size);
+    }
+    fn release_frame_commit(&mut self) {}
     fn update_frame(&mut self) -> Result<IRect>;
     fn focus_without_raise(
         &self,
@@ -122,6 +131,13 @@ pub struct WindowOS {
     border_radius: OnceLock<Option<f64>>,
     pid: OnceLock<Result<Pid>>,
     app_reference: OnceLock<Option<CFRetained<AXUIWrapper>>>,
+    enhanced_ui_commit_held: bool,
+}
+
+impl Drop for WindowOS {
+    fn drop(&mut self) {
+        self.release_enhanced_ui_commit();
+    }
 }
 
 impl WindowOS {
@@ -146,6 +162,7 @@ impl WindowOS {
             border_radius: OnceLock::new(),
             pid: OnceLock::new(),
             app_reference: OnceLock::new(),
+            enhanced_ui_commit_held: false,
         };
 
         if window.is_unknown() {
@@ -273,6 +290,22 @@ impl WindowOS {
                 );
             }
         }
+    }
+
+    fn hold_enhanced_ui_for_commit(&mut self) {
+        if self.enhanced_ui_commit_held {
+            return;
+        }
+        self.disable_enhanced_ui();
+        self.enhanced_ui_commit_held = true;
+    }
+
+    fn release_enhanced_ui_commit(&mut self) {
+        if !self.enhanced_ui_commit_held {
+            return;
+        }
+        self.enhanced_ui_commit_held = false;
+        self.reenable_enhanced_ui();
     }
 
     /// Makes the window the key window for its application by sending synthesized events.
@@ -474,6 +507,48 @@ impl WindowApi for WindowOS {
             self.set_size_attribute(size);
         }
         self.reenable_enhanced_ui();
+    }
+
+    #[instrument(level = Level::TRACE)]
+    fn set_frame_for_commit(
+        &mut self,
+        origin: Origin,
+        size: Size,
+        defer_enhanced_ui_restore: bool,
+    ) {
+        let position_changed = self.frame.min != origin;
+        let size_changed = self.frame.size() != size;
+        if !position_changed && !size_changed {
+            if !defer_enhanced_ui_restore {
+                self.release_enhanced_ui_commit();
+            }
+            trace!("already correct frame.");
+            return;
+        }
+
+        if defer_enhanced_ui_restore {
+            self.hold_enhanced_ui_for_commit();
+            if position_changed {
+                self.set_position_attribute(origin);
+            }
+            if size_changed {
+                self.set_size_attribute(size);
+            }
+        } else if self.enhanced_ui_commit_held {
+            if position_changed {
+                self.set_position_attribute(origin);
+            }
+            if size_changed {
+                self.set_size_attribute(size);
+            }
+            self.release_enhanced_ui_commit();
+        } else {
+            self.set_frame(origin, size);
+        }
+    }
+
+    fn release_frame_commit(&mut self) {
+        self.release_enhanced_ui_commit();
     }
 
     /// Updates the internal `frame` of the window by querying its current position and size from the Accessibility API.

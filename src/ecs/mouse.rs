@@ -392,7 +392,7 @@ fn horizontal_warp_mouse_trigger(
             return;
         }
 
-        let mut target_displays = displays
+        let Some(warp_to) = displays
             .iter()
             .filter(|display| {
                 let above = display.bounds().min.y < current_display.bounds().min.y;
@@ -405,11 +405,8 @@ fn horizontal_warp_mouse_trigger(
                     below
                 }
             })
-            .collect::<Vec<_>>();
-
-        target_displays
-            .sort_by_key(|display| (display.bounds().min.y - current_display.bounds().min.y).abs());
-        let Some(warp_to) = target_displays.first() else {
+            .min_by_key(|display| (display.bounds().min.y - current_display.bounds().min.y).abs())
+        else {
             return;
         };
         let target = warp_to.bounds();

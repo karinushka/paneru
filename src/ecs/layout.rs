@@ -525,6 +525,10 @@ impl LayoutStrip {
         self.columns.iter().filter_map(Column::top).collect()
     }
 
+    pub fn column_tops(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.columns.iter().filter_map(Column::top)
+    }
+
     pub fn id(&self) -> WorkspaceId {
         self.id
     }

@@ -899,16 +899,53 @@ pub(super) fn verify_window_position(
 pub(super) fn commit_window_frames(
     active_display: ActiveDisplay,
     mut framed_windows: Populated<
-        (&mut Window, Ref<Position>, Ref<Bounds>, &mut WidthRatio),
+        (
+            &mut Window,
+            Ref<Position>,
+            Ref<Bounds>,
+            &mut WidthRatio,
+            Option<&RepositionMarker>,
+            Option<&ResizeMarker>,
+        ),
         Or<(Changed<Position>, Changed<Bounds>)>,
     >,
 ) {
     let display_bounds = active_display.bounds();
-    for (mut window, position, bounds, mut width_ratio) in &mut framed_windows {
+    for (mut window, position, bounds, mut width_ratio, reposition, resize) in &mut framed_windows {
         if bounds.is_changed() {
             width_ratio.0 = f64::from(bounds.0.x) / f64::from(display_bounds.width());
         }
-        window.set_frame(position.0, bounds.0);
+        window.set_frame_for_commit(
+            position.0,
+            bounds.0,
+            reposition.is_some() || resize.is_some(),
+        );
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn release_frame_commit_after_reposition(
+    trigger: On<Remove, RepositionMarker>,
+    mut windows: Query<(&mut Window, Option<&ResizeMarker>)>,
+) {
+    let Ok((mut window, resize)) = windows.get_mut(trigger.entity) else {
+        return;
+    };
+    if resize.is_none() {
+        window.release_frame_commit();
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn release_frame_commit_after_resize(
+    trigger: On<Remove, ResizeMarker>,
+    mut windows: Query<(&mut Window, Option<&RepositionMarker>)>,
+) {
+    let Ok((mut window, reposition)) = windows.get_mut(trigger.entity) else {
+        return;
+    };
+    if reposition.is_none() {
+        window.release_frame_commit();
     }
 }
 
@@ -1082,9 +1119,7 @@ pub(crate) fn detect_tabbed_windows(
 }
 
 const LOOP_MAX_TIMEOUT_FRAME_ACTIVE_MS: u32 = 16;
-
-const LOOP_MAX_TIMEOUT_LOWPOWER_MS: u32 = 500;
-
+const LOOP_MAX_TIMEOUT_LOWPOWER_MS: u32 = 50;
 const LOOP_MAX_TIMEOUT_MS: u32 = 50;
 
 const LOOP_TIMEOUT_STEP: u32 = 1;

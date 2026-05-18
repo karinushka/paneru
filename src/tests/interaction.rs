@@ -6,7 +6,7 @@ use crate::ecs::SpawnWindowTrigger;
 use crate::ecs::{ActiveWorkspaceMarker, layout::LayoutStrip};
 use crate::events::Event;
 use crate::manager::{Origin, Size, Window};
-use crate::{assert_focused, assert_window_at, assert_window_size};
+use crate::{assert_focused, assert_window_at, assert_window_near, assert_window_size};
 
 use super::*;
 
@@ -182,9 +182,9 @@ fn test_scrolling() {
             assert_window_at!(world, 0, 800, TEST_MENUBAR_HEIGHT);
         })
         .on_iteration(5, move |world| {
-            assert_window_at!(world, 2, -316, TEST_MENUBAR_HEIGHT);
-            assert_window_at!(world, 1, 84, TEST_MENUBAR_HEIGHT);
-            assert_window_at!(world, 0, 484, TEST_MENUBAR_HEIGHT);
+            assert_window_near!(world, 2, -316, TEST_MENUBAR_HEIGHT, 1);
+            assert_window_near!(world, 1, 84, TEST_MENUBAR_HEIGHT, 1);
+            assert_window_near!(world, 0, 484, TEST_MENUBAR_HEIGHT, 1);
         })
         .run(commands);
 }

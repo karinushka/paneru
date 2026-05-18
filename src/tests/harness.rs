@@ -232,6 +232,34 @@ macro_rules! assert_window_at {
 }
 
 #[macro_export]
+macro_rules! assert_window_near {
+    ($world:expr, $id:expr, $x:expr, $y:expr, $tolerance:expr) => {{
+        let mut query = $world.query::<&$crate::manager::Window>();
+        let window = query
+            .iter($world)
+            .find(|w| w.id() == $id)
+            .expect("window not found");
+        let frame = window.frame();
+        assert!(
+            (frame.min.x - $x).abs() <= $tolerance,
+            "window {} x position mismatch: got {}, expected {} +/- {}",
+            $id,
+            frame.min.x,
+            $x,
+            $tolerance
+        );
+        assert!(
+            (frame.min.y - $y).abs() <= $tolerance,
+            "window {} y position mismatch: got {}, expected {} +/- {}",
+            $id,
+            frame.min.y,
+            $y,
+            $tolerance
+        );
+    }};
+}
+
+#[macro_export]
 macro_rules! assert_window_size {
     ($world:expr, $id:expr, $w:expr, $h:expr) => {{
         let mut query = $world.query::<&$crate::manager::Window>();

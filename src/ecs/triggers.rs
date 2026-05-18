@@ -4,7 +4,9 @@ use bevy::ecs::lifecycle::{Add, Remove};
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Added, Has, With};
-use bevy::ecs::system::{Commands, NonSend, NonSendMut, Populated, Query, Res, ResMut, Single};
+use bevy::ecs::system::{
+    Commands, NonSend, NonSendMut, ParamSet, Populated, Query, Res, ResMut, Single,
+};
 use bevy::math::IRect;
 use notify::event::{DataChange, MetadataKind, ModifyKind};
 use notify::{EventKind, Watcher};
@@ -899,13 +901,13 @@ pub(super) fn spawn_window_trigger(
 
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn apply_window_defaults(
-    added: Populated<(&mut Window, &ChildOf), Added<Window>>,
+    added: Populated<(&mut Window, &ChildOf, &mut Position, &mut Bounds), Added<Window>>,
     apps: Query<(Entity, &Application)>,
     active_display: ActiveDisplay,
     config: Res<Config>,
     initializing: Option<Res<Initializing>>,
 ) {
-    for (ref mut window, child) in added {
+    for (ref mut window, child, mut position, mut bounds) in added {
         let Ok((_, app)) = apps.get(child.parent()) else {
             continue;
         };
@@ -936,31 +938,44 @@ pub(super) fn apply_window_defaults(
         let hpadding = properties.horizontal_padding();
         window.set_padding(WindowPadding::Vertical(vpadding.clamp(0, 50)));
         window.set_padding(WindowPadding::Horizontal(hpadding.clamp(0, 50)));
+        if let Ok(frame) = window.update_frame().inspect_err(|err| error!("{err}")) {
+            position.0 = frame.min;
+            bounds.0 = frame.size();
+        }
 
         // Apply configured width AFTER update_frame so it isn't overwritten.
         // Use padded display width (matching window_resize command behavior).
         // Safe during init: this only resizes, it doesn't reposition, so a
         // window on an inactive display stays put.
         if let Some(width) = properties.width_ratio() {
-            _ = window.update_frame().inspect_err(|err| error!("{err}"));
-            let bounds = active_display.bounds();
+            let display_bounds = active_display.bounds();
             let (_, pad_right, _, pad_left) = config.edge_padding();
-            let padded_width = bounds.width() - pad_left - pad_right;
+            let padded_width = display_bounds.width() - pad_left - pad_right;
             let new_width = (f64::from(padded_width) * width).round() as i32;
             let height = window.frame().height();
             window.resize(Size::new(new_width, height));
             // Re-read the actual OS size: the app may enforce a minimum width
             // that differs from our request.
-            _ = window.update_frame().inspect_err(|err| error!("{err}"));
+            if let Ok(frame) = window.update_frame().inspect_err(|err| error!("{err}")) {
+                position.0 = frame.min;
+                bounds.0 = frame.size();
+            }
         }
     }
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn apply_window_positions(
     added: Populated<Entity, Added<Window>>,
-    mut active_display: ActiveDisplayMut,
+    mut workspaces: ParamSet<(
+        Query<&LayoutStrip>,
+        Query<&mut LayoutStrip, With<ActiveWorkspaceMarker>>,
+    )>,
     windows: Windows,
     apps: Query<&Application>,
     config: Res<Config>,
@@ -970,7 +985,7 @@ pub(super) fn apply_window_positions(
     mut commands: Commands,
 ) {
     for entity in added {
-        if active_display.active_strip().tabbed(entity) {
+        if workspaces.p0().iter().any(|strip| strip.tabbed(entity)) {
             debug!("Ignoring tabbed {entity} attributes.");
             continue;
         }
@@ -1003,7 +1018,14 @@ pub(super) fn apply_window_positions(
             continue;
         }
 
-        let strip = active_display.active_strip();
+        if workspaces.p0().iter().any(|strip| strip.contains(entity)) {
+            continue;
+        }
+
+        let mut active_workspaces = workspaces.p1();
+        let Ok(mut strip) = active_workspaces.single_mut() else {
+            continue;
+        };
 
         // Attempt inserting the window at a pre-defined position.
         let insert_at = properties.insertion().map_or_else(
@@ -1018,7 +1040,7 @@ pub(super) fn apply_window_positions(
             Some,
         );
 
-        debug!("New window adding at {strip}");
+        debug!("New window adding at {}", &*strip);
         match insert_at {
             Some(after) => {
                 debug!("New window inserted at {after}");

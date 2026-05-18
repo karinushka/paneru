@@ -289,6 +289,7 @@ impl WindowManagerApi for MockWindowManager {
         debug!("{}:", function_name!());
         let ids = (self.windows)(workspace_id)
             .iter()
+            .rev()
             .map(|window| window.id())
             .collect();
         Ok(ids)
@@ -593,6 +594,7 @@ impl WindowManagerApi for TwoDisplayMock {
     fn windows_in_workspace(&self, workspace_id: WorkspaceId) -> Result<Vec<WinID>> {
         Ok((self.windows)(workspace_id)
             .iter()
+            .rev()
             .map(|w| w.id())
             .collect())
     }

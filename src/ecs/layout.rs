@@ -239,6 +239,10 @@ impl LayoutStrip {
 
     /// Converts a column containing `leader` to a `Tabs` column and adds `follower`.
     pub fn convert_to_tabs(&mut self, leader: Entity, follower: Entity) -> Result<()> {
+        if leader != follower {
+            self.remove(follower);
+        }
+
         let index = self.index_of(leader)?;
         let column = self.columns.remove(index).unwrap();
         match column {
@@ -1031,6 +1035,25 @@ mod tests {
         assert_eq!(strip.index_of(entities[1]).unwrap(), 0);
         assert_eq!(strip.index_of(entities[0]).unwrap(), 1);
         assert_eq!(strip.index_of(entities[2]).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_convert_to_tabs_removes_existing_follower_column() {
+        let (_world, mut strip, entities) = setup_world_and_strip();
+
+        strip.convert_to_tabs(entities[1], entities[2]).unwrap();
+
+        assert_eq!(strip.len(), 2);
+        assert_eq!(
+            strip.all_windows(),
+            vec![entities[0], entities[1], entities[2]]
+        );
+        assert_eq!(strip.index_of(entities[1]).unwrap(), 1);
+        assert_eq!(strip.index_of(entities[2]).unwrap(), 1);
+        assert!(matches!(
+            strip.get(1).unwrap(),
+            Column::Tabs(tabs) if tabs == vec![entities[1], entities[2]]
+        ));
     }
 
     #[test]

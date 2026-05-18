@@ -4,7 +4,8 @@ use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::query::{Added, Changed, Has, Or, With, Without};
 use bevy::ecs::system::{
-    Commands, Local, NonSend, NonSendMut, ParallelCommands, Populated, Query, Res, ResMut, Single,
+    Commands, Local, NonSend, NonSendMut, ParallelCommands, ParamSet, Populated, Query, Res,
+    ResMut, Single,
 };
 use bevy::math::{IRect, IVec2};
 use bevy::tasks::AsyncComputeTaskPool;
@@ -1043,15 +1044,22 @@ pub(crate) fn update_low_power_state(low_power_mode: Option<ResMut<LowPowerMode>
     state.0 = process_info.isLowPowerModeEnabled();
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 pub(crate) fn detect_tabbed_windows(
     created: Populated<(&Window, Entity, &ChildOf), Added<Window>>,
     windows: Query<(&Window, Entity, &ChildOf)>,
-    mut workspaces: Query<&mut LayoutStrip, With<ActiveWorkspaceMarker>>,
+    mut workspaces: ParamSet<(
+        Query<&LayoutStrip>,
+        Query<&mut LayoutStrip, With<ActiveWorkspaceMarker>>,
+    )>,
     apps: Query<(Entity, &Application)>,
     config: Res<Config>,
 ) {
     for (window, entity, child) in created {
+        if workspaces.p0().iter().any(|strip| strip.contains(entity)) {
+            continue;
+        }
+
         let Ok((app_entity, app)) = apps.get(child.parent()) else {
             continue;
         };
@@ -1085,7 +1093,10 @@ pub(crate) fn detect_tabbed_windows(
                 window.id()
             );
             // strip.remove(entity);
-            let Some(ref mut strip) = workspaces.iter_mut().find(|strip| strip.contains(leader))
+            let mut active_workspaces = workspaces.p1();
+            let Some(ref mut strip) = active_workspaces
+                .iter_mut()
+                .find(|strip| strip.contains(leader))
             else {
                 continue;
             };

@@ -139,7 +139,7 @@ fn swipe_gesture(
         if touchpad_up {
             scrolling.is_user_swiping = false;
         }
-    } else if has_scroll_event || touchpad_down {
+    } else if has_scroll_event {
         let dt = time.delta_secs_f64();
         let velocity = if dt > 0.0 {
             total_delta * swipe_sensitivity / dt

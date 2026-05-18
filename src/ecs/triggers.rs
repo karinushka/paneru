@@ -890,26 +890,22 @@ pub(super) fn spawn_window_trigger(
             continue;
         };
 
-        debug!(
-            "created {} title: {} role: {} subrole: {} element: {}",
-            window_id,
-            window.title().unwrap_or_default(),
-            window.role().unwrap_or_default(),
-            window.subrole().unwrap_or_default(),
-            window
+        if tracing::enabled!(Level::DEBUG) {
+            let title = window.title().unwrap_or_default();
+            let role = window.role().unwrap_or_default();
+            let subrole = window.subrole().unwrap_or_default();
+            let element = window
                 .element()
                 .map(|element| format!("{element}"))
-                .unwrap_or_default(),
-        );
+                .unwrap_or_default();
+            debug!(
+                "created {window_id} title: {title} role: {role} subrole: {subrole} element: {element}",
+            );
+        }
 
         if app.observe_window(&window).is_err() {
             warn!("Error observing window {window_id}.");
         }
-        debug!(
-            "window {} title: {}",
-            window_id,
-            window.title().unwrap_or_default()
-        );
 
         // update_frame expands the OS rect by the per-window padding, so calling it *after*
         // set_padding produces the correct logical frame for the ECS components below.

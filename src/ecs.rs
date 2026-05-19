@@ -210,6 +210,15 @@ pub struct ResizeMarker(pub Size);
 #[derive(Component)]
 pub struct ReshuffleAroundMarker;
 
+/// Marker component requesting that the strip scroll *minimally* to keep the
+/// entity's NEW layout position inside the viewport. Unlike
+/// [`ReshuffleAroundMarker`], this does not anchor the entity to its old visual
+/// position — if the new layout slot is already on-screen, the strip is left
+/// alone and the entity is free to slide there. Only when the new slot would
+/// fall off the edge does the strip scroll just enough to expose it.
+#[derive(Component)]
+pub struct EnsureVisibleMarker;
+
 #[derive(Component, Debug)]
 pub struct Scrolling {
     pub velocity: f64,
@@ -449,6 +458,13 @@ pub fn resize_entity(entity: Entity, size: Size, commands: &mut Commands) {
 pub fn reshuffle_around(entity: Entity, commands: &mut Commands) {
     if let Ok(mut entity_commands) = commands.get_entity(entity) {
         entity_commands.try_insert(ReshuffleAroundMarker);
+    }
+}
+
+#[instrument(level = Level::TRACE, skip(commands))]
+pub fn ensure_visible(entity: Entity, commands: &mut Commands) {
+    if let Ok(mut entity_commands) = commands.get_entity(entity) {
+        entity_commands.try_insert(EnsureVisibleMarker);
     }
 }
 

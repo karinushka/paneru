@@ -260,7 +260,15 @@ fn test_window_hidden_ratio() {
 }
 
 #[test]
-fn test_window_hidden_ratio_swap() {
+fn test_window_swap_brings_focused_into_view() {
+    // After Center, id=4 is at the centered position. Swap(Last) bubbles
+    // id=4 to column 4 (layout x=1600); with the strip at +312 that would
+    // put id=4 off-screen to the right (1912). ensure_visible_in_strip
+    // scrolls the strip by exactly the shortfall so id=4 sits at the right
+    // edge of the viewport (max.x - width = 624). The strip does NOT
+    // re-anchor id=4 to its old centered position — there was room to the
+    // right, so it slides there. id=0 takes the slot immediately to the
+    // left.
     let commands = vec![
         Event::MenuOpened { window_id: 0 },
         Event::Command {
@@ -273,7 +281,6 @@ fn test_window_hidden_ratio_swap() {
 
     let config: Config = (
         MainOptions {
-            window_hidden_ratio: Some(1.0),
             animation_speed: Some(10000.0),
             ..Default::default()
         },
@@ -282,6 +289,7 @@ fn test_window_hidden_ratio_swap() {
         .into();
 
     let centered = (TEST_DISPLAY_WIDTH - TEST_WINDOW_WIDTH) / 2;
+    let right_edge = TEST_DISPLAY_WIDTH - TEST_WINDOW_WIDTH;
 
     TestHarness::new()
         .with_config(config)
@@ -290,8 +298,51 @@ fn test_window_hidden_ratio_swap() {
             assert_window_at!(world, 4, centered, TEST_MENUBAR_HEIGHT);
         })
         .on_iteration(2, move |world| {
-            assert_window_at!(world, 4, centered, TEST_MENUBAR_HEIGHT);
-            assert_window_at!(world, 0, centered - TEST_WINDOW_WIDTH, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 4, right_edge, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(
+                world,
+                0,
+                right_edge - TEST_WINDOW_WIDTH,
+                TEST_MENUBAR_HEIGHT
+            );
+            assert_focused!(world, 4);
+        })
+        .run(commands);
+}
+
+#[test]
+fn test_window_swap_keeps_strip_when_in_view() {
+    // Two windows fit the viewport. Swap(West) on the focused (right)
+    // window swaps the columns: both new layout slots are still inside the
+    // viewport with the strip where it is, so ensure_visible_in_strip does
+    // nothing. The per-window animation slides each window into the other's
+    // old position.
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::Last)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Swap(Direction::West)),
+        },
+    ];
+
+    let config: Config = (
+        MainOptions {
+            animation_speed: Some(10000.0),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(2)
+        .on_iteration(2, |world| {
+            assert_window_at!(world, 0, 0, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 1, TEST_WINDOW_WIDTH, TEST_MENUBAR_HEIGHT);
+            assert_focused!(world, 0);
         })
         .run(commands);
 }

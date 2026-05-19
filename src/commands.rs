@@ -15,8 +15,8 @@ use crate::ecs::layout::{Column, LayoutStrip, StackItem};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Windows};
 use crate::ecs::{
     ActiveDisplayMarker, ActiveWorkspaceMarker, Bounds, FocusedMarker, FullWidthMarker,
-    NativeFullscreenMarker, SelectedVirtualMarker, SendMessageTrigger, Unmanaged, focus_entity,
-    reposition_entity, reshuffle_around, resize_entity,
+    NativeFullscreenMarker, SelectedVirtualMarker, SendMessageTrigger, Unmanaged, ensure_visible,
+    focus_entity, reposition_entity, reshuffle_around, resize_entity,
 };
 use crate::events::Event;
 use crate::manager::{Application, Display, Origin, Size, Window, WindowManager};
@@ -345,8 +345,13 @@ fn command_swap_focus(
         Some(current)
     };
 
+    // Keep the focused window on-screen, but don't anchor it: if its new
+    // layout slot is already visible with the strip where it is, the strip
+    // stays put and per-window animation slides the window into the slot.
+    // Only when the slot would fall off the edge does the strip scroll —
+    // and only by the shortfall.
     if let Some(window) = handler() {
-        reshuffle_around(window, &mut commands);
+        ensure_visible(window, &mut commands);
     } else {
         debug!(
             "swap {direction:?}: handler returned None (focused={:?}, strip_len={})",

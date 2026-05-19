@@ -128,6 +128,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
             (
                 systems::animate_entities,
                 systems::commit_window_position.run_if(not(resource_exists::<Initializing>)),
+                systems::verify_window_position.run_if(not(resource_exists::<Initializing>)),
             )
                 .chain(),
             (
@@ -362,6 +363,24 @@ impl RefreshWindowSizes {
     pub fn ready(&self) -> bool {
         const REFRESH_WINDOW_SIZE_DELAY_SEC: u64 = 5;
         self.0.elapsed() > Duration::from_secs(REFRESH_WINDOW_SIZE_DELAY_SEC)
+    }
+}
+
+#[derive(Component)]
+pub struct VerifyWindowPosition {
+    remaining: u8,
+}
+
+impl Default for VerifyWindowPosition {
+    fn default() -> Self {
+        Self { remaining: 3 }
+    }
+}
+
+impl VerifyWindowPosition {
+    pub fn tick(&mut self) -> bool {
+        self.remaining = self.remaining.saturating_sub(1);
+        self.remaining == 0
     }
 }
 

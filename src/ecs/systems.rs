@@ -20,6 +20,7 @@ use tracing::{Level, debug, error, info, instrument, trace, warn};
 use super::{
     ActiveDisplayMarker, BProcess, ExistingMarker, FreshMarker, PollForNotifications,
     RepositionMarker, ResizeMarker, RetryFrontSwitch, SpawnWindowTrigger, Timeout,
+    VerifyWindowPosition,
 };
 
 use crate::config::{Config, decorations::BorderRadiusOption};
@@ -687,11 +688,20 @@ pub(super) fn pump_events(
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn window_resized_update_frame(
     mut messages: MessageReader<Event>,
-    mut windows: Query<(&mut Window, Entity, &Position, &mut Bounds), Without<LayoutStrip>>,
+    mut windows: Query<
+        (
+            &mut Window,
+            Entity,
+            &Position,
+            &mut Bounds,
+            Option<&Unmanaged>,
+        ),
+        Without<LayoutStrip>,
+    >,
     mut active_workspace: Single<(&LayoutStrip, &mut Position), With<ActiveWorkspaceMarker>>,
 ) {
     for event in messages.read() {
@@ -699,12 +709,15 @@ pub(super) fn window_resized_update_frame(
             continue;
         };
 
-        let Some((mut window, entity, position, mut bounds)) = windows
+        let Some((mut window, entity, position, mut bounds, unmanaged)) = windows
             .iter_mut()
             .find(|window| window.0.id() == *window_id)
         else {
             continue;
         };
+        if matches!(unmanaged, Some(Unmanaged::Minimized | Unmanaged::Hidden)) {
+            continue;
+        }
         let Ok(new_frame) = window.update_frame() else {
             continue;
         };
@@ -732,7 +745,7 @@ pub(super) fn window_resized_update_frame(
         let diff = old_frame.min.y - new_frame.min.y;
         if diff.abs() > 0
             && let Some(above_entity) = active_strip.above(entity)
-            && let Ok((_, _, _, mut above_bounds)) = windows.get_mut(above_entity)
+            && let Ok((_, _, _, mut above_bounds, _)) = windows.get_mut(above_entity)
             && above_bounds.0.y - diff > 200
         {
             above_bounds.0.y -= diff;
@@ -744,19 +757,25 @@ pub(super) fn window_resized_update_frame(
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn window_moved_update_frame(
     mut messages: MessageReader<Event>,
-    mut windows: Query<(&mut Window, &mut Position, &Bounds), Without<LayoutStrip>>,
+    mut windows: Query<
+        (&mut Window, &mut Position, &Bounds, Option<&Unmanaged>),
+        Without<LayoutStrip>,
+    >,
 ) {
     for event in messages.read() {
         let Event::WindowMoved { window_id } = event else {
             continue;
         };
 
-        let Some((mut window, mut position, bounds)) = windows
+        let Some((mut window, mut position, bounds, unmanaged)) = windows
             .iter_mut()
             .find(|window| window.0.id() == *window_id)
         else {
             continue;
         };
+        if matches!(unmanaged, Some(Unmanaged::Minimized | Unmanaged::Hidden)) {
+            continue;
+        }
         let Ok(new_frame) = window.update_frame() else {
             continue;
         };
@@ -923,6 +942,28 @@ pub(super) fn commit_window_position(
     moved_windows
         .par_iter_mut()
         .for_each(|(mut window, position)| window.reposition(position.0));
+}
+
+#[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::TRACE, skip_all)]
+pub(super) fn verify_window_position(
+    mut windows: Populated<(Entity, &mut Window, &Position, &mut VerifyWindowPosition)>,
+    mut commands: Commands,
+) {
+    for (entity, mut window, position, mut verification) in &mut windows {
+        if window
+            .update_frame()
+            .is_ok_and(|frame| frame.min == position.0)
+        {
+            commands.entity(entity).try_remove::<VerifyWindowPosition>();
+            continue;
+        }
+
+        window.reposition(position.0);
+        if verification.tick() {
+            commands.entity(entity).try_remove::<VerifyWindowPosition>();
+        }
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)]

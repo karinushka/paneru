@@ -1,4 +1,4 @@
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use bevy::prelude::*;
@@ -328,6 +328,7 @@ pub(crate) struct MockWindow {
     pub(crate) identifier: String,
     pub(crate) role: String,
     pub(crate) subrole: String,
+    pub(crate) ignored_repositions: Arc<AtomicUsize>,
 }
 
 impl WindowApi for MockWindow {
@@ -385,6 +386,10 @@ impl WindowApi for MockWindow {
     #[instrument(level = Level::DEBUG, skip(self))]
     fn reposition(&mut self, origin: Origin) {
         debug!("{}: id {} to {origin}", function_name!(), self.id);
+        if self.ignored_repositions.load(Ordering::SeqCst) > 0 {
+            self.ignored_repositions.fetch_sub(1, Ordering::SeqCst);
+            return;
+        }
         let size = self.frame.size();
         self.frame.min = origin;
         self.frame.max = origin + size;
@@ -500,7 +505,16 @@ impl MockWindow {
             identifier: String::new(),
             role: "AXWindow".to_string(),
             subrole: "AXStandardWindow".to_string(),
+            ignored_repositions: Arc::default(),
         }
+    }
+
+    pub(crate) fn with_ignored_repositions(
+        mut self,
+        ignored_repositions: Arc<AtomicUsize>,
+    ) -> Self {
+        self.ignored_repositions = ignored_repositions;
+        self
     }
 }
 

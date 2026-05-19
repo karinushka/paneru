@@ -1,9 +1,11 @@
+use std::sync::Arc;
+
 use bevy::prelude::*;
 
 use crate::commands::{Command, Direction, Operation};
 use crate::config::{Config, MainOptions, WindowParams};
 use crate::ecs::SpawnWindowTrigger;
-use crate::ecs::{ActiveWorkspaceMarker, layout::LayoutStrip};
+use crate::ecs::{ActiveWorkspaceMarker, Position, layout::LayoutStrip};
 use crate::events::Event;
 use crate::manager::{Origin, Size, Window};
 use crate::{assert_focused, assert_window_at, assert_window_size};
@@ -212,7 +214,7 @@ fn test_scrolling_stop() {
     TestHarness::new()
         .with_config(config)
         .with_windows(3)
-        .on_iteration(2, |world| {
+        .on_iteration(3, |world| {
             use crate::ecs::Scrolling;
             let mut query = world.query::<&Scrolling>();
             let scroll = query.single(world).unwrap();
@@ -338,8 +340,52 @@ fn test_stale_focus_event_ignored() {
         .on_iteration(1, |world| {
             assert_focused!(world, 3);
         })
-        .on_iteration(3, |world| {
+        .on_iteration(2, |world| {
             assert_focused!(world, 3);
+        })
+        .run(commands);
+}
+
+#[test]
+fn test_repeated_external_focus_reshuffles_already_focused_window() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        Event::WindowFocused { window_id: 0 },
+    ];
+
+    TestHarness::new()
+        .with_windows(5)
+        .on_iteration(5, |world| {
+            assert_focused!(world, 0);
+
+            let mut query =
+                world.query::<(&mut Position, &LayoutStrip, Has<ActiveWorkspaceMarker>)>();
+            let (mut position, _, _) = query
+                .iter_mut(world)
+                .find(|(_, _, active)| *active)
+                .expect("active strip");
+            position.0.x = TEST_DISPLAY_WIDTH * 2;
+        })
+        .on_iteration(4, |world| {
+            assert_focused!(world, 0);
+            assert_window_at!(
+                world,
+                0,
+                TEST_DISPLAY_WIDTH - TEST_WINDOW_WIDTH,
+                TEST_MENUBAR_HEIGHT
+            );
         })
         .run(commands);
 }
@@ -415,6 +461,73 @@ fn test_external_focus_restores_app_hidden_window_to_original_virtual_strip() {
             assert_eq!(active, 1);
         })
         .on_iteration(5, |world| {
+            let mut query = world.query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>();
+            let active = query
+                .iter(world)
+                .find_map(|(strip, active)| active.then_some(strip.virtual_index))
+                .expect("an active virtual strip");
+            assert_eq!(active, 0);
+            assert_window_at!(world, 0, 0, TEST_MENUBAR_HEIGHT);
+            assert_focused!(world, 0);
+        })
+        .run(commands);
+}
+
+#[test]
+fn test_external_focus_restores_hidden_window_without_visible_event() {
+    let ignored_repositions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let ignored_repositions_for_window = ignored_repositions.clone();
+
+    let commands = vec![
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::ApplicationHidden {
+            pid: TEST_PROCESS_ID,
+        },
+        Event::Command {
+            command: Command::Window(Operation::VirtualNumber(1)),
+        },
+        Event::WindowFocused { window_id: 0 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    let mut harness = TestHarness::new();
+    let mock_app = setup_process(harness.app.world_mut());
+    let internal_queue = harness.internal_queue.clone();
+    let wm = MockWindowManager {
+        windows: Box::new(move |_| {
+            let origin = Origin::new(0, 0);
+            let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+            let window = MockWindow::new(
+                0,
+                IRect {
+                    min: origin,
+                    max: origin + size,
+                },
+                internal_queue.clone(),
+                mock_app.clone(),
+            )
+            .with_ignored_repositions(ignored_repositions_for_window.clone());
+            vec![Window::new(Box::new(window))]
+        }),
+        workspaces: vec![TEST_WORKSPACE_ID],
+    };
+
+    harness
+        .with_wm(wm)
+        .on_iteration(1, move |world| {
+            let mut query = world.query::<&mut Window>();
+            let mut window = query
+                .iter_mut(world)
+                .find(|window| window.id() == 0)
+                .expect("window 0");
+            window.reposition(Origin::new(0, TEST_DISPLAY_HEIGHT));
+            ignored_repositions.store(1, std::sync::atomic::Ordering::SeqCst);
+        })
+        .on_iteration(4, |world| {
             let mut query = world.query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>();
             let active = query
                 .iter(world)

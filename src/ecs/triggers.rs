@@ -25,8 +25,8 @@ use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, GlobalState, Windows};
 use crate::ecs::state::PaneruState;
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, DockPosition, Initializing, LayoutPosition, LocateDockTrigger,
-    Position, RestoreWindowState, Scrolling, SendMessageTrigger, WidthRatio, WindowProperties,
-    focus_entity, reposition_entity, reshuffle_around, resize_entity,
+    Position, RestoreWindowState, Scrolling, SendMessageTrigger, VerifyWindowPosition, WidthRatio,
+    WindowProperties, focus_entity, reposition_entity, reshuffle_around, resize_entity,
 };
 use crate::events::Event;
 use crate::manager::{
@@ -182,6 +182,7 @@ pub(super) fn window_focused_trigger(
     windows: Windows,
     mut workspaces: Query<(Entity, &mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     config: Res<Config>,
+    global_state: GlobalState,
     mut commands: Commands,
 ) {
     const STRAY_FOCUS_RETRY_SEC: u64 = 2;
@@ -229,6 +230,17 @@ pub(super) fn window_focused_trigger(
             continue;
         }
 
+        if matches!(
+            windows.get_managed(entity),
+            Some((_, _, Some(Unmanaged::Hidden)))
+        ) {
+            if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                entity_commands.try_remove::<Unmanaged>();
+            }
+            commands.trigger(SendMessageTrigger(Event::WindowFocused { window_id }));
+            continue;
+        }
+
         // Handle tab switching: if the focused window is a tab, make it the leader.
         // Also reactivate the owning virtual strip before treating duplicate
         // focus as a no-op; the focus marker can be stale on a hidden strip.
@@ -256,6 +268,9 @@ pub(super) fn window_focused_trigger(
         }
 
         if already_focused {
+            if !global_state.skip_reshuffle() && !global_state.initializing() {
+                reshuffle_around(entity, &mut commands);
+            }
             continue;
         }
 
@@ -698,7 +713,13 @@ pub(super) fn window_managed_trigger(
         }
     }
 
-    commands.entity(entity).try_remove::<PreviousManagedStrip>();
+    if let Some(origin) = windows.origin(entity) {
+        reposition_entity(entity, origin, &mut commands);
+    }
+    commands
+        .entity(entity)
+        .try_insert(VerifyWindowPosition::default())
+        .try_remove::<PreviousManagedStrip>();
     reshuffle_around(entity, &mut commands);
 }
 

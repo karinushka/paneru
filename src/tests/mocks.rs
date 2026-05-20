@@ -329,6 +329,7 @@ pub(crate) struct MockWindow {
     pub(crate) role: String,
     pub(crate) subrole: String,
     pub(crate) ignored_repositions: Arc<AtomicUsize>,
+    pub(crate) metadata_reads: Option<Arc<AtomicUsize>>,
 }
 
 impl WindowApi for MockWindow {
@@ -354,12 +355,18 @@ impl WindowApi for MockWindow {
     /// Returns the title of the mock window.
     #[instrument(level = Level::TRACE, skip(self), ret)]
     fn title(&self) -> Result<String> {
+        if let Some(reads) = &self.metadata_reads {
+            reads.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(self.title.clone())
     }
 
     /// Returns the identifier of the mock window.
     #[instrument(level = Level::TRACE, skip(self), ret)]
     fn identifier(&self) -> Result<String> {
+        if let Some(reads) = &self.metadata_reads {
+            reads.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(self.identifier.clone())
     }
 
@@ -511,6 +518,7 @@ impl MockWindow {
             role: "AXWindow".to_string(),
             subrole: "AXStandardWindow".to_string(),
             ignored_repositions: Arc::default(),
+            metadata_reads: None,
         }
     }
 

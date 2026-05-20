@@ -1,7 +1,7 @@
 use bevy::ecs::query::Has;
 use bevy::prelude::*;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use crate::config::{Config, MainOptions, WindowParams};
 use crate::ecs::layout::{Column, LayoutStrip};
@@ -77,6 +77,63 @@ fn test_startup_restore_rebuilds_virtual_workspace_layout() {
     assert_eq!(columns.len(), 2);
     assert!(matches!(columns[0], Column::Single(_)));
     assert!(matches!(columns[1], Column::Single(_)));
+}
+
+#[test]
+fn test_startup_restore_hard_matches_without_extra_fallback_metadata_reads() {
+    let baseline_reads = startup_restore_metadata_reads(None);
+    let restore_reads = startup_restore_metadata_reads(Some(state_with_strips(
+        (0_u32..20)
+            .map(|id| SavedStrip {
+                virtual_index: id,
+                columns: vec![SavedColumn::Single(saved_window(
+                    i32::try_from(id).expect("test id should fit in i32"),
+                ))],
+            })
+            .collect(),
+    )));
+
+    assert!(
+        restore_reads <= baseline_reads,
+        "hard-match restore should not add fallback window metadata reads"
+    );
+}
+
+fn startup_restore_metadata_reads(state: Option<PaneruState>) -> usize {
+    let metadata_reads = Arc::new(AtomicUsize::new(0));
+    let mut harness = TestHarness::new();
+    let mock_app = setup_process(harness.app.world_mut());
+    let internal_queue = harness.internal_queue.clone();
+    let reads = metadata_reads.clone();
+    let windows: TestWindowSpawner = Box::new(move |_| {
+        (0..20)
+            .map(|id| {
+                let origin = Origin::new(0, 0);
+                let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+                let mut window = MockWindow::new(
+                    id,
+                    IRect::from_corners(origin, origin + size),
+                    internal_queue.clone(),
+                    mock_app.clone(),
+                );
+                window.metadata_reads = Some(reads.clone());
+                Window::new(Box::new(window))
+            })
+            .collect()
+    });
+    harness = harness.with_wm(MockWindowManager {
+        windows,
+        workspaces: vec![TEST_WORKSPACE_ID],
+    });
+    if let Some(state) = state {
+        harness.app.world_mut().insert_resource(state);
+    }
+
+    for _ in 0..5 {
+        harness.app.update();
+    }
+
+    metadata_reads.load(Ordering::Relaxed)
 }
 
 #[test]

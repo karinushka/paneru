@@ -29,13 +29,16 @@ use crate::platform::{Pid, WinID, WorkspaceId};
 pub(crate) struct SessionRestore {
     state: PaneruState,
     timer: Timer,
+    saved_hard_keys: HashSet<WindowHardMatchKey>,
 }
 
 impl SessionRestore {
     fn new(state: PaneruState, grace: Duration) -> Self {
+        let saved_hard_keys = saved_hard_match_keys(&state);
         Self {
             state,
             timer: Timer::new(grace, TimerMode::Once),
+            saved_hard_keys,
         }
     }
 }
@@ -71,6 +74,10 @@ pub(crate) struct CurrentWindowIdentity {
 }
 
 impl CurrentWindowIdentity {
+    fn hard_key(&self) -> WindowHardMatchKey {
+        WindowHardMatchKey::new(self.window_id, self.pid, self.bundle_id.clone())
+    }
+
     #[cfg(test)]
     pub(crate) fn fallback_only(entity: Entity, bundle_id: &str, title: &str) -> Self {
         Self {
@@ -82,6 +89,23 @@ impl CurrentWindowIdentity {
             identifier: "main".to_string(),
             role: "AXWindow".to_string(),
             subrole: "AXStandardWindow".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct WindowHardMatchKey {
+    window_id: WinID,
+    pid: Pid,
+    bundle_id: String,
+}
+
+impl WindowHardMatchKey {
+    fn new(window_id: WinID, pid: Pid, bundle_id: String) -> Self {
+        Self {
+            window_id,
+            pid,
+            bundle_id,
         }
     }
 }
@@ -119,11 +143,15 @@ pub(crate) struct RestorePlan {
 
 pub(crate) struct RestorePlanner<'a> {
     state: &'a PaneruState,
+    saved_hard_keys: HashSet<WindowHardMatchKey>,
 }
 
 impl<'a> RestorePlanner<'a> {
     pub(crate) fn new(state: &'a PaneruState) -> Self {
-        Self { state }
+        Self {
+            state,
+            saved_hard_keys: saved_hard_match_keys(state),
+        }
     }
 
     pub(crate) fn plan(&self, current: &[CurrentWindowIdentity]) -> RestorePlan {
@@ -257,17 +285,7 @@ impl<'a> RestorePlanner<'a> {
     }
 
     fn current_window_has_saved_hard_match(&self, current: &CurrentWindowIdentity) -> bool {
-        self.saved_windows()
-            .any(|saved| saved.hard_match(current.window_id, current.pid, &current.bundle_id))
-    }
-
-    fn saved_windows(&self) -> impl Iterator<Item = &SavedWindow> {
-        self.state
-            .workspaces
-            .iter()
-            .flat_map(|workspace| &workspace.strips)
-            .flat_map(|strip| &strip.columns)
-            .flat_map(saved_windows_in_column)
+        self.saved_hard_keys.contains(&current.hard_key())
     }
 
     fn record_active_virtual(
@@ -299,6 +317,15 @@ impl<'a> RestorePlanner<'a> {
     }
 }
 
+fn saved_windows_in_state(state: &PaneruState) -> impl Iterator<Item = &SavedWindow> {
+    state
+        .workspaces
+        .iter()
+        .flat_map(|workspace| &workspace.strips)
+        .flat_map(|strip| &strip.columns)
+        .flat_map(saved_windows_in_column)
+}
+
 fn saved_windows_in_column(column: &SavedColumn) -> Box<dyn Iterator<Item = &SavedWindow> + '_> {
     match column {
         SavedColumn::Single(saved) | SavedColumn::Fullscreen(saved) => {
@@ -319,6 +346,10 @@ fn saved_windows_in_stack_item(
 }
 
 impl SavedWindow {
+    fn hard_key(&self) -> WindowHardMatchKey {
+        WindowHardMatchKey::new(self.window_id, self.pid, self.bundle_id.clone())
+    }
+
     fn fallback_match(&self, current: &CurrentWindowIdentity) -> bool {
         !self.title.is_empty()
             && self.bundle_id == current.bundle_id
@@ -327,6 +358,16 @@ impl SavedWindow {
             && self.role == current.role
             && self.subrole == current.subrole
     }
+}
+
+fn saved_hard_match_keys(state: &PaneruState) -> HashSet<WindowHardMatchKey> {
+    saved_windows_in_state(state)
+        .map(SavedWindow::hard_key)
+        .collect()
+}
+
+fn has_saved_fallback_windows(state: &PaneruState) -> bool {
+    saved_windows_in_state(state).any(|window| !window.title.is_empty())
 }
 
 pub(crate) fn matches_startup_restore_state(
@@ -340,18 +381,20 @@ pub(crate) fn matches_startup_restore_state(
         return false;
     }
 
-    let state = session.map_or(restoration, |session| Some(&session.state));
-    let Some(state) = state else {
-        return false;
-    };
     let Ok(pid) = window.pid() else {
         return false;
     };
     let bundle_id = app.bundle_id().unwrap_or_default().to_string();
+    let key = WindowHardMatchKey::new(window.id(), pid, bundle_id.clone());
 
-    RestorePlanner::new(state)
-        .saved_windows()
-        .any(|saved| saved.hard_match(window.id(), pid, &bundle_id))
+    if let Some(session) = session {
+        return session.saved_hard_keys.contains(&key);
+    }
+
+    let Some(state) = restoration else {
+        return false;
+    };
+    saved_windows_in_state(state).any(|saved| saved.hard_match(window.id(), pid, &bundle_id))
 }
 
 #[allow(
@@ -376,10 +419,10 @@ pub(super) fn restore_window_state(
     restoration: Option<Res<PaneruState>>,
     mut commands: Commands,
 ) {
-    let restoration = if let Some(session) = session {
-        session.state.clone()
+    let restoration = if let Some(session) = session.as_deref() {
+        &session.state
     } else {
-        let Some(restoration) = restoration else {
+        let Some(restoration) = restoration.as_deref() else {
             return;
         };
         if !config.restore_enabled() {
@@ -390,7 +433,6 @@ pub(super) fn restore_window_state(
         match config.restore_missing_windows() {
             MissingWindowBehavior::Ignore => {}
         }
-        let restoration = restoration.as_ref().clone();
         commands.insert_resource(SessionRestore::new(
             restoration.clone(),
             config.restore_startup_grace(),
@@ -398,8 +440,8 @@ pub(super) fn restore_window_state(
         restoration
     };
 
-    let current = current_window_identities(&windows, &apps);
-    let plan = RestorePlanner::new(&restoration).plan(&current);
+    let current = current_window_identities(&windows, &apps, restoration);
+    let plan = RestorePlanner::new(restoration).plan(&current);
 
     if plan.consumed_entities.is_empty() {
         info!(
@@ -528,8 +570,9 @@ fn layout_strip_from_plan(planned: &PlannedStrip) -> LayoutStrip {
 fn current_window_identities(
     windows: &Windows,
     apps: &Query<&Application>,
+    restoration: &PaneruState,
 ) -> Vec<CurrentWindowIdentity> {
-    windows
+    let mut current = windows
         .managed_iter()
         .filter_map(|(window, entity, child)| {
             let app = apps.get(child.parent()).ok()?;
@@ -538,13 +581,42 @@ fn current_window_identities(
                 window_id: window.id(),
                 pid: window.pid().ok()?,
                 bundle_id: app.bundle_id().unwrap_or_default().to_string(),
-                title: window.title().unwrap_or_default(),
-                identifier: window.identifier().unwrap_or_default(),
-                role: window.role().unwrap_or_default(),
-                subrole: window.subrole().unwrap_or_default(),
+                title: String::new(),
+                identifier: String::new(),
+                role: String::new(),
+                subrole: String::new(),
             })
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    if has_saved_fallback_windows(restoration) {
+        let saved_hard_keys = saved_hard_match_keys(restoration);
+        hydrate_fallback_identities(&mut current, windows, &saved_hard_keys);
+    }
+
+    current
+}
+
+fn hydrate_fallback_identities(
+    current: &mut [CurrentWindowIdentity],
+    windows: &Windows,
+    saved_hard_keys: &HashSet<WindowHardMatchKey>,
+) {
+    for identity in current {
+        if saved_hard_keys.contains(&identity.hard_key()) {
+            continue;
+        }
+        let Some(window) = windows.get(identity.entity) else {
+            continue;
+        };
+        identity.title = window.title().unwrap_or_default();
+        if identity.title.is_empty() {
+            continue;
+        }
+        identity.identifier = window.identifier().unwrap_or_default();
+        identity.role = window.role().unwrap_or_default();
+        identity.subrole = window.subrole().unwrap_or_default();
+    }
 }
 
 fn select_display<'a>(

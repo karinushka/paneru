@@ -449,7 +449,7 @@ pub(super) fn timeout_ticker(
     for (entity, mut timeout) in timers {
         if timeout.timer.is_finished() {
             trace!("Despawning entity {entity} due to timeout.");
-            if let Some(system_id) = timeout.system_id {
+            if let Some(system_id) = timeout.system_id.take() {
                 commands.run_system(system_id);
                 commands.unregister_system(system_id);
             }

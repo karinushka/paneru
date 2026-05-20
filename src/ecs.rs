@@ -165,6 +165,7 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::send_message_trigger)
         .add_observer(triggers::window_removal_trigger)
         .add_observer(triggers::apply_window_properties)
+        .add_observer(triggers::cleanup_timeout_trigger)
         .add_observer(triggers::restore_window_state);
 }
 

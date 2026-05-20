@@ -1222,3 +1222,17 @@ pub(super) fn restore_window_state(
         commands.spawn((strip, hidden_origin, previous, ChildOf(parent)));
     }
 }
+
+#[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
+pub(super) fn cleanup_timeout_trigger(
+    trigger: On<Remove, Timeout>,
+    all_timeouts: Query<&Timeout>,
+    mut commands: Commands,
+) {
+    if let Ok(timeout) = all_timeouts.get(trigger.entity)
+        && let Some(system_id) = timeout.system_id
+    {
+        commands.unregister_system(system_id);
+    }
+}

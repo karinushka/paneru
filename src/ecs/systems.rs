@@ -19,9 +19,8 @@ use std::time::Duration;
 use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
-    ActiveDisplayMarker, BProcess, ExistingMarker, FreshMarker, PollForNotifications,
-    RepositionMarker, ResizeMarker, RetryFrontSwitch, SpawnWindowTrigger, Timeout,
-    VerifyWindowPosition,
+    ActiveDisplayMarker, BProcess, ExistingMarker, FreshMarker, RepositionMarker, ResizeMarker,
+    RetryFrontSwitch, SpawnWindowTrigger, Timeout, VerifyWindowPosition,
 };
 
 use crate::config::{Config, decorations::BorderRadiusOption};
@@ -41,50 +40,6 @@ use crate::overlay::{FlashMessageManager, OverlayManager};
 use crate::platform::{PlatformCallbacks, WinID};
 
 const ANIAMTE_SNAP_THRESHOLD: f32 = 5.0;
-
-/// Processes a single incoming `Event`. It dispatches various event types to the `WindowManager` or other internal handlers.
-/// This system reads `Event` messages and triggers appropriate Bevy events or modifies resources based on the event type.
-///
-/// # Arguments
-///
-/// * `messages` - A `MessageReader` for incoming `Event` messages.
-/// * `broken_notifications` - A mutable `ResMut` for the `PollForNotifications` resource, used to manage polling state.
-/// * `commands` - Bevy commands to trigger events or insert resources.
-#[allow(clippy::needless_pass_by_value)]
-pub(super) fn dispatch_toplevel_triggers(
-    mut messages: MessageReader<Event>,
-    broken_notifications: Option<Res<PollForNotifications>>,
-    mut commands: Commands,
-) {
-    for event in messages.read() {
-        match event {
-            Event::SpaceChanged if broken_notifications.is_some() => {
-                info!(
-                    "Workspace and display notifications arriving correctly. Disabling the polling.",
-                );
-                commands.remove_resource::<PollForNotifications>();
-            }
-
-            Event::WindowTitleChanged { window_id } => {
-                trace!("WindowTitleChanged: {window_id:?}");
-            }
-            Event::MenuClosed { window_id } => {
-                trace!("MenuClosed event: {window_id:?}");
-            }
-            Event::DisplayResized { display_id } => {
-                debug!("Display Resized: {display_id:?}");
-            }
-            Event::DisplayConfigured { display_id } => {
-                debug!("Display Configured: {display_id:?}");
-            }
-            Event::SystemWoke { msg } => {
-                debug!("system woke: {msg:?}");
-            }
-
-            _ => (),
-        }
-    }
-}
 
 /// Gathers all present displays and spawns them as entities in the Bevy world.
 /// The currently active display (identified by `window_manager.active_display_id()`) is marked with `ActiveDisplayMarker`.
@@ -485,49 +440,6 @@ pub(super) fn retry_front_switch(
         }
         // Otherwise, let timeout_ticker handle expiry.
     }
-}
-
-/// Periodically checks for displays added and removed, as well as changes in the active display.
-/// This system acts as a workaround for inconsistent display change notifications on some macOS versions.
-/// It uses `ThrottledSystem` to limit its execution frequency.
-#[allow(clippy::needless_pass_by_value)]
-pub(super) fn display_changes_watcher(
-    displays: Query<(&Display, Has<ActiveDisplayMarker>)>,
-    window_manager: Res<WindowManager>,
-    mut commands: Commands,
-) {
-    let Ok(current_display_id) = window_manager.active_display_id() else {
-        return;
-    };
-    let found = displays
-        .iter()
-        .find(|(display, _)| display.id() == current_display_id);
-    if let Some((_, active)) = found {
-        if active {
-            return;
-        }
-        debug!("detected dislay change from {current_display_id}.");
-        commands.trigger(SendMessageTrigger(Event::DisplayChanged));
-    } else {
-        debug!("new display {current_display_id} detected.");
-        commands.trigger(SendMessageTrigger(Event::DisplayAdded {
-            display_id: current_display_id,
-        }));
-    }
-
-    let present_displays = window_manager.present_displays();
-    displays.iter().for_each(|(display, _)| {
-        if !present_displays
-            .iter()
-            .any(|(present_display, _)| present_display.id() == display.id())
-        {
-            let display_id = display.id();
-            debug!("detected removal of display {display_id}");
-            commands.trigger(SendMessageTrigger(Event::DisplayRemoved {
-                display_id: display.id(),
-            }));
-        }
-    });
 }
 
 /// Animates window movement.

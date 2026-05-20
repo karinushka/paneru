@@ -48,14 +48,12 @@ pub mod workspace;
 /// Registers the Bevy systems for the `WindowManager`.
 /// This function adds various systems to the `Update` schedule, including event dispatchers,
 /// process/application/window lifecycle management, animation, and periodic watchers.
-/// Systems that poll for notifications are conditionally run based on the `PollForNotifications` resource.
 ///
 /// # Arguments
 ///
 /// * `app` - The Bevy application to register the systems with.
 #[allow(clippy::too_many_lines)]
 pub fn register_systems(app: &mut bevy::app::App) {
-    const DISPLAY_CHANGE_CHECK_FREQ_MS: u64 = 1000;
     const LOW_POWER_MODE_CHECK_SEC: u64 = 60;
 
     let not_swiping = |scrolling: Query<&Scrolling, With<ActiveWorkspaceMarker>>| {
@@ -75,11 +73,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
     );
     app.add_systems(
         PreUpdate,
-        (
-            systems::dispatch_toplevel_triggers,
-            systems::window_creation_event,
-            systems::pump_events,
-        ),
+        (systems::window_creation_event, systems::pump_events),
     );
     app.add_systems(
         Update,
@@ -112,17 +106,6 @@ pub fn register_systems(app: &mut bevy::app::App) {
             state::periodic_state_save.run_if(on_timer(Duration::from_secs(300))),
             state::cleanup_on_exit,
         ),
-    );
-    app.add_systems(
-        Update,
-        (
-            systems::display_changes_watcher,
-            workspace::workspace_change_watcher,
-        )
-            .run_if(resource_exists::<PollForNotifications>)
-            .run_if(on_timer(Duration::from_millis(
-                DISPLAY_CHANGE_CHECK_FREQ_MS,
-            ))),
     );
     app.add_systems(
         PostUpdate,
@@ -417,10 +400,6 @@ pub struct MissionControlActive(pub bool);
 #[derive(Resource)]
 pub struct FocusFollowsMouse(pub Option<WinID>);
 
-/// Resource to control whether the application should poll for notifications.
-#[derive(PartialEq, Resource)]
-pub struct PollForNotifications;
-
 #[derive(PartialEq, Resource)]
 pub struct Initializing;
 
@@ -496,7 +475,6 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         })
         .insert_resource(MissionControlActive(false))
         .insert_resource(FocusFollowsMouse(None))
-        .insert_resource(PollForNotifications)
         .insert_resource(Initializing)
         .insert_non_send_resource(watcher)
         .add_plugins(mouse::MouseEventsPlugin)

@@ -77,7 +77,11 @@ pub fn register_systems(app: &mut bevy::app::App) {
     );
     app.add_systems(
         PreUpdate,
-        (systems::dispatch_toplevel_triggers, systems::pump_events),
+        (
+            systems::dispatch_toplevel_triggers,
+            systems::window_creation_event,
+            systems::pump_events,
+        ),
     );
     app.add_systems(
         Update,

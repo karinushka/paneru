@@ -59,17 +59,6 @@ pub(super) fn dispatch_toplevel_triggers(
 ) {
     for event in messages.read() {
         match event {
-            Event::WindowCreated { element } => {
-                if let Ok(window) = WindowOS::new(element)
-                    .inspect_err(|err| {
-                        trace!("not adding window {element:?}: {err}");
-                    })
-                    .map(|window| Window::new(Box::new(window)))
-                {
-                    commands.trigger(SpawnWindowTrigger(vec![window]));
-                }
-            }
-
             Event::SpaceChanged if broken_notifications.is_some() => {
                 info!(
                     "Workspace and display notifications arriving correctly. Disabling the polling.",
@@ -1100,4 +1089,22 @@ pub(crate) fn update_low_power_state(low_power_mode: Option<ResMut<LowPowerMode>
     };
     let process_info = objc2_foundation::NSProcessInfo::processInfo();
     state.0 = process_info.isLowPowerModeEnabled();
+}
+
+#[instrument(level = Level::DEBUG, skip_all)]
+pub(crate) fn window_creation_event(mut messages: MessageReader<Event>, mut commands: Commands) {
+    for event in messages.read() {
+        let Event::WindowCreated { element } = event else {
+            continue;
+        };
+
+        if let Ok(window) = WindowOS::new(element)
+            .inspect_err(|err| {
+                trace!("not adding window {element:?}: {err}");
+            })
+            .map(|window| Window::new(Box::new(window)))
+        {
+            commands.trigger(SpawnWindowTrigger(vec![window]));
+        }
+    }
 }

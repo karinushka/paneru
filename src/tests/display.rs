@@ -357,7 +357,7 @@ fn test_send_next_display_stays_on_source() {
 /// inactive displays onto the active display. `apply_window_properties`
 /// initially appends every observed window to the active strip; if the
 /// layout writers run before `finish_setup` has reassigned them, they
-/// cache active-display coordinates into `Position` and `commit_window_position`
+/// cache active-display coordinates into `Position` and `commit_window_frames`
 /// later pushes those to macOS, moving the windows.
 #[test]
 fn test_init_keeps_windows_on_their_real_displays() {

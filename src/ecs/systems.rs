@@ -1,5 +1,5 @@
 use bevy::app::AppExit;
-use bevy::ecs::change_detection::DetectChanges;
+use bevy::ecs::change_detection::{DetectChanges, Ref};
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::{MessageReader, MessageWriter};
@@ -950,15 +950,6 @@ pub(super) fn update_overlays(
     );
 }
 
-#[instrument(level = Level::TRACE, skip_all)]
-pub(super) fn commit_window_position(
-    mut moved_windows: Populated<(&mut Window, &Position), Changed<Position>>,
-) {
-    moved_windows
-        .par_iter_mut()
-        .for_each(|(mut window, position)| window.reposition(position.0));
-}
-
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn verify_window_position(
@@ -981,19 +972,22 @@ pub(super) fn verify_window_position(
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::TRACE, skip_all)]
-pub(super) fn commit_window_size(
+pub(super) fn commit_window_frames(
     active_display: ActiveDisplay,
-    mut resized_windows: Populated<(&mut Window, &Bounds, &mut WidthRatio), Changed<Bounds>>,
+    mut framed_windows: Populated<
+        (&mut Window, Ref<Position>, Ref<Bounds>, &mut WidthRatio),
+        Or<(Changed<Position>, Changed<Bounds>)>,
+    >,
 ) {
     let display_bounds = active_display.bounds();
-    resized_windows
-        .par_iter_mut()
-        .for_each(|(mut window, size, mut width_ratio)| {
-            width_ratio.0 = f64::from(size.0.x) / f64::from(display_bounds.width());
-            window.resize(size.0);
-        });
+    for (mut window, position, bounds, mut width_ratio) in &mut framed_windows {
+        if bounds.is_changed() {
+            width_ratio.0 = f64::from(bounds.0.x) / f64::from(display_bounds.width());
+        }
+        window.set_frame(position.0, bounds.0);
+    }
 }
 
 /// Restores user-visible window state before Paneru shuts down: clears any

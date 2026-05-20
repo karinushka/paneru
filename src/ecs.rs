@@ -125,13 +125,9 @@ pub fn register_systems(app: &mut bevy::app::App) {
         (
             (
                 systems::animate_entities,
-                systems::commit_window_position.run_if(not(resource_exists::<Initializing>)),
-                systems::verify_window_position.run_if(not(resource_exists::<Initializing>)),
-            )
-                .chain(),
-            (
                 systems::animate_resize_entities,
-                systems::commit_window_size.run_if(not(resource_exists::<Initializing>)),
+                systems::commit_window_frames.run_if(not(resource_exists::<Initializing>)),
+                systems::verify_window_position.run_if(not(resource_exists::<Initializing>)),
             )
                 .chain(),
             (

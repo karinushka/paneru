@@ -55,6 +55,10 @@ pub trait WindowApi: Send + Sync {
     fn is_full_screen(&self) -> bool;
     fn reposition(&mut self, origin: Origin);
     fn resize(&mut self, size: Size);
+    fn set_frame(&mut self, origin: Origin, size: Size) {
+        self.reposition(origin);
+        self.resize(size);
+    }
     fn update_frame(&mut self) -> Result<IRect>;
     fn focus_without_raise(
         &self,
@@ -297,6 +301,62 @@ impl WindowOS {
         event_bytes[0x08] = 0x02;
         unsafe { SLPSPostEventRecordTo(psn, event_bytes.as_ptr().cast()) };
     }
+
+    fn set_position_attribute(&mut self, origin: Origin) -> bool {
+        let mut point = CGPoint::new(
+            f64::from(origin.x + self.horizontal_padding),
+            f64::from(origin.y + self.vertical_padding),
+        );
+        let position_ref = unsafe {
+            AXValueCreate(
+                kAXValueTypeCGPoint,
+                NonNull::from(&mut point).as_ptr().cast(),
+            )
+        };
+        if let Ok(position) = AXUIWrapper::retain(position_ref) {
+            unsafe {
+                AXUIElementSetAttributeValue(
+                    self.ax_element.as_ptr(),
+                    CFString::from_static_str(kAXPositionAttribute).as_ref(),
+                    position.as_ref(),
+                )
+            };
+            let size = self.frame.size();
+            self.frame.min = origin;
+            self.frame.max = origin + size;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn set_size_attribute(&mut self, size: Size) -> bool {
+        let width_padding = 2 * self.horizontal_padding;
+        let height_padding = 2 * self.vertical_padding;
+        let mut cgsize = CGSize::new(
+            f64::from(size.x - width_padding),
+            f64::from(size.y - height_padding),
+        );
+        let size_ref = unsafe {
+            AXValueCreate(
+                kAXValueTypeCGSize,
+                NonNull::from(&mut cgsize).as_ptr().cast(),
+            )
+        };
+        if let Ok(position) = AXUIWrapper::retain(size_ref) {
+            unsafe {
+                AXUIElementSetAttributeValue(
+                    self.ax_element.as_ptr(),
+                    CFString::from_static_str(kAXSizeAttribute).as_ref(),
+                    position.as_ref(),
+                )
+            };
+            self.frame.max = self.frame.min + size;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl WindowApi for WindowOS {
@@ -382,28 +442,7 @@ impl WindowApi for WindowOS {
             return;
         }
         self.disable_enhanced_ui();
-        let mut point = CGPoint::new(
-            f64::from(origin.x + self.horizontal_padding),
-            f64::from(origin.y + self.vertical_padding),
-        );
-        let position_ref = unsafe {
-            AXValueCreate(
-                kAXValueTypeCGPoint,
-                NonNull::from(&mut point).as_ptr().cast(),
-            )
-        };
-        if let Ok(position) = AXUIWrapper::retain(position_ref) {
-            unsafe {
-                AXUIElementSetAttributeValue(
-                    self.ax_element.as_ptr(),
-                    CFString::from_static_str(kAXPositionAttribute).as_ref(),
-                    position.as_ref(),
-                )
-            };
-            let size = self.frame.size();
-            self.frame.min = origin;
-            self.frame.max = origin + size;
-        }
+        self.set_position_attribute(origin);
         self.reenable_enhanced_ui();
     }
 
@@ -414,27 +453,25 @@ impl WindowApi for WindowOS {
             return;
         }
         self.disable_enhanced_ui();
-        let width_padding = 2 * self.horizontal_padding;
-        let height_padding = 2 * self.vertical_padding;
-        let mut cgsize = CGSize::new(
-            f64::from(size.x - width_padding),
-            f64::from(size.y - height_padding),
-        );
-        let size_ref = unsafe {
-            AXValueCreate(
-                kAXValueTypeCGSize,
-                NonNull::from(&mut cgsize).as_ptr().cast(),
-            )
-        };
-        if let Ok(position) = AXUIWrapper::retain(size_ref) {
-            unsafe {
-                AXUIElementSetAttributeValue(
-                    self.ax_element.as_ptr(),
-                    CFString::from_static_str(kAXSizeAttribute).as_ref(),
-                    position.as_ref(),
-                )
-            };
-            self.frame.max = self.frame.min + size;
+        self.set_size_attribute(size);
+        self.reenable_enhanced_ui();
+    }
+
+    #[instrument(level = Level::TRACE)]
+    fn set_frame(&mut self, origin: Origin, size: Size) {
+        let position_changed = self.frame.min != origin;
+        let size_changed = self.frame.size() != size;
+        if !position_changed && !size_changed {
+            trace!("already correct frame.");
+            return;
+        }
+
+        self.disable_enhanced_ui();
+        if position_changed {
+            self.set_position_attribute(origin);
+        }
+        if size_changed {
+            self.set_size_attribute(size);
         }
         self.reenable_enhanced_ui();
     }

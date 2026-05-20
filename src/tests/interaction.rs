@@ -342,3 +342,75 @@ fn test_stale_focus_event_ignored() {
         })
         .run(commands);
 }
+
+#[test]
+fn mouse_in_bottom_right_corner_does_not_change_focus() {
+    use crate::events::Event;
+    use crate::platform::Modifiers;
+    use objc2_core_foundation::CGPoint;
+
+    // Focus window 2 explicitly, then move cursor into the bottom-right 30x30
+    // dead zone. The corner gate should suppress the focus-follow-mouse event,
+    // so focus stays on window 2.
+    //
+    // Test display is 1024x768 with no Dock, so the dead zone is
+    // x >= 994, y >= 738. Cursor at (1010, 750) is inside it. The mock's
+    // find_window_at_point always returns window 0, so without the gate the
+    // FFM event would shift focus to window 0; with the gate it should not.
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::West)),
+        },
+        Event::MouseMoved {
+            point: CGPoint {
+                x: 1010.0,
+                y: 750.0,
+            },
+            modifiers: Modifiers::empty(),
+        },
+    ];
+
+    TestHarness::new()
+        .with_windows(3)
+        .on_iteration(2, |world| {
+            // After MouseMoved into corner dead zone: focus should remain on window 2
+            // because the corner gate suppressed the focus-follow-mouse event.
+            assert_focused!(world, 2);
+        })
+        .run(commands);
+}
+
+#[test]
+fn mouse_outside_corner_still_changes_focus() {
+    use crate::events::Event;
+    use crate::platform::Modifiers;
+    use objc2_core_foundation::CGPoint;
+
+    // Cursor at (500, 400), middle of the display, outside the dead zone.
+    // FFM should fire normally and switch focus.
+    //
+    // Focus window 2 first, then move cursor away from the corner. The mock's
+    // find_window_at_point always returns window 0, so FFM lands focus on
+    // window 0.
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::West)),
+        },
+        Event::MouseMoved {
+            point: CGPoint { x: 500.0, y: 400.0 },
+            modifiers: Modifiers::empty(),
+        },
+    ];
+
+    TestHarness::new()
+        .with_windows(3)
+        .on_iteration(2, |world| {
+            // After MouseMoved outside corner: FFM should have fired and changed focus.
+            // In the mock, find_window_at_point always returns window 0, so window 0
+            // should now be focused (changed from window 2).
+            assert_focused!(world, 0);
+        })
+        .run(commands);
+}

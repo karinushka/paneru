@@ -12,12 +12,18 @@ use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{GlobalState, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, MissionControlActive, Position, Scrolling, focus_entity,
+    ActiveWorkspaceMarker, DockPosition, MissionControlActive, Position, Scrolling, focus_entity,
     reposition_entity, reshuffle_around, resize_entity,
 };
 use crate::events::Event;
 use crate::manager::{Display, Origin, WindowManager, origin_from};
 use crate::platform::WinID;
+
+/// Bottom-right corner region (`NxN` pixels) where focus events are suppressed.
+/// Sized to a representative macOS title bar height — see karinushka/paneru#233:
+/// macOS prevents windows from being moved further down than a fully visible title bar,
+/// so the parked sliver of a hidden virtual workspace lives within this region.
+const CORNER_DEAD_ZONE_PX: i32 = 30;
 
 pub struct MouseEventsPlugin;
 
@@ -43,6 +49,18 @@ impl Plugin for MouseEventsPlugin {
     }
 }
 
+/// True when `point` sits inside the bottom-right `CORNER_DEAD_ZONE_PX`-sized
+/// square of the display's working area (excluding any Dock).
+fn is_in_corner_dead_zone(
+    point: Origin,
+    display: &Display,
+    dock: Option<&DockPosition>,
+    config: &Config,
+) -> bool {
+    let bounds = display.actual_display_bounds(dock, config);
+    point.x >= bounds.max.x - CORNER_DEAD_ZONE_PX && point.y >= bounds.max.y - CORNER_DEAD_ZONE_PX
+}
+
 /// Handles mouse moved events.
 ///
 /// If "focus follows mouse" is enabled, this function finds the window under the cursor and
@@ -60,6 +78,7 @@ impl Plugin for MouseEventsPlugin {
 fn mouse_moved_trigger(
     mut messages: MessageReader<Event>,
     windows: Windows,
+    displays: Query<(&Display, Option<&DockPosition>)>,
     window_manager: Res<WindowManager>,
     config: Res<Config>,
     mut global_state: GlobalState,
@@ -76,6 +95,18 @@ fn mouse_moved_trigger(
         {
             // Resizing is handled by a separate trigger or logic.
             // For now, let's just intercept it here to prevent focus changes during resize.
+            continue;
+        }
+
+        // Corner dead zone: suppress focus events when the cursor sits in
+        // the bottom-right of any display (where hidden virtual workspace
+        // slivers park). See is_in_corner_dead_zone for details.
+        let cursor = origin_from(*point);
+        if displays.iter().any(|(display, dock)| {
+            display.bounds().contains(cursor)
+                && is_in_corner_dead_zone(cursor, display, dock, &config)
+        }) {
+            trace!("mouse moved suppressed in corner dead-zone {point:?}");
             continue;
         }
 
@@ -413,5 +444,83 @@ fn horizontal_warp_mouse_trigger(
         // Reset the velocity sample to the landing point so the next motion
         // event computes velocity from the new position, not the pre-warp one.
         state.last = Some((landing, now));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::ecs::DockPosition;
+    use crate::manager::{Display, Origin};
+    use bevy::math::IRect;
+
+    fn make_display() -> Display {
+        // 1024x768 test display with a 20px menubar, mirrors the values in src/tests.rs.
+        Display::new(
+            1,
+            IRect {
+                min: Origin::new(0, 0),
+                max: Origin::new(1024, 768),
+            },
+            20,
+        )
+    }
+
+    #[test]
+    fn corner_dead_zone_no_dock() {
+        let display = make_display();
+        let config = Config::default();
+
+        // Inside the 30x30 bottom-right corner.
+        assert!(is_in_corner_dead_zone(
+            Origin::new(1000, 750),
+            &display,
+            None,
+            &config
+        ));
+        assert!(is_in_corner_dead_zone(
+            Origin::new(1024, 768),
+            &display,
+            None,
+            &config
+        ));
+
+        // Just outside the corner (one pixel above/left).
+        assert!(!is_in_corner_dead_zone(
+            Origin::new(993, 750),
+            &display,
+            None,
+            &config
+        ));
+        assert!(!is_in_corner_dead_zone(
+            Origin::new(1000, 737),
+            &display,
+            None,
+            &config
+        ));
+    }
+
+    #[test]
+    fn corner_dead_zone_with_bottom_dock() {
+        let display = make_display();
+        let config = Config::default();
+        let dock = DockPosition::Bottom(80);
+
+        // With an 80px dock at the bottom, actual_display_bounds.max.y = 768 - 80 = 688.
+        // Corner zone is now y >= 658.
+        assert!(is_in_corner_dead_zone(
+            Origin::new(1000, 680),
+            &display,
+            Some(&dock),
+            &config
+        ));
+        // Just outside the corner zone (point within display bounds but outside corner).
+        assert!(!is_in_corner_dead_zone(
+            Origin::new(1000, 657),
+            &display,
+            Some(&dock),
+            &config
+        ));
     }
 }

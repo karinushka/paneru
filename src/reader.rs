@@ -152,6 +152,10 @@ impl CommandReader {
             if is_subscribe_request(&argv_ref) {
                 match stream.try_clone() {
                     Ok(clone) => {
+                        if let Err(err) = clone.set_nonblocking(true) {
+                            error!("configuring state subscriber as nonblocking: {err}");
+                            continue;
+                        }
                         _ = self
                             .events
                             .send(Event::StateSubscribe {

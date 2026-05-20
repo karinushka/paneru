@@ -524,7 +524,7 @@ impl WindowApi for WindowOS {
                 SLPSPostEventRecordTo(&focused_psn, event_bytes.as_ptr().cast());
             }
 
-            // Artificially delay the activation by 1ms. This is necessary because some
+            // Artificially delay the activation. This is necessary because some
             // applications appear to be confused if both of the events appear instantaneously.
             thread::sleep(Duration::from_millis(20));
 

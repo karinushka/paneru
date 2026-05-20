@@ -117,6 +117,14 @@ fn mouse_moved_trigger(
             trace!("ffm_window_id > 0");
             continue;
         }
+        let pointer = origin_from(*point);
+        if windows
+            .focused()
+            .is_some_and(|(window, _)| window.frame().contains(pointer))
+        {
+            trace!("pointer still inside focused window");
+            continue;
+        }
         let Ok(window_id) = window_manager.find_window_at_point(point) else {
             debug!("can not find window at point {point:?}");
             continue;
@@ -279,13 +287,15 @@ fn mouse_resize_trigger(
             continue;
         }
 
-        let Ok(window_id) = window_manager.find_window_at_point(point) else {
-            continue;
+        let window_id = if let Some(window_id) = state.window_id {
+            window_id
+        } else {
+            let Ok(window_id) = window_manager.find_window_at_point(point) else {
+                continue;
+            };
+            state.window_id = Some(window_id);
+            window_id
         };
-        if state.window_id.is_some_and(|id| window_id != id) {
-            continue;
-        }
-        state.window_id = Some(window_id);
 
         let Some((window, entity)) = windows.find(window_id) else {
             continue;

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -109,6 +110,7 @@ fn test_multi_workspace_orphaning() {
     let wm = MockWindowManager {
         windows: spawner,
         workspaces: vec![TEST_WORKSPACE_ID, TEST_WORKSPACE_ID + 1],
+        visible_windows: HashMap::new(),
     };
 
     TestHarness::new()

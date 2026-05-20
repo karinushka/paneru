@@ -251,6 +251,34 @@ fn switch_native_tab(
     mark_focused_entity(target, commands);
 }
 
+fn current_focus_for_tab_navigation(
+    direction: &Direction,
+    windows: &Windows,
+    apps: &Query<&Application>,
+    strip: &LayoutStrip,
+) -> Option<Entity> {
+    let (_, focused_entity) = windows.focused()?;
+    if !matches!(direction, Direction::West | Direction::East) {
+        return Some(focused_entity);
+    }
+
+    let Some(tabs) = strip.tab_group(focused_entity) else {
+        return Some(focused_entity);
+    };
+    let Some(app_focused_entity) = windows
+        .app(focused_entity, apps)
+        .and_then(|app| app.focused_window_id().ok())
+        .and_then(|window_id| windows.find(window_id).map(|(_, entity)| entity))
+    else {
+        return Some(focused_entity);
+    };
+    if tabs.contains(&app_focused_entity) {
+        Some(app_focused_entity)
+    } else {
+        Some(focused_entity)
+    }
+}
+
 /// Handles the "focus" command, moving focus to a window in a specified direction.
 ///
 /// # Arguments
@@ -293,7 +321,9 @@ fn command_move_focus(
         return;
     }
 
-    let Some((_, focused_entity)) = windows.focused() else {
+    let Some(focused_entity) =
+        current_focus_for_tab_navigation(direction, &windows, &apps, active_strip)
+    else {
         return;
     };
 
@@ -381,7 +411,7 @@ fn command_swap_focus(
 
     let active_strip = active_display.active_strip();
     let mut handler = || {
-        let (_, current) = windows.focused()?;
+        let current = current_focus_for_tab_navigation(direction, &windows, &apps, active_strip)?;
         if let Some(tab) = tab_in_direction(direction, current, active_strip) {
             switch_native_tab(direction, current, tab, &windows, &apps, &mut commands);
             return Some((tab, false));

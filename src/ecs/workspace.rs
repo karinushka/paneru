@@ -70,7 +70,7 @@ impl Plugin for WorkspaceEventsPlugin {
 }
 
 /// Marker component to move a window to a specific virtual index on its current workspace.
-#[derive(Component)]
+#[derive(Clone, Copy, Component)]
 struct VirtualMoveMarker {
     pub target_virtual_index: u32,
     pub move_focus: MoveFocus,
@@ -544,6 +544,19 @@ fn cleanup_selected_space_marker(
     });
 }
 
+fn clear_virtual_move_markers(
+    moving_entities: &[Entity],
+    processed: &mut HashSet<Entity>,
+    commands: &mut Commands,
+) {
+    for moving_entity in moving_entities {
+        processed.insert(*moving_entity);
+        commands
+            .entity(*moving_entity)
+            .remove::<VirtualMoveMarker>();
+    }
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn handle_virtual_window_moves(
     moved_windows: Populated<(Entity, &VirtualMoveMarker), With<Window>>,
@@ -564,17 +577,17 @@ fn handle_virtual_window_moves(
     };
 
     let (display_entity, active_display) = *active_display;
+    let mut processed = HashSet::new();
     for (window_entity, move_marker) in &moved_windows {
+        if !processed.insert(window_entity) {
+            continue;
+        }
         let moving_entities = workspaces
             .get(source_entity)
             .ok()
             .and_then(|(_, strip, _, _)| strip.tab_group(window_entity))
             .unwrap_or_else(|| vec![window_entity]);
-        for moving_entity in &moving_entities {
-            commands
-                .entity(*moving_entity)
-                .remove::<VirtualMoveMarker>();
-        }
+        clear_virtual_move_markers(&moving_entities, &mut processed, &mut commands);
         let follow = matches!(move_marker.move_focus, MoveFocus::Follow);
 
         let target_idx = move_marker.target_virtual_index;
@@ -800,10 +813,18 @@ fn move_virtual_workspace_bind(
         _ => return,
     };
 
-    commands.entity(focused_entity).insert(VirtualMoveMarker {
+    let move_marker = VirtualMoveMarker {
         target_virtual_index,
         move_focus,
-    });
+    };
+
+    let moving_entities = active_display
+        .active_strip()
+        .tab_group(focused_entity)
+        .unwrap_or_else(|| vec![focused_entity]);
+    for moving_entity in moving_entities {
+        commands.entity(moving_entity).insert(move_marker);
+    }
 
     if move_focus == MoveFocus::Follow {
         flash_message(format!("{}", target_virtual_index + 1), 1.0, &mut commands);

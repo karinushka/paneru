@@ -1,5 +1,6 @@
 use bevy::ecs::query::Has;
 use bevy::prelude::*;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
@@ -124,6 +125,7 @@ fn startup_restore_metadata_reads(state: Option<PaneruState>) -> usize {
     harness = harness.with_wm(MockWindowManager {
         windows,
         workspaces: vec![TEST_WORKSPACE_ID],
+        visible_windows: HashMap::new(),
     });
     if let Some(state) = state {
         harness.app.world_mut().insert_resource(state);
@@ -613,6 +615,7 @@ fn test_late_startup_window_restores_during_grace_period() {
     harness = harness.with_wm(MockWindowManager {
         windows,
         workspaces: vec![TEST_WORKSPACE_ID],
+        visible_windows: HashMap::new(),
     });
     harness
         .app

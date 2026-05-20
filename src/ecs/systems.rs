@@ -660,6 +660,11 @@ pub(super) fn window_resized_update_frame(
             // and let the tab sync/layout systems propagate the new size.
             continue;
         }
+        if active_strip.tabbed(entity) {
+            // Native tabs share a single layout slot. Keep the strip anchored
+            // and let the tab sync/layout systems propagate the new size.
+            continue;
+        }
 
         if old_frame.min.x != new_frame.min.x {
             let shift = (old_frame.size() - new_frame.size()).with_y(0);
@@ -1040,18 +1045,17 @@ pub(crate) fn window_creation_event(mut messages: MessageReader<Event>, mut comm
 
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn detect_tabbed_windows(
-    created: Populated<(Entity, &Bounds, &ChildOf), Added<Window>>,
+    created: Populated<(Entity, &Window, &Bounds, &ChildOf), Added<Window>>,
     windows: Query<(Entity, &Window, &Position, &Bounds, &ChildOf), With<Window>>,
     apps: Query<Entity, With<Application>>,
     mut workspaces: Query<&mut LayoutStrip>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
-    for (entity, Bounds(bounds), child) in created {
+    for (entity, new_window, Bounds(bounds), child) in created {
         let Ok(app_entity) = apps.get(child.parent()) else {
             continue;
         };
-
         // Overlapping Frame Strategy: check if this window overlaps exactly with an existing
         // window from the same application. If so, it's likely a native tab.
         let tabbed = windows.iter().find_map(
@@ -1062,12 +1066,14 @@ pub(crate) fn detect_tabbed_windows(
         );
 
         // Tab detection heuristics:
-        // If the two windows are overlapping, and the previous window is suddenly not visible on
-        // the scren - it's a tab stack.
+        // If a new native-tabbed window overlaps an existing same-app window,
+        // or the previous same-app window disappeared from the on-screen list,
+        // it belongs to that window's native tab group.
         if let Some((leader, leader_id, leader_position)) = tabbed
-            && window_manager
-                .windows_on_screen()
-                .is_some_and(|ids| !ids.contains(&leader_id))
+            && (new_window.native_tab_count() >= 2
+                || window_manager
+                    .windows_on_screen()
+                    .is_some_and(|ids| !ids.contains(&leader_id)))
             && let Some(mut strip) = workspaces.iter_mut().find(|strip| strip.contains(entity))
             && strip.contains(leader)
         {

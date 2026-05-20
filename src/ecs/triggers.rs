@@ -69,13 +69,15 @@ fn native_tab_leader(
 ) -> Option<Entity> {
     strip.all_windows().into_iter().find(|candidate| {
         *candidate != entity
-            && windows
-                .get(*candidate)
-                .and_then(|candidate_window| windows.find_parent(candidate_window.id()))
-                .is_some_and(|(_, _, candidate_parent)| candidate_parent == parent)
-            && windows
-                .frame(*candidate)
-                .is_some_and(|candidate_frame| native_tab_frames_match(frame, candidate_frame))
+            && windows.get(*candidate).is_some_and(|candidate_window| {
+                let candidate_id = candidate_window.id();
+                windows
+                    .find_parent(candidate_id)
+                    .is_some_and(|(_, _, candidate_parent)| candidate_parent == parent)
+                    && windows.frame(*candidate).is_some_and(|candidate_frame| {
+                        native_tab_frames_match(frame, candidate_frame)
+                    })
+            })
     })
 }
 
@@ -640,6 +642,12 @@ pub(super) fn window_minimized_trigger(
         let display_bounds = active_display.bounds();
 
         for (mut strip, active) in workspaces {
+            let has_managed_tab_sibling = strip.tab_group(entity).is_some_and(|tab_group| {
+                tab_group.iter().any(|sibling| {
+                    *sibling != entity
+                        && matches!(windows.get_managed(*sibling), Some((_, _, None)))
+                })
+            });
             if active {
                 give_away_focus(
                     entity,
@@ -649,6 +657,9 @@ pub(super) fn window_minimized_trigger(
                     &mut config,
                     &mut commands,
                 );
+            }
+            if has_managed_tab_sibling {
+                continue;
             }
             if strip.contains(entity) {
                 if let Ok(index) = strip.index_of(entity) {
@@ -682,6 +693,11 @@ pub(super) fn window_managed_trigger(
         return;
     }
     let entity = trigger.event().entity;
+
+    if workspaces.iter().any(|(strip, _)| strip.contains(entity)) {
+        commands.entity(entity).try_remove::<PreviousManagedStrip>();
+        return;
+    }
 
     debug!("Entity {entity} is managed again.");
     let (display, dock) = *active_display;
@@ -1069,7 +1085,10 @@ pub(super) fn apply_window_positions(
         }
 
         let mut inserted_as_tab = false;
-        if !already_inserted && let Some(frame) = windows.frame(entity) {
+        if !already_inserted
+            && window.native_tab_count() >= 2
+            && let Some(frame) = windows.frame(entity)
+        {
             for (mut strip, _) in &mut workspaces {
                 let Some(leader) = native_tab_leader(&strip, entity, parent, frame, &windows)
                 else {

@@ -53,6 +53,7 @@ pub trait WindowApi: Send + Sync {
     fn subrole(&self) -> Result<String>;
     fn is_minimized(&self) -> bool;
     fn is_full_screen(&self) -> bool;
+    fn native_tab_count(&self) -> usize;
     fn reposition(&mut self, origin: Origin);
     fn resize(&mut self, size: Size);
     fn set_frame(&mut self, origin: Origin, size: Size) {
@@ -433,6 +434,13 @@ impl WindowApi for WindowOS {
 
     fn is_full_screen(&self) -> bool {
         self.ax_element.full_screen().unwrap_or(false)
+    }
+
+    fn native_tab_count(&self) -> usize {
+        let axname = CFString::from_str("AXTabs");
+        self.ax_element
+            .get_attribute::<CFArray<AXUIWrapper>>(&axname)
+            .map_or(0, |tabs| tabs.len())
     }
 
     #[instrument(level = Level::TRACE)]

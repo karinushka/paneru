@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -83,6 +84,7 @@ pub(crate) struct InnerMockApplication {
     pub(crate) pid: Pid,
     pub(crate) focused_id: Option<WinID>,
     pub(crate) bundle_id: String,
+    pub(crate) native_tab_selections: Vec<(NativeTabDirection, WinID)>,
 }
 
 impl MockApplication {
@@ -95,6 +97,7 @@ impl MockApplication {
                 pid,
                 focused_id: None,
                 bundle_id,
+                native_tab_selections: Vec::new(),
             })),
             name: "test".to_string(),
         }
@@ -185,8 +188,10 @@ impl ApplicationApi for MockApplication {
         &self.name
     }
 
-    fn select_native_tab(&self, _direction: NativeTabDirection, target: WinID) {
-        self.inner.force_write().focused_id = Some(target);
+    fn select_native_tab(&self, direction: NativeTabDirection, target: WinID) {
+        let mut inner = self.inner.force_write();
+        inner.native_tab_selections.push((direction, target));
+        inner.focused_id = Some(target);
     }
 }
 
@@ -194,6 +199,7 @@ impl ApplicationApi for MockApplication {
 pub(crate) struct MockWindowManager {
     pub(crate) windows: TestWindowSpawner,
     pub(crate) workspaces: Vec<WorkspaceId>,
+    pub(crate) visible_windows: HashMap<WinID, Vec<WinID>>,
 }
 
 impl std::fmt::Debug for MockWindowManager {
@@ -214,6 +220,7 @@ impl WindowManagerApi for MockWindowManager {
                 pid: process.pid(),
                 focused_id: None,
                 bundle_id: "test".to_string(),
+                native_tab_selections: Vec::new(),
             })),
             name: "test".to_string(),
         })))
@@ -319,11 +326,7 @@ impl WindowManagerApi for MockWindowManager {
 
     #[instrument(level = Level::DEBUG, skip(self))]
     fn windows_on_screen(&self) -> Option<Vec<WinID>> {
-        None
-    }
-    #[instrument(level = Level::DEBUG, skip(self))]
-    fn visible_on_screen(&self, window_id: WinID) -> Option<Vec<WinID>> {
-        None
+        self.visible_windows.values().next().cloned()
     }
 }
 
@@ -343,6 +346,7 @@ pub(crate) struct MockWindow {
     pub(crate) subrole: String,
     pub(crate) ignored_repositions: Arc<AtomicUsize>,
     pub(crate) metadata_reads: Option<Arc<AtomicUsize>>,
+    pub(crate) native_tab_count: Arc<AtomicUsize>,
 }
 
 impl WindowApi for MockWindow {
@@ -500,6 +504,10 @@ impl WindowApi for MockWindow {
         false
     }
 
+    fn native_tab_count(&self) -> usize {
+        self.native_tab_count.load(Ordering::Relaxed)
+    }
+
     fn border_radius(&self) -> Option<f64> {
         None
     }
@@ -527,6 +535,7 @@ impl MockWindow {
             subrole: "AXStandardWindow".to_string(),
             ignored_repositions: Arc::default(),
             metadata_reads: None,
+            native_tab_count: Arc::new(AtomicUsize::new(1)),
         }
     }
 
@@ -535,6 +544,16 @@ impl MockWindow {
         ignored_repositions: Arc<AtomicUsize>,
     ) -> Self {
         self.ignored_repositions = ignored_repositions;
+        self
+    }
+
+    pub(crate) fn with_native_tab_count(mut self, count: usize) -> Self {
+        self.native_tab_count = Arc::new(AtomicUsize::new(count));
+        self
+    }
+
+    pub(crate) fn with_native_tab_count_ref(mut self, count: Arc<AtomicUsize>) -> Self {
+        self.native_tab_count = count;
         self
     }
 }
@@ -564,6 +583,7 @@ impl WindowManagerApi for TwoDisplayMock {
                 pid: process.pid(),
                 focused_id: None,
                 bundle_id: "test".to_string(),
+                native_tab_selections: Vec::new(),
             })),
             name: "test".to_string(),
         })))
@@ -647,9 +667,6 @@ impl WindowManagerApi for TwoDisplayMock {
     fn dim_windows(&self, _windows: &[WinID], _level: f32) {}
 
     fn windows_on_screen(&self) -> Option<Vec<WinID>> {
-        None
-    }
-    fn visible_on_screen(&self, _window_id: WinID) -> Option<Vec<WinID>> {
         None
     }
 }

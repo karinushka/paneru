@@ -3,7 +3,7 @@ use bevy::ecs::change_detection::{DetectChanges as _, DetectChangesMut as _};
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::{Entity, EntityHashMap, EntityHashSet};
 use bevy::ecs::hierarchy::ChildOf;
-use bevy::ecs::query::{Changed, Has, Or, With, Without};
+use bevy::ecs::query::{Added, Changed, Has, Or, With, Without};
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::schedule::common_conditions::{not, resource_exists};
 use bevy::ecs::system::{Commands, ParallelCommands, ParamSet, Populated, Query, Res};
@@ -16,11 +16,12 @@ use tracing::{Level, instrument, trace};
 use crate::config::Config;
 use crate::ecs::params::Windows;
 use crate::ecs::{
-    Bounds, DockPosition, EnsureVisibleMarker, Initializing, LayoutPosition, Position,
-    RepositionMarker, ReshuffleAroundMarker, Scrolling, reposition_entity,
+    Bounds, DockPosition, EnsureVisibleMarker, FocusedMarker, Initializing, LayoutPosition,
+    Position, RepositionMarker, ReshuffleAroundMarker, Scrolling, reposition_entity,
+    reshuffle_around,
 };
 use crate::errors::{Error, Result};
-use crate::manager::{Display, Origin, Window};
+use crate::manager::{Application, Display, Origin, Window, WindowManager};
 use crate::platform::WorkspaceId;
 
 pub struct LayoutEventsPlugin;
@@ -33,6 +34,8 @@ impl Plugin for LayoutEventsPlugin {
                 // Wait for finish_setup before tiling: until then every window
                 // sits in the active strip regardless of its real display.
                 (
+                    reconcile_native_tab_columns,
+                    sync_focused_tab_group_frames,
                     sync_tab_group_frames,
                     layout_sizes_changed,
                     layout_strip_changed,
@@ -265,6 +268,7 @@ impl LayoutStrip {
         let index = self.index_of(leader)?;
         let column = self.columns.remove(index).unwrap();
         self.remove(follower);
+        let index = index.min(self.columns.len());
         match column {
             Column::Single(id) | Column::Fullscren(id) => {
                 self.columns.insert(index, Column::Tabs(vec![id, follower]));
@@ -762,22 +766,271 @@ fn binpack_heights(heights: &[i32], min_height: i32, total_height: i32) -> Optio
 #[instrument(level = Level::DEBUG, skip_all)]
 fn sync_tab_group_frames(
     mut windows: ParamSet<(
-        Query<Entity, (With<Window>, Or<(Changed<Bounds>, Changed<Position>)>)>,
+        Query<
+            (Entity, Ref<Position>, Ref<Bounds>),
+            (With<Window>, Or<(Changed<Bounds>, Changed<Position>)>),
+        >,
+        Query<(&Window, &ChildOf, Has<FocusedMarker>, &Position, &Bounds), With<Window>>,
+        Query<(&mut Position, &mut Bounds), With<Window>>,
+    )>,
+    workspaces: Query<&LayoutStrip>,
+    apps: Query<&Application>,
+) {
+    let changed = windows
+        .p0()
+        .iter()
+        .map(|(entity, position, _)| (entity, position.is_changed()))
+        .collect::<Vec<_>>();
+    let mut updates = HashMap::new();
+
+    for (entity, position_changed) in changed {
+        let Some(tab_group) = workspaces.iter().find_map(|strip| strip.tab_group(entity)) else {
+            continue;
+        };
+        let active_tab = {
+            let read_windows = windows.p1();
+            let app_focused = read_windows
+                .get(entity)
+                .ok()
+                .and_then(|(_, child, _, _, _)| apps.get(child.parent()).ok())
+                .and_then(|app| app.focused_window_id().ok())
+                .and_then(|focused_id| {
+                    tab_group.iter().copied().find(|tab| {
+                        read_windows
+                            .get(*tab)
+                            .is_ok_and(|(window, _, _, _, _)| window.id() == focused_id)
+                    })
+                });
+            app_focused
+                .or_else(|| {
+                    tab_group.iter().copied().find(|tab| {
+                        read_windows
+                            .get(*tab)
+                            .is_ok_and(|(_, _, focused, _, _)| focused)
+                    })
+                })
+                .unwrap_or(entity)
+        };
+        let source_entity = if position_changed { active_tab } else { entity };
+        let (source_position, source_bounds) = {
+            let positions = windows.p1();
+            let Ok((_, _, _, position, bounds)) = positions.get(source_entity) else {
+                continue;
+            };
+            (position.clone(), bounds.clone())
+        };
+        for sibling in tab_group
+            .into_iter()
+            .filter(|sibling| *sibling != source_entity)
+        {
+            updates.insert(sibling, (source_position.clone(), source_bounds.clone()));
+        }
+    }
+
+    for (entity, (source_position, source_bounds)) in updates {
+        let mut write_windows = windows.p2();
+        let Ok((mut position, mut bounds)) = write_windows.get_mut(entity) else {
+            continue;
+        };
+        if position.0 != source_position.0 {
+            position.0 = source_position.0;
+        }
+        if bounds.0 != source_bounds.0 {
+            bounds.0 = source_bounds.0;
+        }
+    }
+}
+
+fn native_tab_repair_anchor(entity: Entity, candidate: Entity, windows: &Windows) -> bool {
+    windows
+        .focused()
+        .is_some_and(|(_, focused)| focused == entity || focused == candidate)
+}
+
+fn native_tab_frames_match(a: IRect, b: IRect) -> bool {
+    const MIN_OVERLAP_PERCENT: i64 = 90;
+
+    let overlap_min_x = a.min.x.max(b.min.x);
+    let overlap_max_x = a.max.x.min(b.max.x);
+    let overlap_min_y = a.min.y.max(b.min.y);
+    let overlap_max_y = a.max.y.min(b.max.y);
+    let overlap_width = i64::from((overlap_max_x - overlap_min_x).max(0));
+    let overlap_height = i64::from((overlap_max_y - overlap_min_y).max(0));
+    let overlap_area = overlap_width * overlap_height;
+    let a_area = i64::from(a.width()) * i64::from(a.height());
+    let b_area = i64::from(b.width()) * i64::from(b.height());
+    let min_area = a_area.min(b_area);
+
+    overlap_area * 100 >= min_area * MIN_OVERLAP_PERCENT
+}
+
+fn native_tab_repair_candidate(
+    entity: Entity,
+    candidate: Entity,
+    windows: &Windows,
+    apps: &Query<&Application>,
+    window_manager: &WindowManager,
+) -> bool {
+    let Some(window) = windows.get(entity) else {
+        return false;
+    };
+    let Some((_, _, parent)) = windows.find_parent(window.id()) else {
+        return false;
+    };
+    let Some(candidate_window) = windows.get(candidate) else {
+        return false;
+    };
+    if windows
+        .find_parent(candidate_window.id())
+        .is_none_or(|(_, _, candidate_parent)| candidate_parent != parent)
+    {
+        return false;
+    }
+
+    let app_focused = apps
+        .get(parent)
+        .ok()
+        .and_then(|app| app.focused_window_id().ok())
+        .and_then(|window_id| windows.find(window_id).map(|(_, entity)| entity));
+    let focused_anchor = app_focused
+        .is_some_and(|focused| focused == entity || focused == candidate)
+        || native_tab_repair_anchor(entity, candidate, windows);
+    if !focused_anchor {
+        return false;
+    }
+
+    let native_tab_signal =
+        window.native_tab_count() >= 2 || candidate_window.native_tab_count() >= 2;
+    let visibility_signal = window_manager
+        .windows_on_screen()
+        .is_some_and(|ids| !ids.contains(&window.id()) || !ids.contains(&candidate_window.id()));
+    if !native_tab_signal && !visibility_signal {
+        return false;
+    }
+
+    windows
+        .size(entity)
+        .zip(windows.size(candidate))
+        .is_some_and(|(size, candidate_size)| size == candidate_size)
+}
+
+fn native_tab_repair_pair(
+    strip: &LayoutStrip,
+    windows: &Windows,
+    apps: &Query<&Application>,
+    window_manager: &WindowManager,
+) -> Option<Vec<Entity>> {
+    let repair_group = |entity| {
+        strip
+            .tab_group(entity)
+            .map_or_else(|| (vec![entity], false), |group| (group, true))
+    };
+
+    for entity in strip.all_windows() {
+        let (entity_group, entity_is_tab_group) = repair_group(entity);
+        if entity_group.first().copied() != Some(entity) {
+            continue;
+        }
+
+        let candidates = [strip.left_neighbour(entity), strip.right_neighbour(entity)];
+        for candidate in candidates.into_iter().flatten() {
+            let (candidate_group, candidate_is_tab_group) = repair_group(candidate);
+            if candidate_group
+                .iter()
+                .any(|candidate| entity_group.contains(candidate))
+            {
+                continue;
+            }
+            if entity_is_tab_group && candidate_is_tab_group {
+                continue;
+            }
+            if !entity_group.iter().any(|entity| {
+                candidate_group.iter().any(|candidate| {
+                    native_tab_repair_candidate(*entity, *candidate, windows, apps, window_manager)
+                })
+            }) {
+                continue;
+            }
+
+            let has_hidden_window = window_manager.windows_on_screen().is_some_and(|ids| {
+                entity_group
+                    .iter()
+                    .chain(candidate_group.iter())
+                    .filter_map(|entity| windows.get(*entity))
+                    .any(|window| !ids.contains(&window.id()))
+            });
+            let frames_match = entity_group.iter().any(|entity| {
+                candidate_group.iter().any(|candidate| {
+                    windows
+                        .frame(*entity)
+                        .zip(windows.frame(*candidate))
+                        .is_some_and(|(frame, candidate_frame)| {
+                            native_tab_frames_match(frame, candidate_frame)
+                        })
+                })
+            });
+            if (has_hidden_window || entity_is_tab_group || candidate_is_tab_group) && !frames_match
+            {
+                continue;
+            }
+
+            let entity_index = strip.index_of(entity_group[0]).ok()?;
+            let candidate_index = strip.index_of(candidate_group[0]).ok()?;
+            let group = if entity_index <= candidate_index {
+                [entity_group, candidate_group].concat()
+            } else {
+                [candidate_group, entity_group].concat()
+            };
+            return Some(group);
+        }
+    }
+    None
+}
+
+#[allow(clippy::needless_pass_by_value)]
+#[instrument(level = Level::DEBUG, skip_all)]
+fn reconcile_native_tab_columns(
+    mut workspaces: Query<&mut LayoutStrip>,
+    windows: Windows,
+    apps: Query<&Application>,
+    window_manager: Res<WindowManager>,
+    mut commands: Commands,
+) {
+    for mut strip in &mut workspaces {
+        while let Some(group) = native_tab_repair_pair(&strip, &windows, &apps, &window_manager) {
+            let Some(source) = group.first().copied() else {
+                break;
+            };
+            let Some(origin) = windows.origin(source) else {
+                break;
+            };
+            strip.append_tab_group(&group);
+            for follower in group.into_iter().filter(|entity| *entity != source) {
+                reposition_entity(follower, origin, &mut commands);
+            }
+            reshuffle_around(source, &mut commands);
+        }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
+#[instrument(level = Level::DEBUG, skip_all)]
+fn sync_focused_tab_group_frames(
+    focused_windows: Populated<Entity, (Added<FocusedMarker>, With<Window>)>,
+    mut windows: ParamSet<(
         Query<(&Position, &Bounds), With<Window>>,
         Query<(&mut Position, &mut Bounds), With<Window>>,
     )>,
     workspaces: Query<&LayoutStrip>,
 ) {
-    let changed = windows.p0().iter().collect::<Vec<_>>();
     let mut updates = HashMap::new();
-
-    for entity in changed {
+    for entity in focused_windows {
         let Some(tab_group) = workspaces.iter().find_map(|strip| strip.tab_group(entity)) else {
             continue;
         };
         let (source_position, source_bounds) = {
-            let positions = windows.p1();
-            let Ok((position, bounds)) = positions.get(entity) else {
+            let read_windows = windows.p0();
+            let Ok((position, bounds)) = read_windows.get(entity) else {
                 continue;
             };
             (position.clone(), bounds.clone())
@@ -788,7 +1041,7 @@ fn sync_tab_group_frames(
     }
 
     for (entity, (source_position, source_bounds)) in updates {
-        let mut write_windows = windows.p2();
+        let mut write_windows = windows.p1();
         let Ok((mut position, mut bounds)) = write_windows.get_mut(entity) else {
             continue;
         };

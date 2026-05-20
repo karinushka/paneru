@@ -23,8 +23,8 @@ use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, Initializing, NativeFullscreenMarker, Position,
-    RefreshWindowSizes, SelectedVirtualMarker, SendMessageTrigger, Timeout, Unmanaged,
-    flash_message, focus_entity, reposition_entity, reshuffle_around,
+    RefreshWindowSizes, SelectedVirtualMarker, Timeout, Unmanaged, flash_message, focus_entity,
+    reposition_entity, reshuffle_around,
 };
 use crate::errors::Result;
 use crate::events::Event;
@@ -495,31 +495,6 @@ fn refresh_workspace_window_sizes(
 
     if let Ok(mut cmds) = commands.get_entity(strip_entity) {
         cmds.try_remove::<RefreshWindowSizes>();
-    }
-}
-
-/// Periodically checks for changes in the active workspace (space) on the active display.
-/// This system acts as a workaround for inconsistent workspace change notifications on some macOS versions.
-/// If a change is detected, it triggers an `Event::SpaceChanged` event.
-#[allow(clippy::needless_pass_by_value)]
-pub(crate) fn workspace_change_watcher(
-    active_display: ActiveDisplay,
-    window_manager: Res<WindowManager>,
-    mut current_space: Local<WorkspaceId>,
-    mut commands: Commands,
-) {
-    let Ok(space_id) = window_manager
-        .0
-        .active_display_space(active_display.id())
-        .inspect_err(|err| warn!("{err}"))
-    else {
-        return;
-    };
-
-    if *current_space != space_id {
-        *current_space = space_id;
-        debug!("workspace changed to {space_id}");
-        commands.trigger(SendMessageTrigger(Event::SpaceChanged));
     }
 }
 

@@ -191,6 +191,7 @@ fn parse_operation(argv: &[&str]) -> Result<Operation> {
         "focus" => Operation::Focus(parse_direction(argv.get(1).ok_or(err)?)?),
         "focus_unmanaged" => Operation::FocusUnmanaged,
         "focus_managed" => Operation::FocusManaged,
+        "raise_floating" => Operation::RaiseFloating,
         "swap" => Operation::Swap(parse_direction(argv.get(1).ok_or(err)?)?),
         "center" => Operation::Center,
         "resize" => Operation::Resize(

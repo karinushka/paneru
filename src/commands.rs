@@ -96,6 +96,9 @@ pub enum Operation {
     FocusUnmanaged,
     /// Focuses the workspace's last-focused managed (tiled) window.
     FocusManaged,
+    /// Raises all visible floating windows on the active display and focuses
+    /// the last-floating window (idempotent — repeat presses behave the same).
+    RaiseFloating,
 }
 
 /// Defines operations that can be performed on the mouse.
@@ -135,6 +138,7 @@ pub fn register_commands(app: &mut bevy::app::App) {
             command_move_focus,
             command_focus_unmanaged,
             command_focus_managed,
+            command_raise_floating,
             command_swap_focus,
             snap_window,
         ),
@@ -360,6 +364,61 @@ fn command_focus_managed(
     if let Some(entity) = target {
         focus_entity(entity, true, &mut commands);
         reshuffle_around(entity, &mut commands);
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn command_raise_floating(
+    mut messages: MessageReader<Event>,
+    windows: Windows,
+    active_display: ActiveDisplay,
+    window_manager: Res<WindowManager>,
+    focus_history: Res<FocusHistory>,
+    mut commands: Commands,
+) {
+    if filter_window_operations(&mut messages, |op| matches!(op, Operation::RaiseFloating))
+        .next()
+        .is_none()
+    {
+        return;
+    }
+
+    let display_bounds = active_display.bounds();
+    let workspace_id = active_display.active_strip().id();
+    // Floats on other macOS Spaces share the display bounds, so without an
+    // explicit workspace-membership filter they leak into the float set.
+    let workspace_window_ids: std::collections::HashSet<_> = window_manager
+        .windows_in_workspace(workspace_id)
+        .ok()
+        .map(|ids| ids.into_iter().collect())
+        .unwrap_or_default();
+
+    let is_visible_float = |entity: Entity| -> bool {
+        let Some((window, _, Some(Unmanaged::Floating))) = windows.get_managed(entity) else {
+            return false;
+        };
+        if !workspace_window_ids.contains(&window.id()) {
+            return false;
+        }
+        let Some(frame) = windows.frame(entity) else {
+            return false;
+        };
+        !display_bounds.intersect(frame).is_empty()
+    };
+
+    let target = focus_history
+        .last_floating(workspace_id)
+        .filter(|entity| is_visible_float(*entity))
+        .or_else(|| windows.iter().find_map(|(_, e)| is_visible_float(e).then_some(e)));
+
+    for (window, entity) in windows.iter() {
+        if is_visible_float(entity) && Some(entity) != target {
+            window.raise_without_focus();
+        }
+    }
+
+    if let Some(entity) = target {
+        focus_entity(entity, true, &mut commands);
     }
 }
 

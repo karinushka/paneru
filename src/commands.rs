@@ -873,7 +873,12 @@ fn full_width_window(
 /// * `windows` - A mutable query for `Window` components, their `Entity`, and whether they have the `Unmanaged` marker.
 /// * `commands` - Bevy commands to modify entities.
 #[allow(clippy::needless_pass_by_value)]
-fn manage_window(mut messages: MessageReader<Event>, windows: Windows, mut commands: Commands) {
+fn manage_window(
+    mut messages: MessageReader<Event>,
+    windows: Windows,
+    mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    mut commands: Commands,
+) {
     if filter_window_operations(&mut messages, |op| matches!(op, Operation::Manage))
         .next()
         .is_none()
@@ -892,12 +897,30 @@ fn manage_window(mut messages: MessageReader<Event>, windows: Windows, mut comma
         window.id(),
         unmanaged.is_some()
     );
+    let was_unmanaged = unmanaged.is_some();
     if let Ok(mut entity_commands) = commands.get_entity(entity) {
-        if unmanaged.is_some() {
+        if was_unmanaged {
             entity_commands.try_remove::<Unmanaged>();
         } else {
             entity_commands.try_insert(Unmanaged::Floating);
         }
+    }
+
+    // Going floating -> managed only flips the component. Nothing else in
+    // the pipeline reinserts the window into a strip, so if it had been
+    // stripped of membership (spawn-floating path in window_unmanaged_trigger
+    // strip.removes; orphan rescue in find_orphaned_workspaces despawns the
+    // strip) the toggle is invisible — the window stays where it floated
+    // and the user thinks the keybind is broken. Append to the active
+    // strip and reshuffle so the layout pipeline tiles it.
+    if was_unmanaged
+        && !workspaces.iter().any(|(strip, _)| strip.contains(entity))
+        && let Some(mut strip) = workspaces
+            .iter_mut()
+            .find_map(|(strip, active)| active.then_some(strip))
+    {
+        strip.append(entity);
+        reshuffle_around(entity, &mut commands);
     }
 }
 

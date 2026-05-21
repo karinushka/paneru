@@ -188,10 +188,17 @@ fn parse_operation(argv: &[&str]) -> Result<Operation> {
     let err = Error::InvalidConfig(format!("{}: Invalid command '{argv:?}'", function_name!()));
 
     let out = match cmd {
-        "focus" => Operation::Focus(parse_direction(argv.get(1).ok_or(err)?)?),
-        "focus_unmanaged" => Operation::FocusUnmanaged,
-        "focus_managed" => Operation::FocusManaged,
-        "raise_floating" => Operation::RaiseFloating,
+        // The bindings key splits on `_`, so `window_focus_unmanaged` arrives
+        // here as ["focus", "unmanaged"] and the suffix tells us the variant.
+        "focus" => match *argv.get(1).ok_or(err.clone())? {
+            "unmanaged" => Operation::FocusUnmanaged,
+            "managed" => Operation::FocusManaged,
+            dir => Operation::Focus(parse_direction(dir)?),
+        },
+        "raise" => match *argv.get(1).ok_or(err.clone())? {
+            "floating" => Operation::RaiseFloating,
+            _ => return Err(err),
+        },
         "togglefloatlayer" => Operation::ToggleFloatingLayer,
         "swap" => Operation::Swap(parse_direction(argv.get(1).ok_or(err)?)?),
         "center" => Operation::Center,

@@ -1,4 +1,5 @@
 use bevy::app::{App, Plugin, Update};
+use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::lifecycle::Add;
@@ -287,8 +288,27 @@ fn reparent_existing_workspaces(
                 origin.clone(),
                 LayoutStrip::new(id, 0),
                 SelectedVirtualMarker,
+                FloatingLayer::default(),
                 ChildOf(display_entity),
             ));
+        }
+    }
+}
+
+/// Tracks whether floating windows on a workspace sit above or behind tiled
+/// ones in the OS z-order. Default is `Front` (floats above tiles).
+#[derive(Component, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FloatingLayer {
+    #[default]
+    Front,
+    Behind,
+}
+
+impl FloatingLayer {
+    pub fn flipped(self) -> Self {
+        match self {
+            Self::Front => Self::Behind,
+            Self::Behind => Self::Front,
         }
     }
 }

@@ -353,9 +353,15 @@ fn command_move_focus(
         return;
     }
 
-    // At the right edge going East, enter the fullscreen workspaces.
-    let candidate =
+    // If focus is on a window that no longer lives in the active strip
+    // (e.g. it just became floating, was minimised on another row, or
+    // the OS handed focus to a window we don't track on this strip),
+    // `get_window_in_direction` would return None and the user would
+    // be unable to leave that window. Enter the active strip from the
+    // appropriate side so subsequent presses behave normally.
+    let candidate = if active_strip.contains(focused_entity) {
         get_window_in_direction(direction, focused_entity, active_strip).or_else(|| {
+            // At the right edge going East, enter the fullscreen workspaces.
             (matches!(direction, Direction::East)
                 && active_strip.right_neighbour(focused_entity).is_none())
             .then(|| {
@@ -367,7 +373,16 @@ fn command_move_focus(
                     .and_then(|(strip, _)| strip.get(0).ok().and_then(|col| col.top()))
             })
             .flatten()
-        });
+        })
+    } else {
+        match direction {
+            Direction::East | Direction::First => {
+                active_strip.first().ok().and_then(|col| col.top())
+            }
+            Direction::West | Direction::Last => active_strip.last().ok().and_then(|col| col.top()),
+            Direction::North | Direction::South => None,
+        }
+    };
 
     if let Some(entity) = candidate {
         focus_entity(entity, true, &mut commands);

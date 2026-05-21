@@ -11,6 +11,7 @@ use tracing::{debug, info};
 mod query;
 
 use crate::config::Config;
+use crate::ecs::focus::FocusHistory;
 use crate::ecs::layout::{Column, LayoutStrip, StackItem};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Windows};
 use crate::ecs::{
@@ -91,6 +92,10 @@ pub enum Operation {
     VirtualMove(Direction, MoveFocus),
     /// Moves the focused window to a virtual strip by its zero-based index.
     VirtualMoveNumber(u32, MoveFocus),
+    /// Focuses the workspace's last-focused floating window.
+    FocusUnmanaged,
+    /// Focuses the workspace's last-focused managed (tiled) window.
+    FocusManaged,
 }
 
 /// Defines operations that can be performed on the mouse.
@@ -128,6 +133,8 @@ pub fn register_commands(app: &mut bevy::app::App) {
             manage_window,
             stack_windows_handler,
             command_move_focus,
+            command_focus_unmanaged,
+            command_focus_managed,
             command_swap_focus,
             snap_window,
         ),
@@ -288,6 +295,71 @@ fn command_move_focus(
         commands.trigger(SendMessageTrigger(Event::Command {
             command: Command::Mouse(MouseMove::ToNextDisplay),
         }));
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn command_focus_unmanaged(
+    mut messages: MessageReader<Event>,
+    windows: Windows,
+    active_display: ActiveDisplay,
+    focus_history: Res<FocusHistory>,
+    mut commands: Commands,
+) {
+    if filter_window_operations(&mut messages, |op| matches!(op, Operation::FocusUnmanaged))
+        .next()
+        .is_none()
+    {
+        return;
+    }
+
+    let display_bounds = active_display.bounds();
+    let workspace_id = active_display.active_strip().id();
+    let is_visible_float = |entity: Entity| -> bool {
+        let Some((_, _, Some(Unmanaged::Floating))) = windows.get_managed(entity) else {
+            return false;
+        };
+        let Some(frame) = windows.frame(entity) else {
+            return false;
+        };
+        !display_bounds.intersect(frame).is_empty()
+    };
+
+    let target = focus_history
+        .last_floating(workspace_id)
+        .filter(|entity| is_visible_float(*entity))
+        .or_else(|| windows.iter().find_map(|(_, e)| is_visible_float(e).then_some(e)));
+
+    if let Some(entity) = target {
+        focus_entity(entity, true, &mut commands);
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn command_focus_managed(
+    mut messages: MessageReader<Event>,
+    active_display: ActiveDisplay,
+    focus_history: Res<FocusHistory>,
+    mut commands: Commands,
+) {
+    if filter_window_operations(&mut messages, |op| matches!(op, Operation::FocusManaged))
+        .next()
+        .is_none()
+    {
+        return;
+    }
+
+    let active_strip = active_display.active_strip();
+    let workspace_id = active_strip.id();
+
+    let target = focus_history
+        .last_managed(workspace_id)
+        .filter(|entity| active_strip.contains(*entity))
+        .or_else(|| active_strip.all_columns().into_iter().next());
+
+    if let Some(entity) = target {
+        focus_entity(entity, true, &mut commands);
+        reshuffle_around(entity, &mut commands);
     }
 }
 

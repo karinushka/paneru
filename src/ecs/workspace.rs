@@ -251,11 +251,17 @@ fn detect_moved_windows(
         }
 
         debug!("Window {entity} moved to workspace {workspace_id}.");
+        let moving_entities = workspaces
+            .iter()
+            .find_map(|(strip, _, _)| strip.tab_group(entity))
+            .unwrap_or_else(|| vec![entity]);
         for (mut strip, strip_entity, _) in &mut workspaces {
             if strip_entity == *activated_workspace {
-                strip.append(entity);
+                strip.append_tab_group(&moving_entities);
             } else {
-                strip.remove(entity);
+                for moving_entity in &moving_entities {
+                    strip.remove(*moving_entity);
+                }
             }
         }
     }
@@ -559,7 +565,16 @@ fn handle_virtual_window_moves(
 
     let (display_entity, active_display) = *active_display;
     for (window_entity, move_marker) in &moved_windows {
-        commands.entity(window_entity).remove::<VirtualMoveMarker>();
+        let moving_entities = workspaces
+            .get(source_entity)
+            .ok()
+            .and_then(|(_, strip, _, _)| strip.tab_group(window_entity))
+            .unwrap_or_else(|| vec![window_entity]);
+        for moving_entity in &moving_entities {
+            commands
+                .entity(*moving_entity)
+                .remove::<VirtualMoveMarker>();
+        }
         let follow = matches!(move_marker.move_focus, MoveFocus::Follow);
 
         let target_idx = move_marker.target_virtual_index;
@@ -596,7 +611,7 @@ fn handle_virtual_window_moves(
                 workspace_id
             );
             let mut new_strip = LayoutStrip::new(workspace_id, target_idx);
-            new_strip.append(window_entity);
+            new_strip.append_tab_group(&moving_entities);
 
             let mut spawned = commands.spawn((
                 new_strip,
@@ -632,9 +647,11 @@ fn handle_virtual_window_moves(
         // Move the window before moving markers to avoid being detected as a moved window.
         for (entity, mut strip, _, _) in &mut workspaces {
             if entity == target_entity {
-                strip.append(window_entity);
+                strip.append_tab_group(&moving_entities);
             } else {
-                strip.remove(window_entity);
+                for moving_entity in &moving_entities {
+                    strip.remove(*moving_entity);
+                }
             }
         }
 

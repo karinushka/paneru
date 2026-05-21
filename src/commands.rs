@@ -19,7 +19,9 @@ use crate::ecs::{
     focus_entity, reposition_entity, reshuffle_around, resize_entity,
 };
 use crate::events::Event;
-use crate::manager::{Application, Display, Origin, Size, Window, WindowManager};
+use crate::manager::{
+    Application, Display, NativeTabDirection, Origin, Size, Window, WindowManager,
+};
 
 /// Represents a cardinal or directional choice for window manipulation.
 #[derive(Clone, Debug)]
@@ -151,7 +153,8 @@ pub fn filter_window_operations<'a, F: Fn(&Operation) -> bool>(
     })
 }
 
-/// Retrieves a window `Entity` in a specified direction relative to a `current_window_id` within a `LayoutStrip`.
+/// Retrieves a window `Entity` in a specified direction relative to a
+/// `current_window_id` within a `LayoutStrip`.
 ///
 /// # Arguments
 ///
@@ -204,6 +207,50 @@ fn get_window_in_direction(
     }
 }
 
+fn tab_in_direction(direction: &Direction, entity: Entity, strip: &LayoutStrip) -> Option<Entity> {
+    let tabs = strip.tab_group(entity)?;
+    let index = tabs.iter().position(|tab| *tab == entity)?;
+
+    match direction {
+        Direction::West => index.checked_sub(1).map(|index| tabs[index]),
+        Direction::East => index
+            .checked_add(1)
+            .and_then(|index| tabs.get(index).copied()),
+        Direction::North | Direction::South | Direction::First | Direction::Last => None,
+    }
+}
+
+fn native_tab_direction(direction: &Direction) -> Option<NativeTabDirection> {
+    match direction {
+        Direction::West => Some(NativeTabDirection::Previous),
+        Direction::East => Some(NativeTabDirection::Next),
+        Direction::North | Direction::South | Direction::First | Direction::Last => None,
+    }
+}
+
+fn mark_focused_entity(entity: Entity, commands: &mut Commands) {
+    if let Ok(mut entity_commands) = commands.get_entity(entity) {
+        entity_commands.try_insert(FocusedMarker);
+    }
+}
+
+fn switch_native_tab(
+    direction: &Direction,
+    current: Entity,
+    target: Entity,
+    windows: &Windows,
+    apps: &Query<&Application>,
+    commands: &mut Commands,
+) {
+    if let Some(direction) = native_tab_direction(direction)
+        && let Some(app) = windows.app(current, apps)
+        && let Some(window) = windows.get(target)
+    {
+        app.select_native_tab(direction, window.id());
+    }
+    mark_focused_entity(target, commands);
+}
+
 /// Handles the "focus" command, moving focus to a window in a specified direction.
 ///
 /// # Arguments
@@ -220,6 +267,7 @@ fn get_window_in_direction(
 fn command_move_focus(
     mut messages: MessageReader<Event>,
     windows: Windows,
+    apps: Query<&Application>,
     workspaces: Query<(&LayoutStrip, Option<&NativeFullscreenMarker>)>,
     active_display: ActiveDisplay,
     mut commands: Commands,
@@ -248,6 +296,18 @@ fn command_move_focus(
     let Some((_, focused_entity)) = windows.focused() else {
         return;
     };
+
+    if let Some(entity) = tab_in_direction(direction, focused_entity, active_strip) {
+        switch_native_tab(
+            direction,
+            focused_entity,
+            entity,
+            &windows,
+            &apps,
+            &mut commands,
+        );
+        return;
+    }
 
     // At the right edge going East, enter the fullscreen workspaces.
     let candidate =
@@ -309,6 +369,7 @@ fn command_move_focus(
 fn command_swap_focus(
     mut messages: MessageReader<Event>,
     windows: Windows,
+    apps: Query<&Application>,
     mut active_display: ActiveDisplayMut,
     mut commands: Commands,
 ) {
@@ -321,6 +382,11 @@ fn command_swap_focus(
     let active_strip = active_display.active_strip();
     let mut handler = || {
         let (_, current) = windows.focused()?;
+        if let Some(tab) = tab_in_direction(direction, current, active_strip) {
+            switch_native_tab(direction, current, tab, &windows, &apps, &mut commands);
+            return Some((tab, false));
+        }
+
         let index = active_strip.index_of(current).ok()?;
         let other_window = get_window_in_direction(direction, current, active_strip)?;
         let new_index = active_strip.index_of(other_window).ok()?;
@@ -342,7 +408,7 @@ fn command_swap_focus(
                 .rev()
                 .for_each(|idx| active_strip.swap(idx, idx + 1));
         }
-        Some(current)
+        Some((current, true))
     };
 
     // Keep the focused window on-screen, but don't anchor it: if its new
@@ -350,14 +416,21 @@ fn command_swap_focus(
     // stays put and per-window animation slides the window into the slot.
     // Only when the slot would fall off the edge does the strip scroll —
     // and only by the shortfall.
-    if let Some(window) = handler() {
-        ensure_visible(window, &mut commands);
+    let outcome = handler();
+    if let Some((window, should_ensure_visible)) = outcome {
+        if should_ensure_visible {
+            ensure_visible(window, &mut commands);
+        }
     } else {
         debug!(
             "swap {direction:?}: handler returned None (focused={:?}, strip_len={})",
             windows.focused().map(|(_, e)| e),
             active_strip.len()
         );
+    }
+
+    if outcome.is_some_and(|(_, should_ensure_visible)| !should_ensure_visible) {
+        return;
     }
 
     if windows
@@ -689,17 +762,26 @@ fn to_next_display(
         other.id(),
         other.width() / 2,
     );
-    let center = other.bounds().center().x;
+    let other_bounds = other.bounds();
+    let other_center = other_bounds.center();
+    let center = other_center.x;
     let target_display_id = other.id();
+
+    let moving_entities = active_display
+        .active_strip()
+        .tab_group(entity)
+        .unwrap_or_else(|| vec![entity]);
 
     let Some(size) = windows.size(entity) else {
         return;
     };
-    let dest = other.bounds().min.with_x(center - size.x / 2);
-    reposition_entity(entity, dest, &mut commands);
+    let dest = other_bounds.min.with_x(center - size.x / 2);
+    for moving_entity in &moving_entities {
+        reposition_entity(*moving_entity, dest, &mut commands);
+    }
 
     if matches!(move_focus, MoveFocus::Follow) {
-        window_manager.warp_mouse(other.bounds().center());
+        window_manager.warp_mouse(other_center);
     }
 
     // Remove the window from the source strip.
@@ -707,7 +789,9 @@ fn to_next_display(
         .active_strip()
         .left_neighbour(entity)
         .or_else(|| active_display.active_strip().right_neighbour(entity));
-    active_display.active_strip().remove(entity);
+    for moving_entity in &moving_entities {
+        active_display.active_strip().remove(*moving_entity);
+    }
     if let Some(neighbour) = source_neighbour {
         reshuffle_around(neighbour, &mut commands);
     }
@@ -724,7 +808,7 @@ fn to_next_display(
             .iter_mut()
             .find(|(strip, selected)| *selected && strip.id() == target_space_id)
     {
-        target_strip.append(entity);
+        target_strip.append_tab_group(&moving_entities);
         reshuffle_around(entity, &mut commands);
     }
 }

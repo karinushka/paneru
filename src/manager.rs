@@ -26,7 +26,7 @@ use crate::manager::skylight::SLSSetWindowListBrightness;
 use crate::platform::{ConnID, Pid, ProcessSerialNumber, WinID, WorkspaceId};
 use crate::util::{AXUIWrapper, MacResult, create_array, symlink_target};
 use app::ApplicationOS;
-pub use app::{Application, ApplicationApi};
+pub use app::{Application, ApplicationApi, NativeTabDirection};
 pub use display::Display;
 pub use process::{Process, ProcessApi};
 pub use skylight::AXUIElementCopyAttributeValue;

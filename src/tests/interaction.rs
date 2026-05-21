@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use bevy::prelude::*;
 
-use crate::commands::{Command, Direction, Operation};
+use crate::commands::{Command, Direction, MoveFocus, Operation};
 use crate::config::{Config, MainOptions, WindowParams};
+use crate::ecs::Bounds;
 use crate::ecs::SpawnWindowTrigger;
 use crate::ecs::{ActiveWorkspaceMarker, Position, layout::LayoutStrip};
 use crate::events::Event;
@@ -11,6 +12,72 @@ use crate::manager::{Origin, Size, Window};
 use crate::{assert_focused, assert_window_at, assert_window_size};
 
 use super::*;
+
+fn harness_with_one_window() -> (TestHarness, MockApplication) {
+    let mut harness = TestHarness::new();
+    let app = setup_process(harness.app.world_mut());
+    let initial_app = app.clone();
+    let initial_queue = harness.internal_queue.clone();
+    let wm = MockWindowManager {
+        windows: Box::new(move |_| {
+            let origin = Origin::new(0, 0);
+            let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+            let window = MockWindow::new(
+                0,
+                IRect {
+                    min: origin,
+                    max: origin + size,
+                },
+                initial_queue.clone(),
+                initial_app.clone(),
+            );
+            vec![Window::new(Box::new(window))]
+        }),
+        workspaces: vec![TEST_WORKSPACE_ID],
+    };
+
+    (harness.with_wm(wm), app)
+}
+
+fn spawn_matching_native_tab(
+    world: &mut World,
+    window_id: i32,
+    event_queue: EventQueue,
+    app: MockApplication,
+) {
+    let origin = Origin::new(0, TEST_MENUBAR_HEIGHT);
+    let size = Size::new(TEST_WINDOW_WIDTH, TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT);
+    let window = MockWindow::new(
+        window_id,
+        IRect {
+            min: origin,
+            max: origin + size,
+        },
+        event_queue,
+        app,
+    );
+    world.trigger(SpawnWindowTrigger(vec![Window::new(Box::new(window))]));
+}
+
+fn spawn_native_window(
+    world: &mut World,
+    window_id: i32,
+    origin: Origin,
+    size: Size,
+    event_queue: EventQueue,
+    app: MockApplication,
+) {
+    let window = MockWindow::new(
+        window_id,
+        IRect {
+            min: origin,
+            max: origin + size,
+        },
+        event_queue,
+        app,
+    );
+    world.trigger(SpawnWindowTrigger(vec![Window::new(Box::new(window))]));
+}
 
 #[test]
 fn test_dont_focus() {
@@ -84,6 +151,355 @@ fn test_offscreen_windows_preserve_height() {
             assert_window_size!(world, 2, TEST_WINDOW_WIDTH, expected_height);
             assert_window_size!(world, 1, TEST_WINDOW_WIDTH, expected_height);
             assert_window_size!(world, 0, TEST_WINDOW_WIDTH, expected_height);
+        })
+        .run(commands);
+}
+
+#[test]
+fn test_same_app_same_frame_native_tab_reuses_existing_column() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    let (harness, app) = harness_with_one_window();
+    let internal_queue = harness.internal_queue.clone();
+
+    harness
+        .on_iteration(0, move |world| {
+            spawn_matching_native_tab(world, 1, internal_queue.clone(), app.clone());
+        })
+        .on_iteration(1, move |world| {
+            let tab_zero = find_window_entity(0, world);
+            let tab_one = find_window_entity(1, world);
+            let mut query = world.query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>();
+            let strip = query
+                .iter(world)
+                .find_map(|(strip, active)| active.then_some(strip))
+                .expect("active strip not found");
+
+            assert_eq!(strip.len(), 1, "native tab should not add a column");
+            assert_eq!(strip.tab_group(tab_zero), Some(vec![tab_zero, tab_one]));
+            assert_eq!(strip.tab_group(tab_one), Some(vec![tab_zero, tab_one]));
+            assert_window_size!(
+                world,
+                0,
+                TEST_WINDOW_WIDTH,
+                TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT
+            );
+            assert_window_size!(
+                world,
+                1,
+                TEST_WINDOW_WIDTH,
+                TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT
+            );
+        })
+        .run(commands);
+}
+
+#[test]
+fn test_native_tab_resize_syncs_sibling_size() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    let (harness, app) = harness_with_one_window();
+    let internal_queue = harness.internal_queue.clone();
+
+    harness
+        .on_iteration(0, move |world| {
+            spawn_matching_native_tab(world, 1, internal_queue.clone(), app.clone());
+        })
+        .on_iteration(1, move |world| {
+            let tab_one = find_window_entity(1, world);
+            let mut query = world.query::<&mut Bounds>();
+            let mut bounds = query.get_mut(world, tab_one).expect("tab bounds missing");
+            bounds.0.x = TEST_WINDOW_WIDTH + 160;
+        })
+        .on_iteration(2, move |world| {
+            assert_window_size!(
+                world,
+                0,
+                TEST_WINDOW_WIDTH + 160,
+                TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT
+            );
+            assert_window_size!(
+                world,
+                1,
+                TEST_WINDOW_WIDTH + 160,
+                TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT
+            );
+        })
+        .run(commands);
+}
+
+#[test]
+fn test_native_tab_focus_east_switches_tabs_inside_group() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+    ];
+
+    let (harness, app) = harness_with_one_window();
+    let internal_queue = harness.internal_queue.clone();
+
+    harness
+        .on_iteration(0, move |world| {
+            spawn_matching_native_tab(world, 1, internal_queue.clone(), app.clone());
+        })
+        .on_iteration(2, move |world| {
+            let tab_zero = find_window_entity(0, world);
+            let tab_one = find_window_entity(1, world);
+            let mut query = world.query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>();
+            let strip = query
+                .iter(world)
+                .find_map(|(strip, active)| active.then_some(strip))
+                .expect("active strip not found");
+
+            assert_eq!(strip.len(), 1);
+            assert_eq!(strip.index_of(tab_zero).unwrap(), 0);
+            assert_eq!(strip.index_of(tab_one).unwrap(), 0);
+            assert_focused!(world, 1);
+        })
+        .run(commands);
+}
+
+#[test]
+fn test_native_tab_focus_east_at_last_tab_moves_to_neighbor_column() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+    ];
+
+    let (harness, app) = harness_with_one_window();
+    let internal_queue = harness.internal_queue.clone();
+
+    harness
+        .on_iteration(0, move |world| {
+            spawn_matching_native_tab(world, 1, internal_queue.clone(), app.clone());
+            spawn_native_window(
+                world,
+                2,
+                Origin::new(TEST_WINDOW_WIDTH, TEST_MENUBAR_HEIGHT),
+                Size::new(TEST_WINDOW_WIDTH, TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT),
+                internal_queue.clone(),
+                app.clone(),
+            );
+        })
+        .on_iteration(3, move |world| {
+            let tab_zero = find_window_entity(0, world);
+            let tab_one = find_window_entity(1, world);
+            let other = find_window_entity(2, world);
+            let mut query = world.query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>();
+            let strip = query
+                .iter(world)
+                .find_map(|(strip, active)| active.then_some(strip))
+                .expect("active strip not found");
+
+            assert_eq!(strip.index_of(tab_zero).unwrap(), 0);
+            assert_eq!(strip.index_of(tab_one).unwrap(), 0);
+            assert_eq!(strip.index_of(other).unwrap(), 1);
+            assert_focused!(world, 2);
+        })
+        .run(commands);
+}
+
+#[test]
+fn test_native_tab_swap_east_switches_tabs_inside_group() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::Window(Operation::Swap(Direction::East)),
+        },
+    ];
+
+    let (harness, app) = harness_with_one_window();
+    let internal_queue = harness.internal_queue.clone();
+
+    harness
+        .on_iteration(0, move |world| {
+            spawn_matching_native_tab(world, 1, internal_queue.clone(), app.clone());
+            spawn_native_window(
+                world,
+                2,
+                Origin::new(TEST_WINDOW_WIDTH, TEST_MENUBAR_HEIGHT),
+                Size::new(TEST_WINDOW_WIDTH, TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT),
+                internal_queue.clone(),
+                app.clone(),
+            );
+        })
+        .on_iteration(2, move |world| {
+            let tab_zero = find_window_entity(0, world);
+            let tab_one = find_window_entity(1, world);
+            let other = find_window_entity(2, world);
+            let mut query = world.query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>();
+            let strip = query
+                .iter(world)
+                .find_map(|(strip, active)| active.then_some(strip))
+                .expect("active strip not found");
+
+            assert_eq!(strip.index_of(tab_zero).unwrap(), 0);
+            assert_eq!(strip.index_of(tab_one).unwrap(), 0);
+            assert_eq!(strip.index_of(other).unwrap(), 1);
+            assert_focused!(world, 1);
+        })
+        .run(commands);
+}
+
+#[test]
+fn test_native_tab_swap_east_at_last_tab_moves_whole_column() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Swap(Direction::East)),
+        },
+    ];
+
+    let (harness, app) = harness_with_one_window();
+    let internal_queue = harness.internal_queue.clone();
+
+    harness
+        .on_iteration(0, move |world| {
+            spawn_matching_native_tab(world, 1, internal_queue.clone(), app.clone());
+            spawn_native_window(
+                world,
+                2,
+                Origin::new(TEST_WINDOW_WIDTH, TEST_MENUBAR_HEIGHT),
+                Size::new(TEST_WINDOW_WIDTH, TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT),
+                internal_queue.clone(),
+                app.clone(),
+            );
+        })
+        .on_iteration(3, move |world| {
+            let tab_zero = find_window_entity(0, world);
+            let tab_one = find_window_entity(1, world);
+            let other = find_window_entity(2, world);
+            let mut query = world.query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>();
+            let strip = query
+                .iter(world)
+                .find_map(|(strip, active)| active.then_some(strip))
+                .expect("active strip not found");
+
+            assert_eq!(strip.index_of(tab_zero).unwrap(), 1);
+            assert_eq!(strip.index_of(tab_one).unwrap(), 1);
+            assert_eq!(strip.index_of(other).unwrap(), 0);
+            assert_focused!(world, 1);
+        })
+        .run(commands);
+}
+
+#[test]
+fn test_native_tab_virtual_move_moves_all_tabs() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Follow)),
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    let (harness, app) = harness_with_one_window();
+    let internal_queue = harness.internal_queue.clone();
+
+    harness
+        .on_iteration(0, move |world| {
+            spawn_matching_native_tab(world, 1, internal_queue.clone(), app.clone());
+        })
+        .on_iteration(3, move |world| {
+            let tab_zero = find_window_entity(0, world);
+            let tab_one = find_window_entity(1, world);
+            let mut query = world.query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>();
+            let active = query
+                .iter(world)
+                .find_map(|(strip, active)| active.then_some(strip))
+                .expect("active strip not found");
+
+            assert_eq!(active.virtual_index, 1);
+            assert_eq!(active.len(), 1);
+            assert_eq!(active.index_of(tab_zero).unwrap(), 0);
+            assert_eq!(active.index_of(tab_one).unwrap(), 0);
+            assert_eq!(active.tab_group(tab_zero), Some(vec![tab_zero, tab_one]));
+
+            let mut query = world.query::<&LayoutStrip>();
+            let source = query
+                .iter(world)
+                .find(|strip| strip.virtual_index == 0)
+                .expect("source strip not found");
+            assert!(!source.contains(tab_zero));
+            assert!(!source.contains(tab_one));
+        })
+        .run(commands);
+}
+
+#[test]
+fn test_native_tab_removal_keeps_remaining_window_column() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    let (harness, app) = harness_with_one_window();
+    let internal_queue = harness.internal_queue.clone();
+
+    harness
+        .on_iteration(0, move |world| {
+            spawn_matching_native_tab(world, 1, internal_queue.clone(), app.clone());
+        })
+        .on_iteration(1, move |world| {
+            let tab_one = find_window_entity(1, world);
+            world.entity_mut(tab_one).despawn();
+        })
+        .on_iteration(2, move |world| {
+            let tab_zero = find_window_entity(0, world);
+            let mut query = world.query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>();
+            let strip = query
+                .iter(world)
+                .find_map(|(strip, active)| active.then_some(strip))
+                .expect("active strip not found");
+
+            assert_eq!(strip.len(), 1, "removing a tab should not empty the column");
+            assert_eq!(strip.tab_group(tab_zero), None);
+            assert_eq!(strip.index_of(tab_zero).unwrap(), 0);
         })
         .run(commands);
 }

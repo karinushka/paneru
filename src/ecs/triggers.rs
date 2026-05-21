@@ -42,6 +42,43 @@ fn update_passthrough(window: &Window, app: &Application, config: &Config) {
     crate::platform::input::set_focused_passthrough(properties.passthrough_keys());
 }
 
+fn native_tab_frames_match(a: IRect, b: IRect) -> bool {
+    const MIN_OVERLAP_PERCENT: i64 = 90;
+
+    if a.width() <= 0 || a.height() <= 0 || b.width() <= 0 || b.height() <= 0 {
+        return false;
+    }
+
+    let overlap = a.intersect(b);
+    let overlap_width = i64::from(overlap.width().max(0));
+    let overlap_height = i64::from(overlap.height().max(0));
+    let overlap_area = overlap_width * overlap_height;
+    let a_area = i64::from(a.width()) * i64::from(a.height());
+    let b_area = i64::from(b.width()) * i64::from(b.height());
+    let min_area = a_area.min(b_area);
+
+    overlap_area * 100 >= min_area * MIN_OVERLAP_PERCENT
+}
+
+fn native_tab_leader(
+    strip: &LayoutStrip,
+    entity: Entity,
+    parent: Entity,
+    frame: IRect,
+    windows: &Windows,
+) -> Option<Entity> {
+    strip.all_windows().into_iter().find(|candidate| {
+        *candidate != entity
+            && windows
+                .get(*candidate)
+                .and_then(|candidate_window| windows.find_parent(candidate_window.id()))
+                .is_some_and(|(_, _, candidate_parent)| candidate_parent == parent)
+            && windows
+                .frame(*candidate)
+                .is_some_and(|candidate_frame| native_tab_frames_match(frame, candidate_frame))
+    })
+}
+
 /// Handles the event when an application switches to the front. It updates the focused window and PSN.
 ///
 /// # Arguments
@@ -245,10 +282,12 @@ pub(super) fn window_focused_trigger(
         // Also reactivate the owning virtual strip before treating duplicate
         // focus as a no-op; the focus marker can be stale on a hidden strip.
         let mut owner = None;
+        let mut focused_tabbed = false;
         for (strip_entity, mut strip, active) in &mut workspaces {
             if !strip.contains(entity) {
                 continue;
             }
+            focused_tabbed = strip.tabbed(entity);
             if let Ok(index) = strip.index_of(entity)
                 && let Some(column) = strip.get_column_mut(index)
             {
@@ -268,7 +307,7 @@ pub(super) fn window_focused_trigger(
         }
 
         if already_focused {
-            if !global_state.skip_reshuffle() && !global_state.initializing() {
+            if !focused_tabbed && !global_state.skip_reshuffle() && !global_state.initializing() {
                 reshuffle_around(entity, &mut commands);
             }
             continue;
@@ -1014,22 +1053,38 @@ pub(super) fn apply_window_positions(
             continue;
         }
 
-        // During startup, the window is already inserted into some strip.
-        let allready_inserted = workspaces
-            .iter_mut()
-            .find_map(|(strip, _)| strip.contains(entity).then_some(strip));
+        // During startup, the window may already be inserted into some strip.
+        let already_inserted = workspaces.iter().any(|(strip, _)| strip.contains(entity));
         let properties = WindowProperties::new(app, window, &config);
 
         if properties.floating() {
             // Avoid managing window if it's floating.
             commands.entity(entity).try_insert(Unmanaged::Floating);
-            if let Some(mut strip) = allready_inserted {
-                strip.remove(entity);
+            if already_inserted {
+                for (mut strip, _) in &mut workspaces {
+                    strip.remove(entity);
+                }
             }
             continue;
         }
 
-        if allready_inserted.is_none()
+        let mut inserted_as_tab = false;
+        if !already_inserted && let Some(frame) = windows.frame(entity) {
+            for (mut strip, _) in &mut workspaces {
+                let Some(leader) = native_tab_leader(&strip, entity, parent, frame, &windows)
+                else {
+                    continue;
+                };
+                if strip.convert_to_tabs(leader, entity).is_ok() {
+                    debug!("New window {entity} grouped with native tab leader {leader}");
+                    inserted_as_tab = true;
+                    break;
+                }
+            }
+        }
+
+        if !already_inserted
+            && !inserted_as_tab
             && let Some(mut strip) = workspaces
                 .iter_mut()
                 .find_map(|(strip, active)| active.then_some(strip))

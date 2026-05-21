@@ -11,8 +11,8 @@ use tracing::{Level, debug, instrument};
 use crate::errors::{Error, Result};
 use crate::events::Event;
 use crate::manager::{
-    Application, ApplicationApi, Display, Origin, ProcessApi, Size, Window, WindowApi,
-    WindowManagerApi,
+    Application, ApplicationApi, Display, NativeTabDirection, Origin, ProcessApi, Size, Window,
+    WindowApi, WindowManagerApi,
 };
 use crate::platform::{ConnID, Pid, WinID, WorkspaceId};
 use crate::{platform::ProcessSerialNumber, util::AXUIWrapper};
@@ -183,6 +183,10 @@ impl ApplicationApi for MockApplication {
 
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn select_native_tab(&self, _direction: NativeTabDirection, target: WinID) {
+        self.inner.force_write().focused_id = Some(target);
     }
 }
 

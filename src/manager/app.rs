@@ -5,6 +5,7 @@ use bevy::ecs::component::Component;
 use core::ptr::NonNull;
 use derive_more::{DerefMut, with_trait::Deref};
 use objc2_core_foundation::{CFRetained, CFString, kCFRunLoopCommonModes};
+use objc2_core_graphics::{CGEvent, CGEventFlags, CGEventTapLocation};
 use std::ffi::c_void;
 use std::pin::Pin;
 use std::ptr::null_mut;
@@ -49,6 +50,12 @@ pub static AX_WINDOW_NOTIFICATIONS: LazyLock<Vec<&str>> = LazyLock::new(|| {
         accessibility_sys::kAXWindowDeminiaturizedNotification,
     ]
 });
+
+#[derive(Clone, Copy, Debug)]
+pub enum NativeTabDirection {
+    Previous,
+    Next,
+}
 
 pub trait ApplicationApi: Send + Sync {
     /// Returns the process ID of the application.
@@ -97,6 +104,10 @@ pub trait ApplicationApi: Send + Sync {
     fn bundle_id(&self) -> Option<&str>;
     /// Returns the display name of the application.
     fn name(&self) -> &str;
+    /// Asks the frontmost app to switch its native macOS tab selection.
+    fn select_native_tab(&self, direction: NativeTabDirection, _target: WinID) {
+        post_native_tab_shortcut(direction);
+    }
 }
 
 /// A wrapper struct for `ApplicationApi` trait objects, allowing for dynamic dispatch.
@@ -118,6 +129,26 @@ impl Application {
     /// * `app` - A `Box<dyn ApplicationApi>` representing the application implementation.
     pub fn new(app: Box<dyn ApplicationApi>) -> Self {
         Application(app)
+    }
+}
+
+fn post_native_tab_shortcut(direction: NativeTabDirection) {
+    const LEFT_BRACKET_KEY: u16 = 0x21;
+    const RIGHT_BRACKET_KEY: u16 = 0x1e;
+
+    let key = match direction {
+        NativeTabDirection::Previous => LEFT_BRACKET_KEY,
+        NativeTabDirection::Next => RIGHT_BRACKET_KEY,
+    };
+    let flags = CGEventFlags::MaskCommand | CGEventFlags::MaskShift;
+
+    if let Some(key_down) = CGEvent::new_keyboard_event(None, key, true) {
+        CGEvent::set_flags(Some(&key_down), flags);
+        CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&key_down));
+    }
+    if let Some(key_up) = CGEvent::new_keyboard_event(None, key, false) {
+        CGEvent::set_flags(Some(&key_up), flags);
+        CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&key_up));
     }
 }
 

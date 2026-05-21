@@ -261,6 +261,15 @@ impl Windows<'_, '_> {
         })
     }
 
+    pub fn app<'a>(
+        &self,
+        entity: Entity,
+        apps: &'a Query<&Application>,
+    ) -> Option<&'a Application> {
+        let (_, _, childof, _) = self.get_all(entity)?;
+        apps.get(childof.parent()).ok()
+    }
+
     pub fn focused(&self) -> Option<(&Window, Entity)> {
         self.focus.single().ok()
     }

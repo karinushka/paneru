@@ -15,8 +15,8 @@ use tracing::{Level, instrument, trace};
 use crate::config::Config;
 use crate::ecs::params::Windows;
 use crate::ecs::{
-    Bounds, DockPosition, FullWidthMarker, Initializing, LayoutPosition, Position,
-    ReshuffleAroundMarker, Scrolling, reposition_entity,
+    Bounds, DockPosition, Initializing, LayoutPosition, Position, ReshuffleAroundMarker, Scrolling,
+    reposition_entity,
 };
 use crate::errors::{Error, Result};
 use crate::manager::{Display, Window};
@@ -748,12 +748,7 @@ fn layout_sizes_changed(
 fn layout_strip_changed(
     changed_strips: Populated<(&LayoutStrip, &ChildOf), Changed<LayoutStrip>>,
     mut windows: Query<
-        (
-            &Position,
-            &mut Bounds,
-            &mut LayoutPosition,
-            Has<FullWidthMarker>,
-        ),
+        (&Position, &mut Bounds, &mut LayoutPosition),
         (Without<LayoutStrip>, With<Window>),
     >,
     displays: Query<(&Display, Option<&DockPosition>)>,
@@ -762,7 +757,7 @@ fn layout_strip_changed(
     let get_window_frame = |entity| {
         windows
             .get(entity)
-            .map(|(position, bounds, _, _)| IRect::from_corners(position.0, position.0 + bounds.0))
+            .map(|(position, bounds, _)| IRect::from_corners(position.0, position.0 + bounds.0))
             .ok()
     };
 
@@ -781,10 +776,7 @@ fn layout_strip_changed(
         .collect::<Vec<_>>();
 
     for (entity, frame) in changed {
-        if let Ok((_, mut bounds, mut layout_position, full_width)) = windows.get_mut(entity) {
-            if full_width {
-                continue;
-            }
+        if let Ok((_, mut bounds, mut layout_position)) = windows.get_mut(entity) {
             if layout_position.0 != frame.min {
                 layout_position.0 = frame.min;
             }
@@ -878,14 +870,7 @@ fn position_layout_strips(
 #[instrument(level = Level::DEBUG, skip_all)]
 fn position_layout_windows(
     mut positioned_windows: Populated<
-        (
-            Entity,
-            &Window,
-            &LayoutPosition,
-            &mut Position,
-            &mut Bounds,
-            Has<FullWidthMarker>,
-        ),
+        (Entity, &Window, &LayoutPosition, &mut Position, &mut Bounds),
         (Changed<LayoutPosition>, With<Window>, Without<LayoutStrip>),
     >,
     workspaces: Query<(&LayoutStrip, &Position, Has<Scrolling>, &ChildOf), With<LayoutStrip>>,
@@ -896,10 +881,7 @@ fn position_layout_windows(
     let (_, pad_right, _, pad_left) = config.edge_padding();
 
     positioned_windows.par_iter_mut().for_each(
-        |(entity, window, layout_position, mut position, mut bounds, full_width)| {
-            if full_width {
-                return;
-            }
+        |(entity, window, layout_position, mut position, mut bounds)| {
             let Some((layout_strip, Position(strip_position), swiping, child_of)) =
                 workspaces.iter().find(|strip| strip.0.contains(entity))
             else {

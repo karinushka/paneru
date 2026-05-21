@@ -8,7 +8,7 @@ use bevy::ecs::observer::On;
 use bevy::ecs::query::{Added, Has, With, Without};
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::schedule::common_conditions::{not, resource_exists};
-use bevy::ecs::system::{Commands, Local, Populated, Query, Res, ResMut, Single};
+use bevy::ecs::system::{Commands, Local, ParamSet, Populated, Query, Res, ResMut, Single};
 use bevy::time::common_conditions::on_timer;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -49,6 +49,7 @@ impl Plugin for WorkspaceEventsPlugin {
         app.add_systems(
             Update,
             (
+                renumber_virtual_indexes,
                 reap_empty_virtual_workspaces.run_if(reap_workspaces),
                 workspace_change_trigger,
                 workspace_created_trigger,
@@ -914,10 +915,72 @@ fn show_active_workspace(
     }
 }
 
+/// Resolves duplicate `virtual_index` values by reassigning each
+/// duplicate to the lowest unused index on its workspace. Triggered by
+/// `Added<LayoutStrip>` — the only event that can introduce a duplicate
+/// (despawning a strip can leave a gap but never collides). Runs
+/// independently of `reap_empty_workspaces` because without it, duplicate
+/// indices silently break navigation: `switch_virtual_workspace_bind`
+/// sorts rows by virtual_index and flashes `next_virtual_index + 1` as
+/// the OSD label, so two rows both at 0 mean South moves between them
+/// while the OSD stays at "1" and North no-ops at the bottom of the
+/// saturating sub.
+///
+/// Sources of duplicate creation we have to defend against:
+/// - `LayoutStrip::fullscreen` pins `virtual_index` to 0 unconditionally.
+/// - Restoration trusts whatever the saved state contained.
+/// - Races in `handle_virtual_window_moves` between checking the target
+///   and spawning a new strip for it.
+///
+/// Gaps in the index sequence are preserved — only duplicates get
+/// renumbered. Single-strip configurations at non-zero indices stay
+/// where they are.
+fn renumber_virtual_indexes(
+    mut set: ParamSet<(
+        Query<&LayoutStrip, Added<LayoutStrip>>,
+        Query<(Entity, &mut LayoutStrip)>,
+    )>,
+) {
+    let affected: HashSet<WorkspaceId> = set.p0().iter().map(|strip| strip.id()).collect();
+    if affected.is_empty() {
+        return;
+    }
+
+    let mut strips = set.p1();
+    for workspace_id in affected {
+        let mut rows = strips
+            .iter_mut()
+            .filter(|(_, strip)| strip.id() == workspace_id)
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|(_, strip)| strip.virtual_index);
+
+        let mut taken: HashSet<u32> = HashSet::new();
+        let mut dups: Vec<usize> = Vec::new();
+        for (i, (_, strip)) in rows.iter().enumerate() {
+            if !taken.insert(strip.virtual_index) {
+                dups.push(i);
+            }
+        }
+        if dups.is_empty() {
+            continue;
+        }
+
+        // Reassign each dup to the lowest free index, growing `taken` as
+        // we go so the next dup doesn't pick the same slot.
+        for i in dups {
+            let mut probe = 0u32;
+            while !taken.insert(probe) {
+                probe += 1;
+            }
+            rows[i].1.virtual_index = probe;
+        }
+    }
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn reap_empty_virtual_workspaces(
     changed: Single<Entity, Added<ActiveWorkspaceMarker>>,
-    mut strips: Populated<(Entity, &mut LayoutStrip)>,
+    strips: Populated<(Entity, &LayoutStrip)>,
     mut commands: Commands,
 ) {
     let changed_entity = *changed;
@@ -926,7 +989,7 @@ fn reap_empty_virtual_workspaces(
     };
     debug!("cleaning up virtual workspaces on space {workspace_id}");
     let mut rows = strips
-        .iter_mut()
+        .iter()
         .filter(|(_, strip)| strip.id() == workspace_id)
         .collect::<Vec<_>>();
     rows.sort_by_key(|(_, strip)| strip.virtual_index);
@@ -936,8 +999,7 @@ fn reap_empty_virtual_workspaces(
     }
 
     let primary_entity = rows[0].0;
-    let mut next_idx = 0;
-    for (entity, mut strip) in rows {
+    for (entity, strip) in rows {
         if strip.virtual_index > 0 && strip.len() == 0 {
             if entity == changed_entity {
                 debug!("moving markers from despawned virtual workspace to primary");
@@ -947,11 +1009,6 @@ fn reap_empty_virtual_workspaces(
                     .try_insert(SelectedVirtualMarker);
             }
             commands.entity(entity).despawn();
-            continue;
         }
-        if strip.virtual_index != next_idx {
-            strip.virtual_index = next_idx;
-        }
-        next_idx += 1;
     }
 }

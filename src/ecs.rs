@@ -252,7 +252,6 @@ pub struct NativeFullscreenMarker {
 #[derive(Component)]
 pub struct FullWidthMarker {
     pub width_ratio: f64,
-    pub height_ratio: f64,
 }
 
 /// Enum component indicating the unmanaged state of a window.

@@ -14,7 +14,7 @@ use crate::config::Config;
 use crate::ecs::layout::{Column, LayoutStrip, StackItem};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Windows};
 use crate::ecs::{
-    ActiveDisplayMarker, ActiveWorkspaceMarker, Bounds, FocusedMarker, FullWidthMarker,
+    ActiveDisplayMarker, ActiveWorkspaceMarker, FocusedMarker, FullWidthMarker,
     NativeFullscreenMarker, SelectedVirtualMarker, SendMessageTrigger, Unmanaged, ensure_visible,
     focus_entity, reposition_entity, reshuffle_around, resize_entity,
 };
@@ -527,7 +527,9 @@ fn resize_window(
     else {
         return;
     };
-    if let Ok(mut cmds) = commands.get_entity(entity) {
+    if windows.full_width(entity).is_some()
+        && let Ok(mut cmds) = commands.get_entity(entity)
+    {
         cmds.try_remove::<FullWidthMarker>();
     }
 
@@ -594,27 +596,6 @@ fn resize_window(
     reshuffle_around(entity, &mut commands);
 }
 
-/// Toggles the focused window between full-width and a preset width.
-///
-/// # Arguments
-///
-/// * `active_display` - A mutable reference to the `Display` resource.
-/// * `focused_entity` - The `Entity` of the currently focused window.
-/// * `windows` - A mutable query for all `Window` components.
-/// * `commands` - Bevy commands to trigger events.
-/// * `config` - The `Config` resource.
-fn exit_full_width(
-    entity: Entity,
-    marker: &FullWidthMarker,
-    viewport: IRect,
-    commands: &mut Commands,
-) {
-    let w = (marker.width_ratio * f64::from(viewport.width())).round() as i32;
-    let h = (marker.height_ratio * f64::from(viewport.height())).round() as i32;
-    commands.entity(entity).try_remove::<FullWidthMarker>();
-    commands.entity(entity).try_insert(Bounds(Size::new(w, h)));
-}
-
 #[allow(clippy::needless_pass_by_value)]
 fn full_width_window(
     mut messages: MessageReader<Event>,
@@ -630,10 +611,7 @@ fn full_width_window(
         return;
     }
 
-    let Some((frame, (_, entity))) = windows
-        .focused()
-        .and_then(|(window, entity)| windows.frame(entity).zip(Some((window, entity))))
-    else {
+    let Some((_, entity)) = windows.focused() else {
         return;
     };
 
@@ -642,8 +620,10 @@ fn full_width_window(
         .actual_display_bounds(active_display.dock(), &config);
 
     if let Some(marker) = windows.full_width(entity) {
-        exit_full_width(entity, marker, viewport, &mut commands);
-        reshuffle_around(entity, &mut commands);
+        commands.entity(entity).try_remove::<FullWidthMarker>();
+        let w = (marker.width_ratio * f64::from(viewport.width())).round() as i32;
+        let bounds = active_display.bounds().size().with_x(w);
+        resize_entity(entity, bounds, &mut commands);
     } else {
         let strip = active_display.active_strip();
         if strip
@@ -655,11 +635,9 @@ fn full_width_window(
             _ = strip.unstack(entity);
         }
         let width_ratio = windows.width_ratio(entity).unwrap_or(0.5);
-        let height_ratio = f64::from(frame.height()) / f64::from(viewport.height());
-        commands.entity(entity).try_insert(FullWidthMarker {
-            width_ratio,
-            height_ratio,
-        });
+        commands
+            .entity(entity)
+            .try_insert(FullWidthMarker { width_ratio });
         reposition_entity(
             entity,
             Origin::new(viewport.min.x, viewport.min.y),
@@ -965,7 +943,7 @@ pub fn stack_windows_handler(
     mut messages: MessageReader<Event>,
     windows: Windows,
     mut active_display: ActiveDisplayMut,
-    config: Res<Config>,
+    // config: Res<Config>,
     mut commands: Commands,
 ) {
     let Some(Operation::Stack(stack)) =
@@ -979,23 +957,14 @@ pub fn stack_windows_handler(
         .and_then(|(_, entity)| windows.get_managed(entity))
         && unmanaged.is_none()
     {
-        let was_full_width = if let Some(marker) = windows.full_width(entity) {
-            let viewport = active_display
-                .display()
-                .actual_display_bounds(active_display.dock(), &config);
-            exit_full_width(entity, marker, viewport, &mut commands);
-            true
-        } else {
-            false
-        };
+        if windows.full_width(entity).is_some() {
+            commands.entity(entity).try_remove::<FullWidthMarker>();
+        }
         let strip = active_display.active_strip();
         if *stack {
             _ = strip.stack(entity);
         } else {
             _ = strip.unstack(entity);
-        }
-        if was_full_width {
-            reshuffle_around(entity, &mut commands);
         }
     }
 }

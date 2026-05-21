@@ -41,6 +41,10 @@ use crate::overlay::{FlashMessageManager, OverlayManager};
 use crate::platform::{PlatformCallbacks, WinID};
 
 const ANIAMTE_SNAP_THRESHOLD: f32 = 5.0;
+const LOOP_MAX_TIMEOUT_FRAME_ACTIVE_MS: u32 = 16;
+const LOOP_MAX_TIMEOUT_LOWPOWER_MS: u32 = 500;
+const LOOP_MAX_TIMEOUT_MS: u32 = 50;
+const LOOP_TIMEOUT_STEP: u32 = 1;
 
 /// Gathers all present displays and spawns them as entities in the Bevy world.
 /// The currently active display (identified by `window_manager.active_display_id()`) is marked with `ActiveDisplayMarker`.
@@ -550,25 +554,27 @@ pub(super) fn animate_resize_entities(
         });
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 pub(super) fn pump_events(
     mut exit: MessageWriter<AppExit>,
     mut messages: MessageWriter<Event>,
     low_power_mode: Option<Res<LowPowerMode>>,
     incoming_events: Option<NonSend<Receiver<Event>>>,
     platform: Option<NonSendMut<Pin<Box<PlatformCallbacks>>>>,
+    repositioning: Query<(), With<RepositionMarker>>,
+    resizing: Query<(), With<ResizeMarker>>,
+    scrolling: Query<(), With<Scrolling>>,
+    flash_messages: Query<(), With<FlashMessage>>,
     mut timeout: Local<u32>,
 ) {
-    const LOOP_MAX_TIMEOUT_LOWPOWER_MS: u32 = 500;
-    const LOOP_MAX_TIMEOUT_MS: u32 = 50;
-    const LOOP_TIMEOUT_STEP: u32 = 1;
-
     let Some((ref mut platform, incoming_events)) = platform.zip(incoming_events) else {
         // No platform interface or incoming event pipe - probably executing in a unit test.
         return;
     };
 
     platform.pump_cocoa_event_loop(f64::from(*timeout) / 1000.0);
+    let mut received_events = Vec::new();
+    let mut pending_mouse = None;
     loop {
         // Repeatedly drain the events until timeout.
         match incoming_events.recv_timeout(Duration::from_millis(1)) {
@@ -577,11 +583,25 @@ pub(super) fn pump_events(
                 break;
             }
             Ok(event) => {
-                messages.write(event);
+                if matches!(event, Event::MouseMoved { .. }) {
+                    pending_mouse = Some(event);
+                } else {
+                    received_events.extend(pending_mouse.take());
+                    received_events.push(event);
+                }
                 *timeout = LOOP_TIMEOUT_STEP;
             }
             Err(RecvTimeoutError::Timeout) => {
-                let timeout_limit = if low_power_mode.is_some_and(|low_power| low_power.0) {
+                received_events.extend(pending_mouse.take());
+                messages.write_batch(received_events);
+                let frame_active = !repositioning.is_empty()
+                    || !resizing.is_empty()
+                    || !scrolling.is_empty()
+                    || !flash_messages.is_empty();
+                let low_power = low_power_mode.is_some_and(|low_power| low_power.0);
+                let timeout_limit = if frame_active {
+                    LOOP_MAX_TIMEOUT_FRAME_ACTIVE_MS
+                } else if low_power {
                     LOOP_MAX_TIMEOUT_LOWPOWER_MS
                 } else {
                     LOOP_MAX_TIMEOUT_MS

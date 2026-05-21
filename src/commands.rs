@@ -22,6 +22,7 @@ use crate::ecs::{
 };
 use crate::events::Event;
 use crate::manager::{Application, Display, Origin, Size, Window, WindowManager};
+use crate::platform::WorkspaceId;
 
 /// Represents a cardinal or directional choice for window manipulation.
 #[derive(Clone, Debug)]
@@ -246,27 +247,48 @@ fn pick_nearest_in_direction(
         .map(|(entity, _)| entity)
 }
 
+fn visible_floating_entities(
+    windows: &Windows,
+    window_manager: &WindowManager,
+    workspace_id: WorkspaceId,
+    display_bounds: IRect,
+) -> Vec<Entity> {
+    let workspace_window_ids: std::collections::HashSet<_> = window_manager
+        .windows_in_workspace(workspace_id)
+        .ok()
+        .map(|ids| ids.into_iter().collect())
+        .unwrap_or_default();
+
+    windows
+        .iter()
+        .filter_map(|(_, entity)| {
+            let (window, _, Some(Unmanaged::Floating)) = windows.get_managed(entity)? else {
+                return None;
+            };
+            if !workspace_window_ids.contains(&window.id()) {
+                return None;
+            }
+            let frame = windows.frame(entity)?;
+            (!display_bounds.intersect(frame).is_empty()).then_some(entity)
+        })
+        .collect()
+}
+
 fn nearest_float_in_direction(
     direction: &Direction,
     focused_entity: Entity,
     windows: &Windows,
+    window_manager: &WindowManager,
+    workspace_id: WorkspaceId,
     display_bounds: IRect,
 ) -> Option<Entity> {
     let focused_center = windows.frame(focused_entity)?.center();
 
-    let candidates = windows.iter().filter_map(|(_, entity)| {
-        if entity == focused_entity {
-            return None;
-        }
-        let (_, _, Some(Unmanaged::Floating)) = windows.get_managed(entity)? else {
-            return None;
-        };
-        let frame = windows.frame(entity)?;
-        if display_bounds.intersect(frame).is_empty() {
-            return None;
-        }
-        Some((entity, frame.center()))
-    });
+    let candidates =
+        visible_floating_entities(windows, window_manager, workspace_id, display_bounds)
+            .into_iter()
+            .filter(|entity| *entity != focused_entity)
+            .filter_map(|entity| windows.frame(entity).map(|frame| (entity, frame.center())));
 
     pick_nearest_in_direction(direction, focused_center, candidates)
 }
@@ -289,6 +311,7 @@ fn command_move_focus(
     windows: Windows,
     workspaces: Query<(&LayoutStrip, Option<&NativeFullscreenMarker>)>,
     active_display: ActiveDisplay,
+    window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
     let Some(Operation::Focus(direction)) =
@@ -317,9 +340,14 @@ fn command_move_focus(
     };
 
     if let Some((_, _, Some(Unmanaged::Floating))) = windows.get_managed(focused_entity) {
-        if let Some(entity) =
-            nearest_float_in_direction(direction, focused_entity, &windows, active_display.bounds())
-        {
+        if let Some(entity) = nearest_float_in_direction(
+            direction,
+            focused_entity,
+            &windows,
+            &window_manager,
+            active_strip.id(),
+            active_display.bounds(),
+        ) {
             focus_entity(entity, true, &mut commands);
         }
         return;
@@ -372,6 +400,7 @@ fn command_focus_unmanaged(
     mut messages: MessageReader<Event>,
     windows: Windows,
     active_display: ActiveDisplay,
+    window_manager: Res<WindowManager>,
     focus_history: Res<FocusHistory>,
     mut commands: Commands,
 ) {
@@ -384,24 +413,14 @@ fn command_focus_unmanaged(
 
     let display_bounds = active_display.bounds();
     let workspace_id = active_display.active_strip().id();
-    let is_visible_float = |entity: Entity| -> bool {
-        let Some((_, _, Some(Unmanaged::Floating))) = windows.get_managed(entity) else {
-            return false;
-        };
-        let Some(frame) = windows.frame(entity) else {
-            return false;
-        };
-        !display_bounds.intersect(frame).is_empty()
-    };
+    let visible_floats =
+        visible_floating_entities(&windows, &window_manager, workspace_id, display_bounds);
+    let is_visible_float = |entity: Entity| -> bool { visible_floats.contains(&entity) };
 
     let target = focus_history
         .last_floating(workspace_id)
         .filter(|entity| is_visible_float(*entity))
-        .or_else(|| {
-            windows
-                .iter()
-                .find_map(|(_, e)| is_visible_float(e).then_some(e))
-        });
+        .or_else(|| visible_floats.into_iter().next());
 
     if let Some(entity) = target {
         focus_entity(entity, true, &mut commands);
@@ -454,35 +473,14 @@ fn command_raise_floating(
 
     let display_bounds = active_display.bounds();
     let workspace_id = active_display.active_strip().id();
-    // Floats on other macOS Spaces share the display bounds, so without an
-    // explicit workspace-membership filter they leak into the float set.
-    let workspace_window_ids: std::collections::HashSet<_> = window_manager
-        .windows_in_workspace(workspace_id)
-        .ok()
-        .map(|ids| ids.into_iter().collect())
-        .unwrap_or_default();
-
-    let is_visible_float = |entity: Entity| -> bool {
-        let Some((window, _, Some(Unmanaged::Floating))) = windows.get_managed(entity) else {
-            return false;
-        };
-        if !workspace_window_ids.contains(&window.id()) {
-            return false;
-        }
-        let Some(frame) = windows.frame(entity) else {
-            return false;
-        };
-        !display_bounds.intersect(frame).is_empty()
-    };
+    let visible_floats =
+        visible_floating_entities(&windows, &window_manager, workspace_id, display_bounds);
+    let is_visible_float = |entity: Entity| -> bool { visible_floats.contains(&entity) };
 
     let target = focus_history
         .last_floating(workspace_id)
         .filter(|entity| is_visible_float(*entity))
-        .or_else(|| {
-            windows
-                .iter()
-                .find_map(|(_, e)| is_visible_float(e).then_some(e))
-        });
+        .or_else(|| visible_floats.first().copied());
 
     for (window, entity) in windows.iter() {
         if is_visible_float(entity) && Some(entity) != target {
@@ -522,37 +520,17 @@ fn command_toggle_floating_layer(
     let (active_strip, layer) = &mut *active_workspace;
     let workspace_id = active_strip.id();
     let target_layer = layer.flipped();
-
-    // Floats on other macOS Spaces share the display bounds, so without an
-    // explicit workspace-membership filter they leak into the float set.
-    let workspace_window_ids: std::collections::HashSet<_> = window_manager
-        .windows_in_workspace(workspace_id)
-        .ok()
-        .map(|ids| ids.into_iter().collect())
-        .unwrap_or_default();
-
+    let visible_floats =
+        visible_floating_entities(&windows, &window_manager, workspace_id, display_bounds);
     let visible_float = |entity: Entity| -> bool {
-        let Some((window, _, Some(Unmanaged::Floating))) = windows.get_managed(entity) else {
-            return false;
-        };
-        if !workspace_window_ids.contains(&window.id()) {
-            return false;
-        }
-        let Some(frame) = windows.frame(entity) else {
-            return false;
-        };
-        !display_bounds.intersect(frame).is_empty() && !active_strip.contains(entity)
+        visible_floats.contains(&entity) && !active_strip.contains(entity)
     };
 
     let target = match target_layer {
         FloatingLayer::Front => focus_history
             .last_floating(workspace_id)
             .filter(|entity| visible_float(*entity))
-            .or_else(|| {
-                windows
-                    .iter()
-                    .find_map(|(_, e)| visible_float(e).then_some(e))
-            }),
+            .or_else(|| visible_floats.iter().copied().find(|e| visible_float(*e))),
         FloatingLayer::Behind => focus_history
             .last_managed(workspace_id)
             .filter(|entity| active_strip.contains(*entity))

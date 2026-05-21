@@ -65,7 +65,7 @@ pub trait WindowApi: Send + Sync {
     fn focus_with_raise(&self, psn: ProcessSerialNumber);
     /// Raises the window in the OS z-order without changing focus. Used to
     /// shuffle the floating-vs-tiled tier order. Best-effort: AX raise can't
-    /// lift a window above another app's frontmost window — that's PR 2's job.
+    /// lift a window above another app's frontmost window.
     fn raise_without_focus(&self);
     fn pid(&self) -> Result<Pid>;
     fn set_padding(&mut self, padding: WindowPadding);

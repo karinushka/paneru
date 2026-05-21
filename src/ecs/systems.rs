@@ -1009,14 +1009,43 @@ pub(crate) fn update_flash_messages(
     let bounds = display.bounds();
     let top_right = NSPoint::new(f64::from(bounds.max.x), f64::from(bounds.min.y));
 
+    // When several FlashMessages coexist (rapid keypresses spawn a fresh
+    // one per workspace switch before the previous timer expires), the
+    // naïve loop would call `show()` for every one of them in arbitrary
+    // order — the OSD ends up flickering between strings, and the moment
+    // any one of them expires its `is_finished()` branch calls
+    // `flash_manager.remove()` even though the newer ones are still
+    // alive. Keep the newest (most time remaining), despawn the rest,
+    // and render exactly once.
+    let mut alive: Option<(Entity, &str, &Timeout)> = None;
+    let mut stale: Vec<Entity> = Vec::new();
     for (entity, FlashMessage(flash), timeout) in messages {
         if timeout.timer.is_finished() {
-            flash_manager.remove();
-            commands.entity(entity).despawn();
-        } else {
-            let opacity = timeout.timer.fraction_remaining();
-            flash_manager.show(flash, opacity, top_right);
+            stale.push(entity);
+            continue;
         }
+        match alive {
+            None => alive = Some((entity, flash, timeout)),
+            Some((prev_entity, _, prev_timeout)) => {
+                if timeout.timer.remaining() > prev_timeout.timer.remaining() {
+                    stale.push(prev_entity);
+                    alive = Some((entity, flash, timeout));
+                } else {
+                    stale.push(entity);
+                }
+            }
+        }
+    }
+
+    for entity in stale {
+        commands.entity(entity).despawn();
+    }
+
+    if let Some((_, flash, timeout)) = alive {
+        let opacity = timeout.timer.fraction_remaining();
+        flash_manager.show(flash, opacity, top_right);
+    } else {
+        flash_manager.remove();
     }
 }
 

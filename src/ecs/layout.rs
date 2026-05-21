@@ -16,8 +16,8 @@ use tracing::{Level, instrument, trace};
 use crate::config::Config;
 use crate::ecs::params::Windows;
 use crate::ecs::{
-    Bounds, DockPosition, EnsureVisibleMarker, Initializing, LayoutPosition, Position,
-    RepositionMarker, ReshuffleAroundMarker, Scrolling, reposition_entity,
+    ActiveWorkspaceMarker, Bounds, DockPosition, EnsureVisibleMarker, Initializing, LayoutPosition,
+    Position, RepositionMarker, ReshuffleAroundMarker, Scrolling, reposition_entity,
 };
 use crate::errors::{Error, Result};
 use crate::manager::{Display, Origin, Window};
@@ -1079,9 +1079,9 @@ fn position_layout_windows(
     workspaces: Query<
         (
             &LayoutStrip,
-            Ref<Position>,
+            &Position,
             Has<Scrolling>,
-            Has<RepositionMarker>,
+            Option<Ref<ActiveWorkspaceMarker>>,
             &ChildOf,
         ),
         With<LayoutStrip>,
@@ -1090,22 +1090,26 @@ fn position_layout_windows(
     config: Res<Config>,
     mut commands: Commands,
 ) {
+    const OFFSCREEN_THRESHOLD: i32 = 100;
     let offscreen_sliver_width = config.sliver_width();
     let (_, pad_right, _, pad_left) = config.edge_padding();
     let mut strip_contexts = EntityHashMap::default();
-    for (layout_strip, strip_pos, swiping, strip_animating, child_of) in &workspaces {
-        let strip_position = strip_pos.0;
-        // Workspace switch: show_active_workspace directly mutates the
-        // strip's Position to slide the strip on/off-screen - no
-        // RepositionMarker, no Scrolling. We snap windows in lockstep so
-        // they don't animate the long jump from off-screen storage into
-        // view.
-        // TODO: Adjust this if workspaces need to be animated later.
-        let workspace_switching = strip_pos.is_changed() && !swiping && !strip_animating;
+    for (layout_strip, Position(strip_position), swiping, marker, child_of) in &workspaces {
+        let display_bounds = displays
+            .get(child_of.parent())
+            .map(|(display, dock)| display.actual_display_bounds(dock, &config));
+        let moving_offscreen = display_bounds
+            .is_ok_and(|bounds| (bounds.max.y - OFFSCREEN_THRESHOLD) < strip_position.y);
+        // To detect whether a virtual workspace is being switched, we check whether it's being
+        // moved offscreen - e.g. it's being hidden.
+        // Or whether it has recently gotten an active marker insertion - e.g. it is being brought
+        // into view.
+        let workspace_switching =
+            moving_offscreen || marker.is_some_and(|marker| marker.is_added());
         insert_strip_window_contexts(
             &mut strip_contexts,
             layout_strip,
-            strip_position,
+            *strip_position,
             swiping,
             workspace_switching,
             child_of.parent(),

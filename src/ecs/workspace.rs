@@ -17,6 +17,7 @@ use tracing::{Level, debug, error, instrument, warn};
 use super::{ActiveDisplayMarker, SpawnWindowTrigger};
 use crate::commands::{Direction, MoveFocus, Operation, filter_window_operations};
 use crate::config::Config;
+use crate::ecs::display::FloatingLayer;
 use crate::ecs::focus::FocusHistory;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
@@ -335,6 +336,7 @@ fn workspace_created_trigger(
             strip,
             origin,
             SelectedVirtualMarker,
+            FloatingLayer::default(),
             ChildOf(display_entity),
         ));
     }
@@ -629,6 +631,7 @@ fn handle_virtual_window_moves(
                 new_strip,
                 Position(origin),
                 SelectedVirtualMarker,
+                FloatingLayer::default(),
                 ChildOf(display_entity),
             ));
             if stay {
@@ -732,6 +735,7 @@ fn switch_virtual_workspace_bind(
                     Position(active_display.bounds().min),
                     ChildOf(active_display.entity()),
                     SelectedVirtualMarker,
+                    FloatingLayer::default(),
                     ActiveWorkspaceMarker,
                 ));
                 flash_message(format!("{}", *target_virtual_index + 1), 1.0, &mut commands);

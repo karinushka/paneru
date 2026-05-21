@@ -658,6 +658,11 @@ pub(super) fn window_resized_update_frame(
             // Floating window, don't nudge the strip.
             continue;
         }
+        if active_strip.tabbed(entity) {
+            // Native tabs share a single layout slot. Keep the strip anchored
+            // and let the tab sync/layout systems propagate the new size.
+            continue;
+        }
 
         if old_frame.min.x != new_frame.min.x {
             let shift = (old_frame.size() - new_frame.size()).with_y(0);

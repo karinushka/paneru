@@ -160,6 +160,9 @@ fn autocenter_window_on_focus(
     if global_state.skip_reshuffle() || global_state.initializing() || !mouse_held.is_empty() {
         return;
     }
+    if active_display.active_strip().tabbed(entity) {
+        return;
+    }
     if config.auto_center()
         && let Some((_, _, None)) = windows.get_managed(entity)
         && let Some(size) = windows.size(entity)

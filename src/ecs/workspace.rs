@@ -8,7 +8,7 @@ use bevy::ecs::observer::On;
 use bevy::ecs::query::{Added, Has, With, Without};
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::schedule::common_conditions::{not, resource_exists};
-use bevy::ecs::system::{Commands, Local, Populated, Query, Res, Single};
+use bevy::ecs::system::{Commands, Local, Populated, Query, Res, ResMut, Single};
 use bevy::time::common_conditions::on_timer;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -17,6 +17,7 @@ use tracing::{Level, debug, error, instrument, warn};
 use super::{ActiveDisplayMarker, SpawnWindowTrigger};
 use crate::commands::{Direction, MoveFocus, Operation, filter_window_operations};
 use crate::config::Config;
+use crate::ecs::focus::FocusHistory;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
@@ -265,12 +266,14 @@ fn detect_moved_windows(
 fn workspace_destroyed_trigger(
     mut messages: MessageReader<Event>,
     mut workspaces: Populated<(&mut LayoutStrip, Entity, Option<&NativeFullscreenMarker>)>,
+    mut focus_history: ResMut<FocusHistory>,
     mut commands: Commands,
 ) {
     for event in messages.read() {
         let Event::SpaceDestroyed { space_id } = event else {
             continue;
         };
+        focus_history.forget_workspace(*space_id);
 
         let Some((entity, fullscreen)) =
             workspaces.iter().find_map(|(strip, entity, fullscreen)| {

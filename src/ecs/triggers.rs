@@ -20,6 +20,7 @@ use super::{
     StrayFocusEvent, SystemTheme, Timeout, Unmanaged,
 };
 use crate::config::{Config, WindowParams};
+use crate::ecs::focus::FocusHistory;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, GlobalState, Windows};
 use crate::ecs::state::PaneruState;
@@ -181,6 +182,7 @@ pub(super) fn window_focused_trigger(
     applications: Query<&Application>,
     windows: Windows,
     mut workspaces: Query<(Entity, &mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    mut focus_history: ResMut<FocusHistory>,
     config: Res<Config>,
     mut commands: Commands,
 ) {
@@ -232,18 +234,24 @@ pub(super) fn window_focused_trigger(
         // Handle tab switching: if the focused window is a tab, make it the leader.
         // Also reactivate the owning virtual strip before treating duplicate
         // focus as a no-op; the focus marker can be stale on a hidden strip.
+        // Track the active workspace as a fallback so focus_history can record
+        // a workspace id even when the entity hasn't been routed into a strip.
         let mut owner = None;
+        let mut owning_workspace_id = None;
+        let mut active_workspace_id = None;
         for (strip_entity, mut strip, active) in &mut workspaces {
-            if !strip.contains(entity) {
-                continue;
+            if active {
+                active_workspace_id = Some(strip.id());
             }
-            if let Ok(index) = strip.index_of(entity)
-                && let Some(column) = strip.get_column_mut(index)
-            {
-                column.move_to_front(entity);
+            if owner.is_none() && strip.contains(entity) {
+                if let Ok(index) = strip.index_of(entity)
+                    && let Some(column) = strip.get_column_mut(index)
+                {
+                    column.move_to_front(entity);
+                }
+                owning_workspace_id = Some(strip.id());
+                owner = Some((strip_entity, active));
             }
-            owner = Some((strip_entity, active));
-            break;
         }
 
         if let Some((strip_entity, active)) = owner
@@ -253,6 +261,14 @@ pub(super) fn window_focused_trigger(
             entity_commands
                 .try_insert(ActiveWorkspaceMarker)
                 .try_insert(SelectedVirtualMarker);
+        }
+
+        // Record before the already-focused short-circuit below: focus_entity
+        // sets FocusedMarker synchronously, so OS-confirmed events for the
+        // same entity would otherwise skip the write.
+        if let Some(workspace_id) = owning_workspace_id.or(active_workspace_id) {
+            let unmanaged = windows.get_managed(entity).and_then(|(_, _, u)| u);
+            focus_history.record(workspace_id, entity, unmanaged);
         }
 
         if already_focused {
@@ -720,6 +736,7 @@ pub(super) fn window_destroyed_trigger(
     active_display: ActiveDisplay,
     mut apps: Query<&mut Application>,
     mut config: GlobalState,
+    mut focus_history: ResMut<FocusHistory>,
     mut commands: Commands,
 ) {
     for event in messages.read() {
@@ -750,6 +767,7 @@ pub(super) fn window_destroyed_trigger(
             &mut config,
             &mut commands,
         );
+        focus_history.forget(entity);
 
         if let Ok(mut entity_commands) = commands.get_entity(entity) {
             entity_commands.try_despawn();

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use bevy::app::{App, Plugin, PostUpdate};
@@ -6,13 +7,14 @@ use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::lifecycle::{Add, Remove};
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Added, Has, With};
+use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::system::{Commands, Populated, Query, Res, Single};
 use bevy::prelude::Event as BevyEvent;
 use bevy::time::common_conditions::on_timer;
 use tracing::{Level, debug, error, instrument, trace, warn};
 
-use super::{FocusedMarker, MouseHeldMarker, SystemTheme};
+use super::{FocusedMarker, MouseHeldMarker, SystemTheme, Unmanaged};
 use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, GlobalState, Windows};
@@ -22,12 +24,73 @@ use crate::ecs::{
 };
 use crate::events::Event;
 use crate::manager::{Application, Display, Window, WindowManager};
+use crate::platform::WorkspaceId;
 
 const REFRESH_WINDOW_CHECK_FREQ_MS: u64 = 1000;
+
+#[derive(Default)]
+pub struct TierMemory {
+    pub last_managed: Option<Entity>,
+    pub last_floating: Option<Entity>,
+}
+
+/// Keyed by `WorkspaceId` so toggling on one Space can't reach a window last
+/// focused on another. Cleared on entity despawn (`forget`) so recycled
+/// Entity IDs can't resolve to the wrong window, and on workspace despawn
+/// (`forget_workspace`) to bound the map.
+#[derive(Default, Resource)]
+pub struct FocusHistory {
+    by_workspace: HashMap<WorkspaceId, TierMemory>,
+}
+
+impl FocusHistory {
+    pub fn record(
+        &mut self,
+        workspace: WorkspaceId,
+        entity: Entity,
+        unmanaged: Option<&Unmanaged>,
+    ) {
+        let slot = self.by_workspace.entry(workspace).or_default();
+        match unmanaged {
+            None => slot.last_managed = Some(entity),
+            Some(Unmanaged::Floating) => slot.last_floating = Some(entity),
+            Some(_) => {}
+        }
+    }
+
+    pub fn last_managed(&self, workspace: WorkspaceId) -> Option<Entity> {
+        self.by_workspace
+            .get(&workspace)
+            .and_then(|t| t.last_managed)
+    }
+
+    pub fn last_floating(&self, workspace: WorkspaceId) -> Option<Entity> {
+        self.by_workspace
+            .get(&workspace)
+            .and_then(|t| t.last_floating)
+    }
+
+    pub fn forget(&mut self, entity: Entity) {
+        for slot in self.by_workspace.values_mut() {
+            if slot.last_managed == Some(entity) {
+                slot.last_managed = None;
+            }
+            if slot.last_floating == Some(entity) {
+                slot.last_floating = None;
+            }
+        }
+    }
+
+    pub fn forget_workspace(&mut self, workspace: WorkspaceId) {
+        self.by_workspace.remove(&workspace);
+    }
+}
+
 pub struct FocusEventsPlugin;
 
 impl Plugin for FocusEventsPlugin {
     fn build(&self, app: &mut App) {
+        app.init_resource::<FocusHistory>();
         app.add_systems(
             PostUpdate,
             (
@@ -284,4 +347,81 @@ pub(super) fn stray_focus_observer(
             commands.trigger(SendMessageTrigger(Event::WindowFocused { window_id }));
             commands.entity(timeout_entity).despawn();
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::world::World;
+
+    #[test]
+    fn record_and_read_per_tier() {
+        let mut world = World::new();
+        let managed = world.spawn(()).id();
+        let floating = world.spawn(()).id();
+        let mut history = FocusHistory::default();
+
+        history.record(1, managed, None);
+        history.record(1, floating, Some(&Unmanaged::Floating));
+
+        assert_eq!(history.last_managed(1), Some(managed));
+        assert_eq!(history.last_floating(1), Some(floating));
+    }
+
+    #[test]
+    fn record_ignores_minimized_and_hidden() {
+        let mut world = World::new();
+        let entity = world.spawn(()).id();
+        let mut history = FocusHistory::default();
+
+        history.record(1, entity, Some(&Unmanaged::Minimized));
+        history.record(1, entity, Some(&Unmanaged::Hidden));
+
+        assert_eq!(history.last_managed(1), None);
+        assert_eq!(history.last_floating(1), None);
+    }
+
+    #[test]
+    fn per_workspace_isolation() {
+        let mut world = World::new();
+        let a = world.spawn(()).id();
+        let b = world.spawn(()).id();
+        let mut history = FocusHistory::default();
+
+        history.record(1, a, None);
+        history.record(2, b, None);
+
+        assert_eq!(history.last_managed(1), Some(a));
+        assert_eq!(history.last_managed(2), Some(b));
+    }
+
+    #[test]
+    fn forget_clears_entity_across_workspaces() {
+        let mut world = World::new();
+        let target = world.spawn(()).id();
+        let other = world.spawn(()).id();
+        let mut history = FocusHistory::default();
+
+        history.record(1, target, None);
+        history.record(2, target, Some(&Unmanaged::Floating));
+        history.record(2, other, None);
+
+        history.forget(target);
+
+        assert_eq!(history.last_managed(1), None);
+        assert_eq!(history.last_floating(2), None);
+        assert_eq!(history.last_managed(2), Some(other));
+    }
+
+    #[test]
+    fn forget_workspace_drops_entry() {
+        let mut world = World::new();
+        let entity = world.spawn(()).id();
+        let mut history = FocusHistory::default();
+
+        history.record(1, entity, None);
+        history.forget_workspace(1);
+
+        assert_eq!(history.last_managed(1), None);
+    }
 }

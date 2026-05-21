@@ -480,6 +480,129 @@ fn test_external_focus_reactivates_hidden_virtual_strip_when_marker_is_stale() {
         .run(commands);
 }
 
+// When the focused window leaves the active strip (e.g. it just became
+// floating, or the OS handed focus to an off-strip window), window_focus
+// east/west must enter the strip from the appropriate side rather than
+// silently doing nothing.
+fn focused_window_id(world: &mut World) -> i32 {
+    let mut q = world.query::<(&Window, Has<crate::ecs::FocusedMarker>)>();
+    q.iter(world)
+        .find_map(|(w, f)| f.then_some(w.id()))
+        .expect("a focused window")
+}
+
+fn entity_to_window_id(world: &mut World, entity: Entity) -> i32 {
+    let mut q = world.query::<(&Window, Entity)>();
+    q.iter(world)
+        .find_map(|(w, e)| (e == entity).then_some(w.id()))
+        .expect("entity must be a Window")
+}
+
+fn active_strip_first_id(world: &mut World) -> i32 {
+    let entity = {
+        let mut q = world.query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>();
+        let strip = q.single(world).expect("a single active strip");
+        strip
+            .first()
+            .expect("strip should have a column")
+            .top()
+            .expect("column should have a top entity")
+    };
+    entity_to_window_id(world, entity)
+}
+
+fn active_strip_last_id(world: &mut World) -> i32 {
+    let entity = {
+        let mut q = world.query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>();
+        let strip = q.single(world).expect("a single active strip");
+        strip
+            .last()
+            .expect("strip should have a column")
+            .top()
+            .expect("column should have a top entity")
+    };
+    entity_to_window_id(world, entity)
+}
+
+// Strip the currently focused entity out of every LayoutStrip so the
+// "focused window not in active strip" condition is reproduced regardless
+// of how the harness happened to populate the strip. Without this, the
+// init-time duplicate-insertion in the test scheduler keeps the entity in
+// the strip and the bug is masked.
+fn remove_focused_from_all_strips(world: &mut World) {
+    let entity = {
+        let mut q = world.query_filtered::<Entity, With<crate::ecs::FocusedMarker>>();
+        q.single(world).expect("a single focused entity")
+    };
+    let mut q = world.query::<&mut LayoutStrip>();
+    for mut strip in q.iter_mut(world) {
+        while strip.contains(entity) {
+            strip.remove(entity);
+        }
+    }
+}
+
+#[test]
+fn test_focus_recovers_when_focused_window_is_outside_strip() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+    ];
+
+    TestHarness::new()
+        .with_windows(3)
+        .on_iteration(0, |world, _state| {
+            // Make the focused entity genuinely live outside any strip,
+            // mirroring the state the user reported: the OS handed focus
+            // to a window Paneru doesn't track on its active strip.
+            remove_focused_from_all_strips(world);
+        })
+        .on_iteration(1, |world, _state| {
+            // Before the fix: get_window_in_direction returns None because
+            // active_strip.index_of(focused) fails for a window that's not
+            // in the strip, so East is a silent no-op and focus stays on 0.
+            let focused = focused_window_id(world);
+            assert_ne!(
+                focused, 0,
+                "focus must leave the off-strip window 0 when pressing East",
+            );
+            let expected = active_strip_first_id(world);
+            assert_eq!(
+                focused, expected,
+                "East from outside the strip enters at the first (leftmost) column",
+            );
+        })
+        .run(commands);
+}
+
+#[test]
+fn test_focus_west_from_outside_strip_enters_at_last_column() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::West)),
+        },
+    ];
+
+    TestHarness::new()
+        .with_windows(3)
+        .on_iteration(0, |world, _state| {
+            remove_focused_from_all_strips(world);
+        })
+        .on_iteration(1, |world, _state| {
+            let focused = focused_window_id(world);
+            let expected = active_strip_last_id(world);
+            assert_ne!(focused, 0);
+            assert_eq!(
+                focused, expected,
+                "West from outside the strip enters at the last (rightmost) column",
+            );
+        })
+        .run(commands);
+}
+
 #[test]
 fn test_external_focus_restores_app_hidden_window_to_original_virtual_strip() {
     let commands = vec![

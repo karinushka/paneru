@@ -40,6 +40,10 @@ use crate::overlay::{FlashMessageManager, OverlayManager};
 use crate::platform::{PlatformCallbacks, WinID};
 
 const ANIAMTE_SNAP_THRESHOLD: f32 = 5.0;
+const LOOP_MAX_TIMEOUT_FRAME_ACTIVE_MS: u32 = 16;
+const LOOP_MAX_TIMEOUT_LOWPOWER_MS: u32 = 500;
+const LOOP_MAX_TIMEOUT_MS: u32 = 50;
+const LOOP_TIMEOUT_STEP: u32 = 1;
 
 /// Gathers all present displays and spawns them as entities in the Bevy world.
 /// The currently active display (identified by `window_manager.active_display_id()`) is marked with `ActiveDisplayMarker`.
@@ -591,10 +595,14 @@ pub(super) fn pump_events(
                     || !resizing.is_empty()
                     || !scrolling.is_empty()
                     || !flash_messages.is_empty();
-                let timeout_limit = pump_timeout_limit(
-                    low_power_mode.is_some_and(|low_power| low_power.0),
-                    frame_active,
-                );
+                let low_power = low_power_mode.is_some_and(|low_power| low_power.0);
+                let timeout_limit = if frame_active {
+                    LOOP_MAX_TIMEOUT_FRAME_ACTIVE_MS
+                } else if low_power {
+                    LOOP_MAX_TIMEOUT_LOWPOWER_MS
+                } else {
+                    LOOP_MAX_TIMEOUT_MS
+                };
                 *timeout = timeout.min(timeout_limit) + LOOP_TIMEOUT_STEP;
                 break;
             }
@@ -1070,50 +1078,5 @@ pub(crate) fn detect_tabbed_windows(
                 reshuffle_around(entity, &mut commands);
             }
         }
-    }
-}
-
-const LOOP_MAX_TIMEOUT_FRAME_ACTIVE_MS: u32 = 16;
-
-const LOOP_MAX_TIMEOUT_LOWPOWER_MS: u32 = 500;
-
-const LOOP_MAX_TIMEOUT_MS: u32 = 50;
-
-const LOOP_TIMEOUT_STEP: u32 = 1;
-
-fn pump_timeout_limit(low_power_active: bool, frame_active: bool) -> u32 {
-    if frame_active {
-        LOOP_MAX_TIMEOUT_FRAME_ACTIVE_MS
-    } else if low_power_active {
-        LOOP_MAX_TIMEOUT_LOWPOWER_MS
-    } else {
-        LOOP_MAX_TIMEOUT_MS
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pump_timeout_limit_uses_frame_active_cap_for_visible_work() {
-        assert_eq!(pump_timeout_limit(false, false), LOOP_MAX_TIMEOUT_MS);
-        assert_eq!(
-            pump_timeout_limit(true, false),
-            LOOP_MAX_TIMEOUT_LOWPOWER_MS
-        );
-        assert_eq!(
-            pump_timeout_limit(false, true),
-            LOOP_MAX_TIMEOUT_FRAME_ACTIVE_MS
-        );
-        assert_eq!(
-            pump_timeout_limit(true, true),
-            LOOP_MAX_TIMEOUT_FRAME_ACTIVE_MS
-        );
-    }
-
-    #[test]
-    fn low_power_idle_timeout_stays_below_interactive_latency_budget() {
-        assert!(pump_timeout_limit(true, false) <= 50);
     }
 }

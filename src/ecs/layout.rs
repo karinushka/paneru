@@ -262,6 +262,21 @@ impl LayoutStrip {
 
     /// Converts a column containing `leader` to a `Tabs` column and adds `follower`.
     pub fn convert_to_tabs(&mut self, leader: Entity, follower: Entity) -> Result<()> {
+        // Validate that the leader exists before touching anything else.
+        let leader_index = self.index_of(leader)?;
+
+        // The follower may already live in its own column (e.g. when
+        // `detect_tabbed_windows` runs after `spawn_window_trigger` has
+        // already appended the new window). Drop that orphan column first
+        // so the follower isn't left in two places after the merge —
+        // otherwise `index_of(follower)` picks the Tabs column and
+        // `right_neighbour` returns the duplicate, self-looping focus.
+        if let Ok(follower_index) = self.index_of(follower)
+            && follower_index != leader_index
+        {
+            self.remove(follower);
+        }
+
         let index = self.index_of(leader)?;
         let column = self.columns.remove(index).unwrap();
         self.remove(follower);
@@ -1917,5 +1932,82 @@ mod tests {
             Column::Tabs(tabs) => assert_eq!(tabs, vec![e1, e2]),
             _ => panic!(),
         }
+    }
+
+    // Mirrors the real `detect_tabbed_windows` flow: spawn_window_trigger
+    // appends the new window to the strip first, and only then does the
+    // tab detector merge it into the leader's column. Before the fix, the
+    // follower was left in both columns, and right_neighbour from the
+    // duplicated entity would self-loop because index_of returned the Tabs
+    // column index, while the column at the next index was the orphaned
+    // Single(follower).
+    #[test]
+    fn test_convert_to_tabs_removes_pre_existing_follower_column() {
+        let mut world = World::new();
+        let leader = world.spawn_empty().id();
+        let follower = world.spawn_empty().id();
+
+        let mut strip = LayoutStrip::default();
+        strip.append(leader);
+        strip.append(follower);
+
+        strip.convert_to_tabs(leader, follower).unwrap();
+
+        assert_eq!(
+            strip.len(),
+            1,
+            "follower must not remain in its own column after being tabbed onto leader",
+        );
+        match strip.get(0).unwrap() {
+            Column::Tabs(tabs) => assert_eq!(tabs, vec![leader, follower]),
+            other => panic!("expected Tabs column, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_convert_to_tabs_no_self_loop_on_neighbour() {
+        let mut world = World::new();
+        let a = world.spawn_empty().id();
+        let leader = world.spawn_empty().id();
+        let follower = world.spawn_empty().id();
+        let b = world.spawn_empty().id();
+
+        let mut strip = LayoutStrip::default();
+        strip.append(a);
+        strip.append(leader);
+        strip.append(follower);
+        strip.append(b);
+
+        strip.convert_to_tabs(leader, follower).unwrap();
+
+        // Both leader-as-focus and follower-as-focus must navigate to `b`
+        // east, not back onto themselves.
+        assert_eq!(strip.right_neighbour(leader), Some(b));
+        assert_eq!(strip.right_neighbour(follower), Some(b));
+        assert_eq!(strip.left_neighbour(leader), Some(a));
+        assert_eq!(strip.left_neighbour(follower), Some(a));
+    }
+
+    #[test]
+    fn test_convert_to_tabs_handles_follower_left_of_leader() {
+        let mut world = World::new();
+        let follower = world.spawn_empty().id();
+        let leader = world.spawn_empty().id();
+        let b = world.spawn_empty().id();
+
+        let mut strip = LayoutStrip::default();
+        strip.append(follower);
+        strip.append(leader);
+        strip.append(b);
+
+        strip.convert_to_tabs(leader, follower).unwrap();
+
+        assert_eq!(strip.len(), 2);
+        match strip.get(0).unwrap() {
+            Column::Tabs(tabs) => assert_eq!(tabs, vec![leader, follower]),
+            other => panic!("expected Tabs column, got {other:?}"),
+        }
+        assert_eq!(strip.right_neighbour(leader), Some(b));
+        assert_eq!(strip.right_neighbour(follower), Some(b));
     }
 }

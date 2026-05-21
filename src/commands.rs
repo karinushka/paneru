@@ -221,6 +221,56 @@ fn get_window_in_direction(
     }
 }
 
+/// 45° direction cone, closest by squared Euclidean distance.
+/// `First` / `Last` are strip-only and return `None`.
+fn pick_nearest_in_direction(
+    direction: &Direction,
+    focused_center: bevy::math::IVec2,
+    candidates: impl IntoIterator<Item = (Entity, bevy::math::IVec2)>,
+) -> Option<Entity> {
+    candidates
+        .into_iter()
+        .filter_map(|(entity, center)| {
+            let dx = center.x - focused_center.x;
+            let dy = center.y - focused_center.y;
+            let in_direction = match direction {
+                Direction::East => dx > 0 && dy.abs() <= dx.abs(),
+                Direction::West => dx < 0 && dy.abs() <= dx.abs(),
+                Direction::North => dy < 0 && dx.abs() <= dy.abs(),
+                Direction::South => dy > 0 && dx.abs() <= dy.abs(),
+                Direction::First | Direction::Last => return None,
+            };
+            in_direction.then_some((entity, dx * dx + dy * dy))
+        })
+        .min_by_key(|(_, dist_sq)| *dist_sq)
+        .map(|(entity, _)| entity)
+}
+
+fn nearest_float_in_direction(
+    direction: &Direction,
+    focused_entity: Entity,
+    windows: &Windows,
+    display_bounds: IRect,
+) -> Option<Entity> {
+    let focused_center = windows.frame(focused_entity)?.center();
+
+    let candidates = windows.iter().filter_map(|(_, entity)| {
+        if entity == focused_entity {
+            return None;
+        }
+        let (_, _, Some(Unmanaged::Floating)) = windows.get_managed(entity)? else {
+            return None;
+        };
+        let frame = windows.frame(entity)?;
+        if display_bounds.intersect(frame).is_empty() {
+            return None;
+        }
+        Some((entity, frame.center()))
+    });
+
+    pick_nearest_in_direction(direction, focused_center, candidates)
+}
+
 /// Handles the "focus" command, moving focus to a window in a specified direction.
 ///
 /// # Arguments
@@ -265,6 +315,15 @@ fn command_move_focus(
     let Some((_, focused_entity)) = windows.focused() else {
         return;
     };
+
+    if let Some((_, _, Some(Unmanaged::Floating))) = windows.get_managed(focused_entity) {
+        if let Some(entity) =
+            nearest_float_in_direction(direction, focused_entity, &windows, active_display.bounds())
+        {
+            focus_entity(entity, true, &mut commands);
+        }
+        return;
+    }
 
     // At the right edge going East, enter the fullscreen workspaces.
     let candidate =
@@ -338,7 +397,11 @@ fn command_focus_unmanaged(
     let target = focus_history
         .last_floating(workspace_id)
         .filter(|entity| is_visible_float(*entity))
-        .or_else(|| windows.iter().find_map(|(_, e)| is_visible_float(e).then_some(e)));
+        .or_else(|| {
+            windows
+                .iter()
+                .find_map(|(_, e)| is_visible_float(e).then_some(e))
+        });
 
     if let Some(entity) = target {
         focus_entity(entity, true, &mut commands);
@@ -415,7 +478,11 @@ fn command_raise_floating(
     let target = focus_history
         .last_floating(workspace_id)
         .filter(|entity| is_visible_float(*entity))
-        .or_else(|| windows.iter().find_map(|(_, e)| is_visible_float(e).then_some(e)));
+        .or_else(|| {
+            windows
+                .iter()
+                .find_map(|(_, e)| is_visible_float(e).then_some(e))
+        });
 
     for (window, entity) in windows.iter() {
         if is_visible_float(entity) && Some(entity) != target {
@@ -1364,6 +1431,63 @@ mod tests {
         assert_eq!(
             get_window_in_direction(&west, entities[3], &strip),
             Some(entities[1])
+        );
+    }
+
+    #[test]
+    fn pick_nearest_in_direction_east_picks_closer() {
+        let mut world = World::new();
+        let near = world.spawn(()).id();
+        let far = world.spawn(()).id();
+        let focused = bevy::math::IVec2::new(0, 0);
+        let candidates = vec![
+            (near, bevy::math::IVec2::new(10, 0)),
+            (far, bevy::math::IVec2::new(50, 0)),
+        ];
+        assert_eq!(
+            pick_nearest_in_direction(&Direction::East, focused, candidates),
+            Some(near),
+        );
+    }
+
+    #[test]
+    fn pick_nearest_in_direction_respects_cone() {
+        let mut world = World::new();
+        let candidate = world.spawn(()).id();
+        let focused = bevy::math::IVec2::new(0, 0);
+        // y/x ratio > 1 → outside the 45° east cone.
+        let candidates = vec![(candidate, bevy::math::IVec2::new(10, 20))];
+        assert_eq!(
+            pick_nearest_in_direction(&Direction::East, focused, candidates),
+            None,
+        );
+    }
+
+    #[test]
+    fn pick_nearest_in_direction_ignores_wrong_side() {
+        let mut world = World::new();
+        let west_one = world.spawn(()).id();
+        let focused = bevy::math::IVec2::new(0, 0);
+        let candidates = vec![(west_one, bevy::math::IVec2::new(-10, 0))];
+        assert_eq!(
+            pick_nearest_in_direction(&Direction::East, focused, candidates),
+            None,
+        );
+    }
+
+    #[test]
+    fn pick_nearest_in_direction_first_last_return_none() {
+        let mut world = World::new();
+        let any = world.spawn(()).id();
+        let focused = bevy::math::IVec2::new(0, 0);
+        let candidates = vec![(any, bevy::math::IVec2::new(10, 0))];
+        assert_eq!(
+            pick_nearest_in_direction(&Direction::First, focused, candidates.clone()),
+            None,
+        );
+        assert_eq!(
+            pick_nearest_in_direction(&Direction::Last, focused, candidates),
+            None,
         );
     }
 }

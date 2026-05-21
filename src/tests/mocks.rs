@@ -435,6 +435,11 @@ impl WindowApi for MockWindow {
         self.app.inner.force_write().focused_id = Some(self.id);
     }
 
+    #[instrument(level = Level::DEBUG, skip(self))]
+    fn raise_without_focus(&self) {
+        debug!("{}: id {}", function_name!(), self.id);
+    }
+
     #[instrument(level = Level::TRACE, skip(self), ret)]
     fn pid(&self) -> Result<Pid> {
         Ok(TEST_PROCESS_ID)

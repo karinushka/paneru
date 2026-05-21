@@ -11,6 +11,7 @@ use tracing::{debug, info};
 mod query;
 
 use crate::config::Config;
+use crate::ecs::display::FloatingLayer;
 use crate::ecs::focus::FocusHistory;
 use crate::ecs::layout::{Column, LayoutStrip, StackItem};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Windows};
@@ -99,6 +100,10 @@ pub enum Operation {
     /// Raises all visible floating windows on the active display and focuses
     /// the last-floating window (idempotent — repeat presses behave the same).
     RaiseFloating,
+    /// Alt-tab between the floating and tiled tiers of the active workspace.
+    /// Flips `FloatingLayer`, raises the other windows in the new top tier,
+    /// and focuses the tier's last-focused window.
+    ToggleFloatingLayer,
 }
 
 /// Defines operations that can be performed on the mouse.
@@ -139,6 +144,7 @@ pub fn register_commands(app: &mut bevy::app::App) {
             command_focus_unmanaged,
             command_focus_managed,
             command_raise_floating,
+            command_toggle_floating_layer,
             command_swap_focus,
             snap_window,
         ),
@@ -420,6 +426,94 @@ fn command_raise_floating(
     if let Some(entity) = target {
         focus_entity(entity, true, &mut commands);
     }
+}
+
+/// Focus-and-raise are deliberately coupled here: macOS AX raise can't lift a
+/// window above another app's frontmost window, so the target's app must be
+/// made frontmost. Other windows in the new top tier are raised within their
+/// own apps' stacks as a best-effort.
+#[allow(clippy::needless_pass_by_value)]
+fn command_toggle_floating_layer(
+    mut messages: MessageReader<Event>,
+    active_display: ActiveDisplay,
+    mut active_workspace: Single<(&LayoutStrip, &mut FloatingLayer), With<ActiveWorkspaceMarker>>,
+    focus_history: Res<FocusHistory>,
+    window_manager: Res<WindowManager>,
+    windows: Windows,
+    mut commands: Commands,
+) {
+    if filter_window_operations(&mut messages, |op| {
+        matches!(op, Operation::ToggleFloatingLayer)
+    })
+    .next()
+    .is_none()
+    {
+        return;
+    }
+
+    let display_bounds = active_display.bounds();
+    let (active_strip, layer) = &mut *active_workspace;
+    let workspace_id = active_strip.id();
+    let target_layer = layer.flipped();
+
+    // Floats on other macOS Spaces share the display bounds, so without an
+    // explicit workspace-membership filter they leak into the float set.
+    let workspace_window_ids: std::collections::HashSet<_> = window_manager
+        .windows_in_workspace(workspace_id)
+        .ok()
+        .map(|ids| ids.into_iter().collect())
+        .unwrap_or_default();
+
+    let visible_float = |entity: Entity| -> bool {
+        let Some((window, _, Some(Unmanaged::Floating))) = windows.get_managed(entity) else {
+            return false;
+        };
+        if !workspace_window_ids.contains(&window.id()) {
+            return false;
+        }
+        let Some(frame) = windows.frame(entity) else {
+            return false;
+        };
+        !display_bounds.intersect(frame).is_empty() && !active_strip.contains(entity)
+    };
+
+    let target = match target_layer {
+        FloatingLayer::Front => focus_history
+            .last_floating(workspace_id)
+            .filter(|entity| visible_float(*entity))
+            .or_else(|| {
+                windows
+                    .iter()
+                    .find_map(|(_, e)| visible_float(e).then_some(e))
+            }),
+        FloatingLayer::Behind => focus_history
+            .last_managed(workspace_id)
+            .filter(|entity| active_strip.contains(*entity))
+            .or_else(|| active_strip.all_columns().into_iter().next()),
+    };
+
+    let mut raise = |entity: Entity| {
+        if Some(entity) == target {
+            return;
+        }
+        if let Some(window) = windows.get(entity) {
+            window.raise_without_focus();
+        }
+    };
+    match target_layer {
+        FloatingLayer::Behind => active_strip.all_windows().into_iter().for_each(&mut raise),
+        FloatingLayer::Front => windows
+            .iter()
+            .filter_map(|(_, e)| visible_float(e).then_some(e))
+            .for_each(raise),
+    }
+
+    if let Some(entity) = target {
+        focus_entity(entity, true, &mut commands);
+    }
+
+    **layer = target_layer;
+    debug!("floating layer -> {target_layer:?}");
 }
 
 /// Handles the "swap" command, swapping the positions of the current window with another window in a specified direction.

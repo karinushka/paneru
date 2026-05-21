@@ -192,6 +192,7 @@ fn parse_operation(argv: &[&str]) -> Result<Operation> {
         "focus_unmanaged" => Operation::FocusUnmanaged,
         "focus_managed" => Operation::FocusManaged,
         "raise_floating" => Operation::RaiseFloating,
+        "togglefloatlayer" => Operation::ToggleFloatingLayer,
         "swap" => Operation::Swap(parse_direction(argv.get(1).ok_or(err)?)?),
         "center" => Operation::Center,
         "resize" => Operation::Resize(

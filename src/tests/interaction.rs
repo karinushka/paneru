@@ -1,8 +1,10 @@
 use bevy::prelude::*;
+use bevy::ecs::query::With;
 
 use crate::commands::{Command, Direction, Operation};
 use crate::config::{Config, MainOptions, WindowParams};
 use crate::ecs::SpawnWindowTrigger;
+use crate::ecs::display::FloatingLayer;
 use crate::ecs::{ActiveWorkspaceMarker, layout::LayoutStrip};
 use crate::events::Event;
 use crate::manager::{Origin, Size, Window};
@@ -495,6 +497,42 @@ fn mouse_outside_corner_still_changes_focus() {
             // In the mock, find_window_at_point always returns window 0, so window 0
             // should now be focused (changed from window 2).
             assert_focused!(world, 0);
+        })
+        .run(commands);
+}
+
+#[test]
+fn toggle_floating_layer_flips_state() {
+    fn current_layer(world: &mut World) -> FloatingLayer {
+        let mut query = world.query_filtered::<&FloatingLayer, With<ActiveWorkspaceMarker>>();
+        *query
+            .single(world)
+            .expect("active workspace has FloatingLayer")
+    }
+
+    let commands = vec![
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::Window(Operation::ToggleFloatingLayer),
+        },
+        Event::Command {
+            command: Command::Window(Operation::ToggleFloatingLayer),
+        },
+    ];
+
+    TestHarness::new()
+        .with_config(Config::default())
+        .with_windows(3)
+        .on_iteration(0, |world| {
+            assert_eq!(current_layer(world), FloatingLayer::Front);
+        })
+        .on_iteration(1, |world| {
+            assert_eq!(current_layer(world), FloatingLayer::Behind);
+        })
+        .on_iteration(2, |world| {
+            assert_eq!(current_layer(world), FloatingLayer::Front);
         })
         .run(commands);
 }

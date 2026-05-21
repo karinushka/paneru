@@ -1,11 +1,11 @@
-use bevy::prelude::*;
 use bevy::ecs::query::With;
+use bevy::prelude::*;
 
 use crate::commands::{Command, Direction, Operation};
 use crate::config::{Config, MainOptions, WindowParams};
 use crate::ecs::SpawnWindowTrigger;
 use crate::ecs::display::FloatingLayer;
-use crate::ecs::{ActiveWorkspaceMarker, layout::LayoutStrip};
+use crate::ecs::{ActiveWorkspaceMarker, Unmanaged, layout::LayoutStrip};
 use crate::events::Event;
 use crate::manager::{Origin, Size, Window};
 use crate::{assert_focused, assert_window_at, assert_window_size};
@@ -533,6 +533,71 @@ fn toggle_floating_layer_flips_state() {
         })
         .on_iteration(2, |world| {
             assert_eq!(current_layer(world), FloatingLayer::Front);
+        })
+        .run(commands);
+}
+
+#[test]
+fn focus_unmanaged_ignores_floats_from_other_workspaces() {
+    let mut harness = TestHarness::new();
+    let mock_app = setup_process(harness.app.world_mut());
+    let internal_queue = harness.internal_queue.clone();
+
+    let active_queue = internal_queue.clone();
+    let other_queue = internal_queue.clone();
+    let active_app = mock_app.clone();
+    let other_app = mock_app;
+    let windows: TestWindowSpawner = Box::new(move |workspace_id| {
+        let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+        if workspace_id == TEST_WORKSPACE_ID {
+            let origin = Origin::new(0, 0);
+            vec![Window::new(Box::new(MockWindow::new(
+                0,
+                IRect::from_corners(origin, origin + size),
+                active_queue.clone(),
+                active_app.clone(),
+            )))]
+        } else {
+            let origin = Origin::new(600, 0);
+            vec![Window::new(Box::new(MockWindow::new(
+                99,
+                IRect::from_corners(origin, origin + size),
+                other_queue.clone(),
+                other_app.clone(),
+            )))]
+        }
+    });
+    let wm = MockWindowManager {
+        windows,
+        workspaces: vec![TEST_WORKSPACE_ID, TEST_WORKSPACE_ID + 1],
+    };
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::FocusUnmanaged),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+    ];
+
+    harness
+        .with_wm(wm)
+        .on_iteration(0, |world| {
+            let off_workspace_float = find_window_entity(99, world);
+            world
+                .entity_mut(off_workspace_float)
+                .insert(Unmanaged::Floating);
+            assert_focused!(world, 0);
+        })
+        .on_iteration(1, |world| {
+            let active_float = find_window_entity(0, world);
+            world.entity_mut(active_float).insert(Unmanaged::Floating);
+            assert_focused!(world, 0);
+        })
+        .on_iteration(2, |world| {
+            assert_focused!(world, 0);
         })
         .run(commands);
 }

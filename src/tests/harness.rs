@@ -24,7 +24,7 @@ use crate::manager::{Application, Origin, Size, Window, WindowManager, WindowMan
 use crate::platform::ProcessSerialNumber;
 use crate::platform::WinID;
 
-use super::mocks::{MockApplication, MockWindow};
+use super::mocks::MockApplication;
 use super::*;
 
 type Verifiers = HashMap<usize, Box<dyn FnMut(&mut World)>>;
@@ -178,7 +178,7 @@ pub(crate) fn window_spawner(
             .map(|i| {
                 let origin = Origin::new(0, 0);
                 let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT - i);
-                let window = MockWindow::new(
+                create_mock_window(
                     i,
                     IRect {
                         min: origin,
@@ -186,8 +186,7 @@ pub(crate) fn window_spawner(
                     },
                     event_queue.clone(),
                     mock_app.clone(),
-                );
-                Window::new(Box::new(window))
+                )
             })
             .rev()
             .collect::<Vec<_>>()

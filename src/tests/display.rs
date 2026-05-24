@@ -9,7 +9,7 @@ use crate::commands::{Command, MoveFocus, Operation};
 use crate::ecs::Timeout;
 use crate::ecs::layout::LayoutStrip;
 use crate::events::Event;
-use crate::manager::{Display, Origin, Size, Window};
+use crate::manager::{Display, Origin, Size};
 use crate::{assert_not_on_workspace, assert_on_workspace, assert_window_at, assert_window_size};
 
 use super::*;
@@ -182,21 +182,21 @@ fn test_multi_display_no_height_crosstalk() {
         if workspace_id == EXT_WORKSPACE_ID {
             let origin = Origin::new(0, 0);
             let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-            vec![Window::new(Box::new(MockWindow::new(
+            vec![create_mock_window(
                 100,
                 IRect::from_corners(origin, origin + size),
                 eq1.clone(),
                 app1.clone(),
-            )))]
+            )]
         } else if workspace_id == TEST_WORKSPACE_ID {
             let origin = Origin::new(0, 0);
             let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-            vec![Window::new(Box::new(MockWindow::new(
+            vec![create_mock_window(
                 200,
                 IRect::from_corners(origin, origin + size),
                 eq2.clone(),
                 app2.clone(),
-            )))]
+            )]
         } else {
             vec![]
         }
@@ -255,12 +255,12 @@ fn test_next_display_inserts_into_target_strip() {
         if workspace_id == EXT_WORKSPACE_ID {
             let origin = Origin::new(0, 0);
             let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-            vec![Window::new(Box::new(MockWindow::new(
+            vec![create_mock_window(
                 100,
                 IRect::from_corners(origin, origin + size),
                 eq.clone(),
                 app.clone(),
-            )))]
+            )]
         } else {
             vec![]
         }
@@ -312,18 +312,18 @@ fn test_send_next_display_stays_on_source() {
             let origin = Origin::new(0, 0);
             let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
             vec![
-                Window::new(Box::new(MockWindow::new(
+                create_mock_window(
                     101,
                     IRect::from_corners(origin, origin + size),
                     eq.clone(),
                     app.clone(),
-                ))),
-                Window::new(Box::new(MockWindow::new(
+                ),
+                create_mock_window(
                     100,
                     IRect::from_corners(origin, origin + size),
                     eq.clone(),
                     app.clone(),
-                ))),
+                ),
             ]
         } else {
             vec![]
@@ -390,20 +390,20 @@ fn test_init_keeps_windows_on_their_real_displays() {
     let windows: TestWindowSpawner = Box::new(move |workspace_id| {
         if workspace_id == EXT_WORKSPACE_ID {
             let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-            vec![Window::new(Box::new(MockWindow::new(
+            vec![create_mock_window(
                 100,
                 IRect::from_corners(ext_origin, ext_origin + size),
                 eq1.clone(),
                 app1.clone(),
-            )))]
+            )]
         } else if workspace_id == TEST_WORKSPACE_ID {
             let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-            vec![Window::new(Box::new(MockWindow::new(
+            vec![create_mock_window(
                 200,
                 IRect::from_corners(int_origin, int_origin + size),
                 eq2.clone(),
                 app2.clone(),
-            )))]
+            )]
         } else {
             vec![]
         }

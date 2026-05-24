@@ -1,66 +1,10 @@
-use std::sync::{Arc, RwLock};
-
 use crate::commands::{Command, Direction, Operation, ResizeDirection};
 use crate::config::{Config, MainOptions, WindowParams};
 use crate::events::Event;
-use crate::manager::{WindowApi, WindowPadding};
-use crate::platform::ProcessSerialNumber;
 use crate::{assert_window_at, assert_window_size};
 use bevy::prelude::*;
 
 use super::*;
-
-#[test]
-fn test_set_padding_expands_frame() {
-    let psn = ProcessSerialNumber { high: 0, low: 0 };
-    let app = MockApplication::new(psn, 1, "test".to_string());
-    let event_queue = Arc::new(RwLock::new(Vec::new()));
-
-    // Window at (100, 50) with size (400, 300).
-    let frame = IRect::new(100, 50, 500, 350);
-    let mut window = MockWindow::new(1, frame, event_queue, app);
-
-    assert_eq!(window.frame().width(), 400);
-    assert_eq!(window.frame().height(), 300);
-
-    // Setting horizontal padding should expand the frame by the padding on each side.
-    window.set_padding(WindowPadding::Horizontal(8));
-    assert_eq!(
-        window.frame().min.x,
-        92,
-        "min.x should shift left by padding"
-    );
-    assert_eq!(
-        window.frame().max.x,
-        508,
-        "max.x should shift right by padding"
-    );
-    assert_eq!(
-        window.frame().width(),
-        416,
-        "width should grow by 2 * padding"
-    );
-
-    // Setting vertical padding should expand the frame vertically.
-    window.set_padding(WindowPadding::Vertical(5));
-    assert_eq!(window.frame().min.y, 45, "min.y should shift up by padding");
-    assert_eq!(
-        window.frame().max.y,
-        355,
-        "max.y should shift down by padding"
-    );
-    assert_eq!(
-        window.frame().height(),
-        310,
-        "height should grow by 2 * padding"
-    );
-
-    // Changing padding from 8 to 12 should only expand by the delta (4).
-    window.set_padding(WindowPadding::Horizontal(12));
-    assert_eq!(window.frame().min.x, 88);
-    assert_eq!(window.frame().max.x, 512);
-    assert_eq!(window.frame().width(), 424);
-}
 
 #[test]
 #[allow(clippy::too_many_lines)]

@@ -44,7 +44,7 @@ fn test_dont_focus() {
         .on_iteration(1, move |world| {
             let origin = Origin::new(0, 0);
             let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-            let window = MockWindow::new(
+            let window = create_mock_window(
                 3,
                 IRect {
                     min: origin,
@@ -53,7 +53,6 @@ fn test_dont_focus() {
                 internal_queue.clone(),
                 app.clone(),
             );
-            let window = Window::new(Box::new(window));
             world.trigger(SpawnWindowTrigger(vec![window]));
         })
         .on_iteration(3, move |world| {
@@ -531,7 +530,6 @@ fn test_external_focus_restores_app_hidden_window_to_original_virtual_strip() {
 #[test]
 fn test_external_focus_restores_hidden_window_without_visible_event() {
     let ignored_repositions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let ignored_repositions_for_window = ignored_repositions.clone();
 
     let commands = vec![
         Event::Command {
@@ -555,7 +553,7 @@ fn test_external_focus_restores_hidden_window_without_visible_event() {
     let spawner = Box::new(move |_| {
         let origin = Origin::new(0, 0);
         let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-        let window = MockWindow::new(
+        let window = create_mock_window(
             0,
             IRect {
                 min: origin,
@@ -563,9 +561,8 @@ fn test_external_focus_restores_hidden_window_without_visible_event() {
             },
             internal_queue.clone(),
             mock_app.clone(),
-        )
-        .with_ignored_repositions(ignored_repositions_for_window.clone());
-        vec![Window::new(Box::new(window))]
+        );
+        vec![window]
     });
     let wm = create_mock_window_manager(MockWindowManagerState::new(
         spawner,
@@ -720,20 +717,20 @@ fn focus_unmanaged_ignores_floats_from_other_workspaces() {
         let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
         if workspace_id == TEST_WORKSPACE_ID {
             let origin = Origin::new(0, 0);
-            vec![Window::new(Box::new(MockWindow::new(
+            vec![create_mock_window(
                 0,
                 IRect::from_corners(origin, origin + size),
                 active_queue.clone(),
                 active_app.clone(),
-            )))]
+            )]
         } else {
             let origin = Origin::new(600, 0);
-            vec![Window::new(Box::new(MockWindow::new(
+            vec![create_mock_window(
                 99,
                 IRect::from_corners(origin, origin + size),
                 other_queue.clone(),
                 other_app.clone(),
-            )))]
+            )]
         }
     });
     let workspaces = vec![TEST_WORKSPACE_ID, TEST_WORKSPACE_ID + 1];

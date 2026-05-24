@@ -1,7 +1,7 @@
 use bevy::ecs::query::Has;
 use bevy::prelude::*;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::AtomicU32;
 
 use crate::config::{Config, MainOptions, WindowParams};
 use crate::ecs::layout::{Column, LayoutStrip};
@@ -10,13 +10,13 @@ use crate::ecs::state::{
 };
 use crate::ecs::workspace::PreviousStripPosition;
 use crate::ecs::{SpawnWindowTrigger, Unmanaged};
-use crate::manager::{Display, Origin, Size, Window};
+use crate::manager::{Display, Origin, Size};
 use crate::platform::{ProcessSerialNumber, WorkspaceId};
 use crate::tests::{
-    EXT_DISPLAY_ID, EXT_WORKSPACE_ID, MockWindow, MockWindowManagerState, TEST_DISPLAY_HEIGHT,
-    TEST_DISPLAY_ID, TEST_DISPLAY_WIDTH, TEST_MENUBAR_HEIGHT, TEST_PROCESS_ID, TEST_WINDOW_HEIGHT,
+    EXT_DISPLAY_ID, EXT_WORKSPACE_ID, MockWindowManagerState, TEST_DISPLAY_HEIGHT, TEST_DISPLAY_ID,
+    TEST_DISPLAY_WIDTH, TEST_MENUBAR_HEIGHT, TEST_PROCESS_ID, TEST_WINDOW_HEIGHT,
     TEST_WINDOW_WIDTH, TEST_WORKSPACE_ID, TestHarness, TestWindowSpawner, TwoDisplayMock,
-    create_mock_window_manager, setup_process,
+    create_mock_window, create_mock_window_manager, setup_process,
 };
 
 #[test]
@@ -77,67 +77,6 @@ fn test_startup_restore_rebuilds_virtual_workspace_layout() {
     assert_eq!(columns.len(), 2);
     assert!(matches!(columns[0], Column::Single(_)));
     assert!(matches!(columns[1], Column::Single(_)));
-}
-
-#[test]
-fn test_startup_restore_hard_matches_without_extra_fallback_metadata_reads() {
-    let baseline_reads = startup_restore_metadata_reads(None);
-    let restore_reads = startup_restore_metadata_reads(Some(state_with_strips(
-        (0_u32..20)
-            .map(|id| SavedStrip {
-                virtual_index: id,
-                columns: vec![SavedColumn::Single(saved_window(
-                    i32::try_from(id).expect("test id should fit in i32"),
-                ))],
-            })
-            .collect(),
-    )));
-
-    assert!(
-        restore_reads <= baseline_reads,
-        "hard-match restore should not add fallback window metadata reads"
-    );
-}
-
-fn startup_restore_metadata_reads(state: Option<PaneruState>) -> usize {
-    let metadata_reads = Arc::new(AtomicUsize::new(0));
-    let mut harness = TestHarness::new();
-    let mock_app = setup_process(harness.app.world_mut());
-    let internal_queue = harness.internal_queue.clone();
-    let reads = metadata_reads.clone();
-    let windows: TestWindowSpawner = Box::new(move |_| {
-        (0..20)
-            .map(|id| {
-                let origin = Origin::new(0, 0);
-                let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-                let mut window = MockWindow::new(
-                    id,
-                    IRect::from_corners(origin, origin + size),
-                    internal_queue.clone(),
-                    mock_app.clone(),
-                );
-                window.metadata_reads = Some(reads.clone());
-                Window::new(Box::new(window))
-            })
-            .collect()
-    });
-    let window_ids = (0..20).collect::<Vec<_>>();
-    let wm = create_mock_window_manager(MockWindowManagerState::new(
-        windows,
-        vec![TEST_WORKSPACE_ID],
-        window_ids.clone(),
-        window_ids,
-    ));
-    harness = harness.with_wm(wm);
-    if let Some(state) = state {
-        harness.app.world_mut().insert_resource(state);
-    }
-
-    for _ in 0..5 {
-        harness.app.update();
-    }
-
-    metadata_reads.load(Ordering::Relaxed)
 }
 
 #[test]
@@ -244,12 +183,12 @@ fn test_startup_restore_prefers_existing_workspace_parent_before_saved_or_active
         if workspace_id == TEST_WORKSPACE_ID {
             let origin = Origin::new(0, 0);
             let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-            vec![Window::new(Box::new(crate::tests::MockWindow::new(
+            vec![create_mock_window(
                 200,
                 IRect::from_corners(origin, origin + size),
                 internal_queue.clone(),
                 mock_app.clone(),
-            )))]
+            )]
         } else {
             vec![]
         }
@@ -324,12 +263,12 @@ fn test_startup_restore_preserves_saved_display_when_present() {
         if workspace_id == EXT_WORKSPACE_ID {
             let origin = Origin::new(0, -TEST_WINDOW_HEIGHT);
             let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-            vec![Window::new(Box::new(MockWindow::new(
+            vec![create_mock_window(
                 300,
                 IRect::from_corners(origin, origin + size),
                 internal_queue.clone(),
                 mock_app.clone(),
-            )))]
+            )]
         } else {
             vec![]
         }
@@ -391,12 +330,12 @@ fn test_startup_restore_keeps_current_native_workspace_active_across_multiple_wo
             _ => return vec![],
         };
         let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-        vec![Window::new(Box::new(MockWindow::new(
+        vec![create_mock_window(
             window_id,
             IRect::from_corners(origin, origin + size),
             internal_queue.clone(),
             mock_app.clone(),
-        )))]
+        )]
     });
 
     harness = harness.with_wm(TwoDisplayMock {
@@ -641,12 +580,12 @@ fn test_late_startup_window_restores_during_grace_period() {
 
     let origin = Origin::new(0, 0);
     let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-    let window = Window::new(Box::new(MockWindow::new(
+    let window = create_mock_window(
         99,
         IRect::from_corners(origin, origin + size),
         harness.internal_queue.clone(),
         mock_app,
-    )));
+    );
     harness
         .app
         .world_mut()

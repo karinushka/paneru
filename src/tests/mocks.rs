@@ -1,8 +1,8 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 
 use bevy::prelude::*;
-use objc2_core_foundation::{CFRetained, CGPoint};
+use objc2_core_foundation::CGPoint;
 use objc2_core_graphics::CGDirectDisplayID;
 use stdext::function_name;
 use stdext::prelude::RwLockExt;
@@ -11,11 +11,11 @@ use tracing::{Level, debug, instrument};
 use crate::errors::{Error, Result};
 use crate::events::Event;
 use crate::manager::{
-    Application, ApplicationApi, Display, MockProcessApi, MockWindowManagerApi, Origin, ProcessApi,
-    Size, Window, WindowApi, WindowManagerApi,
+    Application, ApplicationApi, Display, MockProcessApi, MockWindowApi, MockWindowManagerApi,
+    Origin, ProcessApi, Window, WindowManagerApi,
 };
+use crate::platform::ProcessSerialNumber;
 use crate::platform::{ConnID, Pid, WinID, WorkspaceId};
-use crate::{platform::ProcessSerialNumber, util::AXUIWrapper};
 
 use super::*;
 
@@ -265,220 +265,150 @@ pub(crate) fn create_mock_window_manager(state: MockWindowManagerState) -> MockW
     wm
 }
 
+pub(crate) fn create_mock_window(
+    id: WinID,
+    frame: IRect,
+    event_queue: EventQueue,
+    app: MockApplication,
+) -> Window {
+    let mut mw = MockWindowApi::new();
+
+    let state = Arc::new(RwLock::new(MockWindow::new(
+        frame,
+        event_queue,
+        app.clone(),
+    )));
+
+    mw.expect_id().return_const(id);
+    mw.expect_element().return_const(None);
+    mw.expect_title()
+        .return_const(Ok("test window".to_string()));
+    mw.expect_identifier()
+        .return_const(Ok("testid".to_string()));
+    mw.expect_child_role().return_const(Ok(true));
+    mw.expect_role().return_const(Ok("testrole".to_string()));
+    mw.expect_subrole()
+        .return_const(Ok("testsubrole".to_string()));
+    let pid = app.pid();
+    mw.expect_pid().return_const(Ok(pid));
+
+    let resize_state = state.clone();
+    mw.expect_resize().returning(move |size| {
+        if let Ok(mut lock) = resize_state.write() {
+            lock.frame.max = lock.frame.min + size;
+        }
+        ()
+    });
+    let reposition_state = state.clone();
+    mw.expect_reposition().returning(move |origin| {
+        if let Ok(mut lock) = reposition_state.write() {
+            let size = lock.frame.size();
+            lock.frame.min = origin;
+            lock.frame.max = origin + size;
+        }
+        ()
+    });
+    let update_frame_state = state.clone();
+    mw.expect_update_frame().returning(move || {
+        if let Ok(lock) = update_frame_state.read() {
+            return Ok(lock.frame);
+        } else {
+            return Err(Error::InvalidWindow);
+        }
+    });
+
+    let frame_state = state.clone();
+    mw.expect_frame()
+        .returning(move || frame_state.read().unwrap().frame);
+
+    let raise_state = state.clone();
+    mw.expect_focus_with_raise().returning(move |psn| {
+        if let Ok(lock) = raise_state.write() {
+            lock.event_queue
+                .write()
+                .unwrap()
+                .push(Event::ApplicationFrontSwitched { psn });
+            lock.event_queue
+                .write()
+                .unwrap()
+                .push(Event::WindowFocused { window_id: id });
+            lock.app.inner.force_write().focused_id = Some(id);
+        }
+    });
+    mw.expect_raise_without_focus().return_const(());
+    mw.expect_focus_without_raise().return_const(());
+
+    let hpad_state = state.clone();
+    mw.expect_horizontal_padding().returning(move || {
+        hpad_state
+            .read()
+            .map(|lock| lock.horizontal_padding)
+            .unwrap_or_default()
+    });
+    let vpad_state = state.clone();
+    mw.expect_vertical_padding().returning(move || {
+        vpad_state
+            .read()
+            .map(|lock| lock.vertical_padding)
+            .unwrap_or_default()
+    });
+
+    let pad_state = state.clone();
+    mw.expect_set_padding().returning(move |padding| {
+        if let Ok(mut lock) = pad_state.write() {
+            match padding {
+                crate::manager::WindowPadding::Vertical(padding) => {
+                    let delta = padding - lock.vertical_padding;
+                    lock.frame.min.y -= delta;
+                    lock.frame.max.y += delta;
+                    lock.vertical_padding = padding;
+                }
+                crate::manager::WindowPadding::Horizontal(padding) => {
+                    let delta = padding - lock.horizontal_padding;
+                    lock.frame.min.x -= delta;
+                    lock.frame.max.x += delta;
+                    lock.horizontal_padding = padding;
+                }
+            }
+        }
+    });
+
+    let mini_state = state.clone();
+    mw.expect_is_minimized().returning(move || {
+        mini_state
+            .read()
+            .map(|lock| lock.minimized)
+            .is_ok_and(|minimized| minimized)
+    });
+
+    mw.expect_is_full_screen().return_const(false);
+    mw.expect_border_radius().return_const(None);
+
+    Window::new(Box::new(mw))
+}
+
 /// A mock implementation of the `WindowApi` trait for testing purposes.
 #[derive(Debug)]
-pub(crate) struct MockWindow {
-    pub(crate) id: WinID,
+struct MockWindow {
     pub(crate) frame: IRect,
     pub(crate) horizontal_padding: i32,
     pub(crate) vertical_padding: i32,
     pub(crate) app: MockApplication,
     pub(crate) event_queue: EventQueue,
     pub(crate) minimized: bool,
-    pub(crate) title: String,
-    pub(crate) identifier: String,
-    pub(crate) role: String,
-    pub(crate) subrole: String,
-    pub(crate) ignored_repositions: Arc<AtomicUsize>,
-    pub(crate) metadata_reads: Option<Arc<AtomicUsize>>,
-}
-
-impl WindowApi for MockWindow {
-    /// Returns the ID of the mock window.
-    #[instrument(level = Level::TRACE, skip(self), ret)]
-    fn id(&self) -> WinID {
-        self.id
-    }
-
-    /// Returns the frame (`CGRect`) of the mock window.
-    #[instrument(level = Level::TRACE, skip(self), ret)]
-    fn frame(&self) -> IRect {
-        self.frame
-    }
-
-    /// Returns a dummy `CFRetained<AXUIWrapper>` for the mock window's accessibility element.
-    #[instrument(level = Level::DEBUG, skip(self), ret)]
-    fn element(&self) -> Option<CFRetained<AXUIWrapper>> {
-        debug!("{}:", function_name!());
-        None
-    }
-
-    /// Returns the title of the mock window.
-    #[instrument(level = Level::TRACE, skip(self), ret)]
-    fn title(&self) -> Result<String> {
-        if let Some(reads) = &self.metadata_reads {
-            reads.fetch_add(1, Ordering::Relaxed);
-        }
-        Ok(self.title.clone())
-    }
-
-    /// Returns the identifier of the mock window.
-    #[instrument(level = Level::TRACE, skip(self), ret)]
-    fn identifier(&self) -> Result<String> {
-        if let Some(reads) = &self.metadata_reads {
-            reads.fetch_add(1, Ordering::Relaxed);
-        }
-        Ok(self.identifier.clone())
-    }
-
-    /// Always returns `Ok(true)` for valid role.
-    #[instrument(level = Level::DEBUG, skip(self), ret)]
-    fn child_role(&self) -> Result<bool> {
-        debug!("{}:", function_name!());
-        Ok(true)
-    }
-
-    /// Returns the role of the mock window.
-    #[instrument(level = Level::TRACE, skip(self), ret)]
-    fn role(&self) -> Result<String> {
-        Ok(self.role.clone())
-    }
-
-    /// Returns the subrole of the mock window.
-    #[instrument(level = Level::TRACE, skip(self), ret)]
-    fn subrole(&self) -> Result<String> {
-        Ok(self.subrole.clone())
-    }
-
-    /// Repositions the mock window's frame to the given coordinates.
-    #[instrument(level = Level::DEBUG, skip(self))]
-    fn reposition(&mut self, origin: Origin) {
-        debug!("{}: id {} to {origin}", function_name!(), self.id);
-        if self.ignored_repositions.load(Ordering::SeqCst) > 0 {
-            self.ignored_repositions.fetch_sub(1, Ordering::SeqCst);
-            return;
-        }
-        let size = self.frame.size();
-        self.frame.min = origin;
-        self.frame.max = origin + size;
-    }
-
-    /// Resizes the mock window's frame to the given dimensions.
-    #[instrument(level = Level::DEBUG, skip(self))]
-    fn resize(&mut self, size: Size) {
-        debug!("{}: id {} to {size}", function_name!(), self.id);
-        self.frame.max = self.frame.min + size;
-    }
-
-    /// Always returns `Ok(())` for updating the frame.
-    #[instrument(level = Level::DEBUG, skip(self), ret)]
-    fn update_frame(&mut self) -> Result<IRect> {
-        debug!("{}:", function_name!());
-        Ok(self.frame)
-    }
-
-    /// Prints a debug message for focus without raise.
-    #[instrument(level = Level::DEBUG, skip_all)]
-    fn focus_without_raise(
-        &self,
-        _psn: ProcessSerialNumber,
-        currently_focused: &Window,
-        _ocused_psn: ProcessSerialNumber,
-    ) {
-        debug!(
-            "{}: id {} {}",
-            function_name!(),
-            self.id,
-            currently_focused.id()
-        );
-    }
-
-    /// Prints a debug message for focus with raise and updates the mock application's focused ID.
-    #[instrument(level = Level::DEBUG, skip(self), ret)]
-    fn focus_with_raise(&self, psn: ProcessSerialNumber) {
-        debug!("{}: id {}", function_name!(), self.id);
-        self.event_queue
-            .write()
-            .unwrap()
-            .push(Event::ApplicationFrontSwitched { psn });
-        self.event_queue
-            .write()
-            .unwrap()
-            .push(Event::WindowFocused { window_id: self.id });
-        self.app.inner.force_write().focused_id = Some(self.id);
-    }
-
-    #[instrument(level = Level::DEBUG, skip(self))]
-    fn raise_without_focus(&self) {
-        debug!("{}: id {}", function_name!(), self.id);
-    }
-
-    #[instrument(level = Level::TRACE, skip(self), ret)]
-    fn pid(&self) -> Result<Pid> {
-        Ok(TEST_PROCESS_ID)
-    }
-
-    #[instrument(level = Level::DEBUG, skip(self), ret)]
-    fn set_padding(&mut self, padding: crate::manager::WindowPadding) {
-        match padding {
-            crate::manager::WindowPadding::Vertical(padding) => {
-                let delta = padding - self.vertical_padding;
-                self.frame.min.y -= delta;
-                self.frame.max.y += delta;
-                self.vertical_padding = padding;
-            }
-            crate::manager::WindowPadding::Horizontal(padding) => {
-                let delta = padding - self.horizontal_padding;
-                self.frame.min.x -= delta;
-                self.frame.max.x += delta;
-                self.horizontal_padding = padding;
-            }
-        }
-    }
-
-    fn horizontal_padding(&self) -> i32 {
-        self.horizontal_padding
-    }
-
-    fn vertical_padding(&self) -> i32 {
-        self.vertical_padding
-    }
-
-    #[instrument(level = Level::TRACE, skip(self), ret)]
-    fn is_minimized(&self) -> bool {
-        self.minimized
-    }
-
-    fn is_full_screen(&self) -> bool {
-        false
-    }
-
-    fn border_radius(&self) -> Option<f64> {
-        None
-    }
 }
 
 impl MockWindow {
     /// Creates a new `MockWindow` instance.
-    pub(crate) fn new(
-        id: WinID,
-        frame: IRect,
-        event_queue: EventQueue,
-        app: MockApplication,
-    ) -> Self {
+    pub(crate) fn new(frame: IRect, event_queue: EventQueue, app: MockApplication) -> Self {
         MockWindow {
-            id,
             frame,
             horizontal_padding: 0,
             vertical_padding: 0,
             app,
             event_queue,
             minimized: false,
-            title: String::new(),
-            identifier: String::new(),
-            role: "AXWindow".to_string(),
-            subrole: "AXStandardWindow".to_string(),
-            ignored_repositions: Arc::default(),
-            metadata_reads: None,
         }
-    }
-
-    pub(crate) fn with_ignored_repositions(
-        mut self,
-        ignored_repositions: Arc<AtomicUsize>,
-    ) -> Self {
-        self.ignored_repositions = ignored_repositions;
-        self
     }
 }
 

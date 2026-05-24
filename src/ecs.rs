@@ -526,7 +526,7 @@ impl WindowProperties {
     pub fn new(app: &Application, window: &Window, config: &Config) -> Self {
         let bundle_id = app.bundle_id().unwrap_or_default();
         let title = window.title().unwrap_or_default();
-        let params = config.find_window_properties(&title, bundle_id);
+        let params = config.find_window_properties(&title, &bundle_id);
         Self { params }
     }
 

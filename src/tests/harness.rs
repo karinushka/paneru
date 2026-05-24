@@ -24,7 +24,7 @@ use crate::manager::{Application, Origin, Size, Window, WindowManager, WindowMan
 use crate::platform::ProcessSerialNumber;
 use crate::platform::WinID;
 
-use super::mocks::{MockApplication, MockProcess, MockWindow, MockWindowManager};
+use super::mocks::{MockApplication, MockProcess, MockWindow};
 use super::*;
 
 type Verifiers = HashMap<usize, Box<dyn FnMut(&mut World)>>;
@@ -39,6 +39,7 @@ impl TestHarness {
     pub(crate) fn new() -> Self {
         let app = setup_world();
         let internal_queue = Arc::new(RwLock::new(Vec::new()));
+
         Self {
             app,
             internal_queue,
@@ -49,10 +50,15 @@ impl TestHarness {
     pub(crate) fn with_windows(mut self, count: i32) -> Self {
         let mock_app = setup_process(self.app.world_mut());
         let spawner = window_spawner(count, self.internal_queue.clone(), mock_app);
-        let wm = MockWindowManager {
-            windows: spawner,
-            workspaces: vec![TEST_WORKSPACE_ID],
-        };
+
+        let window_ids = (0..count).collect::<Vec<_>>();
+        let wm = create_mock_window_manager(MockWindowManagerState::new(
+            spawner,
+            vec![TEST_WORKSPACE_ID],
+            window_ids.clone(),
+            window_ids,
+        ));
+
         self.app
             .world_mut()
             .insert_resource(WindowManager(Box::new(wm)));
@@ -168,7 +174,7 @@ pub(crate) fn window_spawner(
     mock_app: MockApplication,
 ) -> TestWindowSpawner {
     Box::new(move |_| {
-        let mut windows = (0..count)
+        (0..count)
             .map(|i| {
                 let origin = Origin::new(0, 0);
                 let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT - i);
@@ -183,9 +189,8 @@ pub(crate) fn window_spawner(
                 );
                 Window::new(Box::new(window))
             })
-            .collect::<Vec<_>>();
-        windows.reverse();
-        windows
+            .rev()
+            .collect::<Vec<_>>()
     })
 }
 

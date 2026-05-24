@@ -163,7 +163,7 @@ impl SavedWindow {
             window_id: window.id(),
             pid: window.pid().ok()?,
             psn: app.psn(),
-            bundle_id: app.bundle_id().unwrap_or_default().to_string(),
+            bundle_id: app.bundle_id().unwrap_or_default().clone(),
             title: window.title().unwrap_or_default(),
             identifier: window.identifier().unwrap_or_default(),
             role: window.role().unwrap_or_default(),
@@ -453,7 +453,7 @@ impl PaneruQueryState {
                     let (window, _, unmanaged) = windows.get_managed(*entity)?;
                     let (_, _, app_entity) = windows.find_parent(window.id())?;
                     let app = apps.get(app_entity).ok()?;
-                    let bundle_id = app.bundle_id().unwrap_or_default().to_string();
+                    let bundle_id = app.bundle_id().unwrap_or_default().clone();
                     let app_name = app.name().to_string();
                     let title = window.title().unwrap_or_default();
                     Some(PaneruWindowState {

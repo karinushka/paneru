@@ -384,7 +384,7 @@ pub(crate) fn matches_startup_restore_state(
     let Ok(pid) = window.pid() else {
         return false;
     };
-    let bundle_id = app.bundle_id().unwrap_or_default().to_string();
+    let bundle_id = app.bundle_id().unwrap_or_default().clone();
     let key = WindowHardMatchKey::new(window.id(), pid, bundle_id.clone());
 
     if let Some(session) = session {
@@ -580,7 +580,7 @@ fn current_window_identities(
                 entity,
                 window_id: window.id(),
                 pid: window.pid().ok()?,
-                bundle_id: app.bundle_id().unwrap_or_default().to_string(),
+                bundle_id: app.bundle_id().unwrap_or_default().clone(),
                 title: String::new(),
                 identifier: String::new(),
                 role: String::new(),

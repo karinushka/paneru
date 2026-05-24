@@ -11,8 +11,8 @@ use tracing::{Level, debug, instrument};
 use crate::errors::{Error, Result};
 use crate::events::Event;
 use crate::manager::{
-    Application, ApplicationApi, Display, Origin, ProcessApi, Size, Window, WindowApi,
-    WindowManagerApi,
+    Application, ApplicationApi, Display, MockWindowManagerApi, Origin, ProcessApi, Size, Window,
+    WindowApi, WindowManagerApi,
 };
 use crate::platform::{ConnID, Pid, WinID, WorkspaceId};
 use crate::{platform::ProcessSerialNumber, util::AXUIWrapper};
@@ -173,12 +173,9 @@ impl ApplicationApi for MockApplication {
 
     /// Returns the bundle identifier of the application.
     #[instrument(level = Level::DEBUG, skip(self), ret)]
-    fn bundle_id(&self) -> Option<&str> {
+    fn bundle_id(&self) -> Option<String> {
         debug!("{}:", function_name!());
-        // unsafe leak for testing.
-        Some(Box::leak(
-            self.inner.force_read().bundle_id.clone().into_boxed_str(),
-        ))
+        Some(self.inner.force_read().bundle_id.to_owned())
     }
 
     fn name(&self) -> &str {
@@ -186,137 +183,122 @@ impl ApplicationApi for MockApplication {
     }
 }
 
-/// A mock implementation of the `WindowManagerApi` trait for testing purposes.
-pub(crate) struct MockWindowManager {
-    pub(crate) windows: TestWindowSpawner,
-    pub(crate) workspaces: Vec<WorkspaceId>,
+#[derive(Clone)]
+pub(crate) struct MockWindowManagerState {
+    inner: Arc<RwLock<MockWindowManagerStateInner>>,
 }
 
-impl std::fmt::Debug for MockWindowManager {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MockWindowManager")
-            .field("windows", &"<closure>") // Placeholder text
-            .finish()
-    }
+struct MockWindowManagerStateInner {
+    windows: TestWindowSpawner,
+    workspaces: Vec<WorkspaceId>,
+    window_ids: Vec<WinID>,
+    visible_windows: Vec<WinID>,
 }
 
-impl WindowManagerApi for MockWindowManager {
-    /// Creates a new mock application.
-    fn new_application(&self, process: &dyn ProcessApi) -> Result<Application> {
-        debug!("{}: from process {}", function_name!(), process.name());
-        Ok(Application::new(Box::new(MockApplication {
-            inner: Arc::new(RwLock::new(InnerMockApplication {
-                psn: process.psn(),
-                pid: process.pid(),
-                focused_id: None,
-                bundle_id: "test".to_string(),
+impl MockWindowManagerState {
+    pub(crate) fn new(
+        windows: TestWindowSpawner,
+        workspaces: Vec<WorkspaceId>,
+        window_ids: Vec<WinID>,
+        visible_windows: Vec<WinID>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(MockWindowManagerStateInner {
+                windows,
+                workspaces,
+                window_ids,
+                visible_windows,
             })),
-            name: "test".to_string(),
-        })))
+        }
     }
 
-    /// Always returns an empty vector, as associated windows are not tested at this level.
-    #[instrument(level = Level::DEBUG, skip(self), ret)]
-    fn get_associated_windows(&self, window_id: WinID) -> Vec<WinID> {
-        debug!("{}:", function_name!());
-        vec![]
+    pub(crate) fn windows(&self, workspace_id: WorkspaceId) -> Vec<Window> {
+        (self.inner.force_read().windows)(workspace_id)
     }
 
-    /// Always returns an empty vector, as present displays are mocked elsewhere.
-    #[instrument(level = Level::DEBUG, skip(self), ret)]
-    fn present_displays(&self) -> Vec<(Display, Vec<WorkspaceId>)> {
+    pub(crate) fn workspaces(&self) -> Vec<WorkspaceId> {
+        self.inner.force_read().workspaces.clone()
+    }
+
+    pub(crate) fn window_ids(&self) -> Vec<WinID> {
+        self.inner.force_read().window_ids.clone()
+    }
+
+    pub(crate) fn visible_windows(&self) -> Vec<WinID> {
+        self.inner.force_read().visible_windows.clone()
+    }
+}
+
+pub(crate) fn create_mock_window_manager(state: MockWindowManagerState) -> MockWindowManagerApi {
+    let mut wm = MockWindowManagerApi::new();
+
+    wm.expect_active_display_id()
+        .returning(|| Ok(TEST_DISPLAY_ID));
+
+    let state_clone = state.clone();
+    wm.expect_active_display_space()
+        .with(mockall::predicate::eq(TEST_DISPLAY_ID))
+        .returning(move |_| Ok(state_clone.workspaces()[0]));
+
+    let state_clone = state.clone();
+    wm.expect_present_displays().returning(move || {
         let display = Display::new(
             TEST_DISPLAY_ID,
             IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
             TEST_MENUBAR_HEIGHT,
         );
-        vec![(display, self.workspaces.clone())]
-    }
+        vec![(display, state_clone.workspaces())]
+    });
 
-    /// Returns a predefined active display ID.
-    #[instrument(level = Level::DEBUG, skip(self), ret)]
-    fn active_display_id(&self) -> Result<u32> {
-        Ok(TEST_DISPLAY_ID)
-    }
+    let state_clone = state.clone();
+    let state_clone2 = state.clone();
+    wm.expect_find_existing_application_windows()
+        .withf(move |app, spaces| {
+            debug!(
+                "{}: app {} spaces {:?}",
+                function_name!(),
+                app.pid(),
+                spaces
+            );
+            let valid_space = spaces
+                .into_iter()
+                .all(|id| state_clone.workspaces().contains(id));
+            app.pid() == 1 && valid_space
+        })
+        .returning(move |_app, spaces| {
+            let windows = spaces
+                .iter()
+                .flat_map(|workspace_id| state_clone2.windows(*workspace_id))
+                .collect::<Vec<_>>();
+            Ok((windows, vec![]))
+        });
 
-    /// Returns a predefined active display space ID.
-    #[instrument(level = Level::DEBUG, skip(self), ret)]
-    fn active_display_space(&self, display_id: CGDirectDisplayID) -> Result<WorkspaceId> {
-        Ok(TEST_WORKSPACE_ID)
-    }
+    let state_clone = state.clone();
+    wm.expect_windows_in_workspace()
+        .with(mockall::predicate::eq(TEST_WORKSPACE_ID))
+        .returning(move |_workspace_id| {
+            let mut ids = state_clone.window_ids();
+            ids.reverse();
+            debug!("{}:", function_name!());
+            Ok(ids)
+        });
 
-    fn is_fullscreen_space(&self, _display_id: CGDirectDisplayID) -> bool {
-        false
-    }
+    wm.expect_warp_mouse().return_const(());
 
-    /// Does nothing, as mouse centering is not tested at this level.
-    #[instrument(level = Level::DEBUG, skip_all, ret)]
-    fn warp_mouse(&self, _origin: Origin) {
-        debug!("{}:", function_name!());
-    }
+    wm.expect_cursor_position().return_const(None);
 
-    /// Always returns an empty vector of windows.
-    #[instrument(level = Level::DEBUG, skip_all)]
-    fn find_existing_application_windows(
-        &self,
-        app: &mut Application,
-        spaces: &[WorkspaceId],
-    ) -> Result<(Vec<Window>, Vec<WinID>)> {
-        debug!(
-            "{}: app {} spaces {:?}",
-            function_name!(),
-            app.pid(),
-            spaces
-        );
+    wm.expect_get_associated_windows().return_const(vec![]);
 
-        let windows = spaces
-            .iter()
-            .flat_map(|workspace_id| (self.windows)(*workspace_id))
-            .collect::<Vec<_>>();
-        Ok((windows, vec![]))
-    }
+    let state_clone = state.clone();
+    wm.expect_windows_on_screen()
+        .returning(move || Some(state_clone.visible_windows()));
 
-    /// Always returns `Ok(0)`.
-    #[instrument(level = Level::DEBUG, skip(self), ret)]
-    fn find_window_at_point(&self, point: &CGPoint) -> Result<WinID> {
-        debug!("{}:", function_name!());
+    wm.expect_find_window_at_point().returning(|point| {
+        debug!("find_window_at_point: {point:?}");
         Ok(0)
-    }
+    });
 
-    /// Always returns an empty vector of window IDs.
-    #[instrument(level = Level::DEBUG, skip(self), ret)]
-    fn windows_in_workspace(&self, workspace_id: WorkspaceId) -> Result<Vec<WinID>> {
-        debug!("{}:", function_name!());
-        let ids = (self.windows)(workspace_id)
-            .iter()
-            .map(|window| window.id())
-            .collect();
-        Ok(ids)
-    }
-
-    /// Always returns `Ok(())`.
-    #[instrument(level = Level::DEBUG, skip(self), ret)]
-    fn quit(&self) -> Result<()> {
-        debug!("{}:", function_name!());
-        Ok(())
-    }
-
-    #[instrument(level = Level::DEBUG, skip(self))]
-    fn setup_config_watcher(&self, path: &std::path::Path) -> Result<Box<dyn notify::Watcher>> {
-        todo!()
-    }
-
-    fn cursor_position(&self) -> Option<CGPoint> {
-        None
-    }
-
-    #[instrument(level = Level::DEBUG, skip(self))]
-    fn dim_windows(&self, windows: &[WinID], level: f32) {}
-
-    #[instrument(level = Level::DEBUG, skip(self))]
-    fn windows_on_screen(&self) -> Option<Vec<WinID>> {
-        None
-    }
+    wm
 }
 
 /// A mock implementation of the `WindowApi` trait for testing purposes.

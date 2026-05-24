@@ -13,10 +13,10 @@ use crate::ecs::{SpawnWindowTrigger, Unmanaged};
 use crate::manager::{Display, Origin, Size, Window};
 use crate::platform::{ProcessSerialNumber, WorkspaceId};
 use crate::tests::{
-    EXT_DISPLAY_ID, EXT_WORKSPACE_ID, MockWindow, MockWindowManager, TEST_DISPLAY_HEIGHT,
+    EXT_DISPLAY_ID, EXT_WORKSPACE_ID, MockWindow, MockWindowManagerState, TEST_DISPLAY_HEIGHT,
     TEST_DISPLAY_ID, TEST_DISPLAY_WIDTH, TEST_MENUBAR_HEIGHT, TEST_PROCESS_ID, TEST_WINDOW_HEIGHT,
     TEST_WINDOW_WIDTH, TEST_WORKSPACE_ID, TestHarness, TestWindowSpawner, TwoDisplayMock,
-    setup_process,
+    create_mock_window_manager, setup_process,
 };
 
 #[test]
@@ -121,10 +121,14 @@ fn startup_restore_metadata_reads(state: Option<PaneruState>) -> usize {
             })
             .collect()
     });
-    harness = harness.with_wm(MockWindowManager {
+    let window_ids = (0..20).collect::<Vec<_>>();
+    let wm = create_mock_window_manager(MockWindowManagerState::new(
         windows,
-        workspaces: vec![TEST_WORKSPACE_ID],
-    });
+        vec![TEST_WORKSPACE_ID],
+        window_ids.clone(),
+        window_ids,
+    ));
+    harness = harness.with_wm(wm);
     if let Some(state) = state {
         harness.app.world_mut().insert_resource(state);
     }
@@ -610,10 +614,13 @@ fn test_late_startup_window_restores_during_grace_period() {
     let mut harness = TestHarness::new();
     let mock_app = setup_process(harness.app.world_mut());
     let windows: TestWindowSpawner = Box::new(|_| vec![]);
-    harness = harness.with_wm(MockWindowManager {
+    let wm = create_mock_window_manager(MockWindowManagerState::new(
         windows,
-        workspaces: vec![TEST_WORKSPACE_ID],
-    });
+        vec![TEST_WORKSPACE_ID],
+        vec![],
+        vec![],
+    ));
+    harness = harness.with_wm(wm);
     harness
         .app
         .world_mut()

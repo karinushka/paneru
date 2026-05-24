@@ -4,6 +4,7 @@ use accessibility_sys::{
 use bevy::ecs::component::Component;
 use core::ptr::NonNull;
 use derive_more::{DerefMut, with_trait::Deref};
+use mockall::automock;
 use objc2_core_foundation::{CFRetained, CFString, kCFRunLoopCommonModes};
 use std::ffi::c_void;
 use std::pin::Pin;
@@ -50,6 +51,7 @@ pub static AX_WINDOW_NOTIFICATIONS: LazyLock<Vec<&str>> = LazyLock::new(|| {
     ]
 });
 
+#[automock]
 pub trait ApplicationApi: Send + Sync {
     /// Returns the process ID of the application.
     fn pid(&self) -> Pid;
@@ -94,7 +96,7 @@ pub trait ApplicationApi: Send + Sync {
     /// Checks if the application is currently the frontmost application.
     fn is_frontmost(&self) -> bool;
     /// Returns the bundle identifier of the application.
-    fn bundle_id(&self) -> Option<&str>;
+    fn bundle_id(&self) -> Option<String>;
     /// Returns the display name of the application.
     fn name(&self) -> &str;
 }
@@ -103,6 +105,12 @@ pub trait ApplicationApi: Send + Sync {
 /// It implements `Deref` and `DerefMut` to easily access the underlying `ApplicationApi` methods.
 #[derive(Component, Deref, DerefMut)]
 pub struct Application(Box<dyn ApplicationApi>);
+
+impl std::fmt::Debug for Application {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "app (pid {})", self.pid())
+    }
+}
 
 impl std::fmt::Display for Application {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -309,8 +317,8 @@ impl ApplicationApi for ApplicationOS {
     /// # Returns
     ///
     /// An `Option<&str>` containing the bundle ID if available, otherwise `None`.
-    fn bundle_id(&self) -> Option<&str> {
-        self.bundle_id.as_deref()
+    fn bundle_id(&self) -> Option<String> {
+        self.bundle_id.clone()
     }
 
     fn name(&self) -> &str {

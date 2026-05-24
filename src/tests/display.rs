@@ -106,10 +106,22 @@ fn test_multi_workspace_orphaning() {
     let mock_app = setup_process(setup_world().world_mut());
     let internal_queue = Arc::new(RwLock::new(Vec::new()));
     let spawner = window_spawner(1, internal_queue.clone(), mock_app);
-    let wm = MockWindowManager {
-        windows: spawner,
-        workspaces: vec![TEST_WORKSPACE_ID, TEST_WORKSPACE_ID + 1],
-    };
+    let workspaces = vec![TEST_WORKSPACE_ID, TEST_WORKSPACE_ID + 1];
+    let mut wm = create_mock_window_manager(MockWindowManagerState::new(
+        spawner,
+        workspaces.clone(),
+        vec![0],
+        vec![0],
+    ));
+    wm.expect_windows_in_workspace()
+        .withf(move |id| workspaces.contains(id))
+        .returning(move |id| {
+            Ok(if id == TEST_WORKSPACE_ID {
+                vec![0]
+            } else {
+                vec![]
+            })
+        });
 
     TestHarness::new()
         .with_wm(wm)

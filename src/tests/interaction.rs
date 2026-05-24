@@ -552,24 +552,27 @@ fn test_external_focus_restores_hidden_window_without_visible_event() {
     let mut harness = TestHarness::new();
     let mock_app = setup_process(harness.app.world_mut());
     let internal_queue = harness.internal_queue.clone();
-    let wm = MockWindowManager {
-        windows: Box::new(move |_| {
-            let origin = Origin::new(0, 0);
-            let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-            let window = MockWindow::new(
-                0,
-                IRect {
-                    min: origin,
-                    max: origin + size,
-                },
-                internal_queue.clone(),
-                mock_app.clone(),
-            )
-            .with_ignored_repositions(ignored_repositions_for_window.clone());
-            vec![Window::new(Box::new(window))]
-        }),
-        workspaces: vec![TEST_WORKSPACE_ID],
-    };
+    let spawner = Box::new(move |_| {
+        let origin = Origin::new(0, 0);
+        let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+        let window = MockWindow::new(
+            0,
+            IRect {
+                min: origin,
+                max: origin + size,
+            },
+            internal_queue.clone(),
+            mock_app.clone(),
+        )
+        .with_ignored_repositions(ignored_repositions_for_window.clone());
+        vec![Window::new(Box::new(window))]
+    });
+    let wm = create_mock_window_manager(MockWindowManagerState::new(
+        spawner,
+        vec![TEST_WORKSPACE_ID],
+        vec![0],
+        vec![0],
+    ));
 
     harness
         .with_wm(wm)
@@ -733,15 +736,30 @@ fn focus_unmanaged_ignores_floats_from_other_workspaces() {
             )))]
         }
     });
-    let wm = MockWindowManager {
+    let workspaces = vec![TEST_WORKSPACE_ID, TEST_WORKSPACE_ID + 1];
+    let mut wm = create_mock_window_manager(MockWindowManagerState::new(
         windows,
-        workspaces: vec![TEST_WORKSPACE_ID, TEST_WORKSPACE_ID + 1],
-    };
+        workspaces.clone(),
+        vec![],
+        vec![],
+    ));
+    wm.expect_windows_in_workspace()
+        .withf(move |id| workspaces.contains(id))
+        .returning(move |id| {
+            Ok(if id == TEST_WORKSPACE_ID {
+                vec![0]
+            } else {
+                vec![99]
+            })
+        });
 
     let commands = vec![
         Event::MenuOpened { window_id: 0 },
         Event::Command {
             command: Command::Window(Operation::FocusUnmanaged),
+        },
+        Event::Command {
+            command: Command::PrintState,
         },
         Event::Command {
             command: Command::Window(Operation::Focus(Direction::East)),
@@ -750,20 +768,20 @@ fn focus_unmanaged_ignores_floats_from_other_workspaces() {
 
     harness
         .with_wm(wm)
-        .on_iteration(0, |world| {
-            let off_workspace_float = find_window_entity(99, world);
+        .on_iteration(2, |world| {
+            let off_workspace_float = find_window_entity(0, world);
             world
                 .entity_mut(off_workspace_float)
                 .insert(Unmanaged::Floating);
-            assert_focused!(world, 0);
+            assert_focused!(world, 99);
         })
-        .on_iteration(1, |world| {
-            let active_float = find_window_entity(0, world);
+        .on_iteration(3, |world| {
+            let active_float = find_window_entity(99, world);
             world.entity_mut(active_float).insert(Unmanaged::Floating);
-            assert_focused!(world, 0);
+            assert_focused!(world, 99);
         })
-        .on_iteration(2, |world| {
-            assert_focused!(world, 0);
+        .on_iteration(4, |world| {
+            assert_focused!(world, 99);
         })
         .run(commands);
 }

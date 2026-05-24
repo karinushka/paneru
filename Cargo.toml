@@ -71,3 +71,4 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 ctrlc = { version = "3.5.2", features = ["termination"] }
 xdg = "^3"
+mockall = "0.14.0"

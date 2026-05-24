@@ -1221,7 +1221,7 @@ fn print_internal_state_handler(
         let bundle_id = apps
             .get(child.parent())
             .ok()
-            .and_then(|app| app.bundle_id().map(str::to_owned))
+            .and_then(|app| app.bundle_id())
             .unwrap_or_default();
         format!(
             "\tid: {}, {entity}, {}:{}, {}x{}{}{}, bundle: {}, role: {}, subrole: {}, title: '{:.70}'",

@@ -20,11 +20,11 @@ use crate::ecs::{
     SkipReshuffle, register_systems, register_triggers,
 };
 use crate::events::Event;
-use crate::manager::{Application, Origin, Size, Window, WindowManager, WindowManagerApi};
+use crate::manager::{Origin, Size, Window, WindowManager, WindowManagerApi};
 use crate::platform::ProcessSerialNumber;
 use crate::platform::WinID;
 
-use super::mocks::MockApplication;
+use super::mocks::MockAppState;
 use super::*;
 
 type Verifiers = HashMap<usize, Box<dyn FnMut(&mut World)>>;
@@ -49,15 +49,17 @@ impl TestHarness {
 
     pub(crate) fn with_windows(mut self, count: i32) -> Self {
         let mock_app = setup_process(self.app.world_mut());
-        let spawner = window_spawner(count, self.internal_queue.clone(), mock_app);
+        let spawner = window_spawner(count, self.internal_queue.clone(), mock_app.clone());
 
         let window_ids = (0..count).collect::<Vec<_>>();
-        let wm = create_mock_window_manager(MockWindowManagerState::new(
+        let wm_state = MockWindowManagerState::new(
             spawner,
             vec![TEST_WORKSPACE_ID],
             window_ids.clone(),
             window_ids,
-        ));
+        );
+        mock_app.set_window_manager_state(wm_state.clone());
+        let wm = create_mock_window_manager(wm_state);
 
         self.app
             .world_mut()
@@ -153,25 +155,22 @@ pub(crate) fn setup_world() -> App {
     bevy_app
 }
 
-pub(crate) fn setup_process(world: &mut World) -> MockApplication {
+pub(crate) fn setup_process(world: &mut World) -> MockAppState {
     let psn = ProcessSerialNumber { high: 1, low: 2 };
     let bundle_id = "test".to_string();
     let mock_process = create_mock_process(psn);
     let process = world.spawn(BProcess(Box::new(mock_process))).id();
 
-    let application = MockApplication::new(psn, TEST_PROCESS_ID, bundle_id);
-    world.spawn((
-        ExistingMarker,
-        ChildOf(process),
-        Application::new(Box::new(application.clone())),
-    ));
-    application
+    let state = MockAppState::new(psn, TEST_PROCESS_ID, bundle_id);
+    let application = create_mock_application(state.clone());
+    world.spawn((ExistingMarker, ChildOf(process), application));
+    state
 }
 
 pub(crate) fn window_spawner(
     count: i32,
     event_queue: EventQueue,
-    mock_app: MockApplication,
+    mock_app: MockAppState,
 ) -> TestWindowSpawner {
     Box::new(move |_| {
         (0..count)

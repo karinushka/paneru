@@ -6,131 +6,97 @@ use objc2_core_foundation::CGPoint;
 use objc2_core_graphics::CGDirectDisplayID;
 use stdext::function_name;
 use stdext::prelude::RwLockExt;
-use tracing::{Level, debug, instrument};
+use tracing::debug;
 
 use crate::errors::{Error, Result};
 use crate::events::Event;
+use crate::manager::app::MockApplicationApi;
 use crate::manager::{
-    Application, ApplicationApi, Display, MockProcessApi, MockWindowApi, MockWindowManagerApi,
-    Origin, ProcessApi, Window, WindowManagerApi,
+    Application, Display, MockProcessApi, MockWindowApi, MockWindowManagerApi, Origin, ProcessApi,
+    Window, WindowManagerApi,
 };
 use crate::platform::ProcessSerialNumber;
-use crate::platform::{ConnID, Pid, WinID, WorkspaceId};
+use crate::platform::{Pid, WinID, WorkspaceId};
 
 use super::*;
 
-/// A mock implementation of the `ApplicationApi` trait for testing purposes.
-/// It internally holds an `InnerMockApplication` within an `Arc<RwLock>`.
-#[derive(Clone, Debug)]
-pub(crate) struct MockApplication {
-    pub(crate) inner: Arc<RwLock<InnerMockApplication>>,
-    pub(crate) name: String,
+#[derive(Clone)]
+pub(crate) struct MockAppState {
+    inner: Arc<RwLock<InnerMockAppState>>,
+    name: String,
 }
 
-/// The inner state of `MockApplication`, containing process serial number, PID, and focused window ID.
-#[derive(Debug)]
-pub(crate) struct InnerMockApplication {
-    pub(crate) psn: ProcessSerialNumber,
-    pub(crate) pid: Pid,
-    pub(crate) focused_id: Option<WinID>,
-    pub(crate) bundle_id: String,
+struct InnerMockAppState {
+    psn: ProcessSerialNumber,
+    pid: Pid,
+    focused_id: Option<WinID>,
+    bundle_id: String,
+    window_manager_state: Option<MockWindowManagerState>,
 }
 
-impl MockApplication {
+pub(crate) fn create_mock_application(app_state: MockAppState) -> Application {
+    let mut ma = MockApplicationApi::new();
+
+    let pid = app_state.pid();
+    let psn = app_state.psn();
+    ma.expect_pid().return_const(pid);
+    ma.expect_psn().return_const(psn);
+
+    ma.expect_observe().returning(|| Ok(true));
+
+    ma.expect_observe_window().returning(|_| Ok(true));
+
+    let app = app_state.clone();
+    ma.expect_focused_window_id().returning(move || {
+        app.inner
+            .force_read()
+            .focused_id
+            .ok_or(Error::InvalidWindow)
+    });
+
+    let bundle = app_state.bundle_id();
+    ma.expect_bundle_id().return_const(bundle);
+
+    ma.expect_is_frontmost().return_const(true);
+
+    ma.expect_name().return_const(app_state.name);
+
+    ma.expect_unobserve_window().return_const(());
+
+    ma.expect_connection().return_const(Some(0));
+
+    Application::new(Box::new(ma))
+}
+
+impl MockAppState {
     /// Creates a new `MockApplication` instance.
-    #[instrument(level = Level::DEBUG, ret)]
     pub(crate) fn new(psn: ProcessSerialNumber, pid: Pid, bundle_id: String) -> Self {
-        MockApplication {
-            inner: Arc::new(RwLock::new(InnerMockApplication {
+        MockAppState {
+            inner: Arc::new(RwLock::new(InnerMockAppState {
                 psn,
                 pid,
                 focused_id: None,
                 bundle_id,
+                window_manager_state: None,
             })),
             name: "test".to_string(),
         }
     }
-}
 
-impl ApplicationApi for MockApplication {
-    /// Returns the PID of the mock application.
-    #[instrument(level = Level::TRACE, skip(self), ret)]
+    pub(crate) fn set_window_manager_state(&self, window_manager_state: MockWindowManagerState) {
+        self.inner.force_write().window_manager_state = Some(window_manager_state);
+    }
+
     fn pid(&self) -> Pid {
         self.inner.force_read().pid
     }
 
-    /// Returns the `ProcessSerialNumber` of the mock application.
-    #[instrument(level = Level::TRACE, skip(self), ret)]
     fn psn(&self) -> ProcessSerialNumber {
-        debug!("{}:", function_name!());
         self.inner.force_read().psn
     }
 
-    /// Always returns `Some(0)` for the connection ID.
-    #[instrument(level = Level::DEBUG, skip(self), ret)]
-    fn connection(&self) -> Option<ConnID> {
-        debug!("{}:", function_name!());
-        Some(0)
-    }
-
-    /// Returns the currently focused window ID for the mock application.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(WinID)` if a window is focused, otherwise `Err(Error::InvalidWindow)`.
-    #[instrument(level = Level::DEBUG, skip(self), ret)]
-    fn focused_window_id(&self) -> Result<WinID> {
-        let id = self
-            .inner
-            .force_read()
-            .focused_id
-            .ok_or(Error::InvalidWindow);
-        debug!("{}: {id:?}", function_name!());
-        id
-    }
-
-    /// Always returns an empty vector of window lists for the mock application.
-    fn window_list(&self) -> Vec<Window> {
-        debug!("{}:", function_name!());
-        vec![]
-    }
-
-    /// Always returns `Ok(true)` for observe operations on the mock application.
-    #[instrument(level = Level::DEBUG, skip(self), ret)]
-    fn observe(&mut self) -> Result<bool> {
-        debug!("{}:", function_name!());
-        Ok(true)
-    }
-
-    /// Always returns `Ok(true)` for observe window operations on the mock application.
-    #[instrument(level = Level::DEBUG, skip_all, ret)]
-    fn observe_window(&mut self, _window: &Window) -> Result<bool> {
-        debug!("{}:", function_name!());
-        Ok(true)
-    }
-
-    /// Does nothing for unobserve window operations on the mock application.
-    #[instrument(level = Level::DEBUG, skip_all, ret)]
-    fn unobserve_window(&mut self, _window: &Window) {
-        debug!("{}:", function_name!());
-    }
-
-    /// Always returns `true`, indicating the mock application is frontmost.
-    #[instrument(level = Level::DEBUG, skip(self), ret)]
-    fn is_frontmost(&self) -> bool {
-        debug!("{}:", function_name!());
-        true
-    }
-
-    /// Returns the bundle identifier of the application.
-    #[instrument(level = Level::DEBUG, skip(self), ret)]
     fn bundle_id(&self) -> Option<String> {
-        debug!("{}:", function_name!());
         Some(self.inner.force_read().bundle_id.to_owned())
-    }
-
-    fn name(&self) -> &str {
-        &self.name
     }
 }
 
@@ -269,7 +235,7 @@ pub(crate) fn create_mock_window(
     id: WinID,
     frame: IRect,
     event_queue: EventQueue,
-    app: MockApplication,
+    app: MockAppState,
 ) -> Window {
     let mut mw = MockWindowApi::new();
 
@@ -388,19 +354,18 @@ pub(crate) fn create_mock_window(
 }
 
 /// A mock implementation of the `WindowApi` trait for testing purposes.
-#[derive(Debug)]
 struct MockWindow {
     pub(crate) frame: IRect,
     pub(crate) horizontal_padding: i32,
     pub(crate) vertical_padding: i32,
-    pub(crate) app: MockApplication,
+    pub(crate) app: MockAppState,
     pub(crate) event_queue: EventQueue,
     pub(crate) minimized: bool,
 }
 
 impl MockWindow {
     /// Creates a new `MockWindow` instance.
-    pub(crate) fn new(frame: IRect, event_queue: EventQueue, app: MockApplication) -> Self {
+    pub(crate) fn new(frame: IRect, event_queue: EventQueue, app: MockAppState) -> Self {
         MockWindow {
             frame,
             horizontal_padding: 0,
@@ -431,15 +396,8 @@ pub(crate) const EXT_DISPLAY_HEIGHT: i32 = 1200;
 
 impl WindowManagerApi for TwoDisplayMock {
     fn new_application(&self, process: &dyn ProcessApi) -> Result<Application> {
-        Ok(Application::new(Box::new(MockApplication {
-            inner: Arc::new(RwLock::new(InnerMockApplication {
-                psn: process.psn(),
-                pid: process.pid(),
-                focused_id: None,
-                bundle_id: "test".to_string(),
-            })),
-            name: "test".to_string(),
-        })))
+        let app_state = MockAppState::new(process.psn(), process.pid(), "test".to_string());
+        Ok(create_mock_application(app_state))
     }
 
     fn get_associated_windows(&self, _window_id: WinID) -> Vec<WinID> {

@@ -1,3 +1,4 @@
+use mockall::automock;
 use objc2::rc::Retained;
 use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication};
 use objc2_core_foundation::{CFRetained, CFString};
@@ -68,6 +69,7 @@ unsafe extern "C" {
 }
 
 /// Defines the interface for interacting with a macOS process, abstracting OS-specific details.
+#[automock]
 pub trait ProcessApi: Send + Sync {
     /// Checks if the process is observable (i.e., has a regular activation policy).
     /// This typically means the application is a standard GUI application that can be managed by the window manager.

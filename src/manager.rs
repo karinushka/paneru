@@ -42,6 +42,9 @@ use skylight::{
 };
 pub use windows::{Window, WindowApi, WindowOS, WindowPadding, ax_window_id};
 
+#[cfg(test)]
+pub use process::MockProcessApi;
+
 pub(crate) mod app;
 mod display;
 mod process;

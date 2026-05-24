@@ -24,7 +24,7 @@ use crate::manager::{Application, Origin, Size, Window, WindowManager, WindowMan
 use crate::platform::ProcessSerialNumber;
 use crate::platform::WinID;
 
-use super::mocks::{MockApplication, MockProcess, MockWindow};
+use super::mocks::{MockApplication, MockWindow};
 use super::*;
 
 type Verifiers = HashMap<usize, Box<dyn FnMut(&mut World)>>;
@@ -156,7 +156,7 @@ pub(crate) fn setup_world() -> App {
 pub(crate) fn setup_process(world: &mut World) -> MockApplication {
     let psn = ProcessSerialNumber { high: 1, low: 2 };
     let bundle_id = "test".to_string();
-    let mock_process = MockProcess { psn };
+    let mock_process = create_mock_process(psn);
     let process = world.spawn(BProcess(Box::new(mock_process))).id();
 
     let application = MockApplication::new(psn, TEST_PROCESS_ID, bundle_id);

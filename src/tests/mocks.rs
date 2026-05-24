@@ -11,62 +11,13 @@ use tracing::{Level, debug, instrument};
 use crate::errors::{Error, Result};
 use crate::events::Event;
 use crate::manager::{
-    Application, ApplicationApi, Display, MockWindowManagerApi, Origin, ProcessApi, Size, Window,
-    WindowApi, WindowManagerApi,
+    Application, ApplicationApi, Display, MockProcessApi, MockWindowManagerApi, Origin, ProcessApi,
+    Size, Window, WindowApi, WindowManagerApi,
 };
 use crate::platform::{ConnID, Pid, WinID, WorkspaceId};
 use crate::{platform::ProcessSerialNumber, util::AXUIWrapper};
 
 use super::*;
-
-/// A mock implementation of the `ProcessApi` trait for testing purposes.
-#[derive(Debug)]
-pub(crate) struct MockProcess {
-    pub(crate) psn: ProcessSerialNumber,
-}
-
-impl ProcessApi for MockProcess {
-    /// Always returns `true`, indicating the mock process is observable.
-    #[instrument(level = Level::DEBUG, ret)]
-    fn is_observable(&mut self) -> bool {
-        debug!("{}:", function_name!());
-        true
-    }
-
-    /// Returns a static name for the mock process.
-    #[instrument(level = Level::DEBUG, ret)]
-    fn name(&self) -> &'static str {
-        "test"
-    }
-
-    /// Returns a predefined PID for the mock process.
-    #[instrument(level = Level::DEBUG, ret)]
-    fn pid(&self) -> Pid {
-        debug!("{}:", function_name!());
-        TEST_PROCESS_ID
-    }
-
-    /// Returns the `ProcessSerialNumber` of the mock process.
-    #[instrument(level = Level::TRACE, ret)]
-    fn psn(&self) -> ProcessSerialNumber {
-        debug!("{}: {:?}", function_name!(), self.psn);
-        self.psn
-    }
-
-    /// Always returns `None` for the `NSRunningApplication`.
-    #[instrument(level = Level::DEBUG, ret)]
-    fn application(&self) -> Option<objc2::rc::Retained<objc2_app_kit::NSRunningApplication>> {
-        debug!("{}:", function_name!());
-        None
-    }
-
-    /// Always returns `true`, indicating the mock process is ready.
-    #[instrument(level = Level::DEBUG, ret)]
-    fn ready(&mut self) -> bool {
-        debug!("{}:", function_name!());
-        true
-    }
-}
 
 /// A mock implementation of the `ApplicationApi` trait for testing purposes.
 /// It internally holds an `InnerMockApplication` within an `Arc<RwLock>`.
@@ -181,6 +132,19 @@ impl ApplicationApi for MockApplication {
     fn name(&self) -> &str {
         &self.name
     }
+}
+
+pub(crate) fn create_mock_process(psn: ProcessSerialNumber) -> MockProcessApi {
+    let mut mp = MockProcessApi::new();
+
+    mp.expect_is_observable().returning(|| true);
+    mp.expect_name().return_const("test".to_string());
+    mp.expect_pid().return_const(TEST_PROCESS_ID);
+    mp.expect_psn().return_const(psn);
+    mp.expect_application().return_const(None);
+    mp.expect_ready().return_const(true);
+
+    mp
 }
 
 #[derive(Clone)]

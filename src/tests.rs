@@ -4,6 +4,7 @@ mod interaction;
 mod mocks;
 mod session_restore;
 mod state;
+mod tabs;
 mod tiling;
 
 pub(crate) use harness::*;

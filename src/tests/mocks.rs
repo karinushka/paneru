@@ -1,7 +1,6 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 
-use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 use objc2_core_graphics::CGDirectDisplayID;
 use stdext::prelude::RwLockExt;
@@ -34,6 +33,7 @@ struct MockWindowData {
     title: String,
     minimized: bool,
     workspace_id: WorkspaceId,
+    visible: bool,
 }
 
 /// Data for a mocked display.
@@ -68,6 +68,12 @@ impl MockState {
                 event_queue: VecDeque::new(),
             })),
         }
+    }
+
+    pub(crate) fn window_visible(&self, window_id: WinID, visible: bool) {
+        let mut state = self.inner.force_write();
+        let window = state.windows.get_mut(&window_id).expect("finding window");
+        window.visible = visible;
     }
 
     // --- OS Behavior Methods ---
@@ -105,6 +111,7 @@ impl MockState {
                 title: format!("Window {id}"),
                 minimized: false,
                 workspace_id,
+                visible: true,
                 ..default()
             },
         );
@@ -360,10 +367,22 @@ impl MockState {
                 Ok(windows)
             });
 
+        let s = self.clone();
+        wm.expect_windows_on_screen().returning(move || {
+            let windows = s
+                .inner
+                .force_read()
+                .windows
+                .iter()
+                .filter_map(|(id, window)| window.visible.then_some(id))
+                .cloned()
+                .collect::<Vec<_>>();
+            Some(windows)
+        });
+
         wm.expect_warp_mouse().return_const(());
         wm.expect_cursor_position().return_const(None);
         wm.expect_get_associated_windows().return_const(vec![]);
-        wm.expect_windows_on_screen().return_const(None);
         wm.expect_find_window_at_point().return_const(Ok(0));
 
         wm

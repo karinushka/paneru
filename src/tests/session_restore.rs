@@ -15,8 +15,8 @@ use crate::platform::{ProcessSerialNumber, WorkspaceId};
 use crate::tests::{
     EXT_DISPLAY_ID, EXT_WORKSPACE_ID, MockWindowManagerState, TEST_DISPLAY_HEIGHT, TEST_DISPLAY_ID,
     TEST_DISPLAY_WIDTH, TEST_MENUBAR_HEIGHT, TEST_PROCESS_ID, TEST_WINDOW_HEIGHT,
-    TEST_WINDOW_WIDTH, TEST_WORKSPACE_ID, TestHarness, TestWindowSpawner, TwoDisplayMock,
-    create_mock_window, create_mock_window_manager, setup_process,
+    TEST_WINDOW_WIDTH, TEST_WORKSPACE_ID, TestHarness, TestWindowSpawner, create_mock_window,
+    create_mock_window_manager, create_two_display_mock, setup_process,
 };
 
 #[test]
@@ -194,10 +194,8 @@ fn test_startup_restore_prefers_existing_workspace_parent_before_saved_or_active
         }
     });
 
-    harness = harness.with_wm(TwoDisplayMock {
-        windows,
-        active_display,
-    });
+    let wm = create_two_display_mock(windows, active_display);
+    harness = harness.with_wm(wm);
 
     harness.app.world_mut().insert_resource(PaneruState {
         version: 2,
@@ -274,10 +272,8 @@ fn test_startup_restore_preserves_saved_display_when_present() {
         }
     });
 
-    harness = harness.with_wm(TwoDisplayMock {
-        windows,
-        active_display,
-    });
+    let wm = create_two_display_mock(windows, active_display);
+    harness = harness.with_wm(wm);
 
     harness.app.world_mut().insert_resource(PaneruState {
         version: 2,
@@ -338,10 +334,8 @@ fn test_startup_restore_keeps_current_native_workspace_active_across_multiple_wo
         )]
     });
 
-    harness = harness.with_wm(TwoDisplayMock {
-        windows,
-        active_display,
-    });
+    let wm = create_two_display_mock(windows, active_display);
+    harness = harness.with_wm(wm);
 
     harness.app.world_mut().insert_resource(PaneruState {
         version: 2,

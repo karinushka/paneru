@@ -2,18 +2,15 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 
 use bevy::prelude::*;
-use objc2_core_foundation::CGPoint;
-use objc2_core_graphics::CGDirectDisplayID;
 use stdext::function_name;
 use stdext::prelude::RwLockExt;
 use tracing::debug;
 
-use crate::errors::{Error, Result};
+use crate::errors::Error;
 use crate::events::Event;
 use crate::manager::app::MockApplicationApi;
 use crate::manager::{
-    Application, Display, MockProcessApi, MockWindowApi, MockWindowManagerApi, Origin, ProcessApi,
-    Window, WindowManagerApi,
+    Application, Display, MockProcessApi, MockWindowApi, MockWindowManagerApi, Window,
 };
 use crate::platform::ProcessSerialNumber;
 use crate::platform::{Pid, WinID, WorkspaceId};
@@ -377,34 +374,23 @@ impl MockWindow {
     }
 }
 
-/// Mock window manager with two displays of different heights.
-pub(crate) struct TwoDisplayMock {
-    pub(crate) windows: TestWindowSpawner,
-    pub(crate) active_display: Arc<std::sync::atomic::AtomicU32>,
-}
-
-impl std::fmt::Debug for TwoDisplayMock {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TwoDisplayMock").finish()
-    }
-}
-
 pub(crate) const EXT_DISPLAY_ID: u32 = 2;
 pub(crate) const EXT_WORKSPACE_ID: u64 = 20;
 pub(crate) const EXT_DISPLAY_WIDTH: i32 = 1920;
 pub(crate) const EXT_DISPLAY_HEIGHT: i32 = 1200;
 
-impl WindowManagerApi for TwoDisplayMock {
-    fn new_application(&self, process: &dyn ProcessApi) -> Result<Application> {
-        let app_state = MockAppState::new(process.psn(), process.pid(), "test".to_string());
-        Ok(create_mock_application(app_state))
-    }
+pub(crate) fn create_two_display_mock(
+    windows: TestWindowSpawner,
+    display: Arc<std::sync::atomic::AtomicU32>,
+) -> MockWindowManagerApi {
+    let mut md = MockWindowManagerApi::new();
+    let spawn_windows = Arc::new(windows);
 
-    fn get_associated_windows(&self, _window_id: WinID) -> Vec<WinID> {
-        vec![]
-    }
+    let active_display = display.clone();
+    md.expect_active_display_id()
+        .returning(move || Ok(active_display.load(Ordering::Relaxed)));
 
-    fn present_displays(&self) -> Vec<(Display, Vec<WorkspaceId>)> {
+    md.expect_present_displays().returning(|| {
         // External display sits above the internal one.
         let ext = Display::new(
             EXT_DISPLAY_ID,
@@ -420,64 +406,36 @@ impl WindowManagerApi for TwoDisplayMock {
             (ext, vec![EXT_WORKSPACE_ID]),
             (int, vec![TEST_WORKSPACE_ID]),
         ]
-    }
+    });
 
-    fn active_display_id(&self) -> Result<u32> {
-        Ok(self.active_display.load(Ordering::Relaxed))
-    }
+    md.expect_active_display_space()
+        .returning(move |display_id| {
+            if display_id == EXT_DISPLAY_ID {
+                Ok(EXT_WORKSPACE_ID)
+            } else {
+                Ok(TEST_WORKSPACE_ID)
+            }
+        });
 
-    fn active_display_space(&self, display_id: CGDirectDisplayID) -> Result<WorkspaceId> {
-        if display_id == EXT_DISPLAY_ID {
-            Ok(EXT_WORKSPACE_ID)
-        } else {
-            Ok(TEST_WORKSPACE_ID)
-        }
-    }
+    let spawner = spawn_windows.clone();
+    md.expect_find_existing_application_windows()
+        .returning(move |_app, spaces| {
+            let windows = spaces
+                .iter()
+                .flat_map(|workspace_id| spawner(*workspace_id))
+                .collect();
+            Ok((windows, vec![]))
+        });
 
-    fn is_fullscreen_space(&self, _display_id: CGDirectDisplayID) -> bool {
-        false
-    }
+    let spawner = spawn_windows.clone();
+    md.expect_windows_in_workspace()
+        .returning(move |workspace_id| Ok(spawner(workspace_id).iter().map(|w| w.id()).collect()));
 
-    fn warp_mouse(&self, _origin: Origin) {}
+    md.expect_warp_mouse().return_const(());
 
-    fn find_existing_application_windows(
-        &self,
-        _app: &mut Application,
-        spaces: &[WorkspaceId],
-    ) -> Result<(Vec<Window>, Vec<WinID>)> {
-        let windows = spaces
-            .iter()
-            .flat_map(|workspace_id| (self.windows)(*workspace_id))
-            .collect();
-        Ok((windows, vec![]))
-    }
+    md.expect_windows_on_screen().return_const(vec![]);
 
-    fn find_window_at_point(&self, _point: &CGPoint) -> Result<WinID> {
-        Ok(0)
-    }
+    md.expect_cursor_position().return_const(None);
 
-    fn windows_in_workspace(&self, workspace_id: WorkspaceId) -> Result<Vec<WinID>> {
-        Ok((self.windows)(workspace_id)
-            .iter()
-            .map(|w| w.id())
-            .collect())
-    }
-
-    fn quit(&self) -> Result<()> {
-        Ok(())
-    }
-
-    fn setup_config_watcher(&self, _path: &std::path::Path) -> Result<Box<dyn notify::Watcher>> {
-        todo!()
-    }
-
-    fn cursor_position(&self) -> Option<CGPoint> {
-        None
-    }
-
-    fn dim_windows(&self, _windows: &[WinID], _level: f32) {}
-
-    fn windows_on_screen(&self) -> Option<Vec<WinID>> {
-        None
-    }
+    md
 }

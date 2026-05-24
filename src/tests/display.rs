@@ -202,10 +202,7 @@ fn test_multi_display_no_height_crosstalk() {
         }
     });
 
-    let wm = TwoDisplayMock {
-        windows,
-        active_display: active_display.clone(),
-    };
+    let wm = create_two_display_mock(windows, active_display);
     harness = harness.with_wm(wm);
 
     let ext_usable_height = EXT_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT;
@@ -266,10 +263,11 @@ fn test_next_display_inserts_into_target_strip() {
         }
     });
 
-    let wm = TwoDisplayMock {
-        windows,
-        active_display: active_display.clone(),
-    };
+    let wm = create_two_display_mock(windows, active_display);
+    // let wm = TwoDisplayMock {
+    //     windows,
+    //     active_display: active_display.clone(),
+    // };
     harness = harness.with_wm(wm);
 
     let commands = vec![
@@ -330,10 +328,11 @@ fn test_send_next_display_stays_on_source() {
         }
     });
 
-    let wm = TwoDisplayMock {
-        windows,
-        active_display: active_display.clone(),
-    };
+    let wm = create_two_display_mock(windows, active_display);
+    // let wm = TwoDisplayMock {
+    //     windows,
+    //     active_display: active_display.clone(),
+    // };
     harness = harness.with_wm(wm);
 
     let commands = vec![
@@ -409,10 +408,11 @@ fn test_init_keeps_windows_on_their_real_displays() {
         }
     });
 
-    let wm = TwoDisplayMock {
-        windows,
-        active_display,
-    };
+    let wm = create_two_display_mock(windows, active_display);
+    // let wm = TwoDisplayMock {
+    //     windows,
+    //     active_display,
+    // };
     harness = harness.with_wm(wm);
 
     let commands = vec![Event::Command {

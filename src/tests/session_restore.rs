@@ -1,8 +1,7 @@
 use bevy::ecs::query::Has;
 use bevy::prelude::*;
-use std::sync::Arc;
-use std::sync::atomic::AtomicU32;
 
+use crate::commands::Command;
 use crate::config::{Config, MainOptions, WindowParams};
 use crate::ecs::layout::{Column, LayoutStrip};
 use crate::ecs::state::{
@@ -10,20 +9,20 @@ use crate::ecs::state::{
 };
 use crate::ecs::workspace::PreviousStripPosition;
 use crate::ecs::{SpawnWindowTrigger, Unmanaged};
+use crate::events::Event;
 use crate::manager::{Display, Origin, Size};
 use crate::platform::{ProcessSerialNumber, WorkspaceId};
 use crate::tests::{
-    EXT_DISPLAY_ID, EXT_WORKSPACE_ID, MockWindowManagerState, TEST_DISPLAY_HEIGHT, TEST_DISPLAY_ID,
-    TEST_DISPLAY_WIDTH, TEST_MENUBAR_HEIGHT, TEST_PROCESS_ID, TEST_WINDOW_HEIGHT,
-    TEST_WINDOW_WIDTH, TEST_WORKSPACE_ID, TestHarness, TestWindowSpawner, create_mock_window,
-    create_mock_window_manager, create_two_display_mock, setup_process,
+    EXT_DISPLAY_HEIGHT, EXT_DISPLAY_ID, EXT_DISPLAY_WIDTH, EXT_WORKSPACE_ID, TEST_DISPLAY_HEIGHT,
+    TEST_DISPLAY_ID, TEST_DISPLAY_WIDTH, TEST_MENUBAR_HEIGHT, TEST_PROCESS_ID, TEST_WINDOW_HEIGHT,
+    TEST_WINDOW_WIDTH, TEST_WORKSPACE_ID, TestHarness, find_window_entity,
 };
 
 #[test]
 fn test_startup_restore_rebuilds_virtual_workspace_layout() {
     let mut harness = TestHarness::new().with_windows(2);
 
-    harness.app.world_mut().insert_resource(PaneruState {
+    harness.world().insert_resource(PaneruState {
         version: 2,
         timestamp: 123_456_789,
         active_display_id: Some(TEST_DISPLAY_ID),
@@ -56,7 +55,7 @@ fn test_startup_restore_rebuilds_virtual_workspace_layout() {
         harness.app.update();
     }
 
-    let world = harness.app.world_mut();
+    let world = harness.world();
     let mut query = world.query::<(&LayoutStrip, Has<crate::ecs::ActiveWorkspaceMarker>)>();
     let active_strips = query
         .iter(world)
@@ -83,7 +82,7 @@ fn test_startup_restore_rebuilds_virtual_workspace_layout() {
 fn test_startup_restore_replaces_consumed_empty_virtual_zero_strip() {
     let mut harness = TestHarness::new().with_windows(2);
 
-    harness.app.world_mut().insert_resource(PaneruState {
+    harness.world().insert_resource(PaneruState {
         version: 2,
         timestamp: 123_456_789,
         active_display_id: Some(TEST_DISPLAY_ID),
@@ -106,7 +105,7 @@ fn test_startup_restore_replaces_consumed_empty_virtual_zero_strip() {
         harness.app.update();
     }
 
-    let world = harness.app.world_mut();
+    let world = harness.world();
     let mut query = world.query::<&LayoutStrip>();
     let matching = query
         .iter(world)
@@ -135,7 +134,7 @@ fn test_startup_restore_replaces_consumed_empty_virtual_zero_strip() {
 fn test_startup_restore_preserves_fullscreen_strip() {
     let mut harness = TestHarness::new().with_windows(1);
 
-    harness.app.world_mut().insert_resource(PaneruState {
+    harness.world().insert_resource(PaneruState {
         version: 2,
         timestamp: 123_456_789,
         active_display_id: Some(TEST_DISPLAY_ID),
@@ -155,7 +154,7 @@ fn test_startup_restore_preserves_fullscreen_strip() {
         harness.app.update();
     }
 
-    let world = harness.app.world_mut();
+    let world = harness.world();
     let mut query = world.query::<&LayoutStrip>();
     let matching = query
         .iter(world)
@@ -175,29 +174,17 @@ fn test_startup_restore_preserves_fullscreen_strip() {
 
 #[test]
 fn test_startup_restore_prefers_existing_workspace_parent_before_saved_or_active_display() {
-    let active_display = Arc::new(AtomicU32::new(EXT_DISPLAY_ID));
     let mut harness = TestHarness::new();
-    let mock_app = setup_process(harness.app.world_mut());
-    let internal_queue = harness.internal_queue.clone();
-    let windows: TestWindowSpawner = Box::new(move |workspace_id: WorkspaceId| {
-        if workspace_id == TEST_WORKSPACE_ID {
-            let origin = Origin::new(0, 0);
-            let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-            vec![create_mock_window(
-                200,
-                IRect::from_corners(origin, origin + size),
-                internal_queue.clone(),
-                mock_app.clone(),
-            )]
-        } else {
-            vec![]
-        }
-    });
 
-    let wm = create_two_display_mock(windows, active_display);
-    harness = harness.with_wm(wm);
-
-    harness.app.world_mut().insert_resource(PaneruState {
+    let origin = Origin::new(0, 0);
+    let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+    harness.mock_state.spawn_window(
+        TEST_PROCESS_ID,
+        TEST_WORKSPACE_ID,
+        200,
+        IRect::from_corners(origin, origin + size),
+    );
+    harness.world().insert_resource(PaneruState {
         version: 2,
         timestamp: 123_456_789,
         active_display_id: Some(EXT_DISPLAY_ID),
@@ -220,7 +207,7 @@ fn test_startup_restore_prefers_existing_workspace_parent_before_saved_or_active
         harness.app.update();
     }
 
-    let world = harness.app.world_mut();
+    let world = harness.world();
     let restored_window = crate::tests::harness::find_window_entity(200, world);
     let restored_entity = {
         let mut query = world.query::<(Entity, &LayoutStrip)>();
@@ -253,29 +240,23 @@ fn test_startup_restore_prefers_existing_workspace_parent_before_saved_or_active
 
 #[test]
 fn test_startup_restore_preserves_saved_display_when_present() {
-    let active_display = Arc::new(AtomicU32::new(TEST_DISPLAY_ID));
     let mut harness = TestHarness::new();
-    let mock_app = setup_process(harness.app.world_mut());
-    let internal_queue = harness.internal_queue.clone();
-    let windows: TestWindowSpawner = Box::new(move |workspace_id: WorkspaceId| {
-        if workspace_id == EXT_WORKSPACE_ID {
-            let origin = Origin::new(0, -TEST_WINDOW_HEIGHT);
-            let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-            vec![create_mock_window(
-                300,
-                IRect::from_corners(origin, origin + size),
-                internal_queue.clone(),
-                mock_app.clone(),
-            )]
-        } else {
-            vec![]
-        }
-    });
+    harness.mock_state.add_display(
+        EXT_DISPLAY_ID,
+        IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+        vec![EXT_WORKSPACE_ID],
+    );
 
-    let wm = create_two_display_mock(windows, active_display);
-    harness = harness.with_wm(wm);
+    let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+    let origin = Origin::new(0, -TEST_WINDOW_WIDTH);
+    harness.mock_state.spawn_window(
+        TEST_PROCESS_ID,
+        EXT_WORKSPACE_ID,
+        300,
+        IRect::from_corners(origin, origin + size),
+    );
 
-    harness.app.world_mut().insert_resource(PaneruState {
+    harness.world().insert_resource(PaneruState {
         version: 2,
         timestamp: 123_456_789,
         active_display_id: Some(EXT_DISPLAY_ID),
@@ -294,50 +275,57 @@ fn test_startup_restore_preserves_saved_display_when_present() {
         }],
     });
 
-    for _ in 0..5 {
-        harness.app.update();
-    }
+    let commands = vec![
+        Event::MenuOpened { window_id: 100 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
 
-    let world = harness.app.world_mut();
-    let restored_window = crate::tests::harness::find_window_entity(300, world);
-    let parent = restored_strip_display_parent(world, EXT_WORKSPACE_ID, 0, restored_window);
-    let display = world
-        .entity(parent)
-        .get::<Display>()
-        .expect("parent should be a display");
+    harness
+        .on_iteration(1, |world, _state| {
+            let restored_window = crate::tests::harness::find_window_entity(300, world);
+            let parent = restored_strip_display_parent(world, EXT_WORKSPACE_ID, 0, restored_window);
+            let display = world
+                .entity(parent)
+                .get::<Display>()
+                .expect("parent should be a display");
 
-    assert_eq!(
-        display.id(),
-        EXT_DISPLAY_ID,
-        "restore should keep the exact saved display when it is present"
-    );
+            assert_eq!(
+                display.id(),
+                EXT_DISPLAY_ID,
+                "restore should keep the exact saved display when it is present"
+            );
+        })
+        .run(commands);
 }
 
 #[test]
 fn test_startup_restore_keeps_current_native_workspace_active_across_multiple_workspaces() {
-    let active_display = Arc::new(AtomicU32::new(TEST_DISPLAY_ID));
     let mut harness = TestHarness::new();
-    let mock_app = setup_process(harness.app.world_mut());
-    let internal_queue = harness.internal_queue.clone();
-    let windows: TestWindowSpawner = Box::new(move |workspace_id: WorkspaceId| {
-        let (window_id, origin) = match workspace_id {
-            TEST_WORKSPACE_ID => (100, Origin::new(0, 0)),
-            EXT_WORKSPACE_ID => (300, Origin::new(0, -TEST_WINDOW_HEIGHT)),
-            _ => return vec![],
-        };
-        let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-        vec![create_mock_window(
-            window_id,
-            IRect::from_corners(origin, origin + size),
-            internal_queue.clone(),
-            mock_app.clone(),
-        )]
-    });
+    harness.mock_state.add_display(
+        EXT_DISPLAY_ID,
+        IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+        vec![EXT_WORKSPACE_ID],
+    );
 
-    let wm = create_two_display_mock(windows, active_display);
-    harness = harness.with_wm(wm);
+    let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+    let origin = Origin::new(0, 0);
+    let ext_origin = Origin::new(0, -TEST_WINDOW_HEIGHT);
+    harness.mock_state.spawn_window(
+        TEST_PROCESS_ID,
+        TEST_WORKSPACE_ID,
+        100,
+        IRect::from_corners(origin, origin + size),
+    );
+    harness.mock_state.spawn_window(
+        TEST_PROCESS_ID,
+        EXT_WORKSPACE_ID,
+        300,
+        IRect::from_corners(ext_origin, ext_origin + size),
+    );
 
-    harness.app.world_mut().insert_resource(PaneruState {
+    harness.world().insert_resource(PaneruState {
         version: 2,
         timestamp: 123_456_789,
         active_display_id: Some(TEST_DISPLAY_ID),
@@ -367,44 +355,50 @@ fn test_startup_restore_keeps_current_native_workspace_active_across_multiple_wo
         ],
     });
 
-    for _ in 0..5 {
-        harness.app.update();
-    }
+    let commands = vec![
+        Event::MenuOpened { window_id: 100 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
 
-    let world = harness.app.world_mut();
-    let mut query = world.query::<(
-        &LayoutStrip,
-        Has<crate::ecs::ActiveWorkspaceMarker>,
-        Has<crate::ecs::SelectedVirtualMarker>,
-    )>();
-    let restored = query
-        .iter(world)
-        .filter(|(strip, _, _)| {
-            (strip.id() == TEST_WORKSPACE_ID || strip.id() == EXT_WORKSPACE_ID)
-                && strip.virtual_index == 0
-                && !strip.all_windows().is_empty()
+    harness
+        .on_iteration(1, |world, _state| {
+            let mut query = world.query::<(
+                &LayoutStrip,
+                Has<crate::ecs::ActiveWorkspaceMarker>,
+                Has<crate::ecs::SelectedVirtualMarker>,
+            )>();
+            let restored = query
+                .iter(world)
+                .filter(|(strip, _, _)| {
+                    (strip.id() == TEST_WORKSPACE_ID || strip.id() == EXT_WORKSPACE_ID)
+                        && strip.virtual_index == 0
+                        && !strip.all_windows().is_empty()
+                })
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                restored.iter().filter(|(_, active, _)| *active).count(),
+                1,
+                "restore should keep one global active native workspace"
+            );
+            assert!(
+                restored
+                    .iter()
+                    .any(|(strip, active, selected)| strip.id() == TEST_WORKSPACE_ID
+                        && *active
+                        && *selected)
+            );
+            assert!(
+                restored
+                    .iter()
+                    .any(|(strip, active, selected)| strip.id() == EXT_WORKSPACE_ID
+                        && !*active
+                        && *selected)
+            );
         })
-        .collect::<Vec<_>>();
-
-    assert_eq!(
-        restored.iter().filter(|(_, active, _)| *active).count(),
-        1,
-        "restore should keep one global active native workspace"
-    );
-    assert!(
-        restored
-            .iter()
-            .any(|(strip, active, selected)| strip.id() == TEST_WORKSPACE_ID
-                && *active
-                && *selected)
-    );
-    assert!(
-        restored
-            .iter()
-            .any(|(strip, active, selected)| strip.id() == EXT_WORKSPACE_ID
-                && !*active
-                && *selected)
-    );
+        .run(commands);
 }
 
 #[test]
@@ -476,7 +470,7 @@ enabled = false
     );
     assert!(!harness.app.world().contains_resource::<PaneruState>());
 
-    let world = harness.app.world_mut();
+    let world = harness.world();
     let mut query = world.query::<&LayoutStrip>();
     assert!(
         query
@@ -498,13 +492,13 @@ fn test_startup_restore_uses_first_restored_row_when_active_metadata_is_missing(
         columns: vec![SavedColumn::Single(saved_window(0))],
     }]);
     state.workspaces[0].active_virtual_index = None;
-    harness.app.world_mut().insert_resource(state);
+    harness.world().insert_resource(state);
 
     for _ in 0..5 {
         harness.app.update();
     }
 
-    let world = harness.app.world_mut();
+    let world = harness.world();
     let mut query = world.query::<(&LayoutStrip, Has<crate::ecs::ActiveWorkspaceMarker>)>();
     let active_strips = query
         .iter(world)
@@ -534,7 +528,7 @@ fn test_startup_restore_overrides_floating_config_for_matched_window() {
         harness.app.update();
     }
 
-    let world = harness.app.world_mut();
+    let world = harness.world();
     let restored_window = crate::tests::harness::find_window_entity(0, world);
     assert!(
         world.entity(restored_window).get::<Unmanaged>().is_none(),
@@ -545,15 +539,6 @@ fn test_startup_restore_overrides_floating_config_for_matched_window() {
 #[test]
 fn test_late_startup_window_restores_during_grace_period() {
     let mut harness = TestHarness::new();
-    let mock_app = setup_process(harness.app.world_mut());
-    let windows: TestWindowSpawner = Box::new(|_| vec![]);
-    let wm = create_mock_window_manager(MockWindowManagerState::new(
-        windows,
-        vec![TEST_WORKSPACE_ID],
-        vec![],
-        vec![],
-    ));
-    harness = harness.with_wm(wm);
     harness
         .app
         .world_mut()
@@ -562,56 +547,55 @@ fn test_late_startup_window_restores_during_grace_period() {
             columns: vec![SavedColumn::Single(saved_window(99))],
         }]));
 
-    for _ in 0..5 {
-        harness.app.update();
-    }
-    assert!(
-        harness
-            .app
-            .world()
-            .contains_resource::<crate::ecs::restore::SessionRestore>()
-    );
+    let commands = vec![
+        Event::MenuOpened { window_id: 100 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
 
-    let origin = Origin::new(0, 0);
-    let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-    let window = create_mock_window(
-        99,
-        IRect::from_corners(origin, origin + size),
-        harness.internal_queue.clone(),
-        mock_app,
-    );
     harness
-        .app
-        .world_mut()
-        .trigger(SpawnWindowTrigger(vec![window]));
+        .on_iteration(1, move |world, state| {
+            assert!(world.contains_resource::<crate::ecs::restore::SessionRestore>());
 
-    for _ in 0..3 {
-        harness.app.update();
-    }
-
-    let world = harness.app.world_mut();
-    let restored_window = crate::tests::harness::find_window_entity(99, world);
-    let mut query = world.query::<(&LayoutStrip, Has<crate::ecs::ActiveWorkspaceMarker>)>();
-    let restored = query
-        .iter(world)
-        .find(|(strip, active)| {
-            strip.id() == TEST_WORKSPACE_ID
-                && strip.virtual_index == 1
-                && *active
-                && strip.contains(restored_window)
+            let origin = Origin::new(0, 0);
+            let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+            let window = state.spawn_window(
+                TEST_PROCESS_ID,
+                TEST_WORKSPACE_ID,
+                99,
+                IRect::from_corners(origin, origin + size),
+            );
+            world.trigger(SpawnWindowTrigger(vec![window]));
         })
-        .map(|(strip, _)| strip);
+        .on_iteration(2, |world, _state| {
+            let restored_window = find_window_entity(99, world);
+            let mut query = world.query::<(&LayoutStrip, Has<crate::ecs::ActiveWorkspaceMarker>)>();
+            let restored = query
+                .iter(world)
+                .find(|(strip, active)| {
+                    strip.id() == TEST_WORKSPACE_ID
+                        && strip.virtual_index == 1
+                        && *active
+                        && strip.contains(restored_window)
+                })
+                .map(|(strip, _)| strip);
 
-    assert!(
-        restored.is_some(),
-        "late startup window should restore into saved row"
-    );
+            assert!(
+                restored.is_some(),
+                "late startup window should restore into saved row"
+            );
+        })
+        .run(commands);
 }
 
 #[test]
 fn test_startup_restore_keeps_one_selected_row_and_hides_inactive_rows() {
     let mut harness = TestHarness::new().with_windows(2);
-    harness.app.world_mut().insert_resource(PaneruState {
+    harness.world().insert_resource(PaneruState {
         version: 2,
         timestamp: 123_456_789,
         active_display_id: Some(TEST_DISPLAY_ID),
@@ -637,7 +621,7 @@ fn test_startup_restore_keeps_one_selected_row_and_hides_inactive_rows() {
         harness.app.update();
     }
 
-    let world = harness.app.world_mut();
+    let world = harness.world();
     let mut query = world.query::<(
         &LayoutStrip,
         Has<crate::ecs::ActiveWorkspaceMarker>,

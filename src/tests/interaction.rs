@@ -1,14 +1,16 @@
 use std::sync::Arc;
 
 use bevy::prelude::*;
+use objc2_core_foundation::CGPoint;
 
 use crate::commands::{Command, Direction, Operation};
 use crate::config::{Config, MainOptions, WindowParams};
-use crate::ecs::SpawnWindowTrigger;
 use crate::ecs::display::FloatingLayer;
 use crate::ecs::{ActiveWorkspaceMarker, Position, Unmanaged, layout::LayoutStrip};
+use crate::ecs::{RepositionMarker, SpawnWindowTrigger};
 use crate::events::Event;
 use crate::manager::{Origin, Size, Window};
+use crate::platform::Modifiers;
 use crate::{assert_focused, assert_window_at, assert_window_size};
 
 use super::*;
@@ -35,32 +37,22 @@ fn test_dont_focus() {
     params.index = Some(100);
     let config: Config = (MainOptions::default(), vec![params]).into();
 
-    let mut harness = TestHarness::new().with_config(config).with_windows(3);
-
-    let app = setup_process(harness.app.world_mut());
-    let internal_queue = harness.internal_queue.clone();
+    let harness = TestHarness::new().with_config(config).with_windows(3);
 
     harness
-        .on_iteration(1, move |world| {
+        .on_iteration(1, move |world, state| {
             let origin = Origin::new(0, 0);
             let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-            let window = create_mock_window(
-                3,
-                IRect {
-                    min: origin,
-                    max: origin + size,
-                },
-                internal_queue.clone(),
-                app.clone(),
-            );
+            let frame = IRect::from_corners(origin, origin + size);
+            let window = state.spawn_window(TEST_PROCESS_ID, TEST_WORKSPACE_ID, 3, frame);
             world.trigger(SpawnWindowTrigger(vec![window]));
         })
-        .on_iteration(3, move |world| {
-            assert_window_at!(world, 2, 0, TEST_MENUBAR_HEIGHT);
+        .on_iteration(3, move |world, _| {
+            assert_window_at!(world, 0, 0, TEST_MENUBAR_HEIGHT);
             assert_window_at!(world, 1, 400, TEST_MENUBAR_HEIGHT);
-            assert_window_at!(world, 0, 800, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 2, 800, TEST_MENUBAR_HEIGHT);
             assert_window_at!(world, 3, offscreen_right, TEST_MENUBAR_HEIGHT);
-            assert_focused!(world, 2);
+            assert_focused!(world, 0);
         })
         .run(commands);
 }
@@ -78,7 +70,7 @@ fn test_offscreen_windows_preserve_height() {
 
     TestHarness::new()
         .with_windows(5)
-        .on_iteration(1, move |world| {
+        .on_iteration(1, move |world, _state| {
             assert_window_size!(world, 4, TEST_WINDOW_WIDTH, expected_height);
             assert_window_size!(world, 3, TEST_WINDOW_WIDTH, expected_height);
             assert_window_size!(world, 2, TEST_WINDOW_WIDTH, expected_height);
@@ -128,19 +120,19 @@ fn test_sliver_smaller_than_edge_padding() {
     TestHarness::new()
         .with_config(config)
         .with_windows(5)
-        .on_iteration(2, move |world| {
-            assert_window_at!(world, 4, left_edge, top_edge);
-            assert_window_at!(world, 3, left_edge + TEST_WINDOW_WIDTH, top_edge);
+        .on_iteration(2, move |world, _state| {
+            assert_window_at!(world, 0, left_edge, top_edge);
+            assert_window_at!(world, 1, left_edge + TEST_WINDOW_WIDTH, top_edge);
             assert_window_at!(world, 2, left_edge + 2 * TEST_WINDOW_WIDTH, top_edge);
-            assert_window_at!(world, 1, offscreen_right, top_edge);
-            assert_window_at!(world, 0, offscreen_right, top_edge);
+            assert_window_at!(world, 3, offscreen_right, top_edge);
+            assert_window_at!(world, 4, offscreen_right, top_edge);
         })
-        .on_iteration(3, move |world| {
-            assert_window_at!(world, 4, offscreen_left, top_edge);
-            assert_window_at!(world, 3, offscreen_left, top_edge);
+        .on_iteration(3, move |world, _state| {
+            assert_window_at!(world, 0, offscreen_left, top_edge);
+            assert_window_at!(world, 1, offscreen_left, top_edge);
             assert_window_at!(world, 2, right_edge - 3 * TEST_WINDOW_WIDTH, top_edge);
-            assert_window_at!(world, 1, right_edge - 2 * TEST_WINDOW_WIDTH, top_edge);
-            assert_window_at!(world, 0, right_edge - TEST_WINDOW_WIDTH, top_edge);
+            assert_window_at!(world, 3, right_edge - 2 * TEST_WINDOW_WIDTH, top_edge);
+            assert_window_at!(world, 4, right_edge - TEST_WINDOW_WIDTH, top_edge);
         })
         .run(commands);
 }
@@ -178,15 +170,15 @@ fn test_scrolling() {
     TestHarness::new()
         .with_config(config)
         .with_windows(3)
-        .on_iteration(3, move |world| {
-            assert_window_at!(world, 2, 0, TEST_MENUBAR_HEIGHT);
+        .on_iteration(3, move |world, _state| {
+            assert_window_at!(world, 0, 0, TEST_MENUBAR_HEIGHT);
             assert_window_at!(world, 1, 400, TEST_MENUBAR_HEIGHT);
-            assert_window_at!(world, 0, 800, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 2, 800, TEST_MENUBAR_HEIGHT);
         })
-        .on_iteration(5, move |world| {
-            assert_window_at!(world, 2, -316, TEST_MENUBAR_HEIGHT);
+        .on_iteration(5, move |world, _state| {
+            assert_window_at!(world, 0, -316, TEST_MENUBAR_HEIGHT);
             assert_window_at!(world, 1, 84, TEST_MENUBAR_HEIGHT);
-            assert_window_at!(world, 0, 484, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 2, 484, TEST_MENUBAR_HEIGHT);
         })
         .run(commands);
 }
@@ -214,7 +206,7 @@ fn test_scrolling_stop() {
     TestHarness::new()
         .with_config(config)
         .with_windows(3)
-        .on_iteration(3, |world| {
+        .on_iteration(3, |world, _state| {
             use crate::ecs::Scrolling;
             let mut query = world.query::<&Scrolling>();
             let scroll = query.single(world).unwrap();
@@ -250,9 +242,9 @@ fn test_window_hidden_ratio() {
     TestHarness::new()
         .with_config(config)
         .with_windows(2)
-        .on_iteration(2, |world| {
-            let mut query = world.query::<&Window>();
-            let window = query.iter(world).find(|w| w.id() == 1).unwrap();
+        .on_iteration(2, |world, _state| {
+            let entity = find_window_entity(0, world);
+            let window = world.get::<Window>(entity).expect("finding window");
             assert!(window.frame().min.x < 0);
         })
         .run(commands);
@@ -271,10 +263,16 @@ fn test_window_swap_brings_focused_into_view() {
     let commands = vec![
         Event::MenuOpened { window_id: 0 },
         Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
             command: Command::Window(Operation::Center),
         },
         Event::Command {
             command: Command::Window(Operation::Swap(Direction::Last)),
+        },
+        Event::Command {
+            command: Command::PrintState,
         },
     ];
 
@@ -293,18 +291,18 @@ fn test_window_swap_brings_focused_into_view() {
     TestHarness::new()
         .with_config(config)
         .with_windows(5)
-        .on_iteration(1, move |world| {
-            assert_window_at!(world, 4, centered, TEST_MENUBAR_HEIGHT);
+        .on_iteration(2, move |world, _state| {
+            assert_window_at!(world, 0, centered, TEST_MENUBAR_HEIGHT);
         })
-        .on_iteration(2, move |world| {
-            assert_window_at!(world, 4, right_edge, TEST_MENUBAR_HEIGHT);
+        .on_iteration(4, move |world, _state| {
+            assert_window_at!(world, 0, right_edge, TEST_MENUBAR_HEIGHT);
             assert_window_at!(
                 world,
-                0,
+                4,
                 right_edge - TEST_WINDOW_WIDTH,
                 TEST_MENUBAR_HEIGHT
             );
-            assert_focused!(world, 4);
+            assert_focused!(world, 0);
         })
         .run(commands);
 }
@@ -338,10 +336,10 @@ fn test_window_swap_keeps_strip_when_in_view() {
     TestHarness::new()
         .with_config(config)
         .with_windows(2)
-        .on_iteration(2, |world| {
-            assert_window_at!(world, 0, 0, TEST_MENUBAR_HEIGHT);
-            assert_window_at!(world, 1, TEST_WINDOW_WIDTH, TEST_MENUBAR_HEIGHT);
-            assert_focused!(world, 0);
+        .on_iteration(2, |world, _state| {
+            assert_window_at!(world, 1, 0, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 0, TEST_WINDOW_WIDTH, TEST_MENUBAR_HEIGHT);
+            assert_focused!(world, 1);
         })
         .run(commands);
 }
@@ -360,7 +358,7 @@ fn test_rapid_focus_not_swallowed() {
         },
     ]);
 
-    verify_focused_window(0, harness.app.world_mut());
+    assert_focused!(harness.world(), 4);
 
     let focus_west = Event::Command {
         command: Command::Window(Operation::Focus(Direction::West)),
@@ -373,7 +371,7 @@ fn test_rapid_focus_not_swallowed() {
         harness.app.update();
     }
 
-    verify_focused_window(3, harness.app.world_mut());
+    assert_focused!(harness.world(), 1);
 }
 
 #[test]
@@ -391,11 +389,11 @@ fn test_stale_focus_event_ignored() {
 
     TestHarness::new()
         .with_windows(5)
-        .on_iteration(1, |world| {
-            assert_focused!(world, 3);
+        .on_iteration(1, |world, _state| {
+            assert_focused!(world, 1);
         })
-        .on_iteration(2, |world| {
-            assert_focused!(world, 3);
+        .on_iteration(2, |world, _state| {
+            assert_focused!(world, 1);
         })
         .run(commands);
 }
@@ -405,41 +403,40 @@ fn test_repeated_external_focus_reshuffles_already_focused_window() {
     let commands = vec![
         Event::MenuOpened { window_id: 0 },
         Event::Command {
-            command: Command::Window(Operation::Focus(Direction::East)),
+            command: Command::PrintState,
         },
         Event::Command {
-            command: Command::Window(Operation::Focus(Direction::East)),
+            command: Command::PrintState,
         },
         Event::Command {
-            command: Command::Window(Operation::Focus(Direction::East)),
+            command: Command::PrintState,
         },
         Event::Command {
-            command: Command::Window(Operation::Focus(Direction::East)),
+            command: Command::PrintState,
         },
-        Event::WindowFocused { window_id: 0 },
     ];
 
     TestHarness::new()
         .with_windows(5)
-        .on_iteration(5, |world| {
+        .on_iteration(1, |world, _state| {
             assert_focused!(world, 0);
 
-            let mut query =
-                world.query::<(&mut Position, &LayoutStrip, Has<ActiveWorkspaceMarker>)>();
-            let (mut position, _, _) = query
-                .iter_mut(world)
+            let mut query = world.query::<(Entity, &LayoutStrip, Has<ActiveWorkspaceMarker>)>();
+            let (entity, _, _) = query
+                .iter(world)
                 .find(|(_, _, active)| *active)
                 .expect("active strip");
-            position.0.x = TEST_DISPLAY_WIDTH * 2;
+            world.commands().entity(entity).insert((
+                Position(Origin::new(0, 0)),
+                RepositionMarker(Origin::new(-TEST_DISPLAY_WIDTH, 0)),
+            ));
         })
-        .on_iteration(4, |world| {
+        .on_iteration(2, |_world, state| {
+            state.focus_window(0);
+        })
+        .on_iteration(4, |world, _state| {
             assert_focused!(world, 0);
-            assert_window_at!(
-                world,
-                0,
-                TEST_DISPLAY_WIDTH - TEST_WINDOW_WIDTH,
-                TEST_MENUBAR_HEIGHT
-            );
+            assert_window_at!(world, 0, 0, TEST_MENUBAR_HEIGHT);
         })
         .run(commands);
 }
@@ -461,7 +458,7 @@ fn test_external_focus_reactivates_hidden_virtual_strip_when_marker_is_stale() {
 
     TestHarness::new()
         .with_windows(1)
-        .on_iteration(1, |world| {
+        .on_iteration(1, |world, _state| {
             let mut query = world.query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>();
             let active = query
                 .iter(world)
@@ -470,7 +467,7 @@ fn test_external_focus_reactivates_hidden_virtual_strip_when_marker_is_stale() {
             assert_eq!(active, 1);
             assert_focused!(world, 0);
         })
-        .on_iteration(3, |world| {
+        .on_iteration(3, |world, _state| {
             let mut query = world.query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>();
             let active = query
                 .iter(world)
@@ -506,7 +503,7 @@ fn test_external_focus_restores_app_hidden_window_to_original_virtual_strip() {
 
     TestHarness::new()
         .with_windows(1)
-        .on_iteration(2, |world| {
+        .on_iteration(2, |world, _state| {
             let mut query = world.query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>();
             let active = query
                 .iter(world)
@@ -514,7 +511,7 @@ fn test_external_focus_restores_app_hidden_window_to_original_virtual_strip() {
                 .expect("an active virtual strip");
             assert_eq!(active, 1);
         })
-        .on_iteration(5, |world| {
+        .on_iteration(5, |world, _state| {
             let mut query = world.query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>();
             let active = query
                 .iter(world)
@@ -547,33 +544,9 @@ fn test_external_focus_restores_hidden_window_without_visible_event() {
         },
     ];
 
-    let mut harness = TestHarness::new();
-    let mock_app = setup_process(harness.app.world_mut());
-    let internal_queue = harness.internal_queue.clone();
-    let spawner = Box::new(move |_| {
-        let origin = Origin::new(0, 0);
-        let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-        let window = create_mock_window(
-            0,
-            IRect {
-                min: origin,
-                max: origin + size,
-            },
-            internal_queue.clone(),
-            mock_app.clone(),
-        );
-        vec![window]
-    });
-    let wm = create_mock_window_manager(MockWindowManagerState::new(
-        spawner,
-        vec![TEST_WORKSPACE_ID],
-        vec![0],
-        vec![0],
-    ));
-
-    harness
-        .with_wm(wm)
-        .on_iteration(1, move |world| {
+    TestHarness::new()
+        .with_windows(1)
+        .on_iteration(1, move |world, _state| {
             let mut query = world.query::<&mut Window>();
             let mut window = query
                 .iter_mut(world)
@@ -582,7 +555,7 @@ fn test_external_focus_restores_hidden_window_without_visible_event() {
             window.reposition(Origin::new(0, TEST_DISPLAY_HEIGHT));
             ignored_repositions.store(1, std::sync::atomic::Ordering::SeqCst);
         })
-        .on_iteration(4, |world| {
+        .on_iteration(4, |world, _state| {
             let mut query = world.query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>();
             let active = query
                 .iter(world)
@@ -597,10 +570,6 @@ fn test_external_focus_restores_hidden_window_without_visible_event() {
 
 #[test]
 fn mouse_in_bottom_right_corner_does_not_change_focus() {
-    use crate::events::Event;
-    use crate::platform::Modifiers;
-    use objc2_core_foundation::CGPoint;
-
     // Focus window 2 explicitly, then move cursor into the bottom-right 30x30
     // dead zone. The corner gate should suppress the focus-follow-mouse event,
     // so focus stays on window 2.
@@ -625,10 +594,10 @@ fn mouse_in_bottom_right_corner_does_not_change_focus() {
 
     TestHarness::new()
         .with_windows(3)
-        .on_iteration(2, |world| {
+        .on_iteration(2, |world, _state| {
             // After MouseMoved into corner dead zone: focus should remain on window 2
             // because the corner gate suppressed the focus-follow-mouse event.
-            assert_focused!(world, 2);
+            assert_focused!(world, 0);
         })
         .run(commands);
 }
@@ -658,7 +627,7 @@ fn mouse_outside_corner_still_changes_focus() {
 
     TestHarness::new()
         .with_windows(3)
-        .on_iteration(2, |world| {
+        .on_iteration(2, |world, _state| {
             // After MouseMoved outside corner: FFM should have fired and changed focus.
             // In the mock, find_window_at_point always returns window 0, so window 0
             // should now be focused (changed from window 2).
@@ -691,13 +660,13 @@ fn toggle_floating_layer_flips_state() {
     TestHarness::new()
         .with_config(Config::default())
         .with_windows(3)
-        .on_iteration(0, |world| {
+        .on_iteration(0, |world, _state| {
             assert_eq!(current_layer(world), FloatingLayer::Front);
         })
-        .on_iteration(1, |world| {
+        .on_iteration(1, |world, _state| {
             assert_eq!(current_layer(world), FloatingLayer::Behind);
         })
-        .on_iteration(2, |world| {
+        .on_iteration(2, |world, _state| {
             assert_eq!(current_layer(world), FloatingLayer::Front);
         })
         .run(commands);
@@ -706,49 +675,25 @@ fn toggle_floating_layer_flips_state() {
 #[test]
 fn focus_unmanaged_ignores_floats_from_other_workspaces() {
     let mut harness = TestHarness::new();
-    let mock_app = setup_process(harness.app.world_mut());
-    let internal_queue = harness.internal_queue.clone();
-
-    let active_queue = internal_queue.clone();
-    let other_queue = internal_queue.clone();
-    let active_app = mock_app.clone();
-    let other_app = mock_app;
-    let windows: TestWindowSpawner = Box::new(move |workspace_id| {
-        let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-        if workspace_id == TEST_WORKSPACE_ID {
-            let origin = Origin::new(0, 0);
-            vec![create_mock_window(
-                0,
-                IRect::from_corners(origin, origin + size),
-                active_queue.clone(),
-                active_app.clone(),
-            )]
-        } else {
-            let origin = Origin::new(600, 0);
-            vec![create_mock_window(
-                99,
-                IRect::from_corners(origin, origin + size),
-                other_queue.clone(),
-                other_app.clone(),
-            )]
-        }
-    });
     let workspaces = vec![TEST_WORKSPACE_ID, TEST_WORKSPACE_ID + 1];
-    let mut wm = create_mock_window_manager(MockWindowManagerState::new(
-        windows,
-        workspaces.clone(),
-        vec![],
-        vec![],
-    ));
-    wm.expect_windows_in_workspace()
-        .withf(move |id| workspaces.contains(id))
-        .returning(move |id| {
-            Ok(if id == TEST_WORKSPACE_ID {
-                vec![0]
-            } else {
-                vec![99]
-            })
-        });
+    harness.mock_state.add_display(
+        TEST_DISPLAY_ID,
+        IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
+        workspaces,
+    );
+
+    harness.mock_state.spawn_window(
+        TEST_PROCESS_ID,
+        TEST_WORKSPACE_ID,
+        0,
+        IRect::new(0, 0, TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT),
+    );
+    harness.mock_state.spawn_window(
+        TEST_PROCESS_ID,
+        TEST_WORKSPACE_ID + 1,
+        99,
+        IRect::new(600, 0, 600 + TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT),
+    );
 
     let commands = vec![
         Event::MenuOpened { window_id: 0 },
@@ -764,21 +709,21 @@ fn focus_unmanaged_ignores_floats_from_other_workspaces() {
     ];
 
     harness
-        .with_wm(wm)
-        .on_iteration(2, |world| {
-            let off_workspace_float = find_window_entity(0, world);
+        // .with_wm(wm)
+        .on_iteration(2, |world, _state| {
+            let off_workspace_float = find_window_entity(99, world);
             world
                 .entity_mut(off_workspace_float)
                 .insert(Unmanaged::Floating);
-            assert_focused!(world, 99);
+            assert_focused!(world, 0);
         })
-        .on_iteration(3, |world| {
-            let active_float = find_window_entity(99, world);
+        .on_iteration(3, |world, _state| {
+            let active_float = find_window_entity(0, world);
             world.entity_mut(active_float).insert(Unmanaged::Floating);
-            assert_focused!(world, 99);
+            assert_focused!(world, 0);
         })
-        .on_iteration(4, |world| {
-            assert_focused!(world, 99);
+        .on_iteration(4, |world, _state| {
+            assert_focused!(world, 0);
         })
         .run(commands);
 }

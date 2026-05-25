@@ -1,7 +1,3 @@
-use std::sync::{Arc, RwLock};
-
-use bevy::prelude::*;
-
 mod display;
 mod harness;
 mod interaction;
@@ -19,15 +15,18 @@ pub(crate) const TEST_WORKSPACE_ID: u64 = 2;
 pub(crate) const TEST_DISPLAY_WIDTH: i32 = 1024;
 pub(crate) const TEST_DISPLAY_HEIGHT: i32 = 768;
 
+pub(crate) const EXT_DISPLAY_ID: u32 = 2;
+pub(crate) const EXT_WORKSPACE_ID: u64 = 20;
+pub(crate) const EXT_DISPLAY_WIDTH: i32 = 1920;
+pub(crate) const EXT_DISPLAY_HEIGHT: i32 = 1200;
+
 pub(crate) const TEST_MENUBAR_HEIGHT: i32 = 20;
 pub(crate) const TEST_WINDOW_WIDTH: i32 = 400;
 pub(crate) const TEST_WINDOW_HEIGHT: i32 = 1000;
 
-/// Type alias for a shared, thread-safe queue of `Event`s, used for simulating internal events in tests.
-pub(crate) type EventQueue = Arc<RwLock<Vec<Event>>>;
-
-pub(crate) type TestWindowSpawner = Box<dyn Fn(WorkspaceId) -> Vec<Window> + Send + Sync + 'static>;
-
+#[allow(unused_imports)]
 use crate::events::Event;
+#[allow(unused_imports)]
 use crate::manager::Window;
+#[allow(unused_imports)]
 use crate::platform::WorkspaceId;

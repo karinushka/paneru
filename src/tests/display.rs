@@ -1,5 +1,3 @@
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use bevy::prelude::*;
@@ -37,11 +35,11 @@ fn test_multi_display_lifecycle() {
         )));
 
     harness
-        .on_iteration(1, |world| {
+        .on_iteration(1, |world, _state| {
             let mut query = world.query_filtered::<Entity, With<Display>>();
             query.single(world).expect("should have one display");
         })
-        .on_iteration(2, |world| {
+        .on_iteration(2, |world, _state| {
             assert!(
                 world
                     .query_filtered::<Entity, With<Display>>()
@@ -64,7 +62,7 @@ fn test_multi_display_lifecycle() {
                 "orphaned workspace should have no parent"
             );
         })
-        .on_iteration(3, |world| {
+        .on_iteration(3, |world, _state| {
             let new_display_entity = world
                 .query_filtered::<Entity, With<Display>>()
                 .single(world)
@@ -103,29 +101,15 @@ fn test_multi_workspace_orphaning() {
         },
     ];
 
-    let mock_app = setup_process(setup_world().world_mut());
-    let internal_queue = Arc::new(RwLock::new(Vec::new()));
-    let spawner = window_spawner(1, internal_queue.clone(), mock_app);
     let workspaces = vec![TEST_WORKSPACE_ID, TEST_WORKSPACE_ID + 1];
-    let mut wm = create_mock_window_manager(MockWindowManagerState::new(
-        spawner,
-        workspaces.clone(),
-        vec![0],
-        vec![0],
-    ));
-    wm.expect_windows_in_workspace()
-        .withf(move |id| workspaces.contains(id))
-        .returning(move |id| {
-            Ok(if id == TEST_WORKSPACE_ID {
-                vec![0]
-            } else {
-                vec![]
-            })
-        });
-
-    TestHarness::new()
-        .with_wm(wm)
-        .on_iteration(1, |world| {
+    let mut harness = TestHarness::new();
+    harness.mock_state.add_display(
+        TEST_DISPLAY_ID,
+        IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
+        workspaces,
+    );
+    harness
+        .on_iteration(1, |world, _state| {
             let display_entity = world
                 .query_filtered::<Entity, With<Display>>()
                 .single(world)
@@ -145,7 +129,7 @@ fn test_multi_workspace_orphaning() {
                 assert_eq!(child_of.parent(), display_entity);
             }
         })
-        .on_iteration(2, |world| {
+        .on_iteration(2, |world, _state| {
             let workspace_entities = world
                 .query_filtered::<Entity, With<LayoutStrip>>()
                 .iter(world)
@@ -167,43 +151,25 @@ fn test_multi_workspace_orphaning() {
 
 #[test]
 fn test_multi_display_no_height_crosstalk() {
-    let active_display = Arc::new(AtomicU32::new(EXT_DISPLAY_ID));
-    let ad_clone = active_display.clone();
-
     let mut harness = TestHarness::new();
-    let mock_app = setup_process(harness.app.world_mut());
-    let internal_queue = harness.internal_queue.clone();
+    harness.mock_state.add_display(
+        EXT_DISPLAY_ID,
+        IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+        vec![EXT_WORKSPACE_ID],
+    );
 
-    let eq1 = internal_queue.clone();
-    let eq2 = internal_queue.clone();
-    let app1 = mock_app.clone();
-    let app2 = mock_app;
-    let windows: TestWindowSpawner = Box::new(move |workspace_id| {
-        if workspace_id == EXT_WORKSPACE_ID {
-            let origin = Origin::new(0, 0);
-            let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-            vec![create_mock_window(
-                100,
-                IRect::from_corners(origin, origin + size),
-                eq1.clone(),
-                app1.clone(),
-            )]
-        } else if workspace_id == TEST_WORKSPACE_ID {
-            let origin = Origin::new(0, 0);
-            let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-            vec![create_mock_window(
-                200,
-                IRect::from_corners(origin, origin + size),
-                eq2.clone(),
-                app2.clone(),
-            )]
-        } else {
-            vec![]
-        }
-    });
+    let origin = Origin::new(0, 0);
+    let ext_origin = Origin::new(0, -EXT_DISPLAY_HEIGHT + TEST_MENUBAR_HEIGHT);
+    let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+    let frame = IRect::from_corners(origin, origin + size);
+    let ext_frame = IRect::from_corners(ext_origin, ext_origin + size);
 
-    let wm = create_two_display_mock(windows, active_display);
-    harness = harness.with_wm(wm);
+    harness
+        .mock_state
+        .spawn_window(TEST_PROCESS_ID, EXT_WORKSPACE_ID, 100, ext_frame);
+    harness
+        .mock_state
+        .spawn_window(TEST_PROCESS_ID, TEST_WORKSPACE_ID, 200, frame);
 
     let ext_usable_height = EXT_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT;
 
@@ -220,11 +186,10 @@ fn test_multi_display_no_height_crosstalk() {
     ];
 
     harness
-        .on_iteration(1, move |world| {
+        .on_iteration(1, move |world, _state| {
             assert_window_size!(world, 100, TEST_WINDOW_WIDTH, ext_usable_height);
-            ad_clone.store(TEST_DISPLAY_ID, Ordering::Relaxed);
         })
-        .on_iteration(2, |world| {
+        .on_iteration(2, |world, _state| {
             use crate::ecs::ActiveWorkspaceMarker;
             let mut strip_query =
                 world.query_filtered::<&mut LayoutStrip, Without<ActiveWorkspaceMarker>>();
@@ -232,7 +197,7 @@ fn test_multi_display_no_height_crosstalk() {
                 strip.set_changed();
             }
         })
-        .on_iteration(4, move |world| {
+        .on_iteration(4, move |world, _state| {
             assert_window_size!(world, 100, TEST_WINDOW_WIDTH, ext_usable_height);
         })
         .run(commands);
@@ -240,35 +205,20 @@ fn test_multi_display_no_height_crosstalk() {
 
 #[test]
 fn test_next_display_inserts_into_target_strip() {
-    let active_display = Arc::new(AtomicU32::new(EXT_DISPLAY_ID));
-
     let mut harness = TestHarness::new();
-    let mock_app = setup_process(harness.app.world_mut());
-    let internal_queue = harness.internal_queue.clone();
+    harness.mock_state.add_display(
+        EXT_DISPLAY_ID,
+        IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+        vec![EXT_WORKSPACE_ID],
+    );
 
-    let eq = internal_queue.clone();
-    let app = mock_app;
-    let windows: TestWindowSpawner = Box::new(move |workspace_id| {
-        if workspace_id == EXT_WORKSPACE_ID {
-            let origin = Origin::new(0, 0);
-            let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-            vec![create_mock_window(
-                100,
-                IRect::from_corners(origin, origin + size),
-                eq.clone(),
-                app.clone(),
-            )]
-        } else {
-            vec![]
-        }
-    });
+    let origin = Origin::new(0, 0);
+    let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+    let frame = IRect::from_corners(origin, origin + size);
 
-    let wm = create_two_display_mock(windows, active_display);
-    // let wm = TwoDisplayMock {
-    //     windows,
-    //     active_display: active_display.clone(),
-    // };
-    harness = harness.with_wm(wm);
+    harness
+        .mock_state
+        .spawn_window(TEST_PROCESS_ID, TEST_WORKSPACE_ID, 100, frame);
 
     let commands = vec![
         Event::MenuOpened { window_id: 100 },
@@ -284,56 +234,35 @@ fn test_next_display_inserts_into_target_strip() {
     ];
 
     harness
-        .on_iteration(1, move |world| {
-            assert_on_workspace!(world, 100, EXT_WORKSPACE_ID);
-        })
-        .on_iteration(2, move |world| {
+        .on_iteration(1, move |world, _state| {
             assert_on_workspace!(world, 100, TEST_WORKSPACE_ID);
-            assert_not_on_workspace!(world, 100, EXT_WORKSPACE_ID);
+        })
+        .on_iteration(2, move |world, _state| {
+            assert_on_workspace!(world, 100, EXT_WORKSPACE_ID);
+            assert_not_on_workspace!(world, 100, TEST_WORKSPACE_ID);
         })
         .run(commands);
 }
 
 #[test]
 fn test_send_next_display_stays_on_source() {
-    let active_display = Arc::new(AtomicU32::new(EXT_DISPLAY_ID));
-    let ad_clone = active_display.clone();
-
     let mut harness = TestHarness::new();
-    let mock_app = setup_process(harness.app.world_mut());
-    let internal_queue = harness.internal_queue.clone();
+    harness.mock_state.add_display(
+        EXT_DISPLAY_ID,
+        IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+        vec![EXT_WORKSPACE_ID],
+    );
 
-    let eq = internal_queue.clone();
-    let app = mock_app;
-    let windows: TestWindowSpawner = Box::new(move |workspace_id| {
-        if workspace_id == EXT_WORKSPACE_ID {
-            let origin = Origin::new(0, 0);
-            let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-            vec![
-                create_mock_window(
-                    101,
-                    IRect::from_corners(origin, origin + size),
-                    eq.clone(),
-                    app.clone(),
-                ),
-                create_mock_window(
-                    100,
-                    IRect::from_corners(origin, origin + size),
-                    eq.clone(),
-                    app.clone(),
-                ),
-            ]
-        } else {
-            vec![]
-        }
-    });
+    let origin = Origin::new(0, 0);
+    let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+    let frame = IRect::from_corners(origin, origin + size);
 
-    let wm = create_two_display_mock(windows, active_display);
-    // let wm = TwoDisplayMock {
-    //     windows,
-    //     active_display: active_display.clone(),
-    // };
-    harness = harness.with_wm(wm);
+    harness
+        .mock_state
+        .spawn_window(TEST_PROCESS_ID, TEST_WORKSPACE_ID, 101, frame);
+    harness
+        .mock_state
+        .spawn_window(TEST_PROCESS_ID, TEST_WORKSPACE_ID, 100, frame);
 
     let commands = vec![
         Event::MenuOpened { window_id: 101 },
@@ -349,17 +278,13 @@ fn test_send_next_display_stays_on_source() {
     ];
 
     harness
-        .on_iteration(1, move |world| {
-            assert_on_workspace!(world, 101, EXT_WORKSPACE_ID);
+        .on_iteration(1, move |world, _state| {
+            assert_on_workspace!(world, 100, TEST_WORKSPACE_ID);
         })
-        .on_iteration(2, move |world| {
-            assert_on_workspace!(world, 101, TEST_WORKSPACE_ID);
-            assert_not_on_workspace!(world, 101, EXT_WORKSPACE_ID);
-            assert_eq!(
-                ad_clone.load(Ordering::Relaxed),
-                EXT_DISPLAY_ID,
-                "active display should still be the external display after sendnextdisplay"
-            );
+        .on_iteration(2, move |world, state| {
+            assert_on_workspace!(world, 100, EXT_WORKSPACE_ID);
+            assert_not_on_workspace!(world, 100, TEST_WORKSPACE_ID);
+            assert_eq!(state.active_display(), TEST_DISPLAY_ID);
         })
         .run(commands);
 }
@@ -374,53 +299,38 @@ fn test_send_next_display_stays_on_source() {
 fn test_init_keeps_windows_on_their_real_displays() {
     // Internal (test) display is active. Window 100 lives on the external
     // display's space, window 200 lives on the active display's space.
-    let active_display = Arc::new(AtomicU32::new(TEST_DISPLAY_ID));
 
     let mut harness = TestHarness::new();
-    let mock_app = setup_process(harness.app.world_mut());
-    let internal_queue = harness.internal_queue.clone();
+    harness.mock_state.add_display(
+        EXT_DISPLAY_ID,
+        IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+        vec![EXT_WORKSPACE_ID],
+    );
 
-    let eq1 = internal_queue.clone();
-    let eq2 = internal_queue.clone();
-    let app1 = mock_app.clone();
-    let app2 = mock_app;
+    let origin = Origin::new(0, 0);
     let ext_origin = Origin::new(0, -EXT_DISPLAY_HEIGHT + TEST_MENUBAR_HEIGHT);
-    let int_origin = Origin::new(0, TEST_MENUBAR_HEIGHT);
-    let windows: TestWindowSpawner = Box::new(move |workspace_id| {
-        if workspace_id == EXT_WORKSPACE_ID {
-            let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-            vec![create_mock_window(
-                100,
-                IRect::from_corners(ext_origin, ext_origin + size),
-                eq1.clone(),
-                app1.clone(),
-            )]
-        } else if workspace_id == TEST_WORKSPACE_ID {
-            let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-            vec![create_mock_window(
-                200,
-                IRect::from_corners(int_origin, int_origin + size),
-                eq2.clone(),
-                app2.clone(),
-            )]
-        } else {
-            vec![]
-        }
-    });
-
-    let wm = create_two_display_mock(windows, active_display);
-    // let wm = TwoDisplayMock {
-    //     windows,
-    //     active_display,
-    // };
-    harness = harness.with_wm(wm);
-
-    let commands = vec![Event::Command {
-        command: Command::PrintState,
-    }];
+    let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+    let frame = IRect::from_corners(origin, origin + size);
+    let ext_frame = IRect::from_corners(ext_origin, ext_origin + size);
 
     harness
-        .on_iteration(0, move |world| {
+        .mock_state
+        .spawn_window(TEST_PROCESS_ID, TEST_WORKSPACE_ID, 200, ext_frame);
+    harness
+        .mock_state
+        .spawn_window(TEST_PROCESS_ID, EXT_WORKSPACE_ID, 100, frame);
+
+    let commands = vec![
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    harness
+        .on_iteration(0, move |world, _state| {
             assert_on_workspace!(world, 100, EXT_WORKSPACE_ID);
             assert_not_on_workspace!(world, 100, TEST_WORKSPACE_ID);
             assert_on_workspace!(world, 200, TEST_WORKSPACE_ID);

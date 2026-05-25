@@ -16,61 +16,73 @@ use crate::ecs::mouse::MouseEventsPlugin;
 use crate::ecs::scroll::ScrollEventsPlugin;
 use crate::ecs::workspace::WorkspaceEventsPlugin;
 use crate::ecs::{
-    BProcess, ExistingMarker, FocusFollowsMouse, FocusedMarker, Initializing, MissionControlActive,
-    SkipReshuffle, register_systems, register_triggers,
+    BProcess, ExistingMarker, FocusFollowsMouse, Initializing, MissionControlActive, SkipReshuffle,
+    SpawnWindowTrigger, register_systems, register_triggers,
 };
 use crate::events::Event;
-use crate::manager::{Origin, Size, Window, WindowManager, WindowManagerApi};
-use crate::platform::ProcessSerialNumber;
+use crate::manager::{Window, WindowManager};
 use crate::platform::WinID;
 
-use super::mocks::MockAppState;
 use super::*;
-
-type Verifiers = HashMap<usize, Box<dyn FnMut(&mut World)>>;
 
 pub(crate) struct TestHarness {
     pub(crate) app: App,
-    pub(crate) internal_queue: EventQueue,
-    pub(crate) verifiers: Verifiers,
+    pub(crate) mock_state: MockState,
+    pub(crate) verifiers: HashMap<usize, Box<dyn FnMut(&mut World, MockState)>>,
 }
 
 impl TestHarness {
     pub(crate) fn new() -> Self {
-        let app = setup_world();
-        let internal_queue = Arc::new(RwLock::new(Vec::new()));
+        let pid = TEST_PROCESS_ID;
+        let mut app = setup_world();
+        let mut mock_state = MockState::new();
+
+        // Setup default display
+        mock_state.add_display(
+            TEST_DISPLAY_ID,
+            IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
+            vec![TEST_WORKSPACE_ID],
+        );
+
+        // Initialize Bevy with the mocked process and WM
+        let world = app.world_mut();
+
+        mock_state.spawn_app(pid, "test", "TestApp");
+
+        let mock_process = mock_state.create_process(pid);
+        let process_entity = world.spawn(BProcess(Box::new(mock_process))).id();
+
+        let application = mock_state.create_application(pid);
+        world.spawn((ExistingMarker, ChildOf(process_entity), application));
+
+        let wm = mock_state.create_window_manager();
+        world.insert_resource(WindowManager(Box::new(wm)));
 
         Self {
             app,
-            internal_queue,
+            mock_state,
             verifiers: HashMap::new(),
         }
     }
 
-    pub(crate) fn with_windows(mut self, count: i32) -> Self {
-        let mock_app = setup_process(self.app.world_mut());
-        let spawner = window_spawner(count, self.internal_queue.clone(), mock_app.clone());
-
-        let window_ids = (0..count).collect::<Vec<_>>();
-        let wm_state = MockWindowManagerState::new(
-            spawner,
-            vec![TEST_WORKSPACE_ID],
-            window_ids.clone(),
-            window_ids,
-        );
-        mock_app.set_window_manager_state(wm_state.clone());
-        let wm = create_mock_window_manager(wm_state);
-
-        self.app
-            .world_mut()
-            .insert_resource(WindowManager(Box::new(wm)));
-        self
+    pub(crate) fn world(&mut self) -> &mut World {
+        self.app.world_mut()
     }
 
-    pub(crate) fn with_wm<T: WindowManagerApi + 'static>(mut self, wm: T) -> Self {
-        self.app
-            .world_mut()
-            .insert_resource(WindowManager(Box::new(wm)));
+    pub(crate) fn with_windows(mut self, count: i32) -> Self {
+        let pid = TEST_PROCESS_ID;
+
+        let windows = (0..count)
+            .into_iter()
+            .map(|i| {
+                let win_id = i as WinID;
+                let frame = IRect::new(0, 0, TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+                self.mock_state
+                    .spawn_window(pid, TEST_WORKSPACE_ID, win_id, frame)
+            })
+            .collect::<Vec<_>>();
+        self.app.world_mut().trigger(SpawnWindowTrigger(windows));
+
         self
     }
 
@@ -81,7 +93,7 @@ impl TestHarness {
 
     pub(crate) fn on_iteration<F>(mut self, iteration: usize, verifier: F) -> Self
     where
-        F: FnMut(&mut World) + 'static,
+        F: FnMut(&mut World, MockState) + 'static,
     {
         self.verifiers.insert(iteration, Box::new(verifier));
         self
@@ -94,20 +106,20 @@ impl TestHarness {
             for _ in 0..5 {
                 self.app.update();
 
-                // Flush the event queue with internally generated mock events.
-                while let Some(event) = self.internal_queue.write().unwrap().pop() {
+                // Drain and process events from our virtual OS
+                for event in self.mock_state.drain_events() {
                     self.app.world_mut().write_message::<Event>(event);
                 }
             }
 
             if let Some(verifier) = self.verifiers.get_mut(&iteration) {
-                verifier(self.app.world_mut());
+                verifier(self.app.world_mut(), self.mock_state.clone());
             }
         }
     }
 }
 
-pub(crate) fn setup_world() -> App {
+fn setup_world() -> App {
     static DONE: OnceLock<()> = OnceLock::new();
     DONE.get_or_init(|| {
         _ = tracing_subscriber::registry()
@@ -155,61 +167,12 @@ pub(crate) fn setup_world() -> App {
     bevy_app
 }
 
-pub(crate) fn setup_process(world: &mut World) -> MockAppState {
-    let psn = ProcessSerialNumber { high: 1, low: 2 };
-    let bundle_id = "test".to_string();
-    let mock_process = create_mock_process(psn);
-    let process = world.spawn(BProcess(Box::new(mock_process))).id();
-
-    let state = MockAppState::new(psn, TEST_PROCESS_ID, bundle_id);
-    let application = create_mock_application(state.clone());
-    world.spawn((ExistingMarker, ChildOf(process), application));
-    state
-}
-
-pub(crate) fn window_spawner(
-    count: i32,
-    event_queue: EventQueue,
-    mock_app: MockAppState,
-) -> TestWindowSpawner {
-    Box::new(move |_| {
-        (0..count)
-            .map(|i| {
-                let origin = Origin::new(0, 0);
-                let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT - i);
-                create_mock_window(
-                    i,
-                    IRect {
-                        min: origin,
-                        max: origin + size,
-                    },
-                    event_queue.clone(),
-                    mock_app.clone(),
-                )
-            })
-            .rev()
-            .collect::<Vec<_>>()
-    })
-}
-
 pub(crate) fn find_window_entity(window_id: WinID, world: &mut World) -> Entity {
     let mut query = world.query::<(&Window, Entity)>();
     query
         .iter(world)
         .find(|(w, _)| w.id() == window_id)
         .map_or_else(|| panic!("window {window_id} not found"), |(_, e)| e)
-}
-
-pub(crate) fn verify_focused_window(expected_id: WinID, world: &mut World) {
-    let mut query = world.query::<(&Window, Has<FocusedMarker>)>();
-    let focused: Vec<_> = query.iter(world).filter(|(_, focused)| *focused).collect();
-    assert_eq!(focused.len(), 1, "expected exactly one focused window");
-    assert_eq!(
-        focused[0].0.id(),
-        expected_id,
-        "expected window {expected_id} focused, got {}",
-        focused[0].0.id()
-    );
 }
 
 #[macro_export]

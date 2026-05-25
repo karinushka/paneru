@@ -141,7 +141,7 @@ fn test_state_extraction() {
     // Initial world run to setup windows
     harness.app.update();
 
-    let world = harness.app.world_mut();
+    let world = harness.world();
     let mut system_state: StateExtractionState<'_, '_> = SystemState::new(world);
     let (workspaces, displays, windows, apps) = system_state.get(world);
 
@@ -174,7 +174,7 @@ fn test_state_serializes_display_and_active_virtual_workspace() {
 
     harness.app.update();
 
-    let world = harness.app.world_mut();
+    let world = harness.world();
     let mut active_display_query =
         world.query_filtered::<Entity, With<crate::ecs::ActiveDisplayMarker>>();
     let display_entity = active_display_query
@@ -230,7 +230,7 @@ fn test_state_extraction_includes_parentless_layout_strips() {
 
     harness.app.update();
 
-    let world = harness.app.world_mut();
+    let world = harness.world();
     let parentless_workspace_id = TEST_WORKSPACE_ID + 1;
     world.spawn(LayoutStrip::new(parentless_workspace_id, 0));
 
@@ -525,7 +525,7 @@ fn test_query_state_contract_exposes_active_virtual_workspace_and_windows() {
 
     harness.app.update();
 
-    let world = harness.app.world_mut();
+    let world = harness.world();
     let mut active_display_query =
         world.query_filtered::<Entity, With<crate::ecs::ActiveDisplayMarker>>();
     let display_entity = active_display_query

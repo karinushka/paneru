@@ -14,47 +14,49 @@ fn test_window_shuffle() {
     const PADDING_TOP: u16 = 7;
     const PADDING_BOTTOM: u16 = 9;
     const SLIVER_WIDTH: u16 = 5;
-    const H_PAD: i32 = 2;
 
     let commands = vec![
         Event::MenuOpened { window_id: 0 }, // 0
         Event::Command {
-            command: Command::Window(Operation::Focus(Direction::Last)),
-        }, // 1
+            command: Command::PrintState,
+        },
         Event::Command {
-            command: Command::Window(Operation::Focus(Direction::First)),
+            command: Command::Window(Operation::Focus(Direction::Last)),
         }, // 2
         Event::Command {
-            command: Command::Window(Operation::Focus(Direction::East)),
+            command: Command::Window(Operation::Focus(Direction::First)),
         }, // 3
         Event::Command {
-            command: Command::Window(Operation::Stack(true)),
+            command: Command::Window(Operation::Focus(Direction::East)),
         }, // 4
         Event::Command {
-            command: Command::Window(Operation::Center),
+            command: Command::Window(Operation::Stack(true)),
         }, // 5
         Event::Command {
-            command: Command::Window(Operation::Focus(Direction::East)),
+            command: Command::Window(Operation::Center),
         }, // 6
         Event::Command {
-            command: Command::Window(Operation::Stack(true)),
+            command: Command::Window(Operation::Focus(Direction::East)),
         }, // 7
         Event::Command {
-            command: Command::Window(Operation::Center),
+            command: Command::Window(Operation::Stack(true)),
         }, // 8
         Event::Command {
-            command: Command::PrintState,
+            command: Command::Window(Operation::Center),
         }, // 9
+        Event::Command {
+            command: Command::PrintState,
+        }, // 10
     ];
 
     // Logical width includes padding expansion on each side.
-    let logical_width = TEST_WINDOW_WIDTH + 2 * H_PAD;
+    let logical_width = TEST_WINDOW_WIDTH;
     let top_edge = TEST_MENUBAR_HEIGHT + i32::from(PADDING_TOP);
     let left_edge = i32::from(PADDING_LEFT);
     let right_edge = TEST_DISPLAY_WIDTH - i32::from(PADDING_RIGHT);
-    let offscreen_right = right_edge - i32::from(SLIVER_WIDTH) + i32::from(PADDING_RIGHT) - H_PAD;
+    let offscreen_right = right_edge - i32::from(SLIVER_WIDTH) + i32::from(PADDING_RIGHT);
     let offscreen_left =
-        left_edge - logical_width + i32::from(SLIVER_WIDTH) - i32::from(PADDING_LEFT) + H_PAD;
+        left_edge - logical_width + i32::from(SLIVER_WIDTH) - i32::from(PADDING_LEFT);
     let centered = (TEST_DISPLAY_WIDTH - logical_width) / 2;
 
     let mut params = WindowParams::new(".*", None);
@@ -75,33 +77,33 @@ fn test_window_shuffle() {
     TestHarness::new()
         .with_config(config)
         .with_windows(5)
-        .on_iteration(1, move |world| {
-            assert_window_at!(world, 4, offscreen_left, top_edge);
-            assert_window_at!(world, 3, offscreen_left, top_edge);
+        .on_iteration(2, move |world, _state| {
+            assert_window_at!(world, 0, offscreen_left, top_edge);
+            assert_window_at!(world, 1, offscreen_left, top_edge);
             assert_window_at!(world, 2, right_edge - 3 * logical_width, top_edge);
-            assert_window_at!(world, 1, right_edge - 2 * logical_width, top_edge);
-            assert_window_at!(world, 0, right_edge - logical_width, top_edge);
+            assert_window_at!(world, 3, right_edge - 2 * logical_width, top_edge);
+            assert_window_at!(world, 4, right_edge - logical_width, top_edge);
         })
-        .on_iteration(2, move |world| {
-            assert_window_at!(world, 4, left_edge, top_edge);
-            assert_window_at!(world, 3, left_edge + logical_width, top_edge);
+        .on_iteration(3, move |world, _state| {
+            assert_window_at!(world, 0, left_edge, top_edge);
+            assert_window_at!(world, 1, left_edge + logical_width, top_edge);
             assert_window_at!(world, 2, left_edge + 2 * logical_width, top_edge);
-            assert_window_at!(world, 1, offscreen_right, top_edge);
-            assert_window_at!(world, 0, offscreen_right, top_edge);
+            assert_window_at!(world, 3, offscreen_right, top_edge);
+            assert_window_at!(world, 4, offscreen_right, top_edge);
         })
-        .on_iteration(5, move |world| {
-            assert_window_at!(world, 4, centered, top_edge);
-            assert_window_at!(world, 3, centered, 393);
+        .on_iteration(6, move |world, _state| {
+            assert_window_at!(world, 0, centered, top_edge);
+            assert_window_at!(world, 1, centered, 393);
             assert_window_at!(world, 2, centered + logical_width, top_edge);
-            assert_window_at!(world, 1, offscreen_right, top_edge);
-            assert_window_at!(world, 0, offscreen_right, top_edge);
+            assert_window_at!(world, 3, offscreen_right, top_edge);
+            assert_window_at!(world, 4, offscreen_right, top_edge);
         })
-        .on_iteration(9, move |world| {
-            assert_window_at!(world, 4, centered, top_edge);
-            assert_window_at!(world, 3, centered, 271);
+        .on_iteration(10, move |world, _state| {
+            assert_window_at!(world, 0, centered, top_edge);
+            assert_window_at!(world, 1, centered, 271);
             assert_window_at!(world, 2, centered, 515);
-            assert_window_at!(world, 1, centered + logical_width, top_edge);
-            assert_window_at!(world, 0, offscreen_right, top_edge);
+            assert_window_at!(world, 3, centered + logical_width, top_edge);
+            assert_window_at!(world, 4, offscreen_right, top_edge);
         })
         .run(commands);
 }
@@ -126,9 +128,9 @@ fn test_startup_windows() {
 
     TestHarness::new()
         .with_windows(5)
-        .on_iteration(4, |world| {
-            assert_window_at!(world, 4, 0, TEST_MENUBAR_HEIGHT);
-            assert_window_at!(world, 3, 400, TEST_MENUBAR_HEIGHT);
+        .on_iteration(4, |world, _state| {
+            assert_window_at!(world, 0, 0, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 1, 400, TEST_MENUBAR_HEIGHT);
             assert_window_at!(world, 2, 800, TEST_MENUBAR_HEIGHT);
         })
         .run(commands);
@@ -164,16 +166,16 @@ fn test_window_resize_grow_and_shrink_cycle() {
     TestHarness::new()
         .with_config(config)
         .with_windows(1)
-        .on_iteration(1, |world| {
+        .on_iteration(1, |world, _state| {
             assert_window_size!(world, 0, 512, 748);
         })
-        .on_iteration(2, |world| {
+        .on_iteration(2, |world, _state| {
             assert_window_size!(world, 0, 768, 748);
         })
-        .on_iteration(3, |world| {
+        .on_iteration(3, |world, _state| {
             assert_window_size!(world, 0, 256, 748);
         })
-        .on_iteration(4, |world| {
+        .on_iteration(4, |world, _state| {
             assert_window_size!(world, 0, 768, 748);
         })
         .run(commands);

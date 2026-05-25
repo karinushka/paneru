@@ -1072,7 +1072,7 @@ pub(crate) fn detect_tabbed_windows(
             && window_manager
                 .windows_on_screen()
                 .is_some_and(|ids| !ids.contains(&leader_id))
-            && let Some(mut strip) = workspaces.iter_mut().find(|strip| strip.contains(entity))
+            && let Some(mut strip) = workspaces.iter_mut().find(|strip| strip.contains(leader))
             && strip.contains(leader)
         {
             debug!("Tabbed window detected: adding {entity} to leader {leader}");

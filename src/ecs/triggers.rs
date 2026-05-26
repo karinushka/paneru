@@ -676,11 +676,6 @@ pub(super) fn window_managed_trigger(
             resize_entity(entity, Size::new(width, height), &mut commands);
         }
 
-        if properties.floating() {
-            commands.entity(entity).try_remove::<PreviousManagedStrip>();
-            return;
-        }
-
         insert_at = properties.insertion().or(insert_at);
     }
 

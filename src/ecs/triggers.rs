@@ -645,6 +645,14 @@ pub(super) fn window_managed_trigger(
     }
     let entity = trigger.event().entity;
 
+    if windows
+        .get(entity)
+        .is_some_and(|window| window.role().is_err())
+    {
+        // The marker was removed because the windows was destroyed.
+        return;
+    }
+
     debug!("Entity {entity} is managed again.");
     let (display, dock) = *active_display;
     let display_bounds = display.actual_display_bounds(dock, &config);

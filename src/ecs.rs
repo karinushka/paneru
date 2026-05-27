@@ -68,6 +68,8 @@ pub fn register_systems(app: &mut bevy::app::App) {
         config
             .is_some_and(|config| config.has_dim_inactive_color() || config.border_active_window())
     };
+    let workspace_menu_status =
+        |config: Option<Res<Config>>| config.is_some_and(|config| config.workspace_menu_status());
 
     app.add_systems(
         Startup,
@@ -139,7 +141,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
                 systems::update_flash_messages,
             )
                 .chain(),
-            crate::menubar::update_virtual_workspace_status_item,
+            crate::menubar::update_virtual_workspace_status_item.run_if(workspace_menu_status),
         ),
     );
 }

@@ -74,7 +74,21 @@ Configure trackpad gestures and scroll-wheel window sliding.
 
 ## 4. Decorations (`[decorations]`)
 
-Visual styling for active and inactive windows.
+Visual styling for workspaces, active and inactive windows.
+
+### Virtual Workspace indicators
+
+Toggles display of the currently active virtual workspace in the menubar or in a brief status popup window. Both are enabled by default.
+(Note: disabling menubar indicator requires a restart)
+
+**Example:**
+```toml
+[decorations]
+# Both default to true
+workspace_menu_status = false
+workspace_popup_status = true
+```
+
 
 ### `[decorations.inactive.dim] (Native macOS Dimming)`
 

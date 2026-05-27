@@ -766,6 +766,22 @@ impl Config {
             .reap_empty_workspaces
             .is_some_and(|reap| reap)
     }
+
+    pub fn workspace_menu_status(&self) -> bool {
+        self.inner()
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.workspace_menu_status)
+            .is_none_or(|enabled| enabled)
+    }
+
+    pub fn workspace_popup_status(&self) -> bool {
+        self.inner()
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.workspace_popup_status)
+            .is_none_or(|enabled| enabled)
+    }
 }
 
 fn parse_hex_color(hex: &str) -> (f64, f64, f64) {

@@ -27,14 +27,12 @@ impl MenuBarManager {
         let status_item = status_bar.statusItemWithLength(NSVariableStatusItemLength);
         status_item.setVisible(true);
 
-        let mut manager = Self {
+        Self {
             mtm,
             status_bar,
             status_item,
             current_label: None,
-        };
-        manager.show_virtual_workspace(0);
-        manager
+        }
     }
 
     pub fn show_virtual_workspace(&mut self, virtual_index: u32) {

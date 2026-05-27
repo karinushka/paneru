@@ -697,6 +697,7 @@ fn switch_virtual_workspace_bind(
     mut messages: MessageReader<Event>,
     active_display: ActiveDisplay,
     workspaces: Query<(Entity, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    config: Res<Config>,
     mut commands: Commands,
 ) {
     let Some(operation) = filter_window_operations(&mut messages, |op| {
@@ -738,7 +739,10 @@ fn switch_virtual_workspace_bind(
                     FloatingLayer::default(),
                     ActiveWorkspaceMarker,
                 ));
-                flash_message(format!("{}", *target_virtual_index + 1), 1.0, &mut commands);
+
+                if config.workspace_popup_status() {
+                    flash_message(format!("{}", *target_virtual_index + 1), 1.0, &mut commands);
+                }
                 return;
             };
             index
@@ -757,8 +761,9 @@ fn switch_virtual_workspace_bind(
             .try_insert(SelectedVirtualMarker)
             .try_insert(ActiveWorkspaceMarker);
 
-        // Flash workspace number
-        flash_message(format!("{}", next_virtual_index + 1), 1.0, &mut commands);
+        if config.workspace_popup_status() {
+            flash_message(format!("{}", next_virtual_index + 1), 1.0, &mut commands);
+        }
     }
     debug!(
         "Switched virtual workspace on display {} from {} to {}",
@@ -775,6 +780,7 @@ fn move_virtual_workspace_bind(
     mut messages: MessageReader<Event>,
     windows: Windows,
     active_display: ActiveDisplay,
+    config: Res<Config>,
     mut commands: Commands,
 ) {
     let Some(operation) = filter_window_operations(&mut messages, |op| {
@@ -819,7 +825,7 @@ fn move_virtual_workspace_bind(
         move_focus,
     });
 
-    if move_focus == MoveFocus::Follow {
+    if move_focus == MoveFocus::Follow && config.workspace_popup_status() {
         flash_message(format!("{}", target_virtual_index + 1), 1.0, &mut commands);
     }
 

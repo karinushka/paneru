@@ -102,12 +102,12 @@ fn test_multi_workspace_orphaning() {
     ];
 
     let workspaces = vec![TEST_WORKSPACE_ID, TEST_WORKSPACE_ID + 1];
-    let mut harness = TestHarness::new();
-    harness.mock_state.add_display(
-        TEST_DISPLAY_ID,
-        IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
-        workspaces,
-    );
+    let harness = TestHarness::new()
+        .with_display(
+            TEST_DISPLAY_ID,
+            IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
+            workspaces,
+        );
     harness
         .on_iteration(1, |world, _state| {
             let display_entity = world

@@ -20,9 +20,7 @@ use crate::tests::{
 
 #[test]
 fn test_startup_restore_rebuilds_virtual_workspace_layout() {
-    let mut harness = TestHarness::new().with_windows(2);
-
-    harness.world().insert_resource(PaneruState {
+    let state = PaneruState {
         version: 2,
         timestamp: 123_456_789,
         active_display_id: Some(TEST_DISPLAY_ID),
@@ -49,7 +47,11 @@ fn test_startup_restore_rebuilds_virtual_workspace_layout() {
                 ],
             }],
         }],
-    });
+    };
+
+    let mut harness = TestHarness::new()
+        .with_windows(2)
+        .with_state(state);
 
     for _ in 0..5 {
         harness.app.update();

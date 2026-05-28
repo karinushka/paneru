@@ -14,6 +14,7 @@ use crate::ecs::focus::FocusEventsPlugin;
 use crate::ecs::layout::LayoutEventsPlugin;
 use crate::ecs::mouse::MouseEventsPlugin;
 use crate::ecs::scroll::ScrollEventsPlugin;
+use crate::ecs::state::PaneruState;
 use crate::ecs::workspace::WorkspaceEventsPlugin;
 use crate::ecs::{
     BProcess, ExistingMarker, FocusFollowsMouse, Initializing, MissionControlActive, SkipReshuffle,
@@ -21,7 +22,7 @@ use crate::ecs::{
 };
 use crate::events::Event;
 use crate::manager::{Window, WindowManager};
-use crate::platform::WinID;
+use crate::platform::{Pid, WinID, WorkspaceId};
 
 use super::*;
 
@@ -86,8 +87,83 @@ impl TestHarness {
         self
     }
 
+    #[allow(unused)]
+    pub(crate) fn with_window<F>(mut self, id: WinID, f: F) -> Self
+    where
+        F: FnOnce(&mut MockWindowData),
+    {
+        let pid = TEST_PROCESS_ID;
+        let frame = IRect::new(0, 0, TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+        let window = self
+            .mock_state
+            .spawn_window(pid, TEST_WORKSPACE_ID, id, frame);
+        self.mock_state.update_window(id, f);
+        self.app
+            .world_mut()
+            .trigger(SpawnWindowTrigger(vec![window]));
+        self
+    }
+
+    pub(crate) fn with_workspace_window<F>(
+        mut self,
+        id: WinID,
+        workspace_id: WorkspaceId,
+        f: F,
+    ) -> Self
+    where
+        F: FnOnce(&mut MockWindowData),
+    {
+        let pid = TEST_PROCESS_ID;
+        let frame = IRect::new(0, 0, TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+        let window = self.mock_state.spawn_window(pid, workspace_id, id, frame);
+        self.mock_state.update_window(id, f);
+        self.app
+            .world_mut()
+            .trigger(SpawnWindowTrigger(vec![window]));
+        self
+    }
+
+    #[allow(unused)]
+    pub(crate) fn with_focused_window(self, id: WinID) -> Self {
+        self.mock_state.focus_window(id);
+        self
+    }
+
+    pub(crate) fn with_display(
+        mut self,
+        id: u32,
+        bounds: IRect,
+        workspaces: Vec<WorkspaceId>,
+    ) -> Self {
+        self.mock_state.add_display(id, bounds, workspaces);
+        self
+    }
+
+    #[allow(unused)]
+    pub(crate) fn with_app<F>(mut self, pid: Pid, bundle_id: &str, name: &str, f: F) -> Self
+    where
+        F: FnOnce(&mut MockAppData),
+    {
+        self.mock_state.spawn_app(pid, bundle_id, name);
+        self.mock_state.update_app(pid, f);
+
+        let world = self.app.world_mut();
+        let mock_process = self.mock_state.create_process(pid);
+        let process_entity = world.spawn(BProcess(Box::new(mock_process))).id();
+
+        let application = self.mock_state.create_application(pid);
+        world.spawn((ExistingMarker, ChildOf(process_entity), application));
+
+        self
+    }
+
     pub(crate) fn with_config(mut self, config: Config) -> Self {
         self.app.world_mut().insert_resource(config);
+        self
+    }
+
+    pub(crate) fn with_state(mut self, state: PaneruState) -> Self {
+        self.app.world_mut().insert_resource(state);
         self
     }
 

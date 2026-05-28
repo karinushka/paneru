@@ -17,14 +17,13 @@ use tracing::{Level, debug, error, instrument, warn};
 use super::{ActiveDisplayMarker, SpawnWindowTrigger};
 use crate::commands::{Direction, MoveFocus, Operation, filter_window_operations};
 use crate::config::Config;
-use crate::ecs::display::FloatingLayer;
 use crate::ecs::focus::FocusHistory;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, Initializing, NativeFullscreenMarker, Position,
-    RefreshWindowSizes, SelectedVirtualMarker, Timeout, Unmanaged, flash_message, focus_entity,
-    reposition_entity, reshuffle_around,
+    RefreshWindowSizes, SelectedVirtualMarker, SpawnCommandsExt, Timeout, Unmanaged, flash_message,
+    focus_entity, reposition_entity, reshuffle_around,
 };
 use crate::errors::Result;
 use crate::events::Event;
@@ -339,14 +338,8 @@ fn workspace_created_trigger(
         debug!("Workspace create {space_id}");
         let (active_display, display_entity) = *active_display;
         let strip = LayoutStrip::new(*space_id, 0);
-        let origin = Position(active_display.bounds().min);
-        commands.spawn((
-            strip,
-            origin,
-            SelectedVirtualMarker,
-            FloatingLayer::default(),
-            ChildOf(display_entity),
-        ));
+        let origin = active_display.bounds().min;
+        commands.spawn_layout_strip(strip, origin, display_entity, false);
     }
 }
 
@@ -619,13 +612,7 @@ fn handle_virtual_window_moves(
             let mut new_strip = LayoutStrip::new(workspace_id, target_idx);
             new_strip.append_tab_group(&moving_entities);
 
-            let mut spawned = commands.spawn((
-                new_strip,
-                Position(origin),
-                SelectedVirtualMarker,
-                FloatingLayer::default(),
-                ChildOf(display_entity),
-            ));
+            let mut spawned = commands.spawn_layout_strip(new_strip, origin, display_entity, false);
             if stay {
                 // show_active_workspace needs this to restore the strip
                 // onscreen when the user later switches to this workspace.
@@ -724,15 +711,12 @@ fn switch_virtual_workspace_bind(
                 if *target_virtual_index == 0 {
                     return;
                 }
-                let strip = LayoutStrip::new(workspace_id, *target_virtual_index);
-                commands.spawn((
-                    strip,
-                    Position(active_display.bounds().min),
-                    ChildOf(active_display.entity()),
-                    SelectedVirtualMarker,
-                    FloatingLayer::default(),
-                    ActiveWorkspaceMarker,
-                ));
+                commands.spawn_layout_strip(
+                    LayoutStrip::new(workspace_id, *target_virtual_index),
+                    active_display.bounds().min,
+                    active_display.entity(),
+                    true,
+                );
 
                 if config.workspace_popup_status() {
                     flash_message(format!("{}", *target_virtual_index + 1), 1.0, &mut commands);

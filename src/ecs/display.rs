@@ -16,8 +16,7 @@ use tracing::{Level, debug, error, instrument};
 use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::{
-    ActiveDisplayMarker, Position, RefreshWindowSizes, SelectedVirtualMarker, SendMessageTrigger,
-    Timeout,
+    ActiveDisplayMarker, RefreshWindowSizes, SendMessageTrigger, SpawnCommandsExt, Timeout,
 };
 use crate::events::Event;
 use crate::manager::{Display, WindowManager};
@@ -282,15 +281,9 @@ fn reparent_existing_workspaces(
 
         if !found {
             // New workspace.
-            let origin = Position(display_bounds.min);
+            let origin = display_bounds.min;
             debug!("new workspace {id} on display {display_entity}");
-            commands.spawn((
-                origin.clone(),
-                LayoutStrip::new(id, 0),
-                SelectedVirtualMarker,
-                FloatingLayer::default(),
-                ChildOf(display_entity),
-            ));
+            commands.spawn_layout_strip(LayoutStrip::new(id, 0), origin, display_entity, false);
         }
     }
 }

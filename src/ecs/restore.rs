@@ -19,8 +19,8 @@ use crate::ecs::state::{
 };
 use crate::ecs::workspace::PreviousStripPosition;
 use crate::ecs::{
-    ActiveDisplayMarker, ActiveWorkspaceMarker, Position, RestoreWindowState,
-    SelectedVirtualMarker, Unmanaged,
+    ActiveDisplayMarker, ActiveWorkspaceMarker, RestoreWindowState, SelectedVirtualMarker,
+    SpawnCommandsExt, Unmanaged,
 };
 use crate::manager::{Application, Display, Window};
 use crate::platform::{Pid, WinID, WorkspaceId};
@@ -535,12 +535,9 @@ pub(super) fn restore_window_state(
             focus: strip.all_windows().first().copied(),
         };
 
-        let mut spawned = commands.spawn((strip, Position(origin), ChildOf(display_entity)));
-        if is_global_active {
-            spawned.insert((ActiveWorkspaceMarker, SelectedVirtualMarker));
-        } else if is_active {
-            spawned.insert((SelectedVirtualMarker, previous));
-        } else {
+        let mut spawned =
+            commands.spawn_layout_strip(strip, origin, display_entity, is_global_active);
+        if !is_global_active {
             spawned.insert(previous);
         }
         restored_strips += 1;

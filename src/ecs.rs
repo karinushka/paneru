@@ -4,11 +4,12 @@ use std::time::{Duration, Instant};
 use bevy::MinimalPlugins;
 use bevy::app::App as BevyApp;
 use bevy::app::{PostUpdate, PreUpdate, Startup};
+use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::message::Messages;
 use bevy::ecs::query::With;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::common_conditions::{not, resource_exists};
-use bevy::ecs::system::{Commands, Query, Res, SystemId};
+use bevy::ecs::system::{Commands, EntityCommands, Query, Res, SystemId};
 use bevy::prelude::Event as BevyEvent;
 use bevy::tasks::Task;
 use bevy::time::Timer;
@@ -23,6 +24,8 @@ use tracing::{Level, instrument};
 
 use crate::commands::register_commands;
 use crate::config::{CONFIGURATION_FILE, Config, WindowParams};
+use crate::ecs::display::FloatingLayer;
+use crate::ecs::layout::LayoutStrip;
 use crate::ecs::state::PaneruState;
 use crate::errors::Result;
 use crate::events::{Event, EventSender};
@@ -468,6 +471,39 @@ pub fn focus_entity(entity: Entity, raise: bool, commands: &mut Commands) {
 pub fn flash_message(message: String, duration: f32, commands: &mut Commands) {
     let timeout = Timeout::new(Duration::from_secs_f32(duration), None, commands);
     commands.spawn((timeout, FlashMessage(message)));
+}
+
+pub trait SpawnCommandsExt {
+    // Spawns a layout strip in a single place, to properly insert all components.
+    fn spawn_layout_strip(
+        &mut self,
+        layout_strip: LayoutStrip,
+        origin: Origin,
+        display_entity: Entity,
+        active: bool,
+    ) -> EntityCommands<'_>;
+}
+
+impl SpawnCommandsExt for Commands<'_, '_> {
+    fn spawn_layout_strip(
+        &mut self,
+        layout_strip: LayoutStrip,
+        origin: Origin,
+        display_entity: Entity,
+        active: bool,
+    ) -> EntityCommands<'_> {
+        let mut spawned = self.spawn((
+            layout_strip,
+            Position(origin),
+            SelectedVirtualMarker,
+            FloatingLayer::default(),
+            ChildOf(display_entity),
+        ));
+        if active {
+            spawned.insert(ActiveWorkspaceMarker);
+        }
+        spawned
+    }
 }
 
 pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<BevyApp> {

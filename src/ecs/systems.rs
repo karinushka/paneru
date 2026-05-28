@@ -24,14 +24,13 @@ use super::{
 };
 
 use crate::config::{Config, decorations::BorderRadiusOption};
-use crate::ecs::display::FloatingLayer;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, BruteforceWindows, FlashMessage, Initializing,
     LocateDockTrigger, LowPowerMode, MissionControlActive, Position, RestoreWindowState, Scrolling,
-    SelectedVirtualMarker, SendMessageTrigger, Unmanaged, WidthRatio, WindowProperties,
-    focus_entity, reposition_entity, reshuffle_around,
+    SendMessageTrigger, SpawnCommandsExt, Unmanaged, WidthRatio, WindowProperties, focus_entity,
+    reposition_entity, reshuffle_around,
 };
 use crate::events::Event;
 use crate::manager::{
@@ -75,25 +74,8 @@ pub fn gather_displays(window_manager: Res<WindowManager>, mut commands: Command
         };
 
         for id in workspaces {
-            let strip = LayoutStrip::new(id, 0);
-            if id == active_space {
-                commands.spawn((
-                    strip,
-                    origin.clone(),
-                    ActiveWorkspaceMarker,
-                    SelectedVirtualMarker,
-                    FloatingLayer::default(),
-                    ChildOf(entity),
-                ));
-            } else {
-                commands.spawn((
-                    strip,
-                    origin.clone(),
-                    SelectedVirtualMarker,
-                    FloatingLayer::default(),
-                    ChildOf(entity),
-                ));
-            }
+            let active = id == active_space;
+            commands.spawn_layout_strip(LayoutStrip::new(id, 0), origin.0, entity, active);
         }
     }
 }

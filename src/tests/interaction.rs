@@ -674,26 +674,17 @@ fn toggle_floating_layer_flips_state() {
 
 #[test]
 fn focus_unmanaged_ignores_floats_from_other_workspaces() {
-    let mut harness = TestHarness::new();
     let workspaces = vec![TEST_WORKSPACE_ID, TEST_WORKSPACE_ID + 1];
-    harness.mock_state.add_display(
-        TEST_DISPLAY_ID,
-        IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
-        workspaces,
-    );
-
-    harness.mock_state.spawn_window(
-        TEST_PROCESS_ID,
-        TEST_WORKSPACE_ID,
-        0,
-        IRect::new(0, 0, TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT),
-    );
-    harness.mock_state.spawn_window(
-        TEST_PROCESS_ID,
-        TEST_WORKSPACE_ID + 1,
-        99,
-        IRect::new(600, 0, 600 + TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT),
-    );
+    let harness = TestHarness::new()
+        .with_display(
+            TEST_DISPLAY_ID,
+            IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
+            workspaces,
+        )
+        .with_workspace_window(0, TEST_WORKSPACE_ID, |_| {})
+        .with_workspace_window(99, TEST_WORKSPACE_ID + 1, |w| {
+            w.frame = IRect::new(600, 0, 600 + TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+        });
 
     let commands = vec![
         Event::MenuOpened { window_id: 0 },
@@ -709,7 +700,6 @@ fn focus_unmanaged_ignores_floats_from_other_workspaces() {
     ];
 
     harness
-        // .with_wm(wm)
         .on_iteration(2, |world, _state| {
             let off_workspace_float = find_window_entity(99, world);
             world

@@ -68,6 +68,8 @@ pub fn register_systems(app: &mut bevy::app::App) {
     };
     let workspace_menu_status =
         |config: Option<Res<Config>>| config.is_some_and(|config| config.workspace_menu_status());
+    let native_tabs_enabled =
+        |config: Option<Res<Config>>| config.is_none_or(|config| config.native_tabs_enabled());
 
     app.add_systems(
         Startup,
@@ -77,7 +79,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
         PreUpdate,
         (
             systems::window_creation_event,
-            systems::detect_tabbed_windows,
+            systems::detect_tabbed_windows.run_if(native_tabs_enabled),
             systems::pump_events,
         ),
     );

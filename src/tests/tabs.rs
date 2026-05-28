@@ -2,6 +2,7 @@ use bevy::prelude::*;
 
 use crate::assert_window_size;
 use crate::commands::{Command, MoveFocus, Operation};
+use crate::config::{Config, MainOptions};
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::{ActiveWorkspaceMarker, Bounds, SpawnWindowTrigger};
 use crate::events::Event;
@@ -168,6 +169,99 @@ fn test_native_tab_removal_keeps_remaining_window_column() {
             assert_eq!(strip.len(), 1, "removing a tab should not empty the column");
             assert_eq!(strip.tab_group(tab_zero), None);
             assert_eq!(strip.index_of(tab_zero).unwrap(), 0);
+        })
+        .run(commands);
+}
+
+#[test]
+fn test_offscreen_same_app_same_width_different_frame_not_tabbed() {
+    // Regression: a same-app sibling that happens to be off-screen (scrolled out of
+    // the strip, on another space, etc.) with merely the same width as the new
+    // window must not be misidentified as a native tab. Real native tabs share the
+    // leader's full frame; partial matches must not trigger conversion.
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    TestHarness::new()
+        .with_windows(1)
+        .on_iteration(0, move |world, state| {
+            let leader = find_window_entity(0, world);
+            let leader_frame = world
+                .get::<Window>(leader)
+                .map(|window| window.frame())
+                .expect("frame should exist");
+
+            // Same width as the leader, but a different origin and a different
+            // height — what a freshly-spawned same-app window typically looks like.
+            let mut frame = leader_frame;
+            frame.min.y += 50;
+            frame.max.y = frame.min.y + leader_frame.height() / 2;
+
+            let window = state.spawn_window(TEST_PROCESS_ID, TEST_WORKSPACE_ID, 1, frame);
+            // Pretend the existing window is off-screen so the only thing preventing
+            // a false positive is the frame check.
+            state.window_visible(0, false);
+            world.trigger(SpawnWindowTrigger(vec![window]));
+        })
+        .on_iteration(1, move |world, _state| {
+            let leader = find_window_entity(0, world);
+            let new_window = find_window_entity(1, world);
+            let strip = world
+                .query::<&LayoutStrip>()
+                .single(world)
+                .expect("getting layout strip");
+            assert!(!strip.tabbed(leader));
+            assert!(!strip.tabbed(new_window));
+            assert_eq!(
+                strip.len(),
+                2,
+                "non-matching frames must get their own column"
+            );
+        })
+        .run(commands);
+}
+
+#[test]
+fn test_disable_native_tabs_skips_detection() {
+    // Setting `disable_native_tabs = true` must short-circuit the detector even
+    // when the new window's frame matches the leader exactly.
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    let options = MainOptions {
+        disable_native_tabs: Some(true),
+        ..MainOptions::default()
+    };
+    let config: Config = (options, vec![]).into();
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(1)
+        .on_iteration(0, move |world, state| {
+            spawn_matching_native_tab(world, state, 0);
+        })
+        .on_iteration(1, move |world, _state| {
+            let leader = find_window_entity(0, world);
+            let new_window = find_window_entity(1, world);
+            let strip = world
+                .query::<&LayoutStrip>()
+                .single(world)
+                .expect("getting layout strip");
+            assert!(!strip.tabbed(leader));
+            assert!(!strip.tabbed(new_window));
+            assert_eq!(
+                strip.len(),
+                2,
+                "detector must be disabled — windows stay in separate columns"
+            );
         })
         .run(commands);
 }

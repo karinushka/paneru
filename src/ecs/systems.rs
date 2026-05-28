@@ -1049,23 +1049,29 @@ pub(crate) fn window_creation_event(mut messages: MessageReader<Event>, mut comm
 
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn detect_tabbed_windows(
-    created: Populated<(Entity, &Bounds, &ChildOf), Added<Window>>,
+    created: Populated<(Entity, &Position, &Bounds, &ChildOf), Added<Window>>,
     windows: Query<(Entity, &Window, &Position, &Bounds, &ChildOf), With<Window>>,
     apps: Query<Entity, With<Application>>,
     mut workspaces: Query<&mut LayoutStrip>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
-    for (entity, Bounds(bounds), child) in created {
+    for (entity, Position(position), Bounds(bounds), child) in created {
         let Ok(app_entity) = apps.get(child.parent()) else {
             continue;
         };
 
-        // Overlapping Frame Strategy: check if this window overlaps exactly with an existing
-        // window from the same application. If so, it's likely a native tab.
+        // Overlapping Frame Strategy: native macOS tabs share an *exact* frame with their
+        // leader — same origin and same size. Matching on width alone yields false
+        // positives whenever an app re-opens with its default geometry while a same-app
+        // sibling happens to be off-screen (scrolled out of the strip, on another
+        // workspace, behind a fullscreen window), so we require the full frame to agree.
         let tabbed = windows.iter().find_map(
             |(leader, window, Position(leader_position), Bounds(leader_bounds), parent)| {
-                (leader != entity && parent.parent() == app_entity && leader_bounds.x == bounds.x)
+                (leader != entity
+                    && parent.parent() == app_entity
+                    && leader_bounds == bounds
+                    && leader_position == position)
                     .then_some((leader, window.id(), leader_position))
             },
         );

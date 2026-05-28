@@ -767,6 +767,14 @@ impl Config {
             .is_some_and(|reap| reap)
     }
 
+    pub fn native_tabs_enabled(&self) -> bool {
+        // Default is enabled.
+        !self
+            .options()
+            .disable_native_tabs
+            .is_some_and(|disabled| disabled)
+    }
+
     pub fn workspace_menu_status(&self) -> bool {
         self.inner()
             .decorations
@@ -1036,6 +1044,11 @@ pub struct MainOptions {
     /// If enabled, an empty virtual workspace will be removed.
     /// Default: true.
     pub reap_empty_workspaces: Option<bool>,
+
+    /// Disable detection of native macOS tabs. When set, newly-spawned windows are
+    /// never auto-merged into a tab group with an existing same-app sibling.
+    /// Default: false.
+    pub disable_native_tabs: Option<bool>,
 }
 
 /// Returns a default set of column widths.

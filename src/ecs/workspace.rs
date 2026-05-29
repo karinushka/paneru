@@ -22,8 +22,7 @@ use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, Initializing, NativeFullscreenMarker, Position,
-    RefreshWindowSizes, SelectedVirtualMarker, SpawnCommandsExt, Timeout, Unmanaged, flash_message,
-    focus_entity, reposition_entity, reshuffle_around,
+    RefreshWindowSizes, SelectedVirtualMarker, SpawnCommandsExt, Timeout, Unmanaged,
 };
 use crate::errors::Result;
 use crate::events::Event;
@@ -308,7 +307,7 @@ fn workspace_destroyed_trigger(
                 previous_index
             );
             strip.insert_at(previous_index, window);
-            reshuffle_around(window, &mut commands);
+            commands.reshuffle_around(window);
         }
 
         if let Ok(mut entity_commands) = commands.get_entity(entity) {
@@ -490,7 +489,7 @@ fn refresh_workspace_window_sizes(
         });
     for window_entity in floating {
         debug!("repositioning floating window {window_entity}");
-        reposition_entity(window_entity, active_display.bounds().min, &mut commands);
+        commands.reposition_entity(window_entity, active_display.bounds().min);
     }
 
     if let Ok(mut cmds) = commands.get_entity(strip_entity) {
@@ -659,10 +658,10 @@ fn handle_virtual_window_moves(
 
         if stay && let Some(neighbour) = source_neighbour {
             // Layout chain repositions the window offscreen with its hidden strip.
-            focus_entity(neighbour, false, &mut commands);
-            reshuffle_around(neighbour, &mut commands);
+            commands.focus_entity(neighbour, false);
+            commands.reshuffle_around(neighbour);
         } else {
-            reshuffle_around(window_entity, &mut commands);
+            commands.reshuffle_around(window_entity);
         }
         debug!(
             "Moved window {} to virtual workspace {}",
@@ -719,7 +718,7 @@ fn switch_virtual_workspace_bind(
                 );
 
                 if config.workspace_popup_status() {
-                    flash_message(format!("{}", *target_virtual_index + 1), 1.0, &mut commands);
+                    commands.flash_message(format!("{}", *target_virtual_index + 1), 1.0);
                 }
                 return;
             };
@@ -740,7 +739,7 @@ fn switch_virtual_workspace_bind(
             .try_insert(ActiveWorkspaceMarker);
 
         if config.workspace_popup_status() {
-            flash_message(format!("{}", next_virtual_index + 1), 1.0, &mut commands);
+            commands.flash_message(format!("{}", next_virtual_index + 1), 1.0);
         }
     }
     debug!(
@@ -804,7 +803,7 @@ fn move_virtual_workspace_bind(
     });
 
     if move_focus == MoveFocus::Follow && config.workspace_popup_status() {
-        flash_message(format!("{}", target_virtual_index + 1), 1.0, &mut commands);
+        commands.flash_message(format!("{}", target_virtual_index + 1), 1.0);
     }
 
     debug!("Moving {focused_entity} to new virtual space {target_virtual_index}");
@@ -894,7 +893,7 @@ fn show_active_workspace(
         if let Some(entity) = focus
             && strip.contains(*entity)
         {
-            focus_entity(*entity, false, &mut commands);
+            commands.focus_entity(*entity, false);
         }
     }
 }

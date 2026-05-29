@@ -17,7 +17,7 @@ use crate::config::Config;
 use crate::ecs::params::Windows;
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, DockPosition, EnsureVisibleMarker, Initializing, LayoutPosition,
-    Position, RepositionMarker, ReshuffleAroundMarker, Scrolling, reposition_entity,
+    Position, RepositionMarker, ReshuffleAroundMarker, Scrolling, SpawnCommandsExt,
 };
 use crate::errors::{Error, Result};
 use crate::manager::{Display, Origin, Window};
@@ -965,7 +965,7 @@ fn reshuffle_layout_strip(
         }
 
         trace!("reshuffle_layout_strip: triggered for entity {entity}, offset {strip_position}");
-        reposition_entity(strip_entity, strip_position, &mut commands);
+        commands.reposition_entity(strip_entity, strip_position);
     });
 }
 
@@ -1014,7 +1014,7 @@ fn ensure_visible_in_strip(
         }
         let strip_target = (clamped_min - layout_position.0).with_y(strip_position.0.y);
         trace!("ensure_visible_in_strip: entity {entity}, scroll strip to {strip_target}");
-        reposition_entity(strip_entity, strip_target, &mut commands);
+        commands.reposition_entity(strip_entity, strip_target);
     }
 }
 
@@ -1283,7 +1283,7 @@ fn position_layout_windows(
                     entity_commands.try_remove::<RepositionMarker>();
                 }
             } else {
-                reposition_entity(entity, frame.min, &mut commands);
+                commands.reposition_entity(entity, frame.min);
             }
         }
     }

@@ -26,8 +26,8 @@ use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, GlobalState, Windows};
 use crate::ecs::state::PaneruState;
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, DockPosition, Initializing, LayoutPosition, LocateDockTrigger,
-    Position, RestoreWindowState, Scrolling, SendMessageTrigger, VerifyWindowPosition, WidthRatio,
-    WindowProperties, focus_entity, reposition_entity, reshuffle_around, resize_entity,
+    Position, RestoreWindowState, Scrolling, SendMessageTrigger, SpawnCommandsExt,
+    VerifyWindowPosition, WidthRatio, WindowProperties,
 };
 use crate::events::Event;
 use crate::manager::{
@@ -285,7 +285,7 @@ pub(super) fn window_focused_trigger(
 
         if already_focused {
             if !global_state.skip_reshuffle() && !global_state.initializing() {
-                reshuffle_around(entity, &mut commands);
+                commands.reshuffle_around(entity);
             }
             continue;
         }
@@ -562,8 +562,8 @@ pub(super) fn window_unmanaged_trigger(
             let y = (f64::from(display_bounds.height()) * ry) as i32;
             let w = (f64::from(display_bounds.width()) * rw) as i32;
             let h = (f64::from(display_bounds.height()) * rh) as i32;
-            reposition_entity(entity, Origin::new(x, y), &mut commands);
-            resize_entity(entity, Size::new(w, h), &mut commands);
+            commands.reposition_entity(entity, Origin::new(x, y));
+            commands.resize_entity(entity, Size::new(w, h));
         } else if !properties.floating() {
             let max_width = display_bounds.width() * UNMANAGED_MAX_SCREEN_RATIO_NUM
                 / UNMANAGED_MAX_SCREEN_RATIO_DEN;
@@ -580,14 +580,13 @@ pub(super) fn window_unmanaged_trigger(
                 offset_frame_within_bounds(target_frame, display_bounds, UNMANAGED_POP_OFFSET);
 
             if target_frame.size() != frame.size() {
-                resize_entity(
+                commands.resize_entity(
                     entity,
                     Size::new(target_frame.width(), target_frame.height()),
-                    &mut commands,
                 );
             }
             if target_frame.min != frame.min {
-                reposition_entity(entity, target_frame.min, &mut commands);
+                commands.reposition_entity(entity, target_frame.min);
             }
         }
     }
@@ -688,7 +687,7 @@ pub(super) fn window_managed_trigger(
             let padded_width = display_bounds.width() - pad_left - pad_right;
             let width = (f64::from(padded_width) * width_ratio).round() as i32;
             let height = display_bounds.height();
-            resize_entity(entity, Size::new(width, height), &mut commands);
+            commands.resize_entity(entity, Size::new(width, height));
         }
 
         insert_at = properties.insertion().or(insert_at);
@@ -733,13 +732,13 @@ pub(super) fn window_managed_trigger(
     }
 
     if let Some(origin) = windows.origin(entity) {
-        reposition_entity(entity, origin, &mut commands);
+        commands.reposition_entity(entity, origin);
     }
     commands
         .entity(entity)
         .try_insert(VerifyWindowPosition::default())
         .try_remove::<PreviousManagedStrip>();
-    reshuffle_around(entity, &mut commands);
+    commands.reshuffle_around(entity);
 }
 
 /// Handles the event when a window is destroyed. The windows itself is not removed from the layout
@@ -847,7 +846,7 @@ fn give_away_focus(
         // window closed/hid, so window_focused_trigger's frontmost/focused
         // guards would reject a fabricated event. focus_entity calls the
         // AX API to raise the neighbour and inserts FocusedMarker directly.
-        focus_entity(neighbour, true, commands);
+        commands.focus_entity(neighbour, true);
     }
 }
 
@@ -1089,7 +1088,7 @@ pub(super) fn apply_window_positions(
                         "Not focusing new window {entity}, keeping focus on '{}'",
                         focus.title().unwrap_or_default()
                     );
-                    focus_entity(prev, true, &mut commands);
+                    commands.focus_entity(prev, true);
                 }
             } else {
                 debug!("Synthesizing WindowFocused for newly spawned window {entity}");

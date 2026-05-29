@@ -430,50 +430,19 @@ pub struct SendMessageTrigger(pub Event);
 #[derive(BevyEvent)]
 pub struct RestoreWindowState;
 
-#[instrument(level = Level::TRACE, skip(commands))]
-pub fn reposition_entity(entity: Entity, origin: Origin, commands: &mut Commands) {
-    if let Ok(mut entity_commands) = commands.get_entity(entity) {
-        entity_commands.try_insert(RepositionMarker(origin));
-    }
-}
-
-#[instrument(level = Level::TRACE, skip(commands))]
-pub fn resize_entity(entity: Entity, size: Size, commands: &mut Commands) {
-    if size.x <= 0 || size.y <= 0 {
-        return;
-    }
-    if let Ok(mut entity_commands) = commands.get_entity(entity) {
-        entity_commands.try_insert(ResizeMarker(size));
-    }
-}
-
-#[instrument(level = Level::TRACE, skip(commands))]
-pub fn reshuffle_around(entity: Entity, commands: &mut Commands) {
-    if let Ok(mut entity_commands) = commands.get_entity(entity) {
-        entity_commands.try_insert(ReshuffleAroundMarker);
-    }
-}
-
-#[instrument(level = Level::TRACE, skip(commands))]
-pub fn ensure_visible(entity: Entity, commands: &mut Commands) {
-    if let Ok(mut entity_commands) = commands.get_entity(entity) {
-        entity_commands.try_insert(EnsureVisibleMarker);
-    }
-}
-
-pub fn focus_entity(entity: Entity, raise: bool, commands: &mut Commands) {
-    if let Ok(mut entity_commands) = commands.get_entity(entity) {
-        entity_commands.try_insert(FocusedMarker);
-        commands.trigger(focus::FocusWindow { entity, raise });
-    }
-}
-
-pub fn flash_message(message: String, duration: f32, commands: &mut Commands) {
-    let timeout = Timeout::new(Duration::from_secs_f32(duration), None, commands);
-    commands.spawn((timeout, FlashMessage(message)));
-}
-
 pub trait SpawnCommandsExt {
+    fn reposition_entity(&mut self, entity: Entity, origin: Origin);
+
+    fn resize_entity(&mut self, entity: Entity, size: Size);
+
+    fn reshuffle_around(&mut self, entity: Entity);
+
+    fn ensure_visible(&mut self, entity: Entity);
+
+    fn focus_entity(&mut self, entity: Entity, raise: bool);
+
+    fn flash_message(&mut self, message: String, duration: f32);
+
     // Spawns a layout strip in a single place, to properly insert all components.
     fn spawn_layout_strip(
         &mut self,
@@ -485,6 +454,52 @@ pub trait SpawnCommandsExt {
 }
 
 impl SpawnCommandsExt for Commands<'_, '_> {
+    #[instrument(level = Level::TRACE, skip(self))]
+    fn reposition_entity(&mut self, entity: Entity, origin: Origin) {
+        if let Ok(mut entity_commands) = self.get_entity(entity) {
+            entity_commands.try_insert(RepositionMarker(origin));
+        }
+    }
+
+    #[instrument(level = Level::TRACE, skip(self))]
+    fn resize_entity(&mut self, entity: Entity, size: Size) {
+        if size.x <= 0 || size.y <= 0 {
+            return;
+        }
+        if let Ok(mut entity_commands) = self.get_entity(entity) {
+            entity_commands.try_insert(ResizeMarker(size));
+        }
+    }
+
+    #[instrument(level = Level::TRACE, skip(self))]
+    fn reshuffle_around(&mut self, entity: Entity) {
+        if let Ok(mut entity_commands) = self.get_entity(entity) {
+            entity_commands.try_insert(ReshuffleAroundMarker);
+        }
+    }
+
+    #[instrument(level = Level::TRACE, skip(self))]
+    fn ensure_visible(&mut self, entity: Entity) {
+        if let Ok(mut entity_commands) = self.get_entity(entity) {
+            entity_commands.try_insert(EnsureVisibleMarker);
+        }
+    }
+
+    #[instrument(level = Level::TRACE, skip(self))]
+    fn focus_entity(&mut self, entity: Entity, raise: bool) {
+        if let Ok(mut entity_commands) = self.get_entity(entity) {
+            entity_commands.try_insert(FocusedMarker);
+            self.trigger(focus::FocusWindow { entity, raise });
+        }
+    }
+
+    #[instrument(level = Level::TRACE, skip(self))]
+    fn flash_message(&mut self, message: String, duration: f32) {
+        let timeout = Timeout::new(Duration::from_secs_f32(duration), None, self);
+        self.spawn((timeout, FlashMessage(message)));
+    }
+
+    #[instrument(level = Level::TRACE, skip(self))]
     fn spawn_layout_strip(
         &mut self,
         layout_strip: LayoutStrip,

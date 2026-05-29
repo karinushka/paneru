@@ -17,8 +17,7 @@ use crate::ecs::layout::{Column, LayoutStrip, StackItem};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Windows};
 use crate::ecs::{
     ActiveDisplayMarker, ActiveWorkspaceMarker, FocusedMarker, FullWidthMarker,
-    NativeFullscreenMarker, SelectedVirtualMarker, SendMessageTrigger, Unmanaged, ensure_visible,
-    focus_entity, reposition_entity, reshuffle_around, resize_entity,
+    NativeFullscreenMarker, SelectedVirtualMarker, SendMessageTrigger, SpawnCommandsExt, Unmanaged,
 };
 use crate::events::Event;
 use crate::manager::{Application, Display, Origin, Size, Window, WindowManager};
@@ -331,7 +330,7 @@ fn command_move_focus(
             .and_then(|strip| strip.last().ok().and_then(|col| col.top()))
     {
         debug!("fullscreen: swap raising {entity}");
-        focus_entity(entity, true, &mut commands);
+        commands.focus_entity(entity, true);
         return;
     }
 
@@ -348,7 +347,7 @@ fn command_move_focus(
             active_strip.id(),
             active_display.bounds(),
         ) {
-            focus_entity(entity, true, &mut commands);
+            commands.focus_entity(entity, true);
         }
         return;
     }
@@ -385,11 +384,11 @@ fn command_move_focus(
     };
 
     if let Some(entity) = candidate {
-        focus_entity(entity, true, &mut commands);
+        commands.focus_entity(entity, true);
         // Explicitly reshuffle so the target window is brought into view.
         // This avoids a race where focus-follows-mouse leaves skip_reshuffle
         // set, causing the WindowFocused handler to skip the reshuffle.
-        reshuffle_around(entity, &mut commands);
+        commands.reshuffle_around(entity);
         return;
     }
 
@@ -438,7 +437,7 @@ fn command_focus_unmanaged(
         .or_else(|| visible_floats.into_iter().next());
 
     if let Some(entity) = target {
-        focus_entity(entity, true, &mut commands);
+        commands.focus_entity(entity, true);
     }
 }
 
@@ -465,8 +464,8 @@ fn command_focus_managed(
         .or_else(|| active_strip.all_columns().into_iter().next());
 
     if let Some(entity) = target {
-        focus_entity(entity, true, &mut commands);
-        reshuffle_around(entity, &mut commands);
+        commands.focus_entity(entity, true);
+        commands.reshuffle_around(entity);
     }
 }
 
@@ -504,7 +503,7 @@ fn command_raise_floating(
     }
 
     if let Some(entity) = target {
-        focus_entity(entity, true, &mut commands);
+        commands.focus_entity(entity, true);
     }
 }
 
@@ -569,7 +568,7 @@ fn command_toggle_floating_layer(
     }
 
     if let Some(entity) = target {
-        focus_entity(entity, true, &mut commands);
+        commands.focus_entity(entity, true);
     }
 
     **layer = target_layer;
@@ -636,7 +635,7 @@ fn command_swap_focus(
     // Only when the slot would fall off the edge does the strip scroll —
     // and only by the shortfall.
     if let Some(window) = handler() {
-        ensure_visible(window, &mut commands);
+        commands.ensure_visible(window);
     } else {
         debug!(
             "swap {direction:?}: handler returned None (focused={:?}, strip_len={})",
@@ -697,13 +696,9 @@ fn command_center_window(
         {
             // Directly reposition the strip (bypasses hidden_ratio check).
             let strip_position = origin - layout_position.0;
-            reposition_entity(
-                active_display.active_strip_entity(),
-                strip_position,
-                &mut commands,
-            );
+            commands.reposition_entity(active_display.active_strip_entity(), strip_position);
         } else {
-            reposition_entity(entity, origin, &mut commands);
+            commands.reposition_entity(entity, origin);
         }
 
         window_manager.warp_mouse(active_display.bounds().center());
@@ -786,7 +781,7 @@ fn resize_window(
         active_display.bounds().min.x + pad_left,
         active_display.bounds().max.x - pad_right - size.x,
     );
-    reposition_entity(entity, origin, &mut commands);
+    commands.reposition_entity(entity, origin);
 
     // Resize all windows in the column so stacked siblings share the new width.
     let strip = active_display.active_strip();
@@ -799,13 +794,13 @@ fn resize_window(
             if sibling != entity
                 && let Some(size) = windows.size(sibling)
             {
-                resize_entity(sibling, size.with_x(new_width), &mut commands);
+                commands.resize_entity(sibling, size.with_x(new_width));
             }
         }
     }
 
-    resize_entity(entity, size, &mut commands);
-    reshuffle_around(entity, &mut commands);
+    commands.resize_entity(entity, size);
+    commands.reshuffle_around(entity);
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -835,7 +830,7 @@ fn full_width_window(
         commands.entity(entity).try_remove::<FullWidthMarker>();
         let w = (marker.width_ratio * f64::from(viewport.width())).round() as i32;
         let bounds = active_display.bounds().size().with_x(w);
-        resize_entity(entity, bounds, &mut commands);
+        commands.resize_entity(entity, bounds);
     } else {
         let strip = active_display.active_strip();
         if strip
@@ -850,17 +845,9 @@ fn full_width_window(
         commands
             .entity(entity)
             .try_insert(FullWidthMarker { width_ratio });
-        reposition_entity(
-            entity,
-            Origin::new(viewport.min.x, viewport.min.y),
-            &mut commands,
-        );
-        resize_entity(
-            entity,
-            Size::new(viewport.width(), viewport.height()),
-            &mut commands,
-        );
-        reshuffle_around(entity, &mut commands);
+        commands.reposition_entity(entity, Origin::new(viewport.min.x, viewport.min.y));
+        commands.resize_entity(entity, Size::new(viewport.width(), viewport.height()));
+        commands.reshuffle_around(entity);
     }
 }
 
@@ -920,7 +907,7 @@ fn manage_window(
             .find_map(|(strip, active)| active.then_some(strip))
     {
         strip.append(entity);
-        reshuffle_around(entity, &mut commands);
+        commands.reshuffle_around(entity);
     }
 }
 
@@ -982,7 +969,7 @@ fn to_next_display(
         return;
     };
     let dest = other.bounds().min.with_x(center - size.x / 2);
-    reposition_entity(entity, dest, &mut commands);
+    commands.reposition_entity(entity, dest);
 
     if matches!(move_focus, MoveFocus::Follow) {
         window_manager.warp_mouse(other.bounds().center());
@@ -995,13 +982,13 @@ fn to_next_display(
         .or_else(|| active_display.active_strip().right_neighbour(entity));
     active_display.active_strip().remove(entity);
     if let Some(neighbour) = source_neighbour {
-        reshuffle_around(neighbour, &mut commands);
+        commands.reshuffle_around(neighbour);
     }
 
     if matches!(move_focus, MoveFocus::Stay)
         && let Some(neighbour) = source_neighbour
     {
-        focus_entity(neighbour, false, &mut commands);
+        commands.focus_entity(neighbour, false);
     }
 
     // Insert into the target display's selected strip.
@@ -1011,7 +998,7 @@ fn to_next_display(
             .find(|(strip, selected)| *selected && strip.id() == target_space_id)
     {
         target_strip.append(entity);
-        reshuffle_around(entity, &mut commands);
+        commands.reshuffle_around(entity);
     }
 }
 
@@ -1070,7 +1057,7 @@ fn mouse_to_next_display(
     debug!("warping mouse to {visible_frame:?}",);
     window_manager.warp_mouse(visible_frame.center());
 
-    focus_entity(entity, true, &mut commands);
+    commands.focus_entity(entity, true);
 }
 
 /// Distributes heights equally among all windows in the currently focused stack.
@@ -1105,7 +1092,7 @@ fn equalize_column(
         for item in &stack {
             for entity in item.all_windows() {
                 if let Some(size) = windows.size(entity) {
-                    resize_entity(entity, size.with_y(equal_height), &mut commands);
+                    commands.resize_entity(entity, size.with_y(equal_height));
                 }
             }
         }
@@ -1154,11 +1141,7 @@ fn snap_window(
     frame.max = frame.min + size;
 
     let strip_position = frame.min - layout_position.0;
-    reposition_entity(
-        active_display.active_strip_entity(),
-        strip_position,
-        &mut commands,
-    );
+    commands.reposition_entity(active_display.active_strip_entity(), strip_position);
 }
 
 #[instrument(level = Level::DEBUG, skip_all)]

@@ -19,8 +19,8 @@ use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, GlobalState, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, Scrolling, SelectedVirtualMarker, SendMessageTrigger, StrayFocusEvent,
-    focus_entity, reposition_entity, reshuffle_around,
+    ActiveWorkspaceMarker, Scrolling, SelectedVirtualMarker, SendMessageTrigger, SpawnCommandsExt,
+    StrayFocusEvent,
 };
 use crate::events::Event;
 use crate::manager::{Application, Display, Window, WindowManager};
@@ -170,9 +170,9 @@ fn autocenter_window_on_focus(
     {
         let center = active_display.bounds().center();
         origin.x = center.x - size.x / 2;
-        reposition_entity(entity, origin, &mut commands);
+        commands.reposition_entity(entity, origin);
     }
-    reshuffle_around(entity, &mut commands);
+    commands.reshuffle_around(entity);
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -326,7 +326,7 @@ fn recover_lost_focus(
         .inspect_err(|err| error!("Unable to get current workspace: {err}"))
         && let Some(entity) = strip.first().ok().and_then(|col| col.top())
     {
-        focus_entity(entity, false, &mut commands);
+        commands.focus_entity(entity, false);
     }
 }
 

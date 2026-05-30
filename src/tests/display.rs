@@ -3,9 +3,10 @@ use std::time::Duration;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 
-use crate::commands::{Command, MoveFocus, Operation};
-use crate::ecs::Timeout;
+use crate::commands::{Command, MouseMove, MoveFocus, Operation};
+use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
+use crate::ecs::{DockPosition, Timeout};
 use crate::events::Event;
 use crate::manager::{Display, Origin, Size};
 use crate::{assert_not_on_workspace, assert_on_workspace, assert_window_at, assert_window_size};
@@ -284,6 +285,56 @@ fn test_send_next_display_stays_on_source() {
             assert_on_workspace!(world, 100, EXT_WORKSPACE_ID);
             assert_not_on_workspace!(world, 100, TEST_WORKSPACE_ID);
             assert_eq!(state.active_display(), TEST_DISPLAY_ID);
+        })
+        .run(commands);
+}
+
+#[test]
+fn test_mouse_to_next_display() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 101 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::Mouse(MouseMove::ToNextDisplay),
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+    let origin = Origin::new(0, 0);
+    let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+    let frame = IRect::from_corners(origin, origin + size);
+    let display_bounds = IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0);
+
+    // harness
+    //     .mock_state
+    //     .spawn_window(TEST_PROCESS_ID, TEST_WORKSPACE_ID, 101, frame);
+    // harness
+    //     .mock_state
+    //     .spawn_window(TEST_PROCESS_ID, TEST_WORKSPACE_ID, 100, frame);
+    TestHarness::new()
+        .with_display(EXT_DISPLAY_ID, display_bounds, vec![EXT_WORKSPACE_ID])
+        .with_window(100, |data| {
+            data.pid = TEST_PROCESS_ID;
+            data.workspace_id = TEST_WORKSPACE_ID;
+            data.frame = frame;
+        })
+        .on_iteration(1, move |world, state| {
+            let entity = find_window_entity(100, world);
+            let window = world.get::<Window>(entity).expect("need window");
+            assert_eq!(state.cursor_position(), window.frame().center());
+        })
+        .on_iteration(3, move |world, state| {
+            let mut query = world.query::<(&Display, Option<&DockPosition>)>();
+            let (display, dock) = query
+                .iter(world)
+                .find(|display| display.0.id() == EXT_DISPLAY_ID)
+                .expect("need display");
+            let config = world.resource::<Config>();
+            let bounds = display.actual_display_bounds(dock, config);
+            assert_eq!(state.cursor_position(), bounds.center());
         })
         .run(commands);
 }

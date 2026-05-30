@@ -1064,8 +1064,11 @@ pub(crate) fn detect_tabbed_windows(
     apps: Query<Entity, With<Application>>,
     mut workspaces: Query<&mut LayoutStrip>,
     window_manager: Res<WindowManager>,
+    active_display: Single<&Display, With<ActiveDisplayMarker>>,
     mut commands: Commands,
 ) {
+    let display_bounds = active_display.bounds();
+
     for (entity, Position(position), Bounds(bounds), child) in created {
         let Ok(app_entity) = apps.get(child.parent()) else {
             continue;
@@ -1078,10 +1081,14 @@ pub(crate) fn detect_tabbed_windows(
         // workspace, behind a fullscreen window), so we require the full frame to agree.
         let tabbed = windows.iter().find_map(
             |(leader, window, Position(leader_position), Bounds(leader_bounds), parent)| {
+                // If the window is partially off-screen, relax the positional matching requirement
+                // because the original window will be moved into view.
+                let offscreen = !display_bounds.contains(*leader_position)
+                    || !display_bounds.contains(*leader_position + leader_bounds);
                 (leader != entity
                     && parent.parent() == app_entity
-                    && leader_bounds == bounds
-                    && leader_position == position)
+                    && leader_bounds.chebyshev_distance(*bounds) <= 1
+                    && (offscreen || leader_position.chebyshev_distance(*position) <= 1))
                     .then_some((leader, window.id(), leader_position))
             },
         );

@@ -22,7 +22,7 @@ use super::{
 use crate::config::Config;
 use crate::ecs::focus::FocusHistory;
 use crate::ecs::layout::LayoutStrip;
-use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, GlobalState, Windows};
+use crate::ecs::params::{ActiveDisplay, GlobalState, Windows};
 use crate::ecs::state::PaneruState;
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, DockPosition, Initializing, LayoutPosition, LocateDockTrigger,
@@ -864,9 +864,9 @@ fn give_away_focus(
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn spawn_window_trigger(
     mut trigger: On<SpawnWindowTrigger>,
-    windows: Query<(&Window, Entity, &ChildOf)>,
+    windows: Query<&Window>,
     mut apps: Query<(Entity, &mut Application)>,
-    active_display: ActiveDisplayMut,
+    active_display: ActiveDisplay,
     initializing: Option<Res<Initializing>>,
     restore: Option<Res<crate::ecs::restore::SessionRestore>>,
     mut commands: Commands,
@@ -876,7 +876,7 @@ pub(super) fn spawn_window_trigger(
     while let Some(mut window) = new_windows.pop() {
         let window_id = window.id();
 
-        if windows.iter().any(|window| window.0.id() == window_id) {
+        if windows.iter().any(|window| window.id() == window_id) {
             continue;
         }
 

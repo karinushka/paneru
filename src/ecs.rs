@@ -80,17 +80,17 @@ pub fn register_systems(app: &mut bevy::app::App) {
     );
     app.add_systems(
         PreUpdate,
-        (
-            systems::window_creation_event,
-            systems::detect_tabbed_windows.run_if(native_tabs_enabled),
-            systems::pump_events,
-        ),
+        (systems::window_creation_event, systems::pump_events),
     );
     app.add_systems(
         Update,
         (
-            triggers::apply_window_defaults,
-            triggers::apply_window_positions,
+            (
+                triggers::apply_window_defaults,
+                systems::detect_tabbed_windows.run_if(native_tabs_enabled),
+                triggers::apply_window_positions,
+            )
+                .chain(),
             (
                 systems::add_existing_process,
                 systems::add_existing_application,

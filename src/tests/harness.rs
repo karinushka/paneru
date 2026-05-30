@@ -87,7 +87,6 @@ impl TestHarness {
         self
     }
 
-    #[allow(unused)]
     pub(crate) fn with_window<F>(mut self, id: WinID, f: F) -> Self
     where
         F: FnOnce(&mut MockWindowData),

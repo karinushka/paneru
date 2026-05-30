@@ -10,7 +10,8 @@ use crate::errors::Error;
 use crate::events::Event;
 use crate::manager::app::MockApplicationApi;
 use crate::manager::{
-    Application, Display, MockProcessApi, MockWindowApi, MockWindowManagerApi, Origin, Size, Window,
+    Application, Display, MockProcessApi, MockWindowApi, MockWindowManagerApi, Origin, Size,
+    Window, origin_to,
 };
 use crate::platform::{Modifiers, Pid, ProcessSerialNumber, WinID, WorkspaceId};
 
@@ -80,6 +81,7 @@ struct MockStateInner {
     windows: HashMap<WinID, MockWindowData>,
     displays: HashMap<u32, MockDisplayData>,
     active_display_id: u32,
+    cursor_position: Origin,
     event_queue: VecDeque<Event>,
 }
 
@@ -96,6 +98,7 @@ impl MockState {
                 windows: HashMap::new(),
                 displays: HashMap::new(),
                 active_display_id: 0,
+                cursor_position: Origin::ZERO,
                 event_queue: VecDeque::new(),
             })),
         }
@@ -296,6 +299,10 @@ impl MockState {
             point: end_p,
             modifiers: Modifiers::empty(),
         });
+    }
+
+    pub fn cursor_position(&self) -> IVec2 {
+        self.inner.force_read().cursor_position
     }
 
     // --- Mock Factory Methods ---
@@ -605,8 +612,14 @@ impl MockState {
             Some(windows)
         });
 
-        wm.expect_warp_mouse().return_const(());
-        wm.expect_cursor_position().return_const(None);
+        let s = self.clone();
+        wm.expect_warp_mouse()
+            .returning(move |origin| s.inner.force_write().cursor_position = origin);
+
+        let s = self.clone();
+        wm.expect_cursor_position()
+            .returning(move || Some(origin_to(s.inner.force_read().cursor_position)));
+
         wm.expect_get_associated_windows().return_const(vec![]);
         wm.expect_find_window_at_point().return_const(Ok(0));
 

@@ -20,7 +20,7 @@ use crate::ecs::{
     NativeFullscreenMarker, SelectedVirtualMarker, SendMessageTrigger, SpawnCommandsExt, Unmanaged,
 };
 use crate::events::Event;
-use crate::manager::{Application, Display, Origin, Size, Window, WindowManager};
+use crate::manager::{Application, Display, Origin, Size, Window, WindowManager, origin_from};
 use crate::platform::WorkspaceId;
 
 /// Represents a cardinal or directional choice for window manipulation.
@@ -1009,7 +1009,7 @@ fn mouse_to_next_display(
     mut messages: MessageReader<Event>,
     windows: Windows,
     layout_strips: Query<(&LayoutStrip, Entity)>,
-    displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
+    displays: Query<&Display>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
@@ -1024,7 +1024,13 @@ fn mouse_to_next_display(
         return;
     }
 
-    let Some((other, _, _)) = displays.iter().find(|(_, _, active)| !*active) else {
+    let Some(cursor_position) = window_manager.cursor_position().map(origin_from) else {
+        return;
+    };
+    let Some(other) = displays
+        .into_iter()
+        .find(|display| !display.bounds().contains(cursor_position))
+    else {
         debug!("no other display to move mouse to.");
         return;
     };
@@ -1050,6 +1056,7 @@ fn mouse_to_next_display(
         })
     else {
         debug!("no suitable windows on the other display to move the mouse.");
+        window_manager.warp_mouse(other.bounds().center());
         return;
     };
 

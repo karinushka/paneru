@@ -560,13 +560,14 @@ fn handle_virtual_window_moves(
         &mut LayoutStrip,
         &Position,
         Has<ActiveWorkspaceMarker>,
+        Option<&mut PreviousStripPosition>,
     )>,
     active_display: Single<(Entity, &Display), With<ActiveDisplayMarker>>,
     mut commands: Commands,
 ) {
     let Some((workspace_id, source_entity)) = workspaces
         .iter()
-        .find_map(|(entity, strip, _, active)| active.then_some((strip.id(), entity)))
+        .find_map(|(entity, strip, _, active, _)| active.then_some((strip.id(), entity)))
     else {
         return;
     };
@@ -576,7 +577,7 @@ fn handle_virtual_window_moves(
         let moving_entities = workspaces
             .get(source_entity)
             .ok()
-            .and_then(|(_, strip, _, _)| strip.tab_group(window_entity))
+            .and_then(|(_, strip, _, _, _)| strip.tab_group(window_entity))
             .unwrap_or_else(|| vec![window_entity]);
         for moving_entity in &moving_entities {
             commands
@@ -586,19 +587,20 @@ fn handle_virtual_window_moves(
         let follow = matches!(move_marker.move_focus, MoveFocus::Follow);
 
         let target_idx = move_marker.target_virtual_index;
-        let target = workspaces.iter().find_map(|(entity, strip, _, _)| {
+        let target = workspaces.iter().find_map(|(entity, strip, _, _, _)| {
             (strip.id() == workspace_id && strip.virtual_index == target_idx).then_some(entity)
         });
 
         // Must be captured before strip.remove below.
-        let source_neighbour = workspaces
-            .get(source_entity)
-            .ok()
-            .and_then(|(_, strip, _, _)| {
-                strip
-                    .left_neighbour(window_entity)
-                    .or_else(|| strip.right_neighbour(window_entity))
-            });
+        let source_neighbour =
+            workspaces
+                .get(source_entity)
+                .ok()
+                .and_then(|(_, strip, _, _, _)| {
+                    strip
+                        .left_neighbour(window_entity)
+                        .or_else(|| strip.right_neighbour(window_entity))
+                });
         // If source will be empty after the move, Stay becomes Follow
         // since there's nothing left to look at.
         let stay = !follow && source_neighbour.is_some();
@@ -636,7 +638,7 @@ fn handle_virtual_window_moves(
         // Preserve the source strip's scroll position for when the user returns.
         if !stay
             && let Ok(mut entity_commands) = commands.get_entity(source_entity)
-            && let Ok((_, source_strip, position, _)) = workspaces.get(source_entity)
+            && let Ok((_, source_strip, position, _, _)) = workspaces.get(source_entity)
         {
             let focus = source_strip
                 .left_neighbour(window_entity)
@@ -648,7 +650,7 @@ fn handle_virtual_window_moves(
         }
 
         // Move the window before moving markers to avoid being detected as a moved window.
-        for (entity, mut strip, _, _) in &mut workspaces {
+        for (entity, mut strip, _, _, _) in &mut workspaces {
             if entity == target_entity {
                 strip.append_tab_group(&moving_entities);
             } else {
@@ -671,7 +673,13 @@ fn handle_virtual_window_moves(
             commands.focus_entity(neighbour, false);
             commands.reshuffle_around(neighbour);
         } else {
-            commands.reshuffle_around(window_entity);
+            let previous_position = workspaces
+                .get_mut(target_entity)
+                .ok()
+                .and_then(|(_, _, _, _, previos_pos)| previos_pos);
+            if let Some(mut previous) = previous_position {
+                previous.focus = Some(window_entity);
+            }
         }
         debug!(
             "Moved window {} to virtual workspace {}",
@@ -834,6 +842,7 @@ fn show_active_workspace(
         Without<Window>,
     >,
     active_display: Single<&Display, With<ActiveDisplayMarker>>,
+    config: Res<Config>,
     mut commands: Commands,
 ) {
     let Some(workspace_id) = workspaces
@@ -878,7 +887,12 @@ fn show_active_workspace(
         }
 
         let bounds = active_display.bounds();
-        position.0 = bounds.max - 10;
+
+        if config.virtual_workspace_animations() {
+            commands.reposition_entity(entity, bounds.max - 10);
+        } else {
+            position.0 = bounds.max - 10;
+        }
     }
 
     let Ok((_, mut position, strip, previous_position)) = workspaces.get_mut(*activated) else {
@@ -891,7 +905,20 @@ fn show_active_workspace(
         if let Ok(mut entity_commands) = commands.get_entity(*activated) {
             entity_commands.try_remove::<PreviousStripPosition>();
         }
-        position.0 = *origin;
+
+        if config.virtual_workspace_animations() {
+            // Focus on the previous window
+            if let Some(entity) = focus
+                && strip.contains(*entity)
+            {
+                commands.focus_entity(*entity, false);
+                commands.reshuffle_around(*entity);
+            }
+
+            commands.reposition_entity(*activated, *origin);
+        } else {
+            position.0 = *origin;
+        }
 
         if let Some((_, current_focus)) = windows.focused()
             && strip.contains(current_focus)

@@ -256,7 +256,7 @@ impl WindowManagerOS {
         };
         let Some(spaces) = display.get(&CFString::from_static_str("Spaces")) else {
             return Err(Error::PermissionDenied(format!(
-                "could not get any spaces for dislay '{uuid}'",
+                "could not get any spaces for display '{uuid}'",
             )));
         };
 

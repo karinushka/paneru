@@ -1,6 +1,6 @@
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
-use bevy::ecs::lifecycle::{Add, Remove};
+use bevy::ecs::lifecycle::{Add, Remove, RemovedComponents};
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Added, Has, With};
@@ -26,7 +26,7 @@ use crate::ecs::params::{ActiveDisplay, GlobalState, Windows};
 use crate::ecs::state::PaneruState;
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, DockPosition, Initializing, LayoutPosition, LocateDockTrigger,
-    Position, RestoreWindowState, Scrolling, SendMessageTrigger, SpawnCommandsExt,
+    Position, ResizeMarker, RestoreWindowState, Scrolling, SendMessageTrigger, SpawnCommandsExt,
     VerifyWindowPosition, WidthRatio, WindowProperties,
 };
 use crate::events::Event;
@@ -1249,5 +1249,30 @@ pub(super) fn cleanup_timeout_trigger(
         && let Some(system_id) = timeout.system_id
     {
         commands.unregister_system(system_id);
+    }
+}
+
+pub(super) fn window_resize_verifier(
+    mut removed: RemovedComponents<ResizeMarker>,
+    mut windows: Query<(&mut Window, &mut Bounds)>,
+) {
+    for entity in removed.read() {
+        let Ok((mut window, mut bounds)) = windows.get_mut(entity) else {
+            continue;
+        };
+        let Ok(frame) = window.update_frame() else {
+            continue;
+        };
+
+        if frame.size().chebyshev_distance(bounds.0) <= 1 {
+            continue;
+        }
+        debug!(
+            "window {} did not resize fully: {} vs {}",
+            window.id(),
+            frame.size(),
+            bounds.0,
+        );
+        bounds.0 = frame.size();
     }
 }

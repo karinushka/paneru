@@ -158,6 +158,7 @@ pub fn register_triggers(app: &mut bevy::app::App) {
             triggers::window_destroyed_trigger,
             triggers::refresh_configuration_trigger,
             triggers::theme_change_trigger,
+            triggers::window_resize_verifier,
         ),
     );
     app.add_observer(triggers::window_unmanaged_trigger)

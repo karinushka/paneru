@@ -556,38 +556,35 @@ pub(super) fn window_unmanaged_trigger(
 
     // Skip the active-display reposition/resize during init; the strip
     // removal below still has to run.
-    if initializing.is_none() {
-        if let Some((rx, ry, rw, rh)) = properties.grid_ratios() {
-            let x = (f64::from(display_bounds.width()) * rx) as i32;
-            let y = (f64::from(display_bounds.height()) * ry) as i32;
-            let w = (f64::from(display_bounds.width()) * rw) as i32;
-            let h = (f64::from(display_bounds.height()) * rh) as i32;
-            commands.reposition_entity(entity, Origin::new(x, y));
-            commands.resize_entity(entity, Size::new(w, h));
-        } else if !properties.floating() {
-            let max_width = display_bounds.width() * UNMANAGED_MAX_SCREEN_RATIO_NUM
-                / UNMANAGED_MAX_SCREEN_RATIO_DEN;
-            let max_height = display_bounds.height() * UNMANAGED_MAX_SCREEN_RATIO_NUM
-                / UNMANAGED_MAX_SCREEN_RATIO_DEN;
-            let new_width = frame.width().min(max_width);
-            let new_height = frame.height().min(max_height);
+    if let Some((rx, ry, rw, rh)) = properties.grid_ratios() {
+        let x = (f64::from(display_bounds.width()) * rx) as i32;
+        let y = (f64::from(display_bounds.height()) * ry) as i32;
+        let w = (f64::from(display_bounds.width()) * rw) as i32;
+        let h = (f64::from(display_bounds.height()) * rh) as i32;
+        commands.reposition_entity(entity, Origin::new(x, y));
+        commands.resize_entity(entity, Size::new(w, h));
+    } else if initializing.is_none() && !properties.floating() {
+        let max_width = display_bounds.width() * UNMANAGED_MAX_SCREEN_RATIO_NUM
+            / UNMANAGED_MAX_SCREEN_RATIO_DEN;
+        let max_height = display_bounds.height() * UNMANAGED_MAX_SCREEN_RATIO_NUM
+            / UNMANAGED_MAX_SCREEN_RATIO_DEN;
+        let new_width = frame.width().min(max_width);
+        let new_height = frame.height().min(max_height);
 
-            let mut target_frame =
-                IRect::from_corners(frame.min, frame.min + Origin::new(new_width, new_height));
-            target_frame =
-                clamp_origin_to_bounds(target_frame, target_frame.size(), display_bounds);
-            target_frame =
-                offset_frame_within_bounds(target_frame, display_bounds, UNMANAGED_POP_OFFSET);
+        let mut target_frame =
+            IRect::from_corners(frame.min, frame.min + Origin::new(new_width, new_height));
+        target_frame = clamp_origin_to_bounds(target_frame, target_frame.size(), display_bounds);
+        target_frame =
+            offset_frame_within_bounds(target_frame, display_bounds, UNMANAGED_POP_OFFSET);
 
-            if target_frame.size() != frame.size() {
-                commands.resize_entity(
-                    entity,
-                    Size::new(target_frame.width(), target_frame.height()),
-                );
-            }
-            if target_frame.min != frame.min {
-                commands.reposition_entity(entity, target_frame.min);
-            }
+        if target_frame.size() != frame.size() {
+            commands.resize_entity(
+                entity,
+                Size::new(target_frame.width(), target_frame.height()),
+            );
+        }
+        if target_frame.min != frame.min {
+            commands.reposition_entity(entity, target_frame.min);
         }
     }
 
@@ -951,10 +948,9 @@ pub(super) fn apply_window_defaults(
         debug!("Applying window defaults for '{}'", window.id());
 
         let initializing = initializing.is_some();
-        let floating = properties.floating();
 
         // Do not add padding to floating windows.
-        if floating {
+        if properties.floating() {
             // Skip grid_ratios during init: we don't know this window's display.
             if !initializing && let Some((rx, ry, rw, rh)) = properties.grid_ratios() {
                 let bounds = active_display.bounds();

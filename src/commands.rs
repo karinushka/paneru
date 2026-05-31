@@ -308,7 +308,7 @@ fn nearest_float_in_direction(
 fn command_move_focus(
     mut messages: MessageReader<Event>,
     windows: Windows,
-    workspaces: Query<(&LayoutStrip, Option<&NativeFullscreenMarker>)>,
+    workspaces: Query<(&LayoutStrip, Entity, Option<&NativeFullscreenMarker>)>,
     active_display: ActiveDisplay,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
@@ -322,15 +322,26 @@ fn command_move_focus(
     let active_strip = active_display.active_strip();
 
     // On a fullscreen space, swap to the last column in the workspace.
-    if let Some(fullscreen) = active_display.fullscreen()
+    if let Some(NativeFullscreenMarker {
+        layout_strip,
+        workspace_id,
+        index: _,
+    }) = active_display.fullscreen()
         && matches!(direction, Direction::West)
-        && let Some(entity) = workspaces
-            .into_iter()
-            .find_map(|(strip, _)| (strip.id() == fullscreen.previous_strip).then_some(strip))
-            .and_then(|strip| strip.last().ok().and_then(|col| col.top()))
     {
-        debug!("fullscreen: swap raising {entity}");
-        commands.focus_entity(entity, true);
+        let mut strip = workspaces
+            .into_iter()
+            .find_map(|(strip, entity, _)| (entity == *layout_strip).then_some(strip));
+        if strip.is_none() {
+            strip = workspaces
+                .into_iter()
+                .find_map(|(strip, _, _)| (strip.id() == *workspace_id).then_some(strip));
+        }
+
+        if let Some(entity) = strip.and_then(|strip| strip.last().ok().and_then(|col| col.top())) {
+            debug!("fullscreen: swap raising {entity}");
+            commands.focus_entity(entity, true);
+        }
         return;
     }
 
@@ -366,10 +377,10 @@ fn command_move_focus(
             .then(|| {
                 workspaces
                     .iter()
-                    .find(|(strip, fullscreen)| {
+                    .find(|(strip, _, fullscreen)| {
                         fullscreen.is_some() && strip.id() != active_strip.id()
                     })
-                    .and_then(|(strip, _)| strip.get(0).ok().and_then(|col| col.top()))
+                    .and_then(|(strip, _, _)| strip.get(0).ok().and_then(|col| col.top()))
             })
             .flatten()
         })

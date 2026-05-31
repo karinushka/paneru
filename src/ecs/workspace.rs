@@ -141,13 +141,14 @@ fn workspace_change_trigger(
         && let Some(old_space) = remove_from
         && window_manager.is_fullscreen_space(active_display.id())
         && let Some((_, focused)) = windows.focused()
-        && let Ok((mut old_strip, _, _, _)) = workspaces.get_mut(old_space)
+        && let Ok((mut old_strip, old_strip_entity, _, _)) = workspaces.get_mut(old_space)
     {
         debug!("workspace_change: space={workspace_id} fullscreen");
 
         let fullscreen_marker = NativeFullscreenMarker {
-            previous_strip: old_strip.id(),
-            previous_index: old_strip.index_of(focused).unwrap_or(0),
+            layout_strip: old_strip_entity,
+            workspace_id: old_strip.id(),
+            index: old_strip.index_of(focused).unwrap_or(0),
         };
         old_strip.remove(focused);
 
@@ -294,20 +295,29 @@ fn workspace_destroyed_trigger(
         if let Some((
             window,
             NativeFullscreenMarker {
-                previous_strip,
-                previous_index,
+                layout_strip,
+                workspace_id,
+                index,
             },
         )) = fullscreen
-            && let Some((mut strip, _, _)) = workspaces
-                .iter_mut()
-                .find(|(strip, _, _)| strip.id() == previous_strip)
         {
+            let mut strip = workspaces
+                .iter_mut()
+                .find_map(|(strip, entity, _)| (entity == layout_strip).then_some(strip));
+            if strip.is_none() {
+                strip = workspaces
+                    .iter_mut()
+                    .find_map(|(strip, _, _)| (strip.id() == workspace_id).then_some(strip));
+            }
+
             debug!(
                 "previously fullscreened window {entity} inserted at {}",
-                previous_index
+                index
             );
-            strip.insert_at(previous_index, window);
-            commands.reshuffle_around(window);
+            if let Some(mut strip) = strip {
+                strip.insert_at(index, window);
+                commands.reshuffle_around(window);
+            }
         }
 
         if let Ok(mut entity_commands) = commands.get_entity(entity) {

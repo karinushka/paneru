@@ -257,8 +257,9 @@ pub struct WidthRatio(pub f64);
 /// so they can be navigated left-to-right in that order after the tiled strip.
 #[derive(Clone, Component, Debug)]
 pub struct NativeFullscreenMarker {
-    pub previous_strip: WorkspaceId,
-    pub previous_index: usize,
+    pub layout_strip: Entity,
+    pub workspace_id: WorkspaceId,
+    pub index: usize,
 }
 
 #[derive(Component)]

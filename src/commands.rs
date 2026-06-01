@@ -801,7 +801,7 @@ fn resize_window(
         .ok()
         .and_then(|idx| strip.get(idx).ok())
     {
-        for sibling in stack.iter().flat_map(StackItem::all_windows) {
+        for sibling in stack.iter().flat_map(StackItem::window_iter) {
             if sibling != entity
                 && let Some(size) = windows.size(sibling)
             {
@@ -1108,7 +1108,7 @@ fn equalize_column(
         let equal_height = active_display.bounds().height() / i32::try_from(stack.len()).unwrap();
 
         for item in &stack {
-            for entity in item.all_windows() {
+            for entity in item.window_iter() {
                 if let Some(size) = windows.size(entity) {
                     commands.resize_entity(entity, size.with_y(equal_height));
                 }

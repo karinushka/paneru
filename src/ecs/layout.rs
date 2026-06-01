@@ -10,6 +10,8 @@ use bevy::ecs::system::{Commands, ParamSet, Populated, Query, Res};
 use bevy::ecs::world::Ref;
 use bevy::math::IRect;
 use std::collections::{HashMap, VecDeque};
+use std::iter::FusedIterator;
+use std::marker::PhantomData;
 use stdext::function_name;
 use tracing::{Level, instrument, trace};
 
@@ -75,11 +77,46 @@ impl StackItem {
         }
     }
 
-    /// Returns all window entities within the item.
-    pub fn all_windows(&self) -> Vec<Entity> {
+    /// Returns an iterator over all window entities in this stack item.
+    pub fn window_iter(&self) -> StackItemIter<'_> {
         match self {
-            StackItem::Single(id) => vec![*id],
-            StackItem::Tabs(tabs) => tabs.clone(),
+            StackItem::Single(entity) => {
+                StackItemIter::Single(std::iter::once(*entity), PhantomData::default())
+            }
+            StackItem::Tabs(tabs) => StackItemIter::Tabs(tabs.iter().copied()),
+        }
+    }
+}
+
+pub enum StackItemIter<'a> {
+    Single(std::iter::Once<Entity>, PhantomData<&'a Column>),
+    Tabs(std::iter::Copied<std::slice::Iter<'a, Entity>>),
+}
+
+impl<'a> Iterator for StackItemIter<'a> {
+    type Item = Entity;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            StackItemIter::Single(iter, _) => iter.next(),
+            StackItemIter::Tabs(iter) => iter.next(),
+        }
+    }
+}
+impl<'a> FusedIterator for StackItemIter<'a> {}
+impl<'a> DoubleEndedIterator for StackItemIter<'a> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        match self {
+            StackItemIter::Single(iter, _) => iter.next_back(),
+            StackItemIter::Tabs(iter) => iter.next_back(),
+        }
+    }
+}
+impl<'a> ExactSizeIterator for StackItemIter<'a> {
+    fn len(&self) -> usize {
+        match self {
+            StackItemIter::Single(_, _) => 1,
+            StackItemIter::Tabs(iter) => iter.len(),
         }
     }
 }
@@ -108,28 +145,27 @@ impl Column {
         }
     }
 
+    /// Returns an iterator over all window entities in this column
+    pub fn window_iter(&self) -> ColumnWindowIter<'_> {
+        match self {
+            Column::Single(entity) | Column::Fullscren(entity) => {
+                ColumnWindowIter::Single(std::iter::once(*entity), PhantomData::default())
+            }
+            Column::Tabs(tabs) => ColumnWindowIter::Tabs(tabs.iter().copied()),
+            Column::Stack(items) => {
+                ColumnWindowIter::Stack(items.iter().flat_map(StackItem::window_iter))
+            }
+        }
+    }
+
     pub fn width<W>(&self, get_window_frame: &W) -> Option<i32>
     where
         W: Fn(Entity) -> Option<IRect>,
     {
-        match self {
-            Column::Single(entity) | Column::Fullscren(entity) => {
-                get_window_frame(*entity).as_ref().map(IRect::width)
-            }
-            Column::Stack(items) => items
-                .iter()
-                .filter_map(StackItem::top)
-                .filter_map(get_window_frame)
-                .map(|frame| frame.width())
-                .max(),
-            Column::Tabs(tabs) => tabs
-                .first()
-                .copied()
-                .map(get_window_frame)
-                .flatten()
-                .as_ref()
-                .map(IRect::width),
-        }
+        self.window_iter()
+            .filter_map(get_window_frame)
+            .map(|frame| frame.width())
+            .max()
     }
 
     /// Returns the entity at the given index, or the last entity if the index exceeds the size.
@@ -161,6 +197,49 @@ impl Column {
             Column::Stack(stack) => stack.iter().any(|item| item.contains(entity)),
             Column::Tabs(tabs) => tabs.contains(&entity),
         });
+    }
+}
+
+pub enum ColumnWindowIter<'a> {
+    Single(std::iter::Once<Entity>, PhantomData<&'a Column>),
+    Tabs(std::iter::Copied<std::slice::Iter<'a, Entity>>),
+    Stack(
+        std::iter::FlatMap<
+            std::slice::Iter<'a, StackItem>,
+            StackItemIter<'a>,
+            fn(&'a StackItem) -> StackItemIter<'a>,
+        >,
+    ),
+}
+
+impl<'a> Iterator for ColumnWindowIter<'a> {
+    type Item = Entity;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Single(iter, _) => iter.next(),
+            Self::Tabs(iter) => iter.next(),
+            Self::Stack(iter) => iter.next(),
+        }
+    }
+}
+impl<'a> FusedIterator for ColumnWindowIter<'a> {}
+impl<'a> DoubleEndedIterator for ColumnWindowIter<'a> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Single(iter, _) => iter.next_back(),
+            Self::Tabs(iter) => iter.next_back(),
+            Self::Stack(iter) => iter.next_back(),
+        }
+    }
+}
+impl<'a> ExactSizeIterator for ColumnWindowIter<'a> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Single(_, _) => 1,
+            Self::Tabs(iter) => iter.len(),
+            Self::Stack(iter) => iter.size_hint().0,
+        }
     }
 }
 
@@ -571,7 +650,7 @@ impl LayoutStrip {
             .iter()
             .flat_map(|column| match column {
                 Column::Single(entity) | Column::Fullscren(entity) => vec![*entity],
-                Column::Stack(items) => items.iter().flat_map(StackItem::all_windows).collect(),
+                Column::Stack(items) => items.iter().flat_map(StackItem::window_iter).collect(),
                 Column::Tabs(ids) => ids.clone(),
             })
             .collect()
@@ -641,11 +720,7 @@ impl LayoutStrip {
                         next_y = frame.max.y;
 
                         // Return ALL windows in the item with the same frame
-                        let results = item
-                            .all_windows()
-                            .into_iter()
-                            .map(|e| (e, frame))
-                            .collect::<Vec<_>>();
+                        let results = item.window_iter().map(|e| (e, frame)).collect::<Vec<_>>();
                         Some(results)
                     })
                     .flatten()

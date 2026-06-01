@@ -1,5 +1,5 @@
 use bevy::app::AppExit;
-use bevy::ecs::change_detection::DetectChanges;
+use bevy::ecs::change_detection::{DetectChanges, DetectChangesMut};
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::{MessageReader, MessageWriter};
@@ -608,7 +608,7 @@ pub(super) fn window_resized_update_frame(
         ),
         Without<LayoutStrip>,
     >,
-    mut active_workspace: Single<(&LayoutStrip, &mut Position), With<ActiveWorkspaceMarker>>,
+    mut workspaces: Query<(&LayoutStrip, &mut Position)>,
 ) {
     for event in messages.read() {
         let Event::WindowResized { window_id } = event else {
@@ -627,19 +627,28 @@ pub(super) fn window_resized_update_frame(
         let Ok(new_frame) = window.update_frame() else {
             continue;
         };
+        let active_strip = workspaces
+            .iter_mut()
+            .find(|(strip, _)| strip.contains(entity));
+        let tabbed = active_strip
+            .as_ref()
+            .is_some_and(|strip| strip.0.tabbed(entity));
 
         let old_frame = IRect::from_corners(position.0, position.0 + bounds.0);
         if old_frame.size() != new_frame.size() {
-            bounds.0 = new_frame.size();
+            if tabbed {
+                bounds.bypass_change_detection().0 = new_frame.size();
+            } else {
+                bounds.0 = new_frame.size();
+            }
         }
 
         // If the window was resized, shift LayoutStrip slightly to avoid moving right corner.
-        let (active_strip, ref mut strip_position) = *active_workspace;
-        if !active_strip.contains(entity) {
+        let Some((strip, mut strip_position)) = active_strip else {
             // Floating window, don't nudge the strip.
             continue;
-        }
-        if active_strip.tabbed(entity) {
+        };
+        if tabbed {
             // Native tabs share a single layout slot. Keep the strip anchored
             // and let the tab sync/layout systems propagate the new size.
             continue;
@@ -655,7 +664,7 @@ pub(super) fn window_resized_update_frame(
         // accomodate.
         let diff = old_frame.min.y - new_frame.min.y;
         if diff.abs() > 0
-            && let Some(above_entity) = active_strip.above(entity)
+            && let Some(above_entity) = strip.above(entity)
             && let Ok((_, _, _, mut above_bounds, _)) = windows.get_mut(above_entity)
             && above_bounds.0.y - diff > 200
         {

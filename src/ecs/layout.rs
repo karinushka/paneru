@@ -108,6 +108,30 @@ impl Column {
         }
     }
 
+    pub fn width<W>(&self, get_window_frame: &W) -> Option<i32>
+    where
+        W: Fn(Entity) -> Option<IRect>,
+    {
+        match self {
+            Column::Single(entity) | Column::Fullscren(entity) => {
+                get_window_frame(*entity).as_ref().map(IRect::width)
+            }
+            Column::Stack(items) => items
+                .iter()
+                .filter_map(StackItem::top)
+                .filter_map(get_window_frame)
+                .map(|frame| frame.width())
+                .max(),
+            Column::Tabs(tabs) => tabs
+                .first()
+                .copied()
+                .map(get_window_frame)
+                .flatten()
+                .as_ref()
+                .map(IRect::width),
+        }
+    }
+
     /// Returns the entity at the given index, or the last entity if the index exceeds the size.
     pub fn at_or_last(&self, index: usize) -> Option<Entity> {
         match self {
@@ -599,10 +623,7 @@ impl LayoutStrip {
                 let heights =
                     binpack_heights(&current_heights, MIN_WINDOW_HEIGHT, layout_strip_height)?;
 
-                let column_width = items
-                    .first()
-                    .and_then(|item| item.top().and_then(get_window_frame))
-                    .map(|frame| frame.width())?;
+                let column_width = column.width(get_window_frame)?;
 
                 let mut next_y = 0;
                 let frames = items
@@ -642,21 +663,15 @@ impl LayoutStrip {
     {
         let mut left_edge = 0;
 
-        self.all_columns()
-            .into_iter()
-            .filter_map(|entity| {
-                let frame = get_window_frame(entity);
-                let column = self
-                    .index_of(entity)
-                    .ok()
-                    .and_then(|index| self.columns.get(index));
-                column.zip(frame)
-            })
-            .map(move |(column, frame)| {
+        self.columns().filter_map(move |column| {
+            let width = column.width(get_window_frame);
+
+            width.map(|width| {
                 let temp = left_edge;
-                left_edge += frame.width();
+                left_edge += width;
                 (column, temp)
             })
+        })
     }
 
     pub fn above(&self, entity: Entity) -> Option<Entity> {

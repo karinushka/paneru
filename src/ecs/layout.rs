@@ -702,8 +702,6 @@ impl LayoutStrip {
                 let heights =
                     binpack_heights(&current_heights, MIN_WINDOW_HEIGHT, layout_strip_height)?;
 
-                let column_width = column.width(get_window_frame)?;
-
                 let mut next_y = 0;
                 let frames = items
                     .into_iter()
@@ -711,8 +709,9 @@ impl LayoutStrip {
                     .filter_map(|(item, height)| {
                         let entity = item.top()?;
                         let mut frame = get_window_frame(entity)?;
+                        let width = frame.width();
                         frame.min.x = position;
-                        frame.max.x = frame.min.x + column_width;
+                        frame.max.x = frame.min.x + width;
 
                         frame.min.y = next_y;
                         frame.max.y = frame.min.y + height;

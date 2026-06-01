@@ -75,11 +75,36 @@ impl StackItem {
         }
     }
 
-    /// Returns all window entities within the item.
-    pub fn all_windows(&self) -> Vec<Entity> {
+    /// Returns an iterator over all window entities in this stack item.
+    pub fn window_iter(&self) -> StackItemIter<'_> {
         match self {
-            StackItem::Single(id) => vec![*id],
-            StackItem::Tabs(tabs) => tabs.clone(),
+            StackItem::Single(entity) => StackItemIter::Single(std::iter::once(*entity)),
+            StackItem::Tabs(tabs) => StackItemIter::Tabs(tabs.iter().copied()),
+        }
+    }
+}
+
+pub enum StackItemIter<'a> {
+    Single(std::iter::Once<Entity>),
+    Tabs(std::iter::Copied<std::slice::Iter<'a, Entity>>),
+}
+
+impl Iterator for StackItemIter<'_> {
+    type Item = Entity;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            StackItemIter::Single(iter) => iter.next(),
+            StackItemIter::Tabs(iter) => iter.next(),
+        }
+    }
+}
+
+impl DoubleEndedIterator for StackItemIter<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        match self {
+            StackItemIter::Single(iter) => iter.next_back(),
+            StackItemIter::Tabs(iter) => iter.next_back(),
         }
     }
 }
@@ -106,6 +131,29 @@ impl Column {
             Column::Stack(stack) => stack.first().and_then(StackItem::top),
             Column::Tabs(tabs) => tabs.first().copied(),
         }
+    }
+
+    /// Returns an iterator over all window entities in this column
+    pub fn window_iter(&self) -> ColumnWindowIter<'_> {
+        match self {
+            Column::Single(entity) | Column::Fullscren(entity) => {
+                ColumnWindowIter::Single(std::iter::once(*entity))
+            }
+            Column::Tabs(tabs) => ColumnWindowIter::Tabs(tabs.iter().copied()),
+            Column::Stack(items) => {
+                ColumnWindowIter::Stack(items.iter().flat_map(StackItem::window_iter))
+            }
+        }
+    }
+
+    pub fn width<W>(&self, get_window_frame: &W) -> Option<i32>
+    where
+        W: Fn(Entity) -> Option<IRect>,
+    {
+        self.window_iter()
+            .filter_map(get_window_frame)
+            .map(|frame| frame.width())
+            .max()
     }
 
     /// Returns the entity at the given index, or the last entity if the index exceeds the size.
@@ -137,6 +185,30 @@ impl Column {
             Column::Stack(stack) => stack.iter().any(|item| item.contains(entity)),
             Column::Tabs(tabs) => tabs.contains(&entity),
         });
+    }
+}
+
+pub enum ColumnWindowIter<'a> {
+    Single(std::iter::Once<Entity>),
+    Tabs(std::iter::Copied<std::slice::Iter<'a, Entity>>),
+    Stack(
+        std::iter::FlatMap<
+            std::slice::Iter<'a, StackItem>,
+            StackItemIter<'a>,
+            fn(&'a StackItem) -> StackItemIter<'a>,
+        >,
+    ),
+}
+
+impl Iterator for ColumnWindowIter<'_> {
+    type Item = Entity;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Single(iter) => iter.next(),
+            Self::Tabs(iter) => iter.next(),
+            Self::Stack(iter) => iter.next(),
+        }
     }
 }
 
@@ -547,7 +619,7 @@ impl LayoutStrip {
             .iter()
             .flat_map(|column| match column {
                 Column::Single(entity) | Column::Fullscren(entity) => vec![*entity],
-                Column::Stack(items) => items.iter().flat_map(StackItem::all_windows).collect(),
+                Column::Stack(items) => items.iter().flat_map(StackItem::window_iter).collect(),
                 Column::Tabs(ids) => ids.clone(),
             })
             .collect()
@@ -599,11 +671,6 @@ impl LayoutStrip {
                 let heights =
                     binpack_heights(&current_heights, MIN_WINDOW_HEIGHT, layout_strip_height)?;
 
-                let column_width = items
-                    .first()
-                    .and_then(|item| item.top().and_then(get_window_frame))
-                    .map(|frame| frame.width())?;
-
                 let mut next_y = 0;
                 let frames = items
                     .into_iter()
@@ -611,8 +678,9 @@ impl LayoutStrip {
                     .filter_map(|(item, height)| {
                         let entity = item.top()?;
                         let mut frame = get_window_frame(entity)?;
+                        let width = frame.width();
                         frame.min.x = position;
-                        frame.max.x = frame.min.x + column_width;
+                        frame.max.x = frame.min.x + width;
 
                         frame.min.y = next_y;
                         frame.max.y = frame.min.y + height;
@@ -620,11 +688,7 @@ impl LayoutStrip {
                         next_y = frame.max.y;
 
                         // Return ALL windows in the item with the same frame
-                        let results = item
-                            .all_windows()
-                            .into_iter()
-                            .map(|e| (e, frame))
-                            .collect::<Vec<_>>();
+                        let results = item.window_iter().map(|e| (e, frame)).collect::<Vec<_>>();
                         Some(results)
                     })
                     .flatten()
@@ -642,21 +706,15 @@ impl LayoutStrip {
     {
         let mut left_edge = 0;
 
-        self.all_columns()
-            .into_iter()
-            .filter_map(|entity| {
-                let frame = get_window_frame(entity);
-                let column = self
-                    .index_of(entity)
-                    .ok()
-                    .and_then(|index| self.columns.get(index));
-                column.zip(frame)
-            })
-            .map(move |(column, frame)| {
+        self.columns().filter_map(move |column| {
+            let width = column.width(get_window_frame);
+
+            width.map(|width| {
                 let temp = left_edge;
-                left_edge += frame.width();
+                left_edge += width;
                 (column, temp)
             })
+        })
     }
 
     pub fn above(&self, entity: Entity) -> Option<Entity> {
@@ -1508,17 +1566,6 @@ mod tests {
 
         let out: Vec<_> = strip.relative_positions(600, &get_window_frame).collect();
         assert_eq!(out.len(), 4);
-
-        // All stacked windows use the top window's width (400).
-        for &(e, ref f) in &out {
-            if e == entities[0] || e == entities[1] || e == entities[2] {
-                assert_eq!(
-                    f.width(),
-                    400,
-                    "stacked window should use top window's width"
-                );
-            }
-        }
 
         // Stacked heights should sum to viewport height.
         let stack_heights: i32 = out

@@ -10,6 +10,7 @@ use notify::event::{DataChange, MetadataKind, ModifyKind};
 use notify::{EventKind, Watcher};
 use objc2_app_kit::NSScreen;
 use objc2_foundation::{NSNumber, NSString, ns_string};
+use std::cmp::Ordering;
 use std::pin::Pin;
 use std::time::Duration;
 use tracing::{Level, debug, error, info, instrument, trace, warn};
@@ -1250,25 +1251,93 @@ pub(super) fn cleanup_timeout_trigger(
 
 pub(super) fn window_resize_verifier(
     mut removed: RemovedComponents<ResizeMarker>,
-    mut windows: Query<(&mut Window, &mut Bounds)>,
+    mut windows: Query<(&mut Window, &Position, &mut Bounds)>,
+    layout_strips: Query<&LayoutStrip>,
+    mut commands: Commands,
 ) {
+    use std::cmp::Ordering;
     for entity in removed.read() {
-        let Ok((mut window, mut bounds)) = windows.get_mut(entity) else {
+        let Ok((mut window, _, mut bounds)) = windows.get_mut(entity) else {
             continue;
         };
         let Ok(frame) = window.update_frame() else {
             continue;
         };
 
-        if frame.size().chebyshev_distance(bounds.0) <= 1 {
+        let actual_size = frame.size();
+        let expected_size = bounds.0;
+
+        // note: macOS loves to make window sizes to even numbers, so we treat actual+1 as equal.
+        let width_ord = fuzzy_equal(actual_size.x, expected_size.x);
+        let height_ord = fuzzy_equal(actual_size.y, expected_size.y);
+
+        if width_ord == Ordering::Equal && height_ord == Ordering::Equal {
             continue;
         }
         debug!(
-            "window {} did not resize fully: {} vs {}",
+            "window '{}'({}) did not fully resized to {}, was {} instead",
+            window.title().unwrap_or_default(),
             window.id(),
-            frame.size(),
-            bounds.0,
+            expected_size,
+            actual_size,
         );
         bounds.0 = frame.size();
+
+        // we may hitting minimum width constraint on this window or this window isn't resizable.
+        // if this window is a part of a column, other windows in the column might have resized(shrunk) successfully,
+        // which leaves an empty space next to those windows.
+        // try to expand those windows to fill the empty space. (it's free real estate after all)
+        //
+        // note that those windows might have max window constraints or isn't resiable.
+        // so we need to ignore cases where windows are failing to expand to the target.
+        if width_ord == Ordering::Less {
+            let Some(column) = layout_strips.iter().find_map(|strip| {
+                strip
+                    .index_of(entity)
+                    .ok()
+                    .and_then(|idx| strip.get(idx).ok())
+            }) else {
+                continue;
+            };
+
+            let get_window_frame = |entity| {
+                windows
+                    .get(entity)
+                    .map(|(_, position, bounds)| {
+                        IRect::from_corners(position.0, position.0 + bounds.0)
+                    })
+                    .ok()
+            };
+
+            let Some(column_width) = column.width(&get_window_frame) else {
+                continue;
+            };
+
+            column
+                .window_iter()
+                .filter(|e| *e != entity)
+                .for_each(|entity| {
+                    if let Some(width) = get_window_frame(entity).as_ref().map(IRect::width)
+                        && width < column_width
+                    {
+                        commands.resize_entity(entity, Size::new(column_width, actual_size.y));
+                    }
+                });
+        }
+    }
+}
+
+fn fuzzy_equal<N>(actual_size: N, expected_size: N) -> Ordering
+where
+    N: std::ops::Sub<Output = N> + Ord + From<i8>,
+{
+    let diff = expected_size - actual_size;
+
+    if diff < N::from(-1) {
+        Ordering::Less
+    } else if diff > N::from(1) {
+        Ordering::Greater
+    } else {
+        Ordering::Equal
     }
 }

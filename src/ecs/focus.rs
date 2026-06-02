@@ -221,9 +221,13 @@ fn mouse_follows_focus(
             .map(Display::bounds)
     {
         let visible = display_bounds.intersect(frame);
-        let origin = visible.center();
-        debug!("centering on {} {origin}", window.id());
-        window_manager.warp_mouse(origin);
+        // If the overlap is smaller than 50x50, the window is probably hidden
+        // off screen, so do not move the mouse.
+        if visible.size().length_squared() > 5000 {
+            let origin = visible.center();
+            debug!("centering on {} {origin}", window.id());
+            window_manager.warp_mouse(origin);
+        }
     }
 }
 

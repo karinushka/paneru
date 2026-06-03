@@ -266,6 +266,11 @@ pub(super) fn window_focused_trigger(
             }
         }
 
+        if owner.is_none() {
+            // The window just spawned and has not yet been inserted into the strip.
+            continue;
+        }
+
         if let Some((strip_entity, active)) = owner
             && !active
             && let Ok(mut entity_commands) = commands.get_entity(strip_entity)

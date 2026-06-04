@@ -1,5 +1,5 @@
 use bevy::app::{App, Plugin, Update};
-use bevy::ecs::change_detection::{DetectChanges as _, DetectChangesMut as _};
+use bevy::ecs::change_detection::DetectChangesMut;
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::{Entity, EntityHashMap, EntityHashSet};
 use bevy::ecs::hierarchy::ChildOf;
@@ -7,7 +7,6 @@ use bevy::ecs::query::{Changed, Has, Or, With, Without};
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::schedule::common_conditions::{not, resource_exists};
 use bevy::ecs::system::{Commands, ParamSet, Populated, Query, Res};
-use bevy::ecs::world::Ref;
 use bevy::math::IRect;
 use std::collections::{HashMap, VecDeque};
 use stdext::function_name;
@@ -16,8 +15,8 @@ use tracing::{Level, instrument, trace};
 use crate::config::Config;
 use crate::ecs::params::Windows;
 use crate::ecs::{
-    ActiveWorkspaceMarker, Bounds, DockPosition, EnsureVisibleMarker, Initializing, LayoutPosition,
-    Position, RepositionMarker, ReshuffleAroundMarker, Scrolling, SpawnCommandsExt,
+    Bounds, DockPosition, EnsureVisibleMarker, Initializing, LayoutPosition, Position,
+    RepositionMarker, ReshuffleAroundMarker, Scrolling, SpawnCommandsExt,
 };
 use crate::errors::{Error, Result};
 use crate::manager::{Display, Origin, Window};
@@ -1093,9 +1092,6 @@ fn position_layout_strips(
 struct StripWindowContext {
     strip_position: Origin,
     swiping: bool,
-    // Cached per strip so parallel window updates keep the same snap/animate
-    // decision that would have been made while iterating the strip directly.
-    workspace_switching: bool,
     display_entity: Entity,
     stacked: bool,
 }
@@ -1105,7 +1101,6 @@ fn insert_strip_window_contexts(
     strip: &LayoutStrip,
     strip_position: Origin,
     swiping: bool,
-    workspace_switching: bool,
     display_entity: Entity,
 ) {
     for column in &strip.columns {
@@ -1114,7 +1109,6 @@ fn insert_strip_window_contexts(
             column,
             strip_position,
             swiping,
-            workspace_switching,
             display_entity,
             matches!(column, Column::Stack(_)),
         );
@@ -1126,7 +1120,6 @@ fn insert_column_window_contexts(
     column: &Column,
     strip_position: Origin,
     swiping: bool,
-    workspace_switching: bool,
     display_entity: Entity,
     stacked: bool,
 ) {
@@ -1137,7 +1130,6 @@ fn insert_column_window_contexts(
                 StripWindowContext {
                     strip_position,
                     swiping,
-                    workspace_switching,
                     display_entity,
                     stacked,
                 },
@@ -1150,7 +1142,6 @@ fn insert_column_window_contexts(
                     item,
                     strip_position,
                     swiping,
-                    workspace_switching,
                     display_entity,
                     stacked,
                 );
@@ -1163,7 +1154,6 @@ fn insert_column_window_contexts(
                     StripWindowContext {
                         strip_position,
                         swiping,
-                        workspace_switching,
                         display_entity,
                         stacked,
                     },
@@ -1178,7 +1168,6 @@ fn insert_stack_item_window_contexts(
     item: &StackItem,
     strip_position: Origin,
     swiping: bool,
-    workspace_switching: bool,
     display_entity: Entity,
     stacked: bool,
 ) {
@@ -1189,7 +1178,6 @@ fn insert_stack_item_window_contexts(
                 StripWindowContext {
                     strip_position,
                     swiping,
-                    workspace_switching,
                     display_entity,
                     stacked,
                 },
@@ -1202,7 +1190,6 @@ fn insert_stack_item_window_contexts(
                     StripWindowContext {
                         strip_position,
                         swiping,
-                        workspace_switching,
                         display_entity,
                         stacked,
                     },
@@ -1221,42 +1208,20 @@ fn position_layout_windows(
         (Entity, &Window, &LayoutPosition, &mut Position, &mut Bounds),
         (Changed<LayoutPosition>, With<Window>, Without<LayoutStrip>),
     >,
-    workspaces: Query<
-        (
-            &LayoutStrip,
-            &Position,
-            Has<Scrolling>,
-            Option<Ref<ActiveWorkspaceMarker>>,
-            &ChildOf,
-        ),
-        With<LayoutStrip>,
-    >,
+    workspaces: Query<(&LayoutStrip, &Position, Has<Scrolling>, &ChildOf), With<LayoutStrip>>,
     displays: Query<(&Display, Option<&DockPosition>)>,
     config: Res<Config>,
     mut commands: Commands,
 ) {
-    const OFFSCREEN_THRESHOLD: i32 = 100;
     let offscreen_sliver_width = config.sliver_width();
     let (_, pad_right, _, pad_left) = config.edge_padding();
     let mut strip_contexts = EntityHashMap::default();
-    for (layout_strip, Position(strip_position), swiping, marker, child_of) in &workspaces {
-        let display_bounds = displays
-            .get(child_of.parent())
-            .map(|(display, dock)| display.actual_display_bounds(dock, &config));
-        let moving_offscreen = display_bounds
-            .is_ok_and(|bounds| (bounds.max.y - OFFSCREEN_THRESHOLD) < strip_position.y);
-        // To detect whether a virtual workspace is being switched, we check whether it's being
-        // moved offscreen - e.g. it's being hidden.
-        // Or whether it has recently gotten an active marker insertion - e.g. it is being brought
-        // into view.
-        let workspace_switching =
-            moving_offscreen || marker.is_some_and(|marker| marker.is_added());
+    for (layout_strip, Position(strip_position), swiping, child_of) in &workspaces {
         insert_strip_window_contexts(
             &mut strip_contexts,
             layout_strip,
             *strip_position,
             swiping,
-            workspace_switching,
             child_of.parent(),
         );
     }
@@ -1269,6 +1234,10 @@ fn position_layout_windows(
             return;
         };
         let viewport = display.actual_display_bounds(dock, &config);
+        // Gets 80% of the display height as threshold.
+        let Ok(vertical_move_threshold) = u32::try_from(viewport.size().y * 8 / 10) else {
+            continue;
+        };
 
         // Account for per-window horizontal_padding: reposition() adds
         // h_pad to the virtual x, so subtract it here so the OS window
@@ -1319,19 +1288,17 @@ fn position_layout_windows(
 
         if position.0 != frame.min {
             // Direct-assign (snap) when:
-            //   - The user is actively swiping: windows must track the
-            //     finger in lockstep.
-            //   - A workspace switch just moved the strip: jumping the
-            //     full off-screen distance should be instantaneous.
-            // Otherwise (programmatic strip animation, or pure layout
-            // change), animate toward the new position so layout changes
-            // (swap/add/remove) slide instead of teleport. When the strip
-            // is also being animated, the per-window target is recomputed
-            // each tick from the strip's current position, so the two
-            // motions compose: e.g., on swap, the focused window's target
-            // converges back to its old visual position as the strip
-            // settles, while the other window slides past.
-            if context.swiping || context.workspace_switching {
+            //   - The user is actively swiping: windows must track the finger in lockstep.
+            //   - A workspace switch just moved the strip vertically: jumping the full off-screen
+            //   distance should be instantaneous.
+            // Otherwise (programmatic strip animation, or pure layout change), animate toward the
+            // new position so layout changes (swap/add/remove) slide instead of teleport. When the
+            // strip is also being animated, the per-window target is recomputed each tick from the
+            // strip's current position, so the two motions compose: e.g., on swap, the focused
+            // window's target converges back to its old visual position as the strip settles, while
+            // the other window slides past.
+            let offscreen_move = position.0.y.abs_diff(frame.min.y) > vertical_move_threshold;
+            if context.swiping || offscreen_move && !config.virtual_workspace_animations() {
                 position.0 = frame.min;
                 if let Ok(mut entity_commands) = commands.get_entity(entity) {
                     entity_commands.try_remove::<RepositionMarker>();
@@ -1385,14 +1352,7 @@ mod tests {
         let strip_position = Origin::new(10, 20);
         let mut contexts = EntityHashMap::default();
 
-        insert_strip_window_contexts(
-            &mut contexts,
-            &strip,
-            strip_position,
-            true,
-            false,
-            display_entity,
-        );
+        insert_strip_window_contexts(&mut contexts, &strip, strip_position, true, display_entity);
 
         let stacked_leader = contexts.get(&entities[0]).unwrap();
         let stacked_follower = contexts.get(&entities[1]).unwrap();
@@ -1401,7 +1361,6 @@ mod tests {
         assert_eq!(stacked_leader.strip_position, strip_position);
         assert_eq!(stacked_leader.display_entity, display_entity);
         assert!(stacked_leader.swiping);
-        assert!(!stacked_leader.workspace_switching);
         assert!(stacked_leader.stacked);
         assert!(stacked_follower.stacked);
         assert!(!single_window.stacked);

@@ -690,6 +690,7 @@ fn handle_virtual_window_moves(
             "Moved window {} to virtual workspace {}",
             window_entity, target_idx
         );
+        commands.reshuffle_around(window_entity);
     }
 }
 

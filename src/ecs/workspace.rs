@@ -22,7 +22,8 @@ use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, Initializing, NativeFullscreenMarker, Position,
-    RefreshWindowSizes, SelectedVirtualMarker, SpawnCommandsExt, Timeout, Unmanaged,
+    RefreshWindowSizes, RepositionMarker, SelectedVirtualMarker, SpawnCommandsExt, Timeout,
+    Unmanaged,
 };
 use crate::errors::Result;
 use crate::events::Event;
@@ -831,7 +832,7 @@ fn move_virtual_workspace_bind(
     debug!("Moving {focused_entity} to new virtual space {target_virtual_index}");
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all)]
 fn show_active_workspace(
     activated: Single<Entity, Added<ActiveWorkspaceMarker>>,
@@ -842,6 +843,7 @@ fn show_active_workspace(
             &mut Position,
             &LayoutStrip,
             Option<&PreviousStripPosition>,
+            Option<&RepositionMarker>,
         ),
         Without<Window>,
     >,
@@ -851,7 +853,7 @@ fn show_active_workspace(
 ) {
     let Some(workspace_id) = workspaces
         .iter()
-        .find_map(|(entity, _, strip, _)| (entity == *activated).then_some(strip.id()))
+        .find_map(|(entity, _, strip, _, _)| (entity == *activated).then_some(strip.id()))
     else {
         return;
     };
@@ -860,9 +862,9 @@ fn show_active_workspace(
     let current_focus = windows.focused();
     let current_workspace = workspaces
         .iter_mut()
-        .filter(|(entity, _, strip, _)| strip.id() == workspace_id && *entity != *activated);
+        .filter(|(entity, _, strip, _, _)| strip.id() == workspace_id && *entity != *activated);
 
-    for (entity, mut position, strip, previous) in current_workspace {
+    for (entity, mut position, strip, previous, moving) in current_workspace {
         if previous.is_none() {
             let mut focus =
                 current_focus.and_then(|(_, entity)| strip.contains(entity).then_some(entity));
@@ -882,11 +884,12 @@ fn show_active_workspace(
                 debug!("No previous focus, taking centered one {focus:?}.");
             }
 
+            let origin = match &moving {
+                Some(RepositionMarker(destination)) => *destination,
+                None => position.0,
+            };
             if let Ok(mut entity_commands) = commands.get_entity(entity) {
-                entity_commands.try_insert(PreviousStripPosition {
-                    origin: position.0,
-                    focus,
-                });
+                entity_commands.try_insert(PreviousStripPosition { origin, focus });
             }
         }
 
@@ -899,7 +902,7 @@ fn show_active_workspace(
         }
     }
 
-    let Ok((_, mut position, strip, previous_position)) = workspaces.get_mut(*activated) else {
+    let Ok((_, mut position, strip, previous_position, _)) = workspaces.get_mut(*activated) else {
         return;
     };
     debug!("showing virtual workspace {} ({})", strip.id(), *activated);

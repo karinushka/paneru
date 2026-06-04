@@ -1074,28 +1074,43 @@ pub(crate) fn detect_tabbed_windows(
             continue;
         };
 
-        // Overlapping Frame Strategy: native macOS tabs share an *exact* frame with their
-        // leader — same origin and same size. Matching on width alone yields false
-        // positives whenever an app re-opens with its default geometry while a same-app
-        // sibling happens to be off-screen (scrolled out of the strip, on another
-        // workspace, behind a fullscreen window), so we require the full frame to agree.
-        let tabbed = windows.iter().find_map(
-            |(leader, window, Position(leader_position), Bounds(leader_bounds), parent)| {
-                // If the window is partially off-screen, relax the positional matching requirement
-                // because the original window will be moved into view.
-                let offscreen = !display_bounds.contains(*leader_position)
-                    || !display_bounds.contains(*leader_position + leader_bounds);
-                (leader != entity
-                    && parent.parent() == app_entity
+        // First find all the windows which have the same size and the same parent app.
+        let mut same_size = windows
+            .iter()
+            .filter(|(leader, _, _, Bounds(leader_bounds), child)| {
+                *leader != entity
+                    && child.parent() == app_entity
                     && leader_bounds.chebyshev_distance(*bounds) <= 1
-                    && (offscreen || leader_position.chebyshev_distance(*position) <= 1))
-                    .then_some((leader, window.id(), leader_position))
-            },
-        );
+            })
+            .collect::<Vec<_>>();
 
-        // Tab detection heuristics:
-        // If the two windows are overlapping, and the previous window is suddenly not visible on
-        // the scren - it's a tab stack.
+        // Now check whether any of these found windows have the same position?
+        let tabbed = same_size
+            .iter()
+            .find_map(|(leader, window, Position(leader_position), _, _)| {
+                // If the window has a positional match, it's tabbed!
+                (leader_position.chebyshev_distance(*position) <= 1).then_some((
+                    *leader,
+                    window.id(),
+                    leader_position,
+                ))
+            })
+            .or_else(|| {
+                // Otherwise if no windows were found by position, sort all the windows by distance
+                // and then pick the one which is currently offscreen.
+                // This heuristic relaxes the position matching, because the window is bumped into view.
+                same_size.sort_by_key(|(_, _, Position(candidate_position), _, _)| {
+                    position.x.abs_diff(candidate_position.x)
+                });
+                same_size.into_iter().find_map(
+                    |(leader, window, Position(leader_position), Bounds(leader_bounds), _)| {
+                        let offscreen = !display_bounds.contains(*leader_position)
+                            || !display_bounds.contains(*leader_position + leader_bounds);
+                        offscreen.then_some((leader, window.id(), leader_position))
+                    },
+                )
+            });
+
         if let Some((leader, leader_id, leader_position)) = tabbed
             && window_manager
                 .windows_on_screen()

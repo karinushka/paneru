@@ -142,7 +142,7 @@ Format: `"[modifiers-]key"`. Available modifiers are:
 | `mouse_nextdisplay` | Warp mouse cursor to the next monitor. |
 | `window_snap` | Snap an overflowing window into the viewport. |
 | `window_raise_floating` | Make the floating windows layer visible on the current workspace. |
-| `window_togglefloatinglayer` | Selectively move the floating windows in front or behind of the workspace windows. |
+| `window_togglefloatlayer` | Selectively move the floating windows in front or behind of the workspace windows. |
 | `quit` | Exit Paneru. |
 
 **Example:**

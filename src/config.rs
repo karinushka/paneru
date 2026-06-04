@@ -199,7 +199,11 @@ fn parse_operation(argv: &[&str]) -> Result<Operation> {
             "floating" => Operation::RaiseFloating,
             _ => return Err(err),
         },
-        "togglefloatlayer" => Operation::ToggleFloatingLayer,
+        // The documented binding key in CONFIGURATION.md is
+        // `window_togglefloatinglayer`, which the underscore-splitter delivers
+        // here as a single `togglefloatinglayer` token. Accept both spellings
+        // so existing configs using either form continue to work.
+        "togglefloatlayer" | "togglefloatinglayer" => Operation::ToggleFloatingLayer,
         "swap" => Operation::Swap(parse_direction(argv.get(1).ok_or(err)?)?),
         "center" => Operation::Center,
         "resize" => Operation::Resize(
@@ -1752,6 +1756,21 @@ fn test_parse_resize_commands() {
     assert!(matches!(
         parse_command(&["window", "shrink"]).unwrap(),
         Command::Window(Operation::Resize(ResizeDirection::Shrink))
+    ));
+}
+
+#[test]
+fn test_parse_togglefloatinglayer_command_aliases() {
+    // `window_togglefloatinglayer` is the binding name documented in
+    // CONFIGURATION.md; it splits to a single token. The original parser
+    // keyword is `togglefloatlayer`. Both must resolve to the same op.
+    assert!(matches!(
+        parse_command(&["window", "togglefloatinglayer"]).unwrap(),
+        Command::Window(Operation::ToggleFloatingLayer)
+    ));
+    assert!(matches!(
+        parse_command(&["window", "togglefloatlayer"]).unwrap(),
+        Command::Window(Operation::ToggleFloatingLayer)
     ));
 }
 

@@ -124,7 +124,7 @@ fn test_native_tab_virtual_move_moves_all_tabs() {
             assert_eq!(active.len(), 1);
             assert_eq!(active.index_of(tab_zero).unwrap(), 0);
             assert_eq!(active.index_of(tab_one).unwrap(), 0);
-            assert_eq!(active.tab_group(tab_zero), Some(vec![tab_zero, tab_one]));
+            assert_eq!(active.tab_group(tab_zero), Some(vec![tab_one, tab_zero]));
 
             let mut query = world.query::<&LayoutStrip>();
             let source = query
@@ -290,8 +290,8 @@ fn test_same_app_same_frame_native_tab_reuses_existing_column() {
                 .expect("active strip not found");
 
             assert_eq!(strip.len(), 1, "native tab should not add a column");
-            assert_eq!(strip.tab_group(tab_zero), Some(vec![tab_zero, tab_one]));
-            assert_eq!(strip.tab_group(tab_one), Some(vec![tab_zero, tab_one]));
+            assert_eq!(strip.tab_group(tab_zero), Some(vec![tab_one, tab_zero]));
+            assert_eq!(strip.tab_group(tab_one), Some(vec![tab_one, tab_zero]));
             assert_window_size!(
                 world,
                 0,

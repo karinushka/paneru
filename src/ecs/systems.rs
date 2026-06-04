@@ -1089,11 +1089,8 @@ pub(crate) fn detect_tabbed_windows(
             .iter()
             .find_map(|(leader, window, Position(leader_position), _, _)| {
                 // If the window has a positional match, it's tabbed!
-                (leader_position.chebyshev_distance(*position) <= 1).then_some((
-                    *leader,
-                    window.id(),
-                    leader_position,
-                ))
+                (leader_position.chebyshev_distance(*position) <= 1)
+                    .then_some((*leader, window.id()))
             })
             .or_else(|| {
                 // Otherwise if no windows were found by position, sort all the windows by distance
@@ -1106,12 +1103,12 @@ pub(crate) fn detect_tabbed_windows(
                     |(leader, window, Position(leader_position), Bounds(leader_bounds), _)| {
                         let offscreen = !display_bounds.contains(*leader_position)
                             || !display_bounds.contains(*leader_position + leader_bounds);
-                        offscreen.then_some((leader, window.id(), leader_position))
+                        offscreen.then_some((leader, window.id()))
                     },
                 )
             });
 
-        if let Some((leader, leader_id, leader_position)) = tabbed
+        if let Some((leader, leader_id)) = tabbed
             && window_manager
                 .windows_on_screen()
                 .is_some_and(|ids| !ids.contains(&leader_id))
@@ -1124,10 +1121,7 @@ pub(crate) fn detect_tabbed_windows(
                 .inspect_err(|err| error!("Failed to convert to tabs: {err}"))
                 .is_ok()
             {
-                // Reposition and reshuffle - otherwise the window will attempt to where the new
-                // tab was previously added.
-                commands.reposition_entity(entity, *leader_position);
-                commands.reshuffle_around(entity);
+                commands.focus_entity(entity, false);
             }
         }
     }

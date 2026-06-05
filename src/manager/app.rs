@@ -9,7 +9,8 @@ use objc2_core_foundation::{CFRetained, CFString, kCFRunLoopCommonModes};
 use std::ffi::c_void;
 use std::pin::Pin;
 use std::ptr::null_mut;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock, RwLock};
+use stdext::sync::rw_lock::RwLockExt;
 
 use stdext::function_name;
 use tracing::{debug, error};
@@ -436,7 +437,7 @@ impl ObserverContext {
 struct AxObserverHandler {
     observer: CFRetained<AXUIWrapper>,
     events: EventSender,
-    contexts: Vec<Pin<Box<ObserverContext>>>,
+    contexts: Arc<RwLock<Vec<Pin<Box<ObserverContext>>>>>,
 }
 
 impl Drop for AxObserverHandler {
@@ -475,7 +476,7 @@ impl AxObserverHandler {
         Ok(Self {
             observer,
             events,
-            contexts: Vec::new(),
+            contexts: Arc::new(RwLock::new(Vec::new())),
         })
     }
 
@@ -502,7 +503,7 @@ impl AxObserverHandler {
             which,
         });
         let context_ptr = NonNull::from_ref(&*context).as_ptr();
-        self.contexts.push(context);
+        self.contexts.force_write().push(context);
 
         // TODO: retry re-registering these.
         let mut retry = vec![];
@@ -555,6 +556,15 @@ impl AxObserverHandler {
         element: &AXUIWrapper,
         notifications: &[&'static str],
     ) {
+        let mut existing = self.contexts.force_write();
+        if let ObserverType::Window(removed) = which &&
+                !existing.iter().any(
+                    |context| matches!(context.which, ObserverType::Window(window_id) if window_id == *removed),
+                ) {
+                    debug!("window {removed} ({element}) already un-observed, skipping!");
+                    return;
+            }
+
         for name in notifications {
             let observer: AXObserverRef = self.observer.deref().as_ptr();
             let notification = CFString::from_static_str(name);
@@ -566,7 +576,7 @@ impl AxObserverHandler {
             }
         }
         if let ObserverType::Window(removed) = which {
-            self.contexts.retain(
+            existing.retain(
                     |context| !matches!(context.which, ObserverType::Window(window_id) if window_id == *removed),
                 );
         }

@@ -26,10 +26,11 @@ use crate::platform::{Pid, WinID, WorkspaceId};
 
 use super::*;
 
+type VerifierFunc = Box<dyn FnMut(&mut World, MockState)>;
 pub(crate) struct TestHarness {
     pub(crate) app: App,
     pub(crate) mock_state: MockState,
-    pub(crate) verifiers: HashMap<usize, Box<dyn FnMut(&mut World, MockState)>>,
+    pub(crate) verifiers: HashMap<usize, VerifierFunc>,
 }
 
 impl TestHarness {
@@ -74,7 +75,6 @@ impl TestHarness {
         let pid = TEST_PROCESS_ID;
 
         let windows = (0..count)
-            .into_iter()
             .map(|i| {
                 let win_id = i as WinID;
                 let frame = IRect::new(0, 0, TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);

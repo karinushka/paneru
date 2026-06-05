@@ -10,7 +10,7 @@ use crate::platform::WinID;
 
 use super::*;
 
-fn spawn_matching_native_tab(world: &mut World, state: MockState, window_id: WinID) {
+fn spawn_matching_native_tab(world: &mut World, state: &MockState, window_id: WinID) {
     let leader = find_window_entity(window_id, world);
     let frame = world
         .get::<Window>(leader)
@@ -36,7 +36,7 @@ fn test_native_tab_detection() {
     TestHarness::new()
         .with_windows(1)
         .on_iteration(0, move |world, state| {
-            spawn_matching_native_tab(world, state, 0);
+            spawn_matching_native_tab(world, &state, 0);
         })
         .on_iteration(1, move |world, _state| {
             let follower = find_window_entity(0, world);
@@ -66,7 +66,7 @@ fn test_native_tab_resize_syncs_sibling_size() {
     TestHarness::new()
         .with_windows(1)
         .on_iteration(0, move |world, state| {
-            spawn_matching_native_tab(world, state, 0);
+            spawn_matching_native_tab(world, &state, 0);
         })
         .on_iteration(1, move |world, _state| {
             let tab_one = find_window_entity(1, world);
@@ -109,7 +109,7 @@ fn test_native_tab_virtual_move_moves_all_tabs() {
     TestHarness::new()
         .with_windows(1)
         .on_iteration(0, move |world, state| {
-            spawn_matching_native_tab(world, state, 0);
+            spawn_matching_native_tab(world, &state, 0);
         })
         .on_iteration(3, move |world, _state| {
             let tab_zero = find_window_entity(0, world);
@@ -152,7 +152,7 @@ fn test_native_tab_removal_keeps_remaining_window_column() {
     TestHarness::new()
         .with_windows(1)
         .on_iteration(0, move |world, state| {
-            spawn_matching_native_tab(world, state, 0);
+            spawn_matching_native_tab(world, &state, 0);
         })
         .on_iteration(1, move |world, _state| {
             let tab_one = find_window_entity(1, world);
@@ -246,7 +246,7 @@ fn test_disable_native_tabs_skips_detection() {
         .with_config(config)
         .with_windows(1)
         .on_iteration(0, move |world, state| {
-            spawn_matching_native_tab(world, state, 0);
+            spawn_matching_native_tab(world, &state, 0);
         })
         .on_iteration(1, move |world, _state| {
             let leader = find_window_entity(0, world);
@@ -278,7 +278,7 @@ fn test_same_app_same_frame_native_tab_reuses_existing_column() {
     TestHarness::new()
         .with_windows(1)
         .on_iteration(0, move |world, state| {
-            spawn_matching_native_tab(world, state, 0);
+            spawn_matching_native_tab(world, &state, 0);
         })
         .on_iteration(1, move |world, _state| {
             let tab_zero = find_window_entity(0, world);

@@ -1902,7 +1902,7 @@ fn test_restore_config_defaults() {
     let config = Config::try_from("[options]\n\n[bindings]\n").expect("config should parse");
 
     assert!(config.restore_enabled());
-    assert_eq!(config.restore_startup_grace(), Duration::from_millis(2000));
+    assert_eq!(config.restore_startup_grace(), Duration::from_secs(2));
     assert_eq!(
         config.restore_missing_windows(),
         MissingWindowBehavior::Ignore

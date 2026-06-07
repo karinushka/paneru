@@ -666,11 +666,10 @@ fn handle_virtual_window_moves(
         }
 
         // Insert new markers. ActiveWorkspaceMarker switches the view.
-        if let Ok(mut entity_commands) = commands.get_entity(target_entity) {
-            entity_commands.try_insert(SelectedVirtualMarker);
-            if !stay {
-                entity_commands.try_insert(ActiveWorkspaceMarker);
-            }
+        if let Ok(mut entity_commands) = commands.get_entity(target_entity)
+            && !stay
+        {
+            entity_commands.try_insert(ActiveWorkspaceMarker);
         }
 
         if stay && let Some(neighbour) = source_neighbour {
@@ -685,12 +684,12 @@ fn handle_virtual_window_moves(
             if let Some(mut previous) = previous_position {
                 previous.focus = Some(window_entity);
             }
+            commands.reshuffle_around(window_entity);
         }
         debug!(
             "Moved window {} to virtual workspace {}",
             window_entity, target_idx
         );
-        commands.reshuffle_around(window_entity);
     }
 }
 

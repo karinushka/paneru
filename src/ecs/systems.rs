@@ -761,11 +761,14 @@ pub(super) struct OverlayWindowConfigCache {
     detected_border_radius: Option<f64>,
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 pub(super) fn update_overlays(
+    active_workspace: Populated<
+        (Has<Scrolling>, &LayoutStrip),
+        (With<ActiveWorkspaceMarker>, Changed<LayoutStrip>),
+    >,
     windows: Windows,
     applications: Query<&Application>,
-    active_workspace: Query<(Has<Scrolling>, &LayoutStrip), With<ActiveWorkspaceMarker>>,
     overlay_mgr: Option<NonSendMut<OverlayManager>>,
     mission_control_active: Res<MissionControlActive>,
     config: Res<Config>,

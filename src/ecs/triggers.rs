@@ -959,7 +959,7 @@ pub(super) fn apply_window_defaults(
         if properties.floating() {
             // Skip grid_ratios during init: we don't know this window's display.
             if !initializing && let Some((rx, ry, rw, rh)) = properties.grid_ratios() {
-                let bounds = active_display.bounds();
+                let bounds = active_display.actual_bounds(&config);
                 let x = (f64::from(bounds.width()) * rx) as i32;
                 let y = (f64::from(bounds.height()) * ry) as i32;
                 let w = (f64::from(bounds.width()) * rw) as i32;
@@ -984,7 +984,7 @@ pub(super) fn apply_window_defaults(
         // window on an inactive display stays put.
         if let Some(width) = properties.width_ratio() {
             _ = window.update_frame().inspect_err(|err| error!("{err}"));
-            let bounds = active_display.bounds();
+            let bounds = active_display.actual_bounds(&config);
             let (_, pad_right, _, pad_left) = config.edge_padding();
             let padded_width = bounds.width() - pad_left - pad_right;
             let new_width = (f64::from(padded_width) * width).round() as i32;
@@ -1281,7 +1281,7 @@ pub(super) fn window_resize_verifier(
             expected_size,
             actual_size,
         );
-        bounds.0 = frame.size();
+        bounds.0 = actual_size;
 
         // we may hitting minimum width constraint on this window or this window isn't resizable.
         // if this window is a part of a column, other windows in the column might have resized(shrunk) successfully,

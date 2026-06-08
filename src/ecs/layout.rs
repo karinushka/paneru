@@ -636,7 +636,7 @@ impl LayoutStrip {
         self.columns.iter()
     }
 
-    #[instrument(level = Level::TRACE, skip_all, fields(offset))]
+    #[instrument(level = Level::TRACE, skip_all, fields(layout_strip_height))]
     pub fn relative_positions<W>(
         &self,
         layout_strip_height: i32,
@@ -1235,7 +1235,7 @@ fn position_layout_windows(
         };
         let viewport = display.actual_display_bounds(dock, &config);
         // Gets 80% of the display height as threshold.
-        let Ok(vertical_move_threshold) = u32::try_from(viewport.size().y * 8 / 10) else {
+        let Ok(vertical_move_threshold) = u32::try_from(viewport.height() * 8 / 10) else {
             continue;
         };
 

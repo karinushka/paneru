@@ -211,9 +211,7 @@ fn apply_snap_force(
         return;
     }
 
-    let viewport = active_display
-        .display()
-        .actual_display_bounds(active_display.dock(), &config);
+    let viewport = active_display.actual_bounds(&config);
     let viewport_center = viewport.center().x;
     let snap_threshold = SNAP_DISPLAY_RATIO * f64::from(viewport.width());
 
@@ -254,9 +252,7 @@ fn scrolling_integrator(
     config: Res<Config>,
 ) {
     let dt = time.delta_secs_f64();
-    let viewport = active_display
-        .display()
-        .actual_display_bounds(active_display.dock(), &config);
+    let viewport = active_display.actual_bounds(&config);
     let viewport_width = f64::from(viewport.width());
 
     // Direction modifier: Natural moves strip left (negative offset) for positive delta (finger left)
@@ -282,9 +278,7 @@ fn apply_scrolling_constraints(
     windows: Windows,
     config: Res<Config>,
 ) {
-    let viewport = active_display
-        .display()
-        .actual_display_bounds(active_display.dock(), &config);
+    let viewport = active_display.actual_bounds(&config);
     let (strip, ref mut position, ref mut scroll) = *strip;
 
     let get_window_frame = |entity| windows.moving_frame(entity);

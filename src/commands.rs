@@ -751,10 +751,8 @@ fn resize_window(
         cmds.try_remove::<FullWidthMarker>();
     }
 
-    let display_width = active_display.bounds().width();
-    let (_, pad_right, _, pad_left) = config.edge_padding();
-    let padded_width = display_width - pad_left - pad_right;
-    let current_ratio = f64::from(frame.width()) / f64::from(padded_width);
+    let viewport = active_display.actual_bounds(&config);
+    let current_ratio = f64::from(frame.width()) / f64::from(viewport.width());
     let widths = config.preset_column_widths();
     let fallback = *widths.first().unwrap_or(&0.5);
     let cycle = config.window_resize_cycle();
@@ -784,14 +782,11 @@ fn resize_window(
             }),
     };
 
-    let new_width = (next_ratio * f64::from(padded_width)).round() as i32;
+    let new_width = (next_ratio * f64::from(viewport.width())).round() as i32;
     let size = Size::new(new_width, frame.height());
 
     let mut origin = IRect::from_center_size(frame.center(), size).min;
-    origin.x = origin.x.clamp(
-        active_display.bounds().min.x + pad_left,
-        active_display.bounds().max.x - pad_right - size.x,
-    );
+    origin.x = origin.x.clamp(viewport.min.x, viewport.max.x - size.x);
     commands.reposition_entity(entity, origin);
 
     // Resize all windows in the column so stacked siblings share the new width.
@@ -833,14 +828,12 @@ fn full_width_window(
         return;
     };
 
-    let viewport = active_display
-        .display()
-        .actual_display_bounds(active_display.dock(), &config);
+    let viewport = active_display.actual_bounds(&config);
 
     if let Some(marker) = windows.full_width(entity) {
         commands.entity(entity).try_remove::<FullWidthMarker>();
         let w = (marker.width_ratio * f64::from(viewport.width())).round() as i32;
-        let bounds = active_display.bounds().size().with_x(w);
+        let bounds = active_display.actual_bounds(&config).size().with_x(w);
         commands.resize_entity(entity, bounds);
     } else {
         let strip = active_display.active_strip();
@@ -1085,6 +1078,7 @@ fn equalize_column(
     current_focus: Single<(&Window, Entity), With<FocusedMarker>>,
     windows: Windows,
     active_display: ActiveDisplay,
+    config: Res<Config>,
     mut commands: Commands,
 ) {
     if filter_window_operations(&mut messages, |op| matches!(op, Operation::Equalize))
@@ -1105,7 +1099,8 @@ fn equalize_column(
 
     if let Column::Stack(stack) = column {
         #[allow(clippy::cast_precision_loss)]
-        let equal_height = active_display.bounds().height() / i32::try_from(stack.len()).unwrap();
+        let equal_height =
+            active_display.actual_bounds(&config).height() / i32::try_from(stack.len()).unwrap();
 
         for item in &stack {
             for entity in item.window_iter() {
@@ -1146,9 +1141,7 @@ fn snap_window(
         return;
     };
 
-    let display_bounds = active_display
-        .display()
-        .actual_display_bounds(active_display.dock(), &config);
+    let display_bounds = active_display.actual_bounds(&config);
 
     // Clamp the frame into the display and reposition the *strip* (not the
     // window) so the layout stays consistent.

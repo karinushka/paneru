@@ -21,7 +21,7 @@ use crate::ecs::focus::FocusHistory;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, Bounds, Initializing, NativeFullscreenMarker, Position,
+    ActiveWorkspaceMarker, Bounds, DockPosition, Initializing, NativeFullscreenMarker, Position,
     RefreshWindowSizes, RepositionMarker, SelectedVirtualMarker, SpawnCommandsExt, Timeout,
     Unmanaged,
 };
@@ -567,7 +567,8 @@ fn handle_virtual_window_moves(
         Has<ActiveWorkspaceMarker>,
         Option<&mut PreviousStripPosition>,
     )>,
-    active_display: Single<(Entity, &Display), With<ActiveDisplayMarker>>,
+    active_display: Single<(Entity, &Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
+    config: Res<Config>,
     mut commands: Commands,
 ) {
     let Some((workspace_id, source_entity)) = workspaces
@@ -577,7 +578,8 @@ fn handle_virtual_window_moves(
         return;
     };
 
-    let (display_entity, active_display) = *active_display;
+    let (display_entity, active_display, dock) = *active_display;
+    let viewport = active_display.actual_display_bounds(dock, &config);
     for (window_entity, move_marker) in &moved_windows {
         let moving_entities = workspaces
             .get(source_entity)
@@ -615,9 +617,9 @@ fn handle_virtual_window_moves(
         } else {
             // Stay: spawn offscreen with PreviousStripPosition for later restoration.
             // Follow (or empty source): spawn visible, user is switching to it.
-            let visible_origin = active_display.bounds().min;
+            let visible_origin = viewport.min;
             let origin = if stay {
-                active_display.bounds().max - 10
+                viewport.max - 10
             } else {
                 visible_origin
             };

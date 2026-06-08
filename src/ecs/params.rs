@@ -13,6 +13,7 @@ use tracing::warn;
 
 use super::{ActiveDisplayMarker, FocusFollowsMouse, SkipReshuffle};
 use crate::{
+    config::Config,
     ecs::{
         ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker, FullWidthMarker, Initializing,
         LayoutPosition, NativeFullscreenMarker, Position, RepositionMarker, ResizeMarker,
@@ -134,13 +135,19 @@ impl ActiveDisplay<'_, '_> {
         self.strip.2
     }
 
-    /// Returns the `CGRect` representing the bounds of the active display.
+    /// Returns the `IRect` representing the bounds of the active display.
     pub fn bounds(&self) -> IRect {
         self.display.0.bounds()
     }
 
     pub fn dock(&self) -> Option<&DockPosition> {
         self.display.2
+    }
+
+    /// Returns the `IRect` representing the bounds of the active display, correctly padded by
+    /// potential dock position and or padding configuration.
+    pub fn actual_bounds(&self, config: &Config) -> IRect {
+        self.display().actual_display_bounds(self.dock(), config)
     }
 }
 
@@ -181,6 +188,12 @@ impl ActiveDisplayMut<'_, '_> {
     /// Returns the `CGRect` representing the bounds of the active display.
     pub fn bounds(&self) -> IRect {
         self.display().bounds()
+    }
+
+    /// Returns the `IRect` representing the bounds of the active display, correctly padded by
+    /// potential dock position and or padding configuration.
+    pub fn actual_bounds(&self, config: &Config) -> IRect {
+        self.display().actual_display_bounds(self.dock(), config)
     }
 }
 

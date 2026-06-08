@@ -1071,12 +1071,18 @@ pub(crate) fn detect_tabbed_windows(
     created: Populated<(Entity, &Position, &Bounds, &ChildOf), Added<Window>>,
     windows: Query<(Entity, &Window, &Position, &Bounds, &ChildOf), With<Window>>,
     apps: Query<Entity, With<Application>>,
-    mut workspaces: Query<&mut LayoutStrip>,
+    mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     window_manager: Res<WindowManager>,
     active_display: Single<&Display, With<ActiveDisplayMarker>>,
     mut commands: Commands,
 ) {
     let display_bounds = active_display.bounds();
+    let Some(workspace_entities) = workspaces
+        .iter()
+        .find_map(|(strip, active)| active.then_some(strip.all_windows()))
+    else {
+        return;
+    };
 
     for (entity, Position(position), Bounds(bounds), child) in created {
         let Ok(app_entity) = apps.get(child.parent()) else {
@@ -1084,8 +1090,10 @@ pub(crate) fn detect_tabbed_windows(
         };
 
         // First find all the windows which have the same size and the same parent app.
-        let mut same_size = windows
+        // .. and in the same workspace.
+        let mut same_size = workspace_entities
             .iter()
+            .filter_map(|e| windows.get(*e).ok())
             .filter(|(leader, _, _, Bounds(leader_bounds), child)| {
                 *leader != entity
                     && child.parent() == app_entity
@@ -1121,7 +1129,8 @@ pub(crate) fn detect_tabbed_windows(
             && window_manager
                 .windows_on_screen()
                 .is_some_and(|ids| !ids.contains(&leader_id))
-            && let Some(mut strip) = workspaces.iter_mut().find(|strip| strip.contains(leader))
+            && let Some((mut strip, _)) =
+                workspaces.iter_mut().find(|strip| strip.0.contains(leader))
             && strip.contains(leader)
         {
             debug!("Tabbed window detected: adding {entity} to leader {leader}");

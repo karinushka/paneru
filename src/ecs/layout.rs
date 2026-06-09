@@ -312,21 +312,30 @@ impl LayoutStrip {
     }
 
     pub fn append_tab_group(&mut self, entities: &[Entity]) {
-        let mut group = Vec::new();
-        for entity in entities {
-            if !group.contains(entity) {
-                group.push(*entity);
-            }
-        }
+        let group = dedup_entities(entities);
         if group.is_empty() {
             return;
         }
 
+        // Re-grouping existing members keeps them at their lowest current index;
+        // a foreign group lands at the end.
         let index = group
             .iter()
             .filter_map(|entity| self.index_of(*entity).ok())
             .min()
             .unwrap_or(self.len());
+
+        self.insert_tab_group_at(index, &group);
+    }
+
+    /// Inserts `entities` as a single column at `index` (clamped to the column
+    /// count), after removing any existing occurrences. A one-element group
+    /// becomes a `Single` column, more than one a `Tabs` column.
+    pub fn insert_tab_group_at(&mut self, index: usize, entities: &[Entity]) {
+        let group = dedup_entities(entities);
+        if group.is_empty() {
+            return;
+        }
 
         for entity in &group {
             self.remove(*entity);
@@ -771,6 +780,16 @@ impl std::fmt::Display for LayoutStrip {
             .collect::<Vec<_>>();
         write!(f, "[{}]", out.join(", "))
     }
+}
+
+/// Deduplicates `entities`, preserving first-seen order.
+fn dedup_entities(entities: &[Entity]) -> Vec<Entity> {
+    let mut seen = EntityHashSet::default();
+    entities
+        .iter()
+        .copied()
+        .filter(|entity| seen.insert(*entity))
+        .collect()
 }
 
 fn binpack_heights(heights: &[i32], min_height: i32, total_height: i32) -> Option<Vec<i32>> {

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use bevy::prelude::*;
 use objc2_core_foundation::CGPoint;
 
-use crate::commands::{Command, Direction, Operation};
+use crate::commands::{Command, Direction, MoveFocus, Operation};
 use crate::config::{Config, MainOptions, WindowParams};
 use crate::ecs::display::FloatingLayer;
 use crate::ecs::{ActiveWorkspaceMarker, Position, Unmanaged, layout::LayoutStrip};
@@ -839,4 +839,218 @@ fn focus_unmanaged_ignores_floats_from_other_workspaces() {
             assert_focused!(world, 0);
         })
         .run(commands);
+}
+
+/// With `insert_windows_mid_strip` enabled, following a window into another
+/// virtual workspace keeps it at its exact on-screen x — even when the
+/// destination strip is scrolled and not grid-aligned. The rest of the strip
+/// shifts to make room.
+#[test]
+fn test_mid_strip_insertion_preserves_window_x() {
+    let config: Config = (
+        MainOptions {
+            insert_windows_mid_strip: Some(true),
+            swipe_gesture_fingers: Some(3),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    let mut h = TestHarness::new().with_config(config).with_windows(8);
+
+    let pump_event = |h: &mut TestHarness, ev: Event| {
+        h.app.world_mut().write_message::<Event>(ev);
+        for _ in 0..6 {
+            h.app.update();
+            for event in h.mock_state.drain_events() {
+                h.app.world_mut().write_message::<Event>(event);
+            }
+        }
+    };
+    let cmd = |h: &mut TestHarness, c: Command| pump_event(h, Event::Command { command: c });
+    let win_x = |h: &mut TestHarness, id: i32| -> i32 {
+        let world = h.app.world_mut();
+        let mut q = world.query::<(&Window, &Position)>();
+        q.iter(world)
+            .find_map(|(w, p)| (w.id() == id).then_some(p.0.x))
+            .expect("window position")
+    };
+
+    // Build VW1 with four windows (scrollable), leaving four on VW0.
+    for _ in 0..4 {
+        cmd(
+            &mut h,
+            Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Stay)),
+        );
+    }
+    // Scroll VW1 off the grid, return, then scroll VW0 off the grid too, so both
+    // the moved window and the destination columns sit between column boundaries.
+    cmd(&mut h, Command::Window(Operation::VirtualNumber(1)));
+    pump_event(
+        &mut h,
+        Event::Swipe {
+            deltas: vec![0.1, 0.1, 0.1],
+        },
+    );
+    cmd(&mut h, Command::Window(Operation::VirtualNumber(0)));
+    pump_event(
+        &mut h,
+        Event::Swipe {
+            deltas: vec![0.1, 0.1, 0.1],
+        },
+    );
+
+    let mover = {
+        let world = h.app.world_mut();
+        let mut q = world.query_filtered::<&Window, With<crate::ecs::FocusedMarker>>();
+        q.single(world).expect("a focused window").id()
+    };
+    let before = win_x(&mut h, mover);
+    assert_ne!(
+        before % TEST_WINDOW_WIDTH,
+        0,
+        "test setup should leave the window off the column grid, got x={before}",
+    );
+
+    cmd(
+        &mut h,
+        Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Follow)),
+    );
+    assert_eq!(
+        win_x(&mut h, mover),
+        before,
+        "moved window must keep its exact on-screen x",
+    );
+}
+
+/// Without the flag (the default), a moved window is appended to the end of the
+/// destination strip, preserving arrival order.
+#[test]
+fn test_move_appends_to_end_by_default() {
+    let mut h = TestHarness::new().with_windows(3);
+
+    let pump = |h: &mut TestHarness, cmd: Command| {
+        h.app
+            .world_mut()
+            .write_message::<Event>(Event::Command { command: cmd });
+        for _ in 0..6 {
+            h.app.update();
+            for event in h.mock_state.drain_events() {
+                h.app.world_mut().write_message::<Event>(event);
+            }
+        }
+    };
+
+    // Seed VW1 with one window, keeping us on VW0.
+    pump(
+        &mut h,
+        Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Stay)),
+    );
+
+    // Whatever window is focused now is the one the follow-move will carry.
+    let mover = focused_window_id(h.app.world_mut());
+
+    pump(
+        &mut h,
+        Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Follow)),
+    );
+
+    // Default behaviour: the moved window is appended, i.e. it is the last
+    // column of the (now active) destination strip.
+    let last = {
+        let world = h.app.world_mut();
+        let mut q = world.query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>();
+        let entity = q
+            .iter(world)
+            .find_map(|(s, a)| a.then(|| s.all_windows()))
+            .and_then(|windows| windows.last().copied())
+            .expect("active strip with windows");
+        let mut wq = world.query::<(Entity, &Window)>();
+        wq.iter(world)
+            .find_map(|(ent, w)| (ent == entity).then_some(w.id()))
+            .expect("window id")
+    };
+    assert_eq!(
+        last, mover,
+        "default move should append to the end of the strip"
+    );
+}
+
+/// With `insert_windows_mid_strip` enabled and a smooth `animation_speed`, moving
+/// a window to another virtual workspace must not animate: every window snaps to
+/// its final spot. Checked per-update, since markers created and consumed
+/// mid-move would be invisible to a settle-then-check.
+#[test]
+fn test_mid_strip_move_does_not_animate() {
+    let config: Config = (
+        MainOptions {
+            insert_windows_mid_strip: Some(true),
+            animation_speed: Some(12.0),
+            virtual_workspace_animations: Some(false),
+            swipe_gesture_fingers: Some(3),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    let mut h = TestHarness::new().with_config(config).with_windows(8);
+    let pump = |h: &mut TestHarness, c: Command| {
+        h.app
+            .world_mut()
+            .write_message::<Event>(Event::Command { command: c });
+        for _ in 0..8 {
+            h.app.update();
+            for e in h.mock_state.drain_events() {
+                h.app.world_mut().write_message::<Event>(e);
+            }
+        }
+    };
+
+    // Build a scrolled VW1 and scroll VW0 too, so the move is off the grid.
+    for _ in 0..4 {
+        pump(
+            &mut h,
+            Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Stay)),
+        );
+    }
+    pump(&mut h, Command::Window(Operation::VirtualNumber(1)));
+    h.app.world_mut().write_message::<Event>(Event::Swipe {
+        deltas: vec![0.1, 0.1, 0.1],
+    });
+    for _ in 0..6 {
+        h.app.update();
+        for e in h.mock_state.drain_events() {
+            h.app.world_mut().write_message::<Event>(e);
+        }
+    }
+    pump(&mut h, Command::Window(Operation::VirtualNumber(0)));
+    h.app.world_mut().write_message::<Event>(Event::Swipe {
+        deltas: vec![0.1, 0.1, 0.1],
+    });
+    for _ in 0..6 {
+        h.app.update();
+        for e in h.mock_state.drain_events() {
+            h.app.world_mut().write_message::<Event>(e);
+        }
+    }
+
+    // Follow-move into the existing VW1, checking every update for animation.
+    h.app.world_mut().write_message::<Event>(Event::Command {
+        command: Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Follow)),
+    });
+    for step in 0..10 {
+        h.app.update();
+        for e in h.mock_state.drain_events() {
+            h.app.world_mut().write_message::<Event>(e);
+        }
+        let world = h.app.world_mut();
+        let mut q = world.query_filtered::<&Window, With<RepositionMarker>>();
+        let animating: Vec<i32> = q.iter(world).map(|w| w.id()).collect();
+        assert!(
+            animating.is_empty(),
+            "step {step}: no window should animate during a mid-strip move, got {animating:?}",
+        );
+    }
 }

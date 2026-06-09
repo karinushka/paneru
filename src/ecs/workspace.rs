@@ -22,8 +22,8 @@ use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, DockPosition, Initializing, NativeFullscreenMarker, Position,
-    RefreshWindowSizes, RepositionMarker, SelectedVirtualMarker, SpawnCommandsExt, Timeout,
-    Unmanaged,
+    RefreshWindowSizes, RepositionMarker, Scrolling, SelectedVirtualMarker, SpawnCommandsExt,
+    Timeout, Unmanaged,
 };
 use crate::errors::Result;
 use crate::events::Event;
@@ -567,6 +567,8 @@ fn handle_virtual_window_moves(
         Has<ActiveWorkspaceMarker>,
         Option<&mut PreviousStripPosition>,
     )>,
+    windows: Windows,
+    mut scrollings: Query<&mut Scrolling>,
     active_display: Single<(Entity, &Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
     config: Res<Config>,
     mut commands: Commands,
@@ -612,17 +614,29 @@ fn handle_virtual_window_moves(
         // since there's nothing left to look at.
         let stay = !follow && source_neighbour.is_some();
 
+        // With `insert_windows_mid_strip`, the window keeps its current on-screen
+        // x. For an existing destination, work out the column slot nearest that x
+        // and the scroll offset that lands it there; for a new strip the lone
+        // window just sits at that x.
+        let moved_left = config
+            .insert_windows_mid_strip()
+            .then(|| windows.moving_frame(window_entity).map(|frame| frame.min.x))
+            .flatten();
+        let mid_placement = moved_left.and_then(|moved_left| {
+            let (_, strip, position, _, previous) = workspaces.get(target?).ok()?;
+            let scroll_x = previous.map_or(position.0.x, |previous| previous.origin.x);
+            Some(mid_strip_slot(strip, scroll_x, moved_left, &windows))
+        });
+
         let target_entity = if let Some(entity) = target {
             entity
         } else {
             // Stay: spawn offscreen with PreviousStripPosition for later restoration.
             // Follow (or empty source): spawn visible, user is switching to it.
             let visible_origin = viewport.min;
-            let origin = if stay {
-                viewport.max - 10
-            } else {
-                visible_origin
-            };
+            // mid-strip: keep the lone window at its current x.
+            let shown = Origin::new(moved_left.unwrap_or(visible_origin.x), visible_origin.y);
+            let origin = if stay { viewport.max - 10 } else { shown };
             debug!(
                 "Creating new virtual row {target_idx} on workspace {}",
                 workspace_id
@@ -635,7 +649,7 @@ fn handle_virtual_window_moves(
                 // show_active_workspace needs this to restore the strip
                 // onscreen when the user later switches to this workspace.
                 spawned.insert(PreviousStripPosition {
-                    origin: visible_origin,
+                    origin: shown,
                     focus: Some(window_entity),
                 });
             }
@@ -659,11 +673,28 @@ fn handle_virtual_window_moves(
         // Move the window before moving markers to avoid being detected as a moved window.
         for (entity, mut strip, _, _, _) in &mut workspaces {
             if entity == target_entity {
-                strip.append_tab_group(&moving_entities);
+                match mid_placement {
+                    Some((slot, _)) => strip.insert_tab_group_at(slot, &moving_entities),
+                    None => strip.append_tab_group(&moving_entities),
+                }
             } else {
                 for moving_entity in &moving_entities {
                     strip.remove(*moving_entity);
                 }
+            }
+        }
+
+        // Scroll the destination so the inserted window keeps its exact x. Done
+        // before the strip is shown so show_active_workspace snaps every window
+        // to its final spot in one go (no horizontal slide). Resetting Scrolling
+        // stops stale momentum from overriding the offset on reactivation.
+        if let Some((_, desired_scroll)) = mid_placement {
+            if let Ok((_, _, _, _, Some(mut previous))) = workspaces.get_mut(target_entity) {
+                previous.origin.x = desired_scroll;
+            }
+            if let Ok(mut scroll) = scrollings.get_mut(target_entity) {
+                scroll.position = f64::from(desired_scroll);
+                scroll.velocity = 0.0;
             }
         }
 
@@ -693,6 +724,47 @@ fn handle_virtual_window_moves(
             window_entity, target_idx
         );
     }
+}
+
+/// Picks where in `strip` a window currently at on-screen x `moved_left` should
+/// be inserted so it keeps that position. Inserting at column `i` lands the
+/// window at that column's left edge, so we choose the column boundary nearest
+/// `moved_left`, then return the scroll offset that makes that slot sit exactly
+/// at `moved_left`. `scroll_x` is the strip's (intended) scroll offset.
+///
+/// Returns `(insert_index, desired_scroll)`.
+fn mid_strip_slot(
+    strip: &LayoutStrip,
+    scroll_x: i32,
+    moved_left: i32,
+    windows: &Windows,
+) -> (usize, i32) {
+    let columns: Vec<(i32, i32)> = strip
+        .all_columns()
+        .into_iter()
+        .filter_map(|column| {
+            let layout_x = windows.layout_position(column)?.0.x;
+            let width = windows
+                .moving_frame(column)
+                .map_or(0, |frame| frame.width());
+            Some((layout_x, width))
+        })
+        .collect();
+
+    let mut index = columns.len();
+    let mut chosen_layout_x = columns
+        .last()
+        .map_or(0, |(layout_x, width)| layout_x + width);
+    let mut best = (chosen_layout_x + scroll_x - moved_left).abs();
+    for (i, (layout_x, _)) in columns.iter().enumerate() {
+        let dist = (layout_x + scroll_x - moved_left).abs();
+        if dist < best {
+            best = dist;
+            index = i;
+            chosen_layout_x = *layout_x;
+        }
+    }
+    (index, moved_left - chosen_layout_x)
 }
 
 /// Handles the keybinding for switching between virtual workspaces.

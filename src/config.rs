@@ -797,6 +797,14 @@ impl Config {
             .virtual_workspace_animations
             .is_some_and(|enabled| enabled)
     }
+
+    pub fn insert_windows_mid_strip(&self) -> bool {
+        // Default is disabled: appending to the end of the strip is the
+        // expected behaviour, especially when moving several windows.
+        self.options()
+            .insert_windows_mid_strip
+            .is_some_and(|enabled| enabled)
+    }
 }
 
 fn parse_hex_color(hex: &str) -> (f64, f64, f64) {
@@ -1061,6 +1069,12 @@ pub struct MainOptions {
     /// Off by default, because people use virtual workspaces due to the slow animation of the
     /// native macOS workspaces.
     pub virtual_workspace_animations: Option<bool>,
+
+    /// When moving a window to another virtual workspace, insert it at the column
+    /// matching its current on-screen position (keeping it where you see it,
+    /// shifting the rest) instead of appending it to the end of the strip.
+    /// Off by default.
+    pub insert_windows_mid_strip: Option<bool>,
 }
 
 /// Returns a default set of column widths.

@@ -24,6 +24,7 @@ pub struct Display {
     menubar_height: i32,
     /// Optional config override for the menubar height.
     menubar_height_override: Option<i32>,
+    notch_height: i32,
 }
 
 impl Display {
@@ -45,6 +46,7 @@ impl Display {
             bounds,
             menubar_height,
             menubar_height_override: None,
+            notch_height: 0,
         }
     }
 
@@ -125,11 +127,17 @@ impl Display {
     }
 
     pub fn menubar_height(&self) -> i32 {
-        self.menubar_height_override.unwrap_or(self.menubar_height)
+        self.menubar_height_override
+            .unwrap_or(self.menubar_height)
+            .max(self.notch_height)
     }
 
     pub fn set_menubar_height_override(&mut self, height: Option<i32>) {
         self.menubar_height_override = height;
+    }
+
+    pub fn set_notch_height(&mut self, height: i32) {
+        self.notch_height = height;
     }
 
     #[instrument(level = Level::TRACE, skip_all, ret)]

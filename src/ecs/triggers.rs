@@ -4,14 +4,11 @@ use bevy::ecs::lifecycle::{Add, Remove, RemovedComponents};
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Added, Has, With};
-use bevy::ecs::system::{Commands, NonSend, NonSendMut, Populated, Query, Res, ResMut, Single};
+use bevy::ecs::system::{Commands, NonSendMut, Populated, Query, Res, ResMut, Single};
 use bevy::math::IRect;
 use notify::event::{DataChange, MetadataKind, ModifyKind};
 use notify::{EventKind, Watcher};
-use objc2_app_kit::NSScreen;
-use objc2_foundation::{NSNumber, NSString, ns_string};
 use std::cmp::Ordering;
-use std::pin::Pin;
 use std::time::Duration;
 use tracing::{Level, debug, error, info, instrument, trace, warn};
 
@@ -26,15 +23,15 @@ use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, GlobalState, Windows};
 use crate::ecs::state::PaneruState;
 use crate::ecs::{
-    ActiveWorkspaceMarker, Bounds, DockPosition, Initializing, LayoutPosition, LocateDockTrigger,
-    Position, ResizeMarker, RestoreWindowState, Scrolling, SendMessageTrigger, SpawnCommandsExt,
+    ActiveWorkspaceMarker, Bounds, DockPosition, Initializing, LayoutPosition, Position,
+    ResizeMarker, RestoreWindowState, Scrolling, SendMessageTrigger, SpawnCommandsExt,
     VerifyWindowPosition, WidthRatio, WindowProperties,
 };
 use crate::events::Event;
 use crate::manager::{
-    Application, Display, Origin, Process, Size, Window, WindowManager, WindowPadding, irect_from,
+    Application, Display, Origin, Process, Size, Window, WindowManager, WindowPadding,
 };
-use crate::platform::{PlatformCallbacks, WinID};
+use crate::platform::WinID;
 use crate::util::symlink_target;
 
 /// Computes the passthrough keybinding set for the given window/app and
@@ -1190,39 +1187,6 @@ pub(super) fn window_removal_trigger(
             strip.id()
         );
         strip.remove(entity);
-    }
-}
-
-#[allow(clippy::needless_pass_by_value)]
-pub(super) fn locate_dock_trigger(
-    trigger: On<LocateDockTrigger>,
-    displays: Query<(&mut Display, Entity)>,
-    platform: Option<NonSend<Pin<Box<PlatformCallbacks>>>>,
-    mut commands: Commands,
-) {
-    let Ok((display, entity)) = displays.get(trigger.event().0) else {
-        return;
-    };
-    let display_id = display.id();
-
-    // NSScreen::screen needs to run in the main thread, thus we run it in a NonSend trigger.
-    let screens = platform.map(|platform| NSScreen::screens(platform.main_thread_marker));
-    let dock = screens.as_ref().and_then(|screens| {
-        screens.iter().find_map(|screen| {
-            let dict = screen.deviceDescription();
-            let numbers = unsafe { dict.cast_unchecked::<NSString, NSNumber>() };
-            let id = numbers.objectForKey(ns_string!("NSScreenNumber"));
-            id.is_some_and(|id| id.as_u32() == display_id).then(|| {
-                let visible_frame = irect_from(screen.visibleFrame());
-                display.locate_dock(&visible_frame)
-            })
-        })
-    });
-    if let Some(dock) = dock {
-        debug!("dock on display {display_id}: {:?}", dock);
-        if let Ok(mut entity_commands) = commands.get_entity(entity) {
-            entity_commands.try_insert(dock);
-        }
     }
 }
 

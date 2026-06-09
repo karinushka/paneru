@@ -3,13 +3,14 @@ use accessibility_sys::{
     kAXRoleAttribute, kAXSubroleAttribute, kAXTitleAttribute, kAXWindowsAttribute,
 };
 use core::ptr::NonNull;
-use objc2::rc::autoreleasepool;
+use objc2::rc::{Retained, autoreleasepool};
+use objc2_app_kit::NSScreen;
 use objc2_core_foundation::{
     CFArray, CFBoolean, CFNumber, CFNumberType, CFRetained, CFRunLoop, CFRunLoopMode,
     CFRunLoopSource, CFString, CFType, Type, kCFTypeArrayCallBacks,
 };
-use objc2_core_graphics::CGError;
-use objc2_foundation::{NSUserDefaults, ns_string};
+use objc2_core_graphics::{CGDirectDisplayID, CGError};
+use objc2_foundation::{NSNumber, NSString, NSUserDefaults, ns_string};
 use std::{
     ffi::{CStr, OsStr, c_int, c_void},
     os::unix::ffi::OsStrExt,
@@ -354,4 +355,21 @@ impl MacResult for CGError {
             ))),
         }
     }
+}
+
+pub fn read_screen_property<F, R>(
+    screens: &Retained<objc2_foundation::NSArray<NSScreen>>,
+    display_id: CGDirectDisplayID,
+    getter: F,
+) -> Option<R>
+where
+    F: Fn(Retained<NSScreen>) -> R,
+{
+    screens.iter().find_map(|screen| {
+        let dict = screen.deviceDescription();
+        let numbers = unsafe { dict.cast_unchecked::<NSString, NSNumber>() };
+        let id = numbers.objectForKey(ns_string!("NSScreenNumber"));
+        id.is_some_and(|id| id.as_u32() == display_id)
+            .then(|| getter(screen))
+    })
 }

@@ -178,7 +178,7 @@ fn mouse_moved_trigger(
 /// * `active_display` - A query for the active display.
 /// * `main_cid` - The main connection ID resource.
 /// * `commands` - Bevy commands to trigger a reshuffle.
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[allow(clippy::needless_pass_by_value)]
 fn mouse_down_trigger(
     mut messages: MessageReader<Event>,
     windows: Windows,

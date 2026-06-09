@@ -27,8 +27,8 @@ use crate::config::{Config, decorations::BorderRadiusOption};
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, Bounds, BruteforceWindows, FlashMessage, Initializing,
-    LocateDockTrigger, LowPowerMode, MissionControlActive, Position, RestoreWindowState, Scrolling,
+    ActiveWorkspaceMarker, Bounds, BruteforceWindows, FlashMessage, Initializing, LowPowerMode,
+    MissionControlActive, Position, ReadDisplayProperties, RestoreWindowState, Scrolling,
     SendMessageTrigger, SpawnCommandsExt, Unmanaged, WidthRatio, WindowProperties,
 };
 use crate::events::Event;
@@ -66,7 +66,7 @@ pub fn gather_displays(window_manager: Res<WindowManager>, mut commands: Command
         }
         .id();
 
-        commands.trigger(LocateDockTrigger(entity));
+        commands.trigger(ReadDisplayProperties(entity));
 
         let Ok(active_space) = window_manager.active_display_space(active_display_id) else {
             return;

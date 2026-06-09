@@ -178,7 +178,6 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::window_managed_trigger)
         .add_observer(triggers::window_minimized_trigger)
         .add_observer(triggers::spawn_window_trigger)
-        .add_observer(triggers::locate_dock_trigger)
         .add_observer(triggers::send_message_trigger)
         .add_observer(triggers::window_removal_trigger)
         .add_observer(triggers::cleanup_timeout_trigger)
@@ -437,7 +436,7 @@ pub struct Initializing;
 pub struct SpawnWindowTrigger(pub Vec<Window>);
 
 #[derive(BevyEvent)]
-pub struct LocateDockTrigger(pub Entity);
+pub struct ReadDisplayProperties(pub Entity);
 
 #[derive(BevyEvent)]
 pub struct SendMessageTrigger(pub Event);

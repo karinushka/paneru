@@ -6,22 +6,25 @@ use bevy::ecs::lifecycle::Add;
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Has, With};
-use bevy::ecs::system::{Commands, Local, Query, Res};
+use bevy::ecs::system::{Commands, Local, NonSend, Query, Res};
 use bevy::math::IRect;
 use bevy::platform::collections::HashSet;
+use objc2_app_kit::NSScreen;
 use objc2_core_graphics::CGDirectDisplayID;
+use std::pin::Pin;
 use std::time::Duration;
 use tracing::{Level, debug, error, instrument};
 
 use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::{
-    ActiveDisplayMarker, ActiveWorkspaceMarker, RefreshWindowSizes, SendMessageTrigger,
-    SpawnCommandsExt, Timeout,
+    ActiveDisplayMarker, ActiveWorkspaceMarker, ReadDisplayProperties, RefreshWindowSizes,
+    SendMessageTrigger, SpawnCommandsExt, Timeout,
 };
 use crate::events::Event;
-use crate::manager::{Display, WindowManager};
-use crate::platform::WorkspaceId;
+use crate::manager::{Display, WindowManager, irect_from};
+use crate::platform::{PlatformCallbacks, WorkspaceId};
+use crate::util::read_screen_property;
 
 const ORPHANED_SPACES_TIMEOUT_SEC: u64 = 30;
 
@@ -37,6 +40,7 @@ impl Plugin for DisplayEventsPlugin {
                 display_change_trigger,
             ),
         )
+        .add_observer(read_display_properties_trigger)
         .add_observer(cleanup_active_display_marker);
     }
 }
@@ -99,7 +103,6 @@ pub(crate) fn displays_rearranged(
     workspaces: Query<(&LayoutStrip, Entity, Option<&ChildOf>)>,
     mut displays: Query<(&mut Display, Entity)>,
     window_manager: Res<WindowManager>,
-    config: Res<Config>,
     mut retries: Local<HashSet<CGDirectDisplayID>>,
     mut commands: Commands,
 ) {
@@ -110,7 +113,6 @@ pub(crate) fn displays_rearranged(
                     *display_id,
                     &workspaces,
                     &window_manager,
-                    &config,
                     &mut retries,
                     &mut commands,
                 );
@@ -124,7 +126,6 @@ pub(crate) fn displays_rearranged(
                     &mut displays,
                     &window_manager,
                     &workspaces,
-                    &config,
                     &mut commands,
                 );
             }
@@ -150,7 +151,6 @@ pub(crate) fn reconcile_displays(
     mut displays: Query<(&mut Display, Entity)>,
     active_strips: Query<Entity, (With<LayoutStrip>, With<ActiveWorkspaceMarker>)>,
     window_manager: Res<WindowManager>,
-    config: Res<Config>,
     mut retries: Local<HashSet<CGDirectDisplayID>>,
     mut commands: Commands,
 ) {
@@ -188,7 +188,6 @@ pub(crate) fn reconcile_displays(
             display_id,
             &workspaces,
             &window_manager,
-            &config,
             &mut retries,
             &mut commands,
         );
@@ -202,7 +201,6 @@ pub(crate) fn reconcile_displays(
             &mut displays,
             &window_manager,
             &workspaces,
-            &config,
             &mut commands,
         );
     }
@@ -223,12 +221,11 @@ fn add_display(
     display_id: CGDirectDisplayID,
     existing_strips: &Query<(&LayoutStrip, Entity, Option<&ChildOf>)>,
     window_manager: &WindowManager,
-    config: &Config,
     retries: &mut HashSet<CGDirectDisplayID>,
     commands: &mut Commands,
 ) {
     debug!("Display Added: {display_id:?}");
-    let Some((mut display, workspace_ids)) = window_manager
+    let Some((display, workspace_ids)) = window_manager
         .0
         .present_displays()
         .into_iter()
@@ -248,9 +245,9 @@ fn add_display(
         return;
     };
 
-    display.set_menubar_height_override(config.menubar_height());
     let display_bounds = display.bounds();
     let display_entity = commands.spawn(display).id();
+    commands.trigger(ReadDisplayProperties(display_entity));
 
     reparent_existing_workspaces(
         &workspace_ids,
@@ -313,7 +310,6 @@ fn move_display(
     displays: &mut Query<(&mut Display, Entity)>,
     window_manager: &Res<WindowManager>,
     existing_strips: &Query<(&LayoutStrip, Entity, Option<&ChildOf>)>,
-    config: &Config,
     commands: &mut Commands,
 ) {
     debug!("Display Moved: {display_id:?}");
@@ -333,7 +329,7 @@ fn move_display(
         return;
     };
     *display = moved_display;
-    display.set_menubar_height_override(config.menubar_height());
+    commands.trigger(ReadDisplayProperties(display_entity));
 
     reparent_existing_workspaces(
         &workspace_ids,
@@ -395,5 +391,50 @@ impl FloatingLayer {
             Self::Front => Self::Behind,
             Self::Behind => Self::Front,
         }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn read_display_properties_trigger(
+    trigger: On<ReadDisplayProperties>,
+    mut displays: Query<(&mut Display, Entity)>,
+    platform: Option<NonSend<Pin<Box<PlatformCallbacks>>>>,
+    config: Option<Res<Config>>,
+    mut commands: Commands,
+) {
+    let Ok((mut display, entity)) = displays.get_mut(trigger.event().0) else {
+        return;
+    };
+    let display_id = display.id();
+
+    // NSScreen::screen needs to run in the main thread, thus we run it in a NonSend trigger.
+    let Some(screens) = platform.map(|platform| NSScreen::screens(platform.main_thread_marker))
+    else {
+        return;
+    };
+
+    let notch = read_screen_property(&screens, display_id, |screen| {
+        let insets = screen.safeAreaInsets();
+        debug!("notch on display {display_id}: {insets:?}");
+        insets.top as i32
+    });
+    if let Some(height) = notch {
+        display.set_notch_height(height);
+    }
+
+    let dock = read_screen_property(&screens, display_id, |screen| {
+        let visible_frame = irect_from(screen.visibleFrame());
+        display.locate_dock(&visible_frame)
+    });
+    if let Some(dock) = dock {
+        debug!("dock on display {display_id}: {:?}", dock);
+        if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            entity_commands.try_insert(dock);
+        }
+    }
+
+    if let Some(config) = config {
+        let height = config.menubar_height();
+        display.set_menubar_height_override(height);
     }
 }

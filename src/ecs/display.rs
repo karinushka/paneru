@@ -16,7 +16,8 @@ use tracing::{Level, debug, error, instrument};
 use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::{
-    ActiveDisplayMarker, RefreshWindowSizes, SendMessageTrigger, SpawnCommandsExt, Timeout,
+    ActiveDisplayMarker, ActiveWorkspaceMarker, RefreshWindowSizes, SendMessageTrigger,
+    SpawnCommandsExt, Timeout,
 };
 use crate::events::Event;
 use crate::manager::{Display, WindowManager};
@@ -28,8 +29,15 @@ pub struct DisplayEventsPlugin;
 
 impl Plugin for DisplayEventsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (displays_rearranged, display_change_trigger))
-            .add_observer(cleanup_active_display_marker);
+        app.add_systems(
+            Update,
+            (
+                displays_rearranged,
+                reconcile_displays,
+                display_change_trigger,
+            ),
+        )
+        .add_observer(cleanup_active_display_marker);
     }
 }
 
@@ -124,6 +132,90 @@ pub(crate) fn displays_rearranged(
         }
         commands.trigger(SendMessageTrigger(Event::DisplayChanged));
     }
+}
+
+/// Full reconciliation of the ECS display set against the OS truth.
+///
+/// Runs on events where the per-display add/remove/move flags are unreliable or
+/// absent: waking from sleep, resolution / arrangement changes, and configuration
+/// events. Rather than trust a single `display_id` flag, it diffs the live
+/// `present_displays()` list against the spawned `Display` entities and applies
+/// the same add / remove / move primitives the event handlers use. It also
+/// forces the active workspace to re-tile, because macOS relocates windows while
+/// asleep even when the display set is unchanged.
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+pub(crate) fn reconcile_displays(
+    mut messages: MessageReader<Event>,
+    workspaces: Query<(&LayoutStrip, Entity, Option<&ChildOf>)>,
+    mut displays: Query<(&mut Display, Entity)>,
+    active_strips: Query<Entity, (With<LayoutStrip>, With<ActiveWorkspaceMarker>)>,
+    window_manager: Res<WindowManager>,
+    config: Res<Config>,
+    mut retries: Local<HashSet<CGDirectDisplayID>>,
+    mut commands: Commands,
+) {
+    let needs_reconcile = messages.read().any(|event| {
+        matches!(
+            event,
+            Event::SystemWoke { .. }
+                | Event::DisplayResized { .. }
+                | Event::DisplayConfigured { .. }
+        )
+    });
+    if !needs_reconcile {
+        return;
+    }
+
+    debug!("reconciling displays against OS after wake / resize / configure");
+
+    let present_ids: HashSet<CGDirectDisplayID> = window_manager
+        .0
+        .present_displays()
+        .iter()
+        .map(|(display, _)| display.id())
+        .collect();
+    let existing_ids: HashSet<CGDirectDisplayID> =
+        displays.iter().map(|(display, _)| display.id()).collect();
+
+    // Displays that vanished while we were away (e.g. unplugged during sleep).
+    for display_id in existing_ids.difference(&present_ids).copied() {
+        remove_display(display_id, &workspaces, &mut displays, &mut commands);
+    }
+
+    // Displays that appeared while we were away.
+    for display_id in present_ids.difference(&existing_ids).copied() {
+        add_display(
+            display_id,
+            &workspaces,
+            &window_manager,
+            &config,
+            &mut retries,
+            &mut commands,
+        );
+    }
+
+    // Displays that are still present: refresh their bounds (resolution or
+    // menubar may have changed) and re-home any workspaces that drifted.
+    for display_id in present_ids.intersection(&existing_ids).copied() {
+        move_display(
+            display_id,
+            &mut displays,
+            &window_manager,
+            &workspaces,
+            &config,
+            &mut commands,
+        );
+    }
+
+    // Re-tile the active workspace even when the topology is unchanged — the OS
+    // shuffles window frames across a sleep/wake cycle.
+    for entity in active_strips {
+        if let Ok(mut cmd) = commands.get_entity(entity) {
+            cmd.insert(RefreshWindowSizes::default());
+        }
+    }
+
+    commands.trigger(SendMessageTrigger(Event::DisplayChanged));
 }
 
 #[instrument(level = Level::DEBUG, skip_all, fields(display_id))]

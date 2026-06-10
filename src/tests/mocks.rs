@@ -185,6 +185,15 @@ impl MockState {
         );
     }
 
+    #[allow(unused)]
+    pub fn remove_display(&self, id: u32) {
+        let mut inner = self.inner.force_write();
+        inner.displays.remove(&id);
+        if inner.active_display_id == id {
+            inner.active_display_id = inner.displays.keys().copied().next().unwrap_or(0);
+        }
+    }
+
     pub fn active_display(&self) -> CGDirectDisplayID {
         self.inner.force_read().active_display_id
     }

@@ -6,7 +6,7 @@ use bevy::time::TimeUpdateStrategy;
 use crate::commands::{Command, MouseMove, MoveFocus, Operation};
 use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
-use crate::ecs::{DockPosition, Timeout};
+use crate::ecs::{ActiveWorkspaceMarker, DockPosition, RefreshWindowSizes, Timeout};
 use crate::events::Event;
 use crate::manager::{Display, Origin, Size};
 use crate::{assert_not_on_workspace, assert_on_workspace, assert_window_at, assert_window_size};
@@ -389,6 +389,93 @@ fn test_init_keeps_windows_on_their_real_displays() {
             // display's vertical bounds (negative y); if init moved it
             // onto the active display the frame would land at y >= 0.
             assert_window_at!(world, 100, ext_origin.x, ext_origin.y);
+        })
+        .run(commands);
+}
+
+/// Waking from sleep (or a resolution/configuration change) with a monitor
+/// gone should reconcile the ECS display set against the OS even though no
+/// per-display `DisplayRemoved` flag arrives: the vanished display is removed
+/// and its workspace is orphaned.
+#[test]
+fn test_wake_reconciles_unplugged_display() {
+    let mut harness = TestHarness::new().with_display(
+        EXT_DISPLAY_ID,
+        IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+        vec![EXT_WORKSPACE_ID],
+    );
+
+    // A window on the external display so its workspace strip actually exists.
+    let ext_origin = Origin::new(0, -EXT_DISPLAY_HEIGHT + TEST_MENUBAR_HEIGHT);
+    let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+    let ext_frame = IRect::from_corners(ext_origin, ext_origin + size);
+    harness
+        .mock_state
+        .spawn_window(TEST_PROCESS_ID, EXT_WORKSPACE_ID, 100, ext_frame);
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 100 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::SystemWoke { msg: String::new() },
+    ];
+
+    harness
+        .on_iteration(1, |world, state| {
+            let displays = world
+                .query_filtered::<Entity, With<Display>>()
+                .iter(world)
+                .count();
+            assert_eq!(displays, 2, "should start with two displays");
+
+            // Unplug the external display behind paneru's back — no
+            // DisplayRemoved event is sent, mimicking a wake-from-sleep.
+            state.remove_display(EXT_DISPLAY_ID);
+        })
+        .on_iteration(2, |world, _state| {
+            let displays = world
+                .query_filtered::<Entity, With<Display>>()
+                .iter(world)
+                .count();
+            assert_eq!(displays, 1, "reconcile should despawn the vanished display");
+
+            // The external display's workspace must be orphaned, not lost.
+            let orphan = world
+                .query::<(&LayoutStrip, Option<&ChildOf>, Has<Timeout>)>()
+                .iter(world)
+                .find(|(strip, _, _)| strip.id() == EXT_WORKSPACE_ID)
+                .map(|(_, child, timeout)| (child.is_some(), timeout));
+            let (has_parent, has_timeout) =
+                orphan.expect("external workspace strip should still exist");
+            assert!(!has_parent, "orphaned workspace should have no parent");
+            assert!(has_timeout, "orphaned workspace should carry a timeout");
+        })
+        .run(commands);
+}
+
+/// Even when the display set is unchanged, waking from sleep must force the
+/// active workspace to re-tile, because macOS relocates window frames across a
+/// sleep/wake cycle.
+#[test]
+fn test_wake_refreshes_active_workspace() {
+    let harness = TestHarness::new().with_windows(1);
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::SystemWoke { msg: String::new() },
+    ];
+
+    harness
+        .on_iteration(1, |world, _state| {
+            let refreshed = world
+                .query_filtered::<Has<RefreshWindowSizes>, With<ActiveWorkspaceMarker>>()
+                .iter(world)
+                .any(|has| has);
+            assert!(
+                refreshed,
+                "wake should mark the active workspace for a window-size refresh"
+            );
         })
         .run(commands);
 }

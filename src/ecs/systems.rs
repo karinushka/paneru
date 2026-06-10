@@ -763,10 +763,9 @@ pub(super) struct OverlayWindowConfigCache {
 
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 pub(super) fn update_overlays(
-    active_workspace: Populated<
-        (Has<Scrolling>, &LayoutStrip),
-        (With<ActiveWorkspaceMarker>, Changed<LayoutStrip>),
-    >,
+    // Gating lives in the `overlay_dirty` run condition (strip change *or*
+    // focus change); this query just resolves the current active workspace.
+    active_workspace: Populated<(Has<Scrolling>, &LayoutStrip), With<ActiveWorkspaceMarker>>,
     windows: Windows,
     applications: Query<&Application>,
     overlay_mgr: Option<NonSendMut<OverlayManager>>,

@@ -177,35 +177,35 @@ fn cg_abs_to_cocoa(frame: NSRect, primary_screen_height: f64) -> NSRect {
     NSRect::new(NSPoint::new(frame.origin.x, cocoa_y), frame.size)
 }
 
+/// Height of the display at the global origin (the main display, whose Cocoa
+/// frame origin is `(0, 0)`). The CG↔Cocoa Y-flip is anchored to this display,
+/// so it must be *that* screen — `NSScreen::screens()[0]` is NOT reliably the
+/// main display, and using the wrong one offsets the overlay (and, when
+/// displays are stacked, lands it on the wrong monitor).
 fn primary_screen_height(mtm: MainThreadMarker) -> f64 {
     let screens = NSScreen::screens(mtm);
-    if screens.is_empty() {
-        return 0.0;
+    let mut fallback = 0.0;
+    let mut first = true;
+    for screen in &screens {
+        let frame = screen.frame();
+        if first {
+            fallback = frame.size.height;
+            first = false;
+        }
+        if frame.origin.x == 0.0 && frame.origin.y == 0.0 {
+            return frame.size.height;
+        }
     }
-    screens.objectAtIndex(0).frame().size.height
+    fallback
 }
 
-/// Get the full Cocoa screen rect covering all displays.
-fn full_screen_rect(mtm: MainThreadMarker) -> NSRect {
-    let screens = NSScreen::screens(mtm);
-    if screens.is_empty() {
-        return NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0));
-    }
-    let mut min_x = f64::MAX;
-    let mut min_y = f64::MAX;
-    let mut max_x = f64::MIN;
-    let mut max_y = f64::MIN;
-    for screen in &screens {
-        let f = screen.frame();
-        min_x = min_x.min(f.origin.x);
-        min_y = min_y.min(f.origin.y);
-        max_x = max_x.max(f.origin.x + f.size.width);
-        max_y = max_y.max(f.origin.y + f.size.height);
-    }
-    NSRect::new(
-        NSPoint::new(min_x, min_y),
-        NSSize::new(max_x - min_x, max_y - min_y),
-    )
+/// Do two Cocoa rects overlap? Used to decide which displays a focused window
+/// touches (a window straddling a seam touches both).
+fn rects_intersect(a: NSRect, b: NSRect) -> bool {
+    a.origin.x < b.origin.x + b.size.width
+        && b.origin.x < a.origin.x + a.size.width
+        && a.origin.y < b.origin.y + b.size.height
+        && b.origin.y < a.origin.y + a.size.height
 }
 
 // ── Overlay window factory ──────────────────────────────────────────────
@@ -239,8 +239,11 @@ fn make_overlay_window(mtm: MainThreadMarker, cocoa_frame: NSRect) -> Retained<N
 
 pub struct OverlayManager {
     mtm: MainThreadMarker,
-    /// Single fullscreen overlay window (dim + cutout + border).
-    overlay: Option<(Retained<NSWindow>, DimParams)>,
+    /// One overlay window per display. macOS will not reliably let a single
+    /// window span multiple displays (with "Displays have separate Spaces" it
+    /// renders on only one), so each screen gets its own overlay drawn in that
+    /// screen's local coordinates. Indexed in lockstep with `NSScreen::screens`.
+    overlays: Vec<(Retained<NSWindow>, DimParams)>,
     hidden: bool,
 }
 
@@ -248,12 +251,12 @@ impl OverlayManager {
     pub fn new(mtm: MainThreadMarker) -> Self {
         Self {
             mtm,
-            overlay: None,
+            overlays: Vec::new(),
             hidden: false,
         }
     }
 
-    /// Update the single fullscreen overlay.
+    /// Update the per-display overlays.
     /// `focused_abs_cg` is the focused window rect in absolute CG coords,
     /// or `None` if no window is focused.
     pub fn update(
@@ -264,57 +267,69 @@ impl OverlayManager {
         border: Option<&BorderParams>,
     ) {
         let screen_h = primary_screen_height(self.mtm);
-        let screen_rect = full_screen_rect(self.mtm);
+        let screens = NSScreen::screens(self.mtm);
 
-        // Convert the focused window rect from absolute CG to Cocoa coords,
-        // then to the overlay window's local coordinate system.
-        let cutout_local = focused_abs_cg.map(|cg_frame| {
-            let cocoa = cg_abs_to_cocoa(cg_frame, screen_h);
-            // Convert from screen coords to local (window-relative) coords.
-            NSRect::new(
-                NSPoint::new(
-                    cocoa.origin.x - screen_rect.origin.x,
-                    // The view is flipped (isFlipped=true), so y goes top-down.
-                    // screen_rect top in Cocoa = screen_rect.origin.y + screen_rect.size.height
-                    // We need: local_y = screen_top - cocoa_top
-                    (screen_rect.origin.y + screen_rect.size.height)
-                        - (cocoa.origin.y + cocoa.size.height),
-                ),
-                cocoa.size,
-            )
-        });
+        // The focused window in Cocoa global coords (shared across all screens).
+        let focused_cocoa = focused_abs_cg.map(|cg| cg_abs_to_cocoa(cg, screen_h));
 
-        let params = DimParams {
-            opacity: dim_opacity,
-            color: dim_color,
-            cutout: cutout_local,
-            border: border.cloned(),
-        };
-
-        if let Some((window, stored)) = &mut self.overlay {
-            if *stored != params {
-                // Recreate the content view with new params.
-                let view = DimView::new(self.mtm, screen_rect, &params);
-                window.setContentView(Some(&view));
-                window.setFrame_display(screen_rect, true);
+        // A display was added/removed — tear down and rebuild from scratch.
+        if self.overlays.len() != screens.len() {
+            for (window, _) in self.overlays.drain(..) {
+                window.orderOut(None::<&AnyObject>);
             }
-            if self.hidden {
-                window.orderFront(None::<&AnyObject>);
-                self.hidden = false;
-            }
-            *stored = params;
-        } else {
-            let window = make_overlay_window(self.mtm, screen_rect);
-            let view = DimView::new(self.mtm, screen_rect, &params);
-            window.setContentView(Some(&view));
-            window.orderFront(None::<&AnyObject>);
-            self.overlay = Some((window, params));
-            self.hidden = false;
         }
+
+        for (i, screen) in (&screens).into_iter().enumerate() {
+            let frame = screen.frame();
+
+            // Cut out the focused window on every display it touches, each in
+            // that display's local (flipped, top-left origin) coordinates. A
+            // window straddling a seam draws on both, clipped to each.
+            let cutout_local = focused_cocoa
+                .filter(|wc| rects_intersect(*wc, frame))
+                .map(|wc| {
+                    NSRect::new(
+                        NSPoint::new(
+                            wc.origin.x - frame.origin.x,
+                            (frame.origin.y + frame.size.height) - (wc.origin.y + wc.size.height),
+                        ),
+                        wc.size,
+                    )
+                });
+
+            let params = DimParams {
+                opacity: dim_opacity,
+                color: dim_color,
+                cutout: cutout_local,
+                border: border.cloned(),
+            };
+
+            if let Some((window, stored)) = self.overlays.get_mut(i) {
+                if *stored == params {
+                    // Keep geometry in sync cheaply (no forced redraw).
+                    window.setFrame_display(frame, false);
+                } else {
+                    let view = DimView::new(self.mtm, frame, &params);
+                    window.setContentView(Some(&view));
+                    window.setFrame_display(frame, true);
+                    *stored = params;
+                }
+                if self.hidden {
+                    window.orderFront(None::<&AnyObject>);
+                }
+            } else {
+                let window = make_overlay_window(self.mtm, frame);
+                let view = DimView::new(self.mtm, frame, &params);
+                window.setContentView(Some(&view));
+                window.orderFront(None::<&AnyObject>);
+                self.overlays.push((window, params));
+            }
+        }
+        self.hidden = false;
     }
 
     pub fn remove_all(&mut self) {
-        if let Some((window, _)) = self.overlay.take() {
+        for (window, _) in self.overlays.drain(..) {
             window.orderOut(None::<&AnyObject>);
         }
         self.hidden = false;
@@ -324,7 +339,7 @@ impl OverlayManager {
         if self.hidden {
             return;
         }
-        if let Some((window, _)) = &self.overlay {
+        for (window, _) in &self.overlays {
             window.orderOut(None::<&AnyObject>);
         }
         self.hidden = true;

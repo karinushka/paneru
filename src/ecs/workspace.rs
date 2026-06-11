@@ -60,7 +60,7 @@ impl Plugin for WorkspaceEventsPlugin {
                     REFRESH_WINDOW_CHECK_FREQ_MS,
                 ))),
                 find_orphaned_workspaces
-                    .after(crate::ecs::display::displays_rearranged)
+                    .after(crate::ecs::display::reconcile_displays)
                     .run_if(on_timer(Duration::from_millis(
                         DISPLAY_CHANGE_CHECK_FREQ_MS,
                     ))),

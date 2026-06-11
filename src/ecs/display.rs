@@ -32,16 +32,9 @@ pub struct DisplayEventsPlugin;
 
 impl Plugin for DisplayEventsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            Update,
-            (
-                displays_rearranged,
-                reconcile_displays,
-                display_change_trigger,
-            ),
-        )
-        .add_observer(read_display_properties_trigger)
-        .add_observer(cleanup_active_display_marker);
+        app.add_systems(Update, (reconcile_displays, display_change_trigger))
+            .add_observer(read_display_properties_trigger)
+            .add_observer(cleanup_active_display_marker);
     }
 }
 
@@ -97,44 +90,6 @@ fn display_change_trigger(
     commands.trigger(SendMessageTrigger(Event::SpaceChanged));
 }
 
-#[allow(clippy::needless_pass_by_value)]
-pub(crate) fn displays_rearranged(
-    mut messages: MessageReader<Event>,
-    workspaces: Query<(&LayoutStrip, Entity, Option<&ChildOf>)>,
-    mut displays: Query<(&mut Display, Entity)>,
-    window_manager: Res<WindowManager>,
-    mut retries: Local<HashSet<CGDirectDisplayID>>,
-    mut commands: Commands,
-) {
-    for event in messages.read() {
-        match event {
-            Event::DisplayAdded { display_id } => {
-                add_display(
-                    *display_id,
-                    &workspaces,
-                    &window_manager,
-                    &mut retries,
-                    &mut commands,
-                );
-            }
-            Event::DisplayRemoved { display_id } => {
-                remove_display(*display_id, &workspaces, &mut displays, &mut commands);
-            }
-            Event::DisplayMoved { display_id } => {
-                move_display(
-                    *display_id,
-                    &mut displays,
-                    &window_manager,
-                    &workspaces,
-                    &mut commands,
-                );
-            }
-            _ => continue,
-        }
-        commands.trigger(SendMessageTrigger(Event::DisplayChanged));
-    }
-}
-
 /// Full reconciliation of the ECS display set against the OS truth.
 ///
 /// Runs on events where the per-display add/remove/move flags are unreliable or
@@ -158,6 +113,9 @@ pub(crate) fn reconcile_displays(
         matches!(
             event,
             Event::SystemWoke { .. }
+                | Event::DisplayAdded { .. }
+                | Event::DisplayRemoved { .. }
+                | Event::DisplayMoved { .. }
                 | Event::DisplayResized { .. }
                 | Event::DisplayConfigured { .. }
         )
@@ -300,7 +258,7 @@ fn remove_display(
     }
 
     if let Ok(mut commands) = commands.get_entity(display_entity) {
-        commands.despawn();
+        commands.try_despawn();
     }
 }
 
@@ -359,9 +317,9 @@ fn reparent_existing_workspaces(
                         debug!("reparenting workspace {id} to display {display_entity}");
                         cmd.try_remove::<Timeout>()
                             .try_remove::<ChildOf>()
-                            .insert(ChildOf(display_entity));
+                            .try_insert(ChildOf(display_entity));
 
-                        cmd.insert(RefreshWindowSizes::default());
+                        cmd.try_insert(RefreshWindowSizes::default());
                     }
                 }
             }

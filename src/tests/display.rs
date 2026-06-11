@@ -36,11 +36,12 @@ fn test_multi_display_lifecycle() {
         )));
 
     harness
-        .on_iteration(1, |world, _state| {
+        .on_iteration(1, |world, state| {
             let mut query = world.query_filtered::<Entity, With<Display>>();
             query.single(world).expect("should have one display");
+            state.remove_display(TEST_DISPLAY_ID);
         })
-        .on_iteration(2, |world, _state| {
+        .on_iteration(2, |world, mut state| {
             assert!(
                 world
                     .query_filtered::<Entity, With<Display>>()
@@ -61,6 +62,11 @@ fn test_multi_display_lifecycle() {
             assert!(
                 workspace.get::<ChildOf>().is_none(),
                 "orphaned workspace should have no parent"
+            );
+            state.add_display(
+                TEST_DISPLAY_ID,
+                IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
+                vec![TEST_WORKSPACE_ID],
             );
         })
         .on_iteration(3, |world, _state| {
@@ -109,7 +115,7 @@ fn test_multi_workspace_orphaning() {
         workspaces,
     );
     harness
-        .on_iteration(1, |world, _state| {
+        .on_iteration(1, |world, state| {
             let display_entity = world
                 .query_filtered::<Entity, With<Display>>()
                 .single(world)
@@ -128,6 +134,7 @@ fn test_multi_workspace_orphaning() {
                     .expect("workspace should have parent");
                 assert_eq!(child_of.parent(), display_entity);
             }
+            state.remove_display(TEST_DISPLAY_ID);
         })
         .on_iteration(2, |world, _state| {
             let workspace_entities = world
@@ -399,7 +406,7 @@ fn test_init_keeps_windows_on_their_real_displays() {
 /// and its workspace is orphaned.
 #[test]
 fn test_wake_reconciles_unplugged_display() {
-    let mut harness = TestHarness::new().with_display(
+    let harness = TestHarness::new().with_display(
         EXT_DISPLAY_ID,
         IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
         vec![EXT_WORKSPACE_ID],

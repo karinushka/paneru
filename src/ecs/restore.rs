@@ -19,7 +19,8 @@ use crate::ecs::state::{
 };
 use crate::ecs::workspace::PreviousStripPosition;
 use crate::ecs::{
-    ActiveDisplayMarker, ActiveWorkspaceMarker, RestoreWindowState, SpawnCommandsExt, Unmanaged,
+    ActiveDisplayMarker, ActiveWorkspaceMarker, RefreshWindowSizes, RestoreWindowState,
+    SpawnCommandsExt, Unmanaged,
 };
 use crate::manager::{Application, Display, Window};
 use crate::platform::{Pid, WinID, WorkspaceId};
@@ -532,6 +533,7 @@ pub(super) fn restore_window_state(
 
         let mut spawned =
             commands.spawn_layout_strip(strip, origin, display_entity, is_global_active);
+        spawned.try_insert(RefreshWindowSizes::default());
         if !is_global_active {
             spawned.insert(previous);
         }

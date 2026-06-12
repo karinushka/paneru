@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use bevy::app::PreUpdate;
 use bevy::ecs::entity::{Entity, EntityHashSet};
 use bevy::ecs::hierarchy::ChildOf;
@@ -16,8 +18,9 @@ use crate::ecs::focus::FocusHistory;
 use crate::ecs::layout::{Column, LayoutStrip, StackItem};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Windows};
 use crate::ecs::{
-    ActiveDisplayMarker, ActiveWorkspaceMarker, FocusedMarker, FullWidthMarker,
-    NativeFullscreenMarker, SelectedVirtualMarker, SendMessageTrigger, SpawnCommandsExt, Unmanaged,
+    ActiveDisplayMarker, ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker,
+    FullWidthMarker, NativeFullscreenMarker, SelectedVirtualMarker, SendMessageTrigger,
+    SpawnCommandsExt, Timeout, Unmanaged,
 };
 use crate::events::Event;
 use crate::manager::{Application, Display, Origin, Size, Window, WindowManager, origin_from};
@@ -927,13 +930,13 @@ fn manage_window(
 /// * `windows` - A mutable query for `Window` components, their `Entity`, and whether they have the `Unmanaged` marker.
 /// * `active_display` - A mutable reference to the `ActiveDisplayMut` resource.
 /// * `commands` - Bevy commands to modify entities and trigger events.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 fn to_next_display(
     mut messages: MessageReader<Event>,
     windows: Windows,
     mut active_display: ActiveDisplayMut,
     mut other_workspaces: Query<
-        &mut LayoutStrip,
+        (&mut LayoutStrip, &ChildOf),
         (With<SelectedVirtualMarker>, Without<ActiveWorkspaceMarker>),
     >,
     window_manager: Res<WindowManager>,
@@ -1000,12 +1003,33 @@ fn to_next_display(
 
     // Insert into the target display's selected strip.
     if let Ok(target_space_id) = window_manager.active_display_space(target_display_id)
-        && let Some(mut target_strip) = other_workspaces
+        && let Some((mut target_strip, child)) = other_workspaces
             .iter_mut()
-            .find(|strip| strip.id() == target_space_id)
+            .find(|(strip, _)| strip.id() == target_space_id)
     {
         target_strip.append(entity);
         commands.reshuffle_around(entity);
+
+        // Add a delayed refresh of the window size - because the otehr display can have different bounds.
+        let display_entity = child.parent();
+        let moved_window = entity;
+        let refresh_size = move |windows: Query<&Bounds, With<Window>>,
+                                 displays: Query<(&Display, Option<&DockPosition>)>,
+                                 mut commands: Commands,
+                                 config: Res<Config>| {
+            let viewport = displays
+                .get(display_entity)
+                .ok()
+                .map(|(display, dock)| display.actual_display_bounds(dock, &config));
+            if let Some(viewport_bounds) = viewport
+                && let Ok(Bounds(bounds)) = windows.get(moved_window)
+            {
+                debug!("Refreshing size of window {entity}");
+                commands.resize_entity(moved_window, bounds.with_y(viewport_bounds.height()));
+            }
+        };
+        let system_id = commands.register_system(refresh_size);
+        Timeout::callback(Duration::from_secs(1), system_id, &mut commands);
     }
 }
 

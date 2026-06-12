@@ -524,12 +524,13 @@ impl SpawnCommandsExt for Commands<'_, '_> {
         let mut spawned = self.spawn((
             layout_strip,
             Position(origin),
-            SelectedVirtualMarker,
             FloatingLayer::default(),
             ChildOf(display_entity),
         ));
         if active {
             spawned.insert(ActiveWorkspaceMarker);
+        } else {
+            spawned.insert(SelectedVirtualMarker);
         }
         spawned
     }

@@ -930,8 +930,8 @@ fn to_next_display(
     windows: Windows,
     mut active_display: ActiveDisplayMut,
     mut other_workspaces: Query<
-        (&mut LayoutStrip, Has<SelectedVirtualMarker>),
-        Without<ActiveWorkspaceMarker>,
+        &mut LayoutStrip,
+        (With<SelectedVirtualMarker>, Without<ActiveWorkspaceMarker>),
     >,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
@@ -997,9 +997,9 @@ fn to_next_display(
 
     // Insert into the target display's selected strip.
     if let Ok(target_space_id) = window_manager.active_display_space(target_display_id)
-        && let Some((mut target_strip, _)) = other_workspaces
+        && let Some(mut target_strip) = other_workspaces
             .iter_mut()
-            .find(|(strip, selected)| *selected && strip.id() == target_space_id)
+            .find(|strip| strip.id() == target_space_id)
     {
         target_strip.append(entity);
         commands.reshuffle_around(entity);

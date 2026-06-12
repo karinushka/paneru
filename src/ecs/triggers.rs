@@ -14,8 +14,8 @@ use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
     ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, MissionControlActive,
-    PreviousManagedStrip, RetryFrontSwitch, SelectedVirtualMarker, SpawnWindowTrigger,
-    StrayFocusEvent, SystemTheme, Timeout, Unmanaged,
+    PreviousManagedStrip, RetryFrontSwitch, SpawnWindowTrigger, StrayFocusEvent, SystemTheme,
+    Timeout, Unmanaged,
 };
 use crate::config::Config;
 use crate::ecs::focus::FocusHistory;
@@ -273,9 +273,7 @@ pub(super) fn window_focused_trigger(
             && !active
             && let Ok(mut entity_commands) = commands.get_entity(strip_entity)
         {
-            entity_commands
-                .try_insert(ActiveWorkspaceMarker)
-                .try_insert(SelectedVirtualMarker);
+            entity_commands.try_insert(ActiveWorkspaceMarker);
         }
 
         // Record before the already-focused short-circuit below: focus_entity

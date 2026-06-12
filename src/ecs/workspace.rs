@@ -168,9 +168,7 @@ fn workspace_change_trigger(
     if let Some(into) = insert_into
         && let Ok(mut entity_commands) = commands.get_entity(into)
     {
-        entity_commands
-            .try_insert(ActiveWorkspaceMarker)
-            .try_insert(SelectedVirtualMarker);
+        entity_commands.try_insert(ActiveWorkspaceMarker);
     }
 }
 
@@ -517,10 +515,14 @@ fn cleanup_active_workspace_marker(
     mut commands: Commands,
 ) {
     workspaces.iter().for_each(|(entity, marker)| {
-        if marker
-            && entity != trigger.entity
+        if entity == trigger.entity
             && let Ok(mut entity_commands) = commands.get_entity(entity)
         {
+            // Mark the currently selected VW with selected marker. This also removes the previously
+            // selected markers from other VW's on the same workspace.
+            entity_commands.try_insert(SelectedVirtualMarker);
+        } else if marker && let Ok(mut entity_commands) = commands.get_entity(entity) {
+            // Remove the active marker from any other workspace.
             entity_commands.try_remove::<ActiveWorkspaceMarker>();
         }
     });
@@ -831,9 +833,7 @@ fn switch_virtual_workspace_bind(
     let new_entity = rows[next_index].0;
     let next_virtual_index = rows[next_index].1.virtual_index;
     if let Ok(mut entity_commands) = commands.get_entity(new_entity) {
-        entity_commands
-            .try_insert(SelectedVirtualMarker)
-            .try_insert(ActiveWorkspaceMarker);
+        entity_commands.try_insert(ActiveWorkspaceMarker);
 
         if config.workspace_popup_status() {
             commands.flash_message(format!("{}", next_virtual_index + 1), 1.0);
@@ -1112,8 +1112,7 @@ fn reap_empty_virtual_workspaces(
                 debug!("moving markers from despawned virtual workspace to primary");
                 commands
                     .entity(primary_entity)
-                    .try_insert(ActiveWorkspaceMarker)
-                    .try_insert(SelectedVirtualMarker);
+                    .try_insert(ActiveWorkspaceMarker);
             }
             commands.entity(entity).despawn();
         }

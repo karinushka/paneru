@@ -908,7 +908,7 @@ fn move_virtual_workspace_bind(
 
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all)]
-fn show_active_workspace(
+pub(crate) fn show_active_workspace(
     activated: Single<Entity, Added<ActiveWorkspaceMarker>>,
     windows: Windows,
     mut workspaces: Query<

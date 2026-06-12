@@ -1,5 +1,5 @@
 use bevy::app::{App, Plugin, Update};
-use bevy::ecs::change_detection::DetectChangesMut;
+use bevy::ecs::change_detection::{DetectChanges, DetectChangesMut, Ref};
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::{Entity, EntityHashMap, EntityHashSet};
 use bevy::ecs::hierarchy::ChildOf;
@@ -15,8 +15,8 @@ use tracing::{Level, instrument, trace};
 use crate::config::Config;
 use crate::ecs::params::Windows;
 use crate::ecs::{
-    Bounds, DockPosition, EnsureVisibleMarker, Initializing, LayoutPosition, Position,
-    RepositionMarker, ReshuffleAroundMarker, Scrolling, SpawnCommandsExt,
+    ActiveWorkspaceMarker, Bounds, DockPosition, EnsureVisibleMarker, Initializing, LayoutPosition,
+    Position, RepositionMarker, ReshuffleAroundMarker, Scrolling, SpawnCommandsExt,
 };
 use crate::errors::{Error, Result};
 use crate::manager::{Display, Origin, Window};
@@ -42,6 +42,7 @@ impl Plugin for LayoutEventsPlugin {
                 )
                     .chain()
                     .after(super::systems::finish_setup)
+                    .before(super::workspace::show_active_workspace)
                     .run_if(not(resource_exists::<Initializing>)),
             ),
         );
@@ -981,11 +982,17 @@ fn layout_strip_changed(
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all)]
 fn reshuffle_layout_strip(
-    markers: Populated<(Entity, &LayoutPosition), With<ReshuffleAroundMarker>>,
-    strips: Query<(&LayoutStrip, Entity, &Position, &ChildOf)>,
+    markers: Query<(Entity, &LayoutPosition), With<ReshuffleAroundMarker>>,
+    strips: Query<(
+        &LayoutStrip,
+        Entity,
+        &Position,
+        &ChildOf,
+        Option<Ref<ActiveWorkspaceMarker>>,
+    )>,
     displays: Query<(&Display, Option<&DockPosition>)>,
     windows: Windows,
     config: Res<Config>,
@@ -995,11 +1002,16 @@ fn reshuffle_layout_strip(
         if let Ok(mut cmd) = commands.get_entity(entity) {
             cmd.try_remove::<ReshuffleAroundMarker>();
         }
-        let Some((_, strip_entity, active_strip, child)) =
+        let Some((_, strip_entity, active_strip, child, active_marker)) =
             strips.into_iter().find(|strip| strip.0.contains(entity))
         else {
             return;
         };
+
+        if active_marker.is_some_and(|m| m.is_added()) {
+            trace!("reshuffle_layout_strip: skipping newly active workspace {strip_entity}");
+            return;
+        }
         let Ok((active_display, dock)) = displays.get(child.parent()) else {
             return;
         };
@@ -1047,11 +1059,17 @@ fn reshuffle_layout_strip(
 /// the per-window animator slides the entity into its slot. Only when the new
 /// slot would fall past an edge does the strip translate, and only by the
 /// shortfall — never to anchor the entity to a particular position.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all)]
 fn ensure_visible_in_strip(
-    markers: Populated<(Entity, &LayoutPosition), With<EnsureVisibleMarker>>,
-    strips: Query<(&LayoutStrip, Entity, &Position, &ChildOf)>,
+    markers: Query<(Entity, &LayoutPosition), With<EnsureVisibleMarker>>,
+    strips: Query<(
+        &LayoutStrip,
+        Entity,
+        &Position,
+        &ChildOf,
+        Option<Ref<ActiveWorkspaceMarker>>,
+    )>,
     displays: Query<(&Display, Option<&DockPosition>)>,
     windows: Windows,
     config: Res<Config>,
@@ -1061,11 +1079,16 @@ fn ensure_visible_in_strip(
         if let Ok(mut cmd) = commands.get_entity(entity) {
             cmd.try_remove::<EnsureVisibleMarker>();
         }
-        let Some((_, strip_entity, strip_position, child)) =
+        let Some((_, strip_entity, strip_position, child, active_marker)) =
             strips.into_iter().find(|s| s.0.contains(entity))
         else {
             return;
         };
+
+        if active_marker.is_some_and(|m| m.is_added()) {
+            trace!("ensure_visible_in_strip: skipping newly active workspace {strip_entity}");
+            return;
+        }
         let Ok((display, dock)) = displays.get(child.parent()) else {
             return;
         };

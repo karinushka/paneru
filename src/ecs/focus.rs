@@ -19,8 +19,7 @@ use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, GlobalState, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, Scrolling, SelectedVirtualMarker, SendMessageTrigger, SpawnCommandsExt,
-    StrayFocusEvent,
+    ActiveWorkspaceMarker, Scrolling, SendMessageTrigger, SpawnCommandsExt, StrayFocusEvent,
 };
 use crate::events::Event;
 use crate::manager::{Application, Display, Window, WindowManager};
@@ -289,9 +288,7 @@ fn virtual_strip_activated(
     if let Some(entity) = owner_strip
         && let Ok(mut entity_commands) = commands.get_entity(entity)
     {
-        entity_commands
-            .try_insert(ActiveWorkspaceMarker)
-            .try_insert(SelectedVirtualMarker);
+        entity_commands.try_insert(ActiveWorkspaceMarker);
     }
 }
 

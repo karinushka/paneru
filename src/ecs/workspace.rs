@@ -916,18 +916,19 @@ pub(crate) fn show_active_workspace(
             Entity,
             &mut Position,
             &LayoutStrip,
+            &ChildOf,
             Option<&PreviousStripPosition>,
             Option<&RepositionMarker>,
         ),
         Without<Window>,
     >,
-    active_display: Single<&Display, With<ActiveDisplayMarker>>,
+    displays: Query<&Display>,
     config: Res<Config>,
     mut commands: Commands,
 ) {
     let Some(workspace_id) = workspaces
         .iter()
-        .find_map(|(entity, _, strip, _, _)| (entity == *activated).then_some(strip.id()))
+        .find_map(|(entity, _, strip, _, _, _)| (entity == *activated).then_some(strip.id()))
     else {
         return;
     };
@@ -936,9 +937,12 @@ pub(crate) fn show_active_workspace(
     let current_focus = windows.focused();
     let current_workspace = workspaces
         .iter_mut()
-        .filter(|(entity, _, strip, _, _)| strip.id() == workspace_id && *entity != *activated);
+        .filter(|(entity, _, strip, _, _, _)| strip.id() == workspace_id && *entity != *activated);
 
-    for (entity, mut position, strip, previous, moving) in current_workspace {
+    for (entity, mut position, strip, child, previous, moving) in current_workspace {
+        let Ok(active_display) = displays.get(child.parent()) else {
+            continue;
+        };
         if previous.is_none() {
             let mut focus =
                 current_focus.and_then(|(_, entity)| strip.contains(entity).then_some(entity));
@@ -976,7 +980,8 @@ pub(crate) fn show_active_workspace(
         }
     }
 
-    let Ok((_, mut position, strip, previous_position, _)) = workspaces.get_mut(*activated) else {
+    let Ok((_, mut position, strip, _, previous_position, _)) = workspaces.get_mut(*activated)
+    else {
         return;
     };
     debug!("showing virtual workspace {} ({})", strip.id(), *activated);

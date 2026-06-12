@@ -1,4 +1,4 @@
-use bevy::app::{App, Plugin, Update};
+use bevy::app::{App, Plugin, PreUpdate, Update};
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
@@ -32,7 +32,8 @@ pub struct DisplayEventsPlugin;
 
 impl Plugin for DisplayEventsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (reconcile_displays, display_change_trigger))
+        app.add_systems(PreUpdate, display_change_handler);
+        app.add_systems(Update, reconcile_displays)
             .add_observer(read_display_properties_trigger)
             .add_observer(cleanup_active_display_marker);
     }
@@ -59,7 +60,7 @@ fn cleanup_active_display_marker(
 /// Handles display change events.
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
-fn display_change_trigger(
+fn display_change_handler(
     mut messages: MessageReader<Event>,
     displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
     window_manager: Res<WindowManager>,

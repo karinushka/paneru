@@ -212,23 +212,8 @@ fn test_multi_display_no_height_crosstalk() {
 
 #[test]
 fn test_next_display_inserts_into_target_strip() {
-    let mut harness = TestHarness::new();
-    harness.mock_state.add_display(
-        EXT_DISPLAY_ID,
-        IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
-        vec![EXT_WORKSPACE_ID],
-    );
-
-    let origin = Origin::new(0, 0);
-    let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
-    let frame = IRect::from_corners(origin, origin + size);
-
-    harness
-        .mock_state
-        .spawn_window(TEST_PROCESS_ID, TEST_WORKSPACE_ID, 100, frame);
-
     let commands = vec![
-        Event::MenuOpened { window_id: 100 },
+        Event::MenuOpened { window_id: 0 },
         Event::Command {
             command: Command::PrintState,
         },
@@ -240,13 +225,19 @@ fn test_next_display_inserts_into_target_strip() {
         },
     ];
 
-    harness
+    TestHarness::new()
+        .with_windows(1)
+        .with_display(
+            EXT_DISPLAY_ID,
+            IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+            vec![EXT_WORKSPACE_ID],
+        )
         .on_iteration(1, move |world, _state| {
-            assert_on_workspace!(world, 100, TEST_WORKSPACE_ID);
+            assert_on_workspace!(world, 0, TEST_WORKSPACE_ID);
         })
         .on_iteration(2, move |world, _state| {
-            assert_on_workspace!(world, 100, EXT_WORKSPACE_ID);
-            assert_not_on_workspace!(world, 100, TEST_WORKSPACE_ID);
+            assert_on_workspace!(world, 0, EXT_WORKSPACE_ID);
+            assert_not_on_workspace!(world, 0, TEST_WORKSPACE_ID);
         })
         .run(commands);
 }

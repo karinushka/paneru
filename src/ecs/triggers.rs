@@ -910,7 +910,7 @@ pub(super) fn spawn_window_trigger(
             continue;
         };
         let position = Position(frame.min);
-        let bounds = Bounds(Size::new(frame.width(), frame.height()));
+        let bounds = Bounds(frame.size());
         let width_ratio =
             WidthRatio(f64::from(frame.width()) / f64::from(active_display.bounds().width()));
         let layout_position = LayoutPosition::default();

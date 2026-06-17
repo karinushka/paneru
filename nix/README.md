@@ -64,6 +64,7 @@ expose the same following options:
         window_focus_east = "cmd - l";
         window_resize = "alt - r";
         window_center = "alt - c";
+        window_balance = "alt - b";
         quit = "ctrl + alt - q";
       };
     };

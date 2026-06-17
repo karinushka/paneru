@@ -139,6 +139,7 @@ Format: `"[modifiers-]key"`. Available modifiers are:
 | `window_stack` | Stack the current window into the column on the left. |
 | `window_unstack` | Pull a window out of a stack into its own column. |
 | `window_equalize` | Make all windows in a stack equal height. |
+| `window_balance` | Make all columns in the strip the same width as the focused window. |
 | `window_nextdisplay` | Move focused window to the next monitor and follow it. |
 | `window_nextdisplaysend` | Move focused window to the next monitor but stay on current. |
 | `mouse_nextdisplay` | Warp mouse cursor to the next monitor. |

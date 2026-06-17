@@ -221,6 +221,7 @@ $ paneru send-cmd <command> [args...]
 | `window fullwidth`         | Toggle full-width mode for the focused window    |
 | `window manage`            | Toggle managed/floating state                    |
 | `window equalize`          | Distribute equal heights in the focused stack    |
+| `window balance`           | Make all columns match the focused window width  |
 | `window stack`             | Stack the focused window onto its left neighbour |
 | `window unstack`           | Unstack the focused window into its own column   |
 | `window nextdisplay`       | Move the focused window to the next display      |
@@ -250,6 +251,9 @@ $ paneru send-cmd window swap west
 
 # Center and resize in one shot (two separate calls).
 $ paneru send-cmd window center && paneru send-cmd window resize
+
+# Balance all columns to the focused window's width.
+$ paneru send-cmd window balance
 
 # Cycle backward through preset widths.
 $ paneru send-cmd window shrink
@@ -289,9 +293,9 @@ scripts, `cron` jobs, or other automation tools:
 
 - **Launch-and-arrange workflow.** Open an application and immediately position
   it: `open -a Safari && sleep 0.5 && paneru send-cmd window resize`.
-- **One-key layout reset.** Bind a script that focuses the first window, resizes
-  it, then moves east and resizes the next one — recreating a preferred layout
-  after windows get shuffled.
+- **One-key layout reset.** Use `paneru send-cmd window balance` to make every
+  column the same width as the focused window — great for resetting layouts
+  after unplugging a monitor or when windows get shuffled.
 - **Integration with other tools.** Pipe focus events from tools like
   [Hammerspoon](https://www.hammerspoon.org) or
   [skhd](https://github.com/koekeishiya/skhd) into `paneru send-cmd` for

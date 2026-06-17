@@ -109,6 +109,33 @@ fn test_window_shuffle() {
 }
 
 #[test]
+fn test_window_balance() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Resize(ResizeDirection::Grow)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Balance),
+        },
+    ];
+
+    TestHarness::new()
+        .with_windows(3)
+        .on_iteration(1, |world, _state| {
+            // After grow, window 0 should be 512 (50% of 1024).
+            assert_window_size!(world, 0, 512, 748);
+        })
+        .on_iteration(2, |world, _state| {
+            // After balance, all windows should match window 0's width.
+            assert_window_size!(world, 0, 512, 748);
+            assert_window_size!(world, 1, 512, 748);
+            assert_window_size!(world, 2, 512, 748);
+        })
+        .run(commands);
+}
+
+#[test]
 fn test_startup_windows() {
     let commands = vec![
         Event::MenuOpened { window_id: 0 },

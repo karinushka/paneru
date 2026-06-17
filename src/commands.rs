@@ -81,6 +81,8 @@ pub enum Operation {
     ToNextDisplay(MoveFocus),
     /// Distributes heights equally among windows in the focused stack.
     Equalize,
+    /// Makes all columns in the active strip the same width as the focused window.
+    Balance,
     /// Toggles the managed state of the focused window.
     Manage,
     /// Stacks or unstacks a window. The boolean indicates whether to stack (`true`) or unstack (`false`).
@@ -141,6 +143,7 @@ pub fn register_commands(app: &mut bevy::app::App) {
             full_width_window,
             to_next_display,
             equalize_column,
+            balance_strip,
             manage_window,
             stack_windows_handler,
             command_move_focus,
@@ -1134,6 +1137,51 @@ fn equalize_column(
             }
         }
     }
+}
+
+/// Makes all columns in the active strip the same width as the focused window.
+#[allow(clippy::needless_pass_by_value)]
+fn balance_strip(
+    mut messages: MessageReader<Event>,
+    windows: Windows,
+    active_display: ActiveDisplay,
+    mut commands: Commands,
+) {
+    if filter_window_operations(&mut messages, |op| matches!(op, Operation::Balance))
+        .next()
+        .is_none()
+    {
+        return;
+    }
+
+    let Some((_, focused_entity)) = windows.focused() else {
+        return;
+    };
+    let Some(focused_width) = windows.size(focused_entity).map(|s| s.x) else {
+        return;
+    };
+
+    let strip = active_display.active_strip();
+
+    for column in strip.columns() {
+        if matches!(column, Column::Fullscren(_)) {
+            continue;
+        }
+
+        for entity in column.window_iter() {
+            if windows.full_width(entity).is_some()
+                && let Ok(mut cmds) = commands.get_entity(entity)
+            {
+                cmds.try_remove::<FullWidthMarker>();
+            }
+
+            if let Some(size) = windows.size(entity) {
+                commands.resize_entity(entity, size.with_x(focused_width));
+            }
+        }
+    }
+
+    commands.reshuffle_around(focused_entity);
 }
 
 /// Slides the strip so the focused window is fully visible, snapping to the

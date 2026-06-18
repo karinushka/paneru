@@ -345,7 +345,8 @@ Here are some other projects which implement a similar workflow:
 - [karousel]: scrollable tiling on top of KDE.
 - [papersway]: scrollable tiling on top of sway/i3.
 - [hyprscroller] and [hyprslidr]: scrollable tiling on top of Hyprland.
-- [PaperWM.spoon]: scrollable tiling on top of MacOS.
+- [PaperWM.spoon]: scrollable tiling for MacOS on top of HammerSpoon.
+- [Nehir]: scrollable tiling for MacOS
 
 [Yabai]: https://github.com/koekeishiya/yabai
 [Niri]: https://github.com/YaLTeR/niri
@@ -355,3 +356,4 @@ Here are some other projects which implement a similar workflow:
 [hyprscroller]: https://github.com/dawsers/hyprscroller
 [hyprslidr]: https://gitlab.com/magus/hyprslidr
 [PaperWM.spoon]: https://github.com/mogenson/PaperWM.spoon
+[Nehir]: https://github.com/Guria/Nehir

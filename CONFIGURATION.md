@@ -218,13 +218,16 @@ structured `paneru query` responses and `paneru subscribe` event stream.
 
 ## 6. Window Rules (`[windows]`)
 
-Define specific behaviors for applications based on their Title or Bundle ID.
+Define specific behaviors for applications based on their Title, Bundle ID, and/or Accessibility role/subrole.
 
 | Option | Type | Description |
 | :--- | :--- | :--- |
 | `title` | Regex | **(Required)** Regex pattern to match the window title. |
 | `bundle_id` | String | Optional Bundle ID to match (e.g., `com.apple.Terminal`). |
+| `role` | Regex | Optional regex to match the window's accessibility role (e.g., `AXWindow`). |
+| `subrole` | Regex | Optional regex to match the window's accessibility subrole (e.g., `AXStandardWindow`). |
 | `floating` | Boolean | Force the window to be floating/unmanaged. |
+| `manage` | Boolean | Force Paneru to manage this app/window even if macOS reports the app as unobservable or the window has a non-standard role/subrole. |
 | `index` | Integer | Preferred position in the strip when spawned. |
 | `dont_focus` | Boolean | Prevent the window from taking focus when spawned. |
 | `width` | Float (0.0–1.0) | Initial width ratio for the window. |
@@ -240,6 +243,27 @@ title = ".*"
 bundle_id = "com.apple.Terminal"
 horizontal_padding = 5
 bindings_passthrough = ["ctrl-h", "ctrl-l"]
+```
+
+### Forcing management of LSUIElement or non-standard windows
+
+Some applications (e.g., BetterTouchTool, ProtonVPN) are flagged as background apps
+(`LSUIElement`) or expose windows with unusual accessibility roles such as `AXTable`
+or `AXTextField`. Paneru normally ignores these processes and windows. Use `manage = true`
+to opt in, and narrow the match with `role`/`subrole` so that only the intended window
+is managed.
+
+```toml
+[windows.btt_main]
+bundle_id = "com.hegenberg.BetterTouchTool"
+title = "BetterTouchTool"
+role = "AXTable|AXTextField"
+manage = true
+
+[windows.btt_screenshot]
+bundle_id = "com.hegenberg.BetterTouchTool"
+title = "Screenshot.*"
+floating = true
 ```
 
 ### Session Restore

@@ -404,18 +404,28 @@ impl Config {
             })
     }
 
-    /// Finds window properties for a given `title` and `bundle_id`.
-    /// It iterates through configured window parameters and returns the first match.
+    /// Finds window properties for a given `title`, `bundle_id`, `role`, and `subrole`.
+    /// It iterates through configured window parameters and returns all matching rules.
+    /// A rule matches when its bundle ID (if any) and title regex match, and when any
+    /// optional `role`/`subrole` regexes also match.
     ///
     /// # Arguments
     ///
     /// * `title` - The title of the window to match.
     /// * `bundle_id` - The bundle identifier of the application owning the window.
+    /// * `role` - The accessibility role of the window (optional).
+    /// * `subrole` - The accessibility subrole of the window (optional).
     ///
     /// # Returns
     ///
-    /// `Some(WindowParams)` if matching window properties are found, otherwise `None`.
-    pub fn find_window_properties(&self, title: &str, bundle_id: &str) -> Vec<WindowParams> {
+    /// A `Vec<WindowParams>` containing all matching window rules.
+    pub fn find_window_properties(
+        &self,
+        title: &str,
+        bundle_id: &str,
+        role: Option<&str>,
+        subrole: Option<&str>,
+    ) -> Vec<WindowParams> {
         self.inner()
             .windows
             .as_ref()
@@ -425,12 +435,37 @@ impl Config {
                     .filter(|params| {
                         let bundle_match =
                             params.bundle_id.as_ref().map(|id| id.as_str() == bundle_id);
-                        bundle_match.is_none_or(|m| m) && params.title.is_match(title)
+                        let role_match = params
+                            .role
+                            .as_ref()
+                            .is_none_or(|re| role.is_some_and(|r| re.is_match(r)));
+                        let subrole_match = params
+                            .subrole
+                            .as_ref()
+                            .is_none_or(|re| subrole.is_some_and(|s| re.is_match(s)));
+                        bundle_match.is_none_or(|m| m)
+                            && params.title.is_match(title)
+                            && role_match
+                            && subrole_match
                     })
                     .cloned()
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default()
+    }
+
+    /// Returns `true` if any window rule for the given bundle ID requests that the
+    /// process be forcibly managed even when macOS reports it as unobservable.
+    pub fn should_force_manage_process(&self, bundle_id: &str) -> bool {
+        self.inner().windows.as_ref().is_some_and(|windows| {
+            windows.values().any(|params| {
+                params
+                    .bundle_id
+                    .as_ref()
+                    .is_some_and(|id| id.as_str() == bundle_id)
+                    && params.manage.is_some_and(|manage| manage)
+            })
+        })
     }
 
     pub fn sliver_height(&self) -> f64 {
@@ -1130,8 +1165,9 @@ impl<'de> Deserialize<'de> for Keybinding {
     }
 }
 
-/// `WindowParams` defines rules and properties for specific windows based on their title or bundle ID.
-/// These parameters can override default window management behavior, such as forcing a window to float or setting its initial index.
+/// `WindowParams` defines rules and properties for specific windows based on their title, bundle ID,
+/// and accessibility role/subrole. These parameters can override default window management behavior,
+/// such as forcing a window to float or setting its initial index.
 #[derive(Clone, Debug, Deserialize)]
 pub struct WindowParams {
     /// A regular expression to match against the window's title.
@@ -1139,8 +1175,17 @@ pub struct WindowParams {
     title: Regex,
     /// An optional bundle identifier to match against the application's bundle ID.
     bundle_id: Option<String>,
+    /// An optional regular expression to match against the window's accessibility role.
+    #[serde(default, deserialize_with = "deserialize_optional_regex")]
+    role: Option<Regex>,
+    /// An optional regular expression to match against the window's accessibility subrole.
+    #[serde(default, deserialize_with = "deserialize_optional_regex")]
+    subrole: Option<Regex>,
     /// If `true`, the window will be managed as a floating window (not tiled).
     pub floating: Option<bool>,
+    /// If `true`, force the process/window to be managed even if macOS reports it as
+    /// unobservable or the window does not look like a standard window.
+    pub manage: Option<bool>,
     /// An optional preferred index for the window's position in the window strip.
     pub index: Option<usize>,
     pub vertical_padding: Option<i32>,
@@ -1170,7 +1215,10 @@ impl WindowParams {
         Self {
             title: Regex::new(title).unwrap(),
             bundle_id,
+            role: None,
+            subrole: None,
             floating: None,
+            manage: None,
             index: None,
             vertical_padding: None,
             horizontal_padding: None,
@@ -1215,6 +1263,19 @@ where
 {
     let s = String::deserialize(deserializer)?;
     Regex::new(&s).map_err(de::Error::custom)
+}
+
+/// Deserializes an optional regular expression string.
+fn deserialize_optional_regex<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Regex>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(s) = Option::<String>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    Regex::new(&s).map(Some).map_err(de::Error::custom)
 }
 
 fn deserialize_modifier<'de, D>(deserializer: D) -> std::result::Result<Option<Modifiers>, D::Error>
@@ -1718,7 +1779,8 @@ index = 1
         Some(Command::Window(Operation::Resize(ResizeDirection::Shrink)))
     ));
 
-    let props = config.find_window_properties("picture in picture", "com.something.apple");
+    let props =
+        config.find_window_properties("picture in picture", "com.something.apple", None, None);
     assert_eq!(props[0].floating, Some(true));
     assert_eq!(props[0].index, Some(1));
 
@@ -1815,7 +1877,10 @@ fn test_grid_ratios() {
     let make = |grid: Option<&str>| WindowParams {
         title: Regex::new(".*").unwrap(),
         bundle_id: None,
+        role: None,
+        subrole: None,
         floating: None,
+        manage: None,
         index: None,
         vertical_padding: None,
         horizontal_padding: None,
@@ -1910,6 +1975,74 @@ fn test_config_defaults() {
     assert_eq!(config.border_width(), 2.0);
     assert_eq!(config.border_radius(), BorderRadiusOption::Auto);
     assert_eq!(config.menubar_height(), None);
+}
+
+#[test]
+fn test_window_rules_match_role_and_subrole() {
+    let input = r#"
+[options]
+
+[bindings]
+
+[windows.btt_main]
+bundle_id = "com.hegenberg.BetterTouchTool"
+title = "BetterTouchTool"
+role = "AXTable|AXTextField"
+subrole = "AXUnknownSubrole"
+manage = true
+
+[windows.btt_floating]
+bundle_id = "com.hegenberg.BetterTouchTool"
+title = "Screenshot.*"
+floating = true
+"#;
+    let config = Config::try_from(input).expect("config should parse");
+
+    // Non-standard window should match the manage rule.
+    let props = config.find_window_properties(
+        "BetterTouchTool",
+        "com.hegenberg.BetterTouchTool",
+        Some("AXTextField"),
+        Some("AXUnknownSubrole"),
+    );
+    assert_eq!(props.len(), 1);
+    assert_eq!(props[0].manage, Some(true));
+
+    // Standard window should not match the manage rule (role differs).
+    let props = config.find_window_properties(
+        "BetterTouchTool",
+        "com.hegenberg.BetterTouchTool",
+        Some("AXWindow"),
+        Some("AXStandardWindow"),
+    );
+    assert!(props.is_empty());
+
+    // Screenshot window matches the floating rule, regardless of role.
+    let props = config.find_window_properties(
+        "Screenshot 1",
+        "com.hegenberg.BetterTouchTool",
+        Some("AXWindow"),
+        Some("AXFloatingWindow"),
+    );
+    assert_eq!(props.len(), 1);
+    assert_eq!(props[0].floating, Some(true));
+}
+
+#[test]
+fn test_should_force_manage_process() {
+    let input = r#"
+[options]
+
+[bindings]
+
+[windows.btt_main]
+bundle_id = "com.hegenberg.BetterTouchTool"
+title = ".*"
+manage = true
+"#;
+    let config = Config::try_from(input).expect("config should parse");
+    assert!(config.should_force_manage_process("com.hegenberg.BetterTouchTool"));
+    assert!(!config.should_force_manage_process("com.apple.Terminal"));
 }
 
 #[test]

@@ -1,4 +1,5 @@
 use bevy::app::{App, Plugin, PreUpdate, Update};
+use bevy::ecs::change_detection::DetectChangesMut;
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
@@ -562,13 +563,16 @@ fn cleanup_selected_space_marker(
 )]
 fn handle_virtual_window_moves(
     moved_windows: Populated<(Entity, &VirtualMoveMarker), With<Window>>,
-    mut workspaces: Query<(
-        Entity,
-        &mut LayoutStrip,
-        &Position,
-        Has<ActiveWorkspaceMarker>,
-        Option<&mut PreviousStripPosition>,
-    )>,
+    mut workspaces: Query<
+        (
+            Entity,
+            &mut LayoutStrip,
+            &mut Position,
+            Has<ActiveWorkspaceMarker>,
+            Option<&mut PreviousStripPosition>,
+        ),
+        Without<Window>,
+    >,
     windows: Windows,
     mut scrollings: Query<&mut Scrolling>,
     active_display: Single<(Entity, &Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
@@ -710,7 +714,14 @@ fn handle_virtual_window_moves(
         if stay && let Some(neighbour) = source_neighbour {
             // Layout chain repositions the window offscreen with its hidden strip.
             commands.focus_entity(neighbour, false);
-            commands.reshuffle_around(neighbour);
+
+            // Force position change on the hidden strip, so it hides the moved window.
+            if let Ok(mut position) = workspaces
+                .get_mut(target_entity)
+                .map(|(_, _, pos, _, _)| pos)
+            {
+                position.set_changed();
+            }
         } else {
             let previous_position = workspaces
                 .get_mut(target_entity)

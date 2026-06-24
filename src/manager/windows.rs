@@ -208,15 +208,8 @@ impl WindowOS {
         let Ok(title) = self.title() else {
             return false;
         };
-        let role = self.role().ok();
-        let subrole = self.subrole().ok();
         config
-            .find_window_properties(
-                &title,
-                bundle_id.unwrap_or_default(),
-                role.as_deref(),
-                subrole.as_deref(),
-            )
+            .find_window_properties(&title, bundle_id.unwrap_or_default())
             .iter()
             .any(|params| params.manage.is_some_and(|manage| manage))
     }

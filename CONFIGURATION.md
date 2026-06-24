@@ -218,14 +218,12 @@ structured `paneru query` responses and `paneru subscribe` event stream.
 
 ## 6. Window Rules (`[windows]`)
 
-Define specific behaviors for applications based on their Title, Bundle ID, and/or Accessibility role/subrole.
+Define specific behaviors for applications based on their Title or Bundle ID.
 
 | Option | Type | Description |
 | :--- | :--- | :--- |
 | `title` | Regex | **(Required)** Regex pattern to match the window title. |
 | `bundle_id` | String | Optional Bundle ID to match (e.g., `com.apple.Terminal`). |
-| `role` | Regex | Optional regex to match the window's accessibility role (e.g., `AXWindow`). |
-| `subrole` | Regex | Optional regex to match the window's accessibility subrole (e.g., `AXStandardWindow`). |
 | `floating` | Boolean | Force the window to be floating/unmanaged. |
 | `manage` | Boolean | Force Paneru to manage this app/window even if macOS reports the app as unobservable or the window has a non-standard role/subrole. |
 | `index` | Integer | Preferred position in the strip when spawned. |
@@ -250,14 +248,12 @@ bindings_passthrough = ["ctrl-h", "ctrl-l"]
 Some applications (e.g., BetterTouchTool, ProtonVPN) are flagged as background apps
 (`LSUIElement`) or expose windows with unusual accessibility roles such as `AXTable`
 or `AXTextField`. Paneru normally ignores these processes and windows. Use `manage = true`
-to opt in, and narrow the match with `role`/`subrole` so that only the intended window
-is managed.
+to opt in and forcibly manage the matching windows.
 
 ```toml
 [windows.btt_main]
 bundle_id = "com.hegenberg.BetterTouchTool"
 title = "BetterTouchTool"
-role = "AXTable|AXTextField"
 manage = true
 
 [windows.btt_screenshot]

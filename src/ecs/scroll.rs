@@ -85,12 +85,12 @@ fn swipe_gesture(
                 total_delta += *delta * scroll_scale;
                 has_scroll_event = true;
             }
-            Event::Swipe { deltas }
+            Event::Swipe { delta, fingers }
                 if config
                     .swipe_gesture_fingers()
-                    .is_none_or(|fingers| deltas.len() == fingers) =>
+                    .is_none_or(|fingers_configured| fingers_configured == *fingers) =>
             {
-                total_delta += deltas.iter().sum::<f64>();
+                total_delta += delta;
                 has_scroll_event = true;
             }
             _ => (),
@@ -362,26 +362,11 @@ fn vertical_swipe_gesture(
     mut commands: Commands,
     mut state: Local<VerticalGestureState>,
 ) {
+    const GESTURE_TIMEOUT: Duration = Duration::from_millis(150);
+
     if active_display.fullscreen().is_some() {
         return;
     }
-
-    let switch_virtual = |delta: f64, commands: &mut Commands| {
-        let physical_finger_direction = if delta > 0.0 {
-            Direction::South
-        } else {
-            Direction::North
-        };
-        let direction = match config.swipe_gesture_direction() {
-            SwipeGestureDirection::Natural => physical_finger_direction.reverse(),
-            SwipeGestureDirection::Reversed => physical_finger_direction,
-        };
-        commands.trigger(SendMessageTrigger(Event::Command {
-            command: Command::Window(Operation::Virtual(direction)),
-        }));
-    };
-
-    const GESTURE_TIMEOUT: Duration = Duration::from_millis(150);
 
     // Reset state when the gesture times out (fingers lifted).
     if let Some(last) = state.last_event
@@ -391,45 +376,47 @@ fn vertical_swipe_gesture(
         state.fired = false;
     }
 
-    // Already fired for this trackpad gesture. Drain the reader to advance
-    // its cursor but only update timing so the timeout tracks the real gesture end.
-    // Scroll wheel ticks still fire since each tick is independent.
-    if state.fired {
-        for event in messages.read() {
-            match event {
-                Event::VerticalScrollTick { delta } => {
-                    switch_virtual(*delta, &mut commands);
-                }
-                Event::VerticalSwipe { .. } => {
-                    state.last_event = Some(Instant::now());
-                }
-                _ => {}
-            }
-        }
-        return;
-    }
-
     for event in messages.read() {
         match event {
             Event::VerticalScrollTick { delta } => {
-                switch_virtual(*delta, &mut commands);
+                switch_virtual_workspace(*delta, &config, &mut commands);
             }
-            Event::VerticalSwipe { delta } => {
-                state.accumulated += delta;
+            Event::VerticalSwipe { delta, fingers }
+                if config
+                    .swipe_gesture_fingers()
+                    .is_none_or(|fingers_configured| fingers_configured == *fingers) =>
+            {
                 state.last_event = Some(Instant::now());
+
+                if !state.fired {
+                    state.accumulated += delta;
+                }
             }
             _ => {}
         }
     }
 
-    if state.accumulated != 0.0 {
-        // Threshold needs to be high enough that incidental vertical movement
-        // during horizontal swipes doesn't trigger a workspace switch.
-        let threshold = 0.15 / config.swipe_sensitivity();
-        if state.accumulated.abs() >= threshold {
-            switch_virtual(state.accumulated, &mut commands);
-            state.accumulated = 0.0;
-            state.fired = true;
-        }
+    // Threshold needs to be high enough that incidental vertical movement
+    // during horizontal swipes doesn't trigger a workspace switch.
+    let threshold = 0.15 / config.swipe_sensitivity();
+    if state.accumulated.abs() >= threshold {
+        switch_virtual_workspace(state.accumulated, &config, &mut commands);
+        state.accumulated = 0.0;
+        state.fired = true;
     }
+}
+
+fn switch_virtual_workspace(delta: f64, config: &Config, commands: &mut Commands) {
+    let physical_finger_direction = if delta > 0.0 {
+        Direction::South
+    } else {
+        Direction::North
+    };
+    let direction = match config.swipe_gesture_direction() {
+        SwipeGestureDirection::Natural => physical_finger_direction.reverse(),
+        SwipeGestureDirection::Reversed => physical_finger_direction,
+    };
+    commands.trigger(SendMessageTrigger(Event::Command {
+        command: Command::Window(Operation::Virtual(direction)),
+    }));
 }

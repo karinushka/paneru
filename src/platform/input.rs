@@ -385,7 +385,10 @@ impl InputHandler {
                 if x_sum.abs() >= y_sum.abs() {
                     // Horizontal dominant: use existing swipe path
                     if x_deltas.iter().all(|p| p.abs() > SWIPE_THRESHOLD) {
-                        _ = events.send(Event::Swipe { deltas: x_deltas });
+                        _ = events.send(Event::Swipe {
+                            delta: x_sum,
+                            fingers: x_deltas.len(),
+                        });
                         self.last_swipe_time = Some(Instant::now());
                     }
                 } else if y_deltas.iter().all(|p| p.abs() > SWIPE_THRESHOLD) {
@@ -394,7 +397,10 @@ impl InputHandler {
                         return false;
                     }
                     // Vertical dominant: send vertical swipe, intercept the event
-                    _ = events.send(Event::VerticalSwipe { delta: y_sum });
+                    _ = events.send(Event::VerticalSwipe {
+                        delta: y_sum,
+                        fingers: y_deltas.len(),
+                    });
                     self.last_swipe_time = Some(Instant::now());
                 }
             }

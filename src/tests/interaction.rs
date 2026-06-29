@@ -151,7 +151,8 @@ fn test_scrolling() {
             command: Command::PrintState,
         },
         Event::Swipe {
-            deltas: vec![0.1, 0.1, 0.1],
+            delta: 0.3,
+            fingers: 3,
         },
         Event::Command {
             command: Command::PrintState,
@@ -189,7 +190,8 @@ fn test_scrolling_stop() {
     let commands = vec![
         Event::MenuOpened { window_id: 0 },
         Event::Swipe {
-            deltas: vec![0.1, 0.1, 0.1],
+            delta: 0.3,
+            fingers: 3,
         },
         Event::TouchpadDown,
     ];
@@ -221,7 +223,8 @@ fn test_window_hidden_ratio() {
     let commands = vec![
         Event::MenuOpened { window_id: 0 },
         Event::Swipe {
-            deltas: vec![0.1, 0.1, 0.1],
+            delta: 0.3,
+            fingers: 3,
         },
         Event::Command {
             command: Command::Window(Operation::Focus(Direction::First)),
@@ -890,14 +893,16 @@ fn test_mid_strip_insertion_preserves_window_x() {
     pump_event(
         &mut h,
         Event::Swipe {
-            deltas: vec![0.1, 0.1, 0.1],
+            delta: 0.3,
+            fingers: 3,
         },
     );
     cmd(&mut h, Command::Window(Operation::VirtualNumber(0)));
     pump_event(
         &mut h,
         Event::Swipe {
-            deltas: vec![0.1, 0.1, 0.1],
+            delta: 0.3,
+            fingers: 3,
         },
     );
 
@@ -1017,7 +1022,8 @@ fn test_mid_strip_move_does_not_animate() {
     }
     pump(&mut h, Command::Window(Operation::VirtualNumber(1)));
     h.app.world_mut().write_message::<Event>(Event::Swipe {
-        deltas: vec![0.1, 0.1, 0.1],
+        delta: 0.3,
+        fingers: 3,
     });
     for _ in 0..6 {
         h.app.update();
@@ -1027,7 +1033,8 @@ fn test_mid_strip_move_does_not_animate() {
     }
     pump(&mut h, Command::Window(Operation::VirtualNumber(0)));
     h.app.world_mut().write_message::<Event>(Event::Swipe {
-        deltas: vec![0.1, 0.1, 0.1],
+        delta: 0.3,
+        fingers: 3,
     });
     for _ in 0..6 {
         h.app.update();

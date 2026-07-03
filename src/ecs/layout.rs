@@ -16,7 +16,8 @@ use crate::config::Config;
 use crate::ecs::params::Windows;
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, DockPosition, EnsureVisibleMarker, Initializing, LayoutPosition,
-    Position, RepositionMarker, ReshuffleAroundMarker, Scrolling, SpawnCommandsExt,
+    Position, RepositionMarker, ReshuffleAroundMarker, Scrolling, SkipReshuffleMarker,
+    SpawnCommandsExt,
 };
 use crate::errors::{Error, Result};
 use crate::manager::{Display, Origin, Window};
@@ -992,6 +993,7 @@ fn reshuffle_layout_strip(
         &Position,
         &ChildOf,
         Option<Ref<ActiveWorkspaceMarker>>,
+        Has<SkipReshuffleMarker>,
     )>,
     displays: Query<(&Display, Option<&DockPosition>)>,
     windows: Windows,
@@ -1002,11 +1004,19 @@ fn reshuffle_layout_strip(
         if let Ok(mut cmd) = commands.get_entity(entity) {
             cmd.try_remove::<ReshuffleAroundMarker>();
         }
-        let Some((_, strip_entity, active_strip, child, active_marker)) =
+        let Some((_, strip_entity, active_strip, child, active_marker, skip_reshuffle)) =
             strips.into_iter().find(|strip| strip.0.contains(entity))
         else {
             return;
         };
+
+        if skip_reshuffle {
+            trace!("reshuffle_layout_strip: skipping snap-repositioned strip {strip_entity}");
+            if let Ok(mut cmd) = commands.get_entity(strip_entity) {
+                cmd.remove::<SkipReshuffleMarker>();
+            }
+            return;
+        }
 
         if active_marker.is_some_and(|m| m.is_added()) {
             trace!("reshuffle_layout_strip: skipping newly active workspace {strip_entity}");

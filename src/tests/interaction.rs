@@ -1061,3 +1061,104 @@ fn test_mid_strip_move_does_not_animate() {
         );
     }
 }
+
+/// Switching virtual workspaces with `virtual_workspace_animations = false` must
+/// never cause the active strip to slide left or right. The strip position must
+/// snap directly to its saved scroll position without any `RepositionMarker`
+/// animating it further. Regression test: after VW2 → VW1, a stale
+/// `reshuffle_layout_strip` was computing an incorrect strip target from
+/// un-updated window positions, inserting a `RepositionMarker` that animated
+/// the strip sideways.
+///
+/// Setup: VW0 has 5 windows (scrollable), scrolled so the focused window sits
+/// at a non-zero strip offset. We then switch to VW1 and back to VW0, and
+/// verify that no RepositionMarker is ever placed on the strip (which would
+/// cause horizontal sliding).
+#[test]
+fn test_virtual_workspace_switch_no_horizontal_slide_no_animations() {
+    let config: Config = (
+        MainOptions {
+            virtual_workspace_animations: Some(false),
+            animation_speed: Some(12.0),
+            swipe_gesture_fingers: Some(3),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    // 5 windows: strip width = 5 * 400 = 2000, display = 1024 → scrollable.
+    let mut h = TestHarness::new().with_config(config).with_windows(5);
+
+    let pump_event = |h: &mut TestHarness, ev: Event| {
+        h.app.world_mut().write_message::<Event>(ev);
+        for _ in 0..8 {
+            h.app.update();
+            for e in h.mock_state.drain_events() {
+                h.app.world_mut().write_message::<Event>(e);
+            }
+        }
+    };
+    let pump = |h: &mut TestHarness, c: Command| pump_event(h, Event::Command { command: c });
+
+    // Boot the strip and focus window 0.
+    pump(&mut h, Command::PrintState);
+
+    // Scroll the strip so it sits at a non-zero x offset.
+    pump_event(
+        &mut h,
+        Event::Swipe {
+            delta: 0.3,
+            fingers: 3,
+        },
+    );
+
+    // Remember the settled strip x after scrolling.
+    let strip_x_after_scroll = {
+        let world = h.app.world_mut();
+        let mut q = world.query_filtered::<&crate::ecs::Position, With<ActiveWorkspaceMarker>>();
+        q.single(world)
+            .expect("exactly one active strip after scroll")
+            .0
+            .x
+    };
+    assert_ne!(
+        strip_x_after_scroll, 0,
+        "test setup: strip should be scrolled to a non-zero position, got 0"
+    );
+
+    // Switch to VW1 (spawned on the fly, empty).
+    pump(&mut h, Command::Window(Operation::VirtualNumber(1)));
+
+    // Switch back to VW0. This is where the bug triggers: the strip should
+    // snap to `strip_x_after_scroll` with no RepositionMarker causing further
+    // horizontal motion.
+    h.app.world_mut().write_message::<Event>(Event::Command {
+        command: Command::Window(Operation::VirtualNumber(0)),
+    });
+
+    // After the VW switch back to VW0, pump frames and assert the active strip's
+    // x position settles exactly at the pre-switch scroll value. Any deviation
+    // means a stale reshuffle slid the strip sideways.
+    for _ in 0..10 {
+        h.app.update();
+        for e in h.mock_state.drain_events() {
+            h.app.world_mut().write_message::<Event>(e);
+        }
+    }
+
+    let strip_x_final = {
+        let world = h.app.world_mut();
+        let mut q = world.query_filtered::<&crate::ecs::Position, With<ActiveWorkspaceMarker>>();
+        q.single(world)
+            .expect("exactly one active strip after switch-back")
+            .0
+            .x
+    };
+
+    assert_eq!(
+        strip_x_final, strip_x_after_scroll,
+        "strip x must equal the pre-switch scroll position after VW switch-back (no sideways slide). \
+         Expected {strip_x_after_scroll}, got {strip_x_final}"
+    );
+}

@@ -23,8 +23,8 @@ use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, DockPosition, Initializing, NativeFullscreenMarker, Position,
-    RefreshWindowSizes, RepositionMarker, Scrolling, SelectedVirtualMarker, SpawnCommandsExt,
-    Timeout, Unmanaged,
+    RefreshWindowSizes, RepositionMarker, Scrolling, SelectedVirtualMarker, SkipReshuffleMarker,
+    SpawnCommandsExt, Timeout, Unmanaged,
 };
 use crate::errors::Result;
 use crate::events::Event;
@@ -989,6 +989,12 @@ pub(crate) fn show_active_workspace(
         } else {
             position.0 = bounds.max - 10;
         }
+        // Drop any in-flight scroll state so the hidden strip's velocity
+        // does not accumulate while it is off-screen and corrupt the
+        // restored position when the strip is shown again.
+        if let Ok(mut cmd) = commands.get_entity(entity) {
+            cmd.try_remove::<Scrolling>();
+        }
     }
 
     let Ok((_, mut position, strip, _, previous_position, _)) = workspaces.get_mut(*activated)
@@ -1015,6 +1021,9 @@ pub(crate) fn show_active_workspace(
             commands.reposition_entity(*activated, *origin);
         } else {
             position.0 = *origin;
+            if let Ok(mut cmd) = commands.get_entity(*activated) {
+                cmd.insert(SkipReshuffleMarker);
+            }
         }
 
         if let Some((_, current_focus)) = windows.focused()

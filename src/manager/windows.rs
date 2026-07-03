@@ -26,6 +26,7 @@ use super::skylight::{
     AXUIElementPerformAction, AXUIElementSetAttributeValue, SLPSPostEventRecordTo,
     SLSWindowIteratorAdvance,
 };
+use crate::config::Config;
 use crate::errors::{Error, Result};
 use crate::manager::{Origin, Size, irect_from};
 use crate::platform::{Pid, ProcessSerialNumber, WinID, macos_major_version};
@@ -127,7 +128,8 @@ pub struct WindowOS {
 }
 
 impl WindowOS {
-    /// Creates a new `Window` instance.
+    /// Creates a new `Window` instance using an empty configuration.
+    /// Non-standard windows are rejected unless they match a `manage = true` rule.
     ///
     /// # Arguments
     ///
@@ -138,6 +140,26 @@ impl WindowOS {
     /// `Ok(Window)` if the window is created successfully, otherwise `Err(Error)`.
     #[instrument(level = Level::TRACE, ret)]
     pub fn new(element: &CFRetained<AXUIWrapper>) -> Result<Self> {
+        Self::new_with_config(element, &Config::default(), None)
+    }
+
+    /// Creates a new `Window` instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `element` - A `CFRetained<AXUIWrapper>` reference to the Accessibility UI element.
+    /// * `config` - The current Paneru configuration, used to evaluate window rules.
+    /// * `bundle_id` - The bundle identifier of the owning application, if known.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Window)` if the window is created successfully, otherwise `Err(Error)`.
+    #[instrument(level = Level::TRACE, ret)]
+    pub fn new_with_config(
+        element: &CFRetained<AXUIWrapper>,
+        config: &Config,
+        bundle_id: Option<&str>,
+    ) -> Result<Self> {
         let id = ax_window_id(element.as_ptr())?;
         let window = Self {
             id,
@@ -150,7 +172,9 @@ impl WindowOS {
             app_reference: OnceLock::new(),
         };
 
-        if window.is_unknown() {
+        let forced = window.is_forced_manage(config, bundle_id);
+
+        if window.is_unknown() && !forced {
             return Err(Error::invalid_window(&format!(
                 "Ignoring AXUnknown window, id: {}, role {}, subrole {}",
                 window.id(),
@@ -159,7 +183,7 @@ impl WindowOS {
             )));
         }
 
-        if !window.is_real() {
+        if !window.is_real() && !forced {
             return Err(Error::invalid_window(&format!(
                 "Ignoring non-real window, id: {}, role {}, subrole {}",
                 window.id(),
@@ -176,6 +200,18 @@ impl WindowOS {
             window.subrole().unwrap_or_default(),
         );
         Ok(window)
+    }
+
+    /// Checks whether a configured window rule forces this window to be managed
+    /// despite having a non-standard role/subrole.
+    fn is_forced_manage(&self, config: &Config, bundle_id: Option<&str>) -> bool {
+        let Ok(title) = self.title() else {
+            return false;
+        };
+        config
+            .find_window_properties(&title, bundle_id.unwrap_or_default())
+            .iter()
+            .any(|params| params.manage.is_some_and(|manage| manage))
     }
 
     /// Checks if the window's subrole is "`AXUnknownSubrole`".

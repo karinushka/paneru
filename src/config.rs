@@ -20,6 +20,7 @@ use self::decorations::BorderRadiusOption;
 use self::swipe::SwipeGestureDirection;
 use crate::{
     commands::{Command, Direction, MouseMove, MoveFocus, Operation, ResizeDirection},
+    manager::ProcessApi,
     platform::{Modifiers, OSStatus, macos_major_version},
 };
 use crate::{
@@ -406,7 +407,8 @@ impl Config {
     }
 
     /// Finds window properties for a given `title` and `bundle_id`.
-    /// It iterates through configured window parameters and returns the first match.
+    /// It iterates through configured window parameters and returns all matching rules.
+    /// A rule matches when its bundle ID (if any) and title regex match.
     ///
     /// # Arguments
     ///
@@ -415,7 +417,7 @@ impl Config {
     ///
     /// # Returns
     ///
-    /// `Some(WindowParams)` if matching window properties are found, otherwise `None`.
+    /// A `Vec<WindowParams>` containing all matching window rules.
     pub fn find_window_properties(&self, title: &str, bundle_id: &str) -> Vec<WindowParams> {
         self.inner()
             .windows
@@ -432,6 +434,28 @@ impl Config {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default()
+    }
+
+    /// Returns `true` if any window rule for the given bundle ID requests that the
+    /// process be forcibly managed even when macOS reports it as unobservable.
+    pub fn should_force_manage_process(&self, process: &dyn ProcessApi) -> bool {
+        self.inner().windows.as_ref().is_some_and(|windows| {
+            let Some(bundle_id) = process
+                .application()
+                .as_ref()
+                .and_then(|app| app.bundleIdentifier())
+                .map(|id| id.to_string())
+            else {
+                return false;
+            };
+            windows.values().any(|params| {
+                params
+                    .bundle_id
+                    .as_ref()
+                    .is_some_and(|id| id.as_str() == bundle_id)
+                    && params.manage.is_some_and(|manage| manage)
+            })
+        })
     }
 
     pub fn sliver_height(&self) -> f64 {
@@ -1142,6 +1166,9 @@ pub struct WindowParams {
     bundle_id: Option<String>,
     /// If `true`, the window will be managed as a floating window (not tiled).
     pub floating: Option<bool>,
+    /// If `true`, force the process/window to be managed even if macOS reports it as
+    /// unobservable or the window does not look like a standard window.
+    pub manage: Option<bool>,
     /// An optional preferred index for the window's position in the window strip.
     pub index: Option<usize>,
     pub vertical_padding: Option<i32>,
@@ -1172,6 +1199,7 @@ impl WindowParams {
             title: Regex::new(title).unwrap(),
             bundle_id,
             floating: None,
+            manage: None,
             index: None,
             vertical_padding: None,
             horizontal_padding: None,
@@ -1825,6 +1853,7 @@ fn test_grid_ratios() {
         title: Regex::new(".*").unwrap(),
         bundle_id: None,
         floating: None,
+        manage: None,
         index: None,
         vertical_padding: None,
         horizontal_padding: None,
@@ -1919,6 +1948,36 @@ fn test_config_defaults() {
     assert_eq!(config.border_width(), 2.0);
     assert_eq!(config.border_radius(), BorderRadiusOption::Auto);
     assert_eq!(config.menubar_height(), None);
+}
+
+#[test]
+fn test_window_rules_manage() {
+    let input = r#"
+[options]
+
+[bindings]
+
+[windows.btt_main]
+bundle_id = "com.hegenberg.BetterTouchTool"
+title = "BetterTouchTool"
+manage = true
+
+[windows.btt_floating]
+bundle_id = "com.hegenberg.BetterTouchTool"
+title = "Screenshot.*"
+floating = true
+"#;
+    let config = Config::try_from(input).expect("config should parse");
+
+    // Main window should match the manage rule.
+    let props = config.find_window_properties("BetterTouchTool", "com.hegenberg.BetterTouchTool");
+    assert_eq!(props.len(), 1);
+    assert_eq!(props[0].manage, Some(true));
+
+    // Screenshot window matches the floating rule.
+    let props = config.find_window_properties("Screenshot 1", "com.hegenberg.BetterTouchTool");
+    assert_eq!(props.len(), 1);
+    assert_eq!(props[0].floating, Some(true));
 }
 
 #[test]

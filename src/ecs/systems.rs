@@ -121,6 +121,7 @@ pub(crate) fn add_existing_application(
     window_manager: Res<WindowManager>,
     workspaces: Query<&LayoutStrip>,
     fresh_apps: Populated<(&mut Application, Entity), With<ExistingMarker>>,
+    config: Res<Config>,
     mut commands: Commands,
 ) {
     let spaces = workspaces
@@ -134,7 +135,7 @@ pub(crate) fn add_existing_application(
 
         if app.observe().is_ok_and(|result| result)
             && let Ok((found_windows, offscreen)) = window_manager
-                .find_existing_application_windows(&mut app, &spaces)
+                .find_existing_application_windows(&mut app, &spaces, &config)
                 .inspect_err(|err| warn!("{err}"))
         {
             offscreen_windows.extend(offscreen);
@@ -144,8 +145,11 @@ pub(crate) fn add_existing_application(
 
         if !offscreen_windows.is_empty() {
             let pid = app.pid();
-            let bruteforce_task =
-                thread_pool.spawn(async move { bruteforce_windows(pid, offscreen_windows) });
+            let bundle_id = app.bundle_id();
+            let config = config.clone();
+            let bruteforce_task = thread_pool.spawn(async move {
+                bruteforce_windows(pid, bundle_id.as_deref(), offscreen_windows, &config)
+            });
             commands.spawn(BruteforceWindows(bruteforce_task));
         }
     }
@@ -256,6 +260,7 @@ pub(crate) fn finish_setup(
 pub(super) fn add_launched_process(
     window_manager: Res<WindowManager>,
     fresh_processes: Populated<(Entity, &mut BProcess, Has<Children>), With<FreshMarker>>,
+    config: Res<Config>,
     mut commands: Commands,
 ) {
     const APP_OBSERVABLE_TIMEOUT_SEC: u64 = 5;
@@ -266,6 +271,14 @@ pub(super) fn add_launched_process(
 
         if !already_seen.insert(process.psn()) {
             continue;
+        }
+
+        if config.should_force_manage_process(process) {
+            debug!(
+                "Forcing management of launched process '{}' despite unobservable policy.",
+                process.name()
+            );
+            process.force_manage(true);
         }
 
         if !process.ready() {
@@ -312,13 +325,14 @@ pub(super) fn add_launched_process(
 pub(super) fn add_launched_application(
     app_query: Populated<(&mut Application, Entity, Has<Children>), With<FreshMarker>>,
     windows: Windows,
+    config: Res<Config>,
     mut commands: Commands,
 ) {
     // TODO: maybe refactor this with add_existing_application_windows()
     let find_window = |window_id| windows.find(window_id);
 
     for (app, entity, has_children) in app_query {
-        let mut create_windows = app.window_list();
+        let mut create_windows = app.window_list(&config);
         // Retain the non-existing windows, so they can be created.
         create_windows.retain(|window| find_window(window.id()).is_none());
 
@@ -737,13 +751,21 @@ pub(crate) fn gather_initial_processes(
             event => warn!("Stray event during initial process gathering: {event:?}"),
         }
     }
-    if let Some(config) = initial_config {
-        commands.insert_resource(config);
-    }
-
     while let Some(mut process) = initial_processes.pop() {
-        if process.is_observable() {
-            debug!("Adding existing process {}", process.name());
+        let forced = initial_config
+            .as_ref()
+            .is_some_and(|c| c.should_force_manage_process(&**process));
+
+        if process.is_observable() || forced {
+            if forced {
+                debug!(
+                    "Forcing management of existing process '{}' despite unobservable policy.",
+                    process.name()
+                );
+                process.force_manage(true);
+            } else {
+                debug!("Adding existing process {}", process.name());
+            }
             commands.spawn((ExistingMarker, process));
         } else {
             debug!(
@@ -751,6 +773,10 @@ pub(crate) fn gather_initial_processes(
                 process.name(),
             );
         }
+    }
+
+    if let Some(config) = initial_config {
+        commands.insert_resource(config);
     }
 }
 

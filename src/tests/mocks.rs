@@ -538,6 +538,7 @@ impl MockState {
         ma.expect_observe().returning(|| Ok(true));
         ma.expect_observe_window().returning(|_| Ok(true));
         ma.expect_unobserve_window().return_const(());
+        ma.expect_window_list().returning(|_| Vec::new());
 
         Application::new(Box::new(ma))
     }
@@ -576,7 +577,7 @@ impl MockState {
 
         let s = self.clone();
         wm.expect_find_existing_application_windows()
-            .returning(move |app, spaces| {
+            .returning(move |app, spaces, _config| {
                 let pid = app.pid();
                 let windows = s
                     .inner
@@ -652,6 +653,7 @@ impl MockState {
         mp.expect_is_observable().returning(|| true);
         mp.expect_application().return_const(None);
         mp.expect_ready().return_const(true);
+        mp.expect_force_manage().return_const(());
 
         mp
     }

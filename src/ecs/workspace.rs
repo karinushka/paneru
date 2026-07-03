@@ -173,7 +173,7 @@ fn workspace_change_trigger(
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn detect_moved_windows(
     activated_workspace: Single<Entity, Added<ActiveWorkspaceMarker>>,
@@ -181,6 +181,7 @@ fn detect_moved_windows(
     mut workspaces: Query<(&mut LayoutStrip, Entity, Has<NativeFullscreenMarker>)>,
     apps: Query<&mut Application>,
     window_manager: Res<WindowManager>,
+    config: Res<Config>,
     mut ignored_windows: Local<HashSet<WinID>>,
     mut commands: Commands,
 ) {
@@ -220,7 +221,7 @@ fn detect_moved_windows(
         let retry_windows = apps
             .into_iter()
             .flat_map(|app| {
-                app.window_list()
+                app.window_list(&config)
                     .into_iter()
                     .filter(|window| unresolved_ids.contains(&window.id()))
             })

@@ -21,6 +21,7 @@ use std::time::Duration;
 use stdext::function_name;
 use tracing::{Level, debug, error, instrument, trace, warn};
 
+use crate::config::Config;
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
 use crate::manager::skylight::SLSSetWindowListBrightness;
@@ -133,7 +134,7 @@ pub trait WindowManagerApi: Send + Sync {
     ///
     /// * `app` - A mutable reference to the `Application` whose windows are to be added.
     /// * `spaces` - A slice of space IDs to query for windows.
-    /// * `refresh_index` - An integer indicating the refresh index (used internally for tracking).
+    /// * `config` - The current Paneru configuration, used to evaluate window rules.
     ///
     /// # Returns
     ///
@@ -142,6 +143,7 @@ pub trait WindowManagerApi: Send + Sync {
         &self,
         app: &mut Application,
         spaces: &[WorkspaceId],
+        config: &Config,
     ) -> Result<(Vec<Window>, Vec<WinID>)>;
     /// Finds the `WinID` of a window at a given screen point.
     ///
@@ -423,6 +425,7 @@ impl WindowManagerApi for WindowManagerOS {
         &self,
         app: &mut Application,
         spaces: &[WorkspaceId],
+        config: &Config,
     ) -> Result<(Vec<Window>, Vec<WinID>)> {
         let global_window_list = existing_application_window_list(self.main_cid, app, spaces)?;
         if global_window_list.is_empty() {
@@ -430,7 +433,7 @@ impl WindowManagerApi for WindowManagerOS {
         }
         debug!("{app} has global windows: {global_window_list:?}");
 
-        let found_windows = app.window_list();
+        let found_windows = app.window_list(config);
         if found_windows.len() == global_window_list.len() {
             debug!("All windows for {:?} are now resolved", app.psn());
             return Ok((found_windows, vec![]));
@@ -714,9 +717,16 @@ fn existing_application_window_list(
 ///
 /// # Arguments
 ///
-/// * `app` - A reference to the `Application` whose windows are to be brute-forced.
+/// * `pid` - The process ID of the application whose windows are to be brute-forced.
+/// * `bundle_id` - The bundle identifier of the application, if known.
 /// * `window_list` - A mutable vector of `WinID`s representing the expected global window list; found windows are removed from this list.
-pub fn bruteforce_windows(pid: Pid, mut window_list: Vec<WinID>) -> Vec<Window> {
+/// * `config` - The current Paneru configuration, used to evaluate window rules.
+pub fn bruteforce_windows(
+    pid: Pid,
+    bundle_id: Option<&str>,
+    mut window_list: Vec<WinID>,
+    config: &Config,
+) -> Vec<Window> {
     const MAGIC: u32 = 0x636f_636f;
     const BUFSIZE: isize = 0x14;
     let mut found_windows = Vec::new();
@@ -762,7 +772,9 @@ pub fn bruteforce_windows(pid: Pid, mut window_list: Vec<WinID>) -> Vec<Window> 
         if let Some(index) = window_list.iter().position(|&id| id == window_id) {
             window_list.remove(index);
             debug!("Found window {window_id:?}");
-            if let Ok(window) = WindowOS::new(&element_ref).inspect_err(|err| warn!("{err}")) {
+            if let Ok(window) = WindowOS::new_with_config(&element_ref, config, bundle_id)
+                .inspect_err(|err| warn!("{err}"))
+            {
                 found_windows.push(Window::new(Box::new(window)));
             }
         }

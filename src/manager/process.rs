@@ -98,6 +98,14 @@ pub trait ProcessApi: Send + Sync {
     ///
     /// `true` if the process is ready, `false` otherwise.
     fn ready(&mut self) -> bool;
+    /// Forces the process to be treated as manageable even if macOS reports it as
+    /// unobservable. This is used for user-configured apps such as `LSUIElement`
+    /// background apps that still create standard windows.
+    ///
+    /// # Arguments
+    ///
+    /// * `force` - If `true`, skip the observable check in `ready()`.
+    fn force_manage(&mut self, force: bool);
 }
 
 /// `ProcessOS` is a concrete implementation of the `ProcessApi` trait for macOS.
@@ -137,6 +145,11 @@ impl ProcessApi for ProcessOS {
     fn ready(&mut self) -> bool {
         self.inner.ready()
     }
+
+    /// Sets the force-manage flag on the inner `Process`.
+    fn force_manage(&mut self, force: bool) {
+        self.inner.force_manage(force);
+    }
 }
 
 impl From<Pin<Box<Process>>> for BProcess {
@@ -167,6 +180,8 @@ pub struct Process {
     observing_launched: AtomicBool,
     /// Atomic boolean to track if "activationPolicy" is being observed.
     observing_activated: AtomicBool,
+    /// When `true`, the process is treated as manageable regardless of its activation policy.
+    force_manage: bool,
 }
 
 impl Drop for Process {
@@ -213,6 +228,7 @@ impl Process {
             observer,
             observing_launched: AtomicBool::new(false),
             observing_activated: AtomicBool::new(false),
+            force_manage: false,
         })
     }
 
@@ -230,6 +246,15 @@ impl Process {
             self.policy = NSApplicationActivationPolicy::Prohibited;
             false
         }
+    }
+
+    /// Forces the process to be treated as manageable regardless of its activation policy.
+    ///
+    /// # Arguments
+    ///
+    /// * `force` - If `true`, `ready()` will skip the observable check.
+    pub fn force_manage(&mut self, force: bool) {
+        self.force_manage = force;
     }
 
     /// Checks if the application associated with this process has finished launching.
@@ -361,7 +386,7 @@ impl Process {
         }
         self.unobserve_finished_launching();
 
-        if !self.is_observable() {
+        if !self.force_manage && !self.is_observable() {
             debug!(
                 "{} ({}) is not observable, subscribing to activationPolicy changes",
                 self.name, self.pid

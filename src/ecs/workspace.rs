@@ -989,11 +989,12 @@ pub(crate) fn show_active_workspace(
         } else {
             position.0 = bounds.max - 10;
         }
-        // Drop any in-flight scroll state so the hidden strip's velocity
-        // does not accumulate while it is off-screen and corrupt the
-        // restored position when the strip is shown again.
+        // Stop any in-flight animation and scroll state so the hidden strip
+        // doesn't continue moving off-screen and doesn't corrupt the saved
+        // position when it is restored.
         if let Ok(mut cmd) = commands.get_entity(entity) {
-            cmd.try_remove::<Scrolling>();
+            cmd.try_remove::<Scrolling>()
+                .try_remove::<RepositionMarker>();
         }
     }
 

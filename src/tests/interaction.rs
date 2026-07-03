@@ -1162,3 +1162,123 @@ fn test_virtual_workspace_switch_no_horizontal_slide_no_animations() {
          Expected {strip_x_after_scroll}, got {strip_x_final}"
     );
 }
+
+/// When a strip is mid-animation (has a `RepositionMarker`) at the moment the
+/// user switches to another virtual workspace, the animation must stop
+/// immediately. Previously the `RepositionMarker` was left on the hidden strip
+/// so `animate_entities` kept updating its position while it was off-screen,
+/// making the two strips briefly visible at the same time (the hidden one still
+/// sliding) and corrupting the saved restore position.
+#[test]
+fn test_virtual_workspace_switch_stops_in_flight_strip_animation() {
+    let config: Config = (
+        MainOptions {
+            virtual_workspace_animations: Some(false),
+            animation_speed: Some(12.0),
+            swipe_gesture_fingers: Some(3),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    let mut h = TestHarness::new().with_config(config).with_windows(5);
+
+    let pump_n = |h: &mut TestHarness, n: usize, ev: Event| {
+        h.app.world_mut().write_message::<Event>(ev);
+        for _ in 0..n {
+            h.app.update();
+            for e in h.mock_state.drain_events() {
+                h.app.world_mut().write_message::<Event>(e);
+            }
+        }
+    };
+    let pump = |h: &mut TestHarness, c: Command| {
+        pump_n(h, 8, Event::Command { command: c });
+    };
+
+    pump(&mut h, Command::PrintState);
+
+    // Scroll and then switch to VW1 mid-animation (only 1 frame so animation
+    // is still in progress when the switch fires).
+    h.app.world_mut().write_message::<Event>(Event::Swipe {
+        delta: 0.3,
+        fingers: 3,
+    });
+    // One frame to start the animation.
+    h.app.update();
+    for e in h.mock_state.drain_events() {
+        h.app.world_mut().write_message::<Event>(e);
+    }
+
+    // Switch to VW1 while the strip may still have a RepositionMarker.
+    pump(&mut h, Command::Window(Operation::VirtualNumber(1)));
+
+    // VW0's strip must have no RepositionMarker (animation stopped on hide).
+    {
+        let world = h.app.world_mut();
+        let mut q = world.query_filtered::<Entity, (
+            With<crate::ecs::layout::LayoutStrip>,
+            Without<ActiveWorkspaceMarker>,
+        )>();
+        for entity in q.iter(world) {
+            assert!(
+                world.get::<RepositionMarker>(entity).is_none(),
+                "hidden strip {entity:?} must not have RepositionMarker after VW switch"
+            );
+        }
+    }
+
+    // Switch back to VW0. The strip should restore to the saved position,
+    // not to wherever the mid-flight animation would have taken it.
+    let saved_x = {
+        // The saved position is snapped to what it was at switch time; just
+        // record where VW0's strip ends up after restoring.
+        h.app.world_mut().write_message::<Event>(Event::Command {
+            command: Command::Window(Operation::VirtualNumber(0)),
+        });
+        for _ in 0..10 {
+            h.app.update();
+            for e in h.mock_state.drain_events() {
+                h.app.world_mut().write_message::<Event>(e);
+            }
+        }
+        let world = h.app.world_mut();
+        let mut q = world.query_filtered::<&crate::ecs::Position, With<ActiveWorkspaceMarker>>();
+        q.single(world)
+            .expect("exactly one active strip after restore")
+            .0
+            .x
+    };
+
+    // After restoring the strip must also have no RepositionMarker — it
+    // should have snapped directly, not started a new animation.
+    {
+        let world = h.app.world_mut();
+        let mut q = world.query_filtered::<Entity, (
+            With<crate::ecs::layout::LayoutStrip>,
+            With<ActiveWorkspaceMarker>,
+        )>();
+        for entity in q.iter(world) {
+            assert!(
+                world.get::<RepositionMarker>(entity).is_none(),
+                "restored strip {entity:?} must not have RepositionMarker (no animation after no-anim VW switch)"
+            );
+        }
+    }
+
+    // The final position must be stable (no further drift).
+    for _ in 0..5 {
+        h.app.update();
+        for e in h.mock_state.drain_events() {
+            h.app.world_mut().write_message::<Event>(e);
+        }
+    }
+    let world = h.app.world_mut();
+    let mut q = world.query_filtered::<&crate::ecs::Position, With<ActiveWorkspaceMarker>>();
+    let final_x = q.single(world).expect("exactly one active strip").0.x;
+    assert_eq!(
+        final_x, saved_x,
+        "strip x drifted after restore: was {saved_x}, now {final_x}"
+    );
+}

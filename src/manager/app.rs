@@ -17,6 +17,7 @@ use tracing::{debug, error};
 
 use super::skylight::_SLPSGetFrontProcess;
 use super::{ProcessApi, Window, WindowOS, ax_window_id};
+use crate::config::Config;
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
 use crate::platform::{
@@ -68,10 +69,14 @@ pub trait ApplicationApi: Send + Sync {
     fn focused_window_id(&self) -> Result<WinID>;
     /// Returns a list of all windows belonging to this application.
     ///
+    /// # Arguments
+    ///
+    /// * `config` - The current Paneru configuration, used to evaluate window rules.
+    ///
     /// # Errors
     ///
     /// Returns an `Error` if the window list cannot be retrieved.
-    fn window_list(&self) -> Vec<Window>;
+    fn window_list(&self, config: &Config) -> Vec<Window>;
     /// Starts observing application-level accessibility notifications.
     ///
     /// # Errors
@@ -237,14 +242,16 @@ impl ApplicationApi for ApplicationOS {
     /// # Returns
     ///
     /// `Ok(Vec<Result<Window>>)` containing the list of window objects if successful, otherwise `Err(Error)`.
-    fn window_list(&self) -> Vec<Window> {
+    fn window_list(&self, config: &Config) -> Vec<Window> {
+        let bundle_id = self.bundle_id.as_deref();
         self.element
             .windows()
             .map(|windows| {
                 windows
                     .into_iter()
                     .flat_map(|element| {
-                        WindowOS::new(&element).map(|window| Window::new(Box::new(window)))
+                        WindowOS::new_with_config(&element, config, bundle_id)
+                            .map(|window| Window::new(Box::new(window)))
                     })
                     .collect()
             })

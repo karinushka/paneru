@@ -225,6 +225,7 @@ Define specific behaviors for applications based on their Title or Bundle ID.
 | `title` | Regex | **(Required)** Regex pattern to match the window title. |
 | `bundle_id` | String | Optional Bundle ID to match (e.g., `com.apple.Terminal`). |
 | `floating` | Boolean | Force the window to be floating/unmanaged. |
+| `manage` | Boolean | Force Paneru to manage this app/window even if macOS reports the app as unobservable or the window has a non-standard role/subrole. |
 | `index` | Integer | Preferred position in the strip when spawned. |
 | `dont_focus` | Boolean | Prevent the window from taking focus when spawned. |
 | `width` | Float (0.0–1.0) | Initial width ratio for the window. |
@@ -240,6 +241,25 @@ title = ".*"
 bundle_id = "com.apple.Terminal"
 horizontal_padding = 5
 bindings_passthrough = ["ctrl-h", "ctrl-l"]
+```
+
+### Forcing management of LSUIElement or non-standard windows
+
+Some applications (e.g., BetterTouchTool, ProtonVPN) are flagged as background apps
+(`LSUIElement`) or expose windows with unusual accessibility roles such as `AXTable`
+or `AXTextField`. Paneru normally ignores these processes and windows. Use `manage = true`
+to opt in and forcibly manage the matching windows.
+
+```toml
+[windows.btt_main]
+bundle_id = "com.hegenberg.BetterTouchTool"
+title = "BetterTouchTool"
+manage = true
+
+[windows.btt_screenshot]
+bundle_id = "com.hegenberg.BetterTouchTool"
+title = "Screenshot.*"
+floating = true
 ```
 
 ### Session Restore

@@ -989,6 +989,13 @@ pub(crate) fn show_active_workspace(
         } else {
             position.0 = bounds.max - 10;
         }
+        // Stop any in-flight animation and scroll state so the hidden strip
+        // doesn't continue moving off-screen and doesn't corrupt the saved
+        // position when it is restored.
+        if let Ok(mut cmd) = commands.get_entity(entity) {
+            cmd.try_remove::<Scrolling>()
+                .try_remove::<RepositionMarker>();
+        }
     }
 
     let Ok((_, mut position, strip, _, previous_position, _)) = workspaces.get_mut(*activated)

@@ -75,18 +75,16 @@ pub fn register_systems(app: &mut bevy::app::App) {
     // an empty virtual workspace), which otherwise leaves a stale outline.
     // Position changes on the focused window also dirty the overlay so that
     // dragging a floating window moves the highlight with it.
-    let overlay_dirty = |strip_changed: Query<
-        (),
-        (With<ActiveWorkspaceMarker>, Changed<LayoutStrip>),
-    >,
-                         focus_gained: Query<(), Added<FocusedMarker>>,
-                         mut focus_lost: RemovedComponents<FocusedMarker>,
-                         focused_moved: Query<(), (With<FocusedMarker>, Changed<Position>)>| {
-        !strip_changed.is_empty()
-            || !focus_gained.is_empty()
-            || focus_lost.read().next().is_some()
-            || !focused_moved.is_empty()
-    };
+    let overlay_dirty =
+        |strip_changed: Query<(), (With<ActiveWorkspaceMarker>, Changed<LayoutStrip>)>,
+         focus_gained: Query<(), Added<FocusedMarker>>,
+         mut focus_lost: RemovedComponents<FocusedMarker>,
+         focused_moved: Query<(), (With<FocusedMarker>, Changed<Position>)>| {
+            !strip_changed.is_empty()
+                || !focus_gained.is_empty()
+                || focus_lost.read().next().is_some()
+                || !focused_moved.is_empty()
+        };
     let workspace_menu_status =
         |config: Option<Res<Config>>| config.is_some_and(|config| config.workspace_menu_status());
     let native_tabs_enabled =

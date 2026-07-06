@@ -11,9 +11,10 @@ use bevy::math::IRect;
 use bevy::platform::collections::HashSet;
 use objc2_app_kit::NSScreen;
 use objc2_core_graphics::CGDirectDisplayID;
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::time::Duration;
-use tracing::{Level, debug, error, instrument};
+use tracing::{Level, debug, error, instrument, warn};
 
 use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
@@ -107,9 +108,12 @@ pub(crate) fn reconcile_displays(
     mut displays: Query<(&mut Display, Entity)>,
     active_strips: Query<Entity, (With<LayoutStrip>, With<ActiveWorkspaceMarker>)>,
     window_manager: Res<WindowManager>,
-    mut retries: Local<HashSet<CGDirectDisplayID>>,
+    mut retries: Local<u8>,
     mut commands: Commands,
 ) {
+    const DISPLAY_RETRY_TIMEOUT: u64 = 5;
+    const DISPLAY_RETRIES: u8 = 3;
+
     let needs_reconcile = messages.read().any(|event| {
         matches!(
             event,
@@ -125,38 +129,65 @@ pub(crate) fn reconcile_displays(
         return;
     }
 
-    debug!("reconciling displays against OS after wake / resize / configure");
+    debug!("Reconciling displays against OS after wake / resize / configure");
 
-    let present_ids: HashSet<CGDirectDisplayID> = window_manager
+    let mut present_displays: HashMap<CGDirectDisplayID, _> = window_manager
         .0
         .present_displays()
-        .iter()
-        .map(|(display, _)| display.id())
+        .into_iter()
+        .map(|(display, workspaces)| (display.id(), (display, workspaces)))
         .collect();
-    let existing_ids: HashSet<CGDirectDisplayID> =
-        displays.iter().map(|(display, _)| display.id()).collect();
+    if present_displays.is_empty() {
+        warn!("No present displays found... retrying again in {DISPLAY_RETRY_TIMEOUT} seconds.");
+        *retries = retries.saturating_sub(1);
+        if *retries > 0 {
+            let retry_displays = move |mut messages: MessageWriter<Event>| {
+                messages.write(Event::SystemWoke {
+                    msg: "Retrying display scan".to_string(),
+                });
+            };
+            let system_id = commands.register_system(retry_displays);
+            Timeout::callback(
+                Duration::from_secs(DISPLAY_RETRY_TIMEOUT),
+                system_id,
+                &mut commands,
+            );
+        }
+        return;
+    }
+    *retries = DISPLAY_RETRIES;
+
+    let existing_displays: HashMap<CGDirectDisplayID, _> = displays
+        .iter()
+        .map(|(display, workspaces)| (display.id(), (display, workspaces)))
+        .collect();
+
+    let present_ids = present_displays.keys().copied().collect::<HashSet<_>>();
+    let existing_ids = existing_displays.keys().copied().collect::<HashSet<_>>();
 
     // Displays that vanished while we were away (e.g. unplugged during sleep).
-    for display_id in existing_ids.difference(&present_ids).copied() {
-        remove_display(display_id, &workspaces, &mut displays, &mut commands);
+    for display_id in existing_ids.difference(&present_ids) {
+        let Some((display, _)) = present_displays.get(display_id) else {
+            error!("Unable to find removed display: {display_id}");
+            continue;
+        };
+        remove_display(display, &workspaces, &displays, &mut commands);
     }
 
     // Displays that appeared while we were away.
-    for display_id in present_ids.difference(&existing_ids).copied() {
-        add_display(
-            display_id,
-            &workspaces,
-            &window_manager,
-            &mut retries,
-            &mut commands,
-        );
+    for display_id in present_ids.difference(&existing_ids) {
+        let Some((display, workspace_ids)) = present_displays.remove(display_id) else {
+            error!("Unable to find added display: {display_id}");
+            continue;
+        };
+        add_display(display, &workspace_ids, &workspaces, &mut commands);
     }
 
     // Displays that are still present: refresh their bounds (resolution or
     // menubar may have changed) and re-home any workspaces that drifted.
-    for display_id in present_ids.intersection(&existing_ids).copied() {
+    for display_id in present_ids.intersection(&existing_ids) {
         move_display(
-            display_id,
+            *display_id,
             &mut displays,
             &window_manager,
             &workspaces,
@@ -177,39 +208,20 @@ pub(crate) fn reconcile_displays(
 
 #[instrument(level = Level::DEBUG, skip_all, fields(display_id))]
 fn add_display(
-    display_id: CGDirectDisplayID,
+    display: Display,
+    workspace_ids: &[WorkspaceId],
     existing_strips: &Query<(&LayoutStrip, Entity, Option<&ChildOf>)>,
-    window_manager: &WindowManager,
-    retries: &mut HashSet<CGDirectDisplayID>,
     commands: &mut Commands,
 ) {
-    debug!("Display Added: {display_id:?}");
-    let Some((display, workspace_ids)) = window_manager
-        .0
-        .present_displays()
-        .into_iter()
-        .find(|(display, _)| display.id() == display_id)
-    else {
-        error!("Unable to find added display id {display_id}!");
-        if retries.insert(display_id) {
-            let retry_display = move |mut messages: MessageWriter<Event>| {
-                debug!("Retrying to add display {display_id}");
-                messages.write(Event::DisplayAdded { display_id });
-            };
-            let system_id = commands.register_system(retry_display);
-            Timeout::callback(Duration::from_secs(5), system_id, commands);
-        } else {
-            retries.remove(&display_id);
-        }
-        return;
-    };
+    let display_id = display.id();
+    debug!("Display Added: {display_id}");
 
     let display_bounds = display.bounds();
     let display_entity = commands.spawn(display).id();
     commands.trigger(ReadDisplayProperties(display_entity));
 
     reparent_existing_workspaces(
-        &workspace_ids,
+        workspace_ids,
         display_entity,
         &display_bounds,
         existing_strips,
@@ -219,11 +231,12 @@ fn add_display(
 
 #[instrument(level = Level::DEBUG, skip_all, fields(display_id))]
 fn remove_display(
-    display_id: CGDirectDisplayID,
+    display: &Display,
     workspaces: &Query<(&LayoutStrip, Entity, Option<&ChildOf>)>,
-    displays: &mut Query<(&mut Display, Entity)>,
+    displays: &Query<(&mut Display, Entity)>,
     commands: &mut Commands,
 ) {
+    let display_id = display.id();
     debug!("Display Removed: {display_id:?}");
     let Some((display, display_entity)) = displays
         .into_iter()

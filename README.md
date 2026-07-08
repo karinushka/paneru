@@ -235,6 +235,7 @@ $ paneru send-cmd <command> [args...]
 | `mouse nextdisplay`        | Warp the mouse pointer to the next display       |
 | `printstate`               | Print the internal ECS state to the debug log    |
 | `quit`                     | Quit Paneru                                      |
+| `restart`                  | Restart the Paneru service                         |
 
 Where `<direction>` is one of: `west`, `east`, `north`, `south`, `first`, `last`.
 

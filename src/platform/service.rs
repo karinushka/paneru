@@ -2,6 +2,7 @@ use std::{
     env, fs,
     io::{Error, ErrorKind, Result, Write},
     path::{Path, PathBuf},
+    process::{Command, Stdio},
 };
 
 use tracing::{info, warn};
@@ -171,6 +172,23 @@ impl Service {
     pub fn restart(&self) -> Result<()> {
         self.stop()?;
         self.start()
+    }
+
+    /// Spawns a detached `paneru restart` subprocess.
+    /// Used by the in-daemon restart command so launchctl stop/start runs outside
+    /// the process being stopped.
+    pub fn request_restart() -> Result<()> {
+        let bin_path = exe_path().ok_or(Error::new(
+            ErrorKind::NotFound,
+            "Cannot find current executable path.",
+        ))?;
+        Command::new(bin_path)
+            .arg("restart")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        Ok(())
     }
 
     /// Generates the content of the launchd plist file for this service.

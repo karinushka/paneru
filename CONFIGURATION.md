@@ -146,6 +146,7 @@ Format: `"[modifiers-]key"`. Available modifiers are:
 | `window_raise_floating` | Make the floating windows layer visible on the current workspace. |
 | `window_togglefloatlayer` | Selectively move the floating windows in front or behind of the workspace windows. |
 | `quit` | Exit Paneru. |
+| `restart` | Restart the Paneru service (`paneru restart`). |
 
 **Example:**
 ```toml

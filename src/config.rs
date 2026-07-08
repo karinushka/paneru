@@ -300,6 +300,7 @@ pub fn parse_command(argv: &[&str]) -> Result<Command> {
         "window" => Command::Window(parse_operation(&argv[1..])?),
         "mouse" => Command::Mouse(parse_mouse_move(&argv[1..])?),
         "quit" => Command::Quit,
+        "restart" => Command::Restart,
         _ => {
             return Err(Error::InvalidConfig(format!(
                 "{}: Unhandled command '{argv:?}'",
@@ -1778,6 +1779,14 @@ fn test_parse_resize_commands() {
     assert!(matches!(
         parse_command(&["window", "shrink"]).unwrap(),
         Command::Window(Operation::Resize(ResizeDirection::Shrink))
+    ));
+}
+
+#[test]
+fn test_parse_restart_command() {
+    assert!(matches!(
+        parse_command(&["restart"]).unwrap(),
+        Command::Restart
     ));
 }
 

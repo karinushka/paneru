@@ -326,8 +326,10 @@ pub(super) fn mission_control_trigger(
             | Event::MissionControlShowDesktop => {
                 mission_control_active.as_mut().0 = true;
                 for (entity, _, _, scroll) in &workspaces {
-                    if scroll.is_some() {
-                        commands.entity(entity).try_remove::<Scrolling>();
+                    if scroll.is_some()
+                        && let Ok(mut entity_commands) = commands.get_entity(entity)
+                    {
+                        entity_commands.try_remove::<Scrolling>();
                     }
                 }
             }
@@ -400,8 +402,10 @@ pub(super) fn application_event_trigger(
             }
 
             Event::ApplicationTerminated { psn } => {
-                if let Some((_, entity)) = find_process(*psn) {
-                    commands.entity(entity).despawn();
+                if let Some((_, entity)) = find_process(*psn)
+                    && let Ok(mut entity_commands) = commands.get_entity(entity)
+                {
+                    entity_commands.try_despawn();
                 }
             }
             _ => (),
@@ -431,8 +435,10 @@ pub(super) fn dispatch_application_messages(
     for event in messages.read() {
         match event {
             Event::WindowMinimized { window_id } => {
-                if let Some((_, entity)) = find_window(*window_id) {
-                    commands.entity(entity).try_insert(Unmanaged::Minimized);
+                if let Some((_, entity)) = find_window(*window_id)
+                    && let Ok(mut entity_commands) = commands.get_entity(entity)
+                {
+                    entity_commands.try_insert(Unmanaged::Minimized);
                 }
             }
 
@@ -454,8 +460,10 @@ pub(super) fn dispatch_application_messages(
                 for entity in children {
                     // Only hide windows that are currently managed (no Unmanaged component).
                     // Preserve existing Floating, Minimized, and Hidden states.
-                    if unmanaged_query.get(*entity).is_err() {
-                        commands.entity(*entity).try_insert(Unmanaged::Hidden);
+                    if unmanaged_query.get(*entity).is_err()
+                        && let Ok(mut entity_commands) = commands.get_entity(*entity)
+                    {
+                        entity_commands.try_insert(Unmanaged::Hidden);
                     }
                 }
             }
@@ -625,8 +633,10 @@ pub(super) fn window_minimized_trigger(
                 );
             }
             if strip.contains(entity) {
-                if let Ok(index) = strip.index_of(entity) {
-                    commands.entity(entity).try_insert(PreviousManagedStrip {
+                if let Ok(index) = strip.index_of(entity)
+                    && let Ok(mut entity_commands) = commands.get_entity(entity)
+                {
+                    entity_commands.try_insert(PreviousManagedStrip {
                         workspace_id: strip.id(),
                         virtual_index: strip.virtual_index,
                         index,
@@ -732,10 +742,11 @@ pub(super) fn window_managed_trigger(
     if let Some(origin) = windows.origin(entity) {
         commands.reposition_entity(entity, origin);
     }
-    commands
-        .entity(entity)
-        .try_insert(VerifyWindowPosition::default())
-        .try_remove::<PreviousManagedStrip>();
+    if let Ok(mut entity_commands) = commands.get_entity(entity) {
+        entity_commands
+            .try_insert(VerifyWindowPosition::default())
+            .try_remove::<PreviousManagedStrip>();
+    }
     commands.reshuffle_around(entity);
 }
 
@@ -1038,8 +1049,10 @@ pub(super) fn apply_window_positions(
         let properties = WindowProperties::new(app, window, &config);
 
         if properties.floating() {
-            // Avoid managing window if it's floating.
-            commands.entity(entity).try_insert(Unmanaged::Floating);
+            if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                // Avoid managing window if it's floating.
+                entity_commands.try_insert(Unmanaged::Floating);
+            }
             if let Some(mut strip) = allready_inserted {
                 strip.remove(entity);
             }

@@ -349,7 +349,9 @@ pub(super) fn stray_focus_observer(
         .for_each(|(timeout_entity, _)| {
             debug!("Re-queueing lost focus event for window id {window_id}.");
             commands.trigger(SendMessageTrigger(Event::WindowFocused { window_id }));
-            commands.entity(timeout_entity).despawn();
+            if let Ok(mut entity_commands) = commands.get_entity(timeout_entity) {
+                entity_commands.try_despawn();
+            }
         });
 }
 

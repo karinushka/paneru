@@ -204,14 +204,18 @@ fn mouse_down_trigger(
 
         // Stop any ongoing scroll.
         for (entity, scroll) in active_workspace {
-            if scroll.is_some() {
-                commands.entity(entity).try_remove::<Scrolling>();
+            if scroll.is_some()
+                && let Ok(mut entity_commands) = commands.get_entity(entity)
+            {
+                entity_commands.try_remove::<Scrolling>();
             }
         }
 
         // Clean up any stale marker from a previous click.
         for held in &mouse_held {
-            commands.entity(held).despawn();
+            if let Ok(mut entity_commands) = commands.get_entity(held) {
+                entity_commands.try_despawn();
+            }
         }
 
         if config.window_hidden_ratio() >= 1.0 {
@@ -240,7 +244,9 @@ fn mouse_up_trigger(
 
         for (held_entity, marker) in &mouse_held {
             commands.reshuffle_around(marker.0);
-            commands.entity(held_entity).despawn();
+            if let Ok(mut entity_commands) = commands.get_entity(held_entity) {
+                entity_commands.try_despawn();
+            }
         }
     }
 }

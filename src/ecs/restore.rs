@@ -478,11 +478,15 @@ pub(super) fn restore_window_state(
     }
 
     for entity in &emptied_existing_strips {
-        commands.entity(*entity).despawn();
+        if let Ok(mut entity_commands) = commands.get_entity(*entity) {
+            entity_commands.try_despawn();
+        }
     }
 
     for entity in &plan.consumed_entities {
-        commands.entity(*entity).try_remove::<Unmanaged>();
+        if let Ok(mut entity_commands) = commands.get_entity(*entity) {
+            entity_commands.try_remove::<Unmanaged>();
+        }
     }
 
     let mut restored_strips = 0;
@@ -515,8 +519,9 @@ pub(super) fn restore_window_state(
                 if strip.id() == planned.workspace_id
                     && !emptied_existing_strips.contains(&entity)
                     && is_global_active
+                    && let Ok(mut entity_commands) = commands.get_entity(entity)
                 {
-                    commands.entity(entity).remove::<ActiveWorkspaceMarker>();
+                    entity_commands.try_remove::<ActiveWorkspaceMarker>();
                 }
             }
         }

@@ -160,8 +160,10 @@ pub(super) fn swiping_timeout(
         if scroll.last_event.elapsed() > FINGER_LIFT_THRESHOLD {
             scroll.is_user_swiping = false;
 
-            if scroll.velocity.abs() * dt * viewport_width < MIN_VELOCITY_PX {
-                commands.entity(entity).remove::<Scrolling>();
+            if scroll.velocity.abs() * dt * viewport_width < MIN_VELOCITY_PX
+                && let Ok(mut entity_commands) = commands.get_entity(entity)
+            {
+                entity_commands.try_remove::<Scrolling>();
             }
             if let Some(point) = window_manager.cursor_position() {
                 commands.trigger(SendMessageTrigger(Event::MouseMoved {

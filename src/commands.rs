@@ -840,7 +840,9 @@ fn full_width_window(
     let viewport = active_display.actual_bounds(&config);
 
     if let Some(marker) = windows.full_width(entity) {
-        commands.entity(entity).try_remove::<FullWidthMarker>();
+        if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            entity_commands.try_remove::<FullWidthMarker>();
+        }
         let w = (marker.width_ratio * f64::from(viewport.width())).round() as i32;
         let bounds = active_display.actual_bounds(&config).size().with_x(w);
         commands.resize_entity(entity, bounds);
@@ -855,9 +857,9 @@ fn full_width_window(
             _ = strip.unstack(entity);
         }
         let width_ratio = windows.width_ratio(entity).unwrap_or(0.5);
-        commands
-            .entity(entity)
-            .try_insert(FullWidthMarker { width_ratio });
+        if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            entity_commands.try_insert(FullWidthMarker { width_ratio });
+        }
         commands.reposition_entity(entity, Origin::new(viewport.min.x, viewport.min.y));
         commands.resize_entity(entity, Size::new(viewport.width(), viewport.height()));
         commands.reshuffle_around(entity);
@@ -1250,8 +1252,10 @@ pub fn stack_windows_handler(
         .and_then(|(_, entity)| windows.get_managed(entity))
         && unmanaged.is_none()
     {
-        if windows.full_width(entity).is_some() {
-            commands.entity(entity).try_remove::<FullWidthMarker>();
+        if windows.full_width(entity).is_some()
+            && let Ok(mut entity_commands) = commands.get_entity(entity)
+        {
+            entity_commands.try_remove::<FullWidthMarker>();
         }
         let strip = active_display.active_strip();
         if *stack {

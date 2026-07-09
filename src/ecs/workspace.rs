@@ -596,9 +596,9 @@ fn handle_virtual_window_moves(
             .and_then(|(_, strip, _, _, _)| strip.tab_group(window_entity))
             .unwrap_or_else(|| vec![window_entity]);
         for moving_entity in &moving_entities {
-            commands
-                .entity(*moving_entity)
-                .remove::<VirtualMoveMarker>();
+            if let Ok(mut entity_commands) = commands.get_entity(*moving_entity) {
+                entity_commands.try_remove::<VirtualMoveMarker>();
+            }
         }
         let follow = matches!(move_marker.move_focus, MoveFocus::Follow);
 
@@ -906,10 +906,12 @@ fn move_virtual_workspace_bind(
         _ => return,
     };
 
-    commands.entity(focused_entity).insert(VirtualMoveMarker {
-        target_virtual_index,
-        move_focus,
-    });
+    if let Ok(mut entity_commands) = commands.get_entity(focused_entity) {
+        entity_commands.try_insert(VirtualMoveMarker {
+            target_virtual_index,
+            move_focus,
+        });
+    }
 
     if move_focus == MoveFocus::Follow && config.workspace_popup_status() {
         commands.flash_message(format!("{}", target_virtual_index + 1), 1.0);
@@ -1129,11 +1131,13 @@ fn reap_empty_virtual_workspaces(
         if strip.virtual_index > 0 && strip.len() == 0 {
             if entity == changed_entity {
                 debug!("moving markers from despawned virtual workspace to primary");
-                commands
-                    .entity(primary_entity)
-                    .try_insert(ActiveWorkspaceMarker);
+                if let Ok(mut entity_commands) = commands.get_entity(primary_entity) {
+                    entity_commands.try_insert(ActiveWorkspaceMarker);
+                }
             }
-            commands.entity(entity).despawn();
+            if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                entity_commands.try_despawn();
+            }
         }
     }
 }

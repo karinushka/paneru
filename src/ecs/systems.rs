@@ -5,7 +5,7 @@ use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::query::{Added, Changed, Has, Or, With, Without};
 use bevy::ecs::system::{
-    Commands, Local, NonSend, NonSendMut, ParallelCommands, Populated, Query, Res, ResMut, Single,
+    Commands, Local, NonSend, NonSendMut, Populated, Query, Res, ResMut, Single,
 };
 use bevy::math::IRect;
 use bevy::tasks::AsyncComputeTaskPool;
@@ -479,7 +479,7 @@ pub(super) fn animate_entities(
     animate: Populated<(&mut Position, Entity, &RepositionMarker)>,
     time: Res<Time>,
     config: Res<Config>,
-    commands: ParallelCommands,
+    mut commands: Commands,
 ) {
     // Frame-rate-independent exponential smoothing (ease-out).
     // `animation_speed` is the decay rate (per second); higher = snappier.
@@ -508,10 +508,8 @@ pub(super) fn animate_entities(
                 position.0,
             );
             position.0 = new_pos;
-            if finished {
-                commands.command_scope(|mut command| {
-                    command.entity(entity).try_remove::<RepositionMarker>();
-                });
+            if finished && let Ok(mut entity_commands) = commands.get_entity(entity) {
+                entity_commands.try_remove::<RepositionMarker>();
             }
         });
 }
@@ -532,7 +530,7 @@ pub(super) fn animate_resize_entities(
     animate: Populated<(&mut Bounds, Entity, &ResizeMarker)>,
     time: Res<Time>,
     config: Res<Config>,
-    commands: ParallelCommands,
+    mut commands: Commands,
 ) {
     // Matches animate_entities: exponential ease-out, frame-rate independent.
     let rate = config.animation_speed();
@@ -557,10 +555,8 @@ pub(super) fn animate_resize_entities(
                 bounds.0,
             );
             bounds.0 = new_size;
-            if finished {
-                commands.command_scope(|mut command| {
-                    command.entity(entity).try_remove::<ResizeMarker>();
-                });
+            if finished && let Ok(mut entity_commands) = commands.get_entity(entity) {
+                entity_commands.try_remove::<ResizeMarker>();
             }
         });
 }
@@ -941,9 +937,10 @@ pub(super) fn verify_window_position(
 
         window.reposition(position.0);
         if verification.tick()
-            && let Ok(mut entity_commands) = commands.get_entity(entity) {
-                entity_commands.try_remove::<VerifyWindowPosition>();
-            }
+            && let Ok(mut entity_commands) = commands.get_entity(entity)
+        {
+            entity_commands.try_remove::<VerifyWindowPosition>();
+        }
     }
 }
 

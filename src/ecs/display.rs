@@ -167,7 +167,7 @@ pub(crate) fn reconcile_displays(
 
     // Displays that vanished while we were away (e.g. unplugged during sleep).
     for display_id in existing_ids.difference(&present_ids) {
-        let Some((display, _)) = present_displays.get(display_id) else {
+        let Some((display, _)) = existing_displays.get(display_id) else {
             error!("Unable to find removed display: {display_id}");
             continue;
         };

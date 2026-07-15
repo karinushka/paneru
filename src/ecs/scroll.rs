@@ -88,7 +88,7 @@ fn swipe_gesture(
             Event::Swipe { delta, fingers }
                 if config
                     .swipe_gesture_fingers()
-                    .is_none_or(|fingers_configured| fingers_configured == *fingers) =>
+                    .is_some_and(|fingers_configured| fingers_configured == *fingers) =>
             {
                 total_delta += delta;
                 has_scroll_event = true;
@@ -386,7 +386,7 @@ fn vertical_swipe_gesture(
             Event::VerticalSwipe { delta, fingers }
                 if config
                     .swipe_gesture_fingers()
-                    .is_none_or(|fingers_configured| fingers_configured == *fingers) =>
+                    .is_some_and(|fingers_configured| fingers_configured == *fingers) =>
             {
                 state.last_event = Some(Instant::now());
 

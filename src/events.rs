@@ -99,7 +99,11 @@ pub enum Event {
 
     /// Fingers have been placed on the touchpad.
     TouchpadDown,
-    /// All fingers are up from the touchpad.
+    /// Physical contact ended; a native momentum phase may still follow.
+    TouchpadPhysicalUp,
+    /// Native momentum began for the current physical gesture.
+    TouchpadMomentumStart,
+    /// The full touchpad gesture, including native momentum, has ended.
     TouchpadUp,
 
     /// A new space (virtual desktop) has been created.

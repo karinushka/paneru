@@ -277,16 +277,10 @@ fn test_multiple_oversized_windows_scroll_across_the_full_strip() {
         },
     ];
 
-    let config: Config = (
-        MainOptions {
-            swipe_gesture_fingers: Some(3),
-            continuous_swipe: Some(true),
-            animation_speed: Some(10000.0),
-            ..Default::default()
-        },
-        vec![],
+    let config = Config::try_from(
+        "[options]\nswipe_gesture_fingers = 3\ncontinuous_swipe = true\nanimation_speed = 10000.0\n\n[swipe]\npaging = false\n\n[bindings]\n",
     )
-        .into();
+    .expect("legacy multi-window free-scroll config should parse");
 
     TestHarness::new()
         .with_config(config)

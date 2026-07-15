@@ -59,7 +59,8 @@ Configure trackpad gestures and scroll-wheel window sliding.
 | `sensitivity` | Float (0.1–2.0) | `0.35` | Multiplier for swipe distance. |
 | `deceleration` | Float (1.0–10.0) | `4.0` | Rate at which inertia slows down after a swipe. |
 | `continuous` | Boolean | `true` | Controls strip edge limits while scrolling; disable to clamp strictly to the full content bounds. |
-| `sticky` | Boolean | `false` | After scrolling ends, smoothly snap the nearest column edge to the matching viewport edge, preserving a small outer gap. |
+| `paging` | Boolean | `true` | Limit one gesture to at most one adjacent stop. A regular column has one stop; an oversized column has exactly two, at its left and right edges. Set to `false` to restore free scrolling. |
+| `sticky` | Boolean | `false` | With `paging = false`, snap exactly to a column edge when scrolling ends inside its 32-point hit zone. This activation zone does not create a visual gap. |
 
 ### `[swipe.gesture]`
 | Option | Type | Default | Description |

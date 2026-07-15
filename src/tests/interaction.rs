@@ -145,6 +145,7 @@ fn sticky_modifier_scroll_keeps_snap_pending_until_momentum_settles() {
 
 [swipe]
 sticky = true
+paging = false
 
 [bindings]
 ",
@@ -327,14 +328,10 @@ fn test_scrolling() {
         },
     ];
 
-    let config: Config = (
-        MainOptions {
-            swipe_gesture_fingers: Some(3),
-            ..Default::default()
-        },
-        vec![],
+    let config = Config::try_from(
+        "[options]\nswipe_gesture_fingers = 3\n\n[swipe]\npaging = false\n\n[bindings]\n",
     )
-        .into();
+    .expect("legacy free-scroll config should parse");
 
     TestHarness::new()
         .with_config(config)
@@ -399,16 +396,10 @@ fn test_window_hidden_ratio() {
         },
     ];
 
-    let config: Config = (
-        MainOptions {
-            window_hidden_ratio: Some(0.5),
-            animation_speed: Some(10000.0),
-            swipe_gesture_fingers: Some(3),
-            ..Default::default()
-        },
-        vec![],
+    let config = Config::try_from(
+        "[options]\nwindow_hidden_ratio = 0.5\nanimation_speed = 10000.0\nswipe_gesture_fingers = 3\n\n[swipe]\npaging = false\n\n[bindings]\n",
     )
-        .into();
+    .expect("legacy hidden-window scrolling config should parse");
 
     TestHarness::new()
         .with_config(config)

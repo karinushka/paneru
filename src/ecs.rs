@@ -241,8 +241,13 @@ pub struct Scrolling {
     pub target_position: Option<f64>,
     /// A physical gesture ended and still needs to choose its sticky anchor.
     pub snap_pending: bool,
-    /// When true, the user's fingers are on the trackpad.
+    /// Movement is still being supplied by the user or native scroll stream.
     pub is_user_swiping: bool,
+    /// An explicit trackpad begin event has not yet received its matching end.
+    /// This prevents the inactivity fallback from ending a paused gesture.
+    pub gesture_active: bool,
+    /// One-hop paging bounds and release decision captured for this gesture.
+    pub paging_gesture: Option<PagingGesture>,
     /// Last time a physical swipe event was received.
     pub last_event: Instant,
 }
@@ -255,9 +260,20 @@ impl Default for Scrolling {
             target_position: None,
             snap_pending: false,
             is_user_swiping: false,
+            gesture_active: false,
+            paging_gesture: None,
             last_event: Instant::now(),
         }
     }
+}
+
+/// Immutable snap neighborhood captured at the beginning of one gesture.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PagingGesture {
+    pub start_stop: f64,
+    pub previous_stop: Option<f64>,
+    pub next_stop: Option<f64>,
+    pub release_velocity: f64,
 }
 
 #[derive(Component, Clone, Debug, Default, Deref, DerefMut)]

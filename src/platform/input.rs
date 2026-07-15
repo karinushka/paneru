@@ -2,7 +2,7 @@ use arc_swap::ArcSwap;
 use core::ptr::NonNull;
 use objc2::msg_send;
 use objc2::rc::Retained;
-use objc2_app_kit::{NSEvent, NSEventType, NSTouch, NSTouchPhase};
+use objc2_app_kit::{NSEvent, NSEventPhase, NSEventType, NSTouch, NSTouchPhase};
 use objc2_core_foundation::{CFMachPort, CFRetained, CFRunLoop, kCFRunLoopCommonModes};
 use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventFlags, CGEventTapLocation, CGEventTapOptions,
@@ -278,6 +278,11 @@ impl InputHandler {
         }
 
         if let Some(events) = &self.events {
+            let (gesture_began, physical_ended, momentum_began, gesture_ended) =
+                NSEvent::eventWithCGEvent(event)
+                    .as_deref()
+                    .map(|event| scroll_gesture_lifecycle(event.phase(), event.momentumPhase()))
+                    .unwrap_or_default();
             let h_delta = CGEvent::double_value_field(
                 Some(event),
                 CGEventField::ScrollWheelEventFixedPtDeltaAxis2,
@@ -295,6 +300,19 @@ impl InputHandler {
                 return true;
             }
 
+            // Exact AppKit phases are available for trackpads. Mouse wheels
+            // and other phase-less devices continue to use the ECS inactivity
+            // fallback instead.
+            if base_match && gesture_began {
+                _ = events.send(Event::TouchpadDown);
+            }
+            if base_match && physical_ended {
+                _ = events.send(Event::TouchpadPhysicalUp);
+            }
+            if base_match && momentum_began {
+                _ = events.send(Event::TouchpadMomentumStart);
+            }
+
             // If we have any horizontal delta, or if there's only vertical delta, use it.
             let delta = if h_delta.abs() > 0.001 {
                 h_delta
@@ -304,8 +322,17 @@ impl InputHandler {
                 0.0
             };
 
-            if delta.abs() > 0.001 {
+            let has_delta = delta.abs() > 0.001;
+            if has_delta {
                 _ = events.send(Event::Scroll { delta });
+            }
+            if base_match && gesture_ended {
+                _ = events.send(Event::TouchpadUp);
+            }
+            if has_delta
+                || (base_match
+                    && (gesture_began || physical_ended || momentum_began || gesture_ended))
+            {
                 return true; // Intercept: don't let the window scroll
             }
         }
@@ -315,9 +342,6 @@ impl InputHandler {
     /// Handles swipe gesture events. Routes to horizontal `Swipe` or vertical
     /// `VerticalSwipe` based on axis dominance. Returns true to intercept the event.
     fn handle_swipe(&mut self, event: &CGEvent) -> bool {
-        const NS_EVENT_PHASE_ENDED: usize = 1 << 3; // 8
-        const NS_EVENT_PHASE_CANCELLED: usize = 1 << 4; // 16
-
         let Some(configured_fingers) = self
             .config
             .swipe_gesture_fingers()
@@ -337,7 +361,7 @@ impl InputHandler {
 
         // Fingers lifted off touchpad.
         let phase = ns_event.phase();
-        if (phase.0 & NS_EVENT_PHASE_CANCELLED != 0 || phase.0 & NS_EVENT_PHASE_ENDED != 0)
+        if phase.intersects(NSEventPhase::Ended | NSEventPhase::Cancelled)
             && let Some(events) = &self.events
         {
             _ = events.send(Event::TouchpadUp);
@@ -463,6 +487,20 @@ fn gesture_should_intercept(configured_fingers: Option<usize>, actual_fingers: u
     configured_fingers.is_some_and(|configured| {
         configured >= GESTURE_MINIMAL_FINGERS && configured == actual_fingers
     })
+}
+
+fn scroll_gesture_lifecycle(
+    phase: NSEventPhase,
+    momentum_phase: NSEventPhase,
+) -> (bool, bool, bool, bool) {
+    // Momentum belongs to the physical gesture that preceded it. Treating its
+    // begin as a new gesture would recapture the paging stop and allow a
+    // second hop from one finger movement.
+    let began = phase.contains(NSEventPhase::Began);
+    let physical_ended = phase.intersects(NSEventPhase::Ended | NSEventPhase::Cancelled);
+    let momentum_began = momentum_phase.contains(NSEventPhase::Began);
+    let momentum_ended = momentum_phase.intersects(NSEventPhase::Ended | NSEventPhase::Cancelled);
+    (began, physical_ended, momentum_began, momentum_ended)
 }
 
 fn get_modifiers(eventflags: CGEventFlags) -> Modifiers {
@@ -604,5 +642,36 @@ mod tests {
         assert!(gesture_should_intercept(Some(3), 3));
         assert!(!gesture_should_intercept(Some(4), 3));
         assert!(gesture_should_intercept(Some(4), 4));
+    }
+
+    #[test]
+    fn native_scroll_lifecycle_covers_touch_and_momentum_phases() {
+        assert_eq!(
+            scroll_gesture_lifecycle(NSEventPhase::Began, NSEventPhase::None),
+            (true, false, false, false)
+        );
+        assert_eq!(
+            scroll_gesture_lifecycle(NSEventPhase::Ended, NSEventPhase::None),
+            (false, true, false, false)
+        );
+        assert_eq!(
+            scroll_gesture_lifecycle(NSEventPhase::None, NSEventPhase::Began),
+            (false, false, true, false),
+            "momentum must continue the existing physical gesture"
+        );
+        assert_eq!(
+            scroll_gesture_lifecycle(NSEventPhase::None, NSEventPhase::Ended),
+            (false, false, false, true)
+        );
+        assert_eq!(
+            scroll_gesture_lifecycle(NSEventPhase::Ended, NSEventPhase::Began),
+            (false, true, true, false),
+            "momentum beginning in the same event must keep the gesture active"
+        );
+        assert_eq!(
+            scroll_gesture_lifecycle(NSEventPhase::Ended, NSEventPhase::Changed),
+            (false, true, false, false),
+            "physical end must not end the full gesture while momentum continues"
+        );
     }
 }

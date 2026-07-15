@@ -730,6 +730,14 @@ impl Config {
             .unwrap_or(false)
     }
 
+    pub fn swipe_paging(&self) -> bool {
+        self.inner()
+            .swipe
+            .as_ref()
+            .and_then(|swipe| swipe.paging)
+            .unwrap_or(true)
+    }
+
     pub fn swipe_deceleration(&self) -> f64 {
         let config = self.inner();
         config
@@ -1840,6 +1848,7 @@ index = 1
     assert_eq!(defaults.swipe_sensitivity(), 0.35);
     assert_eq!(defaults.swipe_deceleration(), 4.0);
     assert!(!defaults.sticky_scroll());
+    assert!(defaults.swipe_paging());
 }
 
 #[test]
@@ -1857,6 +1866,34 @@ sticky = true
     .expect("sticky swipe config should parse");
 
     assert!(config.sticky_scroll());
+}
+
+#[test]
+fn test_swipe_paging_config() {
+    let defaults = Config::try_from("[options]\n\n[bindings]\n")
+        .expect("config without swipe paging should parse");
+    assert!(
+        defaults.swipe_paging(),
+        "paging must be enabled when omitted"
+    );
+
+    let disabled = Config::try_from(
+        r"
+[options]
+
+[swipe]
+paging = false
+sticky = true
+
+[bindings]
+",
+    )
+    .expect("disabled paging config should parse");
+    assert!(!disabled.swipe_paging());
+    assert!(
+        disabled.sticky_scroll(),
+        "disabling paging must not disable edge-sticky scrolling"
+    );
 }
 
 #[test]

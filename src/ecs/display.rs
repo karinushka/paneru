@@ -153,7 +153,6 @@ pub(crate) fn reconcile_displays(
                 &mut commands,
             );
         }
-        return;
     }
     *retries = DISPLAY_RETRIES;
 

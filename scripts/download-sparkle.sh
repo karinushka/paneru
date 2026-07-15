@@ -27,7 +27,8 @@ fi
   "https://github.com/sparkle-project/Sparkle/releases/download/$SPARKLE_VERSION/Sparkle-$SPARKLE_VERSION.tar.xz" \
   --output "$ARCHIVE"
 
-printf '%s  %s\n' "$SPARKLE_SHA256" "$ARCHIVE" | /usr/bin/shasum --algorithm 256 --check
+printf '%s  %s\n' "$SPARKLE_SHA256" "$ARCHIVE" \
+  | /usr/bin/shasum --algorithm 256 --check >&2
 /bin/rm -rf "$DESTINATION"
 /bin/mkdir -p "$DESTINATION"
 /usr/bin/tar -xJf "$ARCHIVE" -C "$DESTINATION"

@@ -26,7 +26,9 @@ pub struct ScrollEventsPlugin;
 
 const NATIVE_SCROLL_RESPONSE_SECONDS: f64 = 0.04;
 const NATIVE_SCROLL_SETTLE_PX: f64 = 0.25;
-const STICKY_EDGE_GAP_PX: i32 = 12;
+/// Distance from a window edge at which sticky scrolling engages. This is a
+/// hit zone, not a visual gap: the resulting snap lands exactly on the edge.
+const STICKY_EDGE_THRESHOLD_PX: i32 = 12;
 
 impl Plugin for ScrollEventsPlugin {
     fn build(&self, app: &mut App) {
@@ -262,7 +264,7 @@ fn apply_snap_force(
 
     let get_window_frame = |entity| windows.moving_frame(entity);
     let target_offset = if sticky {
-        sticky_edge_snap_target(
+        let Some(target_offset) = sticky_edge_snap_target(
             position.x,
             &viewport,
             layout_strip.columns().filter_map(|column| {
@@ -271,8 +273,11 @@ fn apply_snap_force(
                 let column_width = column.width(&get_window_frame)?;
                 Some((column_position, column_width))
             }),
-        )
-        .unwrap_or(position.x)
+        ) else {
+            scroll.snap_pending = false;
+            return;
+        };
+        target_offset
     } else {
         let viewport_center = viewport.center().x;
         layout_strip
@@ -307,19 +312,31 @@ fn sticky_edge_snap_target(
     viewport: &IRect,
     columns: impl IntoIterator<Item = (i32, i32)>,
 ) -> Option<i32> {
-    let edge_gap = STICKY_EDGE_GAP_PX.min(viewport.width().saturating_sub(1) / 2);
-    let left_anchor = viewport.min.x + edge_gap;
-    let right_anchor = viewport.max.x - edge_gap;
+    let current_offset = i64::from(current_offset);
+    let threshold = i64::from(STICKY_EDGE_THRESHOLD_PX);
 
     columns
         .into_iter()
         .flat_map(|(column_position, column_width)| {
             [
-                left_anchor - column_position,
-                right_anchor - (column_position + column_width),
+                (
+                    viewport.min.x - column_position,
+                    // The viewport's left edge is inside the window.
+                    -threshold..=0,
+                ),
+                (
+                    viewport.max.x - (column_position + column_width),
+                    // The viewport's right edge is inside the window.
+                    0..=threshold,
+                ),
             ]
         })
-        .min_by_key(|target| (i64::from(current_offset) - i64::from(*target)).abs())
+        .filter_map(|(target, hit_zone)| {
+            hit_zone
+                .contains(&(current_offset - i64::from(target)))
+                .then_some(target)
+        })
+        .min_by_key(|target| (current_offset - i64::from(*target)).abs())
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -470,30 +487,18 @@ where
     let left_snap = strip_position(layout_strip.last());
     let right_snap = strip_position(layout_strip.get(1));
 
-    let edge_gap = if config.sticky_scroll() {
-        STICKY_EDGE_GAP_PX.min(viewport.width().saturating_sub(1) / 2)
-    } else {
-        0
-    };
-
     let (first_edge, last_edge) = if continuous_swipe
         && !has_oversized_column
         && let Some((left_snap, right_snap)) = left_snap.zip(right_snap)
     {
-        // Allow to scroll away until the last or first window reaches the
-        // viewport edge, preserving the sticky outer gap.
-        (
-            viewport.min.x + edge_gap - left_snap,
-            viewport.max.x - edge_gap - right_snap,
-        )
+        // Allow scrolling until the last or first window reaches the viewport
+        // edge exactly. Sticky's 12px value is only an activation threshold.
+        (viewport.min.x - left_snap, viewport.max.x - right_snap)
     } else {
         // Pan between the leading and trailing strip edges. The min/max form
         // also handles strips narrower than the viewport without an inverted
         // clamp range.
-        (
-            viewport.min.x + edge_gap,
-            viewport.max.x - edge_gap - total_strip_width,
-        )
+        (viewport.min.x, viewport.max.x - total_strip_width)
     };
 
     Some(current_offset.clamp(first_edge.min(last_edge), first_edge.max(last_edge)))
@@ -611,19 +616,29 @@ mod tests {
     }
 
     #[test]
-    fn sticky_scroll_snaps_column_edges_instead_of_centers() {
+    fn sticky_scroll_snaps_only_inside_the_edge_hit_zone() {
         let viewport = IRect::new(0, 0, 1000, 800);
         let columns = [(0, 600), (600, 600)];
 
         assert_eq!(
-            sticky_edge_snap_target(-520, &viewport, columns),
-            Some(-588),
-            "the next column's left edge should land 12px from the viewport edge"
+            sticky_edge_snap_target(-609, &viewport, columns),
+            Some(-600),
+            "a column edge inside the 12px hit zone should snap exactly to the viewport edge"
         );
         assert_eq!(
-            sticky_edge_snap_target(-260, &viewport, columns),
-            Some(-212),
-            "the current column's right edge should land 12px from the viewport edge"
+            sticky_edge_snap_target(-191, &viewport, columns),
+            Some(-200),
+            "the right edge should also snap exactly when it is inside the hit zone"
+        );
+        assert_eq!(
+            sticky_edge_snap_target(-591, &viewport, columns),
+            None,
+            "the hit zone must be inside the window, not outside its edge"
+        );
+        assert_eq!(
+            sticky_edge_snap_target(-187, &viewport, columns),
+            None,
+            "sticky scroll must not pull an edge from farther than 12px"
         );
     }
 
@@ -633,12 +648,17 @@ mod tests {
         let oversized_column = [(0, 1500)];
 
         assert_eq!(
-            sticky_edge_snap_target(-100, &viewport, oversized_column),
-            Some(12)
+            sticky_edge_snap_target(-9, &viewport, oversized_column),
+            Some(0)
         );
         assert_eq!(
-            sticky_edge_snap_target(-450, &viewport, oversized_column),
-            Some(-512)
+            sticky_edge_snap_target(-491, &viewport, oversized_column),
+            Some(-500)
+        );
+        assert_eq!(
+            sticky_edge_snap_target(-250, &viewport, oversized_column),
+            None,
+            "an oversized window must remain freely pannable between its edge zones"
         );
     }
 

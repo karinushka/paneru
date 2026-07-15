@@ -156,7 +156,7 @@ fn swipe_gesture(
     // AppKit can report physical Ended and momentum Began together. Apply the
     // physical end first so the momentum phase remains the final state.
     mark_physical_touch_end(touchpad_physical_up, scrolling.as_deref_mut());
-    resume_touchpad_gesture(resumes_gesture, scrolling.as_deref_mut());
+    resume_touchpad_gesture(resumes_gesture, touchpad_down, scrolling.as_deref_mut());
 
     if touchpad_down && !has_scroll_event && scrolling.is_none() {
         insert_touchpad_begin_state(
@@ -326,9 +326,15 @@ fn begin_touchpad_gesture(
     }
 }
 
-fn resume_touchpad_gesture(resumes_gesture: bool, scrolling: Option<&mut Scrolling>) {
+fn resume_touchpad_gesture(
+    resumes_gesture: bool,
+    interrupts_target: bool,
+    scrolling: Option<&mut Scrolling>,
+) {
     if resumes_gesture && let Some(scrolling) = scrolling {
-        scrolling.target_position = None;
+        if interrupts_target {
+            scrolling.target_position = None;
+        }
         scrolling.snap_pending = true;
         scrolling.is_user_swiping = true;
         scrolling.gesture_active = true;

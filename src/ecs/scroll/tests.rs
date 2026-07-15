@@ -5,7 +5,7 @@ use bevy::math::IRect;
 use bevy::prelude::Entity;
 use bevy::time::TimeUpdateStrategy;
 
-use super::{Scrolling, smooth_native_scroll, sticky_edge_snap_target};
+use super::{Scrolling, resume_touchpad_gesture, smooth_native_scroll, sticky_edge_snap_target};
 use crate::commands::Command;
 use crate::ecs::{ActiveWorkspaceMarker, Position};
 use crate::events::Event;
@@ -26,6 +26,27 @@ fn native_scroll_smoothing_converges_without_overshoot() {
     }
     assert!((position - 100.0).abs() < f64::EPSILON);
     assert!(settled);
+}
+
+#[test]
+fn momentum_resume_preserves_target_but_new_touch_interrupts_it() {
+    let mut scrolling = Scrolling {
+        target_position: Some(-320.0),
+        ..Default::default()
+    };
+
+    resume_touchpad_gesture(true, false, Some(&mut scrolling));
+    assert_eq!(
+        scrolling.target_position,
+        Some(-320.0),
+        "momentum must continue extending the in-flight native-scroll target"
+    );
+
+    resume_touchpad_gesture(true, true, Some(&mut scrolling));
+    assert_eq!(
+        scrolling.target_position, None,
+        "a new physical touch must interrupt the previous target"
+    );
 }
 
 #[test]
@@ -173,17 +194,31 @@ fn later_native_momentum_keeps_original_one_hop_paging_session() {
     TestHarness::new()
         .with_windows(1)
         .on_iteration(2, |world, _state| {
+            // Keep the physical-scroll target in flight across the lifecycle
+            // events below. The harness otherwise advances 500ms per event,
+            // enough for the native-scroll integrator to settle completely.
+            world.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(1)));
             assert_original_oversized_paging_session(world);
         })
         .on_iteration(4, |world, _state| {
-            let (_, _, _, gesture_active, is_user_swiping) = paging_snapshot(world);
+            let (_, _, target_position, gesture_active, is_user_swiping) = paging_snapshot(world);
             assert_original_oversized_paging_session(world);
+            assert_eq!(
+                target_position,
+                Some(0.0),
+                "physical touch end must retain the unfinished native-scroll target"
+            );
             assert!(!gesture_active);
             assert!(is_user_swiping);
         })
         .on_iteration(5, |world, _state| {
-            let (_, _, _, gesture_active, _) = paging_snapshot(world);
+            let (_, _, target_position, gesture_active, _) = paging_snapshot(world);
             assert_original_oversized_paging_session(world);
+            assert_eq!(
+                target_position,
+                Some(0.0),
+                "momentum start must continue the unfinished physical-scroll target"
+            );
             assert!(gesture_active);
         })
         .on_iteration(6, |world, _state| {

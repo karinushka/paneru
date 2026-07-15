@@ -151,7 +151,7 @@ fn test_scrolling() {
             command: Command::PrintState,
         },
         Event::Swipe {
-            delta: 0.3,
+            delta: 0.4,
             fingers: 3,
         },
         Event::Command {
@@ -177,9 +177,9 @@ fn test_scrolling() {
             assert_window_at!(world, 2, 800, TEST_MENUBAR_HEIGHT);
         })
         .on_iteration(5, move |world, _state| {
-            assert_window_at!(world, 0, -315, TEST_MENUBAR_HEIGHT);
-            assert_window_at!(world, 1, 85, TEST_MENUBAR_HEIGHT);
-            assert_window_at!(world, 2, 485, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 0, -395, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 1, -24, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 2, 376, TEST_MENUBAR_HEIGHT);
         })
         .run(commands);
 }

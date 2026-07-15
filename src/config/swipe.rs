@@ -23,6 +23,10 @@ pub struct SwipeOptions {
     #[allow(dead_code)]
     pub continuous: Option<bool>,
 
+    /// Snap to the nearest column after native momentum settles.
+    /// Default: false.
+    pub sticky: Option<bool>,
+
     pub gesture: Option<GestureOptions>,
     pub scroll: Option<ScrollOptions>,
 }

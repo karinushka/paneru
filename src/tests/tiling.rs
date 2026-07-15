@@ -252,6 +252,74 @@ fn test_window_can_resize_to_two_display_widths_and_scroll() {
         .run(commands);
 }
 
+#[test]
+fn test_multiple_oversized_windows_scroll_across_the_full_strip() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::SetWidth(1.5)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::SetWidth(1.5)),
+        },
+        Event::TouchpadDown,
+        Event::Swipe {
+            delta: 100.0,
+            fingers: 3,
+        },
+        Event::TouchpadDown,
+        Event::Swipe {
+            delta: -100.0,
+            fingers: 3,
+        },
+    ];
+
+    let config: Config = (
+        MainOptions {
+            swipe_gesture_fingers: Some(3),
+            continuous_swipe: Some(true),
+            animation_speed: Some(10000.0),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(2)
+        .on_iteration(3, |world, _state| {
+            assert_window_size!(world, 0, 1536, 748);
+            assert_window_size!(world, 1, 1536, 748);
+            assert_active_strip_x(world, -1536);
+        })
+        .on_iteration(4, |world, _state| {
+            assert_active_strip_x(world, -1536);
+        })
+        .on_iteration(5, |world, _state| {
+            assert_active_strip_x(world, -2048);
+        })
+        .on_iteration(6, |world, _state| {
+            assert_active_strip_x(world, -2048);
+        })
+        .on_iteration(7, |world, _state| {
+            assert_active_strip_x(world, 0);
+        })
+        .run(commands);
+}
+
+fn assert_active_strip_x(world: &mut World, expected: i32) {
+    let mut query = world.query_filtered::<&crate::ecs::Position, (
+        With<crate::ecs::layout::LayoutStrip>,
+        With<crate::ecs::ActiveWorkspaceMarker>,
+    )>();
+    let position = query.single(world).expect("active layout strip not found");
+    assert_eq!(position.0.x, expected);
+}
+
 fn assert_oversized_window_is_pannable(world: &mut World, id: i32) {
     let mut query = world.query::<&crate::manager::Window>();
     let window = query

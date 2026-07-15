@@ -4,8 +4,8 @@ use bevy::ecs::system::{NonSendMut, Query, Res};
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSColor, NSControlStateValueOff, NSControlStateValueOn, NSMenu, NSMenuItem, NSStatusBar,
-    NSStatusItem, NSVariableStatusItemLength,
+    NSColor, NSControlStateValueOff, NSControlStateValueOn, NSEventModifierFlags, NSMenu,
+    NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{NSObject, NSString};
@@ -19,6 +19,7 @@ use crate::ecs::{
 };
 use crate::events::{Event, EventSender};
 use crate::manager::Display;
+use crate::platform::Modifiers;
 
 #[derive(Debug, Clone)]
 struct MenuActionTargetIvars {
@@ -83,6 +84,7 @@ pub struct MenuBarManager {
     managed_window_items: Vec<Retained<NSMenuItem>>,
     manage_item: Option<Retained<NSMenuItem>>,
     configured_widths: Vec<i32>,
+    configured_shortcuts: MenuShortcuts,
     current_label: Option<String>,
 }
 
@@ -93,6 +95,20 @@ const STATUS_ITEM_CORNER_RADIUS: CGFloat = 5.0;
 struct WindowMenuEnablement {
     managed_actions: bool,
     toggle_managed: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MenuShortcut {
+    key: String,
+    modifiers: u8,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct MenuShortcuts {
+    widths: Vec<(i32, Option<MenuShortcut>)>,
+    center: Option<MenuShortcut>,
+    manage: Option<MenuShortcut>,
+    quit: Option<MenuShortcut>,
 }
 
 fn window_menu_enablement(
@@ -126,21 +142,23 @@ impl MenuBarManager {
             managed_window_items: Vec::new(),
             manage_item: None,
             configured_widths: Vec::new(),
+            configured_shortcuts: MenuShortcuts::default(),
             current_label: None,
         }
     }
 
-    pub fn update(
+    fn update(
         &mut self,
         virtual_index: u32,
         show_virtual_workspace: bool,
         preset_widths: &[f64],
         has_focused_window: bool,
         focused_width_ratio: Option<f64>,
+        shortcuts: &MenuShortcuts,
     ) {
         let widths = normalized_width_percentages(preset_widths);
-        if self.configured_widths != widths {
-            self.rebuild_menu(&widths);
+        if self.configured_widths != widths || self.configured_shortcuts != *shortcuts {
+            self.rebuild_menu(&widths, shortcuts);
         }
 
         let enablement = window_menu_enablement(has_focused_window, focused_width_ratio);
@@ -168,37 +186,60 @@ impl MenuBarManager {
         self.show_label(label);
     }
 
-    fn rebuild_menu(&mut self, widths: &[i32]) {
+    fn rebuild_menu(&mut self, widths: &[i32], shortcuts: &MenuShortcuts) {
         self.menu.removeAllItems();
         self.width_items.clear();
         self.managed_window_items.clear();
         self.manage_item = None;
 
-        let status = self.add_item("Paneru — Running", None);
+        let status = self.add_item("Paneru — Running", None, None);
         status.setEnabled(false);
         self.menu.addItem(&NSMenuItem::separatorItem(self.mtm));
 
-        let width_header = self.add_item("Window width", None);
+        let width_header = self.add_item("Window width", None, None);
         width_header.setEnabled(false);
         for &percentage in widths {
-            let item = self.add_item(&format!("{percentage}%"), Some(sel!(setWidth:)));
+            let shortcut = shortcuts
+                .widths
+                .iter()
+                .find_map(|(width, shortcut)| (*width == percentage).then_some(shortcut))
+                .and_then(Option::as_ref);
+            let item = self.add_item(&format!("{percentage}%"), Some(sel!(setWidth:)), shortcut);
             item.setTag(isize::try_from(percentage).expect("width percentage fits in isize"));
             self.managed_window_items.push(item.clone());
             self.width_items.push((percentage, item));
         }
 
         self.menu.addItem(&NSMenuItem::separatorItem(self.mtm));
-        let center = self.add_item("Center Window", Some(sel!(centerWindow:)));
-        let manage = self.add_item("Toggle Managed", Some(sel!(toggleManaged:)));
+        let center = self.add_item(
+            "Center Window",
+            Some(sel!(centerWindow:)),
+            shortcuts.center.as_ref(),
+        );
+        let manage = self.add_item(
+            "Toggle Managed",
+            Some(sel!(toggleManaged:)),
+            shortcuts.manage.as_ref(),
+        );
         self.managed_window_items.push(center);
         self.manage_item = Some(manage);
 
         self.menu.addItem(&NSMenuItem::separatorItem(self.mtm));
-        self.add_item("Quit Paneru", Some(sel!(quitPaneru:)));
+        self.add_item(
+            "Quit Paneru",
+            Some(sel!(quitPaneru:)),
+            shortcuts.quit.as_ref(),
+        );
         self.configured_widths = widths.to_vec();
+        self.configured_shortcuts = shortcuts.clone();
     }
 
-    fn add_item(&self, title: &str, action: Option<objc2::runtime::Sel>) -> Retained<NSMenuItem> {
+    fn add_item(
+        &self,
+        title: &str,
+        action: Option<objc2::runtime::Sel>,
+        shortcut: Option<&MenuShortcut>,
+    ) -> Retained<NSMenuItem> {
         let item = unsafe {
             self.menu.addItemWithTitle_action_keyEquivalent(
                 &NSString::from_str(title),
@@ -208,6 +249,10 @@ impl MenuBarManager {
         };
         if action.is_some() {
             unsafe { item.setTarget(Some(&self.action_target)) };
+        }
+        if let Some(shortcut) = shortcut {
+            item.setKeyEquivalent(&NSString::from_str(&shortcut.key));
+            item.setKeyEquivalentModifierMask(native_modifier_flags(shortcut.modifiers));
         }
         item
     }
@@ -270,12 +315,15 @@ pub fn update_menu_bar(
         },
     );
 
+    let preset_widths = config.preset_column_widths();
+    let shortcuts = menu_shortcuts(&config, &preset_widths);
     menu_bar.update(
         strip.virtual_index,
         config.workspace_menu_status(),
-        &config.preset_column_widths(),
+        &preset_widths,
         focused_window.is_some(),
         focused_width_ratio,
+        &shortcuts,
     );
 }
 
@@ -296,12 +344,88 @@ fn normalized_width_percentages(widths: &[f64]) -> Vec<i32> {
     percentages
 }
 
+fn menu_shortcuts(config: &Config, widths: &[f64]) -> MenuShortcuts {
+    let widths = normalized_width_percentages(widths)
+        .into_iter()
+        .map(|percentage| {
+            let command_name = format!("window_width_{percentage}");
+            (
+                percentage,
+                config
+                    .first_keybinding(&command_name)
+                    .and_then(|binding| menu_shortcut(&binding.key, binding.modifiers)),
+            )
+        })
+        .collect();
+
+    let shortcut = |command_name| {
+        config
+            .first_keybinding(command_name)
+            .and_then(|binding| menu_shortcut(&binding.key, binding.modifiers))
+    };
+
+    MenuShortcuts {
+        widths,
+        center: shortcut("window_center"),
+        manage: shortcut("window_manage"),
+        quit: shortcut("quit"),
+    }
+}
+
+fn menu_shortcut(key: &str, modifiers: Modifiers) -> Option<MenuShortcut> {
+    let key = match key {
+        "equal" => "=",
+        "minus" => "-",
+        "rightbracket" => "]",
+        "leftbracket" => "[",
+        "quote" => "'",
+        "semicolon" => ";",
+        "backslash" => "\\",
+        "comma" => ",",
+        "slash" => "/",
+        "period" => ".",
+        "grave" => "`",
+        "return" | "keypadenter" => "\r",
+        "tab" => "\t",
+        "space" => " ",
+        "delete" => "\u{8}",
+        "escape" => "\u{1b}",
+        key if key.chars().count() == 1 => key,
+        _ => return None,
+    };
+
+    Some(MenuShortcut {
+        key: key.to_owned(),
+        modifiers: modifiers.bits(),
+    })
+}
+
+fn native_modifier_flags(modifier_bits: u8) -> NSEventModifierFlags {
+    let modifiers = Modifiers::from_bits_retain(modifier_bits);
+    let mut flags = NSEventModifierFlags::empty();
+    if modifiers.intersects(Modifiers::SHIFT) {
+        flags |= NSEventModifierFlags::Shift;
+    }
+    if modifiers.intersects(Modifiers::CTRL) {
+        flags |= NSEventModifierFlags::Control;
+    }
+    if modifiers.intersects(Modifiers::ALT) {
+        flags |= NSEventModifierFlags::Option;
+    }
+    if modifiers.intersects(Modifiers::CMD) {
+        flags |= NSEventModifierFlags::Command;
+    }
+    flags
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        WindowMenuEnablement, format_virtual_workspace_label, normalized_width_percentages,
-        window_menu_enablement,
+        WindowMenuEnablement, format_virtual_workspace_label, menu_shortcut, menu_shortcuts,
+        normalized_width_percentages, window_menu_enablement,
     };
+    use crate::config::Config;
+    use crate::platform::Modifiers;
 
     #[test]
     fn label_is_one_based() {
@@ -314,6 +438,48 @@ mod tests {
         assert_eq!(
             normalized_width_percentages(&[2.0, 0.5, 1.5, 0.5, 0.001, f64::NAN, -1.0]),
             vec![50, 150, 200]
+        );
+    }
+
+    #[test]
+    fn menu_shortcut_uses_native_key_and_preserves_modifiers() {
+        let shortcut = menu_shortcut("1", Modifiers::LCTRL | Modifiers::RALT | Modifiers::LCMD)
+            .expect("shortcut should be representable");
+        assert_eq!(shortcut.key, "1");
+        assert_eq!(
+            shortcut.modifiers,
+            (Modifiers::LCTRL | Modifiers::RALT | Modifiers::LCMD).bits()
+        );
+    }
+
+    #[test]
+    fn menu_shortcuts_come_from_command_bindings() {
+        let config = Config::try_from(
+            r#"
+[options]
+
+[bindings]
+window_width_150 = "ctrl+alt+cmd-4"
+window_center = "ctrl+alt+cmd-c"
+"#,
+        )
+        .expect("bindings should parse");
+
+        let shortcuts = menu_shortcuts(&config, &[1.0, 1.5]);
+        assert_eq!(shortcuts.widths[0], (100, None));
+        assert_eq!(
+            shortcuts.widths[1]
+                .1
+                .as_ref()
+                .map(|shortcut| shortcut.key.as_str()),
+            Some("4")
+        );
+        assert_eq!(
+            shortcuts
+                .center
+                .as_ref()
+                .map(|shortcut| shortcut.key.as_str()),
+            Some("c")
         );
     }
 

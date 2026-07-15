@@ -11,6 +11,8 @@ use objc2::{
 use objc2_foundation::{NSBundle, NSObject, NSString};
 use tracing::warn;
 
+use crate::events::{Event, EventSender};
+
 const SILENT_CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -22,6 +24,7 @@ pub struct UpdateStatus {
 #[derive(Clone, Debug)]
 struct SparkleUpdaterDelegateIvars {
     status: Rc<RefCell<UpdateStatus>>,
+    events: EventSender,
 }
 
 define_class!(
@@ -39,11 +42,13 @@ define_class!(
                 unsafe { msg_send![item, displayVersionString] };
             let mut status = self.ivars().status.borrow_mut();
             status.available_version = Some(display_version.to_string());
+            _ = self.ivars().events.send(Event::UpdaterStatusChanged);
         }
 
         #[unsafe(method(updaterDidNotFindUpdate:))]
         fn did_not_find_update(&self, _updater: &AnyObject) {
             self.ivars().status.borrow_mut().available_version = None;
+            _ = self.ivars().events.send(Event::UpdaterStatusChanged);
         }
 
         #[unsafe(method(updater:didFinishUpdateCycleForUpdateCheck:error:))]
@@ -54,13 +59,18 @@ define_class!(
             _error: Option<&AnyObject>,
         ) {
             self.ivars().status.borrow_mut().is_checking = false;
+            _ = self.ivars().events.send(Event::UpdaterStatusChanged);
         }
     }
 );
 
 impl SparkleUpdaterDelegate {
-    fn new(mtm: MainThreadMarker, status: Rc<RefCell<UpdateStatus>>) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(SparkleUpdaterDelegateIvars { status });
+    fn new(
+        mtm: MainThreadMarker,
+        status: Rc<RefCell<UpdateStatus>>,
+        events: EventSender,
+    ) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(SparkleUpdaterDelegateIvars { status, events });
         unsafe { msg_send![super(this), init] }
     }
 }
@@ -126,11 +136,40 @@ pub struct SparkleUpdater {
     _delegate: Retained<SparkleUpdaterDelegate>,
     controller: Retained<SPUStandardUpdaterController>,
     status: Rc<RefCell<UpdateStatus>>,
-    last_silent_check: Option<Instant>,
+    events: EventSender,
+    silent_schedule: SilentUpdateSchedule,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SilentUpdateSchedule {
+    next_check: Instant,
+}
+
+impl SilentUpdateSchedule {
+    fn new(now: Instant) -> Self {
+        Self { next_check: now }
+    }
+
+    fn deadline(self) -> Instant {
+        self.next_check
+    }
+
+    fn due(self, now: Instant) -> bool {
+        now >= self.next_check
+    }
+
+    fn advance(&mut self, now: Instant) {
+        self.next_check = now + SILENT_CHECK_INTERVAL;
+    }
+}
+
+fn mark_silent_check_started(status: &RefCell<UpdateStatus>, events: &EventSender) {
+    status.borrow_mut().is_checking = true;
+    _ = events.send(Event::UpdaterStatusChanged);
 }
 
 impl SparkleUpdater {
-    pub fn load(mtm: MainThreadMarker) -> Option<Self> {
+    pub fn load(mtm: MainThreadMarker, events: EventSender) -> Option<Self> {
         let main_bundle = NSBundle::mainBundle();
         let Some(frameworks_path) = main_bundle.privateFrameworksPath() else {
             warn!("unable to load Sparkle: the main bundle has no private frameworks path");
@@ -164,7 +203,7 @@ impl SparkleUpdater {
         }
 
         let status = Rc::new(RefCell::new(UpdateStatus::default()));
-        let delegate = SparkleUpdaterDelegate::new(mtm, Rc::clone(&status));
+        let delegate = SparkleUpdaterDelegate::new(mtm, Rc::clone(&status), events.clone());
         let controller = SPUStandardUpdaterController::init_with_starting_updater(
             SPUStandardUpdaterController::alloc(mtm),
             true,
@@ -177,7 +216,8 @@ impl SparkleUpdater {
             _delegate: delegate,
             controller,
             status,
-            last_silent_check: None,
+            events,
+            silent_schedule: SilentUpdateSchedule::new(Instant::now()),
         })
     }
 
@@ -193,12 +233,16 @@ impl SparkleUpdater {
         self.status.borrow().clone()
     }
 
-    pub fn maybe_check_silently(&mut self) {
-        if self.status.borrow().is_checking
-            || self
-                .last_silent_check
-                .is_some_and(|last_check| last_check.elapsed() < SILENT_CHECK_INTERVAL)
-        {
+    pub fn next_silent_check(&self) -> Instant {
+        self.silent_schedule.deadline()
+    }
+
+    pub fn maybe_check_silently(&mut self, now: Instant) {
+        if !self.silent_schedule.due(now) {
+            return;
+        }
+        self.silent_schedule.advance(now);
+        if self.status.borrow().is_checking {
             return;
         }
 
@@ -207,13 +251,47 @@ impl SparkleUpdater {
             return;
         }
 
-        self.status.borrow_mut().is_checking = true;
-        self.last_silent_check = Some(Instant::now());
+        mark_silent_check_started(&self.status, &self.events);
         updater.check_for_update_information();
     }
 
     #[allow(dead_code)]
     pub fn check_for_updates(&self) {
         unsafe { self.controller.check_for_updates(None) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        SILENT_CHECK_INTERVAL, SilentUpdateSchedule, UpdateStatus, mark_silent_check_started,
+    };
+    use crate::events::{Event, EventSender};
+    use std::cell::RefCell;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn silent_update_schedule_exposes_real_hourly_deadline() {
+        let now = Instant::now();
+        let mut schedule = SilentUpdateSchedule::new(now);
+        assert!(schedule.due(now));
+        schedule.advance(now);
+        assert_eq!(schedule.deadline(), now + SILENT_CHECK_INTERVAL);
+        assert!(!schedule.due(now + Duration::from_secs(3599)));
+        assert!(schedule.due(now + SILENT_CHECK_INTERVAL));
+    }
+
+    #[test]
+    fn silent_check_start_emits_status_transition() {
+        let status = RefCell::new(UpdateStatus::default());
+        let (events, receiver) = EventSender::new();
+
+        mark_silent_check_started(&status, &events);
+
+        assert!(status.borrow().is_checking);
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(Event::UpdaterStatusChanged)
+        ));
     }
 }

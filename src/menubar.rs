@@ -1,24 +1,26 @@
+use bevy::ecs::change_detection::DetectChanges;
 use bevy::ecs::entity::Entity;
-use bevy::ecs::query::{Has, With};
-use bevy::ecs::system::{NonSendMut, Query, Res};
+use bevy::ecs::lifecycle::RemovedComponents;
+use bevy::ecs::message::MessageReader;
+use bevy::ecs::query::{Added, Changed, Has, Or, With};
+use bevy::ecs::system::{Local, NonSendMut, Query, Res};
 use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSColor, NSControlStateValueOff, NSControlStateValueOn, NSEventModifierFlags, NSMenu,
-    NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
+    NSMenuDelegate, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
 };
 use objc2_core_foundation::CGFloat;
-use objc2_foundation::{NSObject, NSString};
+use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
+use std::time::Instant;
 use tracing::warn;
 
 use crate::commands::{Command, Operation};
 use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
-use crate::ecs::{
-    ActiveDisplayMarker, ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker, Unmanaged,
-};
+use crate::ecs::{ActiveWorkspaceMarker, FocusedMarker, Unmanaged, WidthRatio};
 use crate::events::{Event, EventSender};
-use crate::manager::Display;
 use crate::platform::Modifiers;
 use crate::updater::SparkleUpdater;
 
@@ -34,6 +36,8 @@ define_class!(
     #[ivars = MenuActionTargetIvars]
     #[derive(Debug)]
     struct MenuActionTarget;
+
+    unsafe impl NSObjectProtocol for MenuActionTarget {}
 
     impl MenuActionTarget {
         #[unsafe(method(setWidth:))]
@@ -58,6 +62,15 @@ define_class!(
         #[unsafe(method(quitPaneru:))]
         fn quit_paneru(&self, _: &NSMenuItem) {
             self.send_command(Command::Quit);
+        }
+    }
+
+    unsafe impl NSMenuDelegate for MenuActionTarget {
+        #[unsafe(method(menuWillOpen:))]
+        fn menu_will_open(&self, _: &NSMenu) {
+            if let Err(error) = self.ivars().events.send(Event::StatusMenuOpened) {
+                warn!(%error, "unable to request menu refresh");
+            }
         }
     }
 );
@@ -87,6 +100,7 @@ pub struct MenuBarManager {
     configured_widths: Vec<i32>,
     configured_shortcuts: MenuShortcuts,
     current_label: Option<String>,
+    publication: MenuPublicationGate,
     updater: Option<SparkleUpdater>,
     check_for_updates_item: Option<Retained<NSMenuItem>>,
 }
@@ -98,6 +112,35 @@ const STATUS_ITEM_CORNER_RADIUS: CGFloat = 5.0;
 struct WindowMenuEnablement {
     managed_actions: bool,
     toggle_managed: bool,
+}
+
+#[derive(Default)]
+struct MenuPublicationGate {
+    published: bool,
+}
+
+impl MenuPublicationGate {
+    fn publish_after_update(&mut self) -> bool {
+        if self.published {
+            false
+        } else {
+            self.published = true;
+            true
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct MenuDirtyGate {
+    initialized: bool,
+}
+
+impl MenuDirtyGate {
+    fn should_update(&mut self, changed: bool) -> bool {
+        let first = !self.initialized;
+        self.initialized = true;
+        first || changed
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -129,11 +172,15 @@ impl MenuBarManager {
         let status_bar = NSStatusBar::systemStatusBar();
         let status_item = status_bar.statusItemWithLength(NSVariableStatusItemLength);
         let menu = NSMenu::new(mtm);
-        let action_target = MenuActionTarget::new(mtm, events);
+        let action_target = MenuActionTarget::new(mtm, events.clone());
 
         menu.setAutoenablesItems(false);
+        menu.setDelegate(Some(ProtocolObject::from_ref(&*action_target)));
         status_item.setMenu(Some(&menu));
-        status_item.setVisible(true);
+        // Keep the status item unclickable until the first ECS snapshot has
+        // built and enabled every menu item. This makes the first native open
+        // synchronous with initialized content rather than an async refresh.
+        status_item.setVisible(false);
 
         Self {
             mtm,
@@ -147,7 +194,8 @@ impl MenuBarManager {
             configured_widths: Vec::new(),
             configured_shortcuts: MenuShortcuts::default(),
             current_label: None,
-            updater: SparkleUpdater::load(mtm),
+            publication: MenuPublicationGate::default(),
+            updater: SparkleUpdater::load(mtm, events),
             check_for_updates_item: None,
         }
     }
@@ -161,10 +209,6 @@ impl MenuBarManager {
         focused_width_ratio: Option<f64>,
         shortcuts: &MenuShortcuts,
     ) {
-        if let Some(updater) = &mut self.updater {
-            updater.maybe_check_silently();
-        }
-
         let widths = normalized_width_percentages(preset_widths);
         if self.configured_widths != widths || self.configured_shortcuts != *shortcuts {
             self.rebuild_menu(&widths, shortcuts);
@@ -219,6 +263,19 @@ impl MenuBarManager {
             label.push_str(" •");
         }
         self.show_label(label);
+        if self.publication.publish_after_update() {
+            self.status_item.setVisible(true);
+        }
+    }
+
+    pub(crate) fn updater_deadline(&self) -> Option<Instant> {
+        self.updater.as_ref().map(SparkleUpdater::next_silent_check)
+    }
+
+    fn tick_silent_updater(&mut self, now: Instant) {
+        if let Some(updater) = &mut self.updater {
+            updater.maybe_check_silently(now);
+        }
     }
 
     fn rebuild_menu(&mut self, widths: &[i32], shortcuts: &MenuShortcuts) {
@@ -331,6 +388,12 @@ impl MenuBarManager {
     }
 }
 
+pub(crate) fn tick_silent_updater(menu_bar: Option<NonSendMut<MenuBarManager>>) {
+    if let Some(mut menu_bar) = menu_bar {
+        menu_bar.tick_silent_updater(Instant::now());
+    }
+}
+
 impl Drop for MenuBarManager {
     fn drop(&mut self) {
         self.status_bar.removeStatusItem(&self.status_item);
@@ -340,8 +403,7 @@ impl Drop for MenuBarManager {
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 pub fn update_menu_bar(
     active_workspace: Query<(Entity, &LayoutStrip), With<ActiveWorkspaceMarker>>,
-    active_display: Query<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
-    focused: Query<(&Bounds, Has<Unmanaged>), With<FocusedMarker>>,
+    focused: Query<(&WidthRatio, Has<Unmanaged>), With<FocusedMarker>>,
     config: Res<Config>,
     menu_bar: Option<NonSendMut<MenuBarManager>>,
 ) {
@@ -353,14 +415,9 @@ pub fn update_menu_bar(
     };
 
     let focused_window = focused.iter().next();
-    let focused_width_ratio = active_display.iter().next().zip(focused_window).and_then(
-        |((display, dock), (bounds, unmanaged))| {
-            (!unmanaged).then(|| {
-                f64::from(bounds.0.x)
-                    / f64::from(display.actual_display_bounds(dock, &config).width())
-            })
-        },
-    );
+    let focused_width_ratio = focused_window
+        .filter(|(_, unmanaged)| !unmanaged)
+        .map(|(ratio, _)| ratio.0);
 
     let preset_widths = config.preset_column_widths();
     let shortcuts = menu_shortcuts(&config, &preset_widths);
@@ -372,6 +429,45 @@ pub fn update_menu_bar(
         focused_width_ratio,
         &shortcuts,
     );
+}
+
+/// Gates `AppKit` mutations behind state that can change the visible menu.
+/// The first update initializes the status item; subsequent animation frames
+/// do no menu work unless focus, layout, ownership, updater status, or
+/// configuration changed. Width selection uses the logical `WidthRatio`, so
+/// animation-only `Bounds` changes never require an open-time refresh.
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
+pub fn menu_bar_dirty(
+    mut gate: Local<MenuDirtyGate>,
+    config: Res<Config>,
+    active_workspace: Query<
+        (),
+        (
+            With<ActiveWorkspaceMarker>,
+            Or<(Added<ActiveWorkspaceMarker>, Changed<LayoutStrip>)>,
+        ),
+    >,
+    focused: Query<
+        (),
+        (
+            With<FocusedMarker>,
+            Or<(Added<FocusedMarker>, Changed<Unmanaged>)>,
+        ),
+    >,
+    mut focus_removed: RemovedComponents<FocusedMarker>,
+    mut unmanaged_removed: RemovedComponents<Unmanaged>,
+    mut events: MessageReader<Event>,
+) -> bool {
+    let event_dirty = events
+        .read()
+        .any(|event| matches!(event, Event::StatusMenuOpened | Event::UpdaterStatusChanged));
+    let changed = config.is_changed()
+        || !active_workspace.is_empty()
+        || !focused.is_empty()
+        || focus_removed.read().next().is_some()
+        || unmanaged_removed.read().next().is_some()
+        || event_dirty;
+    gate.should_update(changed)
 }
 
 pub(crate) fn format_virtual_workspace_label(virtual_index: u32) -> String {
@@ -468,16 +564,34 @@ fn native_modifier_flags(modifier_bits: u8) -> NSEventModifierFlags {
 #[cfg(test)]
 mod tests {
     use super::{
-        WindowMenuEnablement, format_virtual_workspace_label, menu_shortcut, menu_shortcuts,
-        normalized_width_percentages, window_menu_enablement,
+        MenuDirtyGate, MenuPublicationGate, WindowMenuEnablement, format_virtual_workspace_label,
+        menu_bar_dirty, menu_shortcut, menu_shortcuts, normalized_width_percentages,
+        window_menu_enablement,
     };
     use crate::config::Config;
+    use crate::ecs::{Bounds, FocusedMarker};
+    use crate::events::Event;
     use crate::platform::Modifiers;
+    use bevy::app::{App, Update};
+    use bevy::ecs::message::Messages;
+    use bevy::ecs::resource::Resource;
+    use bevy::ecs::schedule::IntoScheduleConfigs;
+    use bevy::ecs::system::ResMut;
+    use bevy::math::IVec2;
 
     #[test]
     fn label_is_one_based() {
         assert_eq!(format_virtual_workspace_label(0), "VW 1");
         assert_eq!(format_virtual_workspace_label(4), "VW 5");
+    }
+
+    #[test]
+    fn status_item_is_published_only_after_first_content_update() {
+        let mut publication = MenuPublicationGate::default();
+        assert!(!publication.published);
+        assert!(publication.publish_after_update());
+        assert!(publication.published);
+        assert!(!publication.publish_after_update());
     }
 
     #[test]
@@ -553,5 +667,50 @@ window_center = "ctrl+alt+cmd-c"
                 toggle_managed: true,
             }
         );
+    }
+
+    #[test]
+    fn menu_dirty_gate_runs_once_then_only_for_changes() {
+        let mut gate = MenuDirtyGate::default();
+        assert!(gate.should_update(false));
+        assert!(!gate.should_update(false));
+        assert!(gate.should_update(true));
+    }
+
+    #[derive(Default, Resource)]
+    struct MenuUpdateCount(usize);
+
+    fn count_menu_update(mut count: ResMut<MenuUpdateCount>) {
+        count.0 += 1;
+    }
+
+    #[test]
+    fn animated_bounds_do_not_dirty_menu_but_updater_status_does() {
+        let mut app = App::new();
+        app.init_resource::<Messages<Event>>()
+            .init_resource::<MenuUpdateCount>()
+            .insert_resource(Config::default())
+            .add_systems(Update, count_menu_update.run_if(menu_bar_dirty));
+        let window = app
+            .world_mut()
+            .spawn((FocusedMarker, Bounds(IVec2::new(100, 100))))
+            .id();
+        app.update();
+        assert_eq!(app.world().resource::<MenuUpdateCount>().0, 1);
+
+        app.world_mut()
+            .entity_mut(window)
+            .get_mut::<Bounds>()
+            .unwrap()
+            .0
+            .x += 10;
+        app.update();
+        assert_eq!(app.world().resource::<MenuUpdateCount>().0, 1);
+
+        app.world_mut()
+            .resource_mut::<Messages<Event>>()
+            .write(Event::UpdaterStatusChanged);
+        app.update();
+        assert_eq!(app.world().resource::<MenuUpdateCount>().0, 2);
     }
 }

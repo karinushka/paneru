@@ -6,8 +6,8 @@ use derive_more::{DerefMut, with_trait::Deref};
 use mockall::automock;
 use notify::{RecursiveMode, Watcher};
 use objc2_core_foundation::{
-    CFArray, CFDictionary, CFMutableData, CFNumber, CFNumberType, CFRetained, CFString, CFType,
-    CGPoint, CGRect, CGSize, kCFBooleanTrue,
+    CFArray, CFDictionary, CFNumber, CFNumberType, CFRetained, CFString, CFType, CGPoint, CGRect,
+    CGSize, kCFBooleanTrue,
 };
 use objc2_core_graphics::{
     CGAssociateMouseAndMouseCursorPosition, CGDirectDisplayID, CGDisplayBounds,
@@ -16,30 +16,29 @@ use objc2_core_graphics::{
 };
 use std::path::Path;
 use std::ptr::null_mut;
-use std::slice::from_raw_parts_mut;
 use std::time::Duration;
 use stdext::function_name;
-use tracing::{Level, debug, error, instrument, trace, warn};
+use tracing::{Level, debug, instrument, trace, warn};
 
 use crate::config::Config;
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
 use crate::manager::skylight::SLSSetWindowListBrightness;
-use crate::platform::{ConnID, Pid, ProcessSerialNumber, WinID, WorkspaceId};
-use crate::util::{AXUIWrapper, MacResult, create_array, symlink_target};
+use crate::platform::{ConnID, ProcessSerialNumber, WinID, WorkspaceId};
+use crate::util::{MacResult, create_array, symlink_target};
 use app::ApplicationOS;
 pub use app::{Application, ApplicationApi};
 pub use display::Display;
 pub use process::{Process, ProcessApi};
 pub use skylight::AXUIElementCopyAttributeValue;
 use skylight::{
-    _AXUIElementCreateWithRemoteToken, SLSCopyActiveMenuBarDisplayIdentifier,
-    SLSCopyAssociatedWindows, SLSCopyManagedDisplaySpaces, SLSCopyWindowsWithOptionsAndTags,
-    SLSFindWindowAndOwner, SLSGetConnectionIDForPSN, SLSGetCurrentCursorLocation,
-    SLSGetDisplayMenubarHeight, SLSGetSpaceManagementMode, SLSMainConnectionID,
-    SLSManagedDisplayGetCurrentSpace, SLSSpaceGetType, SLSWindowIteratorAdvance,
-    SLSWindowIteratorGetAttributes, SLSWindowIteratorGetParentID, SLSWindowIteratorGetTags,
-    SLSWindowIteratorGetWindowID, SLSWindowQueryResultCopyWindows, SLSWindowQueryWindows,
+    SLSCopyActiveMenuBarDisplayIdentifier, SLSCopyAssociatedWindows, SLSCopyManagedDisplaySpaces,
+    SLSCopyWindowsWithOptionsAndTags, SLSFindWindowAndOwner, SLSGetConnectionIDForPSN,
+    SLSGetCurrentCursorLocation, SLSGetDisplayMenubarHeight, SLSGetSpaceManagementMode,
+    SLSMainConnectionID, SLSManagedDisplayGetCurrentSpace, SLSSpaceGetType,
+    SLSWindowIteratorAdvance, SLSWindowIteratorGetAttributes, SLSWindowIteratorGetParentID,
+    SLSWindowIteratorGetTags, SLSWindowIteratorGetWindowID, SLSWindowQueryResultCopyWindows,
+    SLSWindowQueryWindows,
 };
 pub use windows::{Window, WindowApi, WindowOS, WindowPadding, ax_window_id};
 
@@ -710,76 +709,6 @@ fn existing_application_window_list(
         )));
     }
     space_window_list_for_connection(cid, spaces, app.connection(), true)
-}
-
-/// Attempts to find and add unresolved windows for a given application by brute-forcing `element_id` values.
-/// This is a workaround for macOS API limitations that do not return `AXUIElementRef` for windows on inactive spaces.
-///
-/// # Arguments
-///
-/// * `pid` - The process ID of the application whose windows are to be brute-forced.
-/// * `bundle_id` - The bundle identifier of the application, if known.
-/// * `window_list` - A mutable vector of `WinID`s representing the expected global window list; found windows are removed from this list.
-/// * `config` - The current Paneru configuration, used to evaluate window rules.
-pub fn bruteforce_windows(
-    pid: Pid,
-    bundle_id: Option<&str>,
-    mut window_list: Vec<WinID>,
-    config: &Config,
-) -> Vec<Window> {
-    const MAGIC: u32 = 0x636f_636f;
-    const BUFSIZE: isize = 0x14;
-    let mut found_windows = Vec::new();
-    debug!("{pid} has unresolved window on other desktops, bruteforcing them.");
-
-    //
-    // NOTE: MacOS API does not return AXUIElementRef of windows on inactive spaces. However,
-    // we can just brute-force the element_id and create the AXUIElementRef ourselves.
-    //  https://github.com/decodism
-    //  https://github.com/lwouis/alt-tab-macos/issues/1324#issuecomment-2631035482
-    //
-
-    let Some(data_ref) = CFMutableData::new(None, BUFSIZE) else {
-        error!("error creating mutable data");
-        return found_windows;
-    };
-    CFMutableData::increase_length(data_ref.deref().into(), BUFSIZE);
-
-    let data = unsafe {
-        from_raw_parts_mut(
-            CFMutableData::mutable_byte_ptr(data_ref.deref().into()),
-            BUFSIZE as usize,
-        )
-    };
-    let bytes = pid.to_ne_bytes();
-    data[0x0..bytes.len()].copy_from_slice(&bytes);
-    let bytes = MAGIC.to_ne_bytes();
-    data[0x8..0x8 + bytes.len()].copy_from_slice(&bytes);
-
-    for element_id in 0..0x7fffu64 {
-        let bytes = element_id.to_ne_bytes();
-        data[0xc..0xc + bytes.len()].copy_from_slice(&bytes);
-
-        let Ok(element_ref) =
-            AXUIWrapper::retain(unsafe { _AXUIElementCreateWithRemoteToken(data_ref.as_ref()) })
-        else {
-            continue;
-        };
-        let Ok(window_id) = ax_window_id(element_ref.as_ptr()) else {
-            continue;
-        };
-
-        if let Some(index) = window_list.iter().position(|&id| id == window_id) {
-            window_list.remove(index);
-            debug!("Found window {window_id:?}");
-            if let Ok(window) = WindowOS::new_with_config(&element_ref, config, bundle_id)
-                .inspect_err(|err| warn!("{err}"))
-            {
-                found_windows.push(Window::new(Box::new(window)));
-            }
-        }
-    }
-    found_windows
 }
 
 /// Checks if the application has Accessibility privileges.

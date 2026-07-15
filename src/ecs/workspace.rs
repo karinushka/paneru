@@ -9,10 +9,10 @@ use bevy::ecs::observer::On;
 use bevy::ecs::query::{Added, Has, With, Without};
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::schedule::common_conditions::{not, resource_exists};
-use bevy::ecs::system::{Commands, Local, ParamSet, Populated, Query, Res, ResMut, Single};
-use bevy::time::common_conditions::on_timer;
+use bevy::ecs::system::{
+    Commands, Local, NonSend, ParamSet, Populated, Query, Res, ResMut, Single,
+};
 use std::collections::HashSet;
-use std::time::Duration;
 use tracing::{Level, debug, error, instrument, warn};
 
 use super::{ActiveDisplayMarker, SpawnWindowTrigger};
@@ -21,6 +21,7 @@ use crate::config::Config;
 use crate::ecs::focus::FocusHistory;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
+use crate::ecs::runtime::OrphanReconcileDeadline;
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, DockPosition, Initializing, NativeFullscreenMarker, Position,
     RefreshWindowSizes, RepositionMarker, Scrolling, SelectedVirtualMarker, SpawnCommandsExt,
@@ -29,15 +30,12 @@ use crate::ecs::{
 use crate::errors::Result;
 use crate::events::Event;
 use crate::manager::{Application, Display, Origin, Window, WindowManager};
-use crate::platform::{WinID, WorkspaceId};
+use crate::platform::{AxMainThread, WinID, WorkspaceId};
 
 pub struct WorkspaceEventsPlugin;
 
 impl Plugin for WorkspaceEventsPlugin {
     fn build(&self, app: &mut App) {
-        const REFRESH_WINDOW_CHECK_FREQ_MS: u64 = 1000;
-        const DISPLAY_CHANGE_CHECK_FREQ_MS: u64 = 1000;
-
         let reap_workspaces = |config: Option<Res<Config>>| {
             config.is_some_and(|config| config.reap_empty_workspaces())
         };
@@ -56,14 +54,8 @@ impl Plugin for WorkspaceEventsPlugin {
                 show_active_workspace,
                 handle_virtual_window_moves,
                 detect_moved_windows.run_if(not(resource_exists::<Initializing>)),
-                refresh_workspace_window_sizes.run_if(on_timer(Duration::from_millis(
-                    REFRESH_WINDOW_CHECK_FREQ_MS,
-                ))),
-                find_orphaned_workspaces
-                    .after(crate::ecs::display::reconcile_displays)
-                    .run_if(on_timer(Duration::from_millis(
-                        DISPLAY_CHANGE_CHECK_FREQ_MS,
-                    ))),
+                refresh_workspace_window_sizes,
+                find_orphaned_workspaces.after(crate::ecs::display::reconcile_displays),
             ),
         );
         app.add_systems(PostUpdate, workspace_destroyed_handler);
@@ -176,6 +168,7 @@ fn workspace_change_handler(
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn detect_moved_windows(
+    _main_thread: NonSend<AxMainThread>,
     activated_workspace: Single<Entity, Added<ActiveWorkspaceMarker>>,
     windows: Windows,
     mut workspaces: Query<(&mut LayoutStrip, Entity, Has<NativeFullscreenMarker>)>,
@@ -379,17 +372,28 @@ fn windows_not_in_strips<F: Fn(WinID) -> Option<Entity>>(
         })
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all)]
 fn find_orphaned_workspaces(
-    orphans: Populated<(&LayoutStrip, Entity, &Timeout, Option<&ChildOf>), With<Timeout>>,
+    _main_thread: NonSend<AxMainThread>,
+    orphans: Populated<
+        (
+            &LayoutStrip,
+            Entity,
+            &Timeout,
+            &mut OrphanReconcileDeadline,
+            Option<&ChildOf>,
+        ),
+        With<Timeout>,
+    >,
     displays: Populated<(&Display, Entity)>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
     let present = window_manager.present_displays();
 
-    for (orphan, orphan_entity, timeout, child) in orphans {
+    let now = std::time::Instant::now();
+    for (orphan, orphan_entity, timeout, mut reconcile, child) in orphans {
         if orphan.len() == 0 {
             if let Ok(mut cmd) = commands.get_entity(orphan_entity) {
                 cmd.try_despawn();
@@ -401,6 +405,7 @@ fn find_orphaned_workspaces(
             // Was reparented, remove timer.
             if let Ok(mut cmd) = commands.get_entity(orphan_entity) {
                 cmd.try_remove::<Timeout>();
+                cmd.try_remove::<OrphanReconcileDeadline>();
                 cmd.insert(RefreshWindowSizes::default());
             }
             debug!(
@@ -410,7 +415,7 @@ fn find_orphaned_workspaces(
             continue;
         }
 
-        if timeout.timer.is_finished() {
+        if timeout.due(now) {
             // Rescue windows from orphaned strips before despawning by floating them.
             debug!("Rescue windows from timed out orphan {}.", orphan.id());
             for lost_window in orphan.all_windows() {
@@ -420,6 +425,11 @@ fn find_orphaned_workspaces(
             }
             continue;
         }
+
+        if !reconcile.due(now) {
+            continue;
+        }
+        reconcile.schedule_next(now);
 
         // Find which display now owns this space ID.
         let target = present.iter().find_map(|(present_display, spaces)| {
@@ -443,6 +453,7 @@ fn find_orphaned_workspaces(
 
         if let Ok(mut cmd) = commands.get_entity(orphan_entity) {
             cmd.try_remove::<Timeout>()
+                .try_remove::<OrphanReconcileDeadline>()
                 .insert(ChildOf(target_entity))
                 .insert(RefreshWindowSizes::default());
         }
@@ -451,6 +462,7 @@ fn find_orphaned_workspaces(
 
 #[allow(clippy::needless_pass_by_value)]
 fn refresh_workspace_window_sizes(
+    _main_thread: NonSend<AxMainThread>,
     layout_strip: Single<(&LayoutStrip, Entity, &RefreshWindowSizes), With<ActiveWorkspaceMarker>>,
     mut windows: Query<(Entity, &mut Window, &mut Bounds, Option<&Unmanaged>)>,
     active_display: ActiveDisplay,
@@ -458,7 +470,7 @@ fn refresh_workspace_window_sizes(
     mut commands: Commands,
 ) {
     let (strip, strip_entity, marker) = *layout_strip;
-    if !marker.ready() {
+    if !marker.ready(std::time::Instant::now()) {
         return;
     }
 
@@ -1139,5 +1151,100 @@ fn reap_empty_virtual_workspaces(
                 entity_commands.try_despawn();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod main_thread_tests {
+    use std::time::{Duration, Instant};
+
+    use bevy::prelude::*;
+
+    use super::{LayoutStrip, find_orphaned_workspaces, refresh_workspace_window_sizes};
+    use crate::ecs::runtime::OrphanReconcileDeadline;
+    use crate::ecs::{
+        ActiveDisplayMarker, ActiveWorkspaceMarker, Bounds, RefreshWindowSizes, Timeout,
+    };
+    use crate::manager::{
+        Display, MockWindowApi, MockWindowManagerApi, Size, Window, WindowManager,
+    };
+    use crate::platform::AxMainThread;
+
+    #[test]
+    fn refresh_window_sizes_runs_ax_on_main_thread() {
+        let expected_thread = std::thread::current().id();
+        let mut window = MockWindowApi::new();
+        window.expect_id().return_const(7);
+        window.expect_update_frame().times(1).returning(move || {
+            assert_eq!(std::thread::current().id(), expected_thread);
+            Ok(IRect::new(0, 0, 400, 300))
+        });
+        let mut manager = MockWindowManagerApi::new();
+        manager
+            .expect_windows_in_workspace()
+            .times(1)
+            .returning(|_| Ok(vec![7]));
+
+        let mut app = App::new();
+        app.insert_non_send_resource(AxMainThread::for_tests())
+            .insert_resource(WindowManager(Box::new(manager)))
+            .add_systems(Update, refresh_workspace_window_sizes);
+        let display = app
+            .world_mut()
+            .spawn((
+                Display::new(1, IRect::new(0, 0, 1_000, 800), 0),
+                ActiveDisplayMarker,
+            ))
+            .id();
+        let window = app
+            .world_mut()
+            .spawn((Window::new(Box::new(window)), Bounds(Size::new(1, 1))))
+            .id();
+        let mut strip = LayoutStrip::new(1, 0);
+        strip.append(window);
+        let strip = app
+            .world_mut()
+            .spawn((
+                strip,
+                ActiveWorkspaceMarker,
+                RefreshWindowSizes(Instant::now()),
+                ChildOf(display),
+            ))
+            .id();
+
+        app.update();
+
+        assert!(!app.world().entity(strip).contains::<RefreshWindowSizes>());
+    }
+
+    fn spawn_orphan(mut commands: Commands) {
+        let timeout = Timeout::new(Duration::from_secs(30), None, &mut commands);
+        commands.spawn((
+            LayoutStrip::new(99, 0),
+            timeout,
+            OrphanReconcileDeadline::default(),
+        ));
+    }
+
+    #[test]
+    fn orphan_reconciliation_runs_cg_query_on_main_thread() {
+        let expected_thread = std::thread::current().id();
+        let mut manager = MockWindowManagerApi::new();
+        manager
+            .expect_present_displays()
+            .times(1)
+            .returning(move || {
+                assert_eq!(std::thread::current().id(), expected_thread);
+                Vec::new()
+            });
+        let mut app = App::new();
+        app.insert_non_send_resource(AxMainThread::for_tests())
+            .insert_resource(WindowManager(Box::new(manager)))
+            .add_systems(Startup, spawn_orphan)
+            .add_systems(Update, find_orphaned_workspaces);
+        app.world_mut()
+            .spawn(Display::new(1, IRect::new(0, 0, 1_000, 800), 0));
+
+        app.update();
     }
 }

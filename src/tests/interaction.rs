@@ -7,7 +7,9 @@ use objc2_core_foundation::CGPoint;
 use crate::commands::{Command, Direction, MoveFocus, Operation};
 use crate::config::{Config, MainOptions, WindowParams};
 use crate::ecs::display::FloatingLayer;
-use crate::ecs::{ActiveWorkspaceMarker, Position, Scrolling, Unmanaged, layout::LayoutStrip};
+use crate::ecs::{
+    ActiveWorkspaceMarker, LayoutPosition, Position, Scrolling, Unmanaged, layout::LayoutStrip,
+};
 use crate::ecs::{RepositionMarker, SpawnWindowTrigger};
 use crate::events::Event;
 use crate::manager::{Origin, Size, Window};
@@ -266,9 +268,26 @@ fn test_scrolling() {
             assert_window_at!(world, 2, 800, TEST_MENUBAR_HEIGHT);
         })
         .on_iteration(5, move |world, _state| {
-            assert_window_at!(world, 0, -315, TEST_MENUBAR_HEIGHT);
-            assert_window_at!(world, 1, 85, TEST_MENUBAR_HEIGHT);
-            assert_window_at!(world, 2, 485, TEST_MENUBAR_HEIGHT);
+            let mut strip_query = world.query_filtered::<
+                (&Position, &Scrolling),
+                (With<ActiveWorkspaceMarker>, With<LayoutStrip>),
+            >();
+            let (strip_position, scrolling) = strip_query
+                .single(world)
+                .expect("one active scrolling strip");
+            let strip_x = strip_position.0.x;
+            assert_eq!(strip_x, -800);
+            assert_eq!(scrolling.position as i32, -800);
+
+            // Assert the durable layout contract rather than transient mock AX
+            // frames: each window keeps its column spacing while the strip's
+            // offset moves the last window to the viewport origin.
+            for (window_id, layout_x, screen_x) in [(0, 0, -800), (1, 400, -400), (2, 800, 0)] {
+                let entity = find_window_entity(window_id, world);
+                let layout_position = world.get::<LayoutPosition>(entity).unwrap().0.x;
+                assert_eq!(layout_position, layout_x);
+                assert_eq!(strip_x + layout_position, screen_x);
+            }
         })
         .run(commands);
 }

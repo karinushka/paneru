@@ -8,7 +8,9 @@ use crate::ecs::state::{
     PaneruState, SavedColumn, SavedDisplay, SavedRect, SavedStrip, SavedWindow, SavedWorkspace,
 };
 use crate::ecs::workspace::PreviousStripPosition;
-use crate::ecs::{SpawnWindowTrigger, Unmanaged};
+use crate::ecs::{
+    ApplicationObserved, Bounds, Position, SpawnWindowTrigger, Unmanaged, WidthRatio,
+};
 use crate::events::Event;
 use crate::manager::{Display, Origin, Size};
 use crate::platform::{ProcessSerialNumber, WorkspaceId};
@@ -76,6 +78,57 @@ fn test_startup_restore_rebuilds_virtual_workspace_layout() {
     assert_eq!(columns.len(), 2);
     assert!(matches!(columns[0], Column::Single(_)));
     assert!(matches!(columns[1], Column::Single(_)));
+    assert_eq!(
+        world
+            .query_filtered::<Entity, With<ApplicationObserved>>()
+            .iter(world)
+            .count(),
+        1,
+        "a background owner matched by startup restore must remain broadly observed"
+    );
+}
+
+#[test]
+fn test_startup_restore_reapplies_non_default_width_and_strip_pan() {
+    let mut window = saved_window(0);
+    window.width_ratio = Some(1.5);
+    window.strip_position_x = Some(-321);
+    let state = PaneruState {
+        version: 2,
+        timestamp: 123_456_789,
+        active_display_id: Some(TEST_DISPLAY_ID),
+        displays: vec![saved_display(TEST_DISPLAY_ID, true)],
+        workspaces: vec![SavedWorkspace {
+            workspace_id: TEST_WORKSPACE_ID,
+            display_id: Some(TEST_DISPLAY_ID),
+            active_virtual_index: Some(0),
+            strips: vec![SavedStrip {
+                virtual_index: 0,
+                columns: vec![SavedColumn::Single(window)],
+            }],
+        }],
+    };
+    let mut harness = TestHarness::new().with_windows(1).with_state(state);
+    for _ in 0..10 {
+        harness.app.update();
+    }
+
+    let world = harness.world();
+    let window_entity = find_window_entity(0, world);
+    let (bounds, ratio) = world
+        .query::<(&Bounds, &WidthRatio)>()
+        .get(world, window_entity)
+        .expect("restored window geometry should exist");
+    assert_eq!(bounds.0.x, (f64::from(TEST_DISPLAY_WIDTH) * 1.5) as i32);
+    assert!((ratio.0 - 1.5).abs() < f64::EPSILON);
+
+    let strip_x = world
+        .query::<(&LayoutStrip, &Position)>()
+        .iter(world)
+        .find(|(strip, _)| strip.contains(window_entity))
+        .map(|(_, position)| position.0.x)
+        .expect("restored strip should contain the window");
+    assert_eq!(strip_x, -321);
 }
 
 #[test]
@@ -423,9 +476,12 @@ fn test_restore_resource_is_removed_after_grace_period() {
             .contains_resource::<crate::ecs::restore::SessionRestore>()
     );
 
-    for _ in 0..30 {
-        harness.app.update();
-    }
+    harness
+        .app
+        .world_mut()
+        .resource_mut::<crate::ecs::restore::SessionRestore>()
+        .expire_now();
+    harness.app.update();
 
     assert!(
         !harness
@@ -714,5 +770,7 @@ fn saved_window(window_id: i32) -> SavedWindow {
         identifier: String::new(),
         role: "AXWindow".to_string(),
         subrole: "AXStandardWindow".to_string(),
+        width_ratio: None,
+        strip_position_x: None,
     }
 }

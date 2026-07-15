@@ -1875,10 +1875,10 @@ mod tests {
         // Remove e2 (follower)
         strip.remove(e2);
         assert_eq!(strip.len(), 1);
-        match strip.get(0).unwrap() {
-            Column::Tabs(tabs) => assert_eq!(tabs, vec![e3, e1]),
-            _ => panic!(),
-        }
+        let Column::Tabs(tabs) = strip.get(0).unwrap() else {
+            panic!();
+        };
+        assert_eq!(tabs, vec![e3, e1]);
 
         // Remove e1 (leader)
         strip.remove(e1);
@@ -1983,10 +1983,10 @@ mod tests {
         }
 
         assert_eq!(strip.len(), 1);
-        match strip.get(0).unwrap() {
-            Column::Tabs(tabs) => assert_eq!(tabs, vec![e2, e1]),
-            _ => panic!(),
-        }
+        let Column::Tabs(tabs) = strip.get(0).unwrap() else {
+            panic!();
+        };
+        assert_eq!(tabs, vec![e2, e1]);
     }
 
     // Mirrors the real `detect_tabbed_windows` flow: spawn_window_trigger

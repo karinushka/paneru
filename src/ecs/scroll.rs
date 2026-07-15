@@ -1,9 +1,10 @@
 use bevy::app::{App, Plugin, Update};
 use bevy::ecs::entity::Entity;
+use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::{With, Without};
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
-use bevy::ecs::system::{Commands, Local, Populated, Res, Single};
+use bevy::ecs::system::{Commands, Local, Populated, Query, Res, Single};
 use bevy::math::IRect;
 use bevy::time::Time;
 use std::time::{Duration, Instant};
@@ -15,11 +16,12 @@ use crate::config::swipe::SwipeGestureDirection;
 use crate::ecs::layout::{Column, LayoutStrip};
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, MissionControlActive, Position, Scrolling, SendMessageTrigger,
+    ActiveWorkspaceMarker, DockPosition, MissionControlActive, Position, Scrolling,
+    SendMessageTrigger,
 };
 use crate::errors::Result;
 use crate::events::Event;
-use crate::manager::{Window, WindowManager};
+use crate::manager::{Display, Window, WindowManager};
 use crate::platform::Modifiers;
 
 pub struct ScrollEventsPlugin;
@@ -36,6 +38,7 @@ impl Plugin for ScrollEventsPlugin {
         app.add_systems(
             Update,
             (
+                cleanup_detached_scrolling,
                 vertical_swipe_gesture.run_if(mission_control_inactive),
                 (
                     swipe_gesture.run_if(mission_control_inactive),
@@ -45,9 +48,22 @@ impl Plugin for ScrollEventsPlugin {
                     apply_scrolling_constraints,
                     swiping_timeout,
                 )
-                    .chain(),
+                    .chain()
+                    .after(crate::ecs::workspace::show_active_workspace),
             ),
         );
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn cleanup_detached_scrolling(
+    detached: Query<Entity, (With<Scrolling>, Without<ChildOf>)>,
+    mut commands: Commands,
+) {
+    for entity in detached {
+        if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            entity_commands.try_remove::<Scrolling>();
+        }
     }
 }
 
@@ -181,35 +197,62 @@ fn swipe_gesture(
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn swiping_timeout(
-    strips: Populated<(Entity, &mut Scrolling), With<LayoutStrip>>,
-    active_display: ActiveDisplay,
+    strips: Populated<(Entity, &mut Scrolling, &ChildOf), With<LayoutStrip>>,
+    displays: Query<(&Display, Option<&DockPosition>)>,
     time: Res<Time>,
+    config: Res<Config>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
     const FINGER_LIFT_THRESHOLD: Duration = Duration::from_millis(50);
-    const MIN_VELOCITY_PX: f64 = 5.0;
     let dt = time.delta_secs_f64();
-    let viewport_width = f64::from(active_display.bounds().width());
 
-    for (entity, mut scroll) in strips {
-        if scroll.last_event.elapsed() > FINGER_LIFT_THRESHOLD {
-            scroll.is_user_swiping = false;
-
-            if scroll.velocity.abs() * dt * viewport_width < MIN_VELOCITY_PX
-                && scroll.target_position.is_none()
-                && !scroll.snap_pending
-                && let Ok(mut entity_commands) = commands.get_entity(entity)
-            {
-                entity_commands.try_remove::<Scrolling>();
-            }
-            if let Some(point) = window_manager.cursor_position() {
-                commands.trigger(SendMessageTrigger(Event::MouseMoved {
-                    point,
-                    modifiers: Modifiers::empty(),
-                }));
-            }
+    for (entity, mut scroll, parent) in strips {
+        let Ok((display, dock)) = displays.get(parent.parent()) else {
+            continue;
+        };
+        let viewport_width = f64::from(display.actual_display_bounds(dock, &config).width());
+        let timed_out = scroll.last_event.elapsed() > FINGER_LIFT_THRESHOLD;
+        let outcome = update_swipe_timeout(&mut scroll, timed_out, dt, viewport_width);
+        if outcome.remove
+            && let Ok(mut entity_commands) = commands.get_entity(entity)
+        {
+            entity_commands.try_remove::<Scrolling>();
         }
+        if outcome.emit_mouse_moved
+            && let Some(point) = window_manager.cursor_position()
+        {
+            commands.trigger(SendMessageTrigger(Event::MouseMoved {
+                point,
+                modifiers: Modifiers::empty(),
+            }));
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SwipeTimeoutOutcome {
+    emit_mouse_moved: bool,
+    remove: bool,
+}
+
+fn update_swipe_timeout(
+    scroll: &mut Scrolling,
+    timed_out: bool,
+    dt: f64,
+    viewport_width: f64,
+) -> SwipeTimeoutOutcome {
+    const MIN_VELOCITY_PX: f64 = 5.0;
+    let emit_mouse_moved = timed_out && scroll.is_user_swiping;
+    if emit_mouse_moved {
+        scroll.is_user_swiping = false;
+    }
+    SwipeTimeoutOutcome {
+        emit_mouse_moved,
+        remove: timed_out
+            && scroll.velocity.abs() * dt * viewport_width < MIN_VELOCITY_PX
+            && scroll.target_position.is_none()
+            && !scroll.snap_pending,
     }
 }
 
@@ -238,65 +281,66 @@ fn apply_inertia(
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
 fn apply_snap_force(
-    mut strip: Single<(&LayoutStrip, &Position, &mut Scrolling)>,
-    active_display: ActiveDisplay,
+    mut strips: Populated<(&LayoutStrip, &Position, &mut Scrolling, &ChildOf)>,
+    displays: Query<(&Display, Option<&DockPosition>)>,
     windows: Windows,
     config: Res<Config>,
 ) {
     const SNAP_DISPLAY_RATIO: f64 = 0.45;
 
-    let (layout_strip, position, ref mut scroll) = *strip;
     let sticky = config.sticky_scroll();
-    if !sticky && !config.auto_center() {
+    for (layout_strip, position, mut scroll, parent) in &mut strips {
+        if !sticky && !config.auto_center() {
+            scroll.snap_pending = false;
+            continue;
+        }
+        let Ok((display, dock)) = displays.get(parent.parent()) else {
+            scroll.snap_pending = false;
+            continue;
+        };
+        let viewport = display.actual_display_bounds(dock, &config);
+        let viewport_center = viewport.center().x;
+        let snap_threshold = SNAP_DISPLAY_RATIO * f64::from(viewport.width());
+
+        if scroll.is_user_swiping || scroll.velocity.abs() > 0.5 || scroll.target_position.is_some()
+        {
+            continue;
+        }
+
+        let target_offset = layout_strip
+            .all_columns()
+            .into_iter()
+            .filter_map(|entity| {
+                windows
+                    .layout_position(entity)
+                    .map(|p| p.0.x)
+                    .zip(Some(entity))
+            })
+            .map(|(position, entity)| {
+                let col_width = windows.moving_frame(entity).map_or(0, |f| f.width());
+                viewport_center - (position + col_width / 2)
+            })
+            .min_by_key(|target| (position.x - target).abs())
+            .unwrap_or(position.x);
+
+        let dist_to_snap = f64::from(position.x - target_offset);
         scroll.snap_pending = false;
-        return;
-    }
-
-    let viewport = active_display.actual_bounds(&config);
-    let viewport_center = viewport.center().x;
-    let snap_threshold = SNAP_DISPLAY_RATIO * f64::from(viewport.width());
-
-    if scroll.is_user_swiping || scroll.velocity.abs() > 0.5 || scroll.target_position.is_some() {
-        return;
-    }
-
-    let target_offset = layout_strip
-        .all_columns()
-        .into_iter()
-        .filter_map(|entity| {
-            windows
-                .layout_position(entity)
-                .map(|p| p.0.x)
-                .zip(Some(entity))
-        })
-        .map(|(position, entity)| {
-            let col_width = windows.moving_frame(entity).map_or(0, |f| f.width());
-            viewport_center - (position + col_width / 2)
-        })
-        .min_by_key(|target| (position.x - target).abs())
-        .unwrap_or(position.x);
-
-    let dist_to_snap = f64::from(position.x - target_offset);
-    scroll.snap_pending = false;
-    if sticky || dist_to_snap.abs() < snap_threshold {
-        // Keep Scrolling alive until the shared target integrator reaches the
-        // anchor. This works for native modifier-scroll and raw gestures.
-        scroll.velocity = 0.0;
-        scroll.target_position = Some(f64::from(target_offset));
+        if sticky || dist_to_snap.abs() < snap_threshold {
+            scroll.velocity = 0.0;
+            scroll.target_position = Some(f64::from(target_offset));
+        }
     }
 }
 
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
 fn scrolling_integrator(
-    mut strip: Single<&mut Scrolling, With<LayoutStrip>>,
+    mut strips: Populated<(&mut Scrolling, &ChildOf), With<LayoutStrip>>,
     time: Res<Time>,
-    active_display: ActiveDisplay,
+    displays: Query<(&Display, Option<&DockPosition>)>,
     config: Res<Config>,
 ) {
     let dt = time.delta_secs_f64();
-    let viewport = active_display.actual_bounds(&config);
-    let viewport_width = f64::from(viewport.width());
 
     // Direction modifier: Natural moves strip left (negative offset) for positive delta (finger left)
     let direction_modifier = match config.swipe_gesture_direction() {
@@ -304,17 +348,29 @@ fn scrolling_integrator(
         SwipeGestureDirection::Reversed => 1.0,
     };
 
-    let scroll = &mut *strip;
+    for (mut scroll, parent) in &mut strips {
+        let viewport_width = displays
+            .get(parent.parent())
+            .map_or(0.0, |(display, dock)| {
+                f64::from(display.actual_display_bounds(dock, &config).width())
+            });
+        integrate_scrolling(&mut scroll, dt, viewport_width, direction_modifier);
+    }
+}
+
+fn integrate_scrolling(
+    scroll: &mut Scrolling,
+    dt: f64,
+    viewport_width: f64,
+    direction_modifier: f64,
+) {
     if let Some(target) = scroll.target_position {
         let (position, settled) = smooth_native_scroll(scroll.position, target, dt);
         scroll.position = position;
         if settled {
             scroll.target_position = None;
         }
-        return;
-    }
-
-    if scroll.velocity.abs() > 0.0001 {
+    } else if scroll.velocity.abs() > 0.0001 {
         scroll.position += scroll.velocity * dt * viewport_width * direction_modifier;
     }
 }
@@ -330,46 +386,67 @@ fn smooth_native_scroll(position: f64, target: f64, dt: f64) -> (f64, bool) {
     }
 }
 
+/// Preserve the integrator's subpixel remainder unless viewport constraints
+/// actually changed the integer position that macOS can apply.
+fn reconcile_integrated_position(
+    integrated_position: f64,
+    effective_position: i32,
+    clamped_position: i32,
+) -> f64 {
+    if effective_position == clamped_position {
+        integrated_position
+    } else {
+        f64::from(clamped_position)
+    }
+}
+
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::TRACE, skip_all)]
 fn apply_scrolling_constraints(
-    mut strip: Single<
-        (&LayoutStrip, &mut Position, &mut Scrolling),
-        (With<ActiveWorkspaceMarker>, Without<Window>),
-    >,
-    active_display: ActiveDisplay,
+    mut strips: Populated<(&LayoutStrip, &mut Position, &mut Scrolling, &ChildOf), Without<Window>>,
+    displays: Query<(&Display, Option<&DockPosition>)>,
     windows: Windows,
     config: Res<Config>,
 ) {
-    let viewport = active_display.actual_bounds(&config);
-    let (strip, ref mut position, ref mut scroll) = *strip;
-
-    let get_window_frame = |entity| windows.moving_frame(entity);
-    if let Some(clamped_offset) = clamp_viewport_offset(
-        scroll.position as i32,
-        strip,
-        &windows,
-        &get_window_frame,
-        &viewport,
-        &config,
-    ) {
-        position.x = clamped_offset;
-        scroll.position = f64::from(clamped_offset);
-        if let Some(target) = scroll.target_position
-            && let Some(clamped_target) = clamp_viewport_offset(
-                target as i32,
-                strip,
-                &windows,
-                &get_window_frame,
-                &viewport,
-                &config,
-            )
-        {
-            scroll.target_position = Some(f64::from(clamped_target));
+    for (strip, mut position, mut scroll, parent) in &mut strips {
+        let Ok((display, dock)) = displays.get(parent.parent()) else {
+            continue;
+        };
+        let viewport = display.actual_display_bounds(dock, &config);
+        let get_window_frame = |entity| windows.moving_frame(entity);
+        let effective_offset = scroll.position as i32;
+        if let Some(clamped_offset) = clamp_viewport_offset(
+            effective_offset,
+            strip,
+            &windows,
+            &get_window_frame,
+            &viewport,
+            &config,
+        ) {
+            position.x = clamped_offset;
+            scroll.position =
+                reconcile_integrated_position(scroll.position, effective_offset, clamped_offset);
+            if let Some(target) = scroll.target_position
+                && let effective_target = target as i32
+                && let Some(clamped_target) = clamp_viewport_offset(
+                    effective_target,
+                    strip,
+                    &windows,
+                    &get_window_frame,
+                    &viewport,
+                    &config,
+                )
+            {
+                scroll.target_position = Some(reconcile_integrated_position(
+                    target,
+                    effective_target,
+                    clamped_target,
+                ));
+            }
+        } else {
+            scroll.velocity = 0.0;
+            scroll.target_position = None;
         }
-    } else {
-        scroll.velocity = 0.0;
-        scroll.target_position = None;
     }
 }
 
@@ -507,7 +584,20 @@ fn switch_virtual_workspace(delta: f64, config: &Config, commands: &mut Commands
 
 #[cfg(test)]
 mod tests {
-    use super::smooth_native_scroll;
+    use std::time::{Duration, Instant};
+
+    use bevy::ecs::query::With;
+    use bevy::prelude::{App, Entity, Update};
+    use bevy::time::TimeUpdateStrategy;
+
+    use super::{
+        ChildOf, Scrolling, cleanup_detached_scrolling, integrate_scrolling,
+        reconcile_integrated_position, smooth_native_scroll, update_swipe_timeout,
+    };
+    use crate::commands::Command;
+    use crate::ecs::{ActiveWorkspaceMarker, Position};
+    use crate::events::Event;
+    use crate::tests::TestHarness;
 
     #[test]
     fn native_scroll_smoothing_converges_without_overshoot() {
@@ -527,5 +617,115 @@ mod tests {
 
         assert!((position - 100.0).abs() < f64::EPSILON);
         assert!(settled);
+    }
+
+    #[test]
+    fn detached_strip_cancels_scrolling_on_next_ecs_update() {
+        let mut app = App::new();
+        app.add_systems(Update, cleanup_detached_scrolling);
+        let parent = app.world_mut().spawn_empty().id();
+        let strip = app
+            .world_mut()
+            .spawn((Scrolling::default(), ChildOf(parent)))
+            .id();
+        app.world_mut().entity_mut(strip).remove::<ChildOf>();
+
+        app.update();
+
+        assert!(!app.world().entity(strip).contains::<Scrolling>());
+    }
+
+    #[test]
+    fn two_scrolling_strips_integrate_independently() {
+        let now = Instant::now();
+        let mut first = Scrolling {
+            velocity: 1.0,
+            position: 10.0,
+            last_event: now,
+            ..Scrolling::default()
+        };
+        let mut second = Scrolling {
+            velocity: -2.0,
+            position: -30.0,
+            last_event: now,
+            ..Scrolling::default()
+        };
+        integrate_scrolling(&mut first, 0.1, 1000.0, 1.0);
+        integrate_scrolling(&mut second, 0.1, 500.0, 1.0);
+        assert!((first.position - 110.0).abs() < f64::EPSILON);
+        assert!((second.position + 130.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn timeout_uses_each_parent_display_width_and_emits_lift_once() {
+        let now = Instant::now();
+        let mut narrow = Scrolling {
+            velocity: 1.0,
+            is_user_swiping: true,
+            last_event: now,
+            ..Scrolling::default()
+        };
+        let mut wide = Scrolling {
+            velocity: 1.0,
+            is_user_swiping: true,
+            last_event: now,
+            ..Scrolling::default()
+        };
+        let narrow_result = update_swipe_timeout(&mut narrow, true, 0.016, 100.0);
+        let wide_result = update_swipe_timeout(&mut wide, true, 0.016, 1000.0);
+        assert!(narrow_result.remove);
+        assert!(!wide_result.remove);
+        assert!(narrow_result.emit_mouse_moved);
+        assert!(wide_result.emit_mouse_moved);
+        assert!(
+            !update_swipe_timeout(&mut narrow, true, 0.016, 100.0).emit_mouse_moved,
+            "synthetic mouse move is emitted only on the swiping transition"
+        );
+    }
+
+    #[test]
+    fn clamp_reconciliation_preserves_remainder_only_inside_boundary() {
+        assert!((reconcile_integrated_position(-0.75, 0, 0) + 0.75).abs() < f64::EPSILON);
+        assert!((reconcile_integrated_position(2.25, 2, 1) - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn scrolling_component_is_removed_after_integer_effective_dead_zone() {
+        let commands = vec![
+            Event::MenuOpened { window_id: 0 },
+            Event::Command {
+                command: Command::PrintState,
+            },
+        ];
+
+        TestHarness::new()
+            .with_windows(3)
+            .on_iteration(0, |world, _state| {
+                world.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+                    16,
+                )));
+                let entity = {
+                    let mut query = world.query_filtered::<Entity, With<ActiveWorkspaceMarker>>();
+                    query.single(world).expect("one active workspace")
+                };
+                world.entity_mut(entity).insert(Scrolling {
+                    velocity: 0.0,
+                    position: 0.0,
+                    target_position: Some(-1.0),
+                    snap_pending: false,
+                    is_user_swiping: false,
+                    last_event: Instant::now()
+                        .checked_sub(Duration::from_millis(100))
+                        .expect("100ms must fit before now"),
+                });
+            })
+            .on_iteration(1, |world, _state| {
+                let mut query = world.query_filtered::<&Scrolling, With<ActiveWorkspaceMarker>>();
+                assert!(query.single(world).is_err());
+                let mut positions =
+                    world.query_filtered::<&Position, With<ActiveWorkspaceMarker>>();
+                assert_eq!(positions.single(world).expect("one active workspace").x, -1);
+            })
+            .run(commands);
     }
 }

@@ -18,7 +18,7 @@ Bevy is typically used for games, so Paneru implements a custom bridge to intera
 ### Event Ingestion (macOS -> ECS)
 1.  **Platform Layer:** `src/platform/` uses `objc2` and AppKit to interface with macOS. It runs a native event loop or hooks into OS notifications.
 2.  **Event Channel:** macOS events (mouse moves, window creations, space changes) are sent via a thread-safe `mpsc` channel.
-3.  **Pump System:** The `pump_events` system (in `src/ecs/systems.rs`) reads from this channel during the `PreUpdate` phase and writes Bevy `Message`s or triggers `Observer`s.
+3.  **Pump System:** The `pump_events` system (in `src/ecs/runtime.rs`) drains the channel before sleeping, then waits on a latched `CFRunLoopSource` until a native event or the nearest pending-work deadline. Producers signal that source after publishing, so queue-before-sleep races do not require a free-running idle tick.
 4.  **Observers:** Bevy Observers (primarily in `src/ecs/triggers.rs`, with focused domains such as session restore in `src/ecs/restore.rs`) react to these events to update the ECS World (e.g., spawning new `Window` entities or updating `FocusedMarker`).
 
 ### State Synchronization (ECS -> macOS)
@@ -33,10 +33,13 @@ Bevy is typically used for games, so Paneru implements a custom bridge to intera
 | Directory / Module | Responsibility Statement |
 | :--- | :--- |
 | `src/ecs/layout.rs` | Tiling algorithms, column management, and coordinate calculations. |
-| `src/ecs/systems.rs` | Bevy systems for lifecycle management, event pumping, and state syncing. |
+| `src/ecs/systems.rs` | Bevy systems for lifecycle management and state syncing. |
 | `src/ecs/params.rs` | High-level Bevy `SystemParam` abstractions for querying the World. |
 | `src/ecs/triggers.rs` | Reactive event handlers (Observers) for OS and internal events. |
 | `src/ecs/restore.rs` | Startup session restore planning and application, including window matching, layout rebuilding, and restore grace-period handling. |
+| `src/ecs/persistence.rs` | Dirty-domain tracking, trailing-debounced durable saves, shutdown flush, and bounded retry after save failures. |
+| `src/ecs/runtime.rs` | Event-loop pumping and deadline selection; it sleeps indefinitely only when neither frame work nor deferred jobs are pending. |
+| `src/ecs/observation.rs` | Main-thread AX application/window observer ownership and lifecycle reconciliation. |
 | `src/ecs/workspace.rs` | Management of virtual workspaces, display changes, and window movement between spaces. |
 | `src/ecs/scroll.rs` | Input handling for trackpad swipe gestures, inertia, and snapping. |
 | `src/ecs/focus.rs` | Focus management logic, including focus-follows-mouse and mouse-follows-focus. |
@@ -72,18 +75,20 @@ Bevy is typically used for games, so Paneru implements a custom bridge to intera
 
 ## 5. Architectural Invariants
 
-- **Main Thread Only:** Any interaction with `objc2`, `AppKit`, or `Accessibility` APIs **must** occur on the main thread.
+- **Main Thread Only:** Any interaction with `objc2`, `AppKit`, or `Accessibility` APIs **must** occur on the main thread. AX lifecycle systems require the non-send `AxMainThread` capability created from AppKit's `MainThreadMarker`.
 - **ECS as Source of Truth:** Tiling logic must operate on ECS components (`WidthRatio`, `LayoutStrip`). The physical macOS window state should be a reflection of the ECS state, not the other way around.
 - **Pure Layout:** Layout math (in `layout.rs`) should remain as pure as possible, operating on coordinates and ratios rather than directly calling OS APIs.
 - **Bounded Restore:** Saved session state is only consulted during startup restore. After `SessionRestore` expires, normal config and window-rule placement owns newly discovered windows.
-- **Reactive Power Saving:** Systems should use Bevy's reactive scheduling to avoid CPU usage when no windows are moving or events are occurring.
+- **Reactive Power Saving:** With no pending work, runtime waits indefinitely on a latched native source. Animation uses frame cadence; lifecycle polling, workspace refresh/recovery, persistence, restore, verification, retry, timeout, and updater jobs contribute monotonic nearest deadlines only while needed.
 
 ## 6. Session Restore
 
 `src/ecs/state.rs` extracts and persists the restart snapshot. The state file is
-written atomically to `paneru/state.json` in the XDG state directory
+written durably and atomically to `paneru/state.json` in the XDG state directory
 (`~/.local/state/paneru/state.json` on a default macOS setup) and is loaded
-during Bevy app setup.
+only after startup configuration confirms restore is enabled. Persisted-domain
+changes reset a 250 ms trailing debounce; failed writes remain dirty and retry
+with bounded backoff. Disabling restore performs no state-file read or write.
 
 `src/ecs/restore.rs` owns startup restore. It keeps the loaded `PaneruState`
 alive in `SessionRestore` for the configured grace period so applications have
@@ -98,7 +103,8 @@ are ignored by default, and the restored layout is compacted around the matched
 windows.
 
 Restore rebuilds `LayoutStrip`s, virtual workspace rows, selected virtual
-workspace markers, and display associations. When the current macOS workspace
+workspace markers, display associations, saved oversized `WidthRatio`s, and
+the horizontal pan position of each restored strip. When the current macOS workspace
 to display mapping conflicts with saved display data, the current mapping is
 preferred; otherwise restore falls back to the saved display, then the active
 display, then any available display. Matched startup windows skip static
@@ -120,7 +126,7 @@ graph TD
     H[CommandReader] -->|Unix Socket| C
     S[PaneruState file] -->|Startup load| R(session restore)
     R -->|Rebuild saved strips| E
-    E -->|Periodic / exit save| S
+    E -->|Dirty debounce / exit flush| S
 ```
 
 ## 8. Testing Strategy

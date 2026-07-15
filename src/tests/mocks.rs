@@ -536,8 +536,10 @@ impl MockState {
         });
 
         ma.expect_observe().returning(|| Ok(true));
+        ma.expect_unobserve().return_const(true);
         ma.expect_observe_window().returning(|_| Ok(true));
-        ma.expect_unobserve_window().return_const(());
+        ma.expect_unobserve_window().return_const(true);
+        ma.expect_retry_observer_removals().return_const(true);
         ma.expect_window_list().returning(|_| Vec::new());
 
         Application::new(Box::new(ma))

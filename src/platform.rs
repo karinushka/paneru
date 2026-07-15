@@ -1,25 +1,28 @@
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use accessibility_sys::{AXError, AXObserverRef, AXUIElementRef};
 use objc2::MainThreadMarker;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSEventMask};
-use objc2_core_foundation::CFString;
+use objc2_core_foundation::{CFRunLoop, CFString, kCFRunLoopDefaultMode};
 use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSProcessInfo};
 use std::ffi::c_void;
+use std::marker::PhantomData;
 use std::pin::Pin;
+use std::rc::Rc;
 use tracing::error;
 
 use crate::config::{CONFIGURATION_FILE, Config};
 use crate::errors::{Error, Result};
-use crate::events::{Event, EventSender};
+use crate::events::{Event, EventSender, EventWakeSource};
 use crate::manager::{check_ax_privilege, check_separate_spaces};
 use crate::platform::display::PinnedDisplayHandler;
 use crate::platform::input::PinnedInputHandler;
 use crate::platform::notify::{NotifyHandler, PinnedNotifyHandler};
 use crate::platform::process::PinnedProcessHandler;
 use display::DisplayHandler;
-use input::InputHandler;
+use input::{InputHandler, RunningInputMask};
 use mission_control::MissionControlHandler;
 use process::ProcessHandler;
 pub use process::ProcessSerialNumber;
@@ -45,6 +48,22 @@ pub type Pid = i32;
 pub type CFStringRef = *const CFString;
 
 pub type WorkspaceId = u64;
+
+/// Capability proving that a Bevy system is executing in the AppKit/AX owner
+/// world. It is deliberately `!Send`/`!Sync` and can only be constructed from
+/// a `MainThreadMarker` in production.
+pub struct AxMainThread(PhantomData<Rc<()>>);
+
+impl AxMainThread {
+    pub(crate) fn new(_: MainThreadMarker) -> Self {
+        Self(PhantomData)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_tests() -> Self {
+        Self(PhantomData)
+    }
+}
 
 bitflags::bitflags! {
     #[derive(Clone, Copy, Debug, PartialEq)]
@@ -141,10 +160,12 @@ pub struct PlatformCallbacks {
     cocoa_app: Retained<NSApplication>,
     /// The main `EventSender` for dispatching events across the application.
     events: EventSender,
+    _event_wake: EventWakeSource,
     /// Handler for Carbon process events.
     process_handler: Option<PinnedProcessHandler>,
     /// Handler for low-level input events (keyboard, mouse, gestures).
     event_handler: Option<PinnedInputHandler>,
+    input_mask: Option<RunningInputMask>,
     /// Observer for `NSWorkspace` and distributed notifications.
     workspace_observer: Retained<WorkspaceObserver>,
     /// Handler for Mission Control accessibility events.
@@ -178,16 +199,21 @@ impl PlatformCallbacks {
         NSApplication::load();
 
         let workspace_observer = WorkspaceObserver::new(events.clone());
+        let event_wake = events
+            .install_main_run_loop_source()
+            .expect("main CFRunLoop source should be available");
         Box::pin(PlatformCallbacks {
             main_thread_marker,
             cocoa_app,
             process_handler: None,
             event_handler: None,
+            input_mask: None,
             workspace_observer,
             mission_control_observer: MissionControlHandler::new(events.clone()),
             display_handler: None,
             notify_handler: None,
             events,
+            _event_wake: event_wake,
         })
     }
 
@@ -220,6 +246,7 @@ impl PlatformCallbacks {
 
         let config = Config::new(CONFIGURATION_FILE.as_path())?;
         self.events.send(Event::InitialConfig(config.clone()))?;
+        self.input_mask = Some(RunningInputMask::new(&config));
         self.event_handler = Some(InputHandler::new(self.events.clone(), config).start()?);
 
         self.notify_handler = Some(NotifyHandler::new(self.events.clone()).start()?);
@@ -233,17 +260,47 @@ impl PlatformCallbacks {
         self.events.send(Event::ProcessesLoaded)
     }
 
-    pub fn pump_cocoa_event_loop(&mut self, timeout: f64) {
-        autoreleasepool(|_| {
-            let until_date = NSDate::dateWithTimeIntervalSinceNow(timeout);
+    /// Rebuilds the event tap after a successful config reload. The new tap is
+    /// created before replacing the old guard, so a creation failure preserves
+    /// the currently running handler and all existing hotkeys.
+    pub fn reconfigure_input_handler(&mut self, config: &Config) -> Result<bool> {
+        let transition = self
+            .input_mask
+            .unwrap_or_else(|| RunningInputMask::new(config))
+            .transition(config);
+        let replacement = InputHandler::new(self.events.clone(), config.clone()).start()?;
+        self.event_handler = Some(replacement);
+        let mask = self
+            .input_mask
+            .get_or_insert_with(|| RunningInputMask::new(config));
+        mask.commit(transition);
+        Ok(transition.changed())
+    }
 
-            // nextEventMatchingMask:untilDate:inMode:dequeue:
-            // This is the core of the Cocoa event loop.
+    pub fn pump_cocoa_event_loop(&mut self, timeout: Option<Duration>) {
+        autoreleasepool(|_| {
+            // Drain already queued AppKit events before sleeping. Channel
+            // events are drained by ECS first; their custom run-loop source is
+            // latched, so a signal between that drain and `run_in_mode` cannot
+            // be lost.
+            self.dispatch_pending_cocoa_events();
+            let seconds = timeout.map_or(f64::MAX, |duration| duration.as_secs_f64());
+            CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, seconds, true);
+            self.dispatch_pending_cocoa_events();
+
+            // Housekeeping for UI/Notifications
+            self.cocoa_app.updateWindows();
+        });
+    }
+
+    fn dispatch_pending_cocoa_events(&self) {
+        let poll_date = NSDate::distantPast();
+        autoreleasepool(|_| {
             while let Some(event) = unsafe {
                 self.cocoa_app
                     .nextEventMatchingMask_untilDate_inMode_dequeue(
                         NSEventMask::Any,
-                        Some(&until_date),
+                        Some(&poll_date),
                         NSDefaultRunLoopMode,
                         true, // Dequeue so we can handle it
                     )
@@ -251,9 +308,6 @@ impl PlatformCallbacks {
                 // Dispatch the event to the system
                 self.cocoa_app.sendEvent(&event);
             }
-
-            // Housekeeping for UI/Notifications
-            self.cocoa_app.updateWindows();
         });
     }
 }

@@ -6,7 +6,7 @@ use objc2_core_foundation::CGPoint;
 use crate::commands::{Command, Direction, MoveFocus, Operation};
 use crate::config::{Config, MainOptions, WindowParams};
 use crate::ecs::display::FloatingLayer;
-use crate::ecs::{ActiveWorkspaceMarker, Position, Unmanaged, layout::LayoutStrip};
+use crate::ecs::{ActiveWorkspaceMarker, Position, Scrolling, Unmanaged, layout::LayoutStrip};
 use crate::ecs::{RepositionMarker, SpawnWindowTrigger};
 use crate::events::Event;
 use crate::manager::{Origin, Size, Window};
@@ -31,6 +31,27 @@ fn frontmost_floating_window_is_focused_after_setup() {
             assert!(world.entity(entity).contains::<Unmanaged>());
         })
         .run(vec![Event::MenuOpened { window_id: 0 }]);
+}
+
+#[test]
+fn modifier_scroll_uses_native_momentum_without_synthetic_velocity() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::SetWidth(2.0)),
+        },
+        Event::Scroll { delta: 1.0 },
+    ];
+
+    TestHarness::new()
+        .with_windows(1)
+        .on_iteration(2, |world, _state| {
+            let mut query = world.query_filtered::<&Scrolling, With<ActiveWorkspaceMarker>>();
+            let scrolling = query.single(world).expect("active workspace is scrolling");
+            assert_eq!(scrolling.velocity, 0.0);
+            assert!(scrolling.is_user_swiping);
+        })
+        .run(commands);
 }
 
 #[test]

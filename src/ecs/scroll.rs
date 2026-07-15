@@ -26,6 +26,7 @@ pub struct ScrollEventsPlugin;
 
 const NATIVE_SCROLL_RESPONSE_SECONDS: f64 = 0.04;
 const NATIVE_SCROLL_SETTLE_PX: f64 = 0.25;
+const STICKY_EDGE_GAP_PX: i32 = 12;
 
 impl Plugin for ScrollEventsPlugin {
     fn build(&self, app: &mut App) {
@@ -253,28 +254,43 @@ fn apply_snap_force(
     }
 
     let viewport = active_display.actual_bounds(&config);
-    let viewport_center = viewport.center().x;
     let snap_threshold = SNAP_DISPLAY_RATIO * f64::from(viewport.width());
 
     if scroll.is_user_swiping || scroll.velocity.abs() > 0.5 || scroll.target_position.is_some() {
         return;
     }
 
-    let target_offset = layout_strip
-        .all_columns()
-        .into_iter()
-        .filter_map(|entity| {
-            windows
-                .layout_position(entity)
-                .map(|p| p.0.x)
-                .zip(Some(entity))
-        })
-        .map(|(position, entity)| {
-            let col_width = windows.moving_frame(entity).map_or(0, |f| f.width());
-            viewport_center - (position + col_width / 2)
-        })
-        .min_by_key(|target| (position.x - target).abs())
-        .unwrap_or(position.x);
+    let get_window_frame = |entity| windows.moving_frame(entity);
+    let target_offset = if sticky {
+        sticky_edge_snap_target(
+            position.x,
+            &viewport,
+            layout_strip.columns().filter_map(|column| {
+                let entity = column.top()?;
+                let column_position = windows.layout_position(entity)?.0.x;
+                let column_width = column.width(&get_window_frame)?;
+                Some((column_position, column_width))
+            }),
+        )
+        .unwrap_or(position.x)
+    } else {
+        let viewport_center = viewport.center().x;
+        layout_strip
+            .all_columns()
+            .into_iter()
+            .filter_map(|entity| {
+                windows
+                    .layout_position(entity)
+                    .map(|p| p.0.x)
+                    .zip(Some(entity))
+            })
+            .map(|(column_position, entity)| {
+                let column_width = windows.moving_frame(entity).map_or(0, |f| f.width());
+                viewport_center - (column_position + column_width / 2)
+            })
+            .min_by_key(|target| (position.x - target).abs())
+            .unwrap_or(position.x)
+    };
 
     let dist_to_snap = f64::from(position.x - target_offset);
     scroll.snap_pending = false;
@@ -284,6 +300,26 @@ fn apply_snap_force(
         scroll.velocity = 0.0;
         scroll.target_position = Some(f64::from(target_offset));
     }
+}
+
+fn sticky_edge_snap_target(
+    current_offset: i32,
+    viewport: &IRect,
+    columns: impl IntoIterator<Item = (i32, i32)>,
+) -> Option<i32> {
+    let edge_gap = STICKY_EDGE_GAP_PX.min(viewport.width().saturating_sub(1) / 2);
+    let left_anchor = viewport.min.x + edge_gap;
+    let right_anchor = viewport.max.x - edge_gap;
+
+    columns
+        .into_iter()
+        .flat_map(|(column_position, column_width)| {
+            [
+                left_anchor - column_position,
+                right_anchor - (column_position + column_width),
+            ]
+        })
+        .min_by_key(|target| (i64::from(current_offset) - i64::from(*target)).abs())
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -330,6 +366,20 @@ fn smooth_native_scroll(position: f64, target: f64, dt: f64) -> (f64, bool) {
     }
 }
 
+/// Preserve the integrator's subpixel remainder unless viewport constraints
+/// actually changed the integer position that macOS can apply.
+fn reconcile_integrated_position(
+    integrated_position: f64,
+    effective_position: i32,
+    clamped_position: i32,
+) -> f64 {
+    if effective_position == clamped_position {
+        integrated_position
+    } else {
+        f64::from(clamped_position)
+    }
+}
+
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::TRACE, skip_all)]
 fn apply_scrolling_constraints(
@@ -345,8 +395,9 @@ fn apply_scrolling_constraints(
     let (strip, ref mut position, ref mut scroll) = *strip;
 
     let get_window_frame = |entity| windows.moving_frame(entity);
+    let effective_offset = scroll.position as i32;
     if let Some(clamped_offset) = clamp_viewport_offset(
-        scroll.position as i32,
+        effective_offset,
         strip,
         &windows,
         &get_window_frame,
@@ -354,10 +405,12 @@ fn apply_scrolling_constraints(
         &config,
     ) {
         position.x = clamped_offset;
-        scroll.position = f64::from(clamped_offset);
+        scroll.position =
+            reconcile_integrated_position(scroll.position, effective_offset, clamped_offset);
         if let Some(target) = scroll.target_position
+            && let effective_target = target as i32
             && let Some(clamped_target) = clamp_viewport_offset(
-                target as i32,
+                effective_target,
                 strip,
                 &windows,
                 &get_window_frame,
@@ -365,7 +418,11 @@ fn apply_scrolling_constraints(
                 &config,
             )
         {
-            scroll.target_position = Some(f64::from(clamped_target));
+            scroll.target_position = Some(reconcile_integrated_position(
+                target,
+                effective_target,
+                clamped_target,
+            ));
         }
     } else {
         scroll.velocity = 0.0;
@@ -413,21 +470,33 @@ where
     let left_snap = strip_position(layout_strip.last());
     let right_snap = strip_position(layout_strip.get(1));
 
-    Some(
-        if continuous_swipe
-            && !has_oversized_column
-            && let Some((left_snap, right_snap)) = left_snap.zip(right_snap)
-        {
-            // Allow to scroll away until the last or first window snaps.
-            current_offset.clamp(viewport.min.x - left_snap, viewport.max.x - right_snap)
-        } else if viewport.width() < total_strip_width {
-            // Snap the strip directly to the edges.
-            current_offset.clamp(viewport.max.x - total_strip_width, viewport.min.x)
-        } else {
-            // Snap the strip directly to the edges.
-            current_offset.clamp(viewport.min.x, viewport.max.x - total_strip_width)
-        },
-    )
+    let edge_gap = if config.sticky_scroll() {
+        STICKY_EDGE_GAP_PX.min(viewport.width().saturating_sub(1) / 2)
+    } else {
+        0
+    };
+
+    let (first_edge, last_edge) = if continuous_swipe
+        && !has_oversized_column
+        && let Some((left_snap, right_snap)) = left_snap.zip(right_snap)
+    {
+        // Allow to scroll away until the last or first window reaches the
+        // viewport edge, preserving the sticky outer gap.
+        (
+            viewport.min.x + edge_gap - left_snap,
+            viewport.max.x - edge_gap - right_snap,
+        )
+    } else {
+        // Pan between the leading and trailing strip edges. The min/max form
+        // also handles strips narrower than the viewport without an inverted
+        // clamp range.
+        (
+            viewport.min.x + edge_gap,
+            viewport.max.x - edge_gap - total_strip_width,
+        )
+    };
+
+    Some(current_offset.clamp(first_edge.min(last_edge), first_edge.max(last_edge)))
 }
 
 #[derive(Default)]
@@ -507,7 +576,19 @@ fn switch_virtual_workspace(delta: f64, config: &Config, commands: &mut Commands
 
 #[cfg(test)]
 mod tests {
-    use super::smooth_native_scroll;
+    use std::time::{Duration, Instant};
+
+    use bevy::ecs::query::With;
+    use bevy::prelude::Entity;
+    use bevy::time::TimeUpdateStrategy;
+
+    use bevy::math::IRect;
+
+    use super::{Scrolling, smooth_native_scroll, sticky_edge_snap_target};
+    use crate::commands::Command;
+    use crate::ecs::{ActiveWorkspaceMarker, Position};
+    use crate::events::Event;
+    use crate::tests::TestHarness;
 
     #[test]
     fn native_scroll_smoothing_converges_without_overshoot() {
@@ -527,5 +608,84 @@ mod tests {
 
         assert!((position - 100.0).abs() < f64::EPSILON);
         assert!(settled);
+    }
+
+    #[test]
+    fn sticky_scroll_snaps_column_edges_instead_of_centers() {
+        let viewport = IRect::new(0, 0, 1000, 800);
+        let columns = [(0, 600), (600, 600)];
+
+        assert_eq!(
+            sticky_edge_snap_target(-520, &viewport, columns),
+            Some(-588),
+            "the next column's left edge should land 12px from the viewport edge"
+        );
+        assert_eq!(
+            sticky_edge_snap_target(-260, &viewport, columns),
+            Some(-212),
+            "the current column's right edge should land 12px from the viewport edge"
+        );
+    }
+
+    #[test]
+    fn sticky_scroll_exposes_both_edges_of_an_oversized_column() {
+        let viewport = IRect::new(0, 0, 1000, 800);
+        let oversized_column = [(0, 1500)];
+
+        assert_eq!(
+            sticky_edge_snap_target(-100, &viewport, oversized_column),
+            Some(12)
+        );
+        assert_eq!(
+            sticky_edge_snap_target(-450, &viewport, oversized_column),
+            Some(-512)
+        );
+    }
+
+    #[test]
+    fn scrolling_component_is_removed_after_integer_effective_dead_zone() {
+        let commands = vec![
+            Event::MenuOpened { window_id: 0 },
+            Event::Command {
+                command: Command::PrintState,
+            },
+        ];
+
+        TestHarness::new()
+            .with_windows(3)
+            .on_iteration(0, |world, _state| {
+                world.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+                    16,
+                )));
+                let entity = {
+                    let mut query = world.query_filtered::<Entity, With<ActiveWorkspaceMarker>>();
+                    query.single(world).expect("one active workspace")
+                };
+                world.entity_mut(entity).insert(Scrolling {
+                    velocity: 0.0,
+                    position: 0.0,
+                    target_position: Some(-1.0),
+                    snap_pending: false,
+                    is_user_swiping: false,
+                    last_event: Instant::now()
+                        .checked_sub(Duration::from_millis(100))
+                        .expect("100ms must fit before the current instant"),
+                });
+            })
+            .on_iteration(1, |world, _state| {
+                let mut query = world.query_filtered::<&Scrolling, With<ActiveWorkspaceMarker>>();
+                assert!(
+                    query.single(world).is_err(),
+                    "settled integer-effective motion must remove Scrolling"
+                );
+                let mut positions =
+                    world.query_filtered::<&Position, With<ActiveWorkspaceMarker>>();
+                assert_eq!(
+                    positions.single(world).expect("one active workspace").x,
+                    -1,
+                    "the final effective pixel must be applied before settlement"
+                );
+            })
+            .run(commands);
     }
 }

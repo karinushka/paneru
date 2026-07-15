@@ -58,7 +58,8 @@ Configure trackpad gestures and scroll-wheel window sliding.
 | :--- | :--- | :--- | :--- |
 | `sensitivity` | Float (0.1–2.0) | `0.35` | Multiplier for swipe distance. |
 | `deceleration` | Float (1.0–10.0) | `4.0` | Rate at which inertia slows down after a swipe. |
-| `continuous` | Boolean | `true` | If enabled, the swipe gesture moves windows smoothly with the fingers. If disabled, it snaps to windows as you swipe. |
+| `continuous` | Boolean | `true` | Controls strip edge limits while scrolling; disable to clamp strictly to the full content bounds. |
+| `sticky` | Boolean | `false` | After scrolling ends, smoothly snap the nearest column to the center of the viewport. |
 
 ### `[swipe.gesture]`
 | Option | Type | Default | Description |
@@ -134,6 +135,7 @@ Format: `"[modifiers-]key"`. Available modifiers are:
 | `window_swap_first` / `_last` | Move current window to start/end of strip. |
 | `window_center` | Center the current window in the viewport. |
 | `window_resize` | Cycle through preset widths (Grow). |
+| `window_width_<percent>` | Set an exact display-width percentage, e.g. `window_width_150`. |
 | `window_grow` | Alias for `window_resize`. |
 | `window_shrink` | Cycle through preset widths (Shrink). |
 | `window_fullwidth` | Toggle full-width mode. |

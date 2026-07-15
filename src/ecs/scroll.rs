@@ -24,6 +24,9 @@ use crate::platform::Modifiers;
 
 pub struct ScrollEventsPlugin;
 
+const NATIVE_SCROLL_RESPONSE_SECONDS: f64 = 0.04;
+const NATIVE_SCROLL_SETTLE_PX: f64 = 0.25;
+
 impl Plugin for ScrollEventsPlugin {
     fn build(&self, app: &mut App) {
         let mission_control_inactive = |mission_control: Option<Res<MissionControlActive>>| {
@@ -62,7 +65,8 @@ fn swipe_gesture(
     mut commands: Commands,
 ) {
     let swipe_sensitivity = config.swipe_sensitivity();
-    let mut total_delta = 0.0;
+    let snap_enabled = config.sticky_scroll() || config.auto_center();
+    let mut scroll_delta = 0.0;
     let mut gesture_delta = 0.0;
     let mut touchpad_down = false;
     let mut has_scroll_event = false;
@@ -81,10 +85,9 @@ fn swipe_gesture(
         match event {
             Event::TouchpadDown => {
                 touchpad_down = true;
-                total_delta = 0.0;
             }
             Event::Scroll { delta } => {
-                total_delta += *delta * scroll_scale;
+                scroll_delta += *delta * scroll_scale;
                 has_scroll_event = true;
             }
             Event::Swipe { delta, fingers }
@@ -92,8 +95,7 @@ fn swipe_gesture(
                     .swipe_gesture_fingers()
                     .is_some_and(|fingers_configured| fingers_configured == *fingers) =>
             {
-                total_delta += delta;
-                gesture_delta += delta;
+                gesture_delta += *delta;
                 has_scroll_event = true;
                 has_gesture_event = true;
             }
@@ -109,6 +111,8 @@ fn swipe_gesture(
 
     if touchpad_down && let Some(scrolling) = scrolling.as_mut() {
         scrolling.velocity = 0.0;
+        scrolling.target_position = None;
+        scrolling.snap_pending = snap_enabled;
         scrolling.is_user_swiping = true;
         scrolling.last_event = Instant::now();
     }
@@ -126,8 +130,13 @@ fn swipe_gesture(
         } else {
             0.0
         };
+        let gesture_distance =
+            gesture_delta * viewport_width * direction_modifier * swipe_sensitivity;
+        let scroll_distance =
+            scroll_delta * viewport_width * direction_modifier * swipe_sensitivity;
 
         if let Some(scrolling) = scrolling.as_mut() {
+            let was_user_swiping = scrolling.is_user_swiping;
             // Native modifier-scroll events already include macOS momentum.
             // Add synthetic inertia only for raw multi-finger gestures.
             scrolling.velocity = if has_gesture_event {
@@ -137,15 +146,32 @@ fn swipe_gesture(
                 0.0
             };
             scrolling.is_user_swiping = true;
+            scrolling.snap_pending = snap_enabled;
             scrolling.last_event = Instant::now();
-            scrolling.position +=
-                total_delta * viewport_width * direction_modifier * swipe_sensitivity;
+
+            if has_gesture_event {
+                scrolling.target_position = None;
+                scrolling.position += gesture_distance;
+            }
+
+            if scroll_delta != 0.0 {
+                // A new physical gesture interrupts an in-flight sticky snap.
+                // Native momentum events keep extending the same target.
+                if !was_user_swiping {
+                    scrolling.target_position = None;
+                }
+                let target = scrolling.target_position.unwrap_or(scrolling.position);
+                scrolling.target_position = Some(target + scroll_distance);
+            }
         } else if let Ok(mut entity_commands) = commands.get_entity(*entity) {
+            let initial_position = f64::from(position.0.x) + gesture_distance;
             entity_commands.try_insert(Scrolling {
                 velocity: new_velocity,
-                position: f64::from(position.0.x)
-                    + total_delta * viewport_width * direction_modifier * swipe_sensitivity,
-                is_user_swiping: true,
+                position: initial_position,
+                target_position: (scroll_delta != 0.0)
+                    .then_some(initial_position + scroll_distance),
+                snap_pending: snap_enabled,
+                is_user_swiping: touchpad_down || has_scroll_event,
                 last_event: Instant::now(),
             });
         }
@@ -171,6 +197,8 @@ pub(super) fn swiping_timeout(
             scroll.is_user_swiping = false;
 
             if scroll.velocity.abs() * dt * viewport_width < MIN_VELOCITY_PX
+                && scroll.target_position.is_none()
+                && !scroll.snap_pending
                 && let Ok(mut entity_commands) = commands.get_entity(entity)
             {
                 entity_commands.try_remove::<Scrolling>();
@@ -214,12 +242,13 @@ fn apply_snap_force(
     active_display: ActiveDisplay,
     windows: Windows,
     config: Res<Config>,
-    time: Res<Time>,
 ) {
-    const CENTER_MAGNETIC_FORCE: f64 = 10.0;
     const SNAP_DISPLAY_RATIO: f64 = 0.45;
 
-    if !config.auto_center() {
+    let (layout_strip, position, ref mut scroll) = *strip;
+    let sticky = config.sticky_scroll();
+    if !sticky && !config.auto_center() {
+        scroll.snap_pending = false;
         return;
     }
 
@@ -227,12 +256,11 @@ fn apply_snap_force(
     let viewport_center = viewport.center().x;
     let snap_threshold = SNAP_DISPLAY_RATIO * f64::from(viewport.width());
 
-    let (strip, position, ref mut scroll) = *strip;
-    if scroll.is_user_swiping || scroll.velocity.abs() > 0.5 {
+    if scroll.is_user_swiping || scroll.velocity.abs() > 0.5 || scroll.target_position.is_some() {
         return;
     }
 
-    let target_offset = strip
+    let target_offset = layout_strip
         .all_columns()
         .into_iter()
         .filter_map(|entity| {
@@ -249,9 +277,12 @@ fn apply_snap_force(
         .unwrap_or(position.x);
 
     let dist_to_snap = f64::from(position.x - target_offset);
-    if dist_to_snap.abs() < snap_threshold {
-        let dt = time.delta_secs_f64();
-        scroll.position -= dist_to_snap * dt * CENTER_MAGNETIC_FORCE;
+    scroll.snap_pending = false;
+    if sticky || dist_to_snap.abs() < snap_threshold {
+        // Keep Scrolling alive until the shared target integrator reaches the
+        // anchor. This works for native modifier-scroll and raw gestures.
+        scroll.velocity = 0.0;
+        scroll.target_position = Some(f64::from(target_offset));
     }
 }
 
@@ -274,8 +305,28 @@ fn scrolling_integrator(
     };
 
     let scroll = &mut *strip;
+    if let Some(target) = scroll.target_position {
+        let (position, settled) = smooth_native_scroll(scroll.position, target, dt);
+        scroll.position = position;
+        if settled {
+            scroll.target_position = None;
+        }
+        return;
+    }
+
     if scroll.velocity.abs() > 0.0001 {
         scroll.position += scroll.velocity * dt * viewport_width * direction_modifier;
+    }
+}
+
+fn smooth_native_scroll(position: f64, target: f64, dt: f64) -> (f64, bool) {
+    let blend = 1.0 - (-dt / NATIVE_SCROLL_RESPONSE_SECONDS).exp();
+    let position = position + (target - position) * blend;
+
+    if (target - position).abs() <= NATIVE_SCROLL_SETTLE_PX {
+        (target, true)
+    } else {
+        (position, false)
     }
 }
 
@@ -304,8 +355,21 @@ fn apply_scrolling_constraints(
     ) {
         position.x = clamped_offset;
         scroll.position = f64::from(clamped_offset);
+        if let Some(target) = scroll.target_position
+            && let Some(clamped_target) = clamp_viewport_offset(
+                target as i32,
+                strip,
+                &windows,
+                &get_window_frame,
+                &viewport,
+                &config,
+            )
+        {
+            scroll.target_position = Some(f64::from(clamped_target));
+        }
     } else {
         scroll.velocity = 0.0;
+        scroll.target_position = None;
     }
 }
 
@@ -333,6 +397,11 @@ where
         .map(|(position, frame)| position.x + frame.width())?;
 
     let continuous_swipe = config.continuous_swipe();
+    let has_oversized_column = layout_strip.columns().any(|column| {
+        column
+            .width(get_window_frame)
+            .is_some_and(|width| width > viewport.width())
+    });
     let strip_position = |column: Result<Column>| {
         column
             .ok()
@@ -345,7 +414,10 @@ where
     let right_snap = strip_position(layout_strip.get(1));
 
     Some(
-        if continuous_swipe && let Some((left_snap, right_snap)) = left_snap.zip(right_snap) {
+        if continuous_swipe
+            && !has_oversized_column
+            && let Some((left_snap, right_snap)) = left_snap.zip(right_snap)
+        {
             // Allow to scroll away until the last or first window snaps.
             current_offset.clamp(viewport.min.x - left_snap, viewport.max.x - right_snap)
         } else if viewport.width() < total_strip_width {
@@ -431,4 +503,29 @@ fn switch_virtual_workspace(delta: f64, config: &Config, commands: &mut Commands
     commands.trigger(SendMessageTrigger(Event::Command {
         command: Command::Window(Operation::Virtual(direction)),
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::smooth_native_scroll;
+
+    #[test]
+    fn native_scroll_smoothing_converges_without_overshoot() {
+        let mut position = 0.0;
+        let mut settled = false;
+
+        for _ in 0..120 {
+            let previous = position;
+            (position, settled) = smooth_native_scroll(position, 100.0, 1.0 / 60.0);
+            assert!(position >= previous);
+            assert!(position <= 100.0);
+
+            if settled {
+                break;
+            }
+        }
+
+        assert!((position - 100.0).abs() < f64::EPSILON);
+        assert!(settled);
+    }
 }

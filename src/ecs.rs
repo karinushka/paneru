@@ -236,6 +236,11 @@ pub struct EnsureVisibleMarker;
 pub struct Scrolling {
     pub velocity: f64,
     pub position: f64,
+    /// Target supplied by native modifier-scroll events. The current position
+    /// follows it over a few frames so discrete event delivery is not visible.
+    pub target_position: Option<f64>,
+    /// A physical gesture ended and still needs to choose its sticky anchor.
+    pub snap_pending: bool,
     /// When true, the user's fingers are on the trackpad.
     pub is_user_swiping: bool,
     /// Last time a physical swipe event was received.
@@ -247,6 +252,8 @@ impl Default for Scrolling {
         Self {
             velocity: 0.0,
             position: 0.0,
+            target_position: None,
+            snap_pending: false,
             is_user_swiping: false,
             last_event: Instant::now(),
         }

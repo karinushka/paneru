@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 use objc2_core_foundation::CGPoint;
@@ -41,6 +42,9 @@ fn modifier_scroll_uses_native_momentum_without_synthetic_velocity() {
             command: Command::Window(Operation::SetWidth(2.0)),
         },
         Event::Scroll { delta: 1.0 },
+        Event::Command {
+            command: Command::PrintState,
+        },
     ];
 
     TestHarness::new()
@@ -48,8 +52,54 @@ fn modifier_scroll_uses_native_momentum_without_synthetic_velocity() {
         .on_iteration(2, |world, _state| {
             let mut query = world.query_filtered::<&Scrolling, With<ActiveWorkspaceMarker>>();
             let scrolling = query.single(world).expect("active workspace is scrolling");
-            assert_eq!(scrolling.velocity, 0.0);
+            assert!(scrolling.velocity.abs() < f64::EPSILON);
             assert!(scrolling.is_user_swiping);
+        })
+        .run(commands);
+}
+
+#[test]
+fn sticky_modifier_scroll_keeps_snap_pending_until_momentum_settles() {
+    let config = Config::try_from(
+        r"
+[options]
+
+[swipe]
+sticky = true
+
+[bindings]
+",
+    )
+    .expect("sticky swipe config should parse");
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::SetWidth(2.0)),
+        },
+        Event::Scroll { delta: 1.0 },
+    ];
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(1)
+        .on_iteration(2, |world, _state| {
+            let mut query = world.query_filtered::<&mut Scrolling, With<ActiveWorkspaceMarker>>();
+            let mut scrolling = query
+                .single_mut(world)
+                .expect("active workspace is scrolling");
+            assert!(scrolling.snap_pending);
+            assert!(scrolling.velocity.abs() < f64::EPSILON);
+            scrolling.last_event = Instant::now()
+                .checked_sub(Duration::from_millis(100))
+                .expect("100ms must fit before the current instant");
+        })
+        .on_iteration(3, |world, _state| {
+            let mut query = world.query_filtered::<&Scrolling, With<ActiveWorkspaceMarker>>();
+            let scrolling = query
+                .single(world)
+                .expect("pending sticky snap must keep scrolling alive");
+            assert!(!scrolling.is_user_swiping);
+            assert!(scrolling.snap_pending);
         })
         .run(commands);
 }

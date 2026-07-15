@@ -20,6 +20,7 @@ use crate::ecs::{
 use crate::events::{Event, EventSender};
 use crate::manager::Display;
 use crate::platform::Modifiers;
+use crate::updater::SparkleUpdater;
 
 #[derive(Debug, Clone)]
 struct MenuActionTargetIvars {
@@ -86,6 +87,8 @@ pub struct MenuBarManager {
     configured_widths: Vec<i32>,
     configured_shortcuts: MenuShortcuts,
     current_label: Option<String>,
+    updater: Option<SparkleUpdater>,
+    check_for_updates_item: Option<Retained<NSMenuItem>>,
 }
 
 const STATUS_ITEM_BACKGROUND_ALPHA: CGFloat = 0.18;
@@ -144,6 +147,8 @@ impl MenuBarManager {
             configured_widths: Vec::new(),
             configured_shortcuts: MenuShortcuts::default(),
             current_label: None,
+            updater: SparkleUpdater::load(mtm),
+            check_for_updates_item: None,
         }
     }
 
@@ -156,6 +161,10 @@ impl MenuBarManager {
         focused_width_ratio: Option<f64>,
         shortcuts: &MenuShortcuts,
     ) {
+        if let Some(updater) = &mut self.updater {
+            updater.maybe_check_silently();
+        }
+
         let widths = normalized_width_percentages(preset_widths);
         if self.configured_widths != widths || self.configured_shortcuts != *shortcuts {
             self.rebuild_menu(&widths, shortcuts);
@@ -168,6 +177,25 @@ impl MenuBarManager {
         if let Some(manage_item) = &self.manage_item {
             manage_item.setEnabled(enablement.toggle_managed);
         }
+        if let Some(item) = &self.check_for_updates_item {
+            let status = self.updater.as_ref().map(SparkleUpdater::status);
+            let title = match status.as_ref() {
+                Some(status) if status.is_checking => "Checking for Updates…".to_owned(),
+                Some(status) if status.available_version.is_some() => {
+                    format!(
+                        "Update {}…",
+                        status.available_version.as_deref().unwrap_or_default()
+                    )
+                }
+                _ => "Check for Updates…".to_owned(),
+            };
+            item.setTitle(&NSString::from_str(&title));
+            item.setEnabled(
+                self.updater
+                    .as_ref()
+                    .is_some_and(SparkleUpdater::can_check_for_updates),
+            );
+        }
         for (percentage, item) in &self.width_items {
             let selected = focused_width_ratio
                 .is_some_and(|ratio| (ratio.mul_add(100.0, -f64::from(*percentage))).abs() < 1.0);
@@ -178,11 +206,18 @@ impl MenuBarManager {
             });
         }
 
-        let label = if show_virtual_workspace {
+        let mut label = if show_virtual_workspace {
             format_virtual_workspace_label(virtual_index)
         } else {
             "Paneru".to_owned()
         };
+        if self
+            .updater
+            .as_ref()
+            .is_some_and(|updater| updater.status().available_version.is_some())
+        {
+            label.push_str(" •");
+        }
         self.show_label(label);
     }
 
@@ -191,6 +226,7 @@ impl MenuBarManager {
         self.width_items.clear();
         self.managed_window_items.clear();
         self.manage_item = None;
+        self.check_for_updates_item = None;
 
         let status = self.add_item("Paneru — Running", None, None);
         status.setEnabled(false);
@@ -225,6 +261,17 @@ impl MenuBarManager {
         self.manage_item = Some(manage);
 
         self.menu.addItem(&NSMenuItem::separatorItem(self.mtm));
+        let check_for_updates =
+            self.add_item("Check for Updates…", Some(sel!(checkForUpdates:)), None);
+        if let Some(updater) = &self.updater {
+            unsafe { check_for_updates.setTarget(Some(updater.controller_target())) };
+            check_for_updates.setEnabled(updater.can_check_for_updates());
+        } else {
+            unsafe { check_for_updates.setTarget(None) };
+            check_for_updates.setEnabled(false);
+        }
+        self.check_for_updates_item = Some(check_for_updates);
+
         self.add_item(
             "Quit Paneru",
             Some(sel!(quitPaneru:)),

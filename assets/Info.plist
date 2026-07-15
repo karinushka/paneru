@@ -2,13 +2,49 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
   <dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>Paneru</string>
+    <key>CFBundleExecutable</key>
+    <string>paneru</string>
     <key>CFBundleIdentifier</key>
-    <string>com.github.karinushka.paneru</string>
-    <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>com.github.mrflashaccount.paneru</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Paneru</string>
     <key>CFBundlePackageType</key>
-    <string>BNDL</string>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.5.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <key>LSMultipleInstancesProhibited</key>
+    <true/>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
     <key>NSHumanReadableCopyright</key>
-    <string>Copyright (c) 2025 Karinushka@github. All rights reserved.</string>
+    <string>Copyright (c) 2026 MrFlashAccount. All rights reserved.</string>
+    <key>SUAllowsAutomaticUpdates</key>
+    <true/>
+    <key>SUAutomaticallyUpdate</key>
+    <true/>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUFeedURL</key>
+    <string>https://github.com/MrFlashAccount/paneru/releases/latest/download/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>8z1ChHWDW5rJJwCEZx6Q4cr7A7DLwpDWq5LYFCDhaVc=</string>
+    <key>SURequireSignedFeed</key>
+    <true/>
+    <key>SUScheduledCheckInterval</key>
+    <integer>86400</integer>
+    <key>SUVerifyUpdateBeforeExtraction</key>
+    <true/>
   </dict>
 </plist>

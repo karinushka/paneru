@@ -1,11 +1,11 @@
 [package]
 name = "paneru"
-version = "0.4.3"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.89.0"
 description = "A sliding, tiling window manager for MacOS."
-homepage = "https://github.com/karinushka/paneru"
-repository = "https://github.com/karinushka/paneru"
+homepage = "https://github.com/MrFlashAccount/paneru"
+repository = "https://github.com/MrFlashAccount/paneru"
 readme = "README.md"
 license = "MIT"
 categories = ["os::macos-apis"]

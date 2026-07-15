@@ -10,7 +10,7 @@ use tracing::{info, warn};
 use crate::util::exe_path;
 
 /// The bundle identifier for the `paneru` service.
-pub const ID: &str = "com.github.karinushka.paneru";
+pub const ID: &str = "com.github.mrflashaccount.paneru";
 
 /// `Service` manages the installation, uninstallation, starting, and stopping of the `paneru` application as a launchd service.
 /// It encapsulates the `launchctl::Service` and the path to the executable.

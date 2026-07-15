@@ -1,0 +1,171 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, for example 0.5.0 or v0.5.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build universal app and publish release
+    runs-on: macos-15
+    environment: release
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release version
+        env:
+          RAW_VERSION: ${{ inputs.version }}
+        run: |
+          version="${RAW_VERSION#v}"
+          if [[ ! "$version" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]]; then
+            echo "Invalid version: $RAW_VERSION"
+            echo "Use a release version like 0.5.0 or v0.5.0."
+            exit 1
+          fi
+
+          cargo_version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
+          if [[ "$version" != "$cargo_version" ]]; then
+            echo "Release version $version does not match Cargo.toml version $cargo_version."
+            exit 1
+          fi
+
+          echo "PANERU_VERSION=$version" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=v$version" >> "$GITHUB_ENV"
+          echo "APP_PATH=.build/release/Paneru.app" >> "$GITHUB_ENV"
+          echo "ZIP_PATH=dist/Paneru-$version.zip" >> "$GITHUB_ENV"
+          echo "DMG_PATH=dist/Paneru-$version.dmg" >> "$GITHUB_ENV"
+          echo "APPCAST_PATH=dist/appcast.xml" >> "$GITHUB_ENV"
+
+      - name: Show toolchain
+        run: |
+          rustup show active-toolchain
+          rustc --version --verbose
+          cargo --version
+          xcodebuild -version
+
+      - name: Install Rust targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Verify updater configuration
+        run: |
+          plutil -lint assets/Info.plist
+          [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' assets/Info.plist)" == "com.github.mrflashaccount.paneru" ]]
+          [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' assets/Info.plist)" == "$PANERU_VERSION" ]]
+          [[ "$(/usr/libexec/PlistBuddy -c 'Print :SUFeedURL' assets/Info.plist)" == "https://github.com/MrFlashAccount/paneru/releases/latest/download/appcast.xml" ]]
+          [[ "$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' assets/Info.plist)" == "8z1ChHWDW5rJJwCEZx6Q4cr7A7DLwpDWq5LYFCDhaVc=" ]]
+
+      - name: Download Sparkle
+        run: |
+          sparkle_dir="$(./scripts/download-sparkle.sh)"
+          echo "SPARKLE_DIR=$sparkle_dir" >> "$GITHUB_ENV"
+          echo "SPARKLE_BIN=$sparkle_dir/bin" >> "$GITHUB_ENV"
+
+      - name: Build universal app and DMG
+        env:
+          PANERU_BUILD_ARCHS: universal
+          PANERU_BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          ./scripts/build-app.sh "$PANERU_VERSION"
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$ZIP_PATH"
+          ./scripts/build-dmg.sh "$PANERU_VERSION"
+
+      - name: Generate signed update feed
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_ED25519_PRIVATE_KEY }}
+        run: |
+          if [[ -z "$SPARKLE_PRIVATE_KEY" ]]; then
+            echo "SPARKLE_ED25519_PRIVATE_KEY is not configured in the release environment."
+            exit 1
+          fi
+
+          feed_dir="$RUNNER_TEMP/paneru-appcast"
+          rm -rf "$feed_dir"
+          mkdir -p "$feed_dir"
+          cp "$ZIP_PATH" "$feed_dir/"
+
+          printf '%s' "$SPARKLE_PRIVATE_KEY" \
+            | "$SPARKLE_BIN/generate_appcast" \
+                --ed-key-file - \
+                --download-url-prefix "https://github.com/MrFlashAccount/paneru/releases/download/$RELEASE_TAG/" \
+                --link "https://github.com/MrFlashAccount/paneru" \
+                --maximum-versions 1 \
+                "$feed_dir"
+          cp "$feed_dir/appcast.xml" "$APPCAST_PATH"
+
+          xmllint --noout "$APPCAST_PATH"
+          grep -q 'sparkle:edSignature=' "$APPCAST_PATH"
+          grep -q 'sparkle-signatures:' "$APPCAST_PATH"
+          printf '%s' "$SPARKLE_PRIVATE_KEY" \
+            | "$SPARKLE_BIN/sign_update" --ed-key-file - --verify "$APPCAST_PATH"
+
+      - name: Verify release artifacts
+        run: |
+          executable_archs="$(lipo -archs "$APP_PATH/Contents/MacOS/paneru")"
+          [[ "$executable_archs" == *arm64* && "$executable_archs" == *x86_64* ]]
+          framework_archs="$(lipo -archs "$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle")"
+          [[ "$framework_archs" == *arm64* && "$framework_archs" == *x86_64* ]]
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          hdiutil verify "$DMG_PATH"
+          unzip -t "$ZIP_PATH"
+
+          if spctl --assess --type execute "$APP_PATH"; then
+            echo "Gatekeeper accepted Paneru.app."
+          else
+            echo "Paneru.app is ad-hoc signed and not notarized; a first-launch warning is expected."
+          fi
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: Paneru-${{ env.PANERU_VERSION }}
+          path: |
+            ${{ env.ZIP_PATH }}
+            ${{ env.DMG_PATH }}
+            ${{ env.APPCAST_PATH }}
+          if-no-files-found: error
+
+      - name: Create release tag
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            git fetch origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+            tag_commit="$(git rev-list -n 1 "$RELEASE_TAG")"
+            if [[ "$tag_commit" != "$GITHUB_SHA" ]]; then
+              echo "Tag $RELEASE_TAG already exists on $tag_commit, not $GITHUB_SHA."
+              exit 1
+            fi
+            echo "Tag $RELEASE_TAG already exists on this commit."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$RELEASE_TAG" -m "Paneru $RELEASE_TAG" "$GITHUB_SHA"
+            git push origin "refs/tags/$RELEASE_TAG"
+          fi
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="Paneru $RELEASE_TAG. The app is ad-hoc signed and not notarized, so macOS may show a warning on first launch."
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$ZIP_PATH" "$DMG_PATH" "$APPCAST_PATH" --clobber
+            gh release edit "$RELEASE_TAG" --latest
+          else
+            gh release create "$RELEASE_TAG" "$ZIP_PATH" "$DMG_PATH" "$APPCAST_PATH" \
+              --title "Paneru $RELEASE_TAG" \
+              --notes "$notes" \
+              --latest
+          fi

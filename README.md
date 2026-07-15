@@ -65,6 +65,26 @@ inspired by [Niri] and [PaperWM.spoon].
 
 ## Installation
 
+### Installing the macOS app
+
+Download `Paneru-<version>.dmg` from the
+[latest GitHub Release](https://github.com/MrFlashAccount/paneru/releases/latest),
+open it, and drag `Paneru.app` to Applications. Paneru lives in the menu bar;
+there is no Dock icon or main window. Grant it access in **System Settings →
+Privacy & Security → Accessibility** when macOS asks.
+
+The current releases are ad-hoc signed but not Apple-notarized. If macOS blocks
+the first launch, control-click Paneru in Applications and choose **Open**. If
+that is still blocked, remove the downloaded quarantine attribute once:
+
+```shell
+xattr -dr com.apple.quarantine /Applications/Paneru.app
+```
+
+Paneru checks the signed GitHub update feed automatically in the background.
+Use **Check for Updates…** in the menu bar to check immediately. Update
+archives and the appcast are protected with Sparkle's Ed25519 signatures.
+
 ### Recommended System Options
 
 - Like all non-native window managers for MacOS, Paneru requires accessibility
@@ -114,6 +134,16 @@ $ cargo install --path .
 
 It can run directly from the command line or as a service.
 Note that you will need to grant accessibility privileges to the binary.
+
+To build a local `.app` bundle instead, run:
+
+```shell
+./scripts/build-app.sh
+open .build/release/Paneru.app
+```
+
+Local builds target the current Mac architecture. Release builds set
+`PANERU_BUILD_ARCHS=universal` and contain both Apple Silicon and Intel slices.
 
 ### Installing with Homebrew
 
@@ -340,6 +370,24 @@ The system is decoupled into three primary layers:
 
 - **`main` branch**: Contains the stable, released code.
 - **`testing` branch**: Used for experimental features and architectural refactors. This branch is volatile and may be force-pushed.
+
+### Publishing a release
+
+1. Update the package version in `Cargo.toml` and commit the change.
+2. Add `SPARKLE_ED25519_PRIVATE_KEY` to the protected GitHub `release`
+   environment. It must match `SUPublicEDKey` in `assets/Info.plist`.
+3. Run the **Release** workflow and enter that same version, with or without a
+   leading `v`.
+
+The workflow cross-compiles `arm64` and `x86_64`, creates a universal
+`Paneru.app`, ZIP and DMG, generates and verifies a signed `appcast.xml`, tags
+the selected commit, and publishes all three files to GitHub Releases. The ZIP
+is Sparkle's update enclosure; the DMG is the human-facing installer.
+
+For a production distribution without Gatekeeper warnings—and to keep macOS
+Accessibility approval stable across releases—the next step is Developer ID
+signing and Apple notarization. Sparkle's Ed25519 signature secures updates,
+but it does not replace Apple's code-signing identity.
 
 ## Tile Scrollably Elsewhere
 

@@ -1,4 +1,6 @@
 /target
+/.build
+/dist
 
 # Outputs from `nix build`
 /result

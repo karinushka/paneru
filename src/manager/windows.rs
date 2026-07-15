@@ -38,6 +38,25 @@ use crate::util::{AXUIAttributes, AXUIWrapper, MacResult};
 static ENHANCED_UI_REFCOUNT: LazyLock<Mutex<HashMap<Pid, usize>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// macOS may partially apply an AX width increase when the requested right edge
+/// would be far outside the display. Moving the partial result left by the
+/// missing width before retrying gives `WindowServer` enough offscreen room.
+///
+/// Only retry when the first attempt actually grew the window. Fixed-size apps
+/// otherwise look identical to this failure mode and must not be moved offscreen.
+fn resize_staging_origin(
+    previous_frame: IRect,
+    actual_frame: IRect,
+    target_width: i32,
+) -> Option<Origin> {
+    let actual_width = actual_frame.width();
+    (actual_width > previous_frame.width() && actual_width < target_width).then(|| {
+        actual_frame
+            .min
+            .with_x(actual_frame.min.x - (target_width - actual_width))
+    })
+}
+
 #[derive(Debug)]
 pub enum WindowPadding {
     Vertical(i32),
@@ -313,6 +332,56 @@ impl WindowOS {
         }
     }
 
+    fn set_ax_position(&mut self, origin: Origin) {
+        let mut point = CGPoint::new(
+            f64::from(origin.x + self.horizontal_padding),
+            f64::from(origin.y + self.vertical_padding),
+        );
+        let position_ref = unsafe {
+            AXValueCreate(
+                kAXValueTypeCGPoint,
+                NonNull::from(&mut point).as_ptr().cast(),
+            )
+        };
+        if let Ok(position) = AXUIWrapper::retain(position_ref) {
+            unsafe {
+                AXUIElementSetAttributeValue(
+                    self.ax_element.as_ptr(),
+                    CFString::from_static_str(kAXPositionAttribute).as_ref(),
+                    position.as_ref(),
+                )
+            };
+            let size = self.frame.size();
+            self.frame.min = origin;
+            self.frame.max = origin + size;
+        }
+    }
+
+    fn set_ax_size(&mut self, size: Size) {
+        let width_padding = 2 * self.horizontal_padding;
+        let height_padding = 2 * self.vertical_padding;
+        let mut cgsize = CGSize::new(
+            f64::from(size.x - width_padding),
+            f64::from(size.y - height_padding),
+        );
+        let size_ref = unsafe {
+            AXValueCreate(
+                kAXValueTypeCGSize,
+                NonNull::from(&mut cgsize).as_ptr().cast(),
+            )
+        };
+        if let Ok(size_value) = AXUIWrapper::retain(size_ref) {
+            unsafe {
+                AXUIElementSetAttributeValue(
+                    self.ax_element.as_ptr(),
+                    CFString::from_static_str(kAXSizeAttribute).as_ref(),
+                    size_value.as_ref(),
+                )
+            };
+            self.frame.max = self.frame.min + size;
+        }
+    }
+
     /// Makes the window the key window for its application by sending synthesized events.
     ///
     /// # Arguments
@@ -424,28 +493,7 @@ impl WindowApi for WindowOS {
             return;
         }
         self.disable_enhanced_ui();
-        let mut point = CGPoint::new(
-            f64::from(origin.x + self.horizontal_padding),
-            f64::from(origin.y + self.vertical_padding),
-        );
-        let position_ref = unsafe {
-            AXValueCreate(
-                kAXValueTypeCGPoint,
-                NonNull::from(&mut point).as_ptr().cast(),
-            )
-        };
-        if let Ok(position) = AXUIWrapper::retain(position_ref) {
-            unsafe {
-                AXUIElementSetAttributeValue(
-                    self.ax_element.as_ptr(),
-                    CFString::from_static_str(kAXPositionAttribute).as_ref(),
-                    position.as_ref(),
-                )
-            };
-            let size = self.frame.size();
-            self.frame.min = origin;
-            self.frame.max = origin + size;
-        }
+        self.set_ax_position(origin);
         self.reenable_enhanced_ui();
     }
 
@@ -455,28 +503,44 @@ impl WindowApi for WindowOS {
             trace!("already correct size.");
             return;
         }
+        let previous_frame = self.frame;
+        let target_origin = previous_frame.min;
         self.disable_enhanced_ui();
-        let width_padding = 2 * self.horizontal_padding;
-        let height_padding = 2 * self.vertical_padding;
-        let mut cgsize = CGSize::new(
-            f64::from(size.x - width_padding),
-            f64::from(size.y - height_padding),
-        );
-        let size_ref = unsafe {
-            AXValueCreate(
-                kAXValueTypeCGSize,
-                NonNull::from(&mut cgsize).as_ptr().cast(),
-            )
-        };
-        if let Ok(position) = AXUIWrapper::retain(size_ref) {
-            unsafe {
-                AXUIElementSetAttributeValue(
-                    self.ax_element.as_ptr(),
-                    CFString::from_static_str(kAXSizeAttribute).as_ref(),
-                    position.as_ref(),
-                )
+        self.set_ax_size(size);
+
+        let mut previous_observed_frame = previous_frame;
+        let mut staged = false;
+        for attempt in 1..=3 {
+            let Ok(actual_frame) = self.update_frame() else {
+                break;
             };
-            self.frame.max = self.frame.min + size;
+            let Some(staging_origin) =
+                resize_staging_origin(previous_observed_frame, actual_frame, size.x)
+            else {
+                break;
+            };
+            debug!(
+                attempt,
+                requested_width = size.x,
+                actual_width = actual_frame.width(),
+                staging_x = staging_origin.x,
+                "retrying partially constrained AX resize from an offscreen origin"
+            );
+            staged = true;
+            previous_observed_frame = actual_frame;
+            self.set_ax_position(staging_origin);
+            self.set_ax_size(size);
+        }
+
+        if staged {
+            if let Ok(final_frame) = self.update_frame() {
+                debug!(
+                    requested_width = size.x,
+                    actual_width = final_frame.width(),
+                    "completed staged AX resize"
+                );
+            }
+            self.set_ax_position(target_origin);
         }
         self.reenable_enhanced_ui();
     }
@@ -664,5 +728,37 @@ impl WindowApi for WindowOS {
             // Get first corner radius (usually all corners are the same)
             radii.get(0)?.as_i64().map(|v| v as f64)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stages_partially_applied_width_growth() {
+        let previous = IRect::new(-400, 40, 400, 640);
+        let actual = IRect::new(-400, 40, 2416, 640);
+
+        assert_eq!(
+            resize_staging_origin(previous, actual, 4112),
+            Some(Origin::new(-1696, 40))
+        );
+
+        let nearly_complete = IRect::new(-2056, 40, 2016, 640);
+        assert_eq!(
+            resize_staging_origin(actual, nearly_complete, 4112),
+            Some(Origin::new(-2096, 40))
+        );
+    }
+
+    #[test]
+    fn does_not_stage_fixed_size_or_completed_resizes() {
+        let fixed = IRect::new(0, 40, 230, 448);
+        assert_eq!(resize_staging_origin(fixed, fixed, 4112), None);
+
+        let previous = IRect::new(0, 40, 800, 640);
+        let completed = IRect::new(0, 40, 4112, 640);
+        assert_eq!(resize_staging_origin(previous, completed, 4112), None);
     }
 }

@@ -80,13 +80,30 @@ pub struct MenuBarManager {
     menu: Retained<NSMenu>,
     action_target: Retained<MenuActionTarget>,
     width_items: Vec<(i32, Retained<NSMenuItem>)>,
-    window_items: Vec<Retained<NSMenuItem>>,
+    managed_window_items: Vec<Retained<NSMenuItem>>,
+    manage_item: Option<Retained<NSMenuItem>>,
     configured_widths: Vec<i32>,
     current_label: Option<String>,
 }
 
 const STATUS_ITEM_BACKGROUND_ALPHA: CGFloat = 0.18;
 const STATUS_ITEM_CORNER_RADIUS: CGFloat = 5.0;
+
+#[derive(Debug, Eq, PartialEq)]
+struct WindowMenuEnablement {
+    managed_actions: bool,
+    toggle_managed: bool,
+}
+
+fn window_menu_enablement(
+    has_focused_window: bool,
+    focused_width_ratio: Option<f64>,
+) -> WindowMenuEnablement {
+    WindowMenuEnablement {
+        managed_actions: focused_width_ratio.is_some(),
+        toggle_managed: has_focused_window,
+    }
+}
 
 impl MenuBarManager {
     pub fn new(mtm: MainThreadMarker, events: EventSender) -> Self {
@@ -106,7 +123,8 @@ impl MenuBarManager {
             menu,
             action_target,
             width_items: Vec::new(),
-            window_items: Vec::new(),
+            managed_window_items: Vec::new(),
+            manage_item: None,
             configured_widths: Vec::new(),
             current_label: None,
         }
@@ -117,6 +135,7 @@ impl MenuBarManager {
         virtual_index: u32,
         show_virtual_workspace: bool,
         preset_widths: &[f64],
+        has_focused_window: bool,
         focused_width_ratio: Option<f64>,
     ) {
         let widths = normalized_width_percentages(preset_widths);
@@ -124,9 +143,12 @@ impl MenuBarManager {
             self.rebuild_menu(&widths);
         }
 
-        let has_focused_window = focused_width_ratio.is_some();
-        for item in &self.window_items {
-            item.setEnabled(has_focused_window);
+        let enablement = window_menu_enablement(has_focused_window, focused_width_ratio);
+        for item in &self.managed_window_items {
+            item.setEnabled(enablement.managed_actions);
+        }
+        if let Some(manage_item) = &self.manage_item {
+            manage_item.setEnabled(enablement.toggle_managed);
         }
         for (percentage, item) in &self.width_items {
             let selected = focused_width_ratio
@@ -149,7 +171,8 @@ impl MenuBarManager {
     fn rebuild_menu(&mut self, widths: &[i32]) {
         self.menu.removeAllItems();
         self.width_items.clear();
-        self.window_items.clear();
+        self.managed_window_items.clear();
+        self.manage_item = None;
 
         let status = self.add_item("Paneru — Running", None);
         status.setEnabled(false);
@@ -160,14 +183,15 @@ impl MenuBarManager {
         for &percentage in widths {
             let item = self.add_item(&format!("{percentage}%"), Some(sel!(setWidth:)));
             item.setTag(isize::try_from(percentage).expect("width percentage fits in isize"));
-            self.window_items.push(item.clone());
+            self.managed_window_items.push(item.clone());
             self.width_items.push((percentage, item));
         }
 
         self.menu.addItem(&NSMenuItem::separatorItem(self.mtm));
         let center = self.add_item("Center Window", Some(sel!(centerWindow:)));
         let manage = self.add_item("Toggle Managed", Some(sel!(toggleManaged:)));
-        self.window_items.extend([center, manage]);
+        self.managed_window_items.push(center);
+        self.manage_item = Some(manage);
 
         self.menu.addItem(&NSMenuItem::separatorItem(self.mtm));
         self.add_item("Quit Paneru", Some(sel!(quitPaneru:)));
@@ -236,21 +260,21 @@ pub fn update_menu_bar(
         return;
     };
 
-    let focused_width_ratio = active_display
-        .iter()
-        .next()
-        .zip(focused.iter().next())
-        .and_then(|((display, dock), (bounds, unmanaged))| {
+    let focused_window = focused.iter().next();
+    let focused_width_ratio = active_display.iter().next().zip(focused_window).and_then(
+        |((display, dock), (bounds, unmanaged))| {
             (!unmanaged).then(|| {
                 f64::from(bounds.0.x)
                     / f64::from(display.actual_display_bounds(dock, &config).width())
             })
-        });
+        },
+    );
 
     menu_bar.update(
         strip.virtual_index,
         config.workspace_menu_status(),
         &config.preset_column_widths(),
+        focused_window.is_some(),
         focused_width_ratio,
     );
 }
@@ -274,7 +298,10 @@ fn normalized_width_percentages(widths: &[f64]) -> Vec<i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_virtual_workspace_label, normalized_width_percentages};
+    use super::{
+        WindowMenuEnablement, format_virtual_workspace_label, normalized_width_percentages,
+        window_menu_enablement,
+    };
 
     #[test]
     fn label_is_one_based() {
@@ -287,6 +314,31 @@ mod tests {
         assert_eq!(
             normalized_width_percentages(&[2.0, 0.5, 1.5, 0.5, 0.001, f64::NAN, -1.0]),
             vec![50, 150, 200]
+        );
+    }
+
+    #[test]
+    fn unmanaged_focus_only_enables_toggle_managed() {
+        assert_eq!(
+            window_menu_enablement(true, None),
+            WindowMenuEnablement {
+                managed_actions: false,
+                toggle_managed: true,
+            }
+        );
+        assert_eq!(
+            window_menu_enablement(false, None),
+            WindowMenuEnablement {
+                managed_actions: false,
+                toggle_managed: false,
+            }
+        );
+        assert_eq!(
+            window_menu_enablement(true, Some(1.0)),
+            WindowMenuEnablement {
+                managed_actions: true,
+                toggle_managed: true,
+            }
         );
     }
 }

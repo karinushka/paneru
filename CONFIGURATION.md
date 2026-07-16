@@ -67,6 +67,8 @@ Configure trackpad gestures and scroll-wheel window sliding.
 | `direction` | String | `"Natural"` | Direction of movement: `"Natural"` or `"Reversed"`. |
 | `vertical` | Boolean | `true` | Interpret the vertical gestures with `fingers_count` or ignore them. Enabling this allows using vertical swipe gestures to change virtual desktops. |
 
+When `fingers_count` is omitted or set below 3, Paneru does not intercept native macOS gestures. If macOS uses three-finger horizontal swipes for Spaces, prefer `[swipe.scroll]` with a modifier or configure a different finger count.
+
 ### `[swipe.scroll]`
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |

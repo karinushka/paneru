@@ -58,7 +58,9 @@ Configure trackpad gestures and scroll-wheel window sliding.
 | :--- | :--- | :--- | :--- |
 | `sensitivity` | Float (0.1–2.0) | `0.35` | Multiplier for swipe distance. |
 | `deceleration` | Float (1.0–10.0) | `4.0` | Rate at which inertia slows down after a swipe. |
-| `continuous` | Boolean | `true` | If enabled, the swipe gesture moves windows smoothly with the fingers. If disabled, it snaps to windows as you swipe. |
+| `continuous` | Boolean | `true` | Controls strip edge limits while scrolling; disable to clamp strictly to the full content bounds. |
+| `paging` | Boolean | `true` | Limit one gesture to at most one adjacent stop. A regular column has one stop; an oversized column has exactly two, at its left and right edges. Set to `false` to restore free scrolling. |
+| `sticky` | Boolean | `false` | With `paging = false`, snap exactly to a column edge when scrolling ends inside a hit zone equal to 10% of the usable viewport width. This activation zone does not create a visual gap. |
 
 ### `[swipe.gesture]`
 | Option | Type | Default | Description |
@@ -135,6 +137,7 @@ Format: `"[modifiers-]key"`. Available modifiers are:
 | `window_swap_first` / `_last` | Move current window to start/end of strip. |
 | `window_center` | Center the current window in the viewport. |
 | `window_resize` | Cycle through preset widths (Grow). |
+| `window_width_<percent>` | Set an exact display-width percentage, e.g. `window_width_150`. |
 | `window_grow` | Alias for `window_resize`. |
 | `window_shrink` | Cycle through preset widths (Shrink). |
 | `window_fullwidth` | Toggle full-width mode. |
@@ -273,12 +276,20 @@ starts. Restore is a startup-only phase: Paneru loads the saved session, applies
 it after initial window discovery, keeps matching open for a short grace period,
 then stops consulting the saved state until the next Paneru process start.
 
+State writes are event-driven: each persisted layout/display/selection change
+resets a 250 ms trailing debounce, so continuous scrolling does not write every
+frame. Pending dirty state is flushed on shutdown; failed writes remain dirty
+and retry with bounded backoff. With `enabled = false`, Paneru does not read or
+write the state file.
+
 The saved session includes:
 
 - native workspace ids
 - virtual workspace rows and the selected row per native workspace
 - layout structure: singles, stacks, tabs, and fullscreen strips
 - display/screen association
+- saved width ratios, including values above `1.0`
+- horizontal strip pan positions
 - window identity for matching across restarts
 
 Matched startup windows use the saved session before static `[windows]` rules.
@@ -289,7 +300,7 @@ grace period ends, keep normal `[windows]` behavior.
 
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `enabled` | Boolean | `true` | Enables session restore on startup. |
+| `enabled` | Boolean | `true` | Enables state persistence and startup restore. When false, no state-file I/O or persistence deadline is installed. |
 | `startup_grace_ms` | Integer (ms) | `2000` | How long Paneru keeps restore matching active after startup. This gives apps a chance to create windows shortly after Paneru starts. |
 | `missing_windows` | String | `"ignore"` | Behavior when a saved window is not present during restore. Currently only `"ignore"` is supported, which drops the missing window and compacts the restored layout. |
 
@@ -332,6 +343,9 @@ the workspace is already present on a display. Otherwise it restores to the
 saved display id when that screen is still connected, then falls back to the
 current active display, then the first available display by id. Paneru does not
 create placeholder displays or off-screen state for disconnected monitors.
+
+For matched windows, restore reapplies the saved width ratio and horizontal
+strip pan. Older state files without those optional fields remain compatible.
 
 ---
 

@@ -51,6 +51,7 @@ impl NotifyHandler {
             KnownCGSEvent::SpaceCurrentChanged,
             KnownCGSEvent::SpaceDestroyed,
             KnownCGSEvent::SpaceWindowDestroyed,
+            KnownCGSEvent::WindowTitleChanged,
         ];
         for event in events {
             unsafe {
@@ -121,6 +122,14 @@ impl NotifyHandler {
                 }
             }
 
+            KnownCGSEvent::WindowTitleChanged => {
+                let bytes = (!data.is_null() && len > 0)
+                    .then(|| unsafe { std::slice::from_raw_parts(data.cast::<u8>(), len) });
+                if let Some(event) = bytes.and_then(window_title_event_from_bytes) {
+                    _ = self.events.send(event);
+                }
+            }
+
             KnownCGSEvent::SpaceWindowCreated
             | KnownCGSEvent::WindowClosed
             | KnownCGSEvent::WindowMoved
@@ -143,6 +152,12 @@ impl NotifyHandler {
             }
         }
     }
+}
+
+pub(crate) fn window_title_event_from_bytes(bytes: &[u8]) -> Option<Event> {
+    (bytes.len() >= std::mem::size_of::<WinID>()).then(|| Event::WindowTitleChanged {
+        window_id: unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<WinID>()) },
+    })
 }
 
 fn from_bytes<T>(data: *const c_void, len: usize) -> Option<T> {

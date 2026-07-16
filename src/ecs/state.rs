@@ -1,23 +1,23 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bevy::app::AppExit;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
-use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::Has;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::system::Query;
 use bevy::math::IRect;
 use objc2_core_graphics::CGDirectDisplayID;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, error, info, warn};
+use tracing::error;
 
 use crate::ecs::layout::{Column, LayoutStrip, StackItem};
 use crate::ecs::params::Windows;
-use crate::ecs::{ActiveDisplayMarker, ActiveWorkspaceMarker};
+use crate::ecs::{ActiveDisplayMarker, ActiveWorkspaceMarker, Position};
 use crate::manager::Application;
 use crate::manager::Display;
 use crate::platform::{Pid, ProcessSerialNumber, WinID, WorkspaceId};
@@ -92,6 +92,15 @@ pub struct SavedWindow {
     pub identifier: String,
     pub role: String,
     pub subrole: String,
+
+    /// Width relative to the display at save time. Optional for compatibility
+    /// with v2 state files written before oversized-window persistence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width_ratio: Option<f64>,
+    /// Owning strip's horizontal viewport position. Duplicated per window so
+    /// old enum-shaped column data remains backward compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strip_position_x: Option<i32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -154,6 +163,7 @@ impl SavedWindow {
         entity: Entity,
         windows: &Windows,
         apps: &Query<&Application>,
+        strip_position_x: Option<i32>,
     ) -> Option<Self> {
         let window = windows.get(entity)?;
         let (_, _, app_entity) = windows.find_parent(window.id())?;
@@ -168,6 +178,8 @@ impl SavedWindow {
             identifier: window.identifier().unwrap_or_default(),
             role: window.role().unwrap_or_default(),
             subrole: window.subrole().unwrap_or_default(),
+            width_ratio: windows.width_ratio(entity),
+            strip_position_x,
         })
     }
 
@@ -180,7 +192,12 @@ impl SavedWindow {
 impl PaneruState {
     #[allow(clippy::type_complexity, clippy::too_many_lines)]
     pub fn extract(
-        workspaces: &Query<(Option<&ChildOf>, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+        workspaces: &Query<(
+            Option<&ChildOf>,
+            &LayoutStrip,
+            Option<&Position>,
+            Has<ActiveWorkspaceMarker>,
+        )>,
         displays: &Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
         windows: &Windows,
         apps: &Query<&Application>,
@@ -198,7 +215,8 @@ impl PaneruState {
             display_workspace_ids.insert(entity, Vec::new());
         }
 
-        for (child, strip, active_workspace) in workspaces {
+        for (child, strip, strip_position, active_workspace) in workspaces {
+            let strip_position_x = strip_position.map(|position| position.x);
             let display_entity = child.map(ChildOf::parent);
             let display_id =
                 display_entity.and_then(|entity| display_entity_ids.get(&entity).copied());
@@ -213,20 +231,31 @@ impl PaneruState {
             for col in strip.columns() {
                 let saved_col = match col {
                     Column::Single(entity) => {
-                        SavedWindow::from_entity(*entity, windows, apps).map(SavedColumn::Single)
+                        SavedWindow::from_entity(*entity, windows, apps, strip_position_x)
+                            .map(SavedColumn::Single)
                     }
                     Column::Stack(items) => {
                         let saved_items = items
                             .iter()
                             .filter_map(|item| match item {
-                                StackItem::Single(entity) => {
-                                    SavedWindow::from_entity(*entity, windows, apps)
-                                        .map(SavedStackItem::Single)
-                                }
+                                StackItem::Single(entity) => SavedWindow::from_entity(
+                                    *entity,
+                                    windows,
+                                    apps,
+                                    strip_position_x,
+                                )
+                                .map(SavedStackItem::Single),
                                 StackItem::Tabs(tabs) => {
                                     let saved_tabs: Vec<_> = tabs
                                         .iter()
-                                        .filter_map(|&e| SavedWindow::from_entity(e, windows, apps))
+                                        .filter_map(|&e| {
+                                            SavedWindow::from_entity(
+                                                e,
+                                                windows,
+                                                apps,
+                                                strip_position_x,
+                                            )
+                                        })
                                         .collect();
                                     if saved_tabs.is_empty() {
                                         None
@@ -245,7 +274,9 @@ impl PaneruState {
                     Column::Tabs(tabs) => {
                         let saved_tabs: Vec<_> = tabs
                             .iter()
-                            .filter_map(|&e| SavedWindow::from_entity(e, windows, apps))
+                            .filter_map(|&e| {
+                                SavedWindow::from_entity(e, windows, apps, strip_position_x)
+                            })
                             .collect();
                         if saved_tabs.is_empty() {
                             None
@@ -253,8 +284,10 @@ impl PaneruState {
                             Some(SavedColumn::Tabs(saved_tabs))
                         }
                     }
-                    Column::Fullscren(entity) => SavedWindow::from_entity(*entity, windows, apps)
-                        .map(SavedColumn::Fullscreen),
+                    Column::Fullscren(entity) => {
+                        SavedWindow::from_entity(*entity, windows, apps, strip_position_x)
+                            .map(SavedColumn::Fullscreen)
+                    }
                 };
 
                 if let Some(sc) = saved_col {
@@ -322,8 +355,17 @@ impl PaneruState {
             fs::create_dir_all(parent)?;
         }
         let tmp_path = path.with_extension("json.tmp");
-        fs::write(&tmp_path, json)?;
+        let mut tmp = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&tmp_path)?;
+        tmp.write_all(json.as_bytes())?;
+        tmp.sync_all()?;
         fs::rename(tmp_path, path)?;
+        if let Some(parent) = path.parent() {
+            fs::File::open(parent)?.sync_all()?;
+        }
         Ok(())
     }
 
@@ -543,38 +585,4 @@ fn now_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-}
-
-#[allow(clippy::needless_pass_by_value)]
-pub fn periodic_state_save(
-    workspaces: Query<(Option<&ChildOf>, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
-    displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
-    windows: Windows,
-    apps: Query<&Application>,
-) {
-    let state = PaneruState::extract(&workspaces, &displays, &windows, &apps);
-    let path = PaneruState::default_state_file_path();
-    if let Err(e) = state.save_to_file(&path) {
-        warn!("Failed to save state: {e}");
-    } else {
-        debug!("State saved to {}", path.display());
-    }
-}
-
-#[allow(clippy::needless_pass_by_value)]
-pub fn cleanup_on_exit(
-    mut exit_events: MessageReader<AppExit>,
-    workspaces: Query<(Option<&ChildOf>, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
-    displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
-    windows: Windows,
-    apps: Query<&Application>,
-) {
-    if exit_events.read().next().is_some() {
-        info!("Exiting, saving state...");
-        let state = PaneruState::extract(&workspaces, &displays, &windows, &apps);
-        let path = PaneruState::default_state_file_path();
-        if let Err(e) = state.save_to_file(&path) {
-            error!("Failed to save state on exit: {e}");
-        }
-    }
 }

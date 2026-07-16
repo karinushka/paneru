@@ -6,7 +6,7 @@ use bevy::ecs::lifecycle::Add;
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Has, With};
-use bevy::ecs::system::{Commands, Local, NonSend, Query, Res};
+use bevy::ecs::system::{Commands, Local, NonSend, Query, Res, ResMut};
 use bevy::math::IRect;
 use bevy::platform::collections::HashSet;
 use objc2_app_kit::NSScreen;
@@ -18,13 +18,14 @@ use tracing::{Level, debug, error, instrument, warn};
 
 use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
+use crate::ecs::runtime::{OrphanReconcileDeadline, SyntheticEventPending};
 use crate::ecs::{
     ActiveDisplayMarker, ActiveWorkspaceMarker, ReadDisplayProperties, RefreshWindowSizes,
-    SendMessageTrigger, SpawnCommandsExt, Timeout,
+    Scrolling, SendMessageTrigger, SpawnCommandsExt, Timeout,
 };
 use crate::events::Event;
 use crate::manager::{Display, WindowManager, irect_from};
-use crate::platform::{PlatformCallbacks, WorkspaceId};
+use crate::platform::{AxMainThread, PlatformCallbacks, WorkspaceId};
 use crate::util::read_screen_property;
 
 const ORPHANED_SPACES_TIMEOUT_SEC: u64 = 30;
@@ -108,6 +109,7 @@ pub(crate) fn reconcile_displays(
     mut displays: Query<(&mut Display, Entity)>,
     active_strips: Query<Entity, (With<LayoutStrip>, With<ActiveWorkspaceMarker>)>,
     window_manager: Res<WindowManager>,
+    _main_thread: NonSend<AxMainThread>,
     mut retries: Local<u8>,
     mut commands: Commands,
 ) {
@@ -141,11 +143,14 @@ pub(crate) fn reconcile_displays(
         warn!("No present displays found... retrying again in {DISPLAY_RETRY_TIMEOUT} seconds.");
         *retries = retries.saturating_sub(1);
         if *retries > 0 {
-            let retry_displays = move |mut messages: MessageWriter<Event>| {
-                messages.write(Event::SystemWoke {
-                    msg: "Retrying display scan".to_string(),
-                });
-            };
+            let retry_displays =
+                move |mut messages: MessageWriter<Event>,
+                      mut synthetic_events: ResMut<SyntheticEventPending>| {
+                    messages.write(Event::SystemWoke {
+                        msg: "Retrying display scan".to_string(),
+                    });
+                    synthetic_events.mark();
+                };
             let system_id = commands.register_system(retry_displays);
             Timeout::callback(
                 Duration::from_secs(DISPLAY_RETRY_TIMEOUT),
@@ -263,7 +268,9 @@ fn remove_display(
             commands,
         );
         if let Ok(mut commands) = commands.get_entity(entity) {
-            commands.try_insert(timeout);
+            commands
+                .try_remove::<Scrolling>()
+                .try_insert((timeout, OrphanReconcileDeadline::default()));
         }
         if let Ok(mut commands) = commands.get_entity(display_entity) {
             commands.detach_child(entity);

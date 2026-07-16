@@ -46,11 +46,13 @@ objc2-app-kit = { version = "0.3", features = [
   "NSAttributedString",
   "NSParagraphStyle",
   "NSStringDrawing",
+  "objc2-quartz-core",
 ] }
 objc2-core-foundation = { version = "0.3", features = ["CFRunLoop"] }
 objc2-core-graphics = "0.3"
 objc2-quartz-core = { version = "0.3", features = [
   "CALayer",
+  "CADisplayLink",
   "objc2-core-foundation",
   "objc2-core-graphics",
 ] }
@@ -60,6 +62,7 @@ objc2-foundation = { version = "0.3", features = [
   "NSAttributedString",
   "NSDictionary",
   "NSBundle",
+  "NSRunLoop",
 ] }
 regex = "1.12"
 scopeguard = "1.2"

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 use objc2_core_foundation::CGPoint;
@@ -7,8 +8,8 @@ use crate::commands::{Command, Direction, MoveFocus, Operation};
 use crate::config::{Config, MainOptions, WindowParams};
 use crate::ecs::display::FloatingLayer;
 use crate::ecs::{
-    ActiveWorkspaceMarker, FocusedMarker, NativeFullscreenMarker, Position, Unmanaged,
-    layout::LayoutStrip,
+    ActiveWorkspaceMarker, FocusedMarker, LayoutPosition, NativeFullscreenMarker, Position,
+    Unmanaged, layout::LayoutStrip,
 };
 use crate::ecs::{RepositionMarker, Scrolling, SpawnWindowTrigger};
 use crate::events::Event;
@@ -23,6 +24,9 @@ fn modifier_scroll_uses_native_momentum_without_synthetic_velocity() {
     let commands = vec![
         Event::MenuOpened { window_id: 0 },
         Event::Scroll { delta: 1.0 },
+        Event::Command {
+            command: Command::PrintState,
+        },
     ];
 
     TestHarness::new()
@@ -30,7 +34,7 @@ fn modifier_scroll_uses_native_momentum_without_synthetic_velocity() {
         .on_iteration(1, |world, _state| {
             let mut query = world.query_filtered::<&Scrolling, With<ActiveWorkspaceMarker>>();
             let scrolling = query.single(world).expect("active workspace is scrolling");
-            assert_eq!(scrolling.velocity, 0.0);
+            assert!(scrolling.velocity.abs() < f64::EPSILON);
             assert!(scrolling.is_user_swiping);
         })
         .run(commands);
@@ -131,6 +135,53 @@ fn frontmost_floating_window_is_focused_after_setup() {
             assert!(world.entity(entity).contains::<Unmanaged>());
         })
         .run(vec![Event::MenuOpened { window_id: 0 }]);
+}
+
+#[test]
+fn sticky_modifier_scroll_keeps_snap_pending_until_momentum_settles() {
+    let config = Config::try_from(
+        r"
+[options]
+
+[swipe]
+sticky = true
+paging = false
+
+[bindings]
+",
+    )
+    .expect("sticky swipe config should parse");
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::SetWidth(2.0)),
+        },
+        Event::Scroll { delta: 1.0 },
+    ];
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(1)
+        .on_iteration(2, |world, _state| {
+            let mut query = world.query_filtered::<&mut Scrolling, With<ActiveWorkspaceMarker>>();
+            let mut scrolling = query
+                .single_mut(world)
+                .expect("active workspace is scrolling");
+            assert!(scrolling.snap_pending);
+            assert!(scrolling.velocity.abs() < f64::EPSILON);
+            scrolling.last_event = Instant::now()
+                .checked_sub(Duration::from_millis(100))
+                .expect("100ms must fit before the current instant");
+        })
+        .on_iteration(3, |world, _state| {
+            let mut query = world.query_filtered::<&Scrolling, With<ActiveWorkspaceMarker>>();
+            let scrolling = query
+                .single(world)
+                .expect("pending sticky snap must keep scrolling alive");
+            assert!(!scrolling.is_user_swiping);
+            assert!(scrolling.snap_pending);
+        })
+        .run(commands);
 }
 
 #[test]
@@ -269,7 +320,7 @@ fn test_scrolling() {
             command: Command::PrintState,
         },
         Event::Swipe {
-            delta: 0.2,
+            delta: 0.3,
             fingers: 3,
         },
         Event::Command {
@@ -277,14 +328,10 @@ fn test_scrolling() {
         },
     ];
 
-    let config: Config = (
-        MainOptions {
-            swipe_gesture_fingers: Some(3),
-            ..Default::default()
-        },
-        vec![],
+    let config = Config::try_from(
+        "[options]\nswipe_gesture_fingers = 3\n\n[swipe]\npaging = false\n\n[bindings]\n",
     )
-        .into();
+    .expect("legacy free-scroll config should parse");
 
     TestHarness::new()
         .with_config(config)
@@ -295,9 +342,25 @@ fn test_scrolling() {
             assert_window_at!(world, 2, 800, TEST_MENUBAR_HEIGHT);
         })
         .on_iteration(5, move |world, _state| {
-            assert_window_at!(world, 0, -395, TEST_MENUBAR_HEIGHT);
-            assert_window_at!(world, 1, -382, TEST_MENUBAR_HEIGHT);
-            assert_window_at!(world, 2, 18, TEST_MENUBAR_HEIGHT);
+            let mut strip_query = world.query_filtered::<
+                (&Position, &Scrolling),
+                (With<ActiveWorkspaceMarker>, With<LayoutStrip>),
+            >();
+            let (strip_position, scrolling) = strip_query
+                .single(world)
+                .expect("one active scrolling strip");
+            let strip_x = strip_position.0.x;
+            assert_eq!(strip_x, -800);
+            assert_eq!(scrolling.position as i32, -800);
+
+            // Assert the durable layout contract rather than transient mock AX
+            // frames, which may still be between animation commits.
+            for (window_id, layout_x, screen_x) in [(0, 0, -800), (1, 400, -400), (2, 800, 0)] {
+                let entity = find_window_entity(window_id, world);
+                let layout_position = world.get::<LayoutPosition>(entity).unwrap().0.x;
+                assert_eq!(layout_position, layout_x);
+                assert_eq!(strip_x + layout_position, screen_x);
+            }
         })
         .run(commands);
 }
@@ -349,16 +412,10 @@ fn test_window_hidden_ratio() {
         },
     ];
 
-    let config: Config = (
-        MainOptions {
-            window_hidden_ratio: Some(0.5),
-            animation_speed: Some(10000.0),
-            swipe_gesture_fingers: Some(3),
-            ..Default::default()
-        },
-        vec![],
+    let config = Config::try_from(
+        "[options]\nwindow_hidden_ratio = 0.5\nanimation_speed = 10000.0\nswipe_gesture_fingers = 3\n\n[swipe]\npaging = false\n\n[bindings]\n",
     )
-        .into();
+    .expect("legacy hidden-window scrolling config should parse");
 
     TestHarness::new()
         .with_config(config)
@@ -968,15 +1025,19 @@ fn focus_unmanaged_ignores_floats_from_other_workspaces() {
 /// shifts to make room.
 #[test]
 fn test_mid_strip_insertion_preserves_window_x() {
-    let config: Config = (
-        MainOptions {
-            insert_windows_mid_strip: Some(true),
-            swipe_gesture_fingers: Some(3),
-            ..Default::default()
-        },
-        vec![],
+    let config = Config::try_from(
+        r"
+[options]
+insert_windows_mid_strip = true
+swipe_gesture_fingers = 3
+
+[swipe]
+paging = false
+
+[bindings]
+",
     )
-        .into();
+    .expect("mid-strip insertion test requires free scrolling");
 
     let mut h = TestHarness::new().with_config(config).with_windows(8);
 

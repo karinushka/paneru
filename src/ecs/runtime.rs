@@ -12,12 +12,12 @@ use bevy::ecs::system::{NonSend, NonSendMut, Query, Res, ResMut, SystemParam};
 use bevy::time::{Real, Time};
 
 use super::{
-    ActiveWorkspaceMarker, FlashMessage, FocusedMarker, FreshMarker, Initializing,
-    RefreshWindowSizes, RepositionMarker, ResizeMarker, RetryFrontSwitch, Scrolling, Timeout,
-    VerifyWindowPosition,
+    ActiveDisplayMarker, ActiveWorkspaceMarker, FlashMessage, FocusedMarker, FreshMarker,
+    Initializing, RefreshWindowSizes, RepositionMarker, ResizeMarker, RetryFrontSwitch, Scrolling,
+    Timeout, VerifyWindowPosition,
 };
 use crate::events::{Event, EventReceiver};
-use crate::manager::Window;
+use crate::manager::{Display, Window};
 use crate::platform::PlatformCallbacks;
 
 pub(crate) const ACTIVE_FRAME_INTERVAL: Duration = Duration::from_millis(16);
@@ -149,6 +149,7 @@ pub(super) struct RuntimeWork<'w, 's> {
     orphan_checks: Query<'w, 's, &'static OrphanReconcileDeadline, Without<ChildOf>>,
     windows: Query<'w, 's, (), With<Window>>,
     focused_windows: Query<'w, 's, (), (With<Window>, With<FocusedMarker>)>,
+    active_display: Query<'w, 's, &'static Display, With<ActiveDisplayMarker>>,
     focus_recovery: Option<Res<'w, FocusRecoveryDeadline>>,
     retries: Query<'w, 's, &'static RetryFrontSwitch>,
     verifications: Query<'w, 's, &'static VerifyWindowPosition>,
@@ -228,18 +229,32 @@ pub(super) fn pump_events(
 
     let now = Instant::now();
     let activity = runtime_activity(&work, now);
+    let frame_display_id = activity
+        .frame_work
+        .then(|| work.active_display.iter().next().map(Display::id))
+        .flatten();
     let synthetic_pending = synthetic_events.take();
     let (received_events, should_exit, did_wait) =
         pump_receiver(&incoming_events, activity, now, synthetic_pending, |wait| {
-            platform.pump_cocoa_event_loop(wait);
+            platform.pump_cocoa_event_loop(wait, frame_display_id);
         });
-    if did_wait && let Some(real_time) = real_time.as_mut() {
+    if should_resync_real_time_after_wait(activity, did_wait)
+        && let Some(real_time) = real_time.as_mut()
+    {
         real_time.update_with_instant(Instant::now());
     }
     if should_exit {
         exit.write(AppExit::Success);
     }
     messages.write_batch(received_events);
+}
+
+fn should_resync_real_time_after_wait(activity: RuntimeActivity, did_wait: bool) -> bool {
+    // Long idle/deadline waits must not become one giant animation delta.
+    // Active frame pacing is different: its actual elapsed time must reach
+    // Bevy's Virtual clock on the next update, otherwise each display-link
+    // wait is discarded and easing animations run too slowly in wall time.
+    did_wait && !activity.frame_work
 }
 
 fn pump_receiver(
@@ -293,6 +308,7 @@ mod tests {
     use super::{
         ACTIVE_FRAME_INTERVAL, FreshPollDeadline, LEGACY_TIMER_FALLBACK_INTERVAL, RuntimeActivity,
         RuntimeWork, SyntheticEventPending, pump_receiver, runtime_activity,
+        should_resync_real_time_after_wait,
     };
     use crate::ecs::{ActiveWorkspaceMarker, RefreshWindowSizes, Scrolling, SendMessageTrigger};
     use crate::events::{Event, EventReceiver, EventSender};
@@ -448,6 +464,25 @@ mod tests {
             app.world().resource::<ScrollProbe>().0 < 20.0,
             "40ms idle wait leaked into the next animation delta"
         );
+    }
+
+    #[test]
+    fn only_idle_waits_resync_the_real_clock() {
+        let idle = RuntimeActivity {
+            frame_work: false,
+            nearest_deadline: None,
+        };
+        let animating = RuntimeActivity {
+            frame_work: true,
+            nearest_deadline: None,
+        };
+
+        assert!(should_resync_real_time_after_wait(idle, true));
+        assert!(
+            !should_resync_real_time_after_wait(animating, true),
+            "display-paced frame time must contribute to the next animation delta"
+        );
+        assert!(!should_resync_real_time_after_wait(idle, false));
     }
 
     #[derive(Resource, Default)]

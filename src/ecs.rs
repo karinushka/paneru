@@ -96,7 +96,8 @@ pub fn register_systems(app: &mut bevy::app::App) {
     );
     // Native events must be published before every MessageReader<Event>.
     // All readers live in PreUpdate or later; the pump runs in First after
-    // Bevy updates Time so its blocking wait can resync the real clock.
+    // Bevy updates Time. Idle waits resync the real clock, while active frame
+    // pacing remains part of the next animation delta.
     app.add_systems(
         First,
         runtime::pump_events

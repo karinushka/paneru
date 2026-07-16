@@ -1,5 +1,5 @@
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use accessibility_sys::{AXError, AXObserverRef, AXUIElementRef};
 use objc2::MainThreadMarker;
@@ -18,6 +18,7 @@ use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender, EventWakeSource};
 use crate::manager::{check_ax_privilege, check_separate_spaces};
 use crate::platform::display::PinnedDisplayHandler;
+use crate::platform::frame_pacer::DisplayFramePacer;
 use crate::platform::input::PinnedInputHandler;
 use crate::platform::notify::{NotifyHandler, PinnedNotifyHandler};
 use crate::platform::process::PinnedProcessHandler;
@@ -29,6 +30,7 @@ pub use process::ProcessSerialNumber;
 pub use workspace::WorkspaceObserver;
 
 mod display;
+mod frame_pacer;
 pub(crate) mod input;
 mod mission_control;
 pub mod notify;
@@ -173,6 +175,7 @@ pub struct PlatformCallbacks {
     mission_control_observer: MissionControlHandler,
     /// Handler for Core Graphics display reconfiguration events.
     display_handler: Option<PinnedDisplayHandler>,
+    frame_pacer: DisplayFramePacer,
     notify_handler: Option<PinnedNotifyHandler>,
 }
 
@@ -212,6 +215,7 @@ impl PlatformCallbacks {
             workspace_observer,
             mission_control_observer: MissionControlHandler::new(events.clone()),
             display_handler: None,
+            frame_pacer: DisplayFramePacer::new(main_thread_marker),
             notify_handler: None,
             events,
             _event_wake: event_wake,
@@ -278,15 +282,40 @@ impl PlatformCallbacks {
         Ok(transition.changed())
     }
 
-    pub fn pump_cocoa_event_loop(&mut self, timeout: Option<Duration>) {
+    pub fn pump_cocoa_event_loop(
+        &mut self,
+        timeout: Option<Duration>,
+        frame_display_id: Option<objc2_core_graphics::CGDirectDisplayID>,
+    ) {
         autoreleasepool(|_| {
             // Drain already queued AppKit events before sleeping. Channel
             // events are drained by ECS first; their custom run-loop source is
             // latched, so a signal between that drain and `run_in_mode` cannot
             // be lost.
             self.dispatch_pending_cocoa_events();
-            let seconds = timeout.map_or(f64::MAX, |duration| duration.as_secs_f64());
-            CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, seconds, true);
+            let display_link_armed =
+                frame_display_id.is_some_and(|display_id| self.frame_pacer.arm(display_id));
+            if display_link_armed {
+                const DISPLAY_LINK_SAFETY_TIMEOUT: Duration = Duration::from_millis(50);
+                let deadline = Instant::now() + DISPLAY_LINK_SAFETY_TIMEOUT;
+                while !self.frame_pacer.frame_fired() {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    CFRunLoop::run_in_mode(
+                        unsafe { kCFRunLoopDefaultMode },
+                        remaining.as_secs_f64(),
+                        true,
+                    );
+                }
+            } else {
+                let seconds = timeout.map_or(f64::MAX, |duration| duration.as_secs_f64());
+                CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, seconds, true);
+            }
+            if display_link_armed {
+                self.frame_pacer.pause();
+            }
             self.dispatch_pending_cocoa_events();
 
             // Housekeeping for UI/Notifications

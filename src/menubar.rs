@@ -11,6 +11,7 @@ use objc2_core_foundation::CGFloat;
 use objc2_foundation::{NSObject, NSString};
 use tracing::warn;
 
+use crate::accessibility_prompt::{AccessibilitySetupAction, show_accessibility_setup};
 use crate::commands::{Command, Operation};
 use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
@@ -18,7 +19,7 @@ use crate::ecs::{
     ActiveDisplayMarker, ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker, Unmanaged,
 };
 use crate::events::{Event, EventSender};
-use crate::manager::Display;
+use crate::manager::{Display, request_ax_privilege};
 
 #[derive(Debug, Clone)]
 struct MenuActionTargetIvars {
@@ -51,6 +52,30 @@ define_class!(
         #[unsafe(method(toggleManaged:))]
         fn toggle_managed(&self, _: &NSMenuItem) {
             self.send_command(Command::Window(Operation::Manage));
+        }
+
+        #[unsafe(method(openAccessibilitySettings:))]
+        fn open_accessibility_settings(&self, _: &NSMenuItem) {
+            if let Err(error) = std::process::Command::new("/usr/bin/open")
+                .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+                .spawn()
+            {
+                warn!(%error, "unable to open Accessibility settings");
+            }
+        }
+
+        #[unsafe(method(showAccessibilityInstructions:))]
+        fn show_accessibility_instructions(&self, _: &NSMenuItem) {
+            let Some(main_thread_marker) = MainThreadMarker::new() else {
+                warn!("unable to show Accessibility instructions outside the main thread");
+                return;
+            };
+
+            if show_accessibility_setup(main_thread_marker)
+                == AccessibilitySetupAction::Continue
+            {
+                request_ax_privilege();
+            }
         }
 
         #[unsafe(method(quitPaneru:))]
@@ -128,6 +153,36 @@ impl MenuBarManager {
             configured_widths: Vec::new(),
             current_label: None,
         }
+    }
+
+    pub fn new_accessibility_required(mtm: MainThreadMarker, events: EventSender) -> Self {
+        let mut manager = Self::new(mtm, events);
+        manager.rebuild_accessibility_menu();
+        manager.show_label("Paneru !".to_owned());
+        manager
+    }
+
+    fn rebuild_accessibility_menu(&mut self) {
+        self.menu.removeAllItems();
+
+        let status = self.add_item("Paneru — Accessibility Required", None);
+        status.setEnabled(false);
+
+        let hint = self.add_item("Grant access; Paneru will start automatically", None);
+        hint.setEnabled(false);
+
+        self.menu.addItem(&NSMenuItem::separatorItem(self.mtm));
+        self.add_item(
+            "Show Setup Instructions…",
+            Some(sel!(showAccessibilityInstructions:)),
+        );
+        self.add_item(
+            "Open Accessibility Settings…",
+            Some(sel!(openAccessibilitySettings:)),
+        );
+
+        self.menu.addItem(&NSMenuItem::separatorItem(self.mtm));
+        self.add_item("Quit Paneru", Some(sel!(quitPaneru:)));
     }
 
     pub fn update(

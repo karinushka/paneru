@@ -119,6 +119,7 @@ Format: `"[modifiers-]key"`. Available modifiers are:
 - `ctrl`, `lctrl`, `rctrl`
 - `cmd`, `lcmd`, `rcmd`
 - `shift`, `lshift`, `rshift`
+- `fn`
 
 | Action | Description |
 | :--- | :--- |

@@ -457,7 +457,7 @@ impl InputHandler {
 }
 
 fn get_modifiers(eventflags: CGEventFlags) -> Modifiers {
-    const MODIFIER_MASKS: [(Modifiers, u64); 8] = [
+    const MODIFIER_MASKS: [(Modifiers, u64); 9] = [
         (Modifiers::LALT, 0x0000_0020),
         (Modifiers::RALT, 0x0000_0040),
         (Modifiers::LSHIFT, 0x0000_0002),
@@ -466,6 +466,7 @@ fn get_modifiers(eventflags: CGEventFlags) -> Modifiers {
         (Modifiers::RCMD, 0x0000_0010),
         (Modifiers::LCTRL, 0x0000_0001),
         (Modifiers::RCTRL, 0x0000_2000),
+        (Modifiers::FN, 0x0080_0000),
     ];
     let mut mask = Modifiers::empty();
     for (modifier, m) in MODIFIER_MASKS {
@@ -488,10 +489,28 @@ mod tests {
     const NX_DEVICERCMDKEYMASK: u64 = 0x0000_0010;
     const NX_DEVICELCTLKEYMASK: u64 = 0x0000_0001;
     const NX_DEVICERCTLKEYMASK: u64 = 0x0000_2000;
+    const NX_DEVICEFNKEYMASK: u64 = 0x0080_0000;
 
     #[test]
     fn no_modifiers() {
         assert_eq!(get_modifiers(CGEventFlags(0)), Modifiers::empty());
+    }
+
+    #[test]
+    fn fn_modifier() {
+        assert_eq!(
+            get_modifiers(CGEventFlags(NX_DEVICEFNKEYMASK)),
+            Modifiers::FN
+        );
+    }
+
+    #[test]
+    fn fn_with_other_modifiers() {
+        let flags = NX_DEVICEFNKEYMASK | NX_DEVICELCMDKEYMASK | NX_DEVICELALTKEYMASK;
+        assert_eq!(
+            get_modifiers(CGEventFlags(flags)),
+            Modifiers::FN | Modifiers::LCMD | Modifiers::LALT
+        );
     }
 
     #[test]
@@ -562,5 +581,11 @@ mod tests {
     fn device_independent_flags_ignored() {
         let generic_alt: u64 = 0x0008_0000;
         assert_eq!(get_modifiers(CGEventFlags(generic_alt)), Modifiers::empty());
+    }
+
+    #[test]
+    fn secondary_fn_flag_is_not_ignored() {
+        // Ensure we don't accidentally filter out the fn mask as "device independent"
+        assert_eq!(get_modifiers(CGEventFlags(0x0080_0000)), Modifiers::FN);
     }
 }

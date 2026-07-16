@@ -4,31 +4,90 @@ use bevy::math::IRect;
 
 use crate::ecs::{PagingGesture, Scrolling};
 
-use super::STICKY_EDGE_THRESHOLD_POINTS;
+use super::STICKY_EDGE_THRESHOLD_RATIO;
 
 pub(super) const FLING_VELOCITY_THRESHOLD: f64 = 0.5;
 const ADVANCE_RATIO: f64 = 0.25;
+// Window positions are integrated as floats but ultimately applied in integer
+// logical points. Treat sub-point drift as exact stop alignment so an already
+// consumed stop is not reintroduced as a movement boundary.
+const STOP_ALIGNMENT_EPSILON: f64 = 0.5;
 
 pub(super) fn capture_gesture(
     current_position: f64,
     viewport: &IRect,
     columns: impl IntoIterator<Item = (i32, i32)>,
+    preferred_column: Option<(i32, i32)>,
 ) -> Option<PagingGesture> {
-    let stops = snap_stops(viewport, columns);
-    let start_index = stops
-        .iter()
-        .enumerate()
-        .min_by(|(_, left), (_, right)| {
-            (current_position - **left)
+    let columns = columns.into_iter().collect::<Vec<_>>();
+    let (lower_bound, upper_bound) = content_bounds(viewport, &columns)?;
+    let stops = snap_stops(viewport, columns.iter().copied());
+    let preferred_stop = preferred_column
+        .into_iter()
+        .flat_map(|column| column_stops(viewport, column, lower_bound, upper_bound))
+        .min_by(|left, right| {
+            (current_position - *left)
                 .abs()
-                .total_cmp(&(current_position - **right).abs())
-        })?
-        .0;
+                .total_cmp(&(current_position - *right).abs())
+        });
+    let start_index = preferred_stop
+        .and_then(|preferred| {
+            stops
+                .iter()
+                .position(|stop| (*stop - preferred).abs() <= f64::EPSILON)
+        })
+        .or_else(|| {
+            stops
+                .iter()
+                .enumerate()
+                .min_by(|(_, left), (_, right)| {
+                    (current_position - **left)
+                        .abs()
+                        .total_cmp(&(current_position - **right).abs())
+                })
+                .map(|(index, _)| index)
+        })?;
+
+    let start_stop = stops[start_index];
+    let (previous_stop, next_stop) =
+        if (current_position - start_stop).abs() <= STOP_ALIGNMENT_EPSILON {
+            (
+                start_index.checked_sub(1).map(|index| stops[index]),
+                stops.get(start_index + 1).copied(),
+            )
+        } else {
+            // Motion bounds must come from the real gesture origin. If the
+            // strip starts between stops, deriving both neighbors from the
+            // selected snap target marks one edge as already consumed and lets
+            // a gesture skip it. A pointer-selected window remains the first
+            // boundary in its direction even when another global stop lies
+            // between the current offset and that window's anchor.
+            (
+                (start_stop > current_position)
+                    .then_some(start_stop)
+                    .or_else(|| {
+                        stops
+                            .iter()
+                            .copied()
+                            .filter(|stop| *stop > current_position)
+                            .min_by(f64::total_cmp)
+                    }),
+                (start_stop < current_position)
+                    .then_some(start_stop)
+                    .or_else(|| {
+                        stops
+                            .iter()
+                            .copied()
+                            .filter(|stop| *stop < current_position)
+                            .max_by(f64::total_cmp)
+                    }),
+            )
+        };
 
     Some(PagingGesture {
-        start_stop: stops[start_index],
-        previous_stop: start_index.checked_sub(1).map(|index| stops[index]),
-        next_stop: stops.get(start_index + 1).copied(),
+        start_stop,
+        previous_stop,
+        next_stop,
         release_velocity: 0.0,
     })
 }
@@ -60,9 +119,21 @@ fn snap_stops(viewport: &IRect, columns: impl IntoIterator<Item = (i32, i32)>) -
         .into_iter()
         .filter(|(_, width)| *width > 0)
         .collect::<Vec<_>>();
-    let Some(content_min) = columns.iter().map(|(position, _)| *position).min() else {
+    let Some((lower_bound, upper_bound)) = content_bounds(viewport, &columns) else {
         return Vec::new();
     };
+
+    let mut stops = columns
+        .into_iter()
+        .flat_map(|column| column_stops(viewport, column, lower_bound, upper_bound))
+        .collect::<Vec<_>>();
+    stops.sort_by(|left, right| right.total_cmp(left));
+    stops.dedup();
+    stops
+}
+
+fn content_bounds(viewport: &IRect, columns: &[(i32, i32)]) -> Option<(f64, f64)> {
+    let content_min = columns.iter().map(|(position, _)| *position).min()?;
     let content_max = columns
         .iter()
         .map(|(position, width)| position.saturating_add(*width))
@@ -70,26 +141,27 @@ fn snap_stops(viewport: &IRect, columns: impl IntoIterator<Item = (i32, i32)>) -
         .unwrap_or(content_min);
     let first_bound = viewport.min.x - content_min;
     let last_bound = viewport.max.x - content_max;
-    let lower_bound = f64::from(first_bound.min(last_bound));
-    let upper_bound = f64::from(first_bound.max(last_bound));
+    Some((
+        f64::from(first_bound.min(last_bound)),
+        f64::from(first_bound.max(last_bound)),
+    ))
+}
 
-    let mut stops = columns
-        .into_iter()
-        .flat_map(|(position, width)| {
-            let left_aligned = f64::from(viewport.min.x - position).clamp(lower_bound, upper_bound);
-            let right_aligned =
-                f64::from(viewport.max.x - position - width).clamp(lower_bound, upper_bound);
-            if width > viewport.width() {
-                [Some(left_aligned), Some(right_aligned)]
-            } else {
-                [Some(left_aligned), None]
-            }
-        })
-        .flatten()
-        .collect::<Vec<_>>();
-    stops.sort_by(|left, right| right.total_cmp(left));
-    stops.dedup();
-    stops
+fn column_stops(
+    viewport: &IRect,
+    (position, width): (i32, i32),
+    lower_bound: f64,
+    upper_bound: f64,
+) -> impl Iterator<Item = f64> {
+    let left_aligned = f64::from(viewport.min.x - position).clamp(lower_bound, upper_bound);
+    let right_aligned =
+        f64::from(viewport.max.x - position - width).clamp(lower_bound, upper_bound);
+    [
+        Some(left_aligned),
+        (width > viewport.width()).then_some(right_aligned),
+    ]
+    .into_iter()
+    .flatten()
 }
 
 pub(super) fn snap_target(
@@ -104,7 +176,7 @@ pub(super) fn snap_target(
     ]
     .into_iter()
     .flatten()
-    .filter(|stop| (current_position - *stop).abs() <= f64::from(STICKY_EDGE_THRESHOLD_POINTS))
+    .filter(|stop| (current_position - *stop).abs() <= viewport_width * STICKY_EDGE_THRESHOLD_RATIO)
     .min_by(|left, right| {
         (current_position - *left)
             .abs()
@@ -154,6 +226,7 @@ pub(super) fn ready_to_snap(scrolling: &Scrolling) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use bevy::math::IRect;
 
@@ -187,16 +260,65 @@ mod tests {
     fn neighborhood_is_ordered_and_reverse_symmetric() {
         let viewport = IRect::new(0, 0, 1000, 800);
         let columns = [(0, 600), (600, 1500), (2100, 600)];
-        let left = capture_gesture(-600.0, &viewport, columns).unwrap();
+        let left = capture_gesture(-600.0, &viewport, columns, None).unwrap();
         assert_eq!(
             (left.previous_stop, left.next_stop),
             (Some(0.0), Some(-1100.0))
         );
-        let right = capture_gesture(-1100.0, &viewport, columns).unwrap();
+        let right = capture_gesture(-1100.0, &viewport, columns, None).unwrap();
         assert_eq!(
             (right.previous_stop, right.next_stop),
             (Some(-600.0), Some(-1700.0))
         );
+    }
+
+    #[test]
+    fn window_under_pointer_selects_the_paging_neighborhood() {
+        let viewport = IRect::new(0, 0, 1000, 800);
+        let columns = [(0, 600), (600, 600), (1200, 600)];
+
+        let gesture = capture_gesture(-300.0, &viewport, columns, Some((600, 600))).unwrap();
+
+        assert_eq!(gesture.start_stop, -600.0);
+        assert_eq!(gesture.previous_stop, Some(0.0));
+        assert_eq!(gesture.next_stop, Some(-600.0));
+
+        let last_window = capture_gesture(-300.0, &viewport, columns, Some((1200, 600))).unwrap();
+        assert_eq!(last_window.start_stop, -800.0);
+        assert_eq!(last_window.previous_stop, Some(0.0));
+        assert_eq!(last_window.next_stop, Some(-800.0));
+    }
+
+    #[test]
+    fn unsnapped_origin_cannot_skip_the_first_stop_in_either_direction() {
+        let viewport = IRect::new(0, 0, 1000, 800);
+        let columns = [(0, 600), (600, 1500), (2100, 600)];
+        let paging = capture_gesture(-700.0, &viewport, columns, None).unwrap();
+        assert_eq!(paging.start_stop, -600.0);
+        assert_eq!(paging.previous_stop, Some(-600.0));
+        assert_eq!(paging.next_stop, Some(-1100.0));
+
+        let mut towards_previous = Scrolling {
+            position: 500.0,
+            target_position: Some(500.0),
+            velocity: 2.0,
+            paging_gesture: Some(paging),
+            ..Default::default()
+        };
+        constrain_motion(&mut towards_previous, 1.0);
+        assert_eq!(towards_previous.position, -600.0);
+        assert_eq!(towards_previous.target_position, Some(-600.0));
+
+        let mut towards_next = Scrolling {
+            position: -5000.0,
+            target_position: Some(-5000.0),
+            velocity: -2.0,
+            paging_gesture: Some(paging),
+            ..Default::default()
+        };
+        constrain_motion(&mut towards_next, 1.0);
+        assert_eq!(towards_next.position, -1100.0);
+        assert_eq!(towards_next.target_position, Some(-1100.0));
     }
 
     #[test]
@@ -240,7 +362,7 @@ mod tests {
         assert_eq!(snap_target(-1080.0, 1000.0, paging), -1100.0);
         assert_eq!(
             snap_target(
-                -650.0,
+                -701.0,
                 1000.0,
                 PagingGesture {
                     release_velocity: -0.5,

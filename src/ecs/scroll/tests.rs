@@ -1,3 +1,5 @@
+#![allow(clippy::float_cmp)]
+
 use std::time::{Duration, Instant};
 
 use bevy::ecs::query::With;
@@ -5,7 +7,10 @@ use bevy::math::IRect;
 use bevy::prelude::Entity;
 use bevy::time::TimeUpdateStrategy;
 
-use super::{Scrolling, resume_touchpad_gesture, smooth_native_scroll, sticky_edge_snap_target};
+use super::{
+    Scrolling, finish_touchpad_gesture, resume_touchpad_gesture, smooth_native_scroll,
+    sticky_edge_snap_target,
+};
 use crate::commands::Command;
 use crate::ecs::{ActiveWorkspaceMarker, Position};
 use crate::events::Event;
@@ -29,24 +34,41 @@ fn native_scroll_smoothing_converges_without_overshoot() {
 }
 
 #[test]
-fn momentum_resume_preserves_target_but_new_touch_interrupts_it() {
+fn momentum_resume_discards_physical_interpolation_backlog() {
     let mut scrolling = Scrolling {
+        position: -280.0,
         target_position: Some(-320.0),
         ..Default::default()
     };
 
-    resume_touchpad_gesture(true, false, Some(&mut scrolling));
-    assert_eq!(
-        scrolling.target_position,
-        Some(-320.0),
-        "momentum must continue extending the in-flight native-scroll target"
-    );
+    resume_touchpad_gesture(true, false, true, Some(&mut scrolling));
+    assert_eq!(scrolling.position, -320.0);
+    assert_eq!(scrolling.target_position, None);
 
-    resume_touchpad_gesture(true, true, Some(&mut scrolling));
+    scrolling.target_position = Some(-360.0);
+    resume_touchpad_gesture(true, true, false, Some(&mut scrolling));
     assert_eq!(
         scrolling.target_position, None,
         "a new physical touch must interrupt the previous target"
     );
+}
+
+#[test]
+fn native_momentum_end_commits_the_final_target_without_extra_tail() {
+    let mut scrolling = Scrolling {
+        position: -280.0,
+        target_position: Some(-320.0),
+        gesture_active: true,
+        is_user_swiping: true,
+        ..Default::default()
+    };
+
+    finish_touchpad_gesture(true, 1.0, Some(&mut scrolling));
+
+    assert_eq!(scrolling.position, -320.0);
+    assert_eq!(scrolling.target_position, None);
+    assert!(!scrolling.gesture_active);
+    assert!(!scrolling.is_user_swiping);
 }
 
 #[test]
@@ -61,8 +83,7 @@ fn sticky_scroll_snaps_only_inside_the_edge_hit_zone() {
         sticky_edge_snap_target(-169, &viewport, columns),
         Some(-200)
     );
-    assert_eq!(sticky_edge_snap_target(-591, &viewport, columns), None);
-    assert_eq!(sticky_edge_snap_target(-167, &viewport, columns), None);
+    assert_eq!(sticky_edge_snap_target(-301, &viewport, columns), None);
 }
 
 #[test]
@@ -212,13 +233,10 @@ fn later_native_momentum_keeps_original_one_hop_paging_session() {
             assert!(is_user_swiping);
         })
         .on_iteration(5, |world, _state| {
-            let (_, _, target_position, gesture_active, _) = paging_snapshot(world);
+            let (_, position, target_position, gesture_active, _) = paging_snapshot(world);
             assert_original_oversized_paging_session(world);
-            assert_eq!(
-                target_position,
-                Some(0.0),
-                "momentum start must continue the unfinished physical-scroll target"
-            );
+            assert_eq!(position, 0.0);
+            assert_eq!(target_position, None);
             assert!(gesture_active);
         })
         .on_iteration(6, |world, _state| {
@@ -294,10 +312,14 @@ fn physical_up_and_momentum_start_in_same_update_leave_momentum_active() {
 }
 
 fn assert_original_oversized_paging_session(world: &mut bevy::prelude::World) {
-    let (paging, _, _, _, _) = paging_snapshot(world);
+    let (paging, position, target_position, _, _) = paging_snapshot(world);
     assert_eq!(paging.start_stop, -1024.0);
     assert_eq!(paging.previous_stop, Some(0.0));
-    assert_eq!(paging.next_stop, None);
+    assert_eq!(
+        paging.next_stop,
+        Some(-1024.0),
+        "position={position}, target_position={target_position:?}"
+    );
 }
 
 fn paging_snapshot(

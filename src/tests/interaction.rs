@@ -8,8 +8,8 @@ use crate::commands::{Command, Direction, MoveFocus, Operation};
 use crate::config::{Config, MainOptions, WindowParams};
 use crate::ecs::display::FloatingLayer;
 use crate::ecs::{
-    ActiveWorkspaceMarker, FocusedMarker, NativeFullscreenMarker, Position, Unmanaged,
-    layout::LayoutStrip,
+    ActiveWorkspaceMarker, FocusedMarker, LayoutPosition, NativeFullscreenMarker, Position,
+    Unmanaged, layout::LayoutStrip,
 };
 use crate::ecs::{RepositionMarker, Scrolling, SpawnWindowTrigger};
 use crate::events::Event;
@@ -320,7 +320,7 @@ fn test_scrolling() {
             command: Command::PrintState,
         },
         Event::Swipe {
-            delta: 0.2,
+            delta: 0.3,
             fingers: 3,
         },
         Event::Command {
@@ -342,9 +342,25 @@ fn test_scrolling() {
             assert_window_at!(world, 2, 800, TEST_MENUBAR_HEIGHT);
         })
         .on_iteration(5, move |world, _state| {
-            assert_window_at!(world, 0, -395, TEST_MENUBAR_HEIGHT);
-            assert_window_at!(world, 1, -382, TEST_MENUBAR_HEIGHT);
-            assert_window_at!(world, 2, 18, TEST_MENUBAR_HEIGHT);
+            let mut strip_query = world.query_filtered::<
+                (&Position, &Scrolling),
+                (With<ActiveWorkspaceMarker>, With<LayoutStrip>),
+            >();
+            let (strip_position, scrolling) = strip_query
+                .single(world)
+                .expect("one active scrolling strip");
+            let strip_x = strip_position.0.x;
+            assert_eq!(strip_x, -800);
+            assert_eq!(scrolling.position as i32, -800);
+
+            // Assert the durable layout contract rather than transient mock AX
+            // frames, which may still be between animation commits.
+            for (window_id, layout_x, screen_x) in [(0, 0, -800), (1, 400, -400), (2, 800, 0)] {
+                let entity = find_window_entity(window_id, world);
+                let layout_position = world.get::<LayoutPosition>(entity).unwrap().0.x;
+                assert_eq!(layout_position, layout_x);
+                assert_eq!(strip_x + layout_position, screen_x);
+            }
         })
         .run(commands);
 }
@@ -1009,15 +1025,19 @@ fn focus_unmanaged_ignores_floats_from_other_workspaces() {
 /// shifts to make room.
 #[test]
 fn test_mid_strip_insertion_preserves_window_x() {
-    let config: Config = (
-        MainOptions {
-            insert_windows_mid_strip: Some(true),
-            swipe_gesture_fingers: Some(3),
-            ..Default::default()
-        },
-        vec![],
+    let config = Config::try_from(
+        r"
+[options]
+insert_windows_mid_strip = true
+swipe_gesture_fingers = 3
+
+[swipe]
+paging = false
+
+[bindings]
+",
     )
-        .into();
+    .expect("mid-strip insertion test requires free scrolling");
 
     let mut h = TestHarness::new().with_config(config).with_windows(8);
 

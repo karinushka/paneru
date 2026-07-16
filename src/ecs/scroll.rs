@@ -20,7 +20,7 @@ use crate::ecs::{
 };
 use crate::errors::Result;
 use crate::events::Event;
-use crate::manager::{Window, WindowManager};
+use crate::manager::{Window, WindowManager, origin_from};
 use crate::platform::Modifiers;
 
 mod paging;
@@ -33,9 +33,9 @@ pub struct ScrollEventsPlugin;
 
 const NATIVE_SCROLL_RESPONSE_SECONDS: f64 = 0.04;
 const NATIVE_SCROLL_SETTLE_PX: f64 = 0.25;
-/// Logical-point distance inside a window edge at which sticky scrolling
+/// Fraction of the usable viewport inside a window edge at which snapping
 /// engages. This is a hit zone, not a visual gap: the snap lands on the edge.
-const STICKY_EDGE_THRESHOLD_POINTS: i32 = 32;
+const STICKY_EDGE_THRESHOLD_RATIO: f64 = 0.1;
 
 #[derive(Default)]
 struct GestureInput {
@@ -75,7 +75,11 @@ impl Plugin for ScrollEventsPlugin {
 
 // This ECS system intentionally keeps event aggregation and component updates
 // in one schedule boundary; pure paging math lives in `scroll::paging`.
-#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    clippy::too_many_lines
+)]
 #[instrument(level = Level::TRACE, skip_all)]
 fn swipe_gesture(
     mut messages: MessageReader<Event>,
@@ -87,6 +91,7 @@ fn swipe_gesture(
     windows: Windows,
     time: Res<Time>,
     config: Res<Config>,
+    window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
     let swipe_sensitivity = config.swipe_sensitivity();
@@ -110,6 +115,7 @@ fn swipe_gesture(
     let touchpad_momentum_start = lifecycle & TOUCHPAD_MOMENTUM_START != 0;
     let touchpad_up = lifecycle & TOUCHPAD_UP != 0;
     let has_gesture_event = gesture_delta.is_some();
+    let has_native_scroll_event = scroll_delta.is_some();
     let has_scroll_event = scroll_delta.is_some() || has_gesture_event;
     let scroll_delta = scroll_delta.unwrap_or_default();
     let gesture_delta = gesture_delta.unwrap_or_default();
@@ -142,6 +148,8 @@ fn swipe_gesture(
                 scrolling.as_deref(),
                 &windows,
                 &viewport,
+                &window_manager,
+                has_native_scroll_event,
             )
         })
         .flatten();
@@ -156,7 +164,12 @@ fn swipe_gesture(
     // AppKit can report physical Ended and momentum Began together. Apply the
     // physical end first so the momentum phase remains the final state.
     mark_physical_touch_end(touchpad_physical_up, scrolling.as_deref_mut());
-    resume_touchpad_gesture(resumes_gesture, touchpad_down, scrolling.as_deref_mut());
+    resume_touchpad_gesture(
+        resumes_gesture,
+        touchpad_down,
+        touchpad_momentum_start,
+        scrolling.as_deref_mut(),
+    );
 
     if touchpad_down && !has_scroll_event && scrolling.is_none() {
         insert_touchpad_begin_state(
@@ -295,17 +308,48 @@ fn current_paging_gesture(
     scrolling: Option<&Scrolling>,
     windows: &Windows<'_, '_>,
     viewport: &IRect,
+    window_manager: &WindowManager,
+    prefer_pointer_window: bool,
 ) -> Option<PagingGesture> {
     let get_window_frame = |entity| windows.moving_frame(entity);
-    let columns = layout_strip.columns().filter_map(|column| {
-        let entity = column.top()?;
-        Some((
-            windows.layout_position(entity)?.0.x,
-            column.width(&get_window_frame)?,
-        ))
-    });
+    let columns = layout_strip
+        .columns()
+        .filter_map(|column| {
+            let entity = column.top()?;
+            Some((
+                entity,
+                windows.layout_position(entity)?.0.x,
+                column.width(&get_window_frame)?,
+            ))
+        })
+        .collect::<Vec<_>>();
+    let preferred_column = prefer_pointer_window
+        .then(|| window_manager.cursor_position())
+        .flatten()
+        .and_then(|point| {
+            let cursor = origin_from(point);
+            let window_id = window_manager.find_window_at_point(&point).ok()?;
+            let (_, entity) = windows.find_managed(window_id)?;
+            windows
+                .moving_frame(entity)
+                .is_some_and(|frame| frame.contains(cursor))
+                .then_some(entity)
+        })
+        .and_then(|entity| {
+            columns
+                .iter()
+                .find(|(candidate, _, _)| *candidate == entity)
+                .map(|(_, position, width)| (*position, *width))
+        });
     let current_position = scrolling.map_or(f64::from(position.x), |scrolling| scrolling.position);
-    capture_paging_gesture(current_position, viewport, columns)
+    capture_paging_gesture(
+        current_position,
+        viewport,
+        columns
+            .into_iter()
+            .map(|(_, column_position, column_width)| (column_position, column_width)),
+        preferred_column,
+    )
 }
 
 fn begin_touchpad_gesture(
@@ -329,11 +373,18 @@ fn begin_touchpad_gesture(
 fn resume_touchpad_gesture(
     resumes_gesture: bool,
     interrupts_target: bool,
+    momentum_started: bool,
     scrolling: Option<&mut Scrolling>,
 ) {
     if resumes_gesture && let Some(scrolling) = scrolling {
         if interrupts_target {
             scrolling.target_position = None;
+        } else if momentum_started && let Some(target) = scrolling.target_position.take() {
+            // Native momentum already carries its own decaying deltas. Do not
+            // carry an interpolation backlog from the physical phase into it,
+            // otherwise the strip keeps gliding after macOS momentum has
+            // visibly slowed down.
+            scrolling.position = target;
         }
         scrolling.snap_pending = true;
         scrolling.is_user_swiping = true;
@@ -360,6 +411,12 @@ fn finish_touchpad_gesture(
     // Momentum can keep moving afterwards, but sticky selection starts only
     // after both the gesture and any remaining target/velocity have settled.
     if touchpad_up && let Some(scrolling) = scrolling {
+        if let Some(target) = scrolling.target_position.take() {
+            // The native momentum stream has ended, so its final target is the
+            // authoritative position. Settling an old interpolation target
+            // after this point creates a non-native extra tail.
+            scrolling.position = target;
+        }
         if let Some(paging) = scrolling.paging_gesture.as_mut() {
             paging.release_velocity = scrolling.velocity * direction_modifier;
         }
@@ -507,7 +564,7 @@ fn sticky_edge_snap_target(
     columns: impl IntoIterator<Item = (i32, i32)>,
 ) -> Option<i32> {
     let current_offset = i64::from(current_offset);
-    let threshold = i64::from(STICKY_EDGE_THRESHOLD_POINTS);
+    let threshold = (f64::from(viewport.width()) * STICKY_EDGE_THRESHOLD_RATIO) as i64;
 
     columns
         .into_iter()

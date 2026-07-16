@@ -4,39 +4,41 @@ use bevy::ecs::lifecycle::{Add, Remove, RemovedComponents};
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Added, Has, With};
-use bevy::ecs::system::{Commands, NonSendMut, Populated, Query, Res, ResMut, Single};
+use bevy::ecs::system::{Commands, NonSend, Populated, Query, Res, ResMut, Single};
 use bevy::math::IRect;
-use notify::event::{DataChange, MetadataKind, ModifyKind};
-use notify::{EventKind, Watcher};
 use std::cmp::Ordering;
 use std::time::Duration;
 use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
-    ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, MissionControlActive,
+    ActiveDisplayMarker, ApplicationObserved, BProcess, FocusedMarker, MissionControlActive,
     PreviousManagedStrip, RetryFrontSwitch, SpawnWindowTrigger, StrayFocusEvent, SystemTheme,
     Timeout, Unmanaged,
 };
+use crate::commands::set_last_focused_window_target;
 use crate::config::Config;
+use crate::ecs::floating::{clamp_origin_to_bounds, offset_frame_within_bounds};
 use crate::ecs::focus::FocusHistory;
 use crate::ecs::layout::LayoutStrip;
+use crate::ecs::observation::{
+    ApplicationObservationScope, attach_managed_window, detach_unmanaged_window,
+    ensure_application_observer,
+};
 use crate::ecs::params::{ActiveDisplay, GlobalState, Windows};
+use crate::ecs::runtime::SyntheticEventPending;
 use crate::ecs::state::PaneruState;
 use crate::ecs::{
-    ActiveWorkspaceMarker, Bounds, DockPosition, Initializing, LayoutPosition, Position,
-    ResizeMarker, RestoreWindowState, Scrolling, SendMessageTrigger, SpawnCommandsExt,
-    VerifyWindowPosition, WidthRatio, WindowProperties,
+    ActiveWorkspaceMarker, Bounds, DefaultWindowDisposition, DockPosition, Initializing,
+    LayoutPosition, Position, ResizeMarker, RestoreWindowState, Scrolling, SendMessageTrigger,
+    SpawnCommandsExt, VerifyWindowPosition, WidthRatio, WindowDisposition, WindowProperties,
 };
 use crate::events::Event;
-use crate::manager::{
-    Application, Display, Origin, Process, Size, Window, WindowManager, WindowPadding,
-};
-use crate::platform::WinID;
-use crate::util::symlink_target;
+use crate::manager::{Application, Display, Origin, Size, Window, WindowManager, WindowPadding};
+use crate::platform::{AxMainThread, WinID};
 
 /// Computes the passthrough keybinding set for the given window/app and
 /// publishes it to the input thread. Called on focus change and config reload.
-fn update_passthrough(window: &Window, app: &Application, config: &Config) {
+pub(super) fn update_passthrough(window: &Window, app: &Application, config: &Config) {
     let properties = WindowProperties::new(app, window, config);
     crate::platform::input::set_focused_passthrough(properties.passthrough_keys());
 }
@@ -51,12 +53,14 @@ fn update_passthrough(window: &Window, app: &Application, config: &Config) {
 /// * `focused_window` - A query for the focused window.
 /// * `focus_follows_mouse_id` - The resource to track focus follows mouse window ID.
 /// * `commands` - Bevy commands to trigger events and manage components.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 pub(super) fn front_switched_trigger(
+    main_thread: NonSend<AxMainThread>,
     mut messages: MessageReader<Event>,
     processes: Query<(&BProcess, &Children)>,
-    applications: Query<&Application>,
+    mut observation: ApplicationObservationScope,
     window_manager: Res<WindowManager>,
+    runtime_config: Res<Config>,
     mut config: GlobalState,
     mut commands: Commands,
 ) {
@@ -66,9 +70,12 @@ pub(super) fn front_switched_trigger(
             continue;
         };
 
-        let Some((BProcess(process), children)) =
-            processes.iter().find(|process| &process.0.psn() == psn)
-        else {
+        let tracked = processes.iter().find(|process| &process.0.psn() == psn);
+        let app_entity = tracked.and_then(|(_, children)| children.first().copied());
+        let focused_id =
+            observation.activate(app_entity, &runtime_config, &main_thread, &mut commands);
+
+        let Some((BProcess(process), children)) = tracked else {
             error!("Unable to find process with PSN {psn:?}");
             continue;
         };
@@ -76,18 +83,18 @@ pub(super) fn front_switched_trigger(
         if children.len() > 1 {
             warn!("Multiple apps registered to process '{}'.", process.name());
         }
-        let Some(&app_entity) = children.first() else {
+        let Some(app_entity) = app_entity else {
             error!("No application for process '{}'.", process.name());
             continue;
         };
-        let Some(app) = applications.get(app_entity).ok() else {
+        let Some(focused_id) = focused_id else {
             error!("No application for process '{}'.", process.name());
             continue;
         };
 
         debug!("front switching process: {}", process.name());
 
-        if let Ok(focused_id) = app.focused_window_id().inspect_err(|err| {
+        if let Ok(focused_id) = focused_id.inspect_err(|err| {
             warn!("can not get current focus: {err}");
         }) {
             if let Some(point) = window_manager.cursor_position()
@@ -114,7 +121,7 @@ pub(super) fn front_switched_trigger(
                 )),
                 &mut commands,
             );
-            commands.spawn((timeout, RetryFrontSwitch(app_entity)));
+            commands.spawn((timeout, RetryFrontSwitch::new(app_entity)));
         }
     }
 }
@@ -148,9 +155,23 @@ pub(super) fn theme_change_trigger(
         };
 
         // Re-apply dimming to all windows that are NOT focused.
-        let focused_id = windows.focused().map(|(window, _)| window.id());
+        let focused_id = windows.focused().and_then(|(window, entity)| {
+            windows
+                .get_managed(entity)
+                .is_some_and(|(_, _, unmanaged)| {
+                    matches!(unmanaged, None | Some(Unmanaged::Floating))
+                })
+                .then_some(window.id())
+        });
         let windows_to_dim: Vec<WinID> = windows
             .iter()
+            .filter(|(_, entity)| {
+                windows
+                    .get_managed(*entity)
+                    .is_some_and(|(_, _, unmanaged)| {
+                        matches!(unmanaged, None | Some(Unmanaged::Floating))
+                    })
+            })
             .filter(|(window, _)| Some(window.id()) != focused_id)
             .map(|(window, _)| window.id())
             .collect();
@@ -176,9 +197,11 @@ pub(super) fn theme_change_trigger(
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn window_focused_trigger(
+    _main_thread: NonSend<AxMainThread>,
     mut messages: MessageReader<Event>,
     applications: Query<&Application>,
     windows: Windows,
+    dispositions: Query<&WindowDisposition>,
     mut workspaces: Query<(Entity, &mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     mut focus_history: ResMut<FocusHistory>,
     config: Res<Config>,
@@ -229,13 +252,20 @@ pub(super) fn window_focused_trigger(
         if app.focused_window_id().is_ok_and(|id| id != window_id) {
             continue;
         }
+        set_last_focused_window_target(window_id);
 
         let managed = windows
             .get_managed(entity)
             .and_then(|(_, _, managed)| managed);
         if matches!(managed, Some(Unmanaged::Hidden)) {
-            if let Ok(mut entity_commands) = commands.get_entity(entity) {
-                entity_commands.try_remove::<Unmanaged>();
+            if let Ok(disposition) = dispositions.get(entity)
+                && let Ok(mut entity_commands) = commands.get_entity(entity)
+            {
+                if let Some(unmanaged) = disposition.unmanaged() {
+                    entity_commands.try_insert(unmanaged);
+                } else {
+                    entity_commands.try_remove::<Unmanaged>();
+                }
             }
             commands.trigger(SendMessageTrigger(Event::WindowFocused { window_id }));
             continue;
@@ -285,7 +315,7 @@ pub(super) fn window_focused_trigger(
         }
 
         if already_focused {
-            if !global_state.skip_reshuffle() && !global_state.initializing() {
+            if managed.is_none() && !global_state.skip_reshuffle() && !global_state.initializing() {
                 commands.reshuffle_around(entity);
             }
             continue;
@@ -366,53 +396,6 @@ pub(super) fn mission_control_trigger(
     }
 }
 
-/// Dispatches process-related messages, such as application launch and termination.
-///
-/// # Arguments
-///
-/// * `trigger` - The Bevy event trigger containing the application event.
-/// * `processes` - A query for all processes.
-/// * `commands` - Bevy commands to spawn or despawn entities.
-#[allow(clippy::needless_pass_by_value)]
-pub(super) fn application_event_trigger(
-    mut messages: MessageReader<Event>,
-    processes: Query<(&BProcess, Entity)>,
-    mut commands: Commands,
-) {
-    const PROCESS_READY_TIMEOUT_SEC: u64 = 5;
-    let find_process = |psn| {
-        processes
-            .iter()
-            .find(|(BProcess(process), _)| process.psn() == psn)
-    };
-
-    for event in messages.read() {
-        match event {
-            Event::ApplicationLaunched { psn, observer } if find_process(*psn).is_none() => {
-                let process: BProcess = Process::new(psn, observer.clone()).into();
-                let timeout = Timeout::new(
-                    Duration::from_secs(PROCESS_READY_TIMEOUT_SEC),
-                    Some(format!(
-                        "Process '{}' did not become ready in {PROCESS_READY_TIMEOUT_SEC}s.",
-                        process.name()
-                    )),
-                    &mut commands,
-                );
-                commands.spawn((FreshMarker, timeout, process));
-            }
-
-            Event::ApplicationTerminated { psn } => {
-                if let Some((_, entity)) = find_process(*psn)
-                    && let Ok(mut entity_commands) = commands.get_entity(entity)
-                {
-                    entity_commands.try_despawn();
-                }
-            }
-            _ => (),
-        }
-    }
-}
-
 /// Dispatches application-related messages, such as window creation, destruction, and resizing.
 ///
 /// # Arguments
@@ -428,6 +411,7 @@ pub(super) fn dispatch_application_messages(
     windows: Windows,
     applications: Query<(&Application, &Children)>,
     unmanaged_query: Query<&Unmanaged>,
+    dispositions: Query<&WindowDisposition>,
     mut commands: Commands,
 ) {
     let find_window = |window_id| windows.find(window_id);
@@ -445,9 +429,14 @@ pub(super) fn dispatch_application_messages(
             Event::WindowDeminimized { window_id } => {
                 if let Some((_, entity)) = find_window(*window_id)
                     && matches!(unmanaged_query.get(entity), Ok(Unmanaged::Minimized))
+                    && let Ok(disposition) = dispositions.get(entity)
                     && let Ok(mut entity_commands) = commands.get_entity(entity)
                 {
-                    entity_commands.try_remove::<Unmanaged>();
+                    if let Some(unmanaged) = disposition.unmanaged() {
+                        entity_commands.try_insert(unmanaged);
+                    } else {
+                        entity_commands.try_remove::<Unmanaged>();
+                    }
                 }
             }
 
@@ -458,9 +447,11 @@ pub(super) fn dispatch_application_messages(
                     continue;
                 };
                 for entity in children {
-                    // Only hide windows that are currently managed (no Unmanaged component).
-                    // Preserve existing Floating, Minimized, and Hidden states.
-                    if unmanaged_query.get(*entity).is_err()
+                    // Only managed windows leave a strip for the app hide/show
+                    // cycle. Passthrough and floating base dispositions remain
+                    // excluded without changing ownership.
+                    if matches!(dispositions.get(*entity), Ok(WindowDisposition::Managed))
+                        && unmanaged_query.get(*entity).is_err()
                         && let Ok(mut entity_commands) = commands.get_entity(*entity)
                     {
                         entity_commands.try_insert(Unmanaged::Hidden);
@@ -493,8 +484,9 @@ pub(super) fn dispatch_application_messages(
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 pub(super) fn window_unmanaged_trigger(
     trigger: On<Add, Unmanaged>,
+    main_thread: NonSend<AxMainThread>,
     windows: Windows,
-    apps: Query<(Entity, &Application)>,
+    mut apps: Query<(Entity, &mut Application, Has<ApplicationObserved>)>,
     workspaces: Query<&mut LayoutStrip>,
     active_display: Single<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
     config: Res<Config>,
@@ -505,67 +497,61 @@ pub(super) fn window_unmanaged_trigger(
     const UNMANAGED_MAX_SCREEN_RATIO_DEN: i32 = 5;
     const UNMANAGED_POP_OFFSET: i32 = 32;
 
-    fn clamp_origin_to_bounds(origin: IRect, size: Size, bounds: IRect) -> IRect {
-        let max = (bounds.max - size).max(bounds.min);
-        let min = origin.min.clamp(bounds.min, max);
-        IRect::from_corners(min, min + size)
-    }
-
-    fn offset_frame_within_bounds(frame: IRect, bounds: IRect, offset: i32) -> IRect {
-        let candidates = [
-            (offset, offset),
-            (offset, -offset),
-            (-offset, offset),
-            (-offset, -offset),
-            (offset, 0),
-            (-offset, 0),
-            (0, offset),
-            (0, -offset),
-        ];
-
-        for (dx, dy) in candidates {
-            let moved = IRect::from_corners(
-                Origin::new(frame.min.x + dx, frame.min.y + dy),
-                Origin::new(frame.max.x + dx, frame.max.y + dy),
-            );
-            if moved.min.x >= bounds.min.x
-                && moved.max.x <= bounds.max.x
-                && moved.min.y >= bounds.min.y
-                && moved.max.y <= bounds.max.y
-            {
-                return moved;
-            }
-        }
-
-        frame
-    }
-
     let entity = trigger.event().entity;
-    let Some((_, _, Some(Unmanaged::Floating))) = windows.get_managed(entity) else {
+    let Some((_, _, Some(unmanaged))) = windows.get_managed(entity) else {
         return;
     };
+    if !matches!(unmanaged, Unmanaged::Floating | Unmanaged::Passthrough) {
+        return;
+    }
+
+    workspaces.into_iter().for_each(|mut strip| {
+        if strip.contains(entity) {
+            strip.remove(entity);
+        }
+    });
+
+    let Some(window) = windows.get(entity) else {
+        return;
+    };
+    let Some((_, _, app_entity)) = windows.find_parent(window.id()) else {
+        return;
+    };
+    let Ok((_, mut app, observed)) = apps.get_mut(app_entity) else {
+        return;
+    };
+
+    let still_owns_managed = windows.managed_iter().any(|(_, managed_entity, parent)| {
+        managed_entity != entity && parent.parent() == app_entity
+    });
+    detach_unmanaged_window(
+        app_entity,
+        &mut app,
+        window,
+        observed,
+        still_owns_managed,
+        &main_thread,
+        &mut commands,
+    );
+
+    if *unmanaged == Unmanaged::Passthrough {
+        debug!("Entity {entity} is passthrough.");
+        return;
+    }
+
     let display_bounds = {
         let (display, dock) = *active_display;
         display.actual_display_bounds(dock, &config)
     };
-
     debug!("Entity {entity} is floating.");
 
-    let Some((window, frame)) = windows.get(entity).zip(windows.frame(entity)) else {
-        return;
-    };
-    let Some((_, app)) = windows
-        .find_parent(window.id())
-        .and_then(|(_, _, parent)| apps.get(parent).ok())
-    else {
-        return;
-    };
-
-    let properties = WindowProperties::new(app, window, &config);
+    let properties = WindowProperties::new(&app, window, &config);
 
     // Skip the active-display reposition/resize during init; the strip
     // removal below still has to run.
-    if let Some((rx, ry, rw, rh)) = properties.grid_ratios() {
+    if initializing.is_none()
+        && let Some((rx, ry, rw, rh)) = properties.grid_ratios()
+    {
         let x = (f64::from(display_bounds.width()) * rx) as i32;
         let y = (f64::from(display_bounds.height()) * ry) as i32;
         let w = (f64::from(display_bounds.width()) * rw) as i32;
@@ -573,6 +559,9 @@ pub(super) fn window_unmanaged_trigger(
         commands.reposition_entity(entity, Origin::new(x, y));
         commands.resize_entity(entity, Size::new(w, h));
     } else if initializing.is_none() && !properties.floating() {
+        let Some(frame) = windows.frame(entity) else {
+            return;
+        };
         let max_width = display_bounds.width() * UNMANAGED_MAX_SCREEN_RATIO_NUM
             / UNMANAGED_MAX_SCREEN_RATIO_DEN;
         let max_height = display_bounds.height() * UNMANAGED_MAX_SCREEN_RATIO_NUM
@@ -596,12 +585,6 @@ pub(super) fn window_unmanaged_trigger(
             commands.reposition_entity(entity, target_frame.min);
         }
     }
-
-    workspaces.into_iter().for_each(|mut strip| {
-        if strip.contains(entity) {
-            strip.remove(entity);
-        }
-    });
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -652,26 +635,48 @@ pub(super) fn window_minimized_trigger(
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 pub(super) fn window_managed_trigger(
     trigger: On<Remove, Unmanaged>,
+    main_thread: NonSend<AxMainThread>,
     active_display: Single<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
     windows: Windows,
-    apps: Query<(Entity, &Application)>,
+    mut apps: Query<(Entity, &mut Application, Has<ApplicationObserved>)>,
     mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     previous_strips: Query<&PreviousManagedStrip>,
+    dispositions: Query<&WindowDisposition>,
     config: Res<Config>,
     initializing: Option<Res<Initializing>>,
     mut commands: Commands,
 ) {
-    // finish_setup handles the initial strip assignment during init.
-    if initializing.is_some() {
+    let entity = trigger.event().entity;
+    if !matches!(dispositions.get(entity), Ok(WindowDisposition::Managed)) {
         return;
     }
-    let entity = trigger.event().entity;
 
     if windows
         .get(entity)
         .is_some_and(|window| window.role().is_err())
     {
         // The marker was removed because the windows was destroyed.
+        return;
+    }
+
+    if let Some(window) = windows.get(entity)
+        && let Some((app_entity, mut app, observed)) = windows
+            .find_parent(window.id())
+            .and_then(|(_, _, parent)| apps.get_mut(parent).ok())
+    {
+        attach_managed_window(
+            app_entity,
+            &mut app,
+            window,
+            observed,
+            &main_thread,
+            &mut commands,
+        );
+    }
+
+    // finish_setup handles the initial strip assignment during init, but the
+    // observer attachment above is still required for managed background apps.
+    if initializing.is_some() {
         return;
     }
 
@@ -684,11 +689,11 @@ pub(super) fn window_managed_trigger(
         .map(|previous| previous.index);
 
     if let Some(window) = windows.get(entity)
-        && let Some((_, app)) = windows
+        && let Some((_, app, _)) = windows
             .find_parent(window.id())
-            .and_then(|(_, _, parent)| apps.get(parent).ok())
+            .and_then(|(_, _, parent)| apps.get_mut(parent).ok())
     {
-        let properties = WindowProperties::new(app, window, &config);
+        let properties = WindowProperties::new(&app, window, &config);
 
         if let Some(width_ratio) = properties.width_ratio() {
             let (_, pad_right, _, pad_left) = config.edge_padding();
@@ -739,15 +744,12 @@ pub(super) fn window_managed_trigger(
         }
     }
 
-    if let Some(origin) = windows.origin(entity) {
-        commands.reposition_entity(entity, origin);
-    }
     if let Ok(mut entity_commands) = commands.get_entity(entity) {
         entity_commands
             .try_insert(VerifyWindowPosition::default())
             .try_remove::<PreviousManagedStrip>();
     }
-    commands.reshuffle_around(entity);
+    commands.ensure_visible(entity);
 }
 
 /// Handles the event when a window is destroyed. The windows itself is not removed from the layout
@@ -760,13 +762,14 @@ pub(super) fn window_managed_trigger(
 /// * `apps` - A query for all applications.
 /// * `displays` - A query for all displays.
 /// * `commands` - Bevy commands to despawn entities and trigger events.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn window_destroyed_trigger(
+    main_thread: NonSend<AxMainThread>,
     mut messages: MessageReader<Event>,
     windows: Windows,
     active_display: ActiveDisplay,
-    mut apps: Query<&mut Application>,
+    mut apps: Query<(Entity, &mut Application, Has<ApplicationObserved>)>,
     mut config: GlobalState,
     mut focus_history: ResMut<FocusHistory>,
     mut commands: Commands,
@@ -785,11 +788,22 @@ pub(super) fn window_destroyed_trigger(
             continue;
         }
 
-        let Ok(mut app) = apps.get_mut(parent) else {
+        let Ok((app_entity, mut app, observed)) = apps.get_mut(parent) else {
             error!("Window {} has no parent!", window.id());
             continue;
         };
-        app.unobserve_window(window);
+        let owns_other_managed = windows
+            .managed_iter()
+            .any(|(_, other, parent)| other != entity && parent.parent() == app_entity);
+        detach_unmanaged_window(
+            app_entity,
+            &mut app,
+            window,
+            observed,
+            owns_other_managed,
+            &main_thread,
+            &mut commands,
+        );
 
         give_away_focus(
             entity,
@@ -869,13 +883,16 @@ fn give_away_focus(
 /// * `active_display` - A query for the active display.
 /// * `main_cid` - The main connection ID resource.
 /// * `commands` - Bevy commands to manage components and trigger events.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn spawn_window_trigger(
     mut trigger: On<SpawnWindowTrigger>,
+    _main_thread: NonSend<AxMainThread>,
     windows: Query<&Window>,
     mut apps: Query<(Entity, &mut Application)>,
     active_display: ActiveDisplay,
+    config: Res<Config>,
+    default_disposition: Res<DefaultWindowDisposition>,
     initializing: Option<Res<Initializing>>,
     restore: Option<Res<crate::ecs::restore::SessionRestore>>,
     mut commands: Commands,
@@ -925,6 +942,8 @@ pub(super) fn spawn_window_trigger(
         let width_ratio =
             WidthRatio(f64::from(frame.width()) / f64::from(active_display.bounds().width()));
         let layout_position = LayoutPosition::default();
+        let disposition =
+            WindowProperties::new(&app, &window, &config).disposition(default_disposition.0);
 
         // Insert the window into the internal Bevy state.
         // This insertion triggers window attributes observer.
@@ -934,6 +953,7 @@ pub(super) fn spawn_window_trigger(
             width_ratio,
             window,
             layout_position,
+            disposition,
             ChildOf(app_entity),
         ));
     }
@@ -945,10 +965,12 @@ pub(super) fn spawn_window_trigger(
 
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn apply_window_defaults(
+    _main_thread: NonSend<AxMainThread>,
     added: Populated<(&mut Window, &mut Position, &mut Bounds, &ChildOf), Added<Window>>,
     apps: Query<(Entity, &Application)>,
     active_display: ActiveDisplay,
     config: Res<Config>,
+    default_disposition: Res<DefaultWindowDisposition>,
     initializing: Option<Res<Initializing>>,
 ) {
     for (ref mut window, mut position, mut bounds, child) in added {
@@ -957,14 +979,19 @@ pub(super) fn apply_window_defaults(
         };
 
         let properties = WindowProperties::new(app, window, &config);
+        let disposition = properties.disposition(default_disposition.0);
         debug!("Applying window defaults for '{}'", window.id());
 
         let initializing = initializing.is_some();
 
-        // Do not add padding to floating windows.
-        if properties.floating() {
+        // Paneru must not mutate ordinary passthrough geometry. Floating
+        // rules retain their explicit grid-placement compatibility.
+        if disposition != WindowDisposition::Managed {
             // Skip grid_ratios during init: we don't know this window's display.
-            if !initializing && let Some((rx, ry, rw, rh)) = properties.grid_ratios() {
+            if disposition == WindowDisposition::Floating
+                && !initializing
+                && let Some((rx, ry, rw, rh)) = properties.grid_ratios()
+            {
                 let bounds = active_display.actual_bounds(&config);
                 let x = (f64::from(bounds.width()) * rx) as i32;
                 let y = (f64::from(bounds.height()) * ry) as i32;
@@ -1003,14 +1030,21 @@ pub(super) fn apply_window_defaults(
     }
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    clippy::too_many_lines
+)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn apply_window_positions(
+    main_thread: NonSend<AxMainThread>,
     added: Populated<Entity, Added<Window>>,
     mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     windows: Windows,
-    apps: Query<&Application>,
+    mut apps: Query<(Entity, &mut Application, Has<ApplicationObserved>)>,
+    mut dispositions: Query<&mut WindowDisposition>,
     config: Res<Config>,
+    default_disposition: Res<DefaultWindowDisposition>,
     initializing: Option<Res<Initializing>>,
     restore: Option<Res<crate::ecs::restore::SessionRestore>>,
     restoration: Option<Res<PaneruState>>,
@@ -1028,17 +1062,52 @@ pub(super) fn apply_window_positions(
         else {
             continue;
         };
-        let Ok(app) = apps.get(parent) else {
+        let Ok((app_entity, mut app, observed)) = apps.get_mut(parent) else {
             continue;
         };
 
-        if crate::ecs::restore::matches_startup_restore_state(
+        let properties = WindowProperties::new(&app, window, &config);
+        let restore_match = crate::ecs::restore::matches_startup_restore_state(
             window,
-            app,
+            &app,
             restore.as_deref(),
             restoration.as_deref(),
             &config,
-        ) {
+        );
+        let explicit_disposition = properties.explicit_disposition();
+        let disposition = if explicit_disposition.is_none()
+            && default_disposition.0 == WindowDisposition::Passthrough
+            && restore_match
+        {
+            // A saved strip contains only windows Paneru managed when the
+            // state was written. In opt-in mode, that saved membership restores
+            // a previous manual opt-in unless an explicit ownership rule says
+            // otherwise.
+            WindowDisposition::Managed
+        } else {
+            explicit_disposition.unwrap_or(default_disposition.0)
+        };
+        if let Ok(mut stored_disposition) = dispositions.get_mut(entity) {
+            *stored_disposition = disposition;
+        } else if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            entity_commands.try_insert(disposition);
+        }
+        if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            if let Some(unmanaged) = disposition.unmanaged() {
+                entity_commands.try_insert(unmanaged);
+            } else {
+                entity_commands.try_remove::<Unmanaged>();
+            }
+        }
+
+        if disposition == WindowDisposition::Managed && restore_match {
+            ensure_application_observer(
+                app_entity,
+                &mut app,
+                observed,
+                &main_thread,
+                &mut commands,
+            );
             continue;
         }
 
@@ -1046,18 +1115,19 @@ pub(super) fn apply_window_positions(
         let allready_inserted = workspaces
             .iter_mut()
             .find_map(|(strip, _)| strip.contains(entity).then_some(strip));
-        let properties = WindowProperties::new(app, window, &config);
-
-        if properties.floating() {
-            if let Ok(mut entity_commands) = commands.get_entity(entity) {
-                // Avoid managing window if it's floating.
-                entity_commands.try_insert(Unmanaged::Floating);
-            }
+        if disposition != WindowDisposition::Managed {
             if let Some(mut strip) = allready_inserted {
                 strip.remove(entity);
             }
+            if initializing.is_none() && !properties.dont_focus() {
+                commands.trigger(SendMessageTrigger(Event::WindowFocused {
+                    window_id: window.id(),
+                }));
+            }
             continue;
         }
+
+        ensure_application_observer(app_entity, &mut app, observed, &main_thread, &mut commands);
 
         if allready_inserted.is_none()
             && let Some(mut strip) = workspaces
@@ -1111,81 +1181,6 @@ pub(super) fn apply_window_positions(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-pub(super) fn refresh_configuration_trigger(
-    mut messages: MessageReader<Event>,
-    window_manager: Res<WindowManager>,
-    mut config: ResMut<Config>,
-    mut watcher: Option<NonSendMut<Box<dyn Watcher>>>,
-    windows: Windows,
-    mut displays: Query<&mut Display>,
-    applications: Query<&Application>,
-) {
-    for event in messages.read() {
-        let Event::ConfigRefresh(event) = event else {
-            continue;
-        };
-
-        let Some(ref mut watcher) = watcher else {
-            continue;
-        };
-
-        match &event.kind {
-            EventKind::Modify(
-                // When using the RecommendedWatcher, the event triggers on file data.
-                // When using PollWatcher, it triggers on modification time.
-                ModifyKind::Metadata(MetadataKind::WriteTime)
-                | ModifyKind::Data(DataChange::Content),
-            ) => (),
-            EventKind::Remove(_) => {
-                for path in &event.paths {
-                    _ = watcher.unwatch(path).inspect_err(|err| {
-                        error!("unwatching the config '{}': {err}", path.display());
-                    });
-                }
-                continue;
-            }
-            _ => continue,
-        }
-
-        for path in &event.paths {
-            if let Some(symlink) = symlink_target(path) {
-                debug!(
-                    "symlink '{}' changed, replacing the watcher.",
-                    symlink.display()
-                );
-                if let Ok(new_watcher) =
-                    window_manager
-                        .setup_config_watcher(path)
-                        .inspect_err(|err| {
-                            error!("watching the config '{}': {err}", path.display());
-                        })
-                {
-                    **watcher = new_watcher;
-                }
-            }
-            info!("Reloading configuration file; {}", path.display());
-            _ = config.reload_config(path.as_path()).inspect_err(|err| {
-                error!("loading config '{}': {err}", path.display());
-            });
-        }
-
-        let height = config.menubar_height();
-        for mut display in &mut displays {
-            display.set_menubar_height_override(height);
-        }
-
-        // Recompute passthrough keys for the currently focused window.
-        if let Some((window, _, parent)) = windows
-            .focused()
-            .and_then(|(w, e)| windows.find_parent(w.id()).map(|(w, _, p)| (w, e, p)))
-            && let Ok(app) = applications.get(parent)
-        {
-            update_passthrough(window, app, &config);
-        }
-    }
-}
-
-#[allow(clippy::needless_pass_by_value)]
 pub(super) fn window_removal_trigger(
     trigger: On<Remove, Window>,
     mut workspaces: Query<&mut LayoutStrip>,
@@ -1205,9 +1200,11 @@ pub(super) fn window_removal_trigger(
 pub(super) fn send_message_trigger(
     trigger: On<SendMessageTrigger>,
     mut messages: MessageWriter<Event>,
+    mut synthetic_events: ResMut<SyntheticEventPending>,
 ) {
     let event = &trigger.event().0;
     messages.write(event.clone());
+    synthetic_events.mark();
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -1225,16 +1222,27 @@ pub(super) fn cleanup_timeout_trigger(
 }
 
 pub(super) fn window_resize_verifier(
+    _main_thread: NonSend<AxMainThread>,
     mut removed: RemovedComponents<ResizeMarker>,
-    mut windows: Query<(&mut Window, &Position, &mut Bounds)>,
+    mut windows: Query<(
+        &mut Window,
+        &Position,
+        &mut Bounds,
+        &WindowDisposition,
+        Option<&Unmanaged>,
+    )>,
     layout_strips: Query<&LayoutStrip>,
     mut commands: Commands,
 ) {
     use std::cmp::Ordering;
     for entity in removed.read() {
-        let Ok((mut window, _, mut bounds)) = windows.get_mut(entity) else {
+        let Ok((mut window, _, mut bounds, disposition, unmanaged)) = windows.get_mut(entity)
+        else {
             continue;
         };
+        if !disposition.owns_geometry(unmanaged) {
+            continue;
+        }
         let Ok(frame) = window.update_frame() else {
             continue;
         };
@@ -1278,10 +1286,13 @@ pub(super) fn window_resize_verifier(
             let get_window_frame = |entity| {
                 windows
                     .get(entity)
-                    .map(|(_, position, bounds)| {
+                    .ok()
+                    .filter(|(_, _, _, disposition, unmanaged)| {
+                        disposition.owns_geometry(*unmanaged)
+                    })
+                    .map(|(_, position, bounds, _, _)| {
                         IRect::from_corners(position.0, position.0 + bounds.0)
                     })
-                    .ok()
             };
 
             let Some(column_width) = column.width(&get_window_frame) else {

@@ -1,11 +1,13 @@
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Duration;
 
 use bevy::app::PreUpdate;
+use bevy::ecs::change_detection::DetectChangesMut;
 use bevy::ecs::entity::{Entity, EntityHashSet};
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::{Has, With, Without};
-use bevy::ecs::system::{Commands, Query, Res, Single};
+use bevy::ecs::system::{Commands, NonSend, Query, Res, Single};
 use bevy::math::IRect;
 use tracing::{Level, instrument};
 use tracing::{debug, error, info};
@@ -18,13 +20,18 @@ use crate::ecs::focus::FocusHistory;
 use crate::ecs::layout::{Column, LayoutStrip, StackItem, clamp_origin_to_viewport};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Windows};
 use crate::ecs::{
-    ActiveDisplayMarker, ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker,
-    FullWidthMarker, NativeFullscreenMarker, SelectedVirtualMarker, SendMessageTrigger,
-    SpawnCommandsExt, Timeout, Unmanaged,
+    ActiveDisplayMarker, ActiveWorkspaceMarker, Bounds, DockPosition, EnsureVisibleMarker,
+    FocusedMarker, FullWidthMarker, NativeFullscreenMarker, Position, PreManagedFrame,
+    RepositionMarker, ReshuffleAroundMarker, ResizeMarker, SelectedVirtualMarker,
+    SendMessageTrigger, SpawnCommandsExt, Timeout, Unmanaged, VerifyWindowPosition,
+    WindowDisposition,
 };
 use crate::events::Event;
 use crate::manager::{Application, Display, Origin, Size, Window, WindowManager, origin_from};
-use crate::platform::WorkspaceId;
+use crate::platform::{AxMainThread, WinID, WorkspaceId};
+
+const NO_WINDOW_TARGET: WinID = i32::MIN;
+static LAST_FOCUSED_WINDOW_TARGET: AtomicI32 = AtomicI32::new(NO_WINDOW_TARGET);
 
 /// Represents a cardinal or directional choice for window manipulation.
 #[derive(Clone, Debug)]
@@ -85,8 +92,11 @@ pub enum Operation {
     Equalize,
     /// Makes all columns in the active strip the same width as the focused window.
     Balance,
-    /// Toggles the managed state of the focused window.
-    Manage,
+    /// Toggles the managed state of one concrete window.
+    ///
+    /// Configuration parsing produces `None`; every runtime ingress must bind
+    /// it to the last OS-confirmed focused window before dispatch.
+    Manage(Option<WinID>),
     /// Stacks or unstacks a window. The boolean indicates whether to stack (`true`) or unstack (`false`).
     Stack(bool),
     /// Resizes and repositions the focused window to fit within the visible viewport
@@ -132,6 +142,28 @@ pub enum Command {
     /// A command to restart the window manager service.
     Restart,
     PrintState,
+}
+
+/// Records the last OS-confirmed application window for command ingress paths
+/// that run after Paneru's status item has taken UI focus.
+pub fn set_last_focused_window_target(window_id: WinID) {
+    LAST_FOCUSED_WINDOW_TARGET.store(window_id, Ordering::Release);
+}
+
+/// Binds target-less parsed commands at their invocation boundary.
+///
+/// Returning `None` deliberately drops a manage command when no concrete
+/// window is known; the ECS mutation handler must never guess from a later
+/// `FocusedMarker`.
+pub fn bind_window_command_target(command: Command) -> Option<Command> {
+    match command {
+        Command::Window(Operation::Manage(None)) => {
+            let window_id = LAST_FOCUSED_WINDOW_TARGET.load(Ordering::Acquire);
+            (window_id != NO_WINDOW_TARGET)
+                .then_some(Command::Window(Operation::Manage(Some(window_id))))
+        }
+        command => Some(command),
+    }
 }
 
 pub fn register_commands(app: &mut bevy::app::App) {
@@ -707,6 +739,7 @@ fn command_center_window(
     }
 
     if let Some((_, entity)) = windows.focused()
+        && windows.is_managed(entity)
         && let Some(size) = windows.size(entity)
         && let Some(mut origin) = windows.origin(entity)
     {
@@ -751,10 +784,12 @@ fn resize_window(
         return;
     };
 
-    let Some((frame, entity)) = windows
-        .focused()
-        .and_then(|(_, entity)| windows.frame(entity).zip(Some(entity)))
-    else {
+    let Some((frame, entity)) = windows.focused().and_then(|(_, entity)| {
+        windows
+            .is_managed(entity)
+            .then(|| windows.frame(entity).zip(Some(entity)))
+            .flatten()
+    }) else {
         return;
     };
     if windows.full_width(entity).is_some()
@@ -844,6 +879,9 @@ fn full_width_window(
     let Some((_, entity)) = windows.focused() else {
         return;
     };
+    if !windows.is_managed(entity) {
+        return;
+    }
 
     let viewport = active_display.actual_bounds(&config);
 
@@ -874,63 +912,82 @@ fn full_width_window(
     }
 }
 
-/// Toggles the managed state of the focused window.
-/// If the window is currently unmanaged, it becomes managed. If managed, it becomes unmanaged (floating).
+/// Toggles Paneru ownership for one invocation-bound window.
 ///
 /// # Arguments
 ///
-/// * `focused_entity` - The `Entity` of the currently focused window.
-/// * `windows` - A mutable query for `Window` components, their `Entity`, and whether they have the `Unmanaged` marker.
+/// * `windows` - The per-window disposition and geometry state.
 /// * `commands` - Bevy commands to modify entities.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 fn manage_window(
+    _main_thread: NonSend<AxMainThread>,
     mut messages: MessageReader<Event>,
-    windows: Windows,
-    mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    mut windows: Query<(
+        Entity,
+        &mut Window,
+        &mut Position,
+        &mut Bounds,
+        &mut WindowDisposition,
+        Option<&PreManagedFrame>,
+    )>,
     mut commands: Commands,
 ) {
-    if filter_window_operations(&mut messages, |op| matches!(op, Operation::Manage))
-        .next()
-        .is_none()
-    {
-        return;
-    }
-
-    let Some((window, entity, unmanaged)) = windows
-        .focused()
-        .and_then(|(_, entity)| windows.get_managed(entity))
+    let Some(target_window_id) =
+        filter_window_operations(&mut messages, |op| matches!(op, Operation::Manage(Some(_))))
+            .find_map(|op| match op {
+                Operation::Manage(Some(window_id)) => Some(*window_id),
+                _ => None,
+            })
     else {
         return;
     };
-    debug!(
-        "window: {} {entity} unmanaged: {}.",
-        window.id(),
-        unmanaged.is_some()
-    );
-    let was_unmanaged = unmanaged.is_some();
-    if let Ok(mut entity_commands) = commands.get_entity(entity) {
-        if was_unmanaged {
-            entity_commands.try_remove::<Unmanaged>();
-        } else {
-            entity_commands.try_insert(Unmanaged::Floating);
-        }
-    }
 
-    // Going floating -> managed only flips the component. Nothing else in
-    // the pipeline reinserts the window into a strip, so if it had been
-    // stripped of membership (spawn-floating path in window_unmanaged_trigger
-    // strip.removes; orphan rescue in find_orphaned_workspaces despawns the
-    // strip) the toggle is invisible — the window stays where it floated
-    // and the user thinks the keybind is broken. Append to the active
-    // strip and reshuffle so the layout pipeline tiles it.
-    if was_unmanaged
-        && !workspaces.iter().any(|(strip, _)| strip.contains(entity))
-        && let Some(mut strip) = workspaces
+    let Some((entity, mut window, mut position, mut bounds, mut disposition, previous_frame)) =
+        windows
             .iter_mut()
-            .find_map(|(strip, active)| active.then_some(strip))
-    {
-        strip.append(entity);
-        commands.reshuffle_around(entity);
+            .find(|(_, window, ..)| window.id() == target_window_id)
+    else {
+        debug!("manage target {target_window_id} no longer exists");
+        return;
+    };
+
+    match *disposition {
+        WindowDisposition::Passthrough => {
+            let frame = window.frame();
+            *disposition = WindowDisposition::Managed;
+            if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                entity_commands
+                    .try_insert(PreManagedFrame(frame))
+                    .try_remove::<Unmanaged>();
+            }
+            debug!("window {} ({entity}) is now managed", window.id());
+        }
+        WindowDisposition::Managed => {
+            *disposition = WindowDisposition::Passthrough;
+            if let Some(PreManagedFrame(frame)) = previous_frame.copied() {
+                window.resize(frame.size());
+                window.reposition(frame.min);
+                position.bypass_change_detection().0 = frame.min;
+                bounds.bypass_change_detection().0 = frame.size();
+            }
+            if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                entity_commands
+                    .try_insert(Unmanaged::Passthrough)
+                    .try_remove::<EnsureVisibleMarker>()
+                    .try_remove::<ReshuffleAroundMarker>()
+                    .try_remove::<RepositionMarker>()
+                    .try_remove::<ResizeMarker>()
+                    .try_remove::<VerifyWindowPosition>()
+                    .try_remove::<FullWidthMarker>();
+            }
+            debug!("window {} ({entity}) is now passthrough", window.id());
+        }
+        WindowDisposition::Floating => {
+            debug!(
+                "window {} ({entity}) remains floating; Toggle Managed only changes passthrough ownership",
+                window.id()
+            );
+        }
     }
 }
 
@@ -1129,6 +1186,9 @@ fn equalize_column(
     }
 
     let (_, entity) = *current_focus;
+    if !windows.is_managed(entity) {
+        return;
+    }
     let active_strip = active_display.active_strip();
     let Ok(column) = active_strip
         .index_of(entity)
@@ -1170,6 +1230,9 @@ fn balance_strip(
     let Some((_, focused_entity)) = windows.focused() else {
         return;
     };
+    if !windows.is_managed(focused_entity) {
+        return;
+    }
     let Some(focused_width) = windows.size(focused_entity).map(|s| s.x) else {
         return;
     };
@@ -1219,6 +1282,9 @@ fn snap_window(
     let Some((_, entity)) = windows.focused() else {
         return;
     };
+    if !windows.is_managed(entity) {
+        return;
+    }
     let Some(layout_position) = windows.layout_position(entity) else {
         return;
     };

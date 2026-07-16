@@ -252,10 +252,21 @@ fn parse_operation(argv: &[&str]) -> Result<Operation> {
             argv.get(1)
                 .map_or(Ok(ResizeDirection::Grow), |arg| parse_resize_direction(arg))?,
         ),
+        "width" => {
+            let percentage = argv
+                .get(1)
+                .ok_or(err.clone())?
+                .parse::<f64>()
+                .map_err(|_| err.clone())?;
+            if !percentage.is_finite() || percentage <= 0.0 {
+                return Err(err);
+            }
+            Operation::SetWidth(percentage / 100.0)
+        }
         "grow" => Operation::Resize(ResizeDirection::Grow),
         "shrink" => Operation::Resize(ResizeDirection::Shrink),
         "fullwidth" => Operation::FullWidth,
-        "manage" => Operation::Manage,
+        "manage" => Operation::Manage(None),
         "equalize" => Operation::Equalize,
         "balance" => Operation::Balance,
         "stack" => Operation::Stack(true),
@@ -449,6 +460,17 @@ impl Config {
                 (bind.code == keycode && bind.modifiers.matches(mask))
                     .then_some(bind.command.clone())
             })
+    }
+
+    /// Returns the first configured keybinding for a command name.
+    /// Menus use the same source as the global input handler so displayed
+    /// shortcuts cannot drift from the combinations that actually execute.
+    pub fn first_keybinding(&self, command_name: &str) -> Option<Keybinding> {
+        self.inner()
+            .bindings
+            .get(command_name)
+            .and_then(|bindings| bindings.all().into_iter().next())
+            .cloned()
     }
 
     /// Finds window properties for a given `title` and `bundle_id`.
@@ -700,6 +722,22 @@ impl Config {
             .unwrap_or(true)
     }
 
+    pub fn sticky_scroll(&self) -> bool {
+        self.inner()
+            .swipe
+            .as_ref()
+            .and_then(|swipe| swipe.sticky)
+            .unwrap_or(false)
+    }
+
+    pub fn swipe_paging(&self) -> bool {
+        self.inner()
+            .swipe
+            .as_ref()
+            .and_then(|swipe| swipe.paging)
+            .unwrap_or(true)
+    }
+
     pub fn swipe_deceleration(&self) -> f64 {
         let config = self.inner();
         config
@@ -811,6 +849,15 @@ impl Config {
 
     pub fn horizontal_mouse_warp(&self) -> Option<i16> {
         self.options().horizontal_mouse_warp
+    }
+
+    /// Returns `true` when normal windows must be explicitly opted into
+    /// Paneru management. The legacy automatic-management mode remains the
+    /// default for upstream compatibility.
+    pub fn opt_in_management(&self) -> bool {
+        self.options()
+            .opt_in_management
+            .is_some_and(|enabled| enabled)
     }
 
     /// Returns `true` if focus should follow the mouse based on the current configuration.
@@ -1060,6 +1107,12 @@ pub struct RestoreOptions {
 /// These options control various behaviors such as mouse focus, gesture recognition, and window animation.
 #[derive(Deserialize, Clone, Debug, Default)]
 pub struct MainOptions {
+    /// Require windows to be explicitly opted into Paneru management.
+    ///
+    /// When disabled (the default), normal windows retain Paneru's legacy
+    /// automatic-management behavior. Changing this option requires a restart
+    /// so all existing windows receive a consistent ownership policy.
+    pub opt_in_management: Option<bool>,
     /// Enables or disables focus follows mouse behavior.
     pub focus_follows_mouse: Option<bool>,
     /// Enables or disables mouse follows focus behavior.
@@ -1155,7 +1208,7 @@ pub fn default_preset_column_widths() -> Vec<f64> {
 
 /// `Keybinding` represents a keyboard shortcut and the command it triggers.
 /// It includes the key, its raw keycode, modifier keys, and the associated command.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Keybinding {
     pub key: String,
     pub code: u8,
@@ -1211,8 +1264,9 @@ pub struct WindowParams {
     bundle_id: Option<String>,
     /// If `true`, the window will be managed as a floating window (not tiled).
     pub floating: Option<bool>,
-    /// If `true`, force the process/window to be managed even if macOS reports it as
-    /// unobservable or the window does not look like a standard window.
+    /// Selects strip ownership for matching windows. `true` opts the window
+    /// into the managed strip (and forces observation for non-standard
+    /// windows); `false` keeps it in passthrough mode.
     pub manage: Option<bool>,
     /// An optional preferred index for the window's position in the window strip.
     pub index: Option<usize>,
@@ -1736,17 +1790,17 @@ index = 1
     let keycode = find_key('t');
     assert!(matches!(
         config.find_keybind(keycode, Modifiers::ALT | Modifiers::CTRL),
-        Some(Command::Window(Operation::Manage))
+        Some(Command::Window(Operation::Manage(None)))
     ));
 
     assert!(matches!(
         config.find_keybind(keycode, Modifiers::LALT | Modifiers::LCTRL),
-        Some(Command::Window(Operation::Manage))
+        Some(Command::Window(Operation::Manage(None)))
     ));
 
     assert!(matches!(
         config.find_keybind(keycode, Modifiers::RALT | Modifiers::RCTRL),
-        Some(Command::Window(Operation::Manage))
+        Some(Command::Window(Operation::Manage(None)))
     ));
 
     let keycode = find_key('s');
@@ -1807,8 +1861,77 @@ index = 1
     ));
 
     let defaults = Config::default();
+    assert!(!defaults.opt_in_management());
     assert_eq!(defaults.swipe_sensitivity(), 0.35);
     assert_eq!(defaults.swipe_deceleration(), 4.0);
+    assert!(!defaults.sticky_scroll());
+    assert!(defaults.swipe_paging());
+}
+
+#[test]
+fn test_opt_in_management_config() {
+    let defaults = Config::try_from("[options]\n\n[bindings]\n")
+        .expect("config without opt-in management should parse");
+    assert!(
+        !defaults.opt_in_management(),
+        "legacy automatic management must remain the default"
+    );
+
+    let enabled = Config::try_from(
+        r"
+[options]
+opt_in_management = true
+
+[bindings]
+",
+    )
+    .expect("opt-in management config should parse");
+    assert!(enabled.opt_in_management());
+}
+
+#[test]
+fn test_sticky_scroll_config() {
+    let config = Config::try_from(
+        r"
+[options]
+
+[swipe]
+sticky = true
+
+[bindings]
+",
+    )
+    .expect("sticky swipe config should parse");
+
+    assert!(config.sticky_scroll());
+}
+
+#[test]
+fn test_swipe_paging_config() {
+    let defaults = Config::try_from("[options]\n\n[bindings]\n")
+        .expect("config without swipe paging should parse");
+    assert!(
+        defaults.swipe_paging(),
+        "paging must be enabled when omitted"
+    );
+
+    let disabled = Config::try_from(
+        r"
+[options]
+
+[swipe]
+paging = false
+sticky = true
+
+[bindings]
+",
+    )
+    .expect("disabled paging config should parse");
+    assert!(!disabled.swipe_paging());
+    assert!(
+        disabled.sticky_scroll(),
+        "disabling paging must not disable edge-sticky scrolling"
+    );
 }
 
 #[test]
@@ -1864,6 +1987,16 @@ fn test_parse_resize_commands() {
         parse_command(&["window", "shrink"]).unwrap(),
         Command::Window(Operation::Resize(ResizeDirection::Shrink))
     ));
+}
+
+#[test]
+fn test_parse_exact_width_command() {
+    assert!(matches!(
+        parse_command(&["window", "width", "150"]).unwrap(),
+        Command::Window(Operation::SetWidth(ratio)) if (ratio - 1.5).abs() < f64::EPSILON
+    ));
+    assert!(parse_command(&["window", "width", "0"]).is_err());
+    assert!(parse_command(&["window", "width", "invalid"]).is_err());
 }
 
 #[test]

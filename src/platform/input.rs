@@ -2,7 +2,7 @@ use arc_swap::ArcSwap;
 use core::ptr::NonNull;
 use objc2::msg_send;
 use objc2::rc::Retained;
-use objc2_app_kit::{NSEvent, NSEventType, NSTouch, NSTouchPhase};
+use objc2_app_kit::{NSEvent, NSEventPhase, NSEventType, NSTouch, NSTouchPhase};
 use objc2_core_foundation::{CFMachPort, CFRetained, CFRunLoop, kCFRunLoopCommonModes};
 use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventFlags, CGEventTapLocation, CGEventTapOptions,
@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use stdext::function_name;
 use tracing::{error, info};
 
+use crate::commands::bind_window_command_target;
 use crate::config::Config;
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
@@ -41,6 +42,91 @@ const VERTICAL_GESTURE_SCROLL_SUPPRESS: Duration = Duration::from_millis(1200);
 
 const SWIPE_THRESHOLD: f64 = 0.001;
 const GESTURE_MINIMAL_FINGERS: usize = 3;
+
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InputEventMaskPolicy {
+    mouse_move: bool,
+    mouse_buttons: bool,
+    mouse_drag: bool,
+    scroll: bool,
+    gesture: bool,
+    key_down: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct InputMaskTransition {
+    previous: u64,
+    next: u64,
+}
+
+impl InputMaskTransition {
+    pub(super) fn changed(self) -> bool {
+        self.previous != self.next
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct RunningInputMask(u64);
+
+impl RunningInputMask {
+    pub(super) fn new(config: &Config) -> Self {
+        Self(InputEventMaskPolicy::from_config(config).mask())
+    }
+
+    pub(super) fn transition(self, config: &Config) -> InputMaskTransition {
+        InputMaskTransition {
+            previous: self.0,
+            next: InputEventMaskPolicy::from_config(config).mask(),
+        }
+    }
+
+    pub(super) fn commit(&mut self, transition: InputMaskTransition) {
+        self.0 = transition.next;
+    }
+}
+
+impl InputEventMaskPolicy {
+    fn from_config(config: &Config) -> Self {
+        let mouse_resize = config.mouse_resize_modifier().is_some();
+        Self {
+            mouse_move: config.focus_follows_mouse()
+                || config.horizontal_mouse_warp().is_some()
+                || mouse_resize,
+            // Click-to-reveal is enabled whenever some hidden fraction should
+            // force a managed window back into view.
+            mouse_buttons: config.window_hidden_ratio() < 1.0,
+            // No ECS system consumes MouseDragged; subscribing only burns tap
+            // callbacks during drags.
+            mouse_drag: false,
+            scroll: true,
+            gesture: config
+                .swipe_gesture_fingers()
+                .is_some_and(|fingers| fingers >= GESTURE_MINIMAL_FINGERS),
+            key_down: true,
+        }
+    }
+
+    fn mask(self) -> u64 {
+        let mut mask = 0;
+        let mut add = |enabled: bool, event: usize| {
+            if enabled {
+                mask |= 1_u64 << event;
+            }
+        };
+        add(self.mouse_move, CGEventType::MouseMoved.0 as usize);
+        add(self.mouse_buttons, CGEventType::LeftMouseDown.0 as usize);
+        add(self.mouse_buttons, CGEventType::LeftMouseUp.0 as usize);
+        add(self.mouse_buttons, CGEventType::RightMouseDown.0 as usize);
+        add(self.mouse_buttons, CGEventType::RightMouseUp.0 as usize);
+        add(self.mouse_drag, CGEventType::LeftMouseDragged.0 as usize);
+        add(self.mouse_drag, CGEventType::RightMouseDragged.0 as usize);
+        add(self.scroll, CGEventType::ScrollWheel.0 as usize);
+        add(self.gesture, NSEventType::Gesture.0);
+        add(self.key_down, CGEventType::KeyDown.0 as usize);
+        mask
+    }
+}
 
 /// `InputHandler` manages low-level input events from the macOS `CGEventTap`.
 /// It intercepts keyboard and mouse events, processes gestures, and dispatches them as higher-level `Event`s.
@@ -92,16 +178,7 @@ impl InputHandler {
     ///
     /// `Ok(())` if the event tap is created and started successfully, otherwise `Err(Error)`.
     pub(super) fn start(self) -> Result<PinnedInputHandler> {
-        let mouse_event_mask = (1 << CGEventType::MouseMoved.0)
-            | (1 << CGEventType::LeftMouseDown.0)
-            | (1 << CGEventType::LeftMouseUp.0)
-            | (1 << CGEventType::LeftMouseDragged.0)
-            | (1 << CGEventType::RightMouseDown.0)
-            | (1 << CGEventType::RightMouseUp.0)
-            | (1 << CGEventType::RightMouseDragged.0)
-            | (1 << CGEventType::ScrollWheel.0)
-            | (1 << NSEventType::Gesture.0)
-            | (1 << CGEventType::KeyDown.0);
+        let event_mask = InputEventMaskPolicy::from_config(&self.config).mask();
 
         let mut pinned = Box::pin(self);
         let this = unsafe { NonNull::new_unchecked(pinned.as_mut().get_unchecked_mut()) }.as_ptr();
@@ -110,7 +187,7 @@ impl InputHandler {
                 CGEventTapLocation::HIDEventTap,
                 CGEventTapPlacement::HeadInsertEventTap,
                 CGEventTapOptions::Default,
-                mouse_event_mask,
+                event_mask,
                 Some(Self::callback),
                 this.cast(),
             );
@@ -278,6 +355,11 @@ impl InputHandler {
         }
 
         if let Some(events) = &self.events {
+            let (gesture_began, physical_ended, momentum_began, gesture_ended) =
+                NSEvent::eventWithCGEvent(event)
+                    .as_deref()
+                    .map(|event| scroll_gesture_lifecycle(event.phase(), event.momentumPhase()))
+                    .unwrap_or_default();
             let h_delta = CGEvent::double_value_field(
                 Some(event),
                 CGEventField::ScrollWheelEventFixedPtDeltaAxis2,
@@ -295,6 +377,19 @@ impl InputHandler {
                 return true;
             }
 
+            // Exact AppKit phases are available for trackpads. Mouse wheels
+            // and other phase-less devices continue to use the ECS inactivity
+            // fallback instead.
+            if base_match && gesture_began {
+                _ = events.send(Event::TouchpadDown);
+            }
+            if base_match && physical_ended {
+                _ = events.send(Event::TouchpadPhysicalUp);
+            }
+            if base_match && momentum_began {
+                _ = events.send(Event::TouchpadMomentumStart);
+            }
+
             // If we have any horizontal delta, or if there's only vertical delta, use it.
             let delta = if h_delta.abs() > 0.001 {
                 h_delta
@@ -304,8 +399,17 @@ impl InputHandler {
                 0.0
             };
 
-            if delta.abs() > 0.001 {
+            let has_delta = delta.abs() > 0.001;
+            if has_delta {
                 _ = events.send(Event::Scroll { delta });
+            }
+            if base_match && gesture_ended {
+                _ = events.send(Event::TouchpadUp);
+            }
+            if has_delta
+                || (base_match
+                    && (gesture_began || physical_ended || momentum_began || gesture_ended))
+            {
                 return true; // Intercept: don't let the window scroll
             }
         }
@@ -315,9 +419,6 @@ impl InputHandler {
     /// Handles swipe gesture events. Routes to horizontal `Swipe` or vertical
     /// `VerticalSwipe` based on axis dominance. Returns true to intercept the event.
     fn handle_swipe(&mut self, event: &CGEvent) -> bool {
-        const NS_EVENT_PHASE_ENDED: usize = 1 << 3; // 8
-        const NS_EVENT_PHASE_CANCELLED: usize = 1 << 4; // 16
-
         let Some(configured_fingers) = self
             .config
             .swipe_gesture_fingers()
@@ -337,7 +438,7 @@ impl InputHandler {
 
         // Fingers lifted off touchpad.
         let phase = ns_event.phase();
-        if (phase.0 & NS_EVENT_PHASE_CANCELLED != 0 || phase.0 & NS_EVENT_PHASE_ENDED != 0)
+        if phase.intersects(NSEventPhase::Ended | NSEventPhase::Cancelled)
             && let Some(events) = &self.events
         {
             _ = events.send(Event::TouchpadUp);
@@ -449,6 +550,7 @@ impl InputHandler {
                 }
                 self.config.find_keybind(keycode, mask)
             })
+            .and_then(bind_window_command_target)
             .and_then(|command| {
                 events
                     .send(Event::Command { command })
@@ -463,6 +565,20 @@ fn gesture_should_intercept(configured_fingers: Option<usize>, actual_fingers: u
     configured_fingers.is_some_and(|configured| {
         configured >= GESTURE_MINIMAL_FINGERS && configured == actual_fingers
     })
+}
+
+fn scroll_gesture_lifecycle(
+    phase: NSEventPhase,
+    momentum_phase: NSEventPhase,
+) -> (bool, bool, bool, bool) {
+    // Momentum belongs to the physical gesture that preceded it. Treating its
+    // begin as a new gesture would recapture the paging stop and allow a
+    // second hop from one finger movement.
+    let began = phase.contains(NSEventPhase::Began);
+    let physical_ended = phase.intersects(NSEventPhase::Ended | NSEventPhase::Cancelled);
+    let momentum_began = momentum_phase.contains(NSEventPhase::Began);
+    let momentum_ended = momentum_phase.intersects(NSEventPhase::Ended | NSEventPhase::Cancelled);
+    (began, physical_ended, momentum_began, momentum_ended)
 }
 
 fn get_modifiers(eventflags: CGEventFlags) -> Modifiers {
@@ -499,6 +615,94 @@ mod tests {
     const NX_DEVICELCTLKEYMASK: u64 = 0x0000_0001;
     const NX_DEVICERCTLKEYMASK: u64 = 0x0000_2000;
     const NX_DEVICEFNKEYMASK: u64 = 0x0080_0000;
+
+    fn manual_config() -> Config {
+        Config::try_from(
+            r#"
+[options]
+focus_follows_mouse = false
+mouse_follows_focus = false
+
+[swipe.scroll]
+modifier = "alt"
+
+[bindings]
+"#,
+        )
+        .unwrap()
+    }
+
+    fn feature_config() -> Config {
+        Config::try_from(
+            r"
+[options]
+focus_follows_mouse = true
+window_hidden_ratio = 1.0
+
+[swipe.gesture]
+fingers_count = 3
+
+[bindings]
+",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn manual_use_case_avoids_move_drag_and_gesture_callbacks() {
+        let config = manual_config();
+        let policy = InputEventMaskPolicy::from_config(&config);
+        assert!(!policy.mouse_move);
+        assert!(!policy.mouse_drag);
+        assert!(!policy.gesture);
+        assert!(policy.mouse_buttons, "click-to-reveal remains enabled");
+        assert!(policy.scroll);
+        assert!(policy.key_down);
+    }
+
+    #[test]
+    fn feature_flags_add_only_required_mouse_and_gesture_events() {
+        let config = feature_config();
+        let policy = InputEventMaskPolicy::from_config(&config);
+        assert!(policy.mouse_move);
+        assert!(!policy.mouse_buttons);
+        assert!(!policy.mouse_drag);
+        assert!(policy.gesture);
+    }
+
+    #[test]
+    fn running_mask_reconciles_enable_and_disable_transitions() {
+        let manual = manual_config();
+        let features = feature_config();
+        let mut running = RunningInputMask::new(&manual);
+
+        let enabled = running.transition(&features);
+        assert!(enabled.changed());
+        running.commit(enabled);
+        assert_eq!(
+            running.0,
+            InputEventMaskPolicy::from_config(&features).mask()
+        );
+        assert_ne!(
+            running.0 & (1_u64 << CGEventType::MouseMoved.0),
+            0,
+            "enabling focus-follows-mouse must add mouse movement"
+        );
+        assert_ne!(
+            running.0 & (1_u64 << NSEventType::Gesture.0),
+            0,
+            "enabling gestures must add gesture callbacks"
+        );
+
+        let disabled = running.transition(&manual);
+        assert!(disabled.changed());
+        running.commit(disabled);
+        assert_eq!(running.0, InputEventMaskPolicy::from_config(&manual).mask());
+        assert_eq!(running.0 & (1_u64 << CGEventType::MouseMoved.0), 0);
+        assert_eq!(running.0 & (1_u64 << NSEventType::Gesture.0), 0);
+        assert_ne!(running.0 & (1_u64 << CGEventType::ScrollWheel.0), 0);
+        assert_ne!(running.0 & (1_u64 << CGEventType::KeyDown.0), 0);
+    }
 
     #[test]
     fn no_modifiers() {
@@ -604,5 +808,36 @@ mod tests {
         assert!(gesture_should_intercept(Some(3), 3));
         assert!(!gesture_should_intercept(Some(4), 3));
         assert!(gesture_should_intercept(Some(4), 4));
+    }
+
+    #[test]
+    fn native_scroll_lifecycle_covers_touch_and_momentum_phases() {
+        assert_eq!(
+            scroll_gesture_lifecycle(NSEventPhase::Began, NSEventPhase::None),
+            (true, false, false, false)
+        );
+        assert_eq!(
+            scroll_gesture_lifecycle(NSEventPhase::Ended, NSEventPhase::None),
+            (false, true, false, false)
+        );
+        assert_eq!(
+            scroll_gesture_lifecycle(NSEventPhase::None, NSEventPhase::Began),
+            (false, false, true, false),
+            "momentum must continue the existing physical gesture"
+        );
+        assert_eq!(
+            scroll_gesture_lifecycle(NSEventPhase::None, NSEventPhase::Ended),
+            (false, false, false, true)
+        );
+        assert_eq!(
+            scroll_gesture_lifecycle(NSEventPhase::Ended, NSEventPhase::Began),
+            (false, true, true, false),
+            "momentum beginning in the same event must keep the gesture active"
+        );
+        assert_eq!(
+            scroll_gesture_lifecycle(NSEventPhase::Ended, NSEventPhase::Changed),
+            (false, true, false, false),
+            "physical end must not end the full gesture while momentum continues"
+        );
     }
 }

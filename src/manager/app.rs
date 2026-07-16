@@ -1,5 +1,6 @@
 use accessibility_sys::{
-    AXObserverRef, AXUIElementCreateApplication, AXUIElementRef, kAXErrorSuccess,
+    AXError, AXObserverRef, AXUIElementCreateApplication, AXUIElementRef,
+    kAXErrorNotificationNotRegistered, kAXErrorSuccess,
 };
 use bevy::ecs::component::Component;
 use core::ptr::NonNull;
@@ -83,6 +84,9 @@ pub trait ApplicationApi: Send + Sync {
     ///
     /// Returns an `Error` if observers cannot be registered.
     fn observe(&mut self) -> Result<bool>;
+    /// Stops application-level accessibility notifications while preserving
+    /// any explicit managed-window observers.
+    fn unobserve(&mut self) -> bool;
     /// Starts observing window-specific accessibility notifications for a given window.
     ///
     /// # Arguments
@@ -98,7 +102,10 @@ pub trait ApplicationApi: Send + Sync {
     /// # Arguments
     ///
     /// * `window` - The `Window` to unobserve.
-    fn unobserve_window(&mut self, window: &Window);
+    fn unobserve_window(&mut self, window: &Window) -> bool;
+    /// Retries AX removals that previously returned an ambiguous error.
+    /// Returns `true` once no retained registrations remain pending.
+    fn retry_observer_removals(&mut self) -> bool;
     /// Checks if the application is currently the frontmost application.
     fn is_frontmost(&self) -> bool;
     /// Returns the bundle identifier of the application.
@@ -269,6 +276,11 @@ impl ApplicationApi for ApplicationOS {
             .map(|retry| retry.is_empty())
     }
 
+    fn unobserve(&mut self) -> bool {
+        self.handler
+            .remove_observer(&ObserverType::Application, &self.element, &AX_NOTIFICATIONS)
+    }
+
     /// Registers observers for specific window-level accessibility notifications (e.g., `kAXUIElementDestroyedNotification`).
     ///
     /// # Arguments
@@ -297,14 +309,20 @@ impl ApplicationApi for ApplicationOS {
     /// # Arguments
     ///
     /// * `window` - A reference to the `Window` object to unobserve.
-    fn unobserve_window(&mut self, window: &Window) {
+    fn unobserve_window(&mut self, window: &Window) -> bool {
         if let Some(element) = window.element() {
             self.handler.remove_observer(
                 &ObserverType::Window(window.id()),
                 &element,
                 &AX_WINDOW_NOTIFICATIONS,
-            );
+            )
+        } else {
+            true
         }
+    }
+
+    fn retry_observer_removals(&mut self) -> bool {
+        self.handler.retry_pending_removals()
     }
 
     /// Checks if the application is currently the frontmost application.
@@ -337,9 +355,20 @@ impl ApplicationApi for ApplicationOS {
 /// An enum representing the type of observer being used.
 /// `Application` refers to an observer for application-level events.
 /// `Window(WinID)` refers to an observer for a specific window, identified by its `WinID`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ObserverType {
     Application,
     Window(WinID),
+}
+
+fn should_store_new_context(has_existing: bool, newly_registered: bool) -> bool {
+    !has_existing && newly_registered
+}
+
+fn removal_allows_context_release(results: impl IntoIterator<Item = AXError>) -> bool {
+    results
+        .into_iter()
+        .all(|result| result == kAXErrorSuccess || result == kAXErrorNotificationNotRegistered)
 }
 
 /// `ObserverContext` holds the `EventSender` and the `ObserverType`,
@@ -372,21 +401,14 @@ impl ObserverContext {
     /// * `notification` - The name of the accessibility notification as a `&str`.
     /// * `element` - The `AXUIElementRef` associated with the notification.
     fn notify_app(&self, notification: &str, element: AXUIElementRef) {
-        match notification {
-            accessibility_sys::kAXTitleChangedNotification => {
-                // TODO: WindowTitleChanged does not have a valid window as its element reference.
+        if notification == accessibility_sys::kAXCreatedNotification {
+            let Ok(element) = AXUIWrapper::retain(element).inspect_err(|err| {
+                error!("invalid element {element:?}: {err}");
+            }) else {
                 return;
-            }
-            accessibility_sys::kAXCreatedNotification => {
-                let Ok(element) = AXUIWrapper::retain(element).inspect_err(|err| {
-                    error!("invalid element {element:?}: {err}");
-                }) else {
-                    return;
-                };
-                _ = self.events.send(Event::WindowCreated { element });
-                return;
-            }
-            _ => (),
+            };
+            _ = self.events.send(Event::WindowCreated { element });
+            return;
         }
 
         let Ok(window_id) =
@@ -401,6 +423,9 @@ impl ObserverContext {
             }
             accessibility_sys::kAXWindowMovedNotification => Event::WindowMoved { window_id },
             accessibility_sys::kAXWindowResizedNotification => Event::WindowResized { window_id },
+            accessibility_sys::kAXTitleChangedNotification => {
+                Event::WindowTitleChanged { window_id }
+            }
             accessibility_sys::kAXMenuOpenedNotification => Event::MenuOpened { window_id },
             accessibility_sys::kAXMenuClosedNotification => Event::MenuClosed { window_id },
             _ => {
@@ -445,6 +470,13 @@ struct AxObserverHandler {
     observer: CFRetained<AXUIWrapper>,
     events: EventSender,
     contexts: Arc<RwLock<Vec<Pin<Box<ObserverContext>>>>>,
+    pending_removals: Vec<PendingObserverRemoval>,
+}
+
+struct PendingObserverRemoval {
+    which: ObserverType,
+    element: CFRetained<AXUIWrapper>,
+    notifications: Vec<&'static str>,
 }
 
 impl Drop for AxObserverHandler {
@@ -484,6 +516,7 @@ impl AxObserverHandler {
             observer,
             events,
             contexts: Arc::new(RwLock::new(Vec::new())),
+            pending_removals: Vec::new(),
         })
     }
 
@@ -505,47 +538,62 @@ impl AxObserverHandler {
         which: ObserverType,
     ) -> Result<Vec<&str>> {
         let observer: AXObserverRef = self.observer.as_ptr();
-        let context = Box::pin(ObserverContext {
-            events: self.events.clone(),
-            which,
+        let mut contexts = self.contexts.force_write();
+        let existing_context = contexts.iter().find(|context| context.which == which);
+        let new_context = existing_context.is_none().then(|| {
+            Box::pin(ObserverContext {
+                events: self.events.clone(),
+                which,
+            })
         });
-        let context_ptr = NonNull::from_ref(&*context).as_ptr();
-        self.contexts.force_write().push(context);
+        let context_ptr = existing_context.map_or_else(
+            || NonNull::from_ref(&**new_context.as_ref().expect("new context exists")).as_ptr(),
+            |context| NonNull::from_ref(context.as_ref().get_ref()).as_ptr(),
+        );
 
         // TODO: retry re-registering these.
         let mut retry = vec![];
-        let added = notifications
-            .iter()
-            .filter_map(|name| {
-                debug!("adding {name} {element:x?} {observer:?}");
-                let notification = CFString::from_static_str(name);
-                match unsafe {
-                    AXObserverAddNotification(
-                        observer,
-                        element.as_ptr(),
-                        &notification,
-                        context_ptr.cast(),
-                    )
-                } {
-                    accessibility_sys::kAXErrorSuccess
-                    | accessibility_sys::kAXErrorNotificationAlreadyRegistered => Some(*name),
-                    accessibility_sys::kAXErrorCannotComplete => {
-                        retry.push(*name);
-                        None
-                    }
-                    result => {
-                        error!("error adding {name} {element:x?} {observer:?}: {result}");
-                        None
-                    }
+        let mut registered = 0;
+        let mut newly_registered = false;
+        for name in notifications {
+            debug!("adding {name} {element:x?} {observer:?}");
+            let notification = CFString::from_static_str(name);
+            match unsafe {
+                AXObserverAddNotification(
+                    observer,
+                    element.as_ptr(),
+                    &notification,
+                    context_ptr.cast(),
+                )
+            } {
+                accessibility_sys::kAXErrorSuccess => {
+                    registered += 1;
+                    newly_registered = true;
                 }
-            })
-            .collect::<Vec<_>>();
-        if added.is_empty() {
+                accessibility_sys::kAXErrorNotificationAlreadyRegistered => {
+                    registered += 1;
+                }
+                accessibility_sys::kAXErrorCannotComplete => {
+                    retry.push(*name);
+                }
+                result => {
+                    error!("error adding {name} {element:x?} {observer:?}: {result}");
+                }
+            }
+        }
+        if registered == 0 {
             Err(Error::PermissionDenied(format!(
                 "{}: unable to register any observers!",
                 function_name!()
             )))
         } else {
+            // `AlreadyRegistered` retains the refcon supplied by the original
+            // registration. Never add another context in that case.
+            if should_store_new_context(existing_context.is_some(), newly_registered)
+                && let Some(context) = new_context
+            {
+                contexts.push(context);
+            }
             Ok(retry)
         }
     }
@@ -562,31 +610,72 @@ impl AxObserverHandler {
         which: &ObserverType,
         element: &AXUIWrapper,
         notifications: &[&'static str],
-    ) {
+    ) -> bool {
         let mut existing = self.contexts.force_write();
-        if let ObserverType::Window(removed) = which &&
-                !existing.iter().any(
-                    |context| matches!(context.which, ObserverType::Window(window_id) if window_id == *removed),
-                ) {
-                    debug!("window {removed} ({element}) already un-observed, skipping!");
-                    return;
-            }
+        if !existing.iter().any(|context| context.which == *which) {
+            debug!("{which:?} ({element}) already un-observed, skipping!");
+            return true;
+        }
 
+        let mut results = Vec::with_capacity(notifications.len());
         for name in notifications {
             let observer: AXObserverRef = self.observer.deref().as_ptr();
             let notification = CFString::from_static_str(name);
             debug!("removing {name} {element:x?} {observer:?}");
             let result =
                 unsafe { AXObserverRemoveNotification(observer, element.as_ptr(), &notification) };
-            if result != kAXErrorSuccess {
+            results.push(result);
+            if result != kAXErrorSuccess && result != kAXErrorNotificationNotRegistered {
                 debug!("error removing {name} {element:x?} {observer:?}: {result}");
             }
         }
-        if let ObserverType::Window(removed) = which {
-            existing.retain(
-                    |context| !matches!(context.which, ObserverType::Window(window_id) if window_id == *removed),
-                );
+        if removal_allows_context_release(results) {
+            existing.retain(|context| context.which != *which);
+            self.pending_removals
+                .retain(|pending| pending.which != *which);
+            true
+        } else {
+            if !self
+                .pending_removals
+                .iter()
+                .any(|pending| pending.which == *which)
+            {
+                match AXUIWrapper::retain(element.as_ptr::<c_void>()) {
+                    Ok(element) => self.pending_removals.push(PendingObserverRemoval {
+                        which: *which,
+                        element,
+                        notifications: notifications.to_vec(),
+                    }),
+                    Err(err) => {
+                        error!("unable to retain {which:?} for observer removal retry: {err}");
+                    }
+                }
+            }
+            debug!("retaining {which:?} observer context after ambiguous removal failure");
+            false
         }
+    }
+
+    fn retry_pending_removals(&mut self) -> bool {
+        let observer: AXObserverRef = self.observer.deref().as_ptr();
+        let mut still_pending = Vec::new();
+        let mut contexts = self.contexts.force_write();
+        for pending in self.pending_removals.drain(..) {
+            let results = pending.notifications.iter().map(|name| {
+                let notification = CFString::from_static_str(name);
+                unsafe {
+                    AXObserverRemoveNotification(observer, pending.element.as_ptr(), &notification)
+                }
+            });
+            if removal_allows_context_release(results) {
+                contexts.retain(|context| context.which != pending.which);
+                debug!("observer removal retry completed for {:?}", pending.which);
+            } else {
+                still_pending.push(pending);
+            }
+        }
+        self.pending_removals = still_pending;
+        self.pending_removals.is_empty()
     }
 
     /// The static callback function for `AXObserver`. This function is called by the macOS Accessibility API
@@ -614,5 +703,46 @@ impl AxObserverHandler {
         };
 
         context.notify(&notification, element);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ptr::NonNull;
+
+    use accessibility_sys::{kAXErrorCannotComplete, kAXErrorNotificationNotRegistered};
+
+    use super::{
+        ObserverContext, ObserverType, removal_allows_context_release, should_store_new_context,
+    };
+    use crate::events::EventSender;
+
+    #[test]
+    fn already_registered_notifications_never_allocate_an_extra_context() {
+        assert!(!should_store_new_context(false, false));
+        assert!(!should_store_new_context(true, false));
+        assert!(!should_store_new_context(true, true));
+        assert!(should_store_new_context(false, true));
+    }
+
+    #[test]
+    fn ambiguous_removal_retains_callback_context_until_retry_is_safe() {
+        let (events, _receiver) = EventSender::new();
+        let mut contexts = vec![Box::pin(ObserverContext {
+            events,
+            which: ObserverType::Application,
+        })];
+        let pointer = NonNull::from_ref(contexts[0].as_ref().get_ref());
+
+        let release = removal_allows_context_release([kAXErrorCannotComplete]);
+        if release {
+            contexts.clear();
+        }
+        assert!(!release);
+        assert_eq!(unsafe { pointer.as_ref().which }, ObserverType::Application);
+
+        assert!(removal_allows_context_release([
+            kAXErrorNotificationNotRegistered
+        ]));
     }
 }

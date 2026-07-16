@@ -6,6 +6,7 @@ use std::time::Duration;
 use std::{fs, thread};
 use tracing::{debug, error};
 
+use crate::commands::bind_window_command_target;
 use crate::config::parse_command;
 use crate::ecs::state::StateQueryKind;
 use crate::errors::Result;
@@ -173,6 +174,10 @@ impl CommandReader {
             if let Ok(command) =
                 parse_command(&argv_ref).inspect_err(|err| error!("parsing command: {err}"))
             {
+                let Some(command) = bind_window_command_target(command) else {
+                    debug!("ignoring window command because no focused window target is known");
+                    continue;
+                };
                 _ = self
                     .events
                     .send(Event::Command { command })

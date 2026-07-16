@@ -17,6 +17,7 @@ General behavior settings for the window manager.
 
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
+| `opt_in_management` | Boolean | `false` | Preserve legacy automatic management when `false`. When `true`, normal windows remain passthrough until explicitly managed with `window_manage`, the menu-bar action, or a matching `manage = true` rule. Inactive-Space windows are still discovered so saved managed state can be restored. Changing this option requires a Paneru restart. |
 | `focus_follows_mouse` | Boolean | `true` | If enabled, the window under the mouse cursor will automatically gain focus. |
 | `mouse_follows_focus` | Boolean | `true` | If enabled, the mouse cursor will warp to the center of the focused window when focus changes via keyboard. |
 | `horizontal_mouse_warp` | Integer ``(-1, 1)`` | Off | If enabled, the mouse will warp to another screen above or below, when touching the left or right edge. The direction depends on the direction - a negative value will cause the left edge to warp to a screen above and the right edge to a screen below. This allows having horizontal positioning of displays while having them aligned in a virtual layout in macOS settings. The cursor lands at the *opposite* edge of the target display (preserving cursor flow), with the source's relative Y position. Carries pre-warp horizontal velocity to avoid a "standing start", and skips the warp when the equivalent Y has no position on the target — matching macOS's native side-by-side behavior for displays of unequal height. (inspired by https://github.com/mogenson/WarpMouse.spoon) |
@@ -58,7 +59,9 @@ Configure trackpad gestures and scroll-wheel window sliding.
 | :--- | :--- | :--- | :--- |
 | `sensitivity` | Float (0.1–2.0) | `0.35` | Multiplier for swipe distance. |
 | `deceleration` | Float (1.0–10.0) | `4.0` | Rate at which inertia slows down after a swipe. |
-| `continuous` | Boolean | `true` | If enabled, the swipe gesture moves windows smoothly with the fingers. If disabled, it snaps to windows as you swipe. |
+| `continuous` | Boolean | `true` | Controls strip edge limits while scrolling; disable to clamp strictly to the full content bounds. |
+| `paging` | Boolean | `true` | Limit one gesture to at most one adjacent stop. A regular column has one stop; an oversized column has exactly two, at its left and right edges. Set to `false` to restore free scrolling. |
+| `sticky` | Boolean | `false` | With `paging = false`, snap exactly to a column edge when scrolling ends inside a hit zone equal to 10% of the usable viewport width. This activation zone does not create a visual gap. |
 
 ### `[swipe.gesture]`
 | Option | Type | Default | Description |
@@ -135,10 +138,11 @@ Format: `"[modifiers-]key"`. Available modifiers are:
 | `window_swap_first` / `_last` | Move current window to start/end of strip. |
 | `window_center` | Center the current window in the viewport. |
 | `window_resize` | Cycle through preset widths (Grow). |
+| `window_width_<percent>` | Set an exact display-width percentage, e.g. `window_width_150`. |
 | `window_grow` | Alias for `window_resize`. |
 | `window_shrink` | Cycle through preset widths (Shrink). |
 | `window_fullwidth` | Toggle full-width mode. |
-| `window_manage` | Toggle between tiled and floating state. |
+| `window_manage` | Toggle only the focused window between passthrough and the managed strip. |
 | `window_stack` | Stack the current window into the column on the left. |
 | `window_unstack` | Pull a window out of a stack into its own column. |
 | `window_equalize` | Make all windows in a stack equal height. |
@@ -228,8 +232,8 @@ Define specific behaviors for applications based on their Title or Bundle ID.
 | :--- | :--- | :--- |
 | `title` | Regex | **(Required)** Regex pattern to match the window title. |
 | `bundle_id` | String | Optional Bundle ID to match (e.g., `com.apple.Terminal`). |
-| `floating` | Boolean | Force the window to be floating/unmanaged. |
-| `manage` | Boolean | Force Paneru to manage this app/window even if macOS reports the app as unobservable or the window has a non-standard role/subrole. |
+| `floating` | Boolean | Keep the matching window in Paneru's distinct floating tier, outside the strip. |
+| `manage` | Boolean | `true` opts the matching window into the managed strip (and can force observation of non-standard windows); `false` keeps it in passthrough mode. |
 | `index` | Integer | Preferred position in the strip when spawned. |
 | `dont_focus` | Boolean | Prevent the window from taking focus when spawned. |
 | `width` | Positive Float | Initial width ratio for the window. Values above `1.0` create an oversized, horizontally scrollable window. |
@@ -246,6 +250,18 @@ bundle_id = "com.apple.Terminal"
 horizontal_padding = 5
 bindings_passthrough = ["ctrl-h", "ctrl-l"]
 ```
+
+Windows that do not match an explicit ownership rule start in **passthrough**
+mode: Paneru tracks their identity and focus but does not move, resize, dim,
+border, save, or restore them. Use **Toggle Managed** to opt one concrete window
+into the current strip, or add `manage = true` to make a matching rule opt in
+automatically. With session restore enabled, a manually managed window is saved
+as part of its strip and is opted back in on the next launch.
+
+When multiple rules match, ownership has deterministic precedence:
+`manage = false`, then `floating = true`, then `manage = true`, then the
+passthrough default. This prevents a broad manage rule from accidentally
+capturing an explicitly excluded or floating window.
 
 ### Forcing management of LSUIElement or non-standard windows
 
@@ -273,23 +289,34 @@ starts. Restore is a startup-only phase: Paneru loads the saved session, applies
 it after initial window discovery, keeps matching open for a short grace period,
 then stops consulting the saved state until the next Paneru process start.
 
+State writes are event-driven: each persisted layout/display/selection change
+resets a 250 ms trailing debounce, so continuous scrolling does not write every
+frame. Pending dirty state is flushed on shutdown; failed writes remain dirty
+and retry with bounded backoff. With `enabled = false`, Paneru does not read or
+write the state file.
+
 The saved session includes:
 
 - native workspace ids
 - virtual workspace rows and the selected row per native workspace
 - layout structure: singles, stacks, tabs, and fullscreen strips
 - display/screen association
+- saved width ratios, including values above `1.0`
+- horizontal strip pan positions
 - window identity for matching across restarts
 
-Matched startup windows use the saved session before static `[windows]` rules.
-That means saved layout, virtual workspace, display, and managed/floating state
-win over configured `index`, `floating`, `width`, and `grid` rules during
-restore. Unmatched startup windows, and all windows created after the restore
-grace period ends, keep normal `[windows]` behavior.
+Static ownership rules are evaluated before restore. Explicit `manage = false`
+and `floating = true` rules are never overridden by saved state. A saved window
+with no explicit ownership rule restores as managed, including a window that
+was manually opted in under `opt_in_management = true`. For managed windows,
+the saved layout, virtual workspace, and display win over static placement such
+as `index` and `width` during the startup restore window. Unmatched windows and
+all windows created after the restore grace period ends keep normal `[windows]`
+behavior.
 
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `enabled` | Boolean | `true` | Enables session restore on startup. |
+| `enabled` | Boolean | `true` | Enables state persistence and startup restore. When false, no state-file I/O or persistence deadline is installed. |
 | `startup_grace_ms` | Integer (ms) | `2000` | How long Paneru keeps restore matching active after startup. This gives apps a chance to create windows shortly after Paneru starts. |
 | `missing_windows` | String | `"ignore"` | Behavior when a saved window is not present during restore. Currently only `"ignore"` is supported, which drops the missing window and compacts the restored layout. |
 
@@ -332,6 +359,9 @@ the workspace is already present on a display. Otherwise it restores to the
 saved display id when that screen is still connected, then falls back to the
 current active display, then the first available display by id. Paneru does not
 create placeholder displays or off-screen state for disconnected monitors.
+
+For matched windows, restore reapplies the saved width ratio and horizontal
+strip pan. Older state files without those optional fields remain compatible.
 
 ---
 

@@ -2,7 +2,7 @@ use bevy::app::AppExit;
 use bevy::ecs::change_detection::{DetectChanges, DetectChangesMut};
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
-use bevy::ecs::message::{MessageReader, MessageWriter};
+use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::{Added, Changed, Has, Or, With, Without};
 use bevy::ecs::system::{
     Commands, Local, NonSend, NonSendMut, Populated, Query, Res, ResMut, Single,
@@ -13,8 +13,6 @@ use bevy::tasks::futures_lite::future;
 use bevy::time::Time;
 use objc2_foundation::NSPoint;
 use std::collections::HashSet;
-use std::pin::Pin;
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::Duration;
 use tracing::{Level, debug, error, info, instrument, trace, warn};
 
@@ -25,25 +23,23 @@ use super::{
 
 use crate::config::{Config, decorations::BorderRadiusOption};
 use crate::ecs::layout::LayoutStrip;
-use crate::ecs::params::{ActiveDisplay, Windows};
+use crate::ecs::params::Windows;
+use crate::ecs::runtime::FreshPollDeadline;
+use crate::ecs::width_ratio::width_ratio_for_owner;
 use crate::ecs::{
-    ActiveWorkspaceMarker, Bounds, BruteforceWindows, FlashMessage, FocusedMarker, Initializing,
-    LowPowerMode, MissionControlActive, Position, ReadDisplayProperties, RestoreWindowState,
-    Scrolling, SendMessageTrigger, SpawnCommandsExt, Unmanaged, WidthRatio, WindowProperties,
+    ActiveWorkspaceMarker, ApplicationObserved, Bounds, BruteforceWindows,
+    DefaultWindowDisposition, FlashMessage, FocusedMarker, Initializing, MissionControlActive,
+    Position, ReadDisplayProperties, RestoreWindowState, Scrolling, SendMessageTrigger,
+    SpawnCommandsExt, Unmanaged, WidthRatio, WindowDisposition, WindowProperties,
 };
-use crate::events::Event;
+use crate::events::{Event, EventReceiver};
 use crate::manager::{
     Application, Display, Process, Window, WindowManager, WindowOS, bruteforce_windows,
 };
 use crate::overlay::{FlashMessageManager, OverlayManager};
-use crate::platform::{PlatformCallbacks, WinID};
+use crate::platform::{AxMainThread, WinID};
 
 const ANIAMTE_SNAP_THRESHOLD: f32 = 5.0;
-const LOOP_MAX_TIMEOUT_FRAME_ACTIVE_MS: u32 = 16;
-const LOOP_MAX_TIMEOUT_LOWPOWER_MS: u32 = 500;
-const LOOP_MAX_TIMEOUT_MS: u32 = 50;
-const LOOP_TIMEOUT_STEP: u32 = 1;
-
 /// Gathers all present displays and spawns them as entities in the Bevy world.
 /// The currently active display (identified by `window_manager.active_display_id()`) is marked with `ActiveDisplayMarker`.
 ///
@@ -120,6 +116,7 @@ pub(crate) fn add_existing_process(
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(crate) fn add_existing_application(
+    _main_thread: NonSend<AxMainThread>,
     window_manager: Res<WindowManager>,
     workspaces: Query<&LayoutStrip>,
     fresh_apps: Populated<(&mut Application, Entity), With<ExistingMarker>>,
@@ -133,12 +130,17 @@ pub(crate) fn add_existing_application(
     let thread_pool = AsyncComputeTaskPool::get();
 
     for (mut app, entity) in fresh_apps {
-        let mut offscreen_windows = vec![];
+        let mut offscreen_windows = Vec::new();
 
-        if app.observe().is_ok_and(|result| result)
-            && let Ok((found_windows, offscreen)) = window_manager
-                .find_existing_application_windows(&mut app, &spaces, &config)
-                .inspect_err(|err| warn!("{err}"))
+        if app.is_frontmost()
+            && app.observe().is_ok_and(|result| result)
+            && let Ok(mut entity_commands) = commands.get_entity(entity)
+        {
+            entity_commands.try_insert(ApplicationObserved);
+        }
+        if let Ok((found_windows, offscreen)) = window_manager
+            .find_existing_application_windows(&mut app, &spaces, &config)
+            .inspect_err(|err| warn!("{err}"))
         {
             offscreen_windows.extend(offscreen);
             commands.trigger(SpawnWindowTrigger(found_windows));
@@ -151,10 +153,10 @@ pub(crate) fn add_existing_application(
             let pid = app.pid();
             let bundle_id = app.bundle_id();
             let config = config.clone();
-            let bruteforce_task = thread_pool.spawn(async move {
+            let task = thread_pool.spawn(async move {
                 bruteforce_windows(pid, bundle_id.as_deref(), offscreen_windows, &config)
             });
-            commands.spawn(BruteforceWindows(bruteforce_task));
+            commands.spawn(BruteforceWindows(task));
         }
     }
 }
@@ -169,13 +171,14 @@ pub(crate) fn add_existing_application(
 /// * `displays` - A query for all `Display` entities, including whether they have the `ActiveDisplayMarker`.
 /// * `window_manager` - The `WindowManager` resource for refreshing displays and getting active space information.
 /// * `commands` - Bevy commands to insert components like `FocusedMarker`.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(crate) fn finish_setup(
+    _main_thread: NonSend<AxMainThread>,
     process_query: Query<Entity, With<ExistingMarker>>,
     windows: Windows,
-    applications: Query<&Application>,
     mut bruteforce_tasks: Query<(Entity, &mut BruteforceWindows)>,
+    applications: Query<&Application>,
     mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>, &ChildOf)>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
@@ -185,17 +188,18 @@ pub(crate) fn finish_setup(
         return;
     }
 
-    // Reap the bruteforced windows.
+    // Keep initialization alive until every inactive-Space Accessibility
+    // lookup completes. Runtime activity already polls while `Initializing`
+    // exists, so this adds no permanent wake-up source.
     if !bruteforce_tasks.is_empty() {
-        for (entity, mut job) in &mut bruteforce_tasks {
-            if let Some(found_windows) = future::block_on(future::poll_once(&mut job.0)) {
+        for (entity, mut task) in &mut bruteforce_tasks {
+            if let Some(found_windows) = future::block_on(future::poll_once(&mut task.0)) {
                 commands.trigger(SpawnWindowTrigger(found_windows));
                 if let Ok(mut entity_commands) = commands.get_entity(entity) {
                     entity_commands.try_despawn();
                 }
             }
         }
-        // Wait for the next tick to finish initialization.
         return;
     }
 
@@ -283,15 +287,24 @@ pub(crate) fn finish_setup(
 /// * `commands` - Bevy commands to spawn entities and manage components.
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn add_launched_process(
+    _main_thread: NonSend<AxMainThread>,
     window_manager: Res<WindowManager>,
-    fresh_processes: Populated<(Entity, &mut BProcess, Has<Children>), With<FreshMarker>>,
+    fresh_processes: Populated<
+        (Entity, &mut BProcess, Has<Children>, &mut FreshPollDeadline),
+        With<FreshMarker>,
+    >,
     config: Res<Config>,
     mut commands: Commands,
 ) {
     const APP_OBSERVABLE_TIMEOUT_SEC: u64 = 5;
     let mut already_seen = HashSet::new();
 
-    for (entity, mut process, children) in fresh_processes {
+    let now = std::time::Instant::now();
+    for (entity, mut process, children, mut poll) in fresh_processes {
+        if !poll.due(now) {
+            continue;
+        }
+        poll.schedule_next(now);
         let process = &mut *process.0;
 
         if !already_seen.insert(process.psn()) {
@@ -313,7 +326,9 @@ pub(super) fn add_launched_process(
         if children {
             // Process already has an attached Application, so finish.
             if let Ok(mut entity_commands) = commands.get_entity(entity) {
-                entity_commands.try_remove::<FreshMarker>();
+                entity_commands
+                    .try_remove::<FreshMarker>()
+                    .try_remove::<FreshPollDeadline>();
             }
             continue;
         }
@@ -323,7 +338,14 @@ pub(super) fn add_launched_process(
             return;
         };
 
-        if app.observe().is_ok_and(|good| good) {
+        if !app.is_frontmost() {
+            commands.spawn((
+                app,
+                FreshMarker,
+                FreshPollDeadline::default(),
+                ChildOf(entity),
+            ));
+        } else if app.observe().is_ok_and(|good| good) {
             let timeout = Timeout::new(
                 Duration::from_secs(APP_OBSERVABLE_TIMEOUT_SEC),
                 Some(format!(
@@ -331,7 +353,14 @@ pub(super) fn add_launched_process(
                 )),
                 &mut commands,
             );
-            commands.spawn((app, FreshMarker, timeout, ChildOf(entity)));
+            commands.spawn((
+                app,
+                FreshMarker,
+                FreshPollDeadline::default(),
+                ApplicationObserved,
+                timeout,
+                ChildOf(entity),
+            ));
         } else {
             debug!("failed to register some observers {}", process.name());
         }
@@ -350,7 +379,16 @@ pub(super) fn add_launched_process(
 /// * `commands` - Bevy commands to spawn entities and manage components.
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn add_launched_application(
-    app_query: Populated<(&mut Application, Entity, Has<Children>), With<FreshMarker>>,
+    _main_thread: NonSend<AxMainThread>,
+    app_query: Populated<
+        (
+            &mut Application,
+            Entity,
+            Has<Children>,
+            &mut FreshPollDeadline,
+        ),
+        With<FreshMarker>,
+    >,
     windows: Windows,
     config: Res<Config>,
     mut commands: Commands,
@@ -358,14 +396,21 @@ pub(super) fn add_launched_application(
     // TODO: maybe refactor this with add_existing_application_windows()
     let find_window = |window_id| windows.find(window_id);
 
-    for (app, entity, has_children) in app_query {
+    let now = std::time::Instant::now();
+    for (app, entity, has_children, mut poll) in app_query {
+        if !poll.due(now) {
+            continue;
+        }
+        poll.schedule_next(now);
         let mut create_windows = app.window_list(&config);
         // Retain the non-existing windows, so they can be created.
         create_windows.retain(|window| find_window(window.id()).is_none());
 
         if !create_windows.is_empty() {
             if let Ok(mut entity_commands) = commands.get_entity(entity) {
-                entity_commands.try_remove::<FreshMarker>();
+                entity_commands
+                    .try_remove::<FreshMarker>()
+                    .try_remove::<FreshPollDeadline>();
             }
             debug!(
                 "spawn! (polling path found {} new windows for {entity})",
@@ -377,7 +422,9 @@ pub(super) fn add_launched_application(
             // Remove FreshMarker so the Timeout gets cleaned up.
             debug!("removing FreshMarker from {entity}: windows already created via AXCreated");
             if let Ok(mut entity_commands) = commands.get_entity(entity) {
-                entity_commands.try_remove::<FreshMarker>();
+                entity_commands
+                    .try_remove::<FreshMarker>()
+                    .try_remove::<FreshPollDeadline>();
             }
         }
     }
@@ -424,7 +471,8 @@ pub(super) fn timeout_ticker(
     mut commands: Commands,
 ) {
     for (entity, mut timeout) in timers {
-        if timeout.timer.is_finished() {
+        timeout.timer.tick(clock.delta());
+        if timeout.due(std::time::Instant::now()) {
             trace!("Despawning entity {entity} due to timeout.");
             if let Some(system_id) = timeout.system_id.take() {
                 commands.run_system(system_id);
@@ -434,8 +482,6 @@ pub(super) fn timeout_ticker(
             if let Ok(mut entity_commands) = commands.get_entity(entity) {
                 entity_commands.try_despawn();
             }
-        } else {
-            timeout.timer.tick(clock.delta());
         }
     }
 }
@@ -444,12 +490,17 @@ pub(super) fn timeout_ticker(
 /// during `ApplicationFrontSwitched`. Runs each frame until success or timeout.
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn retry_front_switch(
-    retries: Populated<(Entity, &RetryFrontSwitch)>,
+    _main_thread: NonSend<AxMainThread>,
+    mut retries: Populated<(Entity, &mut RetryFrontSwitch)>,
     applications: Query<&Application>,
     mut commands: Commands,
 ) {
-    for (entity, retry) in retries.iter() {
-        let Ok(app) = applications.get(retry.0) else {
+    let now = std::time::Instant::now();
+    for (entity, mut retry) in &mut retries {
+        if !retry.due(now) {
+            continue;
+        }
+        let Ok(app) = applications.get(retry.application) else {
             // Application entity no longer exists, clean up.
             if let Ok(mut entity_commands) = commands.get_entity(entity) {
                 entity_commands.try_despawn();
@@ -472,6 +523,8 @@ pub(super) fn retry_front_switch(
             if let Ok(mut entity_commands) = commands.get_entity(entity) {
                 entity_commands.try_despawn();
             }
+        } else {
+            retry.schedule_retry(now);
         }
         // Otherwise, let timeout_ticker handle expiry.
     }
@@ -578,68 +631,10 @@ pub(super) fn animate_resize_entities(
         });
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
-pub(super) fn pump_events(
-    mut exit: MessageWriter<AppExit>,
-    mut messages: MessageWriter<Event>,
-    low_power_mode: Option<Res<LowPowerMode>>,
-    incoming_events: Option<NonSend<Receiver<Event>>>,
-    platform: Option<NonSendMut<Pin<Box<PlatformCallbacks>>>>,
-    repositioning: Query<(), With<RepositionMarker>>,
-    resizing: Query<(), With<ResizeMarker>>,
-    scrolling: Query<(), With<Scrolling>>,
-    flash_messages: Query<(), With<FlashMessage>>,
-    mut timeout: Local<u32>,
-) {
-    let Some((ref mut platform, incoming_events)) = platform.zip(incoming_events) else {
-        // No platform interface or incoming event pipe - probably executing in a unit test.
-        return;
-    };
-
-    platform.pump_cocoa_event_loop(f64::from(*timeout) / 1000.0);
-    let mut received_events = Vec::new();
-    let mut pending_mouse = None;
-    loop {
-        // Repeatedly drain the events until timeout.
-        match incoming_events.recv_timeout(Duration::from_millis(1)) {
-            Ok(Event::Exit) | Err(RecvTimeoutError::Disconnected) => {
-                exit.write(AppExit::Success);
-                break;
-            }
-            Ok(event) => {
-                if matches!(event, Event::MouseMoved { .. }) {
-                    pending_mouse = Some(event);
-                } else {
-                    received_events.extend(pending_mouse.take());
-                    received_events.push(event);
-                }
-                *timeout = LOOP_TIMEOUT_STEP;
-            }
-            Err(RecvTimeoutError::Timeout) => {
-                received_events.extend(pending_mouse.take());
-                messages.write_batch(received_events);
-                let frame_active = !repositioning.is_empty()
-                    || !resizing.is_empty()
-                    || !scrolling.is_empty()
-                    || !flash_messages.is_empty();
-                let low_power = low_power_mode.is_some_and(|low_power| low_power.0);
-                let timeout_limit = if frame_active {
-                    LOOP_MAX_TIMEOUT_FRAME_ACTIVE_MS
-                } else if low_power {
-                    LOOP_MAX_TIMEOUT_LOWPOWER_MS
-                } else {
-                    LOOP_MAX_TIMEOUT_MS
-                };
-                *timeout = timeout.min(timeout_limit) + LOOP_TIMEOUT_STEP;
-                break;
-            }
-        }
-    }
-}
-
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn window_resized_update_frame(
+    _main_thread: NonSend<AxMainThread>,
     mut messages: MessageReader<Event>,
     mut windows: Query<
         (
@@ -719,6 +714,7 @@ pub(super) fn window_resized_update_frame(
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn window_moved_update_frame(
+    _main_thread: NonSend<AxMainThread>,
     mut messages: MessageReader<Event>,
     mut windows: Query<
         (&mut Window, &mut Position, &Bounds, Option<&Unmanaged>),
@@ -752,8 +748,9 @@ pub(super) fn window_moved_update_frame(
 
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn gather_initial_processes(
-    receiver: Option<NonSendMut<Receiver<Event>>>,
+    receiver: Option<NonSendMut<EventReceiver>>,
     mut displays: Query<&mut Display>,
+    mut default_disposition: ResMut<DefaultWindowDisposition>,
     mut commands: Commands,
 ) {
     let Some(receiver) = receiver else {
@@ -769,6 +766,8 @@ pub(crate) fn gather_initial_processes(
                 initial_processes.push(Process::new(&psn, observer.clone()).into());
             }
             Event::InitialConfig(config) => {
+                *default_disposition = DefaultWindowDisposition::from_config(&config);
+
                 // If there is a display menubar override, apply it to newly created displays.
                 let height = config.menubar_height();
                 for mut display in &mut displays {
@@ -926,22 +925,61 @@ pub(super) fn update_overlays(
     );
 }
 
+#[allow(clippy::type_complexity)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn commit_window_position(
-    mut moved_windows: Populated<(&mut Window, &Position), Changed<Position>>,
+    _main_thread: NonSend<AxMainThread>,
+    mut moved_windows: Populated<
+        (
+            &mut Window,
+            &Position,
+            Option<&WindowDisposition>,
+            Option<&Unmanaged>,
+        ),
+        Changed<Position>,
+    >,
 ) {
-    moved_windows
-        .par_iter_mut()
-        .for_each(|(mut window, position)| window.reposition(position.0));
+    for (mut window, position, disposition, unmanaged) in &mut moved_windows {
+        if !disposition
+            .copied()
+            .unwrap_or(WindowDisposition::Managed)
+            .owns_geometry(unmanaged)
+        {
+            continue;
+        }
+        window.reposition(position.0);
+    }
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn verify_window_position(
-    mut windows: Populated<(Entity, &mut Window, &Position, &mut VerifyWindowPosition)>,
+    _main_thread: NonSend<AxMainThread>,
+    mut windows: Populated<(
+        Entity,
+        &mut Window,
+        &Position,
+        &mut VerifyWindowPosition,
+        Option<&WindowDisposition>,
+        Option<&Unmanaged>,
+    )>,
     mut commands: Commands,
 ) {
-    for (entity, mut window, position, mut verification) in &mut windows {
+    let now = std::time::Instant::now();
+    for (entity, mut window, position, mut verification, disposition, unmanaged) in &mut windows {
+        if !disposition
+            .copied()
+            .unwrap_or(WindowDisposition::Managed)
+            .owns_geometry(unmanaged)
+        {
+            if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                entity_commands.try_remove::<VerifyWindowPosition>();
+            }
+            continue;
+        }
+        if !verification.due(now) {
+            continue;
+        }
         if window
             .update_frame()
             .is_ok_and(|frame| frame.min == position.0)
@@ -961,19 +999,47 @@ pub(super) fn verify_window_position(
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn commit_window_size(
-    active_display: ActiveDisplay,
-    mut resized_windows: Populated<(&mut Window, &Bounds, &mut WidthRatio), Changed<Bounds>>,
+    _main_thread: NonSend<AxMainThread>,
+    mut resized_windows: Populated<
+        (
+            Entity,
+            &mut Window,
+            &Bounds,
+            &mut WidthRatio,
+            Option<&WindowDisposition>,
+            Option<&Unmanaged>,
+        ),
+        Changed<Bounds>,
+    >,
+    strips: Query<(&LayoutStrip, &ChildOf)>,
+    displays: Query<&Display>,
 ) {
-    let display_bounds = active_display.bounds();
-    resized_windows
-        .par_iter_mut()
-        .for_each(|(mut window, size, mut width_ratio)| {
-            width_ratio.0 = f64::from(size.0.x) / f64::from(display_bounds.width());
-            window.resize(size.0);
-        });
+    for (entity, mut window, size, mut width_ratio, disposition, unmanaged) in &mut resized_windows
+    {
+        if !disposition
+            .copied()
+            .unwrap_or(WindowDisposition::Managed)
+            .owns_geometry(unmanaged)
+        {
+            continue;
+        }
+        if let Some(ratio) = width_ratio_for_owner(
+            entity,
+            size.0.x,
+            strips.iter().filter_map(|(strip, parent)| {
+                displays
+                    .get(parent.parent())
+                    .ok()
+                    .map(|display| (strip, display.bounds().width()))
+            }),
+        ) {
+            width_ratio.0 = ratio;
+        }
+        window.resize(size.0);
+    }
 }
 
 /// Restores user-visible window state before Paneru shuts down: clears any
@@ -981,14 +1047,20 @@ pub(super) fn commit_window_size(
 /// managed window on the display its frame center falls in.
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn cleanup_on_exit(
+    _main_thread: NonSend<AxMainThread>,
     mut exit_events: MessageReader<AppExit>,
-    mut all_windows: Query<&mut Window>,
+    mut all_windows: Query<(&mut Window, Option<&Unmanaged>)>,
     displays: Query<&Display>,
     window_manager: Res<WindowManager>,
     mut overlay_mgr: Option<NonSendMut<OverlayManager>>,
 ) {
     for _ in exit_events.read() {
-        let ids = all_windows.iter().map(|w| w.id()).collect::<Vec<_>>();
+        let ids = all_windows
+            .iter()
+            .filter_map(|(window, unmanaged)| {
+                (!matches!(unmanaged, Some(Unmanaged::Passthrough))).then_some(window.id())
+            })
+            .collect::<Vec<_>>();
         info!("exit cleanup: restoring {} window(s)", ids.len());
         window_manager.dim_windows(&ids, 0.0);
 
@@ -1001,7 +1073,10 @@ pub(super) fn cleanup_on_exit(
             return;
         }
 
-        for mut window in &mut all_windows {
+        for (mut window, unmanaged) in &mut all_windows {
+            if !matches!(unmanaged, None | Some(Unmanaged::Floating)) {
+                continue;
+            }
             let frame = window.frame();
             let center = frame.center();
             let bounds = display_bounds
@@ -1102,17 +1177,13 @@ pub(crate) fn update_flash_messages(
     }
 }
 
-pub(crate) fn update_low_power_state(low_power_mode: Option<ResMut<LowPowerMode>>) {
-    let Some(mut state) = low_power_mode else {
-        return;
-    };
-    let process_info = objc2_foundation::NSProcessInfo::processInfo();
-    state.0 = process_info.isLowPowerModeEnabled();
-}
-
 #[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
-pub(crate) fn window_creation_event(mut messages: MessageReader<Event>, mut commands: Commands) {
+pub(crate) fn window_creation_event(
+    _main_thread: NonSend<AxMainThread>,
+    mut messages: MessageReader<Event>,
+    mut commands: Commands,
+) {
     for event in messages.read() {
         let Event::WindowCreated { element } = event else {
             continue;
@@ -1129,9 +1200,9 @@ pub(crate) fn window_creation_event(mut messages: MessageReader<Event>, mut comm
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 pub(crate) fn detect_tabbed_windows(
-    created: Populated<(Entity, &Position, &Bounds, &ChildOf), Added<Window>>,
+    created: Populated<(Entity, &Position, &Bounds, &ChildOf), (Added<Window>, Without<Unmanaged>)>,
     windows: Query<(Entity, &Window, &Position, &Bounds, &ChildOf), With<Window>>,
     apps: Query<Entity, With<Application>>,
     mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,

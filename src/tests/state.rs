@@ -7,7 +7,7 @@ use crate::ecs::state::{
     PaneruQueryState, PaneruState, SavedColumn, SavedDisplay, SavedRect, SavedStackItem,
     SavedStrip, SavedWindow, SavedWorkspace,
 };
-use crate::ecs::{ActiveDisplayMarker, ActiveWorkspaceMarker};
+use crate::ecs::{ActiveDisplayMarker, ActiveWorkspaceMarker, Position};
 use crate::manager::{Application, Display};
 use crate::platform::{Pid, ProcessSerialNumber, WinID};
 use crate::tests::{
@@ -25,6 +25,7 @@ type StateExtractionState<'w, 's> = SystemState<(
         (
             Option<&'static ChildOf>,
             &'static LayoutStrip,
+            Option<&'static Position>,
             Has<ActiveWorkspaceMarker>,
         ),
     >,
@@ -59,6 +60,8 @@ fn test_state_serialization() {
         identifier: "finder-main".to_string(),
         role: "AXWindow".to_string(),
         subrole: "AXStandardWindow".to_string(),
+        width_ratio: None,
+        strip_position_x: None,
     };
 
     let state = PaneruState {
@@ -94,6 +97,20 @@ fn test_state_serialization() {
 }
 
 #[test]
+fn saved_window_geometry_is_backward_compatible() {
+    let mut value = serde_json::to_value(saved_window(1, 123, "com.example.app", "Main"))
+        .expect("saved window should serialize");
+    let object = value.as_object_mut().expect("saved window is an object");
+    object.remove("width_ratio");
+    object.remove("strip_position_x");
+
+    let restored: SavedWindow =
+        serde_json::from_value(value).expect("legacy saved window should deserialize");
+    assert_eq!(restored.width_ratio, None);
+    assert_eq!(restored.strip_position_x, None);
+}
+
+#[test]
 fn test_state_restoration() {
     let window = SavedWindow {
         window_id: 1,
@@ -104,6 +121,8 @@ fn test_state_restoration() {
         identifier: "finder-main".to_string(),
         role: "AXWindow".to_string(),
         subrole: "AXStandardWindow".to_string(),
+        width_ratio: None,
+        strip_position_x: None,
     };
 
     let state = PaneruState {
@@ -495,6 +514,8 @@ fn saved_window(window_id: WinID, pid: Pid, bundle_id: &str, title: &str) -> Sav
         identifier: "main".to_string(),
         role: "AXWindow".to_string(),
         subrole: "AXStandardWindow".to_string(),
+        width_ratio: None,
+        strip_position_x: None,
     }
 }
 

@@ -1,9 +1,8 @@
-use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use bevy::MinimalPlugins;
 use bevy::app::App as BevyApp;
-use bevy::app::{PostUpdate, PreUpdate, Startup};
+use bevy::app::{First, PostUpdate, PreUpdate, Startup};
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::lifecycle::RemovedComponents;
 use bevy::ecs::message::Messages;
@@ -11,11 +10,11 @@ use bevy::ecs::query::{Added, Changed, With};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::common_conditions::{not, resource_exists};
 use bevy::ecs::system::{Commands, EntityCommands, Query, Res, SystemId};
+use bevy::math::IRect;
 use bevy::prelude::Event as BevyEvent;
 use bevy::tasks::Task;
 use bevy::time::Timer;
-use bevy::time::common_conditions::on_timer;
-use bevy::time::{Time, Virtual};
+use bevy::time::{Time, TimeSystems, Virtual};
 use bevy::{
     app::Update,
     ecs::{component::Component, entity::Entity, schedule::IntoScheduleConfigs},
@@ -27,26 +26,31 @@ use crate::commands::register_commands;
 use crate::config::{CONFIGURATION_FILE, Config, WindowParams};
 use crate::ecs::display::FloatingLayer;
 use crate::ecs::layout::LayoutStrip;
-use crate::ecs::state::PaneruState;
 use crate::errors::Result;
-use crate::events::{Event, EventSender};
+use crate::events::{Event, EventReceiver, EventSender};
 use crate::manager::{
     Application, Origin, ProcessApi, Size, Window, WindowManager, WindowManagerApi, WindowManagerOS,
 };
 use crate::menubar::MenuBarManager;
 use crate::overlay::{FlashMessageManager, OverlayManager};
-use crate::platform::{Modifiers, PlatformCallbacks, WinID, WorkspaceId};
+use crate::platform::{AxMainThread, Modifiers, PlatformCallbacks, WinID, WorkspaceId};
 
+mod config_reload;
 pub mod display;
+mod floating;
 pub mod focus;
 pub mod layout;
 pub mod mouse;
+pub(crate) mod observation;
 pub mod params;
+pub(crate) mod persistence;
 pub(crate) mod restore;
+pub(crate) mod runtime;
 pub mod scroll;
 pub mod state;
 mod systems;
 mod triggers;
+mod width_ratio;
 pub mod workspace;
 
 /// Registers the Bevy systems for the `WindowManager`.
@@ -58,8 +62,8 @@ pub mod workspace;
 /// * `app` - The Bevy application to register the systems with.
 #[allow(clippy::too_many_lines)]
 pub fn register_systems(app: &mut bevy::app::App) {
-    const LOW_POWER_MODE_CHECK_SEC: u64 = 60;
-
+    app.init_resource::<persistence::PersistenceState>()
+        .init_resource::<runtime::SyntheticEventPending>();
     let not_swiping = |scrolling: Query<&Scrolling, With<ActiveWorkspaceMarker>>| {
         scrolling
             .iter()
@@ -90,19 +94,30 @@ pub fn register_systems(app: &mut bevy::app::App) {
 
     app.add_systems(
         Startup,
-        (systems::gather_displays, systems::gather_initial_processes).chain(),
+        (
+            systems::gather_displays,
+            systems::gather_initial_processes,
+            persistence::load_restore_state,
+        )
+            .chain(),
     );
+    // Native events must be published before every MessageReader<Event>.
+    // All readers live in PreUpdate or later; the pump runs in First after
+    // Bevy updates Time so its blocking wait can resync the real clock.
     app.add_systems(
-        PreUpdate,
-        (systems::window_creation_event, systems::pump_events),
+        First,
+        runtime::pump_events
+            .after(TimeSystems)
+            .after(bevy::ecs::message::message_update_system),
     );
+    app.add_systems(PreUpdate, systems::window_creation_event);
     app.add_systems(
         Update,
         (
             (
                 triggers::apply_window_defaults,
-                systems::detect_tabbed_windows.run_if(native_tabs_enabled),
                 triggers::apply_window_positions,
+                systems::detect_tabbed_windows.run_if(native_tabs_enabled),
             )
                 .chain(),
             (
@@ -117,9 +132,6 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::fresh_marker_cleanup,
             systems::timeout_ticker,
             systems::retry_front_switch,
-            systems::update_low_power_state
-                .run_if(resource_exists::<LowPowerMode>)
-                .run_if(on_timer(Duration::from_secs(LOW_POWER_MODE_CHECK_SEC))),
             (
                 systems::window_resized_update_frame,
                 systems::window_moved_update_frame,
@@ -128,8 +140,6 @@ pub fn register_systems(app: &mut bevy::app::App) {
                 .run_if(not_swiping),
             systems::cleanup_on_exit,
             restore::tick_restore_grace,
-            state::periodic_state_save.run_if(on_timer(Duration::from_secs(300))),
-            state::cleanup_on_exit,
         ),
     );
     app.add_systems(
@@ -158,6 +168,16 @@ pub fn register_systems(app: &mut bevy::app::App) {
             crate::menubar::update_menu_bar,
         ),
     );
+    app.add_systems(
+        PostUpdate,
+        (
+            persistence::track_dirty_state,
+            persistence::flush_due_state,
+            persistence::flush_on_exit,
+        )
+            .chain()
+            .after(crate::menubar::update_menu_bar),
+    );
 }
 
 /// Registers all the event triggers for the window manager.
@@ -168,10 +188,11 @@ pub fn register_triggers(app: &mut bevy::app::App) {
             triggers::front_switched_trigger,
             triggers::window_focused_trigger,
             triggers::mission_control_trigger,
-            triggers::application_event_trigger,
+            observation::application_event_trigger,
+            observation::retry_observer_detaches,
             triggers::dispatch_application_messages,
             triggers::window_destroyed_trigger,
-            triggers::refresh_configuration_trigger,
+            config_reload::refresh_configuration_trigger,
             triggers::theme_change_trigger,
             triggers::window_resize_verifier,
         ),
@@ -211,6 +232,12 @@ pub struct FreshMarker;
 #[derive(Component)]
 pub struct ExistingMarker;
 
+/// Marks applications whose broad AX notifications are currently attached.
+/// Only the frontmost application and applications owning managed windows
+/// retain this observer.
+#[derive(Component)]
+pub struct ApplicationObserved;
+
 /// Component representing a request to reposition a window.
 #[derive(Component, Debug, Deref, DerefMut)]
 pub struct RepositionMarker(pub Origin);
@@ -236,8 +263,18 @@ pub struct EnsureVisibleMarker;
 pub struct Scrolling {
     pub velocity: f64,
     pub position: f64,
-    /// When true, the user's fingers are on the trackpad.
+    /// Target supplied by native modifier-scroll events. The current position
+    /// follows it over a few frames so discrete event delivery is not visible.
+    pub target_position: Option<f64>,
+    /// A physical gesture ended and still needs to choose its sticky anchor.
+    pub snap_pending: bool,
+    /// Movement is still being supplied by the user or native scroll stream.
     pub is_user_swiping: bool,
+    /// An explicit trackpad begin event has not yet received its matching end.
+    /// This prevents the inactivity fallback from ending a paused gesture.
+    pub gesture_active: bool,
+    /// One-hop paging bounds and release decision captured for this gesture.
+    pub paging_gesture: Option<PagingGesture>,
     /// Last time a physical swipe event was received.
     pub last_event: Instant,
 }
@@ -247,10 +284,23 @@ impl Default for Scrolling {
         Self {
             velocity: 0.0,
             position: 0.0,
+            target_position: None,
+            snap_pending: false,
             is_user_swiping: false,
+            gesture_active: false,
+            paging_gesture: None,
             last_event: Instant::now(),
         }
     }
+}
+
+/// Immutable snap neighborhood captured at the beginning of one gesture.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PagingGesture {
+    pub start_stop: f64,
+    pub previous_stop: Option<f64>,
+    pub next_stop: Option<f64>,
+    pub release_velocity: f64,
 }
 
 #[derive(Component, Clone, Debug, Default, Deref, DerefMut)]
@@ -281,11 +331,73 @@ pub struct FullWidthMarker {
     pub width_ratio: f64,
 }
 
-/// Enum component indicating the unmanaged state of a window.
-#[derive(Component, Debug)]
+/// Durable per-window ownership policy.
+///
+/// Temporary lifecycle state such as minimization is represented by
+/// [`Unmanaged`]; restoring that state must always return to this disposition.
+#[derive(Clone, Component, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WindowDisposition {
+    Managed,
+    Floating,
+    #[default]
+    Passthrough,
+}
+
+impl WindowDisposition {
+    pub fn unmanaged(self) -> Option<Unmanaged> {
+        match self {
+            Self::Managed => None,
+            Self::Floating => Some(Unmanaged::Floating),
+            Self::Passthrough => Some(Unmanaged::Passthrough),
+        }
+    }
+
+    /// Whether Paneru currently owns the window's geometry.
+    ///
+    /// Floating windows retain explicit grid-placement behavior, while
+    /// minimized/hidden windows and passthrough windows must never receive
+    /// deferred resize or reposition work.
+    pub fn owns_geometry(self, unmanaged: Option<&Unmanaged>) -> bool {
+        matches!(
+            (self, unmanaged),
+            (Self::Managed, None) | (Self::Floating, Some(Unmanaged::Floating))
+        )
+    }
+}
+
+/// Production policy for windows that do not match an explicit rule.
+#[derive(Clone, Copy, Debug, Resource)]
+pub struct DefaultWindowDisposition(pub WindowDisposition);
+
+impl Default for DefaultWindowDisposition {
+    fn default() -> Self {
+        Self(WindowDisposition::Managed)
+    }
+}
+
+impl DefaultWindowDisposition {
+    pub(crate) fn from_config(config: &Config) -> Self {
+        if config.opt_in_management() {
+            Self(WindowDisposition::Passthrough)
+        } else {
+            Self::default()
+        }
+    }
+}
+
+/// The ordinary macOS frame captured immediately before a passthrough window
+/// enters Paneru's strip. It remains attached while managed so unmanaging the
+/// window can restore the user's previous placement.
+#[derive(Clone, Component, Copy, Debug)]
+pub struct PreManagedFrame(pub IRect);
+
+/// Effective marker excluding a window from the managed strip.
+#[derive(Clone, Component, Copy, Debug, Eq, PartialEq)]
 pub enum Unmanaged {
     /// The window is floating and not part of the tiling layout.
     Floating,
+    /// Paneru tracks focus/identity but never owns layout or geometry.
+    Passthrough,
     /// The window is minimized.
     Minimized,
     /// The window is hidden.
@@ -308,6 +420,7 @@ pub struct BProcess(pub Box<dyn ProcessApi>);
 pub struct Timeout {
     /// The Bevy timer instance.
     pub timer: Timer,
+    deadline: Instant,
     /// An optional system to execute on timeout.
     pub system_id: Option<SystemId>,
 }
@@ -325,17 +438,32 @@ impl Timeout {
     ///
     /// A new `Timeout` instance.
     pub fn new(duration: Duration, message: Option<String>, commands: &mut Commands) -> Self {
+        Self::new_at(Instant::now(), duration, message, commands)
+    }
+
+    fn new_at(
+        now: Instant,
+        duration: Duration,
+        message: Option<String>,
+        commands: &mut Commands,
+    ) -> Self {
         let timer = Timer::from_seconds(duration.as_secs_f32(), bevy::time::TimerMode::Once);
+        let deadline = now + duration;
         if let Some(message) = message {
             let callback = move || {
                 tracing::debug!("{message}");
             };
             let system_id = Some(commands.register_system(callback));
 
-            Self { timer, system_id }
+            Self {
+                timer,
+                deadline,
+                system_id,
+            }
         } else {
             Self {
                 timer,
+                deadline,
                 system_id: None,
             }
         }
@@ -346,8 +474,17 @@ impl Timeout {
         let timer = Timer::from_seconds(duration.as_secs_f32(), bevy::time::TimerMode::Once);
         commands.spawn(Self {
             timer,
+            deadline: Instant::now() + duration,
             system_id: Some(system_id),
         });
+    }
+
+    pub(crate) fn due(&self, now: Instant) -> bool {
+        now >= self.deadline
+    }
+
+    pub(crate) fn next_deadline(&self) -> Instant {
+        self.deadline
     }
 }
 
@@ -358,10 +495,31 @@ pub struct StrayFocusEvent(pub WinID);
 /// Component used as a retry mechanism when `focused_window_id()` fails during
 /// an `ApplicationFrontSwitched` event (e.g. transient `kAXErrorCannotComplete`).
 #[derive(Component)]
-pub struct RetryFrontSwitch(pub Entity);
+pub struct RetryFrontSwitch {
+    pub application: Entity,
+    next_attempt: Instant,
+}
 
-#[derive(Component)]
-pub struct BruteforceWindows(Task<Vec<Window>>);
+impl RetryFrontSwitch {
+    pub fn new(application: Entity) -> Self {
+        Self {
+            application,
+            next_attempt: Instant::now(),
+        }
+    }
+
+    pub fn due(&self, now: Instant) -> bool {
+        now >= self.next_attempt
+    }
+
+    pub fn schedule_retry(&mut self, now: Instant) {
+        self.next_attempt = now + Duration::from_millis(50);
+    }
+
+    pub fn next_deadline(&self) -> Instant {
+        self.next_attempt
+    }
+}
 
 #[derive(Component, Debug)]
 pub enum DockPosition {
@@ -376,37 +534,57 @@ pub struct RefreshWindowSizes(pub Instant);
 
 impl Default for RefreshWindowSizes {
     fn default() -> Self {
-        Self(Instant::now())
+        Self(Instant::now() + Self::DELAY)
     }
 }
 
 impl RefreshWindowSizes {
-    pub fn ready(&self) -> bool {
-        const REFRESH_WINDOW_SIZE_DELAY_SEC: u64 = 5;
-        self.0.elapsed() > Duration::from_secs(REFRESH_WINDOW_SIZE_DELAY_SEC)
+    const DELAY: Duration = Duration::from_secs(5);
+
+    pub fn ready(&self, now: Instant) -> bool {
+        now >= self.0
+    }
+
+    pub(crate) fn next_deadline(&self) -> Instant {
+        self.0
     }
 }
 
 #[derive(Component)]
 pub struct VerifyWindowPosition {
     remaining: u8,
+    next_attempt: Instant,
 }
 
 impl Default for VerifyWindowPosition {
     fn default() -> Self {
-        Self { remaining: 3 }
+        Self {
+            remaining: 3,
+            next_attempt: Instant::now(),
+        }
     }
 }
 
 impl VerifyWindowPosition {
+    pub fn due(&self, now: Instant) -> bool {
+        now >= self.next_attempt
+    }
+
     pub fn tick(&mut self) -> bool {
         self.remaining = self.remaining.saturating_sub(1);
+        self.next_attempt = Instant::now() + Duration::from_millis(50);
         self.remaining == 0
+    }
+
+    pub fn next_deadline(&self) -> Instant {
+        self.next_attempt
     }
 }
 
-#[derive(Deref, DerefMut, Resource)]
-pub struct LowPowerMode(pub bool);
+/// Background task resolving Accessibility window elements for windows that
+/// exist on inactive macOS Spaces.
+#[derive(Component)]
+pub struct BruteforceWindows(Task<Vec<Window>>);
 
 #[derive(Resource)]
 pub struct SystemTheme {
@@ -538,7 +716,7 @@ impl SpawnCommandsExt for Commands<'_, '_> {
     }
 }
 
-pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<BevyApp> {
+pub fn setup_bevy_app(sender: EventSender, receiver: EventReceiver) -> Result<BevyApp> {
     let window_manager: Box<dyn WindowManagerApi> = Box::new(WindowManagerOS::new(sender.clone()));
     let watcher = window_manager.setup_config_watcher(CONFIGURATION_FILE.as_path())?;
 
@@ -554,7 +732,9 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         })
         .insert_resource(MissionControlActive(false))
         .insert_resource(FocusFollowsMouse(None))
+        .insert_resource(DefaultWindowDisposition::default())
         .insert_resource(Initializing)
+        .insert_resource(persistence::PersistenceStore::default())
         .insert_non_send_resource(watcher)
         .add_plugins(mouse::MouseEventsPlugin)
         .add_plugins(scroll::ScrollEventsPlugin)
@@ -568,23 +748,16 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
     let mut platform_callbacks = PlatformCallbacks::new(sender);
     platform_callbacks.setup_handlers()?;
     let mtm = platform_callbacks.main_thread_marker;
+    let ax_main_thread = AxMainThread::new(mtm);
     let overlay_manager = OverlayManager::new(mtm);
     let flash_message_manager = FlashMessageManager::new(mtm);
     let menu_bar_manager = MenuBarManager::new(mtm, menu_events);
     app.insert_non_send_resource(platform_callbacks)
+        .insert_non_send_resource(ax_main_thread)
         .insert_non_send_resource(overlay_manager)
         .insert_non_send_resource(flash_message_manager)
         .insert_non_send_resource(menu_bar_manager)
         .insert_non_send_resource(receiver);
-
-    if let Some(previous_state) =
-        PaneruState::load_from_file(&PaneruState::default_state_file_path())
-    {
-        app.insert_resource(previous_state);
-    }
-
-    // Do not insert this in mocks.
-    app.insert_resource(LowPowerMode(false));
 
     Ok(app)
 }
@@ -601,11 +774,29 @@ impl WindowProperties {
         Self { params }
     }
 
+    /// Whether a rule explicitly requested floating behavior.
+    ///
+    /// Runtime-rescued windows may also acquire a floating disposition, but
+    /// they should retain the legacy pop-to-visible behavior rather than being
+    /// treated as rule-owned floating windows.
     pub fn floating(&self) -> bool {
-        self.params
-            .iter()
-            .find_map(|props| props.floating)
-            .unwrap_or(false)
+        self.params.iter().any(|props| props.floating == Some(true))
+    }
+
+    pub fn explicit_disposition(&self) -> Option<WindowDisposition> {
+        if self.params.iter().any(|props| props.manage == Some(false)) {
+            Some(WindowDisposition::Passthrough)
+        } else if self.params.iter().any(|props| props.floating == Some(true)) {
+            Some(WindowDisposition::Floating)
+        } else if self.params.iter().any(|props| props.manage == Some(true)) {
+            Some(WindowDisposition::Managed)
+        } else {
+            None
+        }
+    }
+
+    pub fn disposition(&self, default: WindowDisposition) -> WindowDisposition {
+        self.explicit_disposition().unwrap_or(default)
     }
 
     pub fn insertion(&self) -> Option<usize> {

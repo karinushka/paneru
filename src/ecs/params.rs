@@ -251,6 +251,11 @@ impl Windows<'_, '_> {
             .map(|(window, entity, _, unmanaged)| (window, entity, unmanaged))
     }
 
+    pub fn is_managed(&self, entity: Entity) -> bool {
+        self.get_all(entity)
+            .is_some_and(|(_, _, _, unmanaged)| unmanaged.is_none())
+    }
+
     pub fn get(&self, entity: Entity) -> Option<&Window> {
         self.get_all(entity).map(|(window, _, _, _)| window)
     }

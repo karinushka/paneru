@@ -10,6 +10,7 @@ use bevy::ecs::query::{Added, Changed, With};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::common_conditions::{not, resource_exists};
 use bevy::ecs::system::{Commands, EntityCommands, Query, Res, SystemId};
+use bevy::math::IRect;
 use bevy::prelude::Event as BevyEvent;
 use bevy::tasks::Task;
 use bevy::time::Timer;
@@ -115,8 +116,8 @@ pub fn register_systems(app: &mut bevy::app::App) {
         (
             (
                 triggers::apply_window_defaults,
-                systems::detect_tabbed_windows.run_if(native_tabs_enabled),
                 triggers::apply_window_positions,
+                systems::detect_tabbed_windows.run_if(native_tabs_enabled),
             )
                 .chain(),
             (
@@ -330,11 +331,57 @@ pub struct FullWidthMarker {
     pub width_ratio: f64,
 }
 
-/// Enum component indicating the unmanaged state of a window.
-#[derive(Component, Debug)]
+/// Durable per-window ownership policy.
+///
+/// Temporary lifecycle state such as minimization is represented by
+/// [`Unmanaged`]; restoring that state must always return to this disposition.
+#[derive(Clone, Component, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WindowDisposition {
+    Managed,
+    Floating,
+    #[default]
+    Passthrough,
+}
+
+impl WindowDisposition {
+    pub fn unmanaged(self) -> Option<Unmanaged> {
+        match self {
+            Self::Managed => None,
+            Self::Floating => Some(Unmanaged::Floating),
+            Self::Passthrough => Some(Unmanaged::Passthrough),
+        }
+    }
+
+    /// Whether Paneru currently owns the window's geometry.
+    ///
+    /// Floating windows retain explicit grid-placement behavior, while
+    /// minimized/hidden windows and passthrough windows must never receive
+    /// deferred resize or reposition work.
+    pub fn owns_geometry(self, unmanaged: Option<&Unmanaged>) -> bool {
+        matches!(
+            (self, unmanaged),
+            (Self::Managed, None) | (Self::Floating, Some(Unmanaged::Floating))
+        )
+    }
+}
+
+/// Production policy for windows that do not match an explicit rule.
+#[derive(Clone, Copy, Debug, Default, Resource)]
+pub struct DefaultWindowDisposition(pub WindowDisposition);
+
+/// The ordinary macOS frame captured immediately before a passthrough window
+/// enters Paneru's strip. It remains attached while managed so unmanaging the
+/// window can restore the user's previous placement.
+#[derive(Clone, Component, Copy, Debug)]
+pub struct PreManagedFrame(pub IRect);
+
+/// Effective marker excluding a window from the managed strip.
+#[derive(Clone, Component, Copy, Debug, Eq, PartialEq)]
 pub enum Unmanaged {
     /// The window is floating and not part of the tiling layout.
     Floating,
+    /// Paneru tracks focus/identity but never owns layout or geometry.
+    Passthrough,
     /// The window is minimized.
     Minimized,
     /// The window is hidden.
@@ -669,6 +716,7 @@ pub fn setup_bevy_app(sender: EventSender, receiver: EventReceiver) -> Result<Be
         })
         .insert_resource(MissionControlActive(false))
         .insert_resource(FocusFollowsMouse(None))
+        .insert_resource(DefaultWindowDisposition::default())
         .insert_resource(Initializing)
         .insert_resource(persistence::PersistenceStore::default())
         .insert_non_send_resource(watcher)
@@ -710,11 +758,25 @@ impl WindowProperties {
         Self { params }
     }
 
+    /// Whether a rule explicitly requested floating behavior.
+    ///
+    /// Runtime-rescued windows may also acquire a floating disposition, but
+    /// they should retain the legacy pop-to-visible behavior rather than being
+    /// treated as rule-owned floating windows.
     pub fn floating(&self) -> bool {
-        self.params
-            .iter()
-            .find_map(|props| props.floating)
-            .unwrap_or(false)
+        self.params.iter().any(|props| props.floating == Some(true))
+    }
+
+    pub fn disposition(&self, default: WindowDisposition) -> WindowDisposition {
+        if self.params.iter().any(|props| props.manage == Some(false)) {
+            WindowDisposition::Passthrough
+        } else if self.params.iter().any(|props| props.floating == Some(true)) {
+            WindowDisposition::Floating
+        } else if self.params.iter().any(|props| props.manage == Some(true)) {
+            WindowDisposition::Managed
+        } else {
+            default
+        }
     }
 
     pub fn insertion(&self) -> Option<usize> {

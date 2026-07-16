@@ -62,7 +62,13 @@ Bevy is typically used for games, so Paneru implements a custom bridge to intera
 - **`ActiveWorkspaceMarker`**: Identifies the currently active workspace.
 - **`SelectedVirtualMarker`**: Marks a virtual workspace that is currently selected by the user.
 - **`NativeFullscreenMarker`**: Marks a window that is in macOS native fullscreen mode.
-- **`Unmanaged`:** An enum identifying windows that are `Floating`, `Minimized`, or `Hidden`.
+- **`WindowDisposition`:** Durable per-window ownership: `Managed`, `Floating`,
+  or `Passthrough`. Normal windows default to `Passthrough`.
+- **`Unmanaged`:** The effective strip-exclusion/lifecycle marker:
+  `Floating`, `Passthrough`, `Minimized`, or `Hidden`. Temporary lifecycle
+  state restores from `WindowDisposition`.
+- **`PreManagedFrame`:** The ordinary macOS frame captured before a passthrough
+  window enters a strip and restored when management is toggled off.
 - **`RepositionMarker` / `ResizeMarker`**: Used to signal that a window needs to be moved or resized.
 
 ### Resources
@@ -77,6 +83,13 @@ Bevy is typically used for games, so Paneru implements a custom bridge to intera
 
 - **Main Thread Only:** Any interaction with `objc2`, `AppKit`, or `Accessibility` APIs **must** occur on the main thread. AX lifecycle systems require the non-send `AxMainThread` capability created from AppKit's `MainThreadMarker`.
 - **ECS as Source of Truth:** Tiling logic must operate on ECS components (`WidthRatio`, `LayoutStrip`). The physical macOS window state should be a reflection of the ECS state, not the other way around.
+- **Per-window Ownership:** `LayoutStrip` membership is derived from each
+  window's disposition; there is no workspace-global managed-mode switch.
+  Runtime manage commands carry a concrete `WinID` captured at hotkey, menu, or
+  IPC ingress and never retarget from a later focus marker.
+- **Passthrough Isolation:** Layout, scrolling, borders/dimming, persistence,
+  restore, cleanup, and floating-layer operations must not mutate passthrough
+  windows. Focus remains tracked so recovery does not steal focus.
 - **Pure Layout:** Layout math (in `layout.rs`) should remain as pure as possible, operating on coordinates and ratios rather than directly calling OS APIs.
 - **Bounded Restore:** Saved session state is only consulted during startup restore. After `SessionRestore` expires, normal config and window-rule placement owns newly discovered windows.
 - **Reactive Power Saving:** With no pending work, runtime waits indefinitely on a latched native source. Animation uses frame cadence; lifecycle polling, workspace refresh/recovery, persistence, restore, verification, retry, timeout, and updater jobs contribute monotonic nearest deadlines only while needed.
@@ -94,6 +107,8 @@ with bounded backoff. Disabling restore performs no state-file read or write.
 alive in `SessionRestore` for the configured grace period so applications have
 time to reopen their windows. As windows arrive, `restore_window_state` builds a
 restore plan from the saved state and the currently managed ECS windows.
+Passthrough and floating dispositions are excluded before matching, so stale
+session state cannot silently opt a window back into management.
 
 Window matching prefers stable identity (`window_id`, `pid`, and `bundle_id`)
 and uses the conservative fallback identity only when it can do so
@@ -107,9 +122,10 @@ workspace markers, display associations, saved oversized `WidthRatio`s, and
 the horizontal pan position of each restored strip. When the current macOS workspace
 to display mapping conflicts with saved display data, the current mapping is
 preferred; otherwise restore falls back to the saved display, then the active
-display, then any available display. Matched startup windows skip static
-`[windows]` placement so the saved session wins, while unmatched windows and
-post-grace windows follow normal config behavior.
+display, then any available display. For windows currently classified as
+managed, matched startup state skips static placement so the saved session
+wins. Static passthrough/floating ownership wins over restore, while unmatched
+and post-grace windows follow normal config behavior.
 
 ## 7. Data Flow Diagram
 

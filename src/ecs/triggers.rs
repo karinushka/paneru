@@ -15,6 +15,7 @@ use super::{
     PreviousManagedStrip, RetryFrontSwitch, SpawnWindowTrigger, StrayFocusEvent, SystemTheme,
     Timeout, Unmanaged,
 };
+use crate::commands::set_last_focused_window_target;
 use crate::config::Config;
 use crate::ecs::floating::{clamp_origin_to_bounds, offset_frame_within_bounds};
 use crate::ecs::focus::FocusHistory;
@@ -27,9 +28,9 @@ use crate::ecs::params::{ActiveDisplay, GlobalState, Windows};
 use crate::ecs::runtime::SyntheticEventPending;
 use crate::ecs::state::PaneruState;
 use crate::ecs::{
-    ActiveWorkspaceMarker, Bounds, DockPosition, Initializing, LayoutPosition, Position,
-    ResizeMarker, RestoreWindowState, Scrolling, SendMessageTrigger, SpawnCommandsExt,
-    VerifyWindowPosition, WidthRatio, WindowProperties,
+    ActiveWorkspaceMarker, Bounds, DefaultWindowDisposition, DockPosition, Initializing,
+    LayoutPosition, Position, ResizeMarker, RestoreWindowState, Scrolling, SendMessageTrigger,
+    SpawnCommandsExt, VerifyWindowPosition, WidthRatio, WindowDisposition, WindowProperties,
 };
 use crate::events::Event;
 use crate::manager::{Application, Display, Origin, Size, Window, WindowManager, WindowPadding};
@@ -154,9 +155,23 @@ pub(super) fn theme_change_trigger(
         };
 
         // Re-apply dimming to all windows that are NOT focused.
-        let focused_id = windows.focused().map(|(window, _)| window.id());
+        let focused_id = windows.focused().and_then(|(window, entity)| {
+            windows
+                .get_managed(entity)
+                .is_some_and(|(_, _, unmanaged)| {
+                    matches!(unmanaged, None | Some(Unmanaged::Floating))
+                })
+                .then_some(window.id())
+        });
         let windows_to_dim: Vec<WinID> = windows
             .iter()
+            .filter(|(_, entity)| {
+                windows
+                    .get_managed(*entity)
+                    .is_some_and(|(_, _, unmanaged)| {
+                        matches!(unmanaged, None | Some(Unmanaged::Floating))
+                    })
+            })
             .filter(|(window, _)| Some(window.id()) != focused_id)
             .map(|(window, _)| window.id())
             .collect();
@@ -186,6 +201,7 @@ pub(super) fn window_focused_trigger(
     mut messages: MessageReader<Event>,
     applications: Query<&Application>,
     windows: Windows,
+    dispositions: Query<&WindowDisposition>,
     mut workspaces: Query<(Entity, &mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     mut focus_history: ResMut<FocusHistory>,
     config: Res<Config>,
@@ -236,13 +252,20 @@ pub(super) fn window_focused_trigger(
         if app.focused_window_id().is_ok_and(|id| id != window_id) {
             continue;
         }
+        set_last_focused_window_target(window_id);
 
         let managed = windows
             .get_managed(entity)
             .and_then(|(_, _, managed)| managed);
         if matches!(managed, Some(Unmanaged::Hidden)) {
-            if let Ok(mut entity_commands) = commands.get_entity(entity) {
-                entity_commands.try_remove::<Unmanaged>();
+            if let Ok(disposition) = dispositions.get(entity)
+                && let Ok(mut entity_commands) = commands.get_entity(entity)
+            {
+                if let Some(unmanaged) = disposition.unmanaged() {
+                    entity_commands.try_insert(unmanaged);
+                } else {
+                    entity_commands.try_remove::<Unmanaged>();
+                }
             }
             commands.trigger(SendMessageTrigger(Event::WindowFocused { window_id }));
             continue;
@@ -292,7 +315,7 @@ pub(super) fn window_focused_trigger(
         }
 
         if already_focused {
-            if !global_state.skip_reshuffle() && !global_state.initializing() {
+            if managed.is_none() && !global_state.skip_reshuffle() && !global_state.initializing() {
                 commands.reshuffle_around(entity);
             }
             continue;
@@ -388,6 +411,7 @@ pub(super) fn dispatch_application_messages(
     windows: Windows,
     applications: Query<(&Application, &Children)>,
     unmanaged_query: Query<&Unmanaged>,
+    dispositions: Query<&WindowDisposition>,
     mut commands: Commands,
 ) {
     let find_window = |window_id| windows.find(window_id);
@@ -405,9 +429,14 @@ pub(super) fn dispatch_application_messages(
             Event::WindowDeminimized { window_id } => {
                 if let Some((_, entity)) = find_window(*window_id)
                     && matches!(unmanaged_query.get(entity), Ok(Unmanaged::Minimized))
+                    && let Ok(disposition) = dispositions.get(entity)
                     && let Ok(mut entity_commands) = commands.get_entity(entity)
                 {
-                    entity_commands.try_remove::<Unmanaged>();
+                    if let Some(unmanaged) = disposition.unmanaged() {
+                        entity_commands.try_insert(unmanaged);
+                    } else {
+                        entity_commands.try_remove::<Unmanaged>();
+                    }
                 }
             }
 
@@ -418,9 +447,11 @@ pub(super) fn dispatch_application_messages(
                     continue;
                 };
                 for entity in children {
-                    // Only hide windows that are currently managed (no Unmanaged component).
-                    // Preserve existing Floating, Minimized, and Hidden states.
-                    if unmanaged_query.get(*entity).is_err()
+                    // Only managed windows leave a strip for the app hide/show
+                    // cycle. Passthrough and floating base dispositions remain
+                    // excluded without changing ownership.
+                    if matches!(dispositions.get(*entity), Ok(WindowDisposition::Managed))
+                        && unmanaged_query.get(*entity).is_err()
                         && let Ok(mut entity_commands) = commands.get_entity(*entity)
                     {
                         entity_commands.try_insert(Unmanaged::Hidden);
@@ -467,17 +498,20 @@ pub(super) fn window_unmanaged_trigger(
     const UNMANAGED_POP_OFFSET: i32 = 32;
 
     let entity = trigger.event().entity;
-    let Some((_, _, Some(Unmanaged::Floating))) = windows.get_managed(entity) else {
+    let Some((_, _, Some(unmanaged))) = windows.get_managed(entity) else {
         return;
     };
-    let display_bounds = {
-        let (display, dock) = *active_display;
-        display.actual_display_bounds(dock, &config)
-    };
+    if !matches!(unmanaged, Unmanaged::Floating | Unmanaged::Passthrough) {
+        return;
+    }
 
-    debug!("Entity {entity} is floating.");
+    workspaces.into_iter().for_each(|mut strip| {
+        if strip.contains(entity) {
+            strip.remove(entity);
+        }
+    });
 
-    let Some((window, frame)) = windows.get(entity).zip(windows.frame(entity)) else {
+    let Some(window) = windows.get(entity) else {
         return;
     };
     let Some((_, _, app_entity)) = windows.find_parent(window.id()) else {
@@ -500,11 +534,24 @@ pub(super) fn window_unmanaged_trigger(
         &mut commands,
     );
 
+    if *unmanaged == Unmanaged::Passthrough {
+        debug!("Entity {entity} is passthrough.");
+        return;
+    }
+
+    let display_bounds = {
+        let (display, dock) = *active_display;
+        display.actual_display_bounds(dock, &config)
+    };
+    debug!("Entity {entity} is floating.");
+
     let properties = WindowProperties::new(&app, window, &config);
 
     // Skip the active-display reposition/resize during init; the strip
     // removal below still has to run.
-    if let Some((rx, ry, rw, rh)) = properties.grid_ratios() {
+    if initializing.is_none()
+        && let Some((rx, ry, rw, rh)) = properties.grid_ratios()
+    {
         let x = (f64::from(display_bounds.width()) * rx) as i32;
         let y = (f64::from(display_bounds.height()) * ry) as i32;
         let w = (f64::from(display_bounds.width()) * rw) as i32;
@@ -512,6 +559,9 @@ pub(super) fn window_unmanaged_trigger(
         commands.reposition_entity(entity, Origin::new(x, y));
         commands.resize_entity(entity, Size::new(w, h));
     } else if initializing.is_none() && !properties.floating() {
+        let Some(frame) = windows.frame(entity) else {
+            return;
+        };
         let max_width = display_bounds.width() * UNMANAGED_MAX_SCREEN_RATIO_NUM
             / UNMANAGED_MAX_SCREEN_RATIO_DEN;
         let max_height = display_bounds.height() * UNMANAGED_MAX_SCREEN_RATIO_NUM
@@ -535,12 +585,6 @@ pub(super) fn window_unmanaged_trigger(
             commands.reposition_entity(entity, target_frame.min);
         }
     }
-
-    workspaces.into_iter().for_each(|mut strip| {
-        if strip.contains(entity) {
-            strip.remove(entity);
-        }
-    });
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -597,11 +641,15 @@ pub(super) fn window_managed_trigger(
     mut apps: Query<(Entity, &mut Application, Has<ApplicationObserved>)>,
     mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     previous_strips: Query<&PreviousManagedStrip>,
+    dispositions: Query<&WindowDisposition>,
     config: Res<Config>,
     initializing: Option<Res<Initializing>>,
     mut commands: Commands,
 ) {
     let entity = trigger.event().entity;
+    if !matches!(dispositions.get(entity), Ok(WindowDisposition::Managed)) {
+        return;
+    }
 
     if windows
         .get(entity)
@@ -696,15 +744,12 @@ pub(super) fn window_managed_trigger(
         }
     }
 
-    if let Some(origin) = windows.origin(entity) {
-        commands.reposition_entity(entity, origin);
-    }
     if let Ok(mut entity_commands) = commands.get_entity(entity) {
         entity_commands
             .try_insert(VerifyWindowPosition::default())
             .try_remove::<PreviousManagedStrip>();
     }
-    commands.reshuffle_around(entity);
+    commands.ensure_visible(entity);
 }
 
 /// Handles the event when a window is destroyed. The windows itself is not removed from the layout
@@ -846,6 +891,8 @@ pub(super) fn spawn_window_trigger(
     windows: Query<&Window>,
     mut apps: Query<(Entity, &mut Application)>,
     active_display: ActiveDisplay,
+    config: Res<Config>,
+    default_disposition: Res<DefaultWindowDisposition>,
     initializing: Option<Res<Initializing>>,
     restore: Option<Res<crate::ecs::restore::SessionRestore>>,
     mut commands: Commands,
@@ -895,6 +942,8 @@ pub(super) fn spawn_window_trigger(
         let width_ratio =
             WidthRatio(f64::from(frame.width()) / f64::from(active_display.bounds().width()));
         let layout_position = LayoutPosition::default();
+        let disposition =
+            WindowProperties::new(&app, &window, &config).disposition(default_disposition.0);
 
         // Insert the window into the internal Bevy state.
         // This insertion triggers window attributes observer.
@@ -904,6 +953,7 @@ pub(super) fn spawn_window_trigger(
             width_ratio,
             window,
             layout_position,
+            disposition,
             ChildOf(app_entity),
         ));
     }
@@ -920,6 +970,7 @@ pub(super) fn apply_window_defaults(
     apps: Query<(Entity, &Application)>,
     active_display: ActiveDisplay,
     config: Res<Config>,
+    default_disposition: Res<DefaultWindowDisposition>,
     initializing: Option<Res<Initializing>>,
 ) {
     for (ref mut window, mut position, mut bounds, child) in added {
@@ -928,14 +979,19 @@ pub(super) fn apply_window_defaults(
         };
 
         let properties = WindowProperties::new(app, window, &config);
+        let disposition = properties.disposition(default_disposition.0);
         debug!("Applying window defaults for '{}'", window.id());
 
         let initializing = initializing.is_some();
 
-        // Do not add padding to floating windows.
-        if properties.floating() {
+        // Paneru must not mutate ordinary passthrough geometry. Floating
+        // rules retain their explicit grid-placement compatibility.
+        if disposition != WindowDisposition::Managed {
             // Skip grid_ratios during init: we don't know this window's display.
-            if !initializing && let Some((rx, ry, rw, rh)) = properties.grid_ratios() {
+            if disposition == WindowDisposition::Floating
+                && !initializing
+                && let Some((rx, ry, rw, rh)) = properties.grid_ratios()
+            {
                 let bounds = active_display.actual_bounds(&config);
                 let x = (f64::from(bounds.width()) * rx) as i32;
                 let y = (f64::from(bounds.height()) * ry) as i32;
@@ -974,7 +1030,11 @@ pub(super) fn apply_window_defaults(
     }
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    clippy::too_many_lines
+)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn apply_window_positions(
     main_thread: NonSend<AxMainThread>,
@@ -982,7 +1042,9 @@ pub(super) fn apply_window_positions(
     mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     windows: Windows,
     mut apps: Query<(Entity, &mut Application, Has<ApplicationObserved>)>,
+    mut dispositions: Query<&mut WindowDisposition>,
     config: Res<Config>,
+    default_disposition: Res<DefaultWindowDisposition>,
     initializing: Option<Res<Initializing>>,
     restore: Option<Res<crate::ecs::restore::SessionRestore>>,
     restoration: Option<Res<PaneruState>>,
@@ -1004,13 +1066,28 @@ pub(super) fn apply_window_positions(
             continue;
         };
 
-        if crate::ecs::restore::matches_startup_restore_state(
-            window,
-            &app,
-            restore.as_deref(),
-            restoration.as_deref(),
-            &config,
-        ) {
+        let properties = WindowProperties::new(&app, window, &config);
+        let disposition = properties.disposition(default_disposition.0);
+        if let Ok(mut stored_disposition) = dispositions.get_mut(entity) {
+            *stored_disposition = disposition;
+        } else if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            entity_commands.try_insert(disposition);
+        }
+        if let Ok(mut entity_commands) = commands.get_entity(entity)
+            && let Some(unmanaged) = disposition.unmanaged()
+        {
+            entity_commands.try_insert(unmanaged);
+        }
+
+        if disposition == WindowDisposition::Managed
+            && crate::ecs::restore::matches_startup_restore_state(
+                window,
+                &app,
+                restore.as_deref(),
+                restoration.as_deref(),
+                &config,
+            )
+        {
             ensure_application_observer(
                 app_entity,
                 &mut app,
@@ -1025,15 +1102,14 @@ pub(super) fn apply_window_positions(
         let allready_inserted = workspaces
             .iter_mut()
             .find_map(|(strip, _)| strip.contains(entity).then_some(strip));
-        let properties = WindowProperties::new(&app, window, &config);
-
-        if properties.floating() {
-            if let Ok(mut entity_commands) = commands.get_entity(entity) {
-                // Avoid managing window if it's floating.
-                entity_commands.try_insert(Unmanaged::Floating);
-            }
+        if disposition != WindowDisposition::Managed {
             if let Some(mut strip) = allready_inserted {
                 strip.remove(entity);
+            }
+            if initializing.is_none() && !properties.dont_focus() {
+                commands.trigger(SendMessageTrigger(Event::WindowFocused {
+                    window_id: window.id(),
+                }));
             }
             continue;
         }
@@ -1135,15 +1211,25 @@ pub(super) fn cleanup_timeout_trigger(
 pub(super) fn window_resize_verifier(
     _main_thread: NonSend<AxMainThread>,
     mut removed: RemovedComponents<ResizeMarker>,
-    mut windows: Query<(&mut Window, &Position, &mut Bounds)>,
+    mut windows: Query<(
+        &mut Window,
+        &Position,
+        &mut Bounds,
+        &WindowDisposition,
+        Option<&Unmanaged>,
+    )>,
     layout_strips: Query<&LayoutStrip>,
     mut commands: Commands,
 ) {
     use std::cmp::Ordering;
     for entity in removed.read() {
-        let Ok((mut window, _, mut bounds)) = windows.get_mut(entity) else {
+        let Ok((mut window, _, mut bounds, disposition, unmanaged)) = windows.get_mut(entity)
+        else {
             continue;
         };
+        if !disposition.owns_geometry(unmanaged) {
+            continue;
+        }
         let Ok(frame) = window.update_frame() else {
             continue;
         };
@@ -1187,10 +1273,13 @@ pub(super) fn window_resize_verifier(
             let get_window_frame = |entity| {
                 windows
                     .get(entity)
-                    .map(|(_, position, bounds)| {
+                    .ok()
+                    .filter(|(_, _, _, disposition, unmanaged)| {
+                        disposition.owns_geometry(*unmanaged)
+                    })
+                    .map(|(_, position, bounds, _, _)| {
                         IRect::from_corners(position.0, position.0 + bounds.0)
                     })
-                    .ok()
             };
 
             let Some(column_width) = column.width(&get_window_frame) else {

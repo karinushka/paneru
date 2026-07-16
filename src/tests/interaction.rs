@@ -9,15 +9,230 @@ use crate::config::{Config, MainOptions, WindowParams};
 use crate::ecs::display::FloatingLayer;
 use crate::ecs::{
     ActiveWorkspaceMarker, FocusedMarker, LayoutPosition, NativeFullscreenMarker, Position,
-    Unmanaged, layout::LayoutStrip,
+    PreManagedFrame, Scrolling, Unmanaged, WindowDisposition, layout::LayoutStrip,
 };
-use crate::ecs::{RepositionMarker, Scrolling, SpawnWindowTrigger};
+use crate::ecs::{RepositionMarker, SpawnWindowTrigger};
 use crate::events::Event;
 use crate::manager::{Origin, Size, Window};
 use crate::platform::Modifiers;
 use crate::{assert_focused, assert_window_at, assert_window_size};
 
 use super::*;
+
+fn assert_disposition(
+    world: &mut World,
+    window_id: i32,
+    expected: WindowDisposition,
+    expected_unmanaged: Option<Unmanaged>,
+) {
+    let entity = find_window_entity(window_id, world);
+    assert_eq!(
+        world.entity(entity).get::<WindowDisposition>().copied(),
+        Some(expected)
+    );
+    assert_eq!(
+        world.entity(entity).get::<Unmanaged>().copied(),
+        expected_unmanaged
+    );
+}
+
+fn assert_strip_membership(world: &mut World, window_id: i32, expected: bool) {
+    let entity = find_window_entity(window_id, world);
+    let mut strips = world.query::<&LayoutStrip>();
+    assert_eq!(
+        strips.iter(world).any(|strip| strip.contains(entity)),
+        expected
+    );
+}
+
+#[test]
+fn normal_windows_default_to_passthrough() {
+    TestHarness::new()
+        .with_default_window_disposition(WindowDisposition::Passthrough)
+        .with_windows(2)
+        .on_iteration(0, |world, _state| {
+            for window_id in [0, 1] {
+                assert_disposition(
+                    world,
+                    window_id,
+                    WindowDisposition::Passthrough,
+                    Some(Unmanaged::Passthrough),
+                );
+                assert_strip_membership(world, window_id, false);
+            }
+        })
+        .run(vec![Event::Command {
+            command: Command::PrintState,
+        }]);
+}
+
+#[test]
+fn explicit_manage_rule_overrides_passthrough_default() {
+    let mut params = WindowParams::new(".*", None);
+    params.manage = Some(true);
+    let config: Config = (MainOptions::default(), vec![params]).into();
+
+    TestHarness::new()
+        .with_default_window_disposition(WindowDisposition::Passthrough)
+        .with_config(config)
+        .with_windows(1)
+        .on_iteration(0, |world, _state| {
+            assert_disposition(world, 0, WindowDisposition::Managed, None);
+            assert_strip_membership(world, 0, true);
+        })
+        .run(vec![Event::Command {
+            command: Command::PrintState,
+        }]);
+}
+
+#[test]
+fn toggle_managed_does_not_conflate_floating_with_passthrough() {
+    let mut params = WindowParams::new(".*", None);
+    params.floating = Some(true);
+    let config: Config = (MainOptions::default(), vec![params]).into();
+    let mut harness = TestHarness::new()
+        .with_default_window_disposition(WindowDisposition::Passthrough)
+        .with_config(config)
+        .with_windows(1);
+    harness.run(vec![Event::Command {
+        command: Command::PrintState,
+    }]);
+    harness.run(vec![Event::Command {
+        command: Command::Window(Operation::Manage(Some(0))),
+    }]);
+
+    let world = harness.world();
+    assert_disposition(
+        world,
+        0,
+        WindowDisposition::Floating,
+        Some(Unmanaged::Floating),
+    );
+    assert_strip_membership(world, 0, false);
+}
+
+#[test]
+fn manage_false_precedes_floating_and_manage_true_rules() {
+    let mut managed = WindowParams::new(".*", None);
+    managed.manage = Some(true);
+    let mut floating = WindowParams::new(".*", None);
+    floating.floating = Some(true);
+    let mut passthrough = WindowParams::new(".*", None);
+    passthrough.manage = Some(false);
+    let config: Config = (MainOptions::default(), vec![managed, floating, passthrough]).into();
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(1)
+        .on_iteration(0, |world, _state| {
+            assert_disposition(
+                world,
+                0,
+                WindowDisposition::Passthrough,
+                Some(Unmanaged::Passthrough),
+            );
+            assert_strip_membership(world, 0, false);
+        })
+        .run(vec![Event::Command {
+            command: Command::PrintState,
+        }]);
+}
+
+#[test]
+fn targeted_toggle_changes_only_that_window_and_restores_its_frame() {
+    let mut harness = TestHarness::new()
+        .with_default_window_disposition(WindowDisposition::Passthrough)
+        .with_windows(2);
+    harness.run(vec![Event::Command {
+        command: Command::PrintState,
+    }]);
+
+    // Queue a later focus change to B, then invoke the already-bound command
+    // for A. The ECS handler must use the carried target, not FocusedMarker.
+    harness.mock_state.focus_window(1);
+    harness.run(vec![Event::Command {
+        command: Command::Window(Operation::Manage(Some(0))),
+    }]);
+
+    {
+        let world = harness.world();
+        assert_disposition(world, 0, WindowDisposition::Managed, None);
+        assert_strip_membership(world, 0, true);
+        assert_disposition(
+            world,
+            1,
+            WindowDisposition::Passthrough,
+            Some(Unmanaged::Passthrough),
+        );
+        assert_strip_membership(world, 1, false);
+        assert_eq!(focused_window_id(world), 1);
+    }
+
+    let expected_frame = {
+        let world = harness.world();
+        let entity = find_window_entity(0, world);
+        world
+            .entity(entity)
+            .get::<PreManagedFrame>()
+            .expect("managed window should remember its ordinary frame")
+            .0
+    };
+
+    harness.run(vec![Event::Command {
+        command: Command::Window(Operation::Manage(Some(0))),
+    }]);
+
+    let world = harness.world();
+    assert_disposition(
+        world,
+        0,
+        WindowDisposition::Passthrough,
+        Some(Unmanaged::Passthrough),
+    );
+    assert_strip_membership(world, 0, false);
+    assert_disposition(
+        world,
+        1,
+        WindowDisposition::Passthrough,
+        Some(Unmanaged::Passthrough),
+    );
+    assert_strip_membership(world, 1, false);
+    let entity = find_window_entity(0, world);
+    assert_eq!(
+        world.entity(entity).get::<Window>().unwrap().frame(),
+        expected_frame
+    );
+}
+
+#[test]
+fn minimize_restore_preserves_each_base_disposition() {
+    let mut harness = TestHarness::new()
+        .with_default_window_disposition(WindowDisposition::Passthrough)
+        .with_windows(2);
+    harness.run(vec![Event::Command {
+        command: Command::PrintState,
+    }]);
+    harness.run(vec![Event::Command {
+        command: Command::Window(Operation::Manage(Some(0))),
+    }]);
+    harness.run(vec![
+        Event::WindowMinimized { window_id: 0 },
+        Event::WindowMinimized { window_id: 1 },
+        Event::WindowDeminimized { window_id: 0 },
+        Event::WindowDeminimized { window_id: 1 },
+    ]);
+
+    let world = harness.world();
+    assert_disposition(world, 0, WindowDisposition::Managed, None);
+    assert_strip_membership(world, 0, true);
+    assert_disposition(
+        world,
+        1,
+        WindowDisposition::Passthrough,
+        Some(Unmanaged::Passthrough),
+    );
+    assert_strip_membership(world, 1, false);
+}
 
 #[test]
 fn modifier_scroll_uses_native_momentum_without_synthetic_velocity() {

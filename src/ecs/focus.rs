@@ -155,11 +155,13 @@ fn autocenter_window_on_focus(
     if global_state.skip_reshuffle() || global_state.initializing() || !mouse_held.is_empty() {
         return;
     }
+    if !matches!(windows.get_managed(entity), Some((_, _, None))) {
+        return;
+    }
     if active_display.active_strip().tabbed(entity) {
         return;
     }
     if config.auto_center()
-        && let Some((_, _, None)) = windows.get_managed(entity)
         && let Some(size) = windows.size(entity)
         && let Some(mut origin) = windows.origin(entity)
     {
@@ -234,9 +236,12 @@ fn dim_window_trigger(
     config: Res<Config>,
     theme: Option<Res<SystemTheme>>,
 ) {
-    let Some(window) = windows.get(trigger.event().entity) else {
+    let Some((window, _, unmanaged)) = windows.get_managed(trigger.event().entity) else {
         return;
     };
+    if !matches!(unmanaged, None | Some(Unmanaged::Floating)) {
+        return;
+    }
 
     let dark = theme.is_some_and(|theme| theme.is_dark);
     if config.window_dim_ratio(dark).is_some() {
@@ -382,11 +387,12 @@ mod tests {
     }
 
     #[test]
-    fn record_ignores_minimized_and_hidden() {
+    fn record_ignores_passthrough_minimized_and_hidden() {
         let mut world = World::new();
         let entity = world.spawn(()).id();
         let mut history = FocusHistory::default();
 
+        history.record(1, entity, Some(&Unmanaged::Passthrough));
         history.record(1, entity, Some(&Unmanaged::Minimized));
         history.record(1, entity, Some(&Unmanaged::Hidden));
 

@@ -8,7 +8,7 @@ use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::lifecycle::RemovedComponents;
 use bevy::ecs::message::MessageReader;
-use bevy::ecs::query::{Changed, Has, Or};
+use bevy::ecs::query::{Changed, Has, Or, With, Without};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::system::{Commands, NonSend, Query, Res, ResMut};
 use tracing::{debug, warn};
@@ -16,7 +16,7 @@ use tracing::{debug, warn};
 use super::layout::LayoutStrip;
 use super::params::Windows;
 use super::state::PaneruState;
-use super::{ActiveDisplayMarker, ActiveWorkspaceMarker, Bounds, Position, WidthRatio};
+use super::{ActiveDisplayMarker, ActiveWorkspaceMarker, Bounds, Position, Unmanaged, WidthRatio};
 use crate::config::Config;
 use crate::events::Event;
 use crate::manager::{Application, Display};
@@ -131,18 +131,22 @@ pub(crate) fn load_restore_state(
 )]
 pub(crate) fn track_dirty_state(
     config: Res<Config>,
-    changed: Query<
+    structural_changes: Query<
         (),
         Or<(
             Changed<LayoutStrip>,
-            Changed<Position>,
-            Changed<Bounds>,
-            Changed<WidthRatio>,
-            Changed<ChildOf>,
             Changed<Display>,
             Changed<ActiveWorkspaceMarker>,
             Changed<ActiveDisplayMarker>,
         )>,
+    >,
+    strip_parent_changes: Query<(), (With<LayoutStrip>, Changed<ChildOf>)>,
+    managed_geometry_changes: Query<
+        (),
+        (
+            Without<Unmanaged>,
+            Or<(Changed<Position>, Changed<Bounds>, Changed<WidthRatio>)>,
+        ),
     >,
     mut removed_strips: RemovedComponents<LayoutStrip>,
     mut removed_positions: RemovedComponents<Position>,
@@ -169,7 +173,13 @@ pub(crate) fn track_dirty_state(
         .any(|event| matches!(event, Event::WindowTitleChanged { .. }));
     if !enabled {
         state.mark_changed(false, Instant::now());
-    } else if config.is_changed() || !changed.is_empty() || removed || identity_changed {
+    } else if config.is_changed()
+        || !structural_changes.is_empty()
+        || !strip_parent_changes.is_empty()
+        || !managed_geometry_changes.is_empty()
+        || removed
+        || identity_changed
+    {
         state.mark_changed(true, Instant::now());
     }
 }
@@ -258,8 +268,8 @@ mod tests {
         flush_due_state, flush_on_exit, load_restore_state, track_dirty_state,
     };
     use crate::config::Config;
-    use crate::ecs::Position;
     use crate::ecs::state::PaneruState;
+    use crate::ecs::{Position, Unmanaged};
     use crate::events::Event;
     use crate::platform::AxMainThread;
     use bevy::MinimalPlugins;
@@ -372,6 +382,30 @@ mod tests {
         make_due(&mut app);
         app.update();
         assert_eq!(store.saves.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn passthrough_geometry_does_not_dirty_persistence() {
+        let store = Arc::new(TestStore::default());
+        let mut app = persistence_app(Config::default(), store);
+        app.update();
+        app.world_mut().resource_mut::<PersistenceState>().clear();
+
+        let entity = app
+            .world_mut()
+            .spawn((Position(IVec2::ZERO), Unmanaged::Passthrough))
+            .id();
+        app.update();
+        assert!(!app.world().resource::<PersistenceState>().is_dirty());
+
+        app.world_mut()
+            .entity_mut(entity)
+            .get_mut::<Position>()
+            .unwrap()
+            .0
+            .x += 1;
+        app.update();
+        assert!(!app.world().resource::<PersistenceState>().is_dirty());
     }
 
     #[test]

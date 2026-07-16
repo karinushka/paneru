@@ -141,7 +141,7 @@ Format: `"[modifiers-]key"`. Available modifiers are:
 | `window_grow` | Alias for `window_resize`. |
 | `window_shrink` | Cycle through preset widths (Shrink). |
 | `window_fullwidth` | Toggle full-width mode. |
-| `window_manage` | Toggle between tiled and floating state. |
+| `window_manage` | Toggle only the focused window between passthrough and the managed strip. |
 | `window_stack` | Stack the current window into the column on the left. |
 | `window_unstack` | Pull a window out of a stack into its own column. |
 | `window_equalize` | Make all windows in a stack equal height. |
@@ -231,8 +231,8 @@ Define specific behaviors for applications based on their Title or Bundle ID.
 | :--- | :--- | :--- |
 | `title` | Regex | **(Required)** Regex pattern to match the window title. |
 | `bundle_id` | String | Optional Bundle ID to match (e.g., `com.apple.Terminal`). |
-| `floating` | Boolean | Force the window to be floating/unmanaged. |
-| `manage` | Boolean | Force Paneru to manage this app/window even if macOS reports the app as unobservable or the window has a non-standard role/subrole. |
+| `floating` | Boolean | Keep the matching window in Paneru's distinct floating tier, outside the strip. |
+| `manage` | Boolean | `true` opts the matching window into the managed strip (and can force observation of non-standard windows); `false` keeps it in passthrough mode. |
 | `index` | Integer | Preferred position in the strip when spawned. |
 | `dont_focus` | Boolean | Prevent the window from taking focus when spawned. |
 | `width` | Positive Float | Initial width ratio for the window. Values above `1.0` create an oversized, horizontally scrollable window. |
@@ -249,6 +249,17 @@ bundle_id = "com.apple.Terminal"
 horizontal_padding = 5
 bindings_passthrough = ["ctrl-h", "ctrl-l"]
 ```
+
+Windows that do not match an explicit ownership rule start in **passthrough**
+mode: Paneru tracks their identity and focus but does not move, resize, dim,
+border, save, or restore them. Use **Toggle Managed** to opt one concrete window
+into the current strip for the current run, or add `manage = true` to make a
+matching rule opt in automatically.
+
+When multiple rules match, ownership has deterministic precedence:
+`manage = false`, then `floating = true`, then `manage = true`, then the
+passthrough default. This prevents a broad manage rule from accidentally
+capturing an explicitly excluded or floating window.
 
 ### Forcing management of LSUIElement or non-standard windows
 
@@ -292,11 +303,12 @@ The saved session includes:
 - horizontal strip pan positions
 - window identity for matching across restarts
 
-Matched startup windows use the saved session before static `[windows]` rules.
-That means saved layout, virtual workspace, display, and managed/floating state
-win over configured `index`, `floating`, `width`, and `grid` rules during
-restore. Unmatched startup windows, and all windows created after the restore
-grace period ends, keep normal `[windows]` behavior.
+Static ownership rules are evaluated before restore. Passthrough and floating
+windows are never pulled into a saved strip. For windows whose current
+disposition is managed, the saved layout, virtual workspace, and display win
+over static placement such as `index` and `width` during the startup restore
+window. Unmatched windows and all windows created after the restore grace
+period ends keep normal `[windows]` behavior.
 
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |

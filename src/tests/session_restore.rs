@@ -10,6 +10,7 @@ use crate::ecs::state::{
 use crate::ecs::workspace::PreviousStripPosition;
 use crate::ecs::{
     ApplicationObserved, Bounds, Position, SpawnWindowTrigger, Unmanaged, WidthRatio,
+    WindowDisposition,
 };
 use crate::events::Event;
 use crate::manager::{Display, Origin, Size};
@@ -567,7 +568,7 @@ fn test_startup_restore_uses_first_restored_row_when_active_metadata_is_missing(
 }
 
 #[test]
-fn test_startup_restore_overrides_floating_config_for_matched_window() {
+fn test_startup_restore_respects_floating_config_for_matched_window() {
     let mut params = WindowParams::new(".*", Some("test".to_string()));
     params.floating = Some(true);
     let config: Config = (MainOptions::default(), vec![params]).into();
@@ -586,10 +587,55 @@ fn test_startup_restore_overrides_floating_config_for_matched_window() {
 
     let world = harness.world();
     let restored_window = crate::tests::harness::find_window_entity(0, world);
-    assert!(
-        world.entity(restored_window).get::<Unmanaged>().is_none(),
-        "matched restore windows should not inherit floating config"
+    assert_eq!(
+        world
+            .entity(restored_window)
+            .get::<WindowDisposition>()
+            .copied(),
+        Some(WindowDisposition::Floating)
     );
+    assert_eq!(
+        world.entity(restored_window).get::<Unmanaged>().copied(),
+        Some(Unmanaged::Floating),
+        "explicit floating rules must win over stale managed session state"
+    );
+    let mut strips = world.query::<&LayoutStrip>();
+    assert!(
+        !strips
+            .iter(world)
+            .any(|strip| strip.contains(restored_window))
+    );
+}
+
+#[test]
+fn test_startup_restore_does_not_capture_default_passthrough_window() {
+    let mut harness = TestHarness::new()
+        .with_default_window_disposition(WindowDisposition::Passthrough)
+        .with_windows(1);
+    harness
+        .app
+        .world_mut()
+        .insert_resource(state_with_strips(vec![SavedStrip {
+            virtual_index: 0,
+            columns: vec![SavedColumn::Single(saved_window(0))],
+        }]));
+
+    for _ in 0..5 {
+        harness.app.update();
+    }
+
+    let world = harness.world();
+    let entity = crate::tests::harness::find_window_entity(0, world);
+    assert_eq!(
+        world.entity(entity).get::<WindowDisposition>().copied(),
+        Some(WindowDisposition::Passthrough)
+    );
+    assert_eq!(
+        world.entity(entity).get::<Unmanaged>().copied(),
+        Some(Unmanaged::Passthrough)
+    );
+    let mut strips = world.query::<&LayoutStrip>();
+    assert!(!strips.iter(world).any(|strip| strip.contains(entity)));
 }
 
 #[test]

@@ -25,7 +25,7 @@ use crate::ecs::runtime::OrphanReconcileDeadline;
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, DockPosition, Initializing, NativeFullscreenMarker, Position,
     RefreshWindowSizes, RepositionMarker, Scrolling, SelectedVirtualMarker, SpawnCommandsExt,
-    Timeout, Unmanaged,
+    Timeout, Unmanaged, WindowDisposition,
 };
 use crate::errors::Result;
 use crate::events::Event;
@@ -452,7 +452,7 @@ fn find_orphaned_workspaces(
             debug!("Rescue windows from timed out orphan {}.", orphan.id());
             for lost_window in orphan.all_windows() {
                 if let Ok(mut cmd) = commands.get_entity(lost_window) {
-                    cmd.try_insert(Unmanaged::Floating);
+                    cmd.try_insert((WindowDisposition::Floating, Unmanaged::Floating));
                 }
             }
             continue;
@@ -926,6 +926,9 @@ fn move_virtual_workspace_bind(
     let Some((_, focused_entity)) = windows.focused() else {
         return;
     };
+    if !windows.is_managed(focused_entity) {
+        return;
+    }
 
     let current_virtual_index = active_display.active_strip().virtual_index;
 

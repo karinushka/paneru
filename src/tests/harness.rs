@@ -17,8 +17,9 @@ use crate::ecs::scroll::ScrollEventsPlugin;
 use crate::ecs::state::PaneruState;
 use crate::ecs::workspace::WorkspaceEventsPlugin;
 use crate::ecs::{
-    BProcess, ExistingMarker, FocusFollowsMouse, Initializing, MissionControlActive, SkipReshuffle,
-    SpawnWindowTrigger, register_systems, register_triggers,
+    BProcess, DefaultWindowDisposition, ExistingMarker, FocusFollowsMouse, Initializing,
+    MissionControlActive, SkipReshuffle, SpawnWindowTrigger, WindowDisposition, register_systems,
+    register_triggers,
 };
 use crate::events::Event;
 use crate::manager::{Window, WindowManager};
@@ -161,6 +162,16 @@ impl TestHarness {
         self
     }
 
+    pub(crate) fn with_default_window_disposition(
+        mut self,
+        disposition: WindowDisposition,
+    ) -> Self {
+        self.app
+            .world_mut()
+            .insert_resource(DefaultWindowDisposition(disposition));
+        self
+    }
+
     pub(crate) fn with_state(mut self, state: PaneruState) -> Self {
         self.app.world_mut().insert_resource(state);
         self
@@ -225,6 +236,9 @@ fn setup_world() -> App {
         .insert_resource(SkipReshuffle(false))
         .insert_resource(MissionControlActive(false))
         .insert_resource(FocusFollowsMouse(None))
+        // Most historical layout tests exercise the managed strip. Production
+        // setup uses `DefaultWindowDisposition::default()` (passthrough).
+        .insert_resource(DefaultWindowDisposition(WindowDisposition::Managed))
         .insert_resource(Config::default())
         .insert_resource(Initializing)
         .insert_non_send_resource(AxMainThread::for_tests())

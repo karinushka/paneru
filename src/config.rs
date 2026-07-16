@@ -266,7 +266,7 @@ fn parse_operation(argv: &[&str]) -> Result<Operation> {
         "grow" => Operation::Resize(ResizeDirection::Grow),
         "shrink" => Operation::Resize(ResizeDirection::Shrink),
         "fullwidth" => Operation::FullWidth,
-        "manage" => Operation::Manage,
+        "manage" => Operation::Manage(None),
         "equalize" => Operation::Equalize,
         "balance" => Operation::Balance,
         "stack" => Operation::Stack(true),
@@ -1249,8 +1249,9 @@ pub struct WindowParams {
     bundle_id: Option<String>,
     /// If `true`, the window will be managed as a floating window (not tiled).
     pub floating: Option<bool>,
-    /// If `true`, force the process/window to be managed even if macOS reports it as
-    /// unobservable or the window does not look like a standard window.
+    /// Selects strip ownership for matching windows. `true` opts the window
+    /// into the managed strip (and forces observation for non-standard
+    /// windows); `false` keeps it in passthrough mode.
     pub manage: Option<bool>,
     /// An optional preferred index for the window's position in the window strip.
     pub index: Option<usize>,
@@ -1774,17 +1775,17 @@ index = 1
     let keycode = find_key('t');
     assert!(matches!(
         config.find_keybind(keycode, Modifiers::ALT | Modifiers::CTRL),
-        Some(Command::Window(Operation::Manage))
+        Some(Command::Window(Operation::Manage(None)))
     ));
 
     assert!(matches!(
         config.find_keybind(keycode, Modifiers::LALT | Modifiers::LCTRL),
-        Some(Command::Window(Operation::Manage))
+        Some(Command::Window(Operation::Manage(None)))
     ));
 
     assert!(matches!(
         config.find_keybind(keycode, Modifiers::RALT | Modifiers::RCTRL),
-        Some(Command::Window(Operation::Manage))
+        Some(Command::Window(Operation::Manage(None)))
     ));
 
     let keycode = find_key('s');

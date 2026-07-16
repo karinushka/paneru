@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use stdext::function_name;
 use tracing::{error, info};
 
+use crate::commands::bind_window_command_target;
 use crate::config::Config;
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
@@ -549,6 +550,7 @@ impl InputHandler {
                 }
                 self.config.find_keybind(keycode, mask)
             })
+            .and_then(bind_window_command_target)
             .and_then(|command| {
                 events
                     .send(Event::Command { command })

@@ -14,7 +14,7 @@ use bevy::time::{Real, Time};
 use super::{
     ActiveWorkspaceMarker, FlashMessage, FocusedMarker, FreshMarker, Initializing,
     RefreshWindowSizes, RepositionMarker, ResizeMarker, RetryFrontSwitch, Scrolling, Timeout,
-    VerifyWindowPosition,
+    Unmanaged, VerifyWindowPosition, WindowDisposition,
 };
 use crate::ecs::observation::ObserverDetachRetry;
 use crate::events::{Event, EventReceiver};
@@ -135,8 +135,24 @@ impl RuntimeActivity {
 
 #[derive(SystemParam)]
 pub(super) struct RuntimeWork<'w, 's> {
-    repositioning: Query<'w, 's, (), With<RepositionMarker>>,
-    resizing: Query<'w, 's, (), With<ResizeMarker>>,
+    repositioning: Query<
+        'w,
+        's,
+        (
+            Option<&'static WindowDisposition>,
+            Option<&'static Unmanaged>,
+        ),
+        With<RepositionMarker>,
+    >,
+    resizing: Query<
+        'w,
+        's,
+        (
+            Option<&'static WindowDisposition>,
+            Option<&'static Unmanaged>,
+        ),
+        With<ResizeMarker>,
+    >,
     scrolling: Query<'w, 's, (), With<Scrolling>>,
     flash_messages: Query<'w, 's, (), With<FlashMessage>>,
     timeouts: Query<'w, 's, &'static Timeout>,
@@ -148,7 +164,15 @@ pub(super) struct RuntimeWork<'w, 's> {
     focused_windows: Query<'w, 's, (), (With<Window>, With<FocusedMarker>)>,
     focus_recovery: Option<Res<'w, FocusRecoveryDeadline>>,
     retries: Query<'w, 's, &'static RetryFrontSwitch>,
-    verifications: Query<'w, 's, &'static VerifyWindowPosition>,
+    verifications: Query<
+        'w,
+        's,
+        (
+            &'static VerifyWindowPosition,
+            Option<&'static WindowDisposition>,
+            Option<&'static Unmanaged>,
+        ),
+    >,
     initializing: Option<Res<'w, Initializing>>,
     restore: Option<Res<'w, crate::ecs::restore::SessionRestore>>,
     persistence: Option<Res<'w, crate::ecs::persistence::PersistenceState>>,
@@ -191,7 +215,13 @@ fn runtime_activity(work: &RuntimeWork<'_, '_>, now: Instant) -> RuntimeActivity
     let verification_deadline = work
         .verifications
         .iter()
-        .map(VerifyWindowPosition::next_deadline)
+        .filter(|(_, disposition, unmanaged)| {
+            disposition
+                .copied()
+                .unwrap_or(WindowDisposition::Managed)
+                .owns_geometry(*unmanaged)
+        })
+        .map(|(verification, _, _)| verification.next_deadline())
         .min();
     let restore_deadline = work
         .restore
@@ -206,9 +236,17 @@ fn runtime_activity(work: &RuntimeWork<'_, '_>, now: Instant) -> RuntimeActivity
         .is_some()
         .then_some(now + ACTIVE_FRAME_INTERVAL);
     RuntimeActivity {
-        frame_work: !work.repositioning.is_empty()
-            || !work.resizing.is_empty()
-            || !work.scrolling.is_empty()
+        frame_work: work.repositioning.iter().any(|(disposition, unmanaged)| {
+            disposition
+                .copied()
+                .unwrap_or(WindowDisposition::Managed)
+                .owns_geometry(unmanaged)
+        }) || work.resizing.iter().any(|(disposition, unmanaged)| {
+            disposition
+                .copied()
+                .unwrap_or(WindowDisposition::Managed)
+                .owns_geometry(unmanaged)
+        }) || !work.scrolling.is_empty()
             || !work.flash_messages.is_empty(),
         nearest_deadline: RuntimeActivity::nearest([
             timeout_deadline,

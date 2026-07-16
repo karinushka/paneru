@@ -28,7 +28,7 @@ use crate::ecs::{
     ActiveWorkspaceMarker, ApplicationObserved, Bounds, BruteforceWindows, FlashMessage,
     FocusedMarker, Initializing, MissionControlActive, Position, ReadDisplayProperties,
     RestoreWindowState, Scrolling, SendMessageTrigger, SpawnCommandsExt, Unmanaged, WidthRatio,
-    WindowProperties,
+    WindowDisposition, WindowProperties,
 };
 use crate::events::{Event, EventReceiver};
 use crate::manager::{
@@ -920,25 +920,58 @@ pub(super) fn update_overlays(
     );
 }
 
+#[allow(clippy::type_complexity)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn commit_window_position(
     _main_thread: NonSend<AxMainThread>,
-    mut moved_windows: Populated<(&mut Window, &Position), Changed<Position>>,
+    mut moved_windows: Populated<
+        (
+            &mut Window,
+            &Position,
+            Option<&WindowDisposition>,
+            Option<&Unmanaged>,
+        ),
+        Changed<Position>,
+    >,
 ) {
-    for (mut window, position) in &mut moved_windows {
+    for (mut window, position, disposition, unmanaged) in &mut moved_windows {
+        if !disposition
+            .copied()
+            .unwrap_or(WindowDisposition::Managed)
+            .owns_geometry(unmanaged)
+        {
+            continue;
+        }
         window.reposition(position.0);
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn verify_window_position(
     _main_thread: NonSend<AxMainThread>,
-    mut windows: Populated<(Entity, &mut Window, &Position, &mut VerifyWindowPosition)>,
+    mut windows: Populated<(
+        Entity,
+        &mut Window,
+        &Position,
+        &mut VerifyWindowPosition,
+        Option<&WindowDisposition>,
+        Option<&Unmanaged>,
+    )>,
     mut commands: Commands,
 ) {
     let now = std::time::Instant::now();
-    for (entity, mut window, position, mut verification) in &mut windows {
+    for (entity, mut window, position, mut verification, disposition, unmanaged) in &mut windows {
+        if !disposition
+            .copied()
+            .unwrap_or(WindowDisposition::Managed)
+            .owns_geometry(unmanaged)
+        {
+            if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                entity_commands.try_remove::<VerifyWindowPosition>();
+            }
+            continue;
+        }
         if !verification.due(now) {
             continue;
         }
@@ -961,18 +994,33 @@ pub(super) fn verify_window_position(
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn commit_window_size(
     _main_thread: NonSend<AxMainThread>,
     mut resized_windows: Populated<
-        (Entity, &mut Window, &Bounds, &mut WidthRatio),
+        (
+            Entity,
+            &mut Window,
+            &Bounds,
+            &mut WidthRatio,
+            Option<&WindowDisposition>,
+            Option<&Unmanaged>,
+        ),
         Changed<Bounds>,
     >,
     strips: Query<(&LayoutStrip, &ChildOf)>,
     displays: Query<&Display>,
 ) {
-    for (entity, mut window, size, mut width_ratio) in &mut resized_windows {
+    for (entity, mut window, size, mut width_ratio, disposition, unmanaged) in &mut resized_windows
+    {
+        if !disposition
+            .copied()
+            .unwrap_or(WindowDisposition::Managed)
+            .owns_geometry(unmanaged)
+        {
+            continue;
+        }
         if let Some(ratio) = width_ratio_for_owner(
             entity,
             size.0.x,
@@ -996,13 +1044,18 @@ pub(super) fn commit_window_size(
 pub(super) fn cleanup_on_exit(
     _main_thread: NonSend<AxMainThread>,
     mut exit_events: MessageReader<AppExit>,
-    mut all_windows: Query<&mut Window>,
+    mut all_windows: Query<(&mut Window, Option<&Unmanaged>)>,
     displays: Query<&Display>,
     window_manager: Res<WindowManager>,
     mut overlay_mgr: Option<NonSendMut<OverlayManager>>,
 ) {
     for _ in exit_events.read() {
-        let ids = all_windows.iter().map(|w| w.id()).collect::<Vec<_>>();
+        let ids = all_windows
+            .iter()
+            .filter_map(|(window, unmanaged)| {
+                (!matches!(unmanaged, Some(Unmanaged::Passthrough))).then_some(window.id())
+            })
+            .collect::<Vec<_>>();
         info!("exit cleanup: restoring {} window(s)", ids.len());
         window_manager.dim_windows(&ids, 0.0);
 
@@ -1015,7 +1068,10 @@ pub(super) fn cleanup_on_exit(
             return;
         }
 
-        for mut window in &mut all_windows {
+        for (mut window, unmanaged) in &mut all_windows {
+            if !matches!(unmanaged, None | Some(Unmanaged::Floating)) {
+                continue;
+            }
             let frame = window.frame();
             let center = frame.center();
             let bounds = display_bounds
@@ -1139,9 +1195,9 @@ pub(crate) fn window_creation_event(
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 pub(crate) fn detect_tabbed_windows(
-    created: Populated<(Entity, &Position, &Bounds, &ChildOf), Added<Window>>,
+    created: Populated<(Entity, &Position, &Bounds, &ChildOf), (Added<Window>, Without<Unmanaged>)>,
     windows: Query<(Entity, &Window, &Position, &Bounds, &ChildOf), With<Window>>,
     apps: Query<Entity, With<Application>>,
     mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,

@@ -17,7 +17,7 @@ use tracing::error;
 
 use crate::ecs::layout::{Column, LayoutStrip, StackItem};
 use crate::ecs::params::Windows;
-use crate::ecs::{ActiveDisplayMarker, ActiveWorkspaceMarker, Position};
+use crate::ecs::{ActiveDisplayMarker, ActiveWorkspaceMarker, Position, Unmanaged};
 use crate::manager::Application;
 use crate::manager::Display;
 use crate::platform::{Pid, ProcessSerialNumber, WinID, WorkspaceId};
@@ -165,7 +165,10 @@ impl SavedWindow {
         apps: &Query<&Application>,
         strip_position_x: Option<i32>,
     ) -> Option<Self> {
-        let window = windows.get(entity)?;
+        let (window, _, unmanaged) = windows.get_managed(entity)?;
+        if matches!(unmanaged, Some(Unmanaged::Passthrough)) {
+            return None;
+        }
         let (_, _, app_entity) = windows.find_parent(window.id())?;
         let app = apps.get(app_entity).ok()?;
 
@@ -493,6 +496,9 @@ impl PaneruQueryState {
                 .iter()
                 .filter_map(|entity| {
                     let (window, _, unmanaged) = windows.get_managed(*entity)?;
+                    if matches!(unmanaged, Some(Unmanaged::Passthrough)) {
+                        return None;
+                    }
                     let (_, _, app_entity) = windows.find_parent(window.id())?;
                     let app = apps.get(app_entity).ok()?;
                     let bundle_id = app.bundle_id().unwrap_or_default().clone();

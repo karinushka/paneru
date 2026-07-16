@@ -35,6 +35,7 @@ notify = { version = "8.2", features = ["macos_fsevent"] }
 num_enum = "0.7"
 objc2 = { version = "0.6", features = ["catch-all", "exception"] }
 objc2-app-kit = { version = "0.3", features = [
+  "NSAlert",
   "NSBezierPath",
   "NSColor",
   "NSGraphics",

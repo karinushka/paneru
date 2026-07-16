@@ -4,10 +4,8 @@ use bevy::ecs::lifecycle::{Add, Remove, RemovedComponents};
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Added, Has, With};
-use bevy::ecs::system::{Commands, NonSendMut, Populated, Query, Res, ResMut, Single};
+use bevy::ecs::system::{Commands, Populated, Query, Res, ResMut, Single};
 use bevy::math::IRect;
-use notify::event::{DataChange, MetadataKind, ModifyKind};
-use notify::{EventKind, Watcher};
 use std::cmp::Ordering;
 use std::time::Duration;
 use tracing::{Level, debug, error, info, instrument, trace, warn};
@@ -21,6 +19,7 @@ use crate::config::Config;
 use crate::ecs::focus::FocusHistory;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, GlobalState, Windows};
+use crate::ecs::runtime::{FreshPollDeadline, SyntheticEventPending};
 use crate::ecs::state::PaneruState;
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, DockPosition, Initializing, LayoutPosition, Position,
@@ -32,11 +31,10 @@ use crate::manager::{
     Application, Display, Origin, Process, Size, Window, WindowManager, WindowPadding,
 };
 use crate::platform::WinID;
-use crate::util::symlink_target;
 
 /// Computes the passthrough keybinding set for the given window/app and
 /// publishes it to the input thread. Called on focus change and config reload.
-fn update_passthrough(window: &Window, app: &Application, config: &Config) {
+pub(super) fn update_passthrough(window: &Window, app: &Application, config: &Config) {
     let properties = WindowProperties::new(app, window, config);
     crate::platform::input::set_focused_passthrough(properties.passthrough_keys());
 }
@@ -114,7 +112,7 @@ pub(super) fn front_switched_trigger(
                 )),
                 &mut commands,
             );
-            commands.spawn((timeout, RetryFrontSwitch(app_entity)));
+            commands.spawn((timeout, RetryFrontSwitch::new(app_entity)));
         }
     }
 }
@@ -398,7 +396,7 @@ pub(super) fn application_event_trigger(
                     )),
                     &mut commands,
                 );
-                commands.spawn((FreshMarker, timeout, process));
+                commands.spawn((FreshMarker, FreshPollDeadline::default(), timeout, process));
             }
 
             Event::ApplicationTerminated { psn } => {
@@ -1111,81 +1109,6 @@ pub(super) fn apply_window_positions(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-pub(super) fn refresh_configuration_trigger(
-    mut messages: MessageReader<Event>,
-    window_manager: Res<WindowManager>,
-    mut config: ResMut<Config>,
-    mut watcher: Option<NonSendMut<Box<dyn Watcher>>>,
-    windows: Windows,
-    mut displays: Query<&mut Display>,
-    applications: Query<&Application>,
-) {
-    for event in messages.read() {
-        let Event::ConfigRefresh(event) = event else {
-            continue;
-        };
-
-        let Some(ref mut watcher) = watcher else {
-            continue;
-        };
-
-        match &event.kind {
-            EventKind::Modify(
-                // When using the RecommendedWatcher, the event triggers on file data.
-                // When using PollWatcher, it triggers on modification time.
-                ModifyKind::Metadata(MetadataKind::WriteTime)
-                | ModifyKind::Data(DataChange::Content),
-            ) => (),
-            EventKind::Remove(_) => {
-                for path in &event.paths {
-                    _ = watcher.unwatch(path).inspect_err(|err| {
-                        error!("unwatching the config '{}': {err}", path.display());
-                    });
-                }
-                continue;
-            }
-            _ => continue,
-        }
-
-        for path in &event.paths {
-            if let Some(symlink) = symlink_target(path) {
-                debug!(
-                    "symlink '{}' changed, replacing the watcher.",
-                    symlink.display()
-                );
-                if let Ok(new_watcher) =
-                    window_manager
-                        .setup_config_watcher(path)
-                        .inspect_err(|err| {
-                            error!("watching the config '{}': {err}", path.display());
-                        })
-                {
-                    **watcher = new_watcher;
-                }
-            }
-            info!("Reloading configuration file; {}", path.display());
-            _ = config.reload_config(path.as_path()).inspect_err(|err| {
-                error!("loading config '{}': {err}", path.display());
-            });
-        }
-
-        let height = config.menubar_height();
-        for mut display in &mut displays {
-            display.set_menubar_height_override(height);
-        }
-
-        // Recompute passthrough keys for the currently focused window.
-        if let Some((window, _, parent)) = windows
-            .focused()
-            .and_then(|(w, e)| windows.find_parent(w.id()).map(|(w, _, p)| (w, e, p)))
-            && let Ok(app) = applications.get(parent)
-        {
-            update_passthrough(window, app, &config);
-        }
-    }
-}
-
-#[allow(clippy::needless_pass_by_value)]
 pub(super) fn window_removal_trigger(
     trigger: On<Remove, Window>,
     mut workspaces: Query<&mut LayoutStrip>,
@@ -1205,9 +1128,11 @@ pub(super) fn window_removal_trigger(
 pub(super) fn send_message_trigger(
     trigger: On<SendMessageTrigger>,
     mut messages: MessageWriter<Event>,
+    mut synthetic_events: ResMut<SyntheticEventPending>,
 ) {
     let event = &trigger.event().0;
     messages.write(event.clone());
+    synthetic_events.mark();
 }
 
 #[allow(clippy::needless_pass_by_value)]

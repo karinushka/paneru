@@ -100,7 +100,7 @@ struct WindowMenuEnablement {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct MenuShortcut {
     key: String,
-    modifiers: u8,
+    modifiers: u16,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -400,7 +400,7 @@ fn menu_shortcut(key: &str, modifiers: Modifiers) -> Option<MenuShortcut> {
     })
 }
 
-fn native_modifier_flags(modifier_bits: u8) -> NSEventModifierFlags {
+fn native_modifier_flags(modifier_bits: u16) -> NSEventModifierFlags {
     let modifiers = Modifiers::from_bits_retain(modifier_bits);
     let mut flags = NSEventModifierFlags::empty();
     if modifiers.intersects(Modifiers::SHIFT) {

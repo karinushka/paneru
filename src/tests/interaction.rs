@@ -6,8 +6,11 @@ use objc2_core_foundation::CGPoint;
 use crate::commands::{Command, Direction, MoveFocus, Operation};
 use crate::config::{Config, MainOptions, WindowParams};
 use crate::ecs::display::FloatingLayer;
-use crate::ecs::{ActiveWorkspaceMarker, Position, Scrolling, Unmanaged, layout::LayoutStrip};
-use crate::ecs::{RepositionMarker, SpawnWindowTrigger};
+use crate::ecs::{
+    ActiveWorkspaceMarker, FocusedMarker, NativeFullscreenMarker, Position, Unmanaged,
+    layout::LayoutStrip,
+};
+use crate::ecs::{RepositionMarker, Scrolling, SpawnWindowTrigger};
 use crate::events::Event;
 use crate::manager::{Origin, Size, Window};
 use crate::platform::Modifiers;
@@ -31,6 +34,85 @@ fn modifier_scroll_uses_native_momentum_without_synthetic_velocity() {
             assert!(scrolling.is_user_swiping);
         })
         .run(commands);
+}
+
+#[test]
+fn native_fullscreen_transition_removes_window_from_original_strip_without_focus_marker() {
+    const FULLSCREEN_WORKSPACE_ID: WorkspaceId = TEST_WORKSPACE_ID + 100;
+
+    TestHarness::new()
+        .with_windows(2)
+        .on_iteration(0, |world, state| {
+            let focused = world
+                .query_filtered::<Entity, With<FocusedMarker>>()
+                .iter(world)
+                .collect::<Vec<_>>();
+            for entity in focused {
+                world.entity_mut(entity).remove::<FocusedMarker>();
+            }
+
+            state.update_window(0, |window| {
+                window.workspace_id = FULLSCREEN_WORKSPACE_ID;
+                window.is_full_screen = true;
+            });
+            state.activate_workspace(TEST_DISPLAY_ID, FULLSCREEN_WORKSPACE_ID, true);
+        })
+        .on_iteration(1, |world, _state| {
+            let fullscreen_window = find_window_entity(0, world);
+            let sibling_window = find_window_entity(1, world);
+            let mut strips = world.query::<(&LayoutStrip, Option<&NativeFullscreenMarker>)>();
+
+            let original_strip = strips
+                .iter(world)
+                .find_map(|(strip, marker)| {
+                    (strip.id() == TEST_WORKSPACE_ID && marker.is_none()).then_some(strip)
+                })
+                .expect("original strip");
+            assert!(
+                !original_strip.contains(fullscreen_window),
+                "fullscreen window must not leave a reserved column in the original strip"
+            );
+            assert!(original_strip.contains(sibling_window));
+
+            let (fullscreen_strip, fullscreen_marker) = strips
+                .iter(world)
+                .find(|(strip, _)| strip.id() == FULLSCREEN_WORKSPACE_ID)
+                .expect("fullscreen strip");
+            assert!(fullscreen_strip.contains(fullscreen_window));
+            assert!(fullscreen_marker.is_some());
+        })
+        .on_iteration(2, |world, _state| {
+            let fullscreen_window = find_window_entity(0, world);
+            let sibling_window = find_window_entity(1, world);
+            let mut strips = world.query::<&LayoutStrip>();
+
+            let original_strip = strips
+                .iter(world)
+                .find(|strip| strip.id() == TEST_WORKSPACE_ID)
+                .expect("original strip");
+            assert!(original_strip.contains(fullscreen_window));
+            assert!(original_strip.contains(sibling_window));
+            assert_eq!(
+                original_strip
+                    .index_of(fullscreen_window)
+                    .expect("restored fullscreen window index"),
+                0
+            );
+            assert!(
+                strips
+                    .iter(world)
+                    .all(|strip| strip.id() != FULLSCREEN_WORKSPACE_ID)
+            );
+        })
+        .run(vec![
+            Event::Command {
+                command: Command::PrintState,
+            },
+            Event::SpaceChanged,
+            Event::SpaceDestroyed {
+                space_id: FULLSCREEN_WORKSPACE_ID,
+            },
+        ]);
 }
 
 #[test]

@@ -8,8 +8,9 @@ use crate::commands::{Command, Direction, MoveFocus, Operation};
 use crate::config::{Config, MainOptions, WindowParams};
 use crate::ecs::display::FloatingLayer;
 use crate::ecs::{
-    ActiveWorkspaceMarker, DefaultWindowDisposition, FocusedMarker, NativeFullscreenMarker,
-    Position, PreManagedFrame, Scrolling, Unmanaged, WindowDisposition, layout::LayoutStrip,
+    ActiveWorkspaceMarker, DefaultWindowDisposition, FocusedMarker, LayoutPosition,
+    NativeFullscreenMarker, Position, PreManagedFrame, Scrolling, Unmanaged, WindowDisposition,
+    layout::LayoutStrip,
 };
 use crate::ecs::{RepositionMarker, SpawnWindowTrigger};
 use crate::events::Event;

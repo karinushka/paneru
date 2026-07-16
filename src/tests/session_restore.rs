@@ -608,9 +608,41 @@ fn test_startup_restore_respects_floating_config_for_matched_window() {
 }
 
 #[test]
-fn test_startup_restore_does_not_capture_default_passthrough_window() {
+fn test_startup_restore_reapplies_previous_manual_opt_in() {
     let mut harness = TestHarness::new()
         .with_default_window_disposition(WindowDisposition::Passthrough)
+        .with_windows(1);
+    harness
+        .app
+        .world_mut()
+        .insert_resource(state_with_strips(vec![SavedStrip {
+            virtual_index: 0,
+            columns: vec![SavedColumn::Single(saved_window(0))],
+        }]));
+
+    for _ in 0..5 {
+        harness.app.update();
+    }
+
+    let world = harness.world();
+    let entity = crate::tests::harness::find_window_entity(0, world);
+    assert_eq!(
+        world.entity(entity).get::<WindowDisposition>().copied(),
+        Some(WindowDisposition::Managed)
+    );
+    assert_eq!(world.entity(entity).get::<Unmanaged>().copied(), None);
+    let mut strips = world.query::<&LayoutStrip>();
+    assert!(strips.iter(world).any(|strip| strip.contains(entity)));
+}
+
+#[test]
+fn test_startup_restore_never_overrides_explicit_manage_false() {
+    let mut params = WindowParams::new(".*", Some("test".to_string()));
+    params.manage = Some(false);
+    let config: Config = (MainOptions::default(), vec![params]).into();
+    let mut harness = TestHarness::new()
+        .with_default_window_disposition(WindowDisposition::Passthrough)
+        .with_config(config)
         .with_windows(1);
     harness
         .app

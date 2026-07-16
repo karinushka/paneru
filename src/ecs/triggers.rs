@@ -1067,27 +1067,40 @@ pub(super) fn apply_window_positions(
         };
 
         let properties = WindowProperties::new(&app, window, &config);
-        let disposition = properties.disposition(default_disposition.0);
+        let restore_match = crate::ecs::restore::matches_startup_restore_state(
+            window,
+            &app,
+            restore.as_deref(),
+            restoration.as_deref(),
+            &config,
+        );
+        let explicit_disposition = properties.explicit_disposition();
+        let disposition = if explicit_disposition.is_none()
+            && default_disposition.0 == WindowDisposition::Passthrough
+            && restore_match
+        {
+            // A saved strip contains only windows Paneru managed when the
+            // state was written. In opt-in mode, that saved membership restores
+            // a previous manual opt-in unless an explicit ownership rule says
+            // otherwise.
+            WindowDisposition::Managed
+        } else {
+            explicit_disposition.unwrap_or(default_disposition.0)
+        };
         if let Ok(mut stored_disposition) = dispositions.get_mut(entity) {
             *stored_disposition = disposition;
         } else if let Ok(mut entity_commands) = commands.get_entity(entity) {
             entity_commands.try_insert(disposition);
         }
-        if let Ok(mut entity_commands) = commands.get_entity(entity)
-            && let Some(unmanaged) = disposition.unmanaged()
-        {
-            entity_commands.try_insert(unmanaged);
+        if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            if let Some(unmanaged) = disposition.unmanaged() {
+                entity_commands.try_insert(unmanaged);
+            } else {
+                entity_commands.try_remove::<Unmanaged>();
+            }
         }
 
-        if disposition == WindowDisposition::Managed
-            && crate::ecs::restore::matches_startup_restore_state(
-                window,
-                &app,
-                restore.as_deref(),
-                restoration.as_deref(),
-                &config,
-            )
-        {
+        if disposition == WindowDisposition::Managed && restore_match {
             ensure_application_observer(
                 app_entity,
                 &mut app,

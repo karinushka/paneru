@@ -254,8 +254,9 @@ bindings_passthrough = ["ctrl-h", "ctrl-l"]
 Windows that do not match an explicit ownership rule start in **passthrough**
 mode: Paneru tracks their identity and focus but does not move, resize, dim,
 border, save, or restore them. Use **Toggle Managed** to opt one concrete window
-into the current strip for the current run, or add `manage = true` to make a
-matching rule opt in automatically.
+into the current strip, or add `manage = true` to make a matching rule opt in
+automatically. With session restore enabled, a manually managed window is saved
+as part of its strip and is opted back in on the next launch.
 
 When multiple rules match, ownership has deterministic precedence:
 `manage = false`, then `floating = true`, then `manage = true`, then the
@@ -304,12 +305,14 @@ The saved session includes:
 - horizontal strip pan positions
 - window identity for matching across restarts
 
-Static ownership rules are evaluated before restore. Passthrough and floating
-windows are never pulled into a saved strip. For windows whose current
-disposition is managed, the saved layout, virtual workspace, and display win
-over static placement such as `index` and `width` during the startup restore
-window. Unmatched windows and all windows created after the restore grace
-period ends keep normal `[windows]` behavior.
+Static ownership rules are evaluated before restore. Explicit `manage = false`
+and `floating = true` rules are never overridden by saved state. A saved window
+with no explicit ownership rule restores as managed, including a window that
+was manually opted in under `opt_in_management = true`. For managed windows,
+the saved layout, virtual workspace, and display win over static placement such
+as `index` and `width` during the startup restore window. Unmatched windows and
+all windows created after the restore grace period ends keep normal `[windows]`
+behavior.
 
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |

@@ -783,16 +783,20 @@ impl WindowProperties {
         self.params.iter().any(|props| props.floating == Some(true))
     }
 
-    pub fn disposition(&self, default: WindowDisposition) -> WindowDisposition {
+    pub fn explicit_disposition(&self) -> Option<WindowDisposition> {
         if self.params.iter().any(|props| props.manage == Some(false)) {
-            WindowDisposition::Passthrough
+            Some(WindowDisposition::Passthrough)
         } else if self.params.iter().any(|props| props.floating == Some(true)) {
-            WindowDisposition::Floating
+            Some(WindowDisposition::Floating)
         } else if self.params.iter().any(|props| props.manage == Some(true)) {
-            WindowDisposition::Managed
+            Some(WindowDisposition::Managed)
         } else {
-            default
+            None
         }
+    }
+
+    pub fn disposition(&self, default: WindowDisposition) -> WindowDisposition {
+        self.explicit_disposition().unwrap_or(default)
     }
 
     pub fn insertion(&self) -> Option<usize> {

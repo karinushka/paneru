@@ -112,8 +112,9 @@ with bounded backoff. Disabling restore performs no state-file read or write.
 alive in `SessionRestore` for the configured grace period so applications have
 time to reopen their windows. As windows arrive, `restore_window_state` builds a
 restore plan from the saved state and the currently managed ECS windows.
-Passthrough and floating dispositions are excluded before matching, so stale
-session state cannot silently opt a window back into management.
+Explicit passthrough and floating rules are excluded before matching. Saved
+strip membership may restore an otherwise-default passthrough window to managed
+state, preserving a previous manual opt-in across launches.
 
 Window matching prefers stable identity (`window_id`, `pid`, and `bundle_id`)
 and uses the conservative fallback identity only when it can do so
@@ -127,10 +128,10 @@ workspace markers, display associations, saved oversized `WidthRatio`s, and
 the horizontal pan position of each restored strip. When the current macOS workspace
 to display mapping conflicts with saved display data, the current mapping is
 preferred; otherwise restore falls back to the saved display, then the active
-display, then any available display. For windows currently classified as
-managed, matched startup state skips static placement so the saved session
-wins. Static passthrough/floating ownership wins over restore, while unmatched
-and post-grace windows follow normal config behavior.
+display, then any available display. Explicit passthrough/floating ownership
+wins over restore. Otherwise saved strip membership restores managed ownership
+and skips static placement, while unmatched and post-grace windows follow
+normal config behavior.
 
 ## 7. Data Flow Diagram
 

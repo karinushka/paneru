@@ -6,7 +6,7 @@ use objc2_core_foundation::CGPoint;
 use crate::commands::{Command, Direction, MoveFocus, Operation};
 use crate::config::{Config, MainOptions, WindowParams};
 use crate::ecs::display::FloatingLayer;
-use crate::ecs::{ActiveWorkspaceMarker, Position, Unmanaged, layout::LayoutStrip};
+use crate::ecs::{ActiveWorkspaceMarker, Position, Scrolling, Unmanaged, layout::LayoutStrip};
 use crate::ecs::{RepositionMarker, SpawnWindowTrigger};
 use crate::events::Event;
 use crate::manager::{Origin, Size, Window};
@@ -14,6 +14,24 @@ use crate::platform::Modifiers;
 use crate::{assert_focused, assert_window_at, assert_window_size};
 
 use super::*;
+
+#[test]
+fn modifier_scroll_uses_native_momentum_without_synthetic_velocity() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Scroll { delta: 1.0 },
+    ];
+
+    TestHarness::new()
+        .with_windows(3)
+        .on_iteration(1, |world, _state| {
+            let mut query = world.query_filtered::<&Scrolling, With<ActiveWorkspaceMarker>>();
+            let scrolling = query.single(world).expect("active workspace is scrolling");
+            assert_eq!(scrolling.velocity, 0.0);
+            assert!(scrolling.is_user_swiping);
+        })
+        .run(commands);
+}
 
 #[test]
 fn test_dont_focus() {

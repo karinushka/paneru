@@ -116,6 +116,24 @@ fn native_fullscreen_transition_removes_window_from_original_strip_without_focus
 }
 
 #[test]
+fn frontmost_floating_window_is_focused_after_setup() {
+    let mut params = WindowParams::new(".*", None);
+    params.floating = Some(true);
+    let config: Config = (MainOptions::default(), vec![params]).into();
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(1)
+        .with_focused_window(0)
+        .on_iteration(0, |world, _state| {
+            assert_focused!(world, 0);
+            let entity = find_window_entity(0, world);
+            assert!(world.entity(entity).contains::<Unmanaged>());
+        })
+        .run(vec![Event::MenuOpened { window_id: 0 }]);
+}
+
+#[test]
 fn test_dont_focus() {
     let commands = vec![
         Event::MenuOpened { window_id: 0 }, // 0

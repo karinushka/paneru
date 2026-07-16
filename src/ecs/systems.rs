@@ -27,9 +27,9 @@ use crate::config::{Config, decorations::BorderRadiusOption};
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, Bounds, BruteforceWindows, FlashMessage, Initializing, LowPowerMode,
-    MissionControlActive, Position, ReadDisplayProperties, RestoreWindowState, Scrolling,
-    SendMessageTrigger, SpawnCommandsExt, Unmanaged, WidthRatio, WindowProperties,
+    ActiveWorkspaceMarker, Bounds, BruteforceWindows, FlashMessage, FocusedMarker, Initializing,
+    LowPowerMode, MissionControlActive, Position, ReadDisplayProperties, RestoreWindowState,
+    Scrolling, SendMessageTrigger, SpawnCommandsExt, Unmanaged, WidthRatio, WindowProperties,
 };
 use crate::events::Event;
 use crate::manager::{
@@ -174,6 +174,7 @@ pub(crate) fn add_existing_application(
 pub(crate) fn finish_setup(
     process_query: Query<Entity, With<ExistingMarker>>,
     windows: Windows,
+    applications: Query<&Application>,
     mut bruteforce_tasks: Query<(Entity, &mut BruteforceWindows)>,
     mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>, &ChildOf)>,
     window_manager: Res<WindowManager>,
@@ -203,6 +204,7 @@ pub(crate) fn finish_setup(
         windows.iter().size_hint()
     );
 
+    let mut focused_managed_window = false;
     for (mut strip, active_strip, _) in &mut workspaces {
         debug!("space {}: before refresh {strip:?}", strip.id());
         let workspace_windows = window_manager
@@ -246,7 +248,22 @@ pub(crate) fn finish_setup(
 
         if active_strip && let Some(entity) = strip.first().ok().and_then(|column| column.top()) {
             commands.focus_entity(entity, true);
+            focused_managed_window = true;
         }
+    }
+
+    // An all-floating workspace has no strip member to receive the initial
+    // focus marker. Mirror the frontmost app's AX focus so menu actions such as
+    // Toggle Managed work immediately after launch.
+    if !focused_managed_window
+        && let Some(focused_window_id) = applications
+            .iter()
+            .find(|app| app.is_frontmost())
+            .and_then(|app| app.focused_window_id().ok())
+        && let Some((_, entity)) = windows.find(focused_window_id)
+        && let Ok(mut entity_commands) = commands.get_entity(entity)
+    {
+        entity_commands.try_insert(FocusedMarker);
     }
 
     commands.remove_resource::<Initializing>();

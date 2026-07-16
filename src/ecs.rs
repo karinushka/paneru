@@ -85,8 +85,6 @@ pub fn register_systems(app: &mut bevy::app::App) {
                 || focus_lost.read().next().is_some()
                 || !focused_moved.is_empty()
         };
-    let workspace_menu_status =
-        |config: Option<Res<Config>>| config.is_some_and(|config| config.workspace_menu_status());
     let native_tabs_enabled =
         |config: Option<Res<Config>>| config.is_none_or(|config| config.native_tabs_enabled());
 
@@ -157,7 +155,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
                 systems::update_flash_messages,
             )
                 .chain(),
-            crate::menubar::update_virtual_workspace_status_item.run_if(workspace_menu_status),
+            crate::menubar::update_menu_bar,
         ),
     );
 }
@@ -566,12 +564,13 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         .add_plugins(display::DisplayEventsPlugin)
         .add_plugins((register_triggers, register_systems, register_commands));
 
+    let menu_events = sender.clone();
     let mut platform_callbacks = PlatformCallbacks::new(sender);
     platform_callbacks.setup_handlers()?;
     let mtm = platform_callbacks.main_thread_marker;
     let overlay_manager = OverlayManager::new(mtm);
     let flash_message_manager = FlashMessageManager::new(mtm);
-    let menu_bar_manager = MenuBarManager::new(mtm);
+    let menu_bar_manager = MenuBarManager::new(mtm, menu_events);
     app.insert_non_send_resource(platform_callbacks)
         .insert_non_send_resource(overlay_manager)
         .insert_non_send_resource(flash_message_manager)

@@ -207,3 +207,60 @@ fn test_window_resize_grow_and_shrink_cycle() {
         })
         .run(commands);
 }
+
+#[test]
+fn test_window_can_resize_to_two_display_widths_and_scroll() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::SetWidth(2.0)),
+        },
+        Event::Swipe {
+            delta: 0.3,
+            fingers: 3,
+        },
+        Event::Command {
+            command: Command::Window(Operation::Snap),
+        },
+    ];
+
+    let config: Config = (
+        MainOptions {
+            swipe_gesture_fingers: Some(3),
+            animation_speed: Some(10000.0),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(1)
+        .on_iteration(1, |world, _state| {
+            assert_window_size!(world, 0, 2048, 748);
+            assert_oversized_window_is_pannable(world, 0);
+        })
+        .on_iteration(2, |world, _state| {
+            assert_window_size!(world, 0, 2048, 748);
+            assert_oversized_window_is_pannable(world, 0);
+        })
+        .on_iteration(3, |world, _state| {
+            assert_window_size!(world, 0, 2048, 748);
+            assert_oversized_window_is_pannable(world, 0);
+        })
+        .run(commands);
+}
+
+fn assert_oversized_window_is_pannable(world: &mut World, id: i32) {
+    let mut query = world.query::<&crate::manager::Window>();
+    let window = query
+        .iter(world)
+        .find(|window| window.id() == id)
+        .expect("window not found");
+    let x = window.frame().min.x;
+    assert!(
+        (-TEST_DISPLAY_WIDTH..=0).contains(&x),
+        "oversized window must stay within its pannable range, got x={x}"
+    );
+}

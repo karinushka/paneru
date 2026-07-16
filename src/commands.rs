@@ -15,7 +15,7 @@ mod query;
 use crate::config::Config;
 use crate::ecs::display::FloatingLayer;
 use crate::ecs::focus::FocusHistory;
-use crate::ecs::layout::{Column, LayoutStrip, StackItem};
+use crate::ecs::layout::{Column, LayoutStrip, StackItem, clamp_origin_to_viewport};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Windows};
 use crate::ecs::{
     ActiveDisplayMarker, ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker,
@@ -75,6 +75,8 @@ pub enum Operation {
     Center,
     /// Resizes the focused window in the given direction.
     Resize(ResizeDirection),
+    /// Resizes the focused window to an exact display-width ratio.
+    SetWidth(f64),
     /// Toggles the focused window to full width or a preset width.
     FullWidth,
     /// Moves the focused window to the next available display.
@@ -742,9 +744,10 @@ fn resize_window(
     config: Res<Config>,
     mut commands: Commands,
 ) {
-    let Some(Operation::Resize(direction)) =
-        filter_window_operations(&mut messages, |op| matches!(op, Operation::Resize(_))).next()
-    else {
+    let Some(operation) = filter_window_operations(&mut messages, |op| {
+        matches!(op, Operation::Resize(_) | Operation::SetWidth(_))
+    })
+    .next() else {
         return;
     };
 
@@ -765,8 +768,9 @@ fn resize_window(
     let widths = config.preset_column_widths();
     let fallback = *widths.first().unwrap_or(&0.5);
     let cycle = config.window_resize_cycle();
-    let next_ratio = match direction {
-        ResizeDirection::Grow => widths
+    let next_ratio = match operation {
+        Operation::SetWidth(ratio) if ratio.is_finite() && *ratio > 0.0 => *ratio,
+        Operation::Resize(ResizeDirection::Grow) => widths
             .iter()
             .copied()
             .find(|&r| r > current_ratio + 0.05)
@@ -777,7 +781,7 @@ fn resize_window(
                     *widths.last().unwrap_or(&fallback)
                 }
             }),
-        ResizeDirection::Shrink => widths
+        Operation::Resize(ResizeDirection::Shrink) => widths
             .iter()
             .rev()
             .copied()
@@ -789,13 +793,17 @@ fn resize_window(
                     fallback
                 }
             }),
+        _ => return,
     };
 
     let new_width = (next_ratio * f64::from(viewport.width())).round() as i32;
     let size = Size::new(new_width, frame.height());
 
-    let mut origin = IRect::from_center_size(frame.center(), size).min;
-    origin.x = origin.x.clamp(viewport.min.x, viewport.max.x - size.x);
+    let origin = clamp_origin_to_viewport(
+        IRect::from_center_size(frame.center(), size).min,
+        size,
+        viewport,
+    );
     commands.reposition_entity(entity, origin);
 
     // Resize all windows in the column so stacked siblings share the new width.
@@ -1223,9 +1231,7 @@ fn snap_window(
     // Clamp the frame into the display and reposition the *strip* (not the
     // window) so the layout stays consistent.
     let size = frame.size();
-    frame.min = frame
-        .min
-        .clamp(display_bounds.min, display_bounds.max - size);
+    frame.min = clamp_origin_to_viewport(frame.min, size, display_bounds);
     frame.max = frame.min + size;
 
     let strip_position = frame.min - layout_position.0;

@@ -1150,7 +1150,7 @@ pub struct MainOptions {
 
 /// Returns a default set of column widths.
 pub fn default_preset_column_widths() -> Vec<f64> {
-    vec![0.25, 0.33333, 0.50, 0.66667, 0.75]
+    vec![0.25, 0.33333, 0.50, 0.66667, 0.75, 1.0, 1.5, 2.0]
 }
 
 /// `Keybinding` represents a keyboard shortcut and the command it triggers.
@@ -1219,7 +1219,8 @@ pub struct WindowParams {
     pub vertical_padding: Option<i32>,
     pub horizontal_padding: Option<i32>,
     pub dont_focus: Option<bool>,
-    /// An optional initial width ratio (0.0–1.0) relative to the display width.
+    /// An optional positive initial width ratio relative to the display width.
+    /// Values above 1.0 create an oversized, horizontally scrollable window.
     /// Overrides the default column width when the window is first managed.
     pub width: Option<f64>,
     /// Grid placement for floating windows: "cols:rows:x:y:w:h".

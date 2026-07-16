@@ -19,10 +19,20 @@ use crate::ecs::{
     Position, RepositionMarker, ReshuffleAroundMarker, Scrolling, SpawnCommandsExt,
 };
 use crate::errors::{Error, Result};
-use crate::manager::{Display, Origin, Window};
+use crate::manager::{Display, Origin, Size, Window};
 use crate::platform::WorkspaceId;
 
 pub struct LayoutEventsPlugin;
+
+/// Clamp a window origin to the range where it still touches both viewport
+/// edges. For an oversized window this range is reversed: from right-aligned
+/// to left-aligned, which lets the strip pan across the hidden content.
+pub(crate) fn clamp_origin_to_viewport(origin: Origin, size: Size, viewport: IRect) -> Origin {
+    let far_edge = viewport.max - size;
+    let minimum = viewport.min.min(far_edge);
+    let maximum = viewport.min.max(far_edge);
+    origin.clamp(minimum, maximum)
+}
 
 impl Plugin for LayoutEventsPlugin {
     fn build(&self, app: &mut App) {
@@ -1034,9 +1044,7 @@ fn reshuffle_layout_strip(
         let visible_width = display_bounds.intersect(frame).width();
 
         // Expose the window by clamping it into the viewport.
-        frame.min = frame
-            .min
-            .clamp(display_bounds.min, display_bounds.max - size);
+        frame.min = clamp_origin_to_viewport(frame.min, size, display_bounds);
         frame.max = frame.min + size;
 
         let mut strip_position = (frame.min - layout_position.0).with_y(display_bounds.min.y);
@@ -1138,9 +1146,7 @@ fn ensure_visible_in_strip(
         let candidate_min = layout_position.0 + strip_position.0;
         // Clamp into the viewport. If already on-screen, this is a no-op and
         // the strip target equals its current position — no movement.
-        //let clamped_min = candidate_min.clamp(viewport.min, viewport.max - size);
-        let clamped_min =
-            candidate_min.clamp(viewport.min, (viewport.max - size).max(viewport.min));
+        let clamped_min = clamp_origin_to_viewport(candidate_min, size, viewport);
         if clamped_min == candidate_min {
             return;
         }
@@ -1393,6 +1399,36 @@ fn position_layout_windows(
 mod tests {
     use super::*;
     use bevy::prelude::*;
+
+    #[test]
+    fn clamp_origin_supports_oversized_windows() {
+        let viewport = IRect::new(0, 20, 1024, 768);
+        let size = Size::new(2048, 748);
+
+        assert_eq!(
+            clamp_origin_to_viewport(Origin::new(300, 20), size, viewport),
+            Origin::new(0, 20)
+        );
+        assert_eq!(
+            clamp_origin_to_viewport(Origin::new(-1600, 20), size, viewport),
+            Origin::new(-1024, 20)
+        );
+        assert_eq!(
+            clamp_origin_to_viewport(Origin::new(-600, 20), size, viewport),
+            Origin::new(-600, 20)
+        );
+    }
+
+    #[test]
+    fn clamp_origin_keeps_regular_windows_inside_viewport() {
+        let viewport = IRect::new(0, 20, 1024, 768);
+        let size = Size::new(400, 300);
+
+        assert_eq!(
+            clamp_origin_to_viewport(Origin::new(-100, 900), size, viewport),
+            Origin::new(0, 468)
+        );
+    }
 
     fn setup_world_and_strip() -> (World, LayoutStrip, Vec<Entity>) {
         let mut world = World::new();

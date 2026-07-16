@@ -366,8 +366,24 @@ impl WindowDisposition {
 }
 
 /// Production policy for windows that do not match an explicit rule.
-#[derive(Clone, Copy, Debug, Default, Resource)]
+#[derive(Clone, Copy, Debug, Resource)]
 pub struct DefaultWindowDisposition(pub WindowDisposition);
+
+impl Default for DefaultWindowDisposition {
+    fn default() -> Self {
+        Self(WindowDisposition::Managed)
+    }
+}
+
+impl DefaultWindowDisposition {
+    pub(crate) fn from_config(config: &Config) -> Self {
+        if config.opt_in_management() {
+            Self(WindowDisposition::Passthrough)
+        } else {
+            Self::default()
+        }
+    }
+}
 
 /// The ordinary macOS frame captured immediately before a passthrough window
 /// enters Paneru's strip. It remains attached while managed so unmanaging the

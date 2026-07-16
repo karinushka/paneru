@@ -63,7 +63,8 @@ Bevy is typically used for games, so Paneru implements a custom bridge to intera
 - **`SelectedVirtualMarker`**: Marks a virtual workspace that is currently selected by the user.
 - **`NativeFullscreenMarker`**: Marks a window that is in macOS native fullscreen mode.
 - **`WindowDisposition`:** Durable per-window ownership: `Managed`, `Floating`,
-  or `Passthrough`. Normal windows default to `Passthrough`.
+  or `Passthrough`. Normal windows retain legacy `Managed` behavior by default;
+  `options.opt_in_management = true` changes their default to `Passthrough`.
 - **`Unmanaged`:** The effective strip-exclusion/lifecycle marker:
   `Floating`, `Passthrough`, `Minimized`, or `Hidden`. Temporary lifecycle
   state restores from `WindowDisposition`.
@@ -87,6 +88,10 @@ Bevy is typically used for games, so Paneru implements a custom bridge to intera
   window's disposition; there is no workspace-global managed-mode switch.
   Runtime manage commands carry a concrete `WinID` captured at hotkey, menu, or
   IPC ingress and never retarget from a later focus marker.
+- **Complete Startup Discovery:** Both ownership modes resolve windows on
+  inactive native Spaces in a bounded background task. Opt-in controls default
+  ownership, not discovery; this allows persisted managed state to be restored
+  before the user visits every Space.
 - **Passthrough Isolation:** Layout, scrolling, borders/dimming, persistence,
   restore, cleanup, and floating-layer operations must not mutate passthrough
   windows. Focus remains tracked so recovery does not steal focus.

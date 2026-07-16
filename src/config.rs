@@ -851,6 +851,15 @@ impl Config {
         self.options().horizontal_mouse_warp
     }
 
+    /// Returns `true` when normal windows must be explicitly opted into
+    /// Paneru management. The legacy automatic-management mode remains the
+    /// default for upstream compatibility.
+    pub fn opt_in_management(&self) -> bool {
+        self.options()
+            .opt_in_management
+            .is_some_and(|enabled| enabled)
+    }
+
     /// Returns `true` if focus should follow the mouse based on the current configuration.
     /// If the configuration option is not set, it defaults to `true`.
     pub fn focus_follows_mouse(&self) -> bool {
@@ -1098,6 +1107,12 @@ pub struct RestoreOptions {
 /// These options control various behaviors such as mouse focus, gesture recognition, and window animation.
 #[derive(Deserialize, Clone, Debug, Default)]
 pub struct MainOptions {
+    /// Require windows to be explicitly opted into Paneru management.
+    ///
+    /// When disabled (the default), normal windows retain Paneru's legacy
+    /// automatic-management behavior. Changing this option requires a restart
+    /// so all existing windows receive a consistent ownership policy.
+    pub opt_in_management: Option<bool>,
     /// Enables or disables focus follows mouse behavior.
     pub focus_follows_mouse: Option<bool>,
     /// Enables or disables mouse follows focus behavior.
@@ -1846,10 +1861,32 @@ index = 1
     ));
 
     let defaults = Config::default();
+    assert!(!defaults.opt_in_management());
     assert_eq!(defaults.swipe_sensitivity(), 0.35);
     assert_eq!(defaults.swipe_deceleration(), 4.0);
     assert!(!defaults.sticky_scroll());
     assert!(defaults.swipe_paging());
+}
+
+#[test]
+fn test_opt_in_management_config() {
+    let defaults = Config::try_from("[options]\n\n[bindings]\n")
+        .expect("config without opt-in management should parse");
+    assert!(
+        !defaults.opt_in_management(),
+        "legacy automatic management must remain the default"
+    );
+
+    let enabled = Config::try_from(
+        r"
+[options]
+opt_in_management = true
+
+[bindings]
+",
+    )
+    .expect("opt-in management config should parse");
+    assert!(enabled.opt_in_management());
 }
 
 #[test]

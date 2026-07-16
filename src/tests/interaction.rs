@@ -8,8 +8,8 @@ use crate::commands::{Command, Direction, MoveFocus, Operation};
 use crate::config::{Config, MainOptions, WindowParams};
 use crate::ecs::display::FloatingLayer;
 use crate::ecs::{
-    ActiveWorkspaceMarker, FocusedMarker, LayoutPosition, NativeFullscreenMarker, Position,
-    PreManagedFrame, Scrolling, Unmanaged, WindowDisposition, layout::LayoutStrip,
+    ActiveWorkspaceMarker, DefaultWindowDisposition, FocusedMarker, NativeFullscreenMarker,
+    Position, PreManagedFrame, Scrolling, Unmanaged, WindowDisposition, layout::LayoutStrip,
 };
 use crate::ecs::{RepositionMarker, SpawnWindowTrigger};
 use crate::events::Event;
@@ -42,6 +42,23 @@ fn assert_strip_membership(world: &mut World, window_id: i32, expected: bool) {
     assert_eq!(
         strips.iter(world).any(|strip| strip.contains(entity)),
         expected
+    );
+}
+
+#[test]
+fn opt_in_management_preserves_legacy_default_until_enabled() {
+    let legacy = Config::try_from("[options]\n\n[bindings]\n")
+        .expect("legacy management config should parse");
+    assert_eq!(
+        DefaultWindowDisposition::from_config(&legacy).0,
+        WindowDisposition::Managed
+    );
+
+    let opt_in = Config::try_from("[options]\nopt_in_management = true\n\n[bindings]\n")
+        .expect("opt-in management config should parse");
+    assert_eq!(
+        DefaultWindowDisposition::from_config(&opt_in).0,
+        WindowDisposition::Passthrough
     );
 }
 

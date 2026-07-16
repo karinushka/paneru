@@ -4,7 +4,9 @@ use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::{Added, Changed, Has, Or, With, Without};
-use bevy::ecs::system::{Commands, Local, NonSend, NonSendMut, Populated, Query, Res, Single};
+use bevy::ecs::system::{
+    Commands, Local, NonSend, NonSendMut, Populated, Query, Res, ResMut, Single,
+};
 use bevy::math::IRect;
 use bevy::tasks::AsyncComputeTaskPool;
 use bevy::tasks::futures_lite::future;
@@ -25,10 +27,10 @@ use crate::ecs::params::Windows;
 use crate::ecs::runtime::FreshPollDeadline;
 use crate::ecs::width_ratio::width_ratio_for_owner;
 use crate::ecs::{
-    ActiveWorkspaceMarker, ApplicationObserved, Bounds, BruteforceWindows, FlashMessage,
-    FocusedMarker, Initializing, MissionControlActive, Position, ReadDisplayProperties,
-    RestoreWindowState, Scrolling, SendMessageTrigger, SpawnCommandsExt, Unmanaged, WidthRatio,
-    WindowDisposition, WindowProperties,
+    ActiveWorkspaceMarker, ApplicationObserved, Bounds, BruteforceWindows,
+    DefaultWindowDisposition, FlashMessage, FocusedMarker, Initializing, MissionControlActive,
+    Position, ReadDisplayProperties, RestoreWindowState, Scrolling, SendMessageTrigger,
+    SpawnCommandsExt, Unmanaged, WidthRatio, WindowDisposition, WindowProperties,
 };
 use crate::events::{Event, EventReceiver};
 use crate::manager::{
@@ -748,6 +750,7 @@ pub(super) fn window_moved_update_frame(
 pub(crate) fn gather_initial_processes(
     receiver: Option<NonSendMut<EventReceiver>>,
     mut displays: Query<&mut Display>,
+    mut default_disposition: ResMut<DefaultWindowDisposition>,
     mut commands: Commands,
 ) {
     let Some(receiver) = receiver else {
@@ -763,6 +766,8 @@ pub(crate) fn gather_initial_processes(
                 initial_processes.push(Process::new(&psn, observer.clone()).into());
             }
             Event::InitialConfig(config) => {
+                *default_disposition = DefaultWindowDisposition::from_config(&config);
+
                 // If there is a display menubar override, apply it to newly created displays.
                 let height = config.menubar_height();
                 for mut display in &mut displays {

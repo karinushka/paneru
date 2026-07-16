@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
@@ -7,7 +7,6 @@ use bevy::ecs::observer::On;
 use bevy::ecs::query::Has;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::system::{Commands, Query, Res, ResMut};
-use bevy::time::{Time, Timer, TimerMode, Virtual};
 use objc2_core_graphics::CGDirectDisplayID;
 use tracing::{Level, info, instrument, warn};
 
@@ -28,24 +27,40 @@ use crate::platform::{Pid, WinID, WorkspaceId};
 #[derive(Debug, Resource)]
 pub(crate) struct SessionRestore {
     state: PaneruState,
-    timer: Timer,
+    deadline: Instant,
     saved_hard_keys: HashSet<WindowHardMatchKey>,
 }
 
 impl SessionRestore {
     fn new(state: PaneruState, grace: Duration) -> Self {
+        Self::new_at(state, grace, Instant::now())
+    }
+
+    fn new_at(state: PaneruState, grace: Duration, now: Instant) -> Self {
         let saved_hard_keys = saved_hard_match_keys(&state);
         Self {
             state,
-            timer: Timer::new(grace, TimerMode::Once),
+            deadline: now + grace,
             saved_hard_keys,
         }
+    }
+
+    pub(crate) fn next_deadline(&self) -> Instant {
+        self.deadline
+    }
+
+    fn expired(&self, now: Instant) -> bool {
+        now >= self.deadline
+    }
+
+    #[cfg(test)]
+    pub(crate) fn expire_now(&mut self) {
+        self.deadline = Instant::now();
     }
 }
 
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn tick_restore_grace(
-    time: Res<Time<Virtual>>,
     mut session: Option<ResMut<SessionRestore>>,
     mut commands: Commands,
 ) {
@@ -53,8 +68,7 @@ pub(super) fn tick_restore_grace(
         return;
     };
 
-    session.timer.tick(time.delta());
-    if session.timer.is_finished() {
+    if session.expired(Instant::now()) {
         info!("Session restore grace period ended");
         commands.remove_resource::<SessionRestore>();
         commands.remove_resource::<PaneruState>();
@@ -130,15 +144,22 @@ pub(crate) struct PlannedStrip {
     pub display_id: Option<CGDirectDisplayID>,
     pub virtual_index: u32,
     pub columns: Vec<PlannedColumn>,
+    pub position_x: Option<i32>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct SavedGeometry {
+    pub width_ratio: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct RestorePlan {
     pub strips: Vec<PlannedStrip>,
     pub active_virtual_by_workspace: HashMap<WorkspaceId, u32>,
     pub consumed_entities: HashSet<Entity>,
     pub ignored_missing_windows: usize,
     pub skipped_ambiguous_matches: usize,
+    pub geometry: HashMap<Entity, SavedGeometry>,
 }
 
 pub(crate) struct RestorePlanner<'a> {
@@ -197,6 +218,11 @@ impl<'a> RestorePlanner<'a> {
             display_id: workspace.display_id,
             virtual_index: strip.virtual_index,
             columns,
+            position_x: strip
+                .columns
+                .iter()
+                .flat_map(saved_windows_in_column)
+                .find_map(|window| window.strip_position_x),
         })
     }
 
@@ -256,6 +282,12 @@ impl<'a> RestorePlanner<'a> {
                 && saved.hard_match(window.window_id, window.pid, &window.bundle_id)
         }) {
             plan.consumed_entities.insert(window.entity);
+            plan.geometry.insert(
+                window.entity,
+                SavedGeometry {
+                    width_ratio: saved.width_ratio,
+                },
+            );
             return Some(window.entity);
         }
 
@@ -271,6 +303,12 @@ impl<'a> RestorePlanner<'a> {
         match fallback_matches.as_slice() {
             [window] => {
                 plan.consumed_entities.insert(window.entity);
+                plan.geometry.insert(
+                    window.entity,
+                    SavedGeometry {
+                        width_ratio: saved.width_ratio,
+                    },
+                );
                 Some(window.entity)
             }
             [] => {
@@ -527,7 +565,11 @@ pub(super) fn restore_window_state(
         }
 
         let origin = if is_global_active {
-            display.bounds().min
+            let mut origin = display.bounds().min;
+            if let Some(saved_x) = planned.position_x {
+                origin.x = saved_x;
+            }
+            origin
         } else {
             display.bounds().max - 10
         };
@@ -543,6 +585,25 @@ pub(super) fn restore_window_state(
             spawned.insert(previous);
         }
         restored_strips += 1;
+
+        for entity in planned.columns.iter().flat_map(planned_column_entities) {
+            if let Some(width_ratio) = plan
+                .geometry
+                .get(&entity)
+                .and_then(|geometry| geometry.width_ratio)
+                && width_ratio.is_finite()
+                && width_ratio > 0.0
+                && let Some(size) = windows.size(entity)
+            {
+                commands.resize_entity(
+                    entity,
+                    crate::manager::Size::new(
+                        (f64::from(display.bounds().width()) * width_ratio).round() as i32,
+                        size.y,
+                    ),
+                );
+            }
+        }
     }
 
     info!(
@@ -552,6 +613,19 @@ pub(super) fn restore_window_state(
         plan.ignored_missing_windows,
         plan.skipped_ambiguous_matches
     );
+}
+
+fn planned_column_entities(column: &PlannedColumn) -> Box<dyn Iterator<Item = Entity> + '_> {
+    match column {
+        PlannedColumn::Single(entity) | PlannedColumn::Fullscreen(entity) => {
+            Box::new(std::iter::once(*entity))
+        }
+        PlannedColumn::Tabs(tabs) => Box::new(tabs.iter().copied()),
+        PlannedColumn::Stack(items) => Box::new(items.iter().flat_map(|item| match item {
+            PlannedStackItem::Single(entity) => vec![*entity],
+            PlannedStackItem::Tabs(tabs) => tabs.clone(),
+        })),
+    }
 }
 
 fn layout_strip_from_plan(planned: &PlannedStrip) -> LayoutStrip {
@@ -734,5 +808,33 @@ fn compact_stack_items(items: Vec<PlannedStackItem>) -> Option<PlannedColumn> {
         [PlannedStackItem::Single(entity)] => Some(PlannedColumn::Single(*entity)),
         [PlannedStackItem::Tabs(entities)] => Some(PlannedColumn::Tabs(entities.clone())),
         _ => Some(PlannedColumn::Stack(items)),
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use std::time::{Duration, Instant};
+
+    use super::SessionRestore;
+    use crate::ecs::state::PaneruState;
+
+    #[test]
+    fn restore_grace_fires_at_one_absolute_monotonic_deadline() {
+        let now = Instant::now();
+        let grace = Duration::from_millis(50);
+        let restore = SessionRestore::new_at(
+            PaneruState {
+                version: 2,
+                timestamp: 0,
+                active_display_id: None,
+                displays: Vec::new(),
+                workspaces: Vec::new(),
+            },
+            grace,
+            now,
+        );
+        assert_eq!(restore.next_deadline(), now + grace);
+        assert!(!restore.expired(now + grace.checked_sub(Duration::from_nanos(1)).unwrap()));
+        assert!(restore.expired(now + grace));
     }
 }

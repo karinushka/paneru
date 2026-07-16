@@ -276,12 +276,20 @@ starts. Restore is a startup-only phase: Paneru loads the saved session, applies
 it after initial window discovery, keeps matching open for a short grace period,
 then stops consulting the saved state until the next Paneru process start.
 
+State writes are event-driven: each persisted layout/display/selection change
+resets a 250 ms trailing debounce, so continuous scrolling does not write every
+frame. Pending dirty state is flushed on shutdown; failed writes remain dirty
+and retry with bounded backoff. With `enabled = false`, Paneru does not read or
+write the state file.
+
 The saved session includes:
 
 - native workspace ids
 - virtual workspace rows and the selected row per native workspace
 - layout structure: singles, stacks, tabs, and fullscreen strips
 - display/screen association
+- saved width ratios, including values above `1.0`
+- horizontal strip pan positions
 - window identity for matching across restarts
 
 Matched startup windows use the saved session before static `[windows]` rules.
@@ -292,7 +300,7 @@ grace period ends, keep normal `[windows]` behavior.
 
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `enabled` | Boolean | `true` | Enables session restore on startup. |
+| `enabled` | Boolean | `true` | Enables state persistence and startup restore. When false, no state-file I/O or persistence deadline is installed. |
 | `startup_grace_ms` | Integer (ms) | `2000` | How long Paneru keeps restore matching active after startup. This gives apps a chance to create windows shortly after Paneru starts. |
 | `missing_windows` | String | `"ignore"` | Behavior when a saved window is not present during restore. Currently only `"ignore"` is supported, which drops the missing window and compacts the restored layout. |
 
@@ -335,6 +343,9 @@ the workspace is already present on a display. Otherwise it restores to the
 saved display id when that screen is still connected, then falls back to the
 current active display, then the first available display by id. Paneru does not
 create placeholder displays or off-screen state for disconnected monitors.
+
+For matched windows, restore reapplies the saved width ratio and horizontal
+strip pan. Older state files without those optional fields remain compatible.
 
 ---
 

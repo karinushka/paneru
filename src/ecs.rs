@@ -13,7 +13,6 @@ use bevy::ecs::system::{Commands, EntityCommands, Query, Res, SystemId};
 use bevy::prelude::Event as BevyEvent;
 use bevy::tasks::Task;
 use bevy::time::Timer;
-use bevy::time::common_conditions::on_timer;
 use bevy::time::{Time, TimeSystems, Virtual};
 use bevy::{
     app::Update,
@@ -26,7 +25,6 @@ use crate::commands::register_commands;
 use crate::config::{CONFIGURATION_FILE, Config, WindowParams};
 use crate::ecs::display::FloatingLayer;
 use crate::ecs::layout::LayoutStrip;
-use crate::ecs::state::PaneruState;
 use crate::errors::Result;
 use crate::events::{Event, EventReceiver, EventSender};
 use crate::manager::{
@@ -38,16 +36,20 @@ use crate::platform::{AxMainThread, Modifiers, PlatformCallbacks, WinID, Workspa
 
 mod config_reload;
 pub mod display;
+mod floating;
 pub mod focus;
 pub mod layout;
 pub mod mouse;
+pub(crate) mod observation;
 pub mod params;
+pub(crate) mod persistence;
 pub(crate) mod restore;
 pub(crate) mod runtime;
 pub mod scroll;
 pub mod state;
 mod systems;
 mod triggers;
+mod width_ratio;
 pub mod workspace;
 
 /// Registers the Bevy systems for the `WindowManager`.
@@ -59,9 +61,8 @@ pub mod workspace;
 /// * `app` - The Bevy application to register the systems with.
 #[allow(clippy::too_many_lines)]
 pub fn register_systems(app: &mut bevy::app::App) {
-    const LOW_POWER_MODE_CHECK_SEC: u64 = 60;
-
-    app.init_resource::<runtime::SyntheticEventPending>();
+    app.init_resource::<persistence::PersistenceState>()
+        .init_resource::<runtime::SyntheticEventPending>();
     let not_swiping = |scrolling: Query<&Scrolling, With<ActiveWorkspaceMarker>>| {
         scrolling
             .iter()
@@ -92,7 +93,12 @@ pub fn register_systems(app: &mut bevy::app::App) {
 
     app.add_systems(
         Startup,
-        (systems::gather_displays, systems::gather_initial_processes).chain(),
+        (
+            systems::gather_displays,
+            systems::gather_initial_processes,
+            persistence::load_restore_state,
+        )
+            .chain(),
     );
     // Native events must be published before every MessageReader<Event>.
     // All readers live in PreUpdate or later; the pump runs in First after
@@ -125,9 +131,6 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::fresh_marker_cleanup,
             systems::timeout_ticker,
             systems::retry_front_switch,
-            systems::update_low_power_state
-                .run_if(resource_exists::<LowPowerMode>)
-                .run_if(on_timer(Duration::from_secs(LOW_POWER_MODE_CHECK_SEC))),
             (
                 systems::window_resized_update_frame,
                 systems::window_moved_update_frame,
@@ -136,8 +139,6 @@ pub fn register_systems(app: &mut bevy::app::App) {
                 .run_if(not_swiping),
             systems::cleanup_on_exit,
             restore::tick_restore_grace,
-            state::periodic_state_save.run_if(on_timer(Duration::from_secs(300))),
-            state::cleanup_on_exit,
         ),
     );
     app.add_systems(
@@ -166,6 +167,16 @@ pub fn register_systems(app: &mut bevy::app::App) {
             crate::menubar::update_menu_bar,
         ),
     );
+    app.add_systems(
+        PostUpdate,
+        (
+            persistence::track_dirty_state,
+            persistence::flush_due_state,
+            persistence::flush_on_exit,
+        )
+            .chain()
+            .after(crate::menubar::update_menu_bar),
+    );
 }
 
 /// Registers all the event triggers for the window manager.
@@ -176,7 +187,8 @@ pub fn register_triggers(app: &mut bevy::app::App) {
             triggers::front_switched_trigger,
             triggers::window_focused_trigger,
             triggers::mission_control_trigger,
-            triggers::application_event_trigger,
+            observation::application_event_trigger,
+            observation::retry_observer_detaches,
             triggers::dispatch_application_messages,
             triggers::window_destroyed_trigger,
             config_reload::refresh_configuration_trigger,
@@ -218,6 +230,12 @@ pub struct FreshMarker;
 /// Marker component used to gather existing processes and windows during initialization.
 #[derive(Component)]
 pub struct ExistingMarker;
+
+/// Marks applications whose broad AX notifications are currently attached.
+/// Only the frontmost application and applications owning managed windows
+/// retain this observer.
+#[derive(Component)]
+pub struct ApplicationObserved;
 
 /// Component representing a request to reposition a window.
 #[derive(Component, Debug, Deref, DerefMut)]
@@ -440,9 +458,6 @@ impl RetryFrontSwitch {
     }
 }
 
-#[derive(Component)]
-pub struct BruteforceWindows(Task<Vec<Window>>);
-
 #[derive(Component, Debug)]
 pub enum DockPosition {
     Bottom(i32),
@@ -503,8 +518,10 @@ impl VerifyWindowPosition {
     }
 }
 
-#[derive(Deref, DerefMut, Resource)]
-pub struct LowPowerMode(pub bool);
+/// Background task resolving Accessibility window elements for windows that
+/// exist on inactive macOS Spaces.
+#[derive(Component)]
+pub struct BruteforceWindows(Task<Vec<Window>>);
 
 #[derive(Resource)]
 pub struct SystemTheme {
@@ -653,6 +670,7 @@ pub fn setup_bevy_app(sender: EventSender, receiver: EventReceiver) -> Result<Be
         .insert_resource(MissionControlActive(false))
         .insert_resource(FocusFollowsMouse(None))
         .insert_resource(Initializing)
+        .insert_resource(persistence::PersistenceStore::default())
         .insert_non_send_resource(watcher)
         .add_plugins(mouse::MouseEventsPlugin)
         .add_plugins(scroll::ScrollEventsPlugin)
@@ -676,15 +694,6 @@ pub fn setup_bevy_app(sender: EventSender, receiver: EventReceiver) -> Result<Be
         .insert_non_send_resource(flash_message_manager)
         .insert_non_send_resource(menu_bar_manager)
         .insert_non_send_resource(receiver);
-
-    if let Some(previous_state) =
-        PaneruState::load_from_file(&PaneruState::default_state_file_path())
-    {
-        app.insert_resource(previous_state);
-    }
-
-    // Do not insert this in mocks.
-    app.insert_resource(LowPowerMode(false));
 
     Ok(app)
 }

@@ -16,15 +16,12 @@ use super::{
     RefreshWindowSizes, RepositionMarker, ResizeMarker, RetryFrontSwitch, Scrolling, Timeout,
     VerifyWindowPosition,
 };
+use crate::ecs::observation::ObserverDetachRetry;
 use crate::events::{Event, EventReceiver};
 use crate::manager::Window;
 use crate::platform::PlatformCallbacks;
 
 pub(crate) const ACTIVE_FRAME_INTERVAL: Duration = Duration::from_millis(16);
-// Keep the pre-existing low-power and state-save timers alive until the
-// persistence PR replaces them with explicit deadlines. This preserves their
-// behavior without returning to a 60 Hz idle loop.
-const LEGACY_TIMER_FALLBACK_INTERVAL: Duration = Duration::from_secs(60);
 const FRESH_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const ORPHAN_RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
 const FOCUS_RECOVERY_INTERVAL: Duration = Duration::from_secs(1);
@@ -128,7 +125,6 @@ impl RuntimeActivity {
         } else {
             self.nearest_deadline
                 .map(|deadline| deadline.saturating_duration_since(now))
-                .or(Some(LEGACY_TIMER_FALLBACK_INTERVAL))
         }
     }
 
@@ -146,6 +142,7 @@ pub(super) struct RuntimeWork<'w, 's> {
     timeouts: Query<'w, 's, &'static Timeout>,
     fresh_polls: Query<'w, 's, &'static FreshPollDeadline, With<FreshMarker>>,
     refreshes: Query<'w, 's, &'static RefreshWindowSizes, With<ActiveWorkspaceMarker>>,
+    observer_detaches: Query<'w, 's, &'static ObserverDetachRetry>,
     orphan_checks: Query<'w, 's, &'static OrphanReconcileDeadline, Without<ChildOf>>,
     windows: Query<'w, 's, (), With<Window>>,
     focused_windows: Query<'w, 's, (), (With<Window>, With<FocusedMarker>)>,
@@ -153,6 +150,8 @@ pub(super) struct RuntimeWork<'w, 's> {
     retries: Query<'w, 's, &'static RetryFrontSwitch>,
     verifications: Query<'w, 's, &'static VerifyWindowPosition>,
     initializing: Option<Res<'w, Initializing>>,
+    restore: Option<Res<'w, crate::ecs::restore::SessionRestore>>,
+    persistence: Option<Res<'w, crate::ecs::persistence::PersistenceState>>,
 }
 
 fn runtime_activity(work: &RuntimeWork<'_, '_>, now: Instant) -> RuntimeActivity {
@@ -166,6 +165,11 @@ fn runtime_activity(work: &RuntimeWork<'_, '_>, now: Instant) -> RuntimeActivity
         .refreshes
         .iter()
         .map(RefreshWindowSizes::next_deadline)
+        .min();
+    let observer_detach_deadline = work
+        .observer_detaches
+        .iter()
+        .map(ObserverDetachRetry::next_deadline)
         .min();
     let orphan_deadline = work
         .orphan_checks
@@ -189,6 +193,14 @@ fn runtime_activity(work: &RuntimeWork<'_, '_>, now: Instant) -> RuntimeActivity
         .iter()
         .map(VerifyWindowPosition::next_deadline)
         .min();
+    let restore_deadline = work
+        .restore
+        .as_deref()
+        .map(super::restore::SessionRestore::next_deadline);
+    let persistence_deadline = work
+        .persistence
+        .as_deref()
+        .and_then(crate::ecs::persistence::PersistenceState::next_deadline);
     let immediate_deferred = work
         .initializing
         .is_some()
@@ -202,10 +214,13 @@ fn runtime_activity(work: &RuntimeWork<'_, '_>, now: Instant) -> RuntimeActivity
             timeout_deadline,
             fresh_poll_deadline,
             refresh_deadline,
+            observer_detach_deadline,
             orphan_deadline,
             focus_recovery_deadline,
             retry_deadline,
             verification_deadline,
+            restore_deadline,
+            persistence_deadline,
             immediate_deferred,
         ]),
     }
@@ -291,8 +306,8 @@ fn drain_event_channel(receiver: &EventReceiver) -> (Vec<Event>, bool) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ACTIVE_FRAME_INTERVAL, FreshPollDeadline, LEGACY_TIMER_FALLBACK_INTERVAL, RuntimeActivity,
-        RuntimeWork, SyntheticEventPending, pump_receiver, runtime_activity,
+        ACTIVE_FRAME_INTERVAL, FreshPollDeadline, RuntimeActivity, RuntimeWork,
+        SyntheticEventPending, pump_receiver, runtime_activity,
     };
     use crate::ecs::{ActiveWorkspaceMarker, RefreshWindowSizes, Scrolling, SendMessageTrigger};
     use crate::events::{Event, EventReceiver, EventSender};
@@ -305,7 +320,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
-    fn idle_runtime_keeps_only_the_legacy_minute_wake() {
+    fn idle_runtime_has_no_periodic_deadline() {
         let now = Instant::now();
         assert_eq!(
             RuntimeActivity {
@@ -313,7 +328,7 @@ mod tests {
                 nearest_deadline: None,
             }
             .wait(now),
-            Some(LEGACY_TIMER_FALLBACK_INTERVAL)
+            None
         );
     }
 

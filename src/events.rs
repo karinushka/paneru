@@ -1,9 +1,14 @@
 use bevy::ecs::message::Message;
 use objc2::rc::Retained;
-use objc2_core_foundation::{CFRetained, CGPoint};
+use objc2_core_foundation::{
+    CFRetained, CFRunLoop, CFRunLoopSource, CFRunLoopSourceContext, CGPoint, kCFRunLoopDefaultMode,
+};
 use objc2_core_graphics::CGDirectDisplayID;
+use std::ffi::c_void;
 use std::os::unix::net::UnixStream;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::ptr::{from_ref, null_mut};
+use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, RecvError, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
 
 use crate::commands::Command;
@@ -170,7 +175,67 @@ pub enum Event {
 #[derive(Clone, Debug)]
 pub struct EventSender {
     tx: Sender<Event>,
+    wake: Arc<EventWake>,
 }
+
+#[derive(Debug)]
+struct EventWake {
+    generation: AtomicU64,
+    source: AtomicPtr<CFRunLoopSource>,
+    active_signals: AtomicUsize,
+}
+
+impl Default for EventWake {
+    fn default() -> Self {
+        Self {
+            generation: AtomicU64::new(0),
+            source: AtomicPtr::new(null_mut()),
+            active_signals: AtomicUsize::new(0),
+        }
+    }
+}
+
+/// Receiver paired with [`EventSender`]. The generation counter makes the
+/// queue-before-sleep protocol testable; the registered run-loop source closes
+/// the final check-to-sleep race because its signalled state is latched.
+pub struct EventReceiver {
+    rx: Receiver<Event>,
+    wake: Arc<EventWake>,
+}
+
+impl EventReceiver {
+    pub fn recv(&self) -> std::result::Result<Event, RecvError> {
+        self.rx.recv()
+    }
+
+    pub fn try_recv(&self) -> std::result::Result<Event, TryRecvError> {
+        self.rx.try_recv()
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.wake.generation.load(Ordering::Acquire)
+    }
+}
+
+pub(crate) struct EventWakeSource {
+    source: CFRetained<CFRunLoopSource>,
+    wake: Arc<EventWake>,
+}
+
+impl Drop for EventWakeSource {
+    fn drop(&mut self) {
+        self.wake.source.swap(null_mut(), Ordering::AcqRel);
+        while self.wake.active_signals.load(Ordering::Acquire) != 0 {
+            std::thread::yield_now();
+        }
+        if let Some(main_loop) = CFRunLoop::main() {
+            main_loop.remove_source(Some(&self.source), unsafe { kCFRunLoopDefaultMode });
+        }
+        self.source.invalidate();
+    }
+}
+
+unsafe extern "C-unwind" fn consume_event_wake(_: *mut c_void) {}
 
 impl EventSender {
     /// Creates a new `EventSender` and its corresponding `Receiver`.
@@ -179,9 +244,42 @@ impl EventSender {
     /// # Returns
     ///
     /// A tuple containing the `EventSender` and `Receiver` for the created channel.
-    pub fn new() -> (Self, Receiver<Event>) {
+    pub fn new() -> (Self, EventReceiver) {
         let (tx, rx) = channel::<Event>();
-        (Self { tx }, rx)
+        let wake = Arc::new(EventWake::default());
+        (
+            Self {
+                tx,
+                wake: Arc::clone(&wake),
+            },
+            EventReceiver { rx, wake },
+        )
+    }
+
+    pub(crate) fn install_main_run_loop_source(&self) -> Option<EventWakeSource> {
+        let mut context = CFRunLoopSourceContext {
+            version: 0,
+            info: null_mut(),
+            retain: None,
+            release: None,
+            copyDescription: None,
+            equal: None,
+            hash: None,
+            schedule: None,
+            cancel: None,
+            perform: Some(consume_event_wake),
+        };
+        let source = unsafe { CFRunLoopSource::new(None, 0, &raw mut context) }?;
+        let main_loop = CFRunLoop::main()?;
+        main_loop.add_source(Some(&source), unsafe { kCFRunLoopDefaultMode });
+        self.wake.source.store(
+            from_ref::<CFRunLoopSource>(&source).cast_mut(),
+            Ordering::Release,
+        );
+        Some(EventWakeSource {
+            source,
+            wake: Arc::clone(&self.wake),
+        })
     }
 
     /// Sends an `Event` through the internal channel.
@@ -194,6 +292,60 @@ impl EventSender {
     ///
     /// `Ok(())` if the event is sent successfully, otherwise `Err(Error)` if the receiver has disconnected.
     pub fn send(&self, event: Event) -> Result<()> {
-        Ok(self.tx.send(event)?)
+        self.tx.send(event)?;
+        self.wake.generation.fetch_add(1, Ordering::Release);
+        self.wake.active_signals.fetch_add(1, Ordering::AcqRel);
+        let source = self.wake.source.load(Ordering::Acquire);
+        if !source.is_null() {
+            // Main-thread sends must signal too: AppKit callbacks can run while
+            // PlatformCallbacks is draining queued NSEvents immediately before
+            // entering CFRunLoop::run_in_mode. Without a latched source, that
+            // subsequent run could sleep despite the newly queued ECS event.
+            // The source callback itself is empty and channel draining coalesces
+            // events, so it adds at most one wake turn, not persistent frame work.
+            // SAFETY: `EventWakeSource` owns the source until it first clears
+            // this pointer with Release ordering. Core Foundation permits
+            // signalling a run-loop source from arbitrary threads.
+            unsafe { &*source }.signal();
+        }
+        self.wake.active_signals.fetch_sub(1, Ordering::Release);
+        if let Some(main_loop) = CFRunLoop::main() {
+            main_loop.wake_up();
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Event, EventSender};
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    #[test]
+    fn generation_latches_queued_before_sleep_and_during_ecs() {
+        let (sender, receiver) = EventSender::new();
+        let before = receiver.generation();
+        sender.send(Event::ApplicationActivated).unwrap();
+        assert!(receiver.generation() > before);
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(Event::ApplicationActivated)
+        ));
+
+        let barrier = Arc::new(Barrier::new(2));
+        let worker_barrier = Arc::clone(&barrier);
+        let worker = thread::spawn(move || {
+            worker_barrier.wait();
+            sender.send(Event::ApplicationDeactivated).unwrap();
+        });
+        let before_ecs = receiver.generation();
+        barrier.wait();
+        worker.join().unwrap();
+        assert!(receiver.generation() > before_ecs);
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(Event::ApplicationDeactivated)
+        ));
     }
 }

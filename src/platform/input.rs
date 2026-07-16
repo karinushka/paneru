@@ -42,6 +42,91 @@ const VERTICAL_GESTURE_SCROLL_SUPPRESS: Duration = Duration::from_millis(1200);
 const SWIPE_THRESHOLD: f64 = 0.001;
 const GESTURE_MINIMAL_FINGERS: usize = 3;
 
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InputEventMaskPolicy {
+    mouse_move: bool,
+    mouse_buttons: bool,
+    mouse_drag: bool,
+    scroll: bool,
+    gesture: bool,
+    key_down: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct InputMaskTransition {
+    previous: u64,
+    next: u64,
+}
+
+impl InputMaskTransition {
+    pub(super) fn changed(self) -> bool {
+        self.previous != self.next
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct RunningInputMask(u64);
+
+impl RunningInputMask {
+    pub(super) fn new(config: &Config) -> Self {
+        Self(InputEventMaskPolicy::from_config(config).mask())
+    }
+
+    pub(super) fn transition(self, config: &Config) -> InputMaskTransition {
+        InputMaskTransition {
+            previous: self.0,
+            next: InputEventMaskPolicy::from_config(config).mask(),
+        }
+    }
+
+    pub(super) fn commit(&mut self, transition: InputMaskTransition) {
+        self.0 = transition.next;
+    }
+}
+
+impl InputEventMaskPolicy {
+    fn from_config(config: &Config) -> Self {
+        let mouse_resize = config.mouse_resize_modifier().is_some();
+        Self {
+            mouse_move: config.focus_follows_mouse()
+                || config.horizontal_mouse_warp().is_some()
+                || mouse_resize,
+            // Click-to-reveal is enabled whenever some hidden fraction should
+            // force a managed window back into view.
+            mouse_buttons: config.window_hidden_ratio() < 1.0,
+            // No ECS system consumes MouseDragged; subscribing only burns tap
+            // callbacks during drags.
+            mouse_drag: false,
+            scroll: true,
+            gesture: config
+                .swipe_gesture_fingers()
+                .is_some_and(|fingers| fingers >= GESTURE_MINIMAL_FINGERS),
+            key_down: true,
+        }
+    }
+
+    fn mask(self) -> u64 {
+        let mut mask = 0;
+        let mut add = |enabled: bool, event: usize| {
+            if enabled {
+                mask |= 1_u64 << event;
+            }
+        };
+        add(self.mouse_move, CGEventType::MouseMoved.0 as usize);
+        add(self.mouse_buttons, CGEventType::LeftMouseDown.0 as usize);
+        add(self.mouse_buttons, CGEventType::LeftMouseUp.0 as usize);
+        add(self.mouse_buttons, CGEventType::RightMouseDown.0 as usize);
+        add(self.mouse_buttons, CGEventType::RightMouseUp.0 as usize);
+        add(self.mouse_drag, CGEventType::LeftMouseDragged.0 as usize);
+        add(self.mouse_drag, CGEventType::RightMouseDragged.0 as usize);
+        add(self.scroll, CGEventType::ScrollWheel.0 as usize);
+        add(self.gesture, NSEventType::Gesture.0);
+        add(self.key_down, CGEventType::KeyDown.0 as usize);
+        mask
+    }
+}
+
 /// `InputHandler` manages low-level input events from the macOS `CGEventTap`.
 /// It intercepts keyboard and mouse events, processes gestures, and dispatches them as higher-level `Event`s.
 pub(super) struct InputHandler {
@@ -92,16 +177,7 @@ impl InputHandler {
     ///
     /// `Ok(())` if the event tap is created and started successfully, otherwise `Err(Error)`.
     pub(super) fn start(self) -> Result<PinnedInputHandler> {
-        let mouse_event_mask = (1 << CGEventType::MouseMoved.0)
-            | (1 << CGEventType::LeftMouseDown.0)
-            | (1 << CGEventType::LeftMouseUp.0)
-            | (1 << CGEventType::LeftMouseDragged.0)
-            | (1 << CGEventType::RightMouseDown.0)
-            | (1 << CGEventType::RightMouseUp.0)
-            | (1 << CGEventType::RightMouseDragged.0)
-            | (1 << CGEventType::ScrollWheel.0)
-            | (1 << NSEventType::Gesture.0)
-            | (1 << CGEventType::KeyDown.0);
+        let event_mask = InputEventMaskPolicy::from_config(&self.config).mask();
 
         let mut pinned = Box::pin(self);
         let this = unsafe { NonNull::new_unchecked(pinned.as_mut().get_unchecked_mut()) }.as_ptr();
@@ -110,7 +186,7 @@ impl InputHandler {
                 CGEventTapLocation::HIDEventTap,
                 CGEventTapPlacement::HeadInsertEventTap,
                 CGEventTapOptions::Default,
-                mouse_event_mask,
+                event_mask,
                 Some(Self::callback),
                 this.cast(),
             );
@@ -537,6 +613,94 @@ mod tests {
     const NX_DEVICELCTLKEYMASK: u64 = 0x0000_0001;
     const NX_DEVICERCTLKEYMASK: u64 = 0x0000_2000;
     const NX_DEVICEFNKEYMASK: u64 = 0x0080_0000;
+
+    fn manual_config() -> Config {
+        Config::try_from(
+            r#"
+[options]
+focus_follows_mouse = false
+mouse_follows_focus = false
+
+[swipe.scroll]
+modifier = "alt"
+
+[bindings]
+"#,
+        )
+        .unwrap()
+    }
+
+    fn feature_config() -> Config {
+        Config::try_from(
+            r"
+[options]
+focus_follows_mouse = true
+window_hidden_ratio = 1.0
+
+[swipe.gesture]
+fingers_count = 3
+
+[bindings]
+",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn manual_use_case_avoids_move_drag_and_gesture_callbacks() {
+        let config = manual_config();
+        let policy = InputEventMaskPolicy::from_config(&config);
+        assert!(!policy.mouse_move);
+        assert!(!policy.mouse_drag);
+        assert!(!policy.gesture);
+        assert!(policy.mouse_buttons, "click-to-reveal remains enabled");
+        assert!(policy.scroll);
+        assert!(policy.key_down);
+    }
+
+    #[test]
+    fn feature_flags_add_only_required_mouse_and_gesture_events() {
+        let config = feature_config();
+        let policy = InputEventMaskPolicy::from_config(&config);
+        assert!(policy.mouse_move);
+        assert!(!policy.mouse_buttons);
+        assert!(!policy.mouse_drag);
+        assert!(policy.gesture);
+    }
+
+    #[test]
+    fn running_mask_reconciles_enable_and_disable_transitions() {
+        let manual = manual_config();
+        let features = feature_config();
+        let mut running = RunningInputMask::new(&manual);
+
+        let enabled = running.transition(&features);
+        assert!(enabled.changed());
+        running.commit(enabled);
+        assert_eq!(
+            running.0,
+            InputEventMaskPolicy::from_config(&features).mask()
+        );
+        assert_ne!(
+            running.0 & (1_u64 << CGEventType::MouseMoved.0),
+            0,
+            "enabling focus-follows-mouse must add mouse movement"
+        );
+        assert_ne!(
+            running.0 & (1_u64 << NSEventType::Gesture.0),
+            0,
+            "enabling gestures must add gesture callbacks"
+        );
+
+        let disabled = running.transition(&manual);
+        assert!(disabled.changed());
+        running.commit(disabled);
+        assert_eq!(running.0, InputEventMaskPolicy::from_config(&manual).mask());
+        assert_eq!(running.0 & (1_u64 << CGEventType::MouseMoved.0), 0);
+        assert_eq!(running.0 & (1_u64 << NSEventType::Gesture.0), 0);
+        assert_ne!(running.0 & (1_u64 << CGEventType::ScrollWheel.0), 0);
+        assert_ne!(running.0 & (1_u64 << CGEventType::KeyDown.0), 0);
+    }
 
     #[test]
     fn no_modifiers() {

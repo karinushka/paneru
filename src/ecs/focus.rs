@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::time::Duration;
 
 use bevy::app::{App, Plugin, PostUpdate};
 use bevy::ecs::entity::Entity;
@@ -9,23 +8,21 @@ use bevy::ecs::observer::On;
 use bevy::ecs::query::{Added, Has, With};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
-use bevy::ecs::system::{Commands, Populated, Query, Res, Single};
+use bevy::ecs::system::{Commands, NonSend, Populated, Query, Res, ResMut, Single};
 use bevy::prelude::Event as BevyEvent;
-use bevy::time::common_conditions::on_timer;
 use tracing::{Level, debug, error, instrument, trace, warn};
 
 use super::{FocusedMarker, MouseHeldMarker, SystemTheme, Unmanaged};
 use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, GlobalState, Windows};
+use crate::ecs::runtime::FocusRecoveryDeadline;
 use crate::ecs::{
     ActiveWorkspaceMarker, Scrolling, SendMessageTrigger, SpawnCommandsExt, StrayFocusEvent,
 };
 use crate::events::Event;
 use crate::manager::{Application, Display, Window, WindowManager};
-use crate::platform::WorkspaceId;
-
-const REFRESH_WINDOW_CHECK_FREQ_MS: u64 = 1000;
+use crate::platform::{AxMainThread, WorkspaceId};
 
 #[derive(Default)]
 pub struct TierMemory {
@@ -90,14 +87,13 @@ pub struct FocusEventsPlugin;
 impl Plugin for FocusEventsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FocusHistory>();
+        app.init_resource::<FocusRecoveryDeadline>();
         app.add_systems(
             PostUpdate,
             (
                 autocenter_window_on_focus.after(super::systems::animate_resize_entities),
                 mouse_follows_focus.after(super::systems::animate_resize_entities),
-                recover_lost_focus.run_if(on_timer(Duration::from_millis(
-                    REFRESH_WINDOW_CHECK_FREQ_MS,
-                ))),
+                recover_lost_focus,
             ),
         );
         app.add_observer(dim_remove_window_trigger)
@@ -293,7 +289,12 @@ fn virtual_strip_activated(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn focus_window_trigger(trigger: On<FocusWindow>, windows: Windows, apps: Query<&Application>) {
+fn focus_window_trigger(
+    trigger: On<FocusWindow>,
+    _main_thread: NonSend<AxMainThread>,
+    windows: Windows,
+    apps: Query<&Application>,
+) {
     let FocusWindow { entity, raise } = *trigger.event();
     let Some(window) = windows.get(entity) else {
         return;
@@ -316,11 +317,17 @@ fn focus_window_trigger(trigger: On<FocusWindow>, windows: Windows, apps: Query<
 fn recover_lost_focus(
     windows: Windows,
     active_workspace: Query<&LayoutStrip, With<ActiveWorkspaceMarker>>,
+    mut deadline: ResMut<FocusRecoveryDeadline>,
     mut commands: Commands,
 ) {
     if windows.focused().is_some() {
         return;
     }
+    let now = std::time::Instant::now();
+    if !deadline.due(now) {
+        return;
+    }
+    deadline.schedule_next(now);
     error!("Lost focus marker, recovering!");
     if let Ok(strip) = active_workspace
         .single()

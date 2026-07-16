@@ -22,7 +22,7 @@ use crate::ecs::{
 };
 use crate::events::Event;
 use crate::manager::{Window, WindowManager};
-use crate::platform::{Pid, WinID, WorkspaceId};
+use crate::platform::{AxMainThread, Pid, WinID, WorkspaceId};
 
 use super::*;
 
@@ -227,6 +227,7 @@ fn setup_world() -> App {
         .insert_resource(FocusFollowsMouse(None))
         .insert_resource(Config::default())
         .insert_resource(Initializing)
+        .insert_non_send_resource(AxMainThread::for_tests())
         .add_plugins(MouseEventsPlugin)
         .add_plugins(ScrollEventsPlugin)
         .add_plugins(WorkspaceEventsPlugin)

@@ -1,4 +1,6 @@
-use accessibility_sys::{AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt};
+use accessibility_sys::{
+    AXIsProcessTrusted, AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt,
+};
 use bevy::ecs::resource::Resource;
 use bevy::math::{IRect, IVec2};
 use core::ptr::NonNull;
@@ -782,13 +784,20 @@ pub fn bruteforce_windows(
     found_windows
 }
 
-/// Checks if the application has Accessibility privileges.
-/// It will prompt the user to grant permission if not already granted.
+/// Checks if the application has Accessibility privileges without showing UI.
 ///
 /// # Returns
 ///
 /// `true` if Accessibility privileges are granted, `false` otherwise.
 pub fn check_ax_privilege() -> bool {
+    unsafe { AXIsProcessTrusted() }
+}
+
+/// Requests Accessibility privileges once through the native macOS prompt.
+///
+/// Subsequent permission polling must use [`check_ax_privilege`] so the system
+/// dialog is not requested repeatedly while the application waits.
+pub fn request_ax_privilege() -> bool {
     unsafe {
         let keys = [kAXTrustedCheckOptionPrompt
             .cast::<CFString>()

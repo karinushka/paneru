@@ -48,7 +48,7 @@ pub type WorkspaceId = u64;
 
 bitflags::bitflags! {
     #[derive(Clone, Copy, Debug, PartialEq)]
-    pub struct Modifiers: u8 {
+    pub struct Modifiers: u16 {
         const LALT   = 1 << 0;
         const RALT   = 1 << 1;
         const LSHIFT = 1 << 2;
@@ -57,6 +57,7 @@ bitflags::bitflags! {
         const RCMD   = 1 << 5;
         const LCTRL  = 1 << 6;
         const RCTRL  = 1 << 7;
+        const FN     = 1 << 8;
         const ALT   = Self::LALT.bits() | Self::RALT.bits();
         const SHIFT = Self::LSHIFT.bits() | Self::RSHIFT.bits();
         const CMD   = Self::LCMD.bits() | Self::RCMD.bits();
@@ -264,11 +265,12 @@ impl Modifiers {
     ///   - If the binding requires the group, the event must have at least one matching side bit.
     ///   - If the binding does NOT require the group, the event must not have any bits from that group.
     pub fn matches(self, event: Modifiers) -> bool {
-        const GROUPS: [Modifiers; 4] = [
+        const GROUPS: [Modifiers; 5] = [
             Modifiers::ALT,
             Modifiers::SHIFT,
             Modifiers::CMD,
             Modifiers::CTRL,
+            Modifiers::FN,
         ];
 
         for group in GROUPS {
@@ -324,6 +326,7 @@ mod tests {
         assert!(!Modifiers::empty().matches(Modifiers::RSHIFT));
         assert!(!Modifiers::empty().matches(Modifiers::LCMD));
         assert!(!Modifiers::empty().matches(Modifiers::RCTRL));
+        assert!(!Modifiers::empty().matches(Modifiers::FN));
     }
 
     #[test]
@@ -347,6 +350,7 @@ mod tests {
         let want_alt = Modifiers::ALT;
         assert!(!want_alt.matches(Modifiers::LALT | Modifiers::LSHIFT));
         assert!(!want_alt.matches(Modifiers::LALT | Modifiers::LCTRL));
+        assert!(!want_alt.matches(Modifiers::LALT | Modifiers::FN));
     }
 
     #[test]
@@ -378,11 +382,36 @@ mod tests {
     }
 
     #[test]
-    fn matches_all_four_groups() {
-        let all = Modifiers::ALT | Modifiers::SHIFT | Modifiers::CMD | Modifiers::CTRL;
+    fn matches_all_five_groups() {
+        let all =
+            Modifiers::ALT | Modifiers::SHIFT | Modifiers::CMD | Modifiers::CTRL | Modifiers::FN;
+        assert!(all.matches(
+            Modifiers::LALT
+                | Modifiers::RSHIFT
+                | Modifiers::LCMD
+                | Modifiers::RCTRL
+                | Modifiers::FN
+        ));
         assert!(
-            all.matches(Modifiers::LALT | Modifiers::RSHIFT | Modifiers::LCMD | Modifiers::RCTRL)
+            !all.matches(Modifiers::LALT | Modifiers::LSHIFT | Modifiers::LCMD | Modifiers::FN)
         );
-        assert!(!all.matches(Modifiers::LALT | Modifiers::LSHIFT | Modifiers::LCMD));
+    }
+
+    #[test]
+    fn matches_fn_modifier() {
+        let want_fn = Modifiers::FN;
+        assert!(want_fn.matches(Modifiers::FN));
+        assert!(!want_fn.matches(Modifiers::empty()));
+        assert!(!want_fn.matches(Modifiers::LALT | Modifiers::FN));
+    }
+
+    #[test]
+    fn matches_fn_combined_with_other_groups() {
+        let fn_alt = Modifiers::FN | Modifiers::ALT;
+        assert!(fn_alt.matches(Modifiers::FN | Modifiers::LALT));
+        assert!(fn_alt.matches(Modifiers::FN | Modifiers::RALT));
+        assert!(!fn_alt.matches(Modifiers::FN));
+        assert!(!fn_alt.matches(Modifiers::LALT));
+        assert!(!fn_alt.matches(Modifiers::FN | Modifiers::LALT | Modifiers::LSHIFT));
     }
 }

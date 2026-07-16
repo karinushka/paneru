@@ -1364,6 +1364,7 @@ fn parse_modifiers(input: &str) -> Result<Modifiers> {
             "ctrl" => Modifiers::CTRL,
             "lctrl" => Modifiers::LCTRL,
             "rctrl" => Modifiers::RCTRL,
+            "fn" => Modifiers::FN,
             _ => {
                 return Err(Error::InvalidConfig(format!(
                     "{}: Invalid modifier: {modifier}",
@@ -1678,6 +1679,7 @@ fn test_virtual_keymap() -> Vec<(String, u8)> {
 
 #[test]
 #[allow(clippy::float_cmp)]
+#[allow(clippy::too_many_lines)]
 fn test_config_parsing() {
     let input = r#"
 [options]
@@ -1688,6 +1690,7 @@ quit = "ctrl+alt-q"
 window_manage = "ctrl+alt-t"
 window_stack = ["ctrl-s", "alt-s"]
 window_shrink = "alt-d"
+window_snap = "fn-x"
 
 [windows]
 
@@ -1795,6 +1798,12 @@ index = 1
     let props = config.find_window_properties("picture in picture", "com.something.apple");
     assert_eq!(props[0].floating, Some(true));
     assert_eq!(props[0].index, Some(1));
+
+    let keycode = find_key('x');
+    assert!(matches!(
+        config.find_keybind(keycode, Modifiers::FN),
+        Some(Command::Window(Operation::Snap))
+    ));
 
     let defaults = Config::default();
     assert_eq!(defaults.swipe_sensitivity(), 0.35);

@@ -7,7 +7,8 @@ use std::{
     collections::HashMap,
     env,
     ffi::c_void,
-    fs::read_to_string,
+    fs::{OpenOptions, create_dir_all, read_to_string},
+    io::{ErrorKind, Write},
     path::{Path, PathBuf},
     ptr::NonNull,
     sync::{Arc, LazyLock},
@@ -35,15 +36,59 @@ pub mod swipe;
 
 /// A `LazyLock` that determines the path to the application's configuration file.
 /// It checks the `PANERU_CONFIG` environment variable first, then standard XDG locations and user home directory.
-/// If no configuration file is found, the application will panic.
+/// If no configuration file is found, a minimal one is created in the user's
+/// XDG configuration directory so a fresh app installation can start with the
+/// built-in defaults.
 pub static CONFIGURATION_FILE: LazyLock<PathBuf> = LazyLock::new(|| {
     discover_configuration_file().unwrap_or_else(|| {
-        panic!(
-            "{}: Configuration file not found. Tried: $PANERU_CONFIG, $HOME/.paneru, $HOME/.paneru.toml, $XDG_CONFIG_HOME/paneru/paneru.toml",
-            function_name!()
-        )
+        create_default_configuration_file().unwrap_or_else(|error| {
+            panic!(
+                "{}: Unable to create default configuration: {error}",
+                function_name!()
+            )
+        })
     })
 });
+
+const DEFAULT_CONFIGURATION: &str = "# Paneru configuration\n\n[options]\n\n[bindings]\n";
+
+fn default_configuration_file() -> std::io::Result<PathBuf> {
+    let config_home = env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .ok_or_else(|| {
+            std::io::Error::new(
+                ErrorKind::NotFound,
+                "neither XDG_CONFIG_HOME nor HOME is set",
+            )
+        })?;
+
+    Ok(config_home.join("paneru").join("paneru.toml"))
+}
+
+fn create_default_configuration_file() -> std::io::Result<PathBuf> {
+    let path = default_configuration_file()?;
+    if create_configuration_file_at(&path)? {
+        info!("Created default configuration at {}", path.display());
+    }
+    Ok(path)
+}
+
+fn create_configuration_file_at(path: &Path) -> std::io::Result<bool> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(ErrorKind::InvalidInput, "configuration path has no parent")
+    })?;
+    create_dir_all(parent)?;
+
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(mut file) => {
+            file.write_all(DEFAULT_CONFIGURATION.as_bytes())?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(error),
+    }
+}
 
 /// Finds the first existing configuration file from supported locations.
 /// Unlike [`CONFIGURATION_FILE`], this does not panic when no file is found.
@@ -1948,6 +1993,30 @@ fn test_config_defaults() {
     assert_eq!(config.border_width(), 2.0);
     assert_eq!(config.border_radius(), BorderRadiusOption::Auto);
     assert_eq!(config.menubar_height(), None);
+}
+
+#[test]
+fn test_first_launch_creates_parseable_config_without_overwriting_it() {
+    let unique = format!(
+        "paneru-first-launch-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let directory = std::env::temp_dir().join(unique);
+    let path = directory.join("paneru.toml");
+
+    assert!(create_configuration_file_at(&path).unwrap());
+    Config::new(&path).expect("generated configuration should parse");
+
+    let custom = "[options]\nauto_center = false\n\n[bindings]\n";
+    std::fs::write(&path, custom).unwrap();
+    assert!(!create_configuration_file_at(&path).unwrap());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), custom);
+
+    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]

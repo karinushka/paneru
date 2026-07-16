@@ -143,6 +143,8 @@ Paneru checks for configuration in following locations:
 - `$XDG_CONFIG_HOME/paneru/paneru.toml`
 
 Additionally it allows overriding the location with `$PANERU_CONFIG` environment variable.
+If none of these files exists, Paneru creates
+`$XDG_CONFIG_HOME/paneru/paneru.toml` with the built-in defaults on first launch.
 
 You can use the following basic configuration as a starting point. For a
 complete guide to all available options, keybindings, and window rules, see the
@@ -164,9 +166,9 @@ quit = "ctrl + alt - q"
 
 ### Live reloading
 
-Configuration changes made to your `~/.paneru` file are automatically reloaded
-while Paneru is running. This is useful for tweaking keyboard bindings and
-other settings without restarting the application.
+Changes made to the active configuration file are automatically reloaded while
+Paneru is running. This is useful for tweaking keyboard bindings and other
+settings without restarting the application.
 
 ### Startup session restore
 

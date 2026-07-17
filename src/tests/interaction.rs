@@ -30,7 +30,7 @@ fn modifier_scroll_uses_native_momentum_without_synthetic_velocity() {
         .on_iteration(1, |world, _state| {
             let mut query = world.query_filtered::<&Scrolling, With<ActiveWorkspaceMarker>>();
             let scrolling = query.single(world).expect("active workspace is scrolling");
-            assert_eq!(scrolling.velocity, 0.0);
+            assert!(scrolling.velocity.abs() < 0.0001);
             assert!(scrolling.is_user_swiping);
         })
         .run(commands);

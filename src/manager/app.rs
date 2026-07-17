@@ -337,9 +337,36 @@ impl ApplicationApi for ApplicationOS {
 /// An enum representing the type of observer being used.
 /// `Application` refers to an observer for application-level events.
 /// `Window(WinID)` refers to an observer for a specific window, identified by its `WinID`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ObserverType {
     Application,
     Window(WinID),
+}
+
+fn observer_context_ptr(
+    contexts: &[Pin<Box<ObserverContext>>],
+    which: ObserverType,
+) -> Option<NonNull<ObserverContext>> {
+    contexts
+        .iter()
+        .find(|context| context.which == which)
+        .map(|context| NonNull::from_ref(context.as_ref().get_ref()))
+}
+
+fn observer_context_ptr_or_insert(
+    contexts: &mut Vec<Pin<Box<ObserverContext>>>,
+    events: &EventSender,
+    which: ObserverType,
+) -> NonNull<ObserverContext> {
+    if let Some(context) = observer_context_ptr(contexts, which) {
+        return context;
+    }
+
+    contexts.push(Box::pin(ObserverContext {
+        events: events.clone(),
+        which,
+    }));
+    observer_context_ptr(contexts, which).expect("inserted observer context must be present")
 }
 
 /// `ObserverContext` holds the `EventSender` and the `ObserverType`,
@@ -505,12 +532,10 @@ impl AxObserverHandler {
         which: ObserverType,
     ) -> Result<Vec<&str>> {
         let observer: AXObserverRef = self.observer.as_ptr();
-        let context = Box::pin(ObserverContext {
-            events: self.events.clone(),
-            which,
-        });
-        let context_ptr = NonNull::from_ref(&*context).as_ptr();
-        self.contexts.force_write().push(context);
+        let context_ptr = {
+            let mut contexts = self.contexts.force_write();
+            observer_context_ptr_or_insert(&mut contexts, &self.events, which).as_ptr()
+        };
 
         // TODO: retry re-registering these.
         let mut retry = vec![];
@@ -563,14 +588,10 @@ impl AxObserverHandler {
         element: &AXUIWrapper,
         notifications: &[&'static str],
     ) {
-        let mut existing = self.contexts.force_write();
-        if let ObserverType::Window(removed) = which &&
-                !existing.iter().any(
-                    |context| matches!(context.which, ObserverType::Window(window_id) if window_id == *removed),
-                ) {
-                    debug!("window {removed} ({element}) already un-observed, skipping!");
-                    return;
-            }
+        if observer_context_ptr(&self.contexts.force_read(), *which).is_none() {
+            debug!("{which:?} ({element}) already un-observed, skipping!");
+            return;
+        }
 
         for name in notifications {
             let observer: AXObserverRef = self.observer.deref().as_ptr();
@@ -582,11 +603,8 @@ impl AxObserverHandler {
                 debug!("error removing {name} {element:x?} {observer:?}: {result}");
             }
         }
-        if let ObserverType::Window(removed) = which {
-            existing.retain(
-                    |context| !matches!(context.which, ObserverType::Window(window_id) if window_id == *removed),
-                );
-        }
+        // AX may already have queued callbacks with this context pointer. Keep
+        // every refcon alive until `drop` removes the observer's run-loop source.
     }
 
     /// The static callback function for `AXObserver`. This function is called by the macOS Accessibility API
@@ -614,5 +632,44 @@ impl AxObserverHandler {
         };
 
         context.notify(&notification, element);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ObserverContext, ObserverType, observer_context_ptr, observer_context_ptr_or_insert,
+    };
+    use crate::events::EventSender;
+
+    #[test]
+    fn same_observer_type_reuses_stable_context_pointer() {
+        let (events, _receiver) = EventSender::new();
+        let mut contexts = Vec::new();
+
+        let first =
+            observer_context_ptr_or_insert(&mut contexts, &events, ObserverType::Window(42));
+        let reused =
+            observer_context_ptr_or_insert(&mut contexts, &events, ObserverType::Window(42));
+
+        assert_eq!(reused, first);
+        assert_eq!(contexts.len(), 1);
+    }
+
+    #[test]
+    fn removal_lifecycle_lookup_retains_callback_context() {
+        let (events, _receiver) = EventSender::new();
+        let contexts = vec![Box::pin(ObserverContext {
+            events,
+            which: ObserverType::Application,
+        })];
+        let pointer = observer_context_ptr(&contexts, ObserverType::Application).unwrap();
+
+        assert!(observer_context_ptr(&contexts, ObserverType::Application).is_some());
+        assert_eq!(
+            observer_context_ptr(&contexts, ObserverType::Application),
+            Some(pointer)
+        );
+        assert_eq!(unsafe { pointer.as_ref().which }, ObserverType::Application);
     }
 }

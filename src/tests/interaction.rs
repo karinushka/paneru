@@ -883,9 +883,11 @@ fn mouse_outside_corner_still_changes_focus() {
 #[test]
 fn toggle_floating_layer_flips_state() {
     fn current_layer(world: &mut World) -> FloatingLayer {
-        let mut query = world.query_filtered::<&FloatingLayer, With<ActiveWorkspaceMarker>>();
+        let mut query = world.query::<&FloatingLayer>();
         *query
-            .single(world)
+            .query(world)
+            .iter()
+            .find(|layer| layer.workspace_id == TEST_WORKSPACE_ID)
             .expect("active workspace has FloatingLayer")
     }
 
@@ -905,13 +907,13 @@ fn toggle_floating_layer_flips_state() {
         .with_config(Config::default())
         .with_windows(3)
         .on_iteration(0, |world, _state| {
-            assert_eq!(current_layer(world), FloatingLayer::Front);
+            assert!(!current_layer(world).front);
         })
         .on_iteration(1, |world, _state| {
-            assert_eq!(current_layer(world), FloatingLayer::Behind);
+            assert!(current_layer(world).front);
         })
         .on_iteration(2, |world, _state| {
-            assert_eq!(current_layer(world), FloatingLayer::Front);
+            assert!(!current_layer(world).front);
         })
         .run(commands);
 }

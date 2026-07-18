@@ -24,6 +24,7 @@ use super::{
 };
 
 use crate::config::{Config, decorations::BorderRadiusOption};
+use crate::ecs::display::FloatingLayer;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
@@ -75,6 +76,7 @@ pub fn gather_displays(window_manager: Res<WindowManager>, mut commands: Command
         for id in workspaces {
             let active = id == active_space;
             commands.spawn_layout_strip(LayoutStrip::new(id, 0), origin.0, entity, active);
+            commands.spawn((FloatingLayer::new(id), ChildOf(entity)));
         }
     }
 }

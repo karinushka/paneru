@@ -537,7 +537,7 @@ fn command_raise_floating(
 fn command_toggle_floating_layer(
     mut messages: MessageReader<Event>,
     active_display: ActiveDisplay,
-    mut active_workspace: Single<(&LayoutStrip, &mut FloatingLayer), With<ActiveWorkspaceMarker>>,
+    mut floating_layers: Query<&mut FloatingLayer>,
     focus_history: Res<FocusHistory>,
     window_manager: Res<WindowManager>,
     windows: Windows,
@@ -553,24 +553,41 @@ fn command_toggle_floating_layer(
     }
 
     let display_bounds = active_display.bounds();
-    let (active_strip, layer) = &mut *active_workspace;
+    let active_strip = active_display.active_strip();
     let workspace_id = active_strip.id();
-    let target_layer = layer.flipped();
+
+    let floating_front = floating_layers
+        .iter_mut()
+        .find_map(|mut layer| {
+            if layer.workspace_id == workspace_id {
+                layer.flip();
+                Some(layer.front)
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| {
+            let layer = FloatingLayer::new(workspace_id);
+            commands.spawn((layer, ChildOf(active_display.entity())));
+            false
+        });
+
     let visible_floats =
         visible_floating_entities(&windows, &window_manager, workspace_id, display_bounds);
     let visible_float = |entity: Entity| -> bool {
         visible_floats.contains(&entity) && !active_strip.contains(entity)
     };
 
-    let target = match target_layer {
-        FloatingLayer::Front => focus_history
+    let target = if floating_front {
+        focus_history
             .last_floating(workspace_id)
             .filter(|entity| visible_float(*entity))
-            .or_else(|| visible_floats.iter().copied().find(|e| visible_float(*e))),
-        FloatingLayer::Behind => focus_history
+            .or_else(|| visible_floats.iter().copied().find(|e| visible_float(*e)))
+    } else {
+        focus_history
             .last_managed(workspace_id)
             .filter(|entity| active_strip.contains(*entity))
-            .or_else(|| active_strip.all_columns().into_iter().next()),
+            .or_else(|| active_strip.all_columns().into_iter().next())
     };
 
     let mut raise = |entity: Entity| {
@@ -581,20 +598,20 @@ fn command_toggle_floating_layer(
             window.raise_without_focus();
         }
     };
-    match target_layer {
-        FloatingLayer::Behind => active_strip.all_windows().into_iter().for_each(&mut raise),
-        FloatingLayer::Front => windows
+    if floating_front {
+        windows
             .iter()
             .filter_map(|(_, e)| visible_float(e).then_some(e))
-            .for_each(raise),
+            .for_each(raise);
+    } else {
+        active_strip.all_windows().into_iter().for_each(&mut raise);
     }
 
     if let Some(entity) = target {
         commands.focus_entity(entity, true);
     }
 
-    **layer = target_layer;
-    debug!("floating layer -> {target_layer:?}");
+    debug!("floating layer -> front: {floating_front}");
 }
 
 /// Handles the "swap" command, swapping the positions of the current window with another window in a specified direction.

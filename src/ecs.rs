@@ -25,7 +25,6 @@ use tracing::{Level, instrument};
 
 use crate::commands::register_commands;
 use crate::config::{CONFIGURATION_FILE, Config, WindowParams};
-use crate::ecs::display::FloatingLayer;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::state::PaneruState;
 use crate::errors::Result;
@@ -523,12 +522,7 @@ impl SpawnCommandsExt for Commands<'_, '_> {
         display_entity: Entity,
         active: bool,
     ) -> EntityCommands<'_> {
-        let mut spawned = self.spawn((
-            layout_strip,
-            Position(origin),
-            FloatingLayer::default(),
-            ChildOf(display_entity),
-        ));
+        let mut spawned = self.spawn((layout_strip, Position(origin), ChildOf(display_entity)));
         if active {
             spawned.insert(ActiveWorkspaceMarker);
         } else {

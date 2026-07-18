@@ -676,6 +676,17 @@ impl LayoutStrip {
                 let heights =
                     binpack_heights(&current_heights, MIN_WINDOW_HEIGHT, layout_strip_height)?;
 
+                // Every window in a column shares the master's (top item's)
+                // width, so a window stacked onto a master of a different width
+                // resizes to match it instead of keeping its own width. This
+                // also matches the column slot width from column_positions,
+                // which is the widest member.
+                let column_width = items
+                    .first()
+                    .and_then(StackItem::top)
+                    .and_then(&get_window_frame)
+                    .map(|frame| frame.width())?;
+
                 let mut next_y = 0;
                 let frames = items
                     .into_iter()
@@ -683,9 +694,8 @@ impl LayoutStrip {
                     .filter_map(|(item, height)| {
                         let entity = item.top()?;
                         let mut frame = get_window_frame(entity)?;
-                        let width = frame.width();
                         frame.min.x = position;
-                        frame.max.x = frame.min.x + width;
+                        frame.max.x = frame.min.x + column_width;
 
                         frame.min.y = next_y;
                         frame.max.y = frame.min.y + height;
@@ -1577,10 +1587,12 @@ mod tests {
         strip.stack(entities[1]).unwrap();
         strip.stack(entities[2]).unwrap();
 
-        // Give different heights; top window (e0) is 400px wide, others 300px.
+        // Give the master (e0) a distinct width so we can verify children
+        // adopt it. Here e0 is 500px while its stacked children are 300px;
+        // children must widen to the master's 500, not keep their own width.
         let get_window_frame = |e: Entity| {
             if e == entities[0] {
-                Some(IRect::new(0, 0, 400, 200))
+                Some(IRect::new(0, 0, 500, 200))
             } else if e == entities[1] || e == entities[2] {
                 Some(IRect::new(0, 0, 300, 200))
             } else {
@@ -1590,6 +1602,16 @@ mod tests {
 
         let out: Vec<_> = strip.relative_positions(600, &get_window_frame).collect();
         assert_eq!(out.len(), 4);
+
+        // Every window in the stacked column must adopt the master's width.
+        for e in [entities[0], entities[1], entities[2]] {
+            let frame = out.iter().find(|(entity, _)| *entity == e).unwrap().1;
+            assert_eq!(
+                frame.width(),
+                500,
+                "stacked window must share the master's (top) width"
+            );
+        }
 
         // Stacked heights should sum to viewport height.
         let stack_heights: i32 = out

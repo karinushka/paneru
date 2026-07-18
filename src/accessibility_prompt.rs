@@ -2,7 +2,7 @@ use objc2::MainThreadMarker;
 use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSApplication};
 use objc2_foundation::NSString;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(PartialEq)]
 pub(crate) enum AccessibilitySetupAction {
     Continue,
     NotNow,

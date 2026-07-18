@@ -422,14 +422,14 @@ pub struct SkipReshuffle(pub bool);
 pub struct MouseHeldMarker(pub Entity);
 
 /// Resource indicating whether Mission Control is currently active.
-#[derive(PartialEq, Resource)]
+#[derive(Resource)]
 pub struct MissionControlActive(pub bool);
 
 /// Resource holding the `WinID` of a window that should gain focus when focus-follows-mouse is enabled.
 #[derive(Resource)]
 pub struct FocusFollowsMouse(pub Option<WinID>);
 
-#[derive(PartialEq, Resource)]
+#[derive(Resource)]
 pub struct Initializing;
 
 /// Bevy event trigger for spawning new windows.

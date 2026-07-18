@@ -114,7 +114,7 @@ pub struct MenuBarManager {
 const STATUS_ITEM_BACKGROUND_ALPHA: CGFloat = 0.18;
 const STATUS_ITEM_CORNER_RADIUS: CGFloat = 5.0;
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 struct WindowMenuEnablement {
     managed_actions: bool,
     toggle_managed: bool,

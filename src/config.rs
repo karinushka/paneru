@@ -1043,7 +1043,7 @@ impl InnerConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum MissingWindowBehavior {
     Ignore,

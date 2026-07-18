@@ -61,7 +61,7 @@ pub(super) fn tick_restore_grace(
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) struct CurrentWindowIdentity {
     pub entity: Entity,
     pub window_id: WinID,

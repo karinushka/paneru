@@ -58,7 +58,7 @@ pub enum ResizeDirection {
 }
 
 /// Controls whether focus follows the window after a move operation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MoveFocus {
     Follow,
     Stay,

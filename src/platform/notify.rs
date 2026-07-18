@@ -224,7 +224,7 @@ enum KnownCGSEvent {
     All = 0xFFFF_FFFF,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Hash)]
 enum CGSEventType {
     Known(KnownCGSEvent),
     Unknown(u32),

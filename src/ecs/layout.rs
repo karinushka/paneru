@@ -1002,7 +1002,7 @@ fn reshuffle_layout_strip(
         if let Ok(mut cmd) = commands.get_entity(entity) {
             cmd.try_remove::<ReshuffleAroundMarker>();
         }
-        let Some((_, strip_entity, active_strip, child, active_marker)) =
+        let Some((strip, strip_entity, active_strip, child, active_marker)) =
             strips.into_iter().find(|strip| strip.0.contains(entity))
         else {
             return;
@@ -1029,7 +1029,34 @@ fn reshuffle_layout_strip(
             .clamp(display_bounds.min, display_bounds.max - size);
         frame.max = frame.min + size;
 
-        let strip_position = (frame.min - layout_position.0).with_y(display_bounds.min.y);
+        let mut strip_position = (frame.min - layout_position.0).with_y(display_bounds.min.y);
+
+        // Enforce the edge invariant when auto-center is off: the leftmost
+        // window must touch the left edge and the rightmost the right edge
+        // if more than 1 windows in workspace.
+        if !config.auto_center()
+            && let Some(total_strip_width) = strip
+                .last()
+                .ok()
+                .and_then(|column| column.top())
+                .and_then(|last| {
+                    windows
+                        .layout_position(last)
+                        .map(|position| position.0.x)
+                        .zip(windows.moving_frame(last).map(|frame| frame.width()))
+                })
+                .map(|(last_x, last_width)| last_x + last_width)
+        {
+            strip_position.x = if display_bounds.width() < total_strip_width {
+                strip_position.x.clamp(
+                    display_bounds.max.x - total_strip_width,
+                    display_bounds.min.x,
+                )
+            } else {
+                // Strip fits entirely: pin the leftmost window to the left edge.
+                display_bounds.min.x
+            };
+        }
 
         // Check how much of the window is hidden. Slivers don't count as
         // meaningfully visible, so subtract sliver_width from the visible

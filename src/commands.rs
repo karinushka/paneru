@@ -1263,6 +1263,13 @@ pub fn stack_windows_handler(
         } else {
             _ = strip.unstack(entity);
         }
+
+        // Stacking/unstacking moves the focused window to a new column slot
+        // (onto the left master, or out to its own column on the right).
+        // Reshuffle around it so it is brought fully back into view; the
+        // edge-clamp in reshuffle_layout_strip keeps the strip pinned so the
+        // leftmost window touches the left edge and the rightmost the right.
+        commands.reshuffle_around(entity);
     }
 }
 

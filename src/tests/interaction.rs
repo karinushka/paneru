@@ -1499,3 +1499,109 @@ fn test_virtual_workspace_switch_hides_old_strip_with_animations() {
         TEST_DISPLAY_WIDTH - 10
     );
 }
+
+/// Stacking or unstacking the focused window must bring it fully back into
+/// view. Regression: stack_windows_handler mutated the strip but never
+/// reshuffled, so when the strip was scrolled such that the focused window's
+/// new column slot fell off-screen, the window stayed partially or fully
+/// invisible even though it kept focus. It now reshuffles around the focused
+/// window; the edge-clamp in reshuffle_layout_strip keeps the strip pinned to
+/// the edges.
+#[test]
+fn test_stack_unstack_brings_focused_window_into_view() {
+    use crate::ecs::{Bounds, Position, Scrolling};
+
+    let config: Config = (
+        MainOptions {
+            auto_center: Some(false),
+            animation_speed: Some(10000.0),
+            swipe_gesture_fingers: Some(3),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    // 5 windows @ 400px = 2000px strip on a 1024px display → scrollable.
+    let mut h = TestHarness::new().with_config(config).with_windows(5);
+
+    let pump = |h: &mut TestHarness, c: Command| {
+        h.app
+            .world_mut()
+            .write_message::<Event>(Event::Command { command: c });
+        for _ in 0..16 {
+            h.app.update();
+            for e in h.mock_state.drain_events() {
+                h.app.world_mut().write_message::<Event>(e);
+            }
+        }
+    };
+
+    // Emulate the real-app settled state after a swipe: the strip is scrolled
+    // and the transient Scrolling has been removed (swiping_timeout drops it
+    // within ~50ms in the app; the test harness's fast wall-clock wouldn't).
+    let settle_scroll_offset = |h: &mut TestHarness| {
+        h.app.world_mut().write_message::<Event>(Event::Swipe {
+            delta: 0.9,
+            fingers: 3,
+        });
+        for _ in 0..16 {
+            h.app.update();
+            for e in h.mock_state.drain_events() {
+                h.app.world_mut().write_message::<Event>(e);
+            }
+        }
+        let world = h.app.world_mut();
+        let mut q = world.query_filtered::<Entity, With<Scrolling>>();
+        for e in q.iter(world).collect::<Vec<_>>() {
+            if let Ok(mut em) = world.get_entity_mut(e) {
+                em.remove::<Scrolling>();
+            }
+        }
+        for _ in 0..4 {
+            h.app.update();
+            for e in h.mock_state.drain_events() {
+                h.app.world_mut().write_message::<Event>(e);
+            }
+        }
+    };
+
+    let is_fully_onscreen = |h: &mut TestHarness, id: i32| {
+        let e = find_window_entity(id, h.app.world_mut());
+        let world = h.app.world();
+        let p = world.get::<Position>(e).unwrap().0;
+        let b = world.get::<Bounds>(e).unwrap().0;
+        p.x >= 0 && p.x + b.x <= TEST_DISPLAY_WIDTH
+    };
+
+    pump(&mut h, Command::PrintState);
+
+    // Focus window 1, scroll it off the left edge, then stack it onto window 0.
+    pump(&mut h, Command::Window(Operation::Focus(Direction::First)));
+    pump(&mut h, Command::Window(Operation::Focus(Direction::East)));
+    settle_scroll_offset(&mut h);
+    assert!(
+        !is_fully_onscreen(&mut h, 1),
+        "test setup: focused window should be off-screen before stacking"
+    );
+
+    pump(&mut h, Command::Window(Operation::Stack(true)));
+    assert!(
+        is_fully_onscreen(&mut h, 1),
+        "stacking must bring the focused window fully back into view"
+    );
+
+    // Scroll off-screen again, then unstack: the focused window moves out to
+    // its own column and must likewise be brought into view.
+    settle_scroll_offset(&mut h);
+    assert!(
+        !is_fully_onscreen(&mut h, 1),
+        "test setup: focused window should be off-screen before unstacking"
+    );
+
+    pump(&mut h, Command::Window(Operation::Stack(false)));
+    assert!(
+        is_fully_onscreen(&mut h, 1),
+        "unstacking must bring the focused window fully back into view"
+    );
+}

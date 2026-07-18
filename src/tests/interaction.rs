@@ -133,6 +133,53 @@ fn frontmost_floating_window_is_focused_after_setup() {
         .run(vec![Event::MenuOpened { window_id: 0 }]);
 }
 
+/// Regression: a floating window placed by a grid rule must land at the active
+/// display's usable origin (menubar + padding offset), not at (0, 0). Dropping
+/// the display bounds origin previously sent grid windows to the primary
+/// display's top-left corner (and onto the wrong display in multi-display
+/// setups).
+#[test]
+fn floating_grid_window_uses_active_display_usable_origin() {
+    let options = MainOptions {
+        padding_left: Some(40),
+        padding_top: Some(15),
+        ..MainOptions::default()
+    };
+
+    let mut params = WindowParams::new(".*", None);
+    params.floating = Some(true);
+    // Cell (0,0) spanning the full 1x1 grid: origin should equal the usable
+    // top-left, independent of the display size.
+    params.grid = Some("1:1:0:0:1:1".to_string());
+    let config: Config = (options, vec![params]).into();
+
+    TestHarness::new()
+        .with_config(config)
+        .on_iteration(1, |world, state| {
+            let origin = Origin::new(0, 0);
+            let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+            let frame = IRect::from_corners(origin, origin + size);
+            let window = state.spawn_window(TEST_PROCESS_ID, TEST_WORKSPACE_ID, 0, frame);
+            world.trigger(SpawnWindowTrigger(vec![window]));
+        })
+        .on_iteration(3, |world, _state| {
+            // usable origin = (pad_left, menubar + pad_top) = (40, 20 + 15).
+            assert_window_at!(world, 0, 40, TEST_MENUBAR_HEIGHT + 15);
+        })
+        .run(vec![
+            Event::MenuOpened { window_id: 0 },
+            Event::Command {
+                command: Command::PrintState,
+            },
+            Event::Command {
+                command: Command::PrintState,
+            },
+            Event::Command {
+                command: Command::PrintState,
+            },
+        ]);
+}
+
 #[test]
 fn test_dont_focus() {
     let commands = vec![

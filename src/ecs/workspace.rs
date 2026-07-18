@@ -987,17 +987,15 @@ pub(crate) fn show_active_workspace(
 
         let bounds = active_display.bounds();
 
+        if let Ok(mut cmd) = commands.get_entity(entity) {
+            cmd.try_remove::<Scrolling>()
+                .try_remove::<RepositionMarker>();
+        }
+
         if config.virtual_workspace_animations() {
             commands.reposition_entity(entity, bounds.max - 10);
         } else {
             position.0 = bounds.max - 10;
-        }
-        // Stop any in-flight animation and scroll state so the hidden strip
-        // doesn't continue moving off-screen and doesn't corrupt the saved
-        // position when it is restored.
-        if let Ok(mut cmd) = commands.get_entity(entity) {
-            cmd.try_remove::<Scrolling>()
-                .try_remove::<RepositionMarker>();
         }
     }
 
@@ -1014,12 +1012,10 @@ pub(crate) fn show_active_workspace(
         }
 
         if config.virtual_workspace_animations() {
-            // Focus on the previous window
             if let Some(entity) = focus
                 && strip.contains(*entity)
             {
                 commands.focus_entity(*entity, false);
-                commands.reshuffle_around(*entity);
             }
 
             commands.reposition_entity(*activated, *origin);

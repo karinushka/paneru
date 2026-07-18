@@ -566,8 +566,8 @@ pub(super) fn window_unmanaged_trigger(
     // Skip the active-display reposition/resize during init; the strip
     // removal below still has to run.
     if let Some((rx, ry, rw, rh)) = properties.grid_ratios() {
-        let x = (f64::from(display_bounds.width()) * rx) as i32;
-        let y = (f64::from(display_bounds.height()) * ry) as i32;
+        let x = display_bounds.min.x + (f64::from(display_bounds.width()) * rx) as i32;
+        let y = display_bounds.min.y + (f64::from(display_bounds.height()) * ry) as i32;
         let w = (f64::from(display_bounds.width()) * rw) as i32;
         let h = (f64::from(display_bounds.height()) * rh) as i32;
         commands.reposition_entity(entity, Origin::new(x, y));
@@ -966,8 +966,8 @@ pub(super) fn apply_window_defaults(
             // Skip grid_ratios during init: we don't know this window's display.
             if !initializing && let Some((rx, ry, rw, rh)) = properties.grid_ratios() {
                 let bounds = active_display.actual_bounds(&config);
-                let x = (f64::from(bounds.width()) * rx) as i32;
-                let y = (f64::from(bounds.height()) * ry) as i32;
+                let x = bounds.min.x + (f64::from(bounds.width()) * rx) as i32;
+                let y = bounds.min.y + (f64::from(bounds.height()) * ry) as i32;
                 let w = (f64::from(bounds.width()) * rw) as i32;
                 let h = (f64::from(bounds.height()) * rh) as i32;
                 window.reposition(Origin::new(x, y));

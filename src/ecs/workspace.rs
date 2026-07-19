@@ -545,10 +545,15 @@ fn refresh_workspace_window_sizes(
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn cleanup_active_workspace_marker(
     trigger: On<Add, ActiveWorkspaceMarker>,
-    workspaces: Query<(Entity, Has<ActiveWorkspaceMarker>), With<LayoutStrip>>,
+    workspaces: Query<(Entity, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     mut commands: Commands,
 ) {
-    workspaces.iter().for_each(|(entity, marker)| {
+    let Ok((_, activated_strip, _)) = workspaces.get(trigger.entity) else {
+        return;
+    };
+    let activated_workspace_id = activated_strip.id();
+
+    workspaces.iter().for_each(|(entity, strip, marker)| {
         if entity == trigger.entity
             && let Ok(mut entity_commands) = commands.get_entity(entity)
         {
@@ -558,6 +563,11 @@ fn cleanup_active_workspace_marker(
         } else if marker && let Ok(mut entity_commands) = commands.get_entity(entity) {
             // Remove the active marker from any other workspace.
             entity_commands.try_remove::<ActiveWorkspaceMarker>();
+            if strip.id() != activated_workspace_id {
+                entity_commands
+                    .try_remove::<Scrolling>()
+                    .try_remove::<RepositionMarker>();
+            }
         }
     });
 }
@@ -1171,5 +1181,44 @@ fn reap_empty_virtual_workspaces(
                 entity_commands.try_despawn();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod transient_motion_tests {
+    use bevy::prelude::*;
+
+    use super::{LayoutStrip, cleanup_active_workspace_marker};
+    use crate::ecs::{ActiveWorkspaceMarker, RepositionMarker, Scrolling, SelectedVirtualMarker};
+    use crate::manager::Origin;
+
+    #[test]
+    fn activating_native_workspace_clears_old_transient_motion() {
+        let mut app = App::new();
+        app.add_observer(cleanup_active_workspace_marker);
+        let old = app
+            .world_mut()
+            .spawn((
+                LayoutStrip::new(1, 0),
+                ActiveWorkspaceMarker,
+                Scrolling {
+                    gesture_active: true,
+                    is_user_swiping: true,
+                    ..Default::default()
+                },
+                RepositionMarker(Origin::new(100, 0)),
+            ))
+            .id();
+        let new = app.world_mut().spawn(LayoutStrip::new(2, 0)).id();
+
+        app.world_mut()
+            .entity_mut(new)
+            .insert(ActiveWorkspaceMarker);
+
+        let old = app.world().entity(old);
+        assert!(!old.contains::<ActiveWorkspaceMarker>());
+        assert!(old.contains::<SelectedVirtualMarker>());
+        assert!(!old.contains::<Scrolling>());
+        assert!(!old.contains::<RepositionMarker>());
     }
 }

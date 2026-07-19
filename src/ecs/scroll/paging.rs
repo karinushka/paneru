@@ -17,36 +17,17 @@ pub(super) fn capture_gesture(
     current_position: f64,
     viewport: &IRect,
     columns: impl IntoIterator<Item = (i32, i32)>,
-    preferred_column: Option<(i32, i32)>,
 ) -> Option<PagingGesture> {
-    let columns = columns.into_iter().collect::<Vec<_>>();
-    let (lower_bound, upper_bound) = content_bounds(viewport, &columns)?;
-    let stops = snap_stops(viewport, columns.iter().copied());
-    let preferred_stop = preferred_column
-        .into_iter()
-        .flat_map(|column| column_stops(viewport, column, lower_bound, upper_bound))
-        .min_by(|left, right| {
-            (current_position - *left)
+    let stops = snap_stops(viewport, columns);
+    let start_index = stops
+        .iter()
+        .enumerate()
+        .min_by(|(_, left), (_, right)| {
+            (current_position - **left)
                 .abs()
-                .total_cmp(&(current_position - *right).abs())
-        });
-    let start_index = preferred_stop
-        .and_then(|preferred| {
-            stops
-                .iter()
-                .position(|stop| (*stop - preferred).abs() <= f64::EPSILON)
-        })
-        .or_else(|| {
-            stops
-                .iter()
-                .enumerate()
-                .min_by(|(_, left), (_, right)| {
-                    (current_position - **left)
-                        .abs()
-                        .total_cmp(&(current_position - **right).abs())
-                })
-                .map(|(index, _)| index)
-        })?;
+                .total_cmp(&(current_position - **right).abs())
+        })?
+        .0;
 
     let start_stop = stops[start_index];
     let (previous_stop, next_stop) =
@@ -56,31 +37,21 @@ pub(super) fn capture_gesture(
                 stops.get(start_index + 1).copied(),
             )
         } else {
-            // Motion bounds must come from the real gesture origin. If the
-            // strip starts between stops, deriving both neighbors from the
-            // selected snap target marks one edge as already consumed and lets
-            // a gesture skip it. A pointer-selected window remains the first
-            // boundary in its direction even when another global stop lies
-            // between the current offset and that window's anchor.
+            // The release target is still the nearest stop, but motion bounds
+            // must be derived from the real gesture origin. If the strip starts
+            // between two stops, deriving both neighbors from the nearest stop
+            // marks that edge as already consumed and lets one direction skip it.
             (
-                (start_stop > current_position)
-                    .then_some(start_stop)
-                    .or_else(|| {
-                        stops
-                            .iter()
-                            .copied()
-                            .filter(|stop| *stop > current_position)
-                            .min_by(f64::total_cmp)
-                    }),
-                (start_stop < current_position)
-                    .then_some(start_stop)
-                    .or_else(|| {
-                        stops
-                            .iter()
-                            .copied()
-                            .filter(|stop| *stop < current_position)
-                            .max_by(f64::total_cmp)
-                    }),
+                stops
+                    .iter()
+                    .copied()
+                    .filter(|stop| *stop > current_position)
+                    .min_by(f64::total_cmp),
+                stops
+                    .iter()
+                    .copied()
+                    .filter(|stop| *stop < current_position)
+                    .max_by(f64::total_cmp),
             )
         };
 
@@ -260,12 +231,12 @@ mod tests {
     fn neighborhood_is_ordered_and_reverse_symmetric() {
         let viewport = IRect::new(0, 0, 1000, 800);
         let columns = [(0, 600), (600, 1500), (2100, 600)];
-        let left = capture_gesture(-600.0, &viewport, columns, None).unwrap();
+        let left = capture_gesture(-600.0, &viewport, columns).unwrap();
         assert_eq!(
             (left.previous_stop, left.next_stop),
             (Some(0.0), Some(-1100.0))
         );
-        let right = capture_gesture(-1100.0, &viewport, columns, None).unwrap();
+        let right = capture_gesture(-1100.0, &viewport, columns).unwrap();
         assert_eq!(
             (right.previous_stop, right.next_stop),
             (Some(-600.0), Some(-1700.0))
@@ -273,27 +244,20 @@ mod tests {
     }
 
     #[test]
-    fn window_under_pointer_selects_the_paging_neighborhood() {
-        let viewport = IRect::new(0, 0, 1000, 800);
-        let columns = [(0, 600), (600, 600), (1200, 600)];
+    fn semi_offscreen_window_cannot_skip_adjacent_stop_on_wide_viewport() {
+        let viewport = IRect::new(0, 0, 1800, 1000);
+        let columns = [(0, 1200), (1200, 1200), (2400, 1200)];
 
-        let gesture = capture_gesture(-300.0, &viewport, columns, Some((600, 600))).unwrap();
+        let paging = capture_gesture(-900.0, &viewport, columns).unwrap();
 
-        assert_eq!(gesture.start_stop, -600.0);
-        assert_eq!(gesture.previous_stop, Some(0.0));
-        assert_eq!(gesture.next_stop, Some(-600.0));
-
-        let last_window = capture_gesture(-300.0, &viewport, columns, Some((1200, 600))).unwrap();
-        assert_eq!(last_window.start_stop, -800.0);
-        assert_eq!(last_window.previous_stop, Some(0.0));
-        assert_eq!(last_window.next_stop, Some(-800.0));
+        assert_eq!(paging.next_stop, Some(-1200.0));
     }
 
     #[test]
     fn unsnapped_origin_cannot_skip_the_first_stop_in_either_direction() {
         let viewport = IRect::new(0, 0, 1000, 800);
         let columns = [(0, 600), (600, 1500), (2100, 600)];
-        let paging = capture_gesture(-700.0, &viewport, columns, None).unwrap();
+        let paging = capture_gesture(-700.0, &viewport, columns).unwrap();
         assert_eq!(paging.start_stop, -600.0);
         assert_eq!(paging.previous_stop, Some(-600.0));
         assert_eq!(paging.next_stop, Some(-1100.0));

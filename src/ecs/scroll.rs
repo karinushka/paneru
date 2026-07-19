@@ -20,7 +20,7 @@ use crate::ecs::{
 };
 use crate::errors::Result;
 use crate::events::Event;
-use crate::manager::{Window, WindowManager, origin_from};
+use crate::manager::{Window, WindowManager};
 use crate::platform::Modifiers;
 
 mod paging;
@@ -91,7 +91,6 @@ fn swipe_gesture(
     windows: Windows,
     time: Res<Time>,
     config: Res<Config>,
-    window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
     let swipe_sensitivity = config.swipe_sensitivity();
@@ -115,7 +114,6 @@ fn swipe_gesture(
     let touchpad_momentum_start = lifecycle & TOUCHPAD_MOMENTUM_START != 0;
     let touchpad_up = lifecycle & TOUCHPAD_UP != 0;
     let has_gesture_event = gesture_delta.is_some();
-    let has_native_scroll_event = scroll_delta.is_some();
     let has_scroll_event = scroll_delta.is_some() || has_gesture_event;
     let scroll_delta = scroll_delta.unwrap_or_default();
     let gesture_delta = gesture_delta.unwrap_or_default();
@@ -148,8 +146,6 @@ fn swipe_gesture(
                 scrolling.as_deref(),
                 &windows,
                 &viewport,
-                &window_manager,
-                has_native_scroll_event,
             )
         })
         .flatten();
@@ -308,48 +304,17 @@ fn current_paging_gesture(
     scrolling: Option<&Scrolling>,
     windows: &Windows<'_, '_>,
     viewport: &IRect,
-    window_manager: &WindowManager,
-    prefer_pointer_window: bool,
 ) -> Option<PagingGesture> {
     let get_window_frame = |entity| windows.moving_frame(entity);
-    let columns = layout_strip
-        .columns()
-        .filter_map(|column| {
-            let entity = column.top()?;
-            Some((
-                entity,
-                windows.layout_position(entity)?.0.x,
-                column.width(&get_window_frame)?,
-            ))
-        })
-        .collect::<Vec<_>>();
-    let preferred_column = prefer_pointer_window
-        .then(|| window_manager.cursor_position())
-        .flatten()
-        .and_then(|point| {
-            let cursor = origin_from(point);
-            let window_id = window_manager.find_window_at_point(&point).ok()?;
-            let (_, entity) = windows.find_managed(window_id)?;
-            windows
-                .moving_frame(entity)
-                .is_some_and(|frame| frame.contains(cursor))
-                .then_some(entity)
-        })
-        .and_then(|entity| {
-            columns
-                .iter()
-                .find(|(candidate, _, _)| *candidate == entity)
-                .map(|(_, position, width)| (*position, *width))
-        });
+    let columns = layout_strip.columns().filter_map(|column| {
+        let entity = column.top()?;
+        Some((
+            windows.layout_position(entity)?.0.x,
+            column.width(&get_window_frame)?,
+        ))
+    });
     let current_position = scrolling.map_or(f64::from(position.x), |scrolling| scrolling.position);
-    capture_paging_gesture(
-        current_position,
-        viewport,
-        columns
-            .into_iter()
-            .map(|(_, column_position, column_width)| (column_position, column_width)),
-        preferred_column,
-    )
+    capture_paging_gesture(current_position, viewport, columns)
 }
 
 fn begin_touchpad_gesture(

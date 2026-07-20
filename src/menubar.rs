@@ -1,6 +1,6 @@
 use bevy::ecs::entity::Entity;
-use bevy::ecs::query::{Has, With};
-use bevy::ecs::system::{NonSendMut, Query, Res};
+use bevy::ecs::query::{Added, Has, With};
+use bevy::ecs::system::{NonSendMut, Populated, Query, Res};
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
@@ -14,12 +14,10 @@ use tracing::warn;
 use crate::accessibility_prompt::{AccessibilitySetupAction, show_accessibility_setup};
 use crate::commands::{Command, Operation};
 use crate::config::Config;
-use crate::ecs::layout::LayoutStrip;
-use crate::ecs::{
-    ActiveDisplayMarker, ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker, Unmanaged,
-};
+use crate::ecs::params::ActiveDisplay;
+use crate::ecs::{Bounds, FocusedMarker, Unmanaged};
 use crate::events::{Event, EventSender};
-use crate::manager::{Display, request_ax_privilege};
+use crate::manager::request_ax_privilege;
 
 #[derive(Debug, Clone)]
 struct MenuActionTargetIvars {
@@ -302,8 +300,8 @@ impl Drop for MenuBarManager {
 
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 pub fn update_menu_bar(
-    active_workspace: Query<(Entity, &LayoutStrip), With<ActiveWorkspaceMarker>>,
-    active_display: Query<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
+    _guard: Populated<Entity, Added<FocusedMarker>>,
+    active_display: ActiveDisplay,
     focused: Query<(&Bounds, Has<Unmanaged>), With<FocusedMarker>>,
     config: Res<Config>,
     menu_bar: Option<NonSendMut<MenuBarManager>>,
@@ -311,19 +309,13 @@ pub fn update_menu_bar(
     let Some(mut menu_bar) = menu_bar else {
         return;
     };
-    let Some((_, strip)) = active_workspace.iter().next() else {
-        return;
-    };
+    let strip = active_display.active_strip();
+    let viewport = active_display.actual_bounds(&config);
 
     let focused_window = focused.iter().next();
-    let focused_width_ratio = active_display.iter().next().zip(focused_window).and_then(
-        |((display, dock), (bounds, unmanaged))| {
-            (!unmanaged).then(|| {
-                f64::from(bounds.0.x)
-                    / f64::from(display.actual_display_bounds(dock, &config).width())
-            })
-        },
-    );
+    let focused_width_ratio = focused_window.and_then(|(bounds, unmanaged)| {
+        (!unmanaged).then(|| f64::from(bounds.0.x) / f64::from(viewport.width()))
+    });
 
     menu_bar.update(
         strip.virtual_index,

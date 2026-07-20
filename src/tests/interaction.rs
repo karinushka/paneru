@@ -1471,6 +1471,7 @@ fn test_reshuffle_leftmost_pins_strip_to_left_edge_with_stale_frame() {
         MainOptions {
             auto_center: Some(false),
             animation_speed: Some(30.0),
+            continuous_swipe: Some(false),
             ..Default::default()
         },
         vec![],
@@ -1668,11 +1669,11 @@ fn test_virtual_workspace_switch_hides_old_strip_with_animations() {
 }
 
 /// Stacking or unstacking the focused window must bring it fully back into
-/// view. Regression: stack_windows_handler mutated the strip but never
+/// view. Regression: `stack_windows_handler` mutated the strip but never
 /// reshuffled, so when the strip was scrolled such that the focused window's
 /// new column slot fell off-screen, the window stayed partially or fully
 /// invisible even though it kept focus. It now reshuffles around the focused
-/// window; the edge-clamp in reshuffle_layout_strip keeps the strip pinned to
+/// window; the edge-clamp in `reshuffle_layout_strip` keeps the strip pinned to
 /// the edges.
 #[test]
 fn test_stack_unstack_brings_focused_window_into_view() {

@@ -1053,6 +1053,7 @@ fn reshuffle_layout_strip(
         // window must touch the left edge and the rightmost the right edge
         // if more than 1 windows in workspace.
         if !config.auto_center()
+            && !config.continuous_swipe()
             && let Some(total_strip_width) = strip
                 .last()
                 .ok()

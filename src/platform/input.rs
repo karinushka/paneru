@@ -24,6 +24,8 @@ use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
 use crate::platform::Modifiers;
 
+const NX_DEVICEFNKEYMASK: u64 = 0x0080_0100;
+
 /// The currently active set of passthrough keybindings, shared lock-free with
 /// the `CGEvent` tap callback thread via `ArcSwap`.
 static FOCUSED_PASSTHROUGH: LazyLock<ArcSwap<Vec<(u8, Modifiers)>>> =
@@ -457,7 +459,7 @@ impl InputHandler {
 }
 
 fn get_modifiers(eventflags: CGEventFlags) -> Modifiers {
-    const MODIFIER_MASKS: [(Modifiers, u64); 9] = [
+    const MODIFIER_MASKS: [(Modifiers, u64); 8] = [
         (Modifiers::LALT, 0x0000_0020),
         (Modifiers::RALT, 0x0000_0040),
         (Modifiers::LSHIFT, 0x0000_0002),
@@ -466,15 +468,24 @@ fn get_modifiers(eventflags: CGEventFlags) -> Modifiers {
         (Modifiers::RCMD, 0x0000_0010),
         (Modifiers::LCTRL, 0x0000_0001),
         (Modifiers::RCTRL, 0x0000_2000),
-        (Modifiers::FN, 0x0080_0000),
     ];
-    let mut mask = Modifiers::empty();
-    for (modifier, m) in MODIFIER_MASKS {
-        if eventflags.0 & m != 0 {
-            mask |= modifier;
-        }
+
+    // Fn key should be checked for separately, because pressing
+    // some keys (i.e. leftarrow) seems to inadvertently toggling it.
+    if eventflags.0 == NX_DEVICEFNKEYMASK {
+        tracing::debug!("event flags {:#x}", eventflags.0);
+        return Modifiers::FN;
     }
-    mask
+
+    MODIFIER_MASKS
+        .iter()
+        .fold(Modifiers::empty(), |modifiers, (modifier, mask)| {
+            if eventflags.0 & mask != 0 {
+                modifiers | *modifier
+            } else {
+                modifiers
+            }
+        })
 }
 
 #[cfg(test)]
@@ -489,7 +500,6 @@ mod tests {
     const NX_DEVICERCMDKEYMASK: u64 = 0x0000_0010;
     const NX_DEVICELCTLKEYMASK: u64 = 0x0000_0001;
     const NX_DEVICERCTLKEYMASK: u64 = 0x0000_2000;
-    const NX_DEVICEFNKEYMASK: u64 = 0x0080_0000;
 
     #[test]
     fn no_modifiers() {
@@ -501,15 +511,6 @@ mod tests {
         assert_eq!(
             get_modifiers(CGEventFlags(NX_DEVICEFNKEYMASK)),
             Modifiers::FN
-        );
-    }
-
-    #[test]
-    fn fn_with_other_modifiers() {
-        let flags = NX_DEVICEFNKEYMASK | NX_DEVICELCMDKEYMASK | NX_DEVICELALTKEYMASK;
-        assert_eq!(
-            get_modifiers(CGEventFlags(flags)),
-            Modifiers::FN | Modifiers::LCMD | Modifiers::LALT
         );
     }
 
@@ -586,6 +587,9 @@ mod tests {
     #[test]
     fn secondary_fn_flag_is_not_ignored() {
         // Ensure we don't accidentally filter out the fn mask as "device independent"
-        assert_eq!(get_modifiers(CGEventFlags(0x0080_0000)), Modifiers::FN);
+        assert_eq!(
+            get_modifiers(CGEventFlags(NX_DEVICEFNKEYMASK)),
+            Modifiers::FN
+        );
     }
 }

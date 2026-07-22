@@ -114,12 +114,21 @@ opacity_night = -0.25
 ## 5. Keybindings (`[bindings]`)
 
 Bindings map a key combination to an action. A binding can be a single string or an array of strings.
-Format: `"[modifiers-]key"`. Available modifiers are:
+
+Format: `"[modifiers-]key"`. For example `alt + cmd - j` and `cmd - j`.
+
+Available modifiers are:
 - `alt`, `lalt`, `ralt`
 - `ctrl`, `lctrl`, `rctrl`
 - `cmd`, `lcmd`, `rcmd`
 - `shift`, `lshift`, `rshift`
 - `fn`
+
+For a full list of parseable keys (i.e. `leftarrow`) check the source:
+https://github.com/karinushka/paneru/blob/3790b01f8d65df5d9000142db7cf25f9270dcccc/src/config.rs#L1466-L1601
+
+
+### Window commands
 
 | Action | Description |
 | :--- | :--- |

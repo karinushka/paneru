@@ -945,6 +945,7 @@ fn to_next_display(
         (With<SelectedVirtualMarker>, Without<ActiveWorkspaceMarker>),
     >,
     window_manager: Res<WindowManager>,
+    config: Res<Config>,
     mut commands: Commands,
 ) {
     let Some(Operation::ToNextDisplay(move_focus)) =
@@ -966,6 +967,13 @@ fn to_next_display(
         return;
     }
 
+    // Width relative to the source display's usable viewport (dock- and
+    // padding-adjusted). Captured before `other()` mutably borrows
+    // `active_display`. This matches how `resize_window` computes the ratio
+    // against `actual_bounds`, so a fixed (non-auto-hiding) dock is accounted
+    // for on both the source and target displays.
+    let source_viewport_width = active_display.actual_bounds(&config).width();
+
     let Some(other) = active_display.other().next() else {
         debug!("no other display to move window to.");
         return;
@@ -983,9 +991,8 @@ fn to_next_display(
     let Some(size) = windows.size(entity) else {
         return;
     };
-    // Capture the window's width ratio (width relative to the source display's
-    // width) before the move so it can be preserved on the target display.
-    let width_ratio = windows.width_ratio(entity);
+    let width_ratio =
+        (source_viewport_width > 0).then(|| f64::from(size.x) / f64::from(source_viewport_width));
     let dest = other.bounds().min.with_x(center - size.x / 2);
     commands.reposition_entity(entity, dest);
 
@@ -1031,9 +1038,11 @@ fn to_next_display(
             let viewport_bounds = display.actual_display_bounds(dock, &config);
             if let Ok(Bounds(bounds)) = windows.get(moved_window) {
                 debug!("Refreshing size of window {entity}");
-                // Preserve the window's width ratio relative to the display width
+                // Preserve the window's width ratio relative to the target
+                // display's usable viewport (dock- and padding-adjusted), so a
+                // fixed dock is accounted for consistently with the source.
                 let width = width_ratio.map_or(bounds.x, |ratio| {
-                    (ratio * f64::from(display.bounds().width())).round() as i32
+                    (ratio * f64::from(viewport_bounds.width())).round() as i32
                 });
                 let size = Size::new(width, viewport_bounds.height());
                 commands.resize_entity(moved_window, size);

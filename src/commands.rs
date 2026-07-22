@@ -983,6 +983,9 @@ fn to_next_display(
     let Some(size) = windows.size(entity) else {
         return;
     };
+    // Capture the window's width ratio (width relative to the source display's
+    // width) before the move so it can be preserved on the target display.
+    let width_ratio = windows.width_ratio(entity);
     let dest = other.bounds().min.with_x(center - size.x / 2);
     commands.reposition_entity(entity, dest);
 
@@ -1015,26 +1018,30 @@ fn to_next_display(
         target_strip.append(entity);
         commands.reshuffle_around(entity);
 
-        // Add a delayed refresh of the window size - because the otehr display can have different bounds.
+        // Add a delayed refresh of the window size - because the other display can have different bounds.
         let display_entity = child.parent();
         let moved_window = entity;
         let refresh_size = move |windows: Query<&Bounds, With<Window>>,
                                  displays: Query<(&Display, Option<&DockPosition>)>,
                                  mut commands: Commands,
                                  config: Res<Config>| {
-            let viewport = displays
-                .get(display_entity)
-                .ok()
-                .map(|(display, dock)| display.actual_display_bounds(dock, &config));
-            if let Some(viewport_bounds) = viewport
-                && let Ok(Bounds(bounds)) = windows.get(moved_window)
-            {
+            let Ok((display, dock)) = displays.get(display_entity) else {
+                return;
+            };
+            let viewport_bounds = display.actual_display_bounds(dock, &config);
+            if let Ok(Bounds(bounds)) = windows.get(moved_window) {
                 debug!("Refreshing size of window {entity}");
-                commands.resize_entity(moved_window, bounds.with_y(viewport_bounds.height()));
+                // Preserve the window's width ratio relative to the display width
+                let width = width_ratio.map_or(bounds.x, |ratio| {
+                    (ratio * f64::from(display.bounds().width())).round() as i32
+                });
+                let size = Size::new(width, viewport_bounds.height());
+                commands.resize_entity(moved_window, size);
+                commands.reshuffle_around(moved_window);
             }
         };
         let system_id = commands.register_system(refresh_size);
-        Timeout::callback(Duration::from_secs(1), system_id, &mut commands);
+        Timeout::callback(Duration::from_millis(150), system_id, &mut commands);
     }
 }
 

@@ -1450,6 +1450,106 @@ fn test_virtual_workspace_switch_stops_in_flight_strip_animation() {
     );
 }
 
+/// A virtual-workspace switch restores the strip to its saved position and
+/// re-focuses the remembered window. macOS acknowledges that focus with a
+/// `WindowFocused` event several ticks later — after the `is_added` guards in
+/// `reshuffle_layout_strip` / `ensure_visible_in_strip` have expired. With
+/// `auto_center` enabled, that acknowledgment used to run
+/// `autocenter_window_on_focus`, re-centering the remembered window and
+/// sliding the strip away from the position it was just restored to — visible
+/// as a "wiggle" on every switch.
+#[test]
+fn test_virtual_workspace_switch_focus_echo_does_not_recenter_strip() {
+    let config: Config = (
+        MainOptions {
+            auto_center: Some(true),
+            virtual_workspace_animations: Some(false),
+            animation_speed: Some(12.0),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    let mut h = TestHarness::new().with_config(config).with_windows(6);
+
+    let settle = |h: &mut TestHarness| {
+        for _ in 0..10 {
+            h.app.update();
+            for e in h.mock_state.drain_events() {
+                h.app.world_mut().write_message::<Event>(e);
+            }
+        }
+    };
+    let pump = |h: &mut TestHarness, c: Command| {
+        h.app
+            .world_mut()
+            .write_message::<Event>(Event::Command { command: c });
+        settle(h);
+    };
+    let strip_x = |h: &mut TestHarness| -> i32 {
+        let world = h.app.world_mut();
+        let mut q = world.query_filtered::<&Position, With<ActiveWorkspaceMarker>>();
+        q.single(world).expect("exactly one active strip").0.x
+    };
+
+    pump(&mut h, Command::PrintState);
+
+    // Seed VW1 with one window so focus genuinely moves across the switch.
+    h.mock_state.focus_window(5);
+    settle(&mut h);
+    pump(
+        &mut h,
+        Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Stay)),
+    );
+
+    // Focus window 0 and let auto-center settle the strip on it.
+    h.mock_state.focus_window(0);
+    settle(&mut h);
+    let centered_x = strip_x(&mut h);
+
+    // Displace the strip so the focused window is off its centered position,
+    // as any scroll would leave it. Written directly instead of swiping: the
+    // swipe pipeline's finger-lift threshold is wall-clock based, which makes
+    // event order load-dependent and the test flaky.
+    let saved_x = centered_x - 250;
+    {
+        let world = h.app.world_mut();
+        let mut q = world.query_filtered::<&mut Position, With<ActiveWorkspaceMarker>>();
+        q.single_mut(world).expect("exactly one active strip").0.x = saved_x;
+    }
+    settle(&mut h);
+    assert_eq!(
+        strip_x(&mut h),
+        saved_x,
+        "test setup: the displaced strip position must stick"
+    );
+
+    // Switch to VW1; deliver the OS focus acknowledgment for its window.
+    pump(&mut h, Command::Window(Operation::VirtualNumber(1)));
+    h.mock_state.focus_window(5);
+    settle(&mut h);
+
+    // Switch back to VW0: the strip must restore to its saved scroll position.
+    pump(&mut h, Command::Window(Operation::VirtualNumber(0)));
+    assert_eq!(
+        strip_x(&mut h),
+        saved_x,
+        "strip must restore to its saved position on switch-back"
+    );
+
+    // The delayed focus acknowledgment for the remembered window must not
+    // re-center the strip away from the restored position.
+    h.mock_state.focus_window(0);
+    settle(&mut h);
+    let final_x = strip_x(&mut h);
+    assert_eq!(
+        final_x, saved_x,
+        "late focus acknowledgment re-centered the strip (wiggle): \
+         restored to {saved_x}, ended at {final_x} (centered would be {centered_x})"
+    );
+}
+
 /// With `auto_center` off, a reshuffle around the leftmost window of a
 /// scrollable strip must pin the strip to the left edge — the leftmost
 /// window's left edge must touch the display's left edge, never leaving empty

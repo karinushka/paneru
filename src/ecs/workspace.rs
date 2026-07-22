@@ -85,6 +85,35 @@ pub(crate) struct PreviousStripPosition {
     pub focus: Option<Entity>,
 }
 
+/// Guard spawned by [`show_active_workspace`] alongside the re-focus of the
+/// remembered window when a strip is restored to its saved position. That
+/// focus lands after the strip was already placed at its saved origin —
+/// `focus_entity` inserts `FocusedMarker` a command-flush later, and the OS
+/// acknowledges with one or more `WindowFocused` events several ticks later
+/// still (the front-switch handler synthesizes an extra one), long after the
+/// `is_added` guards in the layout systems have expired. Each of those would
+/// recenter or reshuffle the strip away from the restored position (visible
+/// as a wiggle on every switch). While the guard is alive,
+/// `autocenter_window_on_focus` and the duplicate-focus reshuffle in
+/// `window_focused_trigger` skip the named entity. The guard lives on its own
+/// entity next to a [`Timeout`]: focus moving to any other window despawns it
+/// immediately, and `timeout_ticker` expires it otherwise — so later genuine
+/// re-focus events reshuffle normally.
+#[derive(Component, Debug)]
+pub(crate) struct RestoreFocusMarker {
+    pub entity: Entity,
+}
+
+/// Long enough for the OS focus acknowledgments to arrive, short enough that
+/// a user re-clicking the restored window soon after the switch gets the
+/// normal expose-reshuffle back.
+const RESTORE_FOCUS_GUARD_TIMEOUT: Duration = Duration::from_secs(2);
+
+fn spawn_restore_focus_guard(entity: Entity, commands: &mut Commands) {
+    let timeout = Timeout::new(RESTORE_FOCUS_GUARD_TIMEOUT, None, commands);
+    commands.spawn((timeout, RestoreFocusMarker { entity }));
+}
+
 fn fullscreen_window_in_strip(
     workspace_id: WorkspaceId,
     strip: &LayoutStrip,
@@ -1047,6 +1076,7 @@ pub(crate) fn show_active_workspace(
             if let Some(entity) = focus
                 && strip.contains(*entity)
             {
+                spawn_restore_focus_guard(*entity, &mut commands);
                 commands.focus_entity(*entity, false);
             }
 
@@ -1065,6 +1095,7 @@ pub(crate) fn show_active_workspace(
         if let Some(entity) = focus
             && strip.contains(*entity)
         {
+            spawn_restore_focus_guard(*entity, &mut commands);
             commands.focus_entity(*entity, false);
         }
     }

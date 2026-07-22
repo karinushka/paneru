@@ -22,6 +22,7 @@ use crate::ecs::focus::FocusHistory;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, GlobalState, Windows};
 use crate::ecs::state::PaneruState;
+use crate::ecs::workspace::RestoreFocusMarker;
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, DockPosition, Initializing, LayoutPosition, Position,
     ResizeMarker, RestoreWindowState, Scrolling, SendMessageTrigger, SpawnCommandsExt,
@@ -180,6 +181,7 @@ pub(super) fn window_focused_trigger(
     applications: Query<&Application>,
     windows: Windows,
     mut workspaces: Query<(Entity, &mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    restore_guards: Query<(Entity, &RestoreFocusMarker)>,
     mut focus_history: ResMut<FocusHistory>,
     config: Res<Config>,
     global_state: GlobalState,
@@ -284,7 +286,26 @@ pub(super) fn window_focused_trigger(
             focus_history.record(workspace_id, entity, unmanaged);
         }
 
+        // The restore guard absorbs the OS acknowledgment(s) of the focus
+        // `show_active_workspace` issued — reshuffling on those would slide
+        // the strip away from the position the restore just placed it at.
+        // The acknowledgment can arrive more than once (front_switched_trigger
+        // synthesizes a duplicate), so a matching event leaves the guard in
+        // place; focus moving to any other window means the restore sequence
+        // is over and despawns it (timeout_ticker expires it otherwise).
+        let mut restored_focus = false;
+        for (guard_entity, guard) in &restore_guards {
+            if guard.entity == entity {
+                restored_focus = true;
+            } else if let Ok(mut entity_commands) = commands.get_entity(guard_entity) {
+                entity_commands.try_despawn();
+            }
+        }
+
         if already_focused {
+            if restored_focus {
+                continue;
+            }
             if !global_state.skip_reshuffle() && !global_state.initializing() {
                 commands.reshuffle_around(entity);
             }

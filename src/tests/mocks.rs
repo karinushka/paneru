@@ -579,7 +579,7 @@ impl MockState {
         wm.expect_find_existing_application_windows()
             .returning(move |app, spaces, _config| {
                 let pid = app.pid();
-                let windows = s
+                let mut windows = s
                     .inner
                     .force_read()
                     .windows
@@ -589,6 +589,7 @@ impl MockState {
                             .then_some(s.create_window(w.id))
                     })
                     .collect::<Vec<_>>();
+                windows.sort_unstable_by_key(|window| window.id());
                 Ok((windows, vec![]))
             });
 

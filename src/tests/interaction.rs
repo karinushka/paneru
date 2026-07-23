@@ -799,6 +799,36 @@ fn toggle_floating_layer_flips_state() {
 }
 
 #[test]
+fn test_unfloat_after_virtual_switch_uses_active_workspace() {
+    let commands = vec![
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::Window(Operation::Manage),
+        },
+        Event::Command {
+            command: Command::Window(Operation::VirtualNumber(1)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Manage),
+        },
+    ];
+
+    TestHarness::new()
+        .with_windows(2)
+        .on_iteration(3, |world, _state| {
+            let entity = find_window_entity(0, world);
+            let mut query = world.query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>();
+            let strip = query.single(world).expect("an active virtual workspace");
+
+            assert_eq!(strip.virtual_index, 1);
+            assert!(strip.contains(entity));
+        })
+        .run(commands);
+}
+
+#[test]
 fn focus_unmanaged_ignores_floats_from_other_workspaces() {
     let workspaces = vec![TEST_WORKSPACE_ID, TEST_WORKSPACE_ID + 1];
     let harness = TestHarness::new()

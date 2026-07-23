@@ -11,14 +11,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
+use tracing::warn;
 
 use super::{Command, Operation};
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::Windows;
 use crate::ecs::state::{PaneruActiveState, PaneruQueryState, PaneruVirtualWorkspaceState};
-use crate::ecs::{ActiveDisplayMarker, ActiveWorkspaceMarker, FocusedMarker};
+use crate::ecs::{
+    ActiveDisplayMarker, ActiveWorkspaceMarker, FocusedMarker, SelectedVirtualMarker, Unmanaged,
+};
 use crate::events::Event;
-use crate::manager::{Application, Display};
+use crate::manager::{Application, Display, WindowManager};
 use crate::platform::WinID;
 
 #[derive(Default, Resource)]
@@ -73,6 +76,7 @@ impl From<&PaneruActiveState> for FocusBroadcastSnapshot {
 #[derive(Clone, Copy, Default)]
 struct StateBroadcastSignals {
     virtual_workspace_changed: bool,
+    windows_changed: bool,
     window_focused: bool,
 }
 
@@ -94,6 +98,7 @@ impl StateBroadcastIntent {
     ) -> Self {
         let mut intent = Self {
             virtual_workspace_changed: signals.virtual_workspace_changed,
+            windows_changed: signals.windows_changed,
             window_focused: signals.window_focused,
             ..Self::default()
         };
@@ -167,20 +172,27 @@ pub(super) fn register_query_commands(app: &mut App) {
 #[allow(clippy::needless_pass_by_value)]
 fn state_query_handler(
     mut messages: MessageReader<Event>,
-    workspaces: Query<(&ChildOf, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    workspaces: Query<(
+        &ChildOf,
+        &LayoutStrip,
+        Has<ActiveWorkspaceMarker>,
+        Has<SelectedVirtualMarker>,
+    )>,
     displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
     windows: Windows,
     apps: Query<&Application>,
+    window_manager: Res<WindowManager>,
 ) {
     for event in messages.read() {
         let Event::StateQuery { kind, respond_to } = event else {
             continue;
         };
 
-        let state = PaneruQueryState::extract(&workspaces, &displays, &windows, &apps);
-        let response = state
-            .to_query_json(*kind)
-            .unwrap_or_else(|err| json!({ "error": err.to_string() }).to_string());
+        let response =
+            PaneruQueryState::extract(&workspaces, &displays, &windows, &apps, &window_manager)
+                .map_err(|err| err.to_string())
+                .and_then(|state| state.to_query_json(*kind).map_err(|err| err.to_string()))
+                .unwrap_or_else(|err| json!({ "error": err }).to_string());
         _ = respond_to.send(response);
     }
 }
@@ -319,12 +331,18 @@ fn state_event_broadcast_handler(
     mut messages: MessageReader<Event>,
     mut subscribers: ResMut<StateSubscribers>,
     mut cache: ResMut<StateBroadcastCache>,
-    workspaces: Query<(&ChildOf, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    workspaces: Query<(
+        &ChildOf,
+        &LayoutStrip,
+        Has<ActiveWorkspaceMarker>,
+        Has<SelectedVirtualMarker>,
+    )>,
     focused_changes: Query<Entity, Added<FocusedMarker>>,
     active_workspace_changes: Query<Entity, Added<ActiveWorkspaceMarker>>,
     displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
     windows: Windows,
     apps: Query<&Application>,
+    window_manager: Res<WindowManager>,
 ) {
     let events = messages.read().collect::<Vec<_>>();
 
@@ -334,6 +352,15 @@ fn state_event_broadcast_handler(
 
     let signals = StateBroadcastSignals {
         virtual_workspace_changed: !active_workspace_changes.is_empty(),
+        windows_changed: events.iter().any(|event| {
+            let Event::WindowMoved { window_id } = event else {
+                return false;
+            };
+            windows
+                .find(*window_id)
+                .and_then(|(_, entity)| windows.get_managed(entity))
+                .is_some_and(|(_, _, unmanaged)| matches!(unmanaged, Some(Unmanaged::Floating)))
+        }),
         window_focused: !focused_changes.is_empty(),
     };
     let intent = StateBroadcastIntent::from_events(events, signals);
@@ -341,9 +368,17 @@ fn state_event_broadcast_handler(
         return;
     }
 
-    let state = intent
-        .requires_state()
-        .then(|| PaneruQueryState::extract(&workspaces, &displays, &windows, &apps));
+    let state = if intent.requires_state() {
+        match PaneruQueryState::extract(&workspaces, &displays, &windows, &apps, &window_manager) {
+            Ok(state) => Some(state),
+            Err(err) => {
+                warn!("extracting query state for broadcast: {err}");
+                return;
+            }
+        }
+    } else {
+        None
+    };
     let outgoing = collect_state_broadcast_events_for_intent(
         &intent,
         state.as_ref(),
@@ -463,35 +498,26 @@ mod tests {
     }
 
     #[test]
-    fn test_state_broadcast_coalesces_windows_changed_and_skips_unchanged_state() {
+    fn test_state_broadcasts_floating_window_moves_and_skips_unchanged_state() {
         let state =
             query_state_with_active_window(26_261, "com.cmuxterm.app", "term", 2, vec![26_261]);
         let mut cache = StateBroadcastCache::default();
-        let events = [
-            PaneruEvent::WindowMinimized { window_id: 26_261 },
-            PaneruEvent::WindowDeminimized { window_id: 26_261 },
-        ];
+        let events = [PaneruEvent::WindowMoved { window_id: 26_261 }];
+        let signals = StateBroadcastSignals {
+            windows_changed: true,
+            ..StateBroadcastSignals::default()
+        };
 
-        let outgoing = collect_state_broadcast_events(
-            events.iter(),
-            &state,
-            &mut cache,
-            |_| None,
-            StateBroadcastSignals::default(),
-        );
+        let outgoing =
+            collect_state_broadcast_events(events.iter(), &state, &mut cache, |_| None, signals);
 
         assert_eq!(outgoing.len(), 1);
         assert_eq!(outgoing[0]["event"], "windows_changed");
         assert_eq!(outgoing[0]["virtual_workspace_number"], 2);
         assert_eq!(outgoing[0]["active"]["focused_window_id"], 26_261);
 
-        let duplicate = collect_state_broadcast_events(
-            events.iter(),
-            &state,
-            &mut cache,
-            |_| None,
-            StateBroadcastSignals::default(),
-        );
+        let duplicate =
+            collect_state_broadcast_events(events.iter(), &state, &mut cache, |_| None, signals);
 
         assert!(duplicate.is_empty());
 
@@ -507,7 +533,7 @@ mod tests {
             &changed_state,
             &mut cache,
             |_| None,
-            StateBroadcastSignals::default(),
+            signals,
         );
 
         assert_eq!(changed.len(), 1);
@@ -553,6 +579,7 @@ mod tests {
         let unrelated = StateBroadcastIntent::from_events(
             [
                 PaneruEvent::ThemeChanged,
+                PaneruEvent::WindowMoved { window_id: 10 },
                 PaneruEvent::MouseUp {
                     point: objc2_core_foundation::CGPoint::default(),
                     modifiers: crate::platform::Modifiers::empty(),

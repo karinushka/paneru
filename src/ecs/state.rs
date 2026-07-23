@@ -17,9 +17,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::ecs::layout::{Column, LayoutStrip, StackItem};
 use crate::ecs::params::Windows;
-use crate::ecs::{ActiveDisplayMarker, ActiveWorkspaceMarker};
-use crate::manager::Application;
-use crate::manager::Display;
+use crate::ecs::{ActiveDisplayMarker, ActiveWorkspaceMarker, SelectedVirtualMarker, Unmanaged};
+use crate::manager::{Application, Display, WindowManager};
 use crate::platform::{Pid, ProcessSerialNumber, WinID, WorkspaceId};
 
 pub const STATE_FILE_NAME: &str = "state.json";
@@ -423,20 +422,27 @@ struct SavedWorkspaceBuilder {
 }
 
 impl PaneruQueryState {
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::too_many_lines, clippy::type_complexity)]
     pub fn extract(
-        workspaces: &Query<(&ChildOf, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+        workspaces: &Query<(
+            &ChildOf,
+            &LayoutStrip,
+            Has<ActiveWorkspaceMarker>,
+            Has<SelectedVirtualMarker>,
+        )>,
         displays: &Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
         windows: &Windows,
         apps: &Query<&Application>,
-    ) -> Self {
-        let focused = windows.focused();
-        let focused_entity = focused.map(|(_, entity)| entity);
+        window_manager: &WindowManager,
+    ) -> crate::errors::Result<Self> {
+        let focused_entity = windows.focused().map(|(_, entity)| entity);
 
         let active_display = displays
             .iter()
-            .find(|(_, _, active)| *active)
-            .map(|(display, entity, _)| (display.id(), entity));
+            .find_map(|(display, entity, active)| active.then_some((display.id(), entity)));
+        let active_workspace_id = workspaces
+            .iter()
+            .find_map(|(_, strip, active, _)| active.then_some(strip.id()));
 
         let mut virtual_workspaces = Vec::new();
         let mut workspace_max_numbers: HashMap<WorkspaceId, u32> = HashMap::new();
@@ -445,12 +451,27 @@ impl PaneruQueryState {
             ..PaneruActiveState::default()
         };
 
-        for (child, strip, active_workspace) in workspaces {
+        for (child, strip, active_workspace, selected_workspace) in workspaces {
+            let floating = if active_workspace
+                || selected_workspace && active_workspace_id != Some(strip.id())
+            {
+                window_manager.windows_in_workspace(strip.id())?
+            } else {
+                Vec::new()
+            }
+            .into_iter()
+            .filter_map(|window_id| {
+                let (_, entity) = windows.find(window_id)?;
+                let (_, _, unmanaged) = windows.get_managed(entity)?;
+                (matches!(unmanaged, Some(Unmanaged::Floating)) && !strip.contains(entity))
+                    .then_some(entity)
+            });
             let row_windows = strip
                 .all_windows()
-                .iter()
+                .into_iter()
+                .chain(floating)
                 .filter_map(|entity| {
-                    let (window, _, unmanaged) = windows.get_managed(*entity)?;
+                    let (window, _, unmanaged) = windows.get_managed(entity)?;
                     let (_, _, app_entity) = windows.find_parent(window.id())?;
                     let app = apps.get(app_entity).ok()?;
                     let bundle_id = app.bundle_id().unwrap_or_default().clone();
@@ -461,8 +482,8 @@ impl PaneruQueryState {
                         bundle_id,
                         app_name,
                         title,
-                        focused: focused_entity == Some(*entity),
-                        floating: unmanaged.is_some(),
+                        focused: focused_entity == Some(entity),
+                        floating: matches!(unmanaged, Some(Unmanaged::Floating)),
                     })
                 })
                 .collect::<Vec<_>>();
@@ -521,12 +542,12 @@ impl PaneruQueryState {
         virtual_workspaces
             .sort_by_key(|workspace| (workspace.native_workspace_id, workspace.number));
 
-        Self {
+        Ok(Self {
             version: 1,
             timestamp: now_timestamp(),
             active,
             virtual_workspaces,
-        }
+        })
     }
 
     pub fn to_query_json(&self, kind: StateQueryKind) -> serde_json::Result<String> {

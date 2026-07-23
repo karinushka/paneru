@@ -110,6 +110,7 @@ impl StateBroadcastIntent {
                 | Event::WindowDestroyed { .. }
                 | Event::WindowMinimized { .. }
                 | Event::WindowDeminimized { .. }
+                | Event::WindowMoved { .. }
                 | Event::Command {
                     command:
                         Command::Window(
@@ -478,14 +479,11 @@ mod tests {
     }
 
     #[test]
-    fn test_state_broadcast_coalesces_windows_changed_and_skips_unchanged_state() {
+    fn test_state_broadcasts_window_moves_and_skips_unchanged_state() {
         let state =
             query_state_with_active_window(26_261, "com.cmuxterm.app", "term", 2, vec![26_261]);
         let mut cache = StateBroadcastCache::default();
-        let events = [
-            PaneruEvent::WindowMinimized { window_id: 26_261 },
-            PaneruEvent::WindowDeminimized { window_id: 26_261 },
-        ];
+        let events = [PaneruEvent::WindowMoved { window_id: 26_261 }];
 
         let outgoing = collect_state_broadcast_events(
             events.iter(),

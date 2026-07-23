@@ -422,7 +422,7 @@ struct SavedWorkspaceBuilder {
 }
 
 impl PaneruQueryState {
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::too_many_lines, clippy::type_complexity)]
     pub fn extract(
         workspaces: &Query<(
             &ChildOf,
@@ -434,12 +434,15 @@ impl PaneruQueryState {
         windows: &Windows,
         apps: &Query<&Application>,
         window_manager: &WindowManager,
-    ) -> Self {
+    ) -> crate::errors::Result<Self> {
         let focused_entity = windows.focused().map(|(_, entity)| entity);
 
         let active_display = displays
             .iter()
             .find_map(|(display, entity, active)| active.then_some((display.id(), entity)));
+        let active_workspace_id = workspaces
+            .iter()
+            .find_map(|(_, strip, active, _)| active.then_some(strip.id()));
 
         let mut virtual_workspaces = Vec::new();
         let mut workspace_max_numbers: HashMap<WorkspaceId, u32> = HashMap::new();
@@ -449,20 +452,20 @@ impl PaneruQueryState {
         };
 
         for (child, strip, active_workspace, selected_workspace) in workspaces {
-            let floating = (active_workspace || selected_workspace)
-                .then(|| {
-                    window_manager
-                        .windows_in_workspace(strip.id())
-                        .unwrap_or_default()
-                })
-                .into_iter()
-                .flatten()
-                .filter_map(|window_id| {
-                    let (_, entity) = windows.find(window_id)?;
-                    let (_, _, unmanaged) = windows.get_managed(entity)?;
-                    (matches!(unmanaged, Some(Unmanaged::Floating)) && !strip.contains(entity))
-                        .then_some(entity)
-                });
+            let floating = if active_workspace
+                || selected_workspace && active_workspace_id != Some(strip.id())
+            {
+                window_manager.windows_in_workspace(strip.id())?
+            } else {
+                Vec::new()
+            }
+            .into_iter()
+            .filter_map(|window_id| {
+                let (_, entity) = windows.find(window_id)?;
+                let (_, _, unmanaged) = windows.get_managed(entity)?;
+                (matches!(unmanaged, Some(Unmanaged::Floating)) && !strip.contains(entity))
+                    .then_some(entity)
+            });
             let row_windows = strip
                 .all_windows()
                 .into_iter()
@@ -539,12 +542,12 @@ impl PaneruQueryState {
         virtual_workspaces
             .sort_by_key(|workspace| (workspace.native_workspace_id, workspace.number));
 
-        Self {
+        Ok(Self {
             version: 1,
             timestamp: now_timestamp(),
             active,
             virtual_workspaces,
-        }
+        })
     }
 
     pub fn to_query_json(&self, kind: StateQueryKind) -> serde_json::Result<String> {

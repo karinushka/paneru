@@ -51,7 +51,7 @@ type QueryStateExtractionState<'w, 's> = SystemState<(
     Res<'w, WindowManager>,
 )>;
 
-fn extract_query_state(world: &mut World) -> PaneruQueryState {
+fn extract_query_state(world: &mut World) -> crate::errors::Result<PaneruQueryState> {
     let mut system_state: QueryStateExtractionState<'_, '_> = SystemState::new(world);
     let (workspaces, displays, windows, apps, window_manager) = system_state.get(world);
     PaneruQueryState::extract(&workspaces, &displays, &windows, &apps, &window_manager)
@@ -545,7 +545,7 @@ fn test_query_state_contract_exposes_active_virtual_workspace_and_windows() {
         ChildOf(display_entity),
     ));
 
-    let state = extract_query_state(world);
+    let state = extract_query_state(world).expect("query state extraction");
 
     assert_eq!(state.version, 1);
     assert_eq!(state.active.virtual_workspace_number, Some(1));
@@ -584,12 +584,81 @@ fn test_query_state_includes_floating_windows() {
     });
     harness.app.update();
 
-    let state = extract_query_state(harness.world());
+    let state = extract_query_state(harness.world()).expect("query state extraction");
 
     assert_eq!(state.active.focused_window_id, Some(0));
     assert_eq!(state.virtual_workspaces[0].windows.len(), 1);
     assert!(state.virtual_workspaces[0].windows[0].focused);
     assert!(state.virtual_workspaces[0].windows[0].floating);
+}
+
+#[test]
+fn test_query_state_assigns_float_only_to_active_row() {
+    use crate::commands::{Command, Operation};
+    use crate::tests::harness::TestHarness;
+
+    let mut harness = TestHarness::new().with_windows(1);
+    harness.app.update();
+    harness.app.world_mut().write_message(Event::Command {
+        command: Command::Window(Operation::Manage),
+    });
+    harness.app.update();
+
+    let world = harness.world();
+    let display_entity = world
+        .query_filtered::<Entity, With<ActiveDisplayMarker>>()
+        .single(world)
+        .expect("active display");
+    let active_strip_entity = world
+        .query_filtered::<Entity, With<ActiveWorkspaceMarker>>()
+        .single(world)
+        .expect("active workspace");
+    world
+        .entity_mut(active_strip_entity)
+        .remove::<SelectedVirtualMarker>();
+    world.spawn((
+        LayoutStrip::new(TEST_WORKSPACE_ID, 1),
+        ChildOf(display_entity),
+        SelectedVirtualMarker,
+    ));
+
+    let state = extract_query_state(world).expect("query state extraction");
+    let occurrences = state
+        .virtual_workspaces
+        .iter()
+        .flat_map(|workspace| &workspace.windows)
+        .filter(|window| window.window_id == 0)
+        .count();
+    let active = state
+        .virtual_workspaces
+        .iter()
+        .find(|workspace| workspace.active)
+        .expect("active workspace state");
+
+    assert_eq!(occurrences, 1);
+    assert_eq!(active.windows[0].window_id, 0);
+}
+
+#[test]
+fn test_query_state_propagates_workspace_query_failure() {
+    use crate::errors::Error;
+    use crate::manager::MockWindowManagerApi;
+    use crate::tests::harness::TestHarness;
+
+    let mut harness = TestHarness::new().with_windows(1);
+    harness.app.update();
+
+    let mut window_manager = MockWindowManagerApi::new();
+    window_manager
+        .expect_windows_in_workspace()
+        .returning(|_| Err(Error::Generic("workspace query failed".to_string())));
+    harness
+        .world()
+        .insert_resource(WindowManager(Box::new(window_manager)));
+
+    let error = extract_query_state(harness.world()).expect_err("workspace query should fail");
+
+    assert_eq!(error.to_string(), "Generic error: workspace query failed");
 }
 
 #[test]
@@ -604,7 +673,7 @@ fn test_query_state_includes_configured_floating_windows() {
     harness.app.update();
     harness.app.update();
 
-    let state = extract_query_state(harness.world());
+    let state = extract_query_state(harness.world()).expect("query state extraction");
 
     assert_eq!(state.virtual_workspaces[0].windows.len(), 1);
     assert!(state.virtual_workspaces[0].windows[0].floating);
@@ -653,7 +722,7 @@ fn test_query_state_tracks_float_after_virtual_workspace_is_reaped() {
     send(&mut harness, Command::Window(Operation::Manage));
     send(&mut harness, Command::Window(Operation::VirtualNumber(0)));
 
-    let state = extract_query_state(harness.world());
+    let state = extract_query_state(harness.world()).expect("query state extraction");
     let active = state
         .virtual_workspaces
         .iter()
@@ -675,7 +744,7 @@ fn test_query_state_tracks_float_after_virtual_workspace_is_reaped() {
     harness
         .mock_state
         .update_window(0, |window| window.workspace_id = TEST_WORKSPACE_ID + 1);
-    let moved = extract_query_state(harness.world());
+    let moved = extract_query_state(harness.world()).expect("query state extraction");
     let original_workspace = moved
         .virtual_workspaces
         .iter()

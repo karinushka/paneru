@@ -16,9 +16,11 @@ use super::{Command, Operation};
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::Windows;
 use crate::ecs::state::{PaneruActiveState, PaneruQueryState, PaneruVirtualWorkspaceState};
-use crate::ecs::{ActiveDisplayMarker, ActiveWorkspaceMarker, FocusedMarker};
+use crate::ecs::{
+    ActiveDisplayMarker, ActiveWorkspaceMarker, FocusedMarker, SelectedVirtualMarker,
+};
 use crate::events::Event;
-use crate::manager::{Application, Display};
+use crate::manager::{Application, Display, WindowManager};
 use crate::platform::WinID;
 
 #[derive(Default, Resource)]
@@ -167,17 +169,24 @@ pub(super) fn register_query_commands(app: &mut App) {
 #[allow(clippy::needless_pass_by_value)]
 fn state_query_handler(
     mut messages: MessageReader<Event>,
-    workspaces: Query<(&ChildOf, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    workspaces: Query<(
+        &ChildOf,
+        &LayoutStrip,
+        Has<ActiveWorkspaceMarker>,
+        Has<SelectedVirtualMarker>,
+    )>,
     displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
     windows: Windows,
     apps: Query<&Application>,
+    window_manager: Res<WindowManager>,
 ) {
     for event in messages.read() {
         let Event::StateQuery { kind, respond_to } = event else {
             continue;
         };
 
-        let state = PaneruQueryState::extract(&workspaces, &displays, &windows, &apps);
+        let state =
+            PaneruQueryState::extract(&workspaces, &displays, &windows, &apps, &window_manager);
         let response = state
             .to_query_json(*kind)
             .unwrap_or_else(|err| json!({ "error": err.to_string() }).to_string());
@@ -319,12 +328,18 @@ fn state_event_broadcast_handler(
     mut messages: MessageReader<Event>,
     mut subscribers: ResMut<StateSubscribers>,
     mut cache: ResMut<StateBroadcastCache>,
-    workspaces: Query<(&ChildOf, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    workspaces: Query<(
+        &ChildOf,
+        &LayoutStrip,
+        Has<ActiveWorkspaceMarker>,
+        Has<SelectedVirtualMarker>,
+    )>,
     focused_changes: Query<Entity, Added<FocusedMarker>>,
     active_workspace_changes: Query<Entity, Added<ActiveWorkspaceMarker>>,
     displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
     windows: Windows,
     apps: Query<&Application>,
+    window_manager: Res<WindowManager>,
 ) {
     let events = messages.read().collect::<Vec<_>>();
 
@@ -341,9 +356,9 @@ fn state_event_broadcast_handler(
         return;
     }
 
-    let state = intent
-        .requires_state()
-        .then(|| PaneruQueryState::extract(&workspaces, &displays, &windows, &apps));
+    let state = intent.requires_state().then(|| {
+        PaneruQueryState::extract(&workspaces, &displays, &windows, &apps, &window_manager)
+    });
     let outgoing = collect_state_broadcast_events_for_intent(
         &intent,
         state.as_ref(),

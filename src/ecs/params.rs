@@ -16,8 +16,8 @@ use crate::{
     config::Config,
     ecs::{
         ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker, FullWidthMarker, Initializing,
-        LayoutPosition, NativeFullscreenMarker, Position, PreviousManagedStrip, RepositionMarker,
-        ResizeMarker, Unmanaged, WidthRatio, layout::LayoutStrip,
+        LayoutPosition, NativeFullscreenMarker, Position, RepositionMarker, ResizeMarker,
+        Unmanaged, WidthRatio, layout::LayoutStrip,
     },
     manager::{Application, Display, Origin, Size, Window},
     platform::{ProcessSerialNumber, WinID},
@@ -211,7 +211,6 @@ pub struct Windows<'w, 's> {
         ),
     >,
     focus: Query<'w, 's, (&'static Window, Entity), With<FocusedMarker>>,
-    previous_managed_strip: Query<'w, 's, &'static PreviousManagedStrip>,
     previous_size: Query<
         'w,
         's,
@@ -273,10 +272,6 @@ impl Windows<'_, '_> {
         self.all.iter().find_map(|(window, entity, _, unmanaged)| {
             (unmanaged.is_none() && window.id() == window_id).then_some((window, entity))
         })
-    }
-
-    pub(crate) fn previous_managed_strip(&self, entity: Entity) -> Option<&PreviousManagedStrip> {
-        self.previous_managed_strip.get(entity).ok()
     }
 
     pub fn focused(&self) -> Option<(&Window, Entity)> {

@@ -7,9 +7,9 @@ use crate::ecs::state::{
     PaneruQueryState, PaneruState, SavedColumn, SavedDisplay, SavedRect, SavedStackItem,
     SavedStrip, SavedWindow, SavedWorkspace,
 };
-use crate::ecs::{ActiveDisplayMarker, ActiveWorkspaceMarker};
+use crate::ecs::{ActiveDisplayMarker, ActiveWorkspaceMarker, SelectedVirtualMarker};
 use crate::events::Event;
-use crate::manager::{Application, Display};
+use crate::manager::{Application, Display, WindowManager};
 use crate::platform::{Pid, ProcessSerialNumber, WinID};
 use crate::tests::{
     TEST_DISPLAY_HEIGHT, TEST_DISPLAY_ID, TEST_DISPLAY_WIDTH, TEST_MENUBAR_HEIGHT,
@@ -42,17 +42,19 @@ type QueryStateExtractionState<'w, 's> = SystemState<(
             &'static ChildOf,
             &'static LayoutStrip,
             Has<ActiveWorkspaceMarker>,
+            Has<SelectedVirtualMarker>,
         ),
     >,
     Query<'w, 's, (&'static Display, Entity, Has<ActiveDisplayMarker>)>,
     Windows<'w, 's>,
     Query<'w, 's, &'static Application>,
+    Res<'w, WindowManager>,
 )>;
 
 fn extract_query_state(world: &mut World) -> PaneruQueryState {
     let mut system_state: QueryStateExtractionState<'_, '_> = SystemState::new(world);
-    let (workspaces, displays, windows, apps) = system_state.get(world);
-    PaneruQueryState::extract(&workspaces, &displays, &windows, &apps)
+    let (workspaces, displays, windows, apps, window_manager) = system_state.get(world);
+    PaneruQueryState::extract(&workspaces, &displays, &windows, &apps, &window_manager)
 }
 
 #[test]
@@ -606,4 +608,86 @@ fn test_query_state_includes_configured_floating_windows() {
 
     assert_eq!(state.virtual_workspaces[0].windows.len(), 1);
     assert!(state.virtual_workspaces[0].windows[0].floating);
+}
+
+#[test]
+fn test_query_state_tracks_float_after_virtual_workspace_is_reaped() {
+    use crate::commands::{Command, MoveFocus, Operation};
+    use crate::config::{Config, MainOptions};
+    use crate::tests::harness::TestHarness;
+
+    let config: Config = (
+        MainOptions {
+            reap_empty_workspaces: Some(true),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+    let mut harness = TestHarness::new()
+        .with_config(config)
+        .with_display(
+            TEST_DISPLAY_ID,
+            IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
+            vec![TEST_WORKSPACE_ID, TEST_WORKSPACE_ID + 1],
+        )
+        .with_windows(1);
+    harness.app.update();
+
+    let send = |harness: &mut TestHarness, command| {
+        harness
+            .app
+            .world_mut()
+            .write_message(Event::Command { command });
+        for _ in 0..4 {
+            harness.app.update();
+            for event in harness.mock_state.drain_events() {
+                harness.app.world_mut().write_message(event);
+            }
+        }
+    };
+    send(
+        &mut harness,
+        Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Follow)),
+    );
+    send(&mut harness, Command::Window(Operation::Manage));
+    send(&mut harness, Command::Window(Operation::VirtualNumber(0)));
+
+    let state = extract_query_state(harness.world());
+    let active = state
+        .virtual_workspaces
+        .iter()
+        .find(|workspace| workspace.active)
+        .expect("active virtual workspace");
+
+    assert_eq!(state.active.virtual_workspace_number, Some(1));
+    assert_eq!(state.active.focused_window_id, Some(0));
+    assert!(
+        !state.virtual_workspaces.iter().any(|workspace| {
+            workspace.native_workspace_id == TEST_WORKSPACE_ID && workspace.number == 2
+        }),
+        "the empty remembered row should be reaped"
+    );
+    assert_eq!(active.windows.len(), 1);
+    assert!(active.windows[0].focused);
+    assert!(active.windows[0].floating);
+
+    harness
+        .mock_state
+        .update_window(0, |window| window.workspace_id = TEST_WORKSPACE_ID + 1);
+    let moved = extract_query_state(harness.world());
+    let original_workspace = moved
+        .virtual_workspaces
+        .iter()
+        .find(|workspace| workspace.native_workspace_id == TEST_WORKSPACE_ID)
+        .expect("original native workspace");
+    let live_workspace = moved
+        .virtual_workspaces
+        .iter()
+        .find(|workspace| workspace.native_workspace_id == TEST_WORKSPACE_ID + 1)
+        .expect("live native workspace");
+
+    assert!(original_workspace.windows.is_empty());
+    assert_eq!(live_workspace.windows.len(), 1);
+    assert!(live_workspace.windows[0].floating);
 }

@@ -17,7 +17,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::ecs::layout::{Column, LayoutStrip, StackItem};
 use crate::ecs::params::Windows;
-use crate::ecs::{ActiveDisplayMarker, ActiveWorkspaceMarker};
+use crate::ecs::{ActiveDisplayMarker, ActiveWorkspaceMarker, Unmanaged};
 use crate::manager::Application;
 use crate::manager::Display;
 use crate::platform::{Pid, ProcessSerialNumber, WinID, WorkspaceId};
@@ -448,9 +448,18 @@ impl PaneruQueryState {
         for (child, strip, active_workspace) in workspaces {
             let row_windows = strip
                 .all_windows()
-                .iter()
+                .into_iter()
+                .chain(windows.iter().filter_map(|(_, entity)| {
+                    let (_, _, unmanaged) = windows.get_managed(entity)?;
+                    let previous = windows.previous_managed_strip(entity)?;
+                    (matches!(unmanaged, Some(Unmanaged::Floating))
+                        && !strip.contains(entity)
+                        && previous.workspace_id == strip.id()
+                        && previous.virtual_index == strip.virtual_index)
+                        .then_some(entity)
+                }))
                 .filter_map(|entity| {
-                    let (window, _, unmanaged) = windows.get_managed(*entity)?;
+                    let (window, _, unmanaged) = windows.get_managed(entity)?;
                     let (_, _, app_entity) = windows.find_parent(window.id())?;
                     let app = apps.get(app_entity).ok()?;
                     let bundle_id = app.bundle_id().unwrap_or_default().clone();
@@ -461,8 +470,8 @@ impl PaneruQueryState {
                         bundle_id,
                         app_name,
                         title,
-                        focused: focused_entity == Some(*entity),
-                        floating: unmanaged.is_some(),
+                        focused: focused_entity == Some(entity),
+                        floating: matches!(unmanaged, Some(Unmanaged::Floating)),
                     })
                 })
                 .collect::<Vec<_>>();

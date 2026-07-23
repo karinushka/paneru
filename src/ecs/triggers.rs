@@ -599,9 +599,20 @@ pub(super) fn window_unmanaged_trigger(
 
     workspaces.into_iter().for_each(|mut strip| {
         if strip.contains(entity) {
+            remember_managed_strip(entity, &strip, &mut commands);
             strip.remove(entity);
         }
     });
+}
+
+fn remember_managed_strip(entity: Entity, strip: &LayoutStrip, commands: &mut Commands) {
+    if let Ok(mut entity_commands) = commands.get_entity(entity) {
+        entity_commands.try_insert(PreviousManagedStrip {
+            workspace_id: strip.id(),
+            virtual_index: strip.virtual_index,
+            index: strip.index_of(entity).unwrap_or(strip.len()),
+        });
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -633,15 +644,7 @@ pub(super) fn window_minimized_trigger(
                 );
             }
             if strip.contains(entity) {
-                if let Ok(index) = strip.index_of(entity)
-                    && let Ok(mut entity_commands) = commands.get_entity(entity)
-                {
-                    entity_commands.try_insert(PreviousManagedStrip {
-                        workspace_id: strip.id(),
-                        virtual_index: strip.virtual_index,
-                        index,
-                    });
-                }
+                remember_managed_strip(entity, &strip, &mut commands);
                 strip.remove(entity);
             }
         }
@@ -1042,23 +1045,37 @@ pub(super) fn apply_window_positions(
             continue;
         }
 
-        // During startup, the window is already inserted into some strip.
-        let allready_inserted = workspaces
-            .iter_mut()
-            .find_map(|(strip, _)| strip.contains(entity).then_some(strip));
         let properties = WindowProperties::new(app, window, &config);
 
         if properties.floating() {
+            let remembered = if let Some(mut strip) = workspaces
+                .iter_mut()
+                .find_map(|(strip, _)| strip.contains(entity).then_some(strip))
+            {
+                remember_managed_strip(entity, &strip, &mut commands);
+                strip.remove(entity);
+                true
+            } else {
+                false
+            };
+            if !remembered
+                && let Some(strip) = workspaces
+                    .iter()
+                    .find_map(|(strip, active)| active.then_some(strip))
+            {
+                remember_managed_strip(entity, strip, &mut commands);
+            }
             if let Ok(mut entity_commands) = commands.get_entity(entity) {
                 // Avoid managing window if it's floating.
                 entity_commands.try_insert(Unmanaged::Floating);
             }
-            if let Some(mut strip) = allready_inserted {
-                strip.remove(entity);
-            }
             continue;
         }
 
+        // During startup, the window is already inserted into some strip.
+        let allready_inserted = workspaces
+            .iter_mut()
+            .find_map(|(strip, _)| strip.contains(entity).then_some(strip));
         if allready_inserted.is_none()
             && let Some(mut strip) = workspaces
                 .iter_mut()

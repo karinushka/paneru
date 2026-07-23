@@ -8,6 +8,7 @@ use crate::ecs::state::{
     SavedStrip, SavedWindow, SavedWorkspace,
 };
 use crate::ecs::{ActiveDisplayMarker, ActiveWorkspaceMarker};
+use crate::events::Event;
 use crate::manager::{Application, Display};
 use crate::platform::{Pid, ProcessSerialNumber, WinID};
 use crate::tests::{
@@ -47,6 +48,12 @@ type QueryStateExtractionState<'w, 's> = SystemState<(
     Windows<'w, 's>,
     Query<'w, 's, &'static Application>,
 )>;
+
+fn extract_query_state(world: &mut World) -> PaneruQueryState {
+    let mut system_state: QueryStateExtractionState<'_, '_> = SystemState::new(world);
+    let (workspaces, displays, windows, apps) = system_state.get(world);
+    PaneruQueryState::extract(&workspaces, &displays, &windows, &apps)
+}
 
 #[test]
 fn test_state_serialization() {
@@ -536,10 +543,7 @@ fn test_query_state_contract_exposes_active_virtual_workspace_and_windows() {
         ChildOf(display_entity),
     ));
 
-    let mut system_state: QueryStateExtractionState<'_, '_> = SystemState::new(world);
-    let (workspaces, displays, windows, apps) = system_state.get(world);
-
-    let state = PaneruQueryState::extract(&workspaces, &displays, &windows, &apps);
+    let state = extract_query_state(world);
 
     assert_eq!(state.version, 1);
     assert_eq!(state.active.virtual_workspace_number, Some(1));
@@ -564,4 +568,42 @@ fn test_query_state_contract_exposes_active_virtual_workspace_and_windows() {
         json["virtual_workspaces"][0]["windows"][0]["bundle_id"],
         "test"
     );
+}
+
+#[test]
+fn test_query_state_includes_floating_windows() {
+    use crate::commands::{Command, Operation};
+    use crate::tests::harness::TestHarness;
+
+    let mut harness = TestHarness::new().with_windows(1);
+    harness.app.update();
+    harness.app.world_mut().write_message(Event::Command {
+        command: Command::Window(Operation::Manage),
+    });
+    harness.app.update();
+
+    let state = extract_query_state(harness.world());
+
+    assert_eq!(state.active.focused_window_id, Some(0));
+    assert_eq!(state.virtual_workspaces[0].windows.len(), 1);
+    assert!(state.virtual_workspaces[0].windows[0].focused);
+    assert!(state.virtual_workspaces[0].windows[0].floating);
+}
+
+#[test]
+fn test_query_state_includes_configured_floating_windows() {
+    use crate::config::{Config, MainOptions, WindowParams};
+    use crate::tests::harness::TestHarness;
+
+    let mut params = WindowParams::new(".*", Some("test".to_string()));
+    params.floating = Some(true);
+    let config: Config = (MainOptions::default(), vec![params]).into();
+    let mut harness = TestHarness::new().with_config(config).with_windows(1);
+    harness.app.update();
+    harness.app.update();
+
+    let state = extract_query_state(harness.world());
+
+    assert_eq!(state.virtual_workspaces[0].windows.len(), 1);
+    assert!(state.virtual_workspaces[0].windows[0].floating);
 }

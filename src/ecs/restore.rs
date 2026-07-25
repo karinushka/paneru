@@ -509,14 +509,16 @@ pub(super) fn restore_window_state(
             continue;
         }
 
-        // Keep unmatched startup windows on this row instead of creating a
-        // duplicate index that renumber_virtual_indexes would turn into VW2.
-        if let Some((entity, mut existing, _, _)) =
-            workspaces.iter_mut().find(|(entity, existing, _, _)| {
-                !emptied_existing_strips.contains(entity)
-                    && existing.id() == planned.workspace_id
-                    && existing.virtual_index == planned.virtual_index
-            })
+        // Keep unmatched startup windows on the same normal row. Fullscreen
+        // strips must remain single-column, so leave those rows separate.
+        if !strip.is_fullscreen()
+            && let Some((entity, mut existing, _, _)) =
+                workspaces.iter_mut().find(|(entity, existing, _, _)| {
+                    !emptied_existing_strips.contains(entity)
+                        && existing.id() == planned.workspace_id
+                        && existing.virtual_index == planned.virtual_index
+                        && !existing.is_fullscreen()
+                })
         {
             strip.append_strip(&mut existing);
             emptied_existing_strips.insert(entity);

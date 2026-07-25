@@ -322,6 +322,10 @@ impl LayoutStrip {
         self.columns.push_back(Column::Single(entity));
     }
 
+    pub(crate) fn append_strip(&mut self, other: &mut Self) {
+        self.columns.append(&mut other.columns);
+    }
+
     pub fn append_tab_group(&mut self, entities: &[Entity]) {
         let group = dedup_entities(entities);
         if group.is_empty() {

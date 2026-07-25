@@ -79,7 +79,7 @@ fn test_startup_restore_rebuilds_virtual_workspace_layout() {
 }
 
 #[test]
-fn test_startup_restore_replaces_consumed_empty_virtual_zero_strip() {
+fn test_startup_restore_keeps_unmatched_windows_on_the_restored_row() {
     let mut harness = TestHarness::new().with_windows(2);
 
     harness.world().insert_resource(PaneruState {
@@ -93,10 +93,7 @@ fn test_startup_restore_replaces_consumed_empty_virtual_zero_strip() {
             active_virtual_index: Some(0),
             strips: vec![SavedStrip {
                 virtual_index: 0,
-                columns: vec![
-                    SavedColumn::Single(saved_window(0)),
-                    SavedColumn::Single(saved_window(1)),
-                ],
+                columns: vec![SavedColumn::Single(saved_window(0))],
             }],
         }],
     });
@@ -109,14 +106,15 @@ fn test_startup_restore_replaces_consumed_empty_virtual_zero_strip() {
     let mut query = world.query::<&LayoutStrip>();
     let matching = query
         .iter(world)
-        .filter(|strip| strip.id() == TEST_WORKSPACE_ID && strip.virtual_index == 0)
+        .filter(|strip| strip.id() == TEST_WORKSPACE_ID)
         .collect::<Vec<_>>();
 
     assert_eq!(
         matching.len(),
         1,
-        "restore should replace the emptied startup row 0 instead of leaving a duplicate"
+        "restore should keep unmatched windows on row 0 instead of creating VW2"
     );
+    assert_eq!(matching[0].virtual_index, 0);
 
     let windows = matching[0].all_windows();
     assert_eq!(windows.len(), 2);

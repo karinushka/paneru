@@ -504,9 +504,25 @@ pub(super) fn restore_window_state(
             continue;
         };
 
-        let strip = layout_strip_from_plan(planned);
+        let mut strip = layout_strip_from_plan(planned);
         if strip.all_windows().is_empty() {
             continue;
+        }
+
+        // Keep unmatched startup windows on this row instead of creating a
+        // duplicate index that renumber_virtual_indexes would turn into VW2.
+        if let Some((entity, mut existing, _, _)) =
+            workspaces.iter_mut().find(|(entity, existing, _, _)| {
+                !emptied_existing_strips.contains(entity)
+                    && existing.id() == planned.workspace_id
+                    && existing.virtual_index == planned.virtual_index
+            })
+        {
+            strip.append_strip(&mut existing);
+            emptied_existing_strips.insert(entity);
+            if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                entity_commands.try_despawn();
+            }
         }
 
         let is_active = plan

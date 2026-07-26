@@ -22,9 +22,9 @@ use crate::ecs::focus::FocusHistory;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, Bounds, DockPosition, Initializing, NativeFullscreenMarker, Position,
-    RefreshWindowSizes, RepositionMarker, Scrolling, SelectedVirtualMarker, SpawnCommandsExt,
-    Timeout, Unmanaged,
+    ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker, Initializing,
+    NativeFullscreenMarker, Position, RefreshWindowSizes, RepositionMarker, Scrolling,
+    SelectedVirtualMarker, SpawnCommandsExt, Timeout, Unmanaged,
 };
 use crate::errors::Result;
 use crate::events::Event;
@@ -793,6 +793,13 @@ fn handle_virtual_window_moves(
                 previous.focus = Some(window_entity);
             }
             commands.reshuffle_around(window_entity);
+
+            if mid_placement.is_none()
+                && let Ok(mut entity_commands) = commands.get_entity(window_entity)
+            {
+                entity_commands.try_remove::<FocusedMarker>();
+                commands.focus_entity(window_entity, false);
+            }
         }
         debug!(
             "Moved window {} to virtual workspace {}",

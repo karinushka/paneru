@@ -1201,6 +1201,68 @@ fn test_move_appends_to_end_by_default() {
     );
 }
 
+/// A follow-move that appends the window to an already-populated destination
+/// strip must bring the moved window on-screen. The window keeps focus across
+/// the move, so no `Added<FocusedMarker>` fires on its own and the reshuffle
+/// issued at move time is swallowed by `reshuffle_layout_strip`'s
+/// newly-active-workspace skip. Regression test for the moved window landing
+/// off the right edge until manually centered.
+#[test]
+fn test_follow_move_brings_appended_window_on_screen() {
+    // Enough windows that the destination strip overflows the display width
+    // (each window is 400px wide, display is 1024px), so an appended window
+    // lands off the right edge unless the strip scrolls to expose it.
+    let mut h = TestHarness::new().with_windows(5);
+
+    let pump = |h: &mut TestHarness, cmd: Command| {
+        h.app
+            .world_mut()
+            .write_message::<Event>(Event::Command { command: cmd });
+        for _ in 0..8 {
+            h.app.update();
+            for event in h.mock_state.drain_events() {
+                h.app.world_mut().write_message::<Event>(event);
+            }
+        }
+    };
+
+    // Seed VW1 with three windows (Stay keeps us on VW0), making the
+    // destination strip wider than the display before the follow-move appends
+    // to it.
+    for _ in 0..3 {
+        pump(
+            &mut h,
+            Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Stay)),
+        );
+    }
+
+    let mover = focused_window_id(h.app.world_mut());
+
+    pump(
+        &mut h,
+        Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Follow)),
+    );
+
+    // The moved window keeps focus and must be brought fully on-screen (right
+    // edge within the display), not left appended off the right edge.
+    assert_focused!(h.app.world_mut(), mover);
+    let frame = {
+        let world = h.app.world_mut();
+        let mut q = world.query::<&Window>();
+        q.iter(world)
+            .find(|w| w.id() == mover)
+            .expect("moved window")
+            .frame()
+    };
+    assert!(
+        frame.min.x >= 0 && frame.max.x <= TEST_DISPLAY_WIDTH,
+        "moved window must be fully on-screen, got frame x {}..{} (display width {})",
+        frame.min.x,
+        frame.max.x,
+        TEST_DISPLAY_WIDTH,
+    );
+}
+
 /// With `insert_windows_mid_strip` enabled and a smooth `animation_speed`, moving
 /// a window to another virtual workspace must not animate: every window snaps to
 /// its final spot. Checked per-update, since markers created and consumed

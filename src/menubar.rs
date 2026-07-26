@@ -1,5 +1,5 @@
 use bevy::ecs::entity::Entity;
-use bevy::ecs::query::{Added, Has, With};
+use bevy::ecs::query::{Added, Has, Or, With};
 use bevy::ecs::system::{NonSendMut, Populated, Query, Res};
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
@@ -15,7 +15,7 @@ use crate::accessibility_prompt::{AccessibilitySetupAction, show_accessibility_s
 use crate::commands::{Command, Operation};
 use crate::config::Config;
 use crate::ecs::params::ActiveDisplay;
-use crate::ecs::{Bounds, FocusedMarker, Unmanaged};
+use crate::ecs::{ActiveWorkspaceMarker, Bounds, FocusedMarker, Unmanaged};
 use crate::events::{Event, EventSender};
 use crate::manager::request_ax_privilege;
 
@@ -300,7 +300,7 @@ impl Drop for MenuBarManager {
 
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 pub fn update_menu_bar(
-    _guard: Populated<Entity, Added<FocusedMarker>>,
+    _guard: Populated<Entity, Or<(Added<FocusedMarker>, Added<ActiveWorkspaceMarker>)>>,
     active_display: ActiveDisplay,
     focused: Query<(&Bounds, Has<Unmanaged>), With<FocusedMarker>>,
     config: Res<Config>,

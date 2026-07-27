@@ -53,7 +53,7 @@ type QueryStateExtractionState<'w, 's> = SystemState<(
 
 fn extract_query_state(world: &mut World) -> crate::errors::Result<PaneruQueryState> {
     let mut system_state: QueryStateExtractionState<'_, '_> = SystemState::new(world);
-    let (workspaces, displays, windows, apps, window_manager) = system_state.get(world);
+    let (workspaces, displays, windows, apps, window_manager) = system_state.get(world)?;
     PaneruQueryState::extract(&workspaces, &displays, &windows, &apps, &window_manager)
 }
 
@@ -152,7 +152,8 @@ fn test_state_extraction() {
 
     let world = harness.world();
     let mut system_state: StateExtractionState<'_, '_> = SystemState::new(world);
-    let (workspaces, displays, windows, apps) = system_state.get(world);
+    let (workspaces, displays, windows, apps) =
+        system_state.get(world).expect("failed to get world state");
 
     let state = PaneruState::extract(&workspaces, &displays, &windows, &apps);
 
@@ -195,7 +196,8 @@ fn test_state_serializes_display_and_active_virtual_workspace() {
     ));
 
     let mut system_state: StateExtractionState<'_, '_> = SystemState::new(world);
-    let (workspaces, displays, windows, apps) = system_state.get(world);
+    let (workspaces, displays, windows, apps) =
+        system_state.get(world).expect("failed to get world state");
 
     let state = PaneruState::extract(&workspaces, &displays, &windows, &apps);
 
@@ -244,7 +246,8 @@ fn test_state_extraction_includes_parentless_layout_strips() {
     world.spawn(LayoutStrip::new(parentless_workspace_id, 0));
 
     let mut system_state: StateExtractionState<'_, '_> = SystemState::new(world);
-    let (workspaces, displays, windows, apps) = system_state.get(world);
+    let (workspaces, displays, windows, apps) =
+        system_state.get(world).expect("failed to get world state");
 
     let state = PaneruState::extract(&workspaces, &displays, &windows, &apps);
 

@@ -549,7 +549,7 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         .insert_resource(MissionControlActive(false))
         .insert_resource(FocusFollowsMouse(None))
         .insert_resource(Initializing)
-        .insert_non_send_resource(watcher)
+        .insert_non_send(watcher)
         .add_plugins(mouse::MouseEventsPlugin)
         .add_plugins(scroll::ScrollEventsPlugin)
         .add_plugins(workspace::WorkspaceEventsPlugin)
@@ -565,11 +565,11 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
     let overlay_manager = OverlayManager::new(mtm);
     let flash_message_manager = FlashMessageManager::new(mtm);
     let menu_bar_manager = MenuBarManager::new(mtm, menu_events);
-    app.insert_non_send_resource(platform_callbacks)
-        .insert_non_send_resource(overlay_manager)
-        .insert_non_send_resource(flash_message_manager)
-        .insert_non_send_resource(menu_bar_manager)
-        .insert_non_send_resource(receiver);
+    app.insert_non_send(platform_callbacks)
+        .insert_non_send(overlay_manager)
+        .insert_non_send(flash_message_manager)
+        .insert_non_send(menu_bar_manager)
+        .insert_non_send(receiver);
 
     if let Some(previous_state) =
         PaneruState::load_from_file(&PaneruState::default_state_file_path())

@@ -35,6 +35,7 @@ pub enum Direction {
     East,
     First,
     Last,
+    Nth(usize),
 }
 
 impl Direction {
@@ -46,6 +47,7 @@ impl Direction {
             Direction::East => Direction::West,
             Direction::First => Direction::Last,
             Direction::Last => Direction::First,
+            Direction::Nth(index) => Direction::Nth(*index),
         }
     }
 }
@@ -206,6 +208,8 @@ fn get_window_in_direction(
 
         Direction::Last => strip.last().ok().and_then(|column| column.top()),
 
+        Direction::Nth(index) => strip.get(*index).ok().and_then(|column| column.top()),
+
         Direction::North => match strip.get(index).ok()? {
             Column::Single(_) | Column::Tabs(_) | Column::Fullscren(_) => None,
             Column::Stack(stack) => stack
@@ -249,7 +253,7 @@ fn pick_nearest_in_direction(
                 Direction::West => dx < 0 && dy.abs() <= dx.abs(),
                 Direction::North => dy < 0 && dx.abs() <= dy.abs(),
                 Direction::South => dy > 0 && dx.abs() <= dy.abs(),
-                Direction::First | Direction::Last => return None,
+                Direction::First | Direction::Last | Direction::Nth(_) => return None,
             };
             in_direction.then_some((entity, dx * dx + dy * dy))
         })
@@ -360,7 +364,9 @@ fn command_move_focus(
         return;
     };
 
-    if let Some((_, _, Some(Unmanaged::Floating))) = windows.get_managed(focused_entity) {
+    if let Some((_, _, Some(Unmanaged::Floating))) = windows.get_managed(focused_entity)
+        && !matches!(direction, Direction::Nth(_))
+    {
         if let Some(entity) = nearest_float_in_direction(
             direction,
             focused_entity,
@@ -401,6 +407,10 @@ fn command_move_focus(
                 active_strip.first().ok().and_then(|col| col.top())
             }
             Direction::West | Direction::Last => active_strip.last().ok().and_then(|col| col.top()),
+            Direction::Nth(index) => active_strip
+                .get(*index)
+                .ok()
+                .and_then(|column| column.top()),
             Direction::North | Direction::South => None,
         }
     };

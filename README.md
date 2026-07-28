@@ -214,7 +214,7 @@ $ paneru send-cmd <command> [args...]
 
 | Command                    | Description                                      |
 | -------------------------- | ------------------------------------------------ |
-| `window focus <direction>` | Move focus to a window in the given direction    |
+| `window focus <direction\|number>` | Move focus by direction or column number |
 | `window swap <direction>`  | Swap the focused window with a neighbour         |
 | `window center`            | Center the focused window on screen              |
 | `window resize`            | Cycle through `preset_column_widths`             |
@@ -241,6 +241,7 @@ $ paneru send-cmd <command> [args...]
 | `restart`                  | Restart the Paneru service                         |
 
 Where `<direction>` is one of: `west`, `east`, `north`, `south`, `first`, `last`.
+Window numbers are 1-based and count columns from left to right.
 
 #### Examples
 
@@ -262,6 +263,9 @@ $ paneru send-cmd window shrink
 
 # Jump to the left-most window.
 $ paneru send-cmd window focus first
+
+# Jump to the second window from the left.
+$ paneru send-cmd window focus 2
 
 # Switch directly to virtual workspace 3.
 $ paneru send-cmd window virtualnum 3

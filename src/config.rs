@@ -189,6 +189,17 @@ fn parse_direction(dir: &str) -> Result<Direction> {
     })
 }
 
+fn parse_focus_direction(dir: &str) -> Result<Direction> {
+    match dir.parse::<usize>() {
+        Ok(0) => Err(Error::InvalidConfig(format!(
+            "{}: Window numbers start at 1",
+            function_name!()
+        ))),
+        Ok(number) => Ok(Direction::Nth(number - 1)),
+        Err(_) => parse_direction(dir),
+    }
+}
+
 fn parse_virtual_workspace_number(input: &str) -> Result<u32> {
     let number = input.parse::<u32>().map_err(|_| {
         Error::InvalidConfig(format!(
@@ -239,7 +250,7 @@ fn parse_operation(argv: &[&str]) -> Result<Operation> {
         "focus" => match *argv.get(1).ok_or(err.clone())? {
             "unmanaged" => Operation::FocusUnmanaged,
             "managed" => Operation::FocusManaged,
-            dir => Operation::Focus(parse_direction(dir)?),
+            dir => Operation::Focus(parse_focus_direction(dir)?),
         },
         "raise" => match *argv.get(1).ok_or(err.clone())? {
             "floating" => Operation::RaiseFloating,

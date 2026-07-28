@@ -4,7 +4,7 @@ use bevy::prelude::*;
 use objc2_core_foundation::CGPoint;
 
 use crate::commands::{Command, Direction, MoveFocus, Operation};
-use crate::config::{Config, MainOptions, WindowParams};
+use crate::config::{Config, MainOptions, WindowParams, parse_command};
 use crate::ecs::display::FloatingLayer;
 use crate::ecs::{
     ActiveWorkspaceMarker, FocusedMarker, NativeFullscreenMarker, Position, Unmanaged,
@@ -220,6 +220,28 @@ fn test_dont_focus() {
             assert_focused!(world, 0);
         })
         .run(commands);
+}
+
+#[test]
+fn test_focus_window_by_number() {
+    assert!(parse_command(&["window", "focus", "0"]).is_err());
+    let command = parse_command(&["window", "focus", "2"]).unwrap();
+
+    TestHarness::new()
+        .with_windows(3)
+        .on_iteration(1, |world, _state| assert_focused!(world, 1))
+        .on_iteration(2, |world, _state| assert_focused!(world, 1))
+        .on_iteration(3, |world, _state| assert_focused!(world, 2))
+        .run(vec![
+            Event::MenuOpened { window_id: 0 },
+            Event::Command {
+                command: command.clone(),
+            },
+            Event::Command {
+                command: Command::Window(Operation::Manage),
+            },
+            Event::Command { command },
+        ]);
 }
 
 #[test]

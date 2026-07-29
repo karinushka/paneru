@@ -506,13 +506,12 @@ fn refresh_workspace_window_sizes(
 
     debug!("refreshing workspace {} sizes", strip.id());
     let viewport = active_display.actual_bounds(&config);
+    let mut retry_clamp = false;
     let mut in_workspace = match window_manager.windows_in_workspace(strip.id()) {
         Ok(windows) => windows,
         Err(err) => {
             warn!("getting windows in workspace: {err}");
-            if clamp_bounds {
-                return;
-            }
+            retry_clamp = clamp_bounds;
             Vec::new()
         }
     };
@@ -522,10 +521,9 @@ fn refresh_workspace_window_sizes(
         let Ok((_, ref mut window, ref mut bounds, _)) = windows.get_mut(entity) else {
             continue;
         };
-        let frame = match window.update_frame() {
-            Ok(frame) => frame,
-            Err(_) if clamp_bounds => return,
-            Err(_) => continue,
+        let Ok(frame) = window.update_frame() else {
+            retry_clamp |= clamp_bounds;
+            continue;
         };
         bounds.0 = if clamp_bounds {
             frame.size().with_x(frame.width().min(viewport.width()))
@@ -556,12 +554,14 @@ fn refresh_workspace_window_sizes(
         if clamp_bounds
             && let Ok((_, ref mut window, ref mut bounds, _)) = windows.get_mut(window_entity)
         {
-            let Ok(frame) = window.update_frame() else {
-                return;
-            };
-            let size = frame.size().min(viewport.size());
-            if frame.size() != size {
-                bounds.0 = size;
+            match window.update_frame() {
+                Ok(frame) => {
+                    let size = frame.size().min(viewport.size());
+                    if frame.size() != size {
+                        bounds.0 = size;
+                    }
+                }
+                Err(_) => retry_clamp = true,
             }
         }
         debug!("repositioning floating window {window_entity}");
@@ -575,7 +575,7 @@ fn refresh_workspace_window_sizes(
         );
     }
 
-    if let Ok(mut cmds) = commands.get_entity(strip_entity) {
+    if !retry_clamp && let Ok(mut cmds) = commands.get_entity(strip_entity) {
         cmds.try_remove::<RefreshWindowSizes>()
             .try_remove::<ClampWindowBounds>();
     }

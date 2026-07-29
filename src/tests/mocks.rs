@@ -83,6 +83,7 @@ struct MockStateInner {
     displays: HashMap<u32, MockDisplayData>,
     fullscreen_spaces: HashSet<WorkspaceId>,
     frame_update_failures: HashSet<WinID>,
+    workspace_query_failures: HashSet<WorkspaceId>,
     active_display_id: u32,
     cursor_position: Origin,
     event_queue: VecDeque<Event>,
@@ -102,6 +103,7 @@ impl MockState {
                 displays: HashMap::new(),
                 fullscreen_spaces: HashSet::new(),
                 frame_update_failures: HashSet::new(),
+                workspace_query_failures: HashSet::new(),
                 active_display_id: 0,
                 cursor_position: Origin::ZERO,
                 event_queue: VecDeque::new(),
@@ -180,6 +182,15 @@ impl MockState {
             inner.frame_update_failures.insert(id);
         } else {
             inner.frame_update_failures.remove(&id);
+        }
+    }
+
+    pub(crate) fn fail_workspace_queries(&self, id: WorkspaceId, fail: bool) {
+        let mut inner = self.inner.force_write();
+        if fail {
+            inner.workspace_query_failures.insert(id);
+        } else {
+            inner.workspace_query_failures.remove(&id);
         }
     }
 
@@ -645,9 +656,11 @@ impl MockState {
         let s = self.clone();
         wm.expect_windows_in_workspace()
             .returning(move |workspace_id| {
-                let mut windows = s
-                    .inner
-                    .force_read()
+                let state = s.inner.force_read();
+                if state.workspace_query_failures.contains(&workspace_id) {
+                    return Err(Error::InvalidWindow);
+                }
+                let mut windows = state
                     .windows
                     .values()
                     .filter_map(|w| (w.workspace_id == workspace_id).then_some(w.id))

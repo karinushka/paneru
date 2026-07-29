@@ -480,6 +480,7 @@ fn test_wake_refreshes_active_workspace() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn test_unplug_clamps_windows_to_the_replacement_display_bounds() {
     let mut floating = WindowParams::new("Window 10[12]", None);
     floating.floating = Some(true);
@@ -490,7 +491,7 @@ fn test_unplug_clamps_windows_to_the_replacement_display_bounds() {
         1600,
         -EXT_DISPLAY_HEIGHT + TEST_MENUBAR_HEIGHT + TEST_WINDOW_HEIGHT,
     );
-    let harness = TestHarness::new()
+    let mut harness = TestHarness::new()
         .with_config(config)
         .with_display(
             EXT_DISPLAY_ID,
@@ -506,6 +507,11 @@ fn test_unplug_clamps_windows_to_the_replacement_display_bounds() {
         .with_workspace_window(102, EXT_WORKSPACE_ID, move |window| {
             window.frame = wide_frame;
         });
+    harness
+        .app
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            250,
+        )));
 
     let commands = vec![
         Event::MenuOpened { window_id: 100 },
@@ -548,13 +554,27 @@ fn test_unplug_clamps_windows_to_the_replacement_display_bounds() {
                     .checked_sub(Duration::from_secs(6))
                     .expect("six seconds before now should be representable");
             }
-            state.fail_window_frame_updates(100, true);
+            state.fail_workspace_queries(EXT_WORKSPACE_ID, true);
         })
         .on_iteration(4, |world, state| {
             let mut clamped = world
                 .query_filtered::<Entity, (With<ClampWindowBounds>, With<RefreshWindowSizes>)>();
             assert!(clamped.single(world).is_ok());
-            state.fail_window_frame_updates(100, false);
+            assert_window_size!(
+                world,
+                100,
+                TEST_DISPLAY_WIDTH,
+                TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT
+            );
+            state.fail_workspace_queries(EXT_WORKSPACE_ID, false);
+            state.fail_window_frame_updates(101, true);
+        })
+        .on_iteration(5, |world, state| {
+            let mut clamped = world
+                .query_filtered::<Entity, (With<ClampWindowBounds>, With<RefreshWindowSizes>)>();
+            assert!(clamped.single(world).is_ok());
+            assert_window_size!(world, 102, 400, TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT);
+            state.fail_window_frame_updates(101, false);
         })
         .on_iteration(6, |world, _| {
             for id in [101, 102] {

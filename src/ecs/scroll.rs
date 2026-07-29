@@ -110,7 +110,7 @@ fn swipe_gesture(
     if touchpad_down && let Some(scrolling) = scrolling.as_mut() {
         scrolling.velocity = 0.0;
         scrolling.is_user_swiping = true;
-        scrolling.last_event = Instant::now();
+        scrolling.last_event = time.elapsed();
     }
 
     if has_scroll_event {
@@ -137,7 +137,7 @@ fn swipe_gesture(
                 0.0
             };
             scrolling.is_user_swiping = true;
-            scrolling.last_event = Instant::now();
+            scrolling.last_event = time.elapsed();
             scrolling.position +=
                 total_delta * viewport_width * direction_modifier * swipe_sensitivity;
         } else if let Ok(mut entity_commands) = commands.get_entity(*entity) {
@@ -146,7 +146,7 @@ fn swipe_gesture(
                 position: f64::from(position.0.x)
                     + total_delta * viewport_width * direction_modifier * swipe_sensitivity,
                 is_user_swiping: true,
-                last_event: Instant::now(),
+                last_event: time.elapsed(),
             });
         }
     }
@@ -167,7 +167,7 @@ pub(super) fn swiping_timeout(
     let viewport_width = f64::from(active_display.bounds().width());
 
     for (entity, mut scroll) in strips {
-        if scroll.last_event.elapsed() > FINGER_LIFT_THRESHOLD {
+        if time.elapsed().abs_diff(scroll.last_event) > FINGER_LIFT_THRESHOLD {
             scroll.is_user_swiping = false;
 
             if scroll.velocity.abs() * dt * viewport_width < MIN_VELOCITY_PX

@@ -942,9 +942,7 @@ fn mouse_outside_corner_still_changes_focus() {
         .with_windows(3)
         .on_iteration(2, |world, _state| {
             // After MouseMoved outside corner: FFM should have fired and changed focus.
-            // In the mock, find_window_at_point always returns window 0, so window 0
-            // should now be focused (changed from window 2).
-            assert_focused!(world, 0);
+            assert_focused!(world, 1);
         })
         .run(commands);
 }

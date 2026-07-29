@@ -1,12 +1,13 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 
 use crate::commands::{Command, MouseMove, MoveFocus, Operation};
-use crate::config::Config;
+use crate::config::{Config, MainOptions, WindowParams};
+use crate::ecs::display::ClampWindowBounds;
 use crate::ecs::layout::LayoutStrip;
-use crate::ecs::{ActiveWorkspaceMarker, DockPosition, RefreshWindowSizes, Timeout};
+use crate::ecs::{ActiveWorkspaceMarker, DockPosition, RefreshWindowSizes, Timeout, Unmanaged};
 use crate::events::Event;
 use crate::manager::{Display, Origin, Size};
 use crate::{assert_not_on_workspace, assert_on_workspace, assert_window_at, assert_window_size};
@@ -474,6 +475,100 @@ fn test_wake_refreshes_active_workspace() {
                 refreshed,
                 "wake should mark the active workspace for a window-size refresh"
             );
+        })
+        .run(commands);
+}
+
+#[test]
+fn test_unplug_clamps_windows_to_the_replacement_display_bounds() {
+    let mut floating = WindowParams::new("Window 10[12]", None);
+    floating.floating = Some(true);
+    let config: Config = (MainOptions::default(), vec![floating]).into();
+    let wide_frame = IRect::new(
+        0,
+        -EXT_DISPLAY_HEIGHT + TEST_MENUBAR_HEIGHT,
+        1600,
+        -EXT_DISPLAY_HEIGHT + TEST_MENUBAR_HEIGHT + TEST_WINDOW_HEIGHT,
+    );
+    let harness = TestHarness::new()
+        .with_config(config)
+        .with_display(
+            EXT_DISPLAY_ID,
+            IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+            vec![EXT_WORKSPACE_ID],
+        )
+        .with_workspace_window(100, EXT_WORKSPACE_ID, move |window| {
+            window.frame = wide_frame;
+        })
+        .with_workspace_window(101, EXT_WORKSPACE_ID, move |window| {
+            window.frame = wide_frame;
+        })
+        .with_workspace_window(102, EXT_WORKSPACE_ID, move |window| {
+            window.frame = wide_frame;
+        });
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 100 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::DisplayRemoved {
+            display_id: EXT_DISPLAY_ID,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    harness
+        .on_iteration(1, |_, state| {
+            let origin = Origin::new(0, -EXT_DISPLAY_HEIGHT + TEST_MENUBAR_HEIGHT);
+            state.update_window(101, |window| {
+                window.frame = IRect::from_corners(origin, origin + Size::new(1600, 400));
+            });
+            state.update_window(102, |window| {
+                window.frame = IRect::from_corners(origin, origin + Size::new(400, 1000));
+            });
+            state.remove_display(EXT_DISPLAY_ID);
+            state.activate_workspace(TEST_DISPLAY_ID, EXT_WORKSPACE_ID, false);
+        })
+        .on_iteration(3, |world, state| {
+            let mut refreshes = world.query::<&mut RefreshWindowSizes>();
+            for mut refresh in refreshes.iter_mut(world) {
+                refresh.0 = Instant::now()
+                    .checked_sub(Duration::from_secs(6))
+                    .expect("six seconds before now should be representable");
+            }
+            state.fail_window_frame_updates(100, true);
+        })
+        .on_iteration(4, |world, state| {
+            let mut clamped = world
+                .query_filtered::<Entity, (With<ClampWindowBounds>, With<RefreshWindowSizes>)>();
+            assert!(clamped.single(world).is_ok());
+            state.fail_window_frame_updates(100, false);
+        })
+        .on_iteration(6, |world, _| {
+            for id in [101, 102] {
+                let floating = find_window_entity(id, world);
+                assert!(world.entity(floating).contains::<Unmanaged>());
+            }
+            assert_window_size!(
+                world,
+                100,
+                TEST_DISPLAY_WIDTH,
+                TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT
+            );
+            assert_window_size!(world, 101, TEST_DISPLAY_WIDTH, 400);
+            assert_window_size!(world, 102, 400, TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT);
         })
         .run(commands);
 }

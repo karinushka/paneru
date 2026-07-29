@@ -18,6 +18,7 @@ use tracing::{Level, debug, error, instrument, warn};
 use super::{ActiveDisplayMarker, SpawnWindowTrigger};
 use crate::commands::{Direction, MoveFocus, Operation, filter_window_operations};
 use crate::config::Config;
+use crate::ecs::display::ClampWindowBounds;
 use crate::ecs::focus::FocusHistory;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
@@ -483,34 +484,54 @@ fn find_orphaned_workspaces(
 
 #[allow(clippy::needless_pass_by_value)]
 fn refresh_workspace_window_sizes(
-    layout_strip: Single<(&LayoutStrip, Entity, &RefreshWindowSizes), With<ActiveWorkspaceMarker>>,
+    layout_strip: Single<
+        (
+            &LayoutStrip,
+            Entity,
+            &RefreshWindowSizes,
+            Has<ClampWindowBounds>,
+        ),
+        With<ActiveWorkspaceMarker>,
+    >,
     mut windows: Query<(Entity, &mut Window, &mut Bounds, Option<&Unmanaged>)>,
     active_display: ActiveDisplay,
     window_manager: Res<WindowManager>,
+    config: Res<Config>,
     mut commands: Commands,
 ) {
-    let (strip, strip_entity, marker) = *layout_strip;
+    let (strip, strip_entity, marker, clamp_bounds) = *layout_strip;
     if !marker.ready() {
         return;
     }
 
     debug!("refreshing workspace {} sizes", strip.id());
-    let mut in_workspace = window_manager
-        .windows_in_workspace(strip.id())
-        .inspect_err(|err| {
+    let viewport = active_display.actual_bounds(&config);
+    let mut in_workspace = match window_manager.windows_in_workspace(strip.id()) {
+        Ok(windows) => windows,
+        Err(err) => {
             warn!("getting windows in workspace: {err}");
-        })
-        .unwrap_or_default();
+            if clamp_bounds {
+                return;
+            }
+            Vec::new()
+        }
+    };
 
     // Resize windows for the new display dimensions.
     for entity in strip.all_windows() {
         let Ok((_, ref mut window, ref mut bounds, _)) = windows.get_mut(entity) else {
             continue;
         };
-        let Ok(frame) = window.update_frame() else {
-            continue;
+        let frame = match window.update_frame() {
+            Ok(frame) => frame,
+            Err(_) if clamp_bounds => return,
+            Err(_) => continue,
         };
-        bounds.0 = frame.size();
+        bounds.0 = if clamp_bounds {
+            frame.size().with_x(frame.width().min(viewport.width()))
+        } else {
+            frame.size()
+        };
         debug!("refreshing window {} frame {:?}", window.id(), frame);
 
         in_workspace.retain(|window_id| *window_id != window.id());
@@ -529,14 +550,34 @@ fn refresh_workspace_window_sizes(
         })
         .filter_map(|(unmanaged, entity)| {
             matches!(unmanaged, Unmanaged::Floating).then_some(entity)
-        });
+        })
+        .collect::<Vec<_>>();
     for window_entity in floating {
+        if clamp_bounds
+            && let Ok((_, ref mut window, ref mut bounds, _)) = windows.get_mut(window_entity)
+        {
+            let Ok(frame) = window.update_frame() else {
+                return;
+            };
+            let size = frame.size().min(viewport.size());
+            if frame.size() != size {
+                bounds.0 = size;
+            }
+        }
         debug!("repositioning floating window {window_entity}");
-        commands.reposition_entity(window_entity, active_display.bounds().min);
+        commands.reposition_entity(
+            window_entity,
+            if clamp_bounds {
+                viewport.min
+            } else {
+                active_display.bounds().min
+            },
+        );
     }
 
     if let Ok(mut cmds) = commands.get_entity(strip_entity) {
-        cmds.try_remove::<RefreshWindowSizes>();
+        cmds.try_remove::<RefreshWindowSizes>()
+            .try_remove::<ClampWindowBounds>();
     }
 }
 

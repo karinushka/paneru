@@ -31,6 +31,9 @@ const ORPHANED_SPACES_TIMEOUT_SEC: u64 = 30;
 
 pub struct DisplayEventsPlugin;
 
+#[derive(Component)]
+pub(crate) struct ClampWindowBounds;
+
 impl Plugin for DisplayEventsPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(PreUpdate, display_change_handler);
@@ -263,7 +266,7 @@ fn remove_display(
             commands,
         );
         if let Ok(mut commands) = commands.get_entity(entity) {
-            commands.try_insert(timeout);
+            commands.try_insert((timeout, ClampWindowBounds));
         }
         if let Ok(mut commands) = commands.get_entity(display_entity) {
             commands.detach_child(entity);

@@ -82,6 +82,7 @@ struct MockStateInner {
     windows: HashMap<WinID, MockWindowData>,
     displays: HashMap<u32, MockDisplayData>,
     fullscreen_spaces: HashSet<WorkspaceId>,
+    frame_update_failures: HashSet<WinID>,
     active_display_id: u32,
     cursor_position: Origin,
     event_queue: VecDeque<Event>,
@@ -100,6 +101,7 @@ impl MockState {
                 windows: HashMap::new(),
                 displays: HashMap::new(),
                 fullscreen_spaces: HashSet::new(),
+                frame_update_failures: HashSet::new(),
                 active_display_id: 0,
                 cursor_position: Origin::ZERO,
                 event_queue: VecDeque::new(),
@@ -169,6 +171,15 @@ impl MockState {
                     .event_queue
                     .push_back(Event::WindowFocused { window_id: id });
             }
+        }
+    }
+
+    pub(crate) fn fail_window_frame_updates(&self, id: WinID, fail: bool) {
+        let mut inner = self.inner.force_write();
+        if fail {
+            inner.frame_update_failures.insert(id);
+        } else {
+            inner.frame_update_failures.remove(&id);
         }
     }
 
@@ -411,8 +422,11 @@ impl MockState {
 
         let s = self.clone();
         mw.expect_update_frame().returning(move || {
-            s.inner
-                .force_read()
+            let state = s.inner.force_read();
+            if state.frame_update_failures.contains(&id) {
+                return Err(Error::InvalidWindow);
+            }
+            state
                 .windows
                 .get(&id)
                 .map(|w| w.frame)

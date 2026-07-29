@@ -696,7 +696,8 @@ fn test_query_state_tracks_float_after_virtual_workspace_is_reaped() {
         vec![],
     )
         .into();
-    let mut harness = TestHarness::new()
+
+    let harness = TestHarness::new()
         .with_config(config)
         .with_display(
             TEST_DISPLAY_ID,
@@ -704,62 +705,61 @@ fn test_query_state_tracks_float_after_virtual_workspace_is_reaped() {
             vec![TEST_WORKSPACE_ID, TEST_WORKSPACE_ID + 1],
         )
         .with_windows(1);
-    harness.app.update();
 
-    let send = |harness: &mut TestHarness, command| {
-        harness
-            .app
-            .world_mut()
-            .write_message(Event::Command { command });
-        for _ in 0..4 {
-            harness.app.update();
-            for event in harness.mock_state.drain_events() {
-                harness.app.world_mut().write_message(event);
-            }
-        }
-    };
-    send(
-        &mut harness,
-        Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Follow)),
-    );
-    send(&mut harness, Command::Window(Operation::Manage));
-    send(&mut harness, Command::Window(Operation::VirtualNumber(0)));
-
-    let state = extract_query_state(harness.world()).expect("query state extraction");
-    let active = state
-        .virtual_workspaces
-        .iter()
-        .find(|workspace| workspace.active)
-        .expect("active virtual workspace");
-
-    assert_eq!(state.active.virtual_workspace_number, Some(1));
-    assert_eq!(state.active.focused_window_id, Some(0));
-    assert!(
-        !state.virtual_workspaces.iter().any(|workspace| {
-            workspace.native_workspace_id == TEST_WORKSPACE_ID && workspace.number == 2
-        }),
-        "the empty remembered row should be reaped"
-    );
-    assert_eq!(active.windows.len(), 1);
-    assert!(active.windows[0].focused);
-    assert!(active.windows[0].floating);
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Follow)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Manage),
+        },
+        Event::Command {
+            command: Command::Window(Operation::VirtualNumber(0)),
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
 
     harness
-        .mock_state
-        .update_window(0, |window| window.workspace_id = TEST_WORKSPACE_ID + 1);
-    let moved = extract_query_state(harness.world()).expect("query state extraction");
-    let original_workspace = moved
-        .virtual_workspaces
-        .iter()
-        .find(|workspace| workspace.native_workspace_id == TEST_WORKSPACE_ID)
-        .expect("original native workspace");
-    let live_workspace = moved
-        .virtual_workspaces
-        .iter()
-        .find(|workspace| workspace.native_workspace_id == TEST_WORKSPACE_ID + 1)
-        .expect("live native workspace");
+        .on_iteration(3, |world, _state| {
+            let state = extract_query_state(world).expect("query state extraction");
+            let active = state
+                .virtual_workspaces
+                .iter()
+                .find(|workspace| workspace.active)
+                .expect("active virtual workspace");
 
-    assert!(original_workspace.windows.is_empty());
-    assert_eq!(live_workspace.windows.len(), 1);
-    assert!(live_workspace.windows[0].floating);
+            assert_eq!(state.active.virtual_workspace_number, Some(1));
+            assert_eq!(state.active.focused_window_id, Some(0));
+            assert!(
+                !state.virtual_workspaces.iter().any(|workspace| {
+                    workspace.native_workspace_id == TEST_WORKSPACE_ID && workspace.number == 2
+                }),
+                "the empty remembered row should be reaped"
+            );
+            assert_eq!(active.windows.len(), 1);
+            assert!(active.windows[0].focused);
+            assert!(active.windows[0].floating);
+        })
+        .on_iteration(4, |world, state| {
+            state.update_window(0, |window| window.workspace_id = TEST_WORKSPACE_ID + 1);
+            let moved = extract_query_state(world).expect("query state extraction");
+            let original_workspace = moved
+                .virtual_workspaces
+                .iter()
+                .find(|workspace| workspace.native_workspace_id == TEST_WORKSPACE_ID)
+                .expect("original native workspace");
+            let live_workspace = moved
+                .virtual_workspaces
+                .iter()
+                .find(|workspace| workspace.native_workspace_id == TEST_WORKSPACE_ID + 1)
+                .expect("live native workspace");
+
+            assert!(original_workspace.windows.is_empty());
+            assert_eq!(live_workspace.windows.len(), 1);
+            assert!(live_workspace.windows[0].floating);
+        })
+        .run(commands);
 }

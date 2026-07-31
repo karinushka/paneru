@@ -39,6 +39,34 @@ use crate::util::symlink_target;
 /// A Lua-registered keybind: `(keycode, modifiers, handler_id)`.
 pub(super) type LuaKeybind = (u8, Modifiers, u32);
 
+/// Prepends `PANERU_LUA_PATH`/`PANERU_LUA_CPATH` (if set) onto `package.path`/
+/// `package.cpath`, so `require("sbar")` (or any module supplied via the Nix
+/// `extraLuaPackages` option) resolves. Each var is itself a `;`-separated
+/// list of Lua path templates - the same shape `package.path` already uses -
+/// so nixpkgs' `getLuaPath`/`getLuaCPath` output passes straight through with
+/// no reformatting.
+fn extend_lua_search_paths(lua: &Lua) -> mlua::Result<()> {
+    let package: Table = lua.globals().get("package")?;
+    prepend_env_path(&package, "path", "PANERU_LUA_PATH")?;
+    prepend_env_path(&package, "cpath", "PANERU_LUA_CPATH")?;
+    Ok(())
+}
+
+/// Prepends `$env_var`'s value onto `package[field]`, so caller-supplied
+/// modules are found before Lua's compiled-in defaults.
+fn prepend_env_path(package: &Table, field: &str, env_var: &str) -> mlua::Result<()> {
+    let Ok(extra) = std::env::var(env_var) else {
+        return Ok(());
+    };
+    let extra = extra.trim_matches(';');
+    if extra.is_empty() {
+        return Ok(());
+    }
+    let existing: String = package.get(field)?;
+    package.set(field, format!("{extra};{existing}"))?;
+    Ok(())
+}
+
 /// Everything the script registered, kept on the Rust side so dispatch never
 /// has to reach back into Lua globals to find a callback.
 #[derive(Default)]
@@ -88,6 +116,7 @@ impl LuaRuntime {
     /// executing the script. Registered keybinds are collected for publishing.
     pub fn from_source(source: &str) -> mlua::Result<Self> {
         let lua = Lua::new();
+        extend_lua_search_paths(&lua)?;
         let outbox = Rc::new(RefCell::new(Outbox::default()));
         let registry = SharedRegistry::default();
         api::install(&lua, &outbox, &registry)?;
@@ -386,5 +415,21 @@ mod tests {
     fn empty_runtime_has_no_binds() {
         let runtime = LuaRuntime::empty();
         assert!(runtime.published_keybinds().is_empty());
+    }
+
+    #[test]
+    fn extra_lua_path_env_var_is_prepended() {
+        // Unique var name so this doesn't race other tests' env state.
+        // SAFETY: no other test reads or writes this variable.
+        unsafe { std::env::set_var("PANERU_LUA_PATH", "/tmp/paneru-test/?.lua") };
+        let runtime = LuaRuntime::from_source("").unwrap();
+        let package: Table = runtime.lua().globals().get("package").unwrap();
+        let path: String = package.get("path").unwrap();
+        // SAFETY: no other test reads or writes this variable.
+        unsafe { std::env::remove_var("PANERU_LUA_PATH") };
+        assert!(
+            path.starts_with("/tmp/paneru-test/?.lua;"),
+            "expected the extra path to be prepended, got {path}"
+        );
     }
 }

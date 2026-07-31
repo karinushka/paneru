@@ -170,7 +170,7 @@ fn socket_path(_: &Lua, (): ()) -> LuaResult<String> {
 ///
 /// # Errors
 ///
-/// An error.
+/// Returns an error if any Lua table/function creation or assignment fails.
 pub fn module(lua: &Lua, version: &str) -> LuaResult<LuaTable> {
     let exports = lua.create_table()?;
 

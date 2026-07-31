@@ -14,13 +14,32 @@ keywords = ["macos", "windowmanager", "window", "manager"]
 [workspace]
 members = ["crates/*"]
 default-members = ["."]
+
+# Versions shared by the daemon, the loadable Lua module and the command crate,
+# so the three can never drift apart. Members add only the features they need
+# (the Lua ABI in particular differs: vendored here, `module` in crates/lua).
 [workspace.dependencies]
+mlua = { version = "0.12", default-features = false, features = ["serialize"] }
+paneru-lua = { path = "crates/lua" }
 paneru-shared-types = { path = "crates/shared_types" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 [lints.clippy]
 pedantic = "warn"
+
+# `lua` builds in the `init.lua` scripting runtime (`paneru.on`/
+# `paneru.bind`). Off by default; build with `--features lua,lua54` (or
+# another `lua5x`/`luajit` ABI feature — exactly one must be picked alongside
+# `lua`, same convention as `crates/lua`) to include it.
+[features]
+default = []
+lua = ["dep:mlua", "dep:paneru-lua"]
+lua51 = ["mlua/lua51"]
+lua52 = ["mlua/lua52"]
+lua53 = ["mlua/lua53"]
+lua54 = ["mlua/lua54"]
+luajit = ["mlua/luajit"]
 
 [profile.release]
 codegen-units = 1
@@ -39,6 +58,7 @@ derive_more = { version = "2.1", features = ["deref", "deref_mut"] }
 embed_plist = "1.2"
 launchctl = "0.3"
 libc = "0.2"
+mlua = { workspace = true, features = ["vendored"], optional = true }
 notify = { version = "8.2", features = ["macos_fsevent"] }
 num_enum = "0.7"
 objc2 = { version = "0.6", features = ["catch-all", "exception"] }
@@ -61,6 +81,7 @@ objc2-app-kit = { version = "0.3", features = [
 objc2-core-foundation = { version = "0.3", features = ["CFRunLoop"] }
 objc2-core-graphics = "0.3"
 paneru-shared-types = { workspace = true }
+paneru-lua = { workspace = true, optional = true }
 objc2-quartz-core = { version = "0.3", features = [
   "CALayer",
   "objc2-core-foundation",
@@ -75,8 +96,8 @@ objc2-foundation = { version = "0.3", features = [
 ] }
 regex = "1.12"
 scopeguard = "1.2"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
 stdext = "0.3"
 toml = "1.1"
 tracing = "0.1"

@@ -17,10 +17,14 @@ use std::{
 use stdext::function_name;
 use tracing::{error, info, warn};
 
+// The tests below build expected commands out of the full vocabulary; the
+// non-test code only ever names `Command`.
 use self::decorations::BorderRadiusOption;
 use self::swipe::SwipeGestureDirection;
+#[cfg(test)]
+use crate::commands::{MoveFocus, Operation, ResizeDirection};
 use crate::{
-    commands::{Command, Direction, MouseMove, MoveFocus, Operation, ResizeDirection},
+    commands::Command,
     manager::ProcessApi,
     platform::{Modifiers, OSStatus, macos_major_version},
 };
@@ -163,210 +167,12 @@ pub fn deprecated_options_in_file(path: &Path) -> Result<Vec<String>> {
     deprecated_options_in_input(&input)
 }
 
-/// Parses a string into a `Direction` enum.
-///
-/// # Arguments
-///
-/// * `dir` - The string representation of the direction (e.g., "north", "west").
-///
-/// # Returns
-///
-/// `Ok(Direction)` if the string is a valid direction, otherwise `Err(Error::InvalidConfig)`.
-fn parse_direction(dir: &str) -> Result<Direction> {
-    Ok(match dir {
-        "north" => Direction::North,
-        "south" => Direction::South,
-        "west" => Direction::West,
-        "east" => Direction::East,
-        "first" => Direction::First,
-        "last" => Direction::Last,
-        _ => {
-            return Err(Error::InvalidConfig(format!(
-                "{}: Unhandled direction {dir}",
-                function_name!()
-            )));
-        }
-    })
-}
-
-fn parse_focus_direction(dir: &str) -> Result<Direction> {
-    match dir.parse::<usize>() {
-        Ok(0) => Err(Error::InvalidConfig(format!(
-            "{}: Window numbers start at 1",
-            function_name!()
-        ))),
-        Ok(number) => Ok(Direction::Nth(number - 1)),
-        Err(_) => parse_direction(dir),
-    }
-}
-
-fn parse_virtual_workspace_number(input: &str) -> Result<u32> {
-    let number = input.parse::<u32>().map_err(|_| {
-        Error::InvalidConfig(format!(
-            "{}: Unhandled virtual workspace {input}",
-            function_name!()
-        ))
-    })?;
-    if number == 0 {
-        return Err(Error::InvalidConfig(format!(
-            "{}: Virtual workspace numbers start at 1",
-            function_name!()
-        )));
-    }
-    Ok(number - 1)
-}
-
-/// Parses a string into a `ResizeDirection` enum.
-fn parse_resize_direction(direction: &str) -> Result<ResizeDirection> {
-    Ok(match direction {
-        "grow" => ResizeDirection::Grow,
-        "shrink" => ResizeDirection::Shrink,
-        _ => {
-            return Err(Error::InvalidConfig(format!(
-                "{}: Unhandled resize direction {direction}",
-                function_name!()
-            )));
-        }
-    })
-}
-
-/// Parses a command argument vector into an `Operation` enum.
-///
-/// # Arguments
-///
-/// * `argv` - A slice of strings representing the command arguments (e.g., `["focus", "east"]`).
-///
-/// # Returns
-///
-/// `Ok(Operation)` if the arguments represent a valid operation, otherwise `Err(Error::InvalidConfig)`.
-fn parse_operation(argv: &[&str]) -> Result<Operation> {
-    let empty = "";
-    let cmd = *argv.first().unwrap_or(&empty);
-    let err = Error::InvalidConfig(format!("{}: Invalid command '{argv:?}'", function_name!()));
-
-    let out = match cmd {
-        // The bindings key splits on `_`, so `window_focus_unmanaged` arrives
-        // here as ["focus", "unmanaged"] and the suffix tells us the variant.
-        "focus" => match *argv.get(1).ok_or(err.clone())? {
-            "unmanaged" => Operation::FocusUnmanaged,
-            "managed" => Operation::FocusManaged,
-            dir => Operation::Focus(parse_focus_direction(dir)?),
-        },
-        "raise" => match *argv.get(1).ok_or(err.clone())? {
-            "floating" => Operation::RaiseFloating,
-            _ => return Err(err),
-        },
-        "togglefloatlayer" => Operation::ToggleFloatingLayer,
-        "swap" => Operation::Swap(parse_direction(argv.get(1).ok_or(err)?)?),
-        "center" => Operation::Center,
-        "resize" => Operation::Resize(
-            argv.get(1)
-                .map_or(Ok(ResizeDirection::Grow), |arg| parse_resize_direction(arg))?,
-        ),
-        "grow" => Operation::Resize(ResizeDirection::Grow),
-        "shrink" => Operation::Resize(ResizeDirection::Shrink),
-        "fullwidth" => Operation::FullWidth,
-        "manage" => Operation::Manage,
-        "equalize" => Operation::Equalize,
-        "balance" => Operation::Balance,
-        "stack" => Operation::Stack(true),
-        "unstack" => Operation::Stack(false),
-        "nextdisplay" => Operation::ToNextDisplay(MoveFocus::Follow),
-        "nextdisplaysend" => Operation::ToNextDisplay(MoveFocus::Stay),
-        "snap" => Operation::Snap,
-        "virtual" => {
-            let target = argv.get(1).ok_or(err)?;
-            target.parse::<u32>().map_or_else(
-                |_| parse_direction(target).map(Operation::Virtual),
-                |_| parse_virtual_workspace_number(target).map(Operation::VirtualNumber),
-            )?
-        }
-        "virtualnum" => {
-            Operation::VirtualNumber(parse_virtual_workspace_number(argv.get(1).ok_or(err)?)?)
-        }
-        "virtualmove" => {
-            let target = argv.get(1).ok_or(err)?;
-            target.parse::<u32>().map_or_else(
-                |_| {
-                    parse_direction(target)
-                        .map(|dir| Operation::VirtualMove(dir, MoveFocus::Follow))
-                },
-                |_| {
-                    parse_virtual_workspace_number(target)
-                        .map(|index| Operation::VirtualMoveNumber(index, MoveFocus::Follow))
-                },
-            )?
-        }
-        "virtualmovenum" => Operation::VirtualMoveNumber(
-            parse_virtual_workspace_number(argv.get(1).ok_or(err)?)?,
-            MoveFocus::Follow,
-        ),
-        "virtualsend" => {
-            let target = argv.get(1).ok_or(err)?;
-            target.parse::<u32>().map_or_else(
-                |_| parse_direction(target).map(|dir| Operation::VirtualMove(dir, MoveFocus::Stay)),
-                |_| {
-                    parse_virtual_workspace_number(target)
-                        .map(|index| Operation::VirtualMoveNumber(index, MoveFocus::Stay))
-                },
-            )?
-        }
-        "virtualsendnum" => Operation::VirtualMoveNumber(
-            parse_virtual_workspace_number(argv.get(1).ok_or(err)?)?,
-            MoveFocus::Stay,
-        ),
-        _ => {
-            return Err(err);
-        }
-    };
-    Ok(out)
-}
-
-/// Parses a command argument vector into a `MouseMove` enum.
-fn parse_mouse_move(argv: &[&str]) -> Result<MouseMove> {
-    let empty = "";
-    let cmd = *argv.first().unwrap_or(&empty);
-    let err = Error::InvalidConfig(format!(
-        "{}: Invalid mouse command '{argv:?}'",
-        function_name!()
-    ));
-
-    let out = match cmd {
-        "nextdisplay" => MouseMove::ToNextDisplay,
-        _ => {
-            return Err(err);
-        }
-    };
-    Ok(out)
-}
-
-/// Parses a command argument vector into a `Command` enum.
-///
-/// # Arguments
-///
-/// * `argv` - A slice of strings representing the command arguments (e.g., `["window", "focus", "east"]`).
-///
-/// # Returns
-///
-/// `Ok(Command)` if the arguments represent a valid command, otherwise `Err(Error::InvalidConfig)`.
+/// Parses a command argument vector into a [`Command`] (e.g. `["window",
+/// "focus", "east"]`), mapping the shared vocabulary crate's parse error into
+/// this crate's configuration error.
 pub fn parse_command(argv: &[&str]) -> Result<Command> {
-    let empty = "";
-    let cmd = *argv.first().unwrap_or(&empty);
-
-    let out = match cmd {
-        "printstate" => Command::PrintState,
-        "window" => Command::Window(parse_operation(&argv[1..])?),
-        "mouse" => Command::Mouse(parse_mouse_move(&argv[1..])?),
-        "quit" => Command::Quit,
-        "restart" => Command::Restart,
-        _ => {
-            return Err(Error::InvalidConfig(format!(
-                "{}: Unhandled command '{argv:?}'",
-                function_name!()
-            )));
-        }
-    };
-    Ok(out)
+    paneru_shared_types::commands::parse_command(argv)
+        .map_err(|err| Error::InvalidConfig(format!("{}: {err}", function_name!())))
 }
 
 /// `Config` manages the application's configuration, including options, keybindings, and window-specific parameters.

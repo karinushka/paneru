@@ -2594,6 +2594,7 @@ dependencies = [
  "objc2-core-graphics",
  "objc2-foundation",
  "objc2-quartz-core",
+ "paneru-shared-types",
  "regex",
  "scopeguard",
  "serde",
@@ -2603,6 +2604,14 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "xdg",
+]
+
+[[package]]
+name = "paneru-shared-types"
+version = "0.4.4"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -6,7 +6,7 @@ use bevy::ecs::query::{Added, Has};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs;
 use bevy::ecs::system::{Query, Res, ResMut};
-use serde_json::{Value, json};
+use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::os::unix::net::UnixStream;
@@ -14,9 +14,13 @@ use std::sync::{Arc, Mutex};
 use tracing::warn;
 
 use super::{Command, Operation};
+
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::Windows;
-use crate::ecs::state::{PaneruActiveState, PaneruQueryState, PaneruVirtualWorkspaceState};
+use crate::ecs::state::QueryState;
+use crate::ecs::state::{
+    PaneruActiveState, PaneruQueryState, PaneruVirtualWorkspaceState, StateEvent,
+};
 use crate::ecs::{
     ActiveDisplayMarker, ActiveWorkspaceMarker, FocusedMarker, SelectedVirtualMarker, Unmanaged,
 };
@@ -219,7 +223,7 @@ fn collect_state_broadcast_events<'a>(
     cache: &mut StateBroadcastCache,
     title_for_window: impl Fn(WinID) -> Option<String>,
     signals: StateBroadcastSignals,
-) -> Vec<Value> {
+) -> Vec<StateEvent> {
     let intent = StateBroadcastIntent::from_events(events, signals);
     collect_state_broadcast_events_for_intent(&intent, Some(state), cache, title_for_window)
 }
@@ -229,7 +233,7 @@ fn collect_state_broadcast_events_for_intent(
     state: Option<&PaneruQueryState>,
     cache: &mut StateBroadcastCache,
     title_for_window: impl Fn(WinID) -> Option<String>,
-) -> Vec<Value> {
+) -> Vec<StateEvent> {
     let mut display_changes = intent.display_changes.clone();
     if intent.active_display_changed
         && let Some(state) = state
@@ -249,18 +253,14 @@ fn collect_state_broadcast_events_for_intent(
             if cache.titles.get(&window_id) == Some(&title) {
                 continue;
             }
-            outgoing.push(json!({
-                "event": "window_title_changed",
-                "window_id": window_id,
-                "title": title,
-            }));
+            outgoing.push(StateEvent::WindowTitleChanged {
+                window_id,
+                title: title.clone(),
+            });
             cache.titles.insert(window_id, title);
         }
         for display_id in display_changes {
-            outgoing.push(json!({
-                "event": "display_changed",
-                "display_id": display_id,
-            }));
+            outgoing.push(StateEvent::DisplayChanged { display_id });
         }
         return outgoing;
     };
@@ -273,10 +273,9 @@ fn collect_state_broadcast_events_for_intent(
             && (workspace.native_workspace_id.is_some()
                 || workspace.virtual_workspace_number.is_some())
         {
-            outgoing.push(json!({
-                "event": "virtual_workspace_changed",
-                "active": state.active.clone(),
-            }));
+            outgoing.push(StateEvent::VirtualWorkspaceChanged {
+                active: state.active.clone(),
+            });
             cache.workspace = Some(workspace);
         }
     }
@@ -284,24 +283,22 @@ fn collect_state_broadcast_events_for_intent(
     if intent.windows_changed
         && cache.virtual_workspaces.as_ref() != Some(&state.virtual_workspaces)
     {
-        outgoing.push(json!({
-            "event": "windows_changed",
-            "virtual_workspace_number": state.active.virtual_workspace_number,
-            "active": state.active.clone(),
-        }));
+        outgoing.push(StateEvent::WindowsChanged {
+            virtual_workspace_number: state.active.virtual_workspace_number,
+            active: state.active.clone(),
+        });
         cache.virtual_workspaces = Some(state.virtual_workspaces.clone());
     }
 
     if intent.window_focused {
         let focus = FocusBroadcastSnapshot::from(&state.active);
         if focus.window_id.is_some() && cache.focus.as_ref() != Some(&focus) {
-            outgoing.push(json!({
-                "event": "window_focused",
-                "window_id": focus.window_id,
-                "bundle_id": focus.bundle_id,
-                "title": focus.title,
-                "virtual_workspace_number": focus.virtual_workspace_number,
-            }));
+            outgoing.push(StateEvent::WindowFocused {
+                window_id: focus.window_id,
+                bundle_id: focus.bundle_id.clone(),
+                title: focus.title.clone(),
+                virtual_workspace_number: focus.virtual_workspace_number,
+            });
             cache.focus = Some(focus);
         }
     }
@@ -310,19 +307,15 @@ fn collect_state_broadcast_events_for_intent(
         if cache.titles.get(&window_id) == Some(&title) {
             continue;
         }
-        outgoing.push(json!({
-            "event": "window_title_changed",
-            "window_id": window_id,
-            "title": title,
-        }));
+        outgoing.push(StateEvent::WindowTitleChanged {
+            window_id,
+            title: title.clone(),
+        });
         cache.titles.insert(window_id, title);
     }
 
     for display_id in display_changes {
-        outgoing.push(json!({
-            "event": "display_changed",
-            "display_id": display_id,
-        }));
+        outgoing.push(StateEvent::DisplayChanged { display_id });
     }
 
     outgoing
@@ -396,9 +389,14 @@ fn state_event_broadcast_handler(
         return;
     }
 
+    // One JSON object per line, as documented in QUERY_AND_SUBSCRIBE_FORMAT.md.
     let mut payload = outgoing
-        .into_iter()
-        .map(|event| event.to_string())
+        .iter()
+        .filter_map(|event| {
+            serde_json::to_string(event)
+                .inspect_err(|err| warn!("serializing broadcast event: {err}"))
+                .ok()
+        })
         .collect::<Vec<_>>()
         .join("\n");
     payload.push('\n');
@@ -483,10 +481,22 @@ mod tests {
         );
 
         assert_eq!(outgoing.len(), 1);
-        assert_eq!(outgoing[0]["event"], "window_focused");
-        assert_eq!(outgoing[0]["window_id"], 26_261);
-        assert_eq!(outgoing[0]["bundle_id"], "com.cmuxterm.app");
-        assert_eq!(outgoing[0]["title"], "aicommit2 ~/P/nixos-config");
+        assert_eq!(
+            outgoing[0],
+            StateEvent::WindowFocused {
+                window_id: Some(26_261),
+                bundle_id: Some("com.cmuxterm.app".to_string()),
+                title: Some("aicommit2 ~/P/nixos-config".to_string()),
+                virtual_workspace_number: Some(2),
+            }
+        );
+        // The wire format is what clients actually depend on, so pin the JSON
+        // shape too — not just the typed value.
+        let json = serde_json::to_value(&outgoing[0]).unwrap();
+        assert_eq!(json["event"], "window_focused");
+        assert_eq!(json["window_id"], 26_261);
+        assert_eq!(json["bundle_id"], "com.cmuxterm.app");
+        assert_eq!(json["title"], "aicommit2 ~/P/nixos-config");
 
         let duplicate = collect_state_broadcast_events(
             events.iter(),
@@ -514,9 +524,17 @@ mod tests {
             collect_state_broadcast_events(events.iter(), &state, &mut cache, |_| None, signals);
 
         assert_eq!(outgoing.len(), 1);
-        assert_eq!(outgoing[0]["event"], "windows_changed");
-        assert_eq!(outgoing[0]["virtual_workspace_number"], 2);
-        assert_eq!(outgoing[0]["active"]["focused_window_id"], 26_261);
+        assert_eq!(
+            outgoing[0],
+            StateEvent::WindowsChanged {
+                virtual_workspace_number: Some(2),
+                active: state.active.clone(),
+            }
+        );
+        let json = serde_json::to_value(&outgoing[0]).unwrap();
+        assert_eq!(json["event"], "windows_changed");
+        assert_eq!(json["virtual_workspace_number"], 2);
+        assert_eq!(json["active"]["focused_window_id"], 26_261);
 
         let duplicate =
             collect_state_broadcast_events(events.iter(), &state, &mut cache, |_| None, signals);
@@ -539,7 +557,7 @@ mod tests {
         );
 
         assert_eq!(changed.len(), 1);
-        assert_eq!(changed[0]["event"], "windows_changed");
+        assert!(matches!(changed[0], StateEvent::WindowsChanged { .. }));
     }
 
     #[test]
@@ -565,10 +583,20 @@ mod tests {
         );
 
         assert_eq!(outgoing.len(), 1);
-        assert_eq!(outgoing[0]["event"], "window_focused");
-        assert_eq!(outgoing[0]["window_id"], 26_262);
-        assert_eq!(outgoing[0]["bundle_id"], "com.openai.codex");
-        assert_eq!(outgoing[0]["title"], "Codex");
+        assert_eq!(
+            outgoing[0],
+            StateEvent::WindowFocused {
+                window_id: Some(26_262),
+                bundle_id: Some("com.openai.codex".to_string()),
+                title: Some("Codex".to_string()),
+                virtual_workspace_number: Some(2),
+            }
+        );
+        let json = serde_json::to_value(&outgoing[0]).unwrap();
+        assert_eq!(json["event"], "window_focused");
+        assert_eq!(json["window_id"], 26_262);
+        assert_eq!(json["bundle_id"], "com.openai.codex");
+        assert_eq!(json["title"], "Codex");
     }
 
     #[test]

@@ -93,49 +93,13 @@ pub struct SavedWindow {
     pub subrole: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StateQueryKind {
-    State,
-    VirtualWorkspaces,
-    Active,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct PaneruQueryState {
-    pub version: u32,
-    pub timestamp: u64,
-    pub active: PaneruActiveState,
-    pub virtual_workspaces: Vec<PaneruVirtualWorkspaceState>,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
-pub struct PaneruActiveState {
-    pub display_id: Option<CGDirectDisplayID>,
-    pub native_workspace_id: Option<WorkspaceId>,
-    pub virtual_workspace_number: Option<u32>,
-    pub focused_window_id: Option<WinID>,
-    pub focused_bundle_id: Option<String>,
-    pub focused_app_name: Option<String>,
-    pub focused_window_title: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct PaneruVirtualWorkspaceState {
-    pub number: u32,
-    pub native_workspace_id: WorkspaceId,
-    pub active: bool,
-    pub windows: Vec<PaneruWindowState>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct PaneruWindowState {
-    pub window_id: WinID,
-    pub bundle_id: String,
-    pub app_name: String,
-    pub title: String,
-    pub focused: bool,
-    pub floating: bool,
-}
+// The query/subscribe documents are the socket's wire format, so they live in
+// the shared `paneru_shared_state` crate; the daemon only fills them in from the
+// ECS world. Aliased to the names the rest of the daemon already uses.
+pub use paneru_shared_types::state::{
+    ActiveState as PaneruActiveState, QueryState as PaneruQueryState, StateEvent, StateQueryKind,
+    VirtualWorkspaceState as PaneruVirtualWorkspaceState, WindowState as PaneruWindowState,
+};
 
 impl From<IRect> for SavedRect {
     fn from(rect: IRect) -> Self {
@@ -421,9 +385,28 @@ struct SavedWorkspaceBuilder {
     strips: Vec<SavedStrip>,
 }
 
-impl PaneruQueryState {
+pub trait QueryState: std::marker::Sized {
+    fn extract(
+        workspaces: &Query<(
+            &ChildOf,
+            &LayoutStrip,
+            Has<ActiveWorkspaceMarker>,
+            Has<SelectedVirtualMarker>,
+        )>,
+        displays: &Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
+        windows: &Windows,
+        apps: &Query<&Application>,
+        window_manager: &WindowManager,
+    ) -> crate::errors::Result<Self>;
+}
+
+/// Builds the query/subscribe state document from the ECS world.
+///
+/// A free function rather than an inherent method because [`PaneruQueryState`]
+/// belongs to the shared protocol crate, which knows nothing about the ECS.
+impl QueryState for PaneruQueryState {
     #[allow(clippy::too_many_lines, clippy::type_complexity)]
-    pub fn extract(
+    fn extract(
         workspaces: &Query<(
             &ChildOf,
             &LayoutStrip,
@@ -542,20 +525,12 @@ impl PaneruQueryState {
         virtual_workspaces
             .sort_by_key(|workspace| (workspace.native_workspace_id, workspace.number));
 
-        Ok(Self {
+        Ok(PaneruQueryState {
             version: 1,
             timestamp: now_timestamp(),
             active,
             virtual_workspaces,
         })
-    }
-
-    pub fn to_query_json(&self, kind: StateQueryKind) -> serde_json::Result<String> {
-        match kind {
-            StateQueryKind::State => serde_json::to_string(self),
-            StateQueryKind::VirtualWorkspaces => serde_json::to_string(&self.virtual_workspaces),
-            StateQueryKind::Active => serde_json::to_string(&self.active),
-        }
     }
 }
 

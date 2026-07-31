@@ -1,0 +1,16 @@
+[package]
+name = "paneru-shared-types"
+version = "0.4.4"
+edition = "2024"
+rust-version = "1.89.0"
+description = "The state documents and subscription events Paneru shares between the daemon and its clients."
+license = "MIT"
+publish = false
+
+[lints.clippy]
+pedantic = "warn"
+
+[dependencies]
+serde = { workspace = true }
+# The query/subscribe wire format is JSON.
+serde_json = { workspace = true }

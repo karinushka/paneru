@@ -1,0 +1,39 @@
+[package]
+name = "paneru-lua"
+version = "0.4.4"
+edition = "2024"
+rust-version = "1.89.0"
+description = "The Paneru Lua API: shared by the window manager's embedded runtime and, as a loadable module, by external scripts."
+license = "MIT"
+publish = false
+
+# As a plain library this is what the daemon links against. With the `module`
+# feature it additionally builds the `luaopen_paneru` C extension that
+# `require("paneru")` loads.
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[lints.clippy]
+pedantic = "warn"
+
+# `module` makes this a loadable Lua module resolving the Lua C API from the
+# host interpreter (no Lua embedded); the `lua5x` features pick the ABI, and
+# exactly one must be enabled alongside it. Build the module with:
+#   cargo build -p paneru-lua --no-default-features --features module,lua54
+# The daemon takes the default (no features) and supplies its own vendored
+# interpreter through its own mlua dependency.
+[features]
+default = []
+module = ["mlua/module"]
+lua51 = ["mlua/lua51"]
+lua52 = ["mlua/lua52"]
+lua53 = ["mlua/lua53"]
+lua54 = ["mlua/lua54"]
+luajit = ["mlua/luajit"]
+
+[dependencies]
+mlua = { workspace = true }
+paneru-shared-types = { workspace = true }
+serde = { workspace = true }
+# Decoding daemon query responses into Lua values.
+serde_json = { workspace = true }

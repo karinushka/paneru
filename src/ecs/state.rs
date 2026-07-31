@@ -15,6 +15,7 @@ use objc2_core_graphics::CGDirectDisplayID;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 
+use crate::config::Config;
 use crate::ecs::layout::{Column, LayoutStrip, StackItem};
 use crate::ecs::params::Windows;
 use crate::ecs::{ActiveDisplayMarker, ActiveWorkspaceMarker, SelectedVirtualMarker, Unmanaged};
@@ -97,9 +98,30 @@ pub struct SavedWindow {
 // the shared `paneru_shared_state` crate; the daemon only fills them in from the
 // ECS world. Aliased to the names the rest of the daemon already uses.
 pub use paneru_shared_types::state::{
-    ActiveState as PaneruActiveState, QueryState as PaneruQueryState, StateEvent, StateQueryKind,
-    VirtualWorkspaceState as PaneruVirtualWorkspaceState, WindowState as PaneruWindowState,
+    ActiveState as PaneruActiveState, Frame, QueryState as PaneruQueryState, StateEvent,
+    StateQueryKind, VirtualWorkspaceState as PaneruVirtualWorkspaceState,
+    WindowState as PaneruWindowState,
 };
+
+/// Resolves which display a window frame is on and whether more than a sliver of
+/// it is showing there. Returns `None` when the frame misses every display.
+fn window_visibility(
+    frame: IRect,
+    displays: &Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
+    sliver_width: i32,
+) -> Option<(CGDirectDisplayID, bool)> {
+    displays
+        .iter()
+        // Pick the display showing the largest slice of the window.
+        .map(|(display, _, _)| {
+            let overlap = frame.intersect(display.bounds());
+            let (width, height) = (overlap.width().max(0), overlap.height().max(0));
+            (display.id(), width, height)
+        })
+        .filter(|(_, width, height)| *width > 0 && *height > 0)
+        .max_by_key(|(_, width, height)| i64::from(*width) * i64::from(*height))
+        .map(|(display_id, width, height)| (display_id, width > sliver_width && height > 0))
+}
 
 impl From<IRect> for SavedRect {
     fn from(rect: IRect) -> Self {
@@ -397,6 +419,7 @@ pub trait QueryState: std::marker::Sized {
         windows: &Windows,
         apps: &Query<&Application>,
         window_manager: &WindowManager,
+        config: &Config,
     ) -> crate::errors::Result<Self>;
 }
 
@@ -417,8 +440,10 @@ impl QueryState for PaneruQueryState {
         windows: &Windows,
         apps: &Query<&Application>,
         window_manager: &WindowManager,
+        config: &Config,
     ) -> crate::errors::Result<Self> {
         let focused_entity = windows.focused().map(|(_, entity)| entity);
+        let sliver_width = config.sliver_width();
 
         let active_display = displays
             .iter()
@@ -460,6 +485,14 @@ impl QueryState for PaneruQueryState {
                     let bundle_id = app.bundle_id().unwrap_or_default().clone();
                     let app_name = app.name().to_string();
                     let title = window.title().unwrap_or_default();
+                    let frame = windows.frame(entity);
+                    // Minimized and hidden windows are never on screen, whatever
+                    // their last known frame says.
+                    let hidden =
+                        matches!(unmanaged, Some(Unmanaged::Minimized | Unmanaged::Hidden));
+                    let visibility = frame
+                        .and_then(|frame| window_visibility(frame, displays, sliver_width))
+                        .map(|(display_id, visible)| (display_id, visible && !hidden));
                     Some(PaneruWindowState {
                         window_id: window.id(),
                         bundle_id,
@@ -467,6 +500,14 @@ impl QueryState for PaneruQueryState {
                         title,
                         focused: focused_entity == Some(entity),
                         floating: matches!(unmanaged, Some(Unmanaged::Floating)),
+                        display_id: visibility.map(|(display_id, _)| display_id),
+                        frame: frame.map(|frame| Frame {
+                            x: frame.min.x,
+                            y: frame.min.y,
+                            width: frame.width(),
+                            height: frame.height(),
+                        }),
+                        visible: visibility.is_some_and(|(_, visible)| visible),
                     })
                 })
                 .collect::<Vec<_>>();

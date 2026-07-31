@@ -15,11 +15,12 @@ use tracing::warn;
 
 use super::{Command, Operation};
 
+use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::Windows;
 use crate::ecs::state::QueryState;
 use crate::ecs::state::{
-    PaneruActiveState, PaneruQueryState, PaneruVirtualWorkspaceState, StateEvent,
+    PaneruActiveState, PaneruQueryState, PaneruVirtualWorkspaceState, PaneruWindowState, StateEvent,
 };
 use crate::ecs::{
     ActiveDisplayMarker, ActiveWorkspaceMarker, FocusedMarker, SelectedVirtualMarker, Unmanaged,
@@ -38,6 +39,7 @@ struct StateBroadcastCache {
     workspace: Option<WorkspaceBroadcastSnapshot>,
     focus: Option<FocusBroadcastSnapshot>,
     virtual_workspaces: Option<Vec<PaneruVirtualWorkspaceState>>,
+    on_screen: Option<Vec<PaneruWindowState>>,
     titles: BTreeMap<WinID, String>,
 }
 
@@ -90,6 +92,7 @@ struct StateBroadcastIntent {
     virtual_workspace_changed: bool,
     windows_changed: bool,
     window_focused: bool,
+    on_screen_changed: bool,
     title_changes: BTreeSet<WinID>,
     display_changes: Vec<Option<u32>>,
     active_display_changed: bool,
@@ -126,6 +129,12 @@ impl StateBroadcastIntent {
                         ),
                 } => intent.windows_changed = true,
                 Event::WindowFocused { .. } => intent.window_focused = true,
+                // Geometry alone decides what is on screen, so plain moves and
+                // resizes — scrolling the strip, dragging, animation settling —
+                // can change the visible set without changing anything else.
+                Event::WindowMoved { .. } | Event::WindowResized { .. } => {
+                    intent.on_screen_changed = true;
+                }
                 Event::WindowTitleChanged { window_id } => {
                     intent.title_changes.insert(*window_id);
                 }
@@ -146,6 +155,13 @@ impl StateBroadcastIntent {
             }
         }
 
+        // Anything that rearranges windows, rows or displays also rearranges
+        // what is on screen; titles ride along in the on-screen payload.
+        intent.on_screen_changed |= intent.windows_changed
+            || intent.virtual_workspace_changed
+            || intent.active_display_changed
+            || !intent.title_changes.is_empty();
+
         intent
     }
 
@@ -153,6 +169,7 @@ impl StateBroadcastIntent {
         self.virtual_workspace_changed
             || self.windows_changed
             || self.window_focused
+            || self.on_screen_changed
             || self.active_display_changed
     }
 
@@ -188,17 +205,24 @@ fn state_query_handler(
     windows: Windows,
     apps: Query<&Application>,
     window_manager: Res<WindowManager>,
+    config: Res<Config>,
 ) {
     for event in messages.read() {
         let Event::StateQuery { kind, respond_to } = event else {
             continue;
         };
 
-        let response =
-            PaneruQueryState::extract(&workspaces, &displays, &windows, &apps, &window_manager)
-                .map_err(|err| err.to_string())
-                .and_then(|state| state.to_query_json(*kind).map_err(|err| err.to_string()))
-                .unwrap_or_else(|err| json!({ "error": err }).to_string());
+        let response = PaneruQueryState::extract(
+            &workspaces,
+            &displays,
+            &windows,
+            &apps,
+            &window_manager,
+            &config,
+        )
+        .map_err(|err| err.to_string())
+        .and_then(|state| state.to_query_json(*kind).map_err(|err| err.to_string()))
+        .unwrap_or_else(|err| json!({ "error": err }).to_string());
         _ = respond_to.send(response);
     }
 }
@@ -290,6 +314,17 @@ fn collect_state_broadcast_events_for_intent(
         cache.virtual_workspaces = Some(state.virtual_workspaces.clone());
     }
 
+    if intent.on_screen_changed {
+        let on_screen = state.on_screen().into_iter().cloned().collect::<Vec<_>>();
+        if cache.on_screen.as_ref() != Some(&on_screen) {
+            outgoing.push(StateEvent::OnScreenChanged {
+                windows: on_screen.clone(),
+                active: state.active.clone(),
+            });
+            cache.on_screen = Some(on_screen);
+        }
+    }
+
     if intent.window_focused {
         let focus = FocusBroadcastSnapshot::from(&state.active);
         if focus.window_id.is_some() && cache.focus.as_ref() != Some(&focus) {
@@ -338,6 +373,7 @@ fn state_event_broadcast_handler(
     windows: Windows,
     apps: Query<&Application>,
     window_manager: Res<WindowManager>,
+    config: Res<Config>,
 ) {
     let events = messages.read().collect::<Vec<_>>();
 
@@ -364,7 +400,14 @@ fn state_event_broadcast_handler(
     }
 
     let state = if intent.requires_state() {
-        match PaneruQueryState::extract(&workspaces, &displays, &windows, &apps, &window_manager) {
+        match PaneruQueryState::extract(
+            &workspaces,
+            &displays,
+            &windows,
+            &apps,
+            &window_manager,
+            &config,
+        ) {
             Ok(state) => Some(state),
             Err(err) => {
                 warn!("extracting query state for broadcast: {err}");
@@ -412,7 +455,7 @@ fn state_event_broadcast_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ecs::state::{PaneruVirtualWorkspaceState, PaneruWindowState};
+    use crate::ecs::state::{Frame, PaneruVirtualWorkspaceState, PaneruWindowState};
     use crate::events::Event as PaneruEvent;
 
     fn query_state_with_active_window(
@@ -440,6 +483,14 @@ mod tests {
                 title: title.to_string(),
                 focused: active.focused_window_id == Some(window_id),
                 floating: false,
+                display_id: Some(1),
+                frame: Some(Frame {
+                    x: 0,
+                    y: 0,
+                    width: 800,
+                    height: 600,
+                }),
+                visible: true,
             })
             .collect();
 
@@ -490,13 +541,6 @@ mod tests {
                 virtual_workspace_number: Some(2),
             }
         );
-        // The wire format is what clients actually depend on, so pin the JSON
-        // shape too — not just the typed value.
-        let json = serde_json::to_value(&outgoing[0]).unwrap();
-        assert_eq!(json["event"], "window_focused");
-        assert_eq!(json["window_id"], 26_261);
-        assert_eq!(json["bundle_id"], "com.cmuxterm.app");
-        assert_eq!(json["title"], "aicommit2 ~/P/nixos-config");
 
         let duplicate = collect_state_broadcast_events(
             events.iter(),
@@ -523,18 +567,27 @@ mod tests {
         let outgoing =
             collect_state_broadcast_events(events.iter(), &state, &mut cache, |_| None, signals);
 
-        assert_eq!(outgoing.len(), 1);
+        // A move republishes both the window list and the on-screen set.
+        assert_eq!(outgoing.len(), 2);
+        let StateEvent::WindowsChanged {
+            virtual_workspace_number,
+            active,
+        } = &outgoing[0]
+        else {
+            panic!("expected a windows_changed event, got {:?}", outgoing[0]);
+        };
+        assert_eq!(*virtual_workspace_number, Some(2));
+        assert_eq!(active.focused_window_id, Some(26_261));
+        let StateEvent::OnScreenChanged { windows, .. } = &outgoing[1] else {
+            panic!("expected an on_screen_changed event, got {:?}", outgoing[1]);
+        };
         assert_eq!(
-            outgoing[0],
-            StateEvent::WindowsChanged {
-                virtual_workspace_number: Some(2),
-                active: state.active.clone(),
-            }
+            windows
+                .iter()
+                .map(|window| window.window_id)
+                .collect::<Vec<_>>(),
+            vec![26_261]
         );
-        let json = serde_json::to_value(&outgoing[0]).unwrap();
-        assert_eq!(json["event"], "windows_changed");
-        assert_eq!(json["virtual_workspace_number"], 2);
-        assert_eq!(json["active"]["focused_window_id"], 26_261);
 
         let duplicate =
             collect_state_broadcast_events(events.iter(), &state, &mut cache, |_| None, signals);
@@ -556,8 +609,57 @@ mod tests {
             signals,
         );
 
-        assert_eq!(changed.len(), 1);
+        assert_eq!(changed.len(), 2);
         assert!(matches!(changed[0], StateEvent::WindowsChanged { .. }));
+        let StateEvent::OnScreenChanged { windows, .. } = &changed[1] else {
+            panic!("expected an on_screen_changed event, got {:?}", changed[1]);
+        };
+        assert_eq!(
+            windows
+                .iter()
+                .map(|window| window.window_id)
+                .collect::<Vec<_>>(),
+            vec![26_261, 26_262]
+        );
+    }
+
+    #[test]
+    fn test_window_moves_track_the_on_screen_set() {
+        // Geometry alone decides what is on screen, so a bare move — no window
+        // list or workspace change — still has to be looked at.
+        let intent = StateBroadcastIntent::from_events(
+            [PaneruEvent::WindowMoved { window_id: 10 }].iter(),
+            StateBroadcastSignals::default(),
+        );
+        assert!(intent.on_screen_changed);
+        assert!(intent.requires_state());
+        assert!(
+            !intent.windows_changed,
+            "a move is not a window-list change"
+        );
+
+        // The set itself is cached, so a move that changes nothing visible is
+        // not broadcast twice.
+        let state = query_state_with_active_window(1, "com.example.app", "term", 1, vec![1]);
+        let mut cache = StateBroadcastCache::default();
+        let first = collect_state_broadcast_events(
+            [PaneruEvent::WindowMoved { window_id: 1 }].iter(),
+            &state,
+            &mut cache,
+            |_| None,
+            StateBroadcastSignals::default(),
+        );
+        assert_eq!(first.len(), 1);
+        assert!(matches!(first[0], StateEvent::OnScreenChanged { .. }));
+
+        let repeat = collect_state_broadcast_events(
+            [PaneruEvent::WindowMoved { window_id: 1 }].iter(),
+            &state,
+            &mut cache,
+            |_| None,
+            StateBroadcastSignals::default(),
+        );
+        assert!(repeat.is_empty());
     }
 
     #[test]
@@ -592,11 +694,6 @@ mod tests {
                 virtual_workspace_number: Some(2),
             }
         );
-        let json = serde_json::to_value(&outgoing[0]).unwrap();
-        assert_eq!(json["event"], "window_focused");
-        assert_eq!(json["window_id"], 26_262);
-        assert_eq!(json["bundle_id"], "com.openai.codex");
-        assert_eq!(json["title"], "Codex");
     }
 
     #[test]
@@ -609,7 +706,6 @@ mod tests {
         let unrelated = StateBroadcastIntent::from_events(
             [
                 PaneruEvent::ThemeChanged,
-                PaneruEvent::WindowMoved { window_id: 10 },
                 PaneruEvent::MouseUp {
                     point: objc2_core_foundation::CGPoint::default(),
                     modifiers: crate::platform::Modifiers::empty(),

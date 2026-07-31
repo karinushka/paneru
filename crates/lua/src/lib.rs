@@ -58,7 +58,7 @@ pub type Dispatch = Rc<dyn Fn(&Lua, &Command) -> Result<bool>>;
 ///
 /// # Errors
 ///
-/// An error if fails to install.
+/// Returns an error if any Lua table/function creation or assignment fails.
 pub fn install(lua: &Lua, paneru: &Table, dispatch: &Dispatch) -> Result<()> {
     // paneru.run(cmd) / paneru.command(cmd) — the escape hatch: a command string
     // ("window focus east"), an argv table, or a structured table matching the
@@ -418,11 +418,11 @@ mod tests {
 
     #[test]
     fn defaults_match_the_documented_behaviour() {
-        let commands = run(r#"
+        let commands = run(r"
             paneru.window.resize()
             paneru.window.next_display()
             paneru.window.next_display({ follow = false })
-        "#)
+        ")
         .unwrap();
 
         assert_eq!(

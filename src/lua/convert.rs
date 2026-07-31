@@ -103,6 +103,9 @@ impl TryFrom<&Event> for LuaEvent {
 
     /// Exhaustive on purpose: a new [`Event`] variant must decide here whether
     /// scripts can see it.
+    // One arm per `Event` variant, kept as a single flat match instead of split
+    // helpers so adding a variant here is a one-line diff, not a search across
+    // several functions.
     #[allow(clippy::too_many_lines)]
     fn try_from(event: &Event) -> Result<Self, Self::Error> {
         let mouse = |point: &objc2_core_foundation::CGPoint, modifiers: Modifiers| MousePayload {

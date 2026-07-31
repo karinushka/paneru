@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 
+use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::Windows;
 use crate::ecs::restore::CurrentWindowIdentity;
@@ -50,12 +51,20 @@ type QueryStateExtractionState<'w, 's> = SystemState<(
     Windows<'w, 's>,
     Query<'w, 's, &'static Application>,
     Res<'w, WindowManager>,
+    Res<'w, Config>,
 )>;
 
 fn extract_query_state(world: &mut World) -> crate::errors::Result<PaneruQueryState> {
     let mut system_state: QueryStateExtractionState<'_, '_> = SystemState::new(world);
-    let (workspaces, displays, windows, apps, window_manager) = system_state.get(world)?;
-    PaneruQueryState::extract(&workspaces, &displays, &windows, &apps, &window_manager)
+    let (workspaces, displays, windows, apps, window_manager, config) = system_state.get(world)?;
+    PaneruQueryState::extract(
+        &workspaces,
+        &displays,
+        &windows,
+        &apps,
+        &window_manager,
+        &config,
+    )
 }
 
 #[test]

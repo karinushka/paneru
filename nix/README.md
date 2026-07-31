@@ -35,6 +35,9 @@ expose the same following options:
 | `services.paneru.enable` | `boolean` | `false` | Generate and enable the launchd agent |
 | `services.paneru.package` | `package` | `self.packages.<system>.paneru` | Package to use |
 | `services.paneru.settings` | `null` or `attribute set` | `null` | Paneru configuration (See [`CONFIGURATION.md`](/CONFIGURATION.md)) |
+| `services.paneru.luaConfig.enable` | `boolean` | `true` | Whether `package` is built with the embedded Lua scripting runtime (`init.lua`) compiled in. Only takes effect when `package` is left at its default. |
+| `services.paneru.lua` | `package` | `package.luaModule.lua` | The Lua interpreter `extraLuaPackages` are resolved against. |
+| `services.paneru.extraLuaPackages` | `function` | `luaPs: [ ]` | Extra Lua packages available to `init.lua` via `require(...)` (e.g. [sbarlua](https://github.com/FelixKratz/SbarLua)). Same shape as Home Manager's `programs.sketchybar.extraLuaPackages` — a function from a Lua package set to a list of derivations. |
 
 #### Example
 
@@ -70,6 +73,14 @@ expose the same following options:
     };
   };
 }
+```
+
+To make extra Lua modules available to `init.lua` (e.g. to call SketchyBar's
+Lua bridge directly from a `paneru.on` handler, see
+[`CONFIGURATION.md`](/CONFIGURATION.md#8-lua-scripting)):
+
+```nix
+services.paneru.extraLuaPackages = luaPs: [ (luaPs.callPackage ./sbarlua.nix { }) ];
 ```
 
 > [!NOTE]

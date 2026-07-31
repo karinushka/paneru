@@ -18,6 +18,7 @@
 //! paneru.window.balance()
 //! paneru.workspace.select({ number = 2 })       -- switch virtual workspace
 //! paneru.workspace.move_window({ number = 2, follow = false })
+//! paneru.workspace.add()                        -- create + switch to a new virtual workspace
 //! paneru.quit()
 //!
 //! for _, window in ipairs(paneru.query_on_screen()) do  -- actually visible
@@ -37,7 +38,10 @@
 //! [`Direction::East`] and an unknown value fails at the call site rather than
 //! as a string the daemon rejects later. A script therefore behaves identically
 //! on both hosts; only the host-specific extras differ (`paneru.on` /
-//! `paneru.bind` are embedded-only, `query_*` / `subscribe` are client-only).
+//! `paneru.bind` are embedded-only, `subscribe` and the socket-path helpers are
+//! client-only). The `query_*` functions exist on both, spelled the same: the
+//! client asks the daemon over the socket, the embedded runtime answers from
+//! the world it is already inside.
 
 pub mod client;
 
@@ -158,6 +162,11 @@ fn workspace_table(lua: &Lua, dispatch: &Dispatch) -> Result<Table> {
         })?
     };
     workspace.set("move_window", move_window)?;
+
+    workspace.set(
+        "add",
+        verb(lua, dispatch, Command::Window(Operation::VirtualAdd))?,
+    )?;
 
     Ok(workspace)
 }

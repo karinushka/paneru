@@ -100,6 +100,39 @@ pub fn gather_displays(window_manager: Res<WindowManager>, mut commands: Command
     }
 }
 
+/// Pre-creates additional (empty) virtual workspaces on every physical space,
+/// so that `config.default_workspaces()` virtual workspaces exist right after
+/// startup instead of only being created on first use.
+///
+/// Must run after [`gather_displays`], which spawns the `virtual_index: 0`
+/// strip for every physical space.
+#[allow(clippy::needless_pass_by_value)]
+pub fn initialise_workspaces(
+    strips: Query<(&LayoutStrip, &ChildOf, &Position)>,
+    config: Res<Config>,
+    mut commands: Commands,
+) {
+    let wanted = config.default_workspaces();
+    if wanted <= 1 {
+        return;
+    }
+
+    let mut seen = HashSet::new();
+    for (strip, child_of, origin) in &strips {
+        if strip.virtual_index != 0 || !seen.insert((strip.id(), child_of.parent())) {
+            continue;
+        }
+        for virtual_index in 1..wanted {
+            commands.spawn_layout_strip(
+                LayoutStrip::new(strip.id(), virtual_index),
+                origin.0,
+                child_of.parent(),
+                false,
+            );
+        }
+    }
+}
+
 /// Adds an existing process to the window manager. This is used during initial setup for already running applications.
 /// It attempts to create a new `Application` instance from the `BProcess` and attaches it as a child entity.
 /// The `ExistingMarker` is then removed from the process entity.

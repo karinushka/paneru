@@ -92,6 +92,7 @@ fn parse_operation(argv: &[&str]) -> Result<Operation> {
         // and `num` variants that only take a number.
         "virtual" => virtual_target(argument()?, Operation::Virtual, Operation::VirtualNumber)?,
         "virtualnum" => Operation::VirtualNumber(parse_virtual_workspace_number(argument()?)?),
+        "virtualadd" => Operation::VirtualAdd,
         "virtualmove" => virtual_target(
             argument()?,
             |direction| Operation::VirtualMove(direction, MoveFocus::Follow),
@@ -184,6 +185,7 @@ impl Operation {
             Operation::VirtualNumber(index) => {
                 vec!["virtualnum".to_string(), (index + 1).to_string()]
             }
+            Operation::VirtualAdd => owned(&["virtualadd"]),
             Operation::VirtualMove(direction, MoveFocus::Follow) => {
                 vec!["virtualmove".to_string(), direction.token()]
             }

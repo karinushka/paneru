@@ -91,7 +91,12 @@ pub fn register_systems(app: &mut bevy::app::App) {
 
     app.add_systems(
         Startup,
-        (systems::gather_displays, systems::gather_initial_processes).chain(),
+        (
+            systems::gather_displays,
+            systems::gather_initial_processes,
+            systems::initialise_workspaces,
+        )
+            .chain(),
     );
     app.add_systems(
         PreUpdate,

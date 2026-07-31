@@ -1266,6 +1266,15 @@ pub(super) fn refresh_configuration_trigger(
         }
 
         for path in &event.paths {
+            // The Lua init script shares this watcher and `ConfigRefresh` event;
+            // it is reloaded separately by `lua_reload_system`. Skip it here so
+            // we never try to TOML-parse a Lua file.
+            if path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("lua"))
+            {
+                continue;
+            }
             if let Some(symlink) = symlink_target(path) {
                 debug!(
                     "symlink '{}' changed, replacing the watcher.",

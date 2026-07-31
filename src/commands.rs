@@ -26,6 +26,8 @@ use crate::events::Event;
 use crate::manager::{Application, Display, Origin, Size, Window, WindowManager, origin_from};
 use crate::platform::WorkspaceId;
 
+// The command vocabulary itself lives in the `paneru-command` crate, shared with
+// the Lua API in `crates/lua-api` so every host speaks the same types.
 pub use paneru_shared_types::commands::{
     Command, Direction, MouseMove, MoveFocus, Operation, ResizeDirection,
 };

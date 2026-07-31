@@ -1,0 +1,563 @@
+//! Conversions between window-manager types and Lua values.
+//!
+//! Everything a script sees is described by a serializable type here rather than
+//! by hand-built tables, so the payload of an event and the name it is
+//! dispatched under have one definition each:
+//!
+//! * [`LuaEvent`] mirrors the marshallable subset of [`Event`]. Its serde tag
+//!   *is* the event name (`window_focused`, `mouse_down`, …), so the name a
+//!   handler registers for, the `type` field on the table it receives, and the
+//!   payload shape cannot drift apart.
+//! * [`LuaEvent::NAMES`] lists every name the runtime can emit, which lets
+//!   `paneru.on` reject a typo at registration time instead of silently never
+//!   firing.
+//! * [`StateSnapshot`] does the same for the read-only state handed to
+//!   `paneru.bind` callbacks.
+//!
+//! The conversion runs the other way too — [`TryFrom<&Event>`] is exhaustive, so
+//! a new variant in [`Event`] is a compile error here until it is either mapped
+//! or explicitly declared unmarshallable.
+
+use mlua::{Lua, LuaSerdeExt, Table};
+use serde::Serialize;
+
+use crate::ecs::params::Windows;
+use crate::events::Event;
+use crate::platform::{Modifiers, Pid, WinID, WorkspaceId};
+
+/// The subset of [`Event`] that can be handed to Lua, with the payload each
+/// carries. The serde tag doubles as the `paneru.on` event name.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum LuaEvent {
+    Exit,
+    ProcessesLoaded,
+
+    ApplicationActivated,
+    ApplicationDeactivated,
+    ApplicationVisible { pid: Pid },
+    ApplicationHidden { pid: Pid },
+
+    WindowDestroyed { window_id: WinID },
+    WindowFocused { window_id: WinID },
+    WindowMoved { window_id: WinID },
+    WindowResized { window_id: WinID },
+    WindowMinimized { window_id: WinID },
+    WindowDeminimized { window_id: WinID },
+    WindowTitleChanged { window_id: WinID },
+
+    MouseDown(MousePayload),
+    MouseUp(MousePayload),
+    MouseDragged(MousePayload),
+    MouseMoved(MousePayload),
+
+    Swipe { delta: f64, fingers: usize },
+    VerticalSwipe { delta: f64, fingers: usize },
+    VerticalScrollTick { delta: f64 },
+    Scroll { delta: f64 },
+    TouchpadDown,
+    TouchpadUp,
+
+    SpaceCreated { space_id: WorkspaceId },
+    SpaceDestroyed { space_id: WorkspaceId },
+    SpaceChanged,
+
+    DisplayAdded { display_id: u32 },
+    DisplayRemoved { display_id: u32 },
+    DisplayMoved { display_id: u32 },
+    DisplayResized { display_id: u32 },
+    DisplayConfigured { display_id: u32 },
+    DisplayChanged,
+
+    MissionControlShowAllWindows,
+    MissionControlShowFrontWindows,
+    MissionControlShowDesktop,
+    MissionControlExit,
+
+    MenuOpened { window_id: WinID },
+    MenuClosed { window_id: WinID },
+
+    DockDidChangePref { message: String },
+    DockDidRestart { message: String },
+    MenuBarHiddenChanged { message: String },
+    SystemWoke { message: String },
+
+    ThemeChanged,
+}
+
+/// Pointer position and modifier state, flattened into the event table.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct MousePayload {
+    pub x: f64,
+    pub y: f64,
+    pub modifiers: u32,
+}
+
+/// An [`Event`] that carries something Lua cannot see — an `AppKit` handle, a
+/// socket, a config — or that is internal plumbing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotMarshallable;
+
+impl TryFrom<&Event> for LuaEvent {
+    type Error = NotMarshallable;
+
+    /// Exhaustive on purpose: a new [`Event`] variant must decide here whether
+    /// scripts can see it.
+    #[allow(clippy::too_many_lines)]
+    fn try_from(event: &Event) -> Result<Self, Self::Error> {
+        let mouse = |point: &objc2_core_foundation::CGPoint, modifiers: Modifiers| MousePayload {
+            x: point.x,
+            y: point.y,
+            modifiers: u32::from(modifiers.bits()),
+        };
+
+        Ok(match event {
+            Event::Exit => LuaEvent::Exit,
+            Event::ProcessesLoaded => LuaEvent::ProcessesLoaded,
+
+            Event::ApplicationActivated => LuaEvent::ApplicationActivated,
+            Event::ApplicationDeactivated => LuaEvent::ApplicationDeactivated,
+            Event::ApplicationVisible { pid } => LuaEvent::ApplicationVisible { pid: *pid },
+            Event::ApplicationHidden { pid } => LuaEvent::ApplicationHidden { pid: *pid },
+
+            Event::WindowDestroyed { window_id, .. } => LuaEvent::WindowDestroyed {
+                window_id: *window_id,
+            },
+            Event::WindowFocused { window_id } => LuaEvent::WindowFocused {
+                window_id: *window_id,
+            },
+            Event::WindowMoved { window_id } => LuaEvent::WindowMoved {
+                window_id: *window_id,
+            },
+            Event::WindowResized { window_id } => LuaEvent::WindowResized {
+                window_id: *window_id,
+            },
+            Event::WindowMinimized { window_id } => LuaEvent::WindowMinimized {
+                window_id: *window_id,
+            },
+            Event::WindowDeminimized { window_id } => LuaEvent::WindowDeminimized {
+                window_id: *window_id,
+            },
+            Event::WindowTitleChanged { window_id } => LuaEvent::WindowTitleChanged {
+                window_id: *window_id,
+            },
+
+            Event::MouseDown { point, modifiers } => LuaEvent::MouseDown(mouse(point, *modifiers)),
+            Event::MouseUp { point, modifiers } => LuaEvent::MouseUp(mouse(point, *modifiers)),
+            Event::MouseDragged { point, modifiers } => {
+                LuaEvent::MouseDragged(mouse(point, *modifiers))
+            }
+            Event::MouseMoved { point, modifiers } => {
+                LuaEvent::MouseMoved(mouse(point, *modifiers))
+            }
+
+            Event::Swipe { delta, fingers } => LuaEvent::Swipe {
+                delta: *delta,
+                fingers: *fingers,
+            },
+            Event::VerticalSwipe { delta, fingers } => LuaEvent::VerticalSwipe {
+                delta: *delta,
+                fingers: *fingers,
+            },
+            Event::VerticalScrollTick { delta } => LuaEvent::VerticalScrollTick { delta: *delta },
+            Event::Scroll { delta } => LuaEvent::Scroll { delta: *delta },
+            Event::TouchpadDown => LuaEvent::TouchpadDown,
+            Event::TouchpadUp => LuaEvent::TouchpadUp,
+
+            Event::SpaceCreated { space_id } => LuaEvent::SpaceCreated {
+                space_id: *space_id,
+            },
+            Event::SpaceDestroyed { space_id } => LuaEvent::SpaceDestroyed {
+                space_id: *space_id,
+            },
+            Event::SpaceChanged => LuaEvent::SpaceChanged,
+
+            Event::DisplayAdded { display_id } => LuaEvent::DisplayAdded {
+                display_id: *display_id,
+            },
+            Event::DisplayRemoved { display_id } => LuaEvent::DisplayRemoved {
+                display_id: *display_id,
+            },
+            Event::DisplayMoved { display_id } => LuaEvent::DisplayMoved {
+                display_id: *display_id,
+            },
+            Event::DisplayResized { display_id } => LuaEvent::DisplayResized {
+                display_id: *display_id,
+            },
+            Event::DisplayConfigured { display_id } => LuaEvent::DisplayConfigured {
+                display_id: *display_id,
+            },
+            Event::DisplayChanged => LuaEvent::DisplayChanged,
+
+            Event::MissionControlShowAllWindows => LuaEvent::MissionControlShowAllWindows,
+            Event::MissionControlShowFrontWindows => LuaEvent::MissionControlShowFrontWindows,
+            Event::MissionControlShowDesktop => LuaEvent::MissionControlShowDesktop,
+            Event::MissionControlExit => LuaEvent::MissionControlExit,
+
+            Event::MenuOpened { window_id } => LuaEvent::MenuOpened {
+                window_id: *window_id,
+            },
+            Event::MenuClosed { window_id } => LuaEvent::MenuClosed {
+                window_id: *window_id,
+            },
+
+            Event::DockDidChangePref { msg } => LuaEvent::DockDidChangePref {
+                message: msg.clone(),
+            },
+            Event::DockDidRestart { msg } => LuaEvent::DockDidRestart {
+                message: msg.clone(),
+            },
+            Event::MenuBarHiddenChanged { msg } => LuaEvent::MenuBarHiddenChanged {
+                message: msg.clone(),
+            },
+            Event::SystemWoke { msg } => LuaEvent::SystemWoke {
+                message: msg.clone(),
+            },
+
+            Event::ThemeChanged => LuaEvent::ThemeChanged,
+
+            // Non-marshallable payloads (AppKit handles, sockets, the config) or
+            // internal plumbing.
+            Event::InitialConfig(_)
+            | Event::ConfigRefresh(_)
+            | Event::ApplicationLaunched { .. }
+            | Event::ApplicationTerminated { .. }
+            | Event::ApplicationFrontSwitched { .. }
+            | Event::WindowCreated { .. }
+            | Event::Command { .. }
+            | Event::StateQuery { .. }
+            | Event::StateSubscribe { .. } => return Err(NotMarshallable),
+        })
+    }
+}
+
+impl LuaEvent {
+    /// Every name a script can register for with `paneru.on`. Checked against
+    /// the variants by `every_emitted_name_is_registrable` below, so the two
+    /// cannot drift.
+    pub const NAMES: &'static [&'static str] = &[
+        "exit",
+        "processes_loaded",
+        "application_activated",
+        "application_deactivated",
+        "application_visible",
+        "application_hidden",
+        "window_destroyed",
+        "window_focused",
+        "window_moved",
+        "window_resized",
+        "window_minimized",
+        "window_deminimized",
+        "window_title_changed",
+        "mouse_down",
+        "mouse_up",
+        "mouse_dragged",
+        "mouse_moved",
+        "swipe",
+        "vertical_swipe",
+        "vertical_scroll_tick",
+        "scroll",
+        "touchpad_down",
+        "touchpad_up",
+        "space_created",
+        "space_destroyed",
+        "space_changed",
+        "display_added",
+        "display_removed",
+        "display_moved",
+        "display_resized",
+        "display_configured",
+        "display_changed",
+        "mission_control_show_all_windows",
+        "mission_control_show_front_windows",
+        "mission_control_show_desktop",
+        "mission_control_exit",
+        "menu_opened",
+        "menu_closed",
+        "dock_did_change_pref",
+        "dock_did_restart",
+        "menu_bar_hidden_changed",
+        "system_woke",
+        "theme_changed",
+    ];
+
+    /// Whether `name` is an event the runtime can actually emit.
+    pub fn is_known(name: &str) -> bool {
+        Self::NAMES.contains(&name)
+    }
+
+    /// The `paneru.on` name this event dispatches under, taken from the same
+    /// serde tag that lands in the table's `type` field.
+    pub fn name(&self) -> &'static str {
+        // Serializing into a borrowed-name serializer is overkill; the mapping
+        // is asserted against the serde output in `name_matches_serde_tag`.
+        match self {
+            LuaEvent::Exit => "exit",
+            LuaEvent::ProcessesLoaded => "processes_loaded",
+            LuaEvent::ApplicationActivated => "application_activated",
+            LuaEvent::ApplicationDeactivated => "application_deactivated",
+            LuaEvent::ApplicationVisible { .. } => "application_visible",
+            LuaEvent::ApplicationHidden { .. } => "application_hidden",
+            LuaEvent::WindowDestroyed { .. } => "window_destroyed",
+            LuaEvent::WindowFocused { .. } => "window_focused",
+            LuaEvent::WindowMoved { .. } => "window_moved",
+            LuaEvent::WindowResized { .. } => "window_resized",
+            LuaEvent::WindowMinimized { .. } => "window_minimized",
+            LuaEvent::WindowDeminimized { .. } => "window_deminimized",
+            LuaEvent::WindowTitleChanged { .. } => "window_title_changed",
+            LuaEvent::MouseDown(_) => "mouse_down",
+            LuaEvent::MouseUp(_) => "mouse_up",
+            LuaEvent::MouseDragged(_) => "mouse_dragged",
+            LuaEvent::MouseMoved(_) => "mouse_moved",
+            LuaEvent::Swipe { .. } => "swipe",
+            LuaEvent::VerticalSwipe { .. } => "vertical_swipe",
+            LuaEvent::VerticalScrollTick { .. } => "vertical_scroll_tick",
+            LuaEvent::Scroll { .. } => "scroll",
+            LuaEvent::TouchpadDown => "touchpad_down",
+            LuaEvent::TouchpadUp => "touchpad_up",
+            LuaEvent::SpaceCreated { .. } => "space_created",
+            LuaEvent::SpaceDestroyed { .. } => "space_destroyed",
+            LuaEvent::SpaceChanged => "space_changed",
+            LuaEvent::DisplayAdded { .. } => "display_added",
+            LuaEvent::DisplayRemoved { .. } => "display_removed",
+            LuaEvent::DisplayMoved { .. } => "display_moved",
+            LuaEvent::DisplayResized { .. } => "display_resized",
+            LuaEvent::DisplayConfigured { .. } => "display_configured",
+            LuaEvent::DisplayChanged => "display_changed",
+            LuaEvent::MissionControlShowAllWindows => "mission_control_show_all_windows",
+            LuaEvent::MissionControlShowFrontWindows => "mission_control_show_front_windows",
+            LuaEvent::MissionControlShowDesktop => "mission_control_show_desktop",
+            LuaEvent::MissionControlExit => "mission_control_exit",
+            LuaEvent::MenuOpened { .. } => "menu_opened",
+            LuaEvent::MenuClosed { .. } => "menu_closed",
+            LuaEvent::DockDidChangePref { .. } => "dock_did_change_pref",
+            LuaEvent::DockDidRestart { .. } => "dock_did_restart",
+            LuaEvent::MenuBarHiddenChanged { .. } => "menu_bar_hidden_changed",
+            LuaEvent::SystemWoke { .. } => "system_woke",
+            LuaEvent::ThemeChanged => "theme_changed",
+        }
+    }
+}
+
+/// Converts an [`Event`] into `(name, table)` for dispatch to `paneru.on`
+/// callbacks. Returns `None` for events scripts cannot see.
+pub fn event_to_lua(lua: &Lua, event: &Event) -> Option<(&'static str, Table)> {
+    let event = LuaEvent::try_from(event).ok()?;
+    let name = event.name();
+    let table = lua.to_value(&event).ok()?.as_table().cloned()?;
+    Some((name, table))
+}
+
+/// The read-only state snapshot passed to `paneru.bind` handlers.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct StateSnapshot {
+    /// Id of the focused window, if any.
+    pub focused: Option<WinID>,
+    pub windows: Vec<WindowSnapshot>,
+}
+
+/// One window in a [`StateSnapshot`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct WindowSnapshot {
+    pub id: WinID,
+    /// Whether the window takes part in the tiling layout.
+    pub managed: bool,
+    /// Frame in global display coordinates, when known.
+    pub x: Option<i32>,
+    pub y: Option<i32>,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+}
+
+/// Builds the state snapshot for `paneru.bind` handlers.
+pub fn state_snapshot(lua: &Lua, windows: &Windows) -> mlua::Result<Table> {
+    let snapshot = StateSnapshot {
+        focused: windows.focused().map(|(window, _)| window.id()),
+        windows: windows
+            .iter()
+            .map(|(window, entity)| {
+                let frame = windows.frame(entity);
+                WindowSnapshot {
+                    id: window.id(),
+                    managed: windows
+                        .get_managed(entity)
+                        .is_some_and(|(_, _, unmanaged)| unmanaged.is_none()),
+                    x: frame.map(|frame| frame.min.x),
+                    y: frame.map(|frame| frame.min.y),
+                    width: frame.map(|frame| frame.width()),
+                    height: frame.map(|frame| frame.height()),
+                }
+            })
+            .collect(),
+    };
+
+    lua.to_value(&snapshot)?
+        .as_table()
+        .cloned()
+        .ok_or_else(|| mlua::Error::RuntimeError("state snapshot is not a table".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every event the runtime can emit, one per variant, for exhaustive checks.
+    fn every_event() -> Vec<LuaEvent> {
+        let mouse = MousePayload {
+            x: 1.0,
+            y: 2.0,
+            modifiers: 0,
+        };
+        vec![
+            LuaEvent::Exit,
+            LuaEvent::ProcessesLoaded,
+            LuaEvent::ApplicationActivated,
+            LuaEvent::ApplicationDeactivated,
+            LuaEvent::ApplicationVisible { pid: 1 },
+            LuaEvent::ApplicationHidden { pid: 1 },
+            LuaEvent::WindowDestroyed { window_id: 1 },
+            LuaEvent::WindowFocused { window_id: 1 },
+            LuaEvent::WindowMoved { window_id: 1 },
+            LuaEvent::WindowResized { window_id: 1 },
+            LuaEvent::WindowMinimized { window_id: 1 },
+            LuaEvent::WindowDeminimized { window_id: 1 },
+            LuaEvent::WindowTitleChanged { window_id: 1 },
+            LuaEvent::MouseDown(mouse),
+            LuaEvent::MouseUp(mouse),
+            LuaEvent::MouseDragged(mouse),
+            LuaEvent::MouseMoved(mouse),
+            LuaEvent::Swipe {
+                delta: 1.0,
+                fingers: 3,
+            },
+            LuaEvent::VerticalSwipe {
+                delta: 1.0,
+                fingers: 3,
+            },
+            LuaEvent::VerticalScrollTick { delta: 1.0 },
+            LuaEvent::Scroll { delta: 1.0 },
+            LuaEvent::TouchpadDown,
+            LuaEvent::TouchpadUp,
+            LuaEvent::SpaceCreated { space_id: 1 },
+            LuaEvent::SpaceDestroyed { space_id: 1 },
+            LuaEvent::SpaceChanged,
+            LuaEvent::DisplayAdded { display_id: 1 },
+            LuaEvent::DisplayRemoved { display_id: 1 },
+            LuaEvent::DisplayMoved { display_id: 1 },
+            LuaEvent::DisplayResized { display_id: 1 },
+            LuaEvent::DisplayConfigured { display_id: 1 },
+            LuaEvent::DisplayChanged,
+            LuaEvent::MissionControlShowAllWindows,
+            LuaEvent::MissionControlShowFrontWindows,
+            LuaEvent::MissionControlShowDesktop,
+            LuaEvent::MissionControlExit,
+            LuaEvent::MenuOpened { window_id: 1 },
+            LuaEvent::MenuClosed { window_id: 1 },
+            LuaEvent::DockDidChangePref {
+                message: "m".into(),
+            },
+            LuaEvent::DockDidRestart {
+                message: "m".into(),
+            },
+            LuaEvent::MenuBarHiddenChanged {
+                message: "m".into(),
+            },
+            LuaEvent::SystemWoke {
+                message: "m".into(),
+            },
+            LuaEvent::ThemeChanged,
+        ]
+    }
+
+    #[test]
+    fn name_matches_serde_tag() {
+        let lua = Lua::new();
+        for event in every_event() {
+            let table = lua
+                .to_value(&event)
+                .unwrap()
+                .as_table()
+                .cloned()
+                .expect("events serialize to tables");
+            assert_eq!(
+                table.get::<String>("type").unwrap(),
+                event.name(),
+                "the dispatched name and the table's `type` disagree for {event:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_emitted_name_is_registrable() {
+        for event in every_event() {
+            assert!(
+                LuaEvent::is_known(event.name()),
+                "{} is emitted but rejected by paneru.on",
+                event.name()
+            );
+        }
+        assert!(!LuaEvent::is_known("window_focussed"), "typos are rejected");
+    }
+
+    #[test]
+    fn window_event_maps_to_named_table() {
+        let lua = Lua::new();
+        let (name, table) = event_to_lua(&lua, &Event::WindowFocused { window_id: 42 })
+            .expect("window_focused should marshal");
+        assert_eq!(name, "window_focused");
+        assert_eq!(table.get::<String>("type").unwrap(), "window_focused");
+        assert_eq!(table.get::<i64>("window_id").unwrap(), 42);
+    }
+
+    #[test]
+    fn scalar_payloads_are_marshalled() {
+        let lua = Lua::new();
+        let (name, table) = event_to_lua(
+            &lua,
+            &Event::Swipe {
+                delta: 1.5,
+                fingers: 3,
+            },
+        )
+        .expect("swipe should marshal");
+        assert_eq!(name, "swipe");
+        assert!((table.get::<f64>("delta").unwrap() - 1.5).abs() < f64::EPSILON);
+        assert_eq!(table.get::<i64>("fingers").unwrap(), 3);
+    }
+
+    #[test]
+    fn mouse_payloads_are_flattened_into_the_event() {
+        let lua = Lua::new();
+        let (name, table) = event_to_lua(
+            &lua,
+            &Event::MouseDown {
+                point: objc2_core_foundation::CGPoint { x: 10.0, y: 20.0 },
+                modifiers: Modifiers::ALT,
+            },
+        )
+        .expect("mouse_down should marshal");
+        assert_eq!(name, "mouse_down");
+        assert!((table.get::<f64>("x").unwrap() - 10.0).abs() < f64::EPSILON);
+        assert!((table.get::<f64>("y").unwrap() - 20.0).abs() < f64::EPSILON);
+        assert_eq!(
+            table.get::<i64>("modifiers").unwrap(),
+            i64::from(Modifiers::ALT.bits())
+        );
+    }
+
+    #[test]
+    fn internal_events_are_skipped() {
+        let lua = Lua::new();
+        assert!(event_to_lua(&lua, &Event::SpaceChanged).is_some());
+        // Internal plumbing / non-marshallable payloads yield no callback event.
+        assert!(
+            event_to_lua(
+                &lua,
+                &Event::Command {
+                    command: crate::commands::Command::Lua(0),
+                }
+            )
+            .is_none()
+        );
+    }
+}

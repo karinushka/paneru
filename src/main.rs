@@ -12,6 +12,8 @@ mod config;
 mod ecs;
 mod errors;
 mod events;
+#[cfg(feature = "lua")]
+mod lua;
 mod manager;
 mod menubar;
 mod overlay;

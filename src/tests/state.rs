@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::Windows;
 use crate::ecs::restore::CurrentWindowIdentity;
+use crate::ecs::state::QueryState;
 use crate::ecs::state::{
     PaneruQueryState, PaneruState, SavedColumn, SavedDisplay, SavedRect, SavedStackItem,
     SavedStrip, SavedWindow, SavedWorkspace,

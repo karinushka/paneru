@@ -11,6 +11,14 @@ license = "MIT"
 categories = ["os::macos-apis"]
 keywords = ["macos", "windowmanager", "window", "manager"]
 
+[workspace]
+members = ["crates/*"]
+default-members = ["."]
+[workspace.dependencies]
+paneru-shared-types = { path = "crates/shared_types" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
 [lints.clippy]
 pedantic = "warn"
 
@@ -52,6 +60,7 @@ objc2-app-kit = { version = "0.3", features = [
 ] }
 objc2-core-foundation = { version = "0.3", features = ["CFRunLoop"] }
 objc2-core-graphics = "0.3"
+paneru-shared-types = { workspace = true }
 objc2-quartz-core = { version = "0.3", features = [
   "CALayer",
   "objc2-core-foundation",

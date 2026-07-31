@@ -83,12 +83,37 @@ fn query_json(lua: &Lua, kind: Option<String>) -> LuaResult<LuaValue> {
     lua.to_value(&value)
 }
 
-/// `paneru.subscribe(callback[, opts])` — stream events to `callback`. Blocks
-/// until the daemon closes the connection, so run it in a dedicated process.
-/// Each event is a decoded Lua table unless `opts.decode == false` (then the raw
-/// JSON line string). On a decode error the callback receives `(line, "decode
-/// error")`.
-fn subscribe(lua: &Lua, (callback, opts): (LuaFunction, Option<LuaTable>)) -> LuaResult<bool> {
+/// Reads the `event` argument to `subscribe`: `nil` (every event), a single
+/// event name, or a table listing several.
+fn read_events(value: &LuaValue) -> LuaResult<Option<Vec<String>>> {
+    match value {
+        LuaValue::Nil => Ok(None),
+        LuaValue::String(name) => Ok(Some(vec![name.to_str()?.to_string()])),
+        LuaValue::Table(names) => Ok(Some(
+            names
+                .clone()
+                .sequence_values::<String>()
+                .collect::<LuaResult<_>>()?,
+        )),
+        other => Err(LuaError::RuntimeError(format!(
+            "event must be a string, a table of strings, or nil, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+/// `paneru.subscribe(event, callback[, opts])` — stream events matching
+/// `event` to `callback`. Blocks until the daemon closes the connection, so
+/// run it in a dedicated process. `event` is the event name to filter on
+/// (e.g. `"window_focused"`), a table of several names, or `nil` for every
+/// event. Each event is a decoded Lua table unless `opts.decode == false`
+/// (then the raw JSON line string). On a decode error the callback receives
+/// `(line, "decode error")` regardless of the event filter.
+fn subscribe(
+    lua: &Lua,
+    (event, callback, opts): (LuaValue, LuaFunction, Option<LuaTable>),
+) -> LuaResult<bool> {
+    let events = read_events(&event)?;
     let decode = opts
         .as_ref()
         .and_then(|opts| opts.get::<Option<bool>>("decode").ok().flatten())
@@ -101,14 +126,22 @@ fn subscribe(lua: &Lua, (callback, opts): (LuaFunction, Option<LuaTable>)) -> Lu
         if line.is_empty() {
             continue;
         }
-        if decode {
-            match serde_json::from_str::<serde_json::Value>(&line) {
-                Ok(value) => {
-                    let value = lua.to_value(&value)?;
-                    callback.call::<()>(value)?;
-                }
-                Err(_) => callback.call::<()>((line, "decode error".to_string()))?,
+
+        let parsed = serde_json::from_str::<serde_json::Value>(&line);
+        let Ok(parsed) = parsed else {
+            callback.call::<()>((line, "decode error".to_string()))?;
+            continue;
+        };
+        if let Some(events) = &events {
+            let name = parsed.get("event").and_then(serde_json::Value::as_str);
+            let matches = name.is_some_and(|name| events.iter().any(|event| event == name));
+            if !matches {
+                continue;
             }
+        }
+        if decode {
+            let value = lua.to_value(&parsed)?;
+            callback.call::<()>(value)?;
         } else {
             callback.call::<()>(line)?;
         }

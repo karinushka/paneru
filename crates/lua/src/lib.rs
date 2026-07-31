@@ -24,9 +24,12 @@
 //!   print(window.app_name, window.title)
 //! end
 //!
-//! paneru.subscribe(function(evt)                -- blocking; run in a helper process
-//!   if evt.event == "on_screen_changed" then --[[ update bar ]] end
+//! paneru.subscribe("window_focused", function(evt)  -- blocking; run in a helper process
+//!   print(evt.title)
 //! end)
+//!
+//! paneru.subscribe(nil, function(evt) ... end)  -- nil event = every event
+//! paneru.subscribe({ "window_focused", "window_title_changed" }, function(evt) ... end)
 //! ```
 //!
 //! Every verb builds a real [`Command`]: option tables are deserialized into the

@@ -390,3 +390,48 @@ radius = 12.0
 ```
 
 > **Tip:** You can override the `border_radius` for specific applications in the `[windows]` section. See [Window Rules](#6-window-rules).
+
+---
+
+## 8. Lua Scripting
+
+Paneru embeds a Lua runtime that runs alongside the TOML config, letting a
+script hook into window-manager events (`paneru.on`) and bind keys to Lua
+callbacks or command strings (`paneru.bind`).
+
+By default it looks for a script in the following locations (in order):
+
+1. `$PANERU_LUA` (environment variable)
+2. `$HOME/.paneru.lua`
+3. `$XDG_CONFIG_HOME/paneru/init.lua`
+
+Like the TOML config, the script is automatically reloaded when the file is
+saved.
+
+```lua
+paneru.on("window_focused", function(event)
+  paneru.run("window balance")
+end)
+
+paneru.bind("alt - j", "window focus east")
+```
+
+### Extra Lua modules
+
+`$PANERU_LUA_PATH` and `$PANERU_LUA_CPATH` extend the script's `require()`
+search path (`package.path`/`package.cpath`), so `init.lua` can load modules
+beyond Lua's stock library — for example, calling into
+[sbarlua](https://github.com/FelixKratz/SbarLua) directly from a
+`paneru.on` handler, instead of shelling out to `sketchybar --trigger`:
+
+```lua
+local sbar = require("sbar")
+
+paneru.on("window_focused", function(event)
+  sbar.set("front_app", { label = { string = tostring(event.window_id) } })
+end)
+```
+
+Both are set automatically when using the nix-darwin or Home Manager module's
+`services.paneru.extraLuaPackages` option — see
+[`nix/README.md`](nix/README.md).

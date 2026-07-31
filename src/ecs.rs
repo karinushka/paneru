@@ -21,7 +21,7 @@ use bevy::{
     ecs::{component::Component, entity::Entity, schedule::IntoScheduleConfigs},
 };
 use derive_more::{Deref, DerefMut};
-use tracing::{Level, instrument};
+use tracing::{Level, instrument, warn};
 
 use crate::commands::register_commands;
 use crate::config::{CONFIGURATION_FILE, Config, WindowParams};

@@ -9,6 +9,7 @@ use objc2_core_graphics::{
     CGEventTapPlacement, CGEventTapProxy, CGEventType,
 };
 use objc2_foundation::NSSet;
+use paneru_shared_types::commands::Command;
 use scopeguard::ScopeGuard;
 use std::ffi::c_void;
 use std::marker::PhantomPinned;
@@ -35,6 +36,19 @@ static FOCUSED_PASSTHROUGH: LazyLock<ArcSwap<Vec<(u8, Modifiers)>>> =
 /// key-down. Called from the ECS thread on focus change and config reload.
 pub fn set_focused_passthrough(keys: Vec<(u8, Modifiers)>) {
     FOCUSED_PASSTHROUGH.store(Arc::new(keys));
+}
+
+/// Keybinds registered by the Lua runtime as `(keycode, modifiers, handler_id)`,
+/// shared lock-free with the event tap. Checked before the config bindings so a
+/// scripted bind can override a TOML one.
+static LUA_KEYBINDS: LazyLock<ArcSwap<Vec<(u8, Modifiers, u32)>>> =
+    LazyLock::new(|| ArcSwap::from_pointee(Vec::new()));
+
+/// Replace the Lua keybind set that the event tap checks on every key-down.
+/// Called from the main thread on script load and hot reload.
+#[cfg(feature = "lua")]
+pub fn set_lua_keybinds(keys: Vec<(u8, Modifiers, u32)>) {
+    LUA_KEYBINDS.store(Arc::new(keys));
 }
 
 /// How long to suppress scroll wheel events after a vertical swipe gesture,
@@ -448,6 +462,14 @@ impl InputHandler {
                     .any(|(c, m)| *c == keycode && m.matches(mask))
                 {
                     return None;
+                }
+                // Lua-registered binds take precedence over the TOML config.
+                let lua_binds = LUA_KEYBINDS.load();
+                if let Some((_, _, id)) = lua_binds
+                    .iter()
+                    .find(|(c, m, _)| *c == keycode && m.matches(mask))
+                {
+                    return Some(Command::Lua(*id));
                 }
                 self.config.find_keybind(keycode, mask)
             })

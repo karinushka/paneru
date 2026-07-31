@@ -29,6 +29,8 @@ use crate::ecs::layout::LayoutStrip;
 use crate::ecs::state::PaneruState;
 use crate::errors::Result;
 use crate::events::{Event, EventSender};
+#[cfg(feature = "lua")]
+use crate::lua;
 use crate::manager::{
     Application, Origin, ProcessApi, Size, Window, WindowManager, WindowManagerApi, WindowManagerOS,
 };
@@ -524,7 +526,23 @@ impl SpawnCommandsExt for Commands<'_, '_> {
 
 pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<BevyApp> {
     let window_manager: Box<dyn WindowManagerApi> = Box::new(WindowManagerOS::new(sender.clone()));
-    let watcher = window_manager.setup_config_watcher(CONFIGURATION_FILE.as_path())?;
+    #[cfg_attr(not(feature = "lua"), allow(unused_mut))]
+    let mut watcher = window_manager.setup_config_watcher(CONFIGURATION_FILE.as_path())?;
+
+    // Discover (or create) the Lua init script and watch it alongside the TOML
+    // config so edits hot-reload. Both files feed the same `ConfigRefresh` event.
+    #[cfg(feature = "lua")]
+    let lua_path = {
+        let lua_path = crate::config::ensure_lua_file()
+            .inspect_err(|err| warn!("preparing Lua script: {err}"))
+            .ok();
+        if let Some(path) = &lua_path
+            && let Err(err) = watcher.watch(path, notify::RecursiveMode::NonRecursive)
+        {
+            warn!("watching Lua script '{}': {err}", path.display());
+        }
+        lua_path
+    };
 
     let mut app = BevyApp::new();
 
@@ -569,6 +587,16 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
 
     // Do not insert this in mocks.
     app.insert_resource(LowPowerMode(false));
+
+    // Install the Lua runtime and its hot-reload plugin. Kept out of the mock
+    // harness. A missing/broken script falls back to an empty runtime so the
+    // watcher can still pick up a later fix.
+    #[cfg(feature = "lua")]
+    if let Some(path) = lua_path {
+        app.insert_non_send(lua::load_runtime(&path));
+        app.insert_resource(lua::LuaScriptPath(path));
+        app.add_plugins(lua::LuaPlugin);
+    }
 
     Ok(app)
 }

@@ -11,6 +11,9 @@
 //! handlers), `paneru.bind` (keybinds), `paneru.flash` and `paneru.log`. Their
 //! callbacks are kept in a Rust-side [`Registry`] rather than in Lua globals, so
 //! there is no scaffolding script to keep in sync with the Rust that calls it.
+//!
+//! The `query*` functions are named after the client's, but answer from the
+//! world directly instead of over the socket — see [`provider`].
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -24,6 +27,12 @@ use super::convert::LuaEvent;
 use super::{Outbox, SharedRegistry};
 use crate::commands::Command;
 use crate::config::resolve_chord;
+use crate::ecs::state::StateQueryKind;
+
+/// Registry key holding the short-lived function that answers a query against
+/// the live world. Kept in the Lua registry rather than on the `paneru` table
+/// so a script can neither see nor overwrite it.
+pub(super) const QUERY_PROVIDER: &str = "paneru.query_provider";
 
 /// Installs the `paneru` API into `lua`, wiring the Rust-backed functions to the
 /// shared `outbox` (queued commands/flashes) and `registry` (registered handlers
@@ -49,6 +58,8 @@ pub(super) fn install(
     // `cmd` is the embedded runtime's historical alias for `run`.
     let run: mlua::Function = paneru.get("run")?;
     paneru.set("cmd", run)?;
+
+    install_query(lua, &paneru)?;
 
     // paneru.log(message) — emit a tracing log line.
     let log = lua.create_function(|_, message: String| {
@@ -120,4 +131,66 @@ pub(super) fn install(
     paneru.set("bind", bind)?;
 
     Ok(())
+}
+
+/// Installs the state-query half of the API, matching the client module's
+/// spelling exactly: `paneru.query(kind)` hands back the raw JSON string,
+/// `paneru.query_json(kind)` the decoded table, and `query_state` /
+/// `query_active` / `query_workspaces` / `query_on_screen` are the fixed-kind
+/// shorthands. A script therefore reads state the same way whether it runs
+/// inside the daemon or in a client process.
+///
+/// The functions themselves only find the provider and unpack its answer; what
+/// they cannot do is reach the world, which is not accessible outside a
+/// dispatching system. `super::LuaRuntime::with_query` installs a provider for
+/// exactly as long as a callback is on the stack, so calling one of these at
+/// script top level fails with an explanation rather than stale data.
+fn install_query(lua: &Lua, paneru: &mlua::Table) -> mlua::Result<()> {
+    let query_raw = lua
+        .create_function(|lua, kind: Option<String>| query::<String>(lua, kind.as_deref(), true))?;
+    paneru.set("query", query_raw)?;
+
+    let query_json = lua
+        .create_function(|lua, kind: Option<String>| query::<Value>(lua, kind.as_deref(), false))?;
+    paneru.set("query_json", query_json)?;
+
+    for (name, kind) in [
+        ("query_state", StateQueryKind::State),
+        ("query_active", StateQueryKind::Active),
+        ("query_workspaces", StateQueryKind::VirtualWorkspaces),
+        ("query_on_screen", StateQueryKind::OnScreen),
+    ] {
+        let shorthand =
+            lua.create_function(move |lua, ()| query::<Value>(lua, Some(kind.token()), false))?;
+        paneru.set(name, shorthand)?;
+    }
+
+    Ok(())
+}
+
+/// Runs one query through the currently installed provider. `as_json` picks
+/// the raw JSON string over the decoded table, and `R` is what that yields.
+fn query<R: mlua::FromLuaMulti>(lua: &Lua, kind: Option<&str>, as_json: bool) -> mlua::Result<R> {
+    let kind = kind.unwrap_or_else(|| StateQueryKind::State.token());
+    // Rejected here as well as host-side so the error names the valid kinds.
+    if StateQueryKind::parse(kind).is_none() {
+        return Err(mlua::Error::RuntimeError(format!(
+            "paneru.query: unknown kind '{kind}'; expected one of {}",
+            StateQueryKind::tokens()
+        )));
+    }
+    provider(lua)?.call((kind.to_string(), as_json))
+}
+
+/// The provider installed for the duration of the current callback, or an
+/// error explaining that there is no world to query from here.
+fn provider(lua: &Lua) -> mlua::Result<mlua::Function> {
+    lua.named_registry_value::<Option<mlua::Function>>(QUERY_PROVIDER)?
+        .ok_or_else(|| {
+            mlua::Error::RuntimeError(
+                "paneru.query is only available inside a paneru.on handler or a paneru.bind \
+                 callback"
+                    .into(),
+            )
+        })
 }

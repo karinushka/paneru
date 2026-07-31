@@ -869,7 +869,10 @@ fn switch_virtual_workspace_bind(
     mut commands: Commands,
 ) {
     let Some(operation) = filter_window_operations(&mut messages, |op| {
-        matches!(op, Operation::Virtual(_) | Operation::VirtualNumber(_))
+        matches!(
+            op,
+            Operation::Virtual(_) | Operation::VirtualNumber(_) | Operation::VirtualAdd
+        )
     })
     .next() else {
         return;
@@ -931,6 +934,26 @@ fn switch_virtual_workspace_bind(
                 return;
             };
             index
+        }
+        Operation::VirtualAdd => {
+            let next_virtual_index = rows
+                .iter()
+                .map(|(_, strip, _)| strip.virtual_index)
+                .max()
+                .unwrap_or(0)
+                + 1;
+
+            commands.spawn_layout_strip(
+                LayoutStrip::new(workspace_id, next_virtual_index),
+                active_display.bounds().min,
+                active_display.entity(),
+                true,
+            );
+
+            if config.workspace_popup_status() {
+                commands.flash_message(format!("{}", next_virtual_index + 1), 1.0);
+            }
+            return;
         }
         _ => return,
     };

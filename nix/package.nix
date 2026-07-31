@@ -20,12 +20,7 @@
         ]);
       props = builtins.fromTOML (builtins.readFile ../Cargo.toml);
       pname = "paneru";
-      version =
-        props.package.version
-        + "+date="
-        + (mkDate (self.lastModifiedDate or "19700101"))
-        + "_"
-        + (self.shortRev or "dirty");
+      version = props.package.version;
 
       # One source tree for every derivation here: the daemon and the loadable
       # Lua module are members of the same workspace sharing one lock file, so
@@ -65,6 +60,8 @@
       # --- Daemon (workspace root), built with crane ------------------------
       daemonArgs = commonArgs // {
         inherit pname;
+
+        inherit version;
         cargoArtifacts = sharedDeps;
 
       };
@@ -94,6 +91,8 @@
           drv = craneLib.buildPackage (
             commonArgs
             // {
+
+              inherit version;
               pname = "lua${ver}-paneru";
               # The module is a workspace member, just not a default one (see
               # the root Cargo.toml), so it builds from the same source and
@@ -147,8 +146,8 @@
         craneLib.buildPackage (
           daemonArgs
           // {
-            pname = "paneru${if enableLua then "-withLua" else ""}";
-            cargoExtraArgs = lib.optionalString enableLua "--features lua,${luaFeature lua}";
+            pname = "paneru${if enableLua then "-with-lua" else ""}";
+            cargoExtraArgs = lib.optionalString enableLua "--features lua,vendored,${luaFeature lua}";
 
             # Expose the loadable Lua module so downstream configs can
             # reference it as `paneru.luaModule` (the derivation, built for

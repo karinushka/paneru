@@ -9,7 +9,7 @@ use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::Has;
 use bevy::ecs::resource::Resource;
-use bevy::ecs::system::Query;
+use bevy::ecs::system::{Query, Res, SystemParam};
 use bevy::math::IRect;
 use objc2_core_graphics::CGDirectDisplayID;
 use serde::{Deserialize, Serialize};
@@ -405,6 +405,53 @@ struct SavedWorkspaceBuilder {
     display_id: Option<CGDirectDisplayID>,
     active_virtual_index: Option<u32>,
     strips: Vec<SavedStrip>,
+}
+
+/// The world access [`QueryState::extract`] needs, bundled so the several
+/// callers — the socket query handler, the embedded Lua runtime — take one
+/// parameter instead of re-listing six that must stay in step.
+#[derive(SystemParam)]
+pub struct QueryStateParams<'w, 's> {
+    workspaces: Query<
+        'w,
+        's,
+        (
+            &'static ChildOf,
+            &'static LayoutStrip,
+            Has<ActiveWorkspaceMarker>,
+            Has<SelectedVirtualMarker>,
+        ),
+    >,
+    displays: Query<'w, 's, (&'static Display, Entity, Has<ActiveDisplayMarker>)>,
+    windows: Windows<'w, 's>,
+    apps: Query<'w, 's, &'static Application>,
+    window_manager: Res<'w, WindowManager>,
+    config: Res<'w, Config>,
+}
+
+impl QueryStateParams<'_, '_> {
+    /// Builds the state document from the current world.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the window manager cannot enumerate a workspace.
+    pub fn extract(&self) -> crate::errors::Result<PaneruQueryState> {
+        PaneruQueryState::extract(
+            &self.workspaces,
+            &self.displays,
+            &self.windows,
+            &self.apps,
+            &self.window_manager,
+            &self.config,
+        )
+    }
+
+    /// The window access, for callers that also need it directly — the Lua
+    /// keybind dispatcher builds its own snapshot from it.
+    #[cfg(feature = "lua")]
+    pub fn windows(&self) -> &Windows<'_, '_> {
+        &self.windows
+    }
 }
 
 pub trait QueryState: std::marker::Sized {

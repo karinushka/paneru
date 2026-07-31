@@ -10,14 +10,53 @@
     let
       cfg = config.services.paneru;
       tomlFormat = pkgs.formats.toml { };
-      # `services.paneru.package` defaults to the overrideable `mkPaneru`
-      # derivation (`nix/package.nix`); toggling `luaConfig.enable` overrides
-      # its `enableLua` Cargo-feature switch. Only meaningful if `package` was
-      # left at that default (a custom package may not support `.override`).
-      actualPackage = if cfg.luaConfig.enable then cfg.package else cfg.package.override { enableLua = false; };
       luaPackages = cfg.lua.pkgs;
+      luaPaths = lib.optional (resolvedExtraLuaPackages != [ ]) (
+        lib.concatMapStringsSep ";" luaPackages.getLuaPath resolvedExtraLuaPackages
+      );
+
+      luaCPaths = (
+        lib.optional (resolvedExtraLuaPackages != [ ]) (
+          lib.concatMapStringsSep ";" luaPackages.getLuaCPath resolvedExtraLuaPackages
+        )
+      );
+      makeWrapperArgs = lib.flatten (
+        lib.filter (x: x != [ ]) [
+          (lib.optional (cfg.extraPackages != [ ]) [
+            "--prefix"
+            "PATH"
+            ":"
+            "${lib.makeBinPath cfg.extraPackages}"
+          ])
+
+          (lib.optional (luaPaths != [ ]) [
+            "--prefix"
+            "LUA_PATH"
+            ";"
+            "${lib.concatStringsSep ";" luaPaths}"
+          ])
+
+          (lib.optional (luaCPaths != [ ]) [
+            "--prefix"
+            "LUA_CPATH"
+            ";"
+            "${lib.concatStringsSep ";" luaCPaths}"
+          ])
+        ]
+      );
       resolvedExtraLuaPackages = if cfg.luaConfig.enable then cfg.extraLuaPackages luaPackages else [ ];
       luaPath = lib.concatMapStringsSep ";" luaPackages.getLuaPath resolvedExtraLuaPackages;
+      wrapPaneru =
+        package:
+        pkgs.symlinkJoin {
+          name = "paneru-with-lua-wrapped";
+          paths = [ package ];
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+          postBuild = ''
+            wrapProgram $out/bin/paneru ${lib.escapeShellArgs makeWrapperArgs}
+          '';
+          inherit (cfg.package) meta;
+        };
       luaCPath = lib.concatMapStringsSep ";" luaPackages.getLuaCPath resolvedExtraLuaPackages;
     in
     {
@@ -41,6 +80,38 @@
           type = lib.types.package;
           default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
           description = "The paneru package to use.";
+        };
+        extraPackages = lib.mkOption {
+          type = with lib.types; listOf package;
+          default = _: [ ];
+          defaultText = lib.literalExpression "[ ]";
+          example = lib.literalExpression "[ pkgs.sketchybar ]";
+          description = ''
+            Extra packages to add to the PATH when paneru is run. This is
+            useful for adding dependencies that paneru's Lua scripts may
+            require, such as `sketchybar` for `require("sbar")`.
+          '';
+        };
+        finalPackage = lib.mkOption {
+          type = lib.types.package;
+          readOnly = true;
+          default =
+            if cfg.luaConfig.enable then
+              wrapPaneru (
+                cfg.package.override {
+                  enableLua = true;
+                  lua = cfg.lua;
+                }
+              )
+            else
+              cfg.package.override { enableLua = false; };
+
+          description = ''
+            The final paneru package that will be installed and run. This is
+            the result of `package.override { enableLua = ...; lua = ...; }`
+            (see `luaConfig.enable` and `lua`), so it may differ from
+            `package` if those options are set.
+          '';
         };
 
         lua = lib.mkOption {
@@ -97,7 +168,7 @@
           type = with lib.types; functionTo (listOf package);
           default = _: [ ];
           defaultText = lib.literalExpression "luaPs: [ ]";
-          example = lib.literalExpression ''luaPs: [ (luaPs.callPackage ./sbarlua.nix { }) ]'';
+          example = lib.literalExpression "luaPs: [ (luaPs.callPackage ./sbarlua.nix { }) ]";
           description = ''
             Extra Lua packages made available to paneru's embedded Lua runtime
             via `require(...)` (e.g. `require("sbar")` to call SketchyBar's
@@ -113,7 +184,7 @@
 
       config = lib.mkIf cfg.enable {
         assertions = [ (lib.hm.assertions.assertPlatform "services.paneru" pkgs lib.platforms.darwin) ];
-        home.packages = [ actualPackage ];
+        home.packages = [ cfg.finalPackage ];
         launchd.agents.paneru = {
           enable = true;
           config = {
@@ -128,14 +199,11 @@
               NO_COLOR = "1";
               XDG_CONFIG_HOME =
                 if config.xdg.enable then config.xdg.configHome else "${config.home.homeDirectory}/.config";
-            } // lib.optionalAttrs (resolvedExtraLuaPackages != [ ]) {
-              PANERU_LUA_PATH = luaPath;
-              PANERU_LUA_CPATH = luaCPath;
             };
             RunAtLoad = true;
             StandardOutPath = "/tmp/paneru.log";
             StandardErrorPath = "/tmp/paneru.err.log";
-            Program = lib.getExe actualPackage;
+            Program = lib.getExe cfg.finalPackage;
           };
         };
 

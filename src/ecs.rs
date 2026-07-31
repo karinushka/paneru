@@ -90,7 +90,12 @@ pub fn register_systems(app: &mut bevy::app::App) {
 
     app.add_systems(
         Startup,
-        (systems::gather_displays, systems::gather_initial_processes).chain(),
+        (
+            systems::gather_displays,
+            systems::gather_initial_processes,
+            systems::initialise_workspaces,
+        )
+            .chain(),
     );
     // Registered with `add_message` rather than `init_resource`, so the buffer
     // is double-buffered and dropped after a frame like any other message

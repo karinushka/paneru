@@ -5,11 +5,12 @@ const DEFAULT_SDK: &str = "MacOSX.sdk";
 
 #[allow(clippy::case_sensitive_file_extension_comparisons)]
 fn main() {
-    let sdk_dir = "/Library/Developer/CommandLineTools/SDKs";
+    let sdk_dir = std::env::var("DEVELOPER_DIR")
+        .map_or("/Library/Developer/CommandLineTools/SDKs".into(), |x| format!("{x}/Platforms/MacOSX.platform/Developer/SDKs"));
 
     let sdk_bases: Vec<String> = std::iter::once(format!("{sdk_dir}/{DEFAULT_SDK}"))
         .chain(
-            fs::read_dir(sdk_dir)
+            fs::read_dir(&sdk_dir)
                 .expect("Failed to read SDK directory")
                 .flatten()
                 .filter_map(|entry| entry.file_name().to_str().map(String::from))

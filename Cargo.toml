@@ -2,7 +2,7 @@
 name = "paneru"
 version = "0.4.4"
 edition = "2024"
-rust-version = "1.89.0"
+rust-version = "1.95.0"
 description = "A sliding, tiling window manager for MacOS."
 homepage = "https://github.com/karinushka/paneru"
 repository = "https://github.com/karinushka/paneru"

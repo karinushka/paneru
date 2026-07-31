@@ -128,6 +128,99 @@ pub fn discover_configuration_file() -> Option<PathBuf> {
         .find(|path| path.exists())
 }
 
+/// The default Lua init script, written on first launch when no script exists so the
+/// file watcher always has a concrete path to observe for hot reloading.
+#[cfg(feature = "lua")]
+const DEFAULT_LUA_SCRIPT: &str = "\
+-- Paneru Lua configuration (hot-reloaded on save).
+--
+-- Hook into window-manager events:
+--   paneru.on(\"window_focused\", function(e) paneru.log(\"focused \" .. e.window_id) end)
+--
+-- Bind keys to commands or Lua functions (chord syntax matches [bindings]):
+--   paneru.bind(\"alt - b\", \"window balance\")
+--   paneru.bind(\"alt - j\", function(state)
+--     if state.focused then paneru.run(\"window focus east\") end
+--   end)
+";
+
+/// Returns the default location for the Lua init script (`<config>/paneru/init.lua`).
+#[cfg(feature = "lua")]
+fn default_lua_file() -> std::io::Result<PathBuf> {
+    let config_home = env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .ok_or_else(|| {
+            std::io::Error::new(
+                ErrorKind::NotFound,
+                "neither XDG_CONFIG_HOME nor HOME is set",
+            )
+        })?;
+
+    Ok(config_home.join("paneru").join("init.lua"))
+}
+
+/// Finds the first existing Lua init script from supported locations, mirroring
+/// [`discover_configuration_file`]. Honors `$PANERU_LUA` first.
+#[cfg(feature = "lua")]
+pub fn discover_lua_file() -> Option<PathBuf> {
+    if let Ok(path_str) = env::var("PANERU_LUA") {
+        let path = PathBuf::from(path_str);
+        if path.exists() {
+            return Some(path);
+        }
+        warn!(
+            "{}: $PANERU_LUA is set to {}, but the file does not exist. Falling back to default locations.",
+            function_name!(),
+            path.display()
+        );
+    }
+
+    let standard_paths = [env::var("HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join(".paneru.lua"))];
+
+    let xdg_dirs = xdg::BaseDirectories::with_prefix("paneru");
+    let xdg_paths = xdg_dirs.find_config_files("init.lua");
+
+    standard_paths
+        .into_iter()
+        .flatten()
+        .chain(xdg_paths)
+        .find(|path| path.exists())
+}
+
+/// Returns the path to the Lua init script, creating a default one at the XDG
+/// location if none exists (so the watcher always has a real file to observe).
+#[cfg(feature = "lua")]
+pub fn ensure_lua_file() -> std::io::Result<PathBuf> {
+    if let Some(path) = discover_lua_file() {
+        return Ok(path);
+    }
+    let path = default_lua_file()?;
+    if create_lua_file_at(&path)? {
+        info!("Created default Lua script at {}", path.display());
+    }
+    Ok(path)
+}
+
+#[cfg(feature = "lua")]
+fn create_lua_file_at(path: &Path) -> std::io::Result<bool> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(ErrorKind::InvalidInput, "Lua script path has no parent")
+    })?;
+    create_dir_all(parent)?;
+
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(mut file) => {
+            file.write_all(DEFAULT_LUA_SCRIPT.as_bytes())?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 /// Returns the list of deprecated top-level `[options]` keys present in a TOML config.
 pub fn deprecated_options_in_input(input: &str) -> Result<Vec<String>> {
     const DEPRECATED_KEYS: [&str; 16] = [
@@ -1129,6 +1222,24 @@ where
     parse_modifiers(&s)
         .map(Some)
         .map_err(|e: Error| serde::de::Error::custom(e.to_string()))
+}
+
+/// Resolves a keybinding chord string like `"ctrl+alt-h"` into a `(keycode, Modifiers)`
+/// pair, generating the layout-aware virtual keymap on demand.
+///
+/// This is the entry point used by the Lua runtime's `paneru.bind`, so scripted
+/// keybinds accept the exact same chord syntax as the TOML `[bindings]` table.
+#[cfg(feature = "lua")]
+pub(crate) fn resolve_chord(input: &str) -> Result<(u8, Modifiers)> {
+    // Fast path: resolve against the built-in keymaps first. This avoids the
+    // Carbon/TIS FFI (which is main-thread/GUI-session sensitive) for the common
+    // case and keeps `paneru.bind` usable in headless unit tests.
+    if let Ok(resolved) = resolve_keybinding_str(input, &[]) {
+        return Ok(resolved);
+    }
+    // Fall back to the layout-aware virtual keymap for layout-specific keys.
+    let virtual_keys = generate_virtual_keymap();
+    resolve_keybinding_str(input, &virtual_keys)
 }
 
 /// Resolves a keybinding string like `"ctrl+alt-h"` into a `(keycode, Modifiers)` pair.

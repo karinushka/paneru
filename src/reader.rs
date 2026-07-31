@@ -42,6 +42,7 @@ impl CommandReader {
             StateQueryKind::State => ["query", "state", "--json"],
             StateQueryKind::VirtualWorkspaces => ["query", "virtual-workspaces", "--json"],
             StateQueryKind::Active => ["query", "active", "--json"],
+            StateQueryKind::OnScreen => ["query", "on-screen", "--json"],
         };
         let mut stream = Self::send_socket_request(args.into_iter().map(str::to_string))?;
         let mut output = String::new();
@@ -192,6 +193,7 @@ fn parse_query_request(argv: &[&str]) -> Option<StateQueryKind> {
             Some(StateQueryKind::VirtualWorkspaces)
         }
         ["query", "active", "--json"] | ["query", "active"] => Some(StateQueryKind::Active),
+        ["query", "on-screen", "--json"] | ["query", "on-screen"] => Some(StateQueryKind::OnScreen),
         _ => None,
     }
 }

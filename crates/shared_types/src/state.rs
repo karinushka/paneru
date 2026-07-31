@@ -19,6 +19,8 @@ pub enum StateQueryKind {
     VirtualWorkspaces,
     /// Just the active display/workspace/focus state.
     Active,
+    /// Just the windows currently visible on screen.
+    OnScreen,
 }
 
 impl StateQueryKind {
@@ -29,6 +31,7 @@ impl StateQueryKind {
             StateQueryKind::State => "state",
             StateQueryKind::VirtualWorkspaces => "virtual-workspaces",
             StateQueryKind::Active => "active",
+            StateQueryKind::OnScreen => "on-screen",
         }
     }
 
@@ -39,6 +42,7 @@ impl StateQueryKind {
             StateQueryKind::State,
             StateQueryKind::VirtualWorkspaces,
             StateQueryKind::Active,
+            StateQueryKind::OnScreen,
         ]
         .into_iter()
         .find(|kind| kind.token() == token)
@@ -75,6 +79,15 @@ pub struct VirtualWorkspaceState {
     pub windows: Vec<WindowState>,
 }
 
+/// A window frame in global display coordinates.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Frame {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
 /// A window, as reported by queries and subscription events.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct WindowState {
@@ -84,9 +97,38 @@ pub struct WindowState {
     pub title: String,
     pub focused: bool,
     pub floating: bool,
+    /// Display the window is (mostly) on, when it overlaps one at all.
+    pub display_id: Option<u32>,
+    /// Frame in global display coordinates, when known.
+    pub frame: Option<Frame>,
+    /// Whether the window is meaningfully on screen right now: not minimized or
+    /// hidden, and showing more than the sliver Paneru leaves poking out for
+    /// off-screen windows.
+    pub visible: bool,
 }
 
 impl QueryState {
+    /// The windows currently on screen, left to right per display. Drawn from
+    /// the same rows as the rest of the document — there is no separate
+    /// on-screen state, only the visible subset of it.
+    #[must_use]
+    pub fn on_screen(&self) -> Vec<&WindowState> {
+        let mut on_screen = self
+            .virtual_workspaces
+            .iter()
+            .flat_map(|workspace| workspace.windows.iter())
+            .filter(|window| window.visible)
+            .collect::<Vec<_>>();
+        on_screen.sort_by_key(|window| {
+            (
+                window.display_id,
+                window.frame.map(|frame| frame.x),
+                window.window_id,
+            )
+        });
+        on_screen
+    }
+
     /// Serializes the slice of this document a query asked for.
     ///
     /// # Errors
@@ -98,6 +140,7 @@ impl QueryState {
             StateQueryKind::State => serde_json::to_string(self),
             StateQueryKind::VirtualWorkspaces => serde_json::to_string(&self.virtual_workspaces),
             StateQueryKind::Active => serde_json::to_string(&self.active),
+            StateQueryKind::OnScreen => serde_json::to_string(&self.on_screen()),
         }
     }
 }
@@ -124,6 +167,12 @@ pub enum StateEvent {
         title: Option<String>,
         virtual_workspace_number: Option<u32>,
     },
+    /// The set of windows actually visible on screen changed — including plain
+    /// moves and resizes, which no other event covers.
+    OnScreenChanged {
+        windows: Vec<WindowState>,
+        active: ActiveState,
+    },
     /// A window's title changed.
     WindowTitleChanged { window_id: i32, title: String },
     /// Display configuration changed. `display_id` is `null` for a global
@@ -141,6 +190,7 @@ mod tests {
             StateQueryKind::State,
             StateQueryKind::VirtualWorkspaces,
             StateQueryKind::Active,
+            StateQueryKind::OnScreen,
         ] {
             assert_eq!(StateQueryKind::parse(kind.token()), Some(kind));
         }
@@ -149,19 +199,75 @@ mod tests {
 
     #[test]
     fn events_round_trip_through_json() {
-        let event = StateEvent::WindowFocused {
-            window_id: Some(1),
-            bundle_id: Some("com.example.app".into()),
-            title: Some("window".into()),
-            virtual_workspace_number: Some(1),
+        let event = StateEvent::OnScreenChanged {
+            windows: vec![WindowState {
+                window_id: 1,
+                bundle_id: "com.example.app".into(),
+                app_name: "Example".into(),
+                title: "window".into(),
+                focused: true,
+                floating: false,
+                display_id: Some(1),
+                frame: Some(Frame {
+                    x: 0,
+                    y: 0,
+                    width: 800,
+                    height: 600,
+                }),
+                visible: true,
+            }],
+            active: ActiveState::default(),
         };
 
         let line = serde_json::to_string(&event).unwrap();
-        assert!(line.contains(r#""event":"window_focused""#));
+        assert!(line.contains(r#""event":"on_screen_changed""#));
         assert_eq!(
             serde_json::from_str::<StateEvent>(&line).unwrap(),
             event,
             "clients must decode exactly what the daemon emits"
         );
+    }
+
+    #[test]
+    fn on_screen_is_the_visible_subset_ordered_left_to_right() {
+        let window = |window_id, x, visible| WindowState {
+            window_id,
+            bundle_id: String::new(),
+            app_name: String::new(),
+            title: String::new(),
+            focused: false,
+            floating: false,
+            display_id: Some(1),
+            frame: Some(Frame {
+                x,
+                y: 0,
+                width: 100,
+                height: 100,
+            }),
+            visible,
+        };
+
+        let state = QueryState {
+            version: 1,
+            timestamp: 0,
+            active: ActiveState::default(),
+            virtual_workspaces: vec![VirtualWorkspaceState {
+                number: 1,
+                native_workspace_id: 1,
+                active: true,
+                windows: vec![
+                    window(1, 500, true),
+                    window(2, 0, false),
+                    window(3, 100, true),
+                ],
+            }],
+        };
+
+        let visible: Vec<i32> = state
+            .on_screen()
+            .iter()
+            .map(|window| window.window_id)
+            .collect();
+        assert_eq!(visible, vec![3, 1], "off-screen windows are left out");
     }
 }

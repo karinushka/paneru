@@ -208,6 +208,9 @@ pub enum Operation {
     Virtual(Direction),
     /// Selects a virtual strip by its zero-based index for the current workspace.
     VirtualNumber(u32),
+    /// Creates a new empty virtual strip after the highest existing one for
+    /// the current workspace, and switches to it.
+    VirtualAdd,
     /// Moves the focused window to the virtual strip.
     VirtualMove(Direction, MoveFocus),
     /// Moves the focused window to a virtual strip by its zero-based index.

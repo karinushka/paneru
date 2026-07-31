@@ -24,6 +24,14 @@ pub enum StateQueryKind {
 }
 
 impl StateQueryKind {
+    /// Every query kind, in the order the CLI lists them.
+    pub const ALL: [StateQueryKind; 4] = [
+        StateQueryKind::State,
+        StateQueryKind::VirtualWorkspaces,
+        StateQueryKind::Active,
+        StateQueryKind::OnScreen,
+    ];
+
     /// The argv token naming this query (`paneru query <token> --json`).
     #[must_use]
     pub fn token(self) -> &'static str {
@@ -38,14 +46,17 @@ impl StateQueryKind {
     /// Parses the token back, so the socket and the CLI agree on the spelling.
     #[must_use]
     pub fn parse(token: &str) -> Option<Self> {
-        [
-            StateQueryKind::State,
-            StateQueryKind::VirtualWorkspaces,
-            StateQueryKind::Active,
-            StateQueryKind::OnScreen,
-        ]
-        .into_iter()
-        .find(|kind| kind.token() == token)
+        Self::ALL.into_iter().find(|kind| kind.token() == token)
+    }
+
+    /// Every token, comma separated, for "expected one of …" errors.
+    #[must_use]
+    pub fn tokens() -> String {
+        Self::ALL
+            .iter()
+            .map(|kind| kind.token())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -141,6 +152,24 @@ impl QueryState {
             StateQueryKind::VirtualWorkspaces => serde_json::to_string(&self.virtual_workspaces),
             StateQueryKind::Active => serde_json::to_string(&self.active),
             StateQueryKind::OnScreen => serde_json::to_string(&self.on_screen()),
+        }
+    }
+
+    /// The same slice as [`Self::to_query_json`], left as a JSON value.
+    ///
+    /// In-process callers (the embedded Lua runtime) convert straight from this
+    /// instead of serializing and parsing a string back.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization fails (it should not, barring a bug in
+    /// this type's `Serialize` implementation).
+    pub fn to_query_value(&self, kind: StateQueryKind) -> serde_json::Result<serde_json::Value> {
+        match kind {
+            StateQueryKind::State => serde_json::to_value(self),
+            StateQueryKind::VirtualWorkspaces => serde_json::to_value(&self.virtual_workspaces),
+            StateQueryKind::Active => serde_json::to_value(&self.active),
+            StateQueryKind::OnScreen => serde_json::to_value(self.on_screen()),
         }
     }
 }

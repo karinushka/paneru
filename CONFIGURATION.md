@@ -416,6 +416,42 @@ end)
 paneru.bind("alt - j", "window focus east")
 ```
 
+### Querying state
+
+Inside a `paneru.on` handler or a `paneru.bind` callback, the script can read
+the same state documents `paneru query …` returns — no socket round trip, no
+`io.popen`:
+
+```lua
+paneru.on("window_focused", function(event)
+  for _, window in ipairs(paneru.query_on_screen()) do  -- actually visible
+    paneru.log(window.app_name .. ": " .. window.title)
+  end
+
+  local active = paneru.query_active()
+  paneru.flash("workspace " .. tostring(active.virtual_workspace_number))
+end)
+```
+
+| Function | Returns |
+| --- | --- |
+| `paneru.query(kind)` | the raw JSON string, `kind` defaulting to `"state"` |
+| `paneru.query_json(kind)` | the same document, decoded into a table |
+| `paneru.query_state()` | the complete state document |
+| `paneru.query_active()` | the active display, workspace and focused window |
+| `paneru.query_workspaces()` | the virtual workspace rows |
+| `paneru.query_on_screen()` | the windows currently visible |
+
+These are spelled exactly as in the loadable client module (`require("paneru")`,
+see [`crates/lua`](crates/lua)), so a helper that reads state works unchanged in
+either host. The payloads are documented in
+[`QUERY_AND_SUBSCRIBE_FORMAT.md`](QUERY_AND_SUBSCRIBE_FORMAT.md).
+
+State is gathered on demand and at most once per callback, so handlers that
+never query cost nothing extra — which matters for events as frequent as
+`mouse_moved`. Outside a callback there is no window-manager state to read, so
+calling one of these at script top level raises an error; do it from a handler.
+
 ### Extra Lua modules
 
 `$PANERU_LUA_PATH` and `$PANERU_LUA_CPATH` extend the script's `require()`

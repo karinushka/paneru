@@ -34,7 +34,9 @@ pedantic = "warn"
 # `lua`, same convention as `crates/lua`) to include it.
 [features]
 default = []
+vendored = ["mlua/vendored"]
 lua = ["dep:mlua", "dep:paneru-lua"]
+lua55 = ["mlua/lua55"]
 lua51 = ["mlua/lua51"]
 lua52 = ["mlua/lua52"]
 lua53 = ["mlua/lua53"]

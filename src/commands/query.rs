@@ -18,9 +18,9 @@ use super::{Command, Operation};
 use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::Windows;
-use crate::ecs::state::QueryState;
 use crate::ecs::state::{
-    PaneruActiveState, PaneruQueryState, PaneruVirtualWorkspaceState, PaneruWindowState, StateEvent,
+    PaneruActiveState, PaneruQueryState, PaneruVirtualWorkspaceState, PaneruWindowState,
+    QueryState, QueryStateParams, StateEvent,
 };
 use crate::ecs::{
     ActiveDisplayMarker, ActiveWorkspaceMarker, FocusedMarker, SelectedVirtualMarker, Unmanaged,
@@ -114,7 +114,12 @@ impl StateBroadcastIntent {
             match event {
                 Event::SpaceChanged
                 | Event::Command {
-                    command: Command::Window(Operation::Virtual(_) | Operation::VirtualNumber(_)),
+                    command:
+                        Command::Window(
+                            Operation::Virtual(_)
+                            | Operation::VirtualNumber(_)
+                            | Operation::VirtualAdd,
+                        ),
                 } => intent.virtual_workspace_changed = true,
                 Event::WindowCreated { .. }
                 | Event::WindowDestroyed { .. }
@@ -193,36 +198,17 @@ pub(super) fn register_query_commands(app: &mut App) {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn state_query_handler(
-    mut messages: MessageReader<Event>,
-    workspaces: Query<(
-        &ChildOf,
-        &LayoutStrip,
-        Has<ActiveWorkspaceMarker>,
-        Has<SelectedVirtualMarker>,
-    )>,
-    displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
-    windows: Windows,
-    apps: Query<&Application>,
-    window_manager: Res<WindowManager>,
-    config: Res<Config>,
-) {
+fn state_query_handler(mut messages: MessageReader<Event>, state: QueryStateParams) {
     for event in messages.read() {
         let Event::StateQuery { kind, respond_to } = event else {
             continue;
         };
 
-        let response = PaneruQueryState::extract(
-            &workspaces,
-            &displays,
-            &windows,
-            &apps,
-            &window_manager,
-            &config,
-        )
-        .map_err(|err| err.to_string())
-        .and_then(|state| state.to_query_json(*kind).map_err(|err| err.to_string()))
-        .unwrap_or_else(|err| json!({ "error": err }).to_string());
+        let response = state
+            .extract()
+            .map_err(|err| err.to_string())
+            .and_then(|state| state.to_query_json(*kind).map_err(|err| err.to_string()))
+            .unwrap_or_else(|err| json!({ "error": err }).to_string());
         _ = respond_to.send(response);
     }
 }

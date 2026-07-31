@@ -779,6 +779,13 @@ impl Config {
             .is_some_and(|enabled| enabled)
     }
 
+    /// Number of virtual workspaces to pre-create on each physical space at
+    /// startup. Default: 1 (just the physical space itself, no extra virtual
+    /// workspaces).
+    pub fn default_workspaces(&self) -> u32 {
+        self.inner().default_workspaces.unwrap_or(1).max(1)
+    }
+
     pub fn insert_windows_mid_strip(&self) -> bool {
         // Default is disabled: appending to the end of the strip is the
         // expected behaviour, especially when moving several windows.
@@ -875,6 +882,7 @@ struct InnerConfig {
     bindings: HashMap<String, OneOrMore>,
     windows: Option<HashMap<String, WindowParams>>,
     decorations: Option<decorations::DecorationsOptions>,
+    default_workspaces: Option<u32>,
     swipe: Option<swipe::SwipeOptions>,
     padding: Option<padding::PaddingOptions>,
     restore: Option<RestoreOptions>,
@@ -1835,6 +1843,24 @@ fn test_parse_absolute_virtual_workspace_commands() {
         parse_command(&["window", "virtualsendnum", "3"]).unwrap(),
         Command::Window(Operation::VirtualMoveNumber(2, MoveFocus::Stay))
     ));
+    assert!(matches!(
+        parse_command(&["window", "virtualadd"]).unwrap(),
+        Command::Window(Operation::VirtualAdd)
+    ));
+}
+
+#[test]
+fn test_default_workspaces() {
+    let base = "[options]\n[bindings]\n";
+    let config = Config::try_from(base).unwrap();
+    assert_eq!(config.default_workspaces(), 1);
+
+    let config = Config::try_from(&*format!("default_workspaces = 4\n{base}")).unwrap();
+    assert_eq!(config.default_workspaces(), 4);
+
+    // Zero is clamped up to 1 (the physical space always exists).
+    let config = Config::try_from(&*format!("default_workspaces = 0\n{base}")).unwrap();
+    assert_eq!(config.default_workspaces(), 1);
 }
 
 #[test]

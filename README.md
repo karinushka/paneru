@@ -164,6 +164,22 @@ window_center = "alt - c"
 quit = "ctrl + alt - q"
 ```
 
+Alternatively, the embedded Lua runtime can declare the entire configuration
+via `paneru.setup{...}`, making the TOML file optional — see
+[Configuration from Lua](./CONFIGURATION.md#configuration-from-lua):
+
+```lua
+-- init.lua
+paneru.setup {
+  options = { focus_follows_mouse = true, mouse_follows_focus = true },
+  bindings = {
+    ["window focus west"] = "cmd - h",
+    ["window focus east"] = "cmd - l",
+    ["quit"] = "ctrl + alt - q",
+  },
+}
+```
+
 ### Live reloading
 
 Changes made to the active configuration file are automatically reloaded while
@@ -334,8 +350,9 @@ scripts, `cron` jobs, or other automation tools:
 ## Future Enhancements
 
 - More commands for manipulating windows: finegrained size adjustments, touchpad resizing, etc.
-- Scriptability. For example using Lua for configuration or automation of window handling,
-  like triggering and positioning specific windows or applications.
+- Deeper scriptability building on the embedded Lua runtime, which already
+  supports full configuration (`paneru.setup`), event hooks (`paneru.on`),
+  keybindings (`paneru.bind`), and state queries.
 
 ## Communication
 

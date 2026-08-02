@@ -43,6 +43,31 @@ fn update_passthrough(window: &Window, app: &Application, config: &Config) {
     crate::platform::input::set_focused_passthrough(properties.passthrough_keys());
 }
 
+/// Re-applies the configuration side effects that must follow any config change:
+/// the per-display menubar-height override and the focused window's passthrough
+/// keys. Shared by the TOML reload trigger ([`refresh_configuration_trigger`])
+/// and the Lua reload system so both config sources behave identically on reload.
+pub(crate) fn apply_config_side_effects(
+    config: &Config,
+    displays: &mut Query<&mut Display>,
+    windows: &Windows,
+    applications: &Query<&Application>,
+) {
+    let height = config.menubar_height();
+    for mut display in &mut *displays {
+        display.set_menubar_height_override(height);
+    }
+
+    // Recompute passthrough keys for the currently focused window.
+    if let Some((window, _, parent)) = windows
+        .focused()
+        .and_then(|(w, e)| windows.find_parent(w.id()).map(|(w, _, p)| (w, e, p)))
+        && let Ok(app) = applications.get(parent)
+    {
+        update_passthrough(window, app, config);
+    }
+}
+
 /// Handles the event when an application switches to the front. It updates the focused window and PSN.
 ///
 /// # Arguments
@@ -1296,19 +1321,7 @@ pub(super) fn refresh_configuration_trigger(
             });
         }
 
-        let height = config.menubar_height();
-        for mut display in &mut displays {
-            display.set_menubar_height_override(height);
-        }
-
-        // Recompute passthrough keys for the currently focused window.
-        if let Some((window, _, parent)) = windows
-            .focused()
-            .and_then(|(w, e)| windows.find_parent(w.id()).map(|(w, _, p)| (w, e, p)))
-            && let Ok(app) = applications.get(parent)
-        {
-            update_passthrough(window, app, &config);
-        }
+        apply_config_side_effects(&config, &mut displays, &windows, &applications);
     }
 }
 

@@ -838,6 +838,7 @@ pub(super) fn window_moved_update_frame(
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn gather_initial_processes(
     receiver: Option<NonSendMut<Receiver<Event>>>,
+    existing_config: Option<Res<Config>>,
     mut displays: Query<&mut Display>,
     mut commands: Commands,
 ) {
@@ -846,7 +847,7 @@ pub(crate) fn gather_initial_processes(
         return;
     };
     let mut initial_processes: Vec<BProcess> = Vec::new();
-    let mut initial_config = None;
+    let mut toml_config = None;
     loop {
         match receiver.recv().expect("error reading initial processes") {
             Event::ProcessesLoaded | Event::Exit => break,
@@ -854,19 +855,30 @@ pub(crate) fn gather_initial_processes(
                 initial_processes.push(Process::new(&psn, observer.clone()).into());
             }
             Event::InitialConfig(config) => {
-                // If there is a display menubar override, apply it to newly created displays.
-                let height = config.menubar_height();
-                for mut display in &mut displays {
-                    display.set_menubar_height_override(height);
-                }
-
-                initial_config = Some(config);
+                toml_config = Some(config);
             }
             event => warn!("Stray event during initial process gathering: {event:?}"),
         }
     }
+
+    // A Lua `paneru.setup{...}` config is inserted at build time and wins; the
+    // TOML config drained from the channel is only the fallback. Use whichever
+    // is authoritative for the force-manage and menubar decisions below.
+    let effective = existing_config
+        .as_deref()
+        .cloned()
+        .or_else(|| toml_config.clone());
+
+    // Apply any display menubar override to the newly created displays.
+    if let Some(config) = &effective {
+        let height = config.menubar_height();
+        for mut display in &mut displays {
+            display.set_menubar_height_override(height);
+        }
+    }
+
     while let Some(mut process) = initial_processes.pop() {
-        let forced = initial_config
+        let forced = effective
             .as_ref()
             .is_some_and(|c| c.should_force_manage_process(&**process));
 
@@ -889,7 +901,10 @@ pub(crate) fn gather_initial_processes(
         }
     }
 
-    if let Some(config) = initial_config {
+    // Insert only the TOML fallback; a Lua config is already a resource.
+    if existing_config.is_none()
+        && let Some(config) = toml_config
+    {
         commands.insert_resource(config);
     }
 }

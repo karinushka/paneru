@@ -17,6 +17,7 @@ use std::sync::{LazyLock, Mutex};
 
 use mlua::prelude::*;
 use paneru_shared_types::commands::Command;
+use paneru_shared_types::state::StateQueryKind;
 
 /// Default daemon socket path (matches `CommandReader::SOCKET_PATH`).
 const DEFAULT_SOCKET: &str = "/tmp/paneru.socket";
@@ -180,22 +181,14 @@ pub fn module(lua: &Lua, version: &str) -> LuaResult<LuaTable> {
 
     exports.set("query", lua.create_function(query)?)?;
     exports.set("query_json", lua.create_function(query_json)?)?;
-    exports.set(
-        "query_state",
-        lua.create_function(|lua, ()| query_json(lua, Some("state".to_string())))?,
-    )?;
-    exports.set(
-        "query_active",
-        lua.create_function(|lua, ()| query_json(lua, Some("active".to_string())))?,
-    )?;
-    exports.set(
-        "query_workspaces",
-        lua.create_function(|lua, ()| query_json(lua, Some("virtual-workspaces".to_string())))?,
-    )?;
-    exports.set(
-        "query_on_screen",
-        lua.create_function(|lua, ()| query_json(lua, Some("on-screen".to_string())))?,
-    )?;
+    // The fixed-kind shorthands share one (name, kind) list with the embedded
+    // runtime, so both hosts spell them the same and neither hardcodes a token.
+    for (name, kind) in StateQueryKind::SHORTHANDS {
+        exports.set(
+            name,
+            lua.create_function(move |lua, ()| query_json(lua, Some(kind.token().to_string())))?,
+        )?;
+    }
 
     exports.set("subscribe", lua.create_function(subscribe)?)?;
     exports.set("set_socket_path", lua.create_function(set_socket_path)?)?;

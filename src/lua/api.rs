@@ -154,12 +154,7 @@ fn install_query(lua: &Lua, paneru: &mlua::Table) -> mlua::Result<()> {
         .create_function(|lua, kind: Option<String>| query::<Value>(lua, kind.as_deref(), false))?;
     paneru.set("query_json", query_json)?;
 
-    for (name, kind) in [
-        ("query_state", StateQueryKind::State),
-        ("query_active", StateQueryKind::Active),
-        ("query_workspaces", StateQueryKind::VirtualWorkspaces),
-        ("query_on_screen", StateQueryKind::OnScreen),
-    ] {
+    for (name, kind) in StateQueryKind::SHORTHANDS {
         let shorthand =
             lua.create_function(move |lua, ()| query::<Value>(lua, Some(kind.token()), false))?;
         paneru.set(name, shorthand)?;

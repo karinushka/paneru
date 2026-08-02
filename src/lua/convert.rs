@@ -288,66 +288,18 @@ impl LuaEvent {
     pub fn is_known(name: &str) -> bool {
         Self::NAMES.contains(&name)
     }
-
-    /// The `paneru.on` name this event dispatches under, taken from the same
-    /// serde tag that lands in the table's `type` field.
-    pub fn name(&self) -> &'static str {
-        // Serializing into a borrowed-name serializer is overkill; the mapping
-        // is asserted against the serde output in `name_matches_serde_tag`.
-        match self {
-            LuaEvent::Exit => "exit",
-            LuaEvent::ProcessesLoaded => "processes_loaded",
-            LuaEvent::ApplicationActivated => "application_activated",
-            LuaEvent::ApplicationDeactivated => "application_deactivated",
-            LuaEvent::ApplicationVisible { .. } => "application_visible",
-            LuaEvent::ApplicationHidden { .. } => "application_hidden",
-            LuaEvent::WindowDestroyed { .. } => "window_destroyed",
-            LuaEvent::WindowFocused { .. } => "window_focused",
-            LuaEvent::WindowMoved { .. } => "window_moved",
-            LuaEvent::WindowResized { .. } => "window_resized",
-            LuaEvent::WindowMinimized { .. } => "window_minimized",
-            LuaEvent::WindowDeminimized { .. } => "window_deminimized",
-            LuaEvent::WindowTitleChanged { .. } => "window_title_changed",
-            LuaEvent::MouseDown(_) => "mouse_down",
-            LuaEvent::MouseUp(_) => "mouse_up",
-            LuaEvent::MouseDragged(_) => "mouse_dragged",
-            LuaEvent::MouseMoved(_) => "mouse_moved",
-            LuaEvent::Swipe { .. } => "swipe",
-            LuaEvent::VerticalSwipe { .. } => "vertical_swipe",
-            LuaEvent::VerticalScrollTick { .. } => "vertical_scroll_tick",
-            LuaEvent::Scroll { .. } => "scroll",
-            LuaEvent::TouchpadDown => "touchpad_down",
-            LuaEvent::TouchpadUp => "touchpad_up",
-            LuaEvent::SpaceCreated { .. } => "space_created",
-            LuaEvent::SpaceDestroyed { .. } => "space_destroyed",
-            LuaEvent::SpaceChanged => "space_changed",
-            LuaEvent::DisplayAdded { .. } => "display_added",
-            LuaEvent::DisplayRemoved { .. } => "display_removed",
-            LuaEvent::DisplayMoved { .. } => "display_moved",
-            LuaEvent::DisplayResized { .. } => "display_resized",
-            LuaEvent::DisplayConfigured { .. } => "display_configured",
-            LuaEvent::DisplayChanged => "display_changed",
-            LuaEvent::MissionControlShowAllWindows => "mission_control_show_all_windows",
-            LuaEvent::MissionControlShowFrontWindows => "mission_control_show_front_windows",
-            LuaEvent::MissionControlShowDesktop => "mission_control_show_desktop",
-            LuaEvent::MissionControlExit => "mission_control_exit",
-            LuaEvent::MenuOpened { .. } => "menu_opened",
-            LuaEvent::MenuClosed { .. } => "menu_closed",
-            LuaEvent::DockDidChangePref { .. } => "dock_did_change_pref",
-            LuaEvent::DockDidRestart { .. } => "dock_did_restart",
-            LuaEvent::MenuBarHiddenChanged { .. } => "menu_bar_hidden_changed",
-            LuaEvent::SystemWoke { .. } => "system_woke",
-            LuaEvent::ThemeChanged => "theme_changed",
-        }
-    }
 }
 
 /// Converts an [`Event`] into `(name, table)` for dispatch to `paneru.on`
 /// callbacks. Returns `None` for events scripts cannot see.
-pub fn event_to_lua(lua: &Lua, event: &Event) -> Option<(&'static str, Table)> {
+///
+/// The dispatch name is the serde tag serde already wrote into the table's
+/// `type` field, so there is no second hand-written variant→name mapping to
+/// keep in step with it.
+pub fn event_to_lua(lua: &Lua, event: &Event) -> Option<(String, Table)> {
     let event = LuaEvent::try_from(event).ok()?;
-    let name = event.name();
     let table = lua.to_value(&event).ok()?.as_table().cloned()?;
+    let name = table.get::<String>("type").ok()?;
     Some((name, table))
 }
 
@@ -472,31 +424,26 @@ mod tests {
         ]
     }
 
-    #[test]
-    fn name_matches_serde_tag() {
-        let lua = Lua::new();
-        for event in every_event() {
-            let table = lua
-                .to_value(&event)
-                .unwrap()
-                .as_table()
-                .cloned()
-                .expect("events serialize to tables");
-            assert_eq!(
-                table.get::<String>("type").unwrap(),
-                event.name(),
-                "the dispatched name and the table's `type` disagree for {event:?}"
-            );
-        }
+    /// The name an event dispatches under: the serde `type` tag serde writes
+    /// into the table, which is exactly what `event_to_lua` keys dispatch on.
+    fn serde_name(lua: &Lua, event: &LuaEvent) -> String {
+        lua.to_value(event)
+            .unwrap()
+            .as_table()
+            .cloned()
+            .expect("events serialize to tables")
+            .get::<String>("type")
+            .unwrap()
     }
 
     #[test]
     fn every_emitted_name_is_registrable() {
+        let lua = Lua::new();
         for event in every_event() {
+            let name = serde_name(&lua, &event);
             assert!(
-                LuaEvent::is_known(event.name()),
-                "{} is emitted but rejected by paneru.on",
-                event.name()
+                LuaEvent::is_known(&name),
+                "{name} is emitted but rejected by paneru.on"
             );
         }
         assert!(!LuaEvent::is_known("window_focussed"), "typos are rejected");

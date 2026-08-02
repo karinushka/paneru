@@ -34,7 +34,9 @@ expose the same following options:
 | --- | --- | --- | --- |
 | `services.paneru.enable` | `boolean` | `false` | Generate and enable the launchd agent |
 | `services.paneru.package` | `package` | `self.packages.<system>.paneru` | Package to use |
-| `services.paneru.settings` | `null` or `attribute set` | `null` | Paneru configuration (See [`CONFIGURATION.md`](/CONFIGURATION.md)) |
+| `services.paneru.config` | `null`, lines, or path | `null` | Paneru's `init.lua` (Lua source or a file). Written to `$XDG_CONFIG_HOME/paneru/init.lua` (or `~/.paneru.lua`). Mirrors Home Manager's `services.sketchybar.config`. A `paneru.setup{...}` here takes precedence over `settings`. Requires `luaConfig.enable`. |
+| `services.paneru.settings` | `null` or `attribute set` | `null` | Paneru TOML configuration (See [`CONFIGURATION.md`](/CONFIGURATION.md)) |
+| `services.paneru.extraPackages` | `list of package` | `[ ]` | Extra packages on paneru's `PATH` at runtime (e.g. `sketchybar`). |
 | `services.paneru.luaConfig.enable` | `boolean` | `true` | Whether `package` is built with the embedded Lua scripting runtime (`init.lua`) compiled in. Only takes effect when `package` is left at its default. |
 | `services.paneru.lua` | `package` | `package.luaModule.lua` | The Lua interpreter `extraLuaPackages` are resolved against. |
 | `services.paneru.extraLuaPackages` | `function` | `luaPs: [ ]` | Extra Lua packages available to `init.lua` via `require(...)` (e.g. [sbarlua](https://github.com/FelixKratz/SbarLua)). Same shape as Home Manager's `programs.sketchybar.extraLuaPackages` — a function from a Lua package set to a list of derivations. |
@@ -73,6 +75,29 @@ expose the same following options:
     };
   };
 }
+```
+
+Alternatively, configure paneru entirely from Lua with `config` (the `init.lua`),
+the same way Home Manager's `services.sketchybar.config` works. A `paneru.setup{...}`
+call is authoritative and makes `settings` unnecessary — see
+[`CONFIGURATION.md`](/CONFIGURATION.md#configuration-from-lua):
+
+```nix
+services.paneru = {
+  enable = true;
+  config = ''
+    paneru.setup {
+      options = { focus_follows_mouse = true, mouse_follows_focus = true },
+      bindings = {
+        ["window focus west"] = "cmd - h",
+        ["window focus east"] = "cmd - l",
+        ["quit"] = "ctrl + alt - q",
+      },
+    }
+
+    paneru.bind("alt - j", function(state) paneru.run("window focus south") end)
+  '';
+};
 ```
 
 To make extra Lua modules available to `init.lua` (e.g. to call SketchyBar's

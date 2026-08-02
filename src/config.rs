@@ -308,6 +308,15 @@ impl Config {
         Ok(())
     }
 
+    /// Atomically adopts another config's inner data, so every shared handle to
+    /// this `Config` observes the new settings. Used by the Lua hot-reload path,
+    /// which rebuilds a fresh `Config` from `paneru.setup{...}` and swaps it in.
+    /// Takes `&self` because the swap is a lock-free `ArcSwap::store`.
+    #[cfg(feature = "lua")]
+    pub(crate) fn replace_inner_from(&self, other: &Config) {
+        self.inner.store(other.inner.load_full());
+    }
+
     /// Returns a read guard to the inner `InnerConfig` for read-only access.
     ///
     /// # Returns
@@ -878,7 +887,11 @@ impl OneOrMore {
 /// It is typically accessed via an `Arc<RwLock<InnerConfig>>` within the `Config` struct.
 #[derive(Deserialize, Debug, Default)]
 struct InnerConfig {
+    // Defaulted so a config (TOML or a `paneru.setup{...}` table) may omit these
+    // sections entirely; without this serde rejects a missing `options`/`bindings`.
+    #[serde(default)]
     options: MainOptions,
+    #[serde(default)]
     bindings: HashMap<String, OneOrMore>,
     windows: Option<HashMap<String, WindowParams>>,
     decorations: Option<decorations::DecorationsOptions>,
@@ -1230,6 +1243,62 @@ where
     parse_modifiers(&s)
         .map(Some)
         .map_err(|e: Error| serde::de::Error::custom(e.to_string()))
+}
+
+/// Builds a [`Config`] from the Lua table passed to `paneru.setup{...}`, reusing
+/// the same serde `Deserialize` that parses the TOML file — the table mirrors the
+/// TOML sections one-for-one (`options`, `padding`, `swipe`, `decorations`,
+/// `restore`, `windows`, `default_workspaces`).
+///
+/// Keybindings are deliberately *not* read here: they travel through the Lua
+/// keybind pipeline (`paneru.bind`, resolved via [`resolve_chord`] and delivered
+/// through `LUA_KEYBINDS`), so any `bindings` field is cleared. Window rule
+/// passthrough chords are resolved into `(keycode, modifiers)` exactly as the
+/// TOML two-pass does in [`InnerConfig::parse_config_with_virtual_keys`].
+///
+/// # Errors
+///
+/// Returns an error if `value` is not a table or does not deserialize into the
+/// configuration schema.
+#[cfg(feature = "lua")]
+pub(crate) fn config_from_lua(lua: &mlua::Lua, value: mlua::Value) -> mlua::Result<Config> {
+    use mlua::LuaSerdeExt;
+
+    if !value.is_table() {
+        return Err(mlua::Error::RuntimeError(
+            "paneru.setup: expected a table".to_string(),
+        ));
+    }
+
+    let mut inner: InnerConfig = lua.from_value(value)?;
+    // Bindings are owned by the Lua keybind registry, never this path; drop any
+    // that slipped through so nothing here tries to resolve them.
+    inner.bindings.clear();
+
+    // Resolve window passthrough chords into keycodes, mirroring the TOML
+    // second pass. `parsed_passthrough` is `#[serde(skip)]`, so it starts empty.
+    let needs_keys = inner.windows.as_ref().is_some_and(|windows| {
+        windows
+            .values()
+            .any(|params| !params.bindings_passthrough.is_empty())
+    });
+    if needs_keys {
+        let virtual_keys = generate_virtual_keymap();
+        if let Some(windows) = &mut inner.windows {
+            for params in windows.values_mut() {
+                for chord in &params.bindings_passthrough {
+                    match resolve_keybinding_str(chord, &virtual_keys) {
+                        Ok(pair) => params.parsed_passthrough.push(pair),
+                        Err(err) => error!("paneru.setup passthrough: {err}"),
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(Config {
+        inner: Arc::new(ArcSwap::from_pointee(inner)),
+    })
 }
 
 /// Resolves a keybinding chord string like `"ctrl+alt-h"` into a `(keycode, Modifiers)`
@@ -2095,4 +2164,64 @@ window_grow = "alt - minus"
         config.find_keybind(minus_keycode, Modifiers::ALT),
         Some(Command::Window(Operation::Resize(ResizeDirection::Grow)))
     ));
+}
+
+#[cfg(all(test, feature = "lua"))]
+mod lua_setup_tests {
+    use super::*;
+    use mlua::Lua;
+
+    /// Runs a `paneru.setup`-style table (as a Lua chunk that returns it) through
+    /// the same `config_from_lua` path `paneru.setup` uses.
+    fn config_from_source(source: &str) -> Config {
+        let lua = Lua::new();
+        let value: mlua::Value = lua.load(source).eval().expect("lua chunk should evaluate");
+        config_from_lua(&lua, value).expect("config_from_lua should succeed")
+    }
+
+    #[test]
+    fn setup_table_populates_accessors() {
+        let config = config_from_source(
+            r#"return {
+                default_workspaces = 3,
+                options = { sliver_width = 9, focus_follows_mouse = false },
+                padding = { top = 10, bottom = 4 },
+            }"#,
+        );
+        assert_eq!(config.default_workspaces(), 3);
+        assert_eq!(config.sliver_width(), 9);
+        assert!(!config.focus_follows_mouse());
+        let (top, _right, bottom, _left) = config.edge_padding();
+        assert_eq!((top, bottom), (10, 4));
+    }
+
+    #[test]
+    fn missing_options_and_bindings_are_ok() {
+        // Regression guard for the `#[serde(default)]` fix: a table that omits
+        // `options` and `bindings` must still deserialize.
+        let config = config_from_source(r#"return { padding = { top = 4 } }"#);
+        assert_eq!(config.default_workspaces(), 1);
+        assert_eq!(config.edge_padding().0, 4);
+    }
+
+    #[test]
+    fn window_rule_passthrough_is_resolved() {
+        let config = config_from_source(
+            r#"return {
+                windows = { term = { title = "kitty", bindings_passthrough = { "ctrl+alt-h" } } },
+            }"#,
+        );
+        let rules = config.find_window_properties("kitty", "");
+        assert_eq!(rules.len(), 1);
+        assert!(
+            !rules[0].passthrough_keys().is_empty(),
+            "passthrough chords should resolve to keycodes"
+        );
+    }
+
+    #[test]
+    fn non_table_argument_is_rejected() {
+        let lua = Lua::new();
+        assert!(config_from_lua(&lua, mlua::Value::Integer(3)).is_err());
+    }
 }

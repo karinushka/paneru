@@ -18,7 +18,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use mlua::{Lua, Value};
+use mlua::{Lua, Table, Value};
 use tracing::info;
 
 use paneru_lua as shared;
@@ -26,7 +26,7 @@ use paneru_lua as shared;
 use super::convert::LuaEvent;
 use super::{Outbox, SharedRegistry};
 use crate::commands::Command;
-use crate::config::resolve_chord;
+use crate::config::{Config, config_from_lua, resolve_chord};
 use crate::ecs::state::StateQueryKind;
 
 /// Registry key holding the short-lived function that answers a query against
@@ -41,6 +41,7 @@ pub(super) fn install(
     lua: &Lua,
     outbox: &Rc<RefCell<Outbox>>,
     registry: &SharedRegistry,
+    config_cell: &Rc<RefCell<Option<Config>>>,
 ) -> mlua::Result<()> {
     let paneru = lua.create_table()?;
     lua.globals().set("paneru", paneru.clone())?;
@@ -108,28 +109,59 @@ pub(super) fn install(
     let bind = {
         let registry = Rc::clone(registry);
         lua.create_function(move |_, (chord, handler): (String, Value)| {
-            match &handler {
-                Value::Function(_) | Value::String(_) => {}
-                other => {
-                    return Err(mlua::Error::RuntimeError(format!(
-                        "paneru.bind: handler must be a function or command string, got {}",
-                        other.type_name()
-                    )));
-                }
-            }
-            let (code, modifiers) = resolve_chord(&chord)
-                .map_err(|err| mlua::Error::RuntimeError(format!("paneru.bind: {err}")))?;
-
-            let mut registry = registry.borrow_mut();
-            registry.binds.push(handler);
-            let id = u32::try_from(registry.binds.len())
-                .map_err(|_| mlua::Error::RuntimeError("paneru.bind: too many binds".into()))?;
-            registry.keybinds.push((code, modifiers, id));
-            Ok(())
+            register_bind(&registry, &chord, handler)
         })?
     };
     paneru.set("bind", bind)?;
 
+    // paneru.setup(table) — declare the whole configuration from Lua. The table
+    // mirrors the TOML sections one-for-one. A `bindings` sub-table (command
+    // string = chord string) is desugared onto the same path as `paneru.bind`
+    // and stripped out before the rest is deserialized into a `Config`.
+    let setup = {
+        let registry = Rc::clone(registry);
+        let config_cell = Rc::clone(config_cell);
+        lua.create_function(move |lua, table: Table| {
+            if let Some(bindings) = table.get::<Option<Table>>("bindings")? {
+                for pair in bindings.pairs::<String, String>() {
+                    let (command, chord) = pair?;
+                    let handler = Value::String(lua.create_string(&command)?);
+                    register_bind(&registry, &chord, handler)?;
+                }
+                table.set("bindings", Value::Nil)?;
+            }
+            let config = config_from_lua(lua, Value::Table(table))?;
+            *config_cell.borrow_mut() = Some(config);
+            Ok(())
+        })?
+    };
+    paneru.set("setup", setup)?;
+
+    Ok(())
+}
+
+/// Registers one keybind into the shared registry: validates the handler is a
+/// Lua function or a command string, resolves the chord to `(keycode,
+/// modifiers)`, and records it for publishing to the event tap. Shared by
+/// `paneru.bind` and the `bindings` sub-table of `paneru.setup`.
+fn register_bind(registry: &SharedRegistry, chord: &str, handler: Value) -> mlua::Result<()> {
+    match &handler {
+        Value::Function(_) | Value::String(_) => {}
+        other => {
+            return Err(mlua::Error::RuntimeError(format!(
+                "paneru.bind: handler must be a function or command string, got {}",
+                other.type_name()
+            )));
+        }
+    }
+    let (code, modifiers) = resolve_chord(chord)
+        .map_err(|err| mlua::Error::RuntimeError(format!("paneru.bind: {err}")))?;
+
+    let mut registry = registry.borrow_mut();
+    registry.binds.push(handler);
+    let id = u32::try_from(registry.binds.len())
+        .map_err(|_| mlua::Error::RuntimeError("paneru.bind: too many binds".into()))?;
+    registry.keybinds.push((code, modifiers, id));
     Ok(())
 }
 

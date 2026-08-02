@@ -273,7 +273,7 @@ pub fn dispatch_lua_events(
     let runtime = &*runtime;
     // Marshalled up front: the events cannot be read while the dispatch scope
     // below borrows the world for `paneru.query`.
-    let events: Vec<(&'static str, Table)> = reader
+    let events: Vec<(String, Table)> = reader
         .read()
         .filter_map(|event| convert::event_to_lua(runtime.lua(), event))
         .collect();
@@ -468,7 +468,7 @@ mod tests {
         )
         .unwrap();
         let (name, table) = convert::event_to_lua(runtime.lua(), &Event::SpaceChanged).unwrap();
-        runtime.dispatch_event(name, &table);
+        runtime.dispatch_event(&name, &table);
         assert_eq!(drained_commands(&runtime).len(), 1);
     }
 

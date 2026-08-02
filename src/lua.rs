@@ -140,6 +140,13 @@ impl LuaRuntime {
         self.registry.borrow().keybinds.clone()
     }
 
+    /// Whether the script registered any `paneru.on` handler. Building the Lua
+    /// table for an event is the costly step, so a script that only binds keys
+    /// pays nothing for events it can never observe.
+    fn has_event_handlers(&self) -> bool {
+        !self.registry.borrow().handlers.is_empty()
+    }
+
     /// Runs every `paneru.on(name, ...)` handler. Handlers are cloned out of the
     /// registry first so a handler that registers another one cannot deadlock on
     /// the borrow. One failing handler does not stop the rest.
@@ -240,6 +247,24 @@ impl LuaRuntime {
         result
     }
 
+    /// Runs `body` with `paneru.query*` wired to the live world, logs any
+    /// failure under `context`, then flushes the commands and flash messages its
+    /// callbacks queued. The shared tail of both dispatch systems, which differ
+    /// only in what they collect up front and what `body` does with it.
+    fn dispatch_with_world(
+        &self,
+        context: &str,
+        state: &QueryStateParams<'_, '_>,
+        commands: &mut Commands,
+        body: impl FnOnce(),
+    ) {
+        let extract = || state.extract().map_err(|err| err.to_string());
+        if let Err(err) = self.with_query(&extract, body) {
+            error!("lua {context}: {err}");
+        }
+        self.apply(commands);
+    }
+
     /// An empty runtime (no handlers, no binds). Used as a fallback when the
     /// init script fails to load, so the resource always exists and a later
     /// hot reload can install a fixed script.
@@ -271,6 +296,12 @@ pub fn dispatch_lua_events(
         return;
     };
     let runtime = &*runtime;
+    // No `paneru.on` handlers means no consumer for any of these events, so skip
+    // marshalling them into Lua tables entirely — just advance past them.
+    if !runtime.has_event_handlers() {
+        for _ in reader.read() {}
+        return;
+    }
     // Marshalled up front: the events cannot be read while the dispatch scope
     // below borrows the world for `paneru.query`.
     let events: Vec<(String, Table)> = reader
@@ -280,16 +311,11 @@ pub fn dispatch_lua_events(
     if events.is_empty() {
         return;
     }
-    let extract = || state.extract().map_err(|err| err.to_string());
-    let dispatched = runtime.with_query(&extract, || {
+    runtime.dispatch_with_world("event dispatch", &state, &mut commands, || {
         for (name, table) in &events {
             runtime.dispatch_event(name, table);
         }
     });
-    if let Err(err) = dispatched {
-        error!("lua event dispatch: {err}");
-    }
-    runtime.apply(&mut commands);
 }
 
 /// Handles `Command::Lua(id)` by invoking the bound Lua callback with a state
@@ -324,16 +350,11 @@ pub fn command_lua_handler(
             return;
         }
     };
-    let extract = || state.extract().map_err(|err| err.to_string());
-    let dispatched = runtime.with_query(&extract, || {
+    runtime.dispatch_with_world("keybind dispatch", &state, &mut commands, || {
         for id in ids {
             runtime.dispatch_bind(id, snapshot.clone());
         }
     });
-    if let Err(err) = dispatched {
-        error!("lua keybind dispatch: {err}");
-    }
-    runtime.apply(&mut commands);
 }
 
 /// Rebuilds the Lua runtime when the init script changes, committing atomically

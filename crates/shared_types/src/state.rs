@@ -32,6 +32,17 @@ impl StateQueryKind {
         StateQueryKind::OnScreen,
     ];
 
+    /// The `paneru.query_*` shorthand each kind is exposed under in the Lua API,
+    /// paired with the kind it queries. Both Lua hosts (the embedded runtime and
+    /// the loadable client module) iterate this so the shorthand name and the
+    /// kind it maps to are defined exactly once.
+    pub const SHORTHANDS: [(&'static str, StateQueryKind); 4] = [
+        ("query_state", StateQueryKind::State),
+        ("query_active", StateQueryKind::Active),
+        ("query_workspaces", StateQueryKind::VirtualWorkspaces),
+        ("query_on_screen", StateQueryKind::OnScreen),
+    ];
+
     /// The argv token naming this query (`paneru query <token> --json`).
     #[must_use]
     pub fn token(self) -> &'static str {

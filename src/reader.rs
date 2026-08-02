@@ -38,12 +38,7 @@ impl CommandReader {
     }
 
     pub fn send_query(kind: StateQueryKind) -> Result<String> {
-        let args = match kind {
-            StateQueryKind::State => ["query", "state", "--json"],
-            StateQueryKind::VirtualWorkspaces => ["query", "virtual-workspaces", "--json"],
-            StateQueryKind::Active => ["query", "active", "--json"],
-            StateQueryKind::OnScreen => ["query", "on-screen", "--json"],
-        };
+        let args = ["query", kind.token(), "--json"];
         let mut stream = Self::send_socket_request(args.into_iter().map(str::to_string))?;
         let mut output = String::new();
         stream.read_to_string(&mut output)?;
@@ -187,13 +182,10 @@ impl CommandReader {
 }
 
 fn parse_query_request(argv: &[&str]) -> Option<StateQueryKind> {
+    // `--json` is the only supported (and default) output, so accept it or its
+    // absence; the kind token is resolved by its single owner.
     match argv {
-        ["query", "state", "--json"] | ["query", "state"] => Some(StateQueryKind::State),
-        ["query", "virtual-workspaces", "--json"] | ["query", "virtual-workspaces"] => {
-            Some(StateQueryKind::VirtualWorkspaces)
-        }
-        ["query", "active", "--json"] | ["query", "active"] => Some(StateQueryKind::Active),
-        ["query", "on-screen", "--json"] | ["query", "on-screen"] => Some(StateQueryKind::OnScreen),
+        ["query", token] | ["query", token, "--json"] => StateQueryKind::parse(token),
         _ => None,
     }
 }

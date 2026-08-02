@@ -396,8 +396,10 @@ radius = 12.0
 ## 8. Lua Scripting
 
 Paneru embeds a Lua runtime that runs alongside the TOML config, letting a
-script hook into window-manager events (`paneru.on`) and bind keys to Lua
-callbacks or command strings (`paneru.bind`).
+script hook into window-manager events (`paneru.on`), bind keys to Lua
+callbacks or command strings (`paneru.bind`), and — via `paneru.setup{...}`
+(see [Configuration from Lua](#configuration-from-lua)) — declare the entire
+configuration, so the TOML file is optional.
 
 By default it looks for a script in the following locations (in order):
 
@@ -415,6 +417,65 @@ end)
 
 paneru.bind("alt - j", "window focus east")
 ```
+
+### Configuration from Lua
+
+`paneru.setup{...}` declares the whole configuration from Lua, so `init.lua`
+can replace `paneru.toml` entirely. The table mirrors the TOML sections
+one-for-one — `options`, `padding`, `swipe`, `decorations`, `restore`,
+`windows`, and the top-level `default_workspaces` — so every knob documented in
+sections 1–7 above is available under the same name.
+
+```lua
+paneru.setup {
+  default_workspaces = 3,
+  options = {
+    focus_follows_mouse = true,
+    sliver_width = 5,
+    animation_speed = 12.0,   -- write floats with a decimal point
+  },
+  padding = { top = 10, bottom = 10, left = 8, right = 8 },
+  swipe = { sensitivity = 0.4, scroll = { modifier = "alt" } },
+  decorations = {
+    active = { border = { enabled = true, color = "#89b4fa", width = 2.0 } },
+  },
+  restore = { enabled = true, startup_grace_ms = 2000 },
+  windows = {
+    -- keys are just rule names; `title` is a required regex
+    term = { title = "kitty", floating = true, bindings_passthrough = { "ctrl+alt-h" } },
+  },
+}
+```
+
+**Keybindings.** Two equivalent ways, both accepting the exact chord syntax of
+the TOML `[bindings]` table:
+
+- `paneru.bind(chord, handler)` — the handler is a command string **or a Lua
+  function** (function handlers receive a state snapshot; only `paneru.bind`
+  supports them).
+- a `bindings` sub-table inside `setup`, keyed by command with the chord as the
+  value — a shorthand that desugars onto the same path as `paneru.bind`:
+
+  ```lua
+  paneru.setup {
+    bindings = {
+      ["window focus east"] = "alt - l",
+      ["quit"] = "ctrl + alt - q",
+    },
+  }
+  ```
+
+**Precedence.** If `init.lua` calls `paneru.setup`, that config is
+authoritative and the TOML file is ignored. If it does not, paneru falls back
+to `paneru.toml` exactly as before — existing TOML setups are unaffected.
+Editing and saving `init.lua` hot-reloads the whole configuration (including
+menubar and passthrough updates), just like editing the TOML file.
+
+**Notes.**
+- Float-valued options (`animation_speed`, border `width`/`opacity`, window
+  `width`, …) should be written with a decimal point (`12.0`, not `12`).
+- A reload that *removes* a previous `paneru.setup` call keeps the last config
+  it produced rather than reverting to TOML.
 
 ### Querying state
 

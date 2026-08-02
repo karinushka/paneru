@@ -23,16 +23,18 @@ use std::rc::Rc;
 use bevy::app::{App, Plugin, PreUpdate, Update};
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::resource::Resource;
-use bevy::ecs::system::{Commands, NonSendMut, Res};
+use bevy::ecs::system::{Commands, NonSendMut, Query, Res};
 use mlua::{Function, IntoLua, Lua, LuaSerdeExt, Table, Value};
 use notify::Watcher;
 use tracing::{error, info, warn};
 
 use crate::commands::Command;
+use crate::config::Config;
+use crate::ecs::params::Windows;
 use crate::ecs::state::{PaneruQueryState, QueryStateParams, StateQueryKind};
-use crate::ecs::{SendMessageTrigger, SpawnCommandsExt};
+use crate::ecs::{SendMessageTrigger, SpawnCommandsExt, apply_config_side_effects};
 use crate::events::Event;
-use crate::manager::WindowManager;
+use crate::manager::{Application, Display, WindowManager};
 use crate::platform::Modifiers;
 use crate::platform::input::set_lua_keybinds;
 use crate::util::symlink_target;
@@ -104,6 +106,9 @@ pub struct LuaRuntime {
     lua: Lua,
     outbox: Rc<RefCell<Outbox>>,
     registry: SharedRegistry,
+    /// The `Config` a script declared via `paneru.setup{...}`, if it called it.
+    /// `None` means the script left configuration to the TOML file.
+    built_config: Option<Config>,
 }
 
 impl LuaRuntime {
@@ -121,12 +126,17 @@ impl LuaRuntime {
         extend_lua_search_paths(&lua)?;
         let outbox = Rc::new(RefCell::new(Outbox::default()));
         let registry = SharedRegistry::default();
-        api::install(&lua, &outbox, &registry)?;
+        let config_cell: Rc<RefCell<Option<Config>>> = Rc::new(RefCell::new(None));
+        api::install(&lua, &outbox, &registry, &config_cell)?;
         lua.load(source).exec()?;
+        // The cell is only written by `paneru.setup`; take the built config out so
+        // the runtime owns it directly rather than keeping the shared cell alive.
+        let built_config = config_cell.borrow_mut().take();
         Ok(Self {
             lua,
             outbox,
             registry,
+            built_config,
         })
     }
 
@@ -138,6 +148,12 @@ impl LuaRuntime {
     /// publishing to the event-tap registry.
     pub fn published_keybinds(&self) -> Vec<LuaKeybind> {
         self.registry.borrow().keybinds.clone()
+    }
+
+    /// The `Config` the script declared via `paneru.setup{...}`, or `None` if it
+    /// never called it (in which case the TOML config remains authoritative).
+    pub fn built_config(&self) -> Option<&Config> {
+        self.built_config.as_ref()
     }
 
     /// Whether the script registered any `paneru.on` handler. Building the Lua
@@ -359,13 +375,17 @@ pub fn command_lua_handler(
 
 /// Rebuilds the Lua runtime when the init script changes, committing atomically
 /// only on success so a broken edit never tears down the working setup.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 pub fn lua_reload_system(
     mut runtime: Option<NonSendMut<LuaRuntime>>,
     script_path: Option<Res<LuaScriptPath>>,
     mut reader: MessageReader<Event>,
     window_manager: Res<WindowManager>,
     mut watcher: Option<NonSendMut<Box<dyn Watcher>>>,
+    config: Option<Res<Config>>,
+    mut displays: Query<&mut Display>,
+    windows: Windows,
+    applications: Query<&Application>,
     mut commands: Commands,
 ) {
     let (Some(runtime), Some(script_path)) = (runtime.as_mut(), script_path) else {
@@ -402,6 +422,14 @@ pub fn lua_reload_system(
         Ok(new_runtime) => {
             set_lua_keybinds(new_runtime.published_keybinds());
             **runtime = new_runtime;
+            // A reloaded `paneru.setup{...}` stays authoritative: swap its config
+            // into the shared handle and re-apply the same menubar/passthrough
+            // side effects a TOML reload does. If the edited script dropped
+            // `setup`, keep the previous config rather than reverting to TOML.
+            if let (Some(config), Some(built)) = (config.as_ref(), runtime.built_config()) {
+                config.replace_inner_from(built);
+                apply_config_side_effects(config, &mut displays, &windows, &applications);
+            }
             info!("Reloaded Lua script {}", path.display());
             commands.flash_message("Lua reloaded".to_string(), 1.5);
         }
@@ -659,6 +687,29 @@ mod tests {
     fn empty_runtime_has_no_binds() {
         let runtime = LuaRuntime::empty();
         assert!(runtime.published_keybinds().is_empty());
+    }
+
+    #[test]
+    fn setup_builds_config_and_desugars_bindings() {
+        let runtime = LuaRuntime::from_source(
+            r#"paneru.setup{
+                options = { sliver_width = 7 },
+                bindings = { ["window focus east"] = "alt - j" },
+            }"#,
+        )
+        .unwrap();
+        // The `bindings` table registered a keybind through the shared bind path,
+        assert_eq!(runtime.published_keybinds().len(), 1);
+        // and the remaining sections became the authoritative config.
+        let config = runtime.built_config().expect("setup should build a config");
+        assert_eq!(config.sliver_width(), 7);
+    }
+
+    #[test]
+    fn no_setup_call_leaves_config_to_toml() {
+        let runtime =
+            LuaRuntime::from_source(r#"paneru.bind("alt - b", "window balance")"#).unwrap();
+        assert!(runtime.built_config().is_none());
     }
 
     #[test]

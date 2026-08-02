@@ -49,6 +49,11 @@ mod systems;
 mod triggers;
 pub mod workspace;
 
+// Shared by the Lua reload system so a `paneru.setup{...}` reload applies the
+// same menubar/passthrough side effects as a TOML reload.
+#[cfg(feature = "lua")]
+pub(crate) use triggers::apply_config_side_effects;
+
 /// Registers the Bevy systems for the `WindowManager`.
 /// This function adds various systems to the `Update` schedule, including event dispatchers,
 /// process/application/window lifecycle management, animation, and periodic watchers.
@@ -656,6 +661,14 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
     // watcher can still pick up a later fix.
     #[cfg(feature = "lua")]
     if let Some(path) = lua_path {
+        let runtime = lua::load_runtime(&path);
+        // A script that called `paneru.setup{...}` is authoritative: insert its
+        // config now, before `app.run()`, so it exists ahead of the Startup
+        // schedule and wins over the TOML `InitialConfig` (see
+        // `gather_initial_processes`). Without `setup`, the TOML config is used.
+        if let Some(config) = runtime.built_config() {
+            app.insert_resource(config.clone());
+        }
         app.insert_non_send(lua::load_runtime(&path));
         app.insert_resource(lua::LuaScriptPath(path));
         app.add_plugins(lua::LuaPlugin);

@@ -476,6 +476,9 @@ menubar and passthrough updates), just like editing the TOML file.
   `width`, …) should be written with a decimal point (`12.0`, not `12`).
 - A reload that *removes* a previous `paneru.setup` call keeps the last config
   it produced rather than reverting to TOML.
+- With the Nix modules, set `services.paneru.config` to this `init.lua` (Lua
+  source or a path) — it mirrors Home Manager's `services.sketchybar.config`.
+  See [`nix/README.md`](nix/README.md).
 
 ### Querying state
 

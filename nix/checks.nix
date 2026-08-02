@@ -89,6 +89,11 @@
                 quit = "ctrl + alt - q";
               };
             };
+            config = ''
+              paneru.setup {
+                options = { focus_follows_mouse = true },
+              }
+            '';
           };
 
           test = # sh
@@ -123,6 +128,10 @@
               echo $conf | jq -e ".bindings.window_resize == \"alt - r\""
               echo $conf | jq -e ".bindings.window_center == \"alt - c\""
               echo $conf | jq -e ".bindings.quit == \"ctrl + alt - q\""
+
+              luaPath=`<service.json jq -r ".EnvironmentVariables.PANERU_LUA"`
+              echo >&2 "checking init.lua in $luaPath"
+              grep -q "paneru.setup" "$luaPath"
             '';
         }
       );

@@ -252,4 +252,8 @@ pub enum Command {
     /// Invokes a Lua keybind handler by its registry id (see the daemon's
     /// `crate::lua`). Never produced by parsing; the runtime issues it directly.
     Lua(u32),
+    /// Layout operations a Lua handler produced by transforming a `WindowSet`.
+    /// Window-addressed, unlike every other command here, and applied
+    /// best-effort: see `ecs::layout_ops`. Never produced by parsing.
+    Layout(Vec<crate::windowset::LayoutOp>),
 }

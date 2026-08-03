@@ -27,15 +27,24 @@
 //! ([`Rc::make_mut`]). Two values branched off one parent share everything they
 //! didn't change, including the common prefix of their op lists.
 //!
-//! # Fidelity
+//! # Scope
 //!
-//! Transforms update the tree where the result follows from the layout alone —
-//! focus, ordering, workspace and display membership, floating and managed
-//! flags, width ratios. Where the outcome is the layout engine's to decide
-//! (centring, full-width, equalise, balance) the op is recorded but the tree is
-//! left as it was, since guessing at geometry here would only produce a
-//! prettier lie. Handlers that need the settled result should read it from the
-//! next event's `WindowSet`, not from the one they just transformed.
+//! Every transform here changes the layout in a way that follows from the
+//! layout alone — focus, ordering, workspace membership, stacking, floating,
+//! width ratios — and can therefore be both reflected in the returned tree and
+//! replayed faithfully against one named window.
+//!
+//! The operations that are the layout engine's to decide (centring,
+//! full-width, equalise, balance, raising a float, moving to another display)
+//! are deliberately absent. They act on whatever is focused rather than on a
+//! window you name, and a value that recorded them could neither show their
+//! result nor promise it applied to the window you meant. They remain available
+//! as the imperative `paneru.window.*` verbs, where that is exactly what they
+//! say they do.
+//!
+//! Even for what is here, the returned tree is a prediction: the layout engine
+//! settles the actual geometry. A handler that needs the settled result should
+//! read it from the next event's `WindowSet`, not from the one it just built.
 
 use std::rc::Rc;
 
@@ -61,12 +70,6 @@ pub enum LayoutOp {
         workspace: u32,
         follow: bool,
     },
-    /// Send `window` to another display, optionally following it there.
-    MoveToDisplay {
-        window: WinID,
-        display: u32,
-        follow: bool,
-    },
     /// Show a virtual workspace on its display.
     View { workspace: u32 },
     /// Take `window` out of the tiling layout, or put it back in.
@@ -83,16 +86,6 @@ pub enum LayoutOp {
     },
     /// Give `window` a column of its own again.
     Unstack(WinID),
-    /// Bring a floating window to the front.
-    Raise(WinID),
-    /// Centre `window` on its display.
-    Center(WinID),
-    /// Give `window` the full width of its display.
-    FullWidth(WinID),
-    /// Give every column on the workspace the same width.
-    Equalize { workspace: u32 },
-    /// Fit the workspace's columns to the display.
-    Balance { workspace: u32 },
 }
 
 impl LayoutOp {
@@ -104,16 +97,12 @@ impl LayoutOp {
             LayoutOp::Focus(window)
             | LayoutOp::Swap(window, _)
             | LayoutOp::Unstack(window)
-            | LayoutOp::Raise(window)
-            | LayoutOp::Center(window)
-            | LayoutOp::FullWidth(window)
             | LayoutOp::MoveToWorkspace { window, .. }
-            | LayoutOp::MoveToDisplay { window, .. }
             | LayoutOp::SetFloating { window, .. }
             | LayoutOp::SetManaged { window, .. }
             | LayoutOp::SetWidth { window, .. }
             | LayoutOp::Stack { window, .. } => Some(*window),
-            LayoutOp::View { .. } | LayoutOp::Equalize { .. } | LayoutOp::Balance { .. } => None,
+            LayoutOp::View { .. } => None,
         }
     }
 }
@@ -499,40 +488,6 @@ impl WindowSet {
         )
     }
 
-    /// Sends `window` to another display, without following it.
-    #[must_use]
-    pub fn to_display(&self, window: WinID, display: u32) -> Self {
-        self.to_display_following(window, display, false)
-    }
-
-    /// Sends `window` to another display, following it there.
-    #[must_use]
-    pub fn to_display_following(&self, window: WinID, display: u32, follow: bool) -> Self {
-        self.with(
-            LayoutOp::MoveToDisplay {
-                window,
-                display,
-                follow,
-            },
-            |displays| {
-                let Some(record) = take_window(displays, window) else {
-                    return;
-                };
-                let target = displays
-                    .iter_mut()
-                    .find(|candidate| candidate.id == display)
-                    .and_then(|candidate| {
-                        Rc::make_mut(&mut candidate.workspaces)
-                            .iter_mut()
-                            .find(|workspace| workspace.active)
-                    });
-                if let Some(target) = target {
-                    Rc::make_mut(&mut target.columns).push(ColumnSet::single(record, 0.5));
-                }
-            },
-        )
-    }
-
     /// Shows virtual workspace `workspace` on its display.
     #[must_use]
     pub fn view(&self, workspace: u32) -> Self {
@@ -670,36 +625,6 @@ impl WindowSet {
                 Rc::make_mut(&mut target.columns).push(ColumnSet::single(record, 0.5));
             }
         })
-    }
-
-    /// Brings a floating `window` to the front.
-    #[must_use]
-    pub fn raise(&self, window: WinID) -> Self {
-        self.recording(LayoutOp::Raise(window))
-    }
-
-    /// Centres `window` on its display.
-    #[must_use]
-    pub fn center(&self, window: WinID) -> Self {
-        self.recording(LayoutOp::Center(window))
-    }
-
-    /// Gives `window` the full width of its display.
-    #[must_use]
-    pub fn full_width(&self, window: WinID) -> Self {
-        self.recording(LayoutOp::FullWidth(window))
-    }
-
-    /// Gives every column on `workspace` the same width.
-    #[must_use]
-    pub fn equalize(&self, workspace: u32) -> Self {
-        self.recording(LayoutOp::Equalize { workspace })
-    }
-
-    /// Fits `workspace`'s columns to its display.
-    #[must_use]
-    pub fn balance(&self, workspace: u32) -> Self {
-        self.recording(LayoutOp::Balance { workspace })
     }
 }
 
@@ -908,15 +833,17 @@ mod tests {
     #[test]
     fn untouched_subtrees_are_shared_not_copied() {
         let base = fixture();
-        // A transform that only records leaves every level shared.
-        let recorded = base.center(1);
+        // Cloning shares the whole tree; nothing is copied until something is
+        // changed, which is what makes speculative branching cheap.
+        let clone = base.clone();
         assert!(
-            Rc::ptr_eq(&base.displays, &recorded.displays),
-            "recording an op should not copy the tree"
+            Rc::ptr_eq(&base.displays, &clone.displays),
+            "cloning should share, not copy"
         );
 
-        // A transform that edits copies the spine but not the leaves it never
-        // reached: workspace 2 is untouched by a change to workspace 1.
+        // A transform copies the spine it edits but leaves the contents it
+        // never reached alone: workspace 2 is untouched by a change to
+        // workspace 1.
         let edited = base.width(1, 0.9);
         let before = &base.displays()[0].workspaces[1];
         let after = &edited.displays()[0].workspaces[1];
@@ -1028,7 +955,6 @@ mod tests {
             Some(4)
         );
         assert_eq!(LayoutOp::View { workspace: 2 }.target(), None);
-        assert_eq!(LayoutOp::Balance { workspace: 2 }.target(), None);
     }
 
     #[test]

@@ -68,8 +68,8 @@
 
       # --- Loadable Lua C module, as a function of the interpreter ----------
       #
-      # Mirrors a nixpkgs Lua package: takes `lua`, defaults to Lua 5.4, and is
-      # overrideable (`paneru.luaModule.override { lua = pkgs.lua5_3; }`). The
+      # Mirrors a nixpkgs Lua package: takes `lua`, defaults to LuaJIT, and is
+      # overrideable (`paneru.luaModule.override { lua = pkgs.lua5_4; }`). The
       # module links no Lua and resolves `lua_*` from the host interpreter at
       # load time (see the crate's build.rs); the interpreter only supplies
       # headers. Not exposed as its own top-level flake package — it only
@@ -84,7 +84,7 @@
 
       mkLuaModule =
         {
-          lua ? pkgs.lua5_4,
+          lua ? pkgs.luajit,
         }:
         let
           ver = lua.luaversion;
@@ -128,20 +128,21 @@
         });
 
       # Overrideable like a nixpkgs package (`paneru.override { enableLua =
-      # false; lua = pkgs.lua5_3; }`): `enableLua` toggles the `lua` Cargo
+      # false; lua = pkgs.lua5_4; }`): `enableLua` toggles the `lua` Cargo
       # feature, which builds in the `init.lua` scripting runtime
       # (`paneru.on`/`paneru.bind`). Off by default at the Cargo level (see
       # `Cargo.toml`); on by default here since that's the expected experience
       # for the flake's own package. `lua` resolves the whole Lua dependency
       # graph: it both picks the daemon's own vendored `mlua` ABI feature
-      # (`lua54`/`lua53`/.../`luajit`, matching `${luaFeature lua}`) and the
+      # (`luajit`/`lua54`/..., matching `${luaFeature lua}`) and the
       # interpreter the loadable Lua module (`paneru.luaModule`) is built for
-      # — defaults to Lua 5.4 — and is independently overrideable afterwards
-      # via `paneru.luaModule.override { lua = ...; }`.
+      # — defaults to LuaJIT, whose tracing JIT keeps handler dispatch cheap
+      # enough to run on the hot event path — and is independently
+      # overrideable afterwards via `paneru.luaModule.override { lua = ...; }`.
       mkPaneru =
         {
           enableLua ? false,
-          lua ? pkgs.lua5_4,
+          lua ? pkgs.luajit,
         }:
         craneLib.buildPackage (
           daemonArgs

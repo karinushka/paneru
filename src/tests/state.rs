@@ -773,3 +773,240 @@ fn test_query_state_tracks_float_after_virtual_workspace_is_reaped() {
         })
         .run(commands);
 }
+
+/// Builds the `WindowSet` a Lua handler would be given, from the live world.
+#[cfg(feature = "lua")]
+fn extract_window_set(
+    world: &mut World,
+) -> crate::errors::Result<paneru_shared_types::windowset::WindowSet> {
+    use crate::ecs::state::QueryStateParams;
+
+    let mut system_state: SystemState<QueryStateParams> = SystemState::new(world);
+    let params = system_state.get(world)?;
+    params.extract_window_set()
+}
+
+#[cfg(feature = "lua")]
+#[test]
+fn test_window_set_keeps_the_column_structure_a_flat_query_loses() {
+    use crate::tests::harness::TestHarness;
+    use paneru_shared_types::windowset::ColumnKind;
+
+    let mut harness = TestHarness::new().with_windows(3);
+    harness.app.update();
+
+    let set = extract_window_set(harness.world()).expect("window set extraction");
+
+    assert_eq!(set.displays().len(), 1);
+    let display = &set.displays()[0];
+    assert_eq!(display.id, TEST_DISPLAY_ID);
+    assert!(display.active);
+
+    let workspace = set.current().expect("an active workspace");
+    assert_eq!(workspace.number, 1);
+    assert_eq!(workspace.native_id, TEST_WORKSPACE_ID);
+    assert_eq!(
+        workspace.columns.len(),
+        3,
+        "three unstacked windows are three columns"
+    );
+    for column in workspace.columns.iter() {
+        assert_eq!(column.kind, ColumnKind::Single);
+        assert_eq!(column.windows.len(), 1);
+    }
+
+    // ...and that structure is what makes adjacency answerable at all.
+    let leftmost = workspace.columns[0].top().expect("a window").id;
+    let middle = workspace.columns[1].top().expect("a window").id;
+    assert_eq!(set.east(leftmost), Some(middle));
+    assert_eq!(set.west(middle), Some(leftmost));
+    assert_eq!(set.column_of(middle), Some(1));
+}
+
+#[cfg(feature = "lua")]
+#[test]
+fn test_window_set_reports_focus_and_window_identity() {
+    use crate::tests::harness::TestHarness;
+
+    let mut harness = TestHarness::new().with_windows(2);
+    harness.app.update();
+
+    let set = extract_window_set(harness.world()).expect("window set extraction");
+
+    let focused = set.focused().expect("something should be focused");
+    let window = set
+        .window(focused)
+        .expect("the focused window is in the set");
+    assert!(window.focused);
+    assert!(window.managed, "a tiled window is managed");
+    assert!(!window.floating);
+    assert_eq!(window.bundle_id, "test");
+    assert!(window.frame.is_some(), "a laid-out window has a frame");
+    assert_eq!(
+        set.windows().filter(|window| window.focused).count(),
+        1,
+        "exactly one window is focused"
+    );
+}
+
+#[cfg(feature = "lua")]
+#[test]
+fn test_window_set_marks_floating_windows_outside_the_strip() {
+    use crate::commands::{Command, Operation};
+    use crate::tests::harness::TestHarness;
+
+    let mut harness = TestHarness::new().with_windows(1);
+    harness.app.update();
+    harness.app.world_mut().write_message(Event::Command {
+        command: Command::Window(Operation::Manage),
+    });
+    harness.app.update();
+
+    let set = extract_window_set(harness.world()).expect("window set extraction");
+    let workspace = set.current().expect("an active workspace");
+
+    assert!(
+        workspace.columns.is_empty(),
+        "a floating window holds no column, even though the strip still tracks it"
+    );
+    assert_eq!(workspace.floating.len(), 1);
+    assert!(workspace.floating[0].floating);
+    assert!(!workspace.floating[0].managed);
+}
+
+#[cfg(feature = "lua")]
+#[test]
+fn test_layout_ops_apply_to_the_named_window_not_the_focused_one() {
+    use crate::commands::Command;
+    use crate::tests::harness::TestHarness;
+    use paneru_shared_types::windowset::LayoutOp;
+
+    let mut harness = TestHarness::new().with_windows(3);
+    harness.app.update();
+
+    let before = extract_window_set(harness.world()).expect("window set extraction");
+    let workspace = before.current().expect("an active workspace");
+    let order: Vec<i32> = workspace
+        .columns
+        .iter()
+        .filter_map(|column| column.top().map(|window| window.id))
+        .collect();
+    assert_eq!(order.len(), 3);
+    let focused = before.focused().expect("something is focused");
+
+    // Swap the two windows that are *not* focused: every existing command
+    // handler would have acted on the focused one instead.
+    let (left, right) = (order[1], order[2]);
+    assert!(
+        left != focused && right != focused,
+        "swapping unfocused windows"
+    );
+
+    harness.app.world_mut().write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::Swap(left, right)]),
+    });
+    harness.app.update();
+    harness.app.update();
+
+    let after = extract_window_set(harness.world()).expect("window set extraction");
+    let swapped: Vec<i32> = after
+        .current()
+        .expect("an active workspace")
+        .columns
+        .iter()
+        .filter_map(|column| column.top().map(|window| window.id))
+        .collect();
+    assert_eq!(swapped, vec![order[0], right, left]);
+    assert_eq!(after.focused(), Some(focused), "the focus did not move");
+}
+
+#[cfg(feature = "lua")]
+#[test]
+fn test_layout_ops_skip_a_vanished_window_and_apply_its_neighbours() {
+    use crate::commands::Command;
+    use crate::tests::harness::TestHarness;
+    use paneru_shared_types::windowset::LayoutOp;
+
+    let mut harness = TestHarness::new().with_windows(2);
+    harness.app.update();
+
+    let before = extract_window_set(harness.world()).expect("window set extraction");
+    let live = before.focused().expect("something is focused");
+    let gone = 9999;
+    assert!(before.window(gone).is_none(), "no such window");
+
+    // The handler ran against a stale snapshot: one of its targets is gone.
+    // That op is dropped; the rest of the batch still applies.
+    harness.app.world_mut().write_message(Event::Command {
+        command: Command::Layout(vec![
+            LayoutOp::Focus(gone),
+            LayoutOp::SetFloating {
+                window: live,
+                floating: true,
+            },
+        ]),
+    });
+    harness.app.update();
+    harness.app.update();
+
+    let after = extract_window_set(harness.world()).expect("window set extraction");
+    let workspace = after.current().expect("an active workspace");
+    assert!(
+        workspace.floating.iter().any(|window| window.id == live),
+        "the surviving op applied"
+    );
+}
+
+#[cfg(feature = "lua")]
+#[test]
+fn test_set_frame_places_a_floating_window() {
+    use crate::commands::Command;
+    use crate::tests::harness::TestHarness;
+    use paneru_shared_types::state::Frame;
+    use paneru_shared_types::windowset::LayoutOp;
+
+    let mut harness = TestHarness::new().with_windows(1);
+    // Let the window settle into the strip first: a window still being added
+    // is appended to the layout on the tick it appears, which would undo the
+    // float on the very tick that asked for it.
+    for _ in 0..3 {
+        harness.app.update();
+    }
+
+    let before = extract_window_set(harness.world()).expect("window set extraction");
+    let window = before.focused().expect("something is focused");
+
+    // xmonad's customFloating: take it out of the layout, then place it.
+    let placed = Frame {
+        x: 100,
+        y: 120,
+        width: 640,
+        height: 480,
+    };
+    harness.app.world_mut().write_message(Event::Command {
+        command: Command::Layout(vec![
+            LayoutOp::SetFloating {
+                window,
+                floating: true,
+            },
+            LayoutOp::SetFrame {
+                window,
+                frame: placed,
+            },
+        ]),
+    });
+    // Several ticks: the placement has to survive the layout passes that follow,
+    // not just land for one frame.
+    for _ in 0..4 {
+        harness.app.update();
+    }
+
+    let after = extract_window_set(harness.world()).expect("window set extraction");
+    let record = after.window(window).expect("the window survived");
+    assert!(record.floating, "it should be out of the tiling layout");
+    assert_eq!(
+        record.frame,
+        Some(placed),
+        "and sitting exactly where it was put"
+    );
+}

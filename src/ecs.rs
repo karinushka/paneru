@@ -20,7 +20,7 @@ use bevy::{
     ecs::{component::Component, entity::Entity, schedule::IntoScheduleConfigs},
 };
 use derive_more::{Deref, DerefMut};
-use tracing::{Level, instrument, warn};
+use tracing::{Level, error, instrument, warn};
 
 use crate::commands::register_commands;
 use crate::config::{CONFIGURATION_FILE, Config, WindowParams};
@@ -40,12 +40,14 @@ use crate::platform::{Modifiers, PlatformCallbacks, WinID, WorkspaceId};
 pub mod display;
 pub mod focus;
 pub mod layout;
+#[cfg(feature = "lua")]
+pub mod layout_ops;
 pub mod mouse;
 pub mod params;
 pub(crate) mod restore;
 pub mod scroll;
 pub mod state;
-mod systems;
+pub(crate) mod systems;
 mod triggers;
 pub mod workspace;
 
@@ -542,25 +544,71 @@ impl SpawnCommandsExt for Commands<'_, '_> {
     }
 }
 
+/// Rebuilds the config watcher around `changed`, then re-registers every other
+/// config file.
+///
+/// Editors that save atomically (write-new-then-rename) break the original
+/// watch, so the watcher has to be rebuilt. But `setup_config_watcher` watches
+/// only the path it is handed, and the TOML and the Lua script share one
+/// watcher — so rebuilding for whichever file changed used to silently stop the
+/// other one hot-reloading until the next restart.
+pub(crate) fn rewatch_configs(
+    window_manager: &WindowManager,
+    changed: &std::path::Path,
+) -> Option<Box<dyn notify::Watcher>> {
+    let mut watcher = window_manager
+        .setup_config_watcher(changed)
+        .inspect_err(|err| error!("watching the config '{}': {err}", changed.display()))
+        .ok()?;
+
+    let others = [
+        CONFIGURATION_FILE.clone(),
+        #[cfg(feature = "lua")]
+        crate::config::discover_lua_file(),
+    ];
+    for other in others.into_iter().flatten() {
+        if other == changed {
+            continue;
+        }
+        if let Err(err) = watcher.watch(&other, notify::RecursiveMode::NonRecursive) {
+            warn!("re-watching config '{}': {err}", other.display());
+        }
+    }
+    Some(watcher)
+}
+
 pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<BevyApp> {
     let window_manager: Box<dyn WindowManagerApi> = Box::new(WindowManagerOS::new(sender.clone()));
-    #[cfg_attr(not(feature = "lua"), allow(unused_mut))]
-    let mut watcher = window_manager.setup_config_watcher(CONFIGURATION_FILE.as_path())?;
 
-    // Discover (or create) the Lua init script and watch it alongside the TOML
-    // config so edits hot-reload. Both files feed the same `ConfigRefresh` event.
+    // Discover (or create) the Lua init script first: whether it exists decides
+    // whether a stub TOML gets planted beside it, so it has to be settled before
+    // `CONFIGURATION_FILE` is first read.
     #[cfg(feature = "lua")]
-    let lua_path = {
-        let lua_path = crate::config::ensure_lua_file()
-            .inspect_err(|err| warn!("preparing Lua script: {err}"))
-            .ok();
-        if let Some(path) = &lua_path
-            && let Err(err) = watcher.watch(path, notify::RecursiveMode::NonRecursive)
-        {
-            warn!("watching Lua script '{}': {err}", path.display());
-        }
-        lua_path
-    };
+    let lua_path = crate::config::ensure_lua_file()
+        .inspect_err(|err| warn!("preparing Lua script: {err}"))
+        .ok();
+
+    // With an init.lua there may be no TOML at all, so watch whichever config
+    // files actually exist. Both feed the same `ConfigRefresh` event.
+    let toml_path = CONFIGURATION_FILE.as_deref();
+    #[cfg(feature = "lua")]
+    let primary = toml_path.or(lua_path.as_deref());
+    #[cfg(not(feature = "lua"))]
+    let primary = toml_path;
+    let primary = primary.ok_or_else(|| {
+        crate::errors::Error::InvalidConfig("no configuration file to watch".to_string())
+    })?;
+
+    #[cfg_attr(not(feature = "lua"), allow(unused_mut))]
+    let mut watcher = window_manager.setup_config_watcher(primary)?;
+
+    #[cfg(feature = "lua")]
+    if let Some(path) = &lua_path
+        && path.as_path() != primary
+        && let Err(err) = watcher.watch(path, notify::RecursiveMode::NonRecursive)
+    {
+        warn!("watching Lua script '{}': {err}", path.display());
+    }
 
     let mut app = BevyApp::new();
 
@@ -656,20 +704,27 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
     // Do not insert this in mocks.
     app.insert_resource(LowPowerMode(false));
 
-    // Install the Lua runtime and its hot-reload plugin. Kept out of the mock
-    // harness. A missing/broken script falls back to an empty runtime so the
-    // watcher can still pick up a later fix.
+    // Start the Lua worker and install its hot-reload plugin. Kept out of the
+    // mock harness. A missing/broken script falls back to an empty runtime so
+    // the watcher can still pick up a later fix. `spawn` waits for the script
+    // to finish loading, so errors are reported here at startup and the
+    // keybinds it registered are published before the event tap can see a
+    // keypress.
     #[cfg(feature = "lua")]
     if let Some(path) = lua_path {
-        let runtime = lua::load_runtime(&path);
+        // `paneru.bind` resolves chords on the worker, and the layout-aware
+        // keymap behind that goes through Carbon/TIS. Capture it here, on the
+        // main thread, before the worker can ask for it.
+        crate::config::prime_virtual_keymap();
+        let worker = lua::LuaWorker::spawn(lua::LuaSource::Path(path.clone()));
         // A script that called `paneru.setup{...}` is authoritative: insert its
         // config now, before `app.run()`, so it exists ahead of the Startup
         // schedule and wins over the TOML `InitialConfig` (see
         // `gather_initial_processes`). Without `setup`, the TOML config is used.
-        if let Some(config) = runtime.built_config() {
-            app.insert_resource(config.clone());
+        if let Some(config) = worker.built_config() {
+            app.insert_resource(config);
         }
-        app.insert_non_send(lua::load_runtime(&path));
+        app.insert_resource(worker);
         app.insert_resource(lua::LuaScriptPath(path));
         app.add_plugins(lua::LuaPlugin);
     }

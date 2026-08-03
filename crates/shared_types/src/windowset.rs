@@ -81,6 +81,9 @@ pub enum LayoutOp {
     SetManaged { window: WinID, managed: bool },
     /// Set the column width `window` occupies, as a fraction of the display.
     SetWidth { window: WinID, ratio: f64 },
+    /// Put `window` at an exact frame. Only meaningful for a floating window:
+    /// the layout engine owns where a tiled one goes.
+    SetFrame { window: WinID, frame: Frame },
     /// Put `window` into `onto`'s column, as a stack entry or a tab.
     Stack {
         window: WinID,
@@ -104,8 +107,51 @@ impl LayoutOp {
             | LayoutOp::SetFloating { window, .. }
             | LayoutOp::SetManaged { window, .. }
             | LayoutOp::SetWidth { window, .. }
+            | LayoutOp::SetFrame { window, .. }
             | LayoutOp::Stack { window, .. } => Some(*window),
             LayoutOp::View { .. } => None,
+        }
+    }
+}
+
+/// A rectangle as fractions of a display, in the style of xmonad's
+/// `RationalRect`: `{ x: 0.1, y: 0.05, width: 0.8, height: 0.5 }` is inset a
+/// tenth from the left and a twentieth from the top, covering four fifths of
+/// the width and half the height.
+///
+/// Proportional rather than absolute because that is what makes a scratchpad
+/// placement mean the same thing on a laptop panel and an external display.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RelativeRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl RelativeRect {
+    /// Resolves against a display's bounds.
+    #[must_use]
+    pub fn resolve(self, display: Frame) -> Frame {
+        // The clamp is the truncation guard: whatever a script passes lands
+        // inside `i32` before the cast, so there is nothing left to truncate.
+        #[allow(clippy::cast_possible_truncation)]
+        let scale = |fraction: f64, extent: i32| -> i32 {
+            let scaled = fraction * f64::from(extent);
+            // Saturating rather than wrapping: a script can pass anything.
+            if scaled.is_finite() {
+                scaled
+                    .round()
+                    .clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
+            } else {
+                0
+            }
+        };
+        Frame {
+            x: display.x + scale(self.x, display.width),
+            y: display.y + scale(self.y, display.height),
+            width: scale(self.width, display.width).max(1),
+            height: scale(self.height, display.height).max(1),
         }
     }
 }
@@ -522,10 +568,42 @@ impl WindowSet {
         })
     }
 
-    /// Takes `window` out of the tiling layout.
+    /// Takes `window` out of the tiling layout, leaving it where it is —
+    /// xmonad's `defaultFloating`.
     #[must_use]
     pub fn float(&self, window: WinID) -> Self {
         self.set_floating(window, true)
+    }
+
+    /// Takes `window` out of the tiling layout and puts it at `rect` —
+    /// xmonad's `customFloating`.
+    ///
+    /// The fractions are resolved against the display the window is on *in this
+    /// snapshot*, so the op carries an absolute frame and the returned tree can
+    /// show where the window ended up.
+    #[must_use]
+    pub fn float_at(&self, window: WinID, rect: RelativeRect) -> Self {
+        let display = self
+            .display_of(window)
+            .or_else(|| self.displays.iter().find(|display| display.active))
+            .or_else(|| self.displays.first());
+        let Some(frame) = display.map(|display| rect.resolve(display.frame)) else {
+            // No display to resolve against; floating alone is still meaningful.
+            return self.float(window);
+        };
+        self.float(window).set_frame(window, frame)
+    }
+
+    /// Puts `window` at an exact frame, in global display coordinates.
+    #[must_use]
+    pub fn set_frame(&self, window: WinID, frame: Frame) -> Self {
+        self.with(LayoutOp::SetFrame { window, frame }, |displays| {
+            for_each_window(displays, |record| {
+                if record.id == window {
+                    record.frame = Some(frame);
+                }
+            });
+        })
     }
 
     /// Puts a floating `window` back into the tiling layout.
@@ -931,6 +1009,106 @@ mod tests {
         let workspace = sunk.workspace(1).unwrap();
         assert_eq!(workspace.columns.len(), 3);
         assert!(workspace.floating.is_empty());
+    }
+
+    #[test]
+    fn float_at_resolves_fractions_against_the_display() {
+        // The fixture's display is 1920x1080 at the origin.
+        let set = fixture().float_at(
+            2,
+            RelativeRect {
+                x: 0.25,
+                y: 0.5,
+                width: 0.5,
+                height: 0.25,
+            },
+        );
+        let placed = Frame {
+            x: 480,
+            y: 540,
+            width: 960,
+            height: 270,
+        };
+        assert_eq!(
+            set.ops(),
+            vec![
+                LayoutOp::SetFloating {
+                    window: 2,
+                    floating: true
+                },
+                LayoutOp::SetFrame {
+                    window: 2,
+                    frame: placed
+                },
+            ],
+            "customFloating is float-then-place"
+        );
+        // ...and the tree shows where it landed.
+        let window = set.window(2).expect("the window is still there");
+        assert_eq!(window.frame, Some(placed));
+        assert!(window.floating);
+    }
+
+    #[test]
+    fn a_relative_rect_is_offset_by_the_display_origin() {
+        let second = Frame {
+            x: 1920,
+            y: -200,
+            width: 1000,
+            height: 800,
+        };
+        let full = RelativeRect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        };
+        assert_eq!(full.resolve(second), second, "a full rect is the display");
+
+        let half = RelativeRect {
+            x: 0.5,
+            y: 0.0,
+            width: 0.5,
+            height: 1.0,
+        };
+        assert_eq!(
+            half.resolve(second),
+            Frame {
+                x: 2420,
+                y: -200,
+                width: 500,
+                height: 800
+            }
+        );
+    }
+
+    #[test]
+    fn a_degenerate_rect_still_yields_a_usable_frame() {
+        // Scripts can pass anything; a zero-size or non-finite rect must not
+        // produce a window that cannot be seen or a panicking cast.
+        let display = Frame {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let zero = RelativeRect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        };
+        let resolved = zero.resolve(display);
+        assert_eq!((resolved.width, resolved.height), (1, 1));
+
+        let nonsense = RelativeRect {
+            x: f64::NAN,
+            y: f64::INFINITY,
+            width: 1e30,
+            height: -1.0,
+        };
+        let resolved = nonsense.resolve(display);
+        assert!(resolved.width >= 1 && resolved.height >= 1);
     }
 
     #[test]

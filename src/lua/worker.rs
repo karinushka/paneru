@@ -565,6 +565,26 @@ mod tests {
     /// (on screen) and 9 (the stash). Each window gets a column of its own.
     fn layout(windows: &[(WinID, &str, u32)]) -> WindowSet {
         use paneru_shared_types::state::Frame;
+
+        layout_on(
+            1,
+            Frame {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            windows,
+        )
+    }
+
+    /// The same layout, on a display of a given id and geometry — what a
+    /// proportional placement has to be resolved against.
+    fn layout_on(
+        display_id: u32,
+        display_frame: paneru_shared_types::state::Frame,
+        windows: &[(WinID, &str, u32)],
+    ) -> WindowSet {
         use paneru_shared_types::windowset::{ColumnSet, DisplaySet, WindowRec, WorkspaceSet};
 
         let workspaces = [1, 9]
@@ -600,13 +620,8 @@ mod tests {
 
         WindowSet::new(
             vec![DisplaySet {
-                id: 1,
-                frame: Frame {
-                    x: 0,
-                    y: 0,
-                    width: 1920,
-                    height: 1080,
-                },
+                id: display_id,
+                frame: display_frame,
                 active: true,
                 workspaces: Arc::new(workspaces),
             }],
@@ -945,7 +960,7 @@ mod tests {
           if not window then return end
           local _, pad = scratchpad.pad_of(window)
           if pad and pad.float and window.managed then
-            return ws:float(window.id)
+            return ws:float(window.id, pad.float)
           end
         end)
 
@@ -963,7 +978,8 @@ mod tests {
 
         scratchpad.define("terminal", {
           match = paneru.match{ app = "Alacritty" },
-          spawn = "true", float = true, group = "console",
+          spawn = "true", group = "console",
+          float = { x = 0.1, y = 0.05, width = 0.8, height = 0.5 },
         })
         scratchpad.define("notes", {
           match = paneru.match{ app = "Obsidian" },
@@ -1100,10 +1116,22 @@ mod tests {
 
         assert_eq!(
             next_ops(&worker, "the float"),
-            vec![LayoutOp::SetFloating {
-                window: 7,
-                floating: true
-            }]
+            vec![
+                LayoutOp::SetFloating {
+                    window: 7,
+                    floating: true
+                },
+                // 0.1/0.05/0.8/0.5 of the fixture's 1920x1080 display.
+                LayoutOp::SetFrame {
+                    window: 7,
+                    frame: paneru_shared_types::state::Frame {
+                        x: 192,
+                        y: 54,
+                        width: 1536,
+                        height: 540
+                    }
+                },
+            ]
         );
 
         // Focusing it again is neither a new window nor a focus change, so
@@ -1114,17 +1142,103 @@ mod tests {
     }
 
     #[test]
+    fn a_pad_with_no_rect_is_not_placed_at_all() {
+        // `notes` declares no `float`, so the manage hook leaves it tiled: no
+        // float, and above all no frame invented for it.
+        let worker = worker(SCRATCHPAD);
+        worker.send_events(vec![LuaEvent::WindowFocused { window_id: 8 }]);
+        serve(&worker, layout(&[(8, "Obsidian", 1)]));
+        assert_nothing_queued(&worker);
+    }
+
+    #[test]
+    fn a_pad_is_placed_on_the_display_it_is_on() {
+        // The same fractions, resolved against a second display: proportional
+        // placement is what makes one pad definition work on both.
+        let worker = worker(SCRATCHPAD);
+        worker.send_events(vec![LuaEvent::WindowFocused { window_id: 7 }]);
+        serve(
+            &worker,
+            layout_on(
+                2,
+                paneru_shared_types::state::Frame {
+                    x: 1920,
+                    y: -200,
+                    width: 1280,
+                    height: 800,
+                },
+                &[(7, "Alacritty", 1)],
+            ),
+        );
+
+        assert_eq!(
+            next_ops(&worker, "the float"),
+            vec![
+                LayoutOp::SetFloating {
+                    window: 7,
+                    floating: true
+                },
+                // 0.1/0.05/0.8/0.5 of 1280x800, offset by the display origin.
+                LayoutOp::SetFrame {
+                    window: 7,
+                    frame: paneru_shared_types::state::Frame {
+                        x: 2048,
+                        y: -160,
+                        width: 1024,
+                        height: 400
+                    }
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_placed_pad_still_stashes_and_summons() {
+        // The placement is a manage-hook concern; toggling it in and out of
+        // view stays a workspace move, and does not re-place the window.
+        let worker = worker(SCRATCHPAD);
+        worker.send_events(vec![LuaEvent::WindowFocused { window_id: 7 }]);
+        serve(&worker, layout(&[(7, "Alacritty", 1)]));
+        assert_eq!(next_ops(&worker, "the float").len(), 2, "float then place");
+
+        worker.send_binds(vec![1]);
+        serve(&worker, layout(&[(7, "Alacritty", 1)]));
+        assert_eq!(
+            next_ops(&worker, "the stash"),
+            vec![LayoutOp::MoveToWorkspace {
+                window: 7,
+                workspace: 9,
+                follow: false
+            }]
+        );
+
+        worker.send_binds(vec![1]);
+        serve(&worker, layout(&[(7, "Alacritty", 9)]));
+        assert_eq!(
+            next_ops(&worker, "the summons"),
+            vec![
+                LayoutOp::MoveToWorkspace {
+                    window: 7,
+                    workspace: 1,
+                    follow: true
+                },
+                LayoutOp::Focus(7),
+            ]
+        );
+    }
+
+    #[test]
     fn losing_focus_parks_a_scratchpad() {
         let worker = worker(SCRATCHPAD);
         // Focus the pad, then focus something else.
         worker.send_events(vec![LuaEvent::WindowFocused { window_id: 7 }]);
         serve(&worker, layout(&[(7, "Alacritty", 1), (8, "Mail", 1)]));
         assert_eq!(
-            next_ops(&worker, "the float"),
-            vec![LayoutOp::SetFloating {
+            next_ops(&worker, "the float").first(),
+            Some(&LayoutOp::SetFloating {
                 window: 7,
                 floating: true
-            }]
+            })
         );
 
         worker.send_events(vec![LuaEvent::WindowFocused { window_id: 8 }]);

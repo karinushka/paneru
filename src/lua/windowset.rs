@@ -28,7 +28,22 @@
 use std::cell::RefCell;
 
 use mlua::{AnyUserData, Function, Lua, LuaSerdeExt, UserData, UserDataMethods, Value};
-use paneru_shared_types::windowset::{LayoutOp, WinID, WindowSet};
+use paneru_shared_types::windowset::{LayoutOp, RelativeRect, WinID, WindowSet};
+
+/// Reads `{ x = …, y = …, width = …, height = … }` as fractions of a display.
+/// Missing fields default to a full-display rect, so `{ width = 0.5 }` is the
+/// left half.
+fn relative_rect(rect: &mlua::Table) -> mlua::Result<RelativeRect> {
+    let field = |name: &str, default: f64| -> mlua::Result<f64> {
+        Ok(rect.get::<Option<f64>>(name)?.unwrap_or(default))
+    };
+    Ok(RelativeRect {
+        x: field("x", 0.0)?,
+        y: field("y", 0.0)?,
+        width: field("width", 1.0)?,
+        height: field("height", 1.0)?,
+    })
+}
 
 /// Registry key holding the short-lived function that materialises the window
 /// set from the live world. Kept in the registry rather than on the `paneru`
@@ -171,8 +186,21 @@ impl UserData for LuaWindowSet {
                 .map(|workspace| workspace.number))
         });
 
+        // The whole display record, so a script can work out pixel geometry
+        // itself when fractions are not enough.
         methods.add_method("display_of", |lua, this, id: WinID| {
-            Ok(this.resolve(lua)?.display_of(id).map(|display| display.id))
+            let set = this.resolve(lua)?;
+            let Some(display) = set.display_of(id) else {
+                return Ok(Value::Nil);
+            };
+            let table = lua.create_table()?;
+            table.set("id", display.id)?;
+            table.set("active", display.active)?;
+            table.set("x", display.frame.x)?;
+            table.set("y", display.frame.y)?;
+            table.set("width", display.frame.width)?;
+            table.set("height", display.frame.height)?;
+            Ok(Value::Table(table))
         });
 
         methods.add_method("east", |lua, this, id: WinID| {
@@ -246,9 +274,21 @@ impl UserData for LuaWindowSet {
             ))
         });
 
-        methods.add_method("float", |lua, this, id: WinID| {
-            Ok(LuaWindowSet::materialised(this.resolve(lua)?.float(id)))
-        });
+        // `ws:float(id)` leaves the window where it is (defaultFloating);
+        // `ws:float(id, rect)` places it (customFloating). The rect is given as
+        // fractions of the display, like xmonad's RationalRect.
+        methods.add_method(
+            "float",
+            |lua, this, (id, rect): (WinID, Option<mlua::Table>)| {
+                let set = this.resolve(lua)?;
+                let Some(rect) = rect else {
+                    return Ok(LuaWindowSet::materialised(set.float(id)));
+                };
+                Ok(LuaWindowSet::materialised(
+                    set.float_at(id, relative_rect(&rect)?),
+                ))
+            },
+        );
 
         methods.add_method("sink", |lua, this, id: WinID| {
             Ok(LuaWindowSet::materialised(this.resolve(lua)?.sink(id)))

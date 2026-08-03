@@ -18,6 +18,7 @@ use bevy::ecs::entity::Entity;
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::{Has, Without};
 use bevy::ecs::system::{Commands, Query};
+use bevy::platform::collections::HashSet;
 use paneru_shared_types::windowset::LayoutOp;
 use tracing::debug;
 
@@ -30,6 +31,7 @@ use crate::ecs::{
     ActiveWorkspaceMarker, SendMessageTrigger, SpawnCommandsExt, Unmanaged, WidthRatio, Window,
 };
 use crate::events::Event;
+use crate::manager::{Origin, Size};
 
 /// Applies the layout operations a Lua handler returned.
 #[allow(clippy::needless_pass_by_value)]
@@ -50,8 +52,13 @@ pub(crate) fn apply_layout_ops(
         .collect();
 
     for ops in batches {
+        // `ws:float(id, rect)` is float-then-place, and the `Unmanaged` insert
+        // the first op queues is not visible to the second until the commands
+        // flush. Remember what this batch floated so `SetFrame` can tell a
+        // window it just floated from one that is genuinely still tiled.
+        let mut floated: HashSet<Entity> = HashSet::new();
         for op in ops {
-            apply(op, &windows, &mut workspaces, &mut commands);
+            apply(op, &windows, &mut workspaces, &mut floated, &mut commands);
         }
     }
 }
@@ -64,6 +71,7 @@ fn apply(
     op: LayoutOp,
     windows: &Windows,
     workspaces: &mut Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>), Without<Window>>,
+    floated: &mut HashSet<Entity>,
     commands: &mut Commands,
 ) {
     // Ops that name a window need it to still exist. Resolve up front so every
@@ -146,23 +154,25 @@ fn apply(
         }
 
         LayoutOp::SetFloating { floating, .. } => {
-            set_floating(
-                entity.expect("SetFloating names a window"),
-                floating,
-                workspaces,
-                commands,
-            );
+            let entity = entity.expect("SetFloating names a window");
+            if floating {
+                floated.insert(entity);
+            } else {
+                floated.remove(&entity);
+            }
+            set_floating(entity, floating, workspaces, commands);
         }
 
         // Floating *is* how a window becomes unmanaged here, so the two ops
         // are one mechanism seen from either end.
         LayoutOp::SetManaged { managed, .. } => {
-            set_floating(
-                entity.expect("SetManaged names a window"),
-                !managed,
-                workspaces,
-                commands,
-            );
+            let entity = entity.expect("SetManaged names a window");
+            if managed {
+                floated.remove(&entity);
+            } else {
+                floated.insert(entity);
+            }
+            set_floating(entity, !managed, workspaces, commands);
         }
 
         LayoutOp::SetWidth { ratio, .. } => {
@@ -192,6 +202,26 @@ fn apply(
                 }
             }
             commands.reshuffle_around(entity);
+        }
+
+        LayoutOp::SetFrame { frame, .. } => {
+            let entity = entity.expect("SetFrame names a window");
+            // The layout engine owns a tiled window's geometry and will put it
+            // straight back, so say so rather than letting the script wonder.
+            if !floated.contains(&entity)
+                && windows
+                    .get_managed(entity)
+                    .is_some_and(|(_, _, unmanaged)| unmanaged.is_none())
+            {
+                debug!(
+                    target: "paneru::lua",
+                    "{op:?} targets a tiled window; float it first or the layout will move it back"
+                );
+            }
+            let origin = Origin::new(frame.x, frame.y);
+            let size = Size::new(frame.width.max(1), frame.height.max(1));
+            commands.reposition_entity(entity, origin);
+            commands.resize_entity(entity, size);
         }
 
         LayoutOp::Stack { onto, .. } => {

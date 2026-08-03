@@ -503,7 +503,8 @@ it hands `fn` the window set and commits what it gives back.
 | `ws:workspaces()` | every workspace number |
 | `ws:workspace_windows(n)` | the windows on workspace `n` |
 | `ws:columns([n])` | the columns of a workspace, each a list of window ids |
-| `ws:column_of(id)` / `ws:workspace_of(id)` / `ws:display_of(id)` | where a window is |
+| `ws:column_of(id)` / `ws:workspace_of(id)` | the column index / workspace number a window is on |
+| `ws:display_of(id)` | the display a window is on: `{ id, active, x, y, width, height }` |
 | `ws:east(id)` / `ws:west(id)` | the window one column over |
 | `ws:next(id)` / `ws:prev(id)` | the next/previous window, wrapping |
 
@@ -517,9 +518,25 @@ when the script loads. Any function taking a window record works too.
 #### Transforming
 
 Each returns a new window set: `ws:focus(id)`, `ws:swap(a, b)`,
-`ws:shift(id, workspace[, follow])`, `ws:view(workspace)`, `ws:float(id)`,
+`ws:shift(id, workspace[, follow])`, `ws:view(workspace)`, `ws:float(id[, rect])`,
 `ws:sink(id)`, `ws:manage(id)`, `ws:unmanage(id)`, `ws:width(id, ratio)`,
 `ws:stack(id, onto)`, `ws:tab(id, onto)`, `ws:unstack(id)`.
+
+`ws:float(id)` takes a window out of the tiling layout and leaves it where it is
+— xmonad's `defaultFloating`. `ws:float(id, rect)` places it as well —
+`customFloating`. The rect is fractions of the display the window is on, like
+xmonad's `RationalRect`, so one definition means the same thing on a laptop
+panel and an external display:
+
+```lua
+ws:float(id, { x = 0.1, y = 0.05, width = 0.8, height = 0.5 })
+```
+
+Missing fields default to the full display, so `{ width = 0.5 }` is the left
+half. Placing a window that is still tiled has no lasting effect — the layout
+engine owns a tiled window's geometry and puts it straight back — which is why
+`ws:float` is the operation that carries the rect. For pixel geometry of your
+own, `ws:display_of(id)` gives you the display's bounds to work from.
 
 Operations that act on whatever is focused rather than on a window you name —
 centring, full width, equalise, balance, raising a float, moving to the next
@@ -617,7 +634,7 @@ paneru.on("window_focused", function(event, ws)
   if not window then return end
   local _, pad = scratchpad.pad_of(window)
   if pad and pad.float and window.managed then
-    return ws:float(window.id)
+    return ws:float(window.id, pad.float)      -- customFloating
   end
 end)
 
@@ -645,7 +662,10 @@ Finally, declare the pads and bind them:
 scratchpad.define("terminal", {
   match = paneru.match{ app = "Alacritty", title = "^scratch" },
   spawn = "open -na Alacritty --args --title scratch",
-  float = true, group = "console",
+  group = "console",
+  -- Inset a tenth from the left, covering four fifths of the width and half
+  -- the height — xmonad's `customFloating (RationalRect 0.1 0.05 0.8 0.5)`.
+  float = { x = 0.1, y = 0.05, width = 0.8, height = 0.5 },
 })
 scratchpad.define("notes", {
   match = paneru.match{ app = "Obsidian" },
@@ -662,11 +682,8 @@ paneru.bind("alt - 0", scratchpad.hide_all)
 manager — but the script has its own thread, so a slow launch delays only the
 script.
 
-**Where this differs from xmonad.** Three things do not carry over:
+**Where this differs from xmonad.** Two things do not carry over:
 
-* `customFloating` places a float at a proportional rectangle. There is no
-  set-frame operation on the window set, so `ws:float(id)` floats a window
-  where it is. Use a `[[windows]]` rule with `grid` for the geometry.
 * xmonad applies the manage hook when a window *appears*. Paneru has no
   window-created event for scripts — the window has no id yet at that point —
   so the hook above keys off first focus instead, which is when a new window

@@ -956,3 +956,57 @@ fn test_layout_ops_skip_a_vanished_window_and_apply_its_neighbours() {
         "the surviving op applied"
     );
 }
+
+#[cfg(feature = "lua")]
+#[test]
+fn test_set_frame_places_a_floating_window() {
+    use crate::commands::Command;
+    use crate::tests::harness::TestHarness;
+    use paneru_shared_types::state::Frame;
+    use paneru_shared_types::windowset::LayoutOp;
+
+    let mut harness = TestHarness::new().with_windows(1);
+    // Let the window settle into the strip first: a window still being added
+    // is appended to the layout on the tick it appears, which would undo the
+    // float on the very tick that asked for it.
+    for _ in 0..3 {
+        harness.app.update();
+    }
+
+    let before = extract_window_set(harness.world()).expect("window set extraction");
+    let window = before.focused().expect("something is focused");
+
+    // xmonad's customFloating: take it out of the layout, then place it.
+    let placed = Frame {
+        x: 100,
+        y: 120,
+        width: 640,
+        height: 480,
+    };
+    harness.app.world_mut().write_message(Event::Command {
+        command: Command::Layout(vec![
+            LayoutOp::SetFloating {
+                window,
+                floating: true,
+            },
+            LayoutOp::SetFrame {
+                window,
+                frame: placed,
+            },
+        ]),
+    });
+    // Several ticks: the placement has to survive the layout passes that follow,
+    // not just land for one frame.
+    for _ in 0..4 {
+        harness.app.update();
+    }
+
+    let after = extract_window_set(harness.world()).expect("window set extraction");
+    let record = after.window(window).expect("the window survived");
+    assert!(record.floating, "it should be out of the tiling layout");
+    assert_eq!(
+        record.frame,
+        Some(placed),
+        "and sitting exactly where it was put"
+    );
+}

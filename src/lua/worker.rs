@@ -556,8 +556,18 @@ mod tests {
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// A one-window, one-workspace layout to hand a handler.
+    /// The canned layout with its window on workspace 1.
     fn test_window_set() -> WindowSet {
+        test_window_set_on(1)
+    }
+
+    /// The canned layout with its window on `holding`: one display, workspace 1
+    /// on screen and workspace 9 as somewhere to stash things.
+    ///
+    /// Built directly rather than by transforming, because a transform would
+    /// record an op — and a set handed to a handler has asked for nothing yet,
+    /// which is what the real extractor produces.
+    fn test_window_set_on(holding: u32) -> WindowSet {
         use paneru_shared_types::state::Frame;
         use paneru_shared_types::windowset::{ColumnSet, DisplaySet, WindowRec, WorkspaceSet};
 
@@ -582,13 +592,21 @@ mod tests {
                     height: 1080,
                 },
                 active: true,
-                workspaces: Arc::new(vec![WorkspaceSet {
-                    number: 1,
-                    native_id: 10,
-                    active: true,
-                    columns: Arc::new(vec![ColumnSet::single(window, 1.0)]),
-                    floating: Arc::new(Vec::new()),
-                }]),
+                workspaces: Arc::new(
+                    [1, 9]
+                        .map(|number| WorkspaceSet {
+                            number,
+                            native_id: 10,
+                            active: number == 1,
+                            columns: Arc::new(if number == holding {
+                                vec![ColumnSet::single(window.clone(), 1.0)]
+                            } else {
+                                Vec::new()
+                            }),
+                            floating: Arc::new(Vec::new()),
+                        })
+                        .to_vec(),
+                ),
             }],
             Some(7),
         )
@@ -774,6 +792,109 @@ mod tests {
         assert!(
             worker.queries.try_recv().is_err(),
             "reading a captured set should not go back to the world"
+        );
+    }
+
+    /// The named-scratchpad pattern, as a script would write it: a window is
+    /// stashed on a workspace nobody looks at, and toggled back to the current
+    /// one. Modelled on xmonad's `XMonad.Util.NamedScratchpad`.
+    const SCRATCHPAD: &str = r#"
+        local STASH = 9
+
+        local pads = {
+          terminal = paneru.match{ app = "Test App" },
+        }
+
+        function toggle(name)
+          return function(ws)
+            local window = ws:find(pads[name])
+            if not window then
+              paneru.flash("no scratchpad for " .. name)
+              return
+            end
+            if ws:workspace_of(window.id) == ws:current() then
+              return ws:shift(window.id, STASH)          -- here: put it away
+            end
+            return ws:shift(window.id, ws:current(), true):focus(window.id)
+          end
+        end
+
+        paneru.bind("alt - s", function(ws) return toggle("terminal")(ws) end)
+    "#;
+
+    #[test]
+    fn a_named_scratchpad_stashes_a_window_that_is_here() {
+        let worker = worker(SCRATCHPAD);
+        worker.send_binds(vec![1]);
+        serve_window_set(&worker);
+
+        // The canned set has window 7 on workspace 1, which is current.
+        let FromLua::Command(Command::Layout(ops)) = next_effect(&worker, "the stash") else {
+            panic!("expected a layout command");
+        };
+        assert_eq!(
+            ops,
+            vec![LayoutOp::MoveToWorkspace {
+                window: 7,
+                workspace: 9,
+                follow: false
+            }]
+        );
+    }
+
+    #[test]
+    fn a_named_scratchpad_summons_a_window_that_is_elsewhere() {
+        let worker = worker(SCRATCHPAD);
+        worker.send_binds(vec![1]);
+
+        // Same layout, but the window is stashed on workspace 9 and workspace 1
+        // is the one on screen.
+        let QueryRequest::WindowSet { reply } = worker
+            .queries
+            .recv_timeout(TIMEOUT)
+            .expect("the handler should have asked for the window set")
+        else {
+            panic!("expected a window-set request");
+        };
+        let _ = reply.send(Ok(test_window_set_on(9)));
+
+        let FromLua::Command(Command::Layout(ops)) = next_effect(&worker, "the summons") else {
+            panic!("expected a layout command");
+        };
+        assert_eq!(
+            ops,
+            vec![
+                LayoutOp::MoveToWorkspace {
+                    window: 7,
+                    workspace: 1,
+                    follow: true
+                },
+                LayoutOp::Focus(7),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_named_scratchpad_with_no_window_asks_for_nothing() {
+        let worker = worker(
+            r#"
+            paneru.bind("alt - s", function(ws)
+              local window = ws:find(paneru.match{ app = "Nothing Like This" })
+              if not window then
+                paneru.flash("would spawn it")
+                return
+              end
+              return ws:focus(window.id)
+            end)
+            "#,
+        );
+        worker.send_binds(vec![1]);
+        serve_window_set(&worker);
+
+        assert_eq!(next_flash(&worker, "the miss"), "would spawn it");
+        assert!(
+            worker.outbox.try_recv().is_err(),
+            "a scratchpad that found nothing should change nothing"
         );
     }
 

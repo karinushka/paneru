@@ -188,6 +188,32 @@ impl UserData for LuaWindowSet {
             Ok(this.resolve(lua)?.prev(id))
         });
 
+        // Predicates are plain Lua functions taking a window record, so
+        // `paneru.match` is a convenience rather than a requirement — an
+        // inline `function(w) return w.title:match("scratch") end` works too.
+        methods.add_method("find", |lua, this, predicate: Function| {
+            let set = this.resolve(lua)?;
+            for window in set.windows() {
+                let record = lua.to_value(window)?;
+                if predicate.call::<bool>(record.clone())? {
+                    return Ok(record);
+                }
+            }
+            Ok(Value::Nil)
+        });
+
+        methods.add_method("filter", |lua, this, predicate: Function| {
+            let set = this.resolve(lua)?;
+            let mut matched = Vec::new();
+            for window in set.windows() {
+                let record = lua.to_value(window)?;
+                if predicate.call::<bool>(record.clone())? {
+                    matched.push(record);
+                }
+            }
+            Ok(matched)
+        });
+
         // --- transforming ----------------------------------------------
         //
         // Each returns a *new* window set. The one it was called on is

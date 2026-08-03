@@ -116,7 +116,8 @@ impl LuaRuntime {
     /// Builds a runtime from Lua source, installing the `paneru` API and
     /// executing the script. Registered keybinds are collected for publishing.
     pub fn from_source(source: &str) -> mlua::Result<Self> {
-        // SAFETY: the runtime is only ever used from the main thread, so it's safe to
+        // SAFETY: the runtime is only ever used from the main thread, so it's safe to but
+        // importantly this is needed to load things such as sketchybar
         let lua = unsafe { Lua::unsafe_new() };
         extend_lua_search_paths(&lua)?;
         let outbox = Rc::new(RefCell::new(Outbox::default()));
@@ -306,7 +307,8 @@ pub fn dispatch_lua_events(
     // below borrows the world for `paneru.query`.
     let events: Vec<(String, Table)> = reader
         .read()
-        .filter_map(|event| convert::event_to_lua(runtime.lua(), event))
+        .filter_map(|event| convert::LuaEvent::try_from(event).ok())
+        .filter_map(|event| convert::event_table(runtime.lua(), &event))
         .collect();
     if events.is_empty() {
         return;
@@ -343,7 +345,8 @@ pub fn command_lua_handler(
     if ids.is_empty() {
         return;
     }
-    let snapshot = match convert::state_snapshot(runtime.lua(), state.windows()) {
+    let snapshot = convert::state_snapshot(state.windows());
+    let snapshot = match convert::snapshot_table(runtime.lua(), &snapshot) {
         Ok(snapshot) => snapshot,
         Err(err) => {
             error!("lua state snapshot: {err}");

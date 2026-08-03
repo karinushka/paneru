@@ -773,3 +773,103 @@ fn test_query_state_tracks_float_after_virtual_workspace_is_reaped() {
         })
         .run(commands);
 }
+
+/// Builds the `WindowSet` a Lua handler would be given, from the live world.
+#[cfg(feature = "lua")]
+fn extract_window_set(
+    world: &mut World,
+) -> crate::errors::Result<paneru_shared_types::windowset::WindowSet> {
+    use crate::ecs::state::QueryStateParams;
+
+    let mut system_state: SystemState<QueryStateParams> = SystemState::new(world);
+    let params = system_state.get(world)?;
+    params.extract_window_set()
+}
+
+#[cfg(feature = "lua")]
+#[test]
+fn test_window_set_keeps_the_column_structure_a_flat_query_loses() {
+    use crate::tests::harness::TestHarness;
+    use paneru_shared_types::windowset::ColumnKind;
+
+    let mut harness = TestHarness::new().with_windows(3);
+    harness.app.update();
+
+    let set = extract_window_set(harness.world()).expect("window set extraction");
+
+    assert_eq!(set.displays().len(), 1);
+    let display = &set.displays()[0];
+    assert_eq!(display.id, TEST_DISPLAY_ID);
+    assert!(display.active);
+
+    let workspace = set.current().expect("an active workspace");
+    assert_eq!(workspace.number, 1);
+    assert_eq!(workspace.native_id, TEST_WORKSPACE_ID);
+    assert_eq!(
+        workspace.columns.len(),
+        3,
+        "three unstacked windows are three columns"
+    );
+    for column in workspace.columns.iter() {
+        assert_eq!(column.kind, ColumnKind::Single);
+        assert_eq!(column.windows.len(), 1);
+    }
+
+    // ...and that structure is what makes adjacency answerable at all.
+    let leftmost = workspace.columns[0].top().expect("a window").id;
+    let middle = workspace.columns[1].top().expect("a window").id;
+    assert_eq!(set.east(leftmost), Some(middle));
+    assert_eq!(set.west(middle), Some(leftmost));
+    assert_eq!(set.column_of(middle), Some(1));
+}
+
+#[cfg(feature = "lua")]
+#[test]
+fn test_window_set_reports_focus_and_window_identity() {
+    use crate::tests::harness::TestHarness;
+
+    let mut harness = TestHarness::new().with_windows(2);
+    harness.app.update();
+
+    let set = extract_window_set(harness.world()).expect("window set extraction");
+
+    let focused = set.focused().expect("something should be focused");
+    let window = set
+        .window(focused)
+        .expect("the focused window is in the set");
+    assert!(window.focused);
+    assert!(window.managed, "a tiled window is managed");
+    assert!(!window.floating);
+    assert_eq!(window.bundle_id, "test");
+    assert!(window.frame.is_some(), "a laid-out window has a frame");
+    assert_eq!(
+        set.windows().filter(|window| window.focused).count(),
+        1,
+        "exactly one window is focused"
+    );
+}
+
+#[cfg(feature = "lua")]
+#[test]
+fn test_window_set_marks_floating_windows_outside_the_strip() {
+    use crate::commands::{Command, Operation};
+    use crate::tests::harness::TestHarness;
+
+    let mut harness = TestHarness::new().with_windows(1);
+    harness.app.update();
+    harness.app.world_mut().write_message(Event::Command {
+        command: Command::Window(Operation::Manage),
+    });
+    harness.app.update();
+
+    let set = extract_window_set(harness.world()).expect("window set extraction");
+    let workspace = set.current().expect("an active workspace");
+
+    assert!(
+        workspace.columns.is_empty(),
+        "a floating window holds no column, even though the strip still tracks it"
+    );
+    assert_eq!(workspace.floating.len(), 1);
+    assert!(workspace.floating[0].floating);
+    assert!(!workspace.floating[0].managed);
+}

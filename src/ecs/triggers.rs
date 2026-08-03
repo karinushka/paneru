@@ -1,9 +1,10 @@
+use bevy::ecs::change_detection::DetectChangesMut;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::lifecycle::{Add, Remove, RemovedComponents};
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::observer::On;
-use bevy::ecs::query::{Added, Has, With};
+use bevy::ecs::query::{Added, Has, With, Without};
 use bevy::ecs::system::{Commands, NonSendMut, Populated, Query, Res, ResMut, Single};
 use bevy::math::IRect;
 use notify::event::{DataChange, MetadataKind, ModifyKind};
@@ -704,7 +705,15 @@ pub(super) fn window_managed_trigger(
     active_display: Single<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
     windows: Windows,
     apps: Query<(Entity, &Application)>,
-    mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    mut workspaces: Query<
+        (
+            Entity,
+            &mut LayoutStrip,
+            &mut Position,
+            Has<ActiveWorkspaceMarker>,
+        ),
+        Without<Window>,
+    >,
     previous_strips: Query<&PreviousManagedStrip>,
     config: Res<Config>,
     initializing: Option<Res<Initializing>>,
@@ -751,25 +760,29 @@ pub(super) fn window_managed_trigger(
     }
 
     let previous = previous_strips.get(entity).ok().copied();
-    for (mut strip, _) in &mut workspaces {
+    for (_, mut strip, _, _) in &mut workspaces {
         strip.remove(entity);
     }
 
-    let mut restored = false;
+    // The strip the window ended up in, and whether that strip is the one
+    // currently on screen.
+    let mut landed_in = None;
     if let Some(previous) = previous {
-        for (mut strip, _) in &mut workspaces {
+        for (strip_entity, mut strip, _, active) in &mut workspaces {
             if strip.id() == previous.workspace_id && strip.virtual_index == previous.virtual_index
             {
                 strip.insert_at(insert_at.unwrap_or(previous.index), entity);
-                restored = true;
+                landed_in = Some((strip_entity, active));
                 break;
             }
         }
     }
 
-    if !restored
-        && let Some((mut active_strip, _)) = workspaces.iter_mut().find(|(_, active)| *active)
+    if landed_in.is_none()
+        && let Some((strip_entity, mut active_strip, _, _)) =
+            workspaces.iter_mut().find(|(_, _, _, active)| *active)
     {
+        landed_in = Some((strip_entity, true));
         if let Some(index) = insert_at {
             active_strip.insert_at(index, entity);
         } else {
@@ -788,13 +801,33 @@ pub(super) fn window_managed_trigger(
         }
     }
 
+    if let Ok(mut entity_commands) = commands.get_entity(entity) {
+        entity_commands.try_remove::<PreviousManagedStrip>();
+    }
+
+    if let Some((strip_entity, false)) = landed_in {
+        // The window belongs to a virtual row that isn't on screen, so its
+        // current frame — possibly popped onto the active display while it was
+        // unmanaged — must not be kept. Touching the hidden strip's position
+        // makes the layout chain re-derive every frame in that strip from the
+        // strip's off-screen origin, which pushes this window back off-screen
+        // with the row it belongs to.
+        //
+        // Pinning the current origin (or reshuffling around it) here would
+        // instead paint the window over the active row while it still belongs
+        // to the hidden one, leaving it unreachable: reshuffle_layout_strip
+        // drags the containing strip back on-screen to expose the window.
+        if let Ok((_, _, mut position, _)) = workspaces.get_mut(strip_entity) {
+            position.set_changed();
+        }
+        return;
+    }
+
     if let Some(origin) = windows.origin(entity) {
         commands.reposition_entity(entity, origin);
     }
     if let Ok(mut entity_commands) = commands.get_entity(entity) {
-        entity_commands
-            .try_insert(VerifyWindowPosition::default())
-            .try_remove::<PreviousManagedStrip>();
+        entity_commands.try_insert(VerifyWindowPosition::default());
     }
     commands.reshuffle_around(entity);
 }

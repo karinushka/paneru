@@ -7,7 +7,7 @@ use objc2_core_graphics::CGDirectDisplayID;
 use stdext::prelude::RwLockExt;
 
 use crate::errors::Error;
-use crate::events::Event;
+use crate::events::{DestroySource, Event};
 use crate::manager::app::MockApplicationApi;
 use crate::manager::{
     Application, Display, MockProcessApi, MockWindowApi, MockWindowManagerApi, Origin, Size,
@@ -85,6 +85,9 @@ struct MockStateInner {
     active_display_id: u32,
     cursor_position: Origin,
     event_queue: VecDeque<Event>,
+    /// Windows that are gone but which the app's AX window list still reports,
+    /// modelling the lag real apps show right after a window closes.
+    stale_window_ids: HashMap<WinID, Pid>,
 }
 
 #[derive(Clone)]
@@ -103,6 +106,7 @@ impl MockState {
                 active_display_id: 0,
                 cursor_position: Origin::ZERO,
                 event_queue: VecDeque::new(),
+                stale_window_ids: HashMap::new(),
             })),
         }
     }
@@ -288,6 +292,45 @@ impl MockState {
                     .push_back(Event::WindowDeminimized { window_id: id });
             }
         }
+    }
+
+    /// Closes a window while its application keeps running, the way macOS
+    /// actually reports it: the SLS space notification first, then the AX
+    /// element teardown.
+    ///
+    /// Both of the signals paneru could confirm the close against lag behind
+    /// it, exactly as they do on real apps — the leftover AX element keeps
+    /// answering attribute queries so `role()` still succeeds, and the app's
+    /// window list still reports the window.
+    #[allow(unused)]
+    pub fn os_close_window(&self, id: WinID) {
+        let mut inner = self.inner.force_write();
+        let Some(window) = inner.windows.remove(&id) else {
+            return;
+        };
+        inner.stale_window_ids.insert(id, window.pid);
+        inner.event_queue.push_back(Event::WindowDestroyed {
+            window_id: id,
+            source: DestroySource::SpaceNotification,
+        });
+        inner.event_queue.push_back(Event::WindowDestroyed {
+            window_id: id,
+            source: DestroySource::Accessibility,
+        });
+    }
+
+    /// Makes a window disappear with no notification at all, modelling a
+    /// destroy event that never arrived — a lost notification, or a window
+    /// closed while paneru was not running.
+    #[allow(unused)]
+    pub fn os_vanish_window(&self, id: WinID) {
+        self.inner.force_write().windows.remove(&id);
+    }
+
+    /// Lets the app's window list catch up with reality after a close.
+    #[allow(unused)]
+    pub fn os_settle_window_list(&self) {
+        self.inner.force_write().stale_window_ids.clear();
     }
 
     // --- Interaction Helpers ---
@@ -566,7 +609,27 @@ impl MockState {
         ma.expect_observe().returning(|| Ok(true));
         ma.expect_observe_window().returning(|_| Ok(true));
         ma.expect_unobserve_window().return_const(());
-        ma.expect_window_list().returning(|_| Vec::new());
+        let s = self.clone();
+        let window_ids = move || {
+            let inner = s.inner.force_read();
+            inner
+                .windows
+                .values()
+                .filter(|w| w.pid == pid)
+                .map(|w| w.id)
+                .chain(
+                    inner
+                        .stale_window_ids
+                        .iter()
+                        .filter(|&(_, &owner)| owner == pid)
+                        .map(|(&id, _)| id),
+                )
+                .collect::<Vec<_>>()
+        };
+
+        let (s, ids) = (self.clone(), window_ids.clone());
+        ma.expect_window_list()
+            .returning(move |_| ids().into_iter().map(|id| s.create_window(id)).collect());
 
         Application::new(Box::new(ma))
     }

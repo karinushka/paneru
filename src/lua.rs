@@ -31,6 +31,7 @@
 mod api;
 mod convert;
 mod runtime;
+mod windowset;
 mod worker;
 
 use std::path::{Path, PathBuf};
@@ -44,7 +45,6 @@ use notify::Watcher;
 use tracing::error;
 
 use crate::commands::Command;
-use crate::ecs::params::Windows;
 use crate::ecs::state::QueryStateParams;
 use crate::ecs::{SendMessageTrigger, SpawnCommandsExt};
 use crate::events::Event;
@@ -106,14 +106,9 @@ pub fn dispatch_lua_events(worker: Option<Res<LuaWorker>>, mut reader: MessageRe
     worker.send_events(events);
 }
 
-/// Handles `Command::Lua(id)` by handing the bound callback and a state
-/// snapshot to the worker.
+/// Handles `Command::Lua(id)` by handing the bound callback to the worker.
 #[allow(clippy::needless_pass_by_value)]
-pub fn command_lua_handler(
-    worker: Option<Res<LuaWorker>>,
-    mut reader: MessageReader<Event>,
-    windows: Windows,
-) {
+pub fn command_lua_handler(worker: Option<Res<LuaWorker>>, mut reader: MessageReader<Event>) {
     let Some(worker) = worker else {
         return;
     };
@@ -129,7 +124,7 @@ pub fn command_lua_handler(
     if ids.is_empty() {
         return;
     }
-    worker.send_binds(ids, convert::state_snapshot(&windows));
+    worker.send_binds(ids);
 }
 
 /// Answers the `paneru.query*` calls waiting on the world.
@@ -144,7 +139,14 @@ pub fn serve_lua_queries(worker: Option<Res<LuaWorker>>, state: QueryStateParams
         return;
     };
     for request in worker.pending_queries() {
-        request.answer(state.extract().map_err(|err| err.to_string()));
+        match request {
+            worker::QueryRequest::State { reply } => {
+                let _ = reply.send(state.extract().map_err(|err| err.to_string()));
+            }
+            worker::QueryRequest::WindowSet { reply } => {
+                let _ = reply.send(state.extract_window_set().map_err(|err| err.to_string()));
+            }
+        }
     }
 }
 

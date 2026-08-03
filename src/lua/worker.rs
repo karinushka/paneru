@@ -23,8 +23,8 @@
 //!   the thread a [`LuaSource`] and it builds the interpreter in place.
 //!
 //! Nothing crossing either channel is a Lua value; it is all plain data
-//! ([`LuaEvent`], [`StateSnapshot`], [`Command`], [`PaneruQueryState`]), which
-//! is what the marshalling split in [`super::convert`] exists to make possible.
+//! ([`LuaEvent`], [`WindowSet`], [`Command`], [`PaneruQueryState`]), which is
+//! what the marshalling split in [`super::convert`] exists to make possible.
 //!
 //! [`spawn`]: LuaWorker::spawn
 
@@ -38,11 +38,12 @@ use bevy::ecs::resource::Resource;
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use tracing::{error, info, warn};
 
-use super::convert::{self, LuaEvent, StateSnapshot};
+use super::convert::{self, LuaEvent};
 use super::runtime::LuaRuntime;
 use crate::commands::Command;
 use crate::ecs::state::PaneruQueryState;
 use crate::platform::input::set_lua_keybinds;
+use paneru_shared_types::windowset::WindowSet;
 
 /// What the worker reported when the main thread has already gone away. Surfaces
 /// inside the handler as an ordinary `paneru.query` error, so the script unwinds
@@ -69,10 +70,9 @@ pub enum LuaSource {
 enum ToLua {
     /// One frame's worth of events, already extracted from the world.
     Events(Vec<LuaEvent>),
-    /// One frame's worth of keybind ids, with the snapshot to hand them.
+    /// One frame's worth of keybind ids.
     Binds {
         ids: Vec<u32>,
-        snapshot: StateSnapshot,
     },
     Reload(PathBuf),
     Shutdown,
@@ -84,16 +84,31 @@ pub(super) enum FromLua {
     Flash { message: String, duration: f32 },
 }
 
-/// A `paneru.query*` call waiting on the world. Carries only the reply channel:
-/// which kind was asked for, and whether as JSON, stays on the worker.
-pub(super) struct QueryRequest {
-    reply: Sender<Result<PaneruQueryState, String>>,
+/// A read of the live world that a handler is blocked on. Carries the reply
+/// channel and nothing else: what the answer is wanted *for* — which query
+/// kind, JSON or table — stays on the worker.
+pub(super) enum QueryRequest {
+    /// The `paneru.query*` documents.
+    State {
+        reply: Sender<Result<PaneruQueryState, String>>,
+    },
+    /// The layout tree a handler transforms.
+    WindowSet {
+        reply: Sender<Result<WindowSet, String>>,
+    },
 }
 
+#[cfg(test)]
 impl QueryRequest {
-    /// Answers the waiting handler. Fails silently if it has already gone away.
-    pub(super) fn answer(self, state: Result<PaneruQueryState, String>) {
-        let _ = self.reply.send(state);
+    /// Answers a state query. Panics on a window-set request, which the tests
+    /// using this never make.
+    fn answer(self, state: Result<PaneruQueryState, String>) {
+        match self {
+            QueryRequest::State { reply } => {
+                let _ = reply.send(state);
+            }
+            QueryRequest::WindowSet { .. } => panic!("expected a state query"),
+        }
     }
 }
 
@@ -171,8 +186,8 @@ impl LuaWorker {
     }
 
     /// Queues keybind callbacks for dispatch.
-    pub(super) fn send_binds(&self, ids: Vec<u32>, snapshot: StateSnapshot) {
-        let _ = self.to_lua.send(ToLua::Binds { ids, snapshot });
+    pub(super) fn send_binds(&self, ids: Vec<u32>) {
+        let _ = self.to_lua.send(ToLua::Binds { ids });
     }
 
     /// Asks the worker to rebuild itself from `path`.
@@ -281,7 +296,14 @@ fn run(
     let extract = || -> Result<PaneruQueryState, String> {
         let (reply, answer) = bounded(1);
         queries
-            .send(QueryRequest { reply })
+            .send(QueryRequest::State { reply })
+            .map_err(|_| SHUTTING_DOWN.to_string())?;
+        answer.recv().map_err(|_| SHUTTING_DOWN.to_string())?
+    };
+    let extract_set = || -> Result<WindowSet, String> {
+        let (reply, answer) = bounded(1);
+        queries
+            .send(QueryRequest::WindowSet { reply })
             .map_err(|_| SHUTTING_DOWN.to_string())?;
         answer.recv().map_err(|_| SHUTTING_DOWN.to_string())?
     };
@@ -294,23 +316,16 @@ fn run(
                     .iter()
                     .filter_map(|event| convert::event_table(runtime.lua(), event))
                     .collect();
-                runtime.dispatch_with_query("event dispatch", &extract, || {
+                runtime.dispatch_with_query("event dispatch", &extract, &extract_set, || {
                     for (name, table) in &tables {
                         runtime.dispatch_event(name, table);
                     }
                 })
             }
-            ToLua::Binds { ids, snapshot } => {
-                let snapshot = match convert::snapshot_table(runtime.lua(), &snapshot) {
-                    Ok(snapshot) => snapshot,
-                    Err(err) => {
-                        error!("lua state snapshot: {err}");
-                        continue;
-                    }
-                };
-                runtime.dispatch_with_query("keybind dispatch", &extract, || {
+            ToLua::Binds { ids } => {
+                runtime.dispatch_with_query("keybind dispatch", &extract, &extract_set, || {
                     for id in ids {
-                        runtime.dispatch_bind(id, snapshot.clone());
+                        runtime.dispatch_bind(id);
                     }
                 })
             }
@@ -337,6 +352,7 @@ fn run(
 mod tests {
     use super::*;
     use crate::ecs::state::{PaneruActiveState, PaneruVirtualWorkspaceState, PaneruWindowState};
+    use paneru_shared_types::windowset::LayoutOp;
 
     /// How long a test waits for the worker before calling it wedged. Generous:
     /// it only ever elapses on failure.
@@ -344,14 +360,6 @@ mod tests {
 
     fn worker(source: &str) -> LuaWorker {
         LuaWorker::spawn(LuaSource::Inline(source.to_string()))
-    }
-
-    /// An empty snapshot, for binds that don't look at one.
-    fn snapshot() -> StateSnapshot {
-        StateSnapshot {
-            focused: None,
-            windows: Vec::new(),
-        }
     }
 
     /// A canned state document to answer round-trips with.
@@ -401,7 +409,7 @@ mod tests {
     #[test]
     fn bind_dispatch_reaches_the_outbox() {
         let worker = worker(r#"paneru.bind("alt - b", "window balance")"#);
-        worker.send_binds(vec![1], snapshot());
+        worker.send_binds(vec![1]);
         let FromLua::Command(command) = next_effect(&worker, "the bound command") else {
             panic!("expected a command");
         };
@@ -431,7 +439,7 @@ mod tests {
             end)
             "#,
         );
-        worker.send_binds(vec![1], snapshot());
+        worker.send_binds(vec![1]);
 
         let request = worker
             .queries
@@ -453,7 +461,7 @@ mod tests {
             end)
             "#,
         );
-        worker.send_binds(vec![1], snapshot());
+        worker.send_binds(vec![1]);
 
         worker
             .queries
@@ -475,7 +483,7 @@ mod tests {
             paneru.bind("alt - b", "window balance")
             "#,
         );
-        worker.send_binds(vec![1], snapshot());
+        worker.send_binds(vec![1]);
         // Drop the request without answering, as a shutdown would.
         drop(
             worker
@@ -485,7 +493,7 @@ mod tests {
         );
 
         // The handler's error is not the worker's: it is still dispatching.
-        worker.send_binds(vec![2], snapshot());
+        worker.send_binds(vec![2]);
         let FromLua::Command(command) = next_effect(&worker, "the next bind") else {
             panic!("expected a command");
         };
@@ -511,7 +519,7 @@ mod tests {
         );
 
         // ...and the bind registered by the working script still dispatches.
-        worker.send_binds(vec![1], snapshot());
+        worker.send_binds(vec![1]);
         assert!(matches!(
             next_effect(&worker, "the surviving bind"),
             FromLua::Command(Command::Window(crate::commands::Operation::Balance))
@@ -546,6 +554,227 @@ mod tests {
         assert_eq!(next_flash(&worker, "the new handler"), "reloaded");
 
         std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// A one-window, one-workspace layout to hand a handler.
+    fn test_window_set() -> WindowSet {
+        use paneru_shared_types::state::Frame;
+        use paneru_shared_types::windowset::{ColumnSet, DisplaySet, WindowRec, WorkspaceSet};
+
+        let window = WindowRec {
+            id: 7,
+            app_name: "Test App".to_string(),
+            bundle_id: "com.example.app".to_string(),
+            title: "window".to_string(),
+            frame: None,
+            floating: false,
+            managed: true,
+            visible: true,
+            focused: true,
+        };
+        WindowSet::new(
+            vec![DisplaySet {
+                id: 1,
+                frame: Frame {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+                active: true,
+                workspaces: Arc::new(vec![WorkspaceSet {
+                    number: 1,
+                    native_id: 10,
+                    active: true,
+                    columns: Arc::new(vec![ColumnSet::single(window, 1.0)]),
+                    floating: Arc::new(Vec::new()),
+                }]),
+            }],
+            Some(7),
+        )
+    }
+
+    /// Answers the next window-set request, or panics saying what arrived.
+    fn serve_window_set(worker: &LuaWorker) {
+        match worker
+            .queries
+            .recv_timeout(TIMEOUT)
+            .expect("the handler should have asked for the window set")
+        {
+            QueryRequest::WindowSet { reply } => {
+                let _ = reply.send(Ok(test_window_set()));
+            }
+            QueryRequest::State { .. } => panic!("expected a window-set request"),
+        }
+    }
+
+    #[test]
+    fn a_returned_window_set_commits_its_operations() {
+        let worker =
+            worker(r#"paneru.bind("alt - f", function(ws) return ws:focus(ws:focused()) end)"#);
+        worker.send_binds(vec![1]);
+        serve_window_set(&worker);
+
+        let FromLua::Command(command) = next_effect(&worker, "the layout command") else {
+            panic!("expected a command");
+        };
+        let Command::Layout(ops) = command else {
+            panic!("expected a layout command, got {command:?}");
+        };
+        assert_eq!(ops, vec![LayoutOp::Focus(7)]);
+    }
+
+    #[test]
+    fn a_window_set_computed_but_not_returned_commits_nothing() {
+        // The whole point of the value being pure: work you throw away has no
+        // consequences. The handler transforms, discards, and flashes instead.
+        let worker = worker(
+            r#"
+            paneru.bind("alt - f", function(ws)
+              local unused = ws:focus(ws:focused()):view(2)
+              paneru.flash("discarded")
+            end)
+            "#,
+        );
+        worker.send_binds(vec![1]);
+        serve_window_set(&worker);
+
+        assert_eq!(next_flash(&worker, "the handler to finish"), "discarded");
+        assert!(
+            worker.outbox.try_recv().is_err(),
+            "an unreturned window set should commit nothing"
+        );
+    }
+
+    #[test]
+    fn a_handler_that_raises_after_transforming_commits_nothing() {
+        let worker = worker(
+            r#"
+            paneru.bind("alt - f", function(ws)
+              local pending = ws:focus(ws:focused())
+              error("nope")
+            end)
+            paneru.bind("alt - b", "window balance")
+            "#,
+        );
+        worker.send_binds(vec![1]);
+        serve_window_set(&worker);
+
+        // Nothing from the failed handler; the worker is still dispatching.
+        worker.send_binds(vec![2]);
+        assert!(matches!(
+            next_effect(&worker, "the next bind"),
+            FromLua::Command(Command::Window(crate::commands::Operation::Balance))
+        ));
+    }
+
+    #[test]
+    fn chained_transforms_commit_in_order() {
+        let worker = worker(
+            r#"
+            paneru.bind("alt - x", function(ws)
+              return ws:focus(7):width(7, 0.75):shift(7, 2)
+            end)
+            "#,
+        );
+        worker.send_binds(vec![1]);
+        serve_window_set(&worker);
+
+        let FromLua::Command(Command::Layout(ops)) = next_effect(&worker, "the layout command")
+        else {
+            panic!("expected a layout command");
+        };
+        assert_eq!(
+            ops,
+            vec![
+                LayoutOp::Focus(7),
+                LayoutOp::SetWidth {
+                    window: 7,
+                    ratio: 0.75
+                },
+                LayoutOp::MoveToWorkspace {
+                    window: 7,
+                    workspace: 2,
+                    follow: false
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_handler_that_ignores_the_window_set_never_fetches_one() {
+        // Laziness is what keeps the window set affordable on hot events: it
+        // costs a round-trip and reads every window title over the AX API.
+        let worker = worker(r#"paneru.bind("alt - b", "window balance")"#);
+        worker.send_binds(vec![1]);
+
+        assert!(matches!(
+            next_effect(&worker, "the bound command"),
+            FromLua::Command(Command::Window(crate::commands::Operation::Balance))
+        ));
+        assert!(
+            worker.queries.try_recv().is_err(),
+            "a handler that never touches the window set should not ask for one"
+        );
+    }
+
+    #[test]
+    fn two_handlers_in_one_batch_share_one_window_set() {
+        let worker = worker(
+            r#"
+            paneru.bind("alt - a", function(ws) paneru.flash(tostring(ws:focused())) end)
+            paneru.bind("alt - b", function(ws) paneru.flash(tostring(ws:focused())) end)
+            "#,
+        );
+        worker.send_binds(vec![1, 2]);
+        serve_window_set(&worker);
+
+        assert_eq!(next_flash(&worker, "the first handler"), "7");
+        assert_eq!(next_flash(&worker, "the second handler"), "7");
+        assert!(
+            worker.queries.try_recv().is_err(),
+            "the second handler should have reused the first fetch"
+        );
+    }
+
+    #[test]
+    fn event_handlers_receive_the_event_then_the_window_set() {
+        let worker = worker(
+            r#"
+            paneru.on("space_changed", function(event, ws)
+              paneru.flash(event.type .. ":" .. tostring(ws:focused()))
+            end)
+            "#,
+        );
+        worker.send_events(vec![LuaEvent::SpaceChanged]);
+        serve_window_set(&worker);
+        assert_eq!(next_flash(&worker, "the event handler"), "space_changed:7");
+    }
+
+    #[test]
+    fn a_captured_window_set_stays_the_snapshot_it_was() {
+        // It is a value, not a view: a handler that keeps one sees what it saw,
+        // and does not silently re-read the world later.
+        let worker = worker(
+            r#"
+            escaped = nil
+            paneru.bind("alt - a", function(ws)
+              escaped = ws
+              paneru.flash(tostring(ws:focused()))
+            end)
+            paneru.bind("alt - b", function() paneru.flash(tostring(escaped:focused())) end)
+            "#,
+        );
+        worker.send_binds(vec![1]);
+        serve_window_set(&worker);
+        assert_eq!(next_flash(&worker, "the first handler"), "7");
+
+        worker.send_binds(vec![2]);
+        assert_eq!(next_flash(&worker, "the captured set"), "7");
+        assert!(
+            worker.queries.try_recv().is_err(),
+            "reading a captured set should not go back to the world"
+        );
     }
 
     #[test]

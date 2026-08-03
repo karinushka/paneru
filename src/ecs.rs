@@ -40,6 +40,8 @@ use crate::platform::{Modifiers, PlatformCallbacks, WinID, WorkspaceId};
 pub mod display;
 pub mod focus;
 pub mod layout;
+#[cfg(feature = "lua")]
+pub mod layout_ops;
 pub mod mouse;
 pub mod params;
 pub(crate) mod restore;

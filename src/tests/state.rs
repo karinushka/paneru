@@ -873,3 +873,86 @@ fn test_window_set_marks_floating_windows_outside_the_strip() {
     assert!(workspace.floating[0].floating);
     assert!(!workspace.floating[0].managed);
 }
+
+#[cfg(feature = "lua")]
+#[test]
+fn test_layout_ops_apply_to_the_named_window_not_the_focused_one() {
+    use crate::commands::Command;
+    use crate::tests::harness::TestHarness;
+    use paneru_shared_types::windowset::LayoutOp;
+
+    let mut harness = TestHarness::new().with_windows(3);
+    harness.app.update();
+
+    let before = extract_window_set(harness.world()).expect("window set extraction");
+    let workspace = before.current().expect("an active workspace");
+    let order: Vec<i32> = workspace
+        .columns
+        .iter()
+        .filter_map(|column| column.top().map(|window| window.id))
+        .collect();
+    assert_eq!(order.len(), 3);
+    let focused = before.focused().expect("something is focused");
+
+    // Swap the two windows that are *not* focused: every existing command
+    // handler would have acted on the focused one instead.
+    let (left, right) = (order[1], order[2]);
+    assert!(
+        left != focused && right != focused,
+        "swapping unfocused windows"
+    );
+
+    harness.app.world_mut().write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::Swap(left, right)]),
+    });
+    harness.app.update();
+    harness.app.update();
+
+    let after = extract_window_set(harness.world()).expect("window set extraction");
+    let swapped: Vec<i32> = after
+        .current()
+        .expect("an active workspace")
+        .columns
+        .iter()
+        .filter_map(|column| column.top().map(|window| window.id))
+        .collect();
+    assert_eq!(swapped, vec![order[0], right, left]);
+    assert_eq!(after.focused(), Some(focused), "the focus did not move");
+}
+
+#[cfg(feature = "lua")]
+#[test]
+fn test_layout_ops_skip_a_vanished_window_and_apply_its_neighbours() {
+    use crate::commands::Command;
+    use crate::tests::harness::TestHarness;
+    use paneru_shared_types::windowset::LayoutOp;
+
+    let mut harness = TestHarness::new().with_windows(2);
+    harness.app.update();
+
+    let before = extract_window_set(harness.world()).expect("window set extraction");
+    let live = before.focused().expect("something is focused");
+    let gone = 9999;
+    assert!(before.window(gone).is_none(), "no such window");
+
+    // The handler ran against a stale snapshot: one of its targets is gone.
+    // That op is dropped; the rest of the batch still applies.
+    harness.app.world_mut().write_message(Event::Command {
+        command: Command::Layout(vec![
+            LayoutOp::Focus(gone),
+            LayoutOp::SetFloating {
+                window: live,
+                floating: true,
+            },
+        ]),
+    });
+    harness.app.update();
+    harness.app.update();
+
+    let after = extract_window_set(harness.world()).expect("window set extraction");
+    let workspace = after.current().expect("an active workspace");
+    assert!(
+        workspace.floating.iter().any(|window| window.id == live),
+        "the surviving op applied"
+    );
+}

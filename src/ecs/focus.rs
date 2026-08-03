@@ -17,7 +17,7 @@ use tracing::{Level, debug, error, instrument, trace, warn};
 use super::{FocusedMarker, MouseHeldMarker, SystemTheme, Unmanaged};
 use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
-use crate::ecs::params::{ActiveDisplay, GlobalState, Windows};
+use crate::ecs::params::{ActiveDisplay, GlobalState, WindowCtx, Windows};
 use crate::ecs::workspace::RestoreFocusMarker;
 use crate::ecs::{
     ActiveWorkspaceMarker, Scrolling, SendMessageTrigger, SpawnCommandsExt, StrayFocusEvent,
@@ -144,17 +144,15 @@ fn maintain_focus_singleton(
     config.set_ffm_flag(None);
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn autocenter_window_on_focus(
     focused: Single<Entity, Added<FocusedMarker>>,
     mouse_held: Query<&MouseHeldMarker>,
     restored: Query<&RestoreFocusMarker>,
-    windows: Windows,
     global_state: GlobalState,
     active_display: ActiveDisplay,
-    config: Res<Config>,
-    mut commands: Commands,
+    mut ctx: WindowCtx,
 ) {
     let entity = *focused;
 
@@ -173,16 +171,16 @@ fn autocenter_window_on_focus(
     if active_display.active_strip().tabbed(entity) {
         return;
     }
-    if config.auto_center()
-        && let Some((_, _, None)) = windows.get_managed(entity)
-        && let Some(size) = windows.size(entity)
-        && let Some(mut origin) = windows.origin(entity)
+    if ctx.config.auto_center()
+        && let Some((_, _, None)) = ctx.windows.get_managed(entity)
+        && let Some(size) = ctx.windows.size(entity)
+        && let Some(mut origin) = ctx.windows.origin(entity)
     {
         let center = active_display.bounds().center();
         origin.x = center.x - size.x / 2;
-        commands.reposition_entity(entity, origin);
+        ctx.commands.reposition_entity(entity, origin);
     }
-    commands.reshuffle_around(entity);
+    ctx.commands.reshuffle_around(entity);
 }
 
 #[allow(clippy::needless_pass_by_value)]

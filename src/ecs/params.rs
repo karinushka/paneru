@@ -3,7 +3,7 @@ use bevy::{
         entity::Entity,
         hierarchy::ChildOf,
         query::{With, Without},
-        system::{Query, Res, ResMut, Single, SystemParam},
+        system::{Commands, Query, Res, ResMut, Single, SystemParam},
         world::Mut,
     },
     math::IRect,
@@ -217,6 +217,24 @@ impl FrameActivity<'_, '_> {
             || !self.scrolling.is_empty()
             || !self.flash_messages.is_empty()
     }
+}
+
+/// The three things nearly every window-handling system reaches for: the
+/// window queries, the configuration, and a command buffer to act through.
+///
+/// Grouping them keeps the signatures of the bigger systems readable. Unlike
+/// the bundles above this one carries no behaviour of its own — the fields are
+/// public so call sites borrow them individually, which is what lets a helper
+/// take `&ctx.windows` and `&mut ctx.commands` at the same time.
+///
+/// Only put this on a system that already took all three. Handing a system
+/// world access it did not previously have costs parallelism at best and
+/// panics on a query conflict at worst.
+#[derive(SystemParam)]
+pub struct WindowCtx<'w, 's> {
+    pub windows: Windows<'w, 's>,
+    pub config: Res<'w, Config>,
+    pub commands: Commands<'w, 's>,
 }
 
 #[derive(SystemParam)]

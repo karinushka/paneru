@@ -139,8 +139,8 @@ fn parse_mouse_move(argv: &[&str]) -> Result<MouseMove> {
 impl Command {
     /// The argv encoding of this command, as understood by [`parse_command`].
     ///
-    /// [`Command::Lua`] has no encoding — it is only ever issued in-process —
-    /// and yields `None`.
+    /// [`Command::Lua`] and [`Command::Layout`] have no encoding — they are
+    /// only ever issued in-process — and yield `None`.
     #[must_use]
     pub fn to_argv(&self) -> Option<Vec<String>> {
         let argv = match self {
@@ -155,7 +155,7 @@ impl Command {
             Command::Quit => vec!["quit".to_string()],
             Command::Restart => vec!["restart".to_string()],
             Command::PrintState => vec!["printstate".to_string()],
-            Command::Lua(_) => return None,
+            Command::Lua(_) | Command::Layout(_) => return None,
         };
         Some(argv)
     }

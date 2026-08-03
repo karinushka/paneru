@@ -155,7 +155,6 @@ pub fn register_systems(app: &mut bevy::app::App) {
             )
                 .chain(),
             crate::menubar::update_menu_bar
-                .after(systems::animate_resize_entities)
                 .run_if(vw_indicator_dirty),
         ),
     );

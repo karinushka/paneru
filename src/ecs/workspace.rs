@@ -997,12 +997,10 @@ fn move_virtual_workspace_bind(
         Operation::VirtualMove(Direction::South, move_focus)
             if active_display.active_strip().len() > 1 =>
         {
-            if current_index + 1 < rows.len() {
+            if config.create_workspace_automatically() && current_index + 1 < rows.len() {
                 (rows[current_index + 1].1.virtual_index, *move_focus)
-            } else if config.create_workspace_automatically() {
-                (current_virtual_index + 1, *move_focus)
             } else {
-                return;
+                (current_virtual_index + 1, *move_focus)
             }
         }
         Operation::VirtualMove(Direction::North, move_focus) => {

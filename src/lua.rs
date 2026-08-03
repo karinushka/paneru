@@ -42,7 +42,6 @@ use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs;
 use bevy::ecs::system::{Commands, NonSendMut, Res};
 use notify::Watcher;
-use tracing::error;
 
 use crate::commands::Command;
 use crate::ecs::state::QueryStateParams;
@@ -189,13 +188,8 @@ pub fn lua_reload_system(
         if event.paths.iter().any(|changed| paths_match(changed, path)) {
             // Editors that atomically replace files (write-new-then-rename)
             // break the original watch; re-establish it like the TOML handler.
-            if let (Some(watcher), Some(symlink)) = (watcher.as_mut(), symlink_target(path))
-                && let Ok(new_watcher) =
-                    window_manager
-                        .setup_config_watcher(path)
-                        .inspect_err(|err| {
-                            error!("re-watching lua script '{}': {err}", symlink.display());
-                        })
+            if let (Some(watcher), Some(_symlink)) = (watcher.as_mut(), symlink_target(path))
+                && let Some(new_watcher) = crate::ecs::rewatch_configs(&window_manager, path)
             {
                 **watcher = new_watcher;
             }

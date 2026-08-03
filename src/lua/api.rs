@@ -18,23 +18,26 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use mlua::{Lua, Table, Value};
+use mlua::{IntoLua, Lua, LuaSerdeExt, Table, Value};
 use regex::Regex;
 use tracing::info;
 
 use paneru_lua as shared;
+use paneru_shared_types::script_state::{ScriptStateWrite, WriteOutcome};
 
 use super::convert::LuaEvent;
-use super::runtime::{Outbox, SharedRegistry};
+use super::runtime::{Outbox, SharedRegistry, from_lua_value, store_error, to_lua_value};
 use super::windowset::LuaWindowSet;
+use super::world::DispatchWorld;
 use crate::commands::Command;
 use crate::config::{Config, config_from_lua, resolve_chord};
 use crate::ecs::state::StateQueryKind;
 
-/// Registry key holding the short-lived function that answers a query against
-/// the live world. Kept in the Lua registry rather than on the `paneru` table
-/// so a script can neither see nor overwrite it.
-pub(super) const QUERY_PROVIDER: &str = "paneru.query_provider";
+/// How many times `paneru.state.mutate` may lose the compare-and-set race
+/// before giving up. A handful of writers contending is normal; a dozen
+/// collisions on one key means something is wrong, and looping forever inside a
+/// handler would wedge that dispatch.
+const MUTATE_ATTEMPTS: usize = 8;
 
 /// Installs the `paneru` API into `lua`, wiring the Rust-backed functions to the
 /// shared `outbox` (queued commands/flashes) and `registry` (registered handlers
@@ -47,6 +50,7 @@ pub(super) fn install(
     outbox: &Rc<RefCell<Outbox>>,
     registry: &SharedRegistry,
     config_cell: &Rc<RefCell<Option<Config>>>,
+    world: &Rc<DispatchWorld>,
 ) -> mlua::Result<()> {
     let paneru = lua.create_table()?;
     lua.globals().set("paneru", paneru.clone())?;
@@ -55,8 +59,8 @@ pub(super) fn install(
     // for the command bus.
     let dispatch = {
         let outbox = Rc::clone(outbox);
-        move |_: &Lua, command: &Command| {
-            outbox.borrow_mut().commands.push(command.clone());
+        move |_: &Lua, command: Command| {
+            outbox.borrow_mut().commands.push(command);
             Ok(true)
         }
     };
@@ -65,7 +69,8 @@ pub(super) fn install(
     let run: mlua::Function = paneru.get("run")?;
     paneru.set("cmd", run)?;
 
-    install_query(lua, &paneru)?;
+    install_query(lua, &paneru, world)?;
+    install_script_state(lua, &paneru, world)?;
 
     // paneru.log(message) — emit a tracing log line.
     let log = lua.create_function(|_, message: String| {
@@ -145,26 +150,36 @@ pub(super) fn install(
     // paneru.windows(fn) — xmonad's `windows`: hand the window set to `fn` and
     // commit whatever it hands back. The same contract as a bind handler, for
     // use partway through one.
+    //
+    // Async because `fn` may itself query, and because fetching the set is a
+    // round trip to the main thread. It reads the batch's shared copy, so
+    // calling this from several concurrent handlers costs one fetch.
     let windows = {
         let outbox = Rc::clone(outbox);
-        lua.create_function(move |lua, transform: mlua::Function| {
-            let window_set = lua.create_userdata(LuaWindowSet::lazy())?;
-            let returned: Value = transform.call(window_set)?;
-            let ops = match &returned {
-                Value::Nil => Vec::new(),
-                Value::UserData(data) => data.borrow::<LuaWindowSet>()?.ops(),
-                other => {
-                    return Err(mlua::Error::RuntimeError(format!(
-                        "paneru.windows: expected a window set back, got {}",
-                        other.type_name()
-                    )));
+        let world = Rc::clone(world);
+        lua.create_async_function(move |lua, transform: mlua::Function| {
+            let outbox = Rc::clone(&outbox);
+            let world = Rc::clone(&world);
+            async move {
+                let set = world.layout().await.map_err(mlua::Error::runtime)?;
+                let window_set = lua.create_userdata(LuaWindowSet::materialised((*set).clone()))?;
+                let returned: Value = transform.call_async(window_set).await?;
+                let ops = match &returned {
+                    Value::Nil => Vec::new(),
+                    Value::UserData(data) => data.borrow::<LuaWindowSet>()?.ops(),
+                    other => {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "paneru.windows: expected a window set back, got {}",
+                            other.type_name()
+                        )));
+                    }
+                };
+                if ops.is_empty() {
+                    return Ok(false);
                 }
-            };
-            if ops.is_empty() {
-                return Ok(false);
+                outbox.borrow_mut().commands.push(Command::Layout(ops));
+                Ok(true)
             }
-            outbox.borrow_mut().commands.push(Command::Layout(ops));
-            Ok(true)
         })?
     };
     paneru.set("windows", windows)?;
@@ -261,47 +276,198 @@ fn register_bind(registry: &SharedRegistry, chord: &str, handler: Value) -> mlua
 /// dispatching system. `super::LuaRuntime::with_query` installs a provider for
 /// exactly as long as a callback is on the stack, so calling one of these at
 /// script top level fails with an explanation rather than stale data.
-fn install_query(lua: &Lua, paneru: &mlua::Table) -> mlua::Result<()> {
-    let query_raw = lua
-        .create_function(|lua, kind: Option<String>| query::<String>(lua, kind.as_deref(), true))?;
-    paneru.set("query", query_raw)?;
+fn install_query(lua: &Lua, paneru: &mlua::Table, world: &Rc<DispatchWorld>) -> mlua::Result<()> {
+    let raw = query_function(lua, world, None, true)?;
+    paneru.set("query", raw)?;
 
-    let query_json = lua
-        .create_function(|lua, kind: Option<String>| query::<Value>(lua, kind.as_deref(), false))?;
-    paneru.set("query_json", query_json)?;
+    let json = query_function(lua, world, None, false)?;
+    paneru.set("query_json", json)?;
 
     for (name, kind) in StateQueryKind::SHORTHANDS {
-        let shorthand =
-            lua.create_function(move |lua, ()| query::<Value>(lua, Some(kind.token()), false))?;
+        let shorthand = query_function(lua, world, Some(kind), false)?;
         paneru.set(name, shorthand)?;
     }
 
     Ok(())
 }
 
-/// Runs one query through the currently installed provider. `as_json` picks
-/// the raw JSON string over the decoded table, and `R` is what that yields.
-fn query<R: mlua::FromLuaMulti>(lua: &Lua, kind: Option<&str>, as_json: bool) -> mlua::Result<R> {
-    let kind = kind.unwrap_or_else(|| StateQueryKind::State.token());
-    // Rejected here as well as host-side so the error names the valid kinds.
-    if StateQueryKind::parse(kind).is_none() {
-        return Err(mlua::Error::RuntimeError(format!(
-            "paneru.query: unknown kind '{kind}'; expected one of {}",
-            StateQueryKind::tokens()
-        )));
-    }
-    provider(lua)?.call((kind.to_string(), as_json))
+/// One `paneru.query*` entry point.
+///
+/// `fixed` is the kind for the shorthands, which take no argument; the general
+/// forms take one and fall back to the full state document. `as_json` picks the
+/// raw JSON string over the decoded table.
+fn query_function(
+    lua: &Lua,
+    world: &Rc<DispatchWorld>,
+    fixed: Option<StateQueryKind>,
+    as_json: bool,
+) -> mlua::Result<mlua::Function> {
+    let world = Rc::clone(world);
+    lua.create_async_function(move |lua, requested: Option<String>| {
+        let world = Rc::clone(&world);
+        async move {
+            let kind = if let Some(kind) = fixed {
+                kind
+            } else {
+                let token = requested
+                    .as_deref()
+                    .unwrap_or(StateQueryKind::State.token());
+                // Rejected here as well as host-side so the error names the
+                // valid kinds.
+                StateQueryKind::parse(token).ok_or_else(|| {
+                    mlua::Error::RuntimeError(format!(
+                        "paneru.query: unknown kind '{token}'; expected one of {}",
+                        StateQueryKind::tokens()
+                    ))
+                })?
+            };
+            let state = world
+                .query_state()
+                .await
+                .map_err(|err| mlua::Error::RuntimeError(format!("paneru.query: {err}")))?;
+            if as_json {
+                state
+                    .to_query_json(kind)
+                    .map_err(mlua::Error::external)?
+                    .into_lua(&lua)
+            } else {
+                let value = state.to_query_value(kind).map_err(mlua::Error::external)?;
+                lua.to_value(&value)
+            }
+        }
+    })
 }
 
-/// The provider installed for the duration of the current callback, or an
-/// error explaining that there is no world to query from here.
-fn provider(lua: &Lua) -> mlua::Result<mlua::Function> {
-    lua.named_registry_value::<Option<mlua::Function>>(QUERY_PROVIDER)?
-        .ok_or_else(|| {
-            mlua::Error::RuntimeError(
-                "paneru.query is only available inside a paneru.on handler or a paneru.bind \
-                 callback"
-                    .into(),
-            )
-        })
+/// Installs `paneru.state`: the named store a script keeps things in.
+///
+/// A Lua global is the obvious place to put something a handler wants to
+/// remember, and the wrong one — a hot reload builds a whole new interpreter,
+/// so what is kept there is wiped every time the script is saved. What goes in
+/// here survives that and a restart, and a client can read and write the same
+/// store over the socket under the same names.
+///
+/// Three calls:
+///
+/// ```lua
+/// paneru.state.get("pads.term")           -- the value, or nil
+/// paneru.state.set("pads.term", 12345)    -- nil removes the key
+/// paneru.state.mutate("count", function(n) return (n or 0) + 1 end)
+/// ```
+///
+/// `mutate` is the one to reach for when the new value depends on the old.
+/// It reads, runs your function, and writes only if the value is still what it
+/// read — otherwise it runs your function again against what the value became.
+/// Two handlers, or a handler and a client, incrementing the same counter
+/// therefore cannot lose an increment the way a `get` followed by a `set` can.
+/// It returns what it stored.
+///
+/// Values are anything that maps onto JSON: strings, numbers, booleans, and
+/// tables of those. A function, a coroutine or a userdata cannot be stored, and
+/// says so rather than being silently dropped.
+fn install_script_state(
+    lua: &Lua,
+    paneru: &mlua::Table,
+    world: &Rc<DispatchWorld>,
+) -> mlua::Result<()> {
+    let state = lua.create_table()?;
+
+    state.set("get", {
+        let world = Rc::clone(world);
+        lua.create_async_function(move |lua, key: String| {
+            let world = Rc::clone(&world);
+            async move {
+                let store = world
+                    .script_state()
+                    .await
+                    .map_err(|err| store_error("get", &err))?;
+                to_lua_value(&lua, store.get(&key))
+            }
+        })?
+    })?;
+
+    // `set(key, nil)` removes: the Lua way of spelling "there is nothing here"
+    // is the absence of a value, and storing a JSON null instead would leave a
+    // key that reads back as `nil` but is still there.
+    state.set("set", {
+        let world = Rc::clone(world);
+        lua.create_async_function(move |lua, (key, value): (String, Value)| {
+            let world = Rc::clone(&world);
+            async move {
+                let write = if value.is_nil() {
+                    ScriptStateWrite::remove(key)
+                } else {
+                    ScriptStateWrite::set(key, from_lua_value(&lua, value, "set")?)
+                };
+                // The write has landed by the time this returns, so the cached
+                // copy's revision has moved and the next read refreshes.
+                world
+                    .write_script_state(&write)
+                    .await
+                    .map(|_| ())
+                    .map_err(|err| store_error("set", &err))
+            }
+        })?
+    })?;
+
+    // Read, transform, write — and if the value moved under it in between, do it
+    // again against what it moved to. `transform` is the script's own function,
+    // so it runs here on the worker; only the compare-and-set crosses to the
+    // main thread. That is what makes the whole thing atomic without a Lua
+    // function ever having to leave this thread: a competing write cannot land
+    // inside the read-modify-write, it can only lose the compare and send us
+    // round again.
+    state.set("mutate", {
+        let world = Rc::clone(world);
+        lua.create_async_function(move |lua, (key, transform): (String, mlua::Function)| {
+            let world = Rc::clone(&world);
+            async move {
+                let store = world
+                    .script_state()
+                    .await
+                    .map_err(|err| store_error("mutate", &err))?;
+                let mut current = store.get(&key).cloned();
+
+                for _ in 0..MUTATE_ATTEMPTS {
+                    let next = {
+                        let current = to_lua_value(&lua, current.as_ref())?;
+                        // `call_async`, so a transform that queries suspends
+                        // rather than wedging every other dispatch.
+                        let returned: Value = transform.call_async(current).await?;
+                        if returned.is_nil() {
+                            None
+                        } else {
+                            Some(from_lua_value(&lua, returned, "mutate")?)
+                        }
+                    };
+                    let write = ScriptStateWrite::compare_and_set(
+                        key.clone(),
+                        current.clone(),
+                        next.clone(),
+                    );
+                    match world
+                        .write_script_state(&write)
+                        .await
+                        .map_err(|err| store_error("mutate", &err))?
+                    {
+                        WriteOutcome::Applied { .. } => {
+                            return to_lua_value(&lua, next.as_ref());
+                        }
+                        // The refusal carries what the key holds now, which is
+                        // exactly what the next attempt has to transform.
+                        WriteOutcome::Conflict {
+                            current: overtaken, ..
+                        } => current = overtaken,
+                    }
+                }
+
+                Err(store_error(
+                    "mutate",
+                    &format!("'{key}' kept changing under it after {MUTATE_ATTEMPTS} attempts"),
+                ))
+            }
+        })?
+    })?;
+
+    paneru.set("state", state)?;
+    Ok(())
 }

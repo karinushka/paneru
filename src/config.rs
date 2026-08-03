@@ -45,26 +45,27 @@ pub mod swipe;
 /// built-in defaults.
 /// The TOML configuration file, if there is one to use.
 ///
-/// `None` means: no TOML exists and one should not be invented, because an
-/// `init.lua` is already doing the job. Planting a stub `paneru.toml` beside a
-/// Lua config is actively harmful — the stub becomes the authoritative config,
-/// so every option reverts to its default, and every later touch of that file
-/// re-applies those defaults over the running state.
+/// A Lua script wins outright: when an `init.lua` exists the TOML path is
+/// disabled entirely — no file is read, none is created, and none is watched.
+/// Two authoritative configs cannot coexist. Whatever the script does not set
+/// comes from [`Config::defaults`], not from a leftover `paneru.toml`, so a
+/// stale TOML can't quietly override the script or re-apply itself every time
+/// it is touched.
 ///
-/// Without a Lua script the stub is still created, so a first run has something
-/// to edit.
+/// Without a Lua script the TOML is discovered as usual, and a stub is created
+/// when none exists so a first run has something to edit.
 pub static CONFIGURATION_FILE: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
-    if let Some(path) = discover_configuration_file() {
-        return Some(path);
-    }
     #[cfg(feature = "lua")]
     if let Some(script) = discover_lua_file() {
         info!(
-            "{}: no TOML configuration; using defaults alongside {}",
+            "{}: {} is in charge; the TOML configuration is ignored",
             function_name!(),
             script.display()
         );
         return None;
+    }
+    if let Some(path) = discover_configuration_file() {
+        return Some(path);
     }
     Some(create_default_configuration_file().unwrap_or_else(|error| {
         panic!(
@@ -216,16 +217,30 @@ pub fn discover_lua_file() -> Option<PathBuf> {
 
 /// Returns the path to the Lua init script, creating a default one at the XDG
 /// location if none exists (so the watcher always has a real file to observe).
+///
+/// `Ok(None)` means there is no script and none should be created, because a
+/// `paneru.toml` already exists: a script disables the TOML outright (see
+/// [`CONFIGURATION_FILE`]), so planting one beside an existing TOML would
+/// silently throw that user's configuration away. Those setups keep using the
+/// TOML until they write an `init.lua` themselves.
 #[cfg(feature = "lua")]
-pub fn ensure_lua_file() -> std::io::Result<PathBuf> {
+pub fn ensure_lua_file() -> std::io::Result<Option<PathBuf>> {
     if let Some(path) = discover_lua_file() {
-        return Ok(path);
+        return Ok(Some(path));
+    }
+    if let Some(toml) = discover_configuration_file() {
+        info!(
+            "{}: {} is the active configuration; not creating a default init.lua",
+            function_name!(),
+            toml.display()
+        );
+        return Ok(None);
     }
     let path = default_lua_file()?;
     if create_lua_file_at(&path)? {
         info!("Created default Lua script at {}", path.display());
     }
-    Ok(path)
+    Ok(Some(path))
 }
 
 #[cfg(feature = "lua")]

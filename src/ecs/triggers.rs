@@ -1293,6 +1293,12 @@ pub(super) fn refresh_configuration_trigger(
             _ => continue,
         }
 
+        // An init.lua disables the TOML path entirely, so there is nothing here
+        // to reload — see `CONFIGURATION_FILE`.
+        if crate::config::CONFIGURATION_FILE.is_none() {
+            continue;
+        }
+
         for path in &event.paths {
             // The Lua init script shares this watcher and `ConfigRefresh` event;
             // it is reloaded separately by `lua_reload_system`. Skip it here so

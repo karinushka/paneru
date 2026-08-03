@@ -231,7 +231,8 @@ impl TryFrom<&Event> for LuaEvent {
             | Event::WindowCreated { .. }
             | Event::Command { .. }
             | Event::StateQuery { .. }
-            | Event::StateSubscribe { .. } => return Err(NotMarshallable),
+            | Event::StateSubscribe { .. }
+            | Event::ScriptState { .. } => return Err(NotMarshallable),
         })
     }
 }

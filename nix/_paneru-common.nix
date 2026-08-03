@@ -54,6 +54,7 @@ let
       name = "paneru-with-lua-wrapped";
       paths = [ package ];
       nativeBuildInputs = [ pkgs.makeWrapper ];
+      passthru = package.passthru;
       postBuild = ''
         wrapProgram $out/bin/paneru ${lib.escapeShellArgs makeWrapperArgs}
       '';

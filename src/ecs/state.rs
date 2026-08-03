@@ -520,7 +520,7 @@ impl QueryStateParams<'_, '_> {
                     kind: column_kind(column),
                     width_ratio,
                     selected,
-                    windows: std::rc::Rc::new(tiled),
+                    windows: std::sync::Arc::new(tiled),
                 });
             }
 
@@ -544,8 +544,8 @@ impl QueryStateParams<'_, '_> {
                     number: strip.virtual_index + 1,
                     native_id: strip.id(),
                     active: active_workspace,
-                    columns: std::rc::Rc::new(columns),
-                    floating: std::rc::Rc::new(floating),
+                    columns: std::sync::Arc::new(columns),
+                    floating: std::sync::Arc::new(floating),
                 });
         }
 
@@ -565,7 +565,7 @@ impl QueryStateParams<'_, '_> {
                         height: bounds.height(),
                     },
                     active,
-                    workspaces: std::rc::Rc::new(workspaces),
+                    workspaces: std::sync::Arc::new(workspaces),
                 }
             })
             .collect();

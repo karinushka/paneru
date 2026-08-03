@@ -19,12 +19,14 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use mlua::{Lua, Table, Value};
+use regex::Regex;
 use tracing::info;
 
 use paneru_lua as shared;
 
 use super::convert::LuaEvent;
-use super::{Outbox, SharedRegistry};
+use super::runtime::{Outbox, SharedRegistry};
+use super::windowset::LuaWindowSet;
 use crate::commands::Command;
 use crate::config::{Config, config_from_lua, resolve_chord};
 use crate::ecs::state::StateQueryKind;
@@ -37,6 +39,9 @@ pub(super) const QUERY_PROVIDER: &str = "paneru.query_provider";
 /// Installs the `paneru` API into `lua`, wiring the Rust-backed functions to the
 /// shared `outbox` (queued commands/flashes) and `registry` (registered handlers
 /// and chords).
+// One block per `paneru.*` function, kept flat so adding one is a local change
+// rather than a hunt across helpers.
+#[allow(clippy::too_many_lines)]
 pub(super) fn install(
     lua: &Lua,
     outbox: &Rc<RefCell<Outbox>>,
@@ -136,6 +141,85 @@ pub(super) fn install(
         })?
     };
     paneru.set("setup", setup)?;
+
+    // paneru.windows(fn) — xmonad's `windows`: hand the window set to `fn` and
+    // commit whatever it hands back. The same contract as a bind handler, for
+    // use partway through one.
+    let windows = {
+        let outbox = Rc::clone(outbox);
+        lua.create_function(move |lua, transform: mlua::Function| {
+            let window_set = lua.create_userdata(LuaWindowSet::lazy())?;
+            let returned: Value = transform.call(window_set)?;
+            let ops = match &returned {
+                Value::Nil => Vec::new(),
+                Value::UserData(data) => data.borrow::<LuaWindowSet>()?.ops(),
+                other => {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "paneru.windows: expected a window set back, got {}",
+                        other.type_name()
+                    )));
+                }
+            };
+            if ops.is_empty() {
+                return Ok(false);
+            }
+            outbox.borrow_mut().commands.push(Command::Layout(ops));
+            Ok(true)
+        })?
+    };
+    paneru.set("windows", windows)?;
+
+    // paneru.match{ app = …, bundle = …, title = …, floating = …, managed = … }
+    // — builds a predicate over window records, for `ws:find`/`ws:filter`.
+    // `app`, `bundle` and `title` are regular expressions, compiled here so a
+    // bad pattern is an error at startup rather than a handler that never
+    // matches anything.
+    let matcher = lua.create_function(|lua, spec: mlua::Table| {
+        let pattern = |field: &str| -> mlua::Result<Option<Regex>> {
+            let Some(pattern) = spec.get::<Option<String>>(field)? else {
+                return Ok(None);
+            };
+            Regex::new(&pattern)
+                .map(Some)
+                .map_err(|err| mlua::Error::RuntimeError(format!("paneru.match: {field}: {err}")))
+        };
+        let (app, bundle, title) = (pattern("app")?, pattern("bundle")?, pattern("title")?);
+        let floating: Option<bool> = spec.get("floating")?;
+        let managed: Option<bool> = spec.get("managed")?;
+
+        for entry in spec.pairs::<String, Value>() {
+            let (key, _) = entry?;
+            if !matches!(
+                key.as_str(),
+                "app" | "bundle" | "title" | "floating" | "managed"
+            ) {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "paneru.match: unknown field '{key}'"
+                )));
+            }
+        }
+
+        lua.create_function(move |_, window: mlua::Table| {
+            let matches = |regex: &Option<Regex>, field: &str| -> mlua::Result<bool> {
+                let Some(regex) = regex else {
+                    return Ok(true);
+                };
+                Ok(regex.is_match(&window.get::<String>(field)?))
+            };
+            let flag = |want: Option<bool>, field: &str| -> mlua::Result<bool> {
+                match want {
+                    Some(want) => Ok(window.get::<bool>(field)? == want),
+                    None => Ok(true),
+                }
+            };
+            Ok(matches(&app, "app_name")?
+                && matches(&bundle, "bundle_id")?
+                && matches(&title, "title")?
+                && flag(floating, "floating")?
+                && flag(managed, "managed")?)
+        })
+    })?;
+    paneru.set("match", matcher)?;
 
     Ok(())
 }

@@ -43,15 +43,35 @@ pub mod swipe;
 /// If no configuration file is found, a minimal one is created in the user's
 /// XDG configuration directory so a fresh app installation can start with the
 /// built-in defaults.
-pub static CONFIGURATION_FILE: LazyLock<PathBuf> = LazyLock::new(|| {
-    discover_configuration_file().unwrap_or_else(|| {
-        create_default_configuration_file().unwrap_or_else(|error| {
-            panic!(
-                "{}: Unable to create default configuration: {error}",
-                function_name!()
-            )
-        })
-    })
+/// The TOML configuration file, if there is one to use.
+///
+/// `None` means: no TOML exists and one should not be invented, because an
+/// `init.lua` is already doing the job. Planting a stub `paneru.toml` beside a
+/// Lua config is actively harmful — the stub becomes the authoritative config,
+/// so every option reverts to its default, and every later touch of that file
+/// re-applies those defaults over the running state.
+///
+/// Without a Lua script the stub is still created, so a first run has something
+/// to edit.
+pub static CONFIGURATION_FILE: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
+    if let Some(path) = discover_configuration_file() {
+        return Some(path);
+    }
+    #[cfg(feature = "lua")]
+    if let Some(script) = discover_lua_file() {
+        info!(
+            "{}: no TOML configuration; using defaults alongside {}",
+            function_name!(),
+            script.display()
+        );
+        return None;
+    }
+    Some(create_default_configuration_file().unwrap_or_else(|error| {
+        panic!(
+            "{}: Unable to create default configuration: {error}",
+            function_name!()
+        )
+    }))
 });
 
 const DEFAULT_CONFIGURATION: &str = "# Paneru configuration\n\n[options]\n\n[bindings]\n";
@@ -137,10 +157,14 @@ const DEFAULT_LUA_SCRIPT: &str = "\
 -- Hook into window-manager events:
 --   paneru.on(\"window_focused\", function(e) paneru.log(\"focused \" .. e.window_id) end)
 --
--- Bind keys to commands or Lua functions (chord syntax matches [bindings]):
+-- Bind keys to commands (chord syntax matches [bindings]):
 --   paneru.bind(\"alt - b\", \"window balance\")
---   paneru.bind(\"alt - j\", function(state)
---     if state.focused then paneru.run(\"window focus east\") end
+--
+-- ...or to a function. Handlers are given the whole layout as a value they can
+-- transform; nothing moves until you return one, so computing a layout and
+-- discarding it costs nothing. See CONFIGURATION.md.
+--   paneru.bind(\"alt - j\", function(ws)
+--     return ws:focus(ws:east(ws:focused()))
 --   end)
 ";
 
@@ -290,6 +314,29 @@ impl Config {
         Ok(Config {
             inner: Arc::new(ArcSwap::from_pointee(InnerConfig::new(&input)?)),
         })
+    }
+
+    /// The configuration with every option left at its default. Used when there
+    /// is no TOML file, which with a Lua config is the normal case rather than
+    /// an error — see [`CONFIGURATION_FILE`].
+    ///
+    /// Parses the same text the stub file would have contained, so "no TOML"
+    /// and "the TOML we would have written" cannot mean different things. An
+    /// empty string will not do: `[options]` is a required table.
+    pub fn defaults() -> Result<Self> {
+        Ok(Config {
+            inner: Arc::new(ArcSwap::from_pointee(InnerConfig::new(
+                DEFAULT_CONFIGURATION,
+            )?)),
+        })
+    }
+
+    /// Loads `path` if there is one, otherwise falls back to the defaults.
+    pub fn load(path: Option<&Path>) -> Result<Self> {
+        match path {
+            Some(path) => Self::new(path),
+            None => Self::defaults(),
+        }
     }
 
     /// Reloads the configuration from the specified path, updating the internal options and keybindings.
@@ -1283,11 +1330,13 @@ pub(crate) fn config_from_lua(lua: &mlua::Lua, value: mlua::Value) -> mlua::Resu
             .any(|params| !params.bindings_passthrough.is_empty())
     });
     if needs_keys {
-        let virtual_keys = generate_virtual_keymap();
+        // The primed keymap, not a fresh one: this runs on the Lua worker, and
+        // generating it goes through Carbon/TIS. See [`prime_virtual_keymap`].
+        let virtual_keys = virtual_keymap();
         if let Some(windows) = &mut inner.windows {
             for params in windows.values_mut() {
                 for chord in &params.bindings_passthrough {
-                    match resolve_keybinding_str(chord, &virtual_keys) {
+                    match resolve_keybinding_str(chord, virtual_keys) {
                         Ok(pair) => params.parsed_passthrough.push(pair),
                         Err(err) => error!("paneru.setup passthrough: {err}"),
                     }
@@ -1309,14 +1358,38 @@ pub(crate) fn config_from_lua(lua: &mlua::Lua, value: mlua::Value) -> mlua::Resu
 #[cfg(feature = "lua")]
 pub(crate) fn resolve_chord(input: &str) -> Result<(u8, Modifiers)> {
     // Fast path: resolve against the built-in keymaps first. This avoids the
-    // Carbon/TIS FFI (which is main-thread/GUI-session sensitive) for the common
-    // case and keeps `paneru.bind` usable in headless unit tests.
+    // virtual keymap entirely for the common case and keeps `paneru.bind`
+    // usable in headless unit tests.
     if let Ok(resolved) = resolve_keybinding_str(input, &[]) {
         return Ok(resolved);
     }
     // Fall back to the layout-aware virtual keymap for layout-specific keys.
-    let virtual_keys = generate_virtual_keymap();
-    resolve_keybinding_str(input, &virtual_keys)
+    resolve_keybinding_str(input, virtual_keymap())
+}
+
+/// The layout-aware virtual keymap, computed once.
+///
+/// [`generate_virtual_keymap`] goes through Carbon/TIS, which is
+/// main-thread/GUI-session sensitive, and its `paneru.bind` caller now runs on
+/// the Lua worker thread — at script load and again on every hot reload. So the
+/// daemon primes this from the main thread during startup and the worker only
+/// ever reads what it left behind.
+#[cfg(feature = "lua")]
+static VIRTUAL_KEYMAP: std::sync::OnceLock<Vec<(String, u8)>> = std::sync::OnceLock::new();
+
+/// Computes the virtual keymap now, on the calling thread. Call once from the
+/// main thread before anything can reach [`resolve_chord`].
+#[cfg(feature = "lua")]
+pub(crate) fn prime_virtual_keymap() {
+    let _ = VIRTUAL_KEYMAP.set(generate_virtual_keymap());
+}
+
+/// The primed keymap. Falls back to computing it in place if priming never
+/// happened, which outside the daemon (unit tests) is both harmless and rare —
+/// the fast path above means only layout-specific keys get this far.
+#[cfg(feature = "lua")]
+fn virtual_keymap() -> &'static [(String, u8)] {
+    VIRTUAL_KEYMAP.get_or_init(generate_virtual_keymap)
 }
 
 /// Resolves a keybinding string like `"ctrl+alt-h"` into a `(keycode, Modifiers)` pair.
@@ -2063,6 +2136,19 @@ fn test_first_launch_creates_parseable_config_without_overwriting_it() {
 }
 
 #[test]
+fn defaults_config_matches_the_generated_stub() {
+    // `Config::defaults()` stands in for a TOML that isn't there, so it has to
+    // mean the same thing as the stub that would otherwise have been written.
+    let stub = InnerConfig::new(DEFAULT_CONFIGURATION).expect("the stub should parse");
+    let defaults = Config::defaults().expect("defaults should always build");
+    assert_eq!(
+        format!("{stub:?}"),
+        format!("{:?}", defaults.inner.load()),
+        "a missing TOML should behave exactly like the generated stub"
+    );
+}
+
+#[test]
 fn test_window_rules_manage() {
     let input = r#"
 [options]
@@ -2182,11 +2268,11 @@ mod lua_setup_tests {
     #[test]
     fn setup_table_populates_accessors() {
         let config = config_from_source(
-            r#"return {
+            r"return {
                 default_workspaces = 3,
                 options = { sliver_width = 9, focus_follows_mouse = false },
                 padding = { top = 10, bottom = 4 },
-            }"#,
+            }",
         );
         assert_eq!(config.default_workspaces(), 3);
         assert_eq!(config.sliver_width(), 9);
@@ -2199,7 +2285,7 @@ mod lua_setup_tests {
     fn missing_options_and_bindings_are_ok() {
         // Regression guard for the `#[serde(default)]` fix: a table that omits
         // `options` and `bindings` must still deserialize.
-        let config = config_from_source(r#"return { padding = { top = 4 } }"#);
+        let config = config_from_source(r"return { padding = { top = 4 } }");
         assert_eq!(config.default_workspaces(), 1);
         assert_eq!(config.edge_padding().0, 4);
     }

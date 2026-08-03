@@ -857,7 +857,8 @@ fn mid_strip_slot(
     (index, moved_left - chosen_layout_x)
 }
 
-/// Handles the keybinding for switching between virtual workspaces.
+/// Handles the keybinding for switching between virtual workspaces. Moving South
+/// creates a new workspace if the current one is populated and auto-create is on.
 #[instrument(level = Level::DEBUG, skip_all)]
 #[allow(clippy::needless_pass_by_value)]
 fn switch_virtual_workspace_bind(
@@ -887,7 +888,27 @@ fn switch_virtual_workspace_bind(
 
     let current_index = rows.iter().position(|(_, _, active)| *active).unwrap_or(0);
     let next_index = match operation {
-        Operation::Virtual(Direction::South) => (current_index + 1).clamp(0, rows.len() - 1),
+        Operation::Virtual(Direction::South) => {
+            if current_index + 1 < rows.len() {
+                current_index + 1
+            } else if active_display.active_strip().len() != 0
+                && config.create_workspace_automatically()
+            {
+                let target_index = rows[current_index].1.virtual_index + 1;
+                commands.spawn_layout_strip(
+                    LayoutStrip::new(workspace_id, target_index),
+                    active_display.bounds().min,
+                    active_display.entity(),
+                    true,
+                );
+                if config.workspace_popup_status() {
+                    commands.flash_message(format!("{}", target_index + 1), 1.0);
+                }
+                return;
+            } else {
+                current_index
+            }
+        }
         Operation::Virtual(Direction::North) => current_index.saturating_sub(1),
         Operation::VirtualNumber(target_virtual_index) => {
             let Some(index) = rows
@@ -936,12 +957,16 @@ fn switch_virtual_workspace_bind(
 }
 
 /// Handles the keybinding to move windows between virtual workspaces.
+/// Missing destinations are created by `handle_virtual_window_moves`. South at
+/// the last row only proceeds when `create_workspace_automatically` is on;
+/// numbered targets always may create (except index 0).
 #[instrument(level = Level::DEBUG, skip_all)]
 #[allow(clippy::needless_pass_by_value)]
 fn move_virtual_workspace_bind(
     mut messages: MessageReader<Event>,
     windows: Windows,
     active_display: ActiveDisplay,
+    workspaces: Query<(Entity, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     config: Res<Config>,
     mut commands: Commands,
 ) {
@@ -959,13 +984,26 @@ fn move_virtual_workspace_bind(
         return;
     };
 
+    let mut rows = workspaces
+        .iter()
+        .filter(|(_, strip, _)| strip.id() == active_display.active_strip().id())
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|(_, strip, _)| strip.virtual_index);
+
     let current_virtual_index = active_display.active_strip().virtual_index;
+    let current_index = rows.iter().position(|(_, _, active)| *active).unwrap_or(0);
 
     let (target_virtual_index, move_focus) = match operation {
         Operation::VirtualMove(Direction::South, move_focus)
             if active_display.active_strip().len() > 1 =>
         {
-            (current_virtual_index + 1, *move_focus)
+            if current_index + 1 < rows.len() {
+                (rows[current_index + 1].1.virtual_index, *move_focus)
+            } else if config.create_workspace_automatically() {
+                (current_virtual_index + 1, *move_focus)
+            } else {
+                return;
+            }
         }
         Operation::VirtualMove(Direction::North, move_focus) => {
             if current_virtual_index == 0 {
@@ -975,6 +1013,11 @@ fn move_virtual_workspace_bind(
         }
         Operation::VirtualMoveNumber(target_virtual_index, move_focus) => {
             if *target_virtual_index == current_virtual_index {
+                return;
+            }
+            if *target_virtual_index == 0
+                && !rows.iter().any(|(_, strip, _)| strip.virtual_index == 0)
+            {
                 return;
             }
             (*target_virtual_index, *move_focus)
@@ -1200,15 +1243,11 @@ fn reap_empty_virtual_workspaces(
         return;
     }
 
-    let primary_entity = rows[0].0;
+    // Do not reap the strip that just became active. Switching/creating onto an
+    // empty virtual workspace is intentional (e.g. South auto-create); only
+    // empty rows left behind should be removed.
     for (entity, strip) in rows {
-        if strip.virtual_index > 0 && strip.len() == 0 {
-            if entity == changed_entity {
-                debug!("moving markers from despawned virtual workspace to primary");
-                if let Ok(mut entity_commands) = commands.get_entity(primary_entity) {
-                    entity_commands.try_insert(ActiveWorkspaceMarker);
-                }
-            }
+        if entity != changed_entity && strip.virtual_index > 0 && strip.len() == 0 {
             if let Ok(mut entity_commands) = commands.get_entity(entity) {
                 entity_commands.try_despawn();
             }

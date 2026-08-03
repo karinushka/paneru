@@ -1240,14 +1240,38 @@ where
 #[cfg(feature = "lua")]
 pub(crate) fn resolve_chord(input: &str) -> Result<(u8, Modifiers)> {
     // Fast path: resolve against the built-in keymaps first. This avoids the
-    // Carbon/TIS FFI (which is main-thread/GUI-session sensitive) for the common
-    // case and keeps `paneru.bind` usable in headless unit tests.
+    // virtual keymap entirely for the common case and keeps `paneru.bind`
+    // usable in headless unit tests.
     if let Ok(resolved) = resolve_keybinding_str(input, &[]) {
         return Ok(resolved);
     }
     // Fall back to the layout-aware virtual keymap for layout-specific keys.
-    let virtual_keys = generate_virtual_keymap();
-    resolve_keybinding_str(input, &virtual_keys)
+    resolve_keybinding_str(input, virtual_keymap())
+}
+
+/// The layout-aware virtual keymap, computed once.
+///
+/// [`generate_virtual_keymap`] goes through Carbon/TIS, which is
+/// main-thread/GUI-session sensitive, and its `paneru.bind` caller now runs on
+/// the Lua worker thread — at script load and again on every hot reload. So the
+/// daemon primes this from the main thread during startup and the worker only
+/// ever reads what it left behind.
+#[cfg(feature = "lua")]
+static VIRTUAL_KEYMAP: std::sync::OnceLock<Vec<(String, u8)>> = std::sync::OnceLock::new();
+
+/// Computes the virtual keymap now, on the calling thread. Call once from the
+/// main thread before anything can reach [`resolve_chord`].
+#[cfg(feature = "lua")]
+pub(crate) fn prime_virtual_keymap() {
+    let _ = VIRTUAL_KEYMAP.set(generate_virtual_keymap());
+}
+
+/// The primed keymap. Falls back to computing it in place if priming never
+/// happened, which outside the daemon (unit tests) is both harmless and rare —
+/// the fast path above means only layout-specific keys get this far.
+#[cfg(feature = "lua")]
+fn virtual_keymap() -> &'static [(String, u8)] {
+    VIRTUAL_KEYMAP.get_or_init(generate_virtual_keymap)
 }
 
 /// Resolves a keybinding string like `"ctrl+alt-h"` into a `(keycode, Modifiers)` pair.

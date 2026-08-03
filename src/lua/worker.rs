@@ -134,7 +134,16 @@ impl LuaWorker {
             let has_handlers = Arc::clone(&has_handlers);
             std::thread::Builder::new()
                 .name("paneru-lua".to_string())
-                .spawn(move || run(source, &from_main, &to_main, &query_tx, &has_handlers, &ready_tx))
+                .spawn(move || {
+                    run(
+                        &source,
+                        &from_main,
+                        &to_main,
+                        &query_tx,
+                        &has_handlers,
+                        &ready_tx,
+                    );
+                })
                 .expect("spawning the Lua worker thread")
         };
         // An error here means the thread died before finishing the load, which
@@ -255,14 +264,14 @@ fn flash(to_main: &Sender<FromLua>, message: String, duration: f32) {
 /// The worker thread itself: load, then dispatch whatever arrives until the
 /// main thread goes away.
 fn run(
-    source: LuaSource,
+    source: &LuaSource,
     from_main: &Receiver<ToLua>,
     to_main: &Sender<FromLua>,
     queries: &Sender<QueryRequest>,
     has_handlers: &AtomicBool,
     ready: &Sender<()>,
 ) {
-    let mut runtime = load(&source);
+    let mut runtime = load(source);
     has_handlers.store(runtime.has_event_handlers(), Ordering::Relaxed);
     let _ = ready.send(());
 
@@ -397,16 +406,17 @@ mod tests {
             panic!("expected a command");
         };
         assert!(
-            matches!(command, Command::Window(crate::commands::Operation::Balance)),
+            matches!(
+                command,
+                Command::Window(crate::commands::Operation::Balance)
+            ),
             "expected a balance command, got {command:?}"
         );
     }
 
     #[test]
     fn event_dispatch_reaches_the_outbox() {
-        let worker = worker(
-            r#"paneru.on("space_changed", function(e) paneru.flash(e.type) end)"#,
-        );
+        let worker = worker(r#"paneru.on("space_changed", function(e) paneru.flash(e.type) end)"#);
         assert!(worker.has_event_handlers());
         worker.send_events(vec![LuaEvent::SpaceChanged]);
         assert_eq!(next_flash(&worker, "the event flash"), "space_changed");
@@ -548,6 +558,9 @@ mod tests {
             std::thread::sleep(SHUTDOWN_POLL);
             waited += SHUTDOWN_POLL;
         }
-        assert!(thread.is_finished(), "the worker should stop with its handle");
+        assert!(
+            thread.is_finished(),
+            "the worker should stop with its handle"
+        );
     }
 }

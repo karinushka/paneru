@@ -445,13 +445,6 @@ impl QueryStateParams<'_, '_> {
             &self.config,
         )
     }
-
-    /// The window access, for callers that also need it directly — the Lua
-    /// keybind dispatcher builds its own snapshot from it.
-    #[cfg(feature = "lua")]
-    pub fn windows(&self) -> &Windows<'_, '_> {
-        &self.windows
-    }
 }
 
 pub trait QueryState: std::marker::Sized {

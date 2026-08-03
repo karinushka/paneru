@@ -7,287 +7,58 @@
 //! and mutate the window manager by issuing commands through `paneru.run`, which
 //! are funnelled back onto the existing command bus.
 //!
-//! `mlua::Lua` is `!Send`, so [`LuaRuntime`] lives as a `NonSend` resource and is
-//! only ever touched from the main-thread schedules. Every system takes it as
-//! `Option<NonSendMut<LuaRuntime>>` so the mock test harness (which never inserts
-//! a runtime) keeps compiling and the systems gracefully no-op.
+//! The interpreter does not run here. It runs on a thread of its own (see
+//! [`worker`]), because a handler is arbitrary user code of unbounded duration
+//! and the main thread is where the Cocoa event pump lives — a script that
+//! takes a second used to freeze dragging, focus tracking and the menubar for
+//! that second. This module is the ECS half either side of that channel: the
+//! systems that collect events out of the world and hand them over, answer the
+//! `paneru.query*` round-trip from the live world, and put what the callbacks
+//! queued back onto the command bus.
+//!
+//! Two consequences worth knowing:
+//!
+//! * A handler that calls `paneru.query*` sees data up to about a frame stale,
+//!   and waits about that long for it. Extraction is lazy, so a script that
+//!   never queries never pays either cost.
+//! * Commands a handler issues reach the command handlers one frame later than
+//!   they did when dispatch was synchronous.
+//!
+//! Every system takes the worker as `Option<Res<LuaWorker>>` so the mock test
+//! harness (which never starts one) keeps compiling and the systems gracefully
+//! no-op.
 
 mod api;
 mod convert;
+mod runtime;
+mod windowset;
+mod worker;
 
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 
-use bevy::app::{App, Plugin, PreUpdate, Update};
+use bevy::app::{App, Plugin, PostUpdate, PreUpdate, Update};
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::resource::Resource;
+use bevy::ecs::schedule::IntoScheduleConfigs;
 use bevy::ecs::system::{Commands, NonSendMut, Query, Res};
-use mlua::{Function, IntoLua, Lua, LuaSerdeExt, Table, Value};
 use notify::Watcher;
-use tracing::{error, info, warn};
 
 use crate::commands::Command;
 use crate::config::Config;
 use crate::ecs::params::Windows;
-use crate::ecs::state::{PaneruQueryState, QueryStateParams, StateQueryKind};
+use crate::ecs::state::QueryStateParams;
 use crate::ecs::{SendMessageTrigger, SpawnCommandsExt, apply_config_side_effects};
 use crate::events::Event;
 use crate::manager::{Application, Display, WindowManager};
-use crate::platform::Modifiers;
-use crate::platform::input::set_lua_keybinds;
 use crate::util::symlink_target;
 
-/// A Lua-registered keybind: `(keycode, modifiers, handler_id)`.
-pub(super) type LuaKeybind = (u8, Modifiers, u32);
-
-/// Prepends `PANERU_LUA_PATH`/`PANERU_LUA_CPATH` (if set) onto `package.path`/
-/// `package.cpath`, so `require("sbar")` (or any module supplied via the Nix
-/// `extraLuaPackages` option) resolves. Each var is itself a `;`-separated
-/// list of Lua path templates - the same shape `package.path` already uses -
-/// so nixpkgs' `getLuaPath`/`getLuaCPath` output passes straight through with
-/// no reformatting.
-fn extend_lua_search_paths(lua: &Lua) -> mlua::Result<()> {
-    let package: Table = lua.globals().get("package")?;
-    prepend_env_path(&package, "path", "PANERU_LUA_PATH")?;
-    prepend_env_path(&package, "cpath", "PANERU_LUA_CPATH")?;
-    Ok(())
-}
-
-/// Prepends `$env_var`'s value onto `package[field]`, so caller-supplied
-/// modules are found before Lua's compiled-in defaults.
-fn prepend_env_path(package: &Table, field: &str, env_var: &str) -> mlua::Result<()> {
-    let Ok(extra) = std::env::var(env_var) else {
-        return Ok(());
-    };
-    let extra = extra.trim_matches(';');
-    if extra.is_empty() {
-        return Ok(());
-    }
-    let existing: String = package.get(field)?;
-    package.set(field, format!("{extra};{existing}"))?;
-    Ok(())
-}
-
-/// Everything the script registered, kept on the Rust side so dispatch never
-/// has to reach back into Lua globals to find a callback.
-#[derive(Default)]
-pub(super) struct Registry {
-    /// `paneru.on` handlers, in registration order per event name.
-    handlers: HashMap<String, Vec<Function>>,
-    /// `paneru.bind` handlers indexed by `id - 1`: a Lua function, or a command
-    /// string to run as-is.
-    binds: Vec<Value>,
-    /// Chords parallel to `binds`, for publishing to the event-tap registry.
-    keybinds: Vec<LuaKeybind>,
-}
-
-/// Shared handle to the [`Registry`], captured by the registration closures and
-/// read back when dispatching.
-pub(super) type SharedRegistry = Rc<RefCell<Registry>>;
-
-/// Pending side effects produced by Lua callbacks, drained after each dispatch.
-#[derive(Default)]
-pub(super) struct Outbox {
-    /// Commands queued via `paneru.run` / `paneru.cmd`.
-    commands: Vec<Command>,
-    /// Flash messages queued via `paneru.flash` as `(message, duration_secs)`.
-    flashes: Vec<(String, f32)>,
-}
+use worker::FromLua;
+pub use worker::{LuaSource, LuaWorker};
 
 /// The Lua init-script path, kept as a resource so the reload system knows which
 /// watched file to react to.
 #[derive(Resource, Debug, Clone)]
 pub struct LuaScriptPath(pub PathBuf);
-
-/// The embedded Lua runtime and its shared registration state.
-pub struct LuaRuntime {
-    lua: Lua,
-    outbox: Rc<RefCell<Outbox>>,
-    registry: SharedRegistry,
-    /// The `Config` a script declared via `paneru.setup{...}`, if it called it.
-    /// `None` means the script left configuration to the TOML file.
-    built_config: Option<Config>,
-}
-
-impl LuaRuntime {
-    /// Builds a runtime by reading and executing the script at `path`.
-    pub fn from_file(path: &Path) -> mlua::Result<Self> {
-        let source = std::fs::read_to_string(path).map_err(mlua::Error::external)?;
-        Self::from_source(&source)
-    }
-
-    /// Builds a runtime from Lua source, installing the `paneru` API and
-    /// executing the script. Registered keybinds are collected for publishing.
-    pub fn from_source(source: &str) -> mlua::Result<Self> {
-        // SAFETY: the runtime is only ever used from the main thread, so it's safe to
-        let lua = unsafe { Lua::unsafe_new() };
-        extend_lua_search_paths(&lua)?;
-        let outbox = Rc::new(RefCell::new(Outbox::default()));
-        let registry = SharedRegistry::default();
-        let config_cell: Rc<RefCell<Option<Config>>> = Rc::new(RefCell::new(None));
-        api::install(&lua, &outbox, &registry, &config_cell)?;
-        lua.load(source).exec()?;
-        // The cell is only written by `paneru.setup`; take the built config out so
-        // the runtime owns it directly rather than keeping the shared cell alive.
-        let built_config = config_cell.borrow_mut().take();
-        Ok(Self {
-            lua,
-            outbox,
-            registry,
-            built_config,
-        })
-    }
-
-    fn lua(&self) -> &Lua {
-        &self.lua
-    }
-
-    /// The `(keycode, modifiers, id)` keybinds registered by the script, for
-    /// publishing to the event-tap registry.
-    pub fn published_keybinds(&self) -> Vec<LuaKeybind> {
-        self.registry.borrow().keybinds.clone()
-    }
-
-    /// The `Config` the script declared via `paneru.setup{...}`, or `None` if it
-    /// never called it (in which case the TOML config remains authoritative).
-    pub fn built_config(&self) -> Option<&Config> {
-        self.built_config.as_ref()
-    }
-
-    /// Whether the script registered any `paneru.on` handler. Building the Lua
-    /// table for an event is the costly step, so a script that only binds keys
-    /// pays nothing for events it can never observe.
-    fn has_event_handlers(&self) -> bool {
-        !self.registry.borrow().handlers.is_empty()
-    }
-
-    /// Runs every `paneru.on(name, ...)` handler. Handlers are cloned out of the
-    /// registry first so a handler that registers another one cannot deadlock on
-    /// the borrow. One failing handler does not stop the rest.
-    fn dispatch_event(&self, name: &str, event: &Table) {
-        let handlers = self
-            .registry
-            .borrow()
-            .handlers
-            .get(name)
-            .cloned()
-            .unwrap_or_default();
-        for handler in handlers {
-            if let Err(err) = handler.call::<()>(event.clone()) {
-                error!("lua event handler '{name}': {err}");
-            }
-        }
-    }
-
-    /// Runs the handler bound to keybind `id`: a Lua function gets the state
-    /// snapshot, a command string goes straight onto the outbox.
-    fn dispatch_bind(&self, id: u32, state: Table) {
-        let handler = id
-            .checked_sub(1)
-            .and_then(|index| self.registry.borrow().binds.get(index as usize).cloned());
-        match handler {
-            Some(Value::Function(handler)) => {
-                if let Err(err) = handler.call::<()>(state) {
-                    error!("lua keybind handler {id}: {err}");
-                }
-            }
-            Some(Value::String(command)) => {
-                let command = command.to_string_lossy();
-                let argv: Vec<&str> = command.split_whitespace().collect();
-                match crate::config::parse_command(&argv) {
-                    Ok(command) => self.outbox.borrow_mut().commands.push(command),
-                    Err(err) => error!("lua keybind {id} command '{command}': {err}"),
-                }
-            }
-            _ => warn!("lua keybind {id} has no handler"),
-        }
-    }
-
-    /// Drains queued commands and flash messages onto the command bus.
-    fn apply(&self, commands: &mut Commands) {
-        let mut outbox = self.outbox.borrow_mut();
-        for command in outbox.commands.drain(..) {
-            commands.trigger(SendMessageTrigger(Event::Command { command }));
-        }
-        for (message, duration) in outbox.flashes.drain(..) {
-            commands.flash_message(message, duration);
-        }
-    }
-
-    /// Runs `body` with `paneru.query*` able to answer from the live world.
-    ///
-    /// The provider is a scoped Lua function borrowing `extract`, so it exists
-    /// only while `body` runs: outside a callback there is no world access at
-    /// all, and `paneru.query` says so rather than handing back a stale
-    /// snapshot. `extract` is called lazily and at most once per dispatch — it
-    /// reads every window's title over the accessibility API, so a script that
-    /// never queries never pays for it, however hot the event.
-    fn with_query<R>(
-        &self,
-        extract: &dyn Fn() -> Result<PaneruQueryState, String>,
-        body: impl FnOnce() -> R,
-    ) -> mlua::Result<R> {
-        let cached: RefCell<Option<Rc<PaneruQueryState>>> = RefCell::new(None);
-        let result = self.lua.scope(|scope| {
-            let provider = scope.create_function(|lua, (kind, as_json): (String, bool)| {
-                let kind = StateQueryKind::parse(&kind).ok_or_else(|| {
-                    mlua::Error::RuntimeError(format!("paneru.query: unknown kind '{kind}'"))
-                })?;
-                let state = {
-                    let mut cached = cached.borrow_mut();
-                    if cached.is_none() {
-                        *cached = Some(Rc::new(extract().map_err(|err| {
-                            mlua::Error::RuntimeError(format!("paneru.query: {err}"))
-                        })?));
-                    }
-                    cached.clone().expect("just filled in")
-                };
-                if as_json {
-                    state
-                        .to_query_json(kind)
-                        .map_err(mlua::Error::external)?
-                        .into_lua(lua)
-                } else {
-                    let value = state.to_query_value(kind).map_err(mlua::Error::external)?;
-                    lua.to_value(&value)
-                }
-            })?;
-            self.lua
-                .set_named_registry_value(api::QUERY_PROVIDER, provider)?;
-            Ok(body())
-        });
-        // Whatever happened, the scoped function is dead once the scope ends.
-        self.lua.unset_named_registry_value(api::QUERY_PROVIDER)?;
-        result
-    }
-
-    /// Runs `body` with `paneru.query*` wired to the live world, logs any
-    /// failure under `context`, then flushes the commands and flash messages its
-    /// callbacks queued. The shared tail of both dispatch systems, which differ
-    /// only in what they collect up front and what `body` does with it.
-    fn dispatch_with_world(
-        &self,
-        context: &str,
-        state: &QueryStateParams<'_, '_>,
-        commands: &mut Commands,
-        body: impl FnOnce(),
-    ) {
-        let extract = || state.extract().map_err(|err| err.to_string());
-        if let Err(err) = self.with_query(&extract, body) {
-            error!("lua {context}: {err}");
-        }
-        self.apply(commands);
-    }
-
-    /// An empty runtime (no handlers, no binds). Used as a fallback when the
-    /// init script fails to load, so the resource always exists and a later
-    /// hot reload can install a fixed script.
-    pub fn empty() -> Self {
-        Self::from_source("").expect("empty Lua runtime should always build")
-    }
-}
 
 /// Registers the Lua runtime systems. Added only in the real app, not the mock
 /// test harness.
@@ -295,58 +66,53 @@ pub struct LuaPlugin;
 
 impl Plugin for LuaPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(PreUpdate, command_lua_handler);
+        app.add_systems(
+            PreUpdate,
+            (
+                // Before the pump so a query left outstanding from last frame is
+                // answered before the main thread goes back to sleep waiting on
+                // Cocoa.
+                serve_lua_queries.before(crate::ecs::systems::pump_events),
+                drain_lua_outbox,
+                command_lua_handler,
+            ),
+        );
+        // ...and again after everything, for queries a handler made during this
+        // frame's `Update` dispatch.
+        app.add_systems(PostUpdate, serve_lua_queries);
         app.add_systems(Update, (dispatch_lua_events, lua_reload_system));
     }
 }
 
-/// Forwards window-manager events to registered `paneru.on` callbacks.
+/// Forwards window-manager events to the worker for dispatch to `paneru.on`
+/// callbacks.
 #[allow(clippy::needless_pass_by_value)]
-pub fn dispatch_lua_events(
-    runtime: Option<NonSendMut<LuaRuntime>>,
-    mut reader: MessageReader<Event>,
-    state: QueryStateParams,
-    mut commands: Commands,
-) {
-    let Some(runtime) = runtime else {
+pub fn dispatch_lua_events(worker: Option<Res<LuaWorker>>, mut reader: MessageReader<Event>) {
+    let Some(worker) = worker else {
         return;
     };
-    let runtime = &*runtime;
     // No `paneru.on` handlers means no consumer for any of these events, so skip
-    // marshalling them into Lua tables entirely — just advance past them.
-    if !runtime.has_event_handlers() {
+    // extracting them entirely — just advance past them.
+    if !worker.has_event_handlers() {
         for _ in reader.read() {}
         return;
     }
-    // Marshalled up front: the events cannot be read while the dispatch scope
-    // below borrows the world for `paneru.query`.
-    let events: Vec<(String, Table)> = reader
+    let events: Vec<convert::LuaEvent> = reader
         .read()
-        .filter_map(|event| convert::event_to_lua(runtime.lua(), event))
+        .filter_map(|event| convert::LuaEvent::try_from(event).ok())
         .collect();
     if events.is_empty() {
         return;
     }
-    runtime.dispatch_with_world("event dispatch", &state, &mut commands, || {
-        for (name, table) in &events {
-            runtime.dispatch_event(name, table);
-        }
-    });
+    worker.send_events(events);
 }
 
-/// Handles `Command::Lua(id)` by invoking the bound Lua callback with a state
-/// snapshot, then draining any commands it queued.
+/// Handles `Command::Lua(id)` by handing the bound callback to the worker.
 #[allow(clippy::needless_pass_by_value)]
-pub fn command_lua_handler(
-    runtime: Option<NonSendMut<LuaRuntime>>,
-    mut reader: MessageReader<Event>,
-    state: QueryStateParams,
-    mut commands: Commands,
-) {
-    let Some(runtime) = runtime else {
+pub fn command_lua_handler(worker: Option<Res<LuaWorker>>, mut reader: MessageReader<Event>) {
+    let Some(worker) = worker else {
         return;
     };
-    let runtime = &*runtime;
     let ids: Vec<u32> = reader
         .read()
         .filter_map(|event| match event {
@@ -359,36 +125,79 @@ pub fn command_lua_handler(
     if ids.is_empty() {
         return;
     }
-    let snapshot = match convert::state_snapshot(runtime.lua(), state.windows()) {
-        Ok(snapshot) => snapshot,
-        Err(err) => {
-            error!("lua state snapshot: {err}");
-            return;
-        }
-    };
-    runtime.dispatch_with_world("keybind dispatch", &state, &mut commands, || {
-        for id in ids {
-            runtime.dispatch_bind(id, snapshot.clone());
-        }
-    });
+    worker.send_binds(ids);
 }
 
-/// Rebuilds the Lua runtime when the init script changes, committing atomically
-/// only on success so a broken edit never tears down the working setup.
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
-pub fn lua_reload_system(
-    mut runtime: Option<NonSendMut<LuaRuntime>>,
-    script_path: Option<Res<LuaScriptPath>>,
-    mut reader: MessageReader<Event>,
-    window_manager: Res<WindowManager>,
-    mut watcher: Option<NonSendMut<Box<dyn Watcher>>>,
+/// Answers the `paneru.query*` calls waiting on the world.
+///
+/// This is the whole of the worker's world access: it asks over a channel and
+/// blocks on the reply while the main thread carries on, so a handler mid-query
+/// costs a frame of its own latency and none of anyone else's. Run in both
+/// `PreUpdate` and `PostUpdate`; on an empty queue it costs one `try_recv`.
+#[allow(clippy::needless_pass_by_value)]
+pub fn serve_lua_queries(worker: Option<Res<LuaWorker>>, state: QueryStateParams) {
+    let Some(worker) = worker else {
+        return;
+    };
+    for request in worker.pending_queries() {
+        match request {
+            worker::QueryRequest::State { reply } => {
+                let _ = reply.send(state.extract().map_err(|err| err.to_string()));
+            }
+            worker::QueryRequest::WindowSet { reply } => {
+                let _ = reply.send(state.extract_window_set().map_err(|err| err.to_string()));
+            }
+        }
+    }
+}
+
+/// Puts what the callbacks queued onto the command bus.
+///
+/// Also the landing point for a reloaded `paneru.setup{...}`: the rebuild
+/// happens on the worker, so the config it produced arrives here rather than in
+/// [`lua_reload_system`], and this is where it is swapped into the shared handle.
+#[allow(clippy::needless_pass_by_value)]
+pub fn drain_lua_outbox(
+    worker: Option<Res<LuaWorker>>,
     config: Option<Res<Config>>,
     mut displays: Query<&mut Display>,
     windows: Windows,
     applications: Query<&Application>,
     mut commands: Commands,
 ) {
-    let (Some(runtime), Some(script_path)) = (runtime.as_mut(), script_path) else {
+    let Some(worker) = worker else {
+        return;
+    };
+    for effect in worker.drain_outbox() {
+        match effect {
+            FromLua::Command(command) => {
+                commands.trigger(SendMessageTrigger(Event::Command { command }));
+            }
+            FromLua::Flash { message, duration } => commands.flash_message(message, duration),
+            FromLua::ConfigChanged => {
+                // Swap the rebuilt settings into the handle every reader already
+                // holds, then re-apply the same menubar/passthrough side effects
+                // a TOML reload does.
+                if let (Some(config), Some(built)) = (config.as_ref(), worker.built_config()) {
+                    config.replace_inner_from(&built);
+                    apply_config_side_effects(config, &mut displays, &windows, &applications);
+                }
+            }
+        }
+    }
+}
+
+/// Rebuilds the Lua runtime when the init script changes, committing atomically
+/// only on success so a broken edit never tears down the working setup.
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+pub fn lua_reload_system(
+    worker: Option<Res<LuaWorker>>,
+    script_path: Option<Res<LuaScriptPath>>,
+    mut reader: MessageReader<Event>,
+    window_manager: Res<WindowManager>,
+    mut watcher: Option<NonSendMut<Box<dyn Watcher>>>,
+) {
+    let (Some(worker), Some(script_path)) = (worker, script_path) else {
         return;
     };
     let path = &script_path.0;
@@ -401,13 +210,8 @@ pub fn lua_reload_system(
         if event.paths.iter().any(|changed| paths_match(changed, path)) {
             // Editors that atomically replace files (write-new-then-rename)
             // break the original watch; re-establish it like the TOML handler.
-            if let (Some(watcher), Some(symlink)) = (watcher.as_mut(), symlink_target(path))
-                && let Ok(new_watcher) =
-                    window_manager
-                        .setup_config_watcher(path)
-                        .inspect_err(|err| {
-                            error!("re-watching lua script '{}': {err}", symlink.display());
-                        })
+            if let (Some(watcher), Some(_symlink)) = (watcher.as_mut(), symlink_target(path))
+                && let Some(new_watcher) = crate::ecs::rewatch_configs(&window_manager, path)
             {
                 **watcher = new_watcher;
             }
@@ -418,313 +222,13 @@ pub fn lua_reload_system(
         return;
     }
 
-    match LuaRuntime::from_file(path) {
-        Ok(new_runtime) => {
-            set_lua_keybinds(new_runtime.published_keybinds());
-            **runtime = new_runtime;
-            // A reloaded `paneru.setup{...}` stays authoritative: swap its config
-            // into the shared handle and re-apply the same menubar/passthrough
-            // side effects a TOML reload does. If the edited script dropped
-            // `setup`, keep the previous config rather than reverting to TOML.
-            if let (Some(config), Some(built)) = (config.as_ref(), runtime.built_config()) {
-                config.replace_inner_from(built);
-                apply_config_side_effects(config, &mut displays, &windows, &applications);
-            }
-            info!("Reloaded Lua script {}", path.display());
-            commands.flash_message("Lua reloaded".to_string(), 1.5);
-        }
-        Err(err) => {
-            error!("Reloading Lua script '{}': {err}", path.display());
-            commands.flash_message(format!("Lua error: {err}"), 4.0);
-        }
-    }
+    // The rebuild itself happens on the worker, which owns the interpreter:
+    // it commits only on success, and reports either way through the outbox.
+    worker.send_reload(path.clone());
 }
 
 /// Whether a change notification path refers to the watched script (directly or
 /// by filename, covering atomic-save temp-file renames).
 fn paths_match(changed: &Path, script: &Path) -> bool {
     changed == script || changed.file_name() == script.file_name()
-}
-
-/// Loads the runtime for `path`, falling back to an empty runtime (and logging)
-/// if the script errors. Always publishes the resulting keybinds.
-pub fn load_runtime(path: &Path) -> LuaRuntime {
-    let runtime = match LuaRuntime::from_file(path) {
-        Ok(runtime) => {
-            info!("Loaded Lua script {}", path.display());
-            runtime
-        }
-        Err(err) => {
-            warn!("Loading Lua script '{}': {err}", path.display());
-            LuaRuntime::empty()
-        }
-    };
-    set_lua_keybinds(runtime.published_keybinds());
-    runtime
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Drains the outbox commands for assertions.
-    fn drained_commands(runtime: &LuaRuntime) -> Vec<Command> {
-        runtime.outbox.borrow_mut().commands.drain(..).collect()
-    }
-
-    #[test]
-    fn bind_registers_keybind_and_stores_handler() {
-        let runtime =
-            LuaRuntime::from_source(r#"paneru.bind("alt - j", "window focus east")"#).unwrap();
-        let binds = runtime.published_keybinds();
-        assert_eq!(binds.len(), 1);
-        let (_, modifiers, id) = binds[0];
-        assert_eq!(modifiers, Modifiers::ALT);
-        assert_eq!(id, 1);
-    }
-
-    #[test]
-    fn string_keybind_dispatch_queues_command() {
-        let runtime =
-            LuaRuntime::from_source(r#"paneru.bind("alt - b", "window balance")"#).unwrap();
-        let state = runtime.lua().create_table().unwrap();
-        runtime.dispatch_bind(1, state);
-        let commands = drained_commands(&runtime);
-        assert!(
-            matches!(
-                commands.as_slice(),
-                [Command::Window(crate::commands::Operation::Balance)]
-            ),
-            "expected a balance command, got {commands:?}"
-        );
-    }
-
-    #[test]
-    fn function_keybind_can_run_commands() {
-        let runtime = LuaRuntime::from_source(
-            r#"paneru.bind("alt - j", function(state) paneru.run("window focus east") end)"#,
-        )
-        .unwrap();
-        let state = runtime.lua().create_table().unwrap();
-        runtime.dispatch_bind(1, state);
-        assert_eq!(drained_commands(&runtime).len(), 1);
-    }
-
-    #[test]
-    fn event_handler_receives_event_and_queues_command() {
-        let runtime = LuaRuntime::from_source(
-            r#"paneru.on("space_changed", function(e) paneru.run("window balance") end)"#,
-        )
-        .unwrap();
-        let (name, table) = convert::event_to_lua(runtime.lua(), &Event::SpaceChanged).unwrap();
-        runtime.dispatch_event(&name, &table);
-        assert_eq!(drained_commands(&runtime).len(), 1);
-    }
-
-    #[test]
-    fn invalid_command_string_is_reported_not_panicking() {
-        // A bad command string surfaces as a Lua runtime error at bind time.
-        let result = LuaRuntime::from_source(r#"paneru.run("definitely not a command")"#);
-        assert!(result.is_err());
-    }
-
-    /// A canned state document to answer queries with.
-    fn test_state() -> PaneruQueryState {
-        use crate::ecs::state::{
-            PaneruActiveState, PaneruVirtualWorkspaceState, PaneruWindowState,
-        };
-
-        PaneruQueryState {
-            version: 1,
-            timestamp: 0,
-            active: PaneruActiveState {
-                focused_window_id: Some(7),
-                focused_app_name: Some("Test App".to_string()),
-                ..PaneruActiveState::default()
-            },
-            virtual_workspaces: vec![PaneruVirtualWorkspaceState {
-                number: 1,
-                native_workspace_id: 10,
-                active: true,
-                windows: vec![PaneruWindowState {
-                    window_id: 7,
-                    bundle_id: "com.example.app".to_string(),
-                    app_name: "Test App".to_string(),
-                    title: "window".to_string(),
-                    focused: true,
-                    floating: false,
-                    display_id: Some(1),
-                    frame: None,
-                    visible: true,
-                }],
-            }],
-        }
-    }
-
-    #[test]
-    fn query_is_answered_from_the_provided_state() {
-        let runtime = LuaRuntime::from_source(
-            r#"
-            paneru.bind("alt - q", function()
-              local active = paneru.query_active()
-              paneru.flash(active.focused_app_name)
-              paneru.flash(tostring(#paneru.query_workspaces()))
-              paneru.flash(paneru.query("active"))
-            end)
-            "#,
-        )
-        .unwrap();
-
-        let state = runtime.lua().create_table().unwrap();
-        let extract = || Ok(test_state());
-        runtime
-            .with_query(&extract, || runtime.dispatch_bind(1, state))
-            .unwrap();
-
-        let flashes: Vec<String> = runtime
-            .outbox
-            .borrow_mut()
-            .flashes
-            .drain(..)
-            .map(|(message, _)| message)
-            .collect();
-        assert_eq!(flashes.len(), 3, "every query should have returned");
-        assert_eq!(flashes[0], "Test App");
-        assert_eq!(flashes[1], "1");
-        assert!(
-            flashes[2].starts_with('{') && flashes[2].contains("\"focused_app_name\":\"Test App\""),
-            "paneru.query should return raw JSON, got {}",
-            flashes[2]
-        );
-    }
-
-    #[test]
-    fn the_state_is_extracted_once_per_dispatch_and_only_on_demand() {
-        let runtime = LuaRuntime::from_source(
-            r#"
-            paneru.bind("alt - q", function()
-              paneru.query_active()
-              paneru.query_on_screen()
-            end)
-            paneru.bind("alt - w", function() paneru.flash("no query here") end)
-            "#,
-        )
-        .unwrap();
-
-        let extractions = RefCell::new(0);
-        let extract = || {
-            *extractions.borrow_mut() += 1;
-            Ok(test_state())
-        };
-
-        let state = runtime.lua().create_table().unwrap();
-        runtime
-            .with_query(&extract, || runtime.dispatch_bind(2, state.clone()))
-            .unwrap();
-        assert_eq!(
-            *extractions.borrow(),
-            0,
-            "a handler that never queries pays nothing"
-        );
-
-        runtime
-            .with_query(&extract, || runtime.dispatch_bind(1, state))
-            .unwrap();
-        assert_eq!(*extractions.borrow(), 1, "two queries share one extraction");
-    }
-
-    #[test]
-    fn query_outside_a_callback_explains_itself() {
-        let Err(error) = LuaRuntime::from_source("paneru.query_state()") else {
-            panic!("there is no world to query at script top level");
-        };
-        let error = error.to_string();
-        assert!(
-            error.contains("only available inside"),
-            "expected an explanation, got {error}"
-        );
-
-        // ...and the provider does not outlive the dispatch that installed it.
-        let runtime = LuaRuntime::from_source(
-            r#"
-            escaped = nil
-            paneru.bind("alt - q", function() escaped = paneru.query_state end)
-            "#,
-        )
-        .unwrap();
-        let state = runtime.lua().create_table().unwrap();
-        let extract = || Ok(test_state());
-        runtime
-            .with_query(&extract, || runtime.dispatch_bind(1, state))
-            .unwrap();
-        assert!(
-            runtime.lua().load("escaped()").exec().is_err(),
-            "a query captured during dispatch should not answer afterwards"
-        );
-    }
-
-    #[test]
-    fn unknown_query_kinds_are_rejected() {
-        let runtime = LuaRuntime::from_source("").unwrap();
-        let extract = || Ok(test_state());
-        let error = runtime
-            .with_query(&extract, || {
-                runtime
-                    .lua()
-                    .load(r#"return paneru.query("windows")"#)
-                    .exec()
-            })
-            .unwrap()
-            .expect_err("'windows' is not a query kind")
-            .to_string();
-        assert!(
-            error.contains("unknown kind 'windows'") && error.contains("on-screen"),
-            "the error should list the valid kinds, got {error}"
-        );
-    }
-
-    #[test]
-    fn empty_runtime_has_no_binds() {
-        let runtime = LuaRuntime::empty();
-        assert!(runtime.published_keybinds().is_empty());
-    }
-
-    #[test]
-    fn setup_builds_config_and_desugars_bindings() {
-        let runtime = LuaRuntime::from_source(
-            r#"paneru.setup{
-                options = { sliver_width = 7 },
-                bindings = { ["window focus east"] = "alt - j" },
-            }"#,
-        )
-        .unwrap();
-        // The `bindings` table registered a keybind through the shared bind path,
-        assert_eq!(runtime.published_keybinds().len(), 1);
-        // and the remaining sections became the authoritative config.
-        let config = runtime.built_config().expect("setup should build a config");
-        assert_eq!(config.sliver_width(), 7);
-    }
-
-    #[test]
-    fn no_setup_call_leaves_config_to_toml() {
-        let runtime =
-            LuaRuntime::from_source(r#"paneru.bind("alt - b", "window balance")"#).unwrap();
-        assert!(runtime.built_config().is_none());
-    }
-
-    #[test]
-    fn extra_lua_path_env_var_is_prepended() {
-        // Unique var name so this doesn't race other tests' env state.
-        // SAFETY: no other test reads or writes this variable.
-        unsafe { std::env::set_var("PANERU_LUA_PATH", "/tmp/paneru-test/?.lua") };
-        let runtime = LuaRuntime::from_source("").unwrap();
-        let package: Table = runtime.lua().globals().get("package").unwrap();
-        let path: String = package.get("path").unwrap();
-        // SAFETY: no other test reads or writes this variable.
-        unsafe { std::env::remove_var("PANERU_LUA_PATH") };
-        assert!(
-            path.starts_with("/tmp/paneru-test/?.lua;"),
-            "expected the extra path to be prepended, got {path}"
-        );
-    }
 }

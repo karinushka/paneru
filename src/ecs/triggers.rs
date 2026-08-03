@@ -1310,12 +1310,8 @@ pub(super) fn refresh_configuration_trigger(
                     "symlink '{}' changed, replacing the watcher.",
                     symlink.display()
                 );
-                if let Ok(new_watcher) =
-                    window_manager
-                        .setup_config_watcher(path)
-                        .inspect_err(|err| {
-                            error!("watching the config '{}': {err}", path.display());
-                        })
+                if let Some(new_watcher) =
+                    crate::ecs::rewatch_configs(&window_manager, path.as_path())
                 {
                     **watcher = new_watcher;
                 }

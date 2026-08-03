@@ -11,17 +11,19 @@
 //! * [`LuaEvent::NAMES`] lists every name the runtime can emit, which lets
 //!   `paneru.on` reject a typo at registration time instead of silently never
 //!   firing.
-//! * [`StateSnapshot`] does the same for the read-only state handed to
-//!   `paneru.bind` callbacks.
 //!
 //! The conversion runs the other way too — [`TryFrom<&Event>`] is exhaustive, so
 //! a new variant in [`Event`] is a compile error here until it is either mapped
 //! or explicitly declared unmarshallable.
+//!
+//! The two halves are kept apart: [`TryFrom<&Event>`] reads the world and
+//! produces plain data, while [`event_table`] turns that data into Lua values.
+//! Only the first half needs the ECS and only the second needs a [`Lua`], which
+//! is what lets the runtime live on a thread of its own.
 
 use mlua::{Lua, LuaSerdeExt, Table};
 use serde::Serialize;
 
-use crate::ecs::params::Windows;
 use crate::events::Event;
 use crate::platform::{Modifiers, Pid, WinID, WorkspaceId};
 
@@ -290,66 +292,23 @@ impl LuaEvent {
     }
 }
 
-/// Converts an [`Event`] into `(name, table)` for dispatch to `paneru.on`
-/// callbacks. Returns `None` for events scripts cannot see.
+/// Marshals an already-extracted [`LuaEvent`] into `(name, table)` for dispatch
+/// to `paneru.on` callbacks.
 ///
 /// The dispatch name is the serde tag serde already wrote into the table's
 /// `type` field, so there is no second hand-written variant→name mapping to
 /// keep in step with it.
-pub fn event_to_lua(lua: &Lua, event: &Event) -> Option<(String, Table)> {
-    let event = LuaEvent::try_from(event).ok()?;
-    let table = lua.to_value(&event).ok()?.as_table().cloned()?;
+pub fn event_table(lua: &Lua, event: &LuaEvent) -> Option<(String, Table)> {
+    let table = lua.to_value(event).ok()?.as_table().cloned()?;
     let name = table.get::<String>("type").ok()?;
     Some((name, table))
 }
 
-/// The read-only state snapshot passed to `paneru.bind` handlers.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct StateSnapshot {
-    /// Id of the focused window, if any.
-    pub focused: Option<WinID>,
-    pub windows: Vec<WindowSnapshot>,
-}
-
-/// One window in a [`StateSnapshot`].
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
-pub struct WindowSnapshot {
-    pub id: WinID,
-    /// Whether the window takes part in the tiling layout.
-    pub managed: bool,
-    /// Frame in global display coordinates, when known.
-    pub x: Option<i32>,
-    pub y: Option<i32>,
-    pub width: Option<i32>,
-    pub height: Option<i32>,
-}
-
-/// Builds the state snapshot for `paneru.bind` handlers.
-pub fn state_snapshot(lua: &Lua, windows: &Windows) -> mlua::Result<Table> {
-    let snapshot = StateSnapshot {
-        focused: windows.focused().map(|(window, _)| window.id()),
-        windows: windows
-            .iter()
-            .map(|(window, entity)| {
-                let frame = windows.frame(entity);
-                WindowSnapshot {
-                    id: window.id(),
-                    managed: windows
-                        .get_managed(entity)
-                        .is_some_and(|(_, _, unmanaged)| unmanaged.is_none()),
-                    x: frame.map(|frame| frame.min.x),
-                    y: frame.map(|frame| frame.min.y),
-                    width: frame.map(|frame| frame.width()),
-                    height: frame.map(|frame| frame.height()),
-                }
-            })
-            .collect(),
-    };
-
-    lua.to_value(&snapshot)?
-        .as_table()
-        .cloned()
-        .ok_or_else(|| mlua::Error::RuntimeError("state snapshot is not a table".into()))
+/// Extracts and marshals in one step. Convenience for callers that hold both an
+/// [`Event`] and a [`Lua`]; the halves are separate for those that do not.
+#[cfg(test)]
+pub fn event_to_lua(lua: &Lua, event: &Event) -> Option<(String, Table)> {
+    event_table(lua, &LuaEvent::try_from(event).ok()?)
 }
 
 #[cfg(test)]

@@ -29,19 +29,22 @@ serde_json = "1.0"
 pedantic = "warn"
 
 # `lua` builds in the `init.lua` scripting runtime (`paneru.on`/
-# `paneru.bind`). Off by default; build with `--features lua,lua54` (or
-# another `lua5x`/`luajit` ABI feature — exactly one must be picked alongside
-# `lua`, same convention as `crates/lua`) to include it.
+# `paneru.bind`). Off by default; build with `--features lua,vendored,luajit`
+# to include it. Exactly one ABI feature must be picked alongside `lua` (same
+# convention as `crates/lua`) — `luajit` is the one to pick unless you have a
+# reason not to: handlers run on the event path, and its tracing JIT is worth
+# roughly an order of magnitude there over the reference interpreter. The
+# `lua5x` features remain for scripts needing 5.2+ semantics LuaJIT lacks.
 [features]
 default = []
 vendored = ["mlua/vendored"]
 lua = ["dep:mlua", "dep:paneru-lua"]
+luajit = ["mlua/luajit"]
 lua55 = ["mlua/lua55"]
 lua51 = ["mlua/lua51"]
 lua52 = ["mlua/lua52"]
 lua53 = ["mlua/lua53"]
 lua54 = ["mlua/lua54"]
-luajit = ["mlua/luajit"]
 
 [profile.release]
 codegen-units = 1
@@ -56,6 +59,10 @@ bevy = { version = "0.19", default-features = false, features = [
 bitflags = "2.13"
 chrono = "0.4"
 clap = { version = "4.6", features = ["cargo", "derive"] }
+# Already in the tree via bevy_time. Picked over std's mpsc because its
+# `Receiver` is `Sync`, which is what lets the Lua worker handle be a plain
+# `Res` rather than a `Mutex` behind a `ResMut`.
+crossbeam-channel = "0.5"
 derive_more = { version = "2.1", features = ["deref", "deref_mut"] }
 embed_plist = "1.2"
 launchctl = "0.3"

@@ -21,6 +21,8 @@ use crate::ecs::params::Windows;
 use crate::ecs::{ActiveDisplayMarker, ActiveWorkspaceMarker, SelectedVirtualMarker, Unmanaged};
 use crate::manager::{Application, Display, WindowManager};
 use crate::platform::{Pid, ProcessSerialNumber, WinID, WorkspaceId};
+#[cfg(feature = "lua")]
+use paneru_shared_types::windowset::WindowSet;
 
 pub const STATE_FILE_NAME: &str = "state.json";
 const SUPPORTED_STATE_VERSION: u32 = 2;
@@ -445,12 +447,182 @@ impl QueryStateParams<'_, '_> {
             &self.config,
         )
     }
+}
 
-    /// The window access, for callers that also need it directly — the Lua
-    /// keybind dispatcher builds its own snapshot from it.
-    #[cfg(feature = "lua")]
-    pub fn windows(&self) -> &Windows<'_, '_> {
-        &self.windows
+/// Reads the layout as the tree a script transforms.
+///
+/// Where [`QueryState::extract`] flattens each workspace into a list of
+/// windows, this keeps the strip's shape: which columns there are, in what
+/// order, and how each arranges the windows in it. That structure is what makes
+/// `ws:swap`, `ws:east` and `ws:stack` expressible at all — a flat list cannot
+/// say what is beside what.
+#[cfg(feature = "lua")]
+impl QueryStateParams<'_, '_> {
+    pub fn extract_window_set(&self) -> crate::errors::Result<WindowSet> {
+        use paneru_shared_types::windowset::{ColumnSet, DisplaySet, WorkspaceSet};
+
+        let focused_entity = self.windows.focused().map(|(_, entity)| entity);
+        let sliver_width = self.config.sliver_width();
+        let active_workspace_id = self
+            .workspaces
+            .iter()
+            .find_map(|(_, strip, active, _)| active.then_some(strip.id()));
+
+        // Group the workspace strips by the display entity that owns them, so
+        // each display can be built with its own workspaces in one pass.
+        let mut strips_by_display: HashMap<Entity, Vec<WorkspaceSet>> = HashMap::new();
+        for (child, strip, active_workspace, selected_workspace) in self.workspaces {
+            // Floating windows sit outside the strip, so they have to be
+            // gathered separately. Only worth asking for a workspace that is
+            // actually showing, since the read goes out to the window server —
+            // the same condition `QueryState::extract` uses.
+            let floating_entities = if active_workspace
+                || selected_workspace && active_workspace_id != Some(strip.id())
+            {
+                self.window_manager.windows_in_workspace(strip.id())?
+            } else {
+                Vec::new()
+            };
+
+            // `columns` is the tiled layout and `floating` is everything else,
+            // with no window in both. The strip keeps tracking a window after
+            // it is floated (that is how it gets tiled again later), so strip
+            // membership alone does not decide which list a window belongs in —
+            // the `Floating` marker does.
+            let mut floating = Vec::new();
+            let mut columns: Vec<ColumnSet> = Vec::new();
+            for column in strip.columns() {
+                let mut tiled = Vec::new();
+                for entity in column.window_iter() {
+                    let Some(record) = self.window_record(entity, focused_entity, sliver_width)
+                    else {
+                        continue;
+                    };
+                    if record.floating {
+                        floating.push(record);
+                    } else {
+                        tiled.push(record);
+                    }
+                }
+                if tiled.is_empty() {
+                    continue;
+                }
+                let width_ratio = column
+                    .window_iter()
+                    .find_map(|entity| self.windows.width_ratio(entity))
+                    .unwrap_or(1.0);
+                let selected = column
+                    .top()
+                    .and_then(|top| self.windows.get(top).map(|window| window.id()))
+                    .and_then(|id| tiled.iter().position(|window| window.id == id))
+                    .unwrap_or(0);
+                columns.push(ColumnSet {
+                    kind: column_kind(column),
+                    width_ratio,
+                    selected,
+                    windows: std::sync::Arc::new(tiled),
+                });
+            }
+
+            // Floating windows the strip never knew about.
+            floating.extend(
+                floating_entities
+                    .into_iter()
+                    .filter_map(|window_id| {
+                        let (_, entity) = self.windows.find(window_id)?;
+                        let (_, _, unmanaged) = self.windows.get_managed(entity)?;
+                        (matches!(unmanaged, Some(Unmanaged::Floating)) && !strip.contains(entity))
+                            .then_some(entity)
+                    })
+                    .filter_map(|entity| self.window_record(entity, focused_entity, sliver_width)),
+            );
+
+            strips_by_display
+                .entry(child.parent())
+                .or_default()
+                .push(WorkspaceSet {
+                    number: strip.virtual_index + 1,
+                    native_id: strip.id(),
+                    active: active_workspace,
+                    columns: std::sync::Arc::new(columns),
+                    floating: std::sync::Arc::new(floating),
+                });
+        }
+
+        let displays = self
+            .displays
+            .iter()
+            .map(|(display, entity, active)| {
+                let bounds = display.bounds();
+                let mut workspaces = strips_by_display.remove(&entity).unwrap_or_default();
+                workspaces.sort_by_key(|workspace| workspace.number);
+                DisplaySet {
+                    id: display.id(),
+                    frame: Frame {
+                        x: bounds.min.x,
+                        y: bounds.min.y,
+                        width: bounds.width(),
+                        height: bounds.height(),
+                    },
+                    active,
+                    workspaces: std::sync::Arc::new(workspaces),
+                }
+            })
+            .collect();
+
+        let focused = focused_entity
+            .and_then(|entity| self.windows.get(entity))
+            .map(|window| window.id());
+        Ok(WindowSet::new(displays, focused))
+    }
+
+    /// One window, as a script sees it. `None` for an entity that is no longer
+    /// a window we know anything about.
+    fn window_record(
+        &self,
+        entity: Entity,
+        focused: Option<Entity>,
+        sliver_width: i32,
+    ) -> Option<paneru_shared_types::windowset::WindowRec> {
+        let (window, _, unmanaged) = self.windows.get_managed(entity)?;
+        let (_, _, app_entity) = self.windows.find_parent(window.id())?;
+        let app = self.apps.get(app_entity).ok()?;
+        let frame = self.windows.frame(entity);
+        // Minimized and hidden windows are never on screen, whatever their last
+        // known frame says.
+        let hidden = matches!(unmanaged, Some(Unmanaged::Minimized | Unmanaged::Hidden));
+        let visible = frame
+            .and_then(|frame| window_visibility(frame, &self.displays, sliver_width))
+            .is_some_and(|(_, visible)| visible && !hidden);
+
+        Some(paneru_shared_types::windowset::WindowRec {
+            id: window.id(),
+            app_name: app.name().to_string(),
+            bundle_id: app.bundle_id().unwrap_or_default().clone(),
+            title: window.title().unwrap_or_default(),
+            frame: frame.map(|frame| Frame {
+                x: frame.min.x,
+                y: frame.min.y,
+                width: frame.width(),
+                height: frame.height(),
+            }),
+            floating: matches!(unmanaged, Some(Unmanaged::Floating)),
+            managed: unmanaged.is_none(),
+            visible,
+            focused: focused == Some(entity),
+        })
+    }
+}
+
+/// How a layout column arranges its windows, in the vocabulary a script sees.
+#[cfg(feature = "lua")]
+fn column_kind(column: &Column) -> paneru_shared_types::windowset::ColumnKind {
+    use paneru_shared_types::windowset::ColumnKind;
+    match column {
+        Column::Single(_) => ColumnKind::Single,
+        Column::Stack(_) => ColumnKind::Stack,
+        Column::Tabs(_) => ColumnKind::Tabs,
+        Column::Fullscren(_) => ColumnKind::Fullscreen,
     }
 }
 

@@ -157,10 +157,14 @@ const DEFAULT_LUA_SCRIPT: &str = "\
 -- Hook into window-manager events:
 --   paneru.on(\"window_focused\", function(e) paneru.log(\"focused \" .. e.window_id) end)
 --
--- Bind keys to commands or Lua functions (chord syntax matches [bindings]):
+-- Bind keys to commands (chord syntax matches [bindings]):
 --   paneru.bind(\"alt - b\", \"window balance\")
---   paneru.bind(\"alt - j\", function(state)
---     if state.focused then paneru.run(\"window focus east\") end
+--
+-- ...or to a function. Handlers are given the whole layout as a value they can
+-- transform; nothing moves until you return one, so computing a layout and
+-- discarding it costs nothing. See CONFIGURATION.md.
+--   paneru.bind(\"alt - j\", function(ws)
+--     return ws:focus(ws:east(ws:focused()))
 --   end)
 ";
 

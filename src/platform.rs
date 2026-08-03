@@ -219,7 +219,7 @@ impl PlatformCallbacks {
             ));
         }
 
-        let config = Config::new(CONFIGURATION_FILE.as_path())?;
+        let config = Config::load(CONFIGURATION_FILE.as_deref())?;
         self.events.send(Event::InitialConfig(config.clone()))?;
         self.event_handler = Some(InputHandler::new(self.events.clone(), config).start()?);
 

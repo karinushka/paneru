@@ -22,10 +22,13 @@
 //!
 //! # Cost
 //!
-//! Every level is behind an [`Rc`], so cloning a `WindowSet` is a handful of
+//! Every level is behind an [`Arc`], so cloning a `WindowSet` is a handful of
 //! refcount bumps and a transform copies only the spine it touches
-//! ([`Rc::make_mut`]). Two values branched off one parent share everything they
+//! ([`Arc::make_mut`]). Two values branched off one parent share everything they
 //! didn't change, including the common prefix of their op lists.
+//!
+//! `Arc` rather than `Rc` because the value is built by the window manager on
+//! its own thread and handed to the interpreter on another.
 //!
 //! # Scope
 //!
@@ -46,7 +49,7 @@
 //! settles the actual geometry. A handler that needs the settled result should
 //! read it from the next event's `WindowSet`, not from the one it just built.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -115,7 +118,7 @@ impl LayoutOp {
 #[derive(Debug)]
 struct OpNode {
     op: LayoutOp,
-    prev: Option<Rc<OpNode>>,
+    prev: Option<Arc<OpNode>>,
 }
 
 /// How a column arranges the windows in it.
@@ -161,7 +164,7 @@ pub struct ColumnSet {
     pub width_ratio: f64,
     /// Which of `windows` is on top, for tabs and stacks.
     pub selected: usize,
-    pub windows: Rc<Vec<WindowRec>>,
+    pub windows: Arc<Vec<WindowRec>>,
 }
 
 impl ColumnSet {
@@ -172,7 +175,7 @@ impl ColumnSet {
             kind: ColumnKind::Single,
             width_ratio,
             selected: 0,
-            windows: Rc::new(vec![window]),
+            windows: Arc::new(vec![window]),
         }
     }
 
@@ -196,8 +199,8 @@ pub struct WorkspaceSet {
     pub native_id: u64,
     /// Whether it is the one currently shown on its display.
     pub active: bool,
-    pub columns: Rc<Vec<ColumnSet>>,
-    pub floating: Rc<Vec<WindowRec>>,
+    pub columns: Arc<Vec<ColumnSet>>,
+    pub floating: Arc<Vec<WindowRec>>,
 }
 
 impl WorkspaceSet {
@@ -217,7 +220,7 @@ pub struct DisplaySet {
     pub frame: Frame,
     /// Whether it holds the focus.
     pub active: bool,
-    pub workspaces: Rc<Vec<WorkspaceSet>>,
+    pub workspaces: Arc<Vec<WorkspaceSet>>,
 }
 
 /// The whole layout, as a value.
@@ -225,12 +228,12 @@ pub struct DisplaySet {
 /// See the module documentation for what "as a value" buys and what it costs.
 #[derive(Clone, Debug, Default)]
 pub struct WindowSet {
-    displays: Rc<Vec<DisplaySet>>,
+    displays: Arc<Vec<DisplaySet>>,
     focused: Option<WinID>,
     /// What has been asked of this value, most recent first. Not part of the
     /// layout, and deliberately not compared: two window sets are equal when
     /// they describe the same layout, however they got there.
-    ops: Option<Rc<OpNode>>,
+    ops: Option<Arc<OpNode>>,
 }
 
 impl PartialEq for WindowSet {
@@ -248,7 +251,7 @@ impl WindowSet {
     #[must_use]
     pub fn new(displays: Vec<DisplaySet>, focused: Option<WinID>) -> Self {
         Self {
-            displays: Rc::new(displays),
+            displays: Arc::new(displays),
             focused,
             ops: None,
         }
@@ -406,7 +409,7 @@ impl WindowSet {
     /// touched, and only the spine `edit` reaches gets copied.
     fn with(&self, op: LayoutOp, edit: impl FnOnce(&mut [DisplaySet])) -> Self {
         let mut next = self.recording(op);
-        let displays: &mut Vec<DisplaySet> = Rc::make_mut(&mut next.displays);
+        let displays: &mut Vec<DisplaySet> = Arc::make_mut(&mut next.displays);
         edit(displays);
         next
     }
@@ -416,9 +419,9 @@ impl WindowSet {
     /// fidelity in the module docs.
     fn recording(&self, op: LayoutOp) -> Self {
         Self {
-            displays: Rc::clone(&self.displays),
+            displays: Arc::clone(&self.displays),
             focused: self.focused,
-            ops: Some(Rc::new(OpNode {
+            ops: Some(Arc::new(OpNode {
                 op,
                 prev: self.ops.clone(),
             })),
@@ -482,7 +485,7 @@ impl WindowSet {
                 };
                 let ratio = record.frame.map_or(0.5, |_| 0.5);
                 if let Some(target) = find_workspace_mut(displays, workspace) {
-                    Rc::make_mut(&mut target.columns).push(ColumnSet::single(record, ratio));
+                    Arc::make_mut(&mut target.columns).push(ColumnSet::single(record, ratio));
                 }
             },
         )
@@ -501,7 +504,7 @@ impl WindowSet {
             let Some(index) = on_display else {
                 return;
             };
-            for candidate in Rc::make_mut(&mut displays[index].workspaces) {
+            for candidate in Arc::make_mut(&mut displays[index].workspaces) {
                 candidate.active = candidate.number == workspace;
             }
         })
@@ -528,7 +531,7 @@ impl WindowSet {
             // The window stays where it was; only which side of the workspace
             // it sits on changes.
             let target = displays.iter_mut().find_map(|display| {
-                Rc::make_mut(&mut display.workspaces)
+                Arc::make_mut(&mut display.workspaces)
                     .iter_mut()
                     .find(|workspace| workspace.active)
             });
@@ -536,9 +539,9 @@ impl WindowSet {
                 return;
             };
             if floating {
-                Rc::make_mut(&mut target.floating).push(record);
+                Arc::make_mut(&mut target.floating).push(record);
             } else {
-                Rc::make_mut(&mut target.columns).push(ColumnSet::single(record, 0.5));
+                Arc::make_mut(&mut target.columns).push(ColumnSet::single(record, 0.5));
             }
         })
     }
@@ -604,7 +607,7 @@ impl WindowSet {
                 } else {
                     ColumnKind::Stack
                 };
-                Rc::make_mut(&mut column.windows).push(record.take().expect("checked above"));
+                Arc::make_mut(&mut column.windows).push(record.take().expect("checked above"));
             });
         })
     }
@@ -617,12 +620,12 @@ impl WindowSet {
                 return;
             };
             let target = displays.iter_mut().find_map(|display| {
-                Rc::make_mut(&mut display.workspaces)
+                Arc::make_mut(&mut display.workspaces)
                     .iter_mut()
                     .find(|workspace| workspace.active)
             });
             if let Some(target) = target {
-                Rc::make_mut(&mut target.columns).push(ColumnSet::single(record, 0.5));
+                Arc::make_mut(&mut target.columns).push(ColumnSet::single(record, 0.5));
             }
         })
     }
@@ -635,13 +638,13 @@ impl WindowSet {
 /// Visits every window record in the tree, copying only what it reaches.
 fn for_each_window(displays: &mut [DisplaySet], mut visit: impl FnMut(&mut WindowRec)) {
     for display in displays.iter_mut() {
-        for workspace in Rc::make_mut(&mut display.workspaces) {
-            for column in Rc::make_mut(&mut workspace.columns) {
-                for window in Rc::make_mut(&mut column.windows) {
+        for workspace in Arc::make_mut(&mut display.workspaces) {
+            for column in Arc::make_mut(&mut workspace.columns) {
+                for window in Arc::make_mut(&mut column.windows) {
                     visit(window);
                 }
             }
-            for window in Rc::make_mut(&mut workspace.floating) {
+            for window in Arc::make_mut(&mut workspace.floating) {
                 visit(window);
             }
         }
@@ -651,8 +654,8 @@ fn for_each_window(displays: &mut [DisplaySet], mut visit: impl FnMut(&mut Windo
 /// Visits every column in the tree.
 fn for_each_column(displays: &mut [DisplaySet], mut visit: impl FnMut(&mut ColumnSet)) {
     for display in displays.iter_mut() {
-        for workspace in Rc::make_mut(&mut display.workspaces) {
-            for column in Rc::make_mut(&mut workspace.columns) {
+        for workspace in Arc::make_mut(&mut display.workspaces) {
+            for column in Arc::make_mut(&mut workspace.columns) {
                 visit(column);
             }
         }
@@ -671,7 +674,7 @@ fn find_window(displays: &[DisplaySet], id: WinID) -> Option<&WindowRec> {
 /// Finds a workspace by number, ready to be changed.
 fn find_workspace_mut(displays: &mut [DisplaySet], number: u32) -> Option<&mut WorkspaceSet> {
     displays.iter_mut().find_map(|display| {
-        Rc::make_mut(&mut display.workspaces)
+        Arc::make_mut(&mut display.workspaces)
             .iter_mut()
             .find(|workspace| workspace.number == number)
     })
@@ -681,10 +684,10 @@ fn find_workspace_mut(displays: &mut [DisplaySet], number: u32) -> Option<&mut W
 /// hands it back for the caller to place somewhere else.
 fn take_window(displays: &mut [DisplaySet], id: WinID) -> Option<WindowRec> {
     for display in displays.iter_mut() {
-        for workspace in Rc::make_mut(&mut display.workspaces) {
-            let columns = Rc::make_mut(&mut workspace.columns);
+        for workspace in Arc::make_mut(&mut display.workspaces) {
+            let columns = Arc::make_mut(&mut workspace.columns);
             for index in 0..columns.len() {
-                let windows = Rc::make_mut(&mut columns[index].windows);
+                let windows = Arc::make_mut(&mut columns[index].windows);
                 if let Some(at) = windows.iter().position(|window| window.id == id) {
                     let taken = windows.remove(at);
                     if windows.is_empty() {
@@ -699,7 +702,7 @@ fn take_window(displays: &mut [DisplaySet], id: WinID) -> Option<WindowRec> {
                     return Some(taken);
                 }
             }
-            let floating = Rc::make_mut(&mut workspace.floating);
+            let floating = Arc::make_mut(&mut workspace.floating);
             if let Some(at) = floating.iter().position(|window| window.id == id) {
                 return Some(floating.remove(at));
             }
@@ -748,20 +751,20 @@ mod tests {
                     height: 1080,
                 },
                 active: true,
-                workspaces: Rc::new(vec![
+                workspaces: Arc::new(vec![
                     WorkspaceSet {
                         number: 1,
                         native_id: 10,
                         active: true,
-                        columns: Rc::new(columns),
-                        floating: Rc::new(Vec::new()),
+                        columns: Arc::new(columns),
+                        floating: Arc::new(Vec::new()),
                     },
                     WorkspaceSet {
                         number: 2,
                         native_id: 11,
                         active: false,
-                        columns: Rc::new(Vec::new()),
-                        floating: Rc::new(Vec::new()),
+                        columns: Arc::new(Vec::new()),
+                        floating: Arc::new(Vec::new()),
                     },
                 ]),
             }],
@@ -837,7 +840,7 @@ mod tests {
         // changed, which is what makes speculative branching cheap.
         let clone = base.clone();
         assert!(
-            Rc::ptr_eq(&base.displays, &clone.displays),
+            Arc::ptr_eq(&base.displays, &clone.displays),
             "cloning should share, not copy"
         );
 

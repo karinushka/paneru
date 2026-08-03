@@ -46,6 +46,7 @@ pub mod layout_ops;
 pub mod mouse;
 pub mod params;
 pub(crate) mod restore;
+pub mod script_state;
 pub mod scroll;
 pub mod state;
 pub(crate) mod systems;
@@ -143,6 +144,8 @@ pub fn register_systems(app: &mut bevy::app::App) {
             restore::tick_restore_grace,
             state::periodic_state_save.run_if(on_timer(Duration::from_mins(5))),
             state::cleanup_on_exit,
+            script_state::periodic_script_state_save.run_if(on_timer(Duration::from_mins(5))),
+            script_state::script_state_cleanup_on_exit,
         ),
     );
     app.add_systems(
@@ -184,6 +187,7 @@ pub fn register_triggers(app: &mut bevy::app::App) {
             triggers::application_event_trigger,
             triggers::dispatch_application_messages,
             triggers::window_destroyed_trigger,
+            triggers::reap_phantom_windows,
             triggers::invalidate_window_title,
             triggers::refresh_configuration_trigger,
             triggers::theme_change_trigger,
@@ -573,15 +577,16 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
     let window_manager: Box<dyn WindowManagerApi> = Box::new(WindowManagerOS::new(sender.clone()));
 
     // Discover (or create) the Lua init script first: whether it exists decides
-    // whether a stub TOML gets planted beside it, so it has to be settled before
+    // whether the TOML path runs at all, so it has to be settled before
     // `CONFIGURATION_FILE` is first read.
     #[cfg(feature = "lua")]
     let lua_path = crate::config::ensure_lua_file()
         .inspect_err(|err| warn!("preparing Lua script: {err}"))
-        .ok();
+        .ok()
+        .flatten();
 
-    // With an init.lua there may be no TOML at all, so watch whichever config
-    // files actually exist. Both feed the same `ConfigRefresh` event.
+    // With an init.lua there is no TOML at all, so watch whichever config files
+    // actually exist. Both feed the same `ConfigRefresh` event.
     let toml_path = CONFIGURATION_FILE.as_deref();
     #[cfg(feature = "lua")]
     let primary = toml_path.or(lua_path.as_deref());
@@ -643,6 +648,10 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         app.insert_resource(previous_state);
     }
 
+    // Overwrites the empty store `register_commands` put there, which is what
+    // the mock harness keeps: only the real app reads the user's file.
+    app.insert_resource(script_state::ScriptStateStore::load());
+
     // Do not insert this in mocks.
     app.insert_resource(LowPowerMode(false));
 
@@ -658,7 +667,14 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         // keymap behind that goes through Carbon/TIS. Capture it here, on the
         // main thread, before the worker can ask for it.
         crate::config::prime_virtual_keymap();
-        let worker = lua::LuaWorker::spawn(lua::LuaSource::Path(path.clone()));
+        // The worker caches the script state store and watches this stamp to
+        // know when its copy is stale — including when the writer was a client
+        // rather than the script itself.
+        let revision = app
+            .world()
+            .resource::<script_state::ScriptStateStore>()
+            .revision_handle();
+        let worker = lua::LuaWorker::spawn(lua::LuaSource::Path(path.clone()), revision);
         // A script that called `paneru.setup{...}` is authoritative: insert its
         // config now, before `app.run()`, so it exists ahead of the Startup
         // schedule and wins over the TOML `InitialConfig` (see
@@ -668,7 +684,7 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         }
         app.insert_resource(worker);
         app.insert_resource(lua::LuaScriptPath(path));
-        app.add_plugins(lua::LuaPlugin);
+        app.add_plugins(lua::LuaPlugin {});
     }
 
     Ok(app)

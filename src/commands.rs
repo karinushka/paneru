@@ -40,6 +40,11 @@ pub fn register_commands(app: &mut bevy::app::App) {
     app.add_systems(PreUpdate, crate::ecs::layout_ops::apply_layout_ops);
 
     query::register_query_commands(app);
+    // An empty store, so the mock harness and any run without a saved file
+    // still have one to answer from; the real app overwrites it with what it
+    // loaded from disk.
+    app.init_resource::<crate::ecs::script_state::ScriptStateStore>();
+    app.add_systems(PreUpdate, crate::ecs::script_state::script_state_handler);
     app.add_systems(
         PreUpdate,
         (

@@ -146,6 +146,10 @@ Additionally it allows overriding the location with `$PANERU_CONFIG` environment
 If none of these files exists, Paneru creates
 `$XDG_CONFIG_HOME/paneru/paneru.toml` with the built-in defaults on first launch.
 
+A Lua script (`$XDG_CONFIG_HOME/paneru/init.lua`, `$HOME/.paneru.lua`, or
+`$PANERU_LUA`) replaces the TOML rather than layering on top of it: when one
+exists, no `paneru.toml` is read, created, or watched.
+
 You can use the following basic configuration as a starting point. For a
 complete guide to all available options, keybindings, and window rules, see the
 **[Configuration Guide](./CONFIGURATION.md)**.

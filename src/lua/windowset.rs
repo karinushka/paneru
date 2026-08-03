@@ -27,7 +27,7 @@
 
 use std::cell::RefCell;
 
-use mlua::{AnyUserData, Function, Lua, LuaSerdeExt, UserData, UserDataMethods, Value};
+use mlua::{Function, Lua, LuaSerdeExt, UserData, UserDataMethods, Value};
 use paneru_shared_types::windowset::{LayoutOp, RelativeRect, WinID, WindowSet};
 
 /// Reads `{ x = …, y = …, width = …, height = … }` as fractions of a display.
@@ -45,25 +45,18 @@ fn relative_rect(rect: &mlua::Table) -> mlua::Result<RelativeRect> {
     })
 }
 
-/// Registry key holding the short-lived function that materialises the window
-/// set from the live world. Kept in the registry rather than on the `paneru`
-/// table so a script can neither see nor overwrite it.
-pub(super) const WINDOW_SET_PROVIDER: &str = "paneru.window_set_provider";
-
 /// A window set on the Lua side: either already fetched, or waiting to be.
 pub(super) struct LuaWindowSet {
     set: RefCell<Option<WindowSet>>,
 }
 
 impl LuaWindowSet {
-    /// A window set that will fetch itself when first used.
-    pub(super) fn lazy() -> Self {
-        Self {
-            set: RefCell::new(None),
-        }
-    }
-
     /// A window set that already holds its tree.
+    ///
+    /// There is no lazy form any more. Fetching on first use meant a
+    /// synchronous provider call from inside these methods, which cannot
+    /// suspend — and it saved nothing once every handler in a batch came to
+    /// share one read: see [`super::world::DispatchWorld`].
     pub(super) fn materialised(set: WindowSet) -> Self {
         Self {
             set: RefCell::new(Some(set)),
@@ -79,31 +72,12 @@ impl LuaWindowSet {
             .unwrap_or_default()
     }
 
-    /// The tree, fetching it on first use.
-    fn resolve(&self, lua: &Lua) -> mlua::Result<WindowSet> {
-        if let Some(set) = self.set.borrow().as_ref() {
-            return Ok(set.clone());
-        }
-
-        let provider: Option<Function> = lua.named_registry_value(WINDOW_SET_PROVIDER)?;
-        let provider = provider.ok_or_else(|| {
-            mlua::Error::RuntimeError(
-                "the window set is only available inside a paneru.on handler or a paneru.bind \
-                 callback"
-                    .into(),
-            )
-        })?;
-        let materialised: AnyUserData = provider.call(())?;
-        let set = materialised.borrow::<LuaWindowSet>()?.tree()?;
-        *self.set.borrow_mut() = Some(set.clone());
-        Ok(set)
-    }
-
-    /// The tree of an already-materialised set.
-    fn tree(&self) -> mlua::Result<WindowSet> {
-        self.set.borrow().clone().ok_or_else(|| {
-            mlua::Error::RuntimeError("the window set provider returned nothing".into())
-        })
+    /// The tree this set was built around.
+    fn resolve(&self, _lua: &Lua) -> mlua::Result<WindowSet> {
+        self.set
+            .borrow()
+            .clone()
+            .ok_or_else(|| mlua::Error::RuntimeError("the window set is empty".into()))
     }
 }
 

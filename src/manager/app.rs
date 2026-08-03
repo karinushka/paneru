@@ -83,6 +83,14 @@ pub trait ApplicationApi: Send + Sync {
     ///
     /// Returns an `Error` if the window list cannot be retrieved.
     fn window_list(&self, config: &Config) -> Vec<Window>;
+    /// Returns the IDs of the windows the application currently lists.
+    ///
+    /// Unlike [`Self::window_list`] this reads nothing but the ID off each
+    /// element — no title, role or subrole, and no rule matching — which makes
+    /// it cheap enough for the destroy path. It also does no filtering, so it
+    /// answers "does the app still list this window at all", which is the
+    /// question a liveness check needs to ask.
+    fn window_ids(&self) -> Vec<WinID>;
     /// Starts observing application-level accessibility notifications.
     ///
     /// # Errors
@@ -275,6 +283,18 @@ impl ApplicationApi for ApplicationOS {
                         WindowOS::new_with_config(&element, config, bundle_id)
                             .map(|window| Window::new(Box::new(window)))
                     })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn window_ids(&self) -> Vec<WinID> {
+        self.element
+            .windows()
+            .map(|windows| {
+                windows
+                    .into_iter()
+                    .flat_map(|element| ax_window_id(element.as_ptr()))
                     .collect()
             })
             .unwrap_or_default()

@@ -885,11 +885,21 @@ pub(crate) fn gather_initial_processes(
         }
     }
 
-    // Insert only the TOML fallback; a Lua config is already a resource.
-    if existing_config.is_none()
-        && let Some(config) = toml_config
-    {
-        commands.insert_resource(config);
+    // The input event tap holds a clone of the `Config` handle that came in on
+    // `InitialConfig`, and reads swipe/scroll settings off it on every event. A
+    // Lua `paneru.setup{...}` builds a *fresh* handle, so left alone the tap
+    // would keep reading the TOML (or default) settings forever and gestures
+    // would never be intercepted. Publish the Lua settings into the handle the
+    // tap already holds and keep that one as the resource, so both sides share
+    // one inner from here on — including for `replace_inner_from` on reload.
+    match (existing_config.as_deref(), toml_config) {
+        #[cfg(feature = "lua")]
+        (Some(lua_config), Some(shared)) => {
+            shared.replace_inner_from(lua_config);
+            commands.insert_resource(shared);
+        }
+        (None, Some(config)) => commands.insert_resource(config),
+        _ => {}
     }
 }
 
@@ -1289,5 +1299,42 @@ pub(crate) fn detect_tabbed_windows(
                 commands.focus_entity(entity, false);
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "lua"))]
+mod tests {
+    use std::sync::mpsc::channel;
+
+    use bevy::prelude::*;
+
+    use super::gather_initial_processes;
+    use crate::config::Config;
+    use crate::events::Event;
+
+    /// The input event tap keeps the handle it received on `InitialConfig` and
+    /// reads swipe settings off it per event, so the Lua config must land in
+    /// *that* handle rather than in a fresh one only the ECS can see.
+    #[test]
+    fn lua_config_reaches_the_handle_the_event_tap_holds() {
+        let lua_config: Config = "[options]\n[swipe.gesture]\nfingers_count = 3\n"
+            .try_into()
+            .expect("config should parse");
+        let tap_config = Config::defaults().expect("defaults should parse");
+        assert_eq!(tap_config.swipe_gesture_fingers(), None);
+
+        let (sender, receiver) = channel();
+        sender
+            .send(Event::InitialConfig(tap_config.clone()))
+            .expect("send initial config");
+        sender.send(Event::ProcessesLoaded).expect("send loaded");
+
+        let mut app = App::new();
+        app.insert_resource(lua_config);
+        app.insert_non_send_resource(receiver);
+        app.add_systems(Update, gather_initial_processes);
+        app.update();
+
+        assert_eq!(tap_config.swipe_gesture_fingers(), Some(3));
     }
 }

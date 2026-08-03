@@ -1936,3 +1936,78 @@ fn test_stack_unstack_brings_focused_window_into_view() {
         })
         .run(commands);
 }
+
+/// A window parked on a virtual row that isn't on screen must stay parked when
+/// its app hides and re-shows itself — 1Password raises itself every minute or
+/// so, which runs the whole unmanage/remanage cycle without the user asking.
+///
+/// Regression: the remanage path pinned the window's current (popped) frame and
+/// reshuffled around it. `reshuffle_layout_strip` then dragged the containing
+/// strip back on-screen to expose the window, so it was painted over the active
+/// row while still belonging to the hidden one — every command that operates on
+/// the active strip skipped it, leaving it unreachable.
+#[test]
+fn test_app_self_activation_keeps_window_parked_on_hidden_virtual_row() {
+    /// Position of the parked window and of the hidden strip holding it.
+    fn parked_state(world: &mut World) -> (Origin, Origin) {
+        let entity = find_window_entity(0, world);
+        let mut strips = world.query::<(&LayoutStrip, &Position, Has<ActiveWorkspaceMarker>)>();
+        let (strip_position, active) = strips
+            .iter(world)
+            .find_map(|(strip, position, active)| {
+                (strip.virtual_index == 1 && strip.contains(entity)).then_some((position.0, active))
+            })
+            .expect("window 0 parked on the hidden virtual row");
+        assert!(!active, "virtual row 1 must not be the active one");
+
+        let mut windows = world.query_filtered::<&Position, With<Window>>();
+        let window_position = windows.get(world, entity).expect("window 0 position").0;
+        (window_position, strip_position)
+    }
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        // Park the focused window on VW1 while VW0 stays on screen.
+        Event::Command {
+            command: Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Stay)),
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        // The app hides and re-shows itself, unmanaging and remanaging the
+        // parked window.
+        Event::ApplicationHidden {
+            pid: TEST_PROCESS_ID,
+        },
+        Event::ApplicationVisible {
+            pid: TEST_PROCESS_ID,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    let parked = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let parked_after = parked.clone();
+
+    TestHarness::new()
+        .with_windows(2)
+        .on_iteration(2, move |world, _state| {
+            parked.replace(Some(parked_state(world)));
+        })
+        .on_iteration(5, move |world, _state| {
+            let (window_before, strip_before) =
+                parked_after.borrow().expect("parked state was captured");
+            let (window_after, strip_after) = parked_state(world);
+
+            assert_eq!(
+                window_after, window_before,
+                "parked window must keep its off-screen frame across the hide/show cycle"
+            );
+            assert_eq!(
+                strip_after, strip_before,
+                "hidden virtual row must not be dragged back on screen"
+            );
+        })
+        .run(commands);
+}

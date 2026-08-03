@@ -3,10 +3,36 @@ use std::path::Path;
 
 const DEFAULT_SDK: &str = "MacOSX.sdk";
 
+use cfg_if::cfg_if;
+
+macro_rules! lua_version_cfg_if {
+    ( $( $feat:literal => $ver:literal ),+ $(,)? ) => {
+        cfg_if! {
+            $(
+                if #[cfg(feature = $feat)] {
+                    pub(crate) const LUA_VERSION: &'static str = $ver;
+                } else
+            )+
+            {
+                pub(crate) const LUA_VERSION: &'static str = "unknown";
+            }
+        }
+    };
+}
+
+lua_version_cfg_if!(
+    "lua54" => "Lua 5.4",
+    "lua53" => "Lua 5.3",
+    "lua55" => "Lua 5.5",
+    "lua52" => "Lua 5.2",
+    "luajit" => "LuaJIT",
+);
+
 #[allow(clippy::case_sensitive_file_extension_comparisons)]
 fn main() {
     let sdk_dir = std::env::var("DEVELOPER_DIR")
-        .map_or("/Library/Developer/CommandLineTools/SDKs".into(), |x| format!("{x}/Platforms/MacOSX.platform/Developer/SDKs"));
+        .map(|x| format!("{x}/Platforms/MacOSX.platform/Developer/SDKs"))
+        .unwrap_or("/Library/Developer/CommandLineTools/SDKs".into());
 
     let sdk_bases: Vec<String> = std::iter::once(format!("{sdk_dir}/{DEFAULT_SDK}"))
         .chain(
@@ -32,5 +58,9 @@ fn main() {
         if Path::new(&hit).exists() {
             println!("cargo:rustc-link-search=framework={hit}");
         }
+    }
+
+    if cfg!(feature = "lua") {
+        println!("cargo:rustc-env=PANERU_LUA_VERSION={}", LUA_VERSION);
     }
 }

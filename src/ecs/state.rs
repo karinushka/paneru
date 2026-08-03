@@ -432,6 +432,12 @@ pub struct QueryStateParams<'w, 's> {
 }
 
 impl QueryStateParams<'_, '_> {
+    /// The window queries backing the extract, for callers that also need to
+    /// look a window up directly rather than through the state document.
+    pub fn windows(&self) -> &Windows<'_, '_> {
+        &self.windows
+    }
+
     /// Builds the state document from the current world.
     ///
     /// # Errors

@@ -20,7 +20,7 @@ use crate::commands::{Direction, MoveFocus, Operation, filter_window_operations}
 use crate::config::Config;
 use crate::ecs::focus::FocusHistory;
 use crate::ecs::layout::LayoutStrip;
-use crate::ecs::params::{ActiveDisplay, Windows};
+use crate::ecs::params::{ActiveDisplay, WindowCtx, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker, Initializing,
     NativeFullscreenMarker, Position, RefreshWindowSizes, RepositionMarker, Scrolling,
@@ -234,17 +234,15 @@ fn workspace_change_handler(
     }
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn detect_moved_windows(
     activated_workspace: Single<Entity, Added<ActiveWorkspaceMarker>>,
-    windows: Windows,
     mut workspaces: Query<(&mut LayoutStrip, Entity, Has<NativeFullscreenMarker>)>,
     apps: Query<&mut Application>,
     window_manager: Res<WindowManager>,
-    config: Res<Config>,
     mut ignored_windows: Local<HashSet<WinID>>,
-    mut commands: Commands,
+    mut ctx: WindowCtx,
 ) {
     let Ok(workspace_id) = workspaces
         .get(*activated_workspace)
@@ -258,7 +256,11 @@ fn detect_moved_windows(
         .iter()
         .filter_map(|strip| (strip.0.id() == workspace_id).then_some(strip.0))
         .collect::<Vec<_>>();
-    let find_window = |window_id| windows.find_managed(window_id).map(|(_, entity)| entity);
+    let find_window = |window_id| {
+        ctx.windows
+            .find_managed(window_id)
+            .map(|(_, entity)| entity)
+    };
     let Ok((moved_windows, mut unresolved)) =
         windows_not_in_strips(workspace_id, find_window, &strips, &window_manager).inspect_err(
             |err| {
@@ -270,7 +272,7 @@ fn detect_moved_windows(
     };
     // Skip known, but unmanaged windows.
     unresolved.retain(|window_id| {
-        !ignored_windows.contains(window_id) && windows.find(*window_id).is_none()
+        !ignored_windows.contains(window_id) && ctx.windows.find(*window_id).is_none()
     });
 
     if !unresolved.is_empty() {
@@ -282,7 +284,7 @@ fn detect_moved_windows(
         let retry_windows = apps
             .into_iter()
             .flat_map(|app| {
-                app.window_list(&config)
+                app.window_list(&ctx.config)
                     .into_iter()
                     .filter(|window| unresolved_ids.contains(&window.id()))
             })
@@ -300,7 +302,7 @@ fn detect_moved_windows(
                     .collect::<Vec<_>>()
                     .join(" ")
             );
-            commands.trigger(SpawnWindowTrigger(retry_windows));
+            ctx.commands.trigger(SpawnWindowTrigger(retry_windows));
         }
     }
 

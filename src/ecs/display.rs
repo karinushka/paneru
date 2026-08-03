@@ -101,7 +101,7 @@ fn display_change_handler(
 /// the same add / remove / move primitives the event handlers use. It also
 /// forces the active workspace to re-tile, because macOS relocates windows while
 /// asleep even when the display set is unchanged.
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[allow(clippy::needless_pass_by_value)]
 pub(crate) fn reconcile_displays(
     mut messages: MessageReader<Event>,
     workspaces: Query<(&LayoutStrip, Entity, Option<&ChildOf>)>,

@@ -457,6 +457,130 @@ the window manager on its next scheduled pass rather than instantly: expect the
 document to be up to roughly a frame old, and the call itself to take about
 that long. This does not apply to handlers that never query.
 
+### Programmatic window management
+
+Handlers are given a **window set**: the whole layout — displays, workspaces,
+columns, the windows in them — as a value you can transform. It is modelled on
+xmonad's `StackSet`, and it is *pure*: every operation returns a **new** window
+set rather than changing the one you were given, and nothing touches a real
+window until you **return** one.
+
+```lua
+paneru.bind("alt - h",       function(ws) return ws:focus(ws:west(ws:focused())) end)
+paneru.bind("alt - shift-h", function(ws) return ws:swap(ws:focused(), ws:west(ws:focused())) end)
+paneru.bind("alt - 3",       function(ws) return ws:view(3) end)
+paneru.bind("alt - shift-3", function(ws) return ws:shift(ws:focused(), 3) end)
+```
+
+That the value is pure is the point, not a technicality:
+
+```lua
+paneru.bind("alt - b", function(ws)
+  local tidied = ws:width(ws:focused(), 0.6)   -- computed, not applied
+  if #ws:columns() < 3 then
+    return                                     -- returning nothing changes nothing
+  end
+  return tidied                                -- only what you return commits
+end)
+```
+
+A handler that raises partway through changes nothing either, because it never
+returned anything. You can branch, compute several candidate layouts, and keep
+one.
+
+`paneru.windows(fn)` is the same contract for use partway through a handler:
+it hands `fn` the window set and commits what it gives back.
+
+#### Reading
+
+| Method | Returns |
+| --- | --- |
+| `ws:focused()` | id of the focused window, or `nil` |
+| `ws:windows()` | every window, as records |
+| `ws:window(id)` | one window record |
+| `ws:find(pred)` / `ws:filter(pred)` | the first / all windows matching a predicate |
+| `ws:current()` | the number of the workspace on screen |
+| `ws:workspaces()` | every workspace number |
+| `ws:workspace_windows(n)` | the windows on workspace `n` |
+| `ws:columns([n])` | the columns of a workspace, each a list of window ids |
+| `ws:column_of(id)` / `ws:workspace_of(id)` / `ws:display_of(id)` | where a window is |
+| `ws:east(id)` / `ws:west(id)` | the window one column over |
+| `ws:next(id)` / `ws:prev(id)` | the next/previous window, wrapping |
+
+A window record has `id`, `app_name`, `bundle_id`, `title`, `frame`, `floating`,
+`managed`, `visible` and `focused`.
+
+`paneru.match{ app = …, bundle = …, title = …, floating = …, managed = … }`
+builds a predicate; `app`, `bundle` and `title` are regular expressions, checked
+when the script loads. Any function taking a window record works too.
+
+#### Transforming
+
+Each returns a new window set: `ws:focus(id)`, `ws:swap(a, b)`,
+`ws:shift(id, workspace[, follow])`, `ws:view(workspace)`, `ws:float(id)`,
+`ws:sink(id)`, `ws:manage(id)`, `ws:unmanage(id)`, `ws:width(id, ratio)`,
+`ws:stack(id, onto)`, `ws:tab(id, onto)`, `ws:unstack(id)`.
+
+Operations that act on whatever is focused rather than on a window you name —
+centring, full width, equalise, balance, raising a float, moving to the next
+display — are not here. Use the imperative verbs for those:
+`paneru.window.center()`, `paneru.window.balance()`, and so on.
+
+Two things to keep in mind. The set is a snapshot, so a window it lists may be
+gone by the time your operations are applied; those are skipped and the rest
+still happen, and a handler that cares can check for itself. And the returned
+layout is a prediction — the layout engine settles the actual geometry, so read
+the settled result from the next event rather than from the set you just built.
+
+#### Example: named scratchpads
+
+xmonad's `NamedScratchpad`, in about fifteen lines. A scratchpad is a window
+you toggle in and out of view; when it is not wanted it is parked on a
+workspace you never look at.
+
+```lua
+local STASH = 9  -- a workspace you never switch to
+
+local pads = {
+  terminal = { match = paneru.match{ app = "Alacritty", title = "^scratch" },
+               spawn = "open -na Alacritty --args --title scratch" },
+  notes    = { match = paneru.match{ app = "Obsidian" },
+               spawn = "open -a Obsidian" },
+}
+
+local function toggle(name)
+  local pad = pads[name]
+  return function(ws)
+    local window = ws:find(pad.match)
+    if not window then
+      os.execute(pad.spawn .. " &")            -- not running yet: start it
+      return
+    end
+    if ws:workspace_of(window.id) == ws:current() then
+      return ws:shift(window.id, STASH)        -- in view: put it away
+    end
+    return ws:shift(window.id, ws:current(), true):focus(window.id)
+  end
+end
+
+paneru.bind("alt - s", toggle("terminal"))
+paneru.bind("alt - n", toggle("notes"))
+```
+
+Have new scratchpad windows come up floating, as xmonad's `customFloating` does:
+
+```lua
+paneru.on("window_focused", function(event, ws)
+  local window = ws:window(event.window_id)
+  if window and pads.terminal.match(window) and window.managed then
+    return ws:float(window.id)
+  end
+end)
+```
+
+`os.execute` blocks, which is normally a thing to avoid in a window manager —
+but the script has its own thread, so a slow launch delays only the script.
+
 ### The script runs on its own thread
 
 Handlers are your code, and the window manager cannot know how long yours will

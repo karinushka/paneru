@@ -43,15 +43,35 @@ pub mod swipe;
 /// If no configuration file is found, a minimal one is created in the user's
 /// XDG configuration directory so a fresh app installation can start with the
 /// built-in defaults.
-pub static CONFIGURATION_FILE: LazyLock<PathBuf> = LazyLock::new(|| {
-    discover_configuration_file().unwrap_or_else(|| {
-        create_default_configuration_file().unwrap_or_else(|error| {
-            panic!(
-                "{}: Unable to create default configuration: {error}",
-                function_name!()
-            )
-        })
-    })
+/// The TOML configuration file, if there is one to use.
+///
+/// `None` means: no TOML exists and one should not be invented, because an
+/// `init.lua` is already doing the job. Planting a stub `paneru.toml` beside a
+/// Lua config is actively harmful — the stub becomes the authoritative config,
+/// so every option reverts to its default, and every later touch of that file
+/// re-applies those defaults over the running state.
+///
+/// Without a Lua script the stub is still created, so a first run has something
+/// to edit.
+pub static CONFIGURATION_FILE: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
+    if let Some(path) = discover_configuration_file() {
+        return Some(path);
+    }
+    #[cfg(feature = "lua")]
+    if let Some(script) = discover_lua_file() {
+        info!(
+            "{}: no TOML configuration; using defaults alongside {}",
+            function_name!(),
+            script.display()
+        );
+        return None;
+    }
+    Some(create_default_configuration_file().unwrap_or_else(|error| {
+        panic!(
+            "{}: Unable to create default configuration: {error}",
+            function_name!()
+        )
+    }))
 });
 
 const DEFAULT_CONFIGURATION: &str = "# Paneru configuration\n\n[options]\n\n[bindings]\n";
@@ -290,6 +310,29 @@ impl Config {
         Ok(Config {
             inner: Arc::new(ArcSwap::from_pointee(InnerConfig::new(&input)?)),
         })
+    }
+
+    /// The configuration with every option left at its default. Used when there
+    /// is no TOML file, which with a Lua config is the normal case rather than
+    /// an error — see [`CONFIGURATION_FILE`].
+    ///
+    /// Parses the same text the stub file would have contained, so "no TOML"
+    /// and "the TOML we would have written" cannot mean different things. An
+    /// empty string will not do: `[options]` is a required table.
+    pub fn defaults() -> Result<Self> {
+        Ok(Config {
+            inner: Arc::new(ArcSwap::from_pointee(InnerConfig::new(
+                DEFAULT_CONFIGURATION,
+            )?)),
+        })
+    }
+
+    /// Loads `path` if there is one, otherwise falls back to the defaults.
+    pub fn load(path: Option<&Path>) -> Result<Self> {
+        match path {
+            Some(path) => Self::new(path),
+            None => Self::defaults(),
+        }
     }
 
     /// Reloads the configuration from the specified path, updating the internal options and keybindings.
@@ -2015,6 +2058,19 @@ fn test_first_launch_creates_parseable_config_without_overwriting_it() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), custom);
 
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn defaults_config_matches_the_generated_stub() {
+    // `Config::defaults()` stands in for a TOML that isn't there, so it has to
+    // mean the same thing as the stub that would otherwise have been written.
+    let stub = InnerConfig::new(DEFAULT_CONFIGURATION).expect("the stub should parse");
+    let defaults = Config::defaults().expect("defaults should always build");
+    assert_eq!(
+        format!("{stub:?}"),
+        format!("{:?}", defaults.inner.load()),
+        "a missing TOML should behave exactly like the generated stub"
+    );
 }
 
 #[test]

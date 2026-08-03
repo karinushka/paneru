@@ -7,16 +7,26 @@
 //! and mutate the window manager by issuing commands through `paneru.run`, which
 //! are funnelled back onto the existing command bus.
 //!
-//! This module is the ECS half: the systems that collect events out of the
-//! world, hand them to the interpreter, and put what the callbacks queued back
-//! onto the command bus. The interpreter itself lives in [`runtime`] and knows
-//! nothing about Bevy — it reaches the world only through the `extract`
-//! callback these systems supply.
+//! The interpreter does not run here. It runs on a thread of its own (see
+//! [`worker`]), because a handler is arbitrary user code of unbounded duration
+//! and the main thread is where the Cocoa event pump lives — a script that
+//! takes a second used to freeze dragging, focus tracking and the menubar for
+//! that second. This module is the ECS half either side of that channel: the
+//! systems that collect events out of the world and hand them over, answer the
+//! `paneru.query*` round-trip from the live world, and put what the callbacks
+//! queued back onto the command bus.
 //!
-//! `mlua::Lua` is `!Send`, so [`LuaRuntime`] lives as a `NonSend` resource and is
-//! only ever touched from the main-thread schedules. Every system takes it as
-//! `Option<NonSendMut<LuaRuntime>>` so the mock test harness (which never inserts
-//! a runtime) keeps compiling and the systems gracefully no-op.
+//! Two consequences worth knowing:
+//!
+//! * A handler that calls `paneru.query*` sees data up to about a frame stale,
+//!   and waits about that long for it. Extraction is lazy, so a script that
+//!   never queries never pays either cost.
+//! * Commands a handler issues reach the command handlers one frame later than
+//!   they did when dispatch was synchronous.
+//!
+//! Every system takes the worker as `Option<Res<LuaWorker>>` so the mock test
+//! harness (which never starts one) keeps compiling and the systems gracefully
+//! no-op.
 
 mod api;
 mod convert;

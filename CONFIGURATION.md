@@ -452,6 +452,33 @@ never query cost nothing extra — which matters for events as frequent as
 `mouse_moved`. Outside a callback there is no window-manager state to read, so
 calling one of these at script top level raises an error; do it from a handler.
 
+Because the script runs on its own thread (see below), a query is answered by
+the window manager on its next scheduled pass rather than instantly: expect the
+document to be up to roughly a frame old, and the call itself to take about
+that long. This does not apply to handlers that never query.
+
+### The script runs on its own thread
+
+Handlers are your code, and the window manager cannot know how long yours will
+take. So it does not wait for them: the script runs on a dedicated thread, and
+events, keybind callbacks and hot reloads are handed to it over a queue. A
+handler that blocks for a second no longer freezes window dragging, focus
+tracking or the menubar for that second — it only delays the script's own
+subsequent handlers, which queue up behind it.
+
+Three things follow:
+
+* Commands a handler issues with `paneru.run` take effect a frame later than
+  they would have if the handler ran inline. Nothing you can observe from Lua
+  depends on this, but it is why a handler cannot see its own commands reflected
+  in a query it makes immediately afterwards.
+* A handler that never returns will queue events behind it indefinitely. There
+  is no watchdog and no timeout: the window manager stays fully responsive, but
+  your script stops reacting until it is reloaded. Save the file to reload it.
+* C modules loaded with `require` (sketchybar's `sbar`, say) run on that thread
+  too, not the main one. `SbarLua` writes to a socket and is fine with this; a
+  module that expects to be called from the process's main thread would not be.
+
 ### Extra Lua modules
 
 `$PANERU_LUA_PATH` and `$PANERU_LUA_CPATH` extend the script's `require()`

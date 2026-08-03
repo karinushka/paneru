@@ -17,6 +17,12 @@
 //! The conversion runs the other way too — [`TryFrom<&Event>`] is exhaustive, so
 //! a new variant in [`Event`] is a compile error here until it is either mapped
 //! or explicitly declared unmarshallable.
+//!
+//! The two halves are kept apart: [`TryFrom<&Event>`] and [`state_snapshot`]
+//! read the world and produce plain data, while [`event_table`] and
+//! [`snapshot_table`] turn that data into Lua values. Only the first half needs
+//! the ECS and only the second half needs a [`Lua`], which is what lets the
+//! runtime live on a thread of its own.
 
 use mlua::{Lua, LuaSerdeExt, Table};
 use serde::Serialize;
@@ -290,17 +296,23 @@ impl LuaEvent {
     }
 }
 
-/// Converts an [`Event`] into `(name, table)` for dispatch to `paneru.on`
-/// callbacks. Returns `None` for events scripts cannot see.
+/// Marshals an already-extracted [`LuaEvent`] into `(name, table)` for dispatch
+/// to `paneru.on` callbacks.
 ///
 /// The dispatch name is the serde tag serde already wrote into the table's
 /// `type` field, so there is no second hand-written variant→name mapping to
 /// keep in step with it.
-pub fn event_to_lua(lua: &Lua, event: &Event) -> Option<(String, Table)> {
-    let event = LuaEvent::try_from(event).ok()?;
-    let table = lua.to_value(&event).ok()?.as_table().cloned()?;
+pub fn event_table(lua: &Lua, event: &LuaEvent) -> Option<(String, Table)> {
+    let table = lua.to_value(event).ok()?.as_table().cloned()?;
     let name = table.get::<String>("type").ok()?;
     Some((name, table))
+}
+
+/// Extracts and marshals in one step. Convenience for callers that hold both an
+/// [`Event`] and a [`Lua`]; the halves are separate for those that do not.
+#[cfg(test)]
+pub fn event_to_lua(lua: &Lua, event: &Event) -> Option<(String, Table)> {
+    event_table(lua, &LuaEvent::try_from(event).ok()?)
 }
 
 /// The read-only state snapshot passed to `paneru.bind` handlers.
@@ -324,9 +336,10 @@ pub struct WindowSnapshot {
     pub height: Option<i32>,
 }
 
-/// Builds the state snapshot for `paneru.bind` handlers.
-pub fn state_snapshot(lua: &Lua, windows: &Windows) -> mlua::Result<Table> {
-    let snapshot = StateSnapshot {
+/// Reads the state snapshot for `paneru.bind` handlers out of the world. Pure
+/// data: no Lua involved, so this runs wherever the ECS does.
+pub fn state_snapshot(windows: &Windows) -> StateSnapshot {
+    StateSnapshot {
         focused: windows.focused().map(|(window, _)| window.id()),
         windows: windows
             .iter()
@@ -344,9 +357,12 @@ pub fn state_snapshot(lua: &Lua, windows: &Windows) -> mlua::Result<Table> {
                 }
             })
             .collect(),
-    };
+    }
+}
 
-    lua.to_value(&snapshot)?
+/// Marshals a [`StateSnapshot`] into the table `paneru.bind` handlers receive.
+pub fn snapshot_table(lua: &Lua, snapshot: &StateSnapshot) -> mlua::Result<Table> {
+    lua.to_value(snapshot)?
         .as_table()
         .cloned()
         .ok_or_else(|| mlua::Error::RuntimeError("state snapshot is not a table".into()))

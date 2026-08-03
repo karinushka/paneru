@@ -659,6 +659,10 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
     // keypress.
     #[cfg(feature = "lua")]
     if let Some(path) = lua_path {
+        // `paneru.bind` resolves chords on the worker, and the layout-aware
+        // keymap behind that goes through Carbon/TIS. Capture it here, on the
+        // main thread, before the worker can ask for it.
+        crate::config::prime_virtual_keymap();
         app.insert_resource(lua::LuaWorker::spawn(lua::LuaSource::Path(path.clone())));
         app.insert_resource(lua::LuaScriptPath(path));
         app.add_plugins(lua::LuaPlugin);

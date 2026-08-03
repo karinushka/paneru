@@ -2,29 +2,59 @@
 //!
 //! This module knows nothing about Bevy. It takes source in, hands dispatched
 //! side effects back out as plain values ([`Command`]s and flash messages), and
-//! reaches the world only through the `extract` callback passed to
-//! [`LuaRuntime::with_query`]. That keeps the interpreter — which `mlua` makes
-//! `!Send`, and which runs arbitrary user code of unbounded duration — free to
-//! live on a thread of its own, with the ECS on the other side of a channel.
+//! reaches the world only through [`DispatchWorld`]. That keeps the interpreter
+//! — which `mlua` makes `!Send`, and which runs arbitrary user code of unbounded
+//! duration — free to live on a thread of its own, with the ECS on the other
+//! side of a channel.
+//!
+//! Dispatch is `async`: a handler that reads the world suspends rather than
+//! blocking, so the worker can start the next one instead of queueing it behind
+//! a round trip. Handlers therefore overlap, which is why nothing here may hold
+//! a `RefCell` borrow across an await.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
 
-use mlua::{AnyUserData, Function, IntoLua, Lua, LuaSerdeExt, Table, Value};
+use mlua::{AnyUserData, Function, Lua, LuaSerdeExt, Table, Value};
 use tracing::{error, warn};
 
 use super::api;
-use super::windowset::{LuaWindowSet, WINDOW_SET_PROVIDER};
+use super::windowset::LuaWindowSet;
+use super::world::DispatchWorld;
 use crate::commands::Command;
 use crate::config::Config;
-use crate::ecs::state::{PaneruQueryState, StateQueryKind};
 use crate::platform::Modifiers;
-use paneru_shared_types::windowset::WindowSet;
 
 /// A Lua-registered keybind: `(keycode, modifiers, handler_id)`.
 pub type LuaKeybind = (u8, Modifiers, u32);
+
+/// A store failure, spelled the way the script called it.
+pub(super) fn store_error(call: &str, message: &str) -> mlua::Error {
+    mlua::Error::RuntimeError(format!("paneru.state.{call}: {message}"))
+}
+
+/// A stored value as Lua sees it. Nothing stored is `nil`, which is how a
+/// missing key and a removed one read the same.
+pub(super) fn to_lua_value(lua: &Lua, value: Option<&serde_json::Value>) -> mlua::Result<Value> {
+    match value {
+        Some(value) => lua.to_value(value),
+        None => Ok(Value::Nil),
+    }
+}
+
+/// A Lua value on its way into the store. Functions, coroutines and userdata
+/// have no JSON to be, and say so at the call site rather than being quietly
+/// dropped.
+pub(super) fn from_lua_value(
+    lua: &Lua,
+    value: Value,
+    call: &str,
+) -> mlua::Result<serde_json::Value> {
+    lua.from_value(value)
+        .map_err(|err| store_error(call, &format!("value cannot be stored: {err}")))
+}
 
 /// Prepends `PANERU_LUA_PATH`/`PANERU_LUA_CPATH` (if set) onto `package.path`/
 /// `package.cpath`, so `require("sbar")` (or any module supplied via the Nix
@@ -82,6 +112,10 @@ pub(super) struct Outbox {
 
 /// The side effects one dispatch produced: commands to put on the bus and
 /// flash messages to show.
+///
+/// Script state writes are not among them. They are the one thing a handler
+/// does that it also has to see the result of, so they go and come back while
+/// the handler waits rather than being queued for later.
 pub(super) type Effects = (Vec<Command>, Vec<(String, f32)>);
 
 /// The embedded Lua runtime and its shared registration state.
@@ -89,6 +123,10 @@ pub struct LuaRuntime {
     lua: Lua,
     outbox: Rc<RefCell<Outbox>>,
     registry: SharedRegistry,
+    /// World access for the dispatches in flight, shared with the `paneru.*`
+    /// functions that read through it. Outlives a reload: the caches behind it
+    /// are keyed by batch and revision, not by interpreter.
+    world: Rc<DispatchWorld>,
     /// The `Config` a script declared via `paneru.setup{...}`, if it called it.
     /// `None` means the script left configuration to the TOML file.
     built_config: Option<Config>,
@@ -96,14 +134,14 @@ pub struct LuaRuntime {
 
 impl LuaRuntime {
     /// Builds a runtime by reading and executing the script at `path`.
-    pub fn from_file(path: &Path) -> mlua::Result<Self> {
+    pub fn from_file(path: &Path, world: &Rc<DispatchWorld>) -> mlua::Result<Self> {
         let source = std::fs::read_to_string(path).map_err(mlua::Error::external)?;
-        Self::from_source(&source)
+        Self::from_source(&source, world)
     }
 
     /// Builds a runtime from Lua source, installing the `paneru` API and
     /// executing the script. Registered keybinds are collected for publishing.
-    pub fn from_source(source: &str) -> mlua::Result<Self> {
+    pub fn from_source(source: &str, world: &Rc<DispatchWorld>) -> mlua::Result<Self> {
         // SAFETY: the runtime is confined to the thread that built it, and
         // unsafe libs are what let a script `require` a C module such as
         // sketchybar's.
@@ -112,7 +150,7 @@ impl LuaRuntime {
         let outbox = Rc::new(RefCell::new(Outbox::default()));
         let registry = SharedRegistry::default();
         let config_cell: Rc<RefCell<Option<Config>>> = Rc::new(RefCell::new(None));
-        api::install(&lua, &outbox, &registry, &config_cell)?;
+        api::install(&lua, &outbox, &registry, &config_cell, world)?;
         lua.load(source).exec()?;
         // The cell is only written by `paneru.setup`; take the built config out so
         // the runtime owns it directly rather than keeping the shared cell alive.
@@ -121,6 +159,7 @@ impl LuaRuntime {
             lua,
             outbox,
             registry,
+            world: Rc::clone(world),
             built_config,
         })
     }
@@ -148,50 +187,56 @@ impl LuaRuntime {
         !self.registry.borrow().handlers.is_empty()
     }
 
-    /// Runs every `paneru.on(name, ...)` handler. Handlers are cloned out of the
-    /// registry first so a handler that registers another one cannot deadlock on
-    /// the borrow. One failing handler does not stop the rest.
-    pub(super) fn dispatch_event(&self, name: &str, event: &Table) {
-        let handlers = self
-            .registry
+    /// The handlers registered for `name`, in registration order.
+    ///
+    /// Cloned out of the registry rather than borrowed: they are dispatched
+    /// concurrently and one may register another, so nothing may be holding the
+    /// borrow while they run.
+    pub(super) fn event_handlers(&self, name: &str) -> Vec<Function> {
+        self.registry
             .borrow()
             .handlers
             .get(name)
             .cloned()
-            .unwrap_or_default();
-        for handler in handlers {
-            let window_set = match self.lazy_window_set() {
-                Ok(window_set) => window_set,
-                Err(err) => {
-                    error!("lua event handler '{name}': {err}");
-                    continue;
-                }
-            };
-            match handler.call::<Value>((event.clone(), window_set)) {
-                Ok(returned) => self.commit(&returned, &format!("event handler '{name}'")),
-                Err(err) => error!("lua event handler '{name}': {err}"),
-            }
+            .unwrap_or_default()
+    }
+
+    /// Runs one `paneru.on` handler.
+    ///
+    /// `call_async`, so a handler that reads the world suspends here instead of
+    /// holding the interpreter — which is what lets the next handler run rather
+    /// than queue behind this one.
+    pub(super) async fn dispatch_event(&self, name: &str, event: &Table, handler: &Function) {
+        let context = format!("event handler '{name}'");
+        let _dispatch = self.world.enter();
+        let Some(window_set) = self.window_set_arg(&context).await else {
+            return;
+        };
+        match handler
+            .call_async::<Value>((event.clone(), window_set))
+            .await
+        {
+            Ok(returned) => self.commit(&returned, &context),
+            Err(err) => error!("lua {context}: {err}"),
         }
     }
 
     /// Runs the handler bound to keybind `id`: a Lua function gets the window
     /// set, a command string goes straight onto the outbox.
-    pub(super) fn dispatch_bind(&self, id: u32) {
+    pub(super) async fn dispatch_bind(&self, id: u32) {
         let handler = id
             .checked_sub(1)
             .and_then(|index| self.registry.borrow().binds.get(index as usize).cloned());
         match handler {
             Some(Value::Function(handler)) => {
-                let window_set = match self.lazy_window_set() {
-                    Ok(window_set) => window_set,
-                    Err(err) => {
-                        error!("lua keybind handler {id}: {err}");
-                        return;
-                    }
+                let context = format!("keybind handler {id}");
+                let _dispatch = self.world.enter();
+                let Some(window_set) = self.window_set_arg(&context).await else {
+                    return;
                 };
-                match handler.call::<Value>(window_set) {
-                    Ok(returned) => self.commit(&returned, &format!("keybind handler {id}")),
-                    Err(err) => error!("lua keybind handler {id}: {err}"),
+                match handler.call_async::<Value>(window_set).await {
+                    Ok(returned) => self.commit(&returned, &context),
+                    Err(err) => error!("lua {context}: {err}"),
                 }
             }
             Some(Value::String(command)) => {
@@ -206,10 +251,25 @@ impl LuaRuntime {
         }
     }
 
-    /// The window set a handler is handed: empty until it is first used, so a
-    /// handler that ignores it costs nothing. See [`super::windowset`].
-    fn lazy_window_set(&self) -> mlua::Result<AnyUserData> {
-        self.lua.create_userdata(LuaWindowSet::lazy())
+    /// The window set a handler is handed.
+    ///
+    /// Materialised up front rather than on first use. Fetching it lazily meant
+    /// a synchronous provider call from deep inside the window-set methods,
+    /// which cannot suspend; every handler in a batch shares one read anyway
+    /// (see [`super::world::DispatchWorld`]), so the fetch it saved was already
+    /// at most one per batch. Each handler gets its own copy to transform.
+    async fn window_set_arg(&self, context: &str) -> Option<AnyUserData> {
+        let set = match self.world.layout().await {
+            Ok(set) => set,
+            Err(err) => {
+                error!("lua {context}: {err}");
+                return None;
+            }
+        };
+        self.lua
+            .create_userdata(LuaWindowSet::materialised((*set).clone()))
+            .inspect_err(|err| error!("lua {context}: {err}"))
+            .ok()
     }
 
     /// Queues whatever a handler returned.
@@ -248,109 +308,138 @@ impl LuaRuntime {
         )
     }
 
-    /// Runs `body` with `paneru.query*` able to answer from the live world.
-    ///
-    /// The provider is a scoped Lua function borrowing `extract`, so it exists
-    /// only while `body` runs: outside a callback there is no world access at
-    /// all, and `paneru.query` says so rather than handing back a stale
-    /// snapshot. `extract` is called lazily and at most once per dispatch — it
-    /// reads every window's title over the accessibility API, so a script that
-    /// never queries never pays for it, however hot the event.
-    pub(super) fn with_query<R>(
-        &self,
-        extract: &dyn Fn() -> Result<PaneruQueryState, String>,
-        extract_set: &dyn Fn() -> Result<WindowSet, String>,
-        body: impl FnOnce() -> R,
-    ) -> mlua::Result<R> {
-        let cached: RefCell<Option<Rc<PaneruQueryState>>> = RefCell::new(None);
-        let cached_set: RefCell<Option<WindowSet>> = RefCell::new(None);
-        let result = self.lua.scope(|scope| {
-            let provider = scope.create_function(|lua, (kind, as_json): (String, bool)| {
-                let kind = StateQueryKind::parse(&kind).ok_or_else(|| {
-                    mlua::Error::RuntimeError(format!("paneru.query: unknown kind '{kind}'"))
-                })?;
-                let state = {
-                    let mut cached = cached.borrow_mut();
-                    if cached.is_none() {
-                        *cached = Some(Rc::new(extract().map_err(|err| {
-                            mlua::Error::RuntimeError(format!("paneru.query: {err}"))
-                        })?));
-                    }
-                    cached.clone().expect("just filled in")
-                };
-                if as_json {
-                    state
-                        .to_query_json(kind)
-                        .map_err(mlua::Error::external)?
-                        .into_lua(lua)
-                } else {
-                    let value = state.to_query_value(kind).map_err(mlua::Error::external)?;
-                    lua.to_value(&value)
-                }
-            })?;
-            self.lua
-                .set_named_registry_value(api::QUERY_PROVIDER, provider)?;
-
-            // The window set is fetched on the same terms: lazily, and at most
-            // once however many handlers in this batch ask for one.
-            let set_provider = scope.create_function(|lua, ()| {
-                let set = {
-                    let mut cached = cached_set.borrow_mut();
-                    if cached.is_none() {
-                        *cached = Some(extract_set().map_err(|err| {
-                            mlua::Error::RuntimeError(format!("paneru window set: {err}"))
-                        })?);
-                    }
-                    cached.clone().expect("just filled in")
-                };
-                lua.create_userdata(LuaWindowSet::materialised(set))
-            })?;
-            self.lua
-                .set_named_registry_value(WINDOW_SET_PROVIDER, set_provider)?;
-
-            Ok(body())
-        });
-        // Whatever happened, the scoped functions are dead once the scope ends.
-        self.lua.unset_named_registry_value(api::QUERY_PROVIDER)?;
-        self.lua.unset_named_registry_value(WINDOW_SET_PROVIDER)?;
-        result
-    }
-
-    /// Runs `body` with `paneru.query*` wired to `extract`, logs any failure
-    /// under `context`, then hands back the commands and flash messages its
-    /// callbacks queued. The shared tail of both dispatch paths, which differ
-    /// only in what they collect up front and what `body` does with it.
-    pub(super) fn dispatch_with_query(
-        &self,
-        context: &str,
-        extract: &dyn Fn() -> Result<PaneruQueryState, String>,
-        extract_set: &dyn Fn() -> Result<WindowSet, String>,
-        body: impl FnOnce(),
-    ) -> Effects {
-        if let Err(err) = self.with_query(extract, extract_set, body) {
-            error!("lua {context}: {err}");
-        }
-        self.drain_outbox()
-    }
-
     /// An empty runtime (no handlers, no binds). Used as a fallback when the
     /// init script fails to load, so the resource always exists and a later
     /// hot reload can install a fixed script.
-    pub fn empty() -> Self {
-        Self::from_source("").expect("empty Lua runtime should always build")
+    pub fn empty(world: &Rc<DispatchWorld>) -> Self {
+        Self::from_source("", world).expect("empty Lua runtime should always build")
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use async_channel::{Receiver, unbounded};
+    use futures_lite::future::{block_on, poll_once};
+    use paneru_shared_types::script_state::{ScriptState, ScriptStateWrite, WriteOutcome};
+    use paneru_shared_types::windowset::WindowSet;
+
     use super::super::convert;
+    use super::super::worker::{Shared, StoreRequest, WorldRequest};
+    use super::super::world::WorldAccess;
     use super::*;
+    use crate::ecs::state::PaneruQueryState;
     use crate::events::Event;
 
-    /// A window-set extractor for the tests that never ask for one. Calling it
-    /// is a test failure, not a runtime error: it means the laziness broke.
-    fn no_window_set() -> Result<paneru_shared_types::windowset::WindowSet, String> {
-        panic!("this test should never materialise a window set");
+    /// The main thread's half of the script state store, in one struct: what a
+    /// read answers from and what a write lands in, with the revision the
+    /// worker's cache is checked against.
+    /// A competing writer, run just before a write lands.
+    type Interjection = Box<dyn FnMut(&mut ScriptState)>;
+
+    struct TestWorld {
+        store: RefCell<ScriptState>,
+        revision: Arc<AtomicU64>,
+        /// For the tests that need someone else to get there first.
+        interject: RefCell<Option<Interjection>>,
+        /// The main thread's ends of the two request channels, drained by
+        /// [`TestWorld::drive`].
+        world_queries: Receiver<WorldRequest>,
+        store_queries: Receiver<StoreRequest>,
+        dispatch: Rc<DispatchWorld>,
+    }
+
+    impl Default for TestWorld {
+        fn default() -> Self {
+            let (world_tx, world_queries) = unbounded();
+            let (store_tx, store_queries) = unbounded();
+            let revision = Arc::new(AtomicU64::new(0));
+            Self {
+                store: RefCell::new(ScriptState::default()),
+                revision: Arc::clone(&revision),
+                interject: RefCell::new(None),
+                world_queries,
+                store_queries,
+                dispatch: DispatchWorld::new(WorldAccess::new(world_tx, store_tx, revision)),
+            }
+        }
+    }
+
+    impl TestWorld {
+        /// A runtime whose world reads come back through this world.
+        fn runtime(&self, source: &str) -> mlua::Result<LuaRuntime> {
+            LuaRuntime::from_source(source, &self.dispatch)
+        }
+
+        /// Runs one dispatch to completion, answering its reads the way the main
+        /// thread's `serve_lua_queries` does.
+        ///
+        /// A dispatch suspends whenever it reads the world, so a test cannot
+        /// simply block on it — nothing would be there to answer. Polling the
+        /// future and draining the request queue in turn is the single-threaded
+        /// shape of what the ECS does across frames.
+        fn drive<T>(
+            &self,
+            extract: &dyn Fn() -> Shared<PaneruQueryState>,
+            future: impl Future<Output = T>,
+        ) -> T {
+            /// Ample for any dispatch here; only reached if one is wedged.
+            const TURNS: usize = 1000;
+
+            let mut future = Box::pin(future);
+            for _ in 0..TURNS {
+                if let Some(done) = block_on(poll_once(future.as_mut())) {
+                    return done;
+                }
+                while let Ok(request) = self.world_queries.try_recv() {
+                    match request {
+                        WorldRequest::State { reply } => {
+                            let _ = reply.try_send(extract());
+                        }
+                        WorldRequest::WindowSet { reply } => {
+                            let _ = reply.try_send(Ok(Arc::new(WindowSet::default())));
+                        }
+                    }
+                }
+                while let Ok(request) = self.store_queries.try_recv() {
+                    match request {
+                        StoreRequest::Read { reply } => {
+                            let _ = reply.try_send(self.read());
+                        }
+                        StoreRequest::Write { write, reply } => {
+                            let _ = reply.try_send(self.write(&write));
+                        }
+                    }
+                }
+            }
+            panic!("the dispatch never finished");
+        }
+
+        // Fallible to match what the worker hands the runtime, which reads over
+        // a channel that can be gone.
+        #[allow(clippy::unnecessary_wraps)]
+        fn read(&self) -> Result<ScriptState, String> {
+            Ok(self.store.borrow().clone())
+        }
+
+        fn write(&self, write: &ScriptStateWrite) -> Result<WriteOutcome, String> {
+            if let Some(interject) = self.interject.borrow_mut().as_mut() {
+                interject(&mut self.store.borrow_mut());
+                self.revision.fetch_add(1, Ordering::Release);
+            }
+            let outcome = self.store.borrow_mut().apply(write)?;
+            if matches!(outcome, WriteOutcome::Applied { changed: true }) {
+                self.revision.fetch_add(1, Ordering::Release);
+            }
+            Ok(outcome)
+        }
+
+        fn get(&self, key: &str) -> Option<serde_json::Value> {
+            self.store.borrow().get(key).cloned()
+        }
     }
 
     /// Drains the outbox commands for assertions.
@@ -360,8 +449,10 @@ mod tests {
 
     #[test]
     fn bind_registers_keybind_and_stores_handler() {
-        let runtime =
-            LuaRuntime::from_source(r#"paneru.bind("alt - j", "window focus east")"#).unwrap();
+        let world = TestWorld::default();
+        let runtime = world
+            .runtime(r#"paneru.bind("alt - j", "window focus east")"#)
+            .unwrap();
         let binds = runtime.published_keybinds();
         assert_eq!(binds.len(), 1);
         let (_, modifiers, id) = binds[0];
@@ -371,13 +462,15 @@ mod tests {
 
     #[test]
     fn setup_builds_config_and_desugars_bindings() {
-        let runtime = LuaRuntime::from_source(
-            r#"paneru.setup{
+        let world = TestWorld::default();
+        let runtime = world
+            .runtime(
+                r#"paneru.setup{
                 options = { sliver_width = 7 },
                 bindings = { ["window focus east"] = "alt - j" },
             }"#,
-        )
-        .unwrap();
+            )
+            .unwrap();
         // The `bindings` table registered a keybind through the shared bind path,
         assert_eq!(runtime.published_keybinds().len(), 1);
         // and the remaining sections became the authoritative config.
@@ -387,16 +480,21 @@ mod tests {
 
     #[test]
     fn no_setup_call_leaves_config_to_toml() {
-        let runtime =
-            LuaRuntime::from_source(r#"paneru.bind("alt - b", "window balance")"#).unwrap();
+        let world = TestWorld::default();
+        let runtime = world
+            .runtime(r#"paneru.bind("alt - b", "window balance")"#)
+            .unwrap();
         assert!(runtime.built_config().is_none());
     }
 
     #[test]
     fn string_keybind_dispatch_queues_command() {
-        let runtime =
-            LuaRuntime::from_source(r#"paneru.bind("alt - b", "window balance")"#).unwrap();
-        runtime.dispatch_bind(1);
+        let world = TestWorld::default();
+        let runtime = world
+            .runtime(r#"paneru.bind("alt - b", "window balance")"#)
+            .unwrap();
+        let extract = || Ok(Arc::new(test_state()));
+        world.drive(&extract, runtime.dispatch_bind(1));
         let commands = drained_commands(&runtime);
         assert!(
             matches!(
@@ -409,29 +507,36 @@ mod tests {
 
     #[test]
     fn function_keybind_can_run_commands() {
-        let runtime = LuaRuntime::from_source(
-            r#"paneru.bind("alt - j", function(state) paneru.run("window focus east") end)"#,
-        )
-        .unwrap();
-        runtime.dispatch_bind(1);
+        let world = TestWorld::default();
+        let runtime = world
+            .runtime(
+                r#"paneru.bind("alt - j", function(state) paneru.run("window focus east") end)"#,
+            )
+            .unwrap();
+        let extract = || Ok(Arc::new(test_state()));
+        world.drive(&extract, runtime.dispatch_bind(1));
         assert_eq!(drained_commands(&runtime).len(), 1);
     }
 
     #[test]
     fn event_handler_receives_event_and_queues_command() {
-        let runtime = LuaRuntime::from_source(
-            r#"paneru.on("space_changed", function(e) paneru.run("window balance") end)"#,
-        )
-        .unwrap();
+        let world = TestWorld::default();
+        let runtime = world
+            .runtime(r#"paneru.on("space_changed", function(e) paneru.run("window balance") end)"#)
+            .unwrap();
         let (name, table) = convert::event_to_lua(runtime.lua(), &Event::SpaceChanged).unwrap();
-        runtime.dispatch_event(&name, &table);
+        let extract = || Ok(Arc::new(test_state()));
+        for handler in runtime.event_handlers(&name) {
+            world.drive(&extract, runtime.dispatch_event(&name, &table, &handler));
+        }
         assert_eq!(drained_commands(&runtime).len(), 1);
     }
 
     #[test]
     fn invalid_command_string_is_reported_not_panicking() {
+        let world = TestWorld::default();
         // A bad command string surfaces as a Lua runtime error at bind time.
-        let result = LuaRuntime::from_source(r#"paneru.run("definitely not a command")"#);
+        let result = world.runtime(r#"paneru.run("definitely not a command")"#);
         assert!(result.is_err());
     }
 
@@ -470,8 +575,10 @@ mod tests {
 
     #[test]
     fn query_is_answered_from_the_provided_state() {
-        let runtime = LuaRuntime::from_source(
-            r#"
+        let world = TestWorld::default();
+        let runtime = world
+            .runtime(
+                r#"
             paneru.bind("alt - q", function()
               local active = paneru.query_active()
               paneru.flash(active.focused_app_name)
@@ -479,12 +586,10 @@ mod tests {
               paneru.flash(paneru.query("active"))
             end)
             "#,
-        )
-        .unwrap();
-        let extract = || Ok(test_state());
-        runtime
-            .with_query(&extract, &no_window_set, || runtime.dispatch_bind(1))
+            )
             .unwrap();
+        let extract = || Ok(Arc::new(test_state()));
+        world.drive(&extract, runtime.dispatch_bind(1));
 
         let flashes: Vec<String> = runtime
             .outbox
@@ -505,40 +610,39 @@ mod tests {
 
     #[test]
     fn the_state_is_extracted_once_per_dispatch_and_only_on_demand() {
-        let runtime = LuaRuntime::from_source(
-            r#"
+        let world = TestWorld::default();
+        let runtime = world
+            .runtime(
+                r#"
             paneru.bind("alt - q", function()
               paneru.query_active()
               paneru.query_on_screen()
             end)
             paneru.bind("alt - w", function() paneru.flash("no query here") end)
             "#,
-        )
-        .unwrap();
+            )
+            .unwrap();
 
         let extractions = RefCell::new(0);
         let extract = || {
             *extractions.borrow_mut() += 1;
-            Ok(test_state())
+            Ok(Arc::new(test_state()))
         };
-        runtime
-            .with_query(&extract, &no_window_set, || runtime.dispatch_bind(2))
-            .unwrap();
+        world.drive(&extract, runtime.dispatch_bind(2));
         assert_eq!(
             *extractions.borrow(),
             0,
             "a handler that never queries pays nothing"
         );
 
-        runtime
-            .with_query(&extract, &no_window_set, || runtime.dispatch_bind(1))
-            .unwrap();
+        world.drive(&extract, runtime.dispatch_bind(1));
         assert_eq!(*extractions.borrow(), 1, "two queries share one extraction");
     }
 
     #[test]
     fn query_outside_a_callback_explains_itself() {
-        let Err(error) = LuaRuntime::from_source("paneru.query_state()") else {
+        let world = TestWorld::default();
+        let Err(error) = world.runtime("paneru.query_state()") else {
             panic!("there is no world to query at script top level");
         };
         let error = error.to_string();
@@ -548,17 +652,16 @@ mod tests {
         );
 
         // ...and the provider does not outlive the dispatch that installed it.
-        let runtime = LuaRuntime::from_source(
-            r#"
+        let runtime = world
+            .runtime(
+                r#"
             escaped = nil
             paneru.bind("alt - q", function() escaped = paneru.query_state end)
             "#,
-        )
-        .unwrap();
-        let extract = || Ok(test_state());
-        runtime
-            .with_query(&extract, &no_window_set, || runtime.dispatch_bind(1))
+            )
             .unwrap();
+        let extract = || Ok(Arc::new(test_state()));
+        world.drive(&extract, runtime.dispatch_bind(1));
         assert!(
             runtime.lua().load("escaped()").exec().is_err(),
             "a query captured during dispatch should not answer afterwards"
@@ -567,9 +670,10 @@ mod tests {
 
     #[test]
     fn a_window_set_outside_a_callback_explains_itself() {
+        let world = TestWorld::default();
         // Same contract as `paneru.query`: there is no world to read at script
         // top level, so say so rather than answering from nothing.
-        let runtime = LuaRuntime::from_source("").unwrap();
+        let runtime = world.runtime("").unwrap();
         let error = runtime
             .lua()
             // The set has to actually be *used*: it is lazy, so merely
@@ -586,16 +690,19 @@ mod tests {
 
     #[test]
     fn unknown_query_kinds_are_rejected() {
-        let runtime = LuaRuntime::from_source("").unwrap();
-        let extract = || Ok(test_state());
-        let error = runtime
-            .with_query(&extract, &no_window_set, || {
+        let world = TestWorld::default();
+        let runtime = world.runtime("").unwrap();
+        let extract = || Ok(Arc::new(test_state()));
+        // Driven as a dispatch, because `paneru.query` is async now: at top
+        // level there is no coroutine to suspend in.
+        let error = world
+            .drive(&extract, async {
                 runtime
                     .lua()
                     .load(r#"return paneru.query("windows")"#)
-                    .exec()
+                    .exec_async()
+                    .await
             })
-            .unwrap()
             .expect_err("'windows' is not a query kind")
             .to_string();
         assert!(
@@ -606,38 +713,200 @@ mod tests {
 
     #[test]
     fn dispatch_hands_back_what_the_callbacks_queued() {
-        let runtime = LuaRuntime::from_source(
-            r#"
+        let world = TestWorld::default();
+        let runtime = world
+            .runtime(
+                r#"
             paneru.bind("alt - b", function()
               paneru.run("window balance")
               paneru.flash("done", 3.0)
             end)
             "#,
-        )
-        .unwrap();
-        let extract = || Ok(test_state());
-        let (commands, flashes) =
-            runtime.dispatch_with_query("test", &extract, &no_window_set, || {
-                runtime.dispatch_bind(1);
-            });
+            )
+            .unwrap();
+        let extract = || Ok(Arc::new(test_state()));
+        world.drive(&extract, runtime.dispatch_bind(1));
+        let (commands, flashes) = runtime.drain_outbox();
         assert_eq!(commands.len(), 1);
         assert_eq!(flashes, vec![("done".to_string(), 3.0)]);
         // ...and the outbox is empty afterwards, so nothing is delivered twice.
         assert!(runtime.drain_outbox().0.is_empty());
     }
 
+    /// Runs `source` as a keybind handler with a store behind it, and hands
+    /// back the store so a test can see what it holds afterwards.
+    fn run_with_store(source: &str, world: &TestWorld) {
+        let runtime = world
+            .runtime(&format!(
+                r#"paneru.bind("alt - z", function() {source} end)"#
+            ))
+            .expect("script should load");
+        let extract = || Ok(Arc::new(test_state()));
+        world.drive(&extract, runtime.dispatch_bind(1));
+    }
+
+    #[test]
+    fn state_round_trips_every_kind_of_value() {
+        let world = TestWorld::default();
+        run_with_store(
+            r#"
+            paneru.state.set("string", "hello")
+            paneru.state.set("number", 42)
+            paneru.state.set("bool", true)
+            paneru.state.set("table", { a = 1, nested = { "x", "y" } })
+            "#,
+            &world,
+        );
+
+        assert_eq!(world.get("string"), Some(serde_json::json!("hello")));
+        assert_eq!(world.get("number"), Some(serde_json::json!(42)));
+        assert_eq!(world.get("bool"), Some(serde_json::json!(true)));
+        assert_eq!(
+            world.get("table"),
+            Some(serde_json::json!({ "a": 1, "nested": ["x", "y"] }))
+        );
+    }
+
+    #[test]
+    fn a_stored_value_reads_back_as_the_same_lua_value() {
+        let world = TestWorld::default();
+        run_with_store(
+            r#"
+            paneru.state.set("pad", { id = 7, name = "term" })
+            local pad = paneru.state.get("pad")
+            paneru.state.set("echo", pad.id .. "/" .. pad.name)
+            "#,
+            &world,
+        );
+        assert_eq!(world.get("echo"), Some(serde_json::json!("7/term")));
+    }
+
+    #[test]
+    fn setting_nil_removes_the_key() {
+        let world = TestWorld::default();
+        run_with_store(
+            r#"
+            paneru.state.set("gone", 1)
+            paneru.state.set("gone", nil)
+            paneru.state.set("was_nil", paneru.state.get("gone") == nil)
+            "#,
+            &world,
+        );
+        assert_eq!(world.get("gone"), None);
+        assert_eq!(world.get("was_nil"), Some(serde_json::json!(true)));
+    }
+
+    #[test]
+    fn mutate_hands_the_current_value_in_and_stores_what_comes_back() {
+        let world = TestWorld::default();
+        run_with_store(
+            r#"
+            paneru.state.mutate("count", function(n) return (n or 0) + 1 end)
+            paneru.state.mutate("count", function(n) return n + 1 end)
+            paneru.state.set("returned", paneru.state.mutate("count", function(n) return n + 1 end))
+            "#,
+            &world,
+        );
+        assert_eq!(world.get("count"), Some(serde_json::json!(3)));
+        assert_eq!(world.get("returned"), Some(serde_json::json!(3)));
+    }
+
+    #[test]
+    fn mutate_returning_nil_removes_the_key() {
+        let world = TestWorld::default();
+        run_with_store(
+            r#"
+            paneru.state.set("pad", 1)
+            paneru.state.mutate("pad", function() return nil end)
+            "#,
+            &world,
+        );
+        assert_eq!(world.get("pad"), None);
+    }
+
+    #[test]
+    fn mutate_retries_against_a_writer_that_got_there_first() {
+        let world = TestWorld::default();
+        world.store.borrow_mut().apply(&set("count", 10)).unwrap();
+
+        // Someone else — another handler, or a client over the socket — writes
+        // the same key between this mutate's read and its write. Exactly once,
+        // so the retry is the thing that succeeds.
+        let mut interjected = false;
+        *world.interject.borrow_mut() = Some(Box::new(move |state| {
+            if !interjected {
+                interjected = true;
+                state.apply(&set("count", 100)).expect("accepted");
+            }
+        }));
+
+        run_with_store(
+            r#"paneru.state.mutate("count", function(n) return n + 1 end)"#,
+            &world,
+        );
+
+        // 101, not 11: the increment was re-run against the value that landed
+        // first, so nothing was lost. A get-then-set would have stored 11 and
+        // silently thrown the other write away.
+        assert_eq!(world.get("count"), Some(serde_json::json!(101)));
+    }
+
+    #[test]
+    fn a_value_that_is_not_storable_is_refused_at_the_call_site() {
+        let world = TestWorld::default();
+        let runtime = world
+            .runtime(
+                r#"
+            errored = false
+            paneru.bind("alt - z", function()
+              local ok = pcall(function() paneru.state.set("fn", function() end) end)
+              errored = not ok
+            end)
+            "#,
+            )
+            .expect("script should load");
+        let extract = || Ok(Arc::new(test_state()));
+        world.drive(&extract, runtime.dispatch_bind(1));
+
+        assert!(
+            runtime.lua.globals().get::<bool>("errored").unwrap(),
+            "storing a function should raise, not be silently dropped"
+        );
+        assert!(world.store.borrow().is_empty());
+    }
+
+    #[test]
+    fn the_store_is_out_of_reach_at_script_top_level() {
+        let world = TestWorld::default();
+        // There is no world outside a callback, so there is nothing to read
+        // from or write to, and it says so rather than inventing a value.
+        let Err(error) = world.runtime(r#"paneru.state.get("anything")"#) else {
+            panic!("top-level access should fail");
+        };
+        assert!(
+            error.to_string().contains("paneru.state is only available"),
+            "unexpected error: {error}"
+        );
+    }
+
+    fn set(key: &str, value: i64) -> ScriptStateWrite {
+        ScriptStateWrite::set(key.to_string(), serde_json::json!(value))
+    }
+
     #[test]
     fn empty_runtime_has_no_binds() {
-        let runtime = LuaRuntime::empty();
+        let world = TestWorld::default();
+        let runtime = LuaRuntime::empty(&world.dispatch);
         assert!(runtime.published_keybinds().is_empty());
     }
 
     #[test]
     fn extra_lua_path_env_var_is_prepended() {
+        let world = TestWorld::default();
         // Unique var name so this doesn't race other tests' env state.
         // SAFETY: no other test reads or writes this variable.
         unsafe { std::env::set_var("PANERU_LUA_PATH", "/tmp/paneru-test/?.lua") };
-        let runtime = LuaRuntime::from_source("").unwrap();
+        let runtime = world.runtime("").unwrap();
         let package: Table = runtime.lua().globals().get("package").unwrap();
         let path: String = package.get("path").unwrap();
         // SAFETY: no other test reads or writes this variable.

@@ -18,7 +18,9 @@ pedantic = "warn"
 
 # `module` makes this a loadable Lua module resolving the Lua C API from the
 # host interpreter (no Lua embedded); the `lua5x` features pick the ABI, and
-# exactly one must be enabled alongside it. Build the module with:
+# exactly one must be enabled alongside it. 5.1 and Luau are not among them —
+# see the daemon's Cargo.toml for why the workspace does not carry them. Build
+# the module with:
 #   cargo build -p paneru-lua --no-default-features --features module,lua54
 # The daemon takes the default (no features) and supplies its own vendored
 # interpreter through its own mlua dependency.
@@ -26,7 +28,6 @@ pedantic = "warn"
 default = []
 vendored = ["mlua/vendored"]
 module = ["mlua/module"]
-lua51 = ["mlua/lua51"]
 lua52 = ["mlua/lua52"]
 lua53 = ["mlua/lua53"]
 lua54 = ["mlua/lua54"]
@@ -35,6 +36,7 @@ luajit = ["mlua/luajit"]
 
 [dependencies]
 mlua = { workspace = true }
+cfg-if = { workspace = true }
 paneru-shared-types = { workspace = true }
 serde = { workspace = true }
 # Decoding daemon query responses into Lua values.

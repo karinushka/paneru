@@ -58,7 +58,10 @@ fn send(argv: &[String]) -> LuaResult<UnixStream> {
 
 /// The primitive the shared API is built on: encode the command and send it to
 /// the daemon (fire-and-forget).
-fn dispatch(_: &Lua, command: &Command) -> LuaResult<bool> {
+// Takes `Command` by value to match the shared `crate::Dispatch` closure type,
+// which every verb closure in `lib.rs` also has to satisfy.
+#[allow(clippy::needless_pass_by_value)]
+fn dispatch(_: &Lua, command: Command) -> LuaResult<bool> {
     let argv = command.to_argv().ok_or_else(|| {
         LuaError::RuntimeError(format!("{command:?} cannot be sent to the daemon"))
     })?;
@@ -82,6 +85,126 @@ fn query_json(lua: &Lua, kind: Option<String>) -> LuaResult<LuaValue> {
     let raw = query(lua, kind)?;
     let value: serde_json::Value = serde_json::from_str(&raw).map_err(LuaError::external)?;
     lua.to_value(&value)
+}
+
+/// Runs one script-state request and decodes the daemon's JSON answer.
+///
+/// The daemon answers every one of these with a single object: the value asked
+/// for, or `{"error": …}`, which becomes a Lua error here so a client sees a
+/// failed write as a failure rather than as a silent no-op.
+fn script_state(argv: &[String]) -> LuaResult<serde_json::Value> {
+    let full: Vec<String> = std::iter::once("state".to_string())
+        .chain(argv.iter().cloned())
+        .collect();
+    let mut stream = send(&full)?;
+    let mut out = String::new();
+    stream
+        .read_to_string(&mut out)
+        .map_err(LuaError::external)?;
+    let reply: serde_json::Value = serde_json::from_str(out.trim()).map_err(LuaError::external)?;
+    if let Some(error) = reply.get("error").and_then(serde_json::Value::as_str) {
+        return Err(LuaError::RuntimeError(format!("paneru.state: {error}")));
+    }
+    Ok(reply)
+}
+
+/// How the wire spells "there is no value here": absent in a compare, a
+/// removal in a write. Unambiguous next to JSON, where a string is quoted.
+const ABSENT: &str = "-";
+
+/// Reads the current value of `key`.
+fn state_get(key: &str) -> LuaResult<Option<serde_json::Value>> {
+    let reply = script_state(&["get".to_string(), key.to_string()])?;
+    Ok(match reply.get("value") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => Some(value.clone()),
+    })
+}
+
+/// Encodes an optional value for the wire.
+fn wire(value: Option<&serde_json::Value>) -> String {
+    value.map_or_else(|| ABSENT.to_string(), serde_json::Value::to_string)
+}
+
+/// Builds the `paneru.state` table: the same store, under the same names, as
+/// the embedded runtime gives a script.
+///
+/// The one difference worth knowing is cost. Each call here is a round-trip to
+/// the daemon, where the embedded runtime reads a copy it already has; the
+/// values are the same either way, and so is `mutate`'s guarantee — the daemon
+/// is the one deciding whether a write still matches what it was read as, so a
+/// client and a script contending on a key resolve against the same store.
+fn state_table(lua: &Lua) -> LuaResult<LuaTable> {
+    let state = lua.create_table()?;
+
+    state.set(
+        "get",
+        lua.create_function(|lua, key: String| match state_get(&key)? {
+            Some(value) => lua.to_value(&value),
+            None => Ok(LuaValue::Nil),
+        })?,
+    )?;
+
+    // `set(key, nil)` removes, matching the embedded spelling.
+    state.set(
+        "set",
+        lua.create_function(|lua, (key, value): (String, LuaValue)| {
+            if value.is_nil() {
+                script_state(&["remove".to_string(), key])?;
+                return Ok(());
+            }
+            let value: serde_json::Value = lua.from_value(value)?;
+            script_state(&["set".to_string(), key, value.to_string()])?;
+            Ok(())
+        })?,
+    )?;
+
+    // Read, transform, write — retried against the current value whenever the
+    // daemon reports the key moved in between.
+    state.set(
+        "mutate",
+        lua.create_function(|lua, (key, transform): (String, LuaFunction)| {
+            /// How many times to lose the race before giving up, matching the
+            /// embedded runtime.
+            const ATTEMPTS: usize = 8;
+
+            let mut current = state_get(&key)?;
+            for _ in 0..ATTEMPTS {
+                let old = match &current {
+                    Some(value) => lua.to_value(value)?,
+                    None => LuaValue::Nil,
+                };
+                let returned: LuaValue = transform.call(old)?;
+                let next: Option<serde_json::Value> = if returned.is_nil() {
+                    None
+                } else {
+                    Some(lua.from_value(returned)?)
+                };
+
+                let reply = script_state(&[
+                    "cas".to_string(),
+                    key.clone(),
+                    wire(current.as_ref()),
+                    wire(next.as_ref()),
+                ])?;
+                if reply.get("conflict").is_none() {
+                    return match next {
+                        Some(value) => lua.to_value(&value),
+                        None => Ok(LuaValue::Nil),
+                    };
+                }
+                current = match reply.get("current") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(value) => Some(value.clone()),
+                };
+            }
+            Err(LuaError::RuntimeError(format!(
+                "paneru.state.mutate: '{key}' kept changing under it after {ATTEMPTS} attempts"
+            )))
+        })?,
+    )?;
+
+    Ok(state)
 }
 
 /// Reads the `event` argument to `subscribe`: `nil` (every event), a single
@@ -189,6 +312,8 @@ pub fn module(lua: &Lua, version: &str) -> LuaResult<LuaTable> {
             lua.create_function(move |lua, ()| query_json(lua, Some(kind.token().to_string())))?,
         )?;
     }
+
+    exports.set("state", state_table(lua)?)?;
 
     exports.set("subscribe", lua.create_function(subscribe)?)?;
     exports.set("set_socket_path", lua.create_function(set_socket_path)?)?;

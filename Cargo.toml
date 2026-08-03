@@ -59,6 +59,10 @@ bevy = { version = "0.19", default-features = false, features = [
 bitflags = "2.13"
 chrono = "0.4"
 clap = { version = "4.6", features = ["cargo", "derive"] }
+# Already in the tree via bevy_time. Picked over std's mpsc because its
+# `Receiver` is `Sync`, which is what lets the Lua worker handle be a plain
+# `Res` rather than a `Mutex` behind a `ResMut`.
+crossbeam-channel = "0.5"
 derive_more = { version = "2.1", features = ["deref", "deref_mut"] }
 embed_plist = "1.2"
 launchctl = "0.3"

@@ -21,6 +21,7 @@
 mod api;
 mod convert;
 mod runtime;
+mod worker;
 
 use std::path::{Path, PathBuf};
 

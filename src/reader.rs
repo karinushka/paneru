@@ -9,7 +9,8 @@ use tracing::{debug, error};
 use crate::config::parse_command;
 use crate::ecs::state::StateQueryKind;
 use crate::errors::Result;
-use crate::events::{Event, EventSender};
+use crate::events::{Event, EventSender, ScriptStateRequest};
+use paneru_shared_types::script_state::ScriptStateWrite;
 
 /// `CommandReader` is responsible for sending and receiving commands via a Unix socket.
 /// It acts as an IPC mechanism for the `paneru` application, allowing external processes
@@ -40,6 +41,18 @@ impl CommandReader {
     pub fn send_query(kind: StateQueryKind) -> Result<String> {
         let args = ["query", kind.token(), "--json"];
         let mut stream = Self::send_socket_request(args.into_iter().map(str::to_string))?;
+        let mut output = String::new();
+        stream.read_to_string(&mut output)?;
+        Ok(output)
+    }
+
+    /// Sends one script-state request and reads the daemon's JSON answer. The
+    /// same round-trip as [`send_query`], for the store rather than the world.
+    ///
+    /// [`send_query`]: CommandReader::send_query
+    pub fn send_script_state(request: &[String]) -> Result<String> {
+        let frame = std::iter::once("state".to_string()).chain(request.iter().cloned());
+        let mut stream = Self::send_socket_request(frame)?;
         let mut output = String::new();
         stream.read_to_string(&mut output)?;
         Ok(output)
@@ -145,6 +158,28 @@ impl CommandReader {
                 continue;
             }
 
+            if let Some(request) = parse_script_state_request(&argv_ref) {
+                let (tx, rx) = channel();
+                _ = self
+                    .events
+                    .send(Event::ScriptState {
+                        request,
+                        respond_to: tx,
+                    })
+                    .inspect_err(|err| {
+                        error!("sending script state request: {err}");
+                    });
+
+                match rx.recv_timeout(Duration::from_secs(2)) {
+                    Ok(response) => {
+                        _ = stream.write_all(response.as_bytes());
+                        _ = stream.write_all(b"\n");
+                    }
+                    Err(err) => error!("waiting for script state response: {err}"),
+                }
+                continue;
+            }
+
             if is_subscribe_request(&argv_ref) {
                 match stream.try_clone() {
                     Ok(clone) => {
@@ -190,6 +225,44 @@ fn parse_query_request(argv: &[&str]) -> Option<StateQueryKind> {
     }
 }
 
+/// Reads a script-state frame: `state get <key>`, `state set <key> <json>`,
+/// `state remove <key>`, or `state cas <key> <expected> <value>`.
+///
+/// `cas` is the compare-and-set a client's `mutate` is built on: it lands only
+/// if the key still holds `expected`. Both of its values take a bare `-` for
+/// "no value" — absent in `expected`, a removal in `value` — which cannot
+/// collide with JSON, where a string is quoted.
+///
+/// A frame whose JSON does not parse is not a script-state request at all, so
+/// it falls through to command parsing and is reported there, the same way an
+/// unknown query kind is.
+fn parse_script_state_request(argv: &[&str]) -> Option<ScriptStateRequest> {
+    /// The `-` that stands for "there is no value here".
+    const ABSENT: &str = "-";
+
+    let owned = |value: &str| value.to_string();
+    let maybe_json = |raw: &str| -> Option<Option<serde_json::Value>> {
+        if raw == ABSENT {
+            Some(None)
+        } else {
+            serde_json::from_str(raw).ok().map(Some)
+        }
+    };
+
+    let write = match argv {
+        ["state", "get", key] => return Some(ScriptStateRequest::Get { key: owned(key) }),
+        ["state", "set", key, value] => {
+            ScriptStateWrite::set(owned(key), serde_json::from_str(value).ok()?)
+        }
+        ["state", "remove", key] => ScriptStateWrite::remove(owned(key)),
+        ["state", "cas", key, expected, value] => {
+            ScriptStateWrite::compare_and_set(owned(key), maybe_json(expected)?, maybe_json(value)?)
+        }
+        _ => return None,
+    };
+    Some(ScriptStateRequest::Write(write))
+}
+
 fn is_subscribe_request(argv: &[&str]) -> bool {
     matches!(argv, ["subscribe", "--json"] | ["subscribe"])
 }
@@ -203,5 +276,70 @@ fn full_read(stream: &mut UnixStream, expected: usize, buffer: &mut [u8]) -> boo
     } else {
         error!("short read, expected {expected}.");
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use paneru_shared_types::script_state::Expected;
+    use serde_json::json;
+
+    #[test]
+    fn reads_the_script_state_frames() {
+        assert_eq!(
+            parse_script_state_request(&["state", "get", "pads.term"]),
+            Some(ScriptStateRequest::Get {
+                key: "pads.term".to_string()
+            })
+        );
+        assert_eq!(
+            parse_script_state_request(&["state", "set", "count", "7"]),
+            Some(ScriptStateRequest::Write(ScriptStateWrite::set(
+                "count".to_string(),
+                json!(7)
+            )))
+        );
+        assert_eq!(
+            parse_script_state_request(&["state", "remove", "count"]),
+            Some(ScriptStateRequest::Write(ScriptStateWrite::remove(
+                "count".to_string()
+            )))
+        );
+    }
+
+    #[test]
+    fn a_compare_and_set_frame_reads_both_of_its_values() {
+        let Some(ScriptStateRequest::Write(write)) =
+            parse_script_state_request(&["state", "cas", "count", "7", "8"])
+        else {
+            panic!("expected a write");
+        };
+        assert_eq!(write.expected, Expected::Exactly(Some(json!(7))));
+        assert_eq!(write.value, Some(json!(8)));
+
+        // `-` is how the wire says "no value": absent before, removed after.
+        let Some(ScriptStateRequest::Write(write)) =
+            parse_script_state_request(&["state", "cas", "count", "-", "-"])
+        else {
+            panic!("expected a write");
+        };
+        assert_eq!(write.expected, Expected::Exactly(None));
+        assert_eq!(write.value, None);
+    }
+
+    #[test]
+    fn a_frame_that_is_not_json_is_not_a_script_state_request() {
+        // Falls through to command parsing, which reports it, rather than
+        // being accepted here as a write of something unparseable.
+        assert_eq!(
+            parse_script_state_request(&["state", "set", "count", "not json"]),
+            None
+        );
+        assert_eq!(parse_script_state_request(&["state", "wat", "count"]), None);
+        assert_eq!(
+            parse_script_state_request(&["window", "focus", "east"]),
+            None
+        );
     }
 }

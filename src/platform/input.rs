@@ -10,7 +10,6 @@ use objc2_core_graphics::{
     CGEventTapPlacement, CGEventTapProxy, CGEventType,
 };
 use objc2_foundation::NSSet;
-use paneru_shared_types::commands::Command;
 use scopeguard::ScopeGuard;
 use std::ffi::c_void;
 use std::marker::PhantomPinned;
@@ -21,6 +20,7 @@ use std::time::{Duration, Instant};
 use stdext::function_name;
 use tracing::{error, info};
 
+use crate::commands::Command;
 use crate::config::Config;
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};

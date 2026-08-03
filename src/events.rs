@@ -2,6 +2,7 @@ use bevy::ecs::message::Message;
 use objc2::rc::Retained;
 use objc2_core_foundation::{CFRetained, CGPoint};
 use objc2_core_graphics::CGDirectDisplayID;
+use paneru_shared_types::script_state::ScriptStateWrite;
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -176,6 +177,21 @@ pub enum Event {
 
     /// A socket client has subscribed to line-delimited state events.
     StateSubscribe { stream: Arc<Mutex<UnixStream>> },
+
+    /// A socket client has read or written the script state store. Answered
+    /// from the same store the embedded Lua runtime uses, so the two see each
+    /// other's writes.
+    ScriptState {
+        request: ScriptStateRequest,
+        respond_to: Sender<String>,
+    },
+}
+
+/// What a socket client asked the script state store to do.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ScriptStateRequest {
+    Get { key: String },
+    Write(ScriptStateWrite),
 }
 
 /// `EventSender` is a thin wrapper around a `std::sync::mpsc::Sender` for `Event`s.

@@ -25,6 +25,9 @@
 //!   print(window.app_name, window.title)
 //! end
 //!
+//! paneru.state.set("pads.term", 4213)          -- outlives reloads and restarts
+//! paneru.state.mutate("count", function(n) return (n or 0) + 1 end)
+//!
 //! paneru.subscribe("window_focused", function(evt)  -- blocking; run in a helper process
 //!   print(evt.title)
 //! end)
@@ -41,7 +44,11 @@
 //! `paneru.bind` are embedded-only, `subscribe` and the socket-path helpers are
 //! client-only). The `query_*` functions exist on both, spelled the same: the
 //! client asks the daemon over the socket, the embedded runtime answers from
-//! the world it is already inside.
+//! the world it is already inside. So does `paneru.state`, the named store a
+//! script keeps things in — one store, so a value a client writes is one a
+//! handler reads, and `mutate` resolves a race between them either way, because
+//! it is the daemon that decides whether a write still matches what it was read
+//! as.
 
 pub mod client;
 
@@ -55,7 +62,7 @@ use paneru_shared_types::commands::{
 };
 
 /// Issues a [`Command`]. The only thing the two hosts differ by.
-pub type Dispatch = Rc<dyn Fn(&Lua, &Command) -> Result<bool>>;
+pub type Dispatch = Rc<dyn Fn(&Lua, Command) -> Result<bool>>;
 
 /// Installs the shared API onto the `paneru` table, building every verb on
 /// `dispatch`.
@@ -69,7 +76,7 @@ pub fn install(lua: &Lua, paneru: &Table, dispatch: &Dispatch) -> Result<()> {
     // command enums ({ window = { focus = "east" } }).
     let run = {
         let dispatch = Rc::clone(dispatch);
-        lua.create_function(move |lua, command: Value| dispatch(lua, &to_command(lua, &command)?))?
+        lua.create_function(move |lua, command: Value| dispatch(lua, to_command(lua, &command)?))?
     };
     paneru.set("run", run.clone())?;
     paneru.set("command", run)?;
@@ -143,7 +150,7 @@ fn workspace_table(lua: &Lua, dispatch: &Dispatch) -> Result<Table> {
                 Operation::VirtualNumber,
                 Operation::Virtual,
             )?;
-            dispatch(lua, &Command::Window(operation))
+            dispatch(lua, Command::Window(operation))
         })?
     };
     workspace.set("select", select)?;
@@ -158,7 +165,7 @@ fn workspace_table(lua: &Lua, dispatch: &Dispatch) -> Result<Table> {
                 |index| Operation::VirtualMoveNumber(index, follow),
                 |direction| Operation::VirtualMove(direction, follow),
             )?;
-            dispatch(lua, &Command::Window(operation))
+            dispatch(lua, Command::Window(operation))
         })?
     };
     workspace.set("move_window", move_window)?;
@@ -189,7 +196,7 @@ fn virtual_operation(
 /// A zero-argument verb issuing a fixed command.
 fn verb(lua: &Lua, dispatch: &Dispatch, command: Command) -> Result<Function> {
     let dispatch = Rc::clone(dispatch);
-    lua.create_function(move |lua, ()| dispatch(lua, &command))
+    lua.create_function(move |lua, ()| dispatch(lua, command.clone()))
 }
 
 /// A verb taking `{ direction = "east" }` or `{ number = 3 }` (or the bare
@@ -203,7 +210,7 @@ fn directional(
     let dispatch = Rc::clone(dispatch);
     lua.create_function(move |lua, opts: Value| {
         let direction = Opts::read(lua, &opts)?.target(what)?;
-        dispatch(lua, &Command::Window(operation(direction)))
+        dispatch(lua, Command::Window(operation(direction)))
     })
 }
 
@@ -216,7 +223,7 @@ fn follower(
     let dispatch = Rc::clone(dispatch);
     lua.create_function(move |lua, opts: Value| {
         let follow = Opts::read(lua, &opts)?.follow();
-        dispatch(lua, &Command::Window(operation(follow)))
+        dispatch(lua, Command::Window(operation(follow)))
     })
 }
 
@@ -225,7 +232,7 @@ fn resize(lua: &Lua, dispatch: &Dispatch) -> Result<Function> {
     let dispatch = Rc::clone(dispatch);
     lua.create_function(move |lua, opts: Value| {
         let direction = ResizeOpts::read(lua, &opts)?;
-        dispatch(lua, &Command::Window(Operation::Resize(direction)))
+        dispatch(lua, Command::Window(Operation::Resize(direction)))
     })
 }
 

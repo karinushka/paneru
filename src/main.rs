@@ -39,11 +39,21 @@ use crate::menubar::MenuBarManager;
 use crate::platform::PlatformCallbacks;
 use accessibility_prompt::{AccessibilitySetupAction, show_accessibility_setup};
 
+#[cfg(feature = "lua")]
+pub const VERSION_STRING: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("PANERU_LUA_VERSION"),
+    ")"
+);
+#[cfg(not(feature = "lua"))]
+pub const VERSION_STRING: &'static str = concat!(env!("CARGO_PKG_VERSION"));
+
 /// `Paneru` is the main command-line interface structure for the window manager.
 /// It defines the available subcommands for controlling the Paneru daemon.
 #[derive(Clone, Debug, Default, Parser)]
 #[command(
-    version = clap::crate_version!(),
+    version = VERSION_STRING,
     author = clap::crate_authors!(),
     about = clap::crate_description!(),
 )]
@@ -96,6 +106,31 @@ pub enum SubCmd {
     Subscribe {
         #[arg(long)]
         json: bool,
+    },
+
+    /// Reads and writes the script state store, the same one `paneru.state`
+    /// gives a Lua script.
+    State {
+        #[clap(subcommand)]
+        state: StateCmd,
+    },
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum StateCmd {
+    /// Prints the value stored under a key, or `null`.
+    Get { key: String },
+    /// Stores a value, given as JSON.
+    Set { key: String, value: String },
+    /// Removes a key.
+    Remove { key: String },
+    /// Stores a value only if the key still holds what it was read as. Both
+    /// values are JSON, or `-` for "no value": absent in `expected`, a removal
+    /// in `value`.
+    Cas {
+        key: String,
+        expected: String,
+        value: String,
     },
 }
 
@@ -186,6 +221,10 @@ fn main() -> Result<()> {
             print!("{output}");
         }
         SubCmd::Subscribe { json: _ } => CommandReader::subscribe_json()?,
+        SubCmd::State { state } => {
+            let output = CommandReader::send_script_state(&state.argv())?;
+            print!("{output}");
+        }
     }
     Ok(())
 }
@@ -240,6 +279,23 @@ impl QueryCmd {
     }
 }
 
+impl StateCmd {
+    /// The argv the daemon parses this back out of, minus the leading `state`.
+    fn argv(&self) -> Vec<String> {
+        let owned = |value: &str| value.to_string();
+        match self {
+            StateCmd::Get { key } => vec![owned("get"), key.clone()],
+            StateCmd::Set { key, value } => vec![owned("set"), key.clone(), value.clone()],
+            StateCmd::Remove { key } => vec![owned("remove"), key.clone()],
+            StateCmd::Cas {
+                key,
+                expected,
+                value,
+            } => vec![owned("cas"), key.clone(), expected.clone(), value.clone()],
+        }
+    }
+}
+
 fn should_check_deprecated_options(subcmd: &SubCmd) -> bool {
     matches!(
         subcmd,
@@ -249,6 +305,13 @@ fn should_check_deprecated_options(subcmd: &SubCmd) -> bool {
 
 fn maybe_warn_deprecated_options_for_service(subcmd: &SubCmd) {
     if !should_check_deprecated_options(subcmd) {
+        return;
+    }
+
+    // An init.lua disables the TOML entirely, so its contents — deprecated keys
+    // included — are never read. Warning about them would be noise.
+    #[cfg(feature = "lua")]
+    if config::discover_lua_file().is_some() {
         return;
     }
 

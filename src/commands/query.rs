@@ -1,8 +1,7 @@
 use bevy::app::{App, PostUpdate, PreUpdate};
 use bevy::ecs::entity::Entity;
-use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::message::MessageReader;
-use bevy::ecs::query::{Added, Has};
+use bevy::ecs::query::Added;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs;
 use bevy::ecs::system::{Query, Res, ResMut};
@@ -15,18 +14,12 @@ use tracing::warn;
 
 use super::{Command, Operation};
 
-use crate::config::Config;
-use crate::ecs::layout::LayoutStrip;
-use crate::ecs::params::Windows;
 use crate::ecs::state::{
     PaneruActiveState, PaneruQueryState, PaneruVirtualWorkspaceState, PaneruWindowState,
-    QueryState, QueryStateParams, StateEvent,
+    QueryStateParams, StateEvent,
 };
-use crate::ecs::{
-    ActiveDisplayMarker, ActiveWorkspaceMarker, FocusedMarker, SelectedVirtualMarker, Unmanaged,
-};
+use crate::ecs::{ActiveWorkspaceMarker, FocusedMarker, Unmanaged};
 use crate::events::Event;
-use crate::manager::{Application, Display, WindowManager};
 use crate::platform::WinID;
 
 #[derive(Default, Resource)]
@@ -342,24 +335,14 @@ fn collect_state_broadcast_events_for_intent(
     outgoing
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[allow(clippy::needless_pass_by_value)]
 fn state_event_broadcast_handler(
     mut messages: MessageReader<Event>,
     mut subscribers: ResMut<StateSubscribers>,
     mut cache: ResMut<StateBroadcastCache>,
-    workspaces: Query<(
-        &ChildOf,
-        &LayoutStrip,
-        Has<ActiveWorkspaceMarker>,
-        Has<SelectedVirtualMarker>,
-    )>,
     focused_changes: Query<Entity, Added<FocusedMarker>>,
     active_workspace_changes: Query<Entity, Added<ActiveWorkspaceMarker>>,
-    displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
-    windows: Windows,
-    apps: Query<&Application>,
-    window_manager: Res<WindowManager>,
-    config: Res<Config>,
+    state: QueryStateParams,
 ) {
     let events = messages.read().collect::<Vec<_>>();
 
@@ -373,9 +356,10 @@ fn state_event_broadcast_handler(
             let Event::WindowMoved { window_id } = event else {
                 return false;
             };
-            windows
+            state
+                .windows()
                 .find(*window_id)
-                .and_then(|(_, entity)| windows.get_managed(entity))
+                .and_then(|(_, entity)| state.windows().get_managed(entity))
                 .is_some_and(|(_, _, unmanaged)| matches!(unmanaged, Some(Unmanaged::Floating)))
         }),
         window_focused: !focused_changes.is_empty(),
@@ -385,16 +369,9 @@ fn state_event_broadcast_handler(
         return;
     }
 
-    let state = if intent.requires_state() {
-        match PaneruQueryState::extract(
-            &workspaces,
-            &displays,
-            &windows,
-            &apps,
-            &window_manager,
-            &config,
-        ) {
-            Ok(state) => Some(state),
+    let document = if intent.requires_state() {
+        match state.extract() {
+            Ok(document) => Some(document),
             Err(err) => {
                 warn!("extracting query state for broadcast: {err}");
                 return;
@@ -405,10 +382,11 @@ fn state_event_broadcast_handler(
     };
     let outgoing = collect_state_broadcast_events_for_intent(
         &intent,
-        state.as_ref(),
+        document.as_ref(),
         &mut cache,
         |window_id| {
-            windows
+            state
+                .windows()
                 .find(window_id)
                 .and_then(|(window, _)| window.title().ok())
         },

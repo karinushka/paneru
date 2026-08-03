@@ -20,7 +20,7 @@ use bevy::{
     ecs::{component::Component, entity::Entity, schedule::IntoScheduleConfigs},
 };
 use derive_more::{Deref, DerefMut};
-use tracing::{Level, instrument, warn};
+use tracing::{Level, error, instrument, warn};
 
 use crate::commands::register_commands;
 use crate::config::{CONFIGURATION_FILE, Config, WindowParams};
@@ -539,25 +539,71 @@ impl SpawnCommandsExt for Commands<'_, '_> {
     }
 }
 
+/// Rebuilds the config watcher around `changed`, then re-registers every other
+/// config file.
+///
+/// Editors that save atomically (write-new-then-rename) break the original
+/// watch, so the watcher has to be rebuilt. But `setup_config_watcher` watches
+/// only the path it is handed, and the TOML and the Lua script share one
+/// watcher — so rebuilding for whichever file changed used to silently stop the
+/// other one hot-reloading until the next restart.
+pub(crate) fn rewatch_configs(
+    window_manager: &WindowManager,
+    changed: &std::path::Path,
+) -> Option<Box<dyn notify::Watcher>> {
+    let mut watcher = window_manager
+        .setup_config_watcher(changed)
+        .inspect_err(|err| error!("watching the config '{}': {err}", changed.display()))
+        .ok()?;
+
+    let others = [
+        CONFIGURATION_FILE.clone(),
+        #[cfg(feature = "lua")]
+        crate::config::discover_lua_file(),
+    ];
+    for other in others.into_iter().flatten() {
+        if other == changed {
+            continue;
+        }
+        if let Err(err) = watcher.watch(&other, notify::RecursiveMode::NonRecursive) {
+            warn!("re-watching config '{}': {err}", other.display());
+        }
+    }
+    Some(watcher)
+}
+
 pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<BevyApp> {
     let window_manager: Box<dyn WindowManagerApi> = Box::new(WindowManagerOS::new(sender.clone()));
-    #[cfg_attr(not(feature = "lua"), allow(unused_mut))]
-    let mut watcher = window_manager.setup_config_watcher(CONFIGURATION_FILE.as_path())?;
 
-    // Discover (or create) the Lua init script and watch it alongside the TOML
-    // config so edits hot-reload. Both files feed the same `ConfigRefresh` event.
+    // Discover (or create) the Lua init script first: whether it exists decides
+    // whether a stub TOML gets planted beside it, so it has to be settled before
+    // `CONFIGURATION_FILE` is first read.
     #[cfg(feature = "lua")]
-    let lua_path = {
-        let lua_path = crate::config::ensure_lua_file()
-            .inspect_err(|err| warn!("preparing Lua script: {err}"))
-            .ok();
-        if let Some(path) = &lua_path
-            && let Err(err) = watcher.watch(path, notify::RecursiveMode::NonRecursive)
-        {
-            warn!("watching Lua script '{}': {err}", path.display());
-        }
-        lua_path
-    };
+    let lua_path = crate::config::ensure_lua_file()
+        .inspect_err(|err| warn!("preparing Lua script: {err}"))
+        .ok();
+
+    // With an init.lua there may be no TOML at all, so watch whichever config
+    // files actually exist. Both feed the same `ConfigRefresh` event.
+    let toml_path = CONFIGURATION_FILE.as_deref();
+    #[cfg(feature = "lua")]
+    let primary = toml_path.or(lua_path.as_deref());
+    #[cfg(not(feature = "lua"))]
+    let primary = toml_path;
+    let primary = primary.ok_or_else(|| {
+        crate::errors::Error::InvalidConfig("no configuration file to watch".to_string())
+    })?;
+
+    #[cfg_attr(not(feature = "lua"), allow(unused_mut))]
+    let mut watcher = window_manager.setup_config_watcher(primary)?;
+
+    #[cfg(feature = "lua")]
+    if let Some(path) = &lua_path
+        && path.as_path() != primary
+        && let Err(err) = watcher.watch(path, notify::RecursiveMode::NonRecursive)
+    {
+        warn!("watching Lua script '{}': {err}", path.display());
+    }
 
     let mut app = BevyApp::new();
 

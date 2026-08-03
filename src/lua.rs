@@ -25,24 +25,24 @@ mod worker;
 
 use std::path::{Path, PathBuf};
 
-use bevy::app::{App, Plugin, PreUpdate, Update};
+use bevy::app::{App, Plugin, PostUpdate, PreUpdate, Update};
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::resource::Resource;
+use bevy::ecs::schedule::IntoScheduleConfigs;
 use bevy::ecs::system::{Commands, NonSendMut, Res};
-use mlua::Table;
 use notify::Watcher;
-use tracing::{error, info, warn};
+use tracing::error;
 
 use crate::commands::Command;
+use crate::ecs::params::Windows;
 use crate::ecs::state::QueryStateParams;
 use crate::ecs::{SendMessageTrigger, SpawnCommandsExt};
 use crate::events::Event;
 use crate::manager::WindowManager;
-use crate::platform::input::set_lua_keybinds;
 use crate::util::symlink_target;
 
-pub use runtime::LuaRuntime;
-use runtime::{Outbox, SharedRegistry};
+use worker::FromLua;
+pub use worker::{LuaSource, LuaWorker};
 
 /// The Lua init-script path, kept as a resource so the reload system knows which
 /// watched file to react to.
@@ -55,60 +55,58 @@ pub struct LuaPlugin;
 
 impl Plugin for LuaPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(PreUpdate, command_lua_handler);
+        app.add_systems(
+            PreUpdate,
+            (
+                // Before the pump so a query left outstanding from last frame is
+                // answered before the main thread goes back to sleep waiting on
+                // Cocoa.
+                serve_lua_queries.before(crate::ecs::systems::pump_events),
+                drain_lua_outbox,
+                command_lua_handler,
+            ),
+        );
+        // ...and again after everything, for queries a handler made during this
+        // frame's `Update` dispatch.
+        app.add_systems(PostUpdate, serve_lua_queries);
         app.add_systems(Update, (dispatch_lua_events, lua_reload_system));
     }
 }
 
-/// Forwards window-manager events to registered `paneru.on` callbacks.
+/// Forwards window-manager events to the worker for dispatch to `paneru.on`
+/// callbacks.
 #[allow(clippy::needless_pass_by_value)]
-pub fn dispatch_lua_events(
-    runtime: Option<NonSendMut<LuaRuntime>>,
-    mut reader: MessageReader<Event>,
-    state: QueryStateParams,
-    mut commands: Commands,
-) {
-    let Some(runtime) = runtime else {
+pub fn dispatch_lua_events(worker: Option<Res<LuaWorker>>, mut reader: MessageReader<Event>) {
+    let Some(worker) = worker else {
         return;
     };
-    let runtime = &*runtime;
     // No `paneru.on` handlers means no consumer for any of these events, so skip
-    // marshalling them into Lua tables entirely — just advance past them.
-    if !runtime.has_event_handlers() {
+    // extracting them entirely — just advance past them.
+    if !worker.has_event_handlers() {
         for _ in reader.read() {}
         return;
     }
-    // Marshalled up front: the events cannot be read while the dispatch scope
-    // below borrows the world for `paneru.query`.
-    let events: Vec<(String, Table)> = reader
+    let events: Vec<convert::LuaEvent> = reader
         .read()
         .filter_map(|event| convert::LuaEvent::try_from(event).ok())
-        .filter_map(|event| convert::event_table(runtime.lua(), &event))
         .collect();
     if events.is_empty() {
         return;
     }
-    let effects = runtime.dispatch_with_query("event dispatch", &extractor(&state), || {
-        for (name, table) in &events {
-            runtime.dispatch_event(name, table);
-        }
-    });
-    apply(effects, &mut commands);
+    worker.send_events(events);
 }
 
-/// Handles `Command::Lua(id)` by invoking the bound Lua callback with a state
-/// snapshot, then draining any commands it queued.
+/// Handles `Command::Lua(id)` by handing the bound callback and a state
+/// snapshot to the worker.
 #[allow(clippy::needless_pass_by_value)]
 pub fn command_lua_handler(
-    runtime: Option<NonSendMut<LuaRuntime>>,
+    worker: Option<Res<LuaWorker>>,
     mut reader: MessageReader<Event>,
-    state: QueryStateParams,
-    mut commands: Commands,
+    windows: Windows,
 ) {
-    let Some(runtime) = runtime else {
+    let Some(worker) = worker else {
         return;
     };
-    let runtime = &*runtime;
     let ids: Vec<u32> = reader
         .read()
         .filter_map(|event| match event {
@@ -121,39 +119,38 @@ pub fn command_lua_handler(
     if ids.is_empty() {
         return;
     }
-    let snapshot = convert::state_snapshot(state.windows());
-    let snapshot = match convert::snapshot_table(runtime.lua(), &snapshot) {
-        Ok(snapshot) => snapshot,
-        Err(err) => {
-            error!("lua state snapshot: {err}");
-            return;
-        }
+    worker.send_binds(ids, convert::state_snapshot(&windows));
+}
+
+/// Answers the `paneru.query*` calls waiting on the world.
+///
+/// This is the whole of the worker's world access: it asks over a channel and
+/// blocks on the reply while the main thread carries on, so a handler mid-query
+/// costs a frame of its own latency and none of anyone else's. Run in both
+/// `PreUpdate` and `PostUpdate`; on an empty queue it costs one `try_recv`.
+#[allow(clippy::needless_pass_by_value)]
+pub fn serve_lua_queries(worker: Option<Res<LuaWorker>>, state: QueryStateParams) {
+    let Some(worker) = worker else {
+        return;
     };
-    let effects = runtime.dispatch_with_query("keybind dispatch", &extractor(&state), || {
-        for id in ids {
-            runtime.dispatch_bind(id, snapshot.clone());
-        }
-    });
-    apply(effects, &mut commands);
-}
-
-/// The world-reading half of `paneru.query*`, as the plain callback the runtime
-/// takes. Keeping it a closure over the system param is what stops the runtime
-/// from needing to know about the ECS at all.
-fn extractor<'a>(
-    state: &'a QueryStateParams<'_, '_>,
-) -> impl Fn() -> Result<crate::ecs::state::PaneruQueryState, String> + 'a {
-    || state.extract().map_err(|err| err.to_string())
-}
-
-/// Puts the side effects of a dispatch onto the command bus.
-fn apply(effects: runtime::Effects, commands: &mut Commands) {
-    let (queued, flashes) = effects;
-    for command in queued {
-        commands.trigger(SendMessageTrigger(Event::Command { command }));
+    for request in worker.pending_queries() {
+        request.answer(state.extract().map_err(|err| err.to_string()));
     }
-    for (message, duration) in flashes {
-        commands.flash_message(message, duration);
+}
+
+/// Puts what the callbacks queued onto the command bus.
+#[allow(clippy::needless_pass_by_value)]
+pub fn drain_lua_outbox(worker: Option<Res<LuaWorker>>, mut commands: Commands) {
+    let Some(worker) = worker else {
+        return;
+    };
+    for effect in worker.drain_outbox() {
+        match effect {
+            FromLua::Command(command) => {
+                commands.trigger(SendMessageTrigger(Event::Command { command }));
+            }
+            FromLua::Flash { message, duration } => commands.flash_message(message, duration),
+        }
     }
 }
 
@@ -161,14 +158,13 @@ fn apply(effects: runtime::Effects, commands: &mut Commands) {
 /// only on success so a broken edit never tears down the working setup.
 #[allow(clippy::needless_pass_by_value)]
 pub fn lua_reload_system(
-    mut runtime: Option<NonSendMut<LuaRuntime>>,
+    worker: Option<Res<LuaWorker>>,
     script_path: Option<Res<LuaScriptPath>>,
     mut reader: MessageReader<Event>,
     window_manager: Res<WindowManager>,
     mut watcher: Option<NonSendMut<Box<dyn Watcher>>>,
-    mut commands: Commands,
 ) {
-    let (Some(runtime), Some(script_path)) = (runtime.as_mut(), script_path) else {
+    let (Some(worker), Some(script_path)) = (worker, script_path) else {
         return;
     };
     let path = &script_path.0;
@@ -198,39 +194,13 @@ pub fn lua_reload_system(
         return;
     }
 
-    match LuaRuntime::from_file(path) {
-        Ok(new_runtime) => {
-            set_lua_keybinds(new_runtime.published_keybinds());
-            **runtime = new_runtime;
-            info!("Reloaded Lua script {}", path.display());
-            commands.flash_message("Lua reloaded".to_string(), 1.5);
-        }
-        Err(err) => {
-            error!("Reloading Lua script '{}': {err}", path.display());
-            commands.flash_message(format!("Lua error: {err}"), 4.0);
-        }
-    }
+    // The rebuild itself happens on the worker, which owns the interpreter:
+    // it commits only on success, and reports either way through the outbox.
+    worker.send_reload(path.clone());
 }
 
 /// Whether a change notification path refers to the watched script (directly or
 /// by filename, covering atomic-save temp-file renames).
 fn paths_match(changed: &Path, script: &Path) -> bool {
     changed == script || changed.file_name() == script.file_name()
-}
-
-/// Loads the runtime for `path`, falling back to an empty runtime (and logging)
-/// if the script errors. Always publishes the resulting keybinds.
-pub fn load_runtime(path: &Path) -> LuaRuntime {
-    let runtime = match LuaRuntime::from_file(path) {
-        Ok(runtime) => {
-            info!("Loaded Lua script {}", path.display());
-            runtime
-        }
-        Err(err) => {
-            warn!("Loading Lua script '{}': {err}", path.display());
-            LuaRuntime::empty()
-        }
-    };
-    set_lua_keybinds(runtime.published_keybinds());
-    runtime
 }

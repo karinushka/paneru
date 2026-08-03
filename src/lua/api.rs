@@ -24,7 +24,7 @@ use tracing::info;
 use paneru_lua as shared;
 
 use super::convert::LuaEvent;
-use super::{Outbox, SharedRegistry};
+use super::runtime::{Outbox, SharedRegistry};
 use crate::commands::Command;
 use crate::config::resolve_chord;
 use crate::ecs::state::StateQueryKind;

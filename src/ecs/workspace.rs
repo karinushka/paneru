@@ -74,7 +74,7 @@ impl Plugin for WorkspaceEventsPlugin {
 
 /// Marker component to move a window to a specific virtual index on its current workspace.
 #[derive(Component)]
-struct VirtualMoveMarker {
+pub(super) struct VirtualMoveMarker {
     pub target_virtual_index: u32,
     pub move_focus: MoveFocus,
 }

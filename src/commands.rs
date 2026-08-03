@@ -33,6 +33,12 @@ pub use paneru_shared_types::commands::{
 };
 
 pub fn register_commands(app: &mut bevy::app::App) {
+    // Window-addressed layout operations from a Lua handler. Registered here
+    // rather than with the Lua systems because it handles a Command like any
+    // other, and the mock harness exercises it without a running interpreter.
+    #[cfg(feature = "lua")]
+    app.add_systems(PreUpdate, crate::ecs::layout_ops::apply_layout_ops);
+
     query::register_query_commands(app);
     app.add_systems(
         PreUpdate,

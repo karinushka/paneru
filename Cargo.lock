@@ -2662,6 +2662,7 @@ dependencies = [
  "bitflags",
  "chrono",
  "clap",
+ "crossbeam-channel",
  "ctrlc",
  "derive_more",
  "embed_plist",

@@ -534,52 +534,146 @@ the settled result from the next event rather than from the set you just built.
 
 #### Example: named scratchpads
 
-xmonad's `NamedScratchpad`, in about fifteen lines. A scratchpad is a window
-you toggle in and out of view; when it is not wanted it is parked on a
-workspace you never look at.
+A worked port of xmonad's
+[`XMonad.Util.NamedScratchpad`](https://xmonad.github.io/xmonad-docs/xmonad-contrib/src/XMonad.Util.NamedScratchpad.html).
+A scratchpad is a window you toggle in and out of view; when it is not wanted it
+is parked on a workspace you never look at — xmonad's `NSP`.
 
 ```lua
-local STASH = 9  -- a workspace you never switch to
+scratchpad = { stash = 9, pads = {}, order = {} }
 
-local pads = {
-  terminal = { match = paneru.match{ app = "Alacritty", title = "^scratch" },
-               spawn = "open -na Alacritty --args --title scratch" },
-  notes    = { match = paneru.match{ app = "Obsidian" },
-               spawn = "open -a Obsidian" },
-}
+function scratchpad.define(name, spec)
+  scratchpad.pads[name] = spec
+  table.insert(scratchpad.order, name)
+end
 
-local function toggle(name)
-  local pad = pads[name]
-  return function(ws)
-    local window = ws:find(pad.match)
-    if not window then
-      os.execute(pad.spawn .. " &")            -- not running yet: start it
-      return
+-- The pad a window belongs to, if any. Declaration order decides ties.
+function scratchpad.pad_of(window)
+  for _, name in ipairs(scratchpad.order) do
+    if scratchpad.pads[name].match(window) then
+      return name, scratchpad.pads[name]
     end
-    if ws:workspace_of(window.id) == ws:current() then
-      return ws:shift(window.id, STASH)        -- in view: put it away
-    end
-    return ws:shift(window.id, ws:current(), true):focus(window.id)
   end
 end
 
-paneru.bind("alt - s", toggle("terminal"))
-paneru.bind("alt - n", toggle("notes"))
+-- Park every pad in `names` that is currently on screen.
+function scratchpad.hide(ws, names)
+  for _, name in ipairs(names) do
+    local window = ws:find(scratchpad.pads[name].match)
+    if window and ws:workspace_of(window.id) == ws:current() then
+      ws = ws:shift(window.id, scratchpad.stash)
+    end
+  end
+  return ws
+end
+
+function scratchpad.hide_all(ws)
+  return scratchpad.hide(ws, scratchpad.order)
+end
+
+-- Everything declared in the same group as `name`, except itself.
+function scratchpad.group_of(name)
+  local group, mine = {}, scratchpad.pads[name].group
+  if not mine then return group end
+  for _, other in ipairs(scratchpad.order) do
+    if other ~= name and scratchpad.pads[other].group == mine then
+      table.insert(group, other)
+    end
+  end
+  return group
+end
+
+function scratchpad.toggle(name)
+  return function(ws)
+    local pad = scratchpad.pads[name]
+    local window = ws:find(pad.match)
+    if not window then
+      os.execute(pad.spawn .. " &")                 -- not running: start it
+      return
+    end
+    if ws:workspace_of(window.id) == ws:current() then
+      return ws:shift(window.id, scratchpad.stash)  -- in view: put it away
+    end
+    ws = scratchpad.hide(ws, scratchpad.group_of(name))
+    return ws:shift(window.id, ws:current(), true):focus(window.id)
+  end
+end
 ```
 
-Have new scratchpad windows come up floating, as xmonad's `customFloating` does:
+The three toggle branches are xmonad's, in the same order: spawn if nothing
+matches, stash if it is here, otherwise summon and focus. `group` is
+`addExclusives`: summoning one pad puts its group-mates away first.
+
+Two event handlers finish it off — the equivalent of `namedScratchpadManageHook`
+and `nsHideOnFocusLoss`:
 
 ```lua
+-- Place a pad window the first time we see it (xmonad's per-pad `hook`).
+scratchpad.seen = {}
 paneru.on("window_focused", function(event, ws)
+  if scratchpad.seen[event.window_id] then return end
+  scratchpad.seen[event.window_id] = true
   local window = ws:window(event.window_id)
-  if window and pads.terminal.match(window) and window.managed then
+  if not window then return end
+  local _, pad = scratchpad.pad_of(window)
+  if pad and pad.float and window.managed then
     return ws:float(window.id)
+  end
+end)
+
+-- Hide a pad when the focus leaves it.
+scratchpad.focused = nil
+paneru.on("window_focused", function(event, ws)
+  local previous = scratchpad.focused
+  scratchpad.focused = event.window_id
+  if not previous or previous == event.window_id then return end
+  local window = ws:window(previous)
+  if window and scratchpad.pad_of(window) then
+    return ws:shift(previous, scratchpad.stash)
   end
 end)
 ```
 
-`os.execute` blocks, which is normally a thing to avoid in a window manager —
-but the script has its own thread, so a slow launch delays only the script.
+Both are registered for the same event and each commits its own returned set
+independently, so they compose without knowing about each other. Neither touches
+the window set on the paths where it bails early, so the common case — focusing
+an ordinary window — costs nothing.
+
+Finally, declare the pads and bind them:
+
+```lua
+scratchpad.define("terminal", {
+  match = paneru.match{ app = "Alacritty", title = "^scratch" },
+  spawn = "open -na Alacritty --args --title scratch",
+  float = true, group = "console",
+})
+scratchpad.define("notes", {
+  match = paneru.match{ app = "Obsidian" },
+  spawn = "open -a Obsidian",
+  group = "console",
+})
+
+paneru.bind("alt - s", scratchpad.toggle("terminal"))
+paneru.bind("alt - n", scratchpad.toggle("notes"))
+paneru.bind("alt - 0", scratchpad.hide_all)
+```
+
+`os.execute` blocks, which is normally the last thing you want in a window
+manager — but the script has its own thread, so a slow launch delays only the
+script.
+
+**Where this differs from xmonad.** Three things do not carry over:
+
+* `customFloating` places a float at a proportional rectangle. There is no
+  set-frame operation on the window set, so `ws:float(id)` floats a window
+  where it is. Use a `[[windows]]` rule with `grid` for the geometry.
+* xmonad applies the manage hook when a window *appears*. Paneru has no
+  window-created event for scripts — the window has no id yet at that point —
+  so the hook above keys off first focus instead, which is when a new window
+  normally lands.
+* The stash workspace is an ordinary virtual workspace, so it shows up in the
+  workspace indicators, and `reap_empty_workspaces` will remove it when the last
+  pad leaves. Pick a high number and leave that option off if it bothers you.
 
 ### The script runs on its own thread
 

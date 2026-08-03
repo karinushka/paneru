@@ -348,6 +348,50 @@ fn test_rule_floated_window_does_not_hold_a_slot_in_the_strip() {
         .run(commands);
 }
 
+/// Closing a window while its application stays alive must free its slot in
+/// the strip. The AX element of such a window often keeps answering queries
+/// after the window is gone, which used to make `window_destroyed_trigger`
+/// mistake the destroy event for a space change and leave a gap where the
+/// window had been.
+#[test]
+fn test_closing_window_of_live_app_closes_the_gap() {
+    let commands = vec![
+        Event::Command {
+            command: Command::PrintState,
+        }, // 0
+        Event::Command {
+            command: Command::PrintState,
+        }, // 1
+        Event::Command {
+            command: Command::PrintState,
+        }, // 2
+    ];
+
+    TestHarness::new()
+        .with_windows(3)
+        .on_iteration(0, |world, state| {
+            let left = window_x(world, 0);
+            assert_eq!(
+                window_x(world, 2) - left,
+                2 * TEST_WINDOW_WIDTH,
+                "three windows should tile side by side before the close"
+            );
+            state.os_close_window(1);
+        })
+        .on_iteration(2, |world, _state| {
+            assert!(
+                !window_exists(world, 1),
+                "closed window must be dropped from the world"
+            );
+            assert_eq!(
+                window_x(world, 2) - window_x(world, 0),
+                TEST_WINDOW_WIDTH,
+                "surviving windows must close the gap left by window 1"
+            );
+        })
+        .run(commands);
+}
+
 fn window_x(world: &mut World, id: i32) -> i32 {
     let mut query = world.query::<&crate::manager::Window>();
     query
@@ -357,4 +401,9 @@ fn window_x(world: &mut World, id: i32) -> i32 {
         .frame()
         .min
         .x
+}
+
+fn window_exists(world: &mut World, id: i32) -> bool {
+    let mut query = world.query::<&crate::manager::Window>();
+    query.iter(world).any(|window| window.id() == id)
 }

@@ -480,12 +480,24 @@ impl WindowSet {
                 follow,
             },
             |displays| {
+                // Check the destination before lifting the window out: a
+                // snapshot need not contain every workspace the host knows
+                // about, and losing the window from the tree because we could
+                // not place it would be worse than leaving it where it is. The
+                // op is recorded either way, so the host still moves it.
+                if !displays.iter().any(|display| {
+                    display
+                        .workspaces
+                        .iter()
+                        .any(|candidate| candidate.number == workspace)
+                }) {
+                    return;
+                }
                 let Some(record) = take_window(displays, window) else {
                     return;
                 };
-                let ratio = record.frame.map_or(0.5, |_| 0.5);
                 if let Some(target) = find_workspace_mut(displays, workspace) {
-                    Arc::make_mut(&mut target.columns).push(ColumnSet::single(record, ratio));
+                    Arc::make_mut(&mut target.columns).push(ColumnSet::single(record, 0.5));
                 }
             },
         )
@@ -594,6 +606,11 @@ impl WindowSet {
 
     fn stack_as(&self, window: WinID, onto: WinID, tabs: bool) -> Self {
         self.with(LayoutOp::Stack { window, onto, tabs }, |displays| {
+            // Same reasoning as `shift`: do not lift the window out unless
+            // there is somewhere to put it.
+            if find_window(displays, onto).is_none() {
+                return;
+            }
             let Some(record) = take_window(displays, window) else {
                 return;
             };
@@ -958,6 +975,37 @@ mod tests {
             Some(4)
         );
         assert_eq!(LayoutOp::View { workspace: 2 }.target(), None);
+    }
+
+    #[test]
+    fn shifting_to_a_workspace_the_snapshot_lacks_keeps_the_window() {
+        // A snapshot need not list every workspace the host knows about, and
+        // dropping the window from the tree would be a worse lie than leaving
+        // it put. The intent is recorded regardless.
+        let set = fixture().shift(2, 42);
+        assert!(
+            set.window(2).is_some(),
+            "the window should still be somewhere"
+        );
+        assert_eq!(set.workspace_of(2).map(|w| w.number), Some(1));
+        assert_eq!(
+            set.ops(),
+            vec![LayoutOp::MoveToWorkspace {
+                window: 2,
+                workspace: 42,
+                follow: false
+            }]
+        );
+    }
+
+    #[test]
+    fn stacking_onto_a_window_the_snapshot_lacks_keeps_the_window() {
+        let set = fixture().stack(2, 99);
+        assert!(
+            set.window(2).is_some(),
+            "the window should still be somewhere"
+        );
+        assert_eq!(set.workspace(1).unwrap().columns.len(), 3);
     }
 
     #[test]

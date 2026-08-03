@@ -25,6 +25,7 @@ use paneru_lua as shared;
 
 use super::convert::LuaEvent;
 use super::runtime::{Outbox, SharedRegistry};
+use super::windowset::LuaWindowSet;
 use crate::commands::Command;
 use crate::config::resolve_chord;
 use crate::ecs::state::StateQueryKind;
@@ -129,6 +130,33 @@ pub(super) fn install(
         })?
     };
     paneru.set("bind", bind)?;
+
+    // paneru.windows(fn) — xmonad's `windows`: hand the window set to `fn` and
+    // commit whatever it hands back. The same contract as a bind handler, for
+    // use partway through one.
+    let windows = {
+        let outbox = Rc::clone(outbox);
+        lua.create_function(move |lua, transform: mlua::Function| {
+            let window_set = lua.create_userdata(LuaWindowSet::lazy())?;
+            let returned: Value = transform.call(window_set)?;
+            let ops = match &returned {
+                Value::Nil => Vec::new(),
+                Value::UserData(data) => data.borrow::<LuaWindowSet>()?.ops(),
+                other => {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "paneru.windows: expected a window set back, got {}",
+                        other.type_name()
+                    )));
+                }
+            };
+            if ops.is_empty() {
+                return Ok(false);
+            }
+            outbox.borrow_mut().commands.push(Command::Layout(ops));
+            Ok(true)
+        })?
+    };
+    paneru.set("windows", windows)?;
 
     Ok(())
 }

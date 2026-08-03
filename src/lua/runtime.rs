@@ -12,13 +12,15 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
 
-use mlua::{Function, IntoLua, Lua, LuaSerdeExt, Table, Value};
+use mlua::{AnyUserData, Function, IntoLua, Lua, LuaSerdeExt, Table, Value};
 use tracing::{error, warn};
 
 use super::api;
+use super::windowset::{LuaWindowSet, WINDOW_SET_PROVIDER};
 use crate::commands::Command;
 use crate::ecs::state::{PaneruQueryState, StateQueryKind};
 use crate::platform::Modifiers;
+use paneru_shared_types::windowset::WindowSet;
 
 /// A Lua-registered keybind: `(keycode, modifiers, handler_id)`.
 pub type LuaKeybind = (u8, Modifiers, u32);
@@ -143,22 +145,38 @@ impl LuaRuntime {
             .cloned()
             .unwrap_or_default();
         for handler in handlers {
-            if let Err(err) = handler.call::<()>(event.clone()) {
-                error!("lua event handler '{name}': {err}");
+            let window_set = match self.lazy_window_set() {
+                Ok(window_set) => window_set,
+                Err(err) => {
+                    error!("lua event handler '{name}': {err}");
+                    continue;
+                }
+            };
+            match handler.call::<Value>((event.clone(), window_set)) {
+                Ok(returned) => self.commit(&returned, &format!("event handler '{name}'")),
+                Err(err) => error!("lua event handler '{name}': {err}"),
             }
         }
     }
 
-    /// Runs the handler bound to keybind `id`: a Lua function gets the state
-    /// snapshot, a command string goes straight onto the outbox.
-    pub(super) fn dispatch_bind(&self, id: u32, state: Table) {
+    /// Runs the handler bound to keybind `id`: a Lua function gets the window
+    /// set, a command string goes straight onto the outbox.
+    pub(super) fn dispatch_bind(&self, id: u32) {
         let handler = id
             .checked_sub(1)
             .and_then(|index| self.registry.borrow().binds.get(index as usize).cloned());
         match handler {
             Some(Value::Function(handler)) => {
-                if let Err(err) = handler.call::<()>(state) {
-                    error!("lua keybind handler {id}: {err}");
+                let window_set = match self.lazy_window_set() {
+                    Ok(window_set) => window_set,
+                    Err(err) => {
+                        error!("lua keybind handler {id}: {err}");
+                        return;
+                    }
+                };
+                match handler.call::<Value>(window_set) {
+                    Ok(returned) => self.commit(&returned, &format!("keybind handler {id}")),
+                    Err(err) => error!("lua keybind handler {id}: {err}"),
                 }
             }
             Some(Value::String(command)) => {
@@ -170,6 +188,39 @@ impl LuaRuntime {
                 }
             }
             _ => warn!("lua keybind {id} has no handler"),
+        }
+    }
+
+    /// The window set a handler is handed: empty until it is first used, so a
+    /// handler that ignores it costs nothing. See [`super::windowset`].
+    fn lazy_window_set(&self) -> mlua::Result<AnyUserData> {
+        self.lua.create_userdata(LuaWindowSet::lazy())
+    }
+
+    /// Queues whatever a handler returned.
+    ///
+    /// Returning a window set is how a handler asks for anything to change:
+    /// the operations recorded on the value it hands back are what get replayed
+    /// against the live world. A handler that returns nothing has asked for
+    /// nothing, which is what makes computing a set and *not* returning it free
+    /// of consequences.
+    fn commit(&self, returned: &Value, context: &str) {
+        match returned {
+            Value::Nil => {}
+            Value::UserData(data) => {
+                if let Ok(window_set) = data.borrow::<LuaWindowSet>() {
+                    let ops = window_set.ops();
+                    if !ops.is_empty() {
+                        self.outbox.borrow_mut().commands.push(Command::Layout(ops));
+                    }
+                } else {
+                    warn!("lua {context} returned userdata that is not a window set");
+                }
+            }
+            other => warn!(
+                "lua {context} returned {}; a handler returns a window set, or nothing",
+                other.type_name()
+            ),
         }
     }
 
@@ -193,9 +244,11 @@ impl LuaRuntime {
     pub(super) fn with_query<R>(
         &self,
         extract: &dyn Fn() -> Result<PaneruQueryState, String>,
+        extract_set: &dyn Fn() -> Result<WindowSet, String>,
         body: impl FnOnce() -> R,
     ) -> mlua::Result<R> {
         let cached: RefCell<Option<Rc<PaneruQueryState>>> = RefCell::new(None);
+        let cached_set: RefCell<Option<WindowSet>> = RefCell::new(None);
         let result = self.lua.scope(|scope| {
             let provider = scope.create_function(|lua, (kind, as_json): (String, bool)| {
                 let kind = StateQueryKind::parse(&kind).ok_or_else(|| {
@@ -222,10 +275,29 @@ impl LuaRuntime {
             })?;
             self.lua
                 .set_named_registry_value(api::QUERY_PROVIDER, provider)?;
+
+            // The window set is fetched on the same terms: lazily, and at most
+            // once however many handlers in this batch ask for one.
+            let set_provider = scope.create_function(|lua, ()| {
+                let set = {
+                    let mut cached = cached_set.borrow_mut();
+                    if cached.is_none() {
+                        *cached = Some(extract_set().map_err(|err| {
+                            mlua::Error::RuntimeError(format!("paneru window set: {err}"))
+                        })?);
+                    }
+                    cached.clone().expect("just filled in")
+                };
+                lua.create_userdata(LuaWindowSet::materialised(set))
+            })?;
+            self.lua
+                .set_named_registry_value(WINDOW_SET_PROVIDER, set_provider)?;
+
             Ok(body())
         });
-        // Whatever happened, the scoped function is dead once the scope ends.
+        // Whatever happened, the scoped functions are dead once the scope ends.
         self.lua.unset_named_registry_value(api::QUERY_PROVIDER)?;
+        self.lua.unset_named_registry_value(WINDOW_SET_PROVIDER)?;
         result
     }
 
@@ -237,9 +309,10 @@ impl LuaRuntime {
         &self,
         context: &str,
         extract: &dyn Fn() -> Result<PaneruQueryState, String>,
+        extract_set: &dyn Fn() -> Result<WindowSet, String>,
         body: impl FnOnce(),
     ) -> Effects {
-        if let Err(err) = self.with_query(extract, body) {
+        if let Err(err) = self.with_query(extract, extract_set, body) {
             error!("lua {context}: {err}");
         }
         self.drain_outbox()
@@ -258,6 +331,12 @@ mod tests {
     use super::super::convert;
     use super::*;
     use crate::events::Event;
+
+    /// A window-set extractor for the tests that never ask for one. Calling it
+    /// is a test failure, not a runtime error: it means the laziness broke.
+    fn no_window_set() -> Result<paneru_shared_types::windowset::WindowSet, String> {
+        panic!("this test should never materialise a window set");
+    }
 
     /// Drains the outbox commands for assertions.
     fn drained_commands(runtime: &LuaRuntime) -> Vec<Command> {
@@ -279,8 +358,7 @@ mod tests {
     fn string_keybind_dispatch_queues_command() {
         let runtime =
             LuaRuntime::from_source(r#"paneru.bind("alt - b", "window balance")"#).unwrap();
-        let state = runtime.lua().create_table().unwrap();
-        runtime.dispatch_bind(1, state);
+        runtime.dispatch_bind(1);
         let commands = drained_commands(&runtime);
         assert!(
             matches!(
@@ -297,8 +375,7 @@ mod tests {
             r#"paneru.bind("alt - j", function(state) paneru.run("window focus east") end)"#,
         )
         .unwrap();
-        let state = runtime.lua().create_table().unwrap();
-        runtime.dispatch_bind(1, state);
+        runtime.dispatch_bind(1);
         assert_eq!(drained_commands(&runtime).len(), 1);
     }
 
@@ -366,11 +443,9 @@ mod tests {
             "#,
         )
         .unwrap();
-
-        let state = runtime.lua().create_table().unwrap();
         let extract = || Ok(test_state());
         runtime
-            .with_query(&extract, || runtime.dispatch_bind(1, state))
+            .with_query(&extract, &no_window_set, || runtime.dispatch_bind(1))
             .unwrap();
 
         let flashes: Vec<String> = runtime
@@ -408,10 +483,8 @@ mod tests {
             *extractions.borrow_mut() += 1;
             Ok(test_state())
         };
-
-        let state = runtime.lua().create_table().unwrap();
         runtime
-            .with_query(&extract, || runtime.dispatch_bind(2, state.clone()))
+            .with_query(&extract, &no_window_set, || runtime.dispatch_bind(2))
             .unwrap();
         assert_eq!(
             *extractions.borrow(),
@@ -420,7 +493,7 @@ mod tests {
         );
 
         runtime
-            .with_query(&extract, || runtime.dispatch_bind(1, state))
+            .with_query(&extract, &no_window_set, || runtime.dispatch_bind(1))
             .unwrap();
         assert_eq!(*extractions.borrow(), 1, "two queries share one extraction");
     }
@@ -444,10 +517,9 @@ mod tests {
             "#,
         )
         .unwrap();
-        let state = runtime.lua().create_table().unwrap();
         let extract = || Ok(test_state());
         runtime
-            .with_query(&extract, || runtime.dispatch_bind(1, state))
+            .with_query(&extract, &no_window_set, || runtime.dispatch_bind(1))
             .unwrap();
         assert!(
             runtime.lua().load("escaped()").exec().is_err(),
@@ -456,11 +528,30 @@ mod tests {
     }
 
     #[test]
+    fn a_window_set_outside_a_callback_explains_itself() {
+        // Same contract as `paneru.query`: there is no world to read at script
+        // top level, so say so rather than answering from nothing.
+        let runtime = LuaRuntime::from_source("").unwrap();
+        let error = runtime
+            .lua()
+            // The set has to actually be *used*: it is lazy, so merely
+            // being handed one costs nothing and cannot fail.
+            .load("return paneru.windows(function(ws) return ws:focus(1) end)")
+            .exec()
+            .expect_err("there is no window set at script top level")
+            .to_string();
+        assert!(
+            error.contains("only available inside"),
+            "expected an explanation, got {error}"
+        );
+    }
+
+    #[test]
     fn unknown_query_kinds_are_rejected() {
         let runtime = LuaRuntime::from_source("").unwrap();
         let extract = || Ok(test_state());
         let error = runtime
-            .with_query(&extract, || {
+            .with_query(&extract, &no_window_set, || {
                 runtime
                     .lua()
                     .load(r#"return paneru.query("windows")"#)
@@ -486,10 +577,11 @@ mod tests {
             "#,
         )
         .unwrap();
-        let state = runtime.lua().create_table().unwrap();
         let extract = || Ok(test_state());
         let (commands, flashes) =
-            runtime.dispatch_with_query("test", &extract, || runtime.dispatch_bind(1, state));
+            runtime.dispatch_with_query("test", &extract, &no_window_set, || {
+                runtime.dispatch_bind(1);
+            });
         assert_eq!(commands.len(), 1);
         assert_eq!(flashes, vec![("done".to_string(), 3.0)]);
         // ...and the outbox is empty afterwards, so nothing is delivered twice.

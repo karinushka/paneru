@@ -11,23 +11,19 @@
 //! * [`LuaEvent::NAMES`] lists every name the runtime can emit, which lets
 //!   `paneru.on` reject a typo at registration time instead of silently never
 //!   firing.
-//! * [`StateSnapshot`] does the same for the read-only state handed to
-//!   `paneru.bind` callbacks.
 //!
 //! The conversion runs the other way too — [`TryFrom<&Event>`] is exhaustive, so
 //! a new variant in [`Event`] is a compile error here until it is either mapped
 //! or explicitly declared unmarshallable.
 //!
-//! The two halves are kept apart: [`TryFrom<&Event>`] and [`state_snapshot`]
-//! read the world and produce plain data, while [`event_table`] and
-//! [`snapshot_table`] turn that data into Lua values. Only the first half needs
-//! the ECS and only the second half needs a [`Lua`], which is what lets the
-//! runtime live on a thread of its own.
+//! The two halves are kept apart: [`TryFrom<&Event>`] reads the world and
+//! produces plain data, while [`event_table`] turns that data into Lua values.
+//! Only the first half needs the ECS and only the second needs a [`Lua`], which
+//! is what lets the runtime live on a thread of its own.
 
 use mlua::{Lua, LuaSerdeExt, Table};
 use serde::Serialize;
 
-use crate::ecs::params::Windows;
 use crate::events::Event;
 use crate::platform::{Modifiers, Pid, WinID, WorkspaceId};
 
@@ -313,59 +309,6 @@ pub fn event_table(lua: &Lua, event: &LuaEvent) -> Option<(String, Table)> {
 #[cfg(test)]
 pub fn event_to_lua(lua: &Lua, event: &Event) -> Option<(String, Table)> {
     event_table(lua, &LuaEvent::try_from(event).ok()?)
-}
-
-/// The read-only state snapshot passed to `paneru.bind` handlers.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct StateSnapshot {
-    /// Id of the focused window, if any.
-    pub focused: Option<WinID>,
-    pub windows: Vec<WindowSnapshot>,
-}
-
-/// One window in a [`StateSnapshot`].
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
-pub struct WindowSnapshot {
-    pub id: WinID,
-    /// Whether the window takes part in the tiling layout.
-    pub managed: bool,
-    /// Frame in global display coordinates, when known.
-    pub x: Option<i32>,
-    pub y: Option<i32>,
-    pub width: Option<i32>,
-    pub height: Option<i32>,
-}
-
-/// Reads the state snapshot for `paneru.bind` handlers out of the world. Pure
-/// data: no Lua involved, so this runs wherever the ECS does.
-pub fn state_snapshot(windows: &Windows) -> StateSnapshot {
-    StateSnapshot {
-        focused: windows.focused().map(|(window, _)| window.id()),
-        windows: windows
-            .iter()
-            .map(|(window, entity)| {
-                let frame = windows.frame(entity);
-                WindowSnapshot {
-                    id: window.id(),
-                    managed: windows
-                        .get_managed(entity)
-                        .is_some_and(|(_, _, unmanaged)| unmanaged.is_none()),
-                    x: frame.map(|frame| frame.min.x),
-                    y: frame.map(|frame| frame.min.y),
-                    width: frame.map(|frame| frame.width()),
-                    height: frame.map(|frame| frame.height()),
-                }
-            })
-            .collect(),
-    }
-}
-
-/// Marshals a [`StateSnapshot`] into the table `paneru.bind` handlers receive.
-pub fn snapshot_table(lua: &Lua, snapshot: &StateSnapshot) -> mlua::Result<Table> {
-    lua.to_value(snapshot)?
-        .as_table()
-        .cloned()
-        .ok_or_else(|| mlua::Error::RuntimeError("state snapshot is not a table".into()))
 }
 
 #[cfg(test)]

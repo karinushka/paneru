@@ -1,5 +1,6 @@
 use accessibility_sys::{
-    AXObserverRef, AXUIElementCreateApplication, AXUIElementRef, kAXErrorSuccess,
+    AXObserverRef, AXUIElementCreateApplication, AXUIElementRef, AXUIElementSetMessagingTimeout,
+    kAXErrorSuccess,
 };
 use bevy::ecs::component::Component;
 use core::ptr::NonNull;
@@ -25,6 +26,11 @@ use crate::platform::{
     Pid, ProcessSerialNumber, WinID,
 };
 use crate::util::{AXUIAttributes, AXUIWrapper, MacResult, add_run_loop, remove_run_loop};
+
+/// How long any one accessibility call may wait on the app that owns the
+/// element before giving up. See [`ApplicationOS::new`] for why this is set at
+/// all; the default is six seconds.
+const AX_MESSAGING_TIMEOUT_SEC: f32 = 0.25;
 
 /// A static `LazyLock` that holds a list of `AXNotification` strings to be observed for application-level events.
 /// These notifications are general events related to an application's lifecycle and state changes,
@@ -181,6 +187,22 @@ impl ApplicationOS {
     ) -> Result<Self> {
         let refer = unsafe {
             let ptr = AXUIElementCreateApplication(process.pid());
+            // Every AX read below is a synchronous cross-process call, and the
+            // default timeout for one is six seconds. An app that stops
+            // servicing its accessibility port — beachballing, paused in a
+            // debugger, thrashing — therefore takes the main thread down with
+            // it for six seconds *per call*, which is what a sudden, total,
+            // self-resolving freeze of the window manager looks like from the
+            // outside.
+            //
+            // The timeout is set on the application element, so it covers every
+            // element obtained through it, windows included. A quarter second is
+            // far longer than a healthy app needs (these are sub-millisecond)
+            // and short enough to stay imperceptible when one is not: a read
+            // that trips it fails with `kAXErrorCannotComplete`, which every
+            // caller here already treats as "unknown", the same as any other AX
+            // error.
+            AXUIElementSetMessagingTimeout(ptr, AX_MESSAGING_TIMEOUT_SEC);
             AXUIWrapper::retain(ptr)?
         };
         let bundle_id = process

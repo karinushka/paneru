@@ -144,7 +144,6 @@ fn fullscreen_window_in_strip(
         })
 }
 
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn workspace_change_handler(
     mut messages: MessageReader<Event>,
@@ -234,7 +233,6 @@ fn workspace_change_handler(
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn detect_moved_windows(
     activated_workspace: Single<Entity, Added<ActiveWorkspaceMarker>>,
@@ -333,7 +331,6 @@ fn detect_moved_windows(
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn workspace_destroyed_handler(
     mut messages: MessageReader<Event>,
@@ -391,7 +388,6 @@ fn workspace_destroyed_handler(
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn workspace_created_handler(
     mut messages: MessageReader<Event>,
@@ -442,7 +438,6 @@ fn windows_not_in_strips<F: Fn(WinID) -> Option<Entity>>(
         })
 }
 
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
 fn find_orphaned_workspaces(
     orphans: Populated<(&LayoutStrip, Entity, &Timeout, Option<&ChildOf>), With<Timeout>>,
@@ -512,7 +507,6 @@ fn find_orphaned_workspaces(
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn refresh_workspace_window_sizes(
     layout_strip: Populated<(&RefreshWindowSizes, &LayoutStrip, Entity, &ChildOf)>,
     mut windows: Query<(Entity, &mut Window, &mut Bounds, Option<&Unmanaged>)>,
@@ -580,7 +574,6 @@ fn refresh_workspace_window_sizes(
 }
 
 /// Removes previuos `ActiveWorkspaceMarker`'s when a new one is inserted.
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn cleanup_active_workspace_marker(
     trigger: On<Add, ActiveWorkspaceMarker>,
@@ -602,7 +595,6 @@ fn cleanup_active_workspace_marker(
 }
 
 /// Removes previuos `SelectedVirtualMarker`'s when a new one is inserted.
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn cleanup_selected_space_marker(
     trigger: On<Add, SelectedVirtualMarker>,
@@ -628,11 +620,7 @@ fn cleanup_selected_space_marker(
     });
 }
 
-#[allow(
-    clippy::needless_pass_by_value,
-    clippy::type_complexity,
-    clippy::too_many_lines
-)]
+#[allow(clippy::type_complexity, clippy::too_many_lines)]
 fn handle_virtual_window_moves(
     moved_windows: Populated<(Entity, &VirtualMoveMarker), With<Window>>,
     mut workspaces: Query<
@@ -862,7 +850,6 @@ fn mid_strip_slot(
 /// Handles the keybinding for switching between virtual workspaces. Moving South
 /// creates a new workspace if the current one is populated and auto-create is on.
 #[instrument(level = Level::DEBUG, skip_all)]
-#[allow(clippy::needless_pass_by_value)]
 fn switch_virtual_workspace_bind(
     mut messages: MessageReader<Event>,
     active_display: ActiveDisplay,
@@ -986,7 +973,6 @@ fn switch_virtual_workspace_bind(
 /// the last row only proceeds when `create_workspace_automatically` is on;
 /// numbered targets always may create (except index 0).
 #[instrument(level = Level::DEBUG, skip_all)]
-#[allow(clippy::needless_pass_by_value)]
 fn move_virtual_workspace_bind(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -1062,7 +1048,7 @@ fn move_virtual_workspace_bind(
     debug!("Moving {focused_entity} to new virtual space {target_virtual_index}");
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(crate) fn show_active_workspace(
     activated: Single<Entity, Added<ActiveWorkspaceMarker>>,
@@ -1245,7 +1231,6 @@ fn renumber_virtual_indexes(
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn reap_empty_virtual_workspaces(
     changed: Single<Entity, Added<ActiveWorkspaceMarker>>,
     strips: Populated<(Entity, &LayoutStrip)>,

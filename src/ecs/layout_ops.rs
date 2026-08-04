@@ -34,7 +34,6 @@ use crate::events::Event;
 use crate::manager::{Origin, Size};
 
 /// Applies the layout operations a Lua handler returned.
-#[allow(clippy::needless_pass_by_value)]
 pub(crate) fn apply_layout_ops(
     mut messages: MessageReader<Event>,
     windows: Windows,

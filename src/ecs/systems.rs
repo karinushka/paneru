@@ -15,7 +15,7 @@ use objc2_foundation::NSPoint;
 use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
@@ -26,7 +26,7 @@ use super::{
 use crate::config::{Config, decorations::BorderRadiusOption};
 use crate::ecs::display::FloatingLayer;
 use crate::ecs::layout::LayoutStrip;
-use crate::ecs::params::{ActiveDisplay, Windows};
+use crate::ecs::params::{ActiveDisplay, FrameActivity, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, BruteforceWindows, FlashMessage, FocusedMarker, Initializing,
     LowPowerMode, MissionControlActive, Position, ReadDisplayProperties, RestoreWindowState,
@@ -44,6 +44,25 @@ const LOOP_MAX_TIMEOUT_FRAME_ACTIVE_MS: u32 = 16;
 const LOOP_MAX_TIMEOUT_LOWPOWER_MS: u32 = 500;
 const LOOP_MAX_TIMEOUT_MS: u32 = 50;
 const LOOP_TIMEOUT_STEP: u32 = 1;
+
+/// How long [`pump_events`] may spend draining the incoming channel before it
+/// has to hand the frame back, and how many events it may take in one go.
+///
+/// Both are needed because the drain is the only thing standing between a burst
+/// of notifications and the rest of the schedule. It used to run until a whole
+/// millisecond passed with nothing arriving, which is a condition a burst never
+/// satisfies: a drag, a resize animation, an app churning out
+/// moved/resized/reordered notifications, or a client hammering the socket all
+/// keep events under a millisecond apart indefinitely. The loop then never
+/// exited, the systems after it never ran, and the window manager stopped
+/// responding to anything until the burst let up — sudden, random, and
+/// intermittent, because it depends entirely on what the apps are doing.
+///
+/// Nothing is dropped when a cap is hit: the events stay in the channel and the
+/// next frame picks them up. The cost of stopping early is one frame of latency
+/// on the tail of a burst; the cost of not stopping was the whole schedule.
+const PUMP_BUDGET: Duration = Duration::from_millis(4);
+const PUMP_MAX_EVENTS: usize = 256;
 
 /// Gathers all present displays and spawns them as entities in the Bevy world.
 /// The currently active display (identified by `window_manager.active_display_id()`) is marked with `ActiveDisplayMarker`.
@@ -580,17 +599,14 @@ pub(super) fn animate_resize_entities(
         });
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
-pub(super) fn pump_events(
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn pump_events(
     mut exit: MessageWriter<AppExit>,
     mut messages: MessageWriter<Event>,
     low_power_mode: Option<Res<LowPowerMode>>,
     incoming_events: Option<NonSend<Receiver<Event>>>,
     platform: Option<NonSendMut<Pin<Box<PlatformCallbacks>>>>,
-    repositioning: Query<(), With<RepositionMarker>>,
-    resizing: Query<(), With<ResizeMarker>>,
-    scrolling: Query<(), With<Scrolling>>,
-    flash_messages: Query<(), With<FlashMessage>>,
+    activity: FrameActivity,
     mut timeout: Local<u32>,
 ) {
     let Some((ref mut platform, incoming_events)) = platform.zip(incoming_events) else {
@@ -599,14 +615,30 @@ pub(super) fn pump_events(
     };
 
     platform.pump_cocoa_event_loop(f64::from(*timeout) / 1000.0);
+    let deadline = Instant::now() + PUMP_BUDGET;
     let mut received_events = Vec::new();
     let mut pending_mouse = None;
-    loop {
+
+    // `true` when the channel went quiet, `false` when a cap sent us home with
+    // events still queued. Only the quiet case may back the poll timeout off —
+    // sleeping longer while there is a backlog is the opposite of what is
+    // wanted.
+    let drained = loop {
+        // Checked before the receive so a burst cannot keep extending the stay:
+        // whatever is left stays in the channel for the next frame.
+        if received_events.len() >= PUMP_MAX_EVENTS || Instant::now() >= deadline {
+            trace!(
+                "pump_events: yielding the frame with {} events taken",
+                received_events.len()
+            );
+            break false;
+        }
+
         // Repeatedly drain the events until timeout.
         match incoming_events.recv_timeout(Duration::from_millis(1)) {
             Ok(Event::Exit) | Err(RecvTimeoutError::Disconnected) => {
                 exit.write(AppExit::Success);
-                break;
+                return;
             }
             Ok(event) => {
                 if matches!(event, Event::MouseMoved { .. }) {
@@ -617,25 +649,27 @@ pub(super) fn pump_events(
                 }
                 *timeout = LOOP_TIMEOUT_STEP;
             }
-            Err(RecvTimeoutError::Timeout) => {
-                received_events.extend(pending_mouse.take());
-                messages.write_batch(received_events);
-                let frame_active = !repositioning.is_empty()
-                    || !resizing.is_empty()
-                    || !scrolling.is_empty()
-                    || !flash_messages.is_empty();
-                let low_power = low_power_mode.is_some_and(|low_power| low_power.0);
-                let timeout_limit = if frame_active {
-                    LOOP_MAX_TIMEOUT_FRAME_ACTIVE_MS
-                } else if low_power {
-                    LOOP_MAX_TIMEOUT_LOWPOWER_MS
-                } else {
-                    LOOP_MAX_TIMEOUT_MS
-                };
-                *timeout = timeout.min(timeout_limit) + LOOP_TIMEOUT_STEP;
-                break;
-            }
+            Err(RecvTimeoutError::Timeout) => break true,
         }
+    };
+
+    received_events.extend(pending_mouse.take());
+    messages.write_batch(received_events);
+
+    if drained {
+        let frame_active = activity.mid_frame();
+        let low_power = low_power_mode.is_some_and(|low_power| low_power.0);
+        let timeout_limit = if frame_active {
+            LOOP_MAX_TIMEOUT_FRAME_ACTIVE_MS
+        } else if low_power {
+            LOOP_MAX_TIMEOUT_LOWPOWER_MS
+        } else {
+            LOOP_MAX_TIMEOUT_MS
+        };
+        *timeout = timeout.min(timeout_limit) + LOOP_TIMEOUT_STEP;
+    } else {
+        // Still backed up: come straight back rather than sleeping on it.
+        *timeout = LOOP_TIMEOUT_STEP;
     }
 }
 

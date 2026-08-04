@@ -15,9 +15,9 @@ use super::{ActiveDisplayMarker, FocusFollowsMouse, SkipReshuffle};
 use crate::{
     config::Config,
     ecs::{
-        ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker, FullWidthMarker, Initializing,
-        LayoutPosition, NativeFullscreenMarker, Position, RepositionMarker, ResizeMarker,
-        Unmanaged, WidthRatio, layout::LayoutStrip,
+        ActiveWorkspaceMarker, Bounds, DockPosition, FlashMessage, FocusedMarker, FullWidthMarker,
+        Initializing, LayoutPosition, NativeFullscreenMarker, Position, RepositionMarker,
+        ResizeMarker, Scrolling, Unmanaged, WidthRatio, layout::LayoutStrip,
     },
     manager::{Application, Display, Origin, Size, Window},
     platform::{ProcessSerialNumber, WinID},
@@ -194,6 +194,28 @@ impl ActiveDisplayMut<'_, '_> {
     /// potential dock position and or padding configuration.
     pub fn actual_bounds(&self, config: &Config) -> IRect {
         self.display().actual_display_bounds(self.dock(), config)
+    }
+}
+
+/// The markers that mean "something on screen is still moving". The event
+/// pump polls these together to decide how long it may sleep, so they travel
+/// as one parameter with the or-chain folded into [`Self::mid_frame`].
+#[derive(SystemParam)]
+pub struct FrameActivity<'w, 's> {
+    repositioning: Query<'w, 's, (), With<RepositionMarker>>,
+    resizing: Query<'w, 's, (), With<ResizeMarker>>,
+    scrolling: Query<'w, 's, (), With<Scrolling>>,
+    flash_messages: Query<'w, 's, (), With<FlashMessage>>,
+}
+
+impl FrameActivity<'_, '_> {
+    /// Returns `true` while any window is being moved, resized or scrolled, or
+    /// a flash message is on screen — i.e. while frames still need drawing.
+    pub fn mid_frame(&self) -> bool {
+        !self.repositioning.is_empty()
+            || !self.resizing.is_empty()
+            || !self.scrolling.is_empty()
+            || !self.flash_messages.is_empty()
     }
 }
 

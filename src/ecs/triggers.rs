@@ -510,14 +510,21 @@ pub(super) fn dispatch_application_messages(
     }
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 pub(super) fn window_unmanaged_trigger(
     trigger: On<Add, Unmanaged>,
     windows: Windows,
     apps: Query<(Entity, &Application)>,
-    workspaces: Query<&mut LayoutStrip>,
-    active_display: Single<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
+    mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    // `Option<Single<…>>` rather than `Single<…>`: an unresolvable parameter skips the whole
+    // observer, and dropping the strip membership below is not optional. Without an active display
+    // there is nowhere to pop the window to, but it still must not keep tiling space.
+    active_display: Option<Single<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>>,
     config: Res<Config>,
     initializing: Option<Res<Initializing>>,
     mut commands: Commands,
@@ -565,12 +572,35 @@ pub(super) fn window_unmanaged_trigger(
     let Some((_, _, Some(Unmanaged::Floating))) = windows.get_managed(entity) else {
         return;
     };
-    let display_bounds = {
-        let (display, dock) = *active_display;
-        display.actual_display_bounds(dock, &config)
-    };
 
     debug!("Entity {entity} is floating.");
+
+    // A window parked on a virtual row that isn't on screen sits off-screen by
+    // design. Popping it onto the active display would paint it over the row
+    // the user is actually looking at, and an app that raises itself (rather
+    // than the user floating a focused window) is enough to get here.
+    let parked_out_of_view = workspaces
+        .iter()
+        .any(|(strip, active)| !active && strip.contains(entity));
+
+    // Drop the strip membership *first*, before anything that can bail.
+    //
+    // A floating window is out of the tiling layout by definition, and the
+    // tiler lays a strip out by accumulating column widths left to right — so
+    // a floating member reserves space no window occupies, which is a gap that
+    // never closes on its own. Every step below is best-effort placement of a
+    // window that has already stopped being tiled; when reading its frame or
+    // its app failed, this used to return early and leave the slot behind.
+    for (mut strip, _) in &mut workspaces {
+        if strip.contains(entity) {
+            strip.remove(entity);
+        }
+    }
+
+    let Some((display, dock)) = active_display.map(|display| *display) else {
+        return;
+    };
+    let display_bounds = display.actual_display_bounds(dock, &config);
 
     let Some((window, frame)) = windows.get(entity).zip(windows.frame(entity)) else {
         return;
@@ -586,7 +616,9 @@ pub(super) fn window_unmanaged_trigger(
 
     // Skip the active-display reposition/resize during init; the strip
     // removal below still has to run.
-    if let Some((rx, ry, rw, rh)) = properties.grid_ratios() {
+    if parked_out_of_view {
+        debug!("Entity {entity} is floating on a hidden virtual row, keeping its frame.");
+    } else if let Some((rx, ry, rw, rh)) = properties.grid_ratios() {
         let x = display_bounds.min.x + (f64::from(display_bounds.width()) * rx) as i32;
         let y = display_bounds.min.y + (f64::from(display_bounds.height()) * ry) as i32;
         let w = (f64::from(display_bounds.width()) * rw) as i32;
@@ -617,12 +649,6 @@ pub(super) fn window_unmanaged_trigger(
             commands.reposition_entity(entity, target_frame.min);
         }
     }
-
-    workspaces.into_iter().for_each(|mut strip| {
-        if strip.contains(entity) {
-            strip.remove(entity);
-        }
-    });
 }
 
 fn remember_managed_strip(entity: Entity, strip: &LayoutStrip, commands: &mut Commands) {

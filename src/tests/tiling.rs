@@ -1,5 +1,6 @@
 use crate::commands::{Command, Direction, Operation, ResizeDirection};
 use crate::config::{Config, MainOptions, WindowParams};
+use crate::ecs::layout::LayoutStrip;
 use crate::events::Event;
 use crate::{assert_window_at, assert_window_size};
 use bevy::prelude::*;
@@ -263,4 +264,97 @@ fn assert_oversized_window_is_pannable(world: &mut World, id: i32) {
         (-TEST_DISPLAY_WIDTH..=0).contains(&x),
         "oversized window must stay within its pannable range, got x={x}"
     );
+}
+
+/// A floating window is out of the tiling layout, so it must not keep a slot in
+/// the strip: the tiler lays columns out left to right by accumulated width, so
+/// a floating member reserves space no tiled window occupies — a gap.
+#[test]
+fn test_floating_window_does_not_hold_a_slot_in_the_strip() {
+    let commands = vec![
+        Event::Command {
+            command: Command::PrintState,
+        }, // 0
+        Event::Command {
+            command: Command::Window(Operation::Manage),
+        }, // 1 — float the focused window
+        Event::Command {
+            command: Command::PrintState,
+        }, // 2
+    ];
+
+    TestHarness::new()
+        .with_windows(3)
+        .on_iteration(0, |world, _state| {
+            // Window 0 holds the focus, so it is the one about to float.
+            assert_eq!(window_x(world, 0), 0);
+            assert_eq!(window_x(world, 1), TEST_WINDOW_WIDTH);
+            assert_eq!(window_x(world, 2), 2 * TEST_WINDOW_WIDTH);
+        })
+        .on_iteration(2, |world, _state| {
+            let entity = find_window_entity(0, world);
+            let mut query = world.query::<&LayoutStrip>();
+            assert!(
+                !query.iter(world).any(|strip| strip.contains(entity)),
+                "a floating window must not stay in any layout strip"
+            );
+            // The slot it vacated has to close up: window 1 slides to the left
+            // edge rather than leaving an empty column where window 0 was.
+            assert_eq!(
+                window_x(world, 1),
+                0,
+                "the tiled windows must close the gap the floating one left"
+            );
+            assert_eq!(window_x(world, 2), TEST_WINDOW_WIDTH);
+        })
+        .run(commands);
+}
+
+/// The same invariant for a window floated by a config rule rather than by the
+/// toggle. This is the path that runs while the window is being spawned, so it
+/// races the strip insertion the tiling path is doing at the same time.
+#[test]
+fn test_rule_floated_window_does_not_hold_a_slot_in_the_strip() {
+    let commands = vec![
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    // Only window 1 floats; 0 and 2 tile as usual.
+    let mut params = WindowParams::new("^Window 1$", None);
+    params.floating = Some(true);
+    let config: Config = (MainOptions::default(), vec![params]).into();
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(3)
+        .on_iteration(1, |world, _state| {
+            let entity = find_window_entity(1, world);
+            let mut query = world.query::<&LayoutStrip>();
+            assert!(
+                !query.iter(world).any(|strip| strip.contains(entity)),
+                "a rule-floated window must not stay in any layout strip"
+            );
+            assert_eq!(
+                window_x(world, 2) - window_x(world, 0),
+                TEST_WINDOW_WIDTH,
+                "the tiled windows must close the gap the floating one left"
+            );
+        })
+        .run(commands);
+}
+
+fn window_x(world: &mut World, id: i32) -> i32 {
+    let mut query = world.query::<&crate::manager::Window>();
+    query
+        .iter(world)
+        .find(|window| window.id() == id)
+        .unwrap_or_else(|| panic!("window {id} not found"))
+        .frame()
+        .min
+        .x
 }

@@ -295,7 +295,6 @@ impl Drop for MenuBarManager {
     }
 }
 
-#[allow(clippy::type_complexity)]
 pub fn update_menu_bar(
     active_display: ActiveDisplay,
     focused: Query<(&Bounds, Has<Unmanaged>), With<FocusedMarker>>,

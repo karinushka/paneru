@@ -237,8 +237,25 @@ pub struct WindowCtx<'w, 's> {
     pub commands: Commands<'w, 's>,
 }
 
+/// Where a window sits and where it is headed: its layout slot, its current
+/// frame and width ratio, and the two markers that mean an animation is still
+/// in flight — so callers can ask for either the frame now or the frame it is
+/// moving towards.
+type WindowPlacements<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static LayoutPosition,
+        &'static Position,
+        &'static Bounds,
+        &'static WidthRatio,
+        Option<&'static RepositionMarker>,
+        Option<&'static ResizeMarker>,
+    ),
+    With<Window>,
+>;
+
 #[derive(SystemParam)]
-#[allow(clippy::type_complexity)]
 pub struct Windows<'w, 's> {
     all: Query<
         'w,
@@ -262,23 +279,10 @@ pub struct Windows<'w, 's> {
         ),
         With<FullWidthMarker>,
     >,
-    positions: Query<
-        'w,
-        's,
-        (
-            &'static LayoutPosition,
-            &'static Position,
-            &'static Bounds,
-            &'static WidthRatio,
-            Option<&'static RepositionMarker>,
-            Option<&'static ResizeMarker>,
-        ),
-        With<Window>,
-    >,
+    positions: WindowPlacements<'w, 's>,
 }
 
 impl Windows<'_, '_> {
-    #[allow(clippy::type_complexity)]
     fn get_all(&self, entity: Entity) -> Option<(&Window, Entity, &ChildOf, Option<&Unmanaged>)> {
         self.all
             .get(entity)

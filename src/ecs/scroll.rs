@@ -23,6 +23,7 @@ use bevy::ecs::schedule::common_conditions::on_message;
 use crate::events::{Event, InputEvent};
 use crate::manager::{Window, WindowManager};
 use crate::platform::Modifiers;
+use crate::util::round_px;
 
 pub struct ScrollEventsPlugin;
 
@@ -312,7 +313,7 @@ fn apply_scrolling_constraints(
 
     let get_window_frame = |entity| windows.moving_frame(entity);
     if let Some(clamped_offset) = clamp_viewport_offset(
-        scroll.position as i32,
+        round_px(scroll.position),
         strip,
         &windows,
         &get_window_frame,

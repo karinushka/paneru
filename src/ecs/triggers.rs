@@ -34,7 +34,7 @@ use crate::manager::{
     Application, Display, Origin, Process, Size, Window, WindowManager, WindowPadding,
 };
 use crate::platform::WinID;
-use crate::util::symlink_target;
+use crate::util::{round_px, symlink_target};
 
 /// The display currently in front, paired with the Dock's edge — together they
 /// give the usable viewport a window has to be fitted into.
@@ -643,10 +643,10 @@ pub(super) fn window_unmanaged_trigger(
     if parked_out_of_view {
         debug!("Entity {entity} is floating on a hidden virtual row, keeping its frame.");
     } else if let Some((rx, ry, rw, rh)) = properties.grid_ratios() {
-        let x = display_bounds.min.x + (f64::from(display_bounds.width()) * rx) as i32;
-        let y = display_bounds.min.y + (f64::from(display_bounds.height()) * ry) as i32;
-        let w = (f64::from(display_bounds.width()) * rw) as i32;
-        let h = (f64::from(display_bounds.height()) * rh) as i32;
+        let x = display_bounds.min.x + round_px(f64::from(display_bounds.width()) * rx);
+        let y = display_bounds.min.y + round_px(f64::from(display_bounds.height()) * ry);
+        let w = round_px(f64::from(display_bounds.width()) * rw);
+        let h = round_px(f64::from(display_bounds.height()) * rh);
         ctx.commands.reposition_entity(entity, Origin::new(x, y));
         ctx.commands.resize_entity(entity, Size::new(w, h));
     } else if initializing.is_none() && !properties.floating() {
@@ -772,7 +772,7 @@ pub(super) fn window_managed_trigger(
         if let Some(width_ratio) = properties.width_ratio() {
             let (_, pad_right, _, pad_left) = ctx.config.edge_padding();
             let padded_width = display_bounds.width() - pad_left - pad_right;
-            let width = (f64::from(padded_width) * width_ratio).round() as i32;
+            let width = round_px(f64::from(padded_width) * width_ratio);
             let height = display_bounds.height();
             ctx.commands.resize_entity(entity, Size::new(width, height));
         }
@@ -1101,10 +1101,10 @@ pub(super) fn apply_window_defaults(
             // Skip grid_ratios during init: we don't know this window's display.
             if !initializing && let Some((rx, ry, rw, rh)) = properties.grid_ratios() {
                 let bounds = active_display.actual_bounds(&config);
-                let x = bounds.min.x + (f64::from(bounds.width()) * rx) as i32;
-                let y = bounds.min.y + (f64::from(bounds.height()) * ry) as i32;
-                let w = (f64::from(bounds.width()) * rw) as i32;
-                let h = (f64::from(bounds.height()) * rh) as i32;
+                let x = bounds.min.x + round_px(f64::from(bounds.width()) * rx);
+                let y = bounds.min.y + round_px(f64::from(bounds.height()) * ry);
+                let w = round_px(f64::from(bounds.width()) * rw);
+                let h = round_px(f64::from(bounds.height()) * rh);
                 window.reposition(Origin::new(x, y));
                 window.resize(Size::new(w, h));
             }
@@ -1128,7 +1128,7 @@ pub(super) fn apply_window_defaults(
             let bounds = active_display.actual_bounds(&config);
             let (_, pad_right, _, pad_left) = config.edge_padding();
             let padded_width = bounds.width() - pad_left - pad_right;
-            let new_width = (f64::from(padded_width) * width).round() as i32;
+            let new_width = round_px(f64::from(padded_width) * width);
             let height = window.frame().height();
             window.resize(Size::new(new_width, height));
             // Re-read the actual OS size: the app may enforce a minimum width

@@ -6,7 +6,6 @@
 // (212 sites at the time of writing), so it is turned off once here rather than
 // re-suppressed, undocumented, on each one.
 #![allow(
-    clippy::cast_possible_truncation,
     clippy::needless_pass_by_value,
     reason = "Bevy system and mlua callback signatures are by-value by contract"
 )]

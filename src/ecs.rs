@@ -74,7 +74,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
     // an empty virtual workspace), which otherwise leaves a stale outline.
     // Position changes on the focused window also dirty the overlay so that
     // dragging a floating window moves the highlight with it.
-    let overlay_dirty =
+    let vw_indicator_dirty =
         |strip_changed: Query<(), (With<ActiveWorkspaceMarker>, Changed<LayoutStrip>)>,
          focus_gained: Query<(), Added<FocusedMarker>>,
          mut focus_lost: RemovedComponents<FocusedMarker>,
@@ -127,7 +127,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
                 .run_if(not_swiping),
             systems::cleanup_on_exit,
             restore::tick_restore_grace,
-            state::periodic_state_save.run_if(on_timer(Duration::from_secs(300))),
+            state::periodic_state_save.run_if(on_timer(Duration::from_mins(5))),
             state::cleanup_on_exit,
         ),
     );
@@ -150,11 +150,11 @@ pub fn register_systems(app: &mut bevy::app::App) {
                     .after(systems::animate_entities)
                     .after(systems::animate_resize_entities)
                     .run_if(dimming_enabled)
-                    .run_if(overlay_dirty),
+                    .run_if(vw_indicator_dirty),
                 systems::update_flash_messages,
             )
                 .chain(),
-            crate::menubar::update_menu_bar,
+            crate::menubar::update_menu_bar.run_if(vw_indicator_dirty),
         ),
     );
 }

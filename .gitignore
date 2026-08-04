@@ -7,3 +7,4 @@
 CLAUDE.md
 .direnv
 **/.DS_Store
+flamegraph.svg

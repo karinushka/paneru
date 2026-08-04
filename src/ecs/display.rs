@@ -25,7 +25,7 @@ use crate::ecs::{
 use crate::events::Event;
 use crate::manager::{Display, WindowManager, irect_from};
 use crate::platform::{PlatformCallbacks, WorkspaceId};
-use crate::util::read_screen_property;
+use crate::util::{read_screen_property, round_px};
 
 const ORPHANED_SPACES_TIMEOUT_SEC: u64 = 30;
 
@@ -39,8 +39,6 @@ impl Plugin for DisplayEventsPlugin {
             .add_observer(cleanup_active_display_marker);
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn cleanup_active_display_marker(
     trigger: On<Add, ActiveDisplayMarker>,
@@ -59,7 +57,6 @@ fn cleanup_active_display_marker(
 }
 
 /// Handles display change events.
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn display_change_handler(
     mut messages: MessageReader<Event>,
@@ -101,7 +98,6 @@ fn display_change_handler(
 /// the same add / remove / move primitives the event handlers use. It also
 /// forces the active workspace to re-tile, because macOS relocates windows while
 /// asleep even when the display set is unchanged.
-#[allow(clippy::needless_pass_by_value)]
 pub(crate) fn reconcile_displays(
     mut messages: MessageReader<Event>,
     workspaces: Query<(&LayoutStrip, Entity, Option<&ChildOf>)>,
@@ -367,8 +363,6 @@ impl FloatingLayer {
         self.front = !self.front;
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 fn read_display_properties_trigger(
     trigger: On<ReadDisplayProperties>,
     mut displays: Query<(&mut Display, Entity)>,
@@ -390,7 +384,7 @@ fn read_display_properties_trigger(
     let notch = read_screen_property(&screens, display_id, |screen| {
         let insets = screen.safeAreaInsets();
         debug!("notch on display {display_id}: {insets:?}");
-        insets.top as i32
+        round_px(insets.top)
     });
     if let Some(height) = notch {
         display.set_notch_height(height);

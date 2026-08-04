@@ -89,15 +89,55 @@ impl Direction {
     }
 }
 
+/// The plain, externally tagged spelling of [`Direction`], used on the wire.
+///
+/// A binary format cannot decode the flexible `"east"`-or-`3` form below —
+/// `untagged` works by asking the format what the next value *is*, which only a
+/// self-describing one can answer. This mirror carries the same variants with a
+/// derived impl, so the wire gets a discriminant and a payload.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DirectionRepr {
+    North,
+    South,
+    West,
+    East,
+    First,
+    Last,
+    Nth(usize),
+}
+
+impl From<DirectionRepr> for Direction {
+    fn from(repr: DirectionRepr) -> Self {
+        match repr {
+            DirectionRepr::North => Self::North,
+            DirectionRepr::South => Self::South,
+            DirectionRepr::West => Self::West,
+            DirectionRepr::East => Self::East,
+            DirectionRepr::First => Self::First,
+            DirectionRepr::Last => Self::Last,
+            DirectionRepr::Nth(index) => Self::Nth(index),
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for Direction {
-    /// Accepts `"east"` or `3`, so a Lua caller can write either
-    /// `{ direction = "east" }` or `{ number = 3 }` and get the same enum.
+    /// From a human-readable format, accepts `"east"` or `3`, so a Lua caller
+    /// can write either `{ direction = "east" }` or `{ number = 3 }` and get the
+    /// same enum. From a binary one — the wire — reads the derived spelling,
+    /// because the flexible form is undecodable there and unnecessary: nothing
+    /// hand-writes a request.
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// The two spellings a human-readable format accepts.
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum Repr {
             Name(String),
             Position(i64),
+        }
+
+        if !deserializer.is_human_readable() {
+            return DirectionRepr::deserialize(deserializer).map(Direction::from);
         }
 
         match Repr::deserialize(deserializer)? {
@@ -176,7 +216,7 @@ pub fn parse_virtual_workspace_number(input: &str) -> Result<u32, ParseError> {
 }
 
 /// Defines the various operations that can be performed on windows.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Operation {
     /// Focuses on a window in the specified `Direction`.
@@ -229,7 +269,7 @@ pub enum Operation {
 }
 
 /// Defines operations that can be performed on the mouse.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MouseMove {
     /// Moves the mouse pointer to the next available display.
@@ -237,7 +277,7 @@ pub enum MouseMove {
 }
 
 /// Represents a command that can be issued to the window manager.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Command {
     /// A command targeting a window with a specific `Operation`.

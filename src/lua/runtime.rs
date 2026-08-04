@@ -12,12 +12,14 @@
 //! a round trip. Handlers therefore overlap, which is why nothing here may hold
 //! a `RefCell` borrow across an await.
 
+use paneru_shared_types::script_value::ScriptValue;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
 
-use mlua::{AnyUserData, Function, Lua, LuaSerdeExt, Table, Value};
+use mlua::prelude::{FromLua, IntoLua};
+use mlua::{AnyUserData, Function, Lua, Table, Value};
 use paneru_shared_types::windowset::WindowSet;
 use tracing::{error, warn};
 
@@ -37,9 +39,13 @@ pub(super) fn store_error(call: &str, message: &str) -> mlua::Error {
 
 /// A stored value as Lua sees it. Nothing stored is `nil`, which is how a
 /// missing key and a removed one read the same.
-pub(super) fn to_lua_value(lua: &Lua, value: Option<&serde_json::Value>) -> mlua::Result<Value> {
+///
+/// Goes through [`ScriptValue`]'s own Lua conversion rather than mlua's serde
+/// bridge, so a script sees the value it stored — serde would spell the enum as
+/// its discriminant and hand back `{ Int = 5 }` instead of `5`.
+pub(super) fn to_lua_value(lua: &Lua, value: Option<&ScriptValue>) -> mlua::Result<Value> {
     match value {
-        Some(value) => lua.to_value(value),
+        Some(value) => value.clone().into_lua(lua),
         None => Ok(Value::Nil),
     }
 }
@@ -47,12 +53,8 @@ pub(super) fn to_lua_value(lua: &Lua, value: Option<&serde_json::Value>) -> mlua
 /// A Lua value on its way into the store. Functions, coroutines and userdata
 /// have no JSON to be, and say so at the call site rather than being quietly
 /// dropped.
-pub(super) fn from_lua_value(
-    lua: &Lua,
-    value: Value,
-    call: &str,
-) -> mlua::Result<serde_json::Value> {
-    lua.from_value(value)
+pub(super) fn from_lua_value(lua: &Lua, value: Value, call: &str) -> mlua::Result<ScriptValue> {
+    ScriptValue::from_lua(value, lua)
         .map_err(|err| store_error(call, &format!("value cannot be stored: {err}")))
 }
 
@@ -437,7 +439,7 @@ mod tests {
             Ok(outcome)
         }
 
-        fn get(&self, key: &str) -> Option<serde_json::Value> {
+        fn get(&self, key: &str) -> Option<ScriptValue> {
             self.store.borrow().get(key).cloned()
         }
     }
@@ -758,12 +760,12 @@ mod tests {
             &world,
         );
 
-        assert_eq!(world.get("string"), Some(serde_json::json!("hello")));
-        assert_eq!(world.get("number"), Some(serde_json::json!(42)));
-        assert_eq!(world.get("bool"), Some(serde_json::json!(true)));
+        assert_eq!(world.get("string"), Some(ScriptValue::from(serde_json::json!("hello"))));
+        assert_eq!(world.get("number"), Some(ScriptValue::from(serde_json::json!(42))));
+        assert_eq!(world.get("bool"), Some(ScriptValue::from(serde_json::json!(true))));
         assert_eq!(
             world.get("table"),
-            Some(serde_json::json!({ "a": 1, "nested": ["x", "y"] }))
+            Some(ScriptValue::from(serde_json::json!({ "a": 1, "nested": ["x", "y"] })))
         );
     }
 
@@ -778,7 +780,7 @@ mod tests {
             "#,
             &world,
         );
-        assert_eq!(world.get("echo"), Some(serde_json::json!("7/term")));
+        assert_eq!(world.get("echo"), Some(ScriptValue::from(serde_json::json!("7/term"))));
     }
 
     #[test]
@@ -793,7 +795,7 @@ mod tests {
             &world,
         );
         assert_eq!(world.get("gone"), None);
-        assert_eq!(world.get("was_nil"), Some(serde_json::json!(true)));
+        assert_eq!(world.get("was_nil"), Some(ScriptValue::from(serde_json::json!(true))));
     }
 
     #[test]
@@ -807,8 +809,8 @@ mod tests {
             "#,
             &world,
         );
-        assert_eq!(world.get("count"), Some(serde_json::json!(3)));
-        assert_eq!(world.get("returned"), Some(serde_json::json!(3)));
+        assert_eq!(world.get("count"), Some(ScriptValue::from(serde_json::json!(3))));
+        assert_eq!(world.get("returned"), Some(ScriptValue::from(serde_json::json!(3))));
     }
 
     #[test]
@@ -848,7 +850,7 @@ mod tests {
         // 101, not 11: the increment was re-run against the value that landed
         // first, so nothing was lost. A get-then-set would have stored 11 and
         // silently thrown the other write away.
-        assert_eq!(world.get("count"), Some(serde_json::json!(101)));
+        assert_eq!(world.get("count"), Some(ScriptValue::from(serde_json::json!(101))));
     }
 
     #[test]
@@ -890,7 +892,7 @@ mod tests {
     }
 
     fn set(key: &str, value: i64) -> ScriptStateWrite {
-        ScriptStateWrite::set(key.to_string(), serde_json::json!(value))
+        ScriptStateWrite::set(key.to_string(), ScriptValue::Int(value))
     }
 
     #[test]

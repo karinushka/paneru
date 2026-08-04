@@ -20,8 +20,11 @@ default-members = ["."]
 # (the Lua ABI in particular differs: vendored here, `module` in crates/lua).
 [workspace.dependencies]
 cfg-if = "1.0.4"
+futures-lite = "2.6"
+mach2 = "0.6"
 mlua = { version = "0.12", default-features = false, features = ["serialize"] }
 paneru-lua = { path = "crates/lua" }
+paneru-mach-ipc = { path = "crates/mach_ipc" }
 paneru-shared-types = { path = "crates/shared_types" }
 regex = "1.12"
 serde = { version = "1.0", features = ["derive", "rc"] }
@@ -58,7 +61,9 @@ lua = [
   "dep:mlua",
   "dep:paneru-lua",
   "dep:async-executor",
-  "dep:futures-lite",
+  # Brings in the `FromLua`/`IntoLua` impls the embedded runtime needs to hand
+  # a script the values it stored.
+  "paneru-shared-types/lua",
 ]
 luajit = ["mlua/luajit"]
 lua55 = ["mlua/lua55"]
@@ -83,7 +88,7 @@ async-channel = "2.5"
 # tree via those, so it costs nothing a tokio dependency would not double.
 async-lock = "3.4"
 async-executor = { version = "1.14", optional = true }
-futures-lite = { version = "2.6", optional = true }
+futures-lite = { workspace = true }
 bevy = { version = "0.19", default-features = false, features = [
   "multi_threaded",
 ] }
@@ -125,6 +130,7 @@ objc2-app-kit = { version = "0.3", features = [
 ] }
 objc2-core-foundation = { version = "0.3", features = ["CFRunLoop"] }
 objc2-core-graphics = "0.3"
+paneru-mach-ipc = { workspace = true }
 paneru-shared-types = { workspace = true }
 paneru-lua = { workspace = true, optional = true }
 objc2-quartz-core = { version = "0.3", features = [

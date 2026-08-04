@@ -42,8 +42,6 @@ impl SessionRestore {
         }
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 pub(super) fn tick_restore_grace(
     time: Res<Time<Virtual>>,
     mut session: Option<ResMut<SessionRestore>>,
@@ -397,7 +395,7 @@ pub(crate) fn matches_startup_restore_state(
     saved_windows_in_state(state).any(|saved| saved.hard_match(window.id(), pid, &bundle_id))
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
+#[allow(clippy::too_many_lines)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 pub(super) fn restore_window_state(
     _: On<RestoreWindowState>,

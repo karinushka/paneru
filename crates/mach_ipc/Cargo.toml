@@ -1,0 +1,20 @@
+[package]
+name = "paneru-mach-ipc"
+version = "0.4.4"
+edition = "2024"
+rust-version = "1.95.0"
+description = "Mach port IPC transport for paneru: a well-known bootstrap service, send-once replies and subscriber ports."
+license = "MIT"
+
+[lints.clippy]
+pedantic = "warn"
+
+[dependencies]
+futures-lite = { workspace = true }
+libc = "0.2"
+mach2 = { workspace = true }
+postcard = { version = "1.1.3", features = ["use-std"] }
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+serde = { workspace = true, features = ["derive"] }

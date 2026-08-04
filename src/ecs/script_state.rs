@@ -24,10 +24,10 @@ use bevy::ecs::message::MessageReader;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::system::ResMut;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use tracing::{debug, error, warn};
 
-use crate::events::{Event, ScriptStateRequest};
+use crate::events::Event;
+use paneru_shared_types::wire::{Response, ScriptStateRequest, ScriptStateResponse};
 use paneru_shared_types::script_state::{ScriptState, ScriptStateWrite, WriteOutcome};
 
 pub const SCRIPT_STATE_FILE_NAME: &str = "script-state.json";
@@ -182,7 +182,6 @@ impl ScriptStateStore {
 /// script wrote is one a client can read and vice versa. Every reply is a
 /// single JSON object, shaped like the query handler's so a client can tell an
 /// answer from an error the same way.
-#[allow(clippy::needless_pass_by_value)]
 pub fn script_state_handler(
     mut messages: MessageReader<Event>,
     store: Option<ResMut<ScriptStateStore>>,
@@ -207,24 +206,23 @@ pub fn script_state_handler(
     }
 }
 
-fn answer(store: &mut ScriptStateStore, request: ScriptStateRequest) -> String {
-    let reply = match request {
-        ScriptStateRequest::Get { key } => Ok(json!({ "value": store.state().get(&key) })),
-        ScriptStateRequest::Write(write) => store.apply(&write).map(|outcome| match outcome {
-            WriteOutcome::Applied { changed } => json!({ "ok": true, "changed": changed }),
-            // A client's `mutate` re-runs its function against this and tries
-            // again, exactly as a script's does.
-            WriteOutcome::Conflict { current } => json!({ "conflict": true, "current": current }),
-        }),
-    };
-    match reply {
-        Ok(value) => value.to_string(),
-        Err(err) => error_reply(&err),
+fn answer(store: &mut ScriptStateStore, request: ScriptStateRequest) -> Response {
+    match request {
+        ScriptStateRequest::Get { key } => Response::ScriptState(ScriptStateResponse::Value(
+            store.state().get(&key).cloned(),
+        )),
+        // A conflict is not an error: a client's `mutate` re-runs its function
+        // against what it found and tries again, exactly as a script's does. So
+        // it travels as an outcome rather than a failure.
+        ScriptStateRequest::Write(write) => match store.apply(&write) {
+            Ok(outcome) => Response::ScriptState(ScriptStateResponse::Write(outcome)),
+            Err(err) => Response::Error(err),
+        },
     }
 }
 
-fn error_reply(message: &str) -> String {
-    json!({ "error": message }).to_string()
+fn error_reply(message: &str) -> Response {
+    Response::Error(message.to_string())
 }
 
 /// Saves the store on the same timer as the layout state, and costs nothing on
@@ -237,7 +235,6 @@ pub fn periodic_script_state_save(store: Option<ResMut<ScriptStateStore>>) {
 
 /// Saves the store on the way out, so the last write of a session is not the
 /// one that gets lost.
-#[allow(clippy::needless_pass_by_value)]
 pub fn script_state_cleanup_on_exit(
     mut exit_events: MessageReader<AppExit>,
     store: Option<ResMut<ScriptStateStore>>,
@@ -252,10 +249,11 @@ pub fn script_state_cleanup_on_exit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use paneru_shared_types::script_value::ScriptValue;
     use serde_json::json;
 
     fn set(key: &str, value: serde_json::Value) -> ScriptStateWrite {
-        ScriptStateWrite::set(key.to_string(), value)
+        ScriptStateWrite::set(key.to_string(), ScriptValue::from(value))
     }
 
     fn applied(store: &mut ScriptStateStore, write: &ScriptStateWrite) -> bool {
@@ -291,7 +289,7 @@ mod tests {
         let removed = ScriptStateWrite::remove("pad.a".to_string());
         assert!(applied(&mut store, &removed));
         assert!(store.state().get("pad.a").is_none());
-        assert_eq!(store.state().get("pad.b"), Some(&json!(2)));
+        assert_eq!(store.state().get("pad.b"), Some(&ScriptValue::from(json!(2))));
 
         // Removing what is not there changes nothing, so nothing re-reads.
         assert!(!applied(&mut store, &removed));
@@ -306,33 +304,33 @@ mod tests {
         // with what the key holds now so the caller can retry against it.
         let stale = ScriptStateWrite::compare_and_set(
             "counter".to_string(),
-            Some(json!(0)),
-            Some(json!(1)),
+            Some(ScriptValue::from(json!(0))),
+            Some(ScriptValue::from(json!(1))),
         );
         assert_eq!(
             store.apply(&stale).expect("accepted"),
             WriteOutcome::Conflict {
-                current: Some(json!(1))
+                current: Some(ScriptValue::from(json!(1)))
             }
         );
 
         let fresh = ScriptStateWrite::compare_and_set(
             "counter".to_string(),
-            Some(json!(1)),
-            Some(json!(2)),
+            Some(ScriptValue::from(json!(1))),
+            Some(ScriptValue::from(json!(2))),
         );
         assert_eq!(
             store.apply(&fresh).expect("accepted"),
             WriteOutcome::Applied { changed: true }
         );
-        assert_eq!(store.state().get("counter"), Some(&json!(2)));
+        assert_eq!(store.state().get("counter"), Some(&ScriptValue::from(json!(2))));
     }
 
     #[test]
     fn a_compare_and_set_can_expect_an_absent_key() {
         let mut store = ScriptStateStore::default();
 
-        let first = ScriptStateWrite::compare_and_set("fresh".to_string(), None, Some(json!("a")));
+        let first = ScriptStateWrite::compare_and_set("fresh".to_string(), None, Some(ScriptValue::from(json!("a"))));
         assert_eq!(
             store.apply(&first).expect("accepted"),
             WriteOutcome::Applied { changed: true }
@@ -342,7 +340,7 @@ mod tests {
         assert_eq!(
             store.apply(&first).expect("accepted"),
             WriteOutcome::Conflict {
-                current: Some(json!("a"))
+                current: Some(ScriptValue::from(json!("a")))
             }
         );
     }
@@ -370,7 +368,7 @@ mod tests {
         store.write_file(&path).expect("written");
 
         let loaded = ScriptStateStore::read_file(&path).expect("read back");
-        assert_eq!(loaded.get("counter"), Some(&json!(7)));
+        assert_eq!(loaded.get("counter"), Some(&ScriptValue::from(json!(7))));
 
         let _ = fs::remove_file(path);
     }

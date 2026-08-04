@@ -631,7 +631,7 @@ impl MockState {
         ma.expect_window_list()
             .returning(move |_| ids().into_iter().map(|id| s.create_window(id)).collect());
 
-        ma.expect_window_ids().returning(move || window_ids());
+        ma.expect_window_ids().returning(window_ids);
 
         Application::new(Box::new(ma))
     }

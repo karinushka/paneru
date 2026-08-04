@@ -1,4 +1,14 @@
-#![allow(clippy::cast_possible_truncation)]
+// Bevy's `IntoSystem` and mlua's `create_function` both take their parameters
+// by value: a system's `Res`/`Query`/`On`/`Single`/`Populated` arguments and a
+// Lua callback's arguments are fetched and handed over by the framework, and a
+// signature taking them by reference does not implement the trait at all. That
+// makes this lint unactionable across every system and callback in the crate
+// (212 sites at the time of writing), so it is turned off once here rather than
+// re-suppressed, undocumented, on each one.
+#![allow(
+    clippy::needless_pass_by_value,
+    reason = "Bevy system and mlua callback signatures are by-value by contract"
+)]
 
 use std::sync::mpsc::{Receiver, TryRecvError};
 
@@ -7,6 +17,7 @@ use tracing::{error, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 mod accessibility_prompt;
+mod client;
 mod commands;
 mod config;
 mod ecs;
@@ -31,6 +42,10 @@ use events::{Event, EventSender};
 use ecs::state::StateQueryKind;
 use errors::Result;
 use platform::service;
+use client::ClientCommand;
+use paneru_shared_types::script_state::ScriptStateWrite;
+use paneru_shared_types::script_value::ScriptValue;
+use paneru_shared_types::wire::ScriptStateRequest;
 use reader::CommandReader;
 
 use crate::ecs::setup_bevy_app;
@@ -40,14 +55,14 @@ use crate::platform::PlatformCallbacks;
 use accessibility_prompt::{AccessibilitySetupAction, show_accessibility_setup};
 
 #[cfg(feature = "lua")]
-pub const VERSION_STRING: &'static str = concat!(
+pub const VERSION_STRING: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (",
     env!("PANERU_LUA_VERSION"),
     ")"
 );
 #[cfg(not(feature = "lua"))]
-pub const VERSION_STRING: &'static str = concat!(env!("CARGO_PKG_VERSION"));
+pub const VERSION_STRING: &str = concat!(env!("CARGO_PKG_VERSION"));
 
 /// `Paneru` is the main command-line interface structure for the window manager.
 /// It defines the available subcommands for controlling the Paneru daemon.
@@ -193,7 +208,7 @@ fn main() -> Result<()> {
                 let _ = sender_c.send(events::Event::Exit); // just drop the err. we are exiting anyway.
             })
             .expect("setting Ctrl-C handler should succeed");
-            CommandReader::new(sender.clone()).start();
+            CommandReader::new(sender.clone()).start()?;
             if !check_ax_privilege() && !wait_for_accessibility(sender.clone(), &receiver) {
                 return Ok(());
             }
@@ -215,16 +230,10 @@ fn main() -> Result<()> {
         SubCmd::Start => service()?.start()?,
         SubCmd::Stop => service()?.stop()?,
         SubCmd::Restart => service()?.restart()?,
-        SubCmd::SendCmd { cmd } => CommandReader::send_command(cmd)?,
-        SubCmd::Query { query } => {
-            let output = CommandReader::send_query(query.kind())?;
-            print!("{output}");
-        }
-        SubCmd::Subscribe { json: _ } => CommandReader::subscribe_json()?,
-        SubCmd::State { state } => {
-            let output = CommandReader::send_script_state(&state.argv())?;
-            print!("{output}");
-        }
+        SubCmd::SendCmd { cmd } => client::run(ClientCommand::Send(cmd))?,
+        SubCmd::Query { query } => client::run(ClientCommand::Query(query.kind()))?,
+        SubCmd::Subscribe { json: _ } => client::run(ClientCommand::Subscribe)?,
+        SubCmd::State { state } => client::run(ClientCommand::ScriptState(state.request()?))?,
     }
     Ok(())
 }
@@ -280,19 +289,49 @@ impl QueryCmd {
 }
 
 impl StateCmd {
-    /// The argv the daemon parses this back out of, minus the leading `state`.
-    fn argv(&self) -> Vec<String> {
-        let owned = |value: &str| value.to_string();
-        match self {
-            StateCmd::Get { key } => vec![owned("get"), key.clone()],
-            StateCmd::Set { key, value } => vec![owned("set"), key.clone(), value.clone()],
-            StateCmd::Remove { key } => vec![owned("remove"), key.clone()],
+    /// The request this asks the daemon for.
+    ///
+    /// The values arrive from the shell as JSON text — that is the only spelling
+    /// a terminal has for structured data — and are parsed here, so nothing past
+    /// this point deals in strings.
+    fn request(&self) -> errors::Result<ScriptStateRequest> {
+        /// The `-` that a shell caller writes for "there is no value here":
+        /// absent in `expected`, a removal in `value`. It cannot collide with
+        /// JSON, where a string is quoted.
+        const ABSENT: &str = "-";
+
+        let parse = |raw: &str| -> errors::Result<ScriptValue> {
+            serde_json::from_str::<serde_json::Value>(raw)
+                .map(ScriptValue::from)
+                .map_err(|err| errors::Error::InvalidInput(format!("{raw:?} is not JSON: {err}")))
+        };
+        let maybe = |raw: &str| -> errors::Result<Option<ScriptValue>> {
+            if raw == ABSENT {
+                Ok(None)
+            } else {
+                parse(raw).map(Some)
+            }
+        };
+
+        Ok(match self {
+            StateCmd::Get { key } => ScriptStateRequest::Get { key: key.clone() },
+            StateCmd::Set { key, value } => ScriptStateRequest::Write(ScriptStateWrite::set(
+                key.clone(),
+                parse(value)?,
+            )),
+            StateCmd::Remove { key } => {
+                ScriptStateRequest::Write(ScriptStateWrite::remove(key.clone()))
+            }
             StateCmd::Cas {
                 key,
                 expected,
                 value,
-            } => vec![owned("cas"), key.clone(), expected.clone(), value.clone()],
-        }
+            } => ScriptStateRequest::Write(ScriptStateWrite::compare_and_set(
+                key.clone(),
+                maybe(expected)?,
+                maybe(value)?,
+            )),
+        })
     }
 }
 

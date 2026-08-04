@@ -1,4 +1,3 @@
-use async_lock::Mutex as AsyncMutex;
 use bevy::app::{App, PostUpdate, PreUpdate};
 use bevy::ecs::entity::Entity;
 use bevy::ecs::message::MessageReader;
@@ -6,17 +5,14 @@ use bevy::ecs::query::Added;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs;
 use bevy::ecs::system::{Query, Res, ResMut};
-use bevy::tasks::{IoTaskPool, TaskPool};
-use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
-use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::warn;
 
 use super::{Command, Operation};
 
+use paneru_shared_types::wire::Response;
 use crate::ecs::state::{
     PaneruActiveState, PaneruQueryState, PaneruVirtualWorkspaceState, PaneruWindowState,
     QueryStateParams, StateEvent,
@@ -36,7 +32,7 @@ use crate::platform::WinID;
 /// the broadcast handler reaps on that flag — an atomic load per subscriber
 /// rather than a lock it would have to contend for with the task.
 struct Subscriber {
-    stream: Arc<AsyncMutex<UnixStream>>,
+    channel: Arc<paneru_mach_ipc::Subscriber>,
     alive: Arc<AtomicBool>,
 }
 
@@ -225,13 +221,12 @@ pub(super) fn register_query_commands(app: &mut App) {
 /// the one state document, and this is a different value — the layout tree — so
 /// folding it into that enum would give every consumer of a query kind a case
 /// that cannot happen.
-#[allow(clippy::needless_pass_by_value)]
 fn state_query_handler(mut messages: MessageReader<Event>, state: QueryStateParams) {
     /// Sends an answer without ever waiting for it to be taken. The reply
     /// channel holds one message and exactly one is sent, so this cannot fill;
     /// a client that hung up in the meantime is simply gone.
-    fn reply(respond_to: &crate::events::Reply, answer: Result<String, String>) {
-        _ = respond_to.try_send(answer.unwrap_or_else(|err| json!({ "error": err }).to_string()));
+    fn reply(respond_to: &crate::events::Reply, answer: Result<Response, String>) {
+        _ = respond_to.try_send(answer.unwrap_or_else(Response::Error));
     }
 
     for event in messages.read() {
@@ -241,31 +236,29 @@ fn state_query_handler(mut messages: MessageReader<Event>, state: QueryStatePara
                 state
                     .extract()
                     .map_err(|err| err.to_string())
-                    .and_then(|state| state.to_query_json(*kind).map_err(|err| err.to_string())),
+                    .map(|state| Response::Query(state.to_query_payload(*kind))),
             ),
             Event::WindowSetQuery { respond_to } => reply(
                 respond_to,
                 state
                     .extract_window_set()
                     .map_err(|err| err.to_string())
-                    .and_then(|set| serde_json::to_string(&set).map_err(|err| err.to_string())),
+                    .map(|set| Response::WindowSet(Box::new(set))),
             ),
             _ => {}
         }
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 fn state_subscribe_handler(
     mut messages: MessageReader<Event>,
     mut subscribers: ResMut<StateSubscribers>,
 ) {
     for event in messages.read() {
-        let Event::StateSubscribe { stream } = event else {
+        let Event::StateSubscribe { subscriber } = event else {
             continue;
         };
         subscribers.streams.push(Subscriber {
-            stream: stream.clone(),
+            channel: subscriber.clone(),
             alive: Arc::new(AtomicBool::new(true)),
         });
     }
@@ -386,8 +379,6 @@ fn collect_state_broadcast_events_for_intent(
 
     outgoing
 }
-
-#[allow(clippy::needless_pass_by_value)]
 fn state_event_broadcast_handler(
     mut messages: MessageReader<Event>,
     mut subscribers: ResMut<StateSubscribers>,
@@ -448,41 +439,32 @@ fn state_event_broadcast_handler(
         return;
     }
 
-    // One JSON object per line, as documented in QUERY_AND_SUBSCRIBE_FORMAT.md.
-    let mut payload = outgoing
-        .iter()
-        .filter_map(|event| {
-            serde_json::to_string(event)
-                .inspect_err(|err| warn!("serializing broadcast event: {err}"))
-                .ok()
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    payload.push('\n');
-
-    // Drop whoever a previous broadcast found gone, then hand this one to the IO
-    // pool. Everything the main thread does here is bounded work on values it
-    // already holds — no socket, no lock, no waiting on a client that stopped
-    // reading. A subscriber that is slow now delays only its own task.
+    // Drop whoever a previous broadcast found gone, then push this one. Each
+    // send is non-blocking and bounded, so this stays on the main thread: a
+    // subscriber that has stopped reading has its event dropped rather than
+    // stalling the window manager, and one that has exited is marked for the
+    // next reap.
     subscribers
         .streams
         .retain(|subscriber| subscriber.alive.load(Ordering::Relaxed));
 
-    let payload = Arc::new(payload);
+    let events = Arc::new(outgoing);
     for subscriber in &subscribers.streams {
-        let (stream, alive, payload) = (
-            Arc::clone(&subscriber.stream),
-            Arc::clone(&subscriber.alive),
-            Arc::clone(&payload),
-        );
-        IoTaskPool::get_or_init(TaskPool::default)
-            .spawn(async move {
-                let mut stream = stream.lock().await;
-                if stream.write_all(payload.as_bytes()).is_err() {
-                    alive.store(false, Ordering::Relaxed);
+        for event in events.iter() {
+            match subscriber.channel.try_send(event) {
+                Ok(()) => {}
+                // The subscriber's process is gone; reaped on the next
+                // broadcast. This is a real signal from the kernel rather than
+                // a write error a merely slow reader would also produce.
+                Err(paneru_mach_ipc::Error::PeerGone) => {
+                    subscriber.alive.store(false, Ordering::Relaxed);
+                    break;
                 }
-            })
-            .detach();
+                // Alive but not keeping up. The event is lost; the subscriber
+                // is kept.
+                Err(err) => warn!("pushing broadcast event: {err}"),
+            }
+        }
     }
 }
 

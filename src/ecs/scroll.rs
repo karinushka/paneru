@@ -21,8 +21,23 @@ use crate::errors::Result;
 use crate::events::Event;
 use crate::manager::{Window, WindowManager};
 use crate::platform::Modifiers;
+use crate::util::round_px;
 
 pub struct ScrollEventsPlugin;
+
+/// The on-screen strip together with the scroll state being applied to it: the
+/// strip for its window extents, the origin the scroll writes, and the momentum
+/// driving it.
+type ScrollingStrip<'w, 's> = Single<
+    'w,
+    's,
+    (
+        &'static LayoutStrip,
+        &'static mut Position,
+        &'static mut Scrolling,
+    ),
+    (With<ActiveWorkspaceMarker>, Without<Window>),
+>;
 
 impl Plugin for ScrollEventsPlugin {
     fn build(&self, app: &mut App) {
@@ -47,8 +62,6 @@ impl Plugin for ScrollEventsPlugin {
         );
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
 fn swipe_gesture(
     mut messages: MessageReader<Event>,
@@ -151,8 +164,6 @@ fn swipe_gesture(
         }
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn swiping_timeout(
     strips: Populated<(Entity, &mut Scrolling), With<LayoutStrip>>,
@@ -184,8 +195,6 @@ pub(super) fn swiping_timeout(
         }
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
 fn apply_inertia(
     mut strips: Populated<(Entity, &mut Scrolling), With<LayoutStrip>>,
@@ -206,8 +215,6 @@ fn apply_inertia(
         }
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
 fn apply_snap_force(
     mut strip: Single<(&LayoutStrip, &Position, &mut Scrolling)>,
@@ -254,8 +261,6 @@ fn apply_snap_force(
         scroll.position -= dist_to_snap * dt * CENTER_MAGNETIC_FORCE;
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
 fn scrolling_integrator(
     mut strip: Single<&mut Scrolling, With<LayoutStrip>>,
@@ -278,14 +283,9 @@ fn scrolling_integrator(
         scroll.position += scroll.velocity * dt * viewport_width * direction_modifier;
     }
 }
-
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::TRACE, skip_all)]
 fn apply_scrolling_constraints(
-    mut strip: Single<
-        (&LayoutStrip, &mut Position, &mut Scrolling),
-        (With<ActiveWorkspaceMarker>, Without<Window>),
-    >,
+    mut strip: ScrollingStrip,
     active_display: ActiveDisplay,
     windows: Windows,
     config: Res<Config>,
@@ -295,7 +295,7 @@ fn apply_scrolling_constraints(
 
     let get_window_frame = |entity| windows.moving_frame(entity);
     if let Some(clamped_offset) = clamp_viewport_offset(
-        scroll.position as i32,
+        round_px(scroll.position),
         strip,
         &windows,
         &get_window_frame,
@@ -364,8 +364,6 @@ struct VerticalGestureState {
     last_event: Option<Instant>,
     fired: bool,
 }
-
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
 fn vertical_swipe_gesture(
     mut messages: MessageReader<Event>,

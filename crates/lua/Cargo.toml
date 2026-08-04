@@ -43,3 +43,5 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 # `paneru.match` compiles app/bundle/title patterns.
 regex = { workspace = true }
+futures-lite = "2.6"
+paneru-mach-ipc.workspace = true

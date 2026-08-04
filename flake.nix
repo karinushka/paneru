@@ -33,10 +33,6 @@
             # `nixfmt-tree` allows passing a directory to format all files within it.
             formatter = pkgs.nixfmt-tree;
 
-            # Allows running `nix develop` to get a shell with `paneru` and rust build dependencies available.
-            # Uses `mkShell` (not `mkShellNoCC`) so a C compiler is present: the
-            # daemon's `mlua` builds Lua from vendored C sources, and the
-            # `crates/lua` module compiles against Lua headers (via pkg-config).
           };
       }
     );

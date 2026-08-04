@@ -115,8 +115,6 @@ pub(super) struct FocusWindow {
     pub entity: Entity,
     pub raise: bool,
 }
-
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn maintain_focus_singleton(
     trigger: On<Add, FocusedMarker>,
@@ -143,8 +141,6 @@ fn maintain_focus_singleton(
     }
     config.set_ffm_flag(None);
 }
-
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn autocenter_window_on_focus(
     focused: Single<Entity, Added<FocusedMarker>>,
@@ -182,8 +178,6 @@ fn autocenter_window_on_focus(
     }
     ctx.commands.reshuffle_around(entity);
 }
-
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn mouse_follows_focus(
     focused: Single<Entity, Added<FocusedMarker>>,
@@ -238,8 +232,6 @@ fn mouse_follows_focus(
         }
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 fn dim_window_trigger(
     trigger: On<Add, FocusedMarker>,
     windows: Windows,
@@ -256,8 +248,6 @@ fn dim_window_trigger(
         window_manager.dim_windows(&[window.id()], 0.0);
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 fn dim_remove_window_trigger(
     trigger: On<Remove, FocusedMarker>,
     windows: Windows,
@@ -283,8 +273,6 @@ fn dim_remove_window_trigger(
         window_manager.dim_windows(&[window.id()], dim_ratio);
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn virtual_strip_activated(
     trigger: On<Add, FocusedMarker>,
@@ -300,8 +288,6 @@ fn virtual_strip_activated(
         entity_commands.try_insert(ActiveWorkspaceMarker);
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 fn focus_window_trigger(trigger: On<FocusWindow>, windows: Windows, apps: Query<&Application>) {
     let FocusWindow { entity, raise } = *trigger.event();
     let Some(window) = windows.get(entity) else {
@@ -319,8 +305,6 @@ fn focus_window_trigger(trigger: On<FocusWindow>, windows: Windows, apps: Query<
         window.focus_with_raise(psn);
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
 fn recover_lost_focus(
     windows: Windows,
@@ -339,8 +323,6 @@ fn recover_lost_focus(
         commands.focus_entity(entity, false);
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 pub(super) fn stray_focus_observer(
     trigger: On<Add, Window>,
     focus_events: Populated<(Entity, &StrayFocusEvent)>,

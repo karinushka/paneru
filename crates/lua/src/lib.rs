@@ -50,6 +50,15 @@
 //! it is the daemon that decides whether a write still matches what it was read
 //! as.
 
+// mlua's `create_function` takes its callback arguments by value — that is the
+// shape `IntoLuaMulti` converts into, and a by-reference signature does not
+// implement the trait — so this lint has no actionable fix on any of the
+// callbacks in this crate.
+#![allow(
+    clippy::needless_pass_by_value,
+    reason = "mlua callback signatures are by-value by contract"
+)]
+
 pub mod client;
 
 use std::rc::Rc;
@@ -111,7 +120,6 @@ pub fn install(lua: &Lua, paneru: &Table, dispatch: &Dispatch) -> Result<()> {
 
 /// One `paneru.match{…}` call: compiles the spec into a Lua predicate.
 // Signature is fixed by mlua's `create_function` contract.
-#[allow(clippy::needless_pass_by_value)]
 fn matcher(lua: &Lua, spec: Table) -> Result<Function> {
     let pattern = |field: &str| -> Result<Option<Regex>> {
         let Some(pattern) = spec.get::<Option<String>>(field)? else {

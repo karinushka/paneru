@@ -39,6 +39,31 @@ use crate::manager::{
 use crate::overlay::{FlashMessageManager, OverlayManager};
 use crate::platform::{PlatformCallbacks, WinID};
 
+/// Processes and applications still inside their spawn grace period, with the
+/// `FreshMarker` that says whether the spawn actually completed in time.
+type TimedOutSpawns<'w, 's> = Populated<
+    'w,
+    's,
+    (Entity, Has<FreshMarker>, &'static Timeout),
+    Or<(With<BProcess>, With<Application>)>,
+>;
+
+/// Windows as the resize handler rewrites them: the OS handle to re-read the
+/// frame from, the origin it is measured against, the size to overwrite, and
+/// whether the window is ours to lay out at all.
+type ResizableWindows<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut Window,
+        Entity,
+        &'static Position,
+        &'static mut Bounds,
+        Option<&'static Unmanaged>,
+    ),
+    Without<LayoutStrip>,
+>;
+
 const ANIAMTE_SNAP_THRESHOLD: f32 = 5.0;
 const LOOP_MAX_TIMEOUT_FRAME_ACTIVE_MS: u32 = 16;
 const LOOP_MAX_TIMEOUT_LOWPOWER_MS: u32 = 500;
@@ -71,7 +96,6 @@ const PUMP_MAX_EVENTS: usize = 256;
 ///
 /// * `window_manager` - The `WindowManager` resource for querying display information.
 /// * `commands` - Bevy commands to spawn entities.
-#[allow(clippy::needless_pass_by_value)]
 pub fn gather_displays(window_manager: Res<WindowManager>, mut commands: Commands) {
     let Ok(active_display_id) = window_manager.active_display_id() else {
         error!("Unable to get active display id!");
@@ -106,7 +130,6 @@ pub fn gather_displays(window_manager: Res<WindowManager>, mut commands: Command
 ///
 /// Must run after [`gather_displays`], which spawns the `virtual_index: 0`
 /// strip for every physical space.
-#[allow(clippy::needless_pass_by_value)]
 pub fn initialise_workspaces(
     strips: Query<(&LayoutStrip, &ChildOf, &Position)>,
     config: Res<Config>,
@@ -142,7 +165,6 @@ pub fn initialise_workspaces(
 /// * `window_manager` - The `WindowManager` resource for creating new application instances.
 /// * `process_query` - A query for existing `BProcess` entities marked with `ExistingMarker`.
 /// * `commands` - Bevy commands to spawn entities and manage components.
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(crate) fn add_existing_process(
     window_manager: Res<WindowManager>,
@@ -171,7 +193,6 @@ pub(crate) fn add_existing_process(
 /// * `displays` - A query for all `Display` entities, used to gather all existing space IDs.
 /// * `app_query` - A query for existing `Application` entities marked with `ExistingMarker`.
 /// * `commands` - Bevy commands to spawn entities and manage components.
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(crate) fn add_existing_application(
     window_manager: Res<WindowManager>,
@@ -223,7 +244,6 @@ pub(crate) fn add_existing_application(
 /// * `displays` - A query for all `Display` entities, including whether they have the `ActiveDisplayMarker`.
 /// * `window_manager` - The `WindowManager` resource for refreshing displays and getting active space information.
 /// * `commands` - Bevy commands to insert components like `FocusedMarker`.
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(crate) fn finish_setup(
     process_query: Query<Entity, With<ExistingMarker>>,
@@ -335,7 +355,6 @@ pub(crate) fn finish_setup(
 /// * `window_manager` - The `WindowManager` resource for creating new application instances.
 /// * `process_query` - A `Populated` query for `(Entity, &mut BProcess, Has<Children>)` with `With<FreshMarker>`.
 /// * `commands` - Bevy commands to spawn entities and manage components.
-#[allow(clippy::needless_pass_by_value)]
 pub(super) fn add_launched_process(
     window_manager: Res<WindowManager>,
     fresh_processes: Populated<(Entity, &mut BProcess, Has<Children>), With<FreshMarker>>,
@@ -402,7 +421,6 @@ pub(super) fn add_launched_process(
 /// * `app_query` - A `Populated` query for `(&mut Application, Entity)` with `With<FreshMarker>`.
 /// * `windows` - A query for all `Window` components, used to check for existing windows.
 /// * `commands` - Bevy commands to spawn entities and manage components.
-#[allow(clippy::needless_pass_by_value)]
 pub(super) fn add_launched_application(
     app_query: Populated<(&mut Application, Entity, Has<Children>), With<FreshMarker>>,
     windows: Windows,
@@ -447,12 +465,8 @@ pub(super) fn add_launched_application(
 ///
 /// * `cleanup` - A `Populated` query for `(Entity, Has<FreshMarker>, &Timeout)` components, targeting `BProcess` or `Application` entities.
 /// * `commands` - Bevy commands to remove components.
-#[allow(clippy::type_complexity)]
 pub(super) fn fresh_marker_cleanup(
-    cleanup: Populated<
-        (Entity, Has<FreshMarker>, &Timeout),
-        Or<(With<BProcess>, With<Application>)>,
-    >,
+    cleanup: TimedOutSpawns,
     mut commands: Commands,
 ) {
     for (entity, fresh, _) in cleanup {
@@ -471,7 +485,6 @@ pub(super) fn fresh_marker_cleanup(
 /// * `timers` - A `Populated` query for `(Entity, &mut Timeout)` components.
 /// * `clock` - The Bevy `Time` resource for getting the delta time.
 /// * `commands` - Bevy commands to despawn entities.
-#[allow(clippy::needless_pass_by_value)]
 pub(super) fn timeout_ticker(
     timers: Populated<(Entity, &mut Timeout)>,
     clock: Res<Time>,
@@ -496,7 +509,6 @@ pub(super) fn timeout_ticker(
 
 /// Retries querying the focused window for applications that had a transient AX error
 /// during `ApplicationFrontSwitched`. Runs each frame until success or timeout.
-#[allow(clippy::needless_pass_by_value)]
 pub(super) fn retry_front_switch(
     retries: Populated<(Entity, &RetryFrontSwitch)>,
     applications: Query<&Application>,
@@ -532,6 +544,21 @@ pub(super) fn retry_front_switch(
 }
 
 /// Animates window movement.
+/// Fraction of the remaining distance an exponential ease-out consumes in a
+/// frame, given a decay `rate` (per second) and the frame's `delta` in seconds.
+///
+/// Shared by the reposition and resize animators so the two can never drift out
+/// of step. The result is a `Vec2::lerp` factor, hence `f32`: the clamp pins it
+/// to `[0, 1]`, a range `f32` covers in full, so the narrowing costs only
+/// mantissa bits — orders of magnitude below one pixel of motion.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "clamped to [0, 1], well within f32's range; only sub-pixel precision is lost"
+)]
+fn ease_out_factor(rate: f64, delta: f64) -> f32 {
+    (1.0 - (-rate * delta).exp()).clamp(0.0, 1.0) as f32
+}
+
 /// This is a Bevy system that runs on `Update`. It smoothly moves windows to their target
 /// positions, as indicated by the `RepositionMarker` component.
 /// Animation speed is controlled by the `animation_speed` in the `Config`.
@@ -544,7 +571,6 @@ pub(super) fn retry_front_switch(
 /// * `time` - The Bevy `Time` resource for calculating delta time.
 /// * `config` - The `Config` resource, used for animation speed.
 /// * `commands` - Bevy commands to remove the `RepositionMarker` when animation is complete.
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn animate_entities(
     animate: Populated<(&mut Position, Entity, &RepositionMarker)>,
@@ -554,9 +580,7 @@ pub(super) fn animate_entities(
 ) {
     // Frame-rate-independent exponential smoothing (ease-out).
     // `animation_speed` is the decay rate (per second); higher = snappier.
-    // t = 1 - e^(-rate*dt) is the fraction of remaining distance consumed this frame.
-    let rate = config.animation_speed();
-    let t = (1.0 - (-rate * time.delta_secs_f64()).exp()).clamp(0.0, 1.0) as f32;
+    let t = ease_out_factor(config.animation_speed(), time.delta_secs_f64());
 
     animate
         .into_iter()
@@ -595,7 +619,6 @@ pub(super) fn animate_entities(
 /// * `windows` - A `Populated` query for `(&mut Window, Entity, &ResizeMarker)` components.
 /// * `active_display` - An `ActiveDisplay` system parameter providing immutable access to the active display.
 /// * `commands` - Bevy commands to remove the `ResizeMarker` when resizing is complete.
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn animate_resize_entities(
     animate: Populated<(&mut Bounds, Entity, &ResizeMarker)>,
@@ -604,8 +627,7 @@ pub(super) fn animate_resize_entities(
     mut commands: Commands,
 ) {
     // Matches animate_entities: exponential ease-out, frame-rate independent.
-    let rate = config.animation_speed();
-    let t = (1.0 - (-rate * time.delta_secs_f64()).exp()).clamp(0.0, 1.0) as f32;
+    let t = ease_out_factor(config.animation_speed(), time.delta_secs_f64());
 
     animate
         .into_iter()
@@ -631,8 +653,6 @@ pub(super) fn animate_resize_entities(
             }
         });
 }
-
-#[allow(clippy::needless_pass_by_value)]
 pub(crate) fn pump_events(
     mut exit: MessageWriter<AppExit>,
     mut messages: MessageWriter<Event>,
@@ -705,21 +725,10 @@ pub(crate) fn pump_events(
         *timeout = LOOP_TIMEOUT_STEP;
     }
 }
-
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn window_resized_update_frame(
     mut messages: MessageReader<Event>,
-    mut windows: Query<
-        (
-            &mut Window,
-            Entity,
-            &Position,
-            &mut Bounds,
-            Option<&Unmanaged>,
-        ),
-        Without<LayoutStrip>,
-    >,
+    mut windows: ResizableWindows,
     mut workspaces: Query<(&LayoutStrip, &mut Position)>,
 ) {
     for event in messages.read() {
@@ -784,8 +793,6 @@ pub(super) fn window_resized_update_frame(
         }
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn window_moved_update_frame(
     mut messages: MessageReader<Event>,
@@ -818,8 +825,6 @@ pub(super) fn window_moved_update_frame(
         }
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 pub(crate) fn gather_initial_processes(
     receiver: Option<NonSendMut<Receiver<Event>>>,
     existing_config: Option<Res<Config>>,
@@ -909,8 +914,6 @@ pub(super) struct OverlayWindowConfigCache {
     focused_border_radius: Option<f64>,
     detected_border_radius: Option<f64>,
 }
-
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 pub(super) fn update_overlays(
     // Gating lives in the `overlay_dirty` run condition (strip change *or*
     // focus change); this query just resolves the current active workspace.
@@ -1028,8 +1031,6 @@ pub(super) fn commit_window_position(
         .par_iter_mut()
         .for_each(|(mut window, position)| window.reposition(position.0));
 }
-
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn verify_window_position(
     mut windows: Populated<(Entity, &mut Window, &Position, &mut VerifyWindowPosition)>,
@@ -1054,8 +1055,6 @@ pub(super) fn verify_window_position(
         }
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn commit_window_size(
     active_display: ActiveDisplay,
@@ -1073,7 +1072,6 @@ pub(super) fn commit_window_size(
 /// Restores user-visible window state before Paneru shuts down: clears any
 /// brightness dim, removes the dim/border overlay window, and centers every
 /// managed window on the display its frame center falls in.
-#[allow(clippy::needless_pass_by_value)]
 pub(super) fn cleanup_on_exit(
     mut exit_events: MessageReader<AppExit>,
     mut all_windows: Query<&mut Window>,
@@ -1133,8 +1131,6 @@ pub(super) fn cleanup_on_exit(
         }
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 pub(crate) fn update_flash_messages(
     messages: Populated<(Entity, &FlashMessage, &Timeout)>,
     active_display: Single<(&Display, Entity), With<ActiveDisplayMarker>>,
@@ -1203,8 +1199,6 @@ pub(crate) fn update_low_power_state(low_power_mode: Option<ResMut<LowPowerMode>
     let process_info = objc2_foundation::NSProcessInfo::processInfo();
     state.0 = process_info.isLowPowerModeEnabled();
 }
-
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(crate) fn window_creation_event(mut messages: MessageReader<Event>, mut commands: Commands) {
     for event in messages.read() {
@@ -1222,8 +1216,6 @@ pub(crate) fn window_creation_event(mut messages: MessageReader<Event>, mut comm
         }
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 pub(crate) fn detect_tabbed_windows(
     created: Populated<(Entity, &Position, &Bounds, &ChildOf), Added<Window>>,
     windows: Query<(Entity, &Window, &Position, &Bounds, &ChildOf), With<Window>>,
@@ -1331,7 +1323,7 @@ mod tests {
 
         let mut app = App::new();
         app.insert_resource(lua_config);
-        app.insert_non_send_resource(receiver);
+        app.insert_non_send(receiver);
         app.add_systems(Update, gather_initial_processes);
         app.update();
 

@@ -35,7 +35,16 @@ use crate::manager::{
     Application, Display, Origin, Process, Size, Window, WindowManager, WindowPadding,
 };
 use crate::platform::WinID;
-use crate::util::symlink_target;
+use crate::util::{round_px, symlink_target};
+
+/// The display currently in front, paired with the Dock's edge — together they
+/// give the usable viewport a window has to be fitted into.
+type ActiveDisplayViewport<'w, 's> = Single<
+    'w,
+    's,
+    (&'static Display, Option<&'static DockPosition>),
+    With<ActiveDisplayMarker>,
+>;
 
 /// Computes the passthrough keybinding set for the given window/app and
 /// publishes it to the input thread. Called on focus change and config reload.
@@ -79,7 +88,6 @@ pub(crate) fn apply_config_side_effects(
 /// * `focused_window` - A query for the focused window.
 /// * `focus_follows_mouse_id` - The resource to track focus follows mouse window ID.
 /// * `commands` - Bevy commands to trigger events and manage components.
-#[allow(clippy::needless_pass_by_value)]
 pub(super) fn front_switched_trigger(
     mut messages: MessageReader<Event>,
     processes: Query<(&BProcess, &Children)>,
@@ -146,8 +154,6 @@ pub(super) fn front_switched_trigger(
         }
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 pub(super) fn theme_change_trigger(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -201,7 +207,6 @@ pub(super) fn theme_change_trigger(
 /// * `focus_history` - Per-workspace record of what was focused last.
 /// * `global_state` - Focus-follows-mouse and reshuffle flags.
 /// * `ctx` - Window queries, configuration and the command buffer.
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn window_focused_trigger(
     mut messages: MessageReader<Event>,
@@ -353,7 +358,6 @@ pub(super) fn window_focused_trigger(
 ///
 /// * `trigger` - The Bevy event trigger containing the Mission Control event.
 /// * `mission_control_active` - The `MissionControlActive` resource.
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 pub(super) fn mission_control_trigger(
     mut messages: MessageReader<Event>,
@@ -422,7 +426,6 @@ pub(super) fn mission_control_trigger(
 /// * `trigger` - The Bevy event trigger containing the application event.
 /// * `processes` - A query for all processes.
 /// * `commands` - Bevy commands to spawn or despawn entities.
-#[allow(clippy::needless_pass_by_value)]
 pub(super) fn application_event_trigger(
     mut messages: MessageReader<Event>,
     processes: Query<(&BProcess, Entity)>,
@@ -471,7 +474,6 @@ pub(super) fn application_event_trigger(
 /// * `displays` - A query for the active display.
 /// * `main_cid` - The main connection ID resource.
 /// * `commands` - Bevy commands to spawn or despawn entities.
-#[allow(clippy::needless_pass_by_value)]
 pub(super) fn dispatch_application_messages(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -537,8 +539,6 @@ pub(super) fn dispatch_application_messages(
         }
     }
 }
-
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 pub(super) fn window_unmanaged_trigger(
     trigger: On<Add, Unmanaged>,
@@ -547,7 +547,7 @@ pub(super) fn window_unmanaged_trigger(
     // `Option<Single<…>>` rather than `Single<…>`: an unresolvable parameter skips the whole
     // observer, and dropping the strip membership below is not optional. Without an active display
     // there is nowhere to pop the window to, but it still must not keep tiling space.
-    active_display: Option<Single<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>>,
+    active_display: Option<ActiveDisplayViewport>,
     initializing: Option<Res<Initializing>>,
     mut ctx: WindowCtx,
 ) {
@@ -642,10 +642,10 @@ pub(super) fn window_unmanaged_trigger(
     if parked_out_of_view {
         debug!("Entity {entity} is floating on a hidden virtual row, keeping its frame.");
     } else if let Some((rx, ry, rw, rh)) = properties.grid_ratios() {
-        let x = display_bounds.min.x + (f64::from(display_bounds.width()) * rx) as i32;
-        let y = display_bounds.min.y + (f64::from(display_bounds.height()) * ry) as i32;
-        let w = (f64::from(display_bounds.width()) * rw) as i32;
-        let h = (f64::from(display_bounds.height()) * rh) as i32;
+        let x = display_bounds.min.x + round_px(f64::from(display_bounds.width()) * rx);
+        let y = display_bounds.min.y + round_px(f64::from(display_bounds.height()) * ry);
+        let w = round_px(f64::from(display_bounds.width()) * rw);
+        let h = round_px(f64::from(display_bounds.height()) * rh);
         ctx.commands.reposition_entity(entity, Origin::new(x, y));
         ctx.commands.resize_entity(entity, Size::new(w, h));
     } else if initializing.is_none() && !properties.floating() {
@@ -683,8 +683,6 @@ fn remember_managed_strip(entity: Entity, strip: &LayoutStrip, commands: &mut Co
         });
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 pub(super) fn window_minimized_trigger(
     trigger: On<Add, Unmanaged>,
@@ -719,8 +717,6 @@ pub(super) fn window_minimized_trigger(
         }
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 pub(super) fn window_managed_trigger(
     trigger: On<Remove, Unmanaged>,
@@ -773,7 +769,7 @@ pub(super) fn window_managed_trigger(
         if let Some(width_ratio) = properties.width_ratio() {
             let (_, pad_right, _, pad_left) = ctx.config.edge_padding();
             let padded_width = display_bounds.width() - pad_left - pad_right;
-            let width = (f64::from(padded_width) * width_ratio).round() as i32;
+            let width = round_px(f64::from(padded_width) * width_ratio);
             let height = display_bounds.height();
             ctx.commands.resize_entity(entity, Size::new(width, height));
         }
@@ -866,7 +862,6 @@ pub(super) fn window_managed_trigger(
 /// * `focus_history` - Per-workspace record of what was focused last.
 /// * `windows` - A query for all windows with their parent.
 /// * `commands` - Bevy commands to despawn entities and trigger events.
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn window_destroyed_trigger(
     mut messages: MessageReader<Event>,
@@ -944,7 +939,6 @@ pub(super) fn window_destroyed_trigger(
 /// crucially it runs *before* the broadcast handler reads titles in
 /// `PostUpdate`, so a subscriber sees the new title in the same frame it
 /// changed.
-#[allow(clippy::needless_pass_by_value)]
 pub(super) fn invalidate_window_title(mut messages: MessageReader<Event>, windows: Windows) {
     for event in messages.read() {
         let Event::WindowTitleChanged { window_id } = event else {
@@ -968,7 +962,6 @@ pub(super) fn invalidate_window_title(mut messages: MessageReader<Event>, window
 /// So on every config reload just ask the question directly — does the app
 /// still list this window? A window that merely moved to another space is
 /// still listed, so this only reaps what is genuinely gone.
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn reap_phantom_windows(
     mut messages: MessageReader<Event>,
@@ -1090,7 +1083,6 @@ fn give_away_focus(
 /// * `active_display` - A query for the active display.
 /// * `main_cid` - The main connection ID resource.
 /// * `commands` - Bevy commands to manage components and trigger events.
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn spawn_window_trigger(
     mut trigger: On<SpawnWindowTrigger>,
@@ -1163,8 +1155,6 @@ pub(super) fn spawn_window_trigger(
         commands.trigger(RestoreWindowState);
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 pub(super) fn apply_window_defaults(
     added: Populated<(&mut Window, &mut Position, &mut Bounds, &ChildOf), Added<Window>>,
     apps: Query<(Entity, &Application)>,
@@ -1187,10 +1177,10 @@ pub(super) fn apply_window_defaults(
             // Skip grid_ratios during init: we don't know this window's display.
             if !initializing && let Some((rx, ry, rw, rh)) = properties.grid_ratios() {
                 let bounds = active_display.actual_bounds(&config);
-                let x = bounds.min.x + (f64::from(bounds.width()) * rx) as i32;
-                let y = bounds.min.y + (f64::from(bounds.height()) * ry) as i32;
-                let w = (f64::from(bounds.width()) * rw) as i32;
-                let h = (f64::from(bounds.height()) * rh) as i32;
+                let x = bounds.min.x + round_px(f64::from(bounds.width()) * rx);
+                let y = bounds.min.y + round_px(f64::from(bounds.height()) * ry);
+                let w = round_px(f64::from(bounds.width()) * rw);
+                let h = round_px(f64::from(bounds.height()) * rh);
                 window.reposition(Origin::new(x, y));
                 window.resize(Size::new(w, h));
             }
@@ -1214,7 +1204,7 @@ pub(super) fn apply_window_defaults(
             let bounds = active_display.actual_bounds(&config);
             let (_, pad_right, _, pad_left) = config.edge_padding();
             let padded_width = bounds.width() - pad_left - pad_right;
-            let new_width = (f64::from(padded_width) * width).round() as i32;
+            let new_width = round_px(f64::from(padded_width) * width);
             let height = window.frame().height();
             window.resize(Size::new(new_width, height));
             // Re-read the actual OS size: the app may enforce a minimum width
@@ -1223,8 +1213,6 @@ pub(super) fn apply_window_defaults(
         }
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn apply_window_positions(
     added: Populated<Entity, Added<Window>>,
@@ -1333,8 +1321,6 @@ pub(super) fn apply_window_positions(
         }
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 pub(super) fn refresh_configuration_trigger(
     mut messages: MessageReader<Event>,
     window_manager: Res<WindowManager>,
@@ -1407,8 +1393,6 @@ pub(super) fn refresh_configuration_trigger(
         apply_config_side_effects(&config, &mut displays, &windows, &applications);
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 pub(super) fn window_removal_trigger(
     trigger: On<Remove, Window>,
     mut workspaces: Query<&mut LayoutStrip>,
@@ -1423,8 +1407,6 @@ pub(super) fn window_removal_trigger(
         strip.remove(entity);
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 pub(super) fn send_message_trigger(
     trigger: On<SendMessageTrigger>,
     mut messages: MessageWriter<Event>,
@@ -1432,8 +1414,6 @@ pub(super) fn send_message_trigger(
     let event = &trigger.event().0;
     messages.write(event.clone());
 }
-
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 pub(super) fn cleanup_timeout_trigger(
     trigger: On<Remove, Timeout>,

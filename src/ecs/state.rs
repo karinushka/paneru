@@ -164,7 +164,7 @@ impl SavedWindow {
 }
 
 impl PaneruState {
-    #[allow(clippy::type_complexity, clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines)]
     pub fn extract(
         workspaces: &Query<(Option<&ChildOf>, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
         displays: &Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
@@ -650,7 +650,7 @@ pub trait QueryState: std::marker::Sized {
 /// A free function rather than an inherent method because [`PaneruQueryState`]
 /// belongs to the shared protocol crate, which knows nothing about the ECS.
 impl QueryState for PaneruQueryState {
-    #[allow(clippy::too_many_lines, clippy::type_complexity)]
+    #[allow(clippy::too_many_lines)]
     fn extract(
         workspaces: &Query<(
             &ChildOf,

@@ -24,6 +24,20 @@ use crate::platform::Modifiers;
 
 pub struct ScrollEventsPlugin;
 
+/// The on-screen strip together with the scroll state being applied to it: the
+/// strip for its window extents, the origin the scroll writes, and the momentum
+/// driving it.
+type ScrollingStrip<'w, 's> = Single<
+    'w,
+    's,
+    (
+        &'static LayoutStrip,
+        &'static mut Position,
+        &'static mut Scrolling,
+    ),
+    (With<ActiveWorkspaceMarker>, Without<Window>),
+>;
+
 impl Plugin for ScrollEventsPlugin {
     fn build(&self, app: &mut App) {
         let mission_control_inactive = |mission_control: Option<Res<MissionControlActive>>| {
@@ -274,13 +288,9 @@ fn scrolling_integrator(
     }
 }
 
-#[allow(clippy::type_complexity)]
 #[instrument(level = Level::TRACE, skip_all)]
 fn apply_scrolling_constraints(
-    mut strip: Single<
-        (&LayoutStrip, &mut Position, &mut Scrolling),
-        (With<ActiveWorkspaceMarker>, Without<Window>),
-    >,
+    mut strip: ScrollingStrip,
     active_display: ActiveDisplay,
     windows: Windows,
     config: Res<Config>,

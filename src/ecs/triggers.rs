@@ -36,6 +36,11 @@ use crate::manager::{
 use crate::platform::WinID;
 use crate::util::symlink_target;
 
+/// The display currently in front, paired with the Dock's edge — together they
+/// give the usable viewport a window has to be fitted into.
+type ActiveDisplayViewport<'w, 's> =
+    Single<'w, 's, (&'static Display, Option<&'static DockPosition>), With<ActiveDisplayMarker>>;
+
 /// Computes the passthrough keybinding set for the given window/app and
 /// publishes it to the input thread. Called on focus change and config reload.
 fn update_passthrough(window: &Window, app: &Application, config: &Config) {
@@ -531,7 +536,6 @@ pub(super) fn dispatch_application_messages(
     }
 }
 
-#[allow(clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 pub(super) fn window_unmanaged_trigger(
     trigger: On<Add, Unmanaged>,
@@ -540,7 +544,7 @@ pub(super) fn window_unmanaged_trigger(
     // `Option<Single<…>>` rather than `Single<…>`: an unresolvable parameter skips the whole
     // observer, and dropping the strip membership below is not optional. Without an active display
     // there is nowhere to pop the window to, but it still must not keep tiling space.
-    active_display: Option<Single<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>>,
+    active_display: Option<ActiveDisplayViewport>,
     initializing: Option<Res<Initializing>>,
     mut ctx: WindowCtx,
 ) {

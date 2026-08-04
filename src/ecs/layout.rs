@@ -24,6 +24,86 @@ use crate::platform::WorkspaceId;
 
 pub struct LayoutEventsPlugin;
 
+/// Every strip with the pieces needed to place it: the strip itself, its entity,
+/// its origin, the display it hangs off, and — as a `Ref`, so the systems can
+/// ask whether the marker was added *this* tick — whether it is the active one.
+///
+/// Shared by [`reshuffle_layout_strip`] and [`ensure_visible_in_strip`], which
+/// do the same lookup for different reasons and have to agree on its shape.
+type StripPlacements<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static LayoutStrip,
+        Entity,
+        &'static Position,
+        &'static ChildOf,
+        Option<Ref<'static, ActiveWorkspaceMarker>>,
+    ),
+>;
+
+/// Displays paired with the Dock's current edge, which is what turns a display's
+/// raw bounds into the usable viewport.
+type DisplayViewports<'w, 's> = Query<'w, 's, (&'static Display, Option<&'static DockPosition>)>;
+
+/// The read-then-write pair [`sync_tab_group_frames`] needs: `p0` yields the
+/// windows whose frame moved this tick, `p1` writes the new frame onto their tab
+/// group siblings. They must be a `ParamSet` because the second aliases the
+/// first mutably.
+type TabGroupFrames<'w, 's> = ParamSet<
+    'w,
+    's,
+    (
+        Query<
+            'static,
+            'static,
+            (Entity, &'static Position, &'static Bounds),
+            (With<Window>, Or<(Changed<Bounds>, Changed<Position>)>),
+        >,
+        Query<'static, 'static, (&'static mut Position, &'static mut Bounds), With<Window>>,
+    ),
+>;
+
+/// Windows whose size or origin changed this tick — either one means the strip
+/// holding them has to re-run its layout.
+type ResizedWindows<'w, 's> = Populated<
+    'w,
+    's,
+    Entity,
+    Or<(
+        (Changed<Bounds>, With<Window>),
+        (Changed<Position>, With<Window>),
+    )>,
+>;
+
+/// Window frames as the layout writes them: the current origin, and the size and
+/// slot the layout pass is free to overwrite.
+type WindowFrames<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Position,
+        &'static mut Bounds,
+        &'static mut LayoutPosition,
+    ),
+    (Without<LayoutStrip>, With<Window>),
+>;
+
+/// Windows the layout just assigned a new slot to, with the frame fields that
+/// slot has to be translated into.
+type RepositionedWindows<'w, 's> = Populated<
+    'w,
+    's,
+    (
+        Entity,
+        &'static Window,
+        &'static LayoutPosition,
+        &'static mut Position,
+        &'static mut Bounds,
+    ),
+    (Changed<LayoutPosition>, With<Window>, Without<LayoutStrip>),
+>;
+
 /// Clamp a window origin to the range where it still touches both viewport
 /// edges. For an oversized window this range is reversed: from right-aligned
 /// to left-aligned, which lets the strip pan across the hidden content.
@@ -870,18 +950,8 @@ fn binpack_heights(heights: &[i32], min_height: i32, total_height: i32) -> Optio
     Some(output)
 }
 
-#[allow(clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all)]
-fn sync_tab_group_frames(
-    mut windows: ParamSet<(
-        Query<
-            (Entity, &Position, &Bounds),
-            (With<Window>, Or<(Changed<Bounds>, Changed<Position>)>),
-        >,
-        Query<(&mut Position, &mut Bounds), With<Window>>,
-    )>,
-    workspaces: Query<&LayoutStrip>,
-) {
+fn sync_tab_group_frames(mut windows: TabGroupFrames, workspaces: Query<&LayoutStrip>) {
     let updates = windows
         .p0()
         .into_iter()
@@ -912,18 +982,8 @@ fn sync_tab_group_frames(
 }
 
 /// Watches for size changes to windows and if they are changed, signals to the layout strip.
-#[allow(clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all)]
-fn layout_sizes_changed(
-    changed_sizes: Populated<
-        Entity,
-        Or<(
-            (Changed<Bounds>, With<Window>),
-            (Changed<Position>, With<Window>),
-        )>,
-    >,
-    workspaces: Query<&mut LayoutStrip>,
-) {
+fn layout_sizes_changed(changed_sizes: ResizedWindows, workspaces: Query<&mut LayoutStrip>) {
     let changed_entities = changed_sizes.iter().collect::<EntityHashSet>();
     workspaces.into_iter().for_each(|mut strip| {
         if strip_has_changed_window(&strip, &changed_entities) {
@@ -962,15 +1022,11 @@ fn stack_item_has_changed_window(item: &StackItem, changed_entities: &EntityHash
 
 /// Watches for changes to `LayoutStrip` (i.e. a window added or window order changed) and
 /// re-calculates the logical positions of all the windows in the layout strip.
-#[allow(clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all)]
 fn layout_strip_changed(
     changed_strips: Populated<(&LayoutStrip, &ChildOf), Changed<LayoutStrip>>,
-    mut windows: Query<
-        (&Position, &mut Bounds, &mut LayoutPosition),
-        (Without<LayoutStrip>, With<Window>),
-    >,
-    displays: Query<(&Display, Option<&DockPosition>)>,
+    mut windows: WindowFrames,
+    displays: DisplayViewports,
     config: Res<Config>,
 ) {
     let get_window_frame = |entity| {
@@ -1006,18 +1062,11 @@ fn layout_strip_changed(
     }
 }
 
-#[allow(clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all)]
 fn reshuffle_layout_strip(
     markers: Query<(Entity, &LayoutPosition), With<ReshuffleAroundMarker>>,
-    strips: Query<(
-        &LayoutStrip,
-        Entity,
-        &Position,
-        &ChildOf,
-        Option<Ref<ActiveWorkspaceMarker>>,
-    )>,
-    displays: Query<(&Display, Option<&DockPosition>)>,
+    strips: StripPlacements,
+    displays: DisplayViewports,
     windows: Windows,
     config: Res<Config>,
     mut commands: Commands,
@@ -1109,18 +1158,11 @@ fn reshuffle_layout_strip(
 /// the per-window animator slides the entity into its slot. Only when the new
 /// slot would fall past an edge does the strip translate, and only by the
 /// shortfall — never to anchor the entity to a particular position.
-#[allow(clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all)]
 fn ensure_visible_in_strip(
     markers: Query<(Entity, &LayoutPosition), With<EnsureVisibleMarker>>,
-    strips: Query<(
-        &LayoutStrip,
-        Entity,
-        &Position,
-        &ChildOf,
-        Option<Ref<ActiveWorkspaceMarker>>,
-    )>,
-    displays: Query<(&Display, Option<&DockPosition>)>,
+    strips: StripPlacements,
+    displays: DisplayViewports,
     windows: Windows,
     config: Res<Config>,
     mut commands: Commands,
@@ -1290,15 +1332,11 @@ fn insert_stack_item_window_contexts(
 
 /// Reacts to changes of logical window layout in the strip and any have been changed, reposition
 /// the layout strip against the current display viewport.
-#[allow(clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all)]
 fn position_layout_windows(
-    positioned_windows: Populated<
-        (Entity, &Window, &LayoutPosition, &mut Position, &mut Bounds),
-        (Changed<LayoutPosition>, With<Window>, Without<LayoutStrip>),
-    >,
+    positioned_windows: RepositionedWindows,
     workspaces: Query<(&LayoutStrip, &Position, Has<Scrolling>, &ChildOf), With<LayoutStrip>>,
-    displays: Query<(&Display, Option<&DockPosition>)>,
+    displays: DisplayViewports,
     config: Res<Config>,
     mut commands: Commands,
 ) {

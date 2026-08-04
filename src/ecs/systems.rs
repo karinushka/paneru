@@ -39,6 +39,31 @@ use crate::manager::{
 use crate::overlay::{FlashMessageManager, OverlayManager};
 use crate::platform::{PlatformCallbacks, WinID};
 
+/// Processes and applications still inside their spawn grace period, with the
+/// `FreshMarker` that says whether the spawn actually completed in time.
+type TimedOutSpawns<'w, 's> = Populated<
+    'w,
+    's,
+    (Entity, Has<FreshMarker>, &'static Timeout),
+    Or<(With<BProcess>, With<Application>)>,
+>;
+
+/// Windows as the resize handler rewrites them: the OS handle to re-read the
+/// frame from, the origin it is measured against, the size to overwrite, and
+/// whether the window is ours to lay out at all.
+type ResizableWindows<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut Window,
+        Entity,
+        &'static Position,
+        &'static mut Bounds,
+        Option<&'static Unmanaged>,
+    ),
+    Without<LayoutStrip>,
+>;
+
 const ANIAMTE_SNAP_THRESHOLD: f32 = 5.0;
 const LOOP_MAX_TIMEOUT_FRAME_ACTIVE_MS: u32 = 16;
 const LOOP_MAX_TIMEOUT_LOWPOWER_MS: u32 = 500;
@@ -440,14 +465,7 @@ pub(super) fn add_launched_application(
 ///
 /// * `cleanup` - A `Populated` query for `(Entity, Has<FreshMarker>, &Timeout)` components, targeting `BProcess` or `Application` entities.
 /// * `commands` - Bevy commands to remove components.
-#[allow(clippy::type_complexity)]
-pub(super) fn fresh_marker_cleanup(
-    cleanup: Populated<
-        (Entity, Has<FreshMarker>, &Timeout),
-        Or<(With<BProcess>, With<Application>)>,
-    >,
-    mut commands: Commands,
-) {
+pub(super) fn fresh_marker_cleanup(cleanup: TimedOutSpawns, mut commands: Commands) {
     for (entity, fresh, _) in cleanup {
         if !fresh && let Ok(mut entity_commands) = commands.get_entity(entity) {
             // Process was ready before the timer finished.
@@ -694,20 +712,10 @@ pub(crate) fn pump_events(
     }
 }
 
-#[allow(clippy::type_complexity)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn window_resized_update_frame(
     mut messages: MessageReader<Event>,
-    mut windows: Query<
-        (
-            &mut Window,
-            Entity,
-            &Position,
-            &mut Bounds,
-            Option<&Unmanaged>,
-        ),
-        Without<LayoutStrip>,
-    >,
+    mut windows: ResizableWindows,
     mut workspaces: Query<(&LayoutStrip, &mut Position)>,
 ) {
     for event in messages.read() {
@@ -896,7 +904,6 @@ pub(super) struct OverlayWindowConfigCache {
     detected_border_radius: Option<f64>,
 }
 
-#[allow(clippy::type_complexity)]
 pub(super) fn update_overlays(
     // Gating lives in the `overlay_dirty` run condition (strip change *or*
     // focus change); this query just resolves the current active workspace.

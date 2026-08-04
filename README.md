@@ -223,7 +223,8 @@ $ paneru
 ### Sending Commands
 
 Paneru exposes a `send-cmd` subcommand that lets you control the running
-instance from the command line via a Unix socket (`/tmp/paneru.socket`). Any
+instance from the command line over a Mach service
+(`com.github.karinushka.paneru`). Any
 command that can be bound to a hotkey can also be sent programmatically:
 
 ```shell
@@ -305,7 +306,7 @@ $ paneru query active --json
 $ paneru subscribe --json
 ```
 
-`query` prints a JSON snapshot and exits. `subscribe --json` keeps the socket
+`query` prints a JSON snapshot and exits. `subscribe --json` keeps the channel
 open and emits line-delimited JSON events for changes that integrations usually
 care about, including focus changes, virtual workspace changes, window-list
 changes, title changes, and display changes. See
@@ -314,7 +315,7 @@ full payload contract.
 
 #### Scripting ideas
 
-Because `send-cmd` works over a Unix socket, you can drive Paneru from shell
+Because `send-cmd` talks to the running daemon, you can drive Paneru from shell
 scripts, `cron` jobs, or other automation tools:
 
 - **Launch-and-arrange workflow.** Open an application and immediately position

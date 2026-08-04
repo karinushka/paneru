@@ -497,7 +497,7 @@ menubar and passthrough updates), just like editing the TOML file.
 ### Querying state
 
 Inside a `paneru.on` handler or a `paneru.bind` callback, the script can read
-the same state documents `paneru query …` returns — no socket round trip, no
+the same state documents `paneru query …` returns — no round trip, no
 `io.popen`:
 
 ```lua
@@ -619,7 +619,7 @@ one.
 it hands `fn` the window set and commits what it gives back.
 
 It is also available in the loadable client module (`require("paneru")`), where
-the daemon serves the same layout tree over its socket and takes the recorded
+the daemon serves the same layout tree to a client and takes the recorded
 operations back the same way. So a transform written for an `init.lua` handler
 runs unchanged in an external script:
 
@@ -634,7 +634,7 @@ paneru.windows(function(ws)
 end)
 ```
 
-The difference is cost, not behaviour: a client pays a socket round trip to
+The difference is cost, not behaviour: a client pays a round trip to
 fetch the set and another to commit, and blocks on both, where a handler shares
 one read across the whole batch. `paneru.match` is likewise on both hosts.
 
@@ -871,7 +871,8 @@ Three things follow:
   is no watchdog and no timeout: the window manager stays fully responsive, but
   your script stops reacting until it is reloaded. Save the file to reload it.
 * C modules loaded with `require` (sketchybar's `sbar`, say) run on that thread
-  too, not the main one. `SbarLua` writes to a socket and is fine with this; a
+  too, not the main one. `SbarLua` writes to a socket of its own and is fine
+  with this; a
   module that expects to be called from the process's main thread would not be.
 
 ### Extra Lua modules

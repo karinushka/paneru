@@ -26,6 +26,13 @@
           enable = true;
           config = {
             Label = "com.github.karinushka.paneru";
+            # The Mach service clients look up. launchd creates and holds the
+            # port, so `paneru send-cmd`/`query`/`subscribe` and the Lua module
+            # keep working across a daemon restart rather than racing it to
+            # register the name.
+            MachServices = {
+              "com.github.karinushka.paneru" = true;
+            };
             KeepAlive = {
               Crashed = true;
               SuccessfulExit = false;

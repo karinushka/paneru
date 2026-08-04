@@ -11,6 +11,13 @@
     </dict>
     <key>Label</key>
     <string>{name}</string>
+    <!-- launchd creates and holds this port, so `bootstrap_check_in` finds it
+         already made and clients keep their send rights across a restart. -->
+    <key>MachServices</key>
+    <dict>
+      <key>{name}</key>
+      <true />
+    </dict>
     <key>Nice</key>
     <integer>-20</integer>
     <key>ProcessType</key>

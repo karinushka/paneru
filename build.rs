@@ -28,10 +28,11 @@ lua_version_cfg_if!(
     "luajit" => "LuaJIT",
 );
 
-#[allow(clippy::case_sensitive_file_extension_comparisons)]
 fn main() {
-    let sdk_dir = std::env::var("DEVELOPER_DIR")
-        .map_or("/Library/Developer/CommandLineTools/SDKs".into(), |x| format!("{x}/Platforms/MacOSX.platform/Developer/SDKs"));
+    let sdk_dir = std::env::var("DEVELOPER_DIR").map_or_else(
+        |_| "/Library/Developer/CommandLineTools/SDKs".to_string(),
+        |x| format!("{x}/Platforms/MacOSX.platform/Developer/SDKs"),
+    );
 
     let sdk_bases: Vec<String> = std::iter::once(format!("{sdk_dir}/{DEFAULT_SDK}"))
         .chain(
@@ -39,8 +40,14 @@ fn main() {
                 .expect("Failed to read SDK directory")
                 .flatten()
                 .filter_map(|entry| entry.file_name().to_str().map(String::from))
+                // macOS's default filesystem is case-insensitive, so the on-disk
+                // spelling of the extension is not guaranteed to be lowercase.
                 .filter(|name| {
-                    name.starts_with("MacOSX") && name.ends_with(".sdk") && name != DEFAULT_SDK
+                    name.starts_with("MacOSX")
+                        && Path::new(name)
+                            .extension()
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("sdk"))
+                        && name != DEFAULT_SDK
                 })
                 .map(|name| format!("{sdk_dir}/{name}")),
         )

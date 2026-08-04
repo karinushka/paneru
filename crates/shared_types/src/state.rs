@@ -166,6 +166,25 @@ impl QueryState {
         }
     }
 
+    /// The same slice as [`Self::to_query_json`], typed for the wire.
+    ///
+    /// This is what actually crosses between processes; the two JSON spellings
+    /// above are for a terminal and for the embedded Lua runtime.
+    #[must_use]
+    pub fn to_query_payload(&self, kind: StateQueryKind) -> crate::wire::QueryPayload {
+        use crate::wire::QueryPayload;
+        match kind {
+            StateQueryKind::State => QueryPayload::State(Box::new(self.clone())),
+            StateQueryKind::VirtualWorkspaces => {
+                QueryPayload::VirtualWorkspaces(self.virtual_workspaces.clone())
+            }
+            StateQueryKind::Active => QueryPayload::Active(Box::new(self.active.clone())),
+            StateQueryKind::OnScreen => {
+                QueryPayload::OnScreen(self.on_screen().into_iter().cloned().collect())
+            }
+        }
+    }
+
     /// The same slice as [`Self::to_query_json`], left as a JSON value.
     ///
     /// In-process callers (the embedded Lua runtime) convert straight from this
@@ -191,7 +210,7 @@ impl QueryState {
 /// payload have a single definition shared by the daemon that emits them and
 /// the clients that read them.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "event", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum StateEvent {
     /// The visible workspace changed (native Space or Paneru virtual row).
     VirtualWorkspaceChanged { active: ActiveState },
@@ -218,6 +237,21 @@ pub enum StateEvent {
     /// Display configuration changed. `display_id` is `null` for a global
     /// change Paneru cannot pin to one display.
     DisplayChanged { display_id: Option<u32> },
+}
+
+impl StateEvent {
+    /// The documented `{"event": …}` JSON that `paneru subscribe --json` prints.
+    ///
+    /// # Errors
+    ///
+    /// If serialization fails, which should not happen barring a bug in this
+    /// type's `Serialize` impl.
+    pub fn to_json(&self) -> serde_json::Result<serde_json::Value> {
+        Ok(crate::json::flatten_tag(
+            serde_json::to_value(self)?,
+            "event",
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -259,10 +293,16 @@ mod tests {
             active: ActiveState::default(),
         };
 
-        let line = serde_json::to_string(&event).unwrap();
+        // What a terminal sees: the documented flat shape with its `event` tag.
+        let line = serde_json::to_string(&event.to_json().unwrap()).unwrap();
         assert!(line.contains(r#""event":"on_screen_changed""#));
+        assert!(line.contains(r#""windows":"#));
+
+        // What a client decodes: the wire form, which is binary and must not
+        // need a self-describing format to read back.
+        let bytes = postcard::to_allocvec(&event).unwrap();
         assert_eq!(
-            serde_json::from_str::<StateEvent>(&line).unwrap(),
+            postcard::from_bytes::<StateEvent>(&bytes).unwrap(),
             event,
             "clients must decode exactly what the daemon emits"
         );

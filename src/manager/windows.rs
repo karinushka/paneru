@@ -119,19 +119,26 @@ impl Window {
 ///
 /// `Ok(WinID)` with the window ID if successful, otherwise `Err(Error)`.
 pub fn ax_window_id(element_ref: AXUIElementRef) -> Result<WinID> {
-    let ptr = NonNull::new(element_ref).ok_or(Error::InvalidInput(format!(
-        "{}: nullptr passed as element.",
-        function_name!()
-    )))?;
-    let mut window_id: WinID = 0;
-    unsafe { _AXUIElementGetWindow(ptr.as_ptr(), &mut window_id) }.to_result(function_name!())?;
-    if window_id == 0 {
-        return Err(Error::InvalidInput(format!(
+    try_ax_window_id(element_ref).ok_or_else(|| {
+        Error::InvalidInput(format!(
             "{}: Unable to get window id from element {element_ref:?}.",
             function_name!()
-        )));
+        ))
+    })
+}
+
+/// Allocation-free variant of [`ax_window_id`].
+///
+/// [`crate::manager::bruteforce_windows`] calls this tens of thousands of times in
+/// a row and discards nearly every result, so the error path must not format a
+/// message it will only drop.
+pub fn try_ax_window_id(element_ref: AXUIElementRef) -> Option<WinID> {
+    let ptr = NonNull::new(element_ref)?;
+    let mut window_id: WinID = 0;
+    if unsafe { _AXUIElementGetWindow(ptr.as_ptr(), &mut window_id) } != 0 || window_id == 0 {
+        return None;
     }
-    Ok(window_id)
+    Some(window_id)
 }
 
 // const CPS_ALL_WINDOWS: u32 = 0x100;

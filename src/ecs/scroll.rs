@@ -48,7 +48,6 @@ impl Plugin for ScrollEventsPlugin {
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
 fn swipe_gesture(
     mut messages: MessageReader<Event>,
@@ -152,7 +151,6 @@ fn swipe_gesture(
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn swiping_timeout(
     strips: Populated<(Entity, &mut Scrolling), With<LayoutStrip>>,
@@ -185,7 +183,6 @@ pub(super) fn swiping_timeout(
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
 fn apply_inertia(
     mut strips: Populated<(Entity, &mut Scrolling), With<LayoutStrip>>,
@@ -207,7 +204,6 @@ fn apply_inertia(
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
 fn apply_snap_force(
     mut strip: Single<(&LayoutStrip, &Position, &mut Scrolling)>,
@@ -255,7 +251,6 @@ fn apply_snap_force(
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
 fn scrolling_integrator(
     mut strip: Single<&mut Scrolling, With<LayoutStrip>>,
@@ -279,7 +274,7 @@ fn scrolling_integrator(
     }
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 #[instrument(level = Level::TRACE, skip_all)]
 fn apply_scrolling_constraints(
     mut strip: Single<
@@ -365,7 +360,6 @@ struct VerticalGestureState {
     fired: bool,
 }
 
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::TRACE, skip_all)]
 fn vertical_swipe_gesture(
     mut messages: MessageReader<Event>,

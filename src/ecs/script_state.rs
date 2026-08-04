@@ -182,7 +182,6 @@ impl ScriptStateStore {
 /// script wrote is one a client can read and vice versa. Every reply is a
 /// single JSON object, shaped like the query handler's so a client can tell an
 /// answer from an error the same way.
-#[allow(clippy::needless_pass_by_value)]
 pub fn script_state_handler(
     mut messages: MessageReader<Event>,
     store: Option<ResMut<ScriptStateStore>>,
@@ -237,7 +236,6 @@ pub fn periodic_script_state_save(store: Option<ResMut<ScriptStateStore>>) {
 
 /// Saves the store on the way out, so the last write of a session is not the
 /// one that gets lost.
-#[allow(clippy::needless_pass_by_value)]
 pub fn script_state_cleanup_on_exit(
     mut exit_events: MessageReader<AppExit>,
     store: Option<ResMut<ScriptStateStore>>,

@@ -870,7 +870,7 @@ fn binpack_heights(heights: &[i32], min_height: i32, total_height: i32) -> Optio
     Some(output)
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all)]
 fn sync_tab_group_frames(
     mut windows: ParamSet<(
@@ -912,7 +912,7 @@ fn sync_tab_group_frames(
 }
 
 /// Watches for size changes to windows and if they are changed, signals to the layout strip.
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all)]
 fn layout_sizes_changed(
     changed_sizes: Populated<
@@ -962,7 +962,7 @@ fn stack_item_has_changed_window(item: &StackItem, changed_entities: &EntityHash
 
 /// Watches for changes to `LayoutStrip` (i.e. a window added or window order changed) and
 /// re-calculates the logical positions of all the windows in the layout strip.
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all)]
 fn layout_strip_changed(
     changed_strips: Populated<(&LayoutStrip, &ChildOf), Changed<LayoutStrip>>,
@@ -1006,7 +1006,7 @@ fn layout_strip_changed(
     }
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all)]
 fn reshuffle_layout_strip(
     markers: Query<(Entity, &LayoutPosition), With<ReshuffleAroundMarker>>,
@@ -1109,7 +1109,7 @@ fn reshuffle_layout_strip(
 /// the per-window animator slides the entity into its slot. Only when the new
 /// slot would fall past an edge does the strip translate, and only by the
 /// shortfall — never to anchor the entity to a particular position.
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all)]
 fn ensure_visible_in_strip(
     markers: Query<(Entity, &LayoutPosition), With<EnsureVisibleMarker>>,
@@ -1163,7 +1163,6 @@ fn ensure_visible_in_strip(
 
 /// Reacts to changes in the position of the `LayoutStrip` to Display, and if changed,
 /// marks all the windows in the strip as requiring re-positioning.
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all)]
 fn position_layout_strips(
     moved_strips: Populated<&LayoutStrip, Changed<Position>>,
@@ -1291,7 +1290,7 @@ fn insert_stack_item_window_contexts(
 
 /// Reacts to changes of logical window layout in the strip and any have been changed, reposition
 /// the layout strip against the current display viewport.
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all)]
 fn position_layout_windows(
     positioned_windows: Populated<

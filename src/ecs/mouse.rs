@@ -74,7 +74,6 @@ fn is_in_corner_dead_zone(
 /// * `focused_window` - A query for the currently focused window.
 /// * `main_cid` - The main connection ID resource.
 /// * `config` - The optional configuration resource.
-#[allow(clippy::needless_pass_by_value)]
 fn mouse_moved_trigger(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -178,7 +177,6 @@ fn mouse_moved_trigger(
 /// * `active_display` - A query for the active display.
 /// * `main_cid` - The main connection ID resource.
 /// * `commands` - Bevy commands to trigger a reshuffle.
-#[allow(clippy::needless_pass_by_value)]
 fn mouse_down_trigger(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -231,7 +229,6 @@ fn mouse_down_trigger(
 
 /// Handles mouse-up events. Triggers the deferred reshuffle so the clicked
 /// window slides into view after the user releases the button.
-#[allow(clippy::needless_pass_by_value)]
 fn mouse_up_trigger(
     mut messages: MessageReader<Event>,
     mouse_held: Query<(Entity, &MouseHeldMarker)>,
@@ -257,7 +254,6 @@ pub(super) struct MouseResizeState {
     window_id: Option<WinID>,
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn mouse_resize_trigger(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -338,7 +334,6 @@ pub(super) struct WarpVelocityState {
     last: Option<(Origin, Instant)>,
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn horizontal_warp_mouse_trigger(
     mut messages: MessageReader<Event>,
     displays: Query<&Display>,

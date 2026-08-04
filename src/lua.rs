@@ -101,7 +101,6 @@ impl Plugin for LuaPlugin {
 
 /// Forwards window-manager events to the worker for dispatch to `paneru.on`
 /// callbacks.
-#[allow(clippy::needless_pass_by_value)]
 pub fn dispatch_lua_events(worker: Option<Res<LuaWorker>>, mut reader: MessageReader<Event>) {
     let Some(worker) = worker else {
         return;
@@ -123,7 +122,6 @@ pub fn dispatch_lua_events(worker: Option<Res<LuaWorker>>, mut reader: MessageRe
 }
 
 /// Handles `Command::Lua(id)` by handing the bound callback to the worker.
-#[allow(clippy::needless_pass_by_value)]
 pub fn command_lua_handler(worker: Option<Res<LuaWorker>>, mut reader: MessageReader<Event>) {
     let Some(worker) = worker else {
         return;
@@ -163,7 +161,6 @@ pub fn command_lua_handler(worker: Option<Res<LuaWorker>>, mut reader: MessageRe
 /// the store here would make every pass hold it exclusively — blocking anything
 /// else that touches it even when no script has mentioned `paneru.state`. That
 /// half is [`serve_lua_store`]'s.
-#[allow(clippy::needless_pass_by_value)]
 pub fn serve_lua_queries(worker: Option<Res<LuaWorker>>, state: QueryStateParams) {
     let Some(worker) = worker else {
         return;
@@ -200,7 +197,6 @@ pub fn serve_lua_queries(worker: Option<Res<LuaWorker>>, state: QueryStateParams
 /// *mutably*, which is the widest access either half asks for. Kept to its own
 /// system, that exclusivity lasts only for the store traffic and never bars the
 /// systems that move windows around.
-#[allow(clippy::needless_pass_by_value)]
 pub fn serve_lua_store(
     worker: Option<Res<LuaWorker>>,
     mut script_state: Option<ResMut<ScriptStateStore>>,
@@ -248,7 +244,6 @@ fn extract_once<T>(
 /// Also the landing point for a reloaded `paneru.setup{...}`: the rebuild
 /// happens on the worker, so the config it produced arrives here rather than in
 /// [`lua_reload_system`], and this is where it is swapped into the shared handle.
-#[allow(clippy::needless_pass_by_value)]
 pub fn drain_lua_outbox(
     worker: Option<Res<LuaWorker>>,
     config: Option<Res<Config>>,
@@ -281,7 +276,6 @@ pub fn drain_lua_outbox(
 
 /// Rebuilds the Lua runtime when the init script changes, committing atomically
 /// only on success so a broken edit never tears down the working setup.
-#[allow(clippy::needless_pass_by_value)]
 pub fn lua_reload_system(
     worker: Option<Res<LuaWorker>>,
     script_path: Option<Res<LuaScriptPath>>,

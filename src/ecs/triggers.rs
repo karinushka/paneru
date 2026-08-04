@@ -28,7 +28,7 @@ use crate::ecs::{
     ResizeMarker, RestoreWindowState, Scrolling, SendMessageTrigger, SpawnCommandsExt,
     VerifyWindowPosition, WidthRatio, WindowProperties,
 };
-use crate::events::Event;
+use crate::events::{DestroySource, Event};
 use crate::manager::{
     Application, Display, Origin, Process, Size, Window, WindowManager, WindowPadding,
 };
@@ -816,12 +816,12 @@ pub(super) fn window_destroyed_trigger(
     windows: Windows,
     active_display: ActiveDisplay,
     mut apps: Query<&mut Application>,
-    mut config: GlobalState,
+    mut global_state: GlobalState,
     mut focus_history: ResMut<FocusHistory>,
     mut commands: Commands,
 ) {
     for event in messages.read() {
-        let Event::WindowDestroyed { window_id } = event else {
+        let Event::WindowDestroyed { window_id, source } = event else {
             continue;
         };
 
@@ -829,8 +829,19 @@ pub(super) fn window_destroyed_trigger(
             debug!("Duplicate event: window {window_id} already destroyed.");
             continue;
         };
-        if window.role().is_ok() {
-            debug!("Window still present, this was SLS workspace change.");
+
+        // Only the SLS notification is ambiguous — it also fires when a window merely leaves a
+        // space, so it needs confirming. A `kAXUIElementDestroyedNotification` means the AX element
+        // itself has been torn down and is taken at face value: confirming it against the app is
+        // not just unnecessary but actively wrong, because both signals below lag the teardown.
+        // `role()` keeps succeeding on the dead element for apps that outlive their windows, and
+        // the app's AX window list is still warm for a moment after the close. Re-checking them
+        // raced the window back to life, leaving the entity in the strip and a permanent gap where
+        // the window had been.
+        if matches!(source, DestroySource::SpaceNotification)
+            && window.role().is_ok()
+        {
+            debug!("Window {} still present, this was SLS workspace change.", window.id());
             continue;
         }
 
@@ -838,6 +849,7 @@ pub(super) fn window_destroyed_trigger(
             error!("Window {} has no parent!", window.id());
             continue;
         };
+
         app.unobserve_window(window);
 
         give_away_focus(
@@ -845,7 +857,7 @@ pub(super) fn window_destroyed_trigger(
             &windows,
             active_display.active_strip(),
             &active_display.bounds(),
-            &mut config,
+            &mut global_state,
             &mut commands,
         );
         focus_history.forget(entity);

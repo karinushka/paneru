@@ -13,6 +13,19 @@ use crate::errors::Result;
 use crate::platform::{Modifiers, ProcessSerialNumber, WinID, WorkspaceId, WorkspaceObserver};
 use crate::util::AXUIWrapper;
 
+/// Where a [`Event::WindowDestroyed`] came from, which decides how far it can be
+/// trusted. macOS reports a closing window through two unrelated channels, and
+/// only one of them actually means "this window is gone".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DestroySource {
+    /// `kAXUIElementDestroyedNotification` on the window's own AX element. The
+    /// element itself has been torn down, so the window is definitively gone.
+    Accessibility,
+    /// SLS `SpaceWindowDestroyed`. Despite the name this also fires when a
+    /// window merely leaves a space, so it has to be confirmed before acting.
+    SpaceNotification,
+}
+
 /// `Event` represents various system-level and application-specific occurrences that the window manager reacts to.
 /// These events drive the core logic of the window manager, from window creation to display changes.
 #[allow(dead_code)]
@@ -49,8 +62,12 @@ pub enum Event {
 
     /// A window has been created.
     WindowCreated { element: CFRetained<AXUIWrapper> },
-    /// A window has been destroyed.
-    WindowDestroyed { window_id: WinID },
+    /// A window has been destroyed. `source` records which notification
+    /// reported it; see [`DestroySource`].
+    WindowDestroyed {
+        window_id: WinID,
+        source: DestroySource,
+    },
     /// A window has gained focus.
     WindowFocused { window_id: WinID },
     /// A window has been moved.

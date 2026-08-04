@@ -20,7 +20,7 @@ use super::skylight::_SLPSGetFrontProcess;
 use super::{ProcessApi, Window, WindowOS, ax_window_id};
 use crate::config::Config;
 use crate::errors::{Error, Result};
-use crate::events::{Event, EventSender};
+use crate::events::{DestroySource, Event, EventSender};
 use crate::platform::{
     AXObserverAddNotification, AXObserverCreate, AXObserverRemoveNotification, CFStringRef, ConnID,
     Pid, ProcessSerialNumber, WinID,
@@ -449,9 +449,10 @@ impl ObserverContext {
             accessibility_sys::kAXWindowDeminiaturizedNotification => {
                 Event::WindowDeminimized { window_id }
             }
-            accessibility_sys::kAXUIElementDestroyedNotification => {
-                Event::WindowDestroyed { window_id }
-            }
+            accessibility_sys::kAXUIElementDestroyedNotification => Event::WindowDestroyed {
+                window_id,
+                source: DestroySource::Accessibility,
+            },
 
             _ => {
                 error!("unhandled window notification: {notification:?}");

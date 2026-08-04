@@ -8,7 +8,7 @@ use stdext::function_name;
 use tracing::{Level, debug, error, instrument};
 
 use crate::errors::Result;
-use crate::events::{Event, EventSender};
+use crate::events::{DestroySource, Event, EventSender};
 use crate::platform::{ConnID, OSStatus, WinID, WorkspaceId};
 use crate::util::MacResult;
 
@@ -117,7 +117,10 @@ impl NotifyHandler {
                     )
                 {
                     debug!("{event} space = {space}, window_id = {window_id}");
-                    _ = self.events.send(Event::WindowDestroyed { window_id });
+                    _ = self.events.send(Event::WindowDestroyed {
+                        window_id,
+                        source: DestroySource::SpaceNotification,
+                    });
                 }
             }
 

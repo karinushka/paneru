@@ -1,10 +1,8 @@
-use async_lock::Mutex as AsyncMutex;
 use bevy::ecs::message::Message;
 use objc2::rc::Retained;
 use objc2_core_foundation::{CFRetained, CGPoint};
 use objc2_core_graphics::CGDirectDisplayID;
-use paneru_shared_types::script_state::ScriptStateWrite;
-use std::os::unix::net::UnixStream;
+use paneru_shared_types::wire::{Response, ScriptStateRequest};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
@@ -28,13 +26,17 @@ pub enum DestroySource {
     SpaceNotification,
 }
 
-/// Where a socket client's answer goes.
+/// Where a client's answer goes.
 ///
-/// An async channel rather than a `std::sync::mpsc` one so the connection task
-/// waiting on it can *await* the reply instead of parking a thread on
-/// `recv_timeout`. Bounded at one because exactly one answer is ever sent, which
-/// also lets the ECS side use `try_send` and never block the main thread.
-pub type Reply = async_channel::Sender<String>;
+/// An async channel rather than a `std::sync::mpsc` one so the task waiting on
+/// it can *await* the reply instead of parking a thread. Bounded at one because
+/// exactly one answer is ever sent, which also lets the ECS side use `try_send`
+/// and never block the main thread.
+///
+/// Carries a typed [`Response`] rather than a serialized string: the handlers
+/// answer in values and the transport encodes, so nothing in the world has to
+/// know what the wire looks like.
+pub type Reply = async_channel::Sender<Response>;
 
 /// `Event` represents various system-level and application-specific occurrences that the window manager reacts to.
 /// These events drive the core logic of the window manager, from window creation to display changes.
@@ -206,34 +208,30 @@ pub enum Event {
     /// A command has been issued to the window manager.
     Command { command: Command },
 
-    /// A structured state query has been issued by a socket client.
+    /// A structured state query has been issued by a client.
     StateQuery {
         kind: StateQueryKind,
         respond_to: Reply,
     },
 
-    /// A socket client has asked for the window set — the same layout value a
+    /// A client has asked for the window set — the same layout value a
     /// `paneru.windows` handler is given inside the daemon, so a client script
     /// transforms the identical tree.
     WindowSetQuery { respond_to: Reply },
 
-    /// A socket client has subscribed to line-delimited state events.
-    StateSubscribe { stream: Arc<AsyncMutex<UnixStream>> },
+    /// A client has subscribed to state events. Carries the channel they are
+    /// pushed to, which outlives the request that delivered it.
+    StateSubscribe {
+        subscriber: Arc<paneru_mach_ipc::Subscriber>,
+    },
 
-    /// A socket client has read or written the script state store. Answered
+    /// A client has read or written the script state store. Answered
     /// from the same store the embedded Lua runtime uses, so the two see each
     /// other's writes.
     ScriptState {
         request: ScriptStateRequest,
         respond_to: Reply,
     },
-}
-
-/// What a socket client asked the script state store to do.
-#[derive(Clone, Debug, PartialEq)]
-pub enum ScriptStateRequest {
-    Get { key: String },
-    Write(ScriptStateWrite),
 }
 
 /// `EventSender` is a thin wrapper around a `std::sync::mpsc::Sender` for `Event`s.

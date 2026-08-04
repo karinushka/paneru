@@ -215,6 +215,7 @@
           pkgs.rustc
           pkgs.cargo
           pkgs.rustfmt
+          pkgs.cargo-flamegraph
           pkgs.clippy
           pkgs.pkg-config
         ];

@@ -113,6 +113,9 @@
               <service.json jq -e ".KeepAlive.Crashed == true"
               <service.json jq -e ".KeepAlive.SuccessfulExit == false"
               <service.json jq -e ".Label == \"com.github.karinushka.paneru\""
+              # The Mach service clients look up; without it `bootstrap_check_in`
+              # finds nothing and the daemon falls back to registering its own.
+              <service.json jq -e '.MachServices."com.github.karinushka.paneru" == true'
               <service.json jq -e ".ProcessType == \"Interactive\""
               <service.json jq -e ".RunAtLoad == true"
               <service.json jq -e ".StandardErrorPath == \"/tmp/paneru.err.log\""

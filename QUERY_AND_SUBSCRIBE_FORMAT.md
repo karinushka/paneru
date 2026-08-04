@@ -1,9 +1,20 @@
 # Query and Subscribe Format
 
-Paneru exposes structured state over the same Unix socket used by `send-cmd`.
-The CLI commands below require a running Paneru daemon.
+Paneru exposes structured state over the same IPC channel used by `send-cmd`:
+a Mach service named `com.github.karinushka.paneru`. The CLI commands below
+require a running Paneru daemon.
 
-All query responses are JSON followed by a newline. `subscribe` emits
+**The JSON below is what the CLI prints, not what crosses between processes.**
+Requests and responses travel as typed values in a compact binary encoding
+(`postcard`); `paneru query` and `paneru subscribe` render them as JSON because
+a terminal — and `jq`, and a status bar's shell script — needs text. Anything
+consuming these commands' output sees exactly the shapes documented here.
+
+A client written in Rust can skip the JSON entirely by using the
+`paneru-shared-types` crate: its `wire::Request` and `wire::Response` are the
+protocol, and `paneru-mach-ipc` is the transport.
+
+All query responses are a single JSON document. `subscribe` emits
 line-delimited JSON, with one complete event object per line.
 
 ## Query Commands
@@ -14,8 +25,8 @@ paneru query virtual-workspaces --json
 paneru query active --json
 ```
 
-`--json` is accepted for clarity. The socket protocol also accepts the query
-without it, but callers should include `--json`.
+`--json` is accepted for clarity and is the only output format, so it may be
+omitted; callers should include it anyway, in case another format is ever added.
 
 ### `paneru query state --json`
 
@@ -152,7 +163,7 @@ inside a native workspace so integrations can render stable numbered slots.
 paneru subscribe --json
 ```
 
-`subscribe` keeps the socket open and writes one JSON event per line. The stream
+`subscribe` keeps its channel open and writes one JSON event per line. The stream
 is intended for integrations such as SketchyBar, so it emits changes that are
 useful for keeping a bar in sync: focus changes, native or virtual workspace
 changes, managed window-list changes, window title changes, and display changes.

@@ -19,6 +19,7 @@ lua = ["dep:mlua"]
 
 [dependencies]
 mlua = { workspace = true, optional = true }
+postcard = { version = "1.1.3", features = ["use-std"] }
 serde = { workspace = true }
 # The query/subscribe wire format is JSON.
 serde_json = { workspace = true }

@@ -399,6 +399,10 @@ impl MockState {
                 .map(|w| w.title.clone())
                 .unwrap_or_default())
         });
+        // The real cache is invalidated by the title-changed notification; the
+        // mock reads its title from the shared state every time, so there is
+        // nothing to drop — but the call still has to be expected.
+        mw.expect_invalidate_title().return_const(());
 
         let s = self.clone();
         mw.expect_is_minimized().returning(move || {

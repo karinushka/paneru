@@ -15,10 +15,11 @@ use objc2_core_foundation::{
 };
 use std::collections::HashMap;
 use std::ptr::null_mut;
-use std::sync::{LazyLock, Mutex, OnceLock};
+use std::sync::{LazyLock, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::Duration;
 use stdext::function_name;
+use stdext::sync::rw_lock::RwLockExt;
 use tracing::{Level, debug, instrument, trace, warn};
 
 use super::skylight::{
@@ -69,6 +70,9 @@ pub trait WindowApi: Send + Sync {
     fn frame(&self) -> IRect;
     fn element(&self) -> Option<CFRetained<AXUIWrapper>>;
     fn title(&self) -> Result<String>;
+    /// Drops the cached title so the next [`Self::title`] reads it afresh.
+    /// Called when the app reports the title changed.
+    fn invalidate_title(&self);
     fn identifier(&self) -> Result<String>;
     fn child_role(&self) -> Result<bool>;
     fn role(&self) -> Result<String>;
@@ -144,6 +148,19 @@ pub struct WindowOS {
     border_radius: OnceLock<Option<f64>>,
     pid: OnceLock<Result<Pid>>,
     app_reference: OnceLock<Option<CFRetained<AXUIWrapper>>>,
+    /// The last title read off the element.
+    ///
+    /// Reading a title is a synchronous cross-process call, and the callers that
+    /// want one want it for *every* window at once — the state document, the
+    /// window set, `print_state`. Uncached, a client subscribed to events made
+    /// the main thread do that whole sweep on every frame that moved a window.
+    ///
+    /// A lock rather than a `OnceLock` like its neighbours because a title,
+    /// unlike a pid or a border radius, changes: [`Self::invalidate_title`]
+    /// clears it when the app says so. Missing that notification is the one way
+    /// this can go stale, so the invalidation is driven by the same
+    /// `kAXTitleChangedNotification` the event stream already reports.
+    title: RwLock<Option<String>>,
 }
 
 impl WindowOS {
@@ -189,6 +206,7 @@ impl WindowOS {
             border_radius: OnceLock::new(),
             pid: OnceLock::new(),
             app_reference: OnceLock::new(),
+            title: RwLock::new(None),
         };
 
         let forced = window.is_forced_manage(config, bundle_id);
@@ -444,7 +462,16 @@ impl WindowApi for WindowOS {
     ///
     /// `Ok(String)` with the window title if successful, otherwise `Err(Error)`.
     fn title(&self) -> Result<String> {
-        self.ax_element.title()
+        if let Some(cached) = self.title.force_read().clone() {
+            return Ok(cached);
+        }
+        let title = self.ax_element.title()?;
+        *self.title.force_write() = Some(title.clone());
+        Ok(title)
+    }
+
+    fn invalidate_title(&self) {
+        self.title.force_write().take();
     }
 
     fn identifier(&self) -> Result<String> {

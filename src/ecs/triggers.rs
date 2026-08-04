@@ -832,6 +832,27 @@ pub(super) fn window_destroyed_trigger(
     }
 }
 
+/// Drops a window's cached title when its app reports the title changed.
+///
+/// The cache is what keeps the state document and the window set from reading
+/// every window's title over the accessibility API on every frame; this is the
+/// other half of it. `kAXTitleChangedNotification` is already observed and
+/// already becomes this event, so the invalidation rides along for free — and
+/// crucially it runs *before* the broadcast handler reads titles in
+/// `PostUpdate`, so a subscriber sees the new title in the same frame it
+/// changed.
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn invalidate_window_title(mut messages: MessageReader<Event>, windows: Windows) {
+    for event in messages.read() {
+        let Event::WindowTitleChanged { window_id } = event else {
+            continue;
+        };
+        if let Some((window, _)) = windows.find(*window_id) {
+            window.invalidate_title();
+        }
+    }
+}
+
 /// Moves the focus away to a neighbour window.
 fn give_away_focus(
     entity: Entity,

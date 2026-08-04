@@ -21,6 +21,7 @@ use bevy::ecs::schedule::common_conditions::on_message;
 use crate::events::{Event, InputEvent};
 use crate::manager::{Display, Origin, WindowManager, origin_from};
 use crate::platform::WinID;
+use crate::util::round_px;
 
 /// Bottom-right corner region (`NxN` pixels) where focus events are suppressed.
 /// Sized to a representative macOS title bar height — see karinushka/paneru#233:
@@ -448,7 +449,7 @@ fn horizontal_warp_mouse_trigger(
         // Carry over horizontal velocity so the cursor does not feel "stuck" at
         // the edge — extrapolate motion forward into the target display.
         let carry = velocity_x
-            .map_or(0, |v| (v * CARRY_DURATION.as_secs_f64()) as i32)
+            .map_or(0, |v| round_px(v * CARRY_DURATION.as_secs_f64()))
             .clamp(-MAX_CARRY_PX, MAX_CARRY_PX);
         let target_x = if on_left_edge {
             // Cursor was moving leftward; carry is negative. Push further from

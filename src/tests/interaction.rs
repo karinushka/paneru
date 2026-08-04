@@ -345,10 +345,16 @@ fn test_scrolling() {
             assert_window_at!(world, 1, 400, TEST_MENUBAR_HEIGHT);
             assert_window_at!(world, 2, 800, TEST_MENUBAR_HEIGHT);
         })
+        // The offsets are 4px further left than they used to be. Each tick
+        // rounds the accumulated scroll offset to whole pixels and writes it
+        // back into `Scrolling::position`; that used to truncate, which is a
+        // bias *towards* zero applied once per frame, so a swipe lost ground
+        // the longer it ran — and lost it asymmetrically, since truncation
+        // rounds the two directions opposite ways. Rounding has no such bias.
         .on_iteration(5, move |world, _state| {
-            assert_window_at!(world, 0, -348, TEST_MENUBAR_HEIGHT);
-            assert_window_at!(world, 1, 52, TEST_MENUBAR_HEIGHT);
-            assert_window_at!(world, 2, 452, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 0, -352, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 1, 48, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 2, 448, TEST_MENUBAR_HEIGHT);
         })
         .run(commands);
 }

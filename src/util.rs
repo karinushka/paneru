@@ -26,6 +26,31 @@ use crate::{
     platform::{OSStatus, WinID},
 };
 
+/// Converts a floating-point pixel measurement into whole pixels.
+///
+/// The AppKit/CoreGraphics geometry we consume is `f64`, while everything past
+/// the boundary — `IVec2`, `IRect`, the layout arithmetic — is `i32`, so this
+/// conversion happens at ~25 call sites. Rounding rather than truncating is the
+/// point: `as` alone truncates toward zero, which biases every derived
+/// coordinate by up to a pixel in a direction that flips sign around the origin,
+/// and those errors compound through the chained ratio computations in the
+/// layout passes.
+///
+/// The clamp makes the cast total. Float-to-int `as` already saturates and maps
+/// NaN to zero rather than wrapping, so no input can produce a nonsense result;
+/// clamping first just states the intended range explicitly, and means the
+/// `as` below provably cannot truncate.
+#[must_use]
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "clamped to i32's range and rounded above, so the cast is exact"
+)]
+pub fn round_px(value: f64) -> i32 {
+    value
+        .round()
+        .clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
+}
+
 /// Returns `true` if macOS is currently in Dark Mode.
 pub fn is_dark_mode() -> bool {
     autoreleasepool(|_| {

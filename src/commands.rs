@@ -25,6 +25,7 @@ use crate::ecs::{
 use crate::events::Event;
 use crate::manager::{Application, Display, Origin, Size, Window, WindowManager, origin_from};
 use crate::platform::WorkspaceId;
+use crate::util::round_px;
 
 // The command vocabulary itself lives in the `paneru-command` crate, shared with
 // the Lua API in `crates/lua-api` so every host speaks the same types.
@@ -746,7 +747,7 @@ fn resize_window(
         _ => return,
     };
 
-    let new_width = (next_ratio * f64::from(viewport.width())).round() as i32;
+    let new_width = round_px(next_ratio * f64::from(viewport.width()));
     let size = Size::new(new_width, frame.height());
 
     let origin = clamp_origin_to_viewport(
@@ -800,7 +801,7 @@ fn full_width_window(
         if let Ok(mut entity_commands) = commands.get_entity(entity) {
             entity_commands.try_remove::<FullWidthMarker>();
         }
-        let w = (marker.width_ratio * f64::from(viewport.width())).round() as i32;
+        let w = round_px(marker.width_ratio * f64::from(viewport.width()));
         let bounds = active_display.actual_bounds(&config).size().with_x(w);
         commands.resize_entity(entity, bounds);
     } else {
@@ -994,7 +995,7 @@ fn to_next_display(
                 // display's usable viewport (dock- and padding-adjusted), so a
                 // fixed dock is accounted for consistently with the source.
                 let width = width_ratio.map_or(bounds.x, |ratio| {
-                    (ratio * f64::from(viewport_bounds.width())).round() as i32
+                    round_px(ratio * f64::from(viewport_bounds.width()))
                 });
                 let size = Size::new(width, viewport_bounds.height());
                 commands.resize_entity(moved_window, size);

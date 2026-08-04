@@ -23,7 +23,8 @@ cfg-if = "1.0.4"
 mlua = { version = "0.12", default-features = false, features = ["serialize"] }
 paneru-lua = { path = "crates/lua" }
 paneru-shared-types = { path = "crates/shared_types" }
-serde = { version = "1.0", features = ["derive"] }
+regex = "1.12"
+serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 
 [lints.clippy]
@@ -56,7 +57,6 @@ vendored = ["mlua/vendored"]
 lua = [
   "dep:mlua",
   "dep:paneru-lua",
-  "dep:async-channel",
   "dep:async-executor",
   "dep:futures-lite",
 ]
@@ -76,7 +76,12 @@ arc-swap = "1.9"
 # The Lua worker's executor and its channels. All three arrive with bevy
 # already, so this pins versions rather than widening the dependency graph:
 # `async-executor` is the same `LocalExecutor` bevy's own `spawn_local` uses.
-async-channel = { version = "2.5", optional = true }
+async-channel = "2.5"
+# Async `RwLock`/`Mutex`: unlike the std ones their guards are `Send` and may be
+# held across an `.await`, which is what the socket tasks need. Same smol family
+# as `async-channel`/`async-executor` and bevy's task pool, and already in the
+# tree via those, so it costs nothing a tokio dependency would not double.
+async-lock = "3.4"
 async-executor = { version = "1.14", optional = true }
 futures-lite = { version = "2.6", optional = true }
 bevy = { version = "0.19", default-features = false, features = [
@@ -134,7 +139,7 @@ objc2-foundation = { version = "0.3", features = [
   "NSDictionary",
   "NSBundle",
 ] }
-regex = "1.12"
+regex = { workspace = true }
 scopeguard = "1.2"
 serde = { workspace = true }
 serde_json = { workspace = true }

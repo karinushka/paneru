@@ -21,7 +21,6 @@ use crate::ecs::params::Windows;
 use crate::ecs::{ActiveDisplayMarker, ActiveWorkspaceMarker, SelectedVirtualMarker, Unmanaged};
 use crate::manager::{Application, Display, WindowManager};
 use crate::platform::{Pid, ProcessSerialNumber, WinID, WorkspaceId};
-#[cfg(feature = "lua")]
 use paneru_shared_types::windowset::WindowSet;
 
 pub const STATE_FILE_NAME: &str = "state.json";
@@ -462,7 +461,6 @@ impl QueryStateParams<'_, '_> {
 /// order, and how each arranges the windows in it. That structure is what makes
 /// `ws:swap`, `ws:east` and `ws:stack` expressible at all — a flat list cannot
 /// say what is beside what.
-#[cfg(feature = "lua")]
 impl QueryStateParams<'_, '_> {
     pub fn extract_window_set(&self) -> crate::errors::Result<WindowSet> {
         use paneru_shared_types::windowset::{ColumnSet, DisplaySet, WorkspaceSet};
@@ -621,7 +619,6 @@ impl QueryStateParams<'_, '_> {
 }
 
 /// How a layout column arranges its windows, in the vocabulary a script sees.
-#[cfg(feature = "lua")]
 fn column_kind(column: &Column) -> paneru_shared_types::windowset::ColumnKind {
     use paneru_shared_types::windowset::ColumnKind;
     match column {

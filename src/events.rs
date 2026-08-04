@@ -1,11 +1,12 @@
+use async_lock::Mutex as AsyncMutex;
 use bevy::ecs::message::Message;
 use objc2::rc::Retained;
 use objc2_core_foundation::{CFRetained, CGPoint};
 use objc2_core_graphics::CGDirectDisplayID;
 use paneru_shared_types::script_state::ScriptStateWrite;
 use std::os::unix::net::UnixStream;
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex};
 
 use crate::commands::Command;
 use crate::config::Config;
@@ -26,6 +27,14 @@ pub enum DestroySource {
     /// window merely leaves a space, so it has to be confirmed before acting.
     SpaceNotification,
 }
+
+/// Where a socket client's answer goes.
+///
+/// An async channel rather than a `std::sync::mpsc` one so the connection task
+/// waiting on it can *await* the reply instead of parking a thread on
+/// `recv_timeout`. Bounded at one because exactly one answer is ever sent, which
+/// also lets the ECS side use `try_send` and never block the main thread.
+pub type Reply = async_channel::Sender<String>;
 
 /// `Event` represents various system-level and application-specific occurrences that the window manager reacts to.
 /// These events drive the core logic of the window manager, from window creation to display changes.
@@ -172,18 +181,23 @@ pub enum Event {
     /// A structured state query has been issued by a socket client.
     StateQuery {
         kind: StateQueryKind,
-        respond_to: Sender<String>,
+        respond_to: Reply,
     },
 
+    /// A socket client has asked for the window set — the same layout value a
+    /// `paneru.windows` handler is given inside the daemon, so a client script
+    /// transforms the identical tree.
+    WindowSetQuery { respond_to: Reply },
+
     /// A socket client has subscribed to line-delimited state events.
-    StateSubscribe { stream: Arc<Mutex<UnixStream>> },
+    StateSubscribe { stream: Arc<AsyncMutex<UnixStream>> },
 
     /// A socket client has read or written the script state store. Answered
     /// from the same store the embedded Lua runtime uses, so the two see each
     /// other's writes.
     ScriptState {
         request: ScriptStateRequest,
-        respond_to: Sender<String>,
+        respond_to: Reply,
     },
 }
 

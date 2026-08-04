@@ -618,6 +618,26 @@ one.
 `paneru.windows(fn)` is the same contract for use partway through a handler:
 it hands `fn` the window set and commits what it gives back.
 
+It is also available in the loadable client module (`require("paneru")`), where
+the daemon serves the same layout tree over its socket and takes the recorded
+operations back the same way. So a transform written for an `init.lua` handler
+runs unchanged in an external script:
+
+```lua
+local paneru = require("paneru")
+
+paneru.windows(function(ws)
+  local scratch = ws:find(paneru.match{ title = "^scratch$" })
+  if scratch then
+    return ws:float(scratch.id, { x = 0.25, y = 0.15, width = 0.5, height = 0.7 })
+  end
+end)
+```
+
+The difference is cost, not behaviour: a client pays a socket round trip to
+fetch the set and another to commit, and blocks on both, where a handler shares
+one read across the whole batch. `paneru.match` is likewise on both hosts.
+
 #### Reading
 
 | Method | Returns |

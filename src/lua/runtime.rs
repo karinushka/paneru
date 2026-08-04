@@ -18,10 +18,10 @@ use std::path::Path;
 use std::rc::Rc;
 
 use mlua::{AnyUserData, Function, Lua, LuaSerdeExt, Table, Value};
+use paneru_shared_types::windowset::WindowSet;
 use tracing::{error, warn};
 
 use super::api;
-use super::windowset::LuaWindowSet;
 use super::world::DispatchWorld;
 use crate::commands::Command;
 use crate::config::Config;
@@ -267,7 +267,7 @@ impl LuaRuntime {
             }
         };
         self.lua
-            .create_userdata(LuaWindowSet::materialised((*set).clone()))
+            .create_userdata((*set).clone())
             .inspect_err(|err| error!("lua {context}: {err}"))
             .ok()
     }
@@ -283,7 +283,7 @@ impl LuaRuntime {
         match returned {
             Value::Nil => {}
             Value::UserData(data) => {
-                if let Ok(window_set) = data.borrow::<LuaWindowSet>() {
+                if let Ok(window_set) = data.borrow::<WindowSet>() {
                     let ops = window_set.ops();
                     if !ops.is_empty() {
                         self.outbox.borrow_mut().commands.push(Command::Layout(ops));

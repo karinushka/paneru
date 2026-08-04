@@ -203,7 +203,7 @@ pub struct WindowRec {
 }
 
 /// One column of a workspace's layout strip.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ColumnSet {
     pub kind: ColumnKind,
     /// Width as a fraction of the display, as the layout engine has it.
@@ -237,7 +237,7 @@ impl ColumnSet {
 
 /// One virtual workspace: an ordered strip of columns, plus whatever floats
 /// above it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceSet {
     /// The virtual workspace number a script addresses it by.
     pub number: u32,
@@ -260,7 +260,7 @@ impl WorkspaceSet {
 }
 
 /// One display and the workspaces on it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DisplaySet {
     pub id: u32,
     pub frame: Frame,
@@ -272,13 +272,18 @@ pub struct DisplaySet {
 /// The whole layout, as a value.
 ///
 /// See the module documentation for what "as a value" buys and what it costs.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WindowSet {
     displays: Arc<Vec<DisplaySet>>,
     focused: Option<WinID>,
     /// What has been asked of this value, most recent first. Not part of the
     /// layout, and deliberately not compared: two window sets are equal when
     /// they describe the same layout, however they got there.
+    ///
+    /// Not serialized either, for the same reason: a set sent over the socket
+    /// is one a client is about to transform, and it starts out having been
+    /// asked for nothing. The ops travel back the other way, on their own.
+    #[serde(skip)]
     ops: Option<Arc<OpNode>>,
 }
 

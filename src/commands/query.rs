@@ -225,7 +225,6 @@ pub(super) fn register_query_commands(app: &mut App) {
 /// the one state document, and this is a different value — the layout tree — so
 /// folding it into that enum would give every consumer of a query kind a case
 /// that cannot happen.
-#[allow(clippy::needless_pass_by_value)]
 fn state_query_handler(mut messages: MessageReader<Event>, state: QueryStateParams) {
     /// Sends an answer without ever waiting for it to be taken. The reply
     /// channel holds one message and exactly one is sent, so this cannot fill;
@@ -255,7 +254,6 @@ fn state_query_handler(mut messages: MessageReader<Event>, state: QueryStatePara
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn state_subscribe_handler(
     mut messages: MessageReader<Event>,
     mut subscribers: ResMut<StateSubscribers>,
@@ -387,7 +385,6 @@ fn collect_state_broadcast_events_for_intent(
     outgoing
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn state_event_broadcast_handler(
     mut messages: MessageReader<Event>,
     mut subscribers: ResMut<StateSubscribers>,

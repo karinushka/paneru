@@ -40,7 +40,6 @@ impl Plugin for DisplayEventsPlugin {
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn cleanup_active_display_marker(
     trigger: On<Add, ActiveDisplayMarker>,
@@ -59,7 +58,6 @@ fn cleanup_active_display_marker(
 }
 
 /// Handles display change events.
-#[allow(clippy::needless_pass_by_value)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn display_change_handler(
     mut messages: MessageReader<Event>,
@@ -101,7 +99,6 @@ fn display_change_handler(
 /// the same add / remove / move primitives the event handlers use. It also
 /// forces the active workspace to re-tile, because macOS relocates windows while
 /// asleep even when the display set is unchanged.
-#[allow(clippy::needless_pass_by_value)]
 pub(crate) fn reconcile_displays(
     mut messages: MessageReader<Event>,
     workspaces: Query<(&LayoutStrip, Entity, Option<&ChildOf>)>,
@@ -368,7 +365,6 @@ impl FloatingLayer {
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn read_display_properties_trigger(
     trigger: On<ReadDisplayProperties>,
     mut displays: Query<(&mut Display, Entity)>,

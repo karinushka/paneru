@@ -804,7 +804,6 @@ fn now_timestamp() -> u64 {
         .as_secs()
 }
 
-#[allow(clippy::needless_pass_by_value)]
 pub fn periodic_state_save(
     workspaces: Query<(Option<&ChildOf>, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
@@ -820,7 +819,6 @@ pub fn periodic_state_save(
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
 pub fn cleanup_on_exit(
     mut exit_events: MessageReader<AppExit>,
     workspaces: Query<(Option<&ChildOf>, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,

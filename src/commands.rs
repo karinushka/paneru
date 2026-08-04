@@ -226,7 +226,6 @@ fn nearest_float_in_direction(
 /// # Returns
 ///
 /// `Some(Entity)` with the entity of the newly focused window, otherwise `None`.
-#[allow(clippy::needless_pass_by_value)]
 fn command_move_focus(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -348,7 +347,6 @@ fn command_move_focus(
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn command_focus_unmanaged(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -380,7 +378,6 @@ fn command_focus_unmanaged(
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn command_focus_managed(
     mut messages: MessageReader<Event>,
     active_display: ActiveDisplay,
@@ -408,7 +405,6 @@ fn command_focus_managed(
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn command_raise_floating(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -450,7 +446,6 @@ fn command_raise_floating(
 /// window above another app's frontmost window, so the target's app must be
 /// made frontmost. Other windows in the new top tier are raised within their
 /// own apps' stacks as a best-effort.
-#[allow(clippy::needless_pass_by_value)]
 fn command_toggle_floating_layer(
     mut messages: MessageReader<Event>,
     active_display: ActiveDisplay,
@@ -545,7 +540,6 @@ fn command_toggle_floating_layer(
 ///
 /// `Some(Entity)` with the entity that was swapped with, otherwise `None`.
 #[instrument(level = Level::DEBUG, skip_all)]
-#[allow(clippy::needless_pass_by_value)]
 fn command_swap_focus(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -625,7 +619,6 @@ fn command_swap_focus(
 }
 
 /// Centers the focused window on the active display.
-#[allow(clippy::needless_pass_by_value)]
 fn command_center_window(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -670,7 +663,6 @@ fn command_center_window(
 /// * `windows` - A mutable query for all `Window` components.
 /// * `commands` - Bevy commands to trigger events.
 /// * `config` - The `Config` resource.
-#[allow(clippy::needless_pass_by_value)]
 fn resize_window(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -760,7 +752,6 @@ fn resize_window(
     commands.reshuffle_around(entity);
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn full_width_window(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -816,7 +807,6 @@ fn full_width_window(
 /// * `focused_entity` - The `Entity` of the currently focused window.
 /// * `windows` - A mutable query for `Window` components, their `Entity`, and whether they have the `Unmanaged` marker.
 /// * `commands` - Bevy commands to modify entities.
-#[allow(clippy::needless_pass_by_value)]
 fn manage_window(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -877,7 +867,7 @@ fn manage_window(
 /// * `windows` - A mutable query for `Window` components, their `Entity`, and whether they have the `Unmanaged` marker.
 /// * `active_display` - A mutable reference to the `ActiveDisplayMut` resource.
 /// * `commands` - Bevy commands to modify entities and trigger events.
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 fn to_next_display(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -998,7 +988,6 @@ fn to_next_display(
 
 /// Moves the mouse pointer to the next available display.
 #[instrument(level = Level::DEBUG, skip_all)]
-#[allow(clippy::needless_pass_by_value)]
 fn mouse_to_next_display(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -1062,7 +1051,6 @@ fn mouse_to_next_display(
 }
 
 /// Distributes heights equally among all windows in the currently focused stack.
-#[allow(clippy::needless_pass_by_value)]
 fn equalize_column(
     mut messages: MessageReader<Event>,
     current_focus: Single<(&Window, Entity), With<FocusedMarker>>,
@@ -1103,7 +1091,6 @@ fn equalize_column(
 }
 
 /// Makes all columns in the active strip the same width as the focused window.
-#[allow(clippy::needless_pass_by_value)]
 fn balance_strip(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -1151,7 +1138,6 @@ fn balance_strip(
 /// nearest edge: left-aligned when the window overflows left, right-aligned
 /// when it overflows right. No resize — the window keeps its current size.
 /// Bypasses the lazy-viewport check since the user explicitly asked to reveal.
-#[allow(clippy::needless_pass_by_value)]
 fn snap_window(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -1189,7 +1175,6 @@ fn snap_window(
 }
 
 #[instrument(level = Level::DEBUG, skip_all)]
-#[allow(clippy::needless_pass_by_value)]
 pub fn stack_windows_handler(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -1241,7 +1226,6 @@ pub fn stack_windows_handler(
 /// * `commands` - Bevy commands to trigger events and modify entities.
 /// * `config` - The `Config` resource, containing application settings.
 #[instrument(level = Level::DEBUG, skip_all)]
-#[allow(clippy::needless_pass_by_value)]
 pub fn command_quit_handler(
     mut messages: MessageReader<Event>,
     window_manager: Res<WindowManager>,
@@ -1259,7 +1243,6 @@ pub fn command_quit_handler(
 }
 
 #[instrument(level = Level::DEBUG, skip_all)]
-#[allow(clippy::needless_pass_by_value)]
 pub fn command_restart_handler(mut messages: MessageReader<Event>) {
     if messages.read().any(|event| {
         matches!(
@@ -1275,7 +1258,7 @@ pub fn command_restart_handler(mut messages: MessageReader<Event>) {
 }
 
 #[instrument(level = Level::DEBUG, skip_all)]
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 fn print_internal_state_handler(
     mut messages: MessageReader<Event>,
     focused: Query<(&Window, Entity), With<FocusedMarker>>,

@@ -37,7 +37,9 @@ luajit = ["mlua/luajit"]
 [dependencies]
 mlua = { workspace = true }
 cfg-if = { workspace = true }
-paneru-shared-types = { workspace = true }
+paneru-shared-types = { workspace = true, features = ["lua"] }
 serde = { workspace = true }
 # Decoding daemon query responses into Lua values.
 serde_json = { workspace = true }
+# `paneru.match` compiles app/bundle/title patterns.
+regex = { workspace = true }

@@ -1,3 +1,4 @@
+use async_lock::Mutex as AsyncMutex;
 use bevy::app::{App, PostUpdate, PreUpdate};
 use bevy::ecs::entity::Entity;
 use bevy::ecs::message::MessageReader;
@@ -5,11 +6,13 @@ use bevy::ecs::query::Added;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs;
 use bevy::ecs::system::{Query, Res, ResMut};
+use bevy::tasks::{IoTaskPool, TaskPool};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::os::unix::net::UnixStream;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::warn;
 
 use super::{Command, Operation};
@@ -22,9 +25,24 @@ use crate::ecs::{ActiveWorkspaceMarker, FocusedMarker, Unmanaged};
 use crate::events::Event;
 use crate::platform::WinID;
 
+/// One connected `paneru subscribe` client.
+///
+/// The socket is behind an async mutex and only ever touched from a task on the
+/// IO pool: writing to it is a syscall against a peer that may not be reading,
+/// which is not something the main thread can afford to wait on.
+///
+/// `alive` is how the main thread learns a subscriber has gone without touching
+/// the socket at all. The writing task clears it on the first failed write, and
+/// the broadcast handler reaps on that flag — an atomic load per subscriber
+/// rather than a lock it would have to contend for with the task.
+struct Subscriber {
+    stream: Arc<AsyncMutex<UnixStream>>,
+    alive: Arc<AtomicBool>,
+}
+
 #[derive(Default, Resource)]
 struct StateSubscribers {
-    streams: Vec<Arc<Mutex<UnixStream>>>,
+    streams: Vec<Subscriber>,
 }
 
 #[derive(Default, Resource)]
@@ -190,19 +208,50 @@ pub(super) fn register_query_commands(app: &mut App) {
     );
 }
 
+/// Answers the socket queries that read the world: the state documents and the
+/// window set.
+///
+/// Both live in one system on purpose. Bevy derives a system's world access
+/// from its parameters statically, for every run, so each system asking for
+/// [`QueryStateParams`] is one more thing the scheduler must keep apart from
+/// anything writing those components — every frame, whether or not a client
+/// asked anything. One system holding that access answers both.
+///
+/// For the same reason the extraction itself is done per request rather than up
+/// front: on the overwhelmingly common frame where no query arrived, this reads
+/// nothing at all.
+///
+/// The window set is deliberately not a [`StateQueryKind`]: those all project
+/// the one state document, and this is a different value — the layout tree — so
+/// folding it into that enum would give every consumer of a query kind a case
+/// that cannot happen.
 #[allow(clippy::needless_pass_by_value)]
 fn state_query_handler(mut messages: MessageReader<Event>, state: QueryStateParams) {
-    for event in messages.read() {
-        let Event::StateQuery { kind, respond_to } = event else {
-            continue;
-        };
+    /// Sends an answer without ever waiting for it to be taken. The reply
+    /// channel holds one message and exactly one is sent, so this cannot fill;
+    /// a client that hung up in the meantime is simply gone.
+    fn reply(respond_to: &crate::events::Reply, answer: Result<String, String>) {
+        _ = respond_to.try_send(answer.unwrap_or_else(|err| json!({ "error": err }).to_string()));
+    }
 
-        let response = state
-            .extract()
-            .map_err(|err| err.to_string())
-            .and_then(|state| state.to_query_json(*kind).map_err(|err| err.to_string()))
-            .unwrap_or_else(|err| json!({ "error": err }).to_string());
-        _ = respond_to.send(response);
+    for event in messages.read() {
+        match event {
+            Event::StateQuery { kind, respond_to } => reply(
+                respond_to,
+                state
+                    .extract()
+                    .map_err(|err| err.to_string())
+                    .and_then(|state| state.to_query_json(*kind).map_err(|err| err.to_string())),
+            ),
+            Event::WindowSetQuery { respond_to } => reply(
+                respond_to,
+                state
+                    .extract_window_set()
+                    .map_err(|err| err.to_string())
+                    .and_then(|set| serde_json::to_string(&set).map_err(|err| err.to_string())),
+            ),
+            _ => {}
+        }
     }
 }
 
@@ -215,7 +264,10 @@ fn state_subscribe_handler(
         let Event::StateSubscribe { stream } = event else {
             continue;
         };
-        subscribers.streams.push(stream.clone());
+        subscribers.streams.push(Subscriber {
+            stream: stream.clone(),
+            alive: Arc::new(AtomicBool::new(true)),
+        });
     }
 }
 
@@ -408,12 +460,30 @@ fn state_event_broadcast_handler(
         .join("\n");
     payload.push('\n');
 
-    subscribers.streams.retain(|stream| {
-        let Ok(mut stream) = stream.lock() else {
-            return false;
-        };
-        stream.write_all(payload.as_bytes()).is_ok()
-    });
+    // Drop whoever a previous broadcast found gone, then hand this one to the IO
+    // pool. Everything the main thread does here is bounded work on values it
+    // already holds — no socket, no lock, no waiting on a client that stopped
+    // reading. A subscriber that is slow now delays only its own task.
+    subscribers
+        .streams
+        .retain(|subscriber| subscriber.alive.load(Ordering::Relaxed));
+
+    let payload = Arc::new(payload);
+    for subscriber in &subscribers.streams {
+        let (stream, alive, payload) = (
+            Arc::clone(&subscriber.stream),
+            Arc::clone(&subscriber.alive),
+            Arc::clone(&payload),
+        );
+        IoTaskPool::get_or_init(TaskPool::default)
+            .spawn(async move {
+                let mut stream = stream.lock().await;
+                if stream.write_all(payload.as_bytes()).is_err() {
+                    alive.store(false, Ordering::Relaxed);
+                }
+            })
+            .detach();
+    }
 }
 
 #[cfg(test)]

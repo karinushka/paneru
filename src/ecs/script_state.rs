@@ -197,10 +197,13 @@ pub fn script_state_handler(
             continue;
         };
         let Some(store) = store.as_mut() else {
-            let _ = respond_to.send(error_reply("the script state store is not available"));
+            let _ = respond_to.try_send(error_reply("the script state store is not available"));
             continue;
         };
-        let _ = respond_to.send(answer(store, request.clone()));
+        // `try_send`, never `send`: the reply channel holds one message and
+        // exactly one is sent, so this cannot fill, and the main thread must
+        // never wait on a socket client to collect its answer.
+        let _ = respond_to.try_send(answer(store, request.clone()));
     }
 }
 

@@ -55,6 +55,7 @@ pub mod client;
 use std::rc::Rc;
 
 use mlua::{Function, Lua, LuaSerdeExt, Result, Table, Value};
+use regex::Regex;
 use serde::Deserialize;
 
 use paneru_shared_types::commands::{
@@ -95,7 +96,66 @@ pub fn install(lua: &Lua, paneru: &Table, dispatch: &Dispatch) -> Result<()> {
     paneru.set("restart", verb(lua, dispatch, Command::Restart)?)?;
     paneru.set("print_state", verb(lua, dispatch, Command::PrintState)?)?;
 
+    // paneru.match{ app = …, bundle = …, title = …, floating = …, managed = … }
+    // — builds a predicate over window records, for `ws:find`/`ws:filter`.
+    // `app`, `bundle` and `title` are regular expressions, compiled here so a
+    // bad pattern is an error where it is written rather than a handler that
+    // never matches anything.
+    //
+    // Shared rather than embedded-only because the window set it filters is
+    // shared: a client running `paneru.windows` needs the same companion.
+    paneru.set("match", lua.create_function(matcher)?)?;
+
     Ok(())
+}
+
+/// One `paneru.match{…}` call: compiles the spec into a Lua predicate.
+// Signature is fixed by mlua's `create_function` contract.
+#[allow(clippy::needless_pass_by_value)]
+fn matcher(lua: &Lua, spec: Table) -> Result<Function> {
+    let pattern = |field: &str| -> Result<Option<Regex>> {
+        let Some(pattern) = spec.get::<Option<String>>(field)? else {
+            return Ok(None);
+        };
+        Regex::new(&pattern)
+            .map(Some)
+            .map_err(|err| mlua::Error::RuntimeError(format!("paneru.match: {field}: {err}")))
+    };
+    let (app, bundle, title) = (pattern("app")?, pattern("bundle")?, pattern("title")?);
+    let floating: Option<bool> = spec.get("floating")?;
+    let managed: Option<bool> = spec.get("managed")?;
+
+    for entry in spec.pairs::<String, Value>() {
+        let (key, _) = entry?;
+        if !matches!(
+            key.as_str(),
+            "app" | "bundle" | "title" | "floating" | "managed"
+        ) {
+            return Err(mlua::Error::RuntimeError(format!(
+                "paneru.match: unknown field '{key}'"
+            )));
+        }
+    }
+
+    lua.create_function(move |_, window: Table| {
+        let matches = |regex: &Option<Regex>, field: &str| -> Result<bool> {
+            let Some(regex) = regex else {
+                return Ok(true);
+            };
+            Ok(regex.is_match(&window.get::<String>(field)?))
+        };
+        let flag = |want: Option<bool>, field: &str| -> Result<bool> {
+            match want {
+                Some(want) => Ok(window.get::<bool>(field)? == want),
+                None => Ok(true),
+            }
+        };
+        Ok(matches(&app, "app_name")?
+            && matches(&bundle, "bundle_id")?
+            && matches(&title, "title")?
+            && flag(floating, "floating")?
+            && flag(managed, "managed")?)
+    })
 }
 
 /// Builds the `paneru.window` sub-table.

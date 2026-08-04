@@ -18,6 +18,8 @@ use std::sync::{LazyLock, Mutex};
 use mlua::prelude::*;
 use paneru_shared_types::commands::Command;
 use paneru_shared_types::state::StateQueryKind;
+use paneru_shared_types::windowset::WindowSet;
+use paneru_shared_types::windowset_lua::returned_ops;
 
 /// Default daemon socket path (matches `CommandReader::SOCKET_PATH`).
 const DEFAULT_SOCKET: &str = "/tmp/paneru.socket";
@@ -207,6 +209,46 @@ fn state_table(lua: &Lua) -> LuaResult<LuaTable> {
     Ok(state)
 }
 
+/// `paneru.windows(fn)` — xmonad's `windows`: hand the window set to `fn` and
+/// commit whatever it hands back.
+///
+/// The same contract as the embedded runtime's, and the same value: the daemon
+/// serves this from `extract_window_set`, the very tree a `paneru.on` handler
+/// is given. The transform is pure Lua either way, so a function written for
+/// one host runs unchanged on the other.
+///
+/// Two round trips rather than the embedded runtime's shared per-batch read —
+/// one to fetch, one to commit — and blocking rather than async, like every
+/// other call here. A transform that returns nothing skips the second.
+// Signature is fixed by mlua's `create_function` contract.
+#[allow(clippy::needless_pass_by_value)]
+fn windows(lua: &Lua, transform: LuaFunction) -> LuaResult<bool> {
+    let mut stream = send(&["windowset".to_string()])?;
+    let mut raw = String::new();
+    stream
+        .read_to_string(&mut raw)
+        .map_err(LuaError::external)?;
+    let raw = raw.trim();
+
+    // The daemon reports a failed extraction as `{"error": …}`, which would
+    // otherwise decode into a window set missing every field.
+    let parsed: serde_json::Value = serde_json::from_str(raw).map_err(LuaError::external)?;
+    if let Some(error) = parsed.get("error").and_then(serde_json::Value::as_str) {
+        return Err(LuaError::RuntimeError(format!("paneru.windows: {error}")));
+    }
+    let set: WindowSet = serde_json::from_value(parsed).map_err(LuaError::external)?;
+
+    let returned: LuaValue = transform.call(lua.create_userdata(set)?)?;
+    let ops = returned_ops(&returned)?;
+    if ops.is_empty() {
+        return Ok(false);
+    }
+
+    let encoded = serde_json::to_string(&ops).map_err(LuaError::external)?;
+    send(&["windowset".to_string(), "apply".to_string(), encoded])?;
+    Ok(true)
+}
+
 /// Reads the `event` argument to `subscribe`: `nil` (every event), a single
 /// event name, or a table listing several.
 fn read_events(value: &LuaValue) -> LuaResult<Option<Vec<String>>> {
@@ -314,6 +356,8 @@ pub fn module(lua: &Lua, version: &str) -> LuaResult<LuaTable> {
     }
 
     exports.set("state", state_table(lua)?)?;
+
+    exports.set("windows", lua.create_function(windows)?)?;
 
     exports.set("subscribe", lua.create_function(subscribe)?)?;
     exports.set("set_socket_path", lua.create_function(set_socket_path)?)?;

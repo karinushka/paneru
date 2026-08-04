@@ -37,7 +37,6 @@
 mod api;
 mod convert;
 mod runtime;
-mod windowset;
 mod worker;
 mod world;
 

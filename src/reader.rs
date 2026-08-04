@@ -1,16 +1,17 @@
+use async_lock::Mutex as AsyncMutex;
+use bevy::tasks::{IoTaskPool, TaskPool};
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::sync::mpsc::channel;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::Arc;
 use std::{fs, thread};
 use tracing::{debug, error};
 
 use crate::config::parse_command;
 use crate::ecs::state::StateQueryKind;
 use crate::errors::Result;
-use crate::events::{Event, EventSender, ScriptStateRequest};
+use crate::events::{Event, EventSender, Reply, ScriptStateRequest};
 use paneru_shared_types::script_state::ScriptStateWrite;
+use paneru_shared_types::windowset::LayoutOp;
 
 /// `CommandReader` is responsible for sending and receiving commands via a Unix socket.
 /// It acts as an IPC mechanism for the `paneru` application, allowing external processes
@@ -102,9 +103,18 @@ impl CommandReader {
         });
     }
 
-    /// The main runner function for the `CommandReader` thread. It binds to a Unix socket,
-    /// listens for incoming connections, reads command size and data, and dispatches them as `Event::Command`.
-    /// This loop continues indefinitely until an unrecoverable error occurs.
+    /// Accepts connections and hands each one to a task of its own.
+    ///
+    /// This thread does nothing but accept. Everything a connection needs —
+    /// reading its frame, waiting for the world to answer, writing the reply —
+    /// happens in [`serve`] on the IO task pool, so connections proceed
+    /// independently.
+    ///
+    /// They used to be served inline, one after another, each one holding this
+    /// loop for as long as its answer took (up to a two-second timeout). A
+    /// single client waiting on a reply therefore stalled every other client
+    /// behind it, and a client that connected without sending stalled them
+    /// indefinitely.
     ///
     /// # Returns
     ///
@@ -115,105 +125,175 @@ impl CommandReader {
         let listener = UnixListener::bind(CommandReader::SOCKET_PATH)?;
 
         for stream in listener.incoming() {
-            let Ok(mut stream) = stream.inspect_err(|err| error!("reading stream {err}")) else {
+            let Ok(stream) = stream.inspect_err(|err| error!("reading stream {err}")) else {
                 continue;
             };
-            let mut buffer = [0u8; 4];
-
-            if !full_read(&mut stream, buffer.len(), &mut buffer) {
-                continue;
-            }
-            let size = u32::from_le_bytes(buffer) as usize;
-            let mut buffer = vec![0u8; size];
-
-            if !full_read(&mut stream, buffer.len(), &mut buffer) {
-                continue;
-            }
-            let argv = buffer
-                .split(|c| *c == 0)
-                .filter(|s| !s.is_empty())
-                .map(|s| String::from_utf8_lossy(s).to_string())
-                .collect::<Vec<_>>();
-            let argv_ref = argv.iter().map(String::as_str).collect::<Vec<_>>();
-
-            if let Some(kind) = parse_query_request(&argv_ref) {
-                let (tx, rx) = channel();
-                _ = self
-                    .events
-                    .send(Event::StateQuery {
-                        kind,
-                        respond_to: tx,
-                    })
-                    .inspect_err(|err| {
-                        error!("sending state query: {err}");
-                    });
-
-                match rx.recv_timeout(Duration::from_secs(2)) {
-                    Ok(response) => {
-                        _ = stream.write_all(response.as_bytes());
-                        _ = stream.write_all(b"\n");
-                    }
-                    Err(err) => error!("waiting for state query response: {err}"),
-                }
-                continue;
-            }
-
-            if let Some(request) = parse_script_state_request(&argv_ref) {
-                let (tx, rx) = channel();
-                _ = self
-                    .events
-                    .send(Event::ScriptState {
-                        request,
-                        respond_to: tx,
-                    })
-                    .inspect_err(|err| {
-                        error!("sending script state request: {err}");
-                    });
-
-                match rx.recv_timeout(Duration::from_secs(2)) {
-                    Ok(response) => {
-                        _ = stream.write_all(response.as_bytes());
-                        _ = stream.write_all(b"\n");
-                    }
-                    Err(err) => error!("waiting for script state response: {err}"),
-                }
-                continue;
-            }
-
-            if is_subscribe_request(&argv_ref) {
-                match stream.try_clone() {
-                    Ok(clone) => {
-                        if let Err(err) = clone.set_nonblocking(true) {
-                            error!("configuring state subscriber as nonblocking: {err}");
-                            continue;
-                        }
-                        _ = self
-                            .events
-                            .send(Event::StateSubscribe {
-                                stream: Arc::new(Mutex::new(clone)),
-                            })
-                            .inspect_err(|err| {
-                                error!("registering state subscriber: {err}");
-                            });
-                    }
-                    Err(err) => error!("cloning subscriber stream: {err}"),
-                }
-                continue;
-            }
-
-            if let Ok(command) =
-                parse_command(&argv_ref).inspect_err(|err| error!("parsing command: {err}"))
-            {
-                _ = self
-                    .events
-                    .send(Event::Command { command })
-                    .inspect_err(|err| {
-                        error!("sending command: {err}");
-                    });
-            }
+            let events = self.events.clone();
+            // `get_or_init`, not `get`: this thread is started before the Bevy
+            // app is built, so a client connecting early would find no pool at
+            // all and `get` would panic. Whichever of the two initialises it
+            // first wins and the other reuses it; in practice that is bevy's
+            // `TaskPoolPlugin`, with its configured thread counts.
+            IoTaskPool::get_or_init(TaskPool::default)
+                .spawn(async move { serve(stream, events).await })
+                .detach();
         }
         Ok(())
     }
+}
+
+/// Serves one connection: read its frame, dispatch it, answer if it wants one.
+///
+/// The stream lives behind an async `Mutex` rather than being passed around as
+/// `&mut`. Both halves matter: the lock is what lets the frame read and the
+/// reply write be separate short critical sections instead of one borrow
+/// spanning the whole connection, and it being an *async* lock is what lets a
+/// guard sit across the `.await` on the world's answer at all — a
+/// `std::sync::MutexGuard` is not `Send`, so a future holding one cannot be
+/// spawned onto the pool.
+///
+/// A mutex and not an `RwLock`: every use of a socket is exclusive, so there is
+/// no shared read for the second half of an `RwLock` to buy.
+async fn serve(stream: UnixStream, events: EventSender) {
+    let stream = Arc::new(AsyncMutex::new(stream));
+
+    let Some(argv) = read_frame(&stream).await else {
+        return;
+    };
+    let argv_ref = argv.iter().map(String::as_str).collect::<Vec<_>>();
+
+    if let Some(kind) = parse_query_request(&argv_ref) {
+        answer(&stream, &events, "state query", |respond_to| {
+            Event::StateQuery { kind, respond_to }
+        })
+        .await;
+        return;
+    }
+
+    if is_window_set_request(&argv_ref) {
+        answer(&stream, &events, "window set query", |respond_to| {
+            Event::WindowSetQuery { respond_to }
+        })
+        .await;
+        return;
+    }
+
+    if let Some(ops) = parse_window_set_apply(&argv_ref) {
+        // Fire-and-forget like every other command: the layout ops are applied
+        // best-effort against the live world, and a client that wants the
+        // result reads the next window set.
+        _ = events
+            .send(Event::Command {
+                command: crate::commands::Command::Layout(ops),
+            })
+            .inspect_err(|err| error!("sending layout ops: {err}"));
+        return;
+    }
+
+    if let Some(request) = parse_script_state_request(&argv_ref) {
+        answer(&stream, &events, "script state request", |respond_to| {
+            Event::ScriptState {
+                request,
+                respond_to,
+            }
+        })
+        .await;
+        return;
+    }
+
+    if is_subscribe_request(&argv_ref) {
+        // The subscriber outlives this task, so it gets a descriptor of its own.
+        // Behind the same async lock: broadcasts are written from a task on the
+        // IO pool, never from the ECS system that produces them.
+        let cloned = stream.lock().await.try_clone();
+        match cloned {
+            Ok(clone) => {
+                if let Err(err) = clone.set_nonblocking(true) {
+                    error!("configuring state subscriber as nonblocking: {err}");
+                    return;
+                }
+                _ = events
+                    .send(Event::StateSubscribe {
+                        stream: Arc::new(AsyncMutex::new(clone)),
+                    })
+                    .inspect_err(|err| error!("registering state subscriber: {err}"));
+            }
+            Err(err) => error!("cloning subscriber stream: {err}"),
+        }
+        return;
+    }
+
+    if let Ok(command) =
+        parse_command(&argv_ref).inspect_err(|err| error!("parsing command: {err}"))
+    {
+        _ = events
+            .send(Event::Command { command })
+            .inspect_err(|err| error!("sending command: {err}"));
+    }
+}
+
+/// Reads one `<u32 le len><arg\0 arg\0 …>` frame, holding the lock only for the
+/// two reads.
+async fn read_frame(stream: &Arc<AsyncMutex<UnixStream>>) -> Option<Vec<String>> {
+    let mut stream = stream.lock().await;
+
+    let mut header = [0u8; 4];
+    if !full_read(&mut stream, header.len(), &mut header) {
+        return None;
+    }
+    let mut buffer = vec![0u8; u32::from_le_bytes(header) as usize];
+    if !full_read(&mut stream, buffer.len(), &mut buffer) {
+        return None;
+    }
+
+    Some(
+        buffer
+            .split(|byte| *byte == 0)
+            .filter(|arg| !arg.is_empty())
+            .map(|arg| String::from_utf8_lossy(arg).to_string())
+            .collect(),
+    )
+}
+
+/// Sends one request-carrying event to the world and writes the answer back down
+/// the socket, newline-terminated.
+///
+/// Every frame that expects a reply — a state query, the window set, a
+/// script-state read or write — has this shape: build the event around a fresh
+/// reply channel, wait for the main thread to answer it, forward what came back.
+/// `what` only names the request in the log.
+///
+/// The wait is an `.await`, not a `recv_timeout`, so a task waiting here costs
+/// nothing but the task: it holds no pool thread, no lock on the stream, and
+/// nothing another connection wants. There is no timeout because none is needed
+/// — the reply sender travels inside the event, so if the world never answers,
+/// the event is dropped, the channel closes, and the `recv` resolves.
+async fn answer(
+    stream: &Arc<AsyncMutex<UnixStream>>,
+    events: &EventSender,
+    what: &str,
+    request: impl FnOnce(Reply) -> Event,
+) {
+    let (tx, rx) = async_channel::bounded(1);
+    if events
+        .send(request(tx))
+        .inspect_err(|err| error!("sending {what}: {err}"))
+        .is_err()
+    {
+        return;
+    }
+
+    let Ok(response) = rx
+        .recv()
+        .await
+        .inspect_err(|err| error!("waiting for {what} response: {err}"))
+    else {
+        return;
+    };
+
+    let mut stream = stream.lock().await;
+    _ = stream.write_all(response.as_bytes());
+    _ = stream.write_all(b"\n");
 }
 
 fn parse_query_request(argv: &[&str]) -> Option<StateQueryKind> {
@@ -267,6 +347,25 @@ fn is_subscribe_request(argv: &[&str]) -> bool {
     matches!(argv, ["subscribe", "--json"] | ["subscribe"])
 }
 
+/// Reads a `windowset` frame: the layout tree a `paneru.windows` handler is
+/// given, for a client that wants the same one.
+fn is_window_set_request(argv: &[&str]) -> bool {
+    matches!(argv, ["windowset"] | ["windowset", "--json"])
+}
+
+/// Reads a `windowset apply <json>` frame: the operations a client's transform
+/// recorded, to be replayed against the live world.
+///
+/// A frame whose JSON does not decode is not a layout request at all, so it
+/// falls through to command parsing and is reported there, the same way an
+/// unknown query kind is.
+fn parse_window_set_apply(argv: &[&str]) -> Option<Vec<LayoutOp>> {
+    let ["windowset", "apply", ops] = argv else {
+        return None;
+    };
+    serde_json::from_str(ops).ok()
+}
+
 fn full_read(stream: &mut UnixStream, expected: usize, buffer: &mut [u8]) -> bool {
     if let Ok(count) = stream.read(buffer).inspect_err(|err| {
         error!("{err}");
@@ -284,6 +383,102 @@ mod tests {
     use super::*;
     use paneru_shared_types::script_state::Expected;
     use serde_json::json;
+
+    #[test]
+    fn reads_the_window_set_frames() {
+        assert!(is_window_set_request(&["windowset"]));
+        assert!(is_window_set_request(&["windowset", "--json"]));
+        assert!(!is_window_set_request(&["windowset", "apply", "[]"]));
+
+        assert_eq!(
+            parse_window_set_apply(&["windowset", "apply", "[]"]),
+            Some(vec![])
+        );
+        assert_eq!(
+            parse_window_set_apply(&["windowset", "apply", r#"[{"focus":7}]"#]),
+            Some(vec![LayoutOp::Focus(7)])
+        );
+        assert_eq!(
+            parse_window_set_apply(&[
+                "windowset",
+                "apply",
+                r#"[{"move_to_workspace":{"window":7,"workspace":2,"follow":true}}]"#
+            ]),
+            Some(vec![LayoutOp::MoveToWorkspace {
+                window: 7,
+                workspace: 2,
+                follow: true
+            }])
+        );
+
+        // Undecodable ops are not a layout frame at all; they fall through to
+        // command parsing, which reports them.
+        assert_eq!(
+            parse_window_set_apply(&["windowset", "apply", "not json"]),
+            None
+        );
+        assert_eq!(parse_window_set_apply(&["windowset", "apply"]), None);
+    }
+
+    /// The layout tree survives the socket round trip: what the daemon
+    /// serializes is what a client's `paneru.windows` transforms.
+    #[test]
+    fn window_set_survives_the_wire() {
+        use paneru_shared_types::state::Frame;
+        use paneru_shared_types::windowset::{
+            ColumnSet, DisplaySet, WindowRec, WindowSet, WorkspaceSet,
+        };
+
+        let window = |id| WindowRec {
+            id,
+            app_name: "Test App".to_string(),
+            bundle_id: "com.example.test".to_string(),
+            title: format!("Window {id}"),
+            frame: Some(Frame {
+                x: 0,
+                y: 0,
+                width: 400,
+                height: 600,
+            }),
+            floating: false,
+            managed: true,
+            visible: true,
+            focused: id == 1,
+        };
+        let original = WindowSet::new(
+            vec![DisplaySet {
+                id: 1,
+                frame: Frame {
+                    x: 0,
+                    y: 0,
+                    width: 1024,
+                    height: 768,
+                },
+                active: true,
+                workspaces: Arc::new(vec![WorkspaceSet {
+                    number: 1,
+                    native_id: 10,
+                    active: true,
+                    columns: Arc::new(vec![
+                        ColumnSet::single(window(1), 0.5),
+                        ColumnSet::single(window(2), 0.5),
+                    ]),
+                    floating: Arc::new(Vec::new()),
+                }]),
+            }],
+            Some(1),
+        );
+
+        let encoded = serde_json::to_string(&original).expect("a window set serializes");
+        let decoded: WindowSet = serde_json::from_str(&encoded).expect("and deserializes");
+
+        assert_eq!(decoded, original);
+        assert_eq!(decoded.focused(), Some(1));
+        assert_eq!(decoded.east(1), Some(2));
+        // Ops are deliberately not carried: a set off the wire is one nothing
+        // has been asked of yet.
+        assert!(decoded.ops().is_empty());
+    }
 
     #[test]
     fn reads_the_script_state_frames() {

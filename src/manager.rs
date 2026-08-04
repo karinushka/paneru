@@ -43,7 +43,7 @@ use skylight::{
     SLSWindowIteratorGetAttributes, SLSWindowIteratorGetParentID, SLSWindowIteratorGetTags,
     SLSWindowIteratorGetWindowID, SLSWindowQueryResultCopyWindows, SLSWindowQueryWindows,
 };
-pub use windows::{Window, WindowApi, WindowOS, WindowPadding, ax_window_id};
+pub use windows::{Window, WindowApi, WindowOS, WindowPadding, ax_window_id, try_ax_window_id};
 
 #[cfg(test)]
 pub use process::MockProcessApi;
@@ -759,6 +759,12 @@ pub fn bruteforce_windows(
     data[0x8..0x8 + bytes.len()].copy_from_slice(&bytes);
 
     for element_id in 0..0x7fffu64 {
+        // Every iteration is a synchronous cross-process AX round trip, so stop the
+        // moment the last window we were looking for has been accounted for.
+        if window_list.is_empty() {
+            break;
+        }
+
         let bytes = element_id.to_ne_bytes();
         data[0xc..0xc + bytes.len()].copy_from_slice(&bytes);
 
@@ -767,7 +773,7 @@ pub fn bruteforce_windows(
         else {
             continue;
         };
-        let Ok(window_id) = ax_window_id(element_ref.as_ptr()) else {
+        let Some(window_id) = try_ax_window_id(element_ref.as_ptr()) else {
             continue;
         };
 

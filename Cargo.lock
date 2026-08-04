@@ -2661,6 +2661,7 @@ dependencies = [
  "arc-swap",
  "async-channel",
  "async-executor",
+ "async-lock",
  "bevy",
  "bitflags",
  "cfg-if",
@@ -2703,6 +2704,7 @@ dependencies = [
  "cfg-if",
  "mlua",
  "paneru-shared-types",
+ "regex",
  "serde",
  "serde_json",
 ]
@@ -2711,6 +2713,7 @@ dependencies = [
 name = "paneru-shared-types"
 version = "0.4.4"
 dependencies = [
+ "mlua",
  "serde",
  "serde_json",
 ]

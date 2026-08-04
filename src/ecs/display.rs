@@ -25,7 +25,7 @@ use crate::ecs::{
 use crate::events::Event;
 use crate::manager::{Display, WindowManager, irect_from};
 use crate::platform::{PlatformCallbacks, WorkspaceId};
-use crate::util::read_screen_property;
+use crate::util::{read_screen_property, round_px};
 
 const ORPHANED_SPACES_TIMEOUT_SEC: u64 = 30;
 
@@ -386,7 +386,7 @@ fn read_display_properties_trigger(
     let notch = read_screen_property(&screens, display_id, |screen| {
         let insets = screen.safeAreaInsets();
         debug!("notch on display {display_id}: {insets:?}");
-        insets.top as i32
+        round_px(insets.top)
     });
     if let Some(height) = notch {
         display.set_notch_height(height);

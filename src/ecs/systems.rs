@@ -541,6 +541,21 @@ pub(super) fn retry_front_switch(
 }
 
 /// Animates window movement.
+/// Fraction of the remaining distance an exponential ease-out consumes in a
+/// frame, given a decay `rate` (per second) and the frame's `delta` in seconds.
+///
+/// Shared by the reposition and resize animators so the two can never drift out
+/// of step. The result is a `Vec2::lerp` factor, hence `f32`: the clamp pins it
+/// to `[0, 1]`, a range `f32` covers in full, so the narrowing costs only
+/// mantissa bits — orders of magnitude below one pixel of motion.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "clamped to [0, 1], well within f32's range; only sub-pixel precision is lost"
+)]
+fn ease_out_factor(rate: f64, delta: f64) -> f32 {
+    (1.0 - (-rate * delta).exp()).clamp(0.0, 1.0) as f32
+}
+
 /// This is a Bevy system that runs on `Update`. It smoothly moves windows to their target
 /// positions, as indicated by the `RepositionMarker` component.
 /// Animation speed is controlled by the `animation_speed` in the `Config`.
@@ -562,9 +577,7 @@ pub(super) fn animate_entities(
 ) {
     // Frame-rate-independent exponential smoothing (ease-out).
     // `animation_speed` is the decay rate (per second); higher = snappier.
-    // t = 1 - e^(-rate*dt) is the fraction of remaining distance consumed this frame.
-    let rate = config.animation_speed();
-    let t = (1.0 - (-rate * time.delta_secs_f64()).exp()).clamp(0.0, 1.0) as f32;
+    let t = ease_out_factor(config.animation_speed(), time.delta_secs_f64());
 
     animate
         .into_iter()
@@ -611,8 +624,7 @@ pub(super) fn animate_resize_entities(
     mut commands: Commands,
 ) {
     // Matches animate_entities: exponential ease-out, frame-rate independent.
-    let rate = config.animation_speed();
-    let t = (1.0 - (-rate * time.delta_secs_f64()).exp()).clamp(0.0, 1.0) as f32;
+    let t = ease_out_factor(config.animation_speed(), time.delta_secs_f64());
 
     animate
         .into_iter()

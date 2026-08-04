@@ -28,7 +28,7 @@ use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
 use crate::manager::skylight::SLSSetWindowListBrightness;
 use crate::platform::{ConnID, Pid, ProcessSerialNumber, WinID, WorkspaceId};
-use crate::util::{AXUIWrapper, MacResult, create_array, symlink_target};
+use crate::util::{AXUIWrapper, MacResult, create_array, round_px, symlink_target};
 use app::ApplicationOS;
 pub use app::{Application, ApplicationApi};
 pub use display::Display;
@@ -60,7 +60,7 @@ pub type Origin = IVec2;
 pub type Size = IVec2;
 
 pub fn origin_from(point: CGPoint) -> Origin {
-    Origin::new(point.x as i32, point.y as i32)
+    Origin::new(round_px(point.x), round_px(point.y))
 }
 
 pub fn origin_to(point: Origin) -> CGPoint {
@@ -68,7 +68,7 @@ pub fn origin_to(point: Origin) -> CGPoint {
 }
 
 pub fn size_from(size: CGSize) -> Size {
-    Size::new(size.width as i32, size.height as i32)
+    Size::new(round_px(size.width), round_px(size.height))
 }
 
 pub fn irect_from(rect: CGRect) -> IRect {

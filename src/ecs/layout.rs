@@ -21,6 +21,7 @@ use crate::ecs::{
 use crate::errors::{Error, Result};
 use crate::manager::{Display, Origin, Size, Window};
 use crate::platform::WorkspaceId;
+use crate::util::round_px;
 
 pub struct LayoutEventsPlugin;
 
@@ -936,7 +937,10 @@ fn binpack_heights(heights: &[i32], min_height: i32, total_height: i32) -> Optio
         count -= 1;
         output.truncate(count);
         let sum = output.iter().sum::<i32>();
-        let avg_height = (f64::from(total_height - sum) / f64::from(remaining + 1)) as i32;
+        // Integer division on purpose: this floors, and the leftovers of the
+        // split have to stay inside `total_height`. Rounding would let the
+        // windows we hand `avg_height` to sum past the space available.
+        let avg_height = (total_height - sum) / (remaining + 1);
         if avg_height < min_height {
             return None;
         }
@@ -1403,7 +1407,7 @@ fn position_layout_windows(
             // last window absorb all remaining space.
             if !context.stacked {
                 let inset =
-                    (f64::from(viewport.height()) * (1.0 - config.sliver_height()) / 2.0) as i32;
+                    round_px(f64::from(viewport.height()) * (1.0 - config.sliver_height()) / 2.0);
                 frame.min.y += inset;
                 frame.max.y += inset;
             }

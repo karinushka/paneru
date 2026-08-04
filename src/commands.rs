@@ -32,6 +32,30 @@ pub use paneru_shared_types::commands::{
     Command, Direction, MouseMove, MoveFocus, Operation, ResizeDirection,
 };
 
+/// The strips that are selected on their display but not the one on screen —
+/// the parked virtual workspaces a window can be handed off to.
+type OffscreenStrips<'w, 's> = Query<
+    'w,
+    's,
+    (&'static mut LayoutStrip, &'static ChildOf),
+    (With<SelectedVirtualMarker>, Without<ActiveWorkspaceMarker>),
+>;
+
+/// Every strip alongside the two flags that say where it sits: whether it is the
+/// one currently on screen, and whether it is its display's selected virtual
+/// workspace.
+type StripsWithVisibility<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static ChildOf,
+        &'static LayoutStrip,
+        Entity,
+        Has<ActiveWorkspaceMarker>,
+        Has<SelectedVirtualMarker>,
+    ),
+>;
+
 pub fn register_commands(app: &mut bevy::app::App) {
     // Window-addressed layout operations from a Lua handler. Registered here
     // rather than with the Lua systems because it handles a Command like any
@@ -867,15 +891,11 @@ fn manage_window(
 /// * `windows` - A mutable query for `Window` components, their `Entity`, and whether they have the `Unmanaged` marker.
 /// * `active_display` - A mutable reference to the `ActiveDisplayMut` resource.
 /// * `commands` - Bevy commands to modify entities and trigger events.
-#[allow(clippy::type_complexity)]
 fn to_next_display(
     mut messages: MessageReader<Event>,
     windows: Windows,
     mut active_display: ActiveDisplayMut,
-    mut other_workspaces: Query<
-        (&mut LayoutStrip, &ChildOf),
-        (With<SelectedVirtualMarker>, Without<ActiveWorkspaceMarker>),
-    >,
+    mut other_workspaces: OffscreenStrips,
     window_manager: Res<WindowManager>,
     config: Res<Config>,
     mut commands: Commands,
@@ -1258,19 +1278,12 @@ pub fn command_restart_handler(mut messages: MessageReader<Event>) {
 }
 
 #[instrument(level = Level::DEBUG, skip_all)]
-#[allow(clippy::type_complexity)]
 fn print_internal_state_handler(
     mut messages: MessageReader<Event>,
     focused: Query<(&Window, Entity), With<FocusedMarker>>,
     windows: Query<(&Window, Entity, &ChildOf, Option<&Unmanaged>)>,
     apps: Query<&Application>,
-    workspaces: Query<(
-        &ChildOf,
-        &LayoutStrip,
-        Entity,
-        Has<ActiveWorkspaceMarker>,
-        Has<SelectedVirtualMarker>,
-    )>,
+    workspaces: StripsWithVisibility,
     displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
 ) {
     if !messages.read().any(|event| {

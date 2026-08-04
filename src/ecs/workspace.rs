@@ -33,6 +33,51 @@ use crate::platform::{WinID, WorkspaceId};
 
 pub struct WorkspaceEventsPlugin;
 
+/// Strips as [`handle_virtual_window_moves`] rewrites them: it slides each one
+/// to or from the parked position, so it needs the strip, its origin, whether
+/// it is the visible one, and the saved position to restore it to.
+type MovableStrips<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static mut LayoutStrip,
+        &'static mut Position,
+        Has<ActiveWorkspaceMarker>,
+        Option<&'static mut PreviousStripPosition>,
+    ),
+    Without<Window>,
+>;
+
+/// Strips as [`show_active_workspace`] reads them when bringing one back on
+/// screen: the saved origin to restore, and any in-flight `RepositionMarker`
+/// that would otherwise animate against the restore.
+type RestorableStrips<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static mut Position,
+        &'static LayoutStrip,
+        &'static ChildOf,
+        Option<&'static PreviousStripPosition>,
+        Option<&'static RepositionMarker>,
+    ),
+    Without<Window>,
+>;
+
+/// [`renumber_virtual_indexes`] first asks which strips appeared this tick, then
+/// rewrites the indexes of every strip sharing their workspace. The second query
+/// aliases the first mutably, hence the `ParamSet`.
+type RenumberStrips<'w, 's> = ParamSet<
+    'w,
+    's,
+    (
+        Query<'static, 'static, &'static LayoutStrip, Added<LayoutStrip>>,
+        Query<'static, 'static, (Entity, &'static mut LayoutStrip)>,
+    ),
+>;
+
 impl Plugin for WorkspaceEventsPlugin {
     fn build(&self, app: &mut App) {
         const REFRESH_WINDOW_CHECK_FREQ_MS: u64 = 1000;
@@ -620,19 +665,10 @@ fn cleanup_selected_space_marker(
     });
 }
 
-#[allow(clippy::type_complexity, clippy::too_many_lines)]
+#[allow(clippy::too_many_lines)]
 fn handle_virtual_window_moves(
     moved_windows: Populated<(Entity, &VirtualMoveMarker), With<Window>>,
-    mut workspaces: Query<
-        (
-            Entity,
-            &mut LayoutStrip,
-            &mut Position,
-            Has<ActiveWorkspaceMarker>,
-            Option<&mut PreviousStripPosition>,
-        ),
-        Without<Window>,
-    >,
+    mut workspaces: MovableStrips,
     windows: Windows,
     mut scrollings: Query<&mut Scrolling>,
     active_display: Single<(Entity, &Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
@@ -1048,22 +1084,11 @@ fn move_virtual_workspace_bind(
     debug!("Moving {focused_entity} to new virtual space {target_virtual_index}");
 }
 
-#[allow(clippy::type_complexity)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(crate) fn show_active_workspace(
     activated: Single<Entity, Added<ActiveWorkspaceMarker>>,
     windows: Windows,
-    mut workspaces: Query<
-        (
-            Entity,
-            &mut Position,
-            &LayoutStrip,
-            &ChildOf,
-            Option<&PreviousStripPosition>,
-            Option<&RepositionMarker>,
-        ),
-        Without<Window>,
-    >,
+    mut workspaces: RestorableStrips,
     displays: Query<&Display>,
     config: Res<Config>,
     mut commands: Commands,
@@ -1188,13 +1213,7 @@ pub(crate) fn show_active_workspace(
 /// Gaps in the index sequence are preserved — only duplicates get
 /// renumbered. Single-strip configurations at non-zero indices stay
 /// where they are.
-#[allow(clippy::type_complexity)]
-fn renumber_virtual_indexes(
-    mut set: ParamSet<(
-        Query<&LayoutStrip, Added<LayoutStrip>>,
-        Query<(Entity, &mut LayoutStrip)>,
-    )>,
-) {
+fn renumber_virtual_indexes(mut set: RenumberStrips) {
     let affected: HashSet<WorkspaceId> = set.p0().iter().map(LayoutStrip::id).collect();
     if affected.is_empty() {
         return;

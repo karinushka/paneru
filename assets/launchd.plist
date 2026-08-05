@@ -21,14 +21,16 @@
     <dict>
       <key>NO_COLOR</key>
       <string>1</string>
+      <key>RUST_LOG</key>
+      <string>{rust_log}</string>
       <key>XDG_CONFIG_HOME</key>
       <string>{xdg_config_home}</string>
     </dict>
     <key>RunAtLoad</key>
     <true />
     <key>StandardErrorPath</key>
-    <string>{out_log_path}</string>
-    <key>StandardOutPath</key>
     <string>{error_log_path}</string>
+    <key>StandardOutPath</key>
+    <string>{out_log_path}</string>
   </dict>
 </plist>

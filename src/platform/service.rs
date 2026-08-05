@@ -197,6 +197,7 @@ impl Service {
     pub fn launchd_plist(&self) -> String {
         let xdg_config_home = env::var("XDG_CONFIG_HOME")
             .unwrap_or_else(|_| format!("{}/.config", self.home_dir.display()));
+        let rust_log = env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
         format!(
             include_str!("../../assets/launchd.plist"),
             name = self.raw.name,
@@ -204,6 +205,7 @@ impl Service {
             out_log_path = self.raw.out_log_path,
             error_log_path = self.raw.error_log_path,
             xdg_config_home = xdg_config_home,
+            rust_log = rust_log,
         )
     }
 }

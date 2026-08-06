@@ -57,7 +57,7 @@ This is what keeps `src/lua/runtime.rs` free of any `bevy` import: it reaches th
 | `src/commands.rs` | Implementation of CLI subcommands. |
 | `src/client.rs` | The CLI side of the IPC protocol, and the only place JSON is produced. |
 | `src/reader.rs` | The daemon side: owns the Mach service and turns requests into events. |
-| `crates/mach_ipc` | Typed async channels over Mach ports; the transport itself. |
+| `crates/mach_ipc` | Typed channels over Mach ports; the transport itself. Async and blocking spellings of each operation, on `SendPort`/`RecvPort`. |
 | `src/overlay.rs` | Logic for drawing active window borders and inactive window dimming. |
 
 ## 4. Key Data Entities

@@ -1,4 +1,4 @@
-//! Typed, async channels between unrelated processes, over Mach ports.
+//! Typed channels between unrelated processes, over Mach ports.
 //!
 //! One process binds a well-known service name and holds a [`Receiver<T>`]; any
 //! number of unrelated processes — each `paneru` CLI invocation, the loadable
@@ -11,6 +11,7 @@
 //! # #[derive(Serialize, Deserialize)] struct Request;
 //! # #[derive(Serialize, Deserialize)] struct Response;
 //! # fn main() -> Result<(), paneru_mach_ipc::Error> {
+//! use paneru_mach_ipc::{RecvPort, SendPort};
 //! # futures_lite::future::block_on(async {
 //! // The daemon.
 //! let receiver = paneru_mach_ipc::Receiver::<Request>::bind("com.example.service")?;
@@ -22,6 +23,9 @@
 //! // A client, in some other process.
 //! let sender = paneru_mach_ipc::Sender::<Request>::connect("com.example.service")?;
 //! let response: Response = sender.call(&Request).await?;
+//!
+//! // The same client with no executor to run on: same names, `_blocking`.
+//! let response: Response = sender.call_blocking(&Request)?;
 //! # Ok(())
 //! # })
 //! # }
@@ -41,14 +45,28 @@
 //!   dead subscribers are reaped for the right reason rather than inferred from
 //!   a write error that a merely slow reader would also produce.
 //!
-//! # Async
+//! # Async, and blocking
 //!
-//! Nothing here parks a thread on `mach_msg`. [`Receiver`] is a [`Stream`]
-//! implemented directly over the Mach API: `poll_next` attempts a non-blocking
-//! receive and, when the port is empty, registers the task's waker against a
-//! process-wide kqueue watching that port. See [`reactor`](mod@reactor) for why
-//! `EVFILT_MACHPORT` is the only mechanism the platform offers and why the
-//! registration is one-shot.
+//! The operations come in pairs, named the way `async_channel` names them: an
+//! async `send`/`call`/`subscribe`/`recv` and a `*_blocking` twin of each. They
+//! live on [`SendPort`] and [`RecvPort`], so bring those into scope to use them.
+//!
+//! Both traits are almost entirely provided methods: [`Sender`] and [`Receiver`]
+//! each say which port right they hold, and the operations follow. Nothing is
+//! written twice per type, so the two spellings of a request cannot drift.
+//!
+//! The blocking half is not a `block_on` wrapper: it waits in the kernel
+//! directly. Going through the async half instead means arming a port watcher,
+//! building a waker and parking the thread through an executor to end up blocked
+//! on the same message, which is wasted work for a caller — a CLI invocation, a
+//! Lua module — that has nothing else to run meanwhile.
+//!
+//! Nothing in the async half parks a thread on `mach_msg`. [`Receiver`] is also
+//! a [`Stream`], implemented directly over the Mach API: `poll_next` attempts a
+//! non-blocking receive and, when the port is empty, registers the task's waker
+//! against a process-wide kqueue watching that port. `EVFILT_MACHPORT` is the
+//! only mechanism the platform offers for this, and its registration is
+//! one-shot, which is why the try-then-register order matters.
 //!
 //! # Values, not bytes
 //!
@@ -64,16 +82,26 @@ pub mod rights;
 
 pub use error::{Error, Result};
 pub use futures_lite::Stream;
-
-use mach2::port::mach_port_t;
-use msg::Dest;
-use reactor::Interest;
+// Named only by the sealed `Inbound` supertrait; not part of the API a caller
+// writes against, but it has to be reachable for that bound to typecheck.
+#[doc(hidden)]
+pub use reactor::Interest;
 use rights::{RecvRight, SendOnceRight, SendRight};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+
+/// The one encode, so every operation reports the same error for the same fault.
+fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
+    postcard::to_allocvec(value).map_err(|_| Error::Encode)
+}
+
+/// The one decode, likewise.
+fn decode<T: DeserializeOwned>(payload: &[u8]) -> Result<T> {
+    postcard::from_bytes(payload).map_err(|_| Error::Decode)
+}
 
 /// The one place the try-then-register dance lives.
 ///
@@ -82,7 +110,7 @@ use std::task::{Context, Poll};
 /// only reports messages arriving after it exists, so anything already queued
 /// would otherwise never wake anyone.
 fn poll_recv(
-    port: mach_port_t,
+    port: &RecvRight,
     interest: &Interest,
     cx: &Context<'_>,
 ) -> Poll<Result<msg::Incoming>> {
@@ -114,12 +142,17 @@ fn poll_recv(
 /// means the daemon is wedged, and for an event means the subscriber is asleep
 /// (where [`Subscriber::try_send`], which drops rather than waits, is used).
 async fn send_async(
-    dest: mach_port_t,
+    service: &SendRight,
     payload: &[u8],
-    extra_port: Option<mach_port_t>,
+    extra_port: Option<&RecvRight>,
 ) -> Result<()> {
     loop {
-        match msg::send(dest, Dest::CopySend, payload, None, extra_port, Some(0)) {
+        let message = msg::Outgoing::new(service, payload).without_waiting();
+        let message = match extra_port {
+            Some(port) => message.carrying(port),
+            None => message,
+        };
+        match message.send() {
             Err(Error::WouldBlock) => futures_lite::future::yield_now().await,
             other => return other,
         }
@@ -158,7 +191,7 @@ impl<T: DeserializeOwned> Receiver<T> {
     }
 
     fn from_port(port: RecvRight) -> Self {
-        let interest = Interest::new(port.as_raw());
+        let interest = Interest::new(&port);
         Self {
             port,
             interest,
@@ -166,32 +199,9 @@ impl<T: DeserializeOwned> Receiver<T> {
         }
     }
 
-    /// Waits for the next value.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Decode`] for a value that does not match `T`. The
-    /// service port is reachable by any process in the session, so that is an
-    /// expected input rather than a fatal condition — log it and call `recv`
-    /// again.
-    pub async fn recv(&self) -> Result<Delivery<T>> {
-        futures_lite::future::poll_fn(|cx| self.poll_delivery(cx)).await
-    }
-
     fn poll_delivery(&self, cx: &Context<'_>) -> Poll<Result<Delivery<T>>> {
-        poll_recv(self.port.as_raw(), &self.interest, cx).map(|result| {
-            result.and_then(|incoming| {
-                Ok(Delivery {
-                    value: postcard::from_bytes(&incoming.payload).map_err(|_| Error::Decode)?,
-                    reply: incoming.reply.map(|right| Reply { right }),
-                    subscriber: incoming
-                        .ports
-                        .into_iter()
-                        .next()
-                        .map(|right| Subscriber { right }),
-                })
-            })
-        })
+        poll_recv(&self.port, &self.interest, cx)
+            .map(|result| result.and_then(Delivery::from_incoming))
     }
 }
 
@@ -218,6 +228,24 @@ pub struct Delivery<T> {
     pub reply: Option<Reply>,
     /// The channel a [`Sender::subscribe`] asked for events on.
     pub subscriber: Option<Subscriber>,
+}
+
+impl<T: DeserializeOwned> Delivery<T> {
+    /// Decodes one wire message into a delivery.
+    ///
+    /// Shared by the polled and the blocking receive so the two cannot drift on
+    /// what a message means — only on how they waited for it.
+    fn from_incoming(incoming: msg::Incoming) -> Result<Self> {
+        Ok(Self {
+            value: decode(&incoming.payload)?,
+            reply: incoming.reply.map(|right| Reply { right }),
+            subscriber: incoming
+                .ports
+                .into_iter()
+                .next()
+                .map(|right| Subscriber { right }),
+        })
+    }
 }
 
 /// A one-shot channel back to whoever sent a value.
@@ -271,15 +299,10 @@ impl Subscriber {
     /// be dropped. [`Error::WouldBlock`] means it is alive but not keeping up;
     /// the event is lost but the subscriber should be kept.
     pub fn try_send<E: Serialize>(&self, value: &E) -> Result<()> {
-        let payload = postcard::to_allocvec(value).map_err(|_| Error::Encode)?;
-        msg::send(
-            self.right.as_raw(),
-            Dest::CopySend,
-            &payload,
-            None,
-            None,
-            Some(0),
-        )
+        let payload = encode(value)?;
+        msg::Outgoing::new(&self.right, &payload)
+            .without_waiting()
+            .send()
     }
 }
 
@@ -293,28 +316,52 @@ pub struct Sender<T> {
     _value: PhantomData<fn(T)>,
 }
 
-impl<T: Serialize> Sender<T> {
-    /// Finds the service.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::NotRunning`] when nothing has bound the name — the
-    /// ordinary "paneru isn't running" that clients should report as such.
-    pub fn connect(service: &str) -> Result<Self> {
-        Ok(Self {
-            service: bootstrap::look_up(service)?,
-            _value: PhantomData,
-        })
+/// The accessors the port traits are built on.
+///
+/// Private, which is what seals [`SendPort`] and [`RecvPort`]: only this crate
+/// can name these, so only this crate can add implementations, and the rights
+/// stay an implementation detail rather than part of the public surface.
+mod sealed {
+    use crate::reactor::Interest;
+    use crate::rights::{RecvRight, SendRight};
+
+    pub trait Outbound {
+        fn send_right(&self) -> &SendRight;
     }
+
+    pub trait Inbound {
+        fn recv_right(&self) -> &RecvRight;
+        fn interest(&self) -> &Interest;
+    }
+}
+
+/// One end of a channel that can be sent on.
+///
+/// Everything below is a provided method: an implementor says which send right
+/// it holds and what it carries, and the six operations follow from that. There
+/// is no per-type code to keep in step, which is the point — the async and
+/// blocking spellings of the same request cannot drift apart if there is only
+/// one of each.
+///
+/// The pairing is `async_channel`'s: `send`/`send_blocking`, and so on. The
+/// blocking half is not a `block_on` wrapper — it waits in the kernel directly,
+/// where going through the async half would arm a port watcher, build a waker
+/// and park the thread through an executor to end up blocked on the same
+/// message.
+pub trait SendPort: sealed::Outbound {
+    /// What this end carries.
+    type Message: Serialize;
 
     /// Sends a value and does not wait for an answer.
     ///
     /// # Errors
     ///
     /// Returns [`Error::PeerGone`] if the receiver is gone.
-    pub async fn send(&self, value: &T) -> Result<()> {
-        let payload = postcard::to_allocvec(value).map_err(|_| Error::Encode)?;
-        send_async(self.service.as_raw(), &payload, None).await
+    fn send(&self, value: &Self::Message) -> impl Future<Output = Result<()>> {
+        async move {
+            let payload = encode(value)?;
+            send_async(self.send_right(), &payload, None).await
+        }
     }
 
     /// Sends a value and waits for the answer.
@@ -330,23 +377,14 @@ impl<T: Serialize> Sender<T> {
     ///
     /// Returns [`Error::PeerGone`] if the receiver exits before answering, and
     /// [`Error::Decode`] if the answer is not an `R`.
-    pub async fn call<R: DeserializeOwned>(&self, value: &T) -> Result<R> {
-        let payload = postcard::to_allocvec(value).map_err(|_| Error::Encode)?;
-        let port = RecvRight::alloc()?;
-        let interest = Interest::new(port.as_raw());
-        let raw = port.as_raw();
-
-        msg::send(
-            self.service.as_raw(),
-            Dest::CopySend,
-            &payload,
-            Some(raw),
-            None,
-            None,
-        )?;
-
-        let incoming = futures_lite::future::poll_fn(|cx| poll_recv(raw, &interest, cx)).await?;
-        postcard::from_bytes(&incoming.payload).map_err(|_| Error::Decode)
+    fn call<R: DeserializeOwned>(&self, value: &Self::Message) -> impl Future<Output = Result<R>> {
+        async move {
+            let port = self.request(value, Carried::AsReply)?;
+            let interest = Interest::new(&port);
+            let incoming =
+                futures_lite::future::poll_fn(|cx| poll_recv(&port, &interest, cx)).await?;
+            decode(&incoming.payload)
+        }
     }
 
     /// Sends a value that asks for a lasting event channel, and returns the
@@ -359,11 +397,151 @@ impl<T: Serialize> Sender<T> {
     /// # Errors
     ///
     /// Returns [`Error::PeerGone`] if the receiver is gone.
-    pub async fn subscribe<E: DeserializeOwned>(&self, value: &T) -> Result<Receiver<E>> {
-        let payload = postcard::to_allocvec(value).map_err(|_| Error::Encode)?;
+    fn subscribe<E: DeserializeOwned>(
+        &self,
+        value: &Self::Message,
+    ) -> impl Future<Output = Result<Receiver<E>>> {
+        async move {
+            let payload = encode(value)?;
+            let port = RecvRight::alloc()?;
+            send_async(self.send_right(), &payload, Some(&port)).await?;
+            Ok(Receiver::from_port(port))
+        }
+    }
+
+    /// [`Self::send`] without an executor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::PeerGone`] if the receiver is gone.
+    fn send_blocking(&self, value: &Self::Message) -> Result<()> {
+        msg::Outgoing::new(self.send_right(), &encode(value)?).send()
+    }
+
+    /// [`Self::call`] without an executor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::PeerGone`] if the receiver exits before answering, and
+    /// [`Error::Decode`] if the answer is not an `R`.
+    fn call_blocking<R: DeserializeOwned>(&self, value: &Self::Message) -> Result<R> {
+        let port = self.request(value, Carried::AsReply)?;
+        decode(&msg::recv(&port)?.payload)
+    }
+
+    /// [`Self::subscribe`] without an executor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::PeerGone`] if the receiver is gone.
+    fn subscribe_blocking<E: DeserializeOwned>(
+        &self,
+        value: &Self::Message,
+    ) -> Result<Receiver<E>> {
+        Ok(Receiver::from_port(
+            self.request(value, Carried::AsChannel)?,
+        ))
+    }
+
+    /// Everything a request does except wait for the answer: encode, allocate
+    /// somewhere for the peer to answer on, and hand the message over.
+    ///
+    /// The returned right is the only thing the two spellings of `call` disagree
+    /// about — one polls it, the other blocks on it.
+    #[doc(hidden)]
+    fn request(&self, value: &Self::Message, carried: Carried) -> Result<RecvRight> {
+        let payload = encode(value)?;
         let port = RecvRight::alloc()?;
-        send_async(self.service.as_raw(), &payload, Some(port.as_raw())).await?;
-        Ok(Receiver::from_port(port))
+        let message = msg::Outgoing::new(self.send_right(), &payload);
+        match carried {
+            Carried::AsReply => message.replying_to(&port),
+            Carried::AsChannel => message.carrying(&port),
+        }
+        .send()?;
+        Ok(port)
+    }
+}
+
+/// Which way the port travelling with a request is meant to be used.
+#[derive(Clone, Copy)]
+#[doc(hidden)]
+pub enum Carried {
+    /// A one-shot answer to this request.
+    AsReply,
+    /// A lasting channel the peer keeps pushing to.
+    AsChannel,
+}
+
+/// One end of a channel that can be received on.
+///
+/// The mirror of [`SendPort`]: state which receive right you hold, and both
+/// spellings of `recv` follow.
+pub trait RecvPort: sealed::Inbound {
+    /// What this end carries.
+    type Message: DeserializeOwned;
+
+    /// Waits for the next value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Decode`] for a value that does not match the message
+    /// type. The service port is reachable by any process in the session, so
+    /// that is an expected input rather than a fatal condition — log it and call
+    /// `recv` again.
+    fn recv(&self) -> impl Future<Output = Result<Delivery<Self::Message>>> {
+        futures_lite::future::poll_fn(|cx| {
+            poll_recv(self.recv_right(), self.interest(), cx)
+                .map(|r| r.and_then(Delivery::from_incoming))
+        })
+    }
+
+    /// [`Self::recv`] without an executor: parks the calling thread in the
+    /// kernel until a message arrives.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Decode`] on the same terms as [`Self::recv`].
+    fn recv_blocking(&self) -> Result<Delivery<Self::Message>> {
+        Delivery::from_incoming(msg::recv(self.recv_right())?)
+    }
+}
+
+impl<T> sealed::Outbound for Sender<T> {
+    fn send_right(&self) -> &SendRight {
+        &self.service
+    }
+}
+
+impl<T: Serialize> SendPort for Sender<T> {
+    type Message = T;
+}
+
+impl<T> sealed::Inbound for Receiver<T> {
+    fn recv_right(&self) -> &RecvRight {
+        &self.port
+    }
+
+    fn interest(&self) -> &Interest {
+        &self.interest
+    }
+}
+
+impl<T: DeserializeOwned> RecvPort for Receiver<T> {
+    type Message = T;
+}
+
+impl<T: Serialize> Sender<T> {
+    /// Finds the service.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NotRunning`] when nothing has bound the name — the
+    /// ordinary "paneru isn't running" that clients should report as such.
+    pub fn connect(service: &str) -> Result<Self> {
+        Ok(Self {
+            service: bootstrap::look_up(service)?,
+            _value: PhantomData,
+        })
     }
 }
 

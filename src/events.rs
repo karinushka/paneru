@@ -10,7 +10,9 @@ use crate::commands::Command;
 use crate::config::Config;
 use crate::ecs::state::StateQueryKind;
 use crate::errors::Result;
-use crate::platform::{Modifiers, ProcessSerialNumber, WinID, WorkspaceId, WorkspaceObserver};
+use crate::platform::{
+    EventLoopWaker, Modifiers, ProcessSerialNumber, WinID, WorkspaceId, WorkspaceObserver,
+};
 use crate::util::AXUIWrapper;
 
 /// Where a [`Event::WindowDestroyed`] came from, which decides how far it can be
@@ -239,6 +241,10 @@ pub enum Event {
 #[derive(Clone, Debug)]
 pub struct EventSender {
     tx: Sender<Event>,
+    /// Ends the Cocoa pump's wait once the event is queued. Shared, because a
+    /// wake-up posted by one producer serves every event queued before the pump
+    /// gets to look.
+    waker: Arc<EventLoopWaker>,
 }
 
 impl Event {
@@ -270,7 +276,18 @@ impl EventSender {
     /// A tuple containing the `EventSender` and `Receiver` for the created channel.
     pub fn new() -> (Self, Receiver<Event>) {
         let (tx, rx) = channel::<Event>();
-        (Self { tx }, rx)
+        (
+            Self {
+                tx,
+                waker: Arc::new(EventLoopWaker::new()),
+            },
+            rx,
+        )
+    }
+
+    /// The waker shared by every clone of this sender.
+    pub fn waker(&self) -> &Arc<EventLoopWaker> {
+        &self.waker
     }
 
     /// Sends an `Event` through the internal channel.
@@ -283,6 +300,10 @@ impl EventSender {
     ///
     /// `Ok(())` if the event is sent successfully, otherwise `Err(Error)` if the receiver has disconnected.
     pub fn send(&self, event: Event) -> Result<()> {
-        Ok(self.tx.send(event)?)
+        self.tx.send(event)?;
+        // After the queue push, so the pump cannot wake to an empty channel and
+        // go back to sleep past the event that woke it.
+        self.waker.wake();
+        Ok(())
     }
 }

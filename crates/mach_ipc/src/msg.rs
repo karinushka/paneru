@@ -30,7 +30,7 @@ use mach2::vm::mach_vm_deallocate;
 use mach2::vm_types::mach_vm_address_t;
 
 use crate::error::{Error, Result};
-use crate::rights::{SendOnceRight, SendRight};
+use crate::rights::{RecvRight, SendOnceRight, SendRight};
 
 /// A request carrying its payload out of line, and nothing else.
 #[repr(C, packed(4))]
@@ -110,111 +110,192 @@ pub struct Incoming {
     pub ports: Vec<SendRight>,
 }
 
-/// Sends one message carrying `payload` out of line.
+/// One outgoing message.
 ///
-/// `reply_port` is a receive right we own and want the answer on; the kernel
-/// manufactures a send-once right from it. `extra_port` is a receive right we
-/// are giving the peer lasting access to.
-///
-/// `timeout` of `Some(0)` makes this fail rather than wait when the peer's
-/// queue is full, which is what broadcasting to subscribers needs — a stalled
-/// subscriber must never stall the daemon.
-pub(crate) fn send(
+/// A struct rather than six positional arguments because four of them are
+/// optional ports and timeouts that read as a row of bare `None`s at the call
+/// site, where nothing says which is the reply port and which the carried one.
+pub(crate) struct Outgoing<'a> {
+    /// The port to send to.
+    ///
+    /// Raw only at this boundary: the constructors take the owned right, so a
+    /// caller never handles a bare port name and cannot hand over one whose
+    /// right has already been released.
     dest: mach_port_t,
+    /// What the destination right is, and so what the kernel does with it.
     dest_kind: Dest,
-    payload: &[u8],
+    /// The encoded value.
+    payload: &'a [u8],
+    /// A receive right to answer on, turning this into a request.
     reply_port: Option<mach_port_t>,
+    /// A further right to hand over, which is how a subscription is set up.
     extra_port: Option<mach_port_t>,
+    /// `Some(0)` fails rather than waits when the peer's queue is full — what
+    /// broadcasting needs, so a stalled subscriber cannot stall the daemon.
+    /// `None` waits for room.
     timeout: Option<u32>,
-) -> Result<()> {
-    let remote = match dest_kind {
-        Dest::CopySend => MACH_MSG_TYPE_COPY_SEND,
-        Dest::MoveSendOnce => MACH_MSG_TYPE_MOVE_SEND_ONCE,
-    };
-    let local = if reply_port.is_some() {
-        MACH_MSG_TYPE_MAKE_SEND_ONCE
-    } else {
-        0
-    };
+}
 
-    let size = if extra_port.is_some() {
-        size_of::<OolPortMsg>()
-    } else {
-        size_of::<OolMsg>()
-    };
+impl Outgoing<'_> {
+    /// The ordinary request/command: just a payload for the service.
+    pub(crate) fn new<'a>(service: &SendRight, payload: &'a [u8]) -> Outgoing<'a> {
+        Outgoing {
+            dest: service.as_raw(),
+            dest_kind: Dest::CopySend,
+            payload,
+            reply_port: None,
+            extra_port: None,
+            timeout: None,
+        }
+    }
 
-    let header = mach_msg_header_t {
-        msgh_bits: (remote | (local << 8)) | MACH_MSGH_BITS_COMPLEX,
-        msgh_size: u32::try_from(size).map_err(|_| Error::Malformed("message too large"))?,
-        msgh_remote_port: dest,
-        msgh_local_port: reply_port.unwrap_or(MACH_PORT_NULL),
-        msgh_voucher_port: MACH_PORT_NULL,
-        msgh_id: 0,
-    };
-    let body = mach_msg_body_t {
-        msgh_descriptor_count: if extra_port.is_some() { 2 } else { 1 },
-    };
-    // `deallocate: false` — the kernel copies out of our buffer and we keep it.
-    // Virtual copy so it is copy-on-write rather than an eager bulk copy, which
-    // is what makes a large window set cheap to send.
-    let descriptor = mach_msg_ool_descriptor_t::new(
-        payload.as_ptr() as *mut _,
-        false,
-        MACH_MSG_VIRTUAL_COPY,
-        mach_msg_size_t::try_from(payload.len())
-            .map_err(|_| Error::Malformed("payload too large"))?,
-    );
+    /// Asks for an answer on `port`, a right we own and keep.
+    #[must_use]
+    pub(crate) fn replying_to(mut self, port: &RecvRight) -> Self {
+        self.reply_port = Some(port.as_raw());
+        self
+    }
 
-    let mut with_port;
-    let mut without_port;
-    let (buffer, len): (*mut mach_msg_header_t, usize) = if let Some(port) = extra_port {
-        with_port = OolPortMsg {
-            header,
-            body,
-            payload: descriptor,
-            port: mach_msg_port_descriptor_t::new(port, MACH_MSG_TYPE_MAKE_SEND),
+    /// Carries a further right across, handing the peer a channel back.
+    #[must_use]
+    pub(crate) fn carrying(mut self, port: &RecvRight) -> Self {
+        self.extra_port = Some(port.as_raw());
+        self
+    }
+
+    /// Fails rather than waits when the peer's queue is full.
+    #[must_use]
+    pub(crate) fn without_waiting(mut self) -> Self {
+        self.timeout = Some(0);
+        self
+    }
+
+    /// An answer travelling back down a send-once right, which the send
+    /// consumes — hence taking it by value rather than by reference.
+    pub(crate) fn answering(right: SendOnceRight, payload: &[u8]) -> Outgoing<'_> {
+        Outgoing {
+            // `into_raw` because a successful send consumes the right; letting
+            // `Drop` release it as well would be a double free.
+            dest: right.into_raw(),
+            dest_kind: Dest::MoveSendOnce,
+            payload,
+            reply_port: None,
+            extra_port: None,
+            timeout: None,
+        }
+    }
+
+    /// Hands this message to the kernel, carrying its payload out of line.
+    pub(crate) fn send(self) -> Result<()> {
+        let Outgoing {
+            dest,
+            dest_kind,
+            payload,
+            reply_port,
+            extra_port,
+            timeout,
+        } = self;
+        let remote = match dest_kind {
+            Dest::CopySend => MACH_MSG_TYPE_COPY_SEND,
+            Dest::MoveSendOnce => MACH_MSG_TYPE_MOVE_SEND_ONCE,
         };
-        (std::ptr::addr_of_mut!(with_port).cast(), size)
-    } else {
-        without_port = OolMsg {
-            header,
-            body,
-            payload: descriptor,
+        let local = if reply_port.is_some() {
+            MACH_MSG_TYPE_MAKE_SEND_ONCE
+        } else {
+            0
         };
-        (std::ptr::addr_of_mut!(without_port).cast(), size)
-    };
 
-    let (options, timeout_ms) = match timeout {
-        Some(ms) => (MACH_SEND_MSG | MACH_SEND_TIMEOUT, ms),
-        None => (MACH_SEND_MSG, 0),
-    };
+        let size = if extra_port.is_some() {
+            size_of::<OolPortMsg>()
+        } else {
+            size_of::<OolMsg>()
+        };
 
-    // SAFETY: `buffer` points at a fully initialised message of `len` bytes
-    // whose header describes it, and `payload` outlives this call.
-    let rc = unsafe {
-        mach_msg(
-            buffer,
-            options,
-            u32::try_from(len).map_err(|_| Error::Malformed("message too large"))?,
-            0,
-            MACH_PORT_NULL,
-            timeout_ms,
-            MACH_PORT_NULL,
-        )
-    };
+        let header = mach_msg_header_t {
+            msgh_bits: (remote | (local << 8)) | MACH_MSGH_BITS_COMPLEX,
+            msgh_size: u32::try_from(size).map_err(|_| Error::Malformed("message too large"))?,
+            msgh_remote_port: dest,
+            msgh_local_port: reply_port.unwrap_or(MACH_PORT_NULL),
+            msgh_voucher_port: MACH_PORT_NULL,
+            msgh_id: 0,
+        };
+        let body = mach_msg_body_t {
+            msgh_descriptor_count: if extra_port.is_some() { 2 } else { 1 },
+        };
+        // `deallocate: false` — the kernel copies out of our buffer and we keep it.
+        // Virtual copy so it is copy-on-write rather than an eager bulk copy, which
+        // is what makes a large window set cheap to send.
+        let descriptor = mach_msg_ool_descriptor_t::new(
+            payload.as_ptr() as *mut _,
+            false,
+            MACH_MSG_VIRTUAL_COPY,
+            mach_msg_size_t::try_from(payload.len())
+                .map_err(|_| Error::Malformed("payload too large"))?,
+        );
 
-    if rc == KERN_SUCCESS {
-        Ok(())
-    } else {
-        Err(Error::from_kern(rc))
+        let mut with_port;
+        let mut without_port;
+        let (buffer, len): (*mut mach_msg_header_t, usize) = if let Some(port) = extra_port {
+            with_port = OolPortMsg {
+                header,
+                body,
+                payload: descriptor,
+                port: mach_msg_port_descriptor_t::new(port, MACH_MSG_TYPE_MAKE_SEND),
+            };
+            (std::ptr::addr_of_mut!(with_port).cast(), size)
+        } else {
+            without_port = OolMsg {
+                header,
+                body,
+                payload: descriptor,
+            };
+            (std::ptr::addr_of_mut!(without_port).cast(), size)
+        };
+
+        let (options, timeout_ms) = match timeout {
+            Some(ms) => (MACH_SEND_MSG | MACH_SEND_TIMEOUT, ms),
+            None => (MACH_SEND_MSG, 0),
+        };
+
+        // SAFETY: `buffer` points at a fully initialised message of `len` bytes
+        // whose header describes it, and `payload` outlives this call.
+        let rc = unsafe {
+            mach_msg(
+                buffer,
+                options,
+                u32::try_from(len).map_err(|_| Error::Malformed("message too large"))?,
+                0,
+                MACH_PORT_NULL,
+                timeout_ms,
+                MACH_PORT_NULL,
+            )
+        };
+
+        if rc == KERN_SUCCESS {
+            Ok(())
+        } else {
+            Err(Error::from_kern(rc))
+        }
     }
 }
 
 /// Receives without blocking, reporting [`Error::WouldBlock`] when the port is
 /// empty. This is the half of the async loop that does the actual work; the
 /// waiting is [`crate::poll::Watcher`]'s job.
-pub(crate) fn try_recv(port: mach_port_t) -> Result<Incoming> {
-    recv_with(port, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0)
+pub(crate) fn try_recv(port: &RecvRight) -> Result<Incoming> {
+    recv_with(port.as_raw(), MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0)
+}
+
+/// Receives, parking the calling thread in the kernel until a message arrives.
+///
+/// The same call as [`try_recv`] without `MACH_RCV_TIMEOUT`, which is what turns
+/// the immediate `WouldBlock` return into an indefinite wait. Callers that have
+/// nothing else to do meanwhile want this rather than a `block_on` around the
+/// async path: waiting here costs one kernel wait, where the async route has to
+/// arm a port watcher, build a waker and park the thread through an executor to
+/// reach the same place.
+pub(crate) fn recv(port: &RecvRight) -> Result<Incoming> {
+    recv_with(port.as_raw(), MACH_RCV_MSG, 0)
 }
 
 /// A message this protocol does not understand is reported as
@@ -363,8 +444,5 @@ fn parse(bytes: &[u8]) -> Result<Incoming> {
 
 /// Sends `payload` on a send-once right, consuming it.
 pub(crate) fn reply(right: SendOnceRight, payload: &[u8]) -> Result<()> {
-    // `into_raw` because a successful send consumes the right; letting `Drop`
-    // also release it would be a double free.
-    let name = right.into_raw();
-    send(name, Dest::MoveSendOnce, payload, None, None, None)
+    Outgoing::answering(right, payload).send()
 }

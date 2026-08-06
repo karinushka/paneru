@@ -19,7 +19,7 @@ use objc2_core_graphics::{
 use std::path::Path;
 use std::ptr::null_mut;
 use std::slice::from_raw_parts_mut;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use stdext::function_name;
 use tracing::{Level, debug, error, instrument, trace, warn};
 
@@ -714,6 +714,14 @@ fn existing_application_window_list(
     space_window_list_for_connection(cid, spaces, app.connection(), true)
 }
 
+/// Wall-clock ceiling on a single application's brute-force scan.
+///
+/// Generous next to a healthy scan (the round trips run in the tens of
+/// microseconds, so an app whose windows resolve finishes far inside it) and
+/// short enough that an app which will never resolve cannot hold up
+/// initialisation, which waits on these tasks before it completes.
+const BRUTEFORCE_BUDGET: Duration = Duration::from_millis(250);
+
 /// Attempts to find and add unresolved windows for a given application by brute-forcing `element_id` values.
 /// This is a workaround for macOS API limitations that do not return `AXUIElementRef` for windows on inactive spaces.
 ///
@@ -758,10 +766,27 @@ pub fn bruteforce_windows(
     let bytes = MAGIC.to_ne_bytes();
     data[0x8..0x8 + bytes.len()].copy_from_slice(&bytes);
 
+    // A window SkyLight lists but the app will never hand back an element for —
+    // a panel, a helper, anything non-AX — never clears from `window_list`, so
+    // the early exit below never fires and the scan runs all 0x7fff round trips
+    // every time that app starts. The budget is what stops one such window from
+    // costing a second of startup forever.
+    let deadline = Instant::now() + BRUTEFORCE_BUDGET;
+
     for element_id in 0..0x7fffu64 {
         // Every iteration is a synchronous cross-process AX round trip, so stop the
         // moment the last window we were looking for has been accounted for.
         if window_list.is_empty() {
+            break;
+        }
+        // Only checked periodically: `Instant::now` is itself a syscall on some
+        // paths, and at this granularity the overshoot is irrelevant.
+        if element_id.is_multiple_of(256) && Instant::now() >= deadline {
+            warn!(
+                "{pid}: giving up the brute-force scan at element {element_id} with {} window(s) \
+                 unresolved: {window_list:?}",
+                window_list.len()
+            );
             break;
         }
 

@@ -8,3 +8,4 @@ CLAUDE.md
 .direnv
 **/.DS_Store
 flamegraph.svg
+cargo-flamegraph.trace

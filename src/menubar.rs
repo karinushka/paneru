@@ -3,10 +3,9 @@ use bevy::ecs::system::{NonSendMut, Query, Res};
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSColor, NSControlStateValueOff, NSControlStateValueOn, NSMenu, NSMenuItem, NSStatusBar,
-    NSStatusItem, NSVariableStatusItemLength,
+    NSControlStateValueOff, NSControlStateValueOn, NSFont, NSImage, NSMenu, NSMenuItem,
+    NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
 };
-use objc2_core_foundation::CGFloat;
 use objc2_foundation::{NSObject, NSString};
 use tracing::warn;
 
@@ -108,9 +107,6 @@ pub struct MenuBarManager {
     current_label: Option<String>,
 }
 
-const STATUS_ITEM_BACKGROUND_ALPHA: CGFloat = 0.18;
-const STATUS_ITEM_CORNER_RADIUS: CGFloat = 5.0;
-
 #[derive(Debug, PartialEq)]
 struct WindowMenuEnablement {
     managed_actions: bool,
@@ -155,7 +151,7 @@ impl MenuBarManager {
     pub fn new_accessibility_required(mtm: MainThreadMarker, events: EventSender) -> Self {
         let mut manager = Self::new(mtm, events);
         manager.rebuild_accessibility_menu();
-        manager.show_label("Paneru !".to_owned());
+        manager.show_label("!".to_owned());
         manager
     }
 
@@ -213,9 +209,9 @@ impl MenuBarManager {
         }
 
         let label = if show_virtual_workspace {
-            format_virtual_workspace_label(virtual_index)
+            virtual_workspace_label(virtual_index)
         } else {
-            "Paneru".to_owned()
+            String::new()
         };
         self.show_label(label);
     }
@@ -269,23 +265,25 @@ impl MenuBarManager {
             return;
         }
 
-        let title = NSString::from_str(&label);
         let tooltip = NSString::from_str("Paneru window manager");
         let Some(button) = self.status_item.button(self.mtm) else {
             warn!("unable to update menu bar: status item has no button");
             return;
         };
 
-        button.setWantsLayer(true);
-        if let Some(layer) = button.layer() {
-            let background = NSColor::controlAccentColor()
-                .colorWithAlphaComponent(STATUS_ITEM_BACKGROUND_ALPHA)
-                .CGColor();
-            layer.setBackgroundColor(Some(&background));
-            layer.setCornerRadius(STATUS_ITEM_CORNER_RADIUS);
-            layer.setMasksToBounds(true);
+        if button.image().is_none() {
+            let icon = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                &NSString::from_str("fish.fill"),
+                None,
+            );
+            if let Some(icon) = &icon {
+                icon.setTemplate(true);
+            }
+            button.setImage(icon.as_deref());
+            button.setFont(Some(&NSFont::menuBarFontOfSize(8.0)));
+            button.setImageHugsTitle(true);
         }
-        button.setTitle(&title);
+        button.setTitle(&NSString::from_str(&label));
         button.setToolTip(Some(&tooltip));
         self.current_label = Some(label);
     }
@@ -324,8 +322,8 @@ pub fn update_menu_bar(
     );
 }
 
-pub(crate) fn format_virtual_workspace_label(virtual_index: u32) -> String {
-    format!("VW {}", virtual_index + 1)
+pub(crate) fn virtual_workspace_label(virtual_index: u32) -> String {
+    (virtual_index + 1).to_string()
 }
 
 fn normalized_width_percentages(widths: &[f64]) -> Vec<i32> {
@@ -344,14 +342,14 @@ fn normalized_width_percentages(widths: &[f64]) -> Vec<i32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        WindowMenuEnablement, format_virtual_workspace_label, normalized_width_percentages,
+        WindowMenuEnablement, normalized_width_percentages, virtual_workspace_label,
         window_menu_enablement,
     };
 
     #[test]
-    fn label_is_one_based() {
-        assert_eq!(format_virtual_workspace_label(0), "VW 1");
-        assert_eq!(format_virtual_workspace_label(4), "VW 5");
+    fn virtual_workspace_label_is_one_based() {
+        assert_eq!(virtual_workspace_label(0), "1");
+        assert_eq!(virtual_workspace_label(4), "5");
     }
 
     #[test]

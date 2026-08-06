@@ -2,6 +2,7 @@ use arc_swap::ArcSwap;
 use core::ptr::NonNull;
 use objc2::msg_send;
 use objc2::rc::Retained;
+use objc2::runtime::AnyObject;
 use objc2_app_kit::{NSEvent, NSEventType, NSTouch, NSTouchPhase};
 use objc2_core_foundation::{CFMachPort, CFRetained, CFRunLoop, kCFRunLoopCommonModes};
 use objc2_core_graphics::{
@@ -42,6 +43,46 @@ pub fn set_focused_passthrough(keys: Vec<(u8, Modifiers)>) {
 /// covering macOS momentum scroll that continues after finger lift.
 const VERTICAL_GESTURE_SCROLL_SUPPRESS: Duration = Duration::from_millis(1200);
 
+/// One finger, as a single gesture event saw it. Sampled out of the `NSTouch`
+/// set once per event rather than read repeatedly through Objective-C, since
+/// the matching in [`InputHandler::handle_swipe`] is quadratic in finger count.
+struct Touch {
+    /// Opaque per-finger token, compared with `isEqual:` to follow one finger
+    /// across events. `NSSet` iteration order is not stable, so position in the
+    /// set says nothing.
+    identity: Retained<AnyObject>,
+    x: f64,
+    y: f64,
+    /// Whether the finger landed this event, which suppresses delta tracking
+    /// until every finger is down.
+    began: bool,
+}
+
+impl Touch {
+    /// Samples the whole set in one pass.
+    fn sample(touches: &NSSet<NSTouch>) -> Vec<Self> {
+        touches
+            .iter()
+            .map(|touch| {
+                let position = touch.normalizedPosition();
+                Self {
+                    identity: touch.identity(),
+                    x: position.x,
+                    y: position.y,
+                    began: touch.phase() == NSTouchPhase::Began,
+                }
+            })
+            .collect()
+    }
+
+    /// Whether this and `other` are the same finger.
+    fn is(&self, other: &Self) -> bool {
+        // SAFETY: `identity` is documented as conforming to `NSObject`, so it
+        // answers `isEqual:`.
+        unsafe { msg_send![&*self.identity, isEqual: &*other.identity] }
+    }
+}
+
 /// Keybinds registered by the Lua runtime as `(keycode, modifiers, handler_id)`,
 /// shared lock-free with the event tap. Checked before the config bindings so a
 /// scripted bind can override a TOML one.
@@ -65,8 +106,8 @@ pub(super) struct InputHandler {
     events: Option<EventSender>,
     /// The application `Config` for looking up keybindings.
     config: Config,
-    /// Stores the previous touch positions for swipe gesture detection.
-    finger_position: Option<Retained<NSSet<NSTouch>>>,
+    /// The previous event's fingers, for swipe gesture detection.
+    finger_position: Option<Vec<Touch>>,
     /// The `CFMachPort` representing the `CGEventTap`.
     tap_port: Option<CFRetained<CFMachPort>>,
     /// Timestamp of the last swipe gesture event. Scroll wheel events
@@ -360,21 +401,22 @@ impl InputHandler {
             return false;
         }
 
-        let fingers = ns_event.allTouches();
+        let fingers = Touch::sample(&ns_event.allTouches());
         if !gesture_should_intercept(Some(configured_fingers), fingers.len()) {
             return false;
         }
-        if fingers.iter().any(|f| f.phase() == NSTouchPhase::Began)
-            && let Some(events) = &self.events
-        {
-            _ = events.send(Event::TouchpadDown);
+        if fingers.iter().any(|finger| finger.began) {
+            // A fresh gesture: nothing carries over from the last one.
+            if let Some(events) = &self.events {
+                _ = events.send(Event::TouchpadDown);
+            }
         }
 
         if fingers.len() < GESTURE_MINIMAL_FINGERS {
             return false;
         }
 
-        if fingers.iter().all(|f| f.phase() != NSTouchPhase::Began)
+        if fingers.iter().all(|finger| !finger.began)
             && let Some(prev) = &self.finger_position
         {
             // Match touches by identity rather than relying on NSSet
@@ -382,18 +424,9 @@ impl InputHandler {
             let (x_deltas, y_deltas): (Vec<f64>, Vec<f64>) = fingers
                 .iter()
                 .filter_map(|current| {
-                    let id = current.identity();
                     prev.iter()
-                        .find(|p| {
-                            let p_id = p.identity();
-                            let equal: bool = unsafe { msg_send![&*p_id, isEqual: &*id] };
-                            equal
-                        })
-                        .map(|p| {
-                            let dx = p.normalizedPosition().x - current.normalizedPosition().x;
-                            let dy = p.normalizedPosition().y - current.normalizedPosition().y;
-                            (dx, dy)
-                        })
+                        .find(|previous| previous.is(current))
+                        .map(|previous| (previous.x - current.x, previous.y - current.y))
                 })
                 .unzip();
 

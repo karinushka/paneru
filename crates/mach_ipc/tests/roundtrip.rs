@@ -8,6 +8,7 @@
 use futures_lite::StreamExt;
 use futures_lite::future::block_on;
 use paneru_mach_ipc::{Error, Receiver, Sender};
+use paneru_mach_ipc::{RecvPort, SendPort};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -106,7 +107,10 @@ fn a_reply_can_be_sent_from_another_thread() {
     .join()
     .expect("the replying thread");
 
-    assert_eq!(client.join().expect("the client thread").detail, "elsewhere");
+    assert_eq!(
+        client.join().expect("the client thread").detail,
+        "elsewhere"
+    );
 }
 
 /// Payloads travel out of line, so they have to hold well past anything that
@@ -132,11 +136,14 @@ fn a_large_value_survives() {
         Request::Shout(got) => assert_eq!(got, expected),
         other => panic!("expected a Shout, got {other:?}"),
     }
-    delivery.reply.expect("a reply channel").send(&Response {
-        ok: true,
-        detail: String::new(),
-    })
-    .expect("reply");
+    delivery
+        .reply
+        .expect("a reply channel")
+        .send(&Response {
+            ok: true,
+            detail: String::new(),
+        })
+        .expect("reply");
 
     assert!(client.join().expect("the client thread").ok);
 }
@@ -323,4 +330,58 @@ fn connecting_to_nothing_reports_not_running() {
         Ok(_) => panic!("connected to a service that does not exist"),
         Err(err) => panic!("expected NotRunning, got {err:?}"),
     }
+}
+
+/// The blocking half must behave exactly as the async half does, since the
+/// point of it is that a caller with nothing else to do can skip the executor
+/// without changing what the protocol looks like on the wire.
+#[test]
+fn a_blocking_call_gets_its_reply() {
+    let name = service_name("blocking-call");
+    let receiver = Receiver::<Request>::bind(&name).expect("bind");
+
+    let client_name = name.clone();
+    let client = std::thread::spawn(move || {
+        let sender = connect::<Request>(&client_name);
+        sender
+            .call_blocking::<Response>(&Request::Query("displays".into()))
+            .expect("a reply")
+    });
+
+    // Received through the blocking path too, so both ends of this test skip
+    // the executor entirely.
+    let delivery = receiver.recv_blocking().expect("receive");
+    assert_eq!(delivery.value, Request::Query("displays".into()));
+    delivery
+        .reply
+        .expect("the sender asked for a reply")
+        .send(&Response {
+            ok: true,
+            detail: "two".into(),
+        })
+        .expect("reply");
+
+    let response = client.join().expect("client thread");
+    assert!(response.ok);
+    assert_eq!(response.detail, "two");
+}
+
+#[test]
+fn a_blocking_send_arrives_without_a_reply_port() {
+    let name = service_name("blocking-send");
+    let receiver = Receiver::<Request>::bind(&name).expect("bind");
+
+    let client_name = name.clone();
+    std::thread::spawn(move || {
+        connect::<Request>(&client_name)
+            .send_blocking(&Request::Nothing)
+            .expect("send");
+    });
+
+    let delivery = receiver.recv_blocking().expect("receive");
+    assert_eq!(delivery.value, Request::Nothing);
+    assert!(
+        delivery.reply.is_none(),
+        "a send must not ask for an answer"
+    );
 }

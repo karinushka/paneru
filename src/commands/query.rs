@@ -12,7 +12,6 @@ use tracing::warn;
 
 use super::{Command, Operation};
 
-use paneru_shared_types::wire::Response;
 use crate::ecs::state::{
     PaneruActiveState, PaneruQueryState, PaneruVirtualWorkspaceState, PaneruWindowState,
     QueryStateParams, StateEvent,
@@ -20,6 +19,7 @@ use crate::ecs::state::{
 use crate::ecs::{ActiveWorkspaceMarker, FocusedMarker, Unmanaged};
 use crate::events::Event;
 use crate::platform::WinID;
+use paneru_shared_types::wire::Response;
 
 /// One connected `paneru subscribe` client.
 ///

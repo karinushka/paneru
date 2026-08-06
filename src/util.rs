@@ -46,7 +46,9 @@ use crate::{
     reason = "clamped to i32's range and rounded above, so the cast is exact"
 )]
 pub fn round_px(value: f64) -> i32 {
-    value.round().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
+    value
+        .round()
+        .clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
 }
 
 /// Returns `true` if macOS is currently in Dark Mode.

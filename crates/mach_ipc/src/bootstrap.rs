@@ -59,13 +59,8 @@ pub fn register(name: &str) -> Result<RecvRight> {
 
     // SAFETY: `cname` outlives the call and `send` names a live send right,
     // of which bootstrap takes a reference of its own.
-    let rc = unsafe {
-        bootstrap_register(
-            bootstrap_port,
-            cname.as_ptr().cast_mut(),
-            send.as_raw(),
-        )
-    };
+    let rc =
+        unsafe { bootstrap_register(bootstrap_port, cname.as_ptr().cast_mut(), send.as_raw()) };
 
     if rc == KERN_SUCCESS {
         Ok(right)

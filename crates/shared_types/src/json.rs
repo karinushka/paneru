@@ -60,10 +60,7 @@ mod tests {
 
     #[test]
     fn a_unit_variant_is_just_its_tag() {
-        assert_eq!(
-            flatten_tag(json!("applied"), "outcome"),
-            json!("applied")
-        );
+        assert_eq!(flatten_tag(json!("applied"), "outcome"), json!("applied"));
         assert_eq!(
             flatten_tag(json!({"applied": null}), "outcome"),
             json!({"outcome": "applied"})

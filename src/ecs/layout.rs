@@ -45,8 +45,7 @@ type StripPlacements<'w, 's> = Query<
 
 /// Displays paired with the Dock's current edge, which is what turns a display's
 /// raw bounds into the usable viewport.
-type DisplayViewports<'w, 's> =
-    Query<'w, 's, (&'static Display, Option<&'static DockPosition>)>;
+type DisplayViewports<'w, 's> = Query<'w, 's, (&'static Display, Option<&'static DockPosition>)>;
 
 /// The read-then-write pair [`sync_tab_group_frames`] needs: `p0` yields the
 /// windows whose frame moved this tick, `p1` writes the new frame onto their tab
@@ -955,10 +954,7 @@ fn binpack_heights(heights: &[i32], min_height: i32, total_height: i32) -> Optio
     Some(output)
 }
 #[instrument(level = Level::DEBUG, skip_all)]
-fn sync_tab_group_frames(
-    mut windows: TabGroupFrames,
-    workspaces: Query<&LayoutStrip>,
-) {
+fn sync_tab_group_frames(mut windows: TabGroupFrames, workspaces: Query<&LayoutStrip>) {
     let updates = windows
         .p0()
         .into_iter()
@@ -990,10 +986,7 @@ fn sync_tab_group_frames(
 
 /// Watches for size changes to windows and if they are changed, signals to the layout strip.
 #[instrument(level = Level::DEBUG, skip_all)]
-fn layout_sizes_changed(
-    changed_sizes: ResizedWindows,
-    workspaces: Query<&mut LayoutStrip>,
-) {
+fn layout_sizes_changed(changed_sizes: ResizedWindows, workspaces: Query<&mut LayoutStrip>) {
     let changed_entities = changed_sizes.iter().collect::<EntityHashSet>();
     workspaces.into_iter().for_each(|mut strip| {
         if strip_has_changed_window(&strip, &changed_entities) {

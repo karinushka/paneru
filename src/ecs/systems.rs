@@ -14,7 +14,7 @@ use bevy::time::Time;
 use objc2_foundation::NSPoint;
 use std::collections::HashSet;
 use std::pin::Pin;
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::time::{Duration, Instant};
 use tracing::{Level, debug, error, info, instrument, trace, warn};
 
@@ -465,10 +465,7 @@ pub(super) fn add_launched_application(
 ///
 /// * `cleanup` - A `Populated` query for `(Entity, Has<FreshMarker>, &Timeout)` components, targeting `BProcess` or `Application` entities.
 /// * `commands` - Bevy commands to remove components.
-pub(super) fn fresh_marker_cleanup(
-    cleanup: TimedOutSpawns,
-    mut commands: Commands,
-) {
+pub(super) fn fresh_marker_cleanup(cleanup: TimedOutSpawns, mut commands: Commands) {
     for (entity, fresh, _) in cleanup {
         if !fresh && let Ok(mut entity_commands) = commands.get_entity(entity) {
             // Process was ready before the timer finished.
@@ -687,8 +684,16 @@ pub(crate) fn pump_events(
             break false;
         }
 
-        // Repeatedly drain the events until timeout.
-        match incoming_events.recv_timeout(Duration::from_millis(1)) {
+        // Polled before any timed wait: the Cocoa pump above has already done
+        // this frame's sleeping, so a quiet channel used to cost another
+        // millisecond on top of it — doubling the floor on a frame that is
+        // trying to turn around in one.
+        let received = match incoming_events.try_recv() {
+            Err(TryRecvError::Empty) => incoming_events.recv_timeout(Duration::from_millis(1)),
+            Err(TryRecvError::Disconnected) => Err(RecvTimeoutError::Disconnected),
+            Ok(event) => Ok(event),
+        };
+        match received {
             Ok(Event::Exit) | Err(RecvTimeoutError::Disconnected) => {
                 exit.write(AppExit::Success);
                 return;

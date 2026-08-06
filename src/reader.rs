@@ -30,7 +30,6 @@ use tracing::{error, warn};
 use crate::errors::Result;
 use crate::events::{Event, EventSender, Reply};
 
-
 /// `CommandReader` owns the service port and feeds what arrives on it into the
 /// world.
 pub struct CommandReader {
@@ -105,9 +104,8 @@ impl CommandReader {
             }
 
             Request::Query(kind) => {
-                answer(events, reply, "state query", move |respond_to| Event::StateQuery {
-                    kind,
-                    respond_to,
+                answer(events, reply, "state query", move |respond_to| {
+                    Event::StateQuery { kind, respond_to }
                 });
             }
             Request::WindowSet => {
@@ -203,4 +201,3 @@ fn answer(
         })
         .detach();
 }
-

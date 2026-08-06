@@ -760,12 +760,23 @@ mod tests {
             &world,
         );
 
-        assert_eq!(world.get("string"), Some(ScriptValue::from(serde_json::json!("hello"))));
-        assert_eq!(world.get("number"), Some(ScriptValue::from(serde_json::json!(42))));
-        assert_eq!(world.get("bool"), Some(ScriptValue::from(serde_json::json!(true))));
+        assert_eq!(
+            world.get("string"),
+            Some(ScriptValue::from(serde_json::json!("hello")))
+        );
+        assert_eq!(
+            world.get("number"),
+            Some(ScriptValue::from(serde_json::json!(42)))
+        );
+        assert_eq!(
+            world.get("bool"),
+            Some(ScriptValue::from(serde_json::json!(true)))
+        );
         assert_eq!(
             world.get("table"),
-            Some(ScriptValue::from(serde_json::json!({ "a": 1, "nested": ["x", "y"] })))
+            Some(ScriptValue::from(
+                serde_json::json!({ "a": 1, "nested": ["x", "y"] })
+            ))
         );
     }
 
@@ -780,7 +791,10 @@ mod tests {
             "#,
             &world,
         );
-        assert_eq!(world.get("echo"), Some(ScriptValue::from(serde_json::json!("7/term"))));
+        assert_eq!(
+            world.get("echo"),
+            Some(ScriptValue::from(serde_json::json!("7/term")))
+        );
     }
 
     #[test]
@@ -795,7 +809,10 @@ mod tests {
             &world,
         );
         assert_eq!(world.get("gone"), None);
-        assert_eq!(world.get("was_nil"), Some(ScriptValue::from(serde_json::json!(true))));
+        assert_eq!(
+            world.get("was_nil"),
+            Some(ScriptValue::from(serde_json::json!(true)))
+        );
     }
 
     #[test]
@@ -809,8 +826,14 @@ mod tests {
             "#,
             &world,
         );
-        assert_eq!(world.get("count"), Some(ScriptValue::from(serde_json::json!(3))));
-        assert_eq!(world.get("returned"), Some(ScriptValue::from(serde_json::json!(3))));
+        assert_eq!(
+            world.get("count"),
+            Some(ScriptValue::from(serde_json::json!(3)))
+        );
+        assert_eq!(
+            world.get("returned"),
+            Some(ScriptValue::from(serde_json::json!(3)))
+        );
     }
 
     #[test]
@@ -850,7 +873,10 @@ mod tests {
         // 101, not 11: the increment was re-run against the value that landed
         // first, so nothing was lost. A get-then-set would have stored 11 and
         // silently thrown the other write away.
-        assert_eq!(world.get("count"), Some(ScriptValue::from(serde_json::json!(101))));
+        assert_eq!(
+            world.get("count"),
+            Some(ScriptValue::from(serde_json::json!(101)))
+        );
     }
 
     #[test]

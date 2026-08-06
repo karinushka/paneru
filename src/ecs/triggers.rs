@@ -39,12 +39,8 @@ use crate::util::{round_px, symlink_target};
 
 /// The display currently in front, paired with the Dock's edge — together they
 /// give the usable viewport a window has to be fitted into.
-type ActiveDisplayViewport<'w, 's> = Single<
-    'w,
-    's,
-    (&'static Display, Option<&'static DockPosition>),
-    With<ActiveDisplayMarker>,
->;
+type ActiveDisplayViewport<'w, 's> =
+    Single<'w, 's, (&'static Display, Option<&'static DockPosition>), With<ActiveDisplayMarker>>;
 
 /// Computes the passthrough keybinding set for the given window/app and
 /// publishes it to the input thread. Called on focus change and config reload.

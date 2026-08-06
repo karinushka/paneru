@@ -179,7 +179,9 @@ impl QueryState {
                 QueryPayload::VirtualWorkspaces(self.virtual_workspaces.clone())
             }
             StateQueryKind::Active => QueryPayload::Active(Box::new(self.active.clone())),
-            StateQueryKind::OnScreen => QueryPayload::OnScreen(self.on_screen().into_iter().cloned().collect()),
+            StateQueryKind::OnScreen => {
+                QueryPayload::OnScreen(self.on_screen().into_iter().cloned().collect())
+            }
         }
     }
 

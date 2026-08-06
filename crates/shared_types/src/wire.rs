@@ -164,7 +164,9 @@ mod tests {
     #[test]
     fn every_response_survives_the_wire() {
         round_trip(&Response::Query(QueryPayload::Active(Box::default())));
-        round_trip(&Response::Query(QueryPayload::VirtualWorkspaces(Vec::new())));
+        round_trip(&Response::Query(
+            QueryPayload::VirtualWorkspaces(Vec::new()),
+        ));
         round_trip(&Response::Query(QueryPayload::OnScreen(Vec::new())));
         round_trip(&Response::ScriptState(ScriptStateResponse::Value(Some(
             ScriptValue::Str("hello".to_string()),
@@ -238,7 +240,12 @@ mod tests {
     /// plus `"query\0active\0--json\0"`.
     #[test]
     fn a_request_is_small() {
-        let bytes = postcard::to_allocvec(&Request::Query(StateQueryKind::Active)).expect("encodes");
-        assert!(bytes.len() <= 4, "a query request took {} bytes", bytes.len());
+        let bytes =
+            postcard::to_allocvec(&Request::Query(StateQueryKind::Active)).expect("encodes");
+        assert!(
+            bytes.len() <= 4,
+            "a query request took {} bytes",
+            bytes.len()
+        );
     }
 }

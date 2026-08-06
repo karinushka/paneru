@@ -1206,9 +1206,7 @@ pub(crate) fn show_active_workspace(
 /// Gaps in the index sequence are preserved — only duplicates get
 /// renumbered. Single-strip configurations at non-zero indices stay
 /// where they are.
-fn renumber_virtual_indexes(
-    mut set: RenumberStrips,
-) {
+fn renumber_virtual_indexes(mut set: RenumberStrips) {
     let affected: HashSet<WorkspaceId> = set.p0().iter().map(LayoutStrip::id).collect();
     if affected.is_empty() {
         return;

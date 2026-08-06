@@ -97,8 +97,9 @@ impl From<ScriptValue> for serde_json::Value {
             ScriptValue::Int(value) => Self::Number(value.into()),
             // A non-finite float has no JSON spelling at all, so it renders as
             // null rather than producing a document nothing can parse.
-            ScriptValue::Float(value) => serde_json::Number::from_f64(value)
-                .map_or(Self::Null, Self::Number),
+            ScriptValue::Float(value) => {
+                serde_json::Number::from_f64(value).map_or(Self::Null, Self::Number)
+            }
             ScriptValue::Str(value) => Self::String(value),
             ScriptValue::List(values) => Self::Array(values.into_iter().map(Self::from).collect()),
             ScriptValue::Map(entries) => Self::Object(

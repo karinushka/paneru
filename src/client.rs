@@ -12,14 +12,13 @@
 //! function separately parking the same thread.
 
 use futures_lite::StreamExt;
-use paneru_mach_ipc::Sender;
+use paneru_mach_ipc::{SendPort, Sender};
 use paneru_shared_types::state::{StateEvent, StateQueryKind};
 use paneru_shared_types::wire::{
     QueryPayload, Request, Response, ScriptStateRequest, ScriptStateResponse, service_name,
 };
 
 use crate::errors::{Error, Result};
-
 
 /// Connects to the running daemon.
 ///
@@ -30,9 +29,7 @@ use crate::errors::{Error, Result};
 /// bare `ENOENT` on a socket path.
 fn connect() -> Result<Sender<Request>> {
     Sender::connect(&service_name()).map_err(|err| match err {
-        paneru_mach_ipc::Error::NotRunning => {
-            Error::Generic("paneru is not running".to_string())
-        }
+        paneru_mach_ipc::Error::NotRunning => Error::Generic("paneru is not running".to_string()),
         other => Error::from(other),
     })
 }
@@ -85,9 +82,9 @@ pub async fn script_state(request: ScriptStateRequest) -> Result<String> {
         ScriptStateResponse::Value(value) => serde_json::json!({
             "value": value.map(serde_json::Value::from),
         }),
-        ScriptStateResponse::Write(outcome) => {
-            outcome.to_json().map_err(|err| Error::Generic(err.to_string()))?
-        }
+        ScriptStateResponse::Write(outcome) => outcome
+            .to_json()
+            .map_err(|err| Error::Generic(err.to_string()))?,
     };
     Ok(value.to_string())
 }
@@ -122,7 +119,10 @@ pub async fn subscribe() -> Result<()> {
         let mut stdout = std::io::stdout();
         // Flush per event: a subscriber is usually piped into something reading
         // line by line, and a buffered stream would stall it.
-        if writeln!(stdout, "{line}").and_then(|()| stdout.flush()).is_err() {
+        if writeln!(stdout, "{line}")
+            .and_then(|()| stdout.flush())
+            .is_err()
+        {
             // Whatever we were piped into has closed; nothing to report.
             break;
         }

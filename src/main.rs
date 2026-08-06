@@ -39,13 +39,13 @@ embed_plist::embed_info_plist!("../assets/Info.plist");
 
 use events::{Event, EventSender};
 
+use client::ClientCommand;
 use ecs::state::StateQueryKind;
 use errors::Result;
-use platform::service;
-use client::ClientCommand;
 use paneru_shared_types::script_state::ScriptStateWrite;
 use paneru_shared_types::script_value::ScriptValue;
 use paneru_shared_types::wire::ScriptStateRequest;
+use platform::service;
 use reader::CommandReader;
 
 use crate::ecs::setup_bevy_app;
@@ -315,10 +315,9 @@ impl StateCmd {
 
         Ok(match self {
             StateCmd::Get { key } => ScriptStateRequest::Get { key: key.clone() },
-            StateCmd::Set { key, value } => ScriptStateRequest::Write(ScriptStateWrite::set(
-                key.clone(),
-                parse(value)?,
-            )),
+            StateCmd::Set { key, value } => {
+                ScriptStateRequest::Write(ScriptStateWrite::set(key.clone(), parse(value)?))
+            }
             StateCmd::Remove { key } => {
                 ScriptStateRequest::Write(ScriptStateWrite::remove(key.clone()))
             }

@@ -27,8 +27,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, error, warn};
 
 use crate::events::Event;
-use paneru_shared_types::wire::{Response, ScriptStateRequest, ScriptStateResponse};
 use paneru_shared_types::script_state::{ScriptState, ScriptStateWrite, WriteOutcome};
+use paneru_shared_types::wire::{Response, ScriptStateRequest, ScriptStateResponse};
 
 pub const SCRIPT_STATE_FILE_NAME: &str = "script-state.json";
 const SUPPORTED_SCRIPT_STATE_VERSION: u32 = 1;
@@ -208,9 +208,9 @@ pub fn script_state_handler(
 
 fn answer(store: &mut ScriptStateStore, request: ScriptStateRequest) -> Response {
     match request {
-        ScriptStateRequest::Get { key } => Response::ScriptState(ScriptStateResponse::Value(
-            store.state().get(&key).cloned(),
-        )),
+        ScriptStateRequest::Get { key } => {
+            Response::ScriptState(ScriptStateResponse::Value(store.state().get(&key).cloned()))
+        }
         // A conflict is not an error: a client's `mutate` re-runs its function
         // against what it found and tries again, exactly as a script's does. So
         // it travels as an outcome rather than a failure.
@@ -289,7 +289,10 @@ mod tests {
         let removed = ScriptStateWrite::remove("pad.a".to_string());
         assert!(applied(&mut store, &removed));
         assert!(store.state().get("pad.a").is_none());
-        assert_eq!(store.state().get("pad.b"), Some(&ScriptValue::from(json!(2))));
+        assert_eq!(
+            store.state().get("pad.b"),
+            Some(&ScriptValue::from(json!(2)))
+        );
 
         // Removing what is not there changes nothing, so nothing re-reads.
         assert!(!applied(&mut store, &removed));
@@ -323,14 +326,21 @@ mod tests {
             store.apply(&fresh).expect("accepted"),
             WriteOutcome::Applied { changed: true }
         );
-        assert_eq!(store.state().get("counter"), Some(&ScriptValue::from(json!(2))));
+        assert_eq!(
+            store.state().get("counter"),
+            Some(&ScriptValue::from(json!(2)))
+        );
     }
 
     #[test]
     fn a_compare_and_set_can_expect_an_absent_key() {
         let mut store = ScriptStateStore::default();
 
-        let first = ScriptStateWrite::compare_and_set("fresh".to_string(), None, Some(ScriptValue::from(json!("a"))));
+        let first = ScriptStateWrite::compare_and_set(
+            "fresh".to_string(),
+            None,
+            Some(ScriptValue::from(json!("a"))),
+        );
         assert_eq!(
             store.apply(&first).expect("accepted"),
             WriteOutcome::Applied { changed: true }

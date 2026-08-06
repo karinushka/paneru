@@ -31,6 +31,7 @@ use std::task::Waker;
 use mach2::port::mach_port_t;
 
 use crate::error::{Error, Result};
+use crate::rights::RecvRight;
 
 /// The process-wide kqueue and the wakers waiting on it.
 struct Reactor {
@@ -209,7 +210,10 @@ impl Reactor {
 
 /// A port's registration with the reactor, torn down when the owner is dropped.
 #[derive(Debug)]
-pub(crate) struct Interest {
+/// Public only so the sealed `Inbound` supertrait can name it; nothing outside
+/// this crate can construct or use one.
+#[doc(hidden)]
+pub struct Interest {
     port: mach_port_t,
     /// Whether a one-shot registration is currently armed, so `Drop` only
     /// bothers the kqueue when there is something to remove.
@@ -217,9 +221,9 @@ pub(crate) struct Interest {
 }
 
 impl Interest {
-    pub(crate) fn new(port: mach_port_t) -> Self {
+    pub(crate) fn new(port: &RecvRight) -> Self {
         Self {
-            port,
+            port: port.as_raw(),
             armed: std::cell::Cell::new(false),
         }
     }

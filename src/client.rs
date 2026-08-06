@@ -12,7 +12,7 @@
 //! function separately parking the same thread.
 
 use futures_lite::StreamExt;
-use paneru_mach_ipc::Sender;
+use paneru_mach_ipc::{SendPort, Sender};
 use paneru_shared_types::state::{StateEvent, StateQueryKind};
 use paneru_shared_types::wire::{
     QueryPayload, Request, Response, ScriptStateRequest, ScriptStateResponse, service_name,

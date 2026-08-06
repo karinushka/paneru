@@ -11,15 +11,17 @@
 //! `paneru.set_service_name("com.example.paneru")`.
 //!
 //! Every call here is a blocking round trip, because Lua's C API is synchronous
-//! and a callback cannot yield into an executor. [`call`] is the one place that
-//! drives a future, so the blocking happens once per request rather than being
-//! scattered through every function.
+//! and a callback cannot yield into an executor. That is what
+//! [`paneru_mach_ipc`]'s `*_blocking` half is for: the wait is one kernel wait,
+//! where driving the async half with a `block_on` would arm a port watcher,
+//! build a waker and park the thread through an executor only to end up blocked
+//! on the same message.
 
 use std::rc::Rc;
 use std::sync::{LazyLock, Mutex};
 
 use mlua::prelude::*;
-use paneru_mach_ipc::Sender;
+use paneru_mach_ipc::{RecvPort, SendPort, Sender};
 use paneru_shared_types::commands::Command;
 use paneru_shared_types::script_state::ScriptStateWrite;
 use paneru_shared_types::script_value::ScriptValue;
@@ -58,8 +60,7 @@ fn connect() -> LuaResult<Sender<Request>> {
 /// a failure instead of as a silent no-op.
 fn call(request: &Request) -> LuaResult<Response> {
     let sender = connect()?;
-    let response: Response =
-        futures_lite::future::block_on(sender.call(request)).map_err(LuaError::external)?;
+    let response: Response = sender.call_blocking(request).map_err(LuaError::external)?;
 
     match response {
         Response::Error(message) => Err(LuaError::RuntimeError(message)),
@@ -70,7 +71,7 @@ fn call(request: &Request) -> LuaResult<Response> {
 /// Sends a request that expects no answer.
 fn send(request: &Request) -> LuaResult<()> {
     let sender = connect()?;
-    futures_lite::future::block_on(sender.send(request)).map_err(LuaError::external)
+    sender.send_blocking(request).map_err(LuaError::external)
 }
 
 /// The primitive the shared API is built on: send the command to the daemon
@@ -302,8 +303,6 @@ fn subscribe(
     lua: &Lua,
     (event, callback, opts): (LuaValue, LuaFunction, Option<LuaTable>),
 ) -> LuaResult<bool> {
-    use futures_lite::StreamExt;
-
     let events = read_events(&event)?;
     let decode = opts
         .as_ref()
@@ -311,16 +310,12 @@ fn subscribe(
         .unwrap_or(true);
 
     let sender = connect()?;
-    let stream =
-        futures_lite::future::block_on(sender.subscribe::<StateEvent>(&Request::Subscribe))
-            .map_err(LuaError::external)?;
-    let mut stream = std::pin::pin!(stream);
+    let stream = sender
+        .subscribe_blocking::<StateEvent>(&Request::Subscribe)
+        .map_err(LuaError::external)?;
 
     loop {
-        let delivery = futures_lite::future::block_on(stream.next());
-        let Some(delivery) = delivery else { break };
-
-        let event = match delivery {
+        let event = match stream.recv_blocking() {
             Ok(delivery) => delivery.value,
             // The daemon is gone; the subscription is over, which is how this
             // ends when the window manager stops.

@@ -42,7 +42,6 @@ pub static AX_NOTIFICATIONS: LazyLock<Vec<&str>> = LazyLock::new(|| {
         accessibility_sys::kAXFocusedUIElementChangedNotification,
         accessibility_sys::kAXWindowMovedNotification,
         accessibility_sys::kAXWindowResizedNotification,
-        accessibility_sys::kAXTitleChangedNotification,
         accessibility_sys::kAXMenuOpenedNotification,
         accessibility_sys::kAXMenuClosedNotification,
     ]
@@ -56,6 +55,12 @@ pub static AX_WINDOW_NOTIFICATIONS: LazyLock<Vec<&str>> = LazyLock::new(|| {
         accessibility_sys::kAXUIElementDestroyedNotification,
         accessibility_sys::kAXWindowMiniaturizedNotification,
         accessibility_sys::kAXWindowDeminiaturizedNotification,
+        // Observed per window rather than per application. On the application
+        // observer this arrives with the application as its element, which has
+        // no window id to resolve, so it could only be dropped — which left
+        // `WindowOS::title` caching a title it was never told to invalidate.
+        // A window observer already knows which window it speaks for.
+        accessibility_sys::kAXTitleChangedNotification,
     ]
 });
 
@@ -395,21 +400,16 @@ impl ObserverContext {
     /// * `notification` - The name of the accessibility notification as a `&str`.
     /// * `element` - The `AXUIElementRef` associated with the notification.
     fn notify_app(&self, notification: &str, element: AXUIElementRef) {
-        match notification {
-            accessibility_sys::kAXTitleChangedNotification => {
-                // TODO: WindowTitleChanged does not have a valid window as its element reference.
+        // Handled before the window-id lookup below: a creation notification is
+        // the one case whose element is not yet a window paneru knows about.
+        if notification == accessibility_sys::kAXCreatedNotification {
+            let Ok(element) = AXUIWrapper::retain(element).inspect_err(|err| {
+                error!("invalid element {element:?}: {err}");
+            }) else {
                 return;
-            }
-            accessibility_sys::kAXCreatedNotification => {
-                let Ok(element) = AXUIWrapper::retain(element).inspect_err(|err| {
-                    error!("invalid element {element:?}: {err}");
-                }) else {
-                    return;
-                };
-                _ = self.events.send(Event::WindowCreated { element });
-                return;
-            }
-            _ => (),
+            };
+            _ = self.events.send(Event::WindowCreated { element });
+            return;
         }
 
         let Ok(window_id) =
@@ -453,6 +453,9 @@ impl ObserverContext {
                 window_id,
                 source: DestroySource::Accessibility,
             },
+            accessibility_sys::kAXTitleChangedNotification => {
+                Event::WindowTitleChanged { window_id }
+            }
 
             _ => {
                 error!("unhandled window notification: {notification:?}");

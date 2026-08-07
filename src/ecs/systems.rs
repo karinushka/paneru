@@ -51,6 +51,21 @@ type TimedOutSpawns<'w, 's> = Populated<
 /// Windows as the resize handler rewrites them: the OS handle to re-read the
 /// frame from, the origin it is measured against, the size to overwrite, and
 /// whether the window is ours to lay out at all.
+/// Windows as [`window_moved_update_frame`] sees them: the element to re-read,
+/// the origin to update, and the marker saying we are the ones moving it.
+type MovableWindows<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut Window,
+        &'static mut Position,
+        &'static Bounds,
+        Option<&'static Unmanaged>,
+        Has<RepositionMarker>,
+    ),
+    Without<LayoutStrip>,
+>;
+
 type ResizableWindows<'w, 's> = Query<
     'w,
     's,
@@ -60,6 +75,7 @@ type ResizableWindows<'w, 's> = Query<
         &'static Position,
         &'static mut Bounds,
         Option<&'static Unmanaged>,
+        Has<ResizeMarker>,
     ),
     Without<LayoutStrip>,
 >;
@@ -681,7 +697,14 @@ pub(crate) fn pump_events(
         return;
     };
 
+    // Deliberately *not* paced to a frame period. Holding the pass until a
+    // display frame elapsed cut the redundant passes as intended, but it also
+    // put a floor under how soon a pass could start: an event landing just after
+    // the pump returned waited out the rest of the period before anything moved.
+    // That reads as latency, and latency is worse than the redundant work it
+    // was buying back.
     platform.pump_cocoa_event_loop(f64::from(*timeout) / 1000.0);
+
     let deadline = Instant::now() + PUMP_BUDGET;
     let mut received_events = Vec::new();
     let mut pending_mouse = None;
@@ -759,13 +782,22 @@ pub(super) fn window_resized_update_frame(
             continue;
         };
 
-        let Some((mut window, entity, position, mut bounds, unmanaged)) = windows
+        let Some((mut window, entity, position, mut bounds, unmanaged, resizing)) = windows
             .iter_mut()
             .find(|window| window.0.id() == *window_id)
         else {
             continue;
         };
         if matches!(unmanaged, Some(Unmanaged::Minimized | Unmanaged::Hidden)) {
+            continue;
+        }
+        // Our own resize, echoed back. `commit_window_size` asked for this size
+        // and `animate_resize_entities` is still stepping towards it, so reading
+        // the app's answer in and nudging the strip by the difference fights the
+        // animation that is producing that difference — every window in the
+        // strip at once, whenever a new one arrives and the layout reflows.
+        // Only a resize we did not initiate says anything new.
+        if resizing {
             continue;
         }
         let Ok(new_frame) = window.update_frame() else {
@@ -809,7 +841,7 @@ pub(super) fn window_resized_update_frame(
         let diff = old_frame.min.y - new_frame.min.y;
         if diff.abs() > 0
             && let Some(above_entity) = strip.above(entity)
-            && let Ok((_, _, _, mut above_bounds, _)) = windows.get_mut(above_entity)
+            && let Ok((_, _, _, mut above_bounds, _, _)) = windows.get_mut(above_entity)
             && above_bounds.0.y - diff > 200
         {
             above_bounds.0.y -= diff;
@@ -818,25 +850,30 @@ pub(super) fn window_resized_update_frame(
 }
 
 #[instrument(level = Level::TRACE, skip_all)]
-pub(super) fn window_moved_update_frame(
+pub(crate) fn window_moved_update_frame(
     mut messages: MessageReader<Event>,
-    mut windows: Query<
-        (&mut Window, &mut Position, &Bounds, Option<&Unmanaged>),
-        Without<LayoutStrip>,
-    >,
+    mut windows: MovableWindows,
 ) {
     for event in messages.read() {
         let Event::WindowMoved { window_id } = event else {
             continue;
         };
 
-        let Some((mut window, mut position, bounds, unmanaged)) = windows
+        let Some((mut window, mut position, bounds, unmanaged, repositioning)) = windows
             .iter_mut()
             .find(|window| window.0.id() == *window_id)
         else {
             continue;
         };
         if matches!(unmanaged, Some(Unmanaged::Minimized | Unmanaged::Hidden)) {
+            continue;
+        }
+        // Our own move, echoed back. `animate_entities` lerps from whatever
+        // `Position` currently holds, so writing the app's observed frame into
+        // it while the animation is running restarts each step from wherever the
+        // app had got to — behind, for anything that does not move instantly.
+        // The animation then re-issues the move, and the two chase each other.
+        if repositioning {
             continue;
         }
         let Ok(new_frame) = window.update_frame() else {

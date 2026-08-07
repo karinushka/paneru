@@ -19,7 +19,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use mlua::{IntoLua, Lua, LuaSerdeExt, Table, Value};
-use tracing::info;
+use tracing::{error, info};
 
 use paneru_lua as shared;
 use paneru_shared_types::script_state::{ScriptStateWrite, WriteOutcome};
@@ -31,6 +31,55 @@ use crate::commands::Command;
 use crate::config::{Config, config_from_lua, resolve_chord};
 use crate::ecs::state::StateQueryKind;
 use paneru_shared_types::windowset_lua::returned_ops;
+
+/// One `paneru.exec` call: what to run, and where the answer goes.
+struct ExecJob {
+    program: String,
+    args: Vec<String>,
+    reply: async_channel::Sender<std::io::Result<std::process::Output>>,
+}
+
+/// How many `paneru.exec` commands may be in flight at once.
+///
+/// A queue with a fixed set of workers rather than a thread per call: a handler
+/// bound to a high-frequency event can reach `exec` at the event rate, and
+/// spawning a thread each time would trade one cost for another. Small because
+/// these are waits on other processes, not work — four is enough that one slow
+/// command does not hold up the rest.
+const EXEC_WORKERS: usize = 4;
+
+/// Starts the pool that runs `paneru.exec` commands.
+///
+/// Every worker takes from the same queue, so a job goes to whichever is free.
+/// That does mean two commands issued back to back can finish out of order; a
+/// script that needs one to land before the next should await the first, which
+/// is what the async binding is for.
+///
+/// The workers end when the returned sender is dropped, which is when the Lua
+/// state goes — a reload gets a fresh pool rather than inheriting a queue of
+/// work the old script asked for.
+fn spawn_exec_pool() -> async_channel::Sender<ExecJob> {
+    let (jobs, queue) = async_channel::unbounded::<ExecJob>();
+    for worker in 0..EXEC_WORKERS {
+        let queue = queue.clone();
+        let spawned = std::thread::Builder::new()
+            .name(format!("paneru-lua-exec-{worker}"))
+            .spawn(move || {
+                while let Ok(job) = queue.recv_blocking() {
+                    let output = std::process::Command::new(&job.program)
+                        .args(&job.args)
+                        .output();
+                    // The handler that asked may already be gone; its reply
+                    // channel closing is not an error worth reporting.
+                    let _ = job.reply.send_blocking(output);
+                }
+            });
+        if let Err(err) = spawned {
+            error!("could not start paneru.exec worker {worker}: {err}");
+        }
+    }
+    jobs
+}
 
 /// How many times `paneru.state.mutate` may lose the compare-and-set race
 /// before giving up. A handful of writers contending is normal; a dozen
@@ -90,6 +139,59 @@ pub(super) fn install(
         })?
     };
     paneru.set("flash", flash)?;
+
+    // paneru.exec(program[, args]) — run a program, without holding the
+    // interpreter while it runs.
+    //
+    // Async so the handler suspends here: the executor is free to run the other
+    // handlers, and a world read waiting behind this one is answered on time.
+    // A synchronous exec binding — which is what a script otherwise reaches for,
+    // and what the profile found costing a fork per event — cannot be suspended,
+    // because there is no yield point inside a plain C function for mlua to
+    // resume from. It stops every other handler until the child exits.
+    //
+    // `std::process::Command` also spawns through `posix_spawn` rather than
+    // forking, so the process image is never duplicated.
+    let exec = {
+        // Started on the first call, so a script that never execs never pays for
+        // the workers. Only ever touched from the Lua thread.
+        let pool: Rc<RefCell<Option<async_channel::Sender<ExecJob>>>> = Rc::new(RefCell::new(None));
+        lua.create_async_function(move |lua, (program, args): (String, Option<Vec<String>>)| {
+            let jobs = pool
+                .borrow_mut()
+                .get_or_insert_with(spawn_exec_pool)
+                .clone();
+            async move {
+                let (reply, answer) = async_channel::bounded(1);
+                let job = ExecJob {
+                    program,
+                    args: args.unwrap_or_default(),
+                    reply,
+                };
+                jobs.send(job)
+                    .await
+                    .map_err(|_| mlua::Error::RuntimeError("exec worker is gone".to_string()))?;
+                let output = answer
+                    .recv()
+                    .await
+                    .map_err(|_| mlua::Error::RuntimeError("exec worker is gone".to_string()))?
+                    .map_err(|err| mlua::Error::RuntimeError(format!("exec: {err}")))?;
+
+                let result = lua.create_table()?;
+                result.set("code", output.status.code())?;
+                result.set(
+                    "stdout",
+                    String::from_utf8_lossy(&output.stdout).into_owned(),
+                )?;
+                result.set(
+                    "stderr",
+                    String::from_utf8_lossy(&output.stderr).into_owned(),
+                )?;
+                Ok(result)
+            }
+        })?
+    };
+    paneru.set("exec", exec)?;
 
     // paneru.on(event_name, handler) — run `handler` on every matching event.
     // Unknown names are rejected here rather than silently never firing.

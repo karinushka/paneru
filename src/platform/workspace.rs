@@ -73,6 +73,40 @@ define_class!(
             _ = self.ivars().events.send(msg);
         }
 
+        /// Called when an application becomes the active application.
+        ///
+        /// # Arguments
+        ///
+        /// * `notification` - The notification object containing application info.
+        #[unsafe(method(didActivateApplication:))]
+        fn application_activated(&self, notification: &NSObject) {
+            let pid = unsafe {
+                let user_info: &NSDictionary = msg_send![notification, userInfo];
+                let app: &NSRunningApplication =  msg_send![user_info, objectForKey: NSWorkspaceApplicationKey];
+                app.processIdentifier()
+            };
+
+            let msg = Event::ApplicationActivated{ pid };
+            _ = self.ivars().events.send(msg);
+        }
+
+        /// Called when an application stops being the active application.
+        ///
+        /// # Arguments
+        ///
+        /// * `notification` - The notification object containing application info.
+        #[unsafe(method(didDeactivateApplication:))]
+        fn application_deactivated(&self, notification: &NSObject) {
+            let pid = unsafe {
+                let user_info: &NSDictionary = msg_send![notification, userInfo];
+                let app: &NSRunningApplication =  msg_send![user_info, objectForKey: NSWorkspaceApplicationKey];
+                app.processIdentifier()
+            };
+
+            let msg = Event::ApplicationDeactivated{ pid };
+            _ = self.ivars().events.send(msg);
+        }
+
         /// Called when an application is unhidden.
         ///
         /// # Arguments
@@ -237,6 +271,14 @@ impl WorkspaceObserver {
             (
                 sel!(activeSpaceDidChange:),
                 "NSWorkspaceActiveSpaceDidChangeNotification",
+            ),
+            (
+                sel!(didActivateApplication:),
+                "NSWorkspaceDidActivateApplicationNotification",
+            ),
+            (
+                sel!(didDeactivateApplication:),
+                "NSWorkspaceDidDeactivateApplicationNotification",
             ),
             (
                 sel!(didHideApplication:),

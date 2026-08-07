@@ -35,8 +35,8 @@ pub enum LuaEvent {
     Exit,
     ProcessesLoaded,
 
-    ApplicationActivated,
-    ApplicationDeactivated,
+    ApplicationActivated { pid: Pid },
+    ApplicationDeactivated { pid: Pid },
     ApplicationVisible { pid: Pid },
     ApplicationHidden { pid: Pid },
 
@@ -120,8 +120,8 @@ impl TryFrom<&Event> for LuaEvent {
             Event::Exit => LuaEvent::Exit,
             Event::ProcessesLoaded => LuaEvent::ProcessesLoaded,
 
-            Event::ApplicationActivated => LuaEvent::ApplicationActivated,
-            Event::ApplicationDeactivated => LuaEvent::ApplicationDeactivated,
+            Event::ApplicationActivated { pid } => LuaEvent::ApplicationActivated { pid: *pid },
+            Event::ApplicationDeactivated { pid } => LuaEvent::ApplicationDeactivated { pid: *pid },
             Event::ApplicationVisible { pid } => LuaEvent::ApplicationVisible { pid: *pid },
             Event::ApplicationHidden { pid } => LuaEvent::ApplicationHidden { pid: *pid },
 
@@ -327,8 +327,8 @@ mod tests {
         vec![
             LuaEvent::Exit,
             LuaEvent::ProcessesLoaded,
-            LuaEvent::ApplicationActivated,
-            LuaEvent::ApplicationDeactivated,
+            LuaEvent::ApplicationActivated { pid: 1 },
+            LuaEvent::ApplicationDeactivated { pid: 1 },
             LuaEvent::ApplicationVisible { pid: 1 },
             LuaEvent::ApplicationHidden { pid: 1 },
             LuaEvent::WindowDestroyed { window_id: 1 },

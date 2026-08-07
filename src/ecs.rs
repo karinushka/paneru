@@ -3,12 +3,13 @@ use std::time::{Duration, Instant};
 
 use bevy::MinimalPlugins;
 use bevy::app::App as BevyApp;
-use bevy::app::{PostUpdate, PreUpdate, Startup};
+use bevy::app::{First, Last, PostUpdate, PreUpdate, Startup};
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::lifecycle::RemovedComponents;
 use bevy::ecs::query::{Added, Changed, With};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::common_conditions::{not, resource_exists};
+use bevy::ecs::schedule::{ScheduleLabel as _, SingleThreadedExecutor};
 use bevy::ecs::system::{Commands, EntityCommands, Query, Res, SystemId};
 use bevy::prelude::Event as BevyEvent;
 use bevy::tasks::Task;
@@ -559,6 +560,43 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         .add_plugins(focus::FocusEventsPlugin)
         .add_plugins(display::DisplayEventsPlugin)
         .add_plugins((register_triggers, register_systems, register_commands));
+
+    // Run the schedules inline rather than fanning every system out across the
+    // task pool.
+    //
+    // The handoff — spawning a task per system, parking, waking, the completion
+    // queue and the executor's own bookkeeping mutex — measured about 45% of the
+    // main thread's non-idle time, against 16% doing the accessibility calls
+    // that are the actual work. Inline it fell to around 10%.
+    //
+    // The fan-out was buying very little to begin with. Bevy only overlaps
+    // systems whose data access is disjoint, and the expensive ones here all
+    // take `&mut Window` — `commit_window_position`, `verify_window_position`
+    // and `window_moved_update_frame` are mutually exclusive whatever the
+    // executor does, and the first two are explicitly chained anyway. What is
+    // left to overlap is a hundred-odd systems whose queries usually match
+    // nothing, and sixteen that take `NonSend` and are pinned to this thread
+    // regardless.
+    //
+    // The parallelism that does pay is untouched: `par_iter_mut` reaches
+    // `ComputeTaskPool` directly, so the commit systems still spread their
+    // blocking `AXUIElementSetAttributeValue` round-trips across the pool.
+    //
+    // `First` and `Last` are included even though paneru puts nothing in them:
+    // an empty schedule still costs a task-pool scope and the park/wake that
+    // goes with it, once per frame. Bevy already runs `Main`, `FixedMain` and
+    // `RunFixedMainLoop` single-threaded for the same reason.
+    for label in [
+        First.intern(),
+        PreUpdate.intern(),
+        Update.intern(),
+        PostUpdate.intern(),
+        Last.intern(),
+    ] {
+        app.edit_schedule(label, |schedule| {
+            schedule.set_executor(SingleThreadedExecutor::new());
+        });
+    }
 
     let menu_events = sender.clone();
     let mut platform_callbacks = PlatformCallbacks::new(sender);

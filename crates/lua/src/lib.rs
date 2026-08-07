@@ -8,7 +8,7 @@
 //! client-only `query_*` / `subscribe` helpers on top.
 //!
 //! With the `module` feature the crate additionally builds as a loadable Lua C
-//! extension (`paneru.so`) exposing exactly that client table:
+//! extension (`paneru.so`) exposing that client table:
 //!
 //! ```lua
 //! local paneru = require("paneru")
@@ -36,24 +36,12 @@
 //! paneru.subscribe({ "window_focused", "window_title_changed" }, function(evt) ... end)
 //! ```
 //!
-//! Every verb builds a real [`Command`]: option tables are deserialized into the
-//! actual enums with mlua's serde support, so `"east"` becomes
-//! [`Direction::East`] and an unknown value fails at the call site rather than
-//! as a string the daemon rejects later. A script therefore behaves identically
-//! on both hosts; only the host-specific extras differ (`paneru.on` /
-//! `paneru.bind` are embedded-only, `subscribe` and the socket-path helpers are
-//! client-only). The `query_*` functions exist on both, spelled the same: the
-//! client asks the daemon over the socket, the embedded runtime answers from
-//! the world it is already inside. So does `paneru.state`, the named store a
-//! script keeps things in — one store, so a value a client writes is one a
-//! handler reads, and `mutate` resolves a race between them either way, because
-//! it is the daemon that decides whether a write still matches what it was read
-//! as.
+//! Every verb builds a real [`Command`]: option tables are deserialized into
+//! the actual enums with mlua's serde support, so `"east"` becomes
+//! [`Direction::East`] and an unknown value fails at the call site. Only the
+//! host-specific extras differ (`paneru.on` / `paneru.bind` are embedded-only;
+//! `subscribe` and the socket-path helpers are client-only).
 
-// mlua's `create_function` takes its callback arguments by value — that is the
-// shape `IntoLuaMulti` converts into, and a by-reference signature does not
-// implement the trait — so this lint has no actionable fix on any of the
-// callbacks in this crate.
 #![allow(
     clippy::needless_pass_by_value,
     reason = "mlua callback signatures are by-value by contract"
@@ -81,9 +69,8 @@ pub type Dispatch = Rc<dyn Fn(&Lua, Command) -> Result<bool>>;
 ///
 /// Returns an error if any Lua table/function creation or assignment fails.
 pub fn install(lua: &Lua, paneru: &Table, dispatch: &Dispatch) -> Result<()> {
-    // paneru.run(cmd) / paneru.command(cmd) — the escape hatch: a command string
-    // ("window focus east"), an argv table, or a structured table matching the
-    // command enums ({ window = { focus = "east" } }).
+    // paneru.run(cmd) / paneru.command(cmd) — the escape hatch: a command
+    // string, an argv table, or a structured command table.
     let run = {
         let dispatch = Rc::clone(dispatch);
         lua.create_function(move |lua, command: Value| dispatch(lua, to_command(lua, &command)?))?
@@ -106,20 +93,15 @@ pub fn install(lua: &Lua, paneru: &Table, dispatch: &Dispatch) -> Result<()> {
     paneru.set("print_state", verb(lua, dispatch, Command::PrintState)?)?;
 
     // paneru.match{ app = …, bundle = …, title = …, floating = …, managed = … }
-    // — builds a predicate over window records, for `ws:find`/`ws:filter`.
-    // `app`, `bundle` and `title` are regular expressions, compiled here so a
-    // bad pattern is an error where it is written rather than a handler that
-    // never matches anything.
-    //
-    // Shared rather than embedded-only because the window set it filters is
-    // shared: a client running `paneru.windows` needs the same companion.
+    // builds a predicate over window records, for `ws:find`/`ws:filter`.
+    // `app`, `bundle` and `title` are regexes, compiled here so a bad pattern
+    // errors at the call site rather than silently matching nothing.
     paneru.set("match", lua.create_function(matcher)?)?;
 
     Ok(())
 }
 
 /// One `paneru.match{…}` call: compiles the spec into a Lua predicate.
-// Signature is fixed by mlua's `create_function` contract.
 fn matcher(lua: &Lua, spec: Table) -> Result<Function> {
     let pattern = |field: &str| -> Result<Option<Regex>> {
         let Some(pattern) = spec.get::<Option<String>>(field)? else {
@@ -304,10 +286,8 @@ fn resize(lua: &Lua, dispatch: &Dispatch) -> Result<Function> {
     })
 }
 
-/// The options every verb accepts, deserialized straight into the command
-/// types: `{ direction = "east" }`, `{ number = 3 }`, `{ follow = false }`, or
-/// the bare `"east"` / `3`. [`Direction`]'s own deserializer accepts both a
-/// name and a 1-based position, so serde does all the validating.
+/// The options every verb accepts: `{ direction = "east" }`, `{ number = 3 }`,
+/// `{ follow = false }`, or the bare `"east"` / `3`.
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Opts {

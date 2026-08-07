@@ -1,16 +1,14 @@
 //! The embedded Lua interpreter and everything a script registers into it.
 //!
-//! This module knows nothing about Bevy. It takes source in, hands dispatched
-//! side effects back out as plain values ([`Command`]s and flash messages), and
-//! reaches the world only through [`DispatchWorld`]. That keeps the interpreter
-//! — which `mlua` makes `!Send`, and which runs arbitrary user code of unbounded
-//! duration — free to live on a thread of its own, with the ECS on the other
-//! side of a channel.
+//! This module knows nothing about Bevy: it takes source in, hands dispatched
+//! side effects back out as plain values ([`Command`]s and flash messages),
+//! and reaches the world only through [`DispatchWorld`]. `mlua::Lua` is
+//! `!Send`, so the interpreter lives on a thread of its own with the ECS on
+//! the other side of a channel.
 //!
-//! Dispatch is `async`: a handler that reads the world suspends rather than
-//! blocking, so the worker can start the next one instead of queueing it behind
-//! a round trip. Handlers therefore overlap, which is why nothing here may hold
-//! a `RefCell` borrow across an await.
+//! Dispatch is `async` and handlers overlap — a handler that reads the world
+//! suspends rather than blocking — so nothing here may hold a `RefCell`
+//! borrow across an await.
 
 use paneru_shared_types::script_value::ScriptValue;
 use std::cell::RefCell;
@@ -115,9 +113,9 @@ pub(super) struct Outbox {
 /// The side effects one dispatch produced: commands to put on the bus and
 /// flash messages to show.
 ///
-/// Script state writes are not among them. They are the one thing a handler
-/// does that it also has to see the result of, so they go and come back while
-/// the handler waits rather than being queued for later.
+/// Script state writes are not among them: they are the one thing a handler
+/// has to see the result of, so they go and come back while the handler
+/// waits rather than being queued for later.
 pub(super) type Effects = (Vec<Command>, Vec<(String, f32)>);
 
 /// The embedded Lua runtime and its shared registration state.
@@ -253,13 +251,9 @@ impl LuaRuntime {
         }
     }
 
-    /// The window set a handler is handed.
-    ///
-    /// Materialised up front rather than on first use. Fetching it lazily meant
-    /// a synchronous provider call from deep inside the window-set methods,
-    /// which cannot suspend; every handler in a batch shares one read anyway
-    /// (see [`super::world::DispatchWorld`]), so the fetch it saved was already
-    /// at most one per batch. Each handler gets its own copy to transform.
+    /// The window set a handler is handed, materialised up front since
+    /// fetching it lazily would need a synchronous call that cannot suspend.
+    /// Each handler gets its own copy to transform.
     async fn window_set_arg(&self, context: &str) -> Option<AnyUserData> {
         let set = match self.world.layout().await {
             Ok(set) => set,
@@ -274,13 +268,10 @@ impl LuaRuntime {
             .ok()
     }
 
-    /// Queues whatever a handler returned.
-    ///
-    /// Returning a window set is how a handler asks for anything to change:
-    /// the operations recorded on the value it hands back are what get replayed
-    /// against the live world. A handler that returns nothing has asked for
-    /// nothing, which is what makes computing a set and *not* returning it free
-    /// of consequences.
+    /// Queues whatever a handler returned. Returning a window set replays the
+    /// operations recorded on it against the live world; returning nothing
+    /// commits nothing, so computing a set without returning it is free of
+    /// consequences.
     fn commit(&self, returned: &Value, context: &str) {
         match returned {
             Value::Nil => {}
@@ -336,12 +327,12 @@ mod tests {
     use crate::ecs::state::PaneruQueryState;
     use crate::events::Event;
 
-    /// The main thread's half of the script state store, in one struct: what a
-    /// read answers from and what a write lands in, with the revision the
-    /// worker's cache is checked against.
     /// A competing writer, run just before a write lands.
     type Interjection = Box<dyn FnMut(&mut ScriptState)>;
 
+    /// The main thread's half of the script state store: what a read answers
+    /// from and what a write lands in, with the revision the worker's cache
+    /// watches.
     struct TestWorld {
         store: RefCell<ScriptState>,
         revision: Arc<AtomicU64>,
@@ -376,13 +367,10 @@ mod tests {
             LuaRuntime::from_source(source, &self.dispatch)
         }
 
-        /// Runs one dispatch to completion, answering its reads the way the main
-        /// thread's `serve_lua_queries` does.
-        ///
-        /// A dispatch suspends whenever it reads the world, so a test cannot
-        /// simply block on it — nothing would be there to answer. Polling the
-        /// future and draining the request queue in turn is the single-threaded
-        /// shape of what the ECS does across frames.
+        /// Runs one dispatch to completion, answering its reads the way the
+        /// main thread's `serve_lua_queries` does. A dispatch suspends
+        /// whenever it reads the world, so this polls the future and drains
+        /// the request queue in turn rather than simply blocking on it.
         fn drive<T>(
             &self,
             extract: &dyn Fn() -> Shared<PaneruQueryState>,
@@ -420,13 +408,9 @@ mod tests {
             panic!("the dispatch never finished");
         }
 
-        /// [`Self::drive`], for a dispatch that is waiting on something other
-        /// than this thread.
-        ///
-        /// `drive` spins its whole budget as fast as it can, which is right when
-        /// every await is answered from the same loop. A dispatch parked on
-        /// `paneru.exec` is waiting on a process, and a tight spin would give up
-        /// long before one could start — so this one waits between turns.
+        /// [`Self::drive`], but waiting between turns instead of spinning: for
+        /// a dispatch parked on `paneru.exec`, which is waiting on a process
+        /// rather than on this thread.
         fn drive_patiently<T>(
             &self,
             extract: &dyn Fn() -> Shared<PaneruQueryState>,
@@ -507,9 +491,7 @@ mod tests {
             }"#,
             )
             .unwrap();
-        // The `bindings` table registered a keybind through the shared bind path,
         assert_eq!(runtime.published_keybinds().len(), 1);
-        // and the remaining sections became the authoritative config.
         let config = runtime.built_config().expect("setup should build a config");
         assert_eq!(config.sliver_width(), 7);
     }
@@ -769,8 +751,7 @@ mod tests {
         assert!(runtime.drain_outbox().0.is_empty());
     }
 
-    /// Runs `source` as a keybind handler with a store behind it, and hands
-    /// back the store so a test can see what it holds afterwards.
+    /// Runs `source` as a keybind handler against `world`'s store.
     fn run_with_store(source: &str, world: &TestWorld) {
         let runtime = world
             .runtime(&format!(
@@ -883,12 +864,11 @@ mod tests {
         assert_eq!(world.get("pad"), None);
     }
 
-    /// `paneru.exec` has to suspend the handler rather than hold the
-    /// interpreter, which is the whole reason it exists: a synchronous exec
-    /// binding stops every other handler until the child exits.
+    /// `paneru.exec` suspends the handler instead of holding the interpreter,
+    /// so a slow child process does not stall every other handler.
     ///
-    /// Driven by hand rather than through `drive`, which spins a fixed number of
-    /// turns and would give up long before a real process finished.
+    /// Uses `drive_patiently` rather than `drive`, which spins a fixed number
+    /// of turns and would give up before a real process finished.
     #[test]
     fn exec_runs_a_program_and_hands_back_its_output() {
         let world = TestWorld::default();

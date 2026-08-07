@@ -33,9 +33,9 @@ use crate::platform::{WinID, WorkspaceId};
 
 pub struct WorkspaceEventsPlugin;
 
-/// Strips as [`handle_virtual_window_moves`] rewrites them: it slides each one
-/// to or from the parked position, so it needs the strip, its origin, whether
-/// it is the visible one, and the saved position to restore it to.
+/// The strip, its origin, whether it's visible, and its saved position, as
+/// [`handle_virtual_window_moves`] needs them to slide a strip to/from its
+/// parked position.
 type MovableStrips<'w, 's> = Query<
     'w,
     's,
@@ -49,9 +49,8 @@ type MovableStrips<'w, 's> = Query<
     Without<Window>,
 >;
 
-/// Strips as [`show_active_workspace`] reads them when bringing one back on
-/// screen: the saved origin to restore, and any in-flight `RepositionMarker`
-/// that would otherwise animate against the restore.
+/// The saved origin and any in-flight `RepositionMarker`, as
+/// [`show_active_workspace`] needs them to restore a strip.
 type RestorableStrips<'w, 's> = Query<
     'w,
     's,
@@ -66,9 +65,8 @@ type RestorableStrips<'w, 's> = Query<
     Without<Window>,
 >;
 
-/// [`renumber_virtual_indexes`] first asks which strips appeared this tick, then
-/// rewrites the indexes of every strip sharing their workspace. The second query
-/// aliases the first mutably, hence the `ParamSet`.
+/// `p0`: strips added this tick. `p1`: rewrites indexes of strips sharing
+/// their workspace. Must be a `ParamSet` since `p1` aliases `p0` mutably.
 type RenumberStrips<'w, 's> = ParamSet<
     'w,
     's,
@@ -130,20 +128,13 @@ pub(crate) struct PreviousStripPosition {
     pub focus: Option<Entity>,
 }
 
-/// Guard spawned by [`show_active_workspace`] alongside the re-focus of the
-/// remembered window when a strip is restored to its saved position. That
-/// focus lands after the strip was already placed at its saved origin —
-/// `focus_entity` inserts `FocusedMarker` a command-flush later, and the OS
-/// acknowledges with one or more `WindowFocused` events several ticks later
-/// still (the front-switch handler synthesizes an extra one), long after the
-/// `is_added` guards in the layout systems have expired. Each of those would
-/// recenter or reshuffle the strip away from the restored position (visible
-/// as a wiggle on every switch). While the guard is alive,
-/// `autocenter_window_on_focus` and the duplicate-focus reshuffle in
-/// `window_focused_trigger` skip the named entity. The guard lives on its own
-/// entity next to a [`Timeout`]: focus moving to any other window despawns it
-/// immediately, and `timeout_ticker` expires it otherwise — so later genuine
-/// re-focus events reshuffle normally.
+/// Guard spawned alongside the re-focus of a restored strip's remembered
+/// window. The OS's focus acknowledgment arrives several ticks after the
+/// strip was already placed at its saved origin, so without this guard
+/// `autocenter_window_on_focus` and `window_focused_trigger`'s reshuffle would
+/// slide the strip away again (a visible wiggle on every switch); both skip
+/// the named entity while this marker exists. It is despawned once focus
+/// moves elsewhere, or expires via `timeout_ticker`.
 #[derive(Component, Debug)]
 pub(crate) struct RestoreFocusMarker {
     pub entity: Entity,

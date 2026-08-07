@@ -1,16 +1,13 @@
 //! The script-owned key-value store, as the daemon holds it.
 //!
 //! [`ScriptState`] is the data; this is where it lives while Paneru runs and how
-//! it gets to disk. Two writers reach it — the embedded Lua runtime through
-//! `paneru.state.*`, a client through the socket — so the resource here is the
-//! single authority, and the Lua worker (which caches a copy so a read costs it
-//! no frame) checks [`ScriptStateStore::revision_handle`] to know when its copy
-//! has gone stale.
+//! it gets to disk. Both the embedded Lua runtime and a socket client write
+//! through this single-authority resource; the Lua worker caches a copy and
+//! checks [`ScriptStateStore::revision_handle`] to know when to re-read.
 //!
-//! It is deliberately *not* part of [`PaneruState`]: that is layout, rebuilt
-//! from the world on every save and removed from the world entirely once
-//! session restore is done with it. Script state has neither property, so it
-//! gets a file of its own beside it.
+//! Kept separate from [`PaneruState`] (which is rebuilt from the world on every
+//! save) since script state has neither that property nor a reason to be
+//! removed once session restore finishes.
 //!
 //! [`PaneruState`]: super::state::PaneruState
 
@@ -45,11 +42,8 @@ struct SavedScriptState {
 #[derive(Debug, Default, Resource)]
 pub struct ScriptStateStore {
     state: ScriptState,
-    /// Bumped on every applied mutation, whoever made it. Shared with the Lua
-    /// worker, which compares it against the stamp its cached copy was
-    /// hydrated at: equal means the cache is good, different means re-read.
-    /// Carries no data, only a version, so it needs no synchronisation beyond
-    /// the atomic itself.
+    /// Bumped on every applied mutation. The Lua worker compares this against
+    /// the stamp its cached copy was hydrated at to know when to re-read.
     revision: Arc<AtomicU64>,
     dirty: bool,
 }
@@ -57,8 +51,6 @@ pub struct ScriptStateStore {
 impl ScriptStateStore {
     /// The store as saved by a previous run, or an empty one if there is no
     /// file, it cannot be read, or it was written by an incompatible version.
-    /// Script state is a convenience, never load-bearing, so a bad file is
-    /// worth a warning and nothing more.
     #[must_use]
     pub fn load() -> Self {
         let path = Self::default_file_path();
@@ -121,14 +113,10 @@ impl ScriptStateStore {
         &self.state
     }
 
-    /// Applies `write`, bumping the revision and marking the store for saving
-    /// only if it actually changed something.
-    ///
-    /// This is the one place the store is written, whoever asked: a Lua
-    /// handler's write arrives here, and so does a socket client's. That is
-    /// what a compare-and-set write is measured against, and why
-    /// `paneru.state.mutate` can promise that nothing slipped in between its
-    /// read and its write.
+    /// Applies `write`, bumping the revision and marking the store dirty only
+    /// if it actually changed something. This is the one place the store is
+    /// written, whether the caller is a Lua handler or a socket client, which
+    /// is what makes a compare-and-set write race-free.
     ///
     /// # Errors
     ///
@@ -184,12 +172,8 @@ impl ScriptStateStore {
     }
 }
 
-/// Answers the script-state requests a socket client made.
-///
-/// The client half of `paneru.state`: same store, same names, so a value a
-/// script wrote is one a client can read and vice versa. Every reply is a
-/// single JSON object, shaped like the query handler's so a client can tell an
-/// answer from an error the same way.
+/// Answers the script-state requests a socket client made — the client half
+/// of `paneru.state`, backed by the same store a script writes through.
 pub fn script_state_handler(
     mut messages: MessageReader<Event>,
     store: Option<ResMut<ScriptStateStore>>,
@@ -219,9 +203,8 @@ fn answer(store: &mut ScriptStateStore, request: ScriptStateRequest) -> Response
         ScriptStateRequest::Get { key } => {
             Response::ScriptState(ScriptStateResponse::Value(store.state().get(&key).cloned()))
         }
-        // A conflict is not an error: a client's `mutate` re-runs its function
-        // against what it found and tries again, exactly as a script's does. So
-        // it travels as an outcome rather than a failure.
+        // A conflict is not an error: the caller retries against the current
+        // value, so it travels as an outcome rather than a failure.
         ScriptStateRequest::Write(write) => match store.apply(&write) {
             Ok(outcome) => Response::ScriptState(ScriptStateResponse::Write(outcome)),
             Err(err) => Response::Error(err),
@@ -279,8 +262,6 @@ mod tests {
         assert!(applied(&mut store, &set("a", json!(1))));
         assert_eq!(revision.load(Ordering::Acquire), 1);
 
-        // The same value again changes nothing, so nothing downstream is told
-        // to re-read.
         assert!(!applied(&mut store, &set("a", json!(1))));
         assert_eq!(revision.load(Ordering::Acquire), 1);
 
@@ -302,7 +283,6 @@ mod tests {
             Some(&ScriptValue::from(json!(2)))
         );
 
-        // Removing what is not there changes nothing, so nothing re-reads.
         assert!(!applied(&mut store, &removed));
     }
 
@@ -311,8 +291,6 @@ mod tests {
         let mut store = ScriptStateStore::default();
         applied(&mut store, &set("counter", json!(1)));
 
-        // Someone else got there first: the write is refused, and comes back
-        // with what the key holds now so the caller can retry against it.
         let stale = ScriptStateWrite::compare_and_set(
             "counter".to_string(),
             Some(ScriptValue::from(json!(0))),
@@ -354,7 +332,6 @@ mod tests {
             WriteOutcome::Applied { changed: true }
         );
 
-        // The same write again now finds a value where it expected none.
         assert_eq!(
             store.apply(&first).expect("accepted"),
             WriteOutcome::Conflict {

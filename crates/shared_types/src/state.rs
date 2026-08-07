@@ -293,13 +293,10 @@ mod tests {
             active: ActiveState::default(),
         };
 
-        // What a terminal sees: the documented flat shape with its `event` tag.
         let line = serde_json::to_string(&event.to_json().unwrap()).unwrap();
         assert!(line.contains(r#""event":"on_screen_changed""#));
         assert!(line.contains(r#""windows":"#));
 
-        // What a client decodes: the wire form, which is binary and must not
-        // need a self-describing format to read back.
         let bytes = postcard::to_allocvec(&event).unwrap();
         assert_eq!(
             postcard::from_bytes::<StateEvent>(&bytes).unwrap(),

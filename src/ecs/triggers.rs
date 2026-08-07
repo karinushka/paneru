@@ -315,13 +315,10 @@ pub(super) fn window_focused_trigger(
             focus_history.record(workspace_id, entity, unmanaged);
         }
 
-        // The restore guard absorbs the OS acknowledgment(s) of the focus
-        // `show_active_workspace` issued — reshuffling on those would slide
-        // the strip away from the position the restore just placed it at.
-        // The acknowledgment can arrive more than once (front_switched_trigger
-        // synthesizes a duplicate), so a matching event leaves the guard in
-        // place; focus moving to any other window means the restore sequence
-        // is over and despawns it (timeout_ticker expires it otherwise).
+        // The restore guard absorbs the OS focus acknowledgment from a restore;
+        // reshuffling on it would slide the strip away from where the restore
+        // placed it. It may fire twice (front_switched_trigger synthesizes a
+        // duplicate), so a match keeps the guard; focus moving elsewhere despawns it.
         let mut restored_focus = false;
         for (guard_entity, guard) in &restore_guards {
             if guard.entity == entity {
@@ -545,9 +542,8 @@ pub(super) fn window_unmanaged_trigger(
     trigger: On<Add, Unmanaged>,
     apps: Query<(Entity, &Application)>,
     mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
-    // `Option<Single<…>>` rather than `Single<…>`: an unresolvable parameter skips the whole
-    // observer, and dropping the strip membership below is not optional. Without an active display
-    // there is nowhere to pop the window to, but it still must not keep tiling space.
+    // `Option<Single>` rather than `Single`: an unresolvable display would skip the
+    // whole observer, but the strip removal below must still run without one.
     active_display: Option<ActiveDisplayViewport>,
     initializing: Option<Res<Initializing>>,
     mut ctx: WindowCtx,
@@ -598,22 +594,16 @@ pub(super) fn window_unmanaged_trigger(
 
     debug!("Entity {entity} is floating.");
 
-    // A window parked on a virtual row that isn't on screen sits off-screen by
-    // design. Popping it onto the active display would paint it over the row
-    // the user is actually looking at, and an app that raises itself (rather
-    // than the user floating a focused window) is enough to get here.
+    // A window on a virtual row that isn't on screen is off-screen by design;
+    // popping it onto the active display would paint it over the row the user
+    // is actually looking at.
     let parked_out_of_view = workspaces
         .iter()
         .any(|(strip, active)| !active && strip.contains(entity));
 
-    // Drop the strip membership *first*, before anything that can bail.
-    //
-    // A floating window is out of the tiling layout by definition, and the
-    // tiler lays a strip out by accumulating column widths left to right — so
-    // a floating member reserves space no window occupies, which is a gap that
-    // never closes on its own. Every step below is best-effort placement of a
-    // window that has already stopped being tiled; when reading its frame or
-    // its app failed, this used to return early and leave the slot behind.
+    // Drop the strip membership first, before anything below can bail early —
+    // a floating window still reserves column space in the strip otherwise,
+    // leaving a gap that never closes on its own.
     for (mut strip, _) in &mut workspaces {
         if strip.contains(entity) {
             strip.remove(entity);
@@ -827,17 +817,11 @@ pub(super) fn window_managed_trigger(
     }
 
     if let Some((strip_entity, false)) = landed_in {
-        // The window belongs to a virtual row that isn't on screen, so its
-        // current frame — possibly popped onto the active display while it was
-        // unmanaged — must not be kept. Touching the hidden strip's position
-        // makes the layout chain re-derive every frame in that strip from the
-        // strip's off-screen origin, which pushes this window back off-screen
-        // with the row it belongs to.
-        //
-        // Pinning the current origin (or reshuffling around it) here would
-        // instead paint the window over the active row while it still belongs
-        // to the hidden one, leaving it unreachable: reshuffle_layout_strip
-        // drags the containing strip back on-screen to expose the window.
+        // This strip isn't on screen, so the window's current frame (possibly
+        // popped onto the active display while unmanaged) must not be kept.
+        // Marking the strip's position changed forces the layout to re-derive
+        // this window's frame from the strip's off-screen origin, instead of
+        // painting it over the active row while it still belongs to the hidden one.
         if let Ok((_, _, mut position, _)) = workspaces.get_mut(strip_entity) {
             position.set_changed();
         }
@@ -928,13 +912,8 @@ pub(super) fn window_destroyed_trigger(
 
 /// Drops a window's cached title when its app reports the title changed.
 ///
-/// The cache is what keeps the state document and the window set from reading
-/// every window's title over the accessibility API on every frame; this is the
-/// other half of it. `kAXTitleChangedNotification` is already observed and
-/// already becomes this event, so the invalidation rides along for free — and
-/// crucially it runs *before* the broadcast handler reads titles in
-/// `PostUpdate`, so a subscriber sees the new title in the same frame it
-/// changed.
+/// Must run before the broadcast handler reads titles in `PostUpdate`, so a
+/// subscriber sees the new title in the same frame it changed.
 pub(super) fn invalidate_window_title(mut messages: MessageReader<Event>, windows: Windows) {
     for event in messages.read() {
         let Event::WindowTitleChanged { window_id } = event else {

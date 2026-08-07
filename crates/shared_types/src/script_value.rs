@@ -1,20 +1,10 @@
 //! The value type the script-state store holds.
 //!
-//! This used to be `serde_json::Value`, which was convenient right up until the
-//! wire stopped being JSON. `Value`'s `Deserialize` impl works by calling
-//! `deserialize_any` — it asks the format "what is the next thing?" — and only a
-//! *self-describing* format can answer that. postcard, like every compact binary
-//! format, is not: it writes a `7` with no indication of whether that was an
-//! integer, a string length, or an enum discriminant, because the schema on
-//! both ends is expected to say. So a `Value` simply cannot be decoded from it.
-//!
-//! [`ScriptValue`] is the same shape with the tag written down. The derived
-//! `Deserialize` knows which variant it is looking at from the discriminant the
-//! derived `Serialize` wrote, so nothing has to be inferred from the bytes.
-//!
-//! JSON does not disappear — it is still what the CLI prints and what the store
-//! is saved as — it just stops being what two processes speak to each other.
-//! [`From`] conversions in both directions are what keep those edges working.
+//! Replaces `serde_json::Value`, whose `Deserialize` impl relies on a
+//! self-describing format and so cannot be decoded from postcard's compact
+//! binary wire. [`ScriptValue`]'s derived (de)serialization writes the variant
+//! tag explicitly instead. [`From`] conversions keep JSON working at the edges
+//! (CLI output, on-disk store) where it is still used.
 
 use std::collections::BTreeMap;
 
@@ -39,11 +29,9 @@ pub enum ScriptValue {
     Map(BTreeMap<String, ScriptValue>),
 }
 
-/// `Eq` by hand because `f64` is not `Eq` — but every *stored* value is one a
-/// script wrote and can compare against, and compare-and-set needs equality to
-/// mean something. Two `Float`s are equal when their bits are, which makes
-/// `NaN == NaN` true here. That is the useful answer for "is this still what I
-/// last wrote?", and the only case where it differs from IEEE equality.
+/// `Eq` by hand because `f64` is not `Eq`. Two `Float`s are equal when their
+/// bits are, so `NaN == NaN` here — unlike IEEE equality, but what
+/// compare-and-set needs.
 impl Eq for ScriptValue {}
 
 impl ScriptValue {
@@ -69,9 +57,8 @@ impl From<serde_json::Value> for ScriptValue {
             serde_json::Value::Null => Self::Null,
             serde_json::Value::Bool(value) => Self::Bool(value),
             serde_json::Value::Number(number) => number.as_i64().map_or_else(
-                // A JSON number that is not an `i64` is either a float or an
-                // integer too large to be one; both are best kept as a float,
-                // and `as_f64` is infallible for every other case.
+                // Not an `i64`: either a float or an integer too large for one;
+                // either way, keep it as a float.
                 || Self::Float(number.as_f64().unwrap_or(f64::NAN)),
                 Self::Int,
             ),

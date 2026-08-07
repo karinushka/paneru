@@ -58,16 +58,14 @@ type StripsWithVisibility<'w, 's> = Query<
 >;
 
 pub fn register_commands(app: &mut bevy::app::App) {
-    // Window-addressed layout operations from a Lua handler. Registered here
-    // rather than with the Lua systems because it handles a Command like any
-    // other, and the mock harness exercises it without a running interpreter.
+    // Registered here (not with the Lua systems) so it's exercised by the mock
+    // harness without a running interpreter.
     #[cfg(feature = "lua")]
     app.add_systems(PreUpdate, crate::ecs::layout_ops::apply_layout_ops);
 
     query::register_query_commands(app);
-    // An empty store, so the mock harness and any run without a saved file
-    // still have one to answer from; the real app overwrites it with what it
-    // loaded from disk.
+    // Empty store so the mock harness and saveless runs still have one to
+    // answer from; the real app overwrites it from disk.
     app.init_resource::<crate::ecs::script_state::ScriptStateStore>();
     app.add_systems(PreUpdate, crate::ecs::script_state::script_state_handler);
     app.add_systems(

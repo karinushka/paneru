@@ -28,18 +28,10 @@ use crate::{
 
 /// Converts a floating-point pixel measurement into whole pixels.
 ///
-/// The AppKit/CoreGraphics geometry we consume is `f64`, while everything past
-/// the boundary — `IVec2`, `IRect`, the layout arithmetic — is `i32`, so this
-/// conversion happens at ~25 call sites. Rounding rather than truncating is the
-/// point: `as` alone truncates toward zero, which biases every derived
-/// coordinate by up to a pixel in a direction that flips sign around the origin,
-/// and those errors compound through the chained ratio computations in the
-/// layout passes.
-///
-/// The clamp makes the cast total. Float-to-int `as` already saturates and maps
-/// NaN to zero rather than wrapping, so no input can produce a nonsense result;
-/// clamping first just states the intended range explicitly, and means the
-/// `as` below provably cannot truncate.
+/// Rounds rather than truncates, since truncating biases every derived
+/// coordinate by up to a pixel and those errors compound through downstream
+/// layout math. Clamped to `i32`'s range first, so the cast below cannot
+/// truncate.
 #[must_use]
 #[allow(
     clippy::cast_possible_truncation,

@@ -1,21 +1,11 @@
-//! The client half of the API: talking to a running daemon over its Mach
-//! service.
+//! The client half of the API: talks to a running daemon over its Mach
+//! service. [`module`] builds the table `require("paneru")` returns.
 //!
-//! [`module`] builds the complete table that `require("paneru")` returns — the
-//! shared typed API from [`crate::install`], dispatching to the daemon, plus the
-//! client-only `query_*` / `subscribe` / service-name helpers. The loadable
-//! `module` feature's `luaopen_paneru` is then a one-liner returning this table.
+//! Service name defaults to `com.karinushka.paneru`, overridable via the
+//! `PANERU_MACH_SERVICE` environment variable or `paneru.set_service_name`.
 //!
-//! The service name defaults to `com.karinushka.paneru`, can be overridden with
-//! the `PANERU_MACH_SERVICE` environment variable, or set at runtime via
-//! `paneru.set_service_name("com.example.paneru")`.
-//!
-//! Every call here is a blocking round trip, because Lua's C API is synchronous
-//! and a callback cannot yield into an executor. That is what
-//! [`paneru_mach_ipc`]'s `*_blocking` half is for: the wait is one kernel wait,
-//! where driving the async half with a `block_on` would arm a port watcher,
-//! build a waker and park the thread through an executor only to end up blocked
-//! on the same message.
+//! Every call here blocks: Lua's C API is synchronous, so a callback cannot
+//! yield into an executor.
 
 use std::rc::Rc;
 use std::sync::{LazyLock, Mutex};
@@ -31,8 +21,8 @@ use paneru_shared_types::wire::{
     Request, Response, ScriptStateRequest, ScriptStateResponse, WriteOutcome,
 };
 
-/// The active service name, seeded from the shared default (and its environment
-/// override) and mutable via `set_service_name`.
+/// The active service name, seeded from the shared default and mutable via
+/// `set_service_name`.
 static SERVICE: LazyLock<Mutex<String>> =
     LazyLock::new(|| Mutex::new(paneru_shared_types::wire::service_name()));
 
@@ -43,7 +33,6 @@ fn service_name() -> String {
     )
 }
 
-/// Connects to the running daemon.
 fn connect() -> LuaResult<Sender<Request>> {
     Sender::connect(&service_name()).map_err(|err| match err {
         paneru_mach_ipc::Error::NotRunning => {
@@ -53,11 +42,9 @@ fn connect() -> LuaResult<Sender<Request>> {
     })
 }
 
-/// Sends a request and waits for the answer.
-///
-/// The single place this module blocks. A daemon that reports a failure raises
-/// it as a Lua error rather than returning it, so a script sees a failed call as
-/// a failure instead of as a silent no-op.
+/// Sends a request and waits for the answer. A daemon-reported failure is
+/// raised as a Lua error rather than returned, so a failed call is an error,
+/// not a silent no-op.
 fn call(request: &Request) -> LuaResult<Response> {
     let sender = connect()?;
     let response: Response = sender.call_blocking(request).map_err(LuaError::external)?;
@@ -68,22 +55,16 @@ fn call(request: &Request) -> LuaResult<Response> {
     }
 }
 
-/// Sends a request that expects no answer.
 fn send(request: &Request) -> LuaResult<()> {
     let sender = connect()?;
     sender.send_blocking(request).map_err(LuaError::external)
 }
 
-/// The primitive the shared API is built on: send the command to the daemon
-/// (fire-and-forget).
-// Takes `Command` by value to match the shared `crate::Dispatch` closure type,
-// which every verb closure in `lib.rs` also has to satisfy.
 fn dispatch(_: &Lua, command: Command) -> LuaResult<bool> {
     send(&Request::Command(command))?;
     Ok(true)
 }
 
-/// Runs a state query and returns the payload.
 fn query_payload(kind: StateQueryKind) -> LuaResult<paneru_shared_types::wire::QueryPayload> {
     match call(&Request::Query(kind))? {
         Response::Query(payload) => Ok(payload),
@@ -91,7 +72,6 @@ fn query_payload(kind: StateQueryKind) -> LuaResult<paneru_shared_types::wire::Q
     }
 }
 
-/// Reads the `kind` argument shared by `query` and `query_json`.
 fn read_kind(kind: Option<String>) -> LuaResult<StateQueryKind> {
     let token = kind.unwrap_or_else(|| "state".to_string());
     StateQueryKind::parse(&token).ok_or_else(|| {
@@ -103,9 +83,6 @@ fn read_kind(kind: Option<String>) -> LuaResult<StateQueryKind> {
 }
 
 /// `paneru.query(kind)` — run a state query and return the raw JSON string.
-///
-/// Kept for scripts that want to hand the text to something else; `query_json`
-/// is what a script reading the answer itself wants.
 fn query(_: &Lua, kind: Option<String>) -> LuaResult<String> {
     Ok(query_payload(read_kind(kind)?)?
         .to_json()
@@ -121,7 +98,6 @@ fn query_json(lua: &Lua, kind: Option<String>) -> LuaResult<LuaValue> {
     lua.to_value(&json)
 }
 
-/// Runs one script-state request.
 fn script_state(request: ScriptStateRequest) -> LuaResult<ScriptStateResponse> {
     match call(&Request::ScriptState(request))? {
         Response::ScriptState(answer) => Ok(answer),
@@ -129,10 +105,8 @@ fn script_state(request: ScriptStateRequest) -> LuaResult<ScriptStateResponse> {
     }
 }
 
-/// Reads the current value of `key`.
-///
-/// A stored `Null` and an absent key both read as `nil` in Lua, which is the
-/// only thing Lua can express — it has no way to hold "present but empty".
+/// A stored `Null` and an absent key both read as `nil` in Lua — it has no way
+/// to hold "present but empty".
 fn state_get(key: &str) -> LuaResult<Option<ScriptValue>> {
     match script_state(ScriptStateRequest::Get {
         key: key.to_string(),
@@ -144,7 +118,6 @@ fn state_get(key: &str) -> LuaResult<Option<ScriptValue>> {
     }
 }
 
-/// Runs a write and returns its outcome.
 fn state_write(write: ScriptStateWrite) -> LuaResult<WriteOutcome> {
     match script_state(ScriptStateRequest::Write(write))? {
         ScriptStateResponse::Write(outcome) => Ok(outcome),
@@ -154,14 +127,10 @@ fn state_write(write: ScriptStateWrite) -> LuaResult<WriteOutcome> {
     }
 }
 
-/// Builds the `paneru.state` table: the same store, under the same names, as
-/// the embedded runtime gives a script.
-///
-/// The one difference worth knowing is cost. Each call here is a round trip to
-/// the daemon, where the embedded runtime reads a copy it already has; the
-/// values are the same either way, and so is `mutate`'s guarantee — the daemon
-/// is the one deciding whether a write still matches what it was read as, so a
-/// client and a script contending on a key resolve against the same store.
+/// Builds the `paneru.state` table: the same store the embedded runtime
+/// exposes, but each call round-trips to the daemon instead of reading a local
+/// copy. `mutate`'s compare-and-set guarantee holds either way, since the
+/// daemon is the one deciding whether a write still matches.
 fn state_table(lua: &Lua) -> LuaResult<LuaTable> {
     let state = lua.create_table()?;
 
@@ -237,17 +206,9 @@ fn state_table(lua: &Lua) -> LuaResult<LuaTable> {
 }
 
 /// `paneru.windows(fn)` — xmonad's `windows`: hand the window set to `fn` and
-/// commit whatever it hands back.
-///
-/// The same contract as the embedded runtime's, and the same value: the daemon
-/// serves this from `extract_window_set`, the very tree a `paneru.on` handler is
-/// given. The transform is pure Lua either way, so a function written for one
-/// host runs unchanged on the other.
-///
-/// Two round trips rather than the embedded runtime's shared per-batch read —
-/// one to fetch, one to commit — and blocking rather than async, like every
-/// other call here. A transform that returns nothing skips the second.
-// Signature is fixed by mlua's `create_function` contract.
+/// commit whatever it returns. Costs two round trips (fetch, then commit)
+/// rather than the embedded runtime's shared read; a transform returning
+/// nothing skips the commit.
 fn windows(lua: &Lua, transform: LuaFunction) -> LuaResult<bool> {
     let set = match call(&Request::WindowSet)? {
         Response::WindowSet(set) => *set,
@@ -264,8 +225,6 @@ fn windows(lua: &Lua, transform: LuaFunction) -> LuaResult<bool> {
     Ok(true)
 }
 
-/// Reads the `event` argument to `subscribe`: `nil` (every event), a single
-/// event name, or a table listing several.
 fn read_events(value: &LuaValue) -> LuaResult<Option<Vec<String>>> {
     match value {
         LuaValue::Nil => Ok(None),
@@ -283,8 +242,6 @@ fn read_events(value: &LuaValue) -> LuaResult<Option<Vec<String>>> {
     }
 }
 
-/// The name a filter matches an event against — the same `event` field the JSON
-/// carries, so a filter written against the documented output still works.
 fn event_name(event: &StateEvent) -> Option<String> {
     event
         .to_json()
@@ -317,8 +274,7 @@ fn subscribe(
     loop {
         let event = match stream.recv_blocking() {
             Ok(delivery) => delivery.value,
-            // The daemon is gone; the subscription is over, which is how this
-            // ends when the window manager stops.
+            // The daemon is gone; the subscription ends.
             Err(paneru_mach_ipc::Error::PeerGone) => break,
             Err(err) => return Err(LuaError::external(err)),
         };
@@ -341,7 +297,6 @@ fn subscribe(
 }
 
 /// `paneru.set_service_name(name)` — override the daemon's Mach service name.
-// Signature is fixed by mlua's `create_function` contract.
 #[allow(clippy::unnecessary_wraps)]
 fn set_service_name(_: &Lua, name: String) -> LuaResult<()> {
     if let Ok(mut guard) = SERVICE.lock() {
@@ -351,14 +306,11 @@ fn set_service_name(_: &Lua, name: String) -> LuaResult<()> {
 }
 
 /// `paneru.service_name()` — the service name currently in use.
-// Signature is fixed by mlua's `create_function` contract.
 #[allow(clippy::unnecessary_wraps)]
 fn service_name_fn(_: &Lua, (): ()) -> LuaResult<String> {
     Ok(service_name())
 }
 
-/// The daemon answered something this request never asks for, which means the
-/// two ends disagree about the protocol.
 fn unexpected(response: &Response) -> LuaError {
     LuaError::RuntimeError(format!("unexpected response from paneru: {response:?}"))
 }
@@ -371,14 +323,10 @@ fn unexpected(response: &Response) -> LuaError {
 pub fn module(lua: &Lua, version: &str) -> LuaResult<LuaTable> {
     let exports = lua.create_table()?;
 
-    // Installs paneru.run/command and the typed paneru.window/workspace/mouse
-    // tables on top of the daemon dispatcher.
     crate::install(lua, &exports, &(Rc::new(dispatch) as crate::Dispatch))?;
 
     exports.set("query", lua.create_function(query)?)?;
     exports.set("query_json", lua.create_function(query_json)?)?;
-    // The fixed-kind shorthands share one (name, kind) list with the embedded
-    // runtime, so both hosts spell them the same and neither hardcodes a token.
     for (name, kind) in StateQueryKind::SHORTHANDS {
         exports.set(
             name,

@@ -1,16 +1,12 @@
 //! What the daemon and its clients say to each other.
 //!
-//! These two enums are the whole protocol. Every request is a [`Request`] and
-//! every answer a [`Response`], which is a change from what came before: the
-//! socket transport flattened each request into argv strings on the client and
-//! re-parsed them with a chain of `&[&str]` matchers on the daemon, so the shape
-//! of a command existed twice and could disagree. Here the types below are the
-//! only definition, and the encoding is generated from them.
+//! Every request is a [`Request`] and every answer a [`Response`]; these two
+//! enums are the whole protocol and the wire encoding is generated from them.
 //!
 //! Values travel as postcard — compact, binary, and not self-describing, which
 //! is why [`crate::script_value::ScriptValue`] exists in place of
-//! `serde_json::Value`. JSON has not gone away; it is what `paneru query` prints
-//! to a terminal. It is simply no longer what two processes speak to each other.
+//! `serde_json::Value`. JSON is still what `paneru query` prints to a terminal,
+//! but it is not what the two processes speak to each other.
 
 use serde::{Deserialize, Serialize};
 
@@ -77,17 +73,11 @@ pub enum Response {
     WindowSet(Box<WindowSet>),
     ScriptState(ScriptStateResponse),
     /// The request could not be answered. Carries the message a client should
-    /// show — previously this was a `{"error": …}` object clients had to probe
-    /// for by key, which meant a legitimate value with an `error` field was
-    /// indistinguishable from a failure.
+    /// show.
     Error(String),
 }
 
 /// The answer to a [`Request::Query`], one variant per [`StateQueryKind`].
-///
-/// This replaces a `serde_json::Value` that held whichever subtree the kind
-/// selected. Typed, the caller knows what it got without inspecting it, and the
-/// CLI renders whichever variant arrived — so its JSON output is unchanged.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum QueryPayload {
     State(Box<QueryState>),
@@ -98,9 +88,6 @@ pub enum QueryPayload {
 
 impl QueryPayload {
     /// Renders as JSON, for the CLI and for a Lua client that wants a table.
-    ///
-    /// The shape is exactly what each kind produced before, so `paneru query`
-    /// output does not change.
     ///
     /// # Errors
     ///
@@ -132,9 +119,6 @@ mod tests {
     use crate::state::Frame;
     use std::sync::Arc;
 
-    /// Encode, decode, compare — for every variant. This is the cross-crate
-    /// check that did not exist when the codec was duplicated between the daemon
-    /// and the Lua module.
     fn round_trip<T>(value: &T)
     where
         T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
@@ -235,9 +219,6 @@ mod tests {
         assert!(decoded.ops().is_empty());
     }
 
-    /// The point of a binary wire format, stated as a test: a query request is a
-    /// couple of bytes, where the argv encoding it replaces was a length prefix
-    /// plus `"query\0active\0--json\0"`.
     #[test]
     fn a_request_is_small() {
         let bytes =

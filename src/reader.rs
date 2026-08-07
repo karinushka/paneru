@@ -5,19 +5,6 @@
 //! connect to that name and send it a [`Request`]. Each one is turned into an
 //! [`Event`] for the world, and the ones that expect an answer carry a reply
 //! channel the answering system fills in.
-//!
-//! This replaced a Unix socket at `/tmp/paneru.socket` carrying argv strings and
-//! JSON. The differences that matter:
-//!
-//! * **Nothing parses argv.** A request is a typed value, decoded once. The
-//!   chain of `&[&str]` matchers this file used to be — and the frame encoder
-//!   duplicated in the Lua crate — are gone along with the ways they could
-//!   disagree.
-//! * **There is no file.** The name is owned by the kernel, so there is no stale
-//!   socket to unlink at startup, no world-writable path in `/tmp`, and a second
-//!   daemon is refused rather than quietly taking the name over.
-//! * **Replies ride a send-once port carried in the request**, so the receive
-//!   loop never waits for the world and a reply cannot be sent twice.
 
 use bevy::tasks::{IoTaskPool, TaskPool};
 use futures_lite::StreamExt;
@@ -51,25 +38,20 @@ impl CommandReader {
     ///
     /// # Errors
     ///
-    /// Returns an error if another Paneru already owns the name. That is a
-    /// refusal to start rather than something to override — the socket this
-    /// replaced unlinked whatever it found, so a second daemon silently stole
-    /// the first one's clients.
+    /// Returns an error if another Paneru daemon already owns the name.
     pub fn start(self) -> Result<()> {
         let receiver = Receiver::<Request>::bind(&service_name())?;
 
         thread::spawn(move || {
-            // The requests arrive as a stream; `block_on` here parks exactly one
-            // thread for the life of the process, and every request it yields is
+            // Parks this one thread for the process lifetime; each request is
             // handed to the IO pool rather than served inline.
             futures_lite::future::block_on(async move {
                 let mut requests = std::pin::pin!(receiver);
                 while let Some(delivery) = requests.next().await {
                     match delivery {
                         Ok(delivery) => self.dispatch(delivery),
-                        // Any process in the session can reach the service port,
-                        // so a request that does not decode is a bad client, not
-                        // a reason to stop serving.
+                        // A request that fails to decode is a bad client, not a
+                        // reason to stop serving.
                         Err(err) => warn!("reading request: {err}"),
                     }
                 }
@@ -89,8 +71,7 @@ impl CommandReader {
         } = delivery;
 
         match value {
-            // Fire-and-forget: applied best-effort against the live world, and a
-            // client that wants the result asks for it.
+            // Fire-and-forget: no reply is sent for this request.
             Request::Command(command) => {
                 send(&events, Event::Command { command });
             }
@@ -131,9 +112,8 @@ impl CommandReader {
                         },
                     );
                 } else {
-                    // A subscribe that carried no channel has nowhere for events
-                    // to go; the sender built the request by hand and got it
-                    // wrong.
+                    // No channel to push events to; the sender built the
+                    // request by hand and got it wrong.
                     warn!("subscribe request carried no event channel");
                 }
             }
@@ -149,19 +129,12 @@ fn send(events: &EventSender, event: Event) {
 }
 
 /// Sends a request-carrying event to the world and answers the client with
-/// whatever comes back.
+/// whatever comes back. `what` only names the request in the log.
 ///
-/// Every request that expects a reply has this shape: build the event around a
-/// fresh reply channel, wait for the main thread to answer it, forward what came
-/// back. `what` only names the request in the log.
-///
-/// The wait happens on the IO pool rather than here, so the receive loop is free
-/// to take the next request immediately — a client waiting on a slow answer
-/// blocks nothing but itself. It holds no thread while it waits, only a task.
-///
-/// There is deliberately no timeout, because none is needed: the reply sender
-/// travels inside the event, so if the world never answers it, the event is
-/// dropped, the channel closes, and the `recv` resolves.
+/// The wait runs on the IO pool, not the receive loop, so a slow client blocks
+/// only itself. There is no timeout: the reply sender travels inside the
+/// event, so if the world never answers, the event is dropped, the channel
+/// closes, and `recv` resolves anyway.
 fn answer(
     events: EventSender,
     reply: Option<MachReply>,
@@ -169,8 +142,6 @@ fn answer(
     request: impl FnOnce(Reply) -> Event + Send + 'static,
 ) {
     let Some(reply) = reply else {
-        // The client did not ask for an answer, so there is nothing to wait for
-        // and no point building the request.
         warn!("{what} arrived without a reply channel");
         return;
     };

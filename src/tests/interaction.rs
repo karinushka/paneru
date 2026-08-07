@@ -345,10 +345,6 @@ fn test_scrolling() {
             assert_window_at!(world, 1, 400, TEST_MENUBAR_HEIGHT);
             assert_window_at!(world, 2, 800, TEST_MENUBAR_HEIGHT);
         })
-        // Unchanged from before `GESTURE_GAIN` existed: the gain was chosen to
-        // reproduce exactly this travel. The distance now arrives in one step
-        // instead of a direct write plus a lagging integrated velocity, which is
-        // what made a reversal fight itself.
         .on_iteration(5, move |world, _state| {
             assert_window_at!(world, 0, -352, TEST_MENUBAR_HEIGHT);
             assert_window_at!(world, 1, 48, TEST_MENUBAR_HEIGHT);
@@ -424,14 +420,9 @@ fn test_window_hidden_ratio() {
             let window = world.get::<Window>(entity).expect("finding window");
             assert!(window.frame().min.x < 0);
         })
-        // Focusing it brings it fully back into view. This assertion is
-        // inverted from what it used to be: the test asserted the window stayed
-        // hidden, which held only because the scroll offset was written back
-        // over the reshuffle that had already been issued to expose it. With
-        // that clobber fixed the reshuffle lands, and `window_hidden_ratio` does
-        // not hold it off — the ratio is measured against the window's layout
-        // slot, which is fully on-screen, not against where the strip has
-        // scrolled it to.
+        // Focusing brings it fully back into view: `window_hidden_ratio` is
+        // measured against the window's layout slot, not the strip's scroll
+        // offset.
         .on_iteration(2, |world, _state| {
             let entity = find_window_entity(0, world);
             let window = world.get::<Window>(entity).expect("finding window");
@@ -1130,7 +1121,6 @@ fn test_mid_strip_insertion_preserves_window_x() {
                 world.query_filtered::<(&Window, &Position), With<crate::ecs::FocusedMarker>>();
             let (_, position) = q.single(world).expect("a focused window");
 
-            // Save the currently focused window's offset.
             previous_offset.replace(position.x);
             assert_ne!(position.x, 0);
         })
@@ -1139,7 +1129,6 @@ fn test_mid_strip_insertion_preserves_window_x() {
                 world.query_filtered::<(&Window, &Position), With<crate::ecs::FocusedMarker>>();
             let (_, position) = q.single(world).expect("a focused window");
 
-            // Verify that the currently focused (and moved) window is still on the same offset.
             assert_eq!(position.x, previous_offset2.take());
         })
         .run(commands);
@@ -1199,11 +1188,9 @@ fn test_move_appends_to_end_by_default() {
 }
 
 /// A follow-move that appends the window to an already-populated destination
-/// strip must bring the moved window on-screen. The window keeps focus across
-/// the move, so no `Added<FocusedMarker>` fires on its own and the reshuffle
-/// issued at move time is swallowed by `reshuffle_layout_strip`'s
-/// newly-active-workspace skip. Regression test for the moved window landing
-/// off the right edge until manually centered.
+/// strip must bring it fully on-screen. Regression test: the moved window
+/// keeps focus, so no `Added<FocusedMarker>` fires to trigger the reshuffle,
+/// and it used to land off the right edge until manually centered.
 #[test]
 fn test_follow_move_brings_appended_window_on_screen() {
     // Enough windows that the destination strip overflows the display width
@@ -1240,8 +1227,6 @@ fn test_follow_move_brings_appended_window_on_screen() {
         Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Follow)),
     );
 
-    // The moved window keeps focus and must be brought fully on-screen (right
-    // edge within the display), not left appended off the right edge.
     assert_focused!(h.app.world_mut(), mover);
     let frame = {
         let world = h.app.world_mut();
@@ -1561,14 +1546,11 @@ fn test_virtual_workspace_switch_stops_in_flight_strip_animation() {
     );
 }
 
-/// A virtual-workspace switch restores the strip to its saved position and
-/// re-focuses the remembered window. macOS acknowledges that focus with a
-/// `WindowFocused` event several ticks later — after the `is_added` guards in
-/// `reshuffle_layout_strip` / `ensure_visible_in_strip` have expired. With
-/// `auto_center` enabled, that acknowledgment used to run
-/// `autocenter_window_on_focus`, re-centering the remembered window and
-/// sliding the strip away from the position it was just restored to — visible
-/// as a "wiggle" on every switch.
+/// A virtual-workspace switch restores the strip's saved scroll position and
+/// refocuses the remembered window. macOS acknowledges that focus several
+/// ticks later, after `reshuffle_layout_strip`'s guards have expired; with
+/// `auto_center` on, that late acknowledgment used to re-center the strip and
+/// undo the restore — a "wiggle" on every switch.
 #[test]
 fn test_virtual_workspace_switch_focus_echo_does_not_recenter_strip() {
     let config: Config = (
@@ -1619,10 +1601,9 @@ fn test_virtual_workspace_switch_focus_echo_does_not_recenter_strip() {
     settle(&mut h);
     let centered_x = strip_x(&mut h);
 
-    // Displace the strip so the focused window is off its centered position,
-    // as any scroll would leave it. Written directly instead of swiping: the
-    // swipe pipeline's finger-lift threshold is wall-clock based, which makes
-    // event order load-dependent and the test flaky.
+    // Displace the strip directly instead of swiping: the swipe pipeline's
+    // finger-lift threshold is wall-clock based, which makes event order
+    // load-dependent and the test flaky.
     let saved_x = centered_x - 250;
     {
         let world = h.app.world_mut();
@@ -1641,7 +1622,7 @@ fn test_virtual_workspace_switch_focus_echo_does_not_recenter_strip() {
     h.mock_state.focus_window(5);
     settle(&mut h);
 
-    // Switch back to VW0: the strip must restore to its saved scroll position.
+    // Switch back to VW0.
     pump(&mut h, Command::Window(Operation::VirtualNumber(0)));
     assert_eq!(
         strip_x(&mut h),
@@ -1649,8 +1630,7 @@ fn test_virtual_workspace_switch_focus_echo_does_not_recenter_strip() {
         "strip must restore to its saved position on switch-back"
     );
 
-    // The delayed focus acknowledgment for the remembered window must not
-    // re-center the strip away from the restored position.
+    // Delayed focus acknowledgment for the remembered window.
     h.mock_state.focus_window(0);
     settle(&mut h);
     let final_x = strip_x(&mut h);
@@ -1892,7 +1872,6 @@ fn test_stack_unstack_brings_focused_window_into_view() {
         let mut q = world.query_filtered::<(&Window, &Position), With<crate::ecs::FocusedMarker>>();
         let (_, position) = q.single(world).expect("a focused window");
 
-        // Save the currently focused window's offset.
         assert!(
             position.x < -(TEST_WINDOW_WIDTH / 4),
             "focused window should be somewhat offscreen after the scroll."
@@ -1943,27 +1922,22 @@ fn test_stack_unstack_brings_focused_window_into_view() {
     harness
         .on_iteration(2, check_if_offscreen)
         .on_iteration(3, |world, _state| {
-            // Check that both window are stacked and moved into view.
             assert_window_at!(world, 0, 0, 20);
             assert_window_at!(world, 1, 0, 394);
         })
         .on_iteration(5, check_if_offscreen)
         .on_iteration(6, |world, _state| {
-            // Check that both window are stacked and moved into view.
             assert_window_at!(world, 1, 0, 20);
         })
         .run(commands);
 }
 
-/// A window parked on a virtual row that isn't on screen must stay parked when
-/// its app hides and re-shows itself — 1Password raises itself every minute or
-/// so, which runs the whole unmanage/remanage cycle without the user asking.
-///
-/// Regression: the remanage path pinned the window's current (popped) frame and
-/// reshuffled around it. `reshuffle_layout_strip` then dragged the containing
-/// strip back on-screen to expose the window, so it was painted over the active
-/// row while still belonging to the hidden one — every command that operates on
-/// the active strip skipped it, leaving it unreachable.
+/// A window parked on a hidden virtual row must stay parked when its app
+/// hides and re-shows itself (e.g. 1Password self-activating periodically),
+/// which runs the whole unmanage/remanage cycle unprompted. Regression: the
+/// remanage path used to reshuffle around the window's popped frame, dragging
+/// the hidden strip back on screen and making the window unreachable to
+/// commands that only act on the active strip.
 #[test]
 fn test_app_self_activation_keeps_window_parked_on_hidden_virtual_row() {
     /// Position of the parked window and of the hidden strip holding it.
@@ -2074,16 +2048,13 @@ fn test_foreign_window_move_is_adopted() {
         .run(commands);
 }
 
-/// The same notification, while paneru is the one moving the window, is only an
-/// echo of the move it just asked for. Reading it back sets `animate_entities`
-/// lerping from wherever the app had got to rather than from where the
-/// animation left off, and the two then chase each other — the jitter seen
-/// whenever a new window arrives and the whole strip reflows at once.
+/// A `WindowMoved` echo of a move paneru itself just made must not perturb the
+/// in-flight animation — reading it back naively made the animation and the
+/// echo chase each other, causing jitter on every reflow.
 ///
-/// Driven straight at the system rather than through the harness loop: the mock
-/// applies a reposition synchronously, so a full frame would put the window
-/// back where the layout wants it before the notification could ever be read.
-/// The lag this guard exists for is exactly what the mock cannot reproduce.
+/// Driven directly at the system instead of through the harness loop: the mock
+/// applies its reposition synchronously, so a normal frame would resolve the
+/// move before the notification could ever be read back.
 #[test]
 fn test_own_window_move_echo_is_ignored() {
     use bevy::ecs::system::RunSystemOnce as _;
@@ -2096,9 +2067,9 @@ fn test_own_window_move_echo_is_ignored() {
     let entity = find_window_entity(0, world);
     let before = world.get::<Position>(entity).expect("window position").0;
 
-    // A move of ours is in flight, and the app reports a frame we did not ask
-    // for while it is. Displaced on the axis the animation leaves alone, so the
-    // assertion cannot be confused by how far the lerp has run.
+    // A move of ours is in flight, and the app reports a frame we didn't ask
+    // for. Displaced on the axis the animation leaves alone, so the assertion
+    // can't be confused by how far the lerp has run.
     world
         .entity_mut(entity)
         .insert(RepositionMarker(Origin::new(5000, before.y)));

@@ -17,8 +17,6 @@ use std::{
 use stdext::function_name;
 use tracing::{error, info, warn};
 
-// The tests below build expected commands out of the full vocabulary; the
-// non-test code only ever names `Command`.
 use self::decorations::BorderRadiusOption;
 use self::swipe::SwipeGestureDirection;
 #[cfg(test)]
@@ -43,17 +41,9 @@ pub mod swipe;
 /// If no configuration file is found, a minimal one is created in the user's
 /// XDG configuration directory so a fresh app installation can start with the
 /// built-in defaults.
-/// The TOML configuration file, if there is one to use.
-///
-/// A Lua script wins outright: when an `init.lua` exists the TOML path is
-/// disabled entirely — no file is read, none is created, and none is watched.
-/// Two authoritative configs cannot coexist. Whatever the script does not set
-/// comes from [`Config::defaults`], not from a leftover `paneru.toml`, so a
-/// stale TOML can't quietly override the script or re-apply itself every time
-/// it is touched.
-///
-/// Without a Lua script the TOML is discovered as usual, and a stub is created
-/// when none exists so a first run has something to edit.
+/// The TOML configuration file, if there is one to use. `None` when an
+/// `init.lua` exists, since a script disables the TOML entirely (see
+/// [`Config::defaults`]).
 pub static CONFIGURATION_FILE: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
     #[cfg(feature = "lua")]
     if let Some(script) = discover_lua_file() {
@@ -216,13 +206,11 @@ pub fn discover_lua_file() -> Option<PathBuf> {
 }
 
 /// Returns the path to the Lua init script, creating a default one at the XDG
-/// location if none exists (so the watcher always has a real file to observe).
+/// location if none exists.
 ///
-/// `Ok(None)` means there is no script and none should be created, because a
-/// `paneru.toml` already exists: a script disables the TOML outright (see
-/// [`CONFIGURATION_FILE`]), so planting one beside an existing TOML would
-/// silently throw that user's configuration away. Those setups keep using the
-/// TOML until they write an `init.lua` themselves.
+/// Returns `Ok(None)` instead if a `paneru.toml` already exists: planting a
+/// script beside an existing TOML would silently override it (see
+/// [`CONFIGURATION_FILE`]).
 #[cfg(feature = "lua")]
 pub fn ensure_lua_file() -> std::io::Result<Option<PathBuf>> {
     if let Some(path) = discover_lua_file() {
@@ -331,13 +319,9 @@ impl Config {
         })
     }
 
-    /// The configuration with every option left at its default. Used when there
-    /// is no TOML file, which with a Lua config is the normal case rather than
-    /// an error — see [`CONFIGURATION_FILE`].
-    ///
-    /// Parses the same text the stub file would have contained, so "no TOML"
-    /// and "the TOML we would have written" cannot mean different things. An
-    /// empty string will not do: `[options]` is a required table.
+    /// The configuration with every option left at its default, used when
+    /// there is no TOML file (e.g. a Lua-only setup; see [`CONFIGURATION_FILE`]).
+    /// Parses the same text the generated stub would contain.
     pub fn defaults() -> Result<Self> {
         Ok(Config {
             inner: Arc::new(ArcSwap::from_pointee(InnerConfig::new(
@@ -370,10 +354,9 @@ impl Config {
         Ok(())
     }
 
-    /// Atomically adopts another config's inner data, so every shared handle to
-    /// this `Config` observes the new settings. Used by the Lua hot-reload path,
-    /// which rebuilds a fresh `Config` from `paneru.setup{...}` and swaps it in.
-    /// Takes `&self` because the swap is a lock-free `ArcSwap::store`.
+    /// Atomically adopts another config's inner data via a lock-free
+    /// `ArcSwap::store`, so every shared handle to this `Config` observes the
+    /// new settings. Used by the Lua hot-reload path.
     #[cfg(feature = "lua")]
     pub(crate) fn replace_inner_from(&self, other: &Config) {
         self.inner.store(other.inner.load_full());
@@ -949,8 +932,7 @@ impl OneOrMore {
 /// It is typically accessed via an `Arc<RwLock<InnerConfig>>` within the `Config` struct.
 #[derive(Deserialize, Debug, Default)]
 struct InnerConfig {
-    // Defaulted so a config (TOML or a `paneru.setup{...}` table) may omit these
-    // sections entirely; without this serde rejects a missing `options`/`bindings`.
+    // Defaulted so a config may omit these; otherwise serde requires them.
     #[serde(default)]
     options: MainOptions,
     #[serde(default)]
@@ -1307,21 +1289,14 @@ where
         .map_err(|e: Error| serde::de::Error::custom(e.to_string()))
 }
 
-/// Builds a [`Config`] from the Lua table passed to `paneru.setup{...}`, reusing
-/// the same serde `Deserialize` that parses the TOML file — the table mirrors the
-/// TOML sections one-for-one (`options`, `padding`, `swipe`, `decorations`,
-/// `restore`, `windows`, `default_workspaces`).
-///
-/// Keybindings are deliberately *not* read here: they travel through the Lua
-/// keybind pipeline (`paneru.bind`, resolved via [`resolve_chord`] and delivered
-/// through `LUA_KEYBINDS`), so any `bindings` field is cleared. Window rule
-/// passthrough chords are resolved into `(keycode, modifiers)` exactly as the
-/// TOML two-pass does in [`InnerConfig::parse_config_with_virtual_keys`].
+/// Builds a [`Config`] from the Lua table passed to `paneru.setup{...}`,
+/// reusing the same serde `Deserialize` that parses the TOML file. Keybindings
+/// are not read here — they go through the Lua keybind pipeline via
+/// `paneru.bind` — so any `bindings` field is cleared.
 ///
 /// # Errors
 ///
-/// Returns an error if `value` is not a table or does not deserialize into the
-/// configuration schema.
+/// Returns an error if `value` is not a table or fails to deserialize.
 #[cfg(feature = "lua")]
 pub(crate) fn config_from_lua(lua: &mlua::Lua, value: mlua::Value) -> mlua::Result<Config> {
     use mlua::LuaSerdeExt;
@@ -1333,8 +1308,6 @@ pub(crate) fn config_from_lua(lua: &mlua::Lua, value: mlua::Value) -> mlua::Resu
     }
 
     let mut inner: InnerConfig = lua.from_value(value)?;
-    // Bindings are owned by the Lua keybind registry, never this path; drop any
-    // that slipped through so nothing here tries to resolve them.
     inner.bindings.clear();
 
     // Resolve window passthrough chords into keycodes, mirroring the TOML
@@ -1372,23 +1345,20 @@ pub(crate) fn config_from_lua(lua: &mlua::Lua, value: mlua::Value) -> mlua::Resu
 /// keybinds accept the exact same chord syntax as the TOML `[bindings]` table.
 #[cfg(feature = "lua")]
 pub(crate) fn resolve_chord(input: &str) -> Result<(u8, Modifiers)> {
-    // Fast path: resolve against the built-in keymaps first. This avoids the
-    // virtual keymap entirely for the common case and keeps `paneru.bind`
-    // usable in headless unit tests.
+    // Fast path: avoids the virtual keymap for common chords, keeping this
+    // testable headlessly.
     if let Ok(resolved) = resolve_keybinding_str(input, &[]) {
         return Ok(resolved);
     }
-    // Fall back to the layout-aware virtual keymap for layout-specific keys.
     resolve_keybinding_str(input, virtual_keymap())
 }
 
 /// The layout-aware virtual keymap, computed once.
 ///
-/// [`generate_virtual_keymap`] goes through Carbon/TIS, which is
-/// main-thread/GUI-session sensitive, and its `paneru.bind` caller now runs on
-/// the Lua worker thread — at script load and again on every hot reload. So the
-/// daemon primes this from the main thread during startup and the worker only
-/// ever reads what it left behind.
+/// `generate_virtual_keymap` goes through Carbon/TIS, which is main-thread/
+/// GUI-session sensitive, but `paneru.bind` runs on the Lua worker thread. So
+/// the daemon primes this from the main thread at startup; the worker only
+/// ever reads what was left behind.
 #[cfg(feature = "lua")]
 static VIRTUAL_KEYMAP: std::sync::OnceLock<Vec<(String, u8)>> = std::sync::OnceLock::new();
 
@@ -1400,8 +1370,7 @@ pub(crate) fn prime_virtual_keymap() {
 }
 
 /// The primed keymap. Falls back to computing it in place if priming never
-/// happened, which outside the daemon (unit tests) is both harmless and rare —
-/// the fast path above means only layout-specific keys get this far.
+/// happened (harmless in unit tests, rare elsewhere).
 #[cfg(feature = "lua")]
 fn virtual_keymap() -> &'static [(String, u8)] {
     VIRTUAL_KEYMAP.get_or_init(generate_virtual_keymap)
@@ -2152,8 +2121,6 @@ fn test_first_launch_creates_parseable_config_without_overwriting_it() {
 
 #[test]
 fn defaults_config_matches_the_generated_stub() {
-    // `Config::defaults()` stands in for a TOML that isn't there, so it has to
-    // mean the same thing as the stub that would otherwise have been written.
     let stub = InnerConfig::new(DEFAULT_CONFIGURATION).expect("the stub should parse");
     let defaults = Config::defaults().expect("defaults should always build");
     assert_eq!(

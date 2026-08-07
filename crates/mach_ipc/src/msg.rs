@@ -2,18 +2,15 @@
 //!
 //! # Why `packed(4)`
 //!
-//! A complex Mach message is a 24-byte header, a 4-byte body count, then
-//! descriptors — so the first descriptor begins at offset 28. An OOL descriptor
-//! leads with a 64-bit `address`, and a plain `#[repr(C)]` struct would
-//! therefore insert four bytes of padding to align it, putting it at offset 32
-//! and describing a message the kernel does not recognise. Apple's own headers
-//! wrap the descriptors in `#pragma pack(4)` for exactly this reason, so these
-//! structs do the same and the offsets are asserted below rather than trusted.
+//! A complex Mach message header is 24 bytes, then a 4-byte body count, so the
+//! first descriptor begins at offset 28. A plain `#[repr(C)]` struct would pad
+//! the OOL descriptor's 64-bit `address` to offset 32, describing a message the
+//! kernel does not recognise — hence `packed(4)`, matching Apple's own
+//! `#pragma pack(4)`. The offsets are asserted below rather than trusted.
 //!
-//! The consequence is that fields of a packed struct are not necessarily
-//! aligned, so they are read and written through raw pointers rather than by
-//! reference. Taking a `&` to a misaligned field is undefined behaviour even if
-//! it is never dereferenced.
+//! Because fields of a packed struct are not necessarily aligned, they are read
+//! and written through raw pointers rather than by reference: taking a `&` to a
+//! misaligned field is undefined behaviour even if it is never dereferenced.
 
 use mach2::kern_return::KERN_SUCCESS;
 use mach2::message::{
@@ -52,8 +49,8 @@ struct OolPortMsg {
     port: mach_msg_port_descriptor_t,
 }
 
-/// The kernel's layout, not the compiler's preference. If any of these fire the
-/// transport is silently talking nonsense, so they are checked at compile time.
+/// The kernel's layout, not the compiler's preference — checked at compile
+/// time since a mismatch here means the transport silently talks nonsense.
 const _: () = {
     assert!(size_of::<mach_msg_header_t>() == 24);
     assert!(std::mem::offset_of!(OolMsg, body) == 24);
@@ -68,10 +65,9 @@ const _: () = {
 const RECEIVED_SEND: u32 = MACH_MSG_TYPE_MOVE_SEND;
 const RECEIVED_SEND_ONCE: u32 = MACH_MSG_TYPE_MOVE_SEND_ONCE;
 
-/// Where the `type_` byte sits inside every descriptor kind.
-///
-/// Apple places it at the same offset in all of them precisely so a parser can
-/// read it before it knows which layout it is looking at.
+/// Where the `type_` byte sits inside every descriptor kind — Apple places it
+/// at the same offset in all of them so a parser can read it before it knows
+/// which layout it is looking at.
 const DESC_TYPE_OFFSET: usize = 11;
 /// A port descriptor is 12 bytes; the out-of-line kinds are 16 on 64-bit.
 const PORT_DESC_SIZE: usize = 12;
@@ -111,20 +107,13 @@ pub struct Incoming {
 }
 
 /// One outgoing message.
-///
-/// A struct rather than six positional arguments because four of them are
-/// optional ports and timeouts that read as a row of bare `None`s at the call
-/// site, where nothing says which is the reply port and which the carried one.
 pub(crate) struct Outgoing<'a> {
-    /// The port to send to.
-    ///
-    /// Raw only at this boundary: the constructors take the owned right, so a
-    /// caller never handles a bare port name and cannot hand over one whose
-    /// right has already been released.
+    /// The port to send to. Raw only at this boundary: the constructors take
+    /// the owned right, so a caller never hands over a name whose right has
+    /// already been released.
     dest: mach_port_t,
     /// What the destination right is, and so what the kernel does with it.
     dest_kind: Dest,
-    /// The encoded value.
     payload: &'a [u8],
     /// A receive right to answer on, turning this into a request.
     reply_port: Option<mach_port_t>,
@@ -280,20 +269,14 @@ impl Outgoing<'_> {
 }
 
 /// Receives without blocking, reporting [`Error::WouldBlock`] when the port is
-/// empty. This is the half of the async loop that does the actual work; the
-/// waiting is [`crate::poll::Watcher`]'s job.
+/// empty.
 pub(crate) fn try_recv(port: &RecvRight) -> Result<Incoming> {
     recv_with(port.as_raw(), MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0)
 }
 
 /// Receives, parking the calling thread in the kernel until a message arrives.
-///
-/// The same call as [`try_recv`] without `MACH_RCV_TIMEOUT`, which is what turns
-/// the immediate `WouldBlock` return into an indefinite wait. Callers that have
-/// nothing else to do meanwhile want this rather than a `block_on` around the
-/// async path: waiting here costs one kernel wait, where the async route has to
-/// arm a port watcher, build a waker and park the thread through an executor to
-/// reach the same place.
+/// The same call as [`try_recv`] without `MACH_RCV_TIMEOUT`, which is what
+/// turns the immediate `WouldBlock` return into an indefinite wait.
 pub(crate) fn recv(port: &RecvRight) -> Result<Incoming> {
     recv_with(port.as_raw(), MACH_RCV_MSG, 0)
 }
@@ -326,10 +309,10 @@ fn recv_with(port: mach_port_t, options: i32, timeout: u32) -> Result<Incoming> 
 
 /// Pulls the payload and any rights out of a received message.
 ///
-/// `cast_ptr_alignment` is allowed throughout: `bytes` is always the interior of
-/// a [`RecvBuffer`], which is `repr(align(8))` precisely so these reads are
-/// aligned. Clippy cannot see that through the slice. The descriptor reads that
-/// genuinely *are* misaligned use `read_unaligned` and are marked as such.
+/// `cast_ptr_alignment` is allowed throughout: `bytes` is always the interior
+/// of a [`RecvBuffer`], which is `repr(align(8))` precisely so these reads are
+/// aligned, but clippy cannot see that through the slice. The descriptor reads
+/// that genuinely *are* misaligned use `read_unaligned` and are marked as such.
 #[allow(clippy::cast_ptr_alignment)]
 fn parse(bytes: &[u8]) -> Result<Incoming> {
     // SAFETY: `bytes` is the 8-aligned receive buffer and is longer than a

@@ -55,11 +55,9 @@ pub static AX_WINDOW_NOTIFICATIONS: LazyLock<Vec<&str>> = LazyLock::new(|| {
         accessibility_sys::kAXUIElementDestroyedNotification,
         accessibility_sys::kAXWindowMiniaturizedNotification,
         accessibility_sys::kAXWindowDeminiaturizedNotification,
-        // Observed per window rather than per application. On the application
-        // observer this arrives with the application as its element, which has
-        // no window id to resolve, so it could only be dropped — which left
+        // Observed per window, not per application: on the app observer this
+        // notification's element carries no resolvable window id, which left
         // `WindowOS::title` caching a title it was never told to invalidate.
-        // A window observer already knows which window it speaks for.
         accessibility_sys::kAXTitleChangedNotification,
     ]
 });
@@ -192,21 +190,12 @@ impl ApplicationOS {
     ) -> Result<Self> {
         let refer = unsafe {
             let ptr = AXUIElementCreateApplication(process.pid());
-            // Every AX read below is a synchronous cross-process call, and the
-            // default timeout for one is six seconds. An app that stops
-            // servicing its accessibility port — beachballing, paused in a
-            // debugger, thrashing — therefore takes the main thread down with
-            // it for six seconds *per call*, which is what a sudden, total,
-            // self-resolving freeze of the window manager looks like from the
-            // outside.
-            //
-            // The timeout is set on the application element, so it covers every
-            // element obtained through it, windows included. A quarter second is
-            // far longer than a healthy app needs (these are sub-millisecond)
-            // and short enough to stay imperceptible when one is not: a read
-            // that trips it fails with `kAXErrorCannotComplete`, which every
-            // caller here already treats as "unknown", the same as any other AX
-            // error.
+            // Without this, a synchronous AX call to an app that stops servicing
+            // its accessibility port (beachballing, paused in a debugger) blocks
+            // the main thread for the default six-second timeout, per call. Set
+            // on the application element so it covers every element obtained
+            // through it, windows included; a call that trips it fails with
+            // `kAXErrorCannotComplete`, treated like any other AX error.
             AXUIElementSetMessagingTimeout(ptr, AX_MESSAGING_TIMEOUT_SEC);
             AXUIWrapper::retain(ptr)?
         };

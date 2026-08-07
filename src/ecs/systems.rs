@@ -32,7 +32,7 @@ use crate::ecs::{
     LowPowerMode, MissionControlActive, Position, ReadDisplayProperties, RestoreWindowState,
     Scrolling, SendMessageTrigger, SpawnCommandsExt, Unmanaged, WidthRatio, WindowProperties,
 };
-use crate::events::Event;
+use crate::events::{Event, InputEvent};
 use crate::manager::{
     Application, Display, Process, Window, WindowManager, WindowOS, bruteforce_windows,
 };
@@ -597,6 +597,22 @@ pub(super) fn animate_resize_entities(
                 entity_commands.try_remove::<ResizeMarker>();
             }
         });
+}
+
+/// Republishes the pointer and gesture events onto [`InputEvent`], so the input
+/// systems do not have to sift the whole stream for them every frame.
+///
+/// Runs right after [`pump_events`], which is what puts this frame's events on
+/// the stream in the first place.
+pub(crate) fn demux_input_events(
+    mut messages: MessageReader<Event>,
+    mut input: MessageWriter<InputEvent>,
+) {
+    for event in messages.read() {
+        if event.is_input() {
+            input.write(InputEvent(event.clone()));
+        }
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)]

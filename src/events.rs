@@ -29,6 +29,34 @@ pub enum DestroySource {
 /// `Event` represents various system-level and application-specific occurrences that the window manager reacts to.
 /// These events drive the core logic of the window manager, from window creation to display changes.
 #[allow(dead_code)]
+/// The pointer and gesture subset of [`Event`], republished on its own stream.
+///
+/// Every consumer of [`Event`] pays for the whole stream: fifty-six systems take
+/// a `MessageReader<Event>`, and each one fetches the shared `Messages<Event>`
+/// resource and walks the entire batch to pick out the one or two variants it
+/// wants. With the scheduling overhead gone that resource fetch became the
+/// second-largest cost on the main thread, and these are the events that arrive
+/// most often — a trackpad produces them at the refresh rate whether or not
+/// anything is listening.
+///
+/// [`demux_input_events`](crate::ecs::systems::demux_input_events) reads the
+/// main stream once and republishes these, so the input systems read a stream
+/// carrying nothing else and skip the frame entirely when it is empty. The
+/// events stay on [`Event`] as well, because the Lua bridge and the IPC
+/// subscribers want the undivided stream.
+#[derive(Clone, Debug, Message)]
+pub struct InputEvent(pub Event);
+
+/// Several variants carry a payload that nothing in the daemon itself reads —
+/// the modifier state on a mouse-up, the string on a Dock notification, the pid
+/// on an activation. They are there to be forwarded to the scripting bridge,
+/// and `src/lua/convert.rs` is the only reader. With the `lua` feature off that
+/// reader is compiled out and the dead-code lint is right on its own terms and
+/// unhelpful on ours: dropping the fields would mean adding them back the
+/// moment the feature is on. Suppressed only in the configuration where they
+/// genuinely have no consumer, so the lint still applies to the build that
+/// ships.
+#[allow(dead_code)]
 #[derive(Clone, Debug, Message)]
 pub enum Event {
     /// Signals the application to exit.
@@ -183,6 +211,26 @@ pub enum Event {
 #[derive(Clone, Debug)]
 pub struct EventSender {
     tx: Sender<Event>,
+}
+
+impl Event {
+    /// Whether this is one of the pointer or gesture events republished on
+    /// [`InputEvent`].
+    pub fn is_input(&self) -> bool {
+        matches!(
+            self,
+            Event::MouseDown { .. }
+                | Event::MouseUp { .. }
+                | Event::MouseDragged { .. }
+                | Event::MouseMoved { .. }
+                | Event::Swipe { .. }
+                | Event::VerticalSwipe { .. }
+                | Event::VerticalScrollTick { .. }
+                | Event::Scroll { .. }
+                | Event::TouchpadDown
+                | Event::TouchpadUp
+        )
+    }
 }
 
 impl EventSender {

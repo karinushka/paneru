@@ -27,7 +27,7 @@ use crate::config::{CONFIGURATION_FILE, Config, WindowParams};
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::state::PaneruState;
 use crate::errors::Result;
-use crate::events::{Event, EventSender};
+use crate::events::{Event, EventSender, InputEvent};
 use crate::manager::{
     Application, Origin, ProcessApi, Size, Window, WindowManager, WindowManagerApi, WindowManagerOS,
 };
@@ -90,9 +90,18 @@ pub fn register_systems(app: &mut bevy::app::App) {
         Startup,
         (systems::gather_displays, systems::gather_initial_processes).chain(),
     );
+    // Registered with `add_message` rather than `init_resource`, so the buffer
+    // is double-buffered and dropped after a frame like any other message
+    // stream. Both this and the demux live here rather than in `setup_bevy_app`
+    // because the test harness builds its world through `register_systems` too.
+    app.add_message::<InputEvent>();
     app.add_systems(
         PreUpdate,
-        (systems::window_creation_event, systems::pump_events),
+        (
+            systems::window_creation_event,
+            systems::pump_events,
+            systems::demux_input_events.after(systems::pump_events),
+        ),
     );
     app.add_systems(
         Update,

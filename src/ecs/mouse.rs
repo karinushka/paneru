@@ -15,7 +15,9 @@ use crate::ecs::{
     ActiveWorkspaceMarker, DockPosition, MissionControlActive, Position, Scrolling,
     SpawnCommandsExt,
 };
-use crate::events::Event;
+use bevy::ecs::schedule::common_conditions::on_message;
+
+use crate::events::{Event, InputEvent};
 use crate::manager::{Display, Origin, WindowManager, origin_from};
 use crate::platform::WinID;
 
@@ -33,6 +35,11 @@ impl Plugin for MouseEventsPlugin {
             mission_control.is_none_or(|active| !active.0)
         };
 
+        // All of these act only on an input event, so on a frame carrying none
+        // they have nothing to do — and skipping them skips fetching their
+        // parameters too, which is the `Windows` queries, the config and the
+        // window manager. That resource fetching was the second-largest cost on
+        // the main thread once the scheduling overhead was gone.
         app.add_systems(
             Update,
             (
@@ -44,7 +51,8 @@ impl Plugin for MouseEventsPlugin {
                     .run_if(mission_control_inactive),
                 mouse_up_trigger,
                 horizontal_warp_mouse_trigger,
-            ),
+            )
+                .run_if(on_message::<InputEvent>),
         );
     }
 }
@@ -76,7 +84,7 @@ fn is_in_corner_dead_zone(
 /// * `config` - The optional configuration resource.
 #[allow(clippy::needless_pass_by_value)]
 fn mouse_moved_trigger(
-    mut messages: MessageReader<Event>,
+    mut messages: MessageReader<InputEvent>,
     windows: Windows,
     displays: Query<(&Display, Option<&DockPosition>)>,
     window_manager: Res<WindowManager>,
@@ -84,7 +92,7 @@ fn mouse_moved_trigger(
     mut global_state: GlobalState,
     mut commands: Commands,
 ) {
-    for event in messages.read() {
+    for InputEvent(event) in messages.read() {
         let Event::MouseMoved { point, modifiers } = event else {
             continue;
         };
@@ -180,7 +188,7 @@ fn mouse_moved_trigger(
 /// * `commands` - Bevy commands to trigger a reshuffle.
 #[allow(clippy::needless_pass_by_value)]
 fn mouse_down_trigger(
-    mut messages: MessageReader<Event>,
+    mut messages: MessageReader<InputEvent>,
     windows: Windows,
     active_workspace: Query<(Entity, Option<&Scrolling>), With<ActiveWorkspaceMarker>>,
     window_manager: Res<WindowManager>,
@@ -188,7 +196,7 @@ fn mouse_down_trigger(
     mouse_held: Query<Entity, With<MouseHeldMarker>>,
     mut commands: Commands,
 ) {
-    for event in messages.read() {
+    for InputEvent(event) in messages.read() {
         let Event::MouseDown { point, .. } = event else {
             continue;
         };
@@ -233,11 +241,11 @@ fn mouse_down_trigger(
 /// window slides into view after the user releases the button.
 #[allow(clippy::needless_pass_by_value)]
 fn mouse_up_trigger(
-    mut messages: MessageReader<Event>,
+    mut messages: MessageReader<InputEvent>,
     mouse_held: Query<(Entity, &MouseHeldMarker)>,
     mut commands: Commands,
 ) {
-    for event in messages.read() {
+    for InputEvent(event) in messages.read() {
         if !matches!(event, Event::MouseUp { .. }) {
             continue;
         }
@@ -259,7 +267,7 @@ pub(super) struct MouseResizeState {
 
 #[allow(clippy::needless_pass_by_value)]
 fn mouse_resize_trigger(
-    mut messages: MessageReader<Event>,
+    mut messages: MessageReader<InputEvent>,
     windows: Windows,
     active_workspace: Single<(Entity, &LayoutStrip, &Position), With<ActiveWorkspaceMarker>>,
     window_manager: Res<WindowManager>,
@@ -267,7 +275,7 @@ fn mouse_resize_trigger(
     mut state: Local<MouseResizeState>,
     mut commands: Commands,
 ) {
-    for event in messages.read() {
+    for InputEvent(event) in messages.read() {
         let Event::MouseMoved { point, modifiers } = event else {
             continue;
         };
@@ -340,7 +348,7 @@ pub(super) struct WarpVelocityState {
 
 #[allow(clippy::needless_pass_by_value)]
 fn horizontal_warp_mouse_trigger(
-    mut messages: MessageReader<Event>,
+    mut messages: MessageReader<InputEvent>,
     displays: Query<&Display>,
     window_manager: Res<WindowManager>,
     config: Res<Config>,
@@ -358,7 +366,7 @@ fn horizontal_warp_mouse_trigger(
     /// Stale velocity samples (e.g. from a prior gesture) shouldn't carry.
     const VELOCITY_FRESHNESS: Duration = Duration::from_millis(80);
 
-    for event in messages.read() {
+    for InputEvent(event) in messages.read() {
         let Event::MouseMoved { point, .. } = event else {
             continue;
         };

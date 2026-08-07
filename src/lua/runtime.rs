@@ -420,6 +420,40 @@ mod tests {
             panic!("the dispatch never finished");
         }
 
+        /// [`Self::drive`], for a dispatch that is waiting on something other
+        /// than this thread.
+        ///
+        /// `drive` spins its whole budget as fast as it can, which is right when
+        /// every await is answered from the same loop. A dispatch parked on
+        /// `paneru.exec` is waiting on a process, and a tight spin would give up
+        /// long before one could start — so this one waits between turns.
+        fn drive_patiently<T>(
+            &self,
+            extract: &dyn Fn() -> Shared<PaneruQueryState>,
+            future: impl Future<Output = T>,
+        ) -> T {
+            const TURNS: usize = 2_000;
+
+            let mut future = Box::pin(future);
+            for _ in 0..TURNS {
+                if let Some(done) = block_on(poll_once(future.as_mut())) {
+                    return done;
+                }
+                while let Ok(request) = self.world_queries.try_recv() {
+                    match request {
+                        WorldRequest::State { reply } => {
+                            let _ = reply.try_send(extract());
+                        }
+                        WorldRequest::WindowSet { reply } => {
+                            let _ = reply.try_send(Ok(Arc::new(WindowSet::default())));
+                        }
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            panic!("the dispatch never finished");
+        }
+
         // Fallible to match what the worker hands the runtime, which reads over
         // a channel that can be gone.
         #[allow(clippy::unnecessary_wraps)]
@@ -847,6 +881,69 @@ mod tests {
             &world,
         );
         assert_eq!(world.get("pad"), None);
+    }
+
+    /// `paneru.exec` has to suspend the handler rather than hold the
+    /// interpreter, which is the whole reason it exists: a synchronous exec
+    /// binding stops every other handler until the child exits.
+    ///
+    /// Driven by hand rather than through `drive`, which spins a fixed number of
+    /// turns and would give up long before a real process finished.
+    #[test]
+    fn exec_runs_a_program_and_hands_back_its_output() {
+        let world = TestWorld::default();
+        let runtime = world
+            .runtime(
+                r#"paneru.bind("alt - z", function()
+                       local result = paneru.exec("/bin/echo", {"hello"})
+                       code, out = result.code, result.stdout
+                   end)"#,
+            )
+            .expect("script should load");
+
+        let extract = || Ok(Arc::new(test_state()));
+        world.drive_patiently(&extract, runtime.dispatch_bind(1));
+
+        let globals = runtime.lua().globals();
+        assert_eq!(globals.get::<i32>("code").expect("an exit code"), 0);
+        assert_eq!(
+            globals
+                .get::<String>("out")
+                .expect("captured stdout")
+                .trim(),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn exec_reports_a_program_that_is_not_there_as_an_error() {
+        let world = TestWorld::default();
+        let runtime = world
+            .runtime(
+                r#"paneru.bind("alt - z", function()
+                       local ok, err = pcall(function()
+                           paneru.exec("/nonexistent/paneru-test-binary")
+                       end)
+                       succeeded, message = ok, tostring(err)
+                   end)"#,
+            )
+            .expect("script should load");
+
+        let extract = || Ok(Arc::new(test_state()));
+        world.drive_patiently(&extract, runtime.dispatch_bind(1));
+
+        let globals = runtime.lua().globals();
+        assert!(
+            !globals.get::<bool>("succeeded").expect("a pcall result"),
+            "a missing program must surface to the script, not be swallowed"
+        );
+        assert!(
+            globals
+                .get::<String>("message")
+                .expect("an error message")
+                .contains("exec:"),
+            "the error should say which layer failed"
+        );
     }
 
     #[test]

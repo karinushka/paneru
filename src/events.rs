@@ -93,10 +93,16 @@ pub enum Event {
     ApplicationTerminated { psn: ProcessSerialNumber },
     /// The frontmost application has switched.
     ApplicationFrontSwitched { psn: ProcessSerialNumber },
-    /// The application has been activated.
-    ApplicationActivated,
-    /// The application has been deactivated.
-    ApplicationDeactivated,
+    /// An application has become the active (frontmost) application.
+    ///
+    /// Carries the pid for the same reason [`Event::ApplicationVisible`] does:
+    /// without it a subscriber is told that *something* was activated and has no
+    /// way to find out what. Paneru's own focus handling uses
+    /// [`Event::ApplicationFrontSwitched`], which carries a process serial
+    /// number; these two exist for the scripting and IPC subscribers.
+    ApplicationActivated { pid: i32 },
+    /// An application has stopped being the active application.
+    ApplicationDeactivated { pid: i32 },
     /// An application has become visible.
     ApplicationVisible { pid: i32 },
     /// An application has become hidden.

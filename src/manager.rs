@@ -714,12 +714,9 @@ fn existing_application_window_list(
     space_window_list_for_connection(cid, spaces, app.connection(), true)
 }
 
-/// Wall-clock ceiling on a single application's brute-force scan.
-///
-/// Generous next to a healthy scan (the round trips run in the tens of
-/// microseconds, so an app whose windows resolve finishes far inside it) and
-/// short enough that an app which will never resolve cannot hold up
-/// initialisation, which waits on these tasks before it completes.
+/// Wall-clock ceiling on a single application's brute-force scan: generous
+/// next to a healthy scan, but short enough that an app which never resolves
+/// cannot hold up initialisation, which waits on these tasks.
 const BRUTEFORCE_BUDGET: Duration = Duration::from_millis(250);
 
 /// Attempts to find and add unresolved windows for a given application by brute-forcing `element_id` values.

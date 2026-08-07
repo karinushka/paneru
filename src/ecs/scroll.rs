@@ -343,12 +343,9 @@ fn scrolling_integrator(
     };
 
     let scroll = &mut *strip;
-    // Velocity is the coast after the fingers leave. While they are still down
-    // `swipe_gesture` has already written their movement straight into
-    // `position`, and integrating on top of that applied it a second time — at
-    // roughly double distance, with the extra half coming from an EMA three
-    // frames behind the hand. Reversing direction left that stale half pulling
-    // the other way until it caught up.
+    // Velocity is only the coast after fingers leave: while they're down,
+    // `swipe_gesture` already writes movement straight into `position`, so
+    // integrating here too would double-apply it.
     if scroll.is_user_swiping {
         return;
     }
@@ -366,13 +363,11 @@ fn apply_scrolling_constraints(
     let viewport = active_display.actual_bounds(&config);
     let (strip, ref mut position, ref mut scroll) = *strip;
 
-    // Anything else that moves the strip — `reshuffle_layout_strip` bringing a
-    // stacked window back into view, `ensure_visible_in_strip`, the animator
-    // stepping either of them along — writes `Position` directly. This system
-    // owns `Position` the rest of the time, so a scroll left in flight wrote its
-    // own stale offset straight back over that move and the strip never got
-    // there. A `Position` that no longer matches what was last written here came
-    // from one of those, and it wins: adopt it and drop the coast.
+    // This system owns `Position` except when something else moves the strip
+    // directly (e.g. `reshuffle_layout_strip`, `ensure_visible_in_strip`). If
+    // `Position` no longer matches what we last wrote, one of those won:
+    // adopt it and drop the coast, rather than overwriting it with our own
+    // stale offset.
     if position.x != scroll.applied {
         scroll.position = f64::from(position.x);
         scroll.velocity = 0.0;

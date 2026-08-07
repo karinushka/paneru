@@ -380,14 +380,12 @@ fn run(
     let _ = ready.try_send(());
 
     // Behind an `Rc` so a reload can replace it without disturbing a dispatch
-    // that is suspended mid-await, and behind a `RefCell` so the replacement is
-    // visible to the dispatches that come after. The borrow is never held across
-    // an await — only long enough to clone the handle out.
+    // suspended mid-await, and behind a `RefCell` so the replacement is
+    // visible afterward. The borrow is never held across an await.
     let current = RefCell::new(Rc::new(loaded));
 
-    // One task per handler, all on this one thread. Concurrency, not
-    // parallelism: two handlers never execute Lua at the same instant, but one
-    // parked on a world read is not holding the interpreter, so the next runs
+    // One task per handler, all on this one thread: a handler parked on a
+    // world read is not holding the interpreter, so the next one runs
     // instead of queueing behind it.
     let executor = LocalExecutor::new();
     block_on(executor.run(async {
@@ -455,11 +453,9 @@ impl Task<'_> {
     /// Puts what this dispatch queued on its way to the command bus.
     ///
     /// The outbox is shared, so a dispatch that finishes while another is
-    /// suspended may carry that one's commands out with its own. Nothing is
-    /// lost or duplicated by that — every command still reaches the bus exactly
-    /// once, and in the order it was queued — but which *dispatch* delivers
-    /// them is no longer fixed, which is the visible cost of letting handlers
-    /// overlap.
+    /// suspended may carry that one's commands out with its own — every
+    /// command still reaches the bus exactly once, in order, just not
+    /// necessarily via the dispatch that queued it.
     fn finish(&self) {
         let (commands, flashes) = self.runtime.drain_outbox();
         for command in commands {
@@ -1004,8 +1000,6 @@ mod tests {
 
     #[test]
     fn a_window_set_computed_but_not_returned_commits_nothing() {
-        // The whole point of the value being pure: work you throw away has no
-        // consequences. The handler transforms, discards, and flashes instead.
         let worker = worker(
             r#"
             paneru.bind("alt - f", function(ws)

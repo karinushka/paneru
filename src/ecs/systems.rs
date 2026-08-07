@@ -695,9 +695,7 @@ pub(crate) fn pump_events(
     let mut pending_mouse = None;
 
     // `true` when the channel went quiet, `false` when a cap sent us home with
-    // events still queued. Only the quiet case may back the poll timeout off —
-    // sleeping longer while there is a backlog is the opposite of what is
-    // wanted.
+    // events still queued. Only the quiet case may back the poll timeout off.
     let drained = loop {
         // Checked before the receive so a burst cannot keep extending the stay:
         // whatever is left stays in the channel for the next frame.
@@ -709,10 +707,8 @@ pub(crate) fn pump_events(
             break false;
         }
 
-        // Polled before any timed wait: the Cocoa pump above has already done
-        // this frame's sleeping, so a quiet channel used to cost another
-        // millisecond on top of it — doubling the floor on a frame that is
-        // trying to turn around in one.
+        // Polled before any timed wait: the Cocoa pump above already did this
+        // frame's sleeping, so a quiet channel used to cost another millisecond.
         let received = match incoming_events.try_recv() {
             Err(TryRecvError::Empty) => incoming_events.recv_timeout(Duration::from_millis(1)),
             Err(TryRecvError::Disconnected) => Err(RecvTimeoutError::Disconnected),
@@ -775,12 +771,10 @@ pub(super) fn window_resized_update_frame(
         if matches!(unmanaged, Some(Unmanaged::Minimized | Unmanaged::Hidden)) {
             continue;
         }
-        // Our own resize, echoed back. `commit_window_size` asked for this size
-        // and `animate_resize_entities` is still stepping towards it, so reading
-        // the app's answer in and nudging the strip by the difference fights the
-        // animation that is producing that difference — every window in the
-        // strip at once, whenever a new one arrives and the layout reflows.
-        // Only a resize we did not initiate says anything new.
+        // Our own resize, echoed back: `commit_window_size` requested this size
+        // and `animate_resize_entities` is still stepping toward it, so reading
+        // the echo in here would fight the animation producing that difference.
+        // Only a resize we did not initiate is new information.
         if resizing {
             continue;
         }

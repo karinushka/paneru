@@ -315,13 +315,10 @@ pub(super) fn window_focused_trigger(
             focus_history.record(workspace_id, entity, unmanaged);
         }
 
-        // The restore guard absorbs the OS acknowledgment(s) of the focus
-        // `show_active_workspace` issued — reshuffling on those would slide
-        // the strip away from the position the restore just placed it at.
-        // The acknowledgment can arrive more than once (front_switched_trigger
-        // synthesizes a duplicate), so a matching event leaves the guard in
-        // place; focus moving to any other window means the restore sequence
-        // is over and despawns it (timeout_ticker expires it otherwise).
+        // The restore guard absorbs the OS focus acknowledgment from a restore;
+        // reshuffling on it would slide the strip away from where the restore
+        // placed it. It may fire twice (front_switched_trigger synthesizes a
+        // duplicate), so a match keeps the guard; focus moving elsewhere despawns it.
         let mut restored_focus = false;
         for (guard_entity, guard) in &restore_guards {
             if guard.entity == entity {
@@ -540,9 +537,8 @@ pub(super) fn window_unmanaged_trigger(
     trigger: On<Add, Unmanaged>,
     apps: Query<(Entity, &Application)>,
     mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
-    // `Option<Single<…>>` rather than `Single<…>`: an unresolvable parameter skips the whole
-    // observer, and dropping the strip membership below is not optional. Without an active display
-    // there is nowhere to pop the window to, but it still must not keep tiling space.
+    // `Option<Single>` rather than `Single`: an unresolvable display would skip the
+    // whole observer, but the strip removal below must still run without one.
     active_display: Option<ActiveDisplayViewport>,
     initializing: Option<Res<Initializing>>,
     mut ctx: WindowCtx,
@@ -593,22 +589,16 @@ pub(super) fn window_unmanaged_trigger(
 
     debug!("Entity {entity} is floating.");
 
-    // A window parked on a virtual row that isn't on screen sits off-screen by
-    // design. Popping it onto the active display would paint it over the row
-    // the user is actually looking at, and an app that raises itself (rather
-    // than the user floating a focused window) is enough to get here.
+    // A window on a virtual row that isn't on screen is off-screen by design;
+    // popping it onto the active display would paint it over the row the user
+    // is actually looking at.
     let parked_out_of_view = workspaces
         .iter()
         .any(|(strip, active)| !active && strip.contains(entity));
 
-    // Drop the strip membership *first*, before anything that can bail.
-    //
-    // A floating window is out of the tiling layout by definition, and the
-    // tiler lays a strip out by accumulating column widths left to right — so
-    // a floating member reserves space no window occupies, which is a gap that
-    // never closes on its own. Every step below is best-effort placement of a
-    // window that has already stopped being tiled; when reading its frame or
-    // its app failed, this used to return early and leave the slot behind.
+    // Drop the strip membership first, before anything below can bail early —
+    // a floating window still reserves column space in the strip otherwise,
+    // leaving a gap that never closes on its own.
     for (mut strip, _) in &mut workspaces {
         if strip.contains(entity) {
             strip.remove(entity);
@@ -820,17 +810,11 @@ pub(super) fn window_managed_trigger(
     }
 
     if let Some((strip_entity, false)) = landed_in {
-        // The window belongs to a virtual row that isn't on screen, so its
-        // current frame — possibly popped onto the active display while it was
-        // unmanaged — must not be kept. Touching the hidden strip's position
-        // makes the layout chain re-derive every frame in that strip from the
-        // strip's off-screen origin, which pushes this window back off-screen
-        // with the row it belongs to.
-        //
-        // Pinning the current origin (or reshuffling around it) here would
-        // instead paint the window over the active row while it still belongs
-        // to the hidden one, leaving it unreachable: reshuffle_layout_strip
-        // drags the containing strip back on-screen to expose the window.
+        // This strip isn't on screen, so the window's current frame (possibly
+        // popped onto the active display while unmanaged) must not be kept.
+        // Marking the strip's position changed forces the layout to re-derive
+        // this window's frame from the strip's off-screen origin, instead of
+        // painting it over the active row while it still belongs to the hidden one.
         if let Ok((_, _, mut position, _)) = workspaces.get_mut(strip_entity) {
             position.set_changed();
         }
@@ -883,21 +867,13 @@ pub(super) fn window_destroyed_trigger(
             continue;
         };
 
-        // Only the SLS notification is ambiguous — it also fires when a window
-        // merely leaves a space, so it needs confirming. A
-        // `kAXUIElementDestroyedNotification` means the AX element itself has
-        // been torn down and is taken at face value: confirming it against the
-        // app is not just unnecessary but actively wrong, because both signals
-        // below lag the teardown. `role()` keeps succeeding on the dead element
-        // for apps that outlive their windows, and the app's AX window list is
-        // still warm for a moment after the close. Re-checking them raced the
-        // window back to life, leaving the entity in the strip and a permanent
-        // gap where the window had been.
-        //
-        // `window_ids` rather than `window_list`: the latter reads title, role
-        // and subrole off every window and runs the config rules over them,
-        // which is far too much work for a check that only compares IDs, on a
-        // path that also fires for every window leaving a space.
+        // Only the SLS notification is ambiguous (it also fires when a window
+        // merely leaves a space), so it alone needs confirming; a
+        // `kAXUIElementDestroyedNotification` means the element was actually torn
+        // down and is taken at face value, since `role()` and the app's window
+        // list stay stale for a moment after a real close and would otherwise
+        // race the window back to life. `window_ids` is used over `window_list`
+        // since it's cheap enough to run on every space-change event.
         if matches!(source, DestroySource::SpaceNotification)
             && window.role().is_ok()
             && app.window_ids().contains(window_id)
@@ -928,13 +904,8 @@ pub(super) fn window_destroyed_trigger(
 
 /// Drops a window's cached title when its app reports the title changed.
 ///
-/// The cache is what keeps the state document and the window set from reading
-/// every window's title over the accessibility API on every frame; this is the
-/// other half of it. `kAXTitleChangedNotification` is already observed and
-/// already becomes this event, so the invalidation rides along for free — and
-/// crucially it runs *before* the broadcast handler reads titles in
-/// `PostUpdate`, so a subscriber sees the new title in the same frame it
-/// changed.
+/// Must run before the broadcast handler reads titles in `PostUpdate`, so a
+/// subscriber sees the new title in the same frame it changed.
 pub(super) fn invalidate_window_title(mut messages: MessageReader<Event>, windows: Windows) {
     for event in messages.read() {
         let Event::WindowTitleChanged { window_id } = event else {
@@ -946,18 +917,12 @@ pub(super) fn invalidate_window_title(mut messages: MessageReader<Event>, window
     }
 }
 
-/// Drops window entities whose windows no longer exist.
+/// Drops window entities whose windows no longer exist. Destroy notifications
+/// can be missed (e.g. an app exits without tearing down its windows, or paneru
+/// wasn't running when a window closed), leaving a phantom entity in the strip.
 ///
-/// Destroy notifications can be missed outright — an app that exits without
-/// tearing its windows down first, a notification lost while Mission Control
-/// had the event tap, a window closed while paneru was not running. Whatever
-/// the cause, the entity survives and holds its slot in the strip: a phantom
-/// window with a gap where its frame used to be, and nothing after the fact
-/// ever reconsiders it.
-///
-/// So on every config reload just ask the question directly — does the app
-/// still list this window? A window that merely moved to another space is
-/// still listed, so this only reaps what is genuinely gone.
+/// Runs on every config reload: an entity is reaped only if its app no longer
+/// lists the window, so one that merely moved to another space is left alone.
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn reap_phantom_windows(
     mut messages: MessageReader<Event>,

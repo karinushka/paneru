@@ -1,27 +1,18 @@
 //! Turning "a Mach port has a message" into "a waker fires".
 //!
-//! A Mach port is not a descriptor, so no executor can poll one. `EVFILT_MACHPORT`
-//! is the only kernel mechanism that bridges the two — everything else that
-//! claims to (libdispatch's `DISPATCH_SOURCE_TYPE_MACH_RECV`, `CFMachPort`) is
-//! itself built on it. So this is as direct as the platform allows: one kqueue
-//! for the whole process, every interesting port registered on it, and one
-//! thread blocked in `kevent` handing out wakeups.
+//! `EVFILT_MACHPORT` is the only kernel mechanism that lets an executor poll a
+//! Mach port. One process-wide kqueue holds every registered port, serviced by
+//! a single thread blocked in `kevent`.
 //!
-//! # Why `EV_ONESHOT`
+//! Registrations are `EV_ONESHOT` and must be re-armed by the next
+//! `Poll::Pending`: messages are drained with `mach_msg`, not through
+//! `kevent`, so a level-triggered registration would stay ready forever and
+//! spin.
 //!
-//! Registrations are one-shot and re-armed by the next `Poll::Pending`. That is
-//! not a tuning choice, it is what makes the design correct without a
-//! bookkeeping step: messages are taken with `mach_msg`, not through `kevent`,
-//! so a level-triggered registration would stay ready forever and spin, and an
-//! `EV_CLEAR` one would need the queue drained by hand after every wake. A
-//! one-shot registration is consumed by the delivery itself.
-//!
-//! # The ordering that matters
-//!
-//! Every caller must try to receive *before* it waits, and must re-arm before it
-//! returns `Pending`. A message that arrived before the registration existed
-//! produces no event at all, so a wait-first loop would hang on a message
-//! already sitting in the queue.
+//! Every caller must try to receive *before* it waits, and must re-arm before
+//! returning `Pending` — a message that arrived before the registration
+//! existed produces no event at all, so a wait-first loop would hang on a
+//! message already sitting in the queue.
 
 use std::collections::HashMap;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -36,10 +27,8 @@ use crate::rights::RecvRight;
 /// The process-wide kqueue and the wakers waiting on it.
 struct Reactor {
     kqueue: OwnedFd,
-    /// One waker per port. A port is only ever awaited by one task — a `Server`
-    /// owns its service port and a `Subscription` owns its own — so replacing
-    /// an existing entry means the previous future was dropped, and dropping
-    /// its waker is exactly right.
+    /// One waker per port. A port is only ever awaited by one task, so
+    /// replacing an existing entry means the previous future was dropped.
     wakers: Mutex<HashMap<mach_port_t, Waker>>,
 }
 
@@ -75,18 +64,16 @@ impl Reactor {
                     .map_err(Error::Io)?;
                 Ok(reactor)
             }
-            // Another thread won the race; its reactor is the live one and the
-            // one built here is simply dropped on the floor (leaked, but this
-            // happens at most once in the life of the process).
+            // Another thread won the race; the reactor built here is simply
+            // leaked (this happens at most once in the process's life).
             Err(_) => Ok(REACTOR.get().expect("the winner published its reactor")),
         }
     }
 
     /// Blocks in `kevent` forever, waking whoever asked about each port.
     ///
-    /// The casts are between `kevent`'s own integer types and are bounded by the
-    /// array below, which is 16 entries: none of them can truncate, and `count`
-    /// is only cast after being checked non-negative.
+    /// The casts are bounded by the 16-entry array below, so none can
+    /// truncate; `count` is only cast after being checked non-negative.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     fn run(&self) {
         let mut events: [libc::kevent; 16] = unsafe { std::mem::zeroed() };

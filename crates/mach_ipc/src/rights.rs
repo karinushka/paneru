@@ -1,11 +1,9 @@
 //! Owned Mach port rights.
 //!
-//! A Mach port name is a reference into the task's IPC space, not a handle like
-//! a file descriptor: the same name may hold several *rights*, each separately
-//! reference counted, and releasing the wrong kind (or the right kind twice)
-//! corrupts the space rather than failing loudly. These three types make the
-//! reference counting an ownership question the compiler answers, which is the
-//! whole reason they exist.
+//! A Mach port name may hold several separately reference-counted rights;
+//! releasing the wrong kind (or the same kind twice) corrupts the task's IPC
+//! space. These types make that reference counting an ownership question the
+//! compiler enforces.
 
 use mach2::kern_return::KERN_SUCCESS;
 use mach2::mach_port::{mach_port_deallocate, mach_port_mod_refs};
@@ -16,9 +14,8 @@ use crate::error::{Error, Result};
 
 /// The receive end of a port: the side that gets messages.
 ///
-/// A port has exactly one receive right, which is what makes it a rendezvous
-/// point rather than a broadcast — holding this is what it means to *be* the
-/// server for a name.
+/// A port has exactly one receive right; holding it is what it means to be
+/// the server for that name.
 #[derive(Debug)]
 pub struct RecvRight(mach_port_t);
 
@@ -126,10 +123,9 @@ impl SendRight {
 
     /// Takes another reference to the same send right.
     ///
-    /// Not `Clone`, because it is not free and can fail: the kernel counts
-    /// references per port name, and each one must be released. A failure here
-    /// means the right died between the two calls, so the copy is returned
-    /// as-is and its own send will report [`crate::Error::PeerGone`].
+    /// Not `Clone`: incrementing the kernel's per-name reference count can
+    /// fail. On failure the copy is still returned; its own send will report
+    /// [`crate::Error::PeerGone`].
     #[must_use]
     pub fn duplicate(&self) -> Self {
         // SAFETY: `self.0` names a send right this value owns; this takes one
@@ -158,10 +154,8 @@ impl Drop for SendRight {
 
 /// A right to send exactly one message, then nothing.
 ///
-/// This is the reply channel: it is created by the client, travels to the
-/// daemon inside the request, and is consumed by the answer. Being single-use
-/// is the point — it encodes "one request, one reply" in the kernel rather than
-/// in a convention both ends have to remember, and it cannot be replayed.
+/// This is the reply channel: created by the client, sent inside the request,
+/// and consumed by the answer.
 #[derive(Debug)]
 pub struct SendOnceRight(mach_port_t);
 
@@ -216,8 +210,6 @@ mod tests {
         drop(right);
     }
 
-    /// Many send rights may point at one receive right — this is what lets
-    /// every CLI invocation reach the one daemon.
     #[test]
     fn one_receive_right_backs_many_send_rights() {
         let recv = RecvRight::alloc().expect("allocate a port");

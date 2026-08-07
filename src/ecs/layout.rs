@@ -25,12 +25,8 @@ use crate::util::round_px;
 
 pub struct LayoutEventsPlugin;
 
-/// Every strip with the pieces needed to place it: the strip itself, its entity,
-/// its origin, the display it hangs off, and — as a `Ref`, so the systems can
-/// ask whether the marker was added *this* tick — whether it is the active one.
-///
-/// Shared by [`reshuffle_layout_strip`] and [`ensure_visible_in_strip`], which
-/// do the same lookup for different reasons and have to agree on its shape.
+/// A strip, its entity, origin, display, and whether it's the active one.
+/// Shared by [`reshuffle_layout_strip`] and [`ensure_visible_in_strip`].
 type StripPlacements<'w, 's> = Query<
     'w,
     's,
@@ -47,10 +43,8 @@ type StripPlacements<'w, 's> = Query<
 /// raw bounds into the usable viewport.
 type DisplayViewports<'w, 's> = Query<'w, 's, (&'static Display, Option<&'static DockPosition>)>;
 
-/// The read-then-write pair [`sync_tab_group_frames`] needs: `p0` yields the
-/// windows whose frame moved this tick, `p1` writes the new frame onto their tab
-/// group siblings. They must be a `ParamSet` because the second aliases the
-/// first mutably.
+/// `p0`: windows whose frame moved this tick. `p1`: writes that frame onto
+/// their tab group siblings. Must be a `ParamSet` since `p1` aliases `p0` mutably.
 type TabGroupFrames<'w, 's> = ParamSet<
     'w,
     's,
@@ -937,9 +931,8 @@ fn binpack_heights(heights: &[i32], min_height: i32, total_height: i32) -> Optio
         count -= 1;
         output.truncate(count);
         let sum = output.iter().sum::<i32>();
-        // Integer division on purpose: this floors, and the leftovers of the
-        // split have to stay inside `total_height`. Rounding would let the
-        // windows we hand `avg_height` to sum past the space available.
+        // Integer division (floor) on purpose: rounding here could make the
+        // heights sum past `total_height`.
         let avg_height = (total_height - sum) / (remaining + 1);
         if avg_height < min_height {
             return None;

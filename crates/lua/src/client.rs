@@ -225,8 +225,6 @@ fn windows(lua: &Lua, transform: LuaFunction) -> LuaResult<bool> {
     Ok(true)
 }
 
-/// Reads the `event` argument to `subscribe`: `nil` (every event), a single
-/// event name, or a table listing several.
 fn read_events(value: &LuaValue) -> LuaResult<Option<Vec<String>>> {
     match value {
         LuaValue::Nil => Ok(None),
@@ -244,8 +242,6 @@ fn read_events(value: &LuaValue) -> LuaResult<Option<Vec<String>>> {
     }
 }
 
-/// The name a filter matches an event against — the same `event` field the JSON
-/// carries, so a filter written against the documented output still works.
 fn event_name(event: &StateEvent) -> Option<String> {
     event
         .to_json()
@@ -278,8 +274,7 @@ fn subscribe(
     loop {
         let event = match stream.recv_blocking() {
             Ok(delivery) => delivery.value,
-            // The daemon is gone; the subscription is over, which is how this
-            // ends when the window manager stops.
+            // The daemon is gone; the subscription ends.
             Err(paneru_mach_ipc::Error::PeerGone) => break,
             Err(err) => return Err(LuaError::external(err)),
         };
@@ -302,7 +297,6 @@ fn subscribe(
 }
 
 /// `paneru.set_service_name(name)` — override the daemon's Mach service name.
-// Signature is fixed by mlua's `create_function` contract.
 #[allow(clippy::unnecessary_wraps)]
 fn set_service_name(_: &Lua, name: String) -> LuaResult<()> {
     if let Ok(mut guard) = SERVICE.lock() {
@@ -312,14 +306,11 @@ fn set_service_name(_: &Lua, name: String) -> LuaResult<()> {
 }
 
 /// `paneru.service_name()` — the service name currently in use.
-// Signature is fixed by mlua's `create_function` contract.
 #[allow(clippy::unnecessary_wraps)]
 fn service_name_fn(_: &Lua, (): ()) -> LuaResult<String> {
     Ok(service_name())
 }
 
-/// The daemon answered something this request never asks for, which means the
-/// two ends disagree about the protocol.
 fn unexpected(response: &Response) -> LuaError {
     LuaError::RuntimeError(format!("unexpected response from paneru: {response:?}"))
 }
@@ -332,14 +323,10 @@ fn unexpected(response: &Response) -> LuaError {
 pub fn module(lua: &Lua, version: &str) -> LuaResult<LuaTable> {
     let exports = lua.create_table()?;
 
-    // Installs paneru.run/command and the typed paneru.window/workspace/mouse
-    // tables on top of the daemon dispatcher.
     crate::install(lua, &exports, &(Rc::new(dispatch) as crate::Dispatch))?;
 
     exports.set("query", lua.create_function(query)?)?;
     exports.set("query_json", lua.create_function(query_json)?)?;
-    // The fixed-kind shorthands share one (name, kind) list with the embedded
-    // runtime, so both hosts spell them the same and neither hardcodes a token.
     for (name, kind) in StateQueryKind::SHORTHANDS {
         exports.set(
             name,

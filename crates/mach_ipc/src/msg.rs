@@ -2,18 +2,15 @@
 //!
 //! # Why `packed(4)`
 //!
-//! A complex Mach message is a 24-byte header, a 4-byte body count, then
-//! descriptors — so the first descriptor begins at offset 28. An OOL descriptor
-//! leads with a 64-bit `address`, and a plain `#[repr(C)]` struct would
-//! therefore insert four bytes of padding to align it, putting it at offset 32
-//! and describing a message the kernel does not recognise. Apple's own headers
-//! wrap the descriptors in `#pragma pack(4)` for exactly this reason, so these
-//! structs do the same and the offsets are asserted below rather than trusted.
+//! A complex Mach message header is 24 bytes, then a 4-byte body count, so the
+//! first descriptor begins at offset 28. A plain `#[repr(C)]` struct would pad
+//! the OOL descriptor's 64-bit `address` to offset 32, describing a message the
+//! kernel does not recognise — hence `packed(4)`, matching Apple's own
+//! `#pragma pack(4)`. The offsets are asserted below rather than trusted.
 //!
-//! The consequence is that fields of a packed struct are not necessarily
-//! aligned, so they are read and written through raw pointers rather than by
-//! reference. Taking a `&` to a misaligned field is undefined behaviour even if
-//! it is never dereferenced.
+//! Because fields of a packed struct are not necessarily aligned, they are read
+//! and written through raw pointers rather than by reference: taking a `&` to a
+//! misaligned field is undefined behaviour even if it is never dereferenced.
 
 use mach2::kern_return::KERN_SUCCESS;
 use mach2::message::{
@@ -52,8 +49,8 @@ struct OolPortMsg {
     port: mach_msg_port_descriptor_t,
 }
 
-/// The kernel's layout, not the compiler's preference. If any of these fire the
-/// transport is silently talking nonsense, so they are checked at compile time.
+/// The kernel's layout, not the compiler's preference — checked at compile
+/// time since a mismatch here means the transport silently talks nonsense.
 const _: () = {
     assert!(size_of::<mach_msg_header_t>() == 24);
     assert!(std::mem::offset_of!(OolMsg, body) == 24);

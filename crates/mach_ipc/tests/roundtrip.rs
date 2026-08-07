@@ -1,9 +1,5 @@
-//! End-to-end tests over a real Mach service.
-//!
-//! Every test drives both ends for real — bind a name, connect to it from
-//! another task, exchange typed values — because the interesting failures here
-//! (descriptor layout, port right accounting, edge-triggered wakeups) are
-//! invisible to anything that stops short of a full round trip.
+//! End-to-end tests over a real Mach service: each test binds a name,
+//! connects from another task, and exchanges typed values.
 
 use futures_lite::StreamExt;
 use futures_lite::future::block_on;
@@ -30,9 +26,8 @@ struct Event {
     seq: u32,
 }
 
-/// Service names must not collide between concurrently running tests, and a name
-/// left behind by a crashed run must not fail the next one — so each test gets
-/// its own, keyed by the test name and this process's pid.
+/// Unique per test and per process, so concurrent runs and crash leftovers
+/// don't collide.
 fn service_name(test: &str) -> String {
     format!("com.karinushka.paneru.test.{test}.{}", std::process::id())
 }
@@ -79,10 +74,6 @@ fn a_call_gets_its_reply() {
     );
 }
 
-/// The reply must survive being moved to another task. This is the property the
-/// daemon depends on: its receive loop hands the reply off and goes straight
-/// back to receiving, so the answer is almost never produced where the request
-/// was read.
 #[test]
 fn a_reply_can_be_sent_from_another_thread() {
     let name = service_name("offthread");
@@ -113,8 +104,6 @@ fn a_reply_can_be_sent_from_another_thread() {
     );
 }
 
-/// Payloads travel out of line, so they have to hold well past anything that
-/// would fit inline in a Mach message.
 #[test]
 fn a_large_value_survives() {
     let name = service_name("large");
@@ -148,8 +137,6 @@ fn a_large_value_survives() {
     assert!(client.join().expect("the client thread").ok);
 }
 
-/// A fire-and-forget value carries no reply channel, and the receiver must see
-/// that rather than trying to answer into nothing.
 #[test]
 fn a_send_has_no_reply_channel() {
     let name = service_name("oneway");
@@ -167,8 +154,6 @@ fn a_send_has_no_reply_channel() {
     assert!(delivery.subscriber.is_none());
 }
 
-/// The subscription path: the sender hands over a channel that outlives the
-/// value delivering it, and the service pushes to it.
 #[test]
 fn a_subscriber_receives_pushed_events() {
     let name = service_name("subscribe");

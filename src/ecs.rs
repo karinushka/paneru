@@ -6,7 +6,6 @@ use bevy::app::App as BevyApp;
 use bevy::app::{PostUpdate, PreUpdate, Startup};
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::lifecycle::RemovedComponents;
-use bevy::ecs::message::Messages;
 use bevy::ecs::query::{Added, Changed, With};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::common_conditions::{not, resource_exists};
@@ -529,7 +528,20 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
     let mut app = BevyApp::new();
 
     app.add_plugins(MinimalPlugins)
-        .init_resource::<Messages<Event>>()
+        // `add_message`, not `init_resource`: the latter creates the buffer but
+        // does not register it with bevy's `MessageRegistry`, so
+        // `message_update_system` never double-buffers it and nothing is ever
+        // dropped. Every event the daemon has ever seen stayed in that vector
+        // for the life of the process — at input rates, a leak that grows all
+        // day.
+        //
+        // Messages now live for two frames, which is what every reader here
+        // needs: the only systems that can miss a frame and still read events
+        // are the ones gated on `not_swiping` and on having IPC subscribers,
+        // and both would rather drop what they missed than act on a backlog —
+        // stale window frames applied after a swipe, or a new subscriber handed
+        // history it never asked for.
+        .add_message::<Event>()
         .insert_resource(Time::<Virtual>::from_max_delta(Duration::from_secs(10)))
         .insert_resource(WindowManager(window_manager))
         .insert_resource(SkipReshuffle(false))

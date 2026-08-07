@@ -275,13 +275,8 @@ pub(crate) fn try_recv(port: &RecvRight) -> Result<Incoming> {
 }
 
 /// Receives, parking the calling thread in the kernel until a message arrives.
-///
-/// The same call as [`try_recv`] without `MACH_RCV_TIMEOUT`, which is what turns
-/// the immediate `WouldBlock` return into an indefinite wait. Callers that have
-/// nothing else to do meanwhile want this rather than a `block_on` around the
-/// async path: waiting here costs one kernel wait, where the async route has to
-/// arm a port watcher, build a waker and park the thread through an executor to
-/// reach the same place.
+/// The same call as [`try_recv`] without `MACH_RCV_TIMEOUT`, which is what
+/// turns the immediate `WouldBlock` return into an indefinite wait.
 pub(crate) fn recv(port: &RecvRight) -> Result<Incoming> {
     recv_with(port.as_raw(), MACH_RCV_MSG, 0)
 }
@@ -314,10 +309,10 @@ fn recv_with(port: mach_port_t, options: i32, timeout: u32) -> Result<Incoming> 
 
 /// Pulls the payload and any rights out of a received message.
 ///
-/// `cast_ptr_alignment` is allowed throughout: `bytes` is always the interior of
-/// a [`RecvBuffer`], which is `repr(align(8))` precisely so these reads are
-/// aligned. Clippy cannot see that through the slice. The descriptor reads that
-/// genuinely *are* misaligned use `read_unaligned` and are marked as such.
+/// `cast_ptr_alignment` is allowed throughout: `bytes` is always the interior
+/// of a [`RecvBuffer`], which is `repr(align(8))` precisely so these reads are
+/// aligned, but clippy cannot see that through the slice. The descriptor reads
+/// that genuinely *are* misaligned use `read_unaligned` and are marked as such.
 #[allow(clippy::cast_ptr_alignment)]
 fn parse(bytes: &[u8]) -> Result<Incoming> {
     // SAFETY: `bytes` is the 8-aligned receive buffer and is longer than a

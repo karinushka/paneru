@@ -33,9 +33,9 @@ use crate::platform::{WinID, WorkspaceId};
 
 pub struct WorkspaceEventsPlugin;
 
-/// Strips as [`handle_virtual_window_moves`] rewrites them: it slides each one
-/// to or from the parked position, so it needs the strip, its origin, whether
-/// it is the visible one, and the saved position to restore it to.
+/// The strip, its origin, whether it's visible, and its saved position, as
+/// [`handle_virtual_window_moves`] needs them to slide a strip to/from its
+/// parked position.
 type MovableStrips<'w, 's> = Query<
     'w,
     's,
@@ -49,9 +49,8 @@ type MovableStrips<'w, 's> = Query<
     Without<Window>,
 >;
 
-/// Strips as [`show_active_workspace`] reads them when bringing one back on
-/// screen: the saved origin to restore, and any in-flight `RepositionMarker`
-/// that would otherwise animate against the restore.
+/// The saved origin and any in-flight `RepositionMarker`, as
+/// [`show_active_workspace`] needs them to restore a strip.
 type RestorableStrips<'w, 's> = Query<
     'w,
     's,
@@ -66,9 +65,8 @@ type RestorableStrips<'w, 's> = Query<
     Without<Window>,
 >;
 
-/// [`renumber_virtual_indexes`] first asks which strips appeared this tick, then
-/// rewrites the indexes of every strip sharing their workspace. The second query
-/// aliases the first mutably, hence the `ParamSet`.
+/// `p0`: strips added this tick. `p1`: rewrites indexes of strips sharing
+/// their workspace. Must be a `ParamSet` since `p1` aliases `p0` mutably.
 type RenumberStrips<'w, 's> = ParamSet<
     'w,
     's,

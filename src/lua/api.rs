@@ -1,19 +1,15 @@
 //! Installs the global `paneru` API table into a Lua state.
 //!
-//! The command-issuing half of the API (`paneru.run`, `paneru.window.*`,
-//! `paneru.workspace.*`, `paneru.mouse.*`) is not defined here: it comes from
-//! [`paneru_lua`], the crate that also builds the loadable client module, so
-//! both hosts install the same surface. Both hosts hand it a dispatcher taking a typed
-//! [`Command`] — here it goes onto the command bus, there onto the daemon
-//! socket — so a script sees one identical API either way.
+//! The command-issuing half (`paneru.run`, `paneru.window.*`,
+//! `paneru.workspace.*`, `paneru.mouse.*`) comes from [`paneru_lua`], shared
+//! with the client module so both hosts expose the same surface over a typed
+//! [`Command`] dispatcher — here onto the command bus, there onto the daemon
+//! socket.
 //!
-//! What is installed here is the embedded-only half: `paneru.on` (event
-//! handlers), `paneru.bind` (keybinds), `paneru.flash` and `paneru.log`. Their
-//! callbacks are kept in a Rust-side [`Registry`] rather than in Lua globals, so
-//! there is no scaffolding script to keep in sync with the Rust that calls it.
-//!
-//! The `query*` functions are named after the client's, but answer from the
-//! world directly instead of over the socket — see [`provider`].
+//! What's installed here is embedded-only: `paneru.on` (event handlers),
+//! `paneru.bind` (keybinds), `paneru.flash`, `paneru.log`, and the `query*`
+//! functions (named after the client's, but answering from the world
+//! directly instead of over the socket).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -39,25 +35,18 @@ struct ExecJob {
     reply: async_channel::Sender<std::io::Result<std::process::Output>>,
 }
 
-/// How many `paneru.exec` commands may be in flight at once.
-///
-/// A queue with a fixed set of workers rather than a thread per call: a handler
-/// bound to a high-frequency event can reach `exec` at the event rate, and
-/// spawning a thread each time would trade one cost for another. Small because
-/// these are waits on other processes, not work — four is enough that one slow
-/// command does not hold up the rest.
+/// How many `paneru.exec` commands may run at once. A fixed worker pool
+/// rather than a thread per call; four is enough that one slow command
+/// doesn't hold up the rest, since these are waits on other processes, not
+/// work.
 const EXEC_WORKERS: usize = 4;
 
 /// Starts the pool that runs `paneru.exec` commands.
 ///
-/// Every worker takes from the same queue, so a job goes to whichever is free.
-/// That does mean two commands issued back to back can finish out of order; a
-/// script that needs one to land before the next should await the first, which
-/// is what the async binding is for.
-///
-/// The workers end when the returned sender is dropped, which is when the Lua
-/// state goes — a reload gets a fresh pool rather than inheriting a queue of
-/// work the old script asked for.
+/// Jobs are taken from a shared queue, so two commands issued back to back
+/// can finish out of order — a script that needs ordering should await the
+/// first. Workers end when the returned sender is dropped (on reload), so a
+/// reload gets a fresh pool rather than the old script's queued work.
 fn spawn_exec_pool() -> async_channel::Sender<ExecJob> {
     let (jobs, queue) = async_channel::unbounded::<ExecJob>();
     for worker in 0..EXEC_WORKERS {
@@ -82,16 +71,12 @@ fn spawn_exec_pool() -> async_channel::Sender<ExecJob> {
 }
 
 /// How many times `paneru.state.mutate` may lose the compare-and-set race
-/// before giving up. A handful of writers contending is normal; a dozen
-/// collisions on one key means something is wrong, and looping forever inside a
-/// handler would wedge that dispatch.
+/// before giving up; looping forever would wedge the handler's dispatch.
 const MUTATE_ATTEMPTS: usize = 8;
 
 /// Installs the `paneru` API into `lua`, wiring the Rust-backed functions to the
 /// shared `outbox` (queued commands/flashes) and `registry` (registered handlers
 /// and chords).
-// One block per `paneru.*` function, kept flat so adding one is a local change
-// rather than a hunt across helpers.
 #[allow(clippy::too_many_lines)]
 pub(super) fn install(
     lua: &Lua,
@@ -103,8 +88,8 @@ pub(super) fn install(
     let paneru = lua.create_table()?;
     lua.globals().set("paneru", paneru.clone())?;
 
-    // The one primitive the shared API is built on: queue the command it built
-    // for the command bus.
+    // Queues the command onto the command bus; the primitive the shared API
+    // is built on.
     let dispatch = {
         let outbox = Rc::clone(outbox);
         move |_: &Lua, command: Command| {
@@ -140,21 +125,15 @@ pub(super) fn install(
     };
     paneru.set("flash", flash)?;
 
-    // paneru.exec(program[, args]) — run a program, without holding the
+    // paneru.exec(program[, args]) — run a program without holding the
     // interpreter while it runs.
     //
-    // Async so the handler suspends here: the executor is free to run the other
-    // handlers, and a world read waiting behind this one is answered on time.
-    // A synchronous exec binding — which is what a script otherwise reaches for,
-    // and what the profile found costing a fork per event — cannot be suspended,
-    // because there is no yield point inside a plain C function for mlua to
-    // resume from. It stops every other handler until the child exits.
-    //
-    // `std::process::Command` also spawns through `posix_spawn` rather than
-    // forking, so the process image is never duplicated.
+    // Async so the handler suspends and other handlers/world reads aren't
+    // blocked behind it. A synchronous binding cannot be suspended — there is
+    // no yield point inside a plain C function for mlua to resume from — so it
+    // would stop every other handler until the child exits.
     let exec = {
-        // Started on the first call, so a script that never execs never pays for
-        // the workers. Only ever touched from the Lua thread.
+        // Started lazily on first use; only ever touched from the Lua thread.
         let pool: Rc<RefCell<Option<async_channel::Sender<ExecJob>>>> = Rc::new(RefCell::new(None));
         lua.create_async_function(move |lua, (program, args): (String, Option<Vec<String>>)| {
             let jobs = pool

@@ -261,8 +261,8 @@ fn a_dead_subscriber_is_reported_as_gone() {
     }
 }
 
-/// A value that does not decode as `T` is one bad client, not a dead service —
-/// it must be reported without poisoning the receiver.
+/// A mistyped value is one bad client, not a dead service — it must be
+/// reported without poisoning the receiver.
 #[test]
 fn a_mistyped_value_is_reported_and_survivable() {
     let name = service_name("mistyped");
@@ -281,16 +281,13 @@ fn a_mistyped_value_is_reported_and_survivable() {
         Err(Error::Decode) => {}
         other => panic!("expected Decode, got {other:?}"),
     }
-    // The service is still usable.
     assert_eq!(
         block_on(receiver.recv()).expect("the next value").value,
         Request::Nothing
     );
 }
 
-/// A second binder must be refused rather than take the name over — the failure
-/// the socket transport could not detect, because it simply unlinked whatever it
-/// found at the path.
+/// A second binder must be refused, not silently take the name over.
 #[test]
 fn a_second_bind_is_refused() {
     let name = service_name("conflict");
@@ -303,8 +300,6 @@ fn a_second_bind_is_refused() {
     }
 }
 
-/// Connecting when nothing is bound is the ordinary "paneru isn't running" case,
-/// and has to be distinguishable from every other failure.
 #[test]
 fn connecting_to_nothing_reports_not_running() {
     match Sender::<Request>::connect(&service_name("absent")) {
@@ -314,9 +309,7 @@ fn connecting_to_nothing_reports_not_running() {
     }
 }
 
-/// The blocking half must behave exactly as the async half does, since the
-/// point of it is that a caller with nothing else to do can skip the executor
-/// without changing what the protocol looks like on the wire.
+/// The blocking API must behave exactly like the async one on the wire.
 #[test]
 fn a_blocking_call_gets_its_reply() {
     let name = service_name("blocking-call");
@@ -330,8 +323,6 @@ fn a_blocking_call_gets_its_reply() {
             .expect("a reply")
     });
 
-    // Received through the blocking path too, so both ends of this test skip
-    // the executor entirely.
     let delivery = receiver.recv_blocking().expect("receive");
     assert_eq!(delivery.value, Request::Query("displays".into()));
     delivery

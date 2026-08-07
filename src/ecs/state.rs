@@ -95,9 +95,8 @@ pub struct SavedWindow {
     pub subrole: String,
 }
 
-// The query/subscribe documents are the socket's wire format, so they live in
-// the shared `paneru_shared_state` crate; the daemon only fills them in from the
-// ECS world. Aliased to the names the rest of the daemon already uses.
+// These wire-format types live in the shared `paneru_shared_types` crate;
+// aliased here to the names the rest of the daemon already uses.
 pub use paneru_shared_types::state::{
     ActiveState as PaneruActiveState, Frame, QueryState as PaneruQueryState, StateEvent,
     StateQueryKind, VirtualWorkspaceState as PaneruVirtualWorkspaceState,
@@ -408,9 +407,9 @@ struct SavedWorkspaceBuilder {
     strips: Vec<SavedStrip>,
 }
 
-/// The world access [`QueryState::extract`] needs, bundled so the several
-/// callers — the socket query handler, the embedded Lua runtime — take one
-/// parameter instead of re-listing six that must stay in step.
+/// The world access [`QueryState::extract`] needs, bundled so callers (the
+/// socket query handler, the embedded Lua runtime) take one parameter instead
+/// of six.
 #[derive(SystemParam)]
 pub struct QueryStateParams<'w, 's> {
     workspaces: Query<

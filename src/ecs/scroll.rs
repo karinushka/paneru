@@ -383,12 +383,9 @@ fn apply_scrolling_constraints(
         &viewport,
         &config,
     ) {
-        // Only the on-screen origin is whole pixels. Rounding `scroll.position`
-        // too — as writing the clamped value back unconditionally did — threw
-        // away the fraction every frame, so motion slower than half a pixel per
-        // frame accumulated to nothing and then arrived all at once. Snap it
-        // only when the clamp actually moved the strip, which is what pins it
-        // at the edges.
+        // Only snap `scroll.position` to the rounded pixel value when the clamp
+        // actually moved it (pinning at the edges); otherwise rounding every
+        // frame would throw away sub-pixel motion before it can accumulate.
         if clamped_offset != rounded {
             scroll.position = f64::from(clamped_offset);
         }

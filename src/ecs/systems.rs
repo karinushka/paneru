@@ -845,11 +845,9 @@ pub(crate) fn window_moved_update_frame(
         if matches!(unmanaged, Some(Unmanaged::Minimized | Unmanaged::Hidden)) {
             continue;
         }
-        // Our own move, echoed back. `animate_entities` lerps from whatever
-        // `Position` currently holds, so writing the app's observed frame into
-        // it while the animation is running restarts each step from wherever the
-        // app had got to — behind, for anything that does not move instantly.
-        // The animation then re-issues the move, and the two chase each other.
+        // Our own move, echoed back: `animate_entities` lerps from the current
+        // `Position`, so overwriting it with the echoed frame mid-animation
+        // restarts each step from behind, and the two chase each other.
         if repositioning {
             continue;
         }
@@ -896,7 +894,6 @@ pub(crate) fn gather_initial_processes(
         .cloned()
         .or_else(|| toml_config.clone());
 
-    // Apply any display menubar override to the newly created displays.
     if let Some(config) = &effective {
         let height = config.menubar_height();
         for mut display in &mut displays {
@@ -928,13 +925,11 @@ pub(crate) fn gather_initial_processes(
         }
     }
 
-    // The input event tap holds a clone of the `Config` handle that came in on
-    // `InitialConfig`, and reads swipe/scroll settings off it on every event. A
-    // Lua `paneru.setup{...}` builds a *fresh* handle, so left alone the tap
-    // would keep reading the TOML (or default) settings forever and gestures
-    // would never be intercepted. Publish the Lua settings into the handle the
-    // tap already holds and keep that one as the resource, so both sides share
-    // one inner from here on — including for `replace_inner_from` on reload.
+    // The input event tap holds its own clone of the `Config` handle from
+    // `InitialConfig` and reads swipe/scroll settings off it per event. A Lua
+    // `paneru.setup{...}` builds a fresh handle, so its settings must be
+    // published into the tap's existing handle rather than replacing it, or
+    // gestures would keep reading stale settings.
     match (existing_config.as_deref(), toml_config) {
         #[cfg(feature = "lua")]
         (Some(lua_config), Some(shared)) => {

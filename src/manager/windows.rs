@@ -43,21 +43,10 @@ static ENHANCED_UI_REFCOUNT: LazyLock<Mutex<HashMap<Pid, usize>>> =
 /// Apps observed not to have `AXEnhancedUserInterface` set, so the workaround
 /// above can skip them without asking again.
 ///
-/// An `RwLock` rather than a `Mutex` because the access pattern is lopsided: a
-/// pid is inserted once, the first time any of its windows is moved, and read by
-/// every other window of that app afterwards. Readers do not exclude each other,
-/// which matters because the callers arrive from `par_iter_mut` — several worker
-/// threads asking at once.
-///
-/// Reading the attribute means a synchronous round-trip into the app, and
-/// [`WindowOS::disable_enhanced_ui`] runs on every reposition — once per window
-/// per frame while the strip is scrolling. Caching the negative answer takes
-/// that cost to zero for every app that never turns the attribute on.
-///
-/// An app that enables it *after* being cached keeps its animated moves. That
-/// is the same outcome as before this cache existed for any app that enabled it
-/// mid-session, and the entry dies with the process: a relaunch gets a new pid
-/// and is asked afresh.
+/// An `RwLock` rather than a `Mutex`: entries are written once and read by
+/// many concurrent `par_iter_mut` workers afterwards, so readers must not
+/// exclude each other. Entries die with the process, so a relaunch (new pid)
+/// is asked afresh.
 static ENHANCED_UI_ABSENT: LazyLock<RwLock<HashSet<Pid>>> =
     LazyLock::new(|| RwLock::new(HashSet::new()));
 

@@ -1109,13 +1109,8 @@ mod tests {
         );
     }
 
-    /// The point of dispatching concurrently: a handler parked on a world read
-    /// is not holding the interpreter.
-    ///
-    /// Before, the worker blocked on the reply, so the second handler could not
-    /// start until the first had its answer — and an unanswered read wedged the
-    /// queue behind it. Here the first is left waiting on purpose and the second
-    /// still runs to completion.
+    /// A handler parked on a world read does not hold up the next one: it is
+    /// left waiting on purpose while a second handler runs to completion.
     #[test]
     fn a_handler_waiting_on_the_world_does_not_hold_up_the_next_one() {
         let worker = worker(
@@ -1390,7 +1385,6 @@ mod tests {
             layout(&[(7, "Alacritty", 1), (8, "Obsidian", 1), (9, "Mail", 1)]),
         );
 
-        // Both pads, and nothing else.
         assert_eq!(
             next_ops(&worker, "the sweep"),
             vec![
@@ -1530,7 +1524,6 @@ mod tests {
     #[test]
     fn losing_focus_parks_a_scratchpad() {
         let worker = worker(SCRATCHPAD);
-        // Focus the pad, then focus something else.
         worker.send_events(vec![LuaEvent::WindowFocused { window_id: 7 }]);
         serve(&worker, layout(&[(7, "Alacritty", 1), (8, "Mail", 1)]));
         assert_eq!(

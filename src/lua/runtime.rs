@@ -1,16 +1,14 @@
 //! The embedded Lua interpreter and everything a script registers into it.
 //!
-//! This module knows nothing about Bevy. It takes source in, hands dispatched
-//! side effects back out as plain values ([`Command`]s and flash messages), and
-//! reaches the world only through [`DispatchWorld`]. That keeps the interpreter
-//! — which `mlua` makes `!Send`, and which runs arbitrary user code of unbounded
-//! duration — free to live on a thread of its own, with the ECS on the other
-//! side of a channel.
+//! This module knows nothing about Bevy: it takes source in, hands dispatched
+//! side effects back out as plain values ([`Command`]s and flash messages),
+//! and reaches the world only through [`DispatchWorld`]. `mlua::Lua` is
+//! `!Send`, so the interpreter lives on a thread of its own with the ECS on
+//! the other side of a channel.
 //!
-//! Dispatch is `async`: a handler that reads the world suspends rather than
-//! blocking, so the worker can start the next one instead of queueing it behind
-//! a round trip. Handlers therefore overlap, which is why nothing here may hold
-//! a `RefCell` borrow across an await.
+//! Dispatch is `async` and handlers overlap — a handler that reads the world
+//! suspends rather than blocking — so nothing here may hold a `RefCell`
+//! borrow across an await.
 
 use paneru_shared_types::script_value::ScriptValue;
 use std::cell::RefCell;
@@ -115,9 +113,9 @@ pub(super) struct Outbox {
 /// The side effects one dispatch produced: commands to put on the bus and
 /// flash messages to show.
 ///
-/// Script state writes are not among them. They are the one thing a handler
-/// does that it also has to see the result of, so they go and come back while
-/// the handler waits rather than being queued for later.
+/// Script state writes are not among them: they are the one thing a handler
+/// has to see the result of, so they go and come back while the handler
+/// waits rather than being queued for later.
 pub(super) type Effects = (Vec<Command>, Vec<(String, f32)>);
 
 /// The embedded Lua runtime and its shared registration state.
@@ -253,13 +251,9 @@ impl LuaRuntime {
         }
     }
 
-    /// The window set a handler is handed.
-    ///
-    /// Materialised up front rather than on first use. Fetching it lazily meant
-    /// a synchronous provider call from deep inside the window-set methods,
-    /// which cannot suspend; every handler in a batch shares one read anyway
-    /// (see [`super::world::DispatchWorld`]), so the fetch it saved was already
-    /// at most one per batch. Each handler gets its own copy to transform.
+    /// The window set a handler is handed, materialised up front since
+    /// fetching it lazily would need a synchronous call that cannot suspend.
+    /// Each handler gets its own copy to transform.
     async fn window_set_arg(&self, context: &str) -> Option<AnyUserData> {
         let set = match self.world.layout().await {
             Ok(set) => set,
@@ -274,13 +268,10 @@ impl LuaRuntime {
             .ok()
     }
 
-    /// Queues whatever a handler returned.
-    ///
-    /// Returning a window set is how a handler asks for anything to change:
-    /// the operations recorded on the value it hands back are what get replayed
-    /// against the live world. A handler that returns nothing has asked for
-    /// nothing, which is what makes computing a set and *not* returning it free
-    /// of consequences.
+    /// Queues whatever a handler returned. Returning a window set replays the
+    /// operations recorded on it against the live world; returning nothing
+    /// commits nothing, so computing a set without returning it is free of
+    /// consequences.
     fn commit(&self, returned: &Value, context: &str) {
         match returned {
             Value::Nil => {}

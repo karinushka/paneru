@@ -763,21 +763,18 @@ pub fn bruteforce_windows(
     let bytes = MAGIC.to_ne_bytes();
     data[0x8..0x8 + bytes.len()].copy_from_slice(&bytes);
 
-    // A window SkyLight lists but the app will never hand back an element for —
-    // a panel, a helper, anything non-AX — never clears from `window_list`, so
-    // the early exit below never fires and the scan runs all 0x7fff round trips
-    // every time that app starts. The budget is what stops one such window from
-    // costing a second of startup forever.
+    // A window SkyLight lists but that never resolves to an AX element (a
+    // panel, helper, anything non-AX) never clears from `window_list`, so
+    // without this deadline the scan would run all 0x7fff round trips every
+    // time that app starts.
     let deadline = Instant::now() + BRUTEFORCE_BUDGET;
 
     for element_id in 0..0x7fffu64 {
-        // Every iteration is a synchronous cross-process AX round trip, so stop the
-        // moment the last window we were looking for has been accounted for.
+        // Every iteration is a synchronous cross-process AX round trip.
         if window_list.is_empty() {
             break;
         }
-        // Only checked periodically: `Instant::now` is itself a syscall on some
-        // paths, and at this granularity the overshoot is irrelevant.
+        // Checked periodically only: `Instant::now` can itself be a syscall.
         if element_id.is_multiple_of(256) && Instant::now() >= deadline {
             warn!(
                 "{pid}: giving up the brute-force scan at element {element_id} with {} window(s) \

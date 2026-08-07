@@ -327,12 +327,12 @@ mod tests {
     use crate::ecs::state::PaneruQueryState;
     use crate::events::Event;
 
-    /// The main thread's half of the script state store, in one struct: what a
-    /// read answers from and what a write lands in, with the revision the
-    /// worker's cache is checked against.
     /// A competing writer, run just before a write lands.
     type Interjection = Box<dyn FnMut(&mut ScriptState)>;
 
+    /// The main thread's half of the script state store: what a read answers
+    /// from and what a write lands in, with the revision the worker's cache
+    /// watches.
     struct TestWorld {
         store: RefCell<ScriptState>,
         revision: Arc<AtomicU64>,
@@ -367,13 +367,10 @@ mod tests {
             LuaRuntime::from_source(source, &self.dispatch)
         }
 
-        /// Runs one dispatch to completion, answering its reads the way the main
-        /// thread's `serve_lua_queries` does.
-        ///
-        /// A dispatch suspends whenever it reads the world, so a test cannot
-        /// simply block on it — nothing would be there to answer. Polling the
-        /// future and draining the request queue in turn is the single-threaded
-        /// shape of what the ECS does across frames.
+        /// Runs one dispatch to completion, answering its reads the way the
+        /// main thread's `serve_lua_queries` does. A dispatch suspends
+        /// whenever it reads the world, so this polls the future and drains
+        /// the request queue in turn rather than simply blocking on it.
         fn drive<T>(
             &self,
             extract: &dyn Fn() -> Shared<PaneruQueryState>,
@@ -411,13 +408,9 @@ mod tests {
             panic!("the dispatch never finished");
         }
 
-        /// [`Self::drive`], for a dispatch that is waiting on something other
-        /// than this thread.
-        ///
-        /// `drive` spins its whole budget as fast as it can, which is right when
-        /// every await is answered from the same loop. A dispatch parked on
-        /// `paneru.exec` is waiting on a process, and a tight spin would give up
-        /// long before one could start — so this one waits between turns.
+        /// [`Self::drive`], but waiting between turns instead of spinning: for
+        /// a dispatch parked on `paneru.exec`, which is waiting on a process
+        /// rather than on this thread.
         fn drive_patiently<T>(
             &self,
             extract: &dyn Fn() -> Shared<PaneruQueryState>,
@@ -498,9 +491,7 @@ mod tests {
             }"#,
             )
             .unwrap();
-        // The `bindings` table registered a keybind through the shared bind path,
         assert_eq!(runtime.published_keybinds().len(), 1);
-        // and the remaining sections became the authoritative config.
         let config = runtime.built_config().expect("setup should build a config");
         assert_eq!(config.sliver_width(), 7);
     }
@@ -760,8 +751,7 @@ mod tests {
         assert!(runtime.drain_outbox().0.is_empty());
     }
 
-    /// Runs `source` as a keybind handler with a store behind it, and hands
-    /// back the store so a test can see what it holds afterwards.
+    /// Runs `source` as a keybind handler against `world`'s store.
     fn run_with_store(source: &str, world: &TestWorld) {
         let runtime = world
             .runtime(&format!(

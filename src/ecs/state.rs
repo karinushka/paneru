@@ -453,13 +453,10 @@ impl QueryStateParams<'_, '_> {
     }
 }
 
-/// Reads the layout as the tree a script transforms.
-///
-/// Where [`QueryState::extract`] flattens each workspace into a list of
-/// windows, this keeps the strip's shape: which columns there are, in what
-/// order, and how each arranges the windows in it. That structure is what makes
-/// `ws:swap`, `ws:east` and `ws:stack` expressible at all — a flat list cannot
-/// say what is beside what.
+/// Reads the layout as the tree a script transforms. Unlike
+/// [`QueryState::extract`], which flattens each workspace into a list of
+/// windows, this keeps the strip's column structure — needed for `ws:swap`,
+/// `ws:east`, `ws:stack` and friends to know what is beside what.
 impl QueryStateParams<'_, '_> {
     pub fn extract_window_set(&self) -> crate::errors::Result<WindowSet> {
         use paneru_shared_types::windowset::{ColumnSet, DisplaySet, WorkspaceSet};
@@ -475,10 +472,8 @@ impl QueryStateParams<'_, '_> {
         // each display can be built with its own workspaces in one pass.
         let mut strips_by_display: HashMap<Entity, Vec<WorkspaceSet>> = HashMap::new();
         for (child, strip, active_workspace, selected_workspace) in self.workspaces {
-            // Floating windows sit outside the strip, so they have to be
-            // gathered separately. Only worth asking for a workspace that is
-            // actually showing, since the read goes out to the window server —
-            // the same condition `QueryState::extract` uses.
+            // Only ask for floating windows on a workspace that's actually
+            // showing, since this read goes out to the window server.
             let floating_entities = if active_workspace
                 || selected_workspace && active_workspace_id != Some(strip.id())
             {
@@ -487,11 +482,9 @@ impl QueryStateParams<'_, '_> {
                 Vec::new()
             };
 
-            // `columns` is the tiled layout and `floating` is everything else,
-            // with no window in both. The strip keeps tracking a window after
-            // it is floated (that is how it gets tiled again later), so strip
-            // membership alone does not decide which list a window belongs in —
-            // the `Floating` marker does.
+            // A window stays tracked by the strip after it's floated (so it can
+            // be re-tiled later), so it's the `Floating` marker — not strip
+            // membership — that decides whether it goes in `columns` or `floating`.
             let mut floating = Vec::new();
             let mut columns: Vec<ColumnSet> = Vec::new();
             for column in strip.columns() {

@@ -166,28 +166,20 @@ pub struct WindowOS {
     border_radius: OnceLock<Option<f64>>,
     pid: OnceLock<Result<Pid>>,
     app_reference: OnceLock<Option<CFRetained<AXUIWrapper>>>,
-    /// Set once this window's app has been found not to use
-    /// `AXEnhancedUserInterface`, which is the overwhelmingly common case.
-    ///
-    /// The check itself is the hot path's problem: `reposition` runs for every
-    /// window on every frame the strip scrolls, and reaching the shared answer
-    /// meant taking a global mutex — from inside `par_iter_mut`, so every worker
-    /// thread contended for it. Landing the answer on the window makes the
-    /// steady state a relaxed atomic load and nothing else.
+    /// Set once this window's app is known not to use
+    /// `AXEnhancedUserInterface` (the common case), so the steady-state check
+    /// in [`Self::disable_enhanced_ui`] is a relaxed atomic load instead of
+    /// contending for the global mutex from every `par_iter_mut` worker.
     enhanced_ui_absent: AtomicBool,
 
-    /// The last title read off the element.
+    /// The last title read off the element, cached because reading one is a
+    /// synchronous cross-process call and many callers want it for every
+    /// window at once.
     ///
-    /// Reading a title is a synchronous cross-process call, and the callers that
-    /// want one want it for *every* window at once — the state document, the
-    /// window set, `print_state`. Uncached, a client subscribed to events made
-    /// the main thread do that whole sweep on every frame that moved a window.
-    ///
-    /// A lock rather than a `OnceLock` like its neighbours because a title,
-    /// unlike a pid or a border radius, changes: [`Self::invalidate_title`]
-    /// clears it when the app says so. Missing that notification is the one way
-    /// this can go stale, so the invalidation is driven by the same
-    /// `kAXTitleChangedNotification` the event stream already reports.
+    /// An `RwLock` rather than a `OnceLock` like its neighbours: a title can
+    /// change, and [`Self::invalidate_title`] clears it when the app reports
+    /// `kAXTitleChangedNotification`. Missing that notification is the one
+    /// way this can go stale.
     title: RwLock<Option<String>>,
 }
 
@@ -342,12 +334,10 @@ impl WindowOS {
             self.enhanced_ui_absent.store(true, Ordering::Relaxed);
             return;
         }
-        // Scoped so the lock is not still held for the accessibility calls
-        // below. Reading and writing an attribute are each a synchronous
-        // round-trip into another process, and holding a global mutex across
-        // them stalled every other `par_iter_mut` worker for the duration —
-        // turning a parallel commit back into a serial one behind the slowest
-        // app.
+        // Scoped so the lock isn't held across the accessibility calls below:
+        // each is a synchronous round-trip into another process, and holding a
+        // global mutex across them would serialize every `par_iter_mut` worker
+        // behind the slowest app.
         {
             let mut counts = ENHANCED_UI_REFCOUNT
                 .lock()

@@ -1,43 +1,15 @@
 //! Runs the Lua interpreter on a thread of its own.
 //!
-//! A `paneru.on` handler or a keybind callback is arbitrary user code of
-//! unbounded duration. On the main thread that is a hazard rather than a
-//! nuisance: `pump_events` — the Cocoa event pump, and with it the frame clock —
-//! is itself main-thread-pinned, so a handler that takes a second freezes window
-//! dragging, focus tracking and the menubar for that second. `mlua::Lua` being
-//! `!Send` is what forced it there; a dedicated thread with channels either side
-//! is what gets it out.
-//!
-//! The shape:
-//!
-//! * The main thread only ever *sends* ([`ToLua`]) and *drains* ([`FromLua`]).
-//!   Both channels are unbounded and every receive is non-blocking, so no
-//!   scheduled system can ever wait on a script.
-//! * Each handler is a task on a [`LocalExecutor`] here, and world reads are
-//!   awaited rather than blocked on: the worker sends a [`QueryRequest`]
-//!   carrying a reply channel, and `serve_lua_queries` answers it from the ECS
-//!   on the next system that runs. A handler waiting on that answer is not
-//!   holding the interpreter, so the next one runs meanwhile. Concurrency, not
-//!   parallelism — there is one interpreter and one thread, so two handlers
-//!   never execute Lua at the same instant, and a handler in a tight pure-Lua
-//!   loop still blocks the rest.
-//! * Reads are shared across whoever wants them (see
-//!   [`super::world::DispatchWorld`]), so a batch of overlapping handlers costs
-//!   one round trip per kind rather than one each.
-//! * `paneru.state` goes the same way, in both directions. A read is cached
-//!   against a revision stamp, so a script that reads its own state on every
-//!   event pays for one round-trip rather than one per event; a *write* always
-//!   waits, because the store has a second writer (a socket client) and
-//!   `paneru.state.mutate` has to learn whether it was overtaken while the
-//!   handler is still there to try again.
-//! * Because the runtime is `!Send` it cannot be *moved* here: [`spawn`] hands
-//!   the thread a [`LuaSource`] and it builds the interpreter in place.
-//!
-//! Nothing crossing either channel is a Lua value; it is all plain data
-//! ([`LuaEvent`], [`WindowSet`], [`Command`], [`PaneruQueryState`]), which is
-//! what the marshalling split in [`super::convert`] exists to make possible.
-//!
-//! [`spawn`]: LuaWorker::spawn
+//! `mlua::Lua` is `!Send`, and a handler is arbitrary script code of unbounded
+//! duration, so it cannot run on the main thread without blocking window
+//! management for as long as it takes. The main thread only sends
+//! ([`ToLua`]) and drains ([`FromLua`]) over unbounded, non-blocking
+//! channels; world reads ([`WorldRequest`]) and script-state access
+//! ([`StoreRequest`]) go through their own reply channels, so a handler
+//! awaiting an answer never blocks the others. Nothing crossing either
+//! channel is a Lua value — only plain data ([`LuaEvent`], [`WindowSet`],
+//! [`Command`], [`PaneruQueryState`]); see [`super::convert`] for the
+//! marshalling.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

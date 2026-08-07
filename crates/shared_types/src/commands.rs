@@ -3,9 +3,7 @@
 //! Every way of telling the window manager to do something funnels through
 //! [`Command`]: the TOML `[bindings]` table, the `send-cmd` socket protocol, an
 //! embedded Lua `init.lua`, and the loadable Lua client module. This crate owns
-//! the types and their argv encoding ([`parse_command`] / [`Command::to_argv`]),
-//! so no consumer has to re-derive what a command looks like. The Lua API that
-//! produces them lives one layer up, in `paneru-lua`.
+//! the types and their argv encoding ([`parse_command`] / [`Command::to_argv`]).
 
 use serde::{Deserialize, Serialize};
 

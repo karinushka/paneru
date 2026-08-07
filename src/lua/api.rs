@@ -204,10 +204,10 @@ pub(super) fn install(
     };
     paneru.set("bind", bind)?;
 
-    // paneru.setup(table) — declare the whole configuration from Lua. The table
-    // mirrors the TOML sections one-for-one. A `bindings` sub-table (command
-    // string = chord string) is desugared onto the same path as `paneru.bind`
-    // and stripped out before the rest is deserialized into a `Config`.
+    // paneru.setup(table) — declare the whole configuration from Lua. Mirrors
+    // the TOML sections; a `bindings` sub-table is desugared onto the same
+    // path as `paneru.bind` and stripped before the rest is deserialized into
+    // a `Config`.
     let setup = {
         let registry = Rc::clone(registry);
         let config_cell = Rc::clone(config_cell);
@@ -228,12 +228,11 @@ pub(super) fn install(
     paneru.set("setup", setup)?;
 
     // paneru.windows(fn) — xmonad's `windows`: hand the window set to `fn` and
-    // commit whatever it hands back. The same contract as a bind handler, for
-    // use partway through one.
+    // commit whatever it returns.
     //
-    // Async because `fn` may itself query, and because fetching the set is a
-    // round trip to the main thread. It reads the batch's shared copy, so
-    // calling this from several concurrent handlers costs one fetch.
+    // Async because `fn` may itself query and fetching the set is a round
+    // trip to the main thread; concurrent callers share one fetch via the
+    // batch's cached copy.
     let windows = {
         let outbox = Rc::clone(outbox);
         let world = Rc::clone(world);

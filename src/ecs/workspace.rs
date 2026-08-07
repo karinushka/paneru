@@ -128,20 +128,13 @@ pub(crate) struct PreviousStripPosition {
     pub focus: Option<Entity>,
 }
 
-/// Guard spawned by [`show_active_workspace`] alongside the re-focus of the
-/// remembered window when a strip is restored to its saved position. That
-/// focus lands after the strip was already placed at its saved origin —
-/// `focus_entity` inserts `FocusedMarker` a command-flush later, and the OS
-/// acknowledges with one or more `WindowFocused` events several ticks later
-/// still (the front-switch handler synthesizes an extra one), long after the
-/// `is_added` guards in the layout systems have expired. Each of those would
-/// recenter or reshuffle the strip away from the restored position (visible
-/// as a wiggle on every switch). While the guard is alive,
-/// `autocenter_window_on_focus` and the duplicate-focus reshuffle in
-/// `window_focused_trigger` skip the named entity. The guard lives on its own
-/// entity next to a [`Timeout`]: focus moving to any other window despawns it
-/// immediately, and `timeout_ticker` expires it otherwise — so later genuine
-/// re-focus events reshuffle normally.
+/// Guard spawned alongside the re-focus of a restored strip's remembered
+/// window. The OS's focus acknowledgment arrives several ticks after the
+/// strip was already placed at its saved origin, so without this guard
+/// `autocenter_window_on_focus` and `window_focused_trigger`'s reshuffle would
+/// slide the strip away again (a visible wiggle on every switch); both skip
+/// the named entity while this marker exists. It is despawned once focus
+/// moves elsewhere, or expires via `timeout_ticker`.
 #[derive(Component, Debug)]
 pub(crate) struct RestoreFocusMarker {
     pub entity: Entity,

@@ -345,12 +345,6 @@ fn test_scrolling() {
             assert_window_at!(world, 1, 400, TEST_MENUBAR_HEIGHT);
             assert_window_at!(world, 2, 800, TEST_MENUBAR_HEIGHT);
         })
-        // The offsets are 4px further left than they used to be. Each tick
-        // rounds the accumulated scroll offset to whole pixels and writes it
-        // back into `Scrolling::position`; that used to truncate, which is a
-        // bias *towards* zero applied once per frame, so a swipe lost ground
-        // the longer it ran — and lost it asymmetrically, since truncation
-        // rounds the two directions opposite ways. Rounding has no such bias.
         .on_iteration(5, move |world, _state| {
             assert_window_at!(world, 0, -352, TEST_MENUBAR_HEIGHT);
             assert_window_at!(world, 1, 48, TEST_MENUBAR_HEIGHT);
@@ -1382,7 +1376,7 @@ fn test_virtual_workspace_switch_no_horizontal_slide_no_animations() {
     // Remember the settled strip x after scrolling.
     let strip_x_after_scroll = {
         let world = h.app.world_mut();
-        let mut q = world.query_filtered::<&crate::ecs::Position, With<ActiveWorkspaceMarker>>();
+        let mut q = world.query_filtered::<&Position, With<ActiveWorkspaceMarker>>();
         q.single(world)
             .expect("exactly one active strip after scroll")
             .0
@@ -1415,7 +1409,7 @@ fn test_virtual_workspace_switch_no_horizontal_slide_no_animations() {
 
     let strip_x_final = {
         let world = h.app.world_mut();
-        let mut q = world.query_filtered::<&crate::ecs::Position, With<ActiveWorkspaceMarker>>();
+        let mut q = world.query_filtered::<&Position, With<ActiveWorkspaceMarker>>();
         q.single(world)
             .expect("exactly one active strip after switch-back")
             .0
@@ -1510,7 +1504,7 @@ fn test_virtual_workspace_switch_stops_in_flight_strip_animation() {
             }
         }
         let world = h.app.world_mut();
-        let mut q = world.query_filtered::<&crate::ecs::Position, With<ActiveWorkspaceMarker>>();
+        let mut q = world.query_filtered::<&Position, With<ActiveWorkspaceMarker>>();
         q.single(world)
             .expect("exactly one active strip after restore")
             .0
@@ -1541,7 +1535,7 @@ fn test_virtual_workspace_switch_stops_in_flight_strip_animation() {
         }
     }
     let world = h.app.world_mut();
-    let mut q = world.query_filtered::<&crate::ecs::Position, With<ActiveWorkspaceMarker>>();
+    let mut q = world.query_filtered::<&Position, With<ActiveWorkspaceMarker>>();
     let final_x = q.single(world).expect("exactly one active strip").0.x;
     assert_eq!(
         final_x, saved_x,
@@ -1742,7 +1736,7 @@ fn test_reshuffle_leftmost_pins_strip_to_left_edge_with_stale_frame() {
 /// the origin without reshuffling, mirroring the non-animated branch.
 #[test]
 fn test_virtual_workspace_switch_preserves_scroll_with_animations() {
-    use crate::ecs::Position;
+    use Position;
 
     let config: Config = (
         MainOptions {
@@ -2017,4 +2011,87 @@ fn test_app_self_activation_keeps_window_parked_on_hidden_virtual_row() {
             );
         })
         .run(commands);
+}
+
+/// A `WindowMoved` notification for a window paneru is not currently moving is
+/// the app (or the user) moving it, and the layout must take that new origin on
+/// board.
+#[test]
+fn test_foreign_window_move_is_adopted() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    let config: Config = (
+        MainOptions {
+            // Snappy, so no `RepositionMarker` is still in flight when the
+            // notification below arrives.
+            animation_speed: Some(10000.0),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(2)
+        .on_iteration(0, |_world, state| {
+            state.os_move_window(0, Origin::new(77, 88));
+        })
+        .on_iteration(2, |world, _state| {
+            let entity = find_window_entity(0, world);
+            let position = world.get::<Position>(entity).expect("window position");
+            assert_eq!(
+                position.0,
+                Origin::new(77, 88),
+                "a move paneru did not make must be read back into the layout"
+            );
+        })
+        .run(commands);
+}
+
+/// A `WindowMoved` echo of a move paneru itself just made must not perturb the
+/// in-flight animation — reading it back naively made the animation and the
+/// echo chase each other, causing jitter on every reflow.
+///
+/// Driven directly at the system instead of through the harness loop: the mock
+/// applies its reposition synchronously, so a normal frame would resolve the
+/// move before the notification could ever be read back.
+#[test]
+fn test_own_window_move_echo_is_ignored() {
+    use bevy::ecs::system::RunSystemOnce as _;
+
+    let mut harness = TestHarness::new().with_windows(2);
+    harness.app.update();
+
+    let state = harness.mock_state.clone();
+    let world = harness.world();
+    let entity = find_window_entity(0, world);
+    let before = world.get::<Position>(entity).expect("window position").0;
+
+    // A move of ours is in flight, and the app reports a frame we didn't ask
+    // for. Displaced on the axis the animation leaves alone, so the assertion
+    // can't be confused by how far the lerp has run.
+    world
+        .entity_mut(entity)
+        .insert(RepositionMarker(Origin::new(5000, before.y)));
+    state.os_move_window(0, Origin::new(before.x, before.y + 888));
+    world.write_message(Event::WindowMoved { window_id: 0 });
+
+    world
+        .run_system_once(crate::ecs::systems::window_moved_update_frame)
+        .expect("running window_moved_update_frame");
+
+    assert_eq!(
+        world.get::<Position>(entity).expect("window position").0,
+        before,
+        "the echo of our own move must not be read back over the animation"
+    );
 }

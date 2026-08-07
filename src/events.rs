@@ -2,15 +2,17 @@ use bevy::ecs::message::Message;
 use objc2::rc::Retained;
 use objc2_core_foundation::{CFRetained, CGPoint};
 use objc2_core_graphics::CGDirectDisplayID;
-use std::os::unix::net::UnixStream;
+use paneru_shared_types::wire::{Response, ScriptStateRequest};
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex};
 
 use crate::commands::Command;
 use crate::config::Config;
 use crate::ecs::state::StateQueryKind;
 use crate::errors::Result;
-use crate::platform::{Modifiers, ProcessSerialNumber, WinID, WorkspaceId, WorkspaceObserver};
+use crate::platform::{
+    EventLoopWaker, Modifiers, ProcessSerialNumber, WinID, WorkspaceId, WorkspaceObserver,
+};
 use crate::util::AXUIWrapper;
 
 /// Where a [`Event::WindowDestroyed`] came from, which decides how far it can be
@@ -26,9 +28,26 @@ pub enum DestroySource {
     SpaceNotification,
 }
 
+/// Where a client's answer goes.
+///
+/// Bounded to one: exactly one answer is ever sent, and the ECS side answers
+/// with `try_send` so it never blocks the main thread.
+pub type Reply = async_channel::Sender<Response>;
+
 /// `Event` represents various system-level and application-specific occurrences that the window manager reacts to.
 /// These events drive the core logic of the window manager, from window creation to display changes.
 #[allow(dead_code)]
+/// The pointer and gesture subset of [`Event`], republished on its own stream
+/// by [`demux_input_events`](crate::ecs::systems::demux_input_events) so
+/// input-heavy systems don't have to scan the full event stream. Events still
+/// appear on [`Event`] too, for the Lua bridge and IPC subscribers.
+#[derive(Clone, Debug, Message)]
+pub struct InputEvent(pub Event);
+
+/// Several variants carry a payload used only by the Lua bridge
+/// (`src/lua/convert.rs`). The dead-code lint is suppressed only when the
+/// `lua` feature is off, so it still applies to the build that ships.
+#[cfg_attr(not(feature = "lua"), allow(dead_code))]
 #[derive(Clone, Debug, Message)]
 pub enum Event {
     /// Signals the application to exit.
@@ -51,10 +70,12 @@ pub enum Event {
     ApplicationTerminated { psn: ProcessSerialNumber },
     /// The frontmost application has switched.
     ApplicationFrontSwitched { psn: ProcessSerialNumber },
-    /// The application has been activated.
-    ApplicationActivated,
-    /// The application has been deactivated.
-    ApplicationDeactivated,
+    /// An application has become the active (frontmost) application. Carries
+    /// the pid for subscribers; Paneru's own focus handling uses
+    /// [`Event::ApplicationFrontSwitched`] instead.
+    ApplicationActivated { pid: i32 },
+    /// An application has stopped being the active application.
+    ApplicationDeactivated { pid: i32 },
     /// An application has become visible.
     ApplicationVisible { pid: i32 },
     /// An application has become hidden.
@@ -168,14 +189,29 @@ pub enum Event {
     /// A command has been issued to the window manager.
     Command { command: Command },
 
-    /// A structured state query has been issued by a socket client.
+    /// A structured state query has been issued by a client.
     StateQuery {
         kind: StateQueryKind,
-        respond_to: Sender<String>,
+        respond_to: Reply,
     },
 
-    /// A socket client has subscribed to line-delimited state events.
-    StateSubscribe { stream: Arc<Mutex<UnixStream>> },
+    /// A client has asked for the window set: the same layout value a
+    /// `paneru.windows` handler is given inside the daemon.
+    WindowSetQuery { respond_to: Reply },
+
+    /// A client has subscribed to state events. Carries the channel they are
+    /// pushed to, which outlives the request that delivered it.
+    StateSubscribe {
+        subscriber: Arc<paneru_mach_ipc::Subscriber>,
+    },
+
+    /// A client has read or written the script state store. Answered
+    /// from the same store the embedded Lua runtime uses, so the two see each
+    /// other's writes.
+    ScriptState {
+        request: ScriptStateRequest,
+        respond_to: Reply,
+    },
 }
 
 /// `EventSender` is a thin wrapper around a `std::sync::mpsc::Sender` for `Event`s.
@@ -183,6 +219,29 @@ pub enum Event {
 #[derive(Clone, Debug)]
 pub struct EventSender {
     tx: Sender<Event>,
+    /// Ends the Cocoa pump's wait once the event is queued. Shared so a
+    /// wake-up from any producer covers every event queued before it.
+    waker: Arc<EventLoopWaker>,
+}
+
+impl Event {
+    /// Whether this is one of the pointer or gesture events republished on
+    /// [`InputEvent`].
+    pub fn is_input(&self) -> bool {
+        matches!(
+            self,
+            Event::MouseDown { .. }
+                | Event::MouseUp { .. }
+                | Event::MouseDragged { .. }
+                | Event::MouseMoved { .. }
+                | Event::Swipe { .. }
+                | Event::VerticalSwipe { .. }
+                | Event::VerticalScrollTick { .. }
+                | Event::Scroll { .. }
+                | Event::TouchpadDown
+                | Event::TouchpadUp
+        )
+    }
 }
 
 impl EventSender {
@@ -194,7 +253,18 @@ impl EventSender {
     /// A tuple containing the `EventSender` and `Receiver` for the created channel.
     pub fn new() -> (Self, Receiver<Event>) {
         let (tx, rx) = channel::<Event>();
-        (Self { tx }, rx)
+        (
+            Self {
+                tx,
+                waker: Arc::new(EventLoopWaker::new()),
+            },
+            rx,
+        )
+    }
+
+    /// The waker shared by every clone of this sender.
+    pub fn waker(&self) -> &Arc<EventLoopWaker> {
+        &self.waker
     }
 
     /// Sends an `Event` through the internal channel.
@@ -207,6 +277,10 @@ impl EventSender {
     ///
     /// `Ok(())` if the event is sent successfully, otherwise `Err(Error)` if the receiver has disconnected.
     pub fn send(&self, event: Event) -> Result<()> {
-        Ok(self.tx.send(event)?)
+        self.tx.send(event)?;
+        // After the queue push, so the pump cannot wake to an empty channel and
+        // go back to sleep past the event that woke it.
+        self.waker.wake();
+        Ok(())
     }
 }

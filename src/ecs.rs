@@ -3,13 +3,13 @@ use std::time::{Duration, Instant};
 
 use bevy::MinimalPlugins;
 use bevy::app::App as BevyApp;
-use bevy::app::{PostUpdate, PreUpdate, Startup};
+use bevy::app::{First, Last, PostUpdate, PreUpdate, Startup};
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::lifecycle::RemovedComponents;
-use bevy::ecs::message::Messages;
 use bevy::ecs::query::{Added, Changed, With};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::common_conditions::{not, resource_exists};
+use bevy::ecs::schedule::{ScheduleLabel as _, SingleThreadedExecutor};
 use bevy::ecs::system::{Commands, EntityCommands, Query, Res, SystemId};
 use bevy::prelude::Event as BevyEvent;
 use bevy::tasks::Task;
@@ -28,7 +28,7 @@ use crate::config::{CONFIGURATION_FILE, Config, WindowParams};
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::state::PaneruState;
 use crate::errors::Result;
-use crate::events::{Event, EventSender};
+use crate::events::{Event, EventSender, InputEvent};
 #[cfg(feature = "lua")]
 use crate::lua;
 use crate::manager::{
@@ -46,6 +46,7 @@ pub mod layout_ops;
 pub mod mouse;
 pub mod params;
 pub(crate) mod restore;
+pub mod script_state;
 pub mod scroll;
 pub mod state;
 pub(crate) mod systems;
@@ -105,9 +106,16 @@ pub fn register_systems(app: &mut bevy::app::App) {
         )
             .chain(),
     );
+    // Registered with `add_message`, not `init_resource`, so the buffer is
+    // double-buffered and dropped after a frame like any other message stream.
+    app.add_message::<InputEvent>();
     app.add_systems(
         PreUpdate,
-        (systems::window_creation_event, systems::pump_events),
+        (
+            systems::window_creation_event,
+            systems::pump_events,
+            systems::demux_input_events.after(systems::pump_events),
+        ),
     );
     app.add_systems(
         Update,
@@ -143,6 +151,8 @@ pub fn register_systems(app: &mut bevy::app::App) {
             restore::tick_restore_grace,
             state::periodic_state_save.run_if(on_timer(Duration::from_mins(5))),
             state::cleanup_on_exit,
+            script_state::periodic_script_state_save.run_if(on_timer(Duration::from_mins(5))),
+            script_state::script_state_cleanup_on_exit,
         ),
     );
     app.add_systems(
@@ -184,6 +194,7 @@ pub fn register_triggers(app: &mut bevy::app::App) {
             triggers::application_event_trigger,
             triggers::dispatch_application_messages,
             triggers::window_destroyed_trigger,
+            triggers::reap_phantom_windows,
             triggers::invalidate_window_title,
             triggers::refresh_configuration_trigger,
             triggers::theme_change_trigger,
@@ -254,6 +265,10 @@ pub struct Scrolling {
     pub is_user_swiping: bool,
     /// Last time a physical swipe event was received.
     pub last_event: Duration,
+    /// The strip origin `apply_scrolling_constraints` last wrote. A [`Position`]
+    /// that no longer matches it was moved by something else (e.g. a reshuffle),
+    /// so the scroll offset must adopt that instead of overwriting it.
+    pub applied: i32,
 }
 
 #[derive(Component, Clone, Debug, Default, Deref, DerefMut)]
@@ -537,13 +552,10 @@ impl SpawnCommandsExt for Commands<'_, '_> {
 }
 
 /// Rebuilds the config watcher around `changed`, then re-registers every other
-/// config file.
-///
-/// Editors that save atomically (write-new-then-rename) break the original
-/// watch, so the watcher has to be rebuilt. But `setup_config_watcher` watches
-/// only the path it is handed, and the TOML and the Lua script share one
-/// watcher — so rebuilding for whichever file changed used to silently stop the
-/// other one hot-reloading until the next restart.
+/// config file. Editors that save atomically (write-new-then-rename) break the
+/// original watch, and since the TOML and Lua script share one watcher,
+/// rebuilding it for just the changed file would otherwise silently stop the
+/// other one from hot-reloading.
 pub(crate) fn rewatch_configs(
     window_manager: &WindowManager,
     changed: &std::path::Path,
@@ -573,15 +585,16 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
     let window_manager: Box<dyn WindowManagerApi> = Box::new(WindowManagerOS::new(sender.clone()));
 
     // Discover (or create) the Lua init script first: whether it exists decides
-    // whether a stub TOML gets planted beside it, so it has to be settled before
+    // whether the TOML path runs at all, so it has to be settled before
     // `CONFIGURATION_FILE` is first read.
     #[cfg(feature = "lua")]
     let lua_path = crate::config::ensure_lua_file()
         .inspect_err(|err| warn!("preparing Lua script: {err}"))
-        .ok();
+        .ok()
+        .flatten();
 
-    // With an init.lua there may be no TOML at all, so watch whichever config
-    // files actually exist. Both feed the same `ConfigRefresh` event.
+    // With an init.lua there is no TOML at all, so watch whichever config files
+    // actually exist. Both feed the same `ConfigRefresh` event.
     let toml_path = CONFIGURATION_FILE.as_deref();
     #[cfg(feature = "lua")]
     let primary = toml_path.or(lua_path.as_deref());
@@ -605,7 +618,13 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
     let mut app = BevyApp::new();
 
     app.add_plugins(MinimalPlugins)
-        .init_resource::<Messages<Event>>()
+        // `add_message`, not `init_resource`: the latter never registers the
+        // buffer with bevy's `MessageRegistry`, so it's never double-buffered
+        // and grows unbounded instead — every event lived for the process's
+        // lifetime. Messages now live two frames, which every reader here
+        // tolerates: readers gated on `not_swiping` or IPC subscribers would
+        // rather drop a missed frame than act on a backlog.
+        .add_message::<Event>()
         .insert_resource(Time::<Virtual>::from_max_delta(Duration::from_secs(10)))
         .insert_resource(WindowManager(window_manager))
         .insert_resource(SkipReshuffle(false))
@@ -623,6 +642,26 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         .add_plugins(focus::FocusEventsPlugin)
         .add_plugins(display::DisplayEventsPlugin)
         .add_plugins((register_triggers, register_systems, register_commands));
+
+    // Run every schedule inline rather than fanning systems out across the task
+    // pool: the task-pool handoff measured ~45% of main-thread time against
+    // ~16% actually spent on accessibility calls, dropping to ~10% once
+    // inlined. The expensive systems here all take `&mut Window` and are
+    // already mutually exclusive, so the fan-out bought little; genuine
+    // parallelism (`par_iter_mut`) still goes through `ComputeTaskPool`
+    // directly. `First`/`Last` are included even though unused because an
+    // empty schedule still costs a task-pool scope per frame.
+    for label in [
+        First.intern(),
+        PreUpdate.intern(),
+        Update.intern(),
+        PostUpdate.intern(),
+        Last.intern(),
+    ] {
+        app.edit_schedule(label, |schedule| {
+            schedule.set_executor(SingleThreadedExecutor::new());
+        });
+    }
 
     let menu_events = sender.clone();
     let mut platform_callbacks = PlatformCallbacks::new(sender);
@@ -643,22 +682,32 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         app.insert_resource(previous_state);
     }
 
+    // Overwrites the empty store `register_commands` put there, which is what
+    // the mock harness keeps: only the real app reads the user's file.
+    app.insert_resource(script_state::ScriptStateStore::load());
+
     // Do not insert this in mocks.
     app.insert_resource(LowPowerMode(false));
 
-    // Start the Lua worker and install its hot-reload plugin. Kept out of the
-    // mock harness. A missing/broken script falls back to an empty runtime so
-    // the watcher can still pick up a later fix. `spawn` waits for the script
-    // to finish loading, so errors are reported here at startup and the
-    // keybinds it registered are published before the event tap can see a
-    // keypress.
+    // Start the Lua worker and install its hot-reload plugin (kept out of the
+    // mock harness). A missing/broken script falls back to an empty runtime so
+    // the watcher can still pick up a later fix. `spawn` blocks until the
+    // script finishes loading, so its keybinds are published before the event
+    // tap can see a keypress.
     #[cfg(feature = "lua")]
     if let Some(path) = lua_path {
         // `paneru.bind` resolves chords on the worker, and the layout-aware
-        // keymap behind that goes through Carbon/TIS. Capture it here, on the
-        // main thread, before the worker can ask for it.
+        // keymap behind that goes through Carbon/TIS — must capture it here,
+        // on the main thread, before the worker can ask for it.
         crate::config::prime_virtual_keymap();
-        let worker = lua::LuaWorker::spawn(lua::LuaSource::Path(path.clone()));
+        // The worker caches the script state store and watches this stamp to
+        // know when its copy is stale — including when the writer was a client
+        // rather than the script itself.
+        let revision = app
+            .world()
+            .resource::<script_state::ScriptStateStore>()
+            .revision_handle();
+        let worker = lua::LuaWorker::spawn(lua::LuaSource::Path(path.clone()), revision);
         // A script that called `paneru.setup{...}` is authoritative: insert its
         // config now, before `app.run()`, so it exists ahead of the Startup
         // schedule and wins over the TOML `InitialConfig` (see
@@ -668,7 +717,7 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         }
         app.insert_resource(worker);
         app.insert_resource(lua::LuaScriptPath(path));
-        app.add_plugins(lua::LuaPlugin);
+        app.add_plugins(lua::LuaPlugin {});
     }
 
     Ok(app)

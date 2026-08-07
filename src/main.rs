@@ -1,4 +1,7 @@
-#![allow(clippy::cast_possible_truncation)]
+#![allow(
+    clippy::needless_pass_by_value,
+    reason = "Bevy system and mlua callback signatures are by-value by contract"
+)]
 
 use std::sync::mpsc::{Receiver, TryRecvError};
 
@@ -7,6 +10,7 @@ use tracing::{error, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 mod accessibility_prompt;
+mod client;
 mod commands;
 mod config;
 mod ecs;
@@ -28,8 +32,12 @@ embed_plist::embed_info_plist!("../assets/Info.plist");
 
 use events::{Event, EventSender};
 
+use client::ClientCommand;
 use ecs::state::StateQueryKind;
 use errors::Result;
+use paneru_shared_types::script_state::ScriptStateWrite;
+use paneru_shared_types::script_value::ScriptValue;
+use paneru_shared_types::wire::ScriptStateRequest;
 use platform::service;
 use reader::CommandReader;
 
@@ -39,11 +47,21 @@ use crate::menubar::MenuBarManager;
 use crate::platform::PlatformCallbacks;
 use accessibility_prompt::{AccessibilitySetupAction, show_accessibility_setup};
 
+#[cfg(feature = "lua")]
+pub const VERSION_STRING: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("PANERU_LUA_VERSION"),
+    ")"
+);
+#[cfg(not(feature = "lua"))]
+pub const VERSION_STRING: &str = concat!(env!("CARGO_PKG_VERSION"));
+
 /// `Paneru` is the main command-line interface structure for the window manager.
 /// It defines the available subcommands for controlling the Paneru daemon.
 #[derive(Clone, Debug, Default, Parser)]
 #[command(
-    version = clap::crate_version!(),
+    version = VERSION_STRING,
     author = clap::crate_authors!(),
     about = clap::crate_description!(),
 )]
@@ -96,6 +114,31 @@ pub enum SubCmd {
     Subscribe {
         #[arg(long)]
         json: bool,
+    },
+
+    /// Reads and writes the script state store, the same one `paneru.state`
+    /// gives a Lua script.
+    State {
+        #[clap(subcommand)]
+        state: StateCmd,
+    },
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum StateCmd {
+    /// Prints the value stored under a key, or `null`.
+    Get { key: String },
+    /// Stores a value, given as JSON.
+    Set { key: String, value: String },
+    /// Removes a key.
+    Remove { key: String },
+    /// Stores a value only if the key still holds what it was read as. Both
+    /// values are JSON, or `-` for "no value": absent in `expected`, a removal
+    /// in `value`.
+    Cas {
+        key: String,
+        expected: String,
+        value: String,
     },
 }
 
@@ -158,7 +201,7 @@ fn main() -> Result<()> {
                 let _ = sender_c.send(events::Event::Exit); // just drop the err. we are exiting anyway.
             })
             .expect("setting Ctrl-C handler should succeed");
-            CommandReader::new(sender.clone()).start();
+            CommandReader::new(sender.clone()).start()?;
             if !check_ax_privilege() && !wait_for_accessibility(sender.clone(), &receiver) {
                 return Ok(());
             }
@@ -180,12 +223,10 @@ fn main() -> Result<()> {
         SubCmd::Start => service()?.start()?,
         SubCmd::Stop => service()?.stop()?,
         SubCmd::Restart => service()?.restart()?,
-        SubCmd::SendCmd { cmd } => CommandReader::send_command(cmd)?,
-        SubCmd::Query { query } => {
-            let output = CommandReader::send_query(query.kind())?;
-            print!("{output}");
-        }
-        SubCmd::Subscribe { json: _ } => CommandReader::subscribe_json()?,
+        SubCmd::SendCmd { cmd } => client::run(ClientCommand::Send(cmd))?,
+        SubCmd::Query { query } => client::run(ClientCommand::Query(query.kind()))?,
+        SubCmd::Subscribe { json: _ } => client::run(ClientCommand::Subscribe)?,
+        SubCmd::State { state } => client::run(ClientCommand::ScriptState(state.request()?))?,
     }
     Ok(())
 }
@@ -240,6 +281,50 @@ impl QueryCmd {
     }
 }
 
+impl StateCmd {
+    /// The request this asks the daemon for. Values arrive from the shell as
+    /// JSON text and are parsed here, so nothing past this point deals in
+    /// strings.
+    fn request(&self) -> errors::Result<ScriptStateRequest> {
+        /// The `-` that a shell caller writes for "there is no value here":
+        /// absent in `expected`, a removal in `value`. It cannot collide with
+        /// JSON, where a string is quoted.
+        const ABSENT: &str = "-";
+
+        let parse = |raw: &str| -> errors::Result<ScriptValue> {
+            serde_json::from_str::<serde_json::Value>(raw)
+                .map(ScriptValue::from)
+                .map_err(|err| errors::Error::InvalidInput(format!("{raw:?} is not JSON: {err}")))
+        };
+        let maybe = |raw: &str| -> errors::Result<Option<ScriptValue>> {
+            if raw == ABSENT {
+                Ok(None)
+            } else {
+                parse(raw).map(Some)
+            }
+        };
+
+        Ok(match self {
+            StateCmd::Get { key } => ScriptStateRequest::Get { key: key.clone() },
+            StateCmd::Set { key, value } => {
+                ScriptStateRequest::Write(ScriptStateWrite::set(key.clone(), parse(value)?))
+            }
+            StateCmd::Remove { key } => {
+                ScriptStateRequest::Write(ScriptStateWrite::remove(key.clone()))
+            }
+            StateCmd::Cas {
+                key,
+                expected,
+                value,
+            } => ScriptStateRequest::Write(ScriptStateWrite::compare_and_set(
+                key.clone(),
+                maybe(expected)?,
+                maybe(value)?,
+            )),
+        })
+    }
+}
+
 fn should_check_deprecated_options(subcmd: &SubCmd) -> bool {
     matches!(
         subcmd,
@@ -249,6 +334,13 @@ fn should_check_deprecated_options(subcmd: &SubCmd) -> bool {
 
 fn maybe_warn_deprecated_options_for_service(subcmd: &SubCmd) {
     if !should_check_deprecated_options(subcmd) {
+        return;
+    }
+
+    // An init.lua disables the TOML entirely, so its contents — deprecated keys
+    // included — are never read. Warning about them would be noise.
+    #[cfg(feature = "lua")]
+    if config::discover_lua_file().is_some() {
         return;
     }
 

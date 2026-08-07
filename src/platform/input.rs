@@ -2,6 +2,7 @@ use arc_swap::ArcSwap;
 use core::ptr::NonNull;
 use objc2::msg_send;
 use objc2::rc::Retained;
+use objc2::runtime::AnyObject;
 use objc2_app_kit::{NSEvent, NSEventType, NSTouch, NSTouchPhase};
 use objc2_core_foundation::{CFMachPort, CFRetained, CFRunLoop, kCFRunLoopCommonModes};
 use objc2_core_graphics::{
@@ -9,7 +10,6 @@ use objc2_core_graphics::{
     CGEventTapPlacement, CGEventTapProxy, CGEventType,
 };
 use objc2_foundation::NSSet;
-use paneru_shared_types::commands::Command;
 use scopeguard::ScopeGuard;
 use std::ffi::c_void;
 use std::marker::PhantomPinned;
@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use stdext::function_name;
 use tracing::{error, info};
 
+use crate::commands::Command;
 use crate::config::Config;
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
@@ -51,11 +52,84 @@ pub fn set_lua_keybinds(keys: Vec<(u8, Modifiers, u32)>) {
     LUA_KEYBINDS.store(Arc::new(keys));
 }
 
-/// How long to suppress scroll wheel events after a vertical swipe gesture,
-/// covering macOS momentum scroll that continues after finger lift.
-const VERTICAL_GESTURE_SCROLL_SUPPRESS: Duration = Duration::from_millis(1200);
+/// Upper bound on how long after a swipe gesture macOS may still be delivering
+/// momentum scroll. Only events marked as momentum are dropped within this
+/// window (see [`is_momentum`]), so a deliberate scroll still goes through.
+const GESTURE_MOMENTUM_WINDOW: Duration = Duration::from_millis(1200);
+
+/// Whether the system tagged this scroll event as momentum (the coasting macOS
+/// synthesises after the fingers leave) rather than user-driven scrolling.
+fn is_momentum(event: &CGEvent) -> bool {
+    CGEvent::integer_value_field(Some(event), CGEventField::ScrollWheelEventMomentumPhase) != 0
+}
+
+/// Which way a swipe went. Only the axis the fingers were travelling along
+/// needs momentum suppressed; blanking both would take vertical input down
+/// with a horizontal swipe (workspace switching included).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SwipeAxis {
+    Horizontal,
+    Vertical,
+}
+
+impl SwipeAxis {
+    /// The axis a pair of deltas predominantly lies along.
+    ///
+    /// Ties go to horizontal, matching how [`InputHandler::handle_swipe`]
+    /// decides which way a gesture went.
+    fn dominant(horizontal: f64, vertical: f64) -> Self {
+        if horizontal.abs() >= vertical.abs() {
+            Self::Horizontal
+        } else {
+            Self::Vertical
+        }
+    }
+}
+
+/// One finger, as a single gesture event saw it. Sampled out of the `NSTouch`
+/// set once per event rather than read repeatedly through Objective-C, since
+/// the matching in [`InputHandler::handle_swipe`] is quadratic in finger count.
+struct Touch {
+    /// Opaque per-finger token, compared with `isEqual:` to follow one finger
+    /// across events. `NSSet` iteration order is not stable, so position in the
+    /// set says nothing.
+    identity: Retained<AnyObject>,
+    x: f64,
+    y: f64,
+    /// Whether the finger landed this event, which suppresses delta tracking
+    /// until every finger is down.
+    began: bool,
+}
+
+impl Touch {
+    /// Samples the whole set in one pass.
+    fn sample(touches: &NSSet<NSTouch>) -> Vec<Self> {
+        touches
+            .iter()
+            .map(|touch| {
+                let position = touch.normalizedPosition();
+                Self {
+                    identity: touch.identity(),
+                    x: position.x,
+                    y: position.y,
+                    began: touch.phase() == NSTouchPhase::Began,
+                }
+            })
+            .collect()
+    }
+
+    /// Whether this and `other` are the same finger.
+    fn is(&self, other: &Self) -> bool {
+        // SAFETY: `identity` is documented as conforming to `NSObject`, so it
+        // answers `isEqual:`.
+        unsafe { msg_send![&*self.identity, isEqual: &*other.identity] }
+    }
+}
 
 const SWIPE_THRESHOLD: f64 = 0.001;
+/// How far the hand must travel, as a fraction of the trackpad, before the
+/// gesture's axis is settled (above landing roll, well inside a deliberate swipe).
+const AXIS_COMMIT_TRAVEL: f64 = 0.02;
 const GESTURE_MINIMAL_FINGERS: usize = 3;
 
 /// `InputHandler` manages low-level input events from the macOS `CGEventTap`.
@@ -65,14 +139,20 @@ pub(super) struct InputHandler {
     events: Option<EventSender>,
     /// The application `Config` for looking up keybindings.
     config: Config,
-    /// Stores the previous touch positions for swipe gesture detection.
-    finger_position: Option<Retained<NSSet<NSTouch>>>,
+    /// The previous event's fingers, for swipe gesture detection.
+    finger_position: Option<Vec<Touch>>,
     /// The `CFMachPort` representing the `CGEventTap`.
     tap_port: Option<CFRetained<CFMachPort>>,
-    /// Timestamp of the last swipe gesture event. Scroll wheel events
-    /// are suppressed for a short window after this to prevent the OS from
-    /// scrolling windows underneath (including momentum scroll after finger lift).
-    last_swipe_time: Option<Instant>,
+    /// When the last swipe gesture happened, and which way it went. Scroll
+    /// events *along that axis* are suppressed briefly afterwards, keeping the
+    /// momentum that follows finger lift from scrolling what is underneath.
+    last_swipe: Option<(Instant, SwipeAxis)>,
+    /// The direction the gesture in progress committed to, held until the
+    /// fingers lift. Decided once per gesture rather than per event, since
+    /// individual events can read vertically dominant mid-horizontal-swipe.
+    gesture_axis: Option<SwipeAxis>,
+    /// Travel accumulated since the gesture began, on each axis.
+    gesture_travel: (f64, f64),
     // Prevents from being Unpin automatically
     _pin: PhantomPinned,
 }
@@ -97,7 +177,9 @@ impl InputHandler {
             config,
             finger_position: None,
             tap_port: None,
-            last_swipe_time: None,
+            last_swipe: None,
+            gesture_axis: None,
+            gesture_travel: (0.0, 0.0),
             _pin: PhantomPinned,
         }
     }
@@ -265,14 +347,53 @@ impl InputHandler {
         false
     }
 
+    /// Whether a gesture along `axis` is one paneru acts on. A vertical gesture
+    /// with vertical swiping switched off is handed to macOS whole (see
+    /// [`Self::handle_swipe`]), so its scroll events must reach the window too.
+    fn consumes_axis(&self, axis: SwipeAxis) -> bool {
+        match axis {
+            SwipeAxis::Horizontal => true,
+            SwipeAxis::Vertical => self.config.swipe_vertical(),
+        }
+    }
+
     /// Handles scroll wheel events. If configured modifier is held, it transforms the scroll into a swipe event.
     fn handle_scroll_wheel(&mut self, event: &CGEvent) -> bool {
-        // Suppress scroll events shortly after a swipe gesture to prevent
-        // the OS from scrolling windows underneath, including momentum scroll events
-        // that arrive after finger lift.
-        if self
-            .last_swipe_time
-            .is_some_and(|t| t.elapsed() < VERTICAL_GESTURE_SCROLL_SUPPRESS)
+        let h_delta = CGEvent::double_value_field(
+            Some(event),
+            CGEventField::ScrollWheelEventFixedPtDeltaAxis2,
+        );
+        let v_delta = CGEvent::double_value_field(
+            Some(event),
+            CGEventField::ScrollWheelEventFixedPtDeltaAxis1,
+        );
+
+        let event_axis = SwipeAxis::dominant(h_delta, v_delta);
+
+        // macOS mirrors an in-progress gesture's finger movement as ordinary
+        // scroll events; while the gesture owns an axis, nothing else on that
+        // axis may act on it, or the window under the pointer scrolls along
+        // with the swipe. Bounded by the same window as momentum suppression
+        // below, so a gesture whose end phase never arrives can't silence an
+        // axis indefinitely.
+        if self.gesture_axis == Some(event_axis)
+            && self.consumes_axis(event_axis)
+            && self
+                .last_swipe
+                .is_some_and(|(when, _)| when.elapsed() < GESTURE_MOMENTUM_WINDOW)
+        {
+            return true;
+        }
+
+        // Drop momentum macOS keeps synthesising after a gesture, so it doesn't
+        // scroll whatever the swipe just landed on. Must be marked as momentum
+        // (so real scrolling is never swallowed), along the gesture's axis, and
+        // inside the suppression window (so a missing end phase can't silence
+        // it forever).
+        if let Some((when, axis)) = self.last_swipe
+            && when.elapsed() < GESTURE_MOMENTUM_WINDOW
+            && axis == event_axis
+            && is_momentum(event)
         {
             return true;
         }
@@ -294,15 +415,6 @@ impl InputHandler {
         }
 
         if let Some(events) = &self.events {
-            let h_delta = CGEvent::double_value_field(
-                Some(event),
-                CGEventField::ScrollWheelEventFixedPtDeltaAxis2,
-            );
-            let v_delta = CGEvent::double_value_field(
-                Some(event),
-                CGEventField::ScrollWheelEventFixedPtDeltaAxis1,
-            );
-
             // Vertical workspace switching when vertical modifier is also held.
             // Don't set last_vertical_gesture here: the suppress timer is for
             // trackpad momentum scroll, not discrete wheel ticks.
@@ -357,24 +469,32 @@ impl InputHandler {
             && let Some(events) = &self.events
         {
             _ = events.send(Event::TouchpadUp);
+            self.gesture_axis = None;
+            self.gesture_travel = (0.0, 0.0);
+            self.finger_position = None;
             return false;
         }
 
-        let fingers = ns_event.allTouches();
+        let fingers = Touch::sample(&ns_event.allTouches());
         if !gesture_should_intercept(Some(configured_fingers), fingers.len()) {
             return false;
         }
-        if fingers.iter().any(|f| f.phase() == NSTouchPhase::Began)
-            && let Some(events) = &self.events
-        {
-            _ = events.send(Event::TouchpadDown);
+        if fingers.iter().any(|finger| finger.began) {
+            // A fresh gesture: nothing carries over from the last one.
+            self.gesture_axis = None;
+            self.gesture_travel = (0.0, 0.0);
+            if let Some(events) = &self.events {
+                _ = events.send(Event::TouchpadDown);
+            }
         }
 
         if fingers.len() < GESTURE_MINIMAL_FINGERS {
             return false;
         }
 
-        if fingers.iter().all(|f| f.phase() != NSTouchPhase::Began)
+        // Only the current sample has to be settled; requiring the previous one
+        // too would cost an extra event at the start of every gesture.
+        if fingers.iter().all(|finger| !finger.began)
             && let Some(prev) = &self.finger_position
         {
             // Match touches by identity rather than relying on NSSet
@@ -382,45 +502,51 @@ impl InputHandler {
             let (x_deltas, y_deltas): (Vec<f64>, Vec<f64>) = fingers
                 .iter()
                 .filter_map(|current| {
-                    let id = current.identity();
                     prev.iter()
-                        .find(|p| {
-                            let p_id = p.identity();
-                            let equal: bool = unsafe { msg_send![&*p_id, isEqual: &*id] };
-                            equal
-                        })
-                        .map(|p| {
-                            let dx = p.normalizedPosition().x - current.normalizedPosition().x;
-                            let dy = p.normalizedPosition().y - current.normalizedPosition().y;
-                            (dx, dy)
-                        })
+                        .find(|previous| previous.is(current))
+                        .map(|previous| (previous.x - current.x, previous.y - current.y))
                 })
                 .unzip();
 
-            if let Some(events) = &self.events {
-                let x_sum: f64 = x_deltas.iter().sum();
-                let y_sum: f64 = y_deltas.iter().sum();
+            let x_sum: f64 = x_deltas.iter().sum();
+            let y_sum: f64 = y_deltas.iter().sum();
+            self.gesture_travel.0 += x_sum;
+            self.gesture_travel.1 += y_sum;
 
-                if x_sum.abs() >= y_sum.abs() {
-                    // Horizontal dominant: use existing swipe path
-                    if x_deltas.iter().all(|p| p.abs() > SWIPE_THRESHOLD) {
+            // Decided on accumulated travel since the gesture began, not the
+            // first event to clear `SWIPE_THRESHOLD` — the first delta is
+            // measured across the roll a finger makes as it lands, which can
+            // read the wrong axis. Until enough travel accumulates, the axis
+            // follows the hand and can still change its mind.
+            let (axis, committed) = decide_axis(self.gesture_travel, self.gesture_axis);
+            self.gesture_axis = committed;
+
+            if let Some(events) = &self.events {
+                // Tested on the travel of the whole hand rather than of every
+                // finger, so one finger easing off doesn't drop the event.
+                match axis {
+                    SwipeAxis::Horizontal if x_sum.abs() > SWIPE_THRESHOLD => {
                         _ = events.send(Event::Swipe {
                             delta: x_sum,
-                            fingers: x_deltas.len(),
+                            fingers: fingers.len(),
                         });
-                        self.last_swipe_time = Some(Instant::now());
+                        self.last_swipe = Some((Instant::now(), SwipeAxis::Horizontal));
                     }
-                } else if y_deltas.iter().all(|p| p.abs() > SWIPE_THRESHOLD) {
-                    if !self.config.swipe_vertical() {
-                        // Do not intercept the vertical swipe
-                        return false;
+                    SwipeAxis::Vertical if y_sum.abs() > SWIPE_THRESHOLD => {
+                        if self.config.swipe_vertical() {
+                            _ = events.send(Event::VerticalSwipe {
+                                delta: y_sum,
+                                fingers: fingers.len(),
+                            });
+                            self.last_swipe = Some((Instant::now(), SwipeAxis::Vertical));
+                        } else if committed.is_some() {
+                            // Only hand a settled vertical gesture to macOS
+                            // whole; handing it over on a guess would give away
+                            // a swipe about to turn out horizontal.
+                            return false;
+                        }
                     }
-                    // Vertical dominant: send vertical swipe, intercept the event
-                    _ = events.send(Event::VerticalSwipe {
-                        delta: y_sum,
-                        fingers: y_deltas.len(),
-                    });
-                    self.last_swipe_time = Some(Instant::now());
+                    _ => (),
                 }
             }
         }
@@ -480,6 +606,22 @@ impl InputHandler {
                     .ok()
             })
             .is_some()
+    }
+}
+
+/// Which way a gesture is going, and whether that is settled yet. Returns the
+/// axis to act on now, and the axis to remember as committed (`None` while the
+/// hand hasn't travelled far enough to be sure).
+fn decide_axis(travel: (f64, f64), committed: Option<SwipeAxis>) -> (SwipeAxis, Option<SwipeAxis>) {
+    if let Some(axis) = committed {
+        return (axis, Some(axis));
+    }
+    let (x, y) = travel;
+    let axis = SwipeAxis::dominant(x, y);
+    if x.abs().max(y.abs()) > AXIS_COMMIT_TRAVEL {
+        (axis, Some(axis))
+    } else {
+        (axis, None)
     }
 }
 
@@ -621,6 +763,34 @@ mod tests {
             get_modifiers(CGEventFlags(NX_DEVICEFNKEYMASK)),
             Modifiers::FN
         );
+    }
+
+    #[test]
+    fn axis_is_not_committed_on_the_roll_a_finger_makes_as_it_lands() {
+        let (axis, committed) = decide_axis((0.001, 0.004), None);
+        assert_eq!(axis, SwipeAxis::Vertical);
+        assert_eq!(committed, None);
+    }
+
+    #[test]
+    fn an_uncommitted_axis_follows_the_accumulated_travel() {
+        let (axis, committed) = decide_axis((0.015, 0.004), None);
+        assert_eq!(axis, SwipeAxis::Horizontal);
+        assert_eq!(committed, None);
+    }
+
+    #[test]
+    fn axis_commits_once_the_hand_has_travelled_far_enough() {
+        let (axis, committed) = decide_axis((0.05, 0.004), None);
+        assert_eq!(axis, SwipeAxis::Horizontal);
+        assert_eq!(committed, Some(SwipeAxis::Horizontal));
+    }
+
+    #[test]
+    fn a_committed_axis_is_kept_however_the_travel_later_reads() {
+        let (axis, committed) = decide_axis((0.05, 0.9), Some(SwipeAxis::Horizontal));
+        assert_eq!(axis, SwipeAxis::Horizontal);
+        assert_eq!(committed, Some(SwipeAxis::Horizontal));
     }
 
     #[test]

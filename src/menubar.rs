@@ -17,6 +17,7 @@ use crate::ecs::params::ActiveDisplay;
 use crate::ecs::{Bounds, FocusedMarker, Unmanaged};
 use crate::events::{Event, EventSender};
 use crate::manager::request_ax_privilege;
+use crate::util::round_px;
 
 #[derive(Debug, Clone)]
 struct MenuActionTargetIvars {
@@ -296,8 +297,6 @@ impl Drop for MenuBarManager {
         self.status_bar.removeStatusItem(&self.status_item);
     }
 }
-
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 pub fn update_menu_bar(
     active_display: ActiveDisplay,
     focused: Query<(&Bounds, Has<Unmanaged>), With<FocusedMarker>>,
@@ -333,7 +332,7 @@ fn normalized_width_percentages(widths: &[f64]) -> Vec<i32> {
         .iter()
         .copied()
         .filter(|ratio| ratio.is_finite() && *ratio > 0.0)
-        .map(|ratio| ratio.mul_add(100.0, 0.0).round() as i32)
+        .map(|ratio| round_px(ratio.mul_add(100.0, 0.0)))
         .filter(|percentage| *percentage > 0)
         .collect::<Vec<_>>();
     percentages.sort_unstable();

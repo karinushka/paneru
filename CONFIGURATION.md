@@ -1,6 +1,8 @@
 # Configuration Guide
 
-Paneru is configured via a TOML file. By default, it looks for the configuration in the following locations (in order):
+Paneru is configured via a TOML file *or* a Lua script — never both. By
+default, it looks for the TOML configuration in the following locations (in
+order):
 
 1.  `$PANERU_CONFIG` (environment variable)
 2.  `$HOME/.paneru`
@@ -8,6 +10,9 @@ Paneru is configured via a TOML file. By default, it looks for the configuration
 4.  `$XDG_CONFIG_HOME/paneru/paneru.toml`
 
 The configuration is automatically reloaded when the file is saved.
+
+If an `init.lua` exists (see [section 8](#8-lua-scripting)), it takes over
+completely and none of these TOML paths are read.
 
 ---
 
@@ -395,17 +400,24 @@ radius = 12.0
 
 ## 8. Lua Scripting
 
-Paneru embeds a Lua runtime that runs alongside the TOML config, letting a
-script hook into window-manager events (`paneru.on`), bind keys to Lua
-callbacks or command strings (`paneru.bind`), and — via `paneru.setup{...}`
-(see [Configuration from Lua](#configuration-from-lua)) — declare the entire
-configuration, so the TOML file is optional.
+Paneru embeds a Lua runtime, letting a script hook into window-manager events
+(`paneru.on`), bind keys to Lua callbacks or command strings (`paneru.bind`),
+and — via `paneru.setup{...}` (see
+[Configuration from Lua](#configuration-from-lua)) — declare the entire
+configuration.
 
 By default it looks for a script in the following locations (in order):
 
 1. `$PANERU_LUA` (environment variable)
 2. `$HOME/.paneru.lua`
 3. `$XDG_CONFIG_HOME/paneru/init.lua`
+
+**A script replaces the TOML.** When any of those exist, the TOML path is
+switched off completely: no `paneru.toml` is read, created, or watched, and
+anything the script does not set takes its built-in default. Two authoritative
+configs cannot coexist, so a leftover TOML never quietly overrides the script.
+Conversely, no `init.lua` is created for you when a `paneru.toml` already
+exists — TOML setups keep working untouched until you write a script yourself.
 
 Like the TOML config, the script is automatically reloaded when the file is
 saved.
@@ -465,9 +477,11 @@ the TOML `[bindings]` table:
   }
   ```
 
-**Precedence.** If `init.lua` calls `paneru.setup`, that config is
-authoritative and the TOML file is ignored. If it does not, paneru falls back
-to `paneru.toml` exactly as before — existing TOML setups are unaffected.
+**Precedence.** An `init.lua` disables the TOML entirely (see
+[section 8](#8-lua-scripting)), whether or not it calls `paneru.setup`. With
+`setup`, that table is the configuration; without it, the built-in defaults
+are — never a `paneru.toml` sitting next to the script. To keep using TOML,
+don't have a script.
 Editing and saving `init.lua` hot-reloads the whole configuration (including
 menubar and passthrough updates), just like editing the TOML file.
 
@@ -483,7 +497,7 @@ menubar and passthrough updates), just like editing the TOML file.
 ### Querying state
 
 Inside a `paneru.on` handler or a `paneru.bind` callback, the script can read
-the same state documents `paneru query …` returns — no socket round trip, no
+the same state documents `paneru query …` returns — no round trip, no
 `io.popen`:
 
 ```lua
@@ -521,6 +535,55 @@ the window manager on its next scheduled pass rather than instantly: expect the
 document to be up to roughly a frame old, and the call itself to take about
 that long. This does not apply to handlers that never query.
 
+### Remembering things between invocations
+
+A handler that wants to remember something — which window is the scratchpad,
+what was focused a moment ago, how many times something has happened — cannot
+keep it in a Lua global. Saving `init.lua` rebuilds the interpreter, and every
+global goes with it. `paneru.state` is the store that survives that, and a
+daemon restart with it.
+
+```lua
+paneru.state.set("pads.term", 4213)     -- any JSON-shaped value
+paneru.state.get("pads.term")           -- 4213, or nil
+paneru.state.set("pads.term", nil)      -- nil removes the key
+
+paneru.state.mutate("count", function(n) return (n or 0) + 1 end)
+```
+
+| Function | Does |
+| --- | --- |
+| `paneru.state.get(key)` | the stored value, or `nil` |
+| `paneru.state.set(key, value)` | stores it; `nil` removes the key |
+| `paneru.state.mutate(key, fn)` | passes the current value to `fn` and stores what it returns |
+
+Reach for `mutate` whenever the new value depends on the old one. It reads,
+runs your function, and stores the result only if the value is still what it
+read; if something else got there first it runs your function again against
+what the value became. A `get` followed by a `set` cannot promise that — two
+handlers incrementing the same counter, or a handler racing a client, will lose
+an increment. `mutate` returns what it stored.
+
+Keys are plain strings; namespace your own with a prefix like
+`"scratchpad.focused"`. Values are anything with a JSON shape: strings,
+numbers, booleans, and tables of those. Functions, coroutines and userdata
+cannot be stored and raise an error rather than being silently dropped. Keys
+are capped at 512 bytes and the whole store at 1 MiB, so a runaway loop cannot
+grow the file without bound.
+
+The store is shared with the client module and the CLI, under the same names:
+
+```console
+$ paneru state get pads.term
+{"value":4213}
+$ paneru state set pads.term 4213
+```
+
+so a status bar or a shell script sees what a handler wrote, and the other way
+round. Like `paneru.query*`, it is only reachable from inside a handler or a
+keybind callback, and it is stored in
+`$XDG_STATE_HOME/paneru/script-state.json`.
+
 ### Programmatic window management
 
 Handlers are given a **window set**: the whole layout — displays, workspaces,
@@ -554,6 +617,26 @@ one.
 
 `paneru.windows(fn)` is the same contract for use partway through a handler:
 it hands `fn` the window set and commits what it gives back.
+
+It is also available in the loadable client module (`require("paneru")`), where
+the daemon serves the same layout tree to a client and takes the recorded
+operations back the same way. So a transform written for an `init.lua` handler
+runs unchanged in an external script:
+
+```lua
+local paneru = require("paneru")
+
+paneru.windows(function(ws)
+  local scratch = ws:find(paneru.match{ title = "^scratch$" })
+  if scratch then
+    return ws:float(scratch.id, { x = 0.25, y = 0.15, width = 0.5, height = 0.7 })
+  end
+end)
+```
+
+The difference is cost, not behaviour: a client pays a round trip to
+fetch the set and another to commit, and blocks on both, where a handler shares
+one read across the whole batch. `paneru.match` is likewise on both hosts.
 
 #### Reading
 
@@ -690,10 +773,15 @@ and `nsHideOnFocusLoss`:
 
 ```lua
 -- Place a pad window the first time we see it (xmonad's per-pad `hook`).
-scratchpad.seen = {}
 paneru.on("window_focused", function(event, ws)
-  if scratchpad.seen[event.window_id] then return end
-  scratchpad.seen[event.window_id] = true
+  local first_time = false
+  paneru.state.mutate("scratchpad.seen", function(seen)
+    seen = seen or {}
+    first_time = not seen[tostring(event.window_id)]
+    seen[tostring(event.window_id)] = true
+    return seen
+  end)
+  if not first_time then return end
   local window = ws:window(event.window_id)
   if not window then return end
   local _, pad = scratchpad.pad_of(window)
@@ -703,10 +791,9 @@ paneru.on("window_focused", function(event, ws)
 end)
 
 -- Hide a pad when the focus leaves it.
-scratchpad.focused = nil
 paneru.on("window_focused", function(event, ws)
-  local previous = scratchpad.focused
-  scratchpad.focused = event.window_id
+  local previous = paneru.state.get("scratchpad.focused")
+  paneru.state.set("scratchpad.focused", event.window_id)
   if not previous or previous == event.window_id then return end
   local window = ws:window(previous)
   if window and scratchpad.pad_of(window) then
@@ -719,6 +806,15 @@ Both are registered for the same event and each commits its own returned set
 independently, so they compose without knowing about each other. Neither touches
 the window set on the paths where it bails early, so the common case — focusing
 an ordinary window — costs nothing.
+
+Note what is in `paneru.state` and what is in `scratchpad`. The pad
+*declarations* are a global table, rebuilt from the script on every reload,
+which is exactly right — they are part of the script. The two things that are
+not — which windows have been placed, and what was focused last — go in the
+store, so saving `init.lua` does not make the manage hook run again on every
+open window or lose track of the focus it is comparing against. Keys under
+`scratchpad.seen` are never pruned, so a long-lived session accumulates window
+ids; clear it from a `space_changed` handler if that bothers you.
 
 Finally, declare the pads and bind them:
 
@@ -775,7 +871,8 @@ Three things follow:
   is no watchdog and no timeout: the window manager stays fully responsive, but
   your script stops reacting until it is reloaded. Save the file to reload it.
 * C modules loaded with `require` (sketchybar's `sbar`, say) run on that thread
-  too, not the main one. `SbarLua` writes to a socket and is fine with this; a
+  too, not the main one. `SbarLua` writes to a socket of its own and is fine
+  with this; a
   module that expects to be called from the process's main thread would not be.
 
 ### Extra Lua modules

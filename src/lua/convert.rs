@@ -1,25 +1,17 @@
 //! Conversions between window-manager types and Lua values.
 //!
-//! Everything a script sees is described by a serializable type here rather than
-//! by hand-built tables, so the payload of an event and the name it is
-//! dispatched under have one definition each:
+//! [`LuaEvent`] mirrors the marshallable subset of [`Event`]; its serde tag
+//! doubles as the `paneru.on` event name, so the registered name, the `type`
+//! field on the table a handler receives, and the payload shape cannot drift
+//! apart. [`LuaEvent::NAMES`] lists every emittable name, letting `paneru.on`
+//! reject a typo at registration time.
 //!
-//! * [`LuaEvent`] mirrors the marshallable subset of [`Event`]. Its serde tag
-//!   *is* the event name (`window_focused`, `mouse_down`, …), so the name a
-//!   handler registers for, the `type` field on the table it receives, and the
-//!   payload shape cannot drift apart.
-//! * [`LuaEvent::NAMES`] lists every name the runtime can emit, which lets
-//!   `paneru.on` reject a typo at registration time instead of silently never
-//!   firing.
-//!
-//! The conversion runs the other way too — [`TryFrom<&Event>`] is exhaustive, so
-//! a new variant in [`Event`] is a compile error here until it is either mapped
-//! or explicitly declared unmarshallable.
-//!
-//! The two halves are kept apart: [`TryFrom<&Event>`] reads the world and
-//! produces plain data, while [`event_table`] turns that data into Lua values.
-//! Only the first half needs the ECS and only the second needs a [`Lua`], which
-//! is what lets the runtime live on a thread of its own.
+//! [`TryFrom<&Event>`] is exhaustive, so a new [`Event`] variant is a compile
+//! error here until it's mapped or explicitly declared unmarshallable. It
+//! reads the world and produces plain data; [`event_table`] separately turns
+//! that into Lua values — only the first half needs the ECS and only the
+//! second needs a [`Lua`], which is what lets the runtime live on a thread of
+//! its own.
 
 use mlua::{Lua, LuaSerdeExt, Table};
 use serde::Serialize;
@@ -35,8 +27,8 @@ pub enum LuaEvent {
     Exit,
     ProcessesLoaded,
 
-    ApplicationActivated,
-    ApplicationDeactivated,
+    ApplicationActivated { pid: Pid },
+    ApplicationDeactivated { pid: Pid },
     ApplicationVisible { pid: Pid },
     ApplicationHidden { pid: Pid },
 
@@ -105,9 +97,6 @@ impl TryFrom<&Event> for LuaEvent {
 
     /// Exhaustive on purpose: a new [`Event`] variant must decide here whether
     /// scripts can see it.
-    // One arm per `Event` variant, kept as a single flat match instead of split
-    // helpers so adding a variant here is a one-line diff, not a search across
-    // several functions.
     #[allow(clippy::too_many_lines)]
     fn try_from(event: &Event) -> Result<Self, Self::Error> {
         let mouse = |point: &objc2_core_foundation::CGPoint, modifiers: Modifiers| MousePayload {
@@ -120,8 +109,8 @@ impl TryFrom<&Event> for LuaEvent {
             Event::Exit => LuaEvent::Exit,
             Event::ProcessesLoaded => LuaEvent::ProcessesLoaded,
 
-            Event::ApplicationActivated => LuaEvent::ApplicationActivated,
-            Event::ApplicationDeactivated => LuaEvent::ApplicationDeactivated,
+            Event::ApplicationActivated { pid } => LuaEvent::ApplicationActivated { pid: *pid },
+            Event::ApplicationDeactivated { pid } => LuaEvent::ApplicationDeactivated { pid: *pid },
             Event::ApplicationVisible { pid } => LuaEvent::ApplicationVisible { pid: *pid },
             Event::ApplicationHidden { pid } => LuaEvent::ApplicationHidden { pid: *pid },
 
@@ -231,7 +220,9 @@ impl TryFrom<&Event> for LuaEvent {
             | Event::WindowCreated { .. }
             | Event::Command { .. }
             | Event::StateQuery { .. }
-            | Event::StateSubscribe { .. } => return Err(NotMarshallable),
+            | Event::WindowSetQuery { .. }
+            | Event::StateSubscribe { .. }
+            | Event::ScriptState { .. } => return Err(NotMarshallable),
         })
     }
 }
@@ -325,8 +316,8 @@ mod tests {
         vec![
             LuaEvent::Exit,
             LuaEvent::ProcessesLoaded,
-            LuaEvent::ApplicationActivated,
-            LuaEvent::ApplicationDeactivated,
+            LuaEvent::ApplicationActivated { pid: 1 },
+            LuaEvent::ApplicationDeactivated { pid: 1 },
             LuaEvent::ApplicationVisible { pid: 1 },
             LuaEvent::ApplicationHidden { pid: 1 },
             LuaEvent::WindowDestroyed { window_id: 1 },

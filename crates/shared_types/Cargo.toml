@@ -10,7 +10,16 @@ publish = false
 [lints.clippy]
 pedantic = "warn"
 
+# `lua` adds the `UserData` impl for `WindowSet`. It has to live in this crate
+# rather than in `paneru-lua` because of the orphan rule, but a client that only
+# speaks the wire format should not link an interpreter for it.
+[features]
+default = []
+lua = ["dep:mlua"]
+
 [dependencies]
+mlua = { workspace = true, optional = true }
+postcard = { version = "1.1.3", features = ["use-std"] }
 serde = { workspace = true }
 # The query/subscribe wire format is JSON.
 serde_json = { workspace = true }

@@ -221,7 +221,7 @@ fn setup_world() -> App {
     let mut bevy_app = App::new();
     bevy_app
         .add_plugins(MinimalPlugins)
-        .init_resource::<bevy::ecs::message::Messages<Event>>()
+        .add_message::<Event>()
         .insert_resource(SkipReshuffle(false))
         .insert_resource(MissionControlActive(false))
         .insert_resource(FocusFollowsMouse(None))

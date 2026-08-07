@@ -1,18 +1,11 @@
-//! Replays a script's [`LayoutOp`]s against the live world.
+//! Replays a script's [`LayoutOp`]s (returned by a Lua handler that
+//! transformed a `WindowSet`) against the live world.
 //!
-//! A Lua handler transforms a `WindowSet` — a pure value — and returns it; what
-//! comes back over the worker channel is the sequence of operations that
-//! produced it. This is where those become real window movements.
-//!
-//! Two things make this different from every other command handler. First, the
-//! ops name a window: everything else in `src/commands.rs` acts on whatever is
-//! focused, which is right for a keybinding and useless for
-//! `for _, w in ipairs(ws:windows())`. Second, the snapshot the script
-//! transformed is up to a frame old, so a window it names may be gone by now.
-//! Each op is therefore applied independently and best-effort: one that cannot
-//! be resolved is logged at debug and skipped, and its neighbours still apply.
-//! A handler that cares can check for itself — the window set it was handed
-//! says what existed when it was taken.
+//! Unlike other command handlers, each op names a window explicitly rather
+//! than acting on the focused one. Because the snapshot a script transformed
+//! may be a frame stale, each op is applied independently and best-effort: one
+//! that can't be resolved is logged at debug and skipped without affecting
+//! the rest.
 
 use bevy::ecs::entity::Entity;
 use bevy::ecs::message::MessageReader;
@@ -34,7 +27,6 @@ use crate::events::Event;
 use crate::manager::{Origin, Size};
 
 /// Applies the layout operations a Lua handler returned.
-#[allow(clippy::needless_pass_by_value)]
 pub(crate) fn apply_layout_ops(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -52,10 +44,9 @@ pub(crate) fn apply_layout_ops(
         .collect();
 
     for ops in batches {
-        // `ws:float(id, rect)` is float-then-place, and the `Unmanaged` insert
-        // the first op queues is not visible to the second until the commands
-        // flush. Remember what this batch floated so `SetFrame` can tell a
-        // window it just floated from one that is genuinely still tiled.
+        // `Unmanaged` inserts don't take effect until commands flush, so track
+        // what this batch floated to tell a just-floated window from one still
+        // genuinely tiled (needed by `SetFrame`).
         let mut floated: HashSet<Entity> = HashSet::new();
         for op in ops {
             apply(op, &windows, &mut workspaces, &mut floated, &mut commands);
@@ -64,8 +55,6 @@ pub(crate) fn apply_layout_ops(
 }
 
 /// Applies one op, or explains why it could not be.
-// One arm per operation, kept flat so adding one is a local change rather than
-// a hunt across helpers.
 #[allow(clippy::too_many_lines)]
 fn apply(
     op: LayoutOp,
@@ -74,8 +63,7 @@ fn apply(
     floated: &mut HashSet<Entity>,
     commands: &mut Commands,
 ) {
-    // Ops that name a window need it to still exist. Resolve up front so every
-    // arm below can assume it does.
+    // Resolve up front so every arm below can assume the window still exists.
     let entity = if let Some(window_id) = op.target() {
         let Some((_, entity)) = windows.find(window_id) else {
             debug!(
@@ -146,8 +134,6 @@ fn apply(
                 debug!(target: "paneru::lua", "skipping {op:?}: workspaces are numbered from 1");
                 return;
             };
-            // Showing a workspace is not window-addressed at all, so the
-            // existing command does exactly the right thing.
             commands.trigger(SendMessageTrigger(Event::Command {
                 command: Command::Window(Operation::VirtualNumber(index)),
             }));
@@ -163,8 +149,6 @@ fn apply(
             set_floating(entity, floating, workspaces, commands);
         }
 
-        // Floating *is* how a window becomes unmanaged here, so the two ops
-        // are one mechanism seen from either end.
         LayoutOp::SetManaged { managed, .. } => {
             let entity = entity.expect("SetManaged names a window");
             if managed {
@@ -206,8 +190,8 @@ fn apply(
 
         LayoutOp::SetFrame { frame, .. } => {
             let entity = entity.expect("SetFrame names a window");
-            // The layout engine owns a tiled window's geometry and will put it
-            // straight back, so say so rather than letting the script wonder.
+            // The layout engine owns a tiled window's geometry and will move
+            // it back, so warn if the target isn't floated.
             if !floated.contains(&entity)
                 && windows
                     .get_managed(entity)
@@ -261,11 +245,9 @@ fn apply(
     }
 }
 
-/// Takes a window out of the tiling layout or puts it back.
-///
-/// Mirrors `manage_window`: going floating→tiled only flips the component, and
-/// nothing downstream re-inserts the window into a strip, so a window that lost
-/// its membership has to be appended back or the change is invisible.
+/// Takes a window out of the tiling layout or puts it back. Mirrors
+/// `manage_window`: floating→tiled has to re-append the window to a strip
+/// itself, since nothing downstream does it automatically.
 fn set_floating(
     entity: Entity,
     floating: bool,

@@ -1,91 +1,230 @@
-//! The client half of the API: talking to a running daemon over its Unix
-//! socket.
+//! The client half of the API: talks to a running daemon over its Mach
+//! service. [`module`] builds the table `require("paneru")` returns.
 //!
-//! [`module`] builds the complete table that `require("paneru")` returns — the
-//! shared typed API from [`crate::install`], dispatching over the socket, plus
-//! the client-only `query_*` / `subscribe` / socket-path helpers. The loadable
-//! `module` feature's `luaopen_paneru` is then a one-liner returning this table.
+//! Service name defaults to `com.karinushka.paneru`, overridable via the
+//! `PANERU_MACH_SERVICE` environment variable or `paneru.set_service_name`.
 //!
-//! The socket path defaults to `/tmp/paneru.socket`, can be overridden with the
-//! `PANERU_SOCKET` environment variable, or set at runtime via
-//! `paneru.set_socket_path("/path/to.socket")`.
+//! Every call here blocks: Lua's C API is synchronous, so a callback cannot
+//! yield into an executor.
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::rc::Rc;
 use std::sync::{LazyLock, Mutex};
 
 use mlua::prelude::*;
+use paneru_mach_ipc::{RecvPort, SendPort, Sender};
 use paneru_shared_types::commands::Command;
-use paneru_shared_types::state::StateQueryKind;
+use paneru_shared_types::script_state::ScriptStateWrite;
+use paneru_shared_types::script_value::ScriptValue;
+use paneru_shared_types::state::{StateEvent, StateQueryKind};
+use paneru_shared_types::windowset_lua::returned_ops;
+use paneru_shared_types::wire::{
+    Request, Response, ScriptStateRequest, ScriptStateResponse, WriteOutcome,
+};
 
-/// Default daemon socket path (matches `CommandReader::SOCKET_PATH`).
-const DEFAULT_SOCKET: &str = "/tmp/paneru.socket";
+/// The active service name, seeded from the shared default and mutable via
+/// `set_service_name`.
+static SERVICE: LazyLock<Mutex<String>> =
+    LazyLock::new(|| Mutex::new(paneru_shared_types::wire::service_name()));
 
-/// The active socket path, seeded from `$PANERU_SOCKET` and mutable via
-/// `set_socket_path`.
-static SOCKET_PATH: LazyLock<Mutex<String>> = LazyLock::new(|| {
-    Mutex::new(std::env::var("PANERU_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET.to_string()))
-});
-
-fn current_socket() -> String {
-    SOCKET_PATH
-        .lock()
-        .map_or_else(|_| DEFAULT_SOCKET.to_string(), |guard| guard.clone())
+fn service_name() -> String {
+    SERVICE.lock().map_or_else(
+        |_| paneru_shared_types::wire::SERVICE_NAME.to_string(),
+        |guard| guard.clone(),
+    )
 }
 
-/// Encodes argv into a Paneru socket frame: `<u32 le len><arg\0 arg\0 ...>`.
-fn encode(argv: &[String]) -> Vec<u8> {
-    let mut payload = Vec::new();
-    for arg in argv {
-        payload.extend_from_slice(arg.as_bytes());
-        payload.push(0);
+fn connect() -> LuaResult<Sender<Request>> {
+    Sender::connect(&service_name()).map_err(|err| match err {
+        paneru_mach_ipc::Error::NotRunning => {
+            LuaError::RuntimeError("paneru is not running".to_string())
+        }
+        other => LuaError::external(other),
+    })
+}
+
+/// Sends a request and waits for the answer. A daemon-reported failure is
+/// raised as a Lua error rather than returned, so a failed call is an error,
+/// not a silent no-op.
+fn call(request: &Request) -> LuaResult<Response> {
+    let sender = connect()?;
+    let response: Response = sender.call_blocking(request).map_err(LuaError::external)?;
+
+    match response {
+        Response::Error(message) => Err(LuaError::RuntimeError(message)),
+        other => Ok(other),
     }
-    let len = u32::try_from(payload.len()).unwrap_or(0);
-    let mut frame = len.to_le_bytes().to_vec();
-    frame.extend_from_slice(&payload);
-    frame
 }
 
-/// Connects to the daemon and writes `argv`, returning the open stream.
-fn send(argv: &[String]) -> LuaResult<UnixStream> {
-    let mut stream = UnixStream::connect(current_socket()).map_err(LuaError::external)?;
-    stream
-        .write_all(&encode(argv))
-        .map_err(LuaError::external)?;
-    Ok(stream)
+fn send(request: &Request) -> LuaResult<()> {
+    let sender = connect()?;
+    sender.send_blocking(request).map_err(LuaError::external)
 }
 
-/// The primitive the shared API is built on: encode the command and send it to
-/// the daemon (fire-and-forget).
-fn dispatch(_: &Lua, command: &Command) -> LuaResult<bool> {
-    let argv = command.to_argv().ok_or_else(|| {
-        LuaError::RuntimeError(format!("{command:?} cannot be sent to the daemon"))
-    })?;
-    let _stream = send(&argv)?;
+fn dispatch(_: &Lua, command: Command) -> LuaResult<bool> {
+    send(&Request::Command(command))?;
     Ok(true)
+}
+
+fn query_payload(kind: StateQueryKind) -> LuaResult<paneru_shared_types::wire::QueryPayload> {
+    match call(&Request::Query(kind))? {
+        Response::Query(payload) => Ok(payload),
+        other => Err(unexpected(&other)),
+    }
+}
+
+fn read_kind(kind: Option<String>) -> LuaResult<StateQueryKind> {
+    let token = kind.unwrap_or_else(|| "state".to_string());
+    StateQueryKind::parse(&token).ok_or_else(|| {
+        LuaError::RuntimeError(format!(
+            "unknown query '{token}', expected one of {}",
+            StateQueryKind::tokens()
+        ))
+    })
 }
 
 /// `paneru.query(kind)` — run a state query and return the raw JSON string.
 fn query(_: &Lua, kind: Option<String>) -> LuaResult<String> {
-    let kind = kind.unwrap_or_else(|| "state".to_string());
-    let mut stream = send(&["query".to_string(), kind, "--json".to_string()])?;
-    let mut out = String::new();
-    stream
-        .read_to_string(&mut out)
-        .map_err(LuaError::external)?;
-    Ok(out)
+    Ok(query_payload(read_kind(kind)?)?
+        .to_json()
+        .map_err(LuaError::external)?
+        .to_string())
 }
 
 /// `paneru.query_json(kind)` — like `query` but decoded into a Lua value.
 fn query_json(lua: &Lua, kind: Option<String>) -> LuaResult<LuaValue> {
-    let raw = query(lua, kind)?;
-    let value: serde_json::Value = serde_json::from_str(&raw).map_err(LuaError::external)?;
-    lua.to_value(&value)
+    let json = query_payload(read_kind(kind)?)?
+        .to_json()
+        .map_err(LuaError::external)?;
+    lua.to_value(&json)
 }
 
-/// Reads the `event` argument to `subscribe`: `nil` (every event), a single
-/// event name, or a table listing several.
+fn script_state(request: ScriptStateRequest) -> LuaResult<ScriptStateResponse> {
+    match call(&Request::ScriptState(request))? {
+        Response::ScriptState(answer) => Ok(answer),
+        other => Err(unexpected(&other)),
+    }
+}
+
+/// A stored `Null` and an absent key both read as `nil` in Lua — it has no way
+/// to hold "present but empty".
+fn state_get(key: &str) -> LuaResult<Option<ScriptValue>> {
+    match script_state(ScriptStateRequest::Get {
+        key: key.to_string(),
+    })? {
+        ScriptStateResponse::Value(value) => Ok(value.filter(|value| !value.is_null())),
+        ScriptStateResponse::Write(_) => Err(LuaError::RuntimeError(
+            "paneru.state.get: the daemon answered a read with a write outcome".to_string(),
+        )),
+    }
+}
+
+fn state_write(write: ScriptStateWrite) -> LuaResult<WriteOutcome> {
+    match script_state(ScriptStateRequest::Write(write))? {
+        ScriptStateResponse::Write(outcome) => Ok(outcome),
+        ScriptStateResponse::Value(_) => Err(LuaError::RuntimeError(
+            "paneru.state: the daemon answered a write with a value".to_string(),
+        )),
+    }
+}
+
+/// Builds the `paneru.state` table: the same store the embedded runtime
+/// exposes, but each call round-trips to the daemon instead of reading a local
+/// copy. `mutate`'s compare-and-set guarantee holds either way, since the
+/// daemon is the one deciding whether a write still matches.
+fn state_table(lua: &Lua) -> LuaResult<LuaTable> {
+    let state = lua.create_table()?;
+
+    state.set(
+        "get",
+        lua.create_function(|lua, key: String| match state_get(&key)? {
+            Some(value) => value.into_lua(lua),
+            None => Ok(LuaValue::Nil),
+        })?,
+    )?;
+
+    // `set(key, nil)` removes, matching the embedded spelling.
+    state.set(
+        "set",
+        lua.create_function(|lua, (key, value): (String, LuaValue)| {
+            let write = if value.is_nil() {
+                ScriptStateWrite::remove(key)
+            } else {
+                ScriptStateWrite::set(key, ScriptValue::from_lua(value, lua)?)
+            };
+            state_write(write)?;
+            Ok(())
+        })?,
+    )?;
+
+    // Read, transform, write — retried against the current value whenever the
+    // daemon reports the key moved in between.
+    state.set(
+        "mutate",
+        lua.create_function(|lua, (key, transform): (String, LuaFunction)| {
+            /// How many times to lose the race before giving up, matching the
+            /// embedded runtime.
+            const ATTEMPTS: usize = 8;
+
+            let mut current = state_get(&key)?;
+            for _ in 0..ATTEMPTS {
+                let old = match current.clone() {
+                    Some(value) => value.into_lua(lua)?,
+                    None => LuaValue::Nil,
+                };
+                let returned: LuaValue = transform.call(old)?;
+                let next = if returned.is_nil() {
+                    None
+                } else {
+                    Some(ScriptValue::from_lua(returned, lua)?)
+                };
+
+                let outcome = state_write(ScriptStateWrite::compare_and_set(
+                    key.clone(),
+                    current.clone(),
+                    next.clone(),
+                ))?;
+
+                match outcome {
+                    WriteOutcome::Applied { .. } => {
+                        return match next {
+                            Some(value) => value.into_lua(lua),
+                            None => Ok(LuaValue::Nil),
+                        };
+                    }
+                    // Somebody else wrote the key in between; re-run the
+                    // transform against what is actually there now.
+                    WriteOutcome::Conflict { current: found } => current = found,
+                }
+            }
+            Err(LuaError::RuntimeError(format!(
+                "paneru.state.mutate: '{key}' kept changing under it after {ATTEMPTS} attempts"
+            )))
+        })?,
+    )?;
+
+    Ok(state)
+}
+
+/// `paneru.windows(fn)` — xmonad's `windows`: hand the window set to `fn` and
+/// commit whatever it returns. Costs two round trips (fetch, then commit)
+/// rather than the embedded runtime's shared read; a transform returning
+/// nothing skips the commit.
+fn windows(lua: &Lua, transform: LuaFunction) -> LuaResult<bool> {
+    let set = match call(&Request::WindowSet)? {
+        Response::WindowSet(set) => *set,
+        other => return Err(unexpected(&other)),
+    };
+
+    let returned: LuaValue = transform.call(lua.create_userdata(set)?)?;
+    let ops = returned_ops(&returned)?;
+    if ops.is_empty() {
+        return Ok(false);
+    }
+
+    send(&Request::WindowSetApply(ops))?;
+    Ok(true)
+}
+
 fn read_events(value: &LuaValue) -> LuaResult<Option<Vec<String>>> {
     match value {
         LuaValue::Nil => Ok(None),
@@ -103,13 +242,20 @@ fn read_events(value: &LuaValue) -> LuaResult<Option<Vec<String>>> {
     }
 }
 
-/// `paneru.subscribe(event, callback[, opts])` — stream events matching
-/// `event` to `callback`. Blocks until the daemon closes the connection, so
-/// run it in a dedicated process. `event` is the event name to filter on
-/// (e.g. `"window_focused"`), a table of several names, or `nil` for every
-/// event. Each event is a decoded Lua table unless `opts.decode == false`
-/// (then the raw JSON line string). On a decode error the callback receives
-/// `(line, "decode error")` regardless of the event filter.
+fn event_name(event: &StateEvent) -> Option<String> {
+    event
+        .to_json()
+        .ok()?
+        .get("event")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// `paneru.subscribe(event, callback[, opts])` — stream events matching `event`
+/// to `callback`. Blocks until the daemon exits, so run it in a dedicated
+/// process. `event` is the event name to filter on (e.g. `"window_focused"`), a
+/// table of several names, or `nil` for every event. Each event is a decoded Lua
+/// table unless `opts.decode == false` (then the raw JSON line string).
 fn subscribe(
     lua: &Lua,
     (event, callback, opts): (LuaValue, LuaFunction, Option<LuaTable>),
@@ -120,51 +266,53 @@ fn subscribe(
         .and_then(|opts| opts.get::<Option<bool>>("decode").ok().flatten())
         .unwrap_or(true);
 
-    let stream = send(&["subscribe".to_string(), "--json".to_string()])?;
-    let reader = BufReader::new(stream);
-    for line in reader.lines() {
-        let line = line.map_err(LuaError::external)?;
-        if line.is_empty() {
-            continue;
-        }
+    let sender = connect()?;
+    let stream = sender
+        .subscribe_blocking::<StateEvent>(&Request::Subscribe)
+        .map_err(LuaError::external)?;
 
-        let parsed = serde_json::from_str::<serde_json::Value>(&line);
-        let Ok(parsed) = parsed else {
-            callback.call::<()>((line, "decode error".to_string()))?;
-            continue;
+    loop {
+        let event = match stream.recv_blocking() {
+            Ok(delivery) => delivery.value,
+            // The daemon is gone; the subscription ends.
+            Err(paneru_mach_ipc::Error::PeerGone) => break,
+            Err(err) => return Err(LuaError::external(err)),
         };
-        if let Some(events) = &events {
-            let name = parsed.get("event").and_then(serde_json::Value::as_str);
-            let matches = name.is_some_and(|name| events.iter().any(|event| event == name));
-            if !matches {
+
+        if let Some(wanted) = &events {
+            let name = event_name(&event);
+            if !name.is_some_and(|name| wanted.contains(&name)) {
                 continue;
             }
         }
+
+        let json = event.to_json().map_err(LuaError::external)?;
         if decode {
-            let value = lua.to_value(&parsed)?;
-            callback.call::<()>(value)?;
+            callback.call::<()>(lua.to_value(&json)?)?;
         } else {
-            callback.call::<()>(line)?;
+            callback.call::<()>(json.to_string())?;
         }
     }
     Ok(true)
 }
 
-/// `paneru.set_socket_path(path)` — override the daemon socket path.
-// Signature is fixed by mlua's `create_function` contract.
+/// `paneru.set_service_name(name)` — override the daemon's Mach service name.
 #[allow(clippy::unnecessary_wraps)]
-fn set_socket_path(_: &Lua, path: String) -> LuaResult<()> {
-    if let Ok(mut guard) = SOCKET_PATH.lock() {
-        *guard = path;
+fn set_service_name(_: &Lua, name: String) -> LuaResult<()> {
+    if let Ok(mut guard) = SERVICE.lock() {
+        *guard = name;
     }
     Ok(())
 }
 
-/// `paneru.socket_path()` — the socket path currently in use.
-// Signature is fixed by mlua's `create_function` contract.
+/// `paneru.service_name()` — the service name currently in use.
 #[allow(clippy::unnecessary_wraps)]
-fn socket_path(_: &Lua, (): ()) -> LuaResult<String> {
-    Ok(current_socket())
+fn service_name_fn(_: &Lua, (): ()) -> LuaResult<String> {
+    Ok(service_name())
+}
+
+fn unexpected(response: &Response) -> LuaError {
+    LuaError::RuntimeError(format!("unexpected response from paneru: {response:?}"))
 }
 
 /// Builds the module table `require("paneru")` hands back.
@@ -175,14 +323,10 @@ fn socket_path(_: &Lua, (): ()) -> LuaResult<String> {
 pub fn module(lua: &Lua, version: &str) -> LuaResult<LuaTable> {
     let exports = lua.create_table()?;
 
-    // Installs paneru.run/command and the typed paneru.window/workspace/mouse
-    // tables on top of the socket dispatcher.
     crate::install(lua, &exports, &(Rc::new(dispatch) as crate::Dispatch))?;
 
     exports.set("query", lua.create_function(query)?)?;
     exports.set("query_json", lua.create_function(query_json)?)?;
-    // The fixed-kind shorthands share one (name, kind) list with the embedded
-    // runtime, so both hosts spell them the same and neither hardcodes a token.
     for (name, kind) in StateQueryKind::SHORTHANDS {
         exports.set(
             name,
@@ -190,9 +334,13 @@ pub fn module(lua: &Lua, version: &str) -> LuaResult<LuaTable> {
         )?;
     }
 
+    exports.set("state", state_table(lua)?)?;
+
+    exports.set("windows", lua.create_function(windows)?)?;
+
     exports.set("subscribe", lua.create_function(subscribe)?)?;
-    exports.set("set_socket_path", lua.create_function(set_socket_path)?)?;
-    exports.set("socket_path", lua.create_function(socket_path)?)?;
+    exports.set("set_service_name", lua.create_function(set_service_name)?)?;
+    exports.set("service_name", lua.create_function(service_name_fn)?)?;
 
     exports.set("_VERSION", version)?;
 

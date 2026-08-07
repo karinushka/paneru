@@ -25,6 +25,7 @@ use crate::ecs::{
 use crate::events::Event;
 use crate::manager::{Application, Display, Origin, Size, Window, WindowManager, origin_from};
 use crate::platform::WorkspaceId;
+use crate::util::round_px;
 
 // The command vocabulary itself lives in the `paneru-command` crate, shared with
 // the Lua API in `crates/lua-api` so every host speaks the same types.
@@ -32,14 +33,41 @@ pub use paneru_shared_types::commands::{
     Command, Direction, MouseMove, MoveFocus, Operation, ResizeDirection,
 };
 
+/// The strips that are selected on their display but not the one on screen —
+/// the parked virtual workspaces a window can be handed off to.
+type OffscreenStrips<'w, 's> = Query<
+    'w,
+    's,
+    (&'static mut LayoutStrip, &'static ChildOf),
+    (With<SelectedVirtualMarker>, Without<ActiveWorkspaceMarker>),
+>;
+
+/// Every strip alongside the two flags that say where it sits: whether it is the
+/// one currently on screen, and whether it is its display's selected virtual
+/// workspace.
+type StripsWithVisibility<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static ChildOf,
+        &'static LayoutStrip,
+        Entity,
+        Has<ActiveWorkspaceMarker>,
+        Has<SelectedVirtualMarker>,
+    ),
+>;
+
 pub fn register_commands(app: &mut bevy::app::App) {
-    // Window-addressed layout operations from a Lua handler. Registered here
-    // rather than with the Lua systems because it handles a Command like any
-    // other, and the mock harness exercises it without a running interpreter.
+    // Registered here (not with the Lua systems) so it's exercised by the mock
+    // harness without a running interpreter.
     #[cfg(feature = "lua")]
     app.add_systems(PreUpdate, crate::ecs::layout_ops::apply_layout_ops);
 
     query::register_query_commands(app);
+    // Empty store so the mock harness and saveless runs still have one to
+    // answer from; the real app overwrites it from disk.
+    app.init_resource::<crate::ecs::script_state::ScriptStateStore>();
+    app.add_systems(PreUpdate, crate::ecs::script_state::script_state_handler);
     app.add_systems(
         PreUpdate,
         (
@@ -221,7 +249,6 @@ fn nearest_float_in_direction(
 /// # Returns
 ///
 /// `Some(Entity)` with the entity of the newly focused window, otherwise `None`.
-#[allow(clippy::needless_pass_by_value)]
 fn command_move_focus(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -342,8 +369,6 @@ fn command_move_focus(
         }));
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 fn command_focus_unmanaged(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -374,8 +399,6 @@ fn command_focus_unmanaged(
         commands.focus_entity(entity, true);
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 fn command_focus_managed(
     mut messages: MessageReader<Event>,
     active_display: ActiveDisplay,
@@ -402,8 +425,6 @@ fn command_focus_managed(
         commands.reshuffle_around(entity);
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 fn command_raise_floating(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -445,7 +466,6 @@ fn command_raise_floating(
 /// window above another app's frontmost window, so the target's app must be
 /// made frontmost. Other windows in the new top tier are raised within their
 /// own apps' stacks as a best-effort.
-#[allow(clippy::needless_pass_by_value)]
 fn command_toggle_floating_layer(
     mut messages: MessageReader<Event>,
     active_display: ActiveDisplay,
@@ -540,7 +560,6 @@ fn command_toggle_floating_layer(
 ///
 /// `Some(Entity)` with the entity that was swapped with, otherwise `None`.
 #[instrument(level = Level::DEBUG, skip_all)]
-#[allow(clippy::needless_pass_by_value)]
 fn command_swap_focus(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -620,7 +639,6 @@ fn command_swap_focus(
 }
 
 /// Centers the focused window on the active display.
-#[allow(clippy::needless_pass_by_value)]
 fn command_center_window(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -665,7 +683,6 @@ fn command_center_window(
 /// * `windows` - A mutable query for all `Window` components.
 /// * `commands` - Bevy commands to trigger events.
 /// * `config` - The `Config` resource.
-#[allow(clippy::needless_pass_by_value)]
 fn resize_window(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -725,7 +742,7 @@ fn resize_window(
         _ => return,
     };
 
-    let new_width = (next_ratio * f64::from(viewport.width())).round() as i32;
+    let new_width = round_px(next_ratio * f64::from(viewport.width()));
     let size = Size::new(new_width, frame.height());
 
     let origin = clamp_origin_to_viewport(
@@ -754,8 +771,6 @@ fn resize_window(
     commands.resize_entity(entity, size);
     commands.reshuffle_around(entity);
 }
-
-#[allow(clippy::needless_pass_by_value)]
 fn full_width_window(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -780,7 +795,7 @@ fn full_width_window(
         if let Ok(mut entity_commands) = commands.get_entity(entity) {
             entity_commands.try_remove::<FullWidthMarker>();
         }
-        let w = (marker.width_ratio * f64::from(viewport.width())).round() as i32;
+        let w = round_px(marker.width_ratio * f64::from(viewport.width()));
         let bounds = active_display.actual_bounds(&config).size().with_x(w);
         commands.resize_entity(entity, bounds);
     } else {
@@ -811,7 +826,6 @@ fn full_width_window(
 /// * `focused_entity` - The `Entity` of the currently focused window.
 /// * `windows` - A mutable query for `Window` components, their `Entity`, and whether they have the `Unmanaged` marker.
 /// * `commands` - Bevy commands to modify entities.
-#[allow(clippy::needless_pass_by_value)]
 fn manage_window(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -872,15 +886,11 @@ fn manage_window(
 /// * `windows` - A mutable query for `Window` components, their `Entity`, and whether they have the `Unmanaged` marker.
 /// * `active_display` - A mutable reference to the `ActiveDisplayMut` resource.
 /// * `commands` - Bevy commands to modify entities and trigger events.
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 fn to_next_display(
     mut messages: MessageReader<Event>,
     windows: Windows,
     mut active_display: ActiveDisplayMut,
-    mut other_workspaces: Query<
-        (&mut LayoutStrip, &ChildOf),
-        (With<SelectedVirtualMarker>, Without<ActiveWorkspaceMarker>),
-    >,
+    mut other_workspaces: OffscreenStrips,
     window_manager: Res<WindowManager>,
     config: Res<Config>,
     mut commands: Commands,
@@ -979,7 +989,7 @@ fn to_next_display(
                 // display's usable viewport (dock- and padding-adjusted), so a
                 // fixed dock is accounted for consistently with the source.
                 let width = width_ratio.map_or(bounds.x, |ratio| {
-                    (ratio * f64::from(viewport_bounds.width())).round() as i32
+                    round_px(ratio * f64::from(viewport_bounds.width()))
                 });
                 let size = Size::new(width, viewport_bounds.height());
                 commands.resize_entity(moved_window, size);
@@ -993,7 +1003,6 @@ fn to_next_display(
 
 /// Moves the mouse pointer to the next available display.
 #[instrument(level = Level::DEBUG, skip_all)]
-#[allow(clippy::needless_pass_by_value)]
 fn mouse_to_next_display(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -1057,7 +1066,6 @@ fn mouse_to_next_display(
 }
 
 /// Distributes heights equally among all windows in the currently focused stack.
-#[allow(clippy::needless_pass_by_value)]
 fn equalize_column(
     mut messages: MessageReader<Event>,
     current_focus: Single<(&Window, Entity), With<FocusedMarker>>,
@@ -1098,7 +1106,6 @@ fn equalize_column(
 }
 
 /// Makes all columns in the active strip the same width as the focused window.
-#[allow(clippy::needless_pass_by_value)]
 fn balance_strip(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -1146,7 +1153,6 @@ fn balance_strip(
 /// nearest edge: left-aligned when the window overflows left, right-aligned
 /// when it overflows right. No resize — the window keeps its current size.
 /// Bypasses the lazy-viewport check since the user explicitly asked to reveal.
-#[allow(clippy::needless_pass_by_value)]
 fn snap_window(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -1184,7 +1190,6 @@ fn snap_window(
 }
 
 #[instrument(level = Level::DEBUG, skip_all)]
-#[allow(clippy::needless_pass_by_value)]
 pub fn stack_windows_handler(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -1236,7 +1241,6 @@ pub fn stack_windows_handler(
 /// * `commands` - Bevy commands to trigger events and modify entities.
 /// * `config` - The `Config` resource, containing application settings.
 #[instrument(level = Level::DEBUG, skip_all)]
-#[allow(clippy::needless_pass_by_value)]
 pub fn command_quit_handler(
     mut messages: MessageReader<Event>,
     window_manager: Res<WindowManager>,
@@ -1254,7 +1258,6 @@ pub fn command_quit_handler(
 }
 
 #[instrument(level = Level::DEBUG, skip_all)]
-#[allow(clippy::needless_pass_by_value)]
 pub fn command_restart_handler(mut messages: MessageReader<Event>) {
     if messages.read().any(|event| {
         matches!(
@@ -1270,19 +1273,12 @@ pub fn command_restart_handler(mut messages: MessageReader<Event>) {
 }
 
 #[instrument(level = Level::DEBUG, skip_all)]
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 fn print_internal_state_handler(
     mut messages: MessageReader<Event>,
     focused: Query<(&Window, Entity), With<FocusedMarker>>,
     windows: Query<(&Window, Entity, &ChildOf, Option<&Unmanaged>)>,
     apps: Query<&Application>,
-    workspaces: Query<(
-        &ChildOf,
-        &LayoutStrip,
-        Entity,
-        Has<ActiveWorkspaceMarker>,
-        Has<SelectedVirtualMarker>,
-    )>,
+    workspaces: StripsWithVisibility,
     displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
 ) {
     if !messages.read().any(|event| {

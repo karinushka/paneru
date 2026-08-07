@@ -3,7 +3,7 @@ use bevy::{
         entity::Entity,
         hierarchy::ChildOf,
         query::{With, Without},
-        system::{Query, Res, ResMut, Single, SystemParam},
+        system::{Commands, Query, Res, ResMut, Single, SystemParam},
         world::Mut,
     },
     math::IRect,
@@ -197,9 +197,8 @@ impl ActiveDisplayMut<'_, '_> {
     }
 }
 
-/// The markers that mean "something on screen is still moving". The event
-/// pump polls these together to decide how long it may sleep, so they travel
-/// as one parameter with the or-chain folded into [`Self::mid_frame`].
+/// Markers indicating something on screen is still animating; used by the
+/// event pump to decide how long it may sleep.
 #[derive(SystemParam)]
 pub struct FrameActivity<'w, 's> {
     repositioning: Query<'w, 's, (), With<RepositionMarker>>,
@@ -219,8 +218,33 @@ impl FrameActivity<'_, '_> {
     }
 }
 
+/// Bundles the window queries, config, and a command buffer that most
+/// window-handling systems need. Only add this to a system that already used
+/// all three: granting extra world access can cause a query-conflict panic.
 #[derive(SystemParam)]
-#[allow(clippy::type_complexity)]
+pub struct WindowCtx<'w, 's> {
+    pub windows: Windows<'w, 's>,
+    pub config: Res<'w, Config>,
+    pub commands: Commands<'w, 's>,
+}
+
+/// A window's layout slot, current frame, width ratio, and any in-flight
+/// reposition/resize markers.
+type WindowPlacements<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static LayoutPosition,
+        &'static Position,
+        &'static Bounds,
+        &'static WidthRatio,
+        Option<&'static RepositionMarker>,
+        Option<&'static ResizeMarker>,
+    ),
+    With<Window>,
+>;
+
+#[derive(SystemParam)]
 pub struct Windows<'w, 's> {
     all: Query<
         'w,
@@ -244,23 +268,10 @@ pub struct Windows<'w, 's> {
         ),
         With<FullWidthMarker>,
     >,
-    positions: Query<
-        'w,
-        's,
-        (
-            &'static LayoutPosition,
-            &'static Position,
-            &'static Bounds,
-            &'static WidthRatio,
-            Option<&'static RepositionMarker>,
-            Option<&'static ResizeMarker>,
-        ),
-        With<Window>,
-    >,
+    positions: WindowPlacements<'w, 's>,
 }
 
 impl Windows<'_, '_> {
-    #[allow(clippy::type_complexity)]
     fn get_all(&self, entity: Entity) -> Option<(&Window, Entity, &ChildOf, Option<&Unmanaged>)> {
         self.all
             .get(entity)
@@ -304,6 +315,13 @@ impl Windows<'_, '_> {
         self.all
             .iter()
             .map(|(window, entity, _, _)| (window, entity))
+    }
+
+    /// Every window with the application entity that owns it, managed or not.
+    pub fn iter_with_parent(&self) -> impl Iterator<Item = (&Window, Entity, Entity)> {
+        self.all
+            .iter()
+            .map(|(window, entity, childof, _)| (window, entity, childof.parent()))
     }
 
     pub fn managed_iter(&self) -> impl Iterator<Item = (&Window, Entity, &ChildOf)> {

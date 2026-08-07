@@ -19,10 +19,15 @@ default-members = ["."]
 # so the three can never drift apart. Members add only the features they need
 # (the Lua ABI in particular differs: vendored here, `module` in crates/lua).
 [workspace.dependencies]
+cfg-if = "1.0.4"
+futures-lite = "2.6"
+mach2 = "0.6"
 mlua = { version = "0.12", default-features = false, features = ["serialize"] }
 paneru-lua = { path = "crates/lua" }
+paneru-mach-ipc = { path = "crates/mach_ipc" }
 paneru-shared-types = { path = "crates/shared_types" }
-serde = { version = "1.0", features = ["derive"] }
+regex = "1.12"
+serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 
 [lints.clippy]
@@ -35,16 +40,42 @@ pedantic = "warn"
 # reason not to: handlers run on the event path, and its tracing JIT is worth
 # roughly an order of magnitude there over the reference interpreter. The
 # `lua5x` features remain for scripts needing 5.2+ semantics LuaJIT lacks.
+#
+# Lua 5.1 and Luau are deliberately not offered. The world-access calls
+# (`paneru.query*`, the window set, `paneru.state`) are async, which means the
+# interpreter has to be able to yield out of a Rust callback. LuaJIT can —
+# it is resumable across pcall, metamethods and C boundaries — but reference
+# 5.1 cannot yield across a C-call boundary at all, and Luau is missing the
+# same machinery (mlua gates several of its async APIs off both).
+#
+# `vendored` builds the interpreter from source rather than linking one the
+# system already has, and is what a plain `cargo build` wants. Leave it off
+# where the build already supplies an interpreter and its headers (the Nix
+# package does, via pkg-config): building it from source there fails anyway,
+# because `luajit-src` copies its sources out of the read-only Nix store and
+# then cannot write to the copy.
 [features]
 default = []
 vendored = ["mlua/vendored"]
-lua = ["dep:mlua", "dep:paneru-lua"]
+lua = [
+  "dep:mlua",
+  "dep:paneru-lua",
+  "dep:async-executor",
+  # Brings in the `FromLua`/`IntoLua` impls the embedded runtime needs to hand
+  # a script the values it stored.
+  "paneru-shared-types/lua",
+]
 luajit = ["mlua/luajit"]
 lua55 = ["mlua/lua55"]
-lua51 = ["mlua/lua51"]
 lua52 = ["mlua/lua52"]
 lua53 = ["mlua/lua53"]
 lua54 = ["mlua/lua54"]
+
+[profile.fast-release]
+inherits = "release"
+codegen-units = 256
+lto = false
+debug = true
 
 [profile.release]
 codegen-units = 1
@@ -53,6 +84,17 @@ lto = true
 [dependencies]
 accessibility-sys = "0.2"
 arc-swap = "1.9"
+# The Lua worker's executor and its channels. All three arrive with bevy
+# already, so this pins versions rather than widening the dependency graph:
+# `async-executor` is the same `LocalExecutor` bevy's own `spawn_local` uses.
+async-channel = "2.5"
+# Async `RwLock`/`Mutex`: unlike the std ones their guards are `Send` and may be
+# held across an `.await`, which is what the socket tasks need. Same smol family
+# as `async-channel`/`async-executor` and bevy's task pool, and already in the
+# tree via those, so it costs nothing a tokio dependency would not double.
+async-lock = "3.4"
+async-executor = { version = "1.14", optional = true }
+futures-lite = { workspace = true }
 bevy = { version = "0.19", default-features = false, features = [
   "multi_threaded",
 ] }
@@ -67,7 +109,14 @@ derive_more = { version = "2.1", features = ["deref", "deref_mut"] }
 embed_plist = "1.2"
 launchctl = "0.3"
 libc = "0.2"
-mlua = { workspace = true, features = ["vendored"], optional = true }
+# Vendoring is left to the `vendored` feature rather than forced on here, so a
+# build that already has an interpreter to link against can say so.
+#
+# `async` is added only for the daemon: it is the embedded runtime that awaits
+# the main thread for world access. The loadable module in `crates/lua` talks to
+# the daemon over a socket and has nothing to await, so it stays on the plain
+# workspace dependency.
+mlua = { workspace = true, optional = true, features = ["async"] }
 notify = { version = "8.2", features = ["macos_fsevent"] }
 num_enum = "0.7"
 objc2 = { version = "0.6", features = ["catch-all", "exception"] }
@@ -87,6 +136,7 @@ objc2-app-kit = { version = "0.3", features = [
 ] }
 objc2-core-foundation = { version = "0.3", features = ["CFRunLoop"] }
 objc2-core-graphics = "0.3"
+paneru-mach-ipc = { workspace = true }
 paneru-shared-types = { workspace = true }
 paneru-lua = { workspace = true, optional = true }
 objc2-quartz-core = { version = "0.3", features = [
@@ -101,7 +151,7 @@ objc2-foundation = { version = "0.3", features = [
   "NSDictionary",
   "NSBundle",
 ] }
-regex = "1.12"
+regex = { workspace = true }
 scopeguard = "1.2"
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -112,3 +162,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ctrlc = { version = "3.5", features = ["termination"] }
 xdg = "3.0"
 mockall = "0.15"
+[build-dependencies]
+cfg-if = { workspace = true}
+
+

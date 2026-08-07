@@ -15,9 +15,12 @@ use crate::ecs::{
     ActiveWorkspaceMarker, DockPosition, MissionControlActive, Position, Scrolling,
     SpawnCommandsExt,
 };
-use crate::events::Event;
+use bevy::ecs::schedule::common_conditions::on_message;
+
+use crate::events::{Event, InputEvent};
 use crate::manager::{Display, Origin, WindowManager, origin_from};
 use crate::platform::WinID;
+use crate::util::round_px;
 
 /// Bottom-right corner region (`NxN` pixels) where focus events are suppressed.
 /// Sized to a representative macOS title bar height — see karinushka/paneru#233:
@@ -33,6 +36,9 @@ impl Plugin for MouseEventsPlugin {
             mission_control.is_none_or(|active| !active.0)
         };
 
+        // `run_if` also skips fetching each system's parameters (Windows
+        // queries, config, window manager) when there's no input event, which
+        // matters for perf.
         app.add_systems(
             Update,
             (
@@ -44,7 +50,8 @@ impl Plugin for MouseEventsPlugin {
                     .run_if(mission_control_inactive),
                 mouse_up_trigger,
                 horizontal_warp_mouse_trigger,
-            ),
+            )
+                .run_if(on_message::<InputEvent>),
         );
     }
 }
@@ -74,9 +81,8 @@ fn is_in_corner_dead_zone(
 /// * `focused_window` - A query for the currently focused window.
 /// * `main_cid` - The main connection ID resource.
 /// * `config` - The optional configuration resource.
-#[allow(clippy::needless_pass_by_value)]
 fn mouse_moved_trigger(
-    mut messages: MessageReader<Event>,
+    mut messages: MessageReader<InputEvent>,
     windows: Windows,
     displays: Query<(&Display, Option<&DockPosition>)>,
     window_manager: Res<WindowManager>,
@@ -84,7 +90,7 @@ fn mouse_moved_trigger(
     mut global_state: GlobalState,
     mut commands: Commands,
 ) {
-    for event in messages.read() {
+    for InputEvent(event) in messages.read() {
         let Event::MouseMoved { point, modifiers } = event else {
             continue;
         };
@@ -178,9 +184,8 @@ fn mouse_moved_trigger(
 /// * `active_display` - A query for the active display.
 /// * `main_cid` - The main connection ID resource.
 /// * `commands` - Bevy commands to trigger a reshuffle.
-#[allow(clippy::needless_pass_by_value)]
 fn mouse_down_trigger(
-    mut messages: MessageReader<Event>,
+    mut messages: MessageReader<InputEvent>,
     windows: Windows,
     active_workspace: Query<(Entity, Option<&Scrolling>), With<ActiveWorkspaceMarker>>,
     window_manager: Res<WindowManager>,
@@ -188,7 +193,7 @@ fn mouse_down_trigger(
     mouse_held: Query<Entity, With<MouseHeldMarker>>,
     mut commands: Commands,
 ) {
-    for event in messages.read() {
+    for InputEvent(event) in messages.read() {
         let Event::MouseDown { point, .. } = event else {
             continue;
         };
@@ -231,13 +236,12 @@ fn mouse_down_trigger(
 
 /// Handles mouse-up events. Triggers the deferred reshuffle so the clicked
 /// window slides into view after the user releases the button.
-#[allow(clippy::needless_pass_by_value)]
 fn mouse_up_trigger(
-    mut messages: MessageReader<Event>,
+    mut messages: MessageReader<InputEvent>,
     mouse_held: Query<(Entity, &MouseHeldMarker)>,
     mut commands: Commands,
 ) {
-    for event in messages.read() {
+    for InputEvent(event) in messages.read() {
         if !matches!(event, Event::MouseUp { .. }) {
             continue;
         }
@@ -256,10 +260,8 @@ pub(super) struct MouseResizeState {
     last_point: Option<Origin>,
     window_id: Option<WinID>,
 }
-
-#[allow(clippy::needless_pass_by_value)]
 fn mouse_resize_trigger(
-    mut messages: MessageReader<Event>,
+    mut messages: MessageReader<InputEvent>,
     windows: Windows,
     active_workspace: Single<(Entity, &LayoutStrip, &Position), With<ActiveWorkspaceMarker>>,
     window_manager: Res<WindowManager>,
@@ -267,7 +269,7 @@ fn mouse_resize_trigger(
     mut state: Local<MouseResizeState>,
     mut commands: Commands,
 ) {
-    for event in messages.read() {
+    for InputEvent(event) in messages.read() {
         let Event::MouseMoved { point, modifiers } = event else {
             continue;
         };
@@ -337,10 +339,8 @@ fn mouse_resize_trigger(
 pub(super) struct WarpVelocityState {
     last: Option<(Origin, Instant)>,
 }
-
-#[allow(clippy::needless_pass_by_value)]
 fn horizontal_warp_mouse_trigger(
-    mut messages: MessageReader<Event>,
+    mut messages: MessageReader<InputEvent>,
     displays: Query<&Display>,
     window_manager: Res<WindowManager>,
     config: Res<Config>,
@@ -358,7 +358,7 @@ fn horizontal_warp_mouse_trigger(
     /// Stale velocity samples (e.g. from a prior gesture) shouldn't carry.
     const VELOCITY_FRESHNESS: Duration = Duration::from_millis(80);
 
-    for event in messages.read() {
+    for InputEvent(event) in messages.read() {
         let Event::MouseMoved { point, .. } = event else {
             continue;
         };
@@ -425,7 +425,7 @@ fn horizontal_warp_mouse_trigger(
         // Carry over horizontal velocity so the cursor does not feel "stuck" at
         // the edge — extrapolate motion forward into the target display.
         let carry = velocity_x
-            .map_or(0, |v| (v * CARRY_DURATION.as_secs_f64()) as i32)
+            .map_or(0, |v| round_px(v * CARRY_DURATION.as_secs_f64()))
             .clamp(-MAX_CARRY_PX, MAX_CARRY_PX);
         let target_x = if on_left_edge {
             // Cursor was moving leftward; carry is negative. Push further from

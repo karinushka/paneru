@@ -1,37 +1,40 @@
 use bevy::app::{App, PostUpdate, PreUpdate};
 use bevy::ecs::entity::Entity;
-use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::message::MessageReader;
-use bevy::ecs::query::{Added, Has};
+use bevy::ecs::query::Added;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs;
 use bevy::ecs::system::{Query, Res, ResMut};
-use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
-use std::os::unix::net::UnixStream;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::warn;
 
 use super::{Command, Operation};
 
-use crate::config::Config;
-use crate::ecs::layout::LayoutStrip;
-use crate::ecs::params::Windows;
 use crate::ecs::state::{
     PaneruActiveState, PaneruQueryState, PaneruVirtualWorkspaceState, PaneruWindowState,
-    QueryState, QueryStateParams, StateEvent,
+    QueryStateParams, StateEvent,
 };
-use crate::ecs::{
-    ActiveDisplayMarker, ActiveWorkspaceMarker, FocusedMarker, SelectedVirtualMarker, Unmanaged,
-};
+use crate::ecs::{ActiveWorkspaceMarker, FocusedMarker, Unmanaged};
 use crate::events::Event;
-use crate::manager::{Application, Display, WindowManager};
 use crate::platform::WinID;
+use paneru_shared_types::wire::Response;
+
+/// One connected `paneru subscribe` client.
+///
+/// The channel is only ever touched from a task on the IO pool, since writing
+/// to a peer that may not be reading can block. `alive` lets the main thread
+/// learn a subscriber is gone via a plain atomic flag instead of a lock shared
+/// with that task.
+struct Subscriber {
+    channel: Arc<paneru_mach_ipc::Subscriber>,
+    alive: Arc<AtomicBool>,
+}
 
 #[derive(Default, Resource)]
 struct StateSubscribers {
-    streams: Vec<Arc<Mutex<UnixStream>>>,
+    streams: Vec<Subscriber>,
 }
 
 #[derive(Default, Resource)]
@@ -134,9 +137,8 @@ impl StateBroadcastIntent {
                         ),
                 } => intent.windows_changed = true,
                 Event::WindowFocused { .. } => intent.window_focused = true,
-                // Geometry alone decides what is on screen, so plain moves and
-                // resizes — scrolling the strip, dragging, animation settling —
-                // can change the visible set without changing anything else.
+                // Geometry alone decides what's on screen, so plain moves and
+                // resizes can change the visible set on their own.
                 Event::WindowMoved { .. } | Event::WindowResized { .. } => {
                     intent.on_screen_changed = true;
                 }
@@ -197,32 +199,50 @@ pub(super) fn register_query_commands(app: &mut App) {
     );
 }
 
-#[allow(clippy::needless_pass_by_value)]
+/// Answers socket queries that read the world: state documents and the window
+/// set. Both live in one system so only one system holds [`QueryStateParams`]'s
+/// world access. The window set is a separate variant rather than folded into
+/// [`StateQueryKind`] since it projects a different value (the layout tree).
 fn state_query_handler(mut messages: MessageReader<Event>, state: QueryStateParams) {
-    for event in messages.read() {
-        let Event::StateQuery { kind, respond_to } = event else {
-            continue;
-        };
+    /// Sends an answer without ever waiting for it to be taken. The reply
+    /// channel holds one message and exactly one is sent, so this cannot fill;
+    /// a client that hung up in the meantime is simply gone.
+    fn reply(respond_to: &crate::events::Reply, answer: Result<Response, String>) {
+        _ = respond_to.try_send(answer.unwrap_or_else(Response::Error));
+    }
 
-        let response = state
-            .extract()
-            .map_err(|err| err.to_string())
-            .and_then(|state| state.to_query_json(*kind).map_err(|err| err.to_string()))
-            .unwrap_or_else(|err| json!({ "error": err }).to_string());
-        _ = respond_to.send(response);
+    for event in messages.read() {
+        match event {
+            Event::StateQuery { kind, respond_to } => reply(
+                respond_to,
+                state
+                    .extract()
+                    .map_err(|err| err.to_string())
+                    .map(|state| Response::Query(state.to_query_payload(*kind))),
+            ),
+            Event::WindowSetQuery { respond_to } => reply(
+                respond_to,
+                state
+                    .extract_window_set()
+                    .map_err(|err| err.to_string())
+                    .map(|set| Response::WindowSet(Box::new(set))),
+            ),
+            _ => {}
+        }
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 fn state_subscribe_handler(
     mut messages: MessageReader<Event>,
     mut subscribers: ResMut<StateSubscribers>,
 ) {
     for event in messages.read() {
-        let Event::StateSubscribe { stream } = event else {
+        let Event::StateSubscribe { subscriber } = event else {
             continue;
         };
-        subscribers.streams.push(stream.clone());
+        subscribers.streams.push(Subscriber {
+            channel: subscriber.clone(),
+            alive: Arc::new(AtomicBool::new(true)),
+        });
     }
 }
 
@@ -341,25 +361,13 @@ fn collect_state_broadcast_events_for_intent(
 
     outgoing
 }
-
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 fn state_event_broadcast_handler(
     mut messages: MessageReader<Event>,
     mut subscribers: ResMut<StateSubscribers>,
     mut cache: ResMut<StateBroadcastCache>,
-    workspaces: Query<(
-        &ChildOf,
-        &LayoutStrip,
-        Has<ActiveWorkspaceMarker>,
-        Has<SelectedVirtualMarker>,
-    )>,
     focused_changes: Query<Entity, Added<FocusedMarker>>,
     active_workspace_changes: Query<Entity, Added<ActiveWorkspaceMarker>>,
-    displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
-    windows: Windows,
-    apps: Query<&Application>,
-    window_manager: Res<WindowManager>,
-    config: Res<Config>,
+    state: QueryStateParams,
 ) {
     let events = messages.read().collect::<Vec<_>>();
 
@@ -373,9 +381,10 @@ fn state_event_broadcast_handler(
             let Event::WindowMoved { window_id } = event else {
                 return false;
             };
-            windows
+            state
+                .windows()
                 .find(*window_id)
-                .and_then(|(_, entity)| windows.get_managed(entity))
+                .and_then(|(_, entity)| state.windows().get_managed(entity))
                 .is_some_and(|(_, _, unmanaged)| matches!(unmanaged, Some(Unmanaged::Floating)))
         }),
         window_focused: !focused_changes.is_empty(),
@@ -385,16 +394,9 @@ fn state_event_broadcast_handler(
         return;
     }
 
-    let state = if intent.requires_state() {
-        match PaneruQueryState::extract(
-            &workspaces,
-            &displays,
-            &windows,
-            &apps,
-            &window_manager,
-            &config,
-        ) {
-            Ok(state) => Some(state),
+    let document = if intent.requires_state() {
+        match state.extract() {
+            Ok(document) => Some(document),
             Err(err) => {
                 warn!("extracting query state for broadcast: {err}");
                 return;
@@ -405,10 +407,11 @@ fn state_event_broadcast_handler(
     };
     let outgoing = collect_state_broadcast_events_for_intent(
         &intent,
-        state.as_ref(),
+        document.as_ref(),
         &mut cache,
         |window_id| {
-            windows
+            state
+                .windows()
                 .find(window_id)
                 .and_then(|(window, _)| window.title().ok())
         },
@@ -418,24 +421,31 @@ fn state_event_broadcast_handler(
         return;
     }
 
-    // One JSON object per line, as documented in QUERY_AND_SUBSCRIBE_FORMAT.md.
-    let mut payload = outgoing
-        .iter()
-        .filter_map(|event| {
-            serde_json::to_string(event)
-                .inspect_err(|err| warn!("serializing broadcast event: {err}"))
-                .ok()
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    payload.push('\n');
+    // Each send is non-blocking and bounded, so a stalled reader just drops the
+    // event instead of blocking the main thread; an exited subscriber is
+    // marked below and reaped here on the next broadcast.
+    subscribers
+        .streams
+        .retain(|subscriber| subscriber.alive.load(Ordering::Relaxed));
 
-    subscribers.streams.retain(|stream| {
-        let Ok(mut stream) = stream.lock() else {
-            return false;
-        };
-        stream.write_all(payload.as_bytes()).is_ok()
-    });
+    let events = Arc::new(outgoing);
+    for subscriber in &subscribers.streams {
+        for event in events.iter() {
+            match subscriber.channel.try_send(event) {
+                Ok(()) => {}
+                // The subscriber's process is gone; reaped on the next
+                // broadcast. This is a real signal from the kernel rather than
+                // a write error a merely slow reader would also produce.
+                Err(paneru_mach_ipc::Error::PeerGone) => {
+                    subscriber.alive.store(false, Ordering::Relaxed);
+                    break;
+                }
+                // Alive but not keeping up. The event is lost; the subscriber
+                // is kept.
+                Err(err) => warn!("pushing broadcast event: {err}"),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -611,8 +621,8 @@ mod tests {
 
     #[test]
     fn test_window_moves_track_the_on_screen_set() {
-        // Geometry alone decides what is on screen, so a bare move — no window
-        // list or workspace change — still has to be looked at.
+        // A bare move (no window-list or workspace change) still has to be
+        // looked at.
         let intent = StateBroadcastIntent::from_events(
             [PaneruEvent::WindowMoved { window_id: 10 }].iter(),
             StateBroadcastSignals::default(),

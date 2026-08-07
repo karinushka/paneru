@@ -8,7 +8,7 @@
 //! client-only `query_*` / `subscribe` helpers on top.
 //!
 //! With the `module` feature the crate additionally builds as a loadable Lua C
-//! extension (`paneru.so`) exposing exactly that client table:
+//! extension (`paneru.so`) exposing that client table:
 //!
 //! ```lua
 //! local paneru = require("paneru")
@@ -25,6 +25,9 @@
 //!   print(window.app_name, window.title)
 //! end
 //!
+//! paneru.state.set("pads.term", 4213)          -- outlives reloads and restarts
+//! paneru.state.mutate("count", function(n) return (n or 0) + 1 end)
+//!
 //! paneru.subscribe("window_focused", function(evt)  -- blocking; run in a helper process
 //!   print(evt.title)
 //! end)
@@ -33,21 +36,23 @@
 //! paneru.subscribe({ "window_focused", "window_title_changed" }, function(evt) ... end)
 //! ```
 //!
-//! Every verb builds a real [`Command`]: option tables are deserialized into the
-//! actual enums with mlua's serde support, so `"east"` becomes
-//! [`Direction::East`] and an unknown value fails at the call site rather than
-//! as a string the daemon rejects later. A script therefore behaves identically
-//! on both hosts; only the host-specific extras differ (`paneru.on` /
-//! `paneru.bind` are embedded-only, `subscribe` and the socket-path helpers are
-//! client-only). The `query_*` functions exist on both, spelled the same: the
-//! client asks the daemon over the socket, the embedded runtime answers from
-//! the world it is already inside.
+//! Every verb builds a real [`Command`]: option tables are deserialized into
+//! the actual enums with mlua's serde support, so `"east"` becomes
+//! [`Direction::East`] and an unknown value fails at the call site. Only the
+//! host-specific extras differ (`paneru.on` / `paneru.bind` are embedded-only;
+//! `subscribe` and the socket-path helpers are client-only).
+
+#![allow(
+    clippy::needless_pass_by_value,
+    reason = "mlua callback signatures are by-value by contract"
+)]
 
 pub mod client;
 
 use std::rc::Rc;
 
 use mlua::{Function, Lua, LuaSerdeExt, Result, Table, Value};
+use regex::Regex;
 use serde::Deserialize;
 
 use paneru_shared_types::commands::{
@@ -55,7 +60,7 @@ use paneru_shared_types::commands::{
 };
 
 /// Issues a [`Command`]. The only thing the two hosts differ by.
-pub type Dispatch = Rc<dyn Fn(&Lua, &Command) -> Result<bool>>;
+pub type Dispatch = Rc<dyn Fn(&Lua, Command) -> Result<bool>>;
 
 /// Installs the shared API onto the `paneru` table, building every verb on
 /// `dispatch`.
@@ -64,12 +69,11 @@ pub type Dispatch = Rc<dyn Fn(&Lua, &Command) -> Result<bool>>;
 ///
 /// Returns an error if any Lua table/function creation or assignment fails.
 pub fn install(lua: &Lua, paneru: &Table, dispatch: &Dispatch) -> Result<()> {
-    // paneru.run(cmd) / paneru.command(cmd) — the escape hatch: a command string
-    // ("window focus east"), an argv table, or a structured table matching the
-    // command enums ({ window = { focus = "east" } }).
+    // paneru.run(cmd) / paneru.command(cmd) — the escape hatch: a command
+    // string, an argv table, or a structured command table.
     let run = {
         let dispatch = Rc::clone(dispatch);
-        lua.create_function(move |lua, command: Value| dispatch(lua, &to_command(lua, &command)?))?
+        lua.create_function(move |lua, command: Value| dispatch(lua, to_command(lua, &command)?))?
     };
     paneru.set("run", run.clone())?;
     paneru.set("command", run)?;
@@ -88,7 +92,60 @@ pub fn install(lua: &Lua, paneru: &Table, dispatch: &Dispatch) -> Result<()> {
     paneru.set("restart", verb(lua, dispatch, Command::Restart)?)?;
     paneru.set("print_state", verb(lua, dispatch, Command::PrintState)?)?;
 
+    // paneru.match{ app = …, bundle = …, title = …, floating = …, managed = … }
+    // builds a predicate over window records, for `ws:find`/`ws:filter`.
+    // `app`, `bundle` and `title` are regexes, compiled here so a bad pattern
+    // errors at the call site rather than silently matching nothing.
+    paneru.set("match", lua.create_function(matcher)?)?;
+
     Ok(())
+}
+
+/// One `paneru.match{…}` call: compiles the spec into a Lua predicate.
+fn matcher(lua: &Lua, spec: Table) -> Result<Function> {
+    let pattern = |field: &str| -> Result<Option<Regex>> {
+        let Some(pattern) = spec.get::<Option<String>>(field)? else {
+            return Ok(None);
+        };
+        Regex::new(&pattern)
+            .map(Some)
+            .map_err(|err| mlua::Error::RuntimeError(format!("paneru.match: {field}: {err}")))
+    };
+    let (app, bundle, title) = (pattern("app")?, pattern("bundle")?, pattern("title")?);
+    let floating: Option<bool> = spec.get("floating")?;
+    let managed: Option<bool> = spec.get("managed")?;
+
+    for entry in spec.pairs::<String, Value>() {
+        let (key, _) = entry?;
+        if !matches!(
+            key.as_str(),
+            "app" | "bundle" | "title" | "floating" | "managed"
+        ) {
+            return Err(mlua::Error::RuntimeError(format!(
+                "paneru.match: unknown field '{key}'"
+            )));
+        }
+    }
+
+    lua.create_function(move |_, window: Table| {
+        let matches = |regex: &Option<Regex>, field: &str| -> Result<bool> {
+            let Some(regex) = regex else {
+                return Ok(true);
+            };
+            Ok(regex.is_match(&window.get::<String>(field)?))
+        };
+        let flag = |want: Option<bool>, field: &str| -> Result<bool> {
+            match want {
+                Some(want) => Ok(window.get::<bool>(field)? == want),
+                None => Ok(true),
+            }
+        };
+        Ok(matches(&app, "app_name")?
+            && matches(&bundle, "bundle_id")?
+            && matches(&title, "title")?
+            && flag(floating, "floating")?
+            && flag(managed, "managed")?)
+    })
 }
 
 /// Builds the `paneru.window` sub-table.
@@ -143,7 +200,7 @@ fn workspace_table(lua: &Lua, dispatch: &Dispatch) -> Result<Table> {
                 Operation::VirtualNumber,
                 Operation::Virtual,
             )?;
-            dispatch(lua, &Command::Window(operation))
+            dispatch(lua, Command::Window(operation))
         })?
     };
     workspace.set("select", select)?;
@@ -158,7 +215,7 @@ fn workspace_table(lua: &Lua, dispatch: &Dispatch) -> Result<Table> {
                 |index| Operation::VirtualMoveNumber(index, follow),
                 |direction| Operation::VirtualMove(direction, follow),
             )?;
-            dispatch(lua, &Command::Window(operation))
+            dispatch(lua, Command::Window(operation))
         })?
     };
     workspace.set("move_window", move_window)?;
@@ -189,7 +246,7 @@ fn virtual_operation(
 /// A zero-argument verb issuing a fixed command.
 fn verb(lua: &Lua, dispatch: &Dispatch, command: Command) -> Result<Function> {
     let dispatch = Rc::clone(dispatch);
-    lua.create_function(move |lua, ()| dispatch(lua, &command))
+    lua.create_function(move |lua, ()| dispatch(lua, command.clone()))
 }
 
 /// A verb taking `{ direction = "east" }` or `{ number = 3 }` (or the bare
@@ -203,7 +260,7 @@ fn directional(
     let dispatch = Rc::clone(dispatch);
     lua.create_function(move |lua, opts: Value| {
         let direction = Opts::read(lua, &opts)?.target(what)?;
-        dispatch(lua, &Command::Window(operation(direction)))
+        dispatch(lua, Command::Window(operation(direction)))
     })
 }
 
@@ -216,7 +273,7 @@ fn follower(
     let dispatch = Rc::clone(dispatch);
     lua.create_function(move |lua, opts: Value| {
         let follow = Opts::read(lua, &opts)?.follow();
-        dispatch(lua, &Command::Window(operation(follow)))
+        dispatch(lua, Command::Window(operation(follow)))
     })
 }
 
@@ -225,14 +282,12 @@ fn resize(lua: &Lua, dispatch: &Dispatch) -> Result<Function> {
     let dispatch = Rc::clone(dispatch);
     lua.create_function(move |lua, opts: Value| {
         let direction = ResizeOpts::read(lua, &opts)?;
-        dispatch(lua, &Command::Window(Operation::Resize(direction)))
+        dispatch(lua, Command::Window(Operation::Resize(direction)))
     })
 }
 
-/// The options every verb accepts, deserialized straight into the command
-/// types: `{ direction = "east" }`, `{ number = 3 }`, `{ follow = false }`, or
-/// the bare `"east"` / `3`. [`Direction`]'s own deserializer accepts both a
-/// name and a 1-based position, so serde does all the validating.
+/// The options every verb accepts: `{ direction = "east" }`, `{ number = 3 }`,
+/// `{ follow = false }`, or the bare `"east"` / `3`.
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Opts {

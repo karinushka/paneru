@@ -1,207 +1,174 @@
-use std::io::{Read, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::sync::mpsc::channel;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use std::{fs, thread};
-use tracing::{debug, error};
+//! Where requests from other processes come in.
+//!
+//! Paneru publishes a Mach service under a well-known name; the CLI, the
+//! loadable Lua module and anything else that wants to drive the window manager
+//! connect to that name and send it a [`Request`]. Each one is turned into an
+//! [`Event`] for the world, and the ones that expect an answer carry a reply
+//! channel the answering system fills in.
 
-use crate::config::parse_command;
-use crate::ecs::state::StateQueryKind;
+use bevy::tasks::{IoTaskPool, TaskPool};
+use futures_lite::StreamExt;
+use paneru_mach_ipc::{Delivery, Receiver, Reply as MachReply};
+use paneru_shared_types::wire::{Request, service_name};
+use std::sync::Arc;
+use std::thread;
+use tracing::{error, warn};
+
 use crate::errors::Result;
-use crate::events::{Event, EventSender};
+use crate::events::{Event, EventSender, Reply};
 
-/// `CommandReader` is responsible for sending and receiving commands via a Unix socket.
-/// It acts as an IPC mechanism for the `paneru` application, allowing external processes
-/// or the CLI client to communicate with the running daemon.
+/// `CommandReader` owns the service port and feeds what arrives on it into the
+/// world.
 pub struct CommandReader {
     events: EventSender,
 }
 
 impl CommandReader {
-    /// The path to the Unix socket used for inter-process communication.
-    const SOCKET_PATH: &str = "/tmp/paneru.socket";
-
-    /// Sends a command and its arguments to the running `paneru` application via a Unix socket.
-    /// The arguments are serialized and sent as a byte stream.
+    /// Creates a new `CommandReader`.
     ///
     /// # Arguments
     ///
-    /// * `params` - An iterator over command-line arguments, where each `String` is a parameter.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` if the command is sent successfully, otherwise `Err(Error)` if an I/O error occurs or the connection fails.
-    pub fn send_command(params: impl IntoIterator<Item = String>) -> Result<()> {
-        let _stream = Self::send_socket_request(params)?;
-        Ok(())
-    }
-
-    pub fn send_query(kind: StateQueryKind) -> Result<String> {
-        let args = ["query", kind.token(), "--json"];
-        let mut stream = Self::send_socket_request(args.into_iter().map(str::to_string))?;
-        let mut output = String::new();
-        stream.read_to_string(&mut output)?;
-        Ok(output)
-    }
-
-    pub fn subscribe_json() -> Result<()> {
-        let mut stream =
-            Self::send_socket_request(["subscribe", "--json"].into_iter().map(str::to_string))?;
-        std::io::copy(&mut stream, &mut std::io::stdout())?;
-        Ok(())
-    }
-
-    fn send_socket_request(params: impl IntoIterator<Item = String>) -> Result<UnixStream> {
-        let output = params
-            .into_iter()
-            .flat_map(|param| [param.as_bytes(), &[0]].concat())
-            .collect::<Vec<_>>();
-        let size: u32 = output.len().try_into()?;
-        debug!("{:?} {output:?}", size.to_le_bytes());
-
-        let mut stream = UnixStream::connect(CommandReader::SOCKET_PATH)?;
-        stream.write_all(&size.to_le_bytes())?;
-        stream.write_all(&output)?;
-        Ok(stream)
-    }
-
-    /// Creates a new `CommandReader` instance.
-    ///
-    /// # Arguments
-    ///
-    /// * `events` - An `EventSender` to dispatch received commands as `Event::Command`.
-    ///
-    /// # Returns
-    ///
-    /// A new `CommandReader`.
+    /// * `events` - An `EventSender` to dispatch received requests on.
+    #[must_use]
     pub fn new(events: EventSender) -> Self {
         CommandReader { events }
     }
 
-    /// Starts the `CommandReader` in a new thread, listening for incoming commands on a Unix socket.
-    /// Any errors encountered in the runner thread are logged.
-    pub fn start(mut self) {
+    /// Claims the service name and starts serving it on a thread of its own.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if another Paneru daemon already owns the name.
+    pub fn start(self) -> Result<()> {
+        let receiver = Receiver::<Request>::bind(&service_name())?;
+
         thread::spawn(move || {
-            if let Err(err) = self.runner() {
-                error!("{err}");
-            }
+            // Parks this one thread for the process lifetime; each request is
+            // handed to the IO pool rather than served inline.
+            futures_lite::future::block_on(async move {
+                let mut requests = std::pin::pin!(receiver);
+                while let Some(delivery) = requests.next().await {
+                    match delivery {
+                        Ok(delivery) => self.dispatch(delivery),
+                        // A request that fails to decode is a bad client, not a
+                        // reason to stop serving.
+                        Err(err) => warn!("reading request: {err}"),
+                    }
+                }
+            });
         });
-    }
 
-    /// The main runner function for the `CommandReader` thread. It binds to a Unix socket,
-    /// listens for incoming connections, reads command size and data, and dispatches them as `Event::Command`.
-    /// This loop continues indefinitely until an unrecoverable error occurs.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` if the runner completes successfully (though it's typically a long-running loop),
-    /// otherwise `Err(Error)` if a binding or I/O error occurs.
-    fn runner(&mut self) -> Result<()> {
-        _ = fs::remove_file(CommandReader::SOCKET_PATH);
-        let listener = UnixListener::bind(CommandReader::SOCKET_PATH)?;
-
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream.inspect_err(|err| error!("reading stream {err}")) else {
-                continue;
-            };
-            let mut buffer = [0u8; 4];
-
-            if !full_read(&mut stream, buffer.len(), &mut buffer) {
-                continue;
-            }
-            let size = u32::from_le_bytes(buffer) as usize;
-            let mut buffer = vec![0u8; size];
-
-            if !full_read(&mut stream, buffer.len(), &mut buffer) {
-                continue;
-            }
-            let argv = buffer
-                .split(|c| *c == 0)
-                .filter(|s| !s.is_empty())
-                .map(|s| String::from_utf8_lossy(s).to_string())
-                .collect::<Vec<_>>();
-            let argv_ref = argv.iter().map(String::as_str).collect::<Vec<_>>();
-
-            if let Some(kind) = parse_query_request(&argv_ref) {
-                let (tx, rx) = channel();
-                _ = self
-                    .events
-                    .send(Event::StateQuery {
-                        kind,
-                        respond_to: tx,
-                    })
-                    .inspect_err(|err| {
-                        error!("sending state query: {err}");
-                    });
-
-                match rx.recv_timeout(Duration::from_secs(2)) {
-                    Ok(response) => {
-                        _ = stream.write_all(response.as_bytes());
-                        _ = stream.write_all(b"\n");
-                    }
-                    Err(err) => error!("waiting for state query response: {err}"),
-                }
-                continue;
-            }
-
-            if is_subscribe_request(&argv_ref) {
-                match stream.try_clone() {
-                    Ok(clone) => {
-                        if let Err(err) = clone.set_nonblocking(true) {
-                            error!("configuring state subscriber as nonblocking: {err}");
-                            continue;
-                        }
-                        _ = self
-                            .events
-                            .send(Event::StateSubscribe {
-                                stream: Arc::new(Mutex::new(clone)),
-                            })
-                            .inspect_err(|err| {
-                                error!("registering state subscriber: {err}");
-                            });
-                    }
-                    Err(err) => error!("cloning subscriber stream: {err}"),
-                }
-                continue;
-            }
-
-            if let Ok(command) =
-                parse_command(&argv_ref).inspect_err(|err| error!("parsing command: {err}"))
-            {
-                _ = self
-                    .events
-                    .send(Event::Command { command })
-                    .inspect_err(|err| {
-                        error!("sending command: {err}");
-                    });
-            }
-        }
         Ok(())
     }
-}
 
-fn parse_query_request(argv: &[&str]) -> Option<StateQueryKind> {
-    // `--json` is the only supported (and default) output, so accept it or its
-    // absence; the kind token is resolved by its single owner.
-    match argv {
-        ["query", token] | ["query", token, "--json"] => StateQueryKind::parse(token),
-        _ => None,
+    /// Turns one request into an event, and arranges for its answer.
+    fn dispatch(&self, delivery: Delivery<Request>) {
+        let events = self.events.clone();
+        let Delivery {
+            value,
+            reply,
+            subscriber,
+        } = delivery;
+
+        match value {
+            // Fire-and-forget: no reply is sent for this request.
+            Request::Command(command) => {
+                send(&events, Event::Command { command });
+            }
+            Request::WindowSetApply(ops) => {
+                send(
+                    &events,
+                    Event::Command {
+                        command: crate::commands::Command::Layout(ops),
+                    },
+                );
+            }
+
+            Request::Query(kind) => {
+                answer(events, reply, "state query", move |respond_to| {
+                    Event::StateQuery { kind, respond_to }
+                });
+            }
+            Request::WindowSet => {
+                answer(events, reply, "window set query", |respond_to| {
+                    Event::WindowSetQuery { respond_to }
+                });
+            }
+            Request::ScriptState(request) => {
+                answer(events, reply, "script state request", move |respond_to| {
+                    Event::ScriptState {
+                        request,
+                        respond_to,
+                    }
+                });
+            }
+
+            Request::Subscribe => {
+                if let Some(subscriber) = subscriber {
+                    send(
+                        &events,
+                        Event::StateSubscribe {
+                            subscriber: Arc::new(subscriber),
+                        },
+                    );
+                } else {
+                    // No channel to push events to; the sender built the
+                    // request by hand and got it wrong.
+                    warn!("subscribe request carried no event channel");
+                }
+            }
+        }
     }
 }
 
-fn is_subscribe_request(argv: &[&str]) -> bool {
-    matches!(argv, ["subscribe", "--json"] | ["subscribe"])
+/// Sends an event that expects no answer.
+fn send(events: &EventSender, event: Event) {
+    _ = events
+        .send(event)
+        .inspect_err(|err| error!("sending event: {err}"));
 }
 
-fn full_read(stream: &mut UnixStream, expected: usize, buffer: &mut [u8]) -> bool {
-    if let Ok(count) = stream.read(buffer).inspect_err(|err| {
-        error!("{err}");
-    }) && count == expected
+/// Sends a request-carrying event to the world and answers the client with
+/// whatever comes back. `what` only names the request in the log.
+///
+/// The wait runs on the IO pool, not the receive loop, so a slow client blocks
+/// only itself. There is no timeout: the reply sender travels inside the
+/// event, so if the world never answers, the event is dropped, the channel
+/// closes, and `recv` resolves anyway.
+fn answer(
+    events: EventSender,
+    reply: Option<MachReply>,
+    what: &'static str,
+    request: impl FnOnce(Reply) -> Event + Send + 'static,
+) {
+    let Some(reply) = reply else {
+        warn!("{what} arrived without a reply channel");
+        return;
+    };
+
+    let (tx, rx) = async_channel::bounded(1);
+    if events
+        .send(request(tx))
+        .inspect_err(|err| error!("sending {what}: {err}"))
+        .is_err()
     {
-        true
-    } else {
-        error!("short read, expected {expected}.");
-        false
+        return;
     }
+
+    // `get_or_init`, not `get`: the reader starts before the Bevy app is built,
+    // so an early client would otherwise find no pool at all and panic.
+    IoTaskPool::get_or_init(TaskPool::default)
+        .spawn(async move {
+            match rx.recv().await {
+                Ok(response) => {
+                    if let Err(err) = reply.send(&response) {
+                        // A client that stopped waiting is normal — an
+                        // interrupted `paneru query` does exactly this.
+                        warn!("answering {what}: {err}");
+                    }
+                }
+                Err(err) => error!("waiting for {what} response: {err}"),
+            }
+        })
+        .detach();
 }

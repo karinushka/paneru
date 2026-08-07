@@ -13,7 +13,7 @@ use tracing::{Level, info, instrument, warn};
 
 use crate::config::{Config, MissingWindowBehavior};
 use crate::ecs::layout::LayoutStrip;
-use crate::ecs::params::Windows;
+use crate::ecs::params::{WindowCtx, Windows};
 use crate::ecs::state::{
     PaneruState, SavedColumn, SavedStackItem, SavedStrip, SavedWindow, SavedWorkspace,
 };
@@ -42,8 +42,6 @@ impl SessionRestore {
         }
     }
 }
-
-#[allow(clippy::needless_pass_by_value)]
 pub(super) fn tick_restore_grace(
     time: Res<Time<Virtual>>,
     mut session: Option<ResMut<SessionRestore>>,
@@ -397,15 +395,10 @@ pub(crate) fn matches_startup_restore_state(
     saved_windows_in_state(state).any(|saved| saved.hard_match(window.id(), pid, &bundle_id))
 }
 
-#[allow(
-    clippy::needless_pass_by_value,
-    clippy::too_many_arguments,
-    clippy::too_many_lines
-)]
+#[allow(clippy::too_many_lines)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 pub(super) fn restore_window_state(
     _: On<RestoreWindowState>,
-    windows: Windows,
     mut workspaces: Query<(
         Entity,
         &mut LayoutStrip,
@@ -414,10 +407,9 @@ pub(super) fn restore_window_state(
     )>,
     displays: Query<(Entity, &Display, Has<ActiveDisplayMarker>)>,
     apps: Query<&Application>,
-    config: Res<Config>,
     session: Option<Res<SessionRestore>>,
     restoration: Option<Res<PaneruState>>,
-    mut commands: Commands,
+    mut ctx: WindowCtx,
 ) {
     let restoration = if let Some(session) = session.as_deref() {
         &session.state
@@ -425,22 +417,22 @@ pub(super) fn restore_window_state(
         let Some(restoration) = restoration.as_deref() else {
             return;
         };
-        if !config.restore_enabled() {
+        if !ctx.config.restore_enabled() {
             info!("Session restore disabled by configuration");
-            commands.remove_resource::<PaneruState>();
+            ctx.commands.remove_resource::<PaneruState>();
             return;
         }
-        match config.restore_missing_windows() {
+        match ctx.config.restore_missing_windows() {
             MissingWindowBehavior::Ignore => {}
         }
-        commands.insert_resource(SessionRestore::new(
+        ctx.commands.insert_resource(SessionRestore::new(
             restoration.clone(),
-            config.restore_startup_grace(),
+            ctx.config.restore_startup_grace(),
         ));
         restoration
     };
 
-    let current = current_window_identities(&windows, &apps, restoration);
+    let current = current_window_identities(&ctx.windows, &apps, restoration);
     let plan = RestorePlanner::new(restoration).plan(&current);
 
     if plan.consumed_entities.is_empty() {
@@ -478,13 +470,13 @@ pub(super) fn restore_window_state(
     }
 
     for entity in &emptied_existing_strips {
-        if let Ok(mut entity_commands) = commands.get_entity(*entity) {
+        if let Ok(mut entity_commands) = ctx.commands.get_entity(*entity) {
             entity_commands.try_despawn();
         }
     }
 
     for entity in &plan.consumed_entities {
-        if let Ok(mut entity_commands) = commands.get_entity(*entity) {
+        if let Ok(mut entity_commands) = ctx.commands.get_entity(*entity) {
             entity_commands.try_remove::<Unmanaged>();
         }
     }
@@ -522,7 +514,7 @@ pub(super) fn restore_window_state(
         {
             strip.append_strip(&mut existing);
             emptied_existing_strips.insert(entity);
-            if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            if let Ok(mut entity_commands) = ctx.commands.get_entity(entity) {
                 entity_commands.try_despawn();
             }
         }
@@ -537,7 +529,7 @@ pub(super) fn restore_window_state(
                 if strip.id() == planned.workspace_id
                     && !emptied_existing_strips.contains(&entity)
                     && is_global_active
-                    && let Ok(mut entity_commands) = commands.get_entity(entity)
+                    && let Ok(mut entity_commands) = ctx.commands.get_entity(entity)
                 {
                     entity_commands.try_remove::<ActiveWorkspaceMarker>();
                 }
@@ -555,7 +547,8 @@ pub(super) fn restore_window_state(
         };
 
         let mut spawned =
-            commands.spawn_layout_strip(strip, origin, display_entity, is_global_active);
+            ctx.commands
+                .spawn_layout_strip(strip, origin, display_entity, is_global_active);
         spawned.try_insert(RefreshWindowSizes::default());
         if !is_global_active {
             spawned.insert(previous);

@@ -3,11 +3,16 @@ use std::sync::OnceLock;
 use accessibility_sys::{AXError, AXObserverRef, AXUIElementRef};
 use objc2::MainThreadMarker;
 use objc2::rc::{Retained, autoreleasepool};
-use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSEventMask};
+use objc2_app_kit::{
+    NSApplication, NSApplicationActivationPolicy, NSEvent, NSEventMask, NSEventModifierFlags,
+    NSEventType,
+};
 use objc2_core_foundation::CFString;
-use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSProcessInfo};
-use std::ffi::c_void;
+use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSPoint, NSProcessInfo};
+use std::ffi::{c_short, c_void};
 use std::pin::Pin;
+use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::error;
 
 use crate::config::{CONFIGURATION_FILE, Config};
@@ -135,6 +140,100 @@ unsafe extern "C" {
     ) -> AXError;
 }
 
+/// Tag on the synthetic event [`EventLoopWaker`] posts, so the pump can tell it
+/// apart from a real one and drop it. Arbitrary; just has to be ours.
+const WAKE_EVENT_SUBTYPE: c_short = 0x7061;
+
+/// Wakes the Cocoa event pump from whatever thread produced an [`Event`].
+///
+/// `nextEventMatchingMask:untilDate:inMode:dequeue:` only returns early when it
+/// dequeues an actual `NSEvent` — signalling a run loop source is not enough to
+/// end the wait. Posting a real `ApplicationDefined` event is what does it.
+#[derive(Debug)]
+pub struct EventLoopWaker {
+    /// Set while a wake-up has been posted but not yet consumed, so a burst of
+    /// events costs one posted event rather than one per send.
+    pending: AtomicBool,
+    /// The shared `NSApplication`, held as a pointer because the waker is cloned
+    /// out to threads with no `MainThreadMarker` (the socket reader, notably).
+    /// The only message ever sent through it is `postEvent:atStart:`, which is
+    /// documented as callable from any thread.
+    ///
+    /// Empty until [`Self::install`] runs, because `postEvent:` silently drops
+    /// events until the app has finished launching.
+    app: OnceLock<NonNull<NSApplication>>,
+}
+
+// SAFETY: the only message sent through `app` is `postEvent:atStart:`, which is
+// documented as thread-safe. See the field comment.
+unsafe impl Send for EventLoopWaker {}
+unsafe impl Sync for EventLoopWaker {}
+
+impl EventLoopWaker {
+    pub fn new() -> Self {
+        Self {
+            pending: AtomicBool::new(false),
+            app: OnceLock::new(),
+        }
+    }
+
+    /// Points the waker at the running application. Called once, on the main
+    /// thread, after `finishLaunching`.
+    fn install(&self, app: &NSApplication) {
+        _ = self.app.set(NonNull::from(app));
+    }
+
+    /// Ends the pump's current wait, unless one is already posted.
+    pub fn wake(&self) {
+        let Some(app) = self.app.get() else {
+            return;
+        };
+        if self.pending.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let Some(event) = NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
+            NSEventType::ApplicationDefined,
+            NSPoint::ZERO,
+            NSEventModifierFlags::empty(),
+            0.0,
+            0,
+            None,
+            WAKE_EVENT_SUBTYPE,
+            0,
+            0,
+        ) else {
+            // Nothing else will clear the flag, so drop it here or the pump is
+            // never woken again.
+            self.pending.store(false, Ordering::Release);
+            error!("unable to create wake-up event");
+            return;
+        };
+        // SAFETY: `postEvent:atStart:` is callable from any thread.
+        let app = unsafe { app.as_ref() };
+        // Appended, not pushed to the front, so it can't reorder real input.
+        app.postEvent_atStart(&event, false);
+    }
+
+    /// Re-arms the waker. Must be called before the pump waits, not after:
+    /// clearing afterward could erase a wake-up that arrived in between.
+    fn rearm(&self) {
+        self.pending.store(false, Ordering::Release);
+    }
+
+    /// True for the synthetic event [`Self::wake`] posts.
+    fn is_wake_event(event: &NSEvent) -> bool {
+        // `subtype` is only meaningful for some event types, so the type check
+        // must come first and short-circuit.
+        event.r#type() == NSEventType::ApplicationDefined && event.subtype().0 == WAKE_EVENT_SUBTYPE
+    }
+}
+
+impl Default for EventLoopWaker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// `PlatformCallbacks` aggregates and manages all platform-specific event handlers and observers.
 /// It serves as the central point for setting up and running macOS-specific interactions with the window manager.
 pub struct PlatformCallbacks {
@@ -177,6 +276,9 @@ impl PlatformCallbacks {
         cocoa_app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
         cocoa_app.finishLaunching();
         NSApplication::load();
+
+        // Only now is there an event queue for `postEvent:` to reach.
+        events.waker().install(&cocoa_app);
 
         let workspace_observer = WorkspaceObserver::new(events.clone());
         Box::pin(PlatformCallbacks {
@@ -234,9 +336,17 @@ impl PlatformCallbacks {
         self.events.send(Event::ProcessesLoaded)
     }
 
-    pub fn pump_cocoa_event_loop(&mut self, timeout: f64) {
+    /// Returns `true` when at least one event was dispatched this pass.
+    pub fn pump_cocoa_event_loop(&mut self, timeout: f64) -> bool {
+        // Re-armed before the wait, not after it — see [`EventLoopWaker::rearm`].
+        self.events.waker().rearm();
+
         autoreleasepool(|_| {
-            let until_date = NSDate::dateWithTimeIntervalSinceNow(timeout);
+            // Only the *first* dequeue may block. Once something has arrived,
+            // the rest of the queue is drained with an already-past deadline so
+            // the pass ends as soon as the queue is empty.
+            let mut deadline = NSDate::dateWithTimeIntervalSinceNow(timeout);
+            let mut dispatched = false;
 
             // nextEventMatchingMask:untilDate:inMode:dequeue:
             // This is the core of the Cocoa event loop.
@@ -244,18 +354,31 @@ impl PlatformCallbacks {
                 self.cocoa_app
                     .nextEventMatchingMask_untilDate_inMode_dequeue(
                         NSEventMask::Any,
-                        Some(&until_date),
+                        Some(&deadline),
                         NSDefaultRunLoopMode,
                         true, // Dequeue so we can handle it
                     )
             } {
+                deadline = NSDate::distantPast();
+
+                // Synthetic, only meant to end the wait above; must not count
+                // as dispatched or an idle wake-up would trigger `updateWindows`.
+                if EventLoopWaker::is_wake_event(&event) {
+                    continue;
+                }
+
                 // Dispatch the event to the system
                 self.cocoa_app.sendEvent(&event);
+                dispatched = true;
             }
 
-            // Housekeeping for UI/Notifications
-            self.cocoa_app.updateWindows();
-        });
+            // `updateWindows` walks every window sending `update`; skip it on an
+            // idle pass that dequeued nothing.
+            if dispatched {
+                self.cocoa_app.updateWindows();
+            }
+            dispatched
+        })
     }
 }
 

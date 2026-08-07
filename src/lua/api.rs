@@ -283,17 +283,15 @@ fn register_bind(registry: &SharedRegistry, chord: &str, handler: Value) -> mlua
 }
 
 /// Installs the state-query half of the API, matching the client module's
-/// spelling exactly: `paneru.query(kind)` hands back the raw JSON string,
+/// naming: `paneru.query(kind)` hands back the raw JSON string,
 /// `paneru.query_json(kind)` the decoded table, and `query_state` /
-/// `query_active` / `query_workspaces` / `query_on_screen` are the fixed-kind
-/// shorthands. A script therefore reads state the same way whether it runs
-/// inside the daemon or in a client process.
+/// `query_active` / `query_workspaces` / `query_on_screen` are fixed-kind
+/// shorthands.
 ///
-/// The functions themselves only find the provider and unpack its answer; what
-/// they cannot do is reach the world, which is not accessible outside a
-/// dispatching system. `super::LuaRuntime::with_query` installs a provider for
-/// exactly as long as a callback is on the stack, so calling one of these at
-/// script top level fails with an explanation rather than stale data.
+/// The world itself is only reachable while a dispatch is on the stack
+/// (`super::LuaRuntime::with_query` installs the provider for exactly that
+/// long), so calling one of these at script top level fails with an
+/// explanation rather than returning stale data.
 fn install_query(lua: &Lua, paneru: &mlua::Table, world: &Rc<DispatchWorld>) -> mlua::Result<()> {
     let raw = query_function(lua, world, None, true)?;
     paneru.set("query", raw)?;
@@ -356,15 +354,9 @@ fn query_function(
     })
 }
 
-/// Installs `paneru.state`: the named store a script keeps things in.
-///
-/// A Lua global is the obvious place to put something a handler wants to
-/// remember, and the wrong one — a hot reload builds a whole new interpreter,
-/// so what is kept there is wiped every time the script is saved. What goes in
-/// here survives that and a restart, and a client can read and write the same
-/// store over the socket under the same names.
-///
-/// Three calls:
+/// Installs `paneru.state`: a named store a script can keep values in,
+/// surviving hot reloads and restarts (unlike a Lua global). A client can
+/// also read and write the same store over the socket under the same names.
 ///
 /// ```lua
 /// paneru.state.get("pads.term")           -- the value, or nil
@@ -372,16 +364,11 @@ fn query_function(
 /// paneru.state.mutate("count", function(n) return (n or 0) + 1 end)
 /// ```
 ///
-/// `mutate` is the one to reach for when the new value depends on the old.
-/// It reads, runs your function, and writes only if the value is still what it
-/// read — otherwise it runs your function again against what the value became.
-/// Two handlers, or a handler and a client, incrementing the same counter
-/// therefore cannot lose an increment the way a `get` followed by a `set` can.
-/// It returns what it stored.
-///
-/// Values are anything that maps onto JSON: strings, numbers, booleans, and
-/// tables of those. A function, a coroutine or a userdata cannot be stored, and
-/// says so rather than being silently dropped.
+/// `mutate` reads, runs your function, and writes only if the value hasn't
+/// changed since the read — retrying otherwise — so concurrent writers can't
+/// lose an increment the way `get` then `set` can. Values must be
+/// JSON-representable; functions, coroutines, and userdata are rejected
+/// rather than silently dropped.
 fn install_script_state(
     lua: &Lua,
     paneru: &mlua::Table,
@@ -403,9 +390,8 @@ fn install_script_state(
         })?
     })?;
 
-    // `set(key, nil)` removes: the Lua way of spelling "there is nothing here"
-    // is the absence of a value, and storing a JSON null instead would leave a
-    // key that reads back as `nil` but is still there.
+    // `set(key, nil)` removes the key, rather than storing a JSON null that
+    // would still be present but read back as `nil`.
     state.set("set", {
         let world = Rc::clone(world);
         lua.create_async_function(move |lua, (key, value): (String, Value)| {
@@ -427,13 +413,10 @@ fn install_script_state(
         })?
     })?;
 
-    // Read, transform, write — and if the value moved under it in between, do it
-    // again against what it moved to. `transform` is the script's own function,
-    // so it runs here on the worker; only the compare-and-set crosses to the
-    // main thread. That is what makes the whole thing atomic without a Lua
-    // function ever having to leave this thread: a competing write cannot land
-    // inside the read-modify-write, it can only lose the compare and send us
-    // round again.
+    // Read, transform, write, retrying against whatever the value moved to if
+    // it changed underneath. `transform` runs here on the worker; only the
+    // compare-and-set crosses to the main thread, which is what keeps this
+    // atomic without the Lua function ever leaving this thread.
     state.set("mutate", {
         let world = Rc::clone(world);
         lua.create_async_function(move |lua, (key, transform): (String, mlua::Function)| {

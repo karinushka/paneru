@@ -48,9 +48,6 @@ type TimedOutSpawns<'w, 's> = Populated<
     Or<(With<BProcess>, With<Application>)>,
 >;
 
-/// Windows as the resize handler rewrites them: the OS handle to re-read the
-/// frame from, the origin it is measured against, the size to overwrite, and
-/// whether the window is ours to lay out at all.
 /// Windows as [`window_moved_update_frame`] sees them: the element to re-read,
 /// the origin to update, and the marker saying we are the ones moving it.
 type MovableWindows<'w, 's> = Query<
@@ -66,6 +63,9 @@ type MovableWindows<'w, 's> = Query<
     Without<LayoutStrip>,
 >;
 
+/// Windows as the resize handler rewrites them: the OS handle to re-read the
+/// frame from, the size to overwrite, and whether the window is ours to lay
+/// out at all.
 type ResizableWindows<'w, 's> = Query<
     'w,
     's,
@@ -89,19 +89,11 @@ const LOOP_TIMEOUT_STEP: u32 = 1;
 /// How long [`pump_events`] may spend draining the incoming channel before it
 /// has to hand the frame back, and how many events it may take in one go.
 ///
-/// Both are needed because the drain is the only thing standing between a burst
-/// of notifications and the rest of the schedule. It used to run until a whole
-/// millisecond passed with nothing arriving, which is a condition a burst never
-/// satisfies: a drag, a resize animation, an app churning out
-/// moved/resized/reordered notifications, or a client hammering the socket all
-/// keep events under a millisecond apart indefinitely. The loop then never
-/// exited, the systems after it never ran, and the window manager stopped
-/// responding to anything until the burst let up — sudden, random, and
-/// intermittent, because it depends entirely on what the apps are doing.
-///
-/// Nothing is dropped when a cap is hit: the events stay in the channel and the
-/// next frame picks them up. The cost of stopping early is one frame of latency
-/// on the tail of a burst; the cost of not stopping was the whole schedule.
+/// The drain previously ran until a full millisecond passed with nothing
+/// arriving, a condition a sustained burst (drag, resize animation, a churning
+/// app) never satisfies — the loop never exited and the window manager stopped
+/// responding until the burst let up. Nothing is dropped when a cap is hit:
+/// leftover events stay in the channel for the next frame to pick up.
 const PUMP_BUDGET: Duration = Duration::from_millis(4);
 const PUMP_MAX_EVENTS: usize = 256;
 

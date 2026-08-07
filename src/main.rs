@@ -1,10 +1,3 @@
-// Bevy's `IntoSystem` and mlua's `create_function` both take their parameters
-// by value: a system's `Res`/`Query`/`On`/`Single`/`Populated` arguments and a
-// Lua callback's arguments are fetched and handed over by the framework, and a
-// signature taking them by reference does not implement the trait at all. That
-// makes this lint unactionable across every system and callback in the crate
-// (212 sites at the time of writing), so it is turned off once here rather than
-// re-suppressed, undocumented, on each one.
 #![allow(
     clippy::needless_pass_by_value,
     reason = "Bevy system and mlua callback signatures are by-value by contract"

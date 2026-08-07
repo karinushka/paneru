@@ -27,9 +27,7 @@ use crate::util::round_px;
 
 pub struct ScrollEventsPlugin;
 
-/// The on-screen strip together with the scroll state being applied to it: the
-/// strip for its window extents, the origin the scroll writes, and the momentum
-/// driving it.
+/// The on-screen strip, its origin, and the scroll state being applied to it.
 type ScrollingStrip<'w, 's> = Single<
     'w,
     's,
@@ -47,12 +45,9 @@ impl Plugin for ScrollEventsPlugin {
             mission_control.is_none_or(|active| !active.0)
         };
 
-        // The two gesture systems only act on an input event, so a frame
-        // carrying none can skip them and everything they would have fetched.
-        //
-        // The rest of the chain is deliberately left ungated: inertia, the snap
-        // force and the integrator run precisely when the fingers have stopped
-        // sending events, and `swiping_timeout` exists to notice their absence.
+        // Only the two gesture systems are gated on an input event. The rest of
+        // the chain (inertia, snap force, integrator) must keep running after
+        // the fingers stop sending events, since that's when they take over.
         app.add_systems(
             Update,
             (
@@ -87,16 +82,8 @@ fn swipe_gesture(
     mut commands: Commands,
 ) {
     // How far a full-trackpad swipe carries the strip, in viewport widths, at
-    // sensitivity 1.0. Fingers travel a few centimetres and the strip has to
-    // cross a display, so the gesture is geared up.
-    //
-    // This used to be applied by accident: `scrolling_integrator` added a
-    // velocity built from this same delta on top of the direct write. Removing
-    // that double integration — which is what made a reversal fight itself —
-    // cut how far a swipe reached, so the gearing is now explicit. The value is
-    // the one that reproduces the old travel exactly rather than a derivation:
-    // the accidental version compounded a lagging EMA over several frames and
-    // delivered appreciably more than the doubling it looked like.
+    // sensitivity 1.0. This value is empirical (chosen to reproduce prior
+    // behavior), not derived from other constants — don't try to recompute it.
     const GESTURE_GAIN: f64 = 3.0;
 
     let swipe_sensitivity = config.swipe_sensitivity();

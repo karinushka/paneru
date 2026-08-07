@@ -71,6 +71,12 @@ lua52 = ["mlua/lua52"]
 lua53 = ["mlua/lua53"]
 lua54 = ["mlua/lua54"]
 
+[profile.fast-release]
+inherits = "release"
+codegen-units = 256
+lto = false
+debug = true
+
 [profile.release]
 codegen-units = 1
 lto = true
@@ -160,3 +166,5 @@ xdg = "3.0"
 mockall = "0.15"
 [build-dependencies]
 cfg-if = { workspace = true}
+
+

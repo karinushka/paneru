@@ -197,9 +197,8 @@ impl ActiveDisplayMut<'_, '_> {
     }
 }
 
-/// The markers that mean "something on screen is still moving". The event
-/// pump polls these together to decide how long it may sleep, so they travel
-/// as one parameter with the or-chain folded into [`Self::mid_frame`].
+/// Markers indicating something on screen is still animating; used by the
+/// event pump to decide how long it may sleep.
 #[derive(SystemParam)]
 pub struct FrameActivity<'w, 's> {
     repositioning: Query<'w, 's, (), With<RepositionMarker>>,
@@ -219,17 +218,9 @@ impl FrameActivity<'_, '_> {
     }
 }
 
-/// The three things nearly every window-handling system reaches for: the
-/// window queries, the configuration, and a command buffer to act through.
-///
-/// Grouping them keeps the signatures of the bigger systems readable. Unlike
-/// the bundles above this one carries no behaviour of its own — the fields are
-/// public so call sites borrow them individually, which is what lets a helper
-/// take `&ctx.windows` and `&mut ctx.commands` at the same time.
-///
-/// Only put this on a system that already took all three. Handing a system
-/// world access it did not previously have costs parallelism at best and
-/// panics on a query conflict at worst.
+/// Bundles the window queries, config, and a command buffer that most
+/// window-handling systems need. Only add this to a system that already used
+/// all three: granting extra world access can cause a query-conflict panic.
 #[derive(SystemParam)]
 pub struct WindowCtx<'w, 's> {
     pub windows: Windows<'w, 's>,
@@ -237,10 +228,8 @@ pub struct WindowCtx<'w, 's> {
     pub commands: Commands<'w, 's>,
 }
 
-/// Where a window sits and where it is headed: its layout slot, its current
-/// frame and width ratio, and the two markers that mean an animation is still
-/// in flight — so callers can ask for either the frame now or the frame it is
-/// moving towards.
+/// A window's layout slot, current frame, width ratio, and any in-flight
+/// reposition/resize markers.
 type WindowPlacements<'w, 's> = Query<
     'w,
     's,

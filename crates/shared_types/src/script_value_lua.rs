@@ -1,10 +1,8 @@
 //! Moving [`ScriptValue`] in and out of Lua.
 //!
-//! Hand-written rather than routed through mlua's serde bridge, because the
-//! derived representation is not what a script should see: serde spells an enum
-//! as its discriminant, so `ScriptValue::Int(5)` would arrive in Lua as
-//! `{ Int = 5 }` rather than as `5`. A script stores values, not the tagging
-//! this crate uses to get them across a process boundary.
+//! Hand-written rather than routed through mlua's serde bridge: serde spells
+//! an enum as its discriminant, so `ScriptValue::Int(5)` would arrive in Lua
+//! as `{ Int = 5 }` rather than as `5`.
 //!
 //! Behind the `lua` feature, so a client wanting only the wire types links no
 //! interpreter.
@@ -62,11 +60,8 @@ impl FromLua for ScriptValue {
 }
 
 /// Decides whether a Lua table is an array or a dictionary, and converts it.
-///
-/// Lua has one table type for both, so the distinction has to be inferred:
-/// a table is treated as a list when its keys are exactly `1..=n`. An empty
-/// table is a list, which is the more common intent and matches what every JSON
-/// encoder for Lua does.
+/// A table is treated as a list when its keys are exactly `1..=n` (an empty
+/// table counts as a list).
 fn table_to_value(table: &LuaTable, lua: &Lua) -> LuaResult<ScriptValue> {
     let length = table.raw_len();
     let mut keys = 0usize;

@@ -37,11 +37,9 @@ impl Plugin for MouseEventsPlugin {
             mission_control.is_none_or(|active| !active.0)
         };
 
-        // All of these act only on an input event, so on a frame carrying none
-        // they have nothing to do — and skipping them skips fetching their
-        // parameters too, which is the `Windows` queries, the config and the
-        // window manager. That resource fetching was the second-largest cost on
-        // the main thread once the scheduling overhead was gone.
+        // `run_if` also skips fetching each system's parameters (Windows
+        // queries, config, window manager) when there's no input event, which
+        // matters for perf.
         app.add_systems(
             Update,
             (

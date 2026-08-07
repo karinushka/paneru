@@ -27,9 +27,7 @@ use crate::util::round_px;
 
 pub struct ScrollEventsPlugin;
 
-/// The on-screen strip together with the scroll state being applied to it: the
-/// strip for its window extents, the origin the scroll writes, and the momentum
-/// driving it.
+/// The on-screen strip, its origin, and the scroll state being applied to it.
 type ScrollingStrip<'w, 's> = Single<
     'w,
     's,
@@ -47,12 +45,9 @@ impl Plugin for ScrollEventsPlugin {
             mission_control.is_none_or(|active| !active.0)
         };
 
-        // The two gesture systems only act on an input event, so a frame
-        // carrying none can skip them and everything they would have fetched.
-        //
-        // The rest of the chain is deliberately left ungated: inertia, the snap
-        // force and the integrator run precisely when the fingers have stopped
-        // sending events, and `swiping_timeout` exists to notice their absence.
+        // Only the two gesture systems are gated on an input event. The rest of
+        // the chain (inertia, snap force, integrator) must keep running after
+        // the fingers stop sending events, since that's when they take over.
         app.add_systems(
             Update,
             (

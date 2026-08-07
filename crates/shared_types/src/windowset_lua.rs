@@ -1,21 +1,11 @@
 //! The [`WindowSet`] as a script sees it: its `UserData` impl and the
 //! marshalling around it.
 //!
-//! The value is already pure and already immutable-by-transform, which is
-//! exactly what a script wants, so there is no wrapper type here — `WindowSet`
-//! *is* the userdata. Every `add_method` below is a thin shell over the method
-//! of the same name in [`super::windowset`].
-//!
-//! It lives here, next to the value, because the orphan rule puts it here:
-//! `UserData` is mlua's and `WindowSet` is ours, so the impl cannot go in the
-//! Lua crate that uses it. Gated behind the `lua` feature so a client that only
-//! wants the wire types does not pull in an interpreter.
-//!
-//! Both hosts hand a script the same window set; only *getting* one differs —
-//! the embedded runtime reads the world it is inside, a client asks the daemon
-//! over its socket — so the two `paneru.windows` installs differ in how they
-//! fetch and commit, and share everything a script actually touches: this impl
-//! and [`returned_ops`].
+//! `WindowSet` itself is the userdata — it is already pure and
+//! immutable-by-transform, so no wrapper type is needed. Lives here rather
+//! than in the Lua crate because of the orphan rule (`UserData` is mlua's,
+//! `WindowSet` is ours). Gated behind the `lua` feature so a client wanting
+//! only the wire types does not pull in an interpreter.
 //!
 //! # Indices
 //!
@@ -148,9 +138,8 @@ impl UserData for WindowSet {
         methods.add_method("next", |_, this, id: WinID| Ok(this.next(id)));
         methods.add_method("prev", |_, this, id: WinID| Ok(this.prev(id)));
 
-        // Predicates are plain Lua functions taking a window record, so
-        // `paneru.match` is a convenience rather than a requirement — an
-        // inline `function(w) return w.title:match("scratch") end` works too.
+        // Predicates are plain Lua functions taking a window record;
+        // `paneru.match` is a convenience, not a requirement.
         methods.add_method("find", |lua, this, predicate: Function| {
             for window in this.windows() {
                 let record = lua.to_value(window)?;
@@ -174,9 +163,9 @@ impl UserData for WindowSet {
 
         // --- transforming ----------------------------------------------
         //
-        // Each returns a *new* window set. The one it was called on is
-        // untouched, and nothing reaches a real window until a handler returns
-        // a set carrying these operations.
+        // Each returns a *new* window set; the one it was called on is
+        // untouched, and nothing reaches a real window until a handler
+        // returns a set carrying these operations.
 
         methods.add_method("focus", |_, this, id: WinID| Ok(this.focus(id)));
 

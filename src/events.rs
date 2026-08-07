@@ -30,47 +30,24 @@ pub enum DestroySource {
 
 /// Where a client's answer goes.
 ///
-/// An async channel rather than a `std::sync::mpsc` one so the task waiting on
-/// it can *await* the reply instead of parking a thread. Bounded at one because
-/// exactly one answer is ever sent, which also lets the ECS side use `try_send`
-/// and never block the main thread.
-///
-/// Carries a typed [`Response`] rather than a serialized string: the handlers
-/// answer in values and the transport encodes, so nothing in the world has to
-/// know what the wire looks like.
+/// Bounded to one: exactly one answer is ever sent, and the ECS side answers
+/// with `try_send` so it never blocks the main thread.
 pub type Reply = async_channel::Sender<Response>;
 
 /// `Event` represents various system-level and application-specific occurrences that the window manager reacts to.
 /// These events drive the core logic of the window manager, from window creation to display changes.
-#[allow(dead_code)]
-/// The pointer and gesture subset of [`Event`], republished on its own stream.
-///
-/// Every consumer of [`Event`] pays for the whole stream: fifty-six systems take
-/// a `MessageReader<Event>`, and each one fetches the shared `Messages<Event>`
-/// resource and walks the entire batch to pick out the one or two variants it
-/// wants. With the scheduling overhead gone that resource fetch became the
-/// second-largest cost on the main thread, and these are the events that arrive
-/// most often — a trackpad produces them at the refresh rate whether or not
-/// anything is listening.
-///
-/// [`demux_input_events`](crate::ecs::systems::demux_input_events) reads the
-/// main stream once and republishes these, so the input systems read a stream
-/// carrying nothing else and skip the frame entirely when it is empty. The
-/// events stay on [`Event`] as well, because the Lua bridge and the IPC
-/// subscribers want the undivided stream.
+#[cfg_attr(not(feature = "lua"), allow(dead_code))]
+/// The pointer and gesture subset of [`Event`], republished on its own stream
+/// by [`demux_input_events`](crate::ecs::systems::demux_input_events) so
+/// input-heavy systems don't have to scan the full event stream. Events still
+/// appear on [`Event`] too, for the Lua bridge and IPC subscribers.
 #[derive(Clone, Debug, Message)]
 pub struct InputEvent(pub Event);
 
-/// Several variants carry a payload that nothing in the daemon itself reads —
-/// the modifier state on a mouse-up, the string on a Dock notification, the pid
-/// on an activation. They are there to be forwarded to the scripting bridge,
-/// and `src/lua/convert.rs` is the only reader. With the `lua` feature off that
-/// reader is compiled out and the dead-code lint is right on its own terms and
-/// unhelpful on ours: dropping the fields would mean adding them back the
-/// moment the feature is on. Suppressed only in the configuration where they
-/// genuinely have no consumer, so the lint still applies to the build that
-/// ships.
-#[allow(dead_code)]
+/// Several variants carry a payload used only by the Lua bridge
+/// (`src/lua/convert.rs`). The dead-code lint is suppressed only when the
+/// `lua` feature is off, so it still applies to the build that ships.
+#[cfg_attr(not(feature = "lua"), allow(dead_code))]
 #[derive(Clone, Debug, Message)]
 pub enum Event {
     /// Signals the application to exit.
@@ -93,13 +70,9 @@ pub enum Event {
     ApplicationTerminated { psn: ProcessSerialNumber },
     /// The frontmost application has switched.
     ApplicationFrontSwitched { psn: ProcessSerialNumber },
-    /// An application has become the active (frontmost) application.
-    ///
-    /// Carries the pid for the same reason [`Event::ApplicationVisible`] does:
-    /// without it a subscriber is told that *something* was activated and has no
-    /// way to find out what. Paneru's own focus handling uses
-    /// [`Event::ApplicationFrontSwitched`], which carries a process serial
-    /// number; these two exist for the scripting and IPC subscribers.
+    /// An application has become the active (frontmost) application. Carries
+    /// the pid for subscribers; Paneru's own focus handling uses
+    /// [`Event::ApplicationFrontSwitched`] instead.
     ApplicationActivated { pid: i32 },
     /// An application has stopped being the active application.
     ApplicationDeactivated { pid: i32 },
@@ -222,9 +195,8 @@ pub enum Event {
         respond_to: Reply,
     },
 
-    /// A client has asked for the window set — the same layout value a
-    /// `paneru.windows` handler is given inside the daemon, so a client script
-    /// transforms the identical tree.
+    /// A client has asked for the window set: the same layout value a
+    /// `paneru.windows` handler is given inside the daemon.
     WindowSetQuery { respond_to: Reply },
 
     /// A client has subscribed to state events. Carries the channel they are
@@ -247,9 +219,8 @@ pub enum Event {
 #[derive(Clone, Debug)]
 pub struct EventSender {
     tx: Sender<Event>,
-    /// Ends the Cocoa pump's wait once the event is queued. Shared, because a
-    /// wake-up posted by one producer serves every event queued before the pump
-    /// gets to look.
+    /// Ends the Cocoa pump's wait once the event is queued. Shared so a
+    /// wake-up from any producer covers every event queued before it.
     waker: Arc<EventLoopWaker>,
 }
 

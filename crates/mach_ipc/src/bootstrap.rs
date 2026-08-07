@@ -1,9 +1,8 @@
 //! Publishing and finding the daemon under a well-known name.
 //!
-//! This is the piece that replaces the socket file. A bootstrap name is owned
-//! by the kernel and the bootstrap server rather than by the filesystem, so
-//! there is no stale entry to clean up after a crash, no path to make
-//! world-writable, and no window where the name exists but nothing is listening.
+//! A bootstrap name is owned by the kernel rather than the filesystem, so
+//! there is no stale entry to clean up after a crash and no window where the
+//! name exists but nothing is listening.
 
 use mach2::bootstrap::{bootstrap_check_in, bootstrap_look_up, bootstrap_port, bootstrap_register};
 use mach2::kern_return::KERN_SUCCESS;
@@ -15,10 +14,9 @@ use crate::rights::{RecvRight, SendRight};
 
 /// Claims a name launchd is holding for us.
 ///
-/// This is the path to prefer when running as a service: launchd creates the
-/// port at load time from the job's `MachServices` key and holds it across
-/// restarts, so clients that look the name up while the daemon is restarting
-/// get queued rather than refused.
+/// Prefer this when running as a service: launchd creates the port at load
+/// time and holds it across restarts, so clients that look up the name while
+/// the daemon restarts get queued rather than refused.
 ///
 /// # Errors
 ///
@@ -43,15 +41,13 @@ pub fn check_in(name: &str) -> Result<RecvRight> {
 /// Publishes a fresh port under `name`, for a daemon started outside launchd.
 ///
 /// `bootstrap_register` is deprecated by Apple in favour of XPC but remains
-/// functional and is what comparable tools (sketchybar among them) use. The
-/// deprecation is why [`check_in`] is tried first.
+/// functional; this is why [`check_in`] is tried first.
 ///
 /// # Errors
 ///
 /// Returns [`Error::AlreadyRunning`] when the name is taken, which means
-/// another daemon is live. That is a refusal to start, not something to
-/// override — the socket implementation's habit of unlinking whatever it found
-/// is what this replaces.
+/// another daemon is already live. This is a refusal to start, not something
+/// to override.
 pub fn register(name: &str) -> Result<RecvRight> {
     let cname = CString::new(name).map_err(|_| Error::InvalidName)?;
     let right = RecvRight::alloc()?;

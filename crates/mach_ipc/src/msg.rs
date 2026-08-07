@@ -65,10 +65,9 @@ const _: () = {
 const RECEIVED_SEND: u32 = MACH_MSG_TYPE_MOVE_SEND;
 const RECEIVED_SEND_ONCE: u32 = MACH_MSG_TYPE_MOVE_SEND_ONCE;
 
-/// Where the `type_` byte sits inside every descriptor kind.
-///
-/// Apple places it at the same offset in all of them precisely so a parser can
-/// read it before it knows which layout it is looking at.
+/// Where the `type_` byte sits inside every descriptor kind — Apple places it
+/// at the same offset in all of them so a parser can read it before it knows
+/// which layout it is looking at.
 const DESC_TYPE_OFFSET: usize = 11;
 /// A port descriptor is 12 bytes; the out-of-line kinds are 16 on 64-bit.
 const PORT_DESC_SIZE: usize = 12;
@@ -108,20 +107,13 @@ pub struct Incoming {
 }
 
 /// One outgoing message.
-///
-/// A struct rather than six positional arguments because four of them are
-/// optional ports and timeouts that read as a row of bare `None`s at the call
-/// site, where nothing says which is the reply port and which the carried one.
 pub(crate) struct Outgoing<'a> {
-    /// The port to send to.
-    ///
-    /// Raw only at this boundary: the constructors take the owned right, so a
-    /// caller never handles a bare port name and cannot hand over one whose
-    /// right has already been released.
+    /// The port to send to. Raw only at this boundary: the constructors take
+    /// the owned right, so a caller never hands over a name whose right has
+    /// already been released.
     dest: mach_port_t,
     /// What the destination right is, and so what the kernel does with it.
     dest_kind: Dest,
-    /// The encoded value.
     payload: &'a [u8],
     /// A receive right to answer on, turning this into a request.
     reply_port: Option<mach_port_t>,
@@ -277,8 +269,7 @@ impl Outgoing<'_> {
 }
 
 /// Receives without blocking, reporting [`Error::WouldBlock`] when the port is
-/// empty. This is the half of the async loop that does the actual work; the
-/// waiting is [`crate::poll::Watcher`]'s job.
+/// empty.
 pub(crate) fn try_recv(port: &RecvRight) -> Result<Incoming> {
     recv_with(port.as_raw(), MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0)
 }

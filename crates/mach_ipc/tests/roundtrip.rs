@@ -174,7 +174,6 @@ fn a_subscriber_receives_pushed_events() {
     assert_eq!(client.join().expect("the client thread"), Event { seq: 7 });
 }
 
-/// A subscription is a stream, which is how `paneru subscribe` consumes it.
 #[test]
 fn a_subscription_is_a_stream_of_events() {
     let name = service_name("stream");
@@ -206,8 +205,8 @@ fn a_subscription_is_a_stream_of_events() {
     assert_eq!(client.join().expect("the client thread"), vec![1, 2, 3]);
 }
 
-/// The receiver is a stream too, and consecutive values must each wake it —
-/// this is what catches a wakeup registration that only ever fires once.
+/// Consecutive values must each wake the stream — this is what catches a
+/// wakeup registration that only fires once.
 #[test]
 fn a_receiver_is_a_stream_of_deliveries() {
     let name = service_name("recvstream");
@@ -238,9 +237,8 @@ fn a_receiver_is_a_stream_of_deliveries() {
     assert_eq!(seen, ["0", "1", "2", "3", "4"]);
 }
 
-/// The whole point of the subscriber design: a dead client is reported as
-/// [`Error::PeerGone`], so it can be reaped for the right reason rather than
-/// inferred from a failed write a slow reader would also produce.
+/// A dead client must be reported as [`Error::PeerGone`], distinct from a
+/// slow reader (which would also fail a write).
 #[test]
 fn a_dead_subscriber_is_reported_as_gone() {
     let name = service_name("death");
@@ -250,7 +248,6 @@ fn a_dead_subscriber_is_reported_as_gone() {
     let client = std::thread::spawn(move || {
         let sender = connect::<Request>(&client_name);
         let events = block_on(sender.subscribe::<Event>(&Request::Subscribe)).expect("subscribe");
-        // Dropping the receiving end is exactly what a client exiting does.
         drop(events);
     });
 

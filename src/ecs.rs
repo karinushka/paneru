@@ -106,10 +106,8 @@ pub fn register_systems(app: &mut bevy::app::App) {
         )
             .chain(),
     );
-    // Registered with `add_message` rather than `init_resource`, so the buffer
-    // is double-buffered and dropped after a frame like any other message
-    // stream. Both this and the demux live here rather than in `setup_bevy_app`
-    // because the test harness builds its world through `register_systems` too.
+    // Registered with `add_message`, not `init_resource`, so the buffer is
+    // double-buffered and dropped after a frame like any other message stream.
     app.add_message::<InputEvent>();
     app.add_systems(
         PreUpdate,

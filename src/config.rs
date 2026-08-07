@@ -2121,8 +2121,6 @@ fn test_first_launch_creates_parseable_config_without_overwriting_it() {
 
 #[test]
 fn defaults_config_matches_the_generated_stub() {
-    // `Config::defaults()` stands in for a TOML that isn't there, so it has to
-    // mean the same thing as the stub that would otherwise have been written.
     let stub = InnerConfig::new(DEFAULT_CONFIGURATION).expect("the stub should parse");
     let defaults = Config::defaults().expect("defaults should always build");
     assert_eq!(

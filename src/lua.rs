@@ -273,8 +273,6 @@ pub fn lua_reload_system(
         return;
     }
 
-    // The rebuild itself happens on the worker, which owns the interpreter:
-    // it commits only on success, and reports either way through the outbox.
     worker.send_reload(path.clone());
 }
 
@@ -289,12 +287,7 @@ mod tests {
     use super::*;
     use std::cell::Cell;
 
-    /// The point of the whole thing: many waiters, one read of the world.
-    ///
-    /// Before dispatches could overlap this was unobservable — each handler was
-    /// in a frame of its own, so each legitimately re-read. Now that several can
-    /// be queued at once, re-reading per waiter would multiply the accessibility
-    /// traffic by however many handlers happened to be in flight.
+    // Many concurrent waiters should share a single read of the world.
     #[test]
     fn one_extraction_answers_every_waiter() {
         let reads = Cell::new(0);
@@ -312,7 +305,6 @@ mod tests {
         for answer in &answers {
             assert_eq!(*answer.as_ref().expect("a successful read"), Arc::new(7));
         }
-        // ...and they share it rather than each holding a copy.
         let first = answers[0].as_ref().expect("a successful read");
         assert!(
             answers[1..]
@@ -322,9 +314,7 @@ mod tests {
         );
     }
 
-    /// A world that could not be read is not re-read for the next waiter: the
-    /// failure is shared on the same terms a success is. Retrying per waiter
-    /// would turn one bad frame into one bad frame per handler.
+    // A failed read is shared rather than retried per waiter.
     #[test]
     fn a_failed_extraction_is_shared_not_retried() {
         let reads = Cell::new(0);

@@ -95,12 +95,20 @@ impl ScriptStateStore {
     }
 
     /// A handle on the revision stamp, for the Lua worker to watch.
+    ///
+    /// Only the worker wants it, so without the `lua` feature there is no
+    /// caller — which is not the same as the method being dead.
+    #[cfg_attr(not(feature = "lua"), allow(dead_code))]
     #[must_use]
     pub fn revision_handle(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.revision)
     }
 
     /// The whole store, for answering a read.
+    ///
+    /// As with [`Self::revision_handle`], the only caller is behind the `lua`
+    /// feature.
+    #[cfg_attr(not(feature = "lua"), allow(dead_code))]
     #[must_use]
     pub fn snapshot(&self) -> ScriptState {
         self.state.clone()

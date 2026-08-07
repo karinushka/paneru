@@ -3,13 +3,13 @@ use std::time::{Duration, Instant};
 
 use bevy::MinimalPlugins;
 use bevy::app::App as BevyApp;
-use bevy::app::{PostUpdate, PreUpdate, Startup};
+use bevy::app::{First, Last, PostUpdate, PreUpdate, Startup};
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::lifecycle::RemovedComponents;
-use bevy::ecs::message::Messages;
 use bevy::ecs::query::{Added, Changed, With};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::common_conditions::{not, resource_exists};
+use bevy::ecs::schedule::{ScheduleLabel as _, SingleThreadedExecutor};
 use bevy::ecs::system::{Commands, EntityCommands, Query, Res, SystemId};
 use bevy::prelude::Event as BevyEvent;
 use bevy::tasks::Task;
@@ -28,7 +28,7 @@ use crate::config::{CONFIGURATION_FILE, Config, WindowParams};
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::state::PaneruState;
 use crate::errors::Result;
-use crate::events::{Event, EventSender};
+use crate::events::{Event, EventSender, InputEvent};
 #[cfg(feature = "lua")]
 use crate::lua;
 use crate::manager::{
@@ -106,9 +106,18 @@ pub fn register_systems(app: &mut bevy::app::App) {
         )
             .chain(),
     );
+    // Registered with `add_message` rather than `init_resource`, so the buffer
+    // is double-buffered and dropped after a frame like any other message
+    // stream. Both this and the demux live here rather than in `setup_bevy_app`
+    // because the test harness builds its world through `register_systems` too.
+    app.add_message::<InputEvent>();
     app.add_systems(
         PreUpdate,
-        (systems::window_creation_event, systems::pump_events),
+        (
+            systems::window_creation_event,
+            systems::pump_events,
+            systems::demux_input_events.after(systems::pump_events),
+        ),
     );
     app.add_systems(
         Update,
@@ -258,6 +267,11 @@ pub struct Scrolling {
     pub is_user_swiping: bool,
     /// Last time a physical swipe event was received.
     pub last_event: Duration,
+    /// The strip origin `apply_scrolling_constraints` last wrote. A [`Position`]
+    /// that no longer matches it was moved by something else — a reshuffle
+    /// bringing a window back into view, say — and the scroll offset has to
+    /// adopt that rather than write its own stale value back over it.
+    pub applied: i32,
 }
 
 #[derive(Component, Clone, Debug, Default, Deref, DerefMut)]
@@ -610,7 +624,20 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
     let mut app = BevyApp::new();
 
     app.add_plugins(MinimalPlugins)
-        .init_resource::<Messages<Event>>()
+        // `add_message`, not `init_resource`: the latter creates the buffer but
+        // does not register it with bevy's `MessageRegistry`, so
+        // `message_update_system` never double-buffers it and nothing is ever
+        // dropped. Every event the daemon has ever seen stayed in that vector
+        // for the life of the process — at input rates, a leak that grows all
+        // day.
+        //
+        // Messages now live for two frames, which is what every reader here
+        // needs: the only systems that can miss a frame and still read events
+        // are the ones gated on `not_swiping` and on having IPC subscribers,
+        // and both would rather drop what they missed than act on a backlog —
+        // stale window frames applied after a swipe, or a new subscriber handed
+        // history it never asked for.
+        .add_message::<Event>()
         .insert_resource(Time::<Virtual>::from_max_delta(Duration::from_secs(10)))
         .insert_resource(WindowManager(window_manager))
         .insert_resource(SkipReshuffle(false))
@@ -628,6 +655,43 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         .add_plugins(focus::FocusEventsPlugin)
         .add_plugins(display::DisplayEventsPlugin)
         .add_plugins((register_triggers, register_systems, register_commands));
+
+    // Run the schedules inline rather than fanning every system out across the
+    // task pool.
+    //
+    // The handoff — spawning a task per system, parking, waking, the completion
+    // queue and the executor's own bookkeeping mutex — measured about 45% of the
+    // main thread's non-idle time, against 16% doing the accessibility calls
+    // that are the actual work. Inline it fell to around 10%.
+    //
+    // The fan-out was buying very little to begin with. Bevy only overlaps
+    // systems whose data access is disjoint, and the expensive ones here all
+    // take `&mut Window` — `commit_window_position`, `verify_window_position`
+    // and `window_moved_update_frame` are mutually exclusive whatever the
+    // executor does, and the first two are explicitly chained anyway. What is
+    // left to overlap is a hundred-odd systems whose queries usually match
+    // nothing, and sixteen that take `NonSend` and are pinned to this thread
+    // regardless.
+    //
+    // The parallelism that does pay is untouched: `par_iter_mut` reaches
+    // `ComputeTaskPool` directly, so the commit systems still spread their
+    // blocking `AXUIElementSetAttributeValue` round-trips across the pool.
+    //
+    // `First` and `Last` are included even though paneru puts nothing in them:
+    // an empty schedule still costs a task-pool scope and the park/wake that
+    // goes with it, once per frame. Bevy already runs `Main`, `FixedMain` and
+    // `RunFixedMainLoop` single-threaded for the same reason.
+    for label in [
+        First.intern(),
+        PreUpdate.intern(),
+        Update.intern(),
+        PostUpdate.intern(),
+        Last.intern(),
+    ] {
+        app.edit_schedule(label, |schedule| {
+            schedule.set_executor(SingleThreadedExecutor::new());
+        });
+    }
 
     let menu_events = sender.clone();
     let mut platform_callbacks = PlatformCallbacks::new(sender);

@@ -345,12 +345,10 @@ fn test_scrolling() {
             assert_window_at!(world, 1, 400, TEST_MENUBAR_HEIGHT);
             assert_window_at!(world, 2, 800, TEST_MENUBAR_HEIGHT);
         })
-        // The offsets are 4px further left than they used to be. Each tick
-        // rounds the accumulated scroll offset to whole pixels and writes it
-        // back into `Scrolling::position`; that used to truncate, which is a
-        // bias *towards* zero applied once per frame, so a swipe lost ground
-        // the longer it ran — and lost it asymmetrically, since truncation
-        // rounds the two directions opposite ways. Rounding has no such bias.
+        // Unchanged from before `GESTURE_GAIN` existed: the gain was chosen to
+        // reproduce exactly this travel. The distance now arrives in one step
+        // instead of a direct write plus a lagging integrated velocity, which is
+        // what made a reversal fight itself.
         .on_iteration(5, move |world, _state| {
             assert_window_at!(world, 0, -352, TEST_MENUBAR_HEIGHT);
             assert_window_at!(world, 1, 48, TEST_MENUBAR_HEIGHT);
@@ -420,10 +418,24 @@ fn test_window_hidden_ratio() {
     TestHarness::new()
         .with_config(config)
         .with_windows(2)
-        .on_iteration(2, |world, _state| {
+        // After the swipe, window 0 hangs off the left edge.
+        .on_iteration(1, |world, _state| {
             let entity = find_window_entity(0, world);
             let window = world.get::<Window>(entity).expect("finding window");
             assert!(window.frame().min.x < 0);
+        })
+        // Focusing it brings it fully back into view. This assertion is
+        // inverted from what it used to be: the test asserted the window stayed
+        // hidden, which held only because the scroll offset was written back
+        // over the reshuffle that had already been issued to expose it. With
+        // that clobber fixed the reshuffle lands, and `window_hidden_ratio` does
+        // not hold it off — the ratio is measured against the window's layout
+        // slot, which is fully on-screen, not against where the strip has
+        // scrolled it to.
+        .on_iteration(2, |world, _state| {
+            let entity = find_window_entity(0, world);
+            let window = world.get::<Window>(entity).expect("finding window");
+            assert_eq!(window.frame().min.x, 0);
         })
         .run(commands);
 }
@@ -1382,7 +1394,7 @@ fn test_virtual_workspace_switch_no_horizontal_slide_no_animations() {
     // Remember the settled strip x after scrolling.
     let strip_x_after_scroll = {
         let world = h.app.world_mut();
-        let mut q = world.query_filtered::<&crate::ecs::Position, With<ActiveWorkspaceMarker>>();
+        let mut q = world.query_filtered::<&Position, With<ActiveWorkspaceMarker>>();
         q.single(world)
             .expect("exactly one active strip after scroll")
             .0
@@ -1415,7 +1427,7 @@ fn test_virtual_workspace_switch_no_horizontal_slide_no_animations() {
 
     let strip_x_final = {
         let world = h.app.world_mut();
-        let mut q = world.query_filtered::<&crate::ecs::Position, With<ActiveWorkspaceMarker>>();
+        let mut q = world.query_filtered::<&Position, With<ActiveWorkspaceMarker>>();
         q.single(world)
             .expect("exactly one active strip after switch-back")
             .0
@@ -1510,7 +1522,7 @@ fn test_virtual_workspace_switch_stops_in_flight_strip_animation() {
             }
         }
         let world = h.app.world_mut();
-        let mut q = world.query_filtered::<&crate::ecs::Position, With<ActiveWorkspaceMarker>>();
+        let mut q = world.query_filtered::<&Position, With<ActiveWorkspaceMarker>>();
         q.single(world)
             .expect("exactly one active strip after restore")
             .0
@@ -1541,7 +1553,7 @@ fn test_virtual_workspace_switch_stops_in_flight_strip_animation() {
         }
     }
     let world = h.app.world_mut();
-    let mut q = world.query_filtered::<&crate::ecs::Position, With<ActiveWorkspaceMarker>>();
+    let mut q = world.query_filtered::<&Position, With<ActiveWorkspaceMarker>>();
     let final_x = q.single(world).expect("exactly one active strip").0.x;
     assert_eq!(
         final_x, saved_x,
@@ -1742,7 +1754,7 @@ fn test_reshuffle_leftmost_pins_strip_to_left_edge_with_stale_frame() {
 /// the origin without reshuffling, mirroring the non-animated branch.
 #[test]
 fn test_virtual_workspace_switch_preserves_scroll_with_animations() {
-    use crate::ecs::Position;
+    use Position;
 
     let config: Config = (
         MainOptions {
@@ -2016,4 +2028,90 @@ fn test_app_self_activation_keeps_window_parked_on_hidden_virtual_row() {
             );
         })
         .run(commands);
+}
+
+/// A `WindowMoved` notification for a window paneru is not currently moving is
+/// the app (or the user) moving it, and the layout must take that new origin on
+/// board.
+#[test]
+fn test_foreign_window_move_is_adopted() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    let config: Config = (
+        MainOptions {
+            // Snappy, so no `RepositionMarker` is still in flight when the
+            // notification below arrives.
+            animation_speed: Some(10000.0),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(2)
+        .on_iteration(0, |_world, state| {
+            state.os_move_window(0, Origin::new(77, 88));
+        })
+        .on_iteration(2, |world, _state| {
+            let entity = find_window_entity(0, world);
+            let position = world.get::<Position>(entity).expect("window position");
+            assert_eq!(
+                position.0,
+                Origin::new(77, 88),
+                "a move paneru did not make must be read back into the layout"
+            );
+        })
+        .run(commands);
+}
+
+/// The same notification, while paneru is the one moving the window, is only an
+/// echo of the move it just asked for. Reading it back sets `animate_entities`
+/// lerping from wherever the app had got to rather than from where the
+/// animation left off, and the two then chase each other — the jitter seen
+/// whenever a new window arrives and the whole strip reflows at once.
+///
+/// Driven straight at the system rather than through the harness loop: the mock
+/// applies a reposition synchronously, so a full frame would put the window
+/// back where the layout wants it before the notification could ever be read.
+/// The lag this guard exists for is exactly what the mock cannot reproduce.
+#[test]
+fn test_own_window_move_echo_is_ignored() {
+    use bevy::ecs::system::RunSystemOnce as _;
+
+    let mut harness = TestHarness::new().with_windows(2);
+    harness.app.update();
+
+    let state = harness.mock_state.clone();
+    let world = harness.world();
+    let entity = find_window_entity(0, world);
+    let before = world.get::<Position>(entity).expect("window position").0;
+
+    // A move of ours is in flight, and the app reports a frame we did not ask
+    // for while it is. Displaced on the axis the animation leaves alone, so the
+    // assertion cannot be confused by how far the lerp has run.
+    world
+        .entity_mut(entity)
+        .insert(RepositionMarker(Origin::new(5000, before.y)));
+    state.os_move_window(0, Origin::new(before.x, before.y + 888));
+    world.write_message(Event::WindowMoved { window_id: 0 });
+
+    world
+        .run_system_once(crate::ecs::systems::window_moved_update_frame)
+        .expect("running window_moved_update_frame");
+
+    assert_eq!(
+        world.get::<Position>(entity).expect("window position").0,
+        before,
+        "the echo of our own move must not be read back over the animation"
+    );
 }

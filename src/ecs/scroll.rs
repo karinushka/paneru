@@ -27,9 +27,7 @@ use crate::util::round_px;
 
 pub struct ScrollEventsPlugin;
 
-/// The on-screen strip together with the scroll state being applied to it: the
-/// strip for its window extents, the origin the scroll writes, and the momentum
-/// driving it.
+/// The on-screen strip, its origin, and the scroll state being applied to it.
 type ScrollingStrip<'w, 's> = Single<
     'w,
     's,
@@ -47,12 +45,9 @@ impl Plugin for ScrollEventsPlugin {
             mission_control.is_none_or(|active| !active.0)
         };
 
-        // The two gesture systems only act on an input event, so a frame
-        // carrying none can skip them and everything they would have fetched.
-        //
-        // The rest of the chain is deliberately left ungated: inertia, the snap
-        // force and the integrator run precisely when the fingers have stopped
-        // sending events, and `swiping_timeout` exists to notice their absence.
+        // Only the two gesture systems are gated on an input event. The rest of
+        // the chain (inertia, snap force, integrator) must keep running after
+        // the fingers stop sending events, since that's when they take over.
         app.add_systems(
             Update,
             (
@@ -87,16 +82,8 @@ fn swipe_gesture(
     mut commands: Commands,
 ) {
     // How far a full-trackpad swipe carries the strip, in viewport widths, at
-    // sensitivity 1.0. Fingers travel a few centimetres and the strip has to
-    // cross a display, so the gesture is geared up.
-    //
-    // This used to be applied by accident: `scrolling_integrator` added a
-    // velocity built from this same delta on top of the direct write. Removing
-    // that double integration — which is what made a reversal fight itself —
-    // cut how far a swipe reached, so the gearing is now explicit. The value is
-    // the one that reproduces the old travel exactly rather than a derivation:
-    // the accidental version compounded a lagging EMA over several frames and
-    // delivered appreciably more than the doubling it looked like.
+    // sensitivity 1.0. This value is empirical (chosen to reproduce prior
+    // behavior), not derived from other constants — don't try to recompute it.
     const GESTURE_GAIN: f64 = 3.0;
 
     let swipe_sensitivity = config.swipe_sensitivity();
@@ -161,11 +148,9 @@ fn swipe_gesture(
         let applied_delta = wheel_delta + gesture_delta * GESTURE_GAIN;
 
         let dt = time.delta_secs_f64();
-        // Deliberately *not* geared by `GESTURE_GAIN`, even though the strip is
-        // travelling at that multiple when the fingers leave. This is a
-        // `delta / dt` estimate off a single frame and is noisy enough already;
-        // multiplying it up made the coast dominate the gesture, carrying the
-        // strip roughly twice as far again as the swipe itself.
+        // Deliberately not geared by `GESTURE_GAIN`: this single-frame velocity
+        // estimate is noisy enough already, and gearing it up made the coast
+        // overshoot the swipe.
         let new_velocity = if has_gesture_event && dt > 0.0 {
             gesture_delta * swipe_sensitivity / dt
         } else {
@@ -240,13 +225,9 @@ pub(super) fn swiping_timeout(
     }
 
     for (entity, mut scroll) in strips {
-        // While the fingers are down, the lift event is the only trustworthy
-        // signal. Inferring the end of a gesture from silence ended it at every
-        // direction change: fingers pause as they reverse, no delta clears
-        // `SWIPE_THRESHOLD`, and the gap looks exactly like a lift. That handed
-        // the still-moving strip to inertia and the auto-center magnet, dropped
-        // `Scrolling` so the border flickered back on mid-slide, and refocused
-        // whatever window happened to be sliding under the cursor.
+        // While fingers are down, only the lift event ends the gesture.
+        // Inferring it from silence misfired on every direction change (a pause
+        // while reversing looks just like a lift).
         let idle_limit = if state.fingers_down {
             LOST_LIFT_BACKSTOP
         } else {
@@ -256,10 +237,8 @@ pub(super) fn swiping_timeout(
             continue;
         }
 
-        // Refocusing under the cursor is what lets a swipe hand focus to the
-        // window it brought over the pointer, so it stays — but only on the
-        // frame the gesture actually ends. Firing it for every frame the strip
-        // spent coasting walked focus across each window that slid past.
+        // Only refocus on the frame the gesture actually ends — firing every
+        // coast frame would walk focus across each window that slid past.
         if scroll.is_user_swiping {
             scroll.is_user_swiping = false;
 
@@ -364,12 +343,9 @@ fn scrolling_integrator(
     };
 
     let scroll = &mut *strip;
-    // Velocity is the coast after the fingers leave. While they are still down
-    // `swipe_gesture` has already written their movement straight into
-    // `position`, and integrating on top of that applied it a second time — at
-    // roughly double distance, with the extra half coming from an EMA three
-    // frames behind the hand. Reversing direction left that stale half pulling
-    // the other way until it caught up.
+    // Velocity is only the coast after fingers leave: while they're down,
+    // `swipe_gesture` already writes movement straight into `position`, so
+    // integrating here too would double-apply it.
     if scroll.is_user_swiping {
         return;
     }
@@ -387,13 +363,11 @@ fn apply_scrolling_constraints(
     let viewport = active_display.actual_bounds(&config);
     let (strip, ref mut position, ref mut scroll) = *strip;
 
-    // Anything else that moves the strip — `reshuffle_layout_strip` bringing a
-    // stacked window back into view, `ensure_visible_in_strip`, the animator
-    // stepping either of them along — writes `Position` directly. This system
-    // owns `Position` the rest of the time, so a scroll left in flight wrote its
-    // own stale offset straight back over that move and the strip never got
-    // there. A `Position` that no longer matches what was last written here came
-    // from one of those, and it wins: adopt it and drop the coast.
+    // This system owns `Position` except when something else moves the strip
+    // directly (e.g. `reshuffle_layout_strip`, `ensure_visible_in_strip`). If
+    // `Position` no longer matches what we last wrote, one of those won:
+    // adopt it and drop the coast, rather than overwriting it with our own
+    // stale offset.
     if position.x != scroll.applied {
         scroll.position = f64::from(position.x);
         scroll.velocity = 0.0;
@@ -409,12 +383,9 @@ fn apply_scrolling_constraints(
         &viewport,
         &config,
     ) {
-        // Only the on-screen origin is whole pixels. Rounding `scroll.position`
-        // too — as writing the clamped value back unconditionally did — threw
-        // away the fraction every frame, so motion slower than half a pixel per
-        // frame accumulated to nothing and then arrived all at once. Snap it
-        // only when the clamp actually moved the strip, which is what pins it
-        // at the edges.
+        // Only snap `scroll.position` to the rounded pixel value when the clamp
+        // actually moved it (pinning at the edges); otherwise rounding every
+        // frame would throw away sub-pixel motion before it can accumulate.
         if clamped_offset != rounded {
             scroll.position = f64::from(clamped_offset);
         }

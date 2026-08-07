@@ -1,16 +1,11 @@
 //! The script-owned key-value store: arbitrary named state a script can put
-//! somewhere that outlives it.
+//! somewhere that outlives it, surviving both a Lua hot reload and a daemon
+//! restart.
 //!
-//! A Lua global is the obvious place to keep something between invocations, and
-//! the wrong one: a hot reload builds a whole new interpreter, so anything held
-//! there is silently wiped every time the script is saved. This is the store
-//! that survives both that and a daemon restart.
-//!
-//! Shared by the daemon and its clients, because both can read and write it: the
-//! embedded runtime through `paneru.state.*`, a client through the same
-//! spelling over the socket. Two writers is also why a write carries what it
-//! [`Expected`] to find: that is what makes `paneru.state.mutate` a real
-//! read-modify-write rather than a read and a hopeful write.
+//! Shared by the daemon and its clients: the embedded runtime writes it via
+//! `paneru.state.*`, a client via the same spelling over the socket. Because
+//! there are two writers, a write carries what it [`Expected`] to find — that
+//! is what makes `paneru.state.mutate` a real read-modify-write.
 
 use std::collections::BTreeMap;
 

@@ -296,12 +296,8 @@ impl MockState {
 
     /// Closes a window while its application keeps running, the way macOS
     /// actually reports it: the SLS space notification first, then the AX
-    /// element teardown.
-    ///
-    /// Both of the signals paneru could confirm the close against lag behind
-    /// it, exactly as they do on real apps — the leftover AX element keeps
-    /// answering attribute queries so `role()` still succeeds, and the app's
-    /// window list still reports the window.
+    /// element teardown, with the AX element and the app's window list still
+    /// reporting the window for a while after, as they do on real apps.
     #[allow(unused)]
     pub fn os_close_window(&self, id: WinID) {
         let mut inner = self.inner.force_write();
@@ -442,9 +438,8 @@ impl MockState {
                 .map(|w| w.title.clone())
                 .unwrap_or_default())
         });
-        // The real cache is invalidated by the title-changed notification; the
-        // mock reads its title from the shared state every time, so there is
-        // nothing to drop — but the call still has to be expected.
+        // The mock reads its title from shared state every time, so there's
+        // nothing to invalidate — but the call still needs an expectation.
         mw.expect_invalidate_title().return_const(());
 
         let s = self.clone();

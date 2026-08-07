@@ -1,22 +1,20 @@
 //! What a handler can ask the main thread for, and the cache in front of it.
 //!
-//! Every read here is a round trip: the worker sends a [`QueryRequest`] carrying
-//! a reply channel and *awaits* it, while the main thread carries on and answers
-//! from the ECS in `serve_lua_queries`. Awaiting rather than blocking is what
-//! lets handlers overlap — a handler parked on a read is not holding the
-//! interpreter, so the next one runs instead of queueing behind it.
+//! Every read here is a round trip: the worker sends a request carrying a
+//! reply channel and *awaits* it, while the main thread answers from the ECS
+//! in `serve_lua_queries`. Awaiting rather than blocking lets handlers
+//! overlap — a handler parked on a read is not holding the interpreter.
 //!
-//! Two things follow from that overlap, and both are why this module exists
-//! rather than the reads being four loose closures:
+//! Two invariants:
 //!
-//! * **The caches are per batch, not per dispatch.** Handlers that overlap are
-//!   reading the same frame's world, so they should see the same answer — and
-//!   the first one to ask pays for all of them. [`DispatchWorld`] clears them
-//!   when the last dispatch finishes, so the next batch reads afresh.
-//! * **No borrow may be held across an await.** These are `RefCell`s on a single
-//!   thread, so a borrow spanning a suspension point is not a wait — it is a
-//!   `BorrowMutError` panic the moment another dispatch touches the same cell.
-//!   Every read below takes what it needs, drops the borrow, *then* awaits.
+//! * **The caches are per batch, not per dispatch.** Handlers that overlap
+//!   are reading the same frame's world, so [`DispatchWorld`] clears them
+//!   only when the last dispatch in the batch finishes.
+//! * **No borrow may be held across an await.** These are `RefCell`s on a
+//!   single thread, so a borrow spanning a suspension point is not a wait —
+//!   it is a `BorrowMutError` panic the moment another dispatch touches the
+//!   same cell. Every read below takes what it needs, drops the borrow,
+//!   *then* awaits.
 
 use std::cell::{Cell, RefCell};
 use std::future::Future;
@@ -109,13 +107,9 @@ impl WorldAccess {
 
 /// One read of the world that several dispatches may want at once.
 ///
-/// The first caller makes the round trip; anyone who asks while it is still out
-/// queues behind it and is handed the same answer when it lands. A plain cache
-/// is not enough for that: dispatches overlap, so they *all* miss it while the
-/// first read is still in flight and each sends a request of its own. The main
-/// thread would coalesce those into one extraction anyway, but the channel
-/// traffic, the wakeups and the reply allocations would still be one per
-/// handler.
+/// The first caller makes the round trip; anyone who asks while it's still
+/// out queues behind it and is handed the same answer when it lands, rather
+/// than each sending a request of its own.
 struct SharedRead<T> {
     cached: RefCell<Option<Arc<T>>>,
     /// `Some` while a read is out, holding whoever is waiting on it.
@@ -139,9 +133,8 @@ impl<T> SharedRead<T> {
     where
         F: Future<Output = Shared<T>>,
     {
-        // Every borrow below is taken, used and dropped before an await: these
-        // are `RefCell`s on one thread, so a borrow spanning a suspension point
-        // is a panic rather than a wait.
+        // Every borrow here is taken, used, and dropped before an `await`: a
+        // `RefCell` borrow spanning a suspension point panics rather than waits.
         let cached = self.cached.borrow().clone();
         if let Some(cached) = cached {
             return Ok(cached);
@@ -170,8 +163,8 @@ impl<T> SharedRead<T> {
         if let Ok(value) = &answer {
             *self.cached.borrow_mut() = Some(Arc::clone(value));
         }
-        // Taken rather than borrowed across the sends: a waiter woken by one of
-        // them may ask again before this returns.
+        // Taken, not borrowed, across the sends: a woken waiter may ask again
+        // before this returns.
         let queued = self.waiting.borrow_mut().take().unwrap_or_default();
         for waiter in queued {
             let _ = waiter.try_send(answer.clone());
@@ -189,10 +182,8 @@ pub(super) struct DispatchWorld {
     in_flight: Cell<usize>,
     state: SharedRead<PaneruQueryState>,
     window_set: SharedRead<WindowSet>,
-    /// Unlike the other two this survives the batch: the store changes only when
-    /// someone writes it, and the revision stamp says when that happened. A
-    /// script that reads its own state on every event therefore pays for one
-    /// round trip, not one per batch.
+    /// Unlike the other two caches, this survives the batch — the store only
+    /// changes on a write, tracked by the revision stamp.
     script_state: RefCell<Option<(u64, ScriptState)>>,
 }
 
@@ -238,12 +229,10 @@ impl DispatchWorld {
         self.window_set.get(|| self.access.window_set()).await
     }
 
-    /// The script state store, re-read whenever the revision says the copy here
-    /// has gone stale.
-    ///
-    /// The stamp is taken *before* the read, so a write landing mid-read leaves
-    /// the copy marked older than it is: the next call re-reads needlessly,
-    /// which is the harmless direction to be wrong in.
+    /// The script state store, re-read whenever the revision says the cached
+    /// copy is stale. The stamp is taken *before* the read, so a write landing
+    /// mid-read leaves the copy marked older than it is — re-read needlessly
+    /// next time, which is the harmless direction to be wrong in.
     pub(super) async fn script_state(&self) -> Result<ScriptState, String> {
         self.available("paneru.state")?;
         let revision = self.access.revision.load(Ordering::Acquire);
@@ -258,11 +247,9 @@ impl DispatchWorld {
         }
     }
 
-    /// Applies one write and reports what became of it.
-    ///
-    /// The one thing a handler does that it also has to see the result of, so
-    /// unlike a command it waits: `paneru.state.mutate` only holds together if
-    /// it learns whether it was overtaken while it is still there to try again.
+    /// Applies one write and reports what became of it. Unlike a command, this
+    /// waits for the result: `paneru.state.mutate` needs to know whether it
+    /// was overtaken while it's still there to retry.
     pub(super) async fn write_script_state(
         &self,
         write: &ScriptStateWrite,

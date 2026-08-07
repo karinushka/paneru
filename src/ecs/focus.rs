@@ -152,11 +152,9 @@ fn autocenter_window_on_focus(
 ) {
     let entity = *focused;
 
-    // A workspace restore re-focuses the remembered window after the strip was
-    // already placed at its saved origin; centering that focus would slide the
-    // strip away from the restored position. The guard outlives this system on
-    // purpose — window_focused_trigger despawns it once focus moves on, and
-    // timeout_ticker expires it otherwise.
+    // Skip auto-centering when this focus came from a workspace restore, since
+    // the strip is already at its saved origin. window_focused_trigger and
+    // timeout_ticker are responsible for clearing the marker.
     if restored.iter().any(|marker| marker.entity == entity) {
         return;
     }

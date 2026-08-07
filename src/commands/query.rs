@@ -23,14 +23,10 @@ use paneru_shared_types::wire::Response;
 
 /// One connected `paneru subscribe` client.
 ///
-/// The socket is behind an async mutex and only ever touched from a task on the
-/// IO pool: writing to it is a syscall against a peer that may not be reading,
-/// which is not something the main thread can afford to wait on.
-///
-/// `alive` is how the main thread learns a subscriber has gone without touching
-/// the socket at all. The writing task clears it on the first failed write, and
-/// the broadcast handler reaps on that flag — an atomic load per subscriber
-/// rather than a lock it would have to contend for with the task.
+/// The channel is only ever touched from a task on the IO pool, since writing
+/// to a peer that may not be reading can block. `alive` lets the main thread
+/// learn a subscriber is gone via a plain atomic flag instead of a lock shared
+/// with that task.
 struct Subscriber {
     channel: Arc<paneru_mach_ipc::Subscriber>,
     alive: Arc<AtomicBool>,
@@ -141,9 +137,8 @@ impl StateBroadcastIntent {
                         ),
                 } => intent.windows_changed = true,
                 Event::WindowFocused { .. } => intent.window_focused = true,
-                // Geometry alone decides what is on screen, so plain moves and
-                // resizes — scrolling the strip, dragging, animation settling —
-                // can change the visible set without changing anything else.
+                // Geometry alone decides what's on screen, so plain moves and
+                // resizes can change the visible set on their own.
                 Event::WindowMoved { .. } | Event::WindowResized { .. } => {
                     intent.on_screen_changed = true;
                 }
@@ -204,23 +199,10 @@ pub(super) fn register_query_commands(app: &mut App) {
     );
 }
 
-/// Answers the socket queries that read the world: the state documents and the
-/// window set.
-///
-/// Both live in one system on purpose. Bevy derives a system's world access
-/// from its parameters statically, for every run, so each system asking for
-/// [`QueryStateParams`] is one more thing the scheduler must keep apart from
-/// anything writing those components — every frame, whether or not a client
-/// asked anything. One system holding that access answers both.
-///
-/// For the same reason the extraction itself is done per request rather than up
-/// front: on the overwhelmingly common frame where no query arrived, this reads
-/// nothing at all.
-///
-/// The window set is deliberately not a [`StateQueryKind`]: those all project
-/// the one state document, and this is a different value — the layout tree — so
-/// folding it into that enum would give every consumer of a query kind a case
-/// that cannot happen.
+/// Answers socket queries that read the world: state documents and the window
+/// set. Both live in one system so only one system holds [`QueryStateParams`]'s
+/// world access. The window set is a separate variant rather than folded into
+/// [`StateQueryKind`] since it projects a different value (the layout tree).
 fn state_query_handler(mut messages: MessageReader<Event>, state: QueryStateParams) {
     /// Sends an answer without ever waiting for it to be taken. The reply
     /// channel holds one message and exactly one is sent, so this cannot fill;
@@ -439,11 +421,9 @@ fn state_event_broadcast_handler(
         return;
     }
 
-    // Drop whoever a previous broadcast found gone, then push this one. Each
-    // send is non-blocking and bounded, so this stays on the main thread: a
-    // subscriber that has stopped reading has its event dropped rather than
-    // stalling the window manager, and one that has exited is marked for the
-    // next reap.
+    // Each send is non-blocking and bounded, so a stalled reader just drops the
+    // event instead of blocking the main thread; an exited subscriber is
+    // marked below and reaped here on the next broadcast.
     subscribers
         .streams
         .retain(|subscriber| subscriber.alive.load(Ordering::Relaxed));
@@ -641,8 +621,8 @@ mod tests {
 
     #[test]
     fn test_window_moves_track_the_on_screen_set() {
-        // Geometry alone decides what is on screen, so a bare move — no window
-        // list or workspace change — still has to be looked at.
+        // A bare move (no window-list or workspace change) still has to be
+        // looked at.
         let intent = StateBroadcastIntent::from_events(
             [PaneruEvent::WindowMoved { window_id: 10 }].iter(),
             StateBroadcastSignals::default(),

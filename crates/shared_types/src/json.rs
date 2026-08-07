@@ -1,16 +1,10 @@
 //! Rendering wire types as the JSON a terminal sees.
 //!
-//! Several types are documented as JSON objects carrying a discriminant field —
-//! `{"event": "window_focused", …}`, `{"outcome": "applied", …}` — which serde
-//! spells `#[serde(tag = "…")]`. That representation cannot be *decoded* from a
-//! binary format: it works by reading the whole value and then looking for the
-//! tag inside it, which requires asking the format what each piece is, and only
-//! a self-describing format can answer.
-//!
-//! So the types derive the ordinary externally tagged form, which a binary
-//! format handles, and this is what turns that into the documented shape on the
-//! way out. The JSON a client sees is unchanged; it is simply produced here
-//! rather than by an attribute.
+//! Types derive the ordinary externally tagged serde form (`{"variant": {…}}`)
+//! because `#[serde(tag = "…")]` needs a self-describing format and can't be
+//! decoded from postcard. This flattens that into the documented
+//! `{"tag": "variant", …}` shape afterwards, so the JSON a client sees is
+//! unchanged.
 
 /// Rewrites serde's externally tagged `{"variant": {…}}` into the flat
 /// `{"tag": "variant", …}` clients are documented to read.

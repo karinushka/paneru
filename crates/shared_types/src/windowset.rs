@@ -1,53 +1,17 @@
-//! A window layout as a **pure value**, in the style of xmonad's `StackSet`.
+//! A window layout as a pure value, in the style of xmonad's `StackSet`: every
+//! transform returns a new [`WindowSet`] rather than mutating the one it was
+//! given, and records what it did as a [`LayoutOp`] so the host can replay the
+//! change against the live layout.
 //!
-//! The window manager's real layout lives in the ECS and can only be changed by
-//! systems. This is a photograph of it that a script can transform freely:
-//! every operation returns a *new* [`WindowSet`] instead of mutating the one it
-//! was given, so a handler can branch, compute speculatively, and discard what
-//! it doesn't want, without any of it reaching a real window.
+//! Each level is behind an [`Arc`], so cloning is cheap and a transform copies
+//! only the spine it touches. `Arc` rather than `Rc` because the value is built
+//! on the window manager's thread and handed to the interpreter on another.
 //!
-//! What makes that useful rather than merely tidy is that each transform also
-//! records what it *meant* — a [`LayoutOp`] — onto the value it returns. The
-//! handler's return value therefore carries both the layout it wants and the
-//! sequence of intents that produced it; the host replays the intents against
-//! the live world. A value the handler computes but does not return carries its
-//! ops off to the garbage collector, which is exactly the behaviour you want
-//! from `if some_condition then return ws:swap(a, b) end`.
-//!
-//! ```text
-//! ws                       -- ops: []
-//!   :focus(w)              -- ops: [Focus(w)]
-//!   :shift(w, 3)           -- ops: [Focus(w), MoveToWorkspace(w, 3)]
-//! ```
-//!
-//! # Cost
-//!
-//! Every level is behind an [`Arc`], so cloning a `WindowSet` is a handful of
-//! refcount bumps and a transform copies only the spine it touches
-//! ([`Arc::make_mut`]). Two values branched off one parent share everything they
-//! didn't change, including the common prefix of their op lists.
-//!
-//! `Arc` rather than `Rc` because the value is built by the window manager on
-//! its own thread and handed to the interpreter on another.
-//!
-//! # Scope
-//!
-//! Every transform here changes the layout in a way that follows from the
-//! layout alone — focus, ordering, workspace membership, stacking, floating,
-//! width ratios — and can therefore be both reflected in the returned tree and
-//! replayed faithfully against one named window.
-//!
-//! The operations that are the layout engine's to decide (centring,
-//! full-width, equalise, balance, raising a float, moving to another display)
-//! are deliberately absent. They act on whatever is focused rather than on a
-//! window you name, and a value that recorded them could neither show their
-//! result nor promise it applied to the window you meant. They remain available
-//! as the imperative `paneru.window.*` verbs, where that is exactly what they
-//! say they do.
-//!
-//! Even for what is here, the returned tree is a prediction: the layout engine
-//! settles the actual geometry. A handler that needs the settled result should
-//! read it from the next event's `WindowSet`, not from the one it just built.
+//! Only transforms that follow from the layout alone are here (focus,
+//! ordering, workspace membership, stacking, floating, width ratios); ops the
+//! layout engine decides (centring, equalise, raising a float, ...) stay as
+//! imperative `paneru.window.*` verbs instead. The returned tree is a
+//! prediction — the layout engine settles the actual geometry.
 
 use std::sync::Arc;
 
@@ -115,12 +79,8 @@ impl LayoutOp {
 }
 
 /// A rectangle as fractions of a display, in the style of xmonad's
-/// `RationalRect`: `{ x: 0.1, y: 0.05, width: 0.8, height: 0.5 }` is inset a
-/// tenth from the left and a twentieth from the top, covering four fifths of
-/// the width and half the height.
-///
-/// Proportional rather than absolute because that is what makes a scratchpad
-/// placement mean the same thing on a laptop panel and an external display.
+/// `RationalRect`. Proportional rather than absolute, so a scratchpad
+/// placement means the same thing on a laptop panel and an external display.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RelativeRect {
     pub x: f64,
@@ -156,11 +116,9 @@ impl RelativeRect {
     }
 }
 
-/// One link of the recorded op list.
-///
-/// A cons list rather than a `Vec`: appending is O(1) and, more to the point,
-/// two values branched off the same parent get independent tails without
-/// copying the prefix they share.
+/// One link of the recorded op list. A cons list rather than a `Vec` so two
+/// values branched off the same parent get independent tails without copying
+/// the shared prefix.
 #[derive(Debug)]
 struct OpNode {
     op: LayoutOp,
@@ -277,12 +235,9 @@ pub struct WindowSet {
     displays: Arc<Vec<DisplaySet>>,
     focused: Option<WinID>,
     /// What has been asked of this value, most recent first. Not part of the
-    /// layout, and deliberately not compared: two window sets are equal when
-    /// they describe the same layout, however they got there.
-    ///
-    /// Not serialized either, for the same reason: a set sent over the socket
-    /// is one a client is about to transform, and it starts out having been
-    /// asked for nothing. The ops travel back the other way, on their own.
+    /// layout: two window sets are equal when they describe the same layout,
+    /// however they got there, so this field is excluded from `PartialEq` and
+    /// not serialized.
     #[serde(skip)]
     ops: Option<Arc<OpNode>>,
 }
@@ -465,9 +420,7 @@ impl WindowSet {
         next
     }
 
-    /// Records `op` without changing the tree at all — not even copying it. For
-    /// the ops whose outcome is the layout engine's to decide, see the note on
-    /// fidelity in the module docs.
+    /// Records `op` without changing the tree at all — not even copying it.
     fn recording(&self, op: LayoutOp) -> Self {
         Self {
             displays: Arc::clone(&self.displays),
@@ -531,11 +484,8 @@ impl WindowSet {
                 follow,
             },
             |displays| {
-                // Check the destination before lifting the window out: a
-                // snapshot need not contain every workspace the host knows
-                // about, and losing the window from the tree because we could
-                // not place it would be worse than leaving it where it is. The
-                // op is recorded either way, so the host still moves it.
+                // Check the destination before lifting the window out, so a
+                // missing workspace doesn't lose the window from the tree.
                 if !displays.iter().any(|display| {
                     display
                         .workspaces
@@ -928,7 +878,6 @@ mod tests {
 
         assert_eq!(left.ops(), vec![LayoutOp::Focus(2)]);
         assert_eq!(right.ops(), vec![LayoutOp::Focus(3)]);
-        // ...and neither reached the value they branched from.
         assert!(base.ops().is_empty());
         assert_eq!(base.focused(), Some(1));
     }
@@ -936,17 +885,12 @@ mod tests {
     #[test]
     fn untouched_subtrees_are_shared_not_copied() {
         let base = fixture();
-        // Cloning shares the whole tree; nothing is copied until something is
-        // changed, which is what makes speculative branching cheap.
         let clone = base.clone();
         assert!(
             Arc::ptr_eq(&base.displays, &clone.displays),
             "cloning should share, not copy"
         );
 
-        // A transform copies the spine it edits but leaves the contents it
-        // never reached alone: workspace 2 is untouched by a change to
-        // workspace 1.
         let edited = base.width(1, 0.9);
         let before = &base.displays()[0].workspaces[1];
         let after = &edited.displays()[0].workspaces[1];
@@ -1048,7 +992,6 @@ mod tests {
             ],
             "customFloating is float-then-place"
         );
-        // ...and the tree shows where it landed.
         let window = set.window(2).expect("the window is still there");
         assert_eq!(window.frame, Some(placed));
         assert!(window.floating);
@@ -1162,9 +1105,6 @@ mod tests {
 
     #[test]
     fn shifting_to_a_workspace_the_snapshot_lacks_keeps_the_window() {
-        // A snapshot need not list every workspace the host knows about, and
-        // dropping the window from the tree would be a worse lie than leaving
-        // it put. The intent is recorded regardless.
         let set = fixture().shift(2, 42);
         assert!(
             set.window(2).is_some(),
@@ -1193,7 +1133,6 @@ mod tests {
 
     #[test]
     fn transforming_a_missing_window_still_records_the_intent() {
-        // The snapshot is a frame stale; the host may still resolve the window.
         let set = fixture().focus(99);
         assert_eq!(set.ops(), vec![LayoutOp::Focus(99)]);
     }

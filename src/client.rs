@@ -1,15 +1,6 @@
-//! The `paneru …` side of the protocol: what a CLI invocation says to a running
-//! daemon, and how it prints the answer.
-//!
-//! This is the only place JSON is produced. Everything between the two processes
-//! is a typed value carried as postcard; the JSON exists because a terminal (and
-//! `jq`, and a status bar's shell script) needs text, and it is rendered here at
-//! the very last step rather than being what the daemon and its clients speak.
-//!
-//! Every function here is `async` and none of them drives an executor. A CLI
-//! invocation is one round trip, so there is exactly one place worth blocking —
-//! [`run`], at the entry point — and doing it here instead would mean each
-//! function separately parking the same thread.
+//! The `paneru …` CLI side of the protocol: sends requests to the running
+//! daemon and prints the answer as JSON. This is the only place JSON is
+//! produced; the daemon and its clients otherwise speak typed postcard values.
 
 use futures_lite::StreamExt;
 use paneru_mach_ipc::{SendPort, Sender};
@@ -24,9 +15,7 @@ use crate::errors::{Error, Result};
 ///
 /// # Errors
 ///
-/// Reports plainly that Paneru is not running when nothing has claimed the
-/// service name — the common case by far, and one that used to surface as a
-/// bare `ENOENT` on a socket path.
+/// Returns a plain "paneru is not running" error when no daemon is running.
 fn connect() -> Result<Sender<Request>> {
     Sender::connect(&service_name()).map_err(|err| match err {
         paneru_mach_ipc::Error::NotRunning => Error::Generic("paneru is not running".to_string()),
@@ -34,8 +23,7 @@ fn connect() -> Result<Sender<Request>> {
     })
 }
 
-/// Sends a command and does not wait: the daemon applies it against the live
-/// world, and a caller that wants the result queries for it.
+/// Sends a command without waiting for a reply.
 ///
 /// # Errors
 ///
@@ -77,8 +65,8 @@ pub async fn script_state(request: ScriptStateRequest) -> Result<String> {
     };
 
     let value = match answer {
-        // Rendered under `value` rather than bare, so a stored `null` and an
-        // absent key stay distinguishable to a caller reading the output.
+        // Nested under `value` so a stored `null` is distinguishable from an
+        // absent key.
         ScriptStateResponse::Value(value) => serde_json::json!({
             "value": value.map(serde_json::Value::from),
         }),
@@ -93,8 +81,7 @@ pub async fn script_state(request: ScriptStateRequest) -> Result<String> {
 ///
 /// # Errors
 ///
-/// If the daemon cannot be reached. A daemon that exits ends the stream rather
-/// than erroring: that is a normal end to a subscription, not a failure of one.
+/// If the daemon cannot be reached.
 pub async fn subscribe() -> Result<()> {
     use std::io::Write;
 
@@ -106,8 +93,7 @@ pub async fn subscribe() -> Result<()> {
     while let Some(delivery) = events.next().await {
         let event = match delivery {
             Ok(delivery) => delivery.value,
-            // The daemon is gone; the subscription is over, which is how a
-            // `paneru subscribe` ends when the window manager stops.
+            // The daemon exiting ends the subscription normally.
             Err(paneru_mach_ipc::Error::PeerGone) => break,
             Err(err) => return Err(Error::from(err)),
         };
@@ -117,13 +103,11 @@ pub async fn subscribe() -> Result<()> {
             .map_err(|err| Error::Generic(err.to_string()))?
             .to_string();
         let mut stdout = std::io::stdout();
-        // Flush per event: a subscriber is usually piped into something reading
-        // line by line, and a buffered stream would stall it.
+        // Flush per line: callers pipe this into readers expecting immediate lines.
         if writeln!(stdout, "{line}")
             .and_then(|()| stdout.flush())
             .is_err()
         {
-            // Whatever we were piped into has closed; nothing to report.
             break;
         }
     }
@@ -132,9 +116,7 @@ pub async fn subscribe() -> Result<()> {
 
 /// Runs one client subcommand to completion.
 ///
-/// The single place the CLI blocks. Everything above is `async` and composes;
-/// this is the boundary where a program that must eventually return an exit code
-/// meets that.
+/// The single place the CLI blocks; everything above is `async`.
 ///
 /// # Errors
 ///
@@ -156,11 +138,8 @@ pub fn run(command: ClientCommand) -> Result<()> {
     })
 }
 
-/// What a CLI invocation wants of the daemon.
-///
-/// Distinct from [`Request`]: this is what the *command line* asked for,
-/// including how to print the answer, where a `Request` is only what crosses to
-/// the daemon.
+/// What a CLI invocation wants of the daemon, including how to print the
+/// answer. Distinct from [`Request`], which is only what crosses to the daemon.
 #[derive(Debug)]
 pub enum ClientCommand {
     Send(Vec<String>),
@@ -177,8 +156,7 @@ fn render(payload: &QueryPayload) -> Result<String> {
         .map_err(|err| Error::Generic(err.to_string()))
 }
 
-/// The daemon answered something this request never asks for, which means the
-/// two ends disagree about the protocol.
+/// The daemon answered something this request never asks for.
 fn unexpected(response: &Response) -> Error {
     match response {
         Response::Error(message) => Error::Generic(message.clone()),

@@ -1,19 +1,15 @@
 //! Installs the global `paneru` API table into a Lua state.
 //!
-//! The command-issuing half of the API (`paneru.run`, `paneru.window.*`,
-//! `paneru.workspace.*`, `paneru.mouse.*`) is not defined here: it comes from
-//! [`paneru_lua`], the crate that also builds the loadable client module, so
-//! both hosts install the same surface. Both hosts hand it a dispatcher taking a typed
-//! [`Command`] — here it goes onto the command bus, there onto the daemon
-//! socket — so a script sees one identical API either way.
+//! The command-issuing half (`paneru.run`, `paneru.window.*`,
+//! `paneru.workspace.*`, `paneru.mouse.*`) comes from [`paneru_lua`], shared
+//! with the client module so both hosts expose the same surface over a typed
+//! [`Command`] dispatcher — here onto the command bus, there onto the daemon
+//! socket.
 //!
-//! What is installed here is the embedded-only half: `paneru.on` (event
-//! handlers), `paneru.bind` (keybinds), `paneru.flash` and `paneru.log`. Their
-//! callbacks are kept in a Rust-side [`Registry`] rather than in Lua globals, so
-//! there is no scaffolding script to keep in sync with the Rust that calls it.
-//!
-//! The `query*` functions are named after the client's, but answer from the
-//! world directly instead of over the socket — see [`provider`].
+//! What's installed here is embedded-only: `paneru.on` (event handlers),
+//! `paneru.bind` (keybinds), `paneru.flash`, `paneru.log`, and the `query*`
+//! functions (named after the client's, but answering from the world
+//! directly instead of over the socket).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -39,25 +35,18 @@ struct ExecJob {
     reply: async_channel::Sender<std::io::Result<std::process::Output>>,
 }
 
-/// How many `paneru.exec` commands may be in flight at once.
-///
-/// A queue with a fixed set of workers rather than a thread per call: a handler
-/// bound to a high-frequency event can reach `exec` at the event rate, and
-/// spawning a thread each time would trade one cost for another. Small because
-/// these are waits on other processes, not work — four is enough that one slow
-/// command does not hold up the rest.
+/// How many `paneru.exec` commands may run at once. A fixed worker pool
+/// rather than a thread per call; four is enough that one slow command
+/// doesn't hold up the rest, since these are waits on other processes, not
+/// work.
 const EXEC_WORKERS: usize = 4;
 
 /// Starts the pool that runs `paneru.exec` commands.
 ///
-/// Every worker takes from the same queue, so a job goes to whichever is free.
-/// That does mean two commands issued back to back can finish out of order; a
-/// script that needs one to land before the next should await the first, which
-/// is what the async binding is for.
-///
-/// The workers end when the returned sender is dropped, which is when the Lua
-/// state goes — a reload gets a fresh pool rather than inheriting a queue of
-/// work the old script asked for.
+/// Jobs are taken from a shared queue, so two commands issued back to back
+/// can finish out of order — a script that needs ordering should await the
+/// first. Workers end when the returned sender is dropped (on reload), so a
+/// reload gets a fresh pool rather than the old script's queued work.
 fn spawn_exec_pool() -> async_channel::Sender<ExecJob> {
     let (jobs, queue) = async_channel::unbounded::<ExecJob>();
     for worker in 0..EXEC_WORKERS {
@@ -82,16 +71,12 @@ fn spawn_exec_pool() -> async_channel::Sender<ExecJob> {
 }
 
 /// How many times `paneru.state.mutate` may lose the compare-and-set race
-/// before giving up. A handful of writers contending is normal; a dozen
-/// collisions on one key means something is wrong, and looping forever inside a
-/// handler would wedge that dispatch.
+/// before giving up; looping forever would wedge the handler's dispatch.
 const MUTATE_ATTEMPTS: usize = 8;
 
 /// Installs the `paneru` API into `lua`, wiring the Rust-backed functions to the
 /// shared `outbox` (queued commands/flashes) and `registry` (registered handlers
 /// and chords).
-// One block per `paneru.*` function, kept flat so adding one is a local change
-// rather than a hunt across helpers.
 #[allow(clippy::too_many_lines)]
 pub(super) fn install(
     lua: &Lua,
@@ -103,8 +88,8 @@ pub(super) fn install(
     let paneru = lua.create_table()?;
     lua.globals().set("paneru", paneru.clone())?;
 
-    // The one primitive the shared API is built on: queue the command it built
-    // for the command bus.
+    // Queues the command onto the command bus; the primitive the shared API
+    // is built on.
     let dispatch = {
         let outbox = Rc::clone(outbox);
         move |_: &Lua, command: Command| {
@@ -140,21 +125,15 @@ pub(super) fn install(
     };
     paneru.set("flash", flash)?;
 
-    // paneru.exec(program[, args]) — run a program, without holding the
+    // paneru.exec(program[, args]) — run a program without holding the
     // interpreter while it runs.
     //
-    // Async so the handler suspends here: the executor is free to run the other
-    // handlers, and a world read waiting behind this one is answered on time.
-    // A synchronous exec binding — which is what a script otherwise reaches for,
-    // and what the profile found costing a fork per event — cannot be suspended,
-    // because there is no yield point inside a plain C function for mlua to
-    // resume from. It stops every other handler until the child exits.
-    //
-    // `std::process::Command` also spawns through `posix_spawn` rather than
-    // forking, so the process image is never duplicated.
+    // Async so the handler suspends and other handlers/world reads aren't
+    // blocked behind it. A synchronous binding cannot be suspended — there is
+    // no yield point inside a plain C function for mlua to resume from — so it
+    // would stop every other handler until the child exits.
     let exec = {
-        // Started on the first call, so a script that never execs never pays for
-        // the workers. Only ever touched from the Lua thread.
+        // Started lazily on first use; only ever touched from the Lua thread.
         let pool: Rc<RefCell<Option<async_channel::Sender<ExecJob>>>> = Rc::new(RefCell::new(None));
         lua.create_async_function(move |lua, (program, args): (String, Option<Vec<String>>)| {
             let jobs = pool
@@ -225,10 +204,10 @@ pub(super) fn install(
     };
     paneru.set("bind", bind)?;
 
-    // paneru.setup(table) — declare the whole configuration from Lua. The table
-    // mirrors the TOML sections one-for-one. A `bindings` sub-table (command
-    // string = chord string) is desugared onto the same path as `paneru.bind`
-    // and stripped out before the rest is deserialized into a `Config`.
+    // paneru.setup(table) — declare the whole configuration from Lua. Mirrors
+    // the TOML sections; a `bindings` sub-table is desugared onto the same
+    // path as `paneru.bind` and stripped before the rest is deserialized into
+    // a `Config`.
     let setup = {
         let registry = Rc::clone(registry);
         let config_cell = Rc::clone(config_cell);
@@ -249,12 +228,11 @@ pub(super) fn install(
     paneru.set("setup", setup)?;
 
     // paneru.windows(fn) — xmonad's `windows`: hand the window set to `fn` and
-    // commit whatever it hands back. The same contract as a bind handler, for
-    // use partway through one.
+    // commit whatever it returns.
     //
-    // Async because `fn` may itself query, and because fetching the set is a
-    // round trip to the main thread. It reads the batch's shared copy, so
-    // calling this from several concurrent handlers costs one fetch.
+    // Async because `fn` may itself query and fetching the set is a round
+    // trip to the main thread; concurrent callers share one fetch via the
+    // batch's cached copy.
     let windows = {
         let outbox = Rc::clone(outbox);
         let world = Rc::clone(world);
@@ -305,17 +283,15 @@ fn register_bind(registry: &SharedRegistry, chord: &str, handler: Value) -> mlua
 }
 
 /// Installs the state-query half of the API, matching the client module's
-/// spelling exactly: `paneru.query(kind)` hands back the raw JSON string,
+/// naming: `paneru.query(kind)` hands back the raw JSON string,
 /// `paneru.query_json(kind)` the decoded table, and `query_state` /
-/// `query_active` / `query_workspaces` / `query_on_screen` are the fixed-kind
-/// shorthands. A script therefore reads state the same way whether it runs
-/// inside the daemon or in a client process.
+/// `query_active` / `query_workspaces` / `query_on_screen` are fixed-kind
+/// shorthands.
 ///
-/// The functions themselves only find the provider and unpack its answer; what
-/// they cannot do is reach the world, which is not accessible outside a
-/// dispatching system. `super::LuaRuntime::with_query` installs a provider for
-/// exactly as long as a callback is on the stack, so calling one of these at
-/// script top level fails with an explanation rather than stale data.
+/// The world itself is only reachable while a dispatch is on the stack
+/// (`super::LuaRuntime::with_query` installs the provider for exactly that
+/// long), so calling one of these at script top level fails with an
+/// explanation rather than returning stale data.
 fn install_query(lua: &Lua, paneru: &mlua::Table, world: &Rc<DispatchWorld>) -> mlua::Result<()> {
     let raw = query_function(lua, world, None, true)?;
     paneru.set("query", raw)?;
@@ -378,15 +354,9 @@ fn query_function(
     })
 }
 
-/// Installs `paneru.state`: the named store a script keeps things in.
-///
-/// A Lua global is the obvious place to put something a handler wants to
-/// remember, and the wrong one — a hot reload builds a whole new interpreter,
-/// so what is kept there is wiped every time the script is saved. What goes in
-/// here survives that and a restart, and a client can read and write the same
-/// store over the socket under the same names.
-///
-/// Three calls:
+/// Installs `paneru.state`: a named store a script can keep values in,
+/// surviving hot reloads and restarts (unlike a Lua global). A client can
+/// also read and write the same store over the socket under the same names.
 ///
 /// ```lua
 /// paneru.state.get("pads.term")           -- the value, or nil
@@ -394,16 +364,11 @@ fn query_function(
 /// paneru.state.mutate("count", function(n) return (n or 0) + 1 end)
 /// ```
 ///
-/// `mutate` is the one to reach for when the new value depends on the old.
-/// It reads, runs your function, and writes only if the value is still what it
-/// read — otherwise it runs your function again against what the value became.
-/// Two handlers, or a handler and a client, incrementing the same counter
-/// therefore cannot lose an increment the way a `get` followed by a `set` can.
-/// It returns what it stored.
-///
-/// Values are anything that maps onto JSON: strings, numbers, booleans, and
-/// tables of those. A function, a coroutine or a userdata cannot be stored, and
-/// says so rather than being silently dropped.
+/// `mutate` reads, runs your function, and writes only if the value hasn't
+/// changed since the read — retrying otherwise — so concurrent writers can't
+/// lose an increment the way `get` then `set` can. Values must be
+/// JSON-representable; functions, coroutines, and userdata are rejected
+/// rather than silently dropped.
 fn install_script_state(
     lua: &Lua,
     paneru: &mlua::Table,
@@ -425,9 +390,8 @@ fn install_script_state(
         })?
     })?;
 
-    // `set(key, nil)` removes: the Lua way of spelling "there is nothing here"
-    // is the absence of a value, and storing a JSON null instead would leave a
-    // key that reads back as `nil` but is still there.
+    // `set(key, nil)` removes the key, rather than storing a JSON null that
+    // would still be present but read back as `nil`.
     state.set("set", {
         let world = Rc::clone(world);
         lua.create_async_function(move |lua, (key, value): (String, Value)| {
@@ -449,13 +413,10 @@ fn install_script_state(
         })?
     })?;
 
-    // Read, transform, write — and if the value moved under it in between, do it
-    // again against what it moved to. `transform` is the script's own function,
-    // so it runs here on the worker; only the compare-and-set crosses to the
-    // main thread. That is what makes the whole thing atomic without a Lua
-    // function ever having to leave this thread: a competing write cannot land
-    // inside the read-modify-write, it can only lose the compare and send us
-    // round again.
+    // Read, transform, write, retrying against whatever the value moved to if
+    // it changed underneath. `transform` runs here on the worker; only the
+    // compare-and-set crosses to the main thread, which is what keeps this
+    // atomic without the Lua function ever leaving this thread.
     state.set("mutate", {
         let world = Rc::clone(world);
         lua.create_async_function(move |lua, (key, transform): (String, mlua::Function)| {

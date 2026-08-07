@@ -106,10 +106,8 @@ pub fn register_systems(app: &mut bevy::app::App) {
         )
             .chain(),
     );
-    // Registered with `add_message` rather than `init_resource`, so the buffer
-    // is double-buffered and dropped after a frame like any other message
-    // stream. Both this and the demux live here rather than in `setup_bevy_app`
-    // because the test harness builds its world through `register_systems` too.
+    // Registered with `add_message`, not `init_resource`, so the buffer is
+    // double-buffered and dropped after a frame like any other message stream.
     app.add_message::<InputEvent>();
     app.add_systems(
         PreUpdate,
@@ -268,9 +266,8 @@ pub struct Scrolling {
     /// Last time a physical swipe event was received.
     pub last_event: Duration,
     /// The strip origin `apply_scrolling_constraints` last wrote. A [`Position`]
-    /// that no longer matches it was moved by something else — a reshuffle
-    /// bringing a window back into view, say — and the scroll offset has to
-    /// adopt that rather than write its own stale value back over it.
+    /// that no longer matches it was moved by something else (e.g. a reshuffle),
+    /// so the scroll offset must adopt that instead of overwriting it.
     pub applied: i32,
 }
 
@@ -555,13 +552,10 @@ impl SpawnCommandsExt for Commands<'_, '_> {
 }
 
 /// Rebuilds the config watcher around `changed`, then re-registers every other
-/// config file.
-///
-/// Editors that save atomically (write-new-then-rename) break the original
-/// watch, so the watcher has to be rebuilt. But `setup_config_watcher` watches
-/// only the path it is handed, and the TOML and the Lua script share one
-/// watcher — so rebuilding for whichever file changed used to silently stop the
-/// other one hot-reloading until the next restart.
+/// config file. Editors that save atomically (write-new-then-rename) break the
+/// original watch, and since the TOML and Lua script share one watcher,
+/// rebuilding it for just the changed file would otherwise silently stop the
+/// other one from hot-reloading.
 pub(crate) fn rewatch_configs(
     window_manager: &WindowManager,
     changed: &std::path::Path,
@@ -624,19 +618,12 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
     let mut app = BevyApp::new();
 
     app.add_plugins(MinimalPlugins)
-        // `add_message`, not `init_resource`: the latter creates the buffer but
-        // does not register it with bevy's `MessageRegistry`, so
-        // `message_update_system` never double-buffers it and nothing is ever
-        // dropped. Every event the daemon has ever seen stayed in that vector
-        // for the life of the process — at input rates, a leak that grows all
-        // day.
-        //
-        // Messages now live for two frames, which is what every reader here
-        // needs: the only systems that can miss a frame and still read events
-        // are the ones gated on `not_swiping` and on having IPC subscribers,
-        // and both would rather drop what they missed than act on a backlog —
-        // stale window frames applied after a swipe, or a new subscriber handed
-        // history it never asked for.
+        // `add_message`, not `init_resource`: the latter never registers the
+        // buffer with bevy's `MessageRegistry`, so it's never double-buffered
+        // and grows unbounded instead — every event lived for the process's
+        // lifetime. Messages now live two frames, which every reader here
+        // tolerates: readers gated on `not_swiping` or IPC subscribers would
+        // rather drop a missed frame than act on a backlog.
         .add_message::<Event>()
         .insert_resource(Time::<Virtual>::from_max_delta(Duration::from_secs(10)))
         .insert_resource(WindowManager(window_manager))
@@ -656,31 +643,14 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         .add_plugins(display::DisplayEventsPlugin)
         .add_plugins((register_triggers, register_systems, register_commands));
 
-    // Run the schedules inline rather than fanning every system out across the
-    // task pool.
-    //
-    // The handoff — spawning a task per system, parking, waking, the completion
-    // queue and the executor's own bookkeeping mutex — measured about 45% of the
-    // main thread's non-idle time, against 16% doing the accessibility calls
-    // that are the actual work. Inline it fell to around 10%.
-    //
-    // The fan-out was buying very little to begin with. Bevy only overlaps
-    // systems whose data access is disjoint, and the expensive ones here all
-    // take `&mut Window` — `commit_window_position`, `verify_window_position`
-    // and `window_moved_update_frame` are mutually exclusive whatever the
-    // executor does, and the first two are explicitly chained anyway. What is
-    // left to overlap is a hundred-odd systems whose queries usually match
-    // nothing, and sixteen that take `NonSend` and are pinned to this thread
-    // regardless.
-    //
-    // The parallelism that does pay is untouched: `par_iter_mut` reaches
-    // `ComputeTaskPool` directly, so the commit systems still spread their
-    // blocking `AXUIElementSetAttributeValue` round-trips across the pool.
-    //
-    // `First` and `Last` are included even though paneru puts nothing in them:
-    // an empty schedule still costs a task-pool scope and the park/wake that
-    // goes with it, once per frame. Bevy already runs `Main`, `FixedMain` and
-    // `RunFixedMainLoop` single-threaded for the same reason.
+    // Run every schedule inline rather than fanning systems out across the task
+    // pool: the task-pool handoff measured ~45% of main-thread time against
+    // ~16% actually spent on accessibility calls, dropping to ~10% once
+    // inlined. The expensive systems here all take `&mut Window` and are
+    // already mutually exclusive, so the fan-out bought little; genuine
+    // parallelism (`par_iter_mut`) still goes through `ComputeTaskPool`
+    // directly. `First`/`Last` are included even though unused because an
+    // empty schedule still costs a task-pool scope per frame.
     for label in [
         First.intern(),
         PreUpdate.intern(),
@@ -719,17 +689,16 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
     // Do not insert this in mocks.
     app.insert_resource(LowPowerMode(false));
 
-    // Start the Lua worker and install its hot-reload plugin. Kept out of the
-    // mock harness. A missing/broken script falls back to an empty runtime so
-    // the watcher can still pick up a later fix. `spawn` waits for the script
-    // to finish loading, so errors are reported here at startup and the
-    // keybinds it registered are published before the event tap can see a
-    // keypress.
+    // Start the Lua worker and install its hot-reload plugin (kept out of the
+    // mock harness). A missing/broken script falls back to an empty runtime so
+    // the watcher can still pick up a later fix. `spawn` blocks until the
+    // script finishes loading, so its keybinds are published before the event
+    // tap can see a keypress.
     #[cfg(feature = "lua")]
     if let Some(path) = lua_path {
         // `paneru.bind` resolves chords on the worker, and the layout-aware
-        // keymap behind that goes through Carbon/TIS. Capture it here, on the
-        // main thread, before the worker can ask for it.
+        // keymap behind that goes through Carbon/TIS — must capture it here,
+        // on the main thread, before the worker can ask for it.
         crate::config::prime_virtual_keymap();
         // The worker caches the script state store and watches this stamp to
         // know when its copy is stale — including when the writer was a client

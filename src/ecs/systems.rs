@@ -48,9 +48,6 @@ type TimedOutSpawns<'w, 's> = Populated<
     Or<(With<BProcess>, With<Application>)>,
 >;
 
-/// Windows as the resize handler rewrites them: the OS handle to re-read the
-/// frame from, the origin it is measured against, the size to overwrite, and
-/// whether the window is ours to lay out at all.
 /// Windows as [`window_moved_update_frame`] sees them: the element to re-read,
 /// the origin to update, and the marker saying we are the ones moving it.
 type MovableWindows<'w, 's> = Query<
@@ -66,6 +63,9 @@ type MovableWindows<'w, 's> = Query<
     Without<LayoutStrip>,
 >;
 
+/// Windows as the resize handler rewrites them: the OS handle to re-read the
+/// frame from, the size to overwrite, and whether the window is ours to lay
+/// out at all.
 type ResizableWindows<'w, 's> = Query<
     'w,
     's,
@@ -89,19 +89,11 @@ const LOOP_TIMEOUT_STEP: u32 = 1;
 /// How long [`pump_events`] may spend draining the incoming channel before it
 /// has to hand the frame back, and how many events it may take in one go.
 ///
-/// Both are needed because the drain is the only thing standing between a burst
-/// of notifications and the rest of the schedule. It used to run until a whole
-/// millisecond passed with nothing arriving, which is a condition a burst never
-/// satisfies: a drag, a resize animation, an app churning out
-/// moved/resized/reordered notifications, or a client hammering the socket all
-/// keep events under a millisecond apart indefinitely. The loop then never
-/// exited, the systems after it never ran, and the window manager stopped
-/// responding to anything until the burst let up — sudden, random, and
-/// intermittent, because it depends entirely on what the apps are doing.
-///
-/// Nothing is dropped when a cap is hit: the events stay in the channel and the
-/// next frame picks them up. The cost of stopping early is one frame of latency
-/// on the tail of a burst; the cost of not stopping was the whole schedule.
+/// The drain previously ran until a full millisecond passed with nothing
+/// arriving, a condition a sustained burst (drag, resize animation, a churning
+/// app) never satisfies — the loop never exited and the window manager stopped
+/// responding until the burst let up. Nothing is dropped when a cap is hit:
+/// leftover events stay in the channel for the next frame to pick up.
 const PUMP_BUDGET: Duration = Duration::from_millis(4);
 const PUMP_MAX_EVENTS: usize = 256;
 
@@ -559,11 +551,7 @@ pub(super) fn retry_front_switch(
 /// Animates window movement.
 /// Fraction of the remaining distance an exponential ease-out consumes in a
 /// frame, given a decay `rate` (per second) and the frame's `delta` in seconds.
-///
-/// Shared by the reposition and resize animators so the two can never drift out
-/// of step. The result is a `Vec2::lerp` factor, hence `f32`: the clamp pins it
-/// to `[0, 1]`, a range `f32` covers in full, so the narrowing costs only
-/// mantissa bits — orders of magnitude below one pixel of motion.
+/// Shared by the reposition and resize animators so the two never drift out of step.
 #[allow(
     clippy::cast_possible_truncation,
     reason = "clamped to [0, 1], well within f32's range; only sub-pixel precision is lost"
@@ -696,12 +684,10 @@ pub(crate) fn pump_events(
         return;
     };
 
-    // Deliberately *not* paced to a frame period. Holding the pass until a
-    // display frame elapsed cut the redundant passes as intended, but it also
-    // put a floor under how soon a pass could start: an event landing just after
-    // the pump returned waited out the rest of the period before anything moved.
-    // That reads as latency, and latency is worse than the redundant work it
-    // was buying back.
+    // Deliberately not paced to a frame period: waiting a full period put a
+    // floor under how soon a pump could start, so an event landing right after
+    // one returned had to wait out the rest of it. That latency is worse than
+    // the redundant work skipping the wait costs.
     platform.pump_cocoa_event_loop(f64::from(*timeout) / 1000.0);
 
     let deadline = Instant::now() + PUMP_BUDGET;
@@ -709,9 +695,7 @@ pub(crate) fn pump_events(
     let mut pending_mouse = None;
 
     // `true` when the channel went quiet, `false` when a cap sent us home with
-    // events still queued. Only the quiet case may back the poll timeout off —
-    // sleeping longer while there is a backlog is the opposite of what is
-    // wanted.
+    // events still queued. Only the quiet case may back the poll timeout off.
     let drained = loop {
         // Checked before the receive so a burst cannot keep extending the stay:
         // whatever is left stays in the channel for the next frame.
@@ -723,10 +707,8 @@ pub(crate) fn pump_events(
             break false;
         }
 
-        // Polled before any timed wait: the Cocoa pump above has already done
-        // this frame's sleeping, so a quiet channel used to cost another
-        // millisecond on top of it — doubling the floor on a frame that is
-        // trying to turn around in one.
+        // Polled before any timed wait: the Cocoa pump above already did this
+        // frame's sleeping, so a quiet channel used to cost another millisecond.
         let received = match incoming_events.try_recv() {
             Err(TryRecvError::Empty) => incoming_events.recv_timeout(Duration::from_millis(1)),
             Err(TryRecvError::Disconnected) => Err(RecvTimeoutError::Disconnected),
@@ -789,12 +771,10 @@ pub(super) fn window_resized_update_frame(
         if matches!(unmanaged, Some(Unmanaged::Minimized | Unmanaged::Hidden)) {
             continue;
         }
-        // Our own resize, echoed back. `commit_window_size` asked for this size
-        // and `animate_resize_entities` is still stepping towards it, so reading
-        // the app's answer in and nudging the strip by the difference fights the
-        // animation that is producing that difference — every window in the
-        // strip at once, whenever a new one arrives and the layout reflows.
-        // Only a resize we did not initiate says anything new.
+        // Our own resize, echoed back: `commit_window_size` requested this size
+        // and `animate_resize_entities` is still stepping toward it, so reading
+        // the echo in here would fight the animation producing that difference.
+        // Only a resize we did not initiate is new information.
         if resizing {
             continue;
         }
@@ -865,11 +845,9 @@ pub(crate) fn window_moved_update_frame(
         if matches!(unmanaged, Some(Unmanaged::Minimized | Unmanaged::Hidden)) {
             continue;
         }
-        // Our own move, echoed back. `animate_entities` lerps from whatever
-        // `Position` currently holds, so writing the app's observed frame into
-        // it while the animation is running restarts each step from wherever the
-        // app had got to — behind, for anything that does not move instantly.
-        // The animation then re-issues the move, and the two chase each other.
+        // Our own move, echoed back: `animate_entities` lerps from the current
+        // `Position`, so overwriting it with the echoed frame mid-animation
+        // restarts each step from behind, and the two chase each other.
         if repositioning {
             continue;
         }
@@ -916,7 +894,6 @@ pub(crate) fn gather_initial_processes(
         .cloned()
         .or_else(|| toml_config.clone());
 
-    // Apply any display menubar override to the newly created displays.
     if let Some(config) = &effective {
         let height = config.menubar_height();
         for mut display in &mut displays {
@@ -948,13 +925,11 @@ pub(crate) fn gather_initial_processes(
         }
     }
 
-    // The input event tap holds a clone of the `Config` handle that came in on
-    // `InitialConfig`, and reads swipe/scroll settings off it on every event. A
-    // Lua `paneru.setup{...}` builds a *fresh* handle, so left alone the tap
-    // would keep reading the TOML (or default) settings forever and gestures
-    // would never be intercepted. Publish the Lua settings into the handle the
-    // tap already holds and keep that one as the resource, so both sides share
-    // one inner from here on — including for `replace_inner_from` on reload.
+    // The input event tap holds its own clone of the `Config` handle from
+    // `InitialConfig` and reads swipe/scroll settings off it per event. A Lua
+    // `paneru.setup{...}` builds a fresh handle, so its settings must be
+    // published into the tap's existing handle rather than replacing it, or
+    // gestures would keep reading stale settings.
     match (existing_config.as_deref(), toml_config) {
         #[cfg(feature = "lua")]
         (Some(lua_config), Some(shared)) => {

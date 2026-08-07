@@ -182,10 +182,8 @@ pub(super) struct DispatchWorld {
     in_flight: Cell<usize>,
     state: SharedRead<PaneruQueryState>,
     window_set: SharedRead<WindowSet>,
-    /// Unlike the other two this survives the batch: the store changes only when
-    /// someone writes it, and the revision stamp says when that happened. A
-    /// script that reads its own state on every event therefore pays for one
-    /// round trip, not one per batch.
+    /// Unlike the other two caches, this survives the batch — the store only
+    /// changes on a write, tracked by the revision stamp.
     script_state: RefCell<Option<(u64, ScriptState)>>,
 }
 
@@ -231,12 +229,10 @@ impl DispatchWorld {
         self.window_set.get(|| self.access.window_set()).await
     }
 
-    /// The script state store, re-read whenever the revision says the copy here
-    /// has gone stale.
-    ///
-    /// The stamp is taken *before* the read, so a write landing mid-read leaves
-    /// the copy marked older than it is: the next call re-reads needlessly,
-    /// which is the harmless direction to be wrong in.
+    /// The script state store, re-read whenever the revision says the cached
+    /// copy is stale. The stamp is taken *before* the read, so a write landing
+    /// mid-read leaves the copy marked older than it is — re-read needlessly
+    /// next time, which is the harmless direction to be wrong in.
     pub(super) async fn script_state(&self) -> Result<ScriptState, String> {
         self.available("paneru.state")?;
         let revision = self.access.revision.load(Ordering::Acquire);
@@ -251,11 +247,9 @@ impl DispatchWorld {
         }
     }
 
-    /// Applies one write and reports what became of it.
-    ///
-    /// The one thing a handler does that it also has to see the result of, so
-    /// unlike a command it waits: `paneru.state.mutate` only holds together if
-    /// it learns whether it was overtaken while it is still there to try again.
+    /// Applies one write and reports what became of it. Unlike a command, this
+    /// waits for the result: `paneru.state.mutate` needs to know whether it
+    /// was overtaken while it's still there to retry.
     pub(super) async fn write_script_state(
         &self,
         write: &ScriptStateWrite,

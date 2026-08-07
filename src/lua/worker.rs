@@ -279,10 +279,9 @@ impl Drop for LuaWorker {
     }
 }
 
-/// Builds the runtime for `source`, falling back to an empty one (and logging)
-/// if the script errors, so a later hot reload can still install a fixed script.
-/// Always publishes the resulting keybinds — [`set_lua_keybinds`] hands them to
-/// the event tap through an `ArcSwap`, which is happy to be written from here.
+/// Builds the runtime for `source`, falling back to an empty one (and
+/// logging) if the script errors, so a later reload can still install a fix.
+/// Always publishes the resulting keybinds via [`set_lua_keybinds`].
 fn load(source: &LuaSource, world: &Rc<DispatchWorld>) -> LuaRuntime {
     let runtime = match source {
         LuaSource::Path(path) => match LuaRuntime::from_file(path, world) {
@@ -321,9 +320,9 @@ fn reload(
     match LuaRuntime::from_file(path, world) {
         Ok(runtime) => {
             set_lua_keybinds(runtime.published_keybinds());
-            // A reloaded `paneru.setup{...}` stays authoritative. If the edited
-            // script dropped `setup`, keep the config already in force rather
-            // than reverting to TOML behind the user's back.
+            // A reloaded `paneru.setup{...}` stays authoritative: if the
+            // edited script dropped `setup`, keep the config already in
+            // force rather than reverting to TOML.
             if let Some(config) = runtime.built_config() {
                 publish_config(built_config, config);
                 let _ = to_main.try_send(FromLua::ConfigChanged);
@@ -354,8 +353,8 @@ fn flash(to_main: &Sender<FromLua>, message: String, duration: f32) {
 
 /// The worker thread itself: load, then dispatch whatever arrives until the
 /// main thread goes away.
-// One parameter per channel and per shared cell, all of them owned by `spawn`.
-// Bundling them into a struct would only move the same list somewhere else.
+// One parameter per channel and per shared cell, all owned by `spawn`;
+// bundling them into a struct would only move the same list elsewhere.
 #[allow(clippy::too_many_arguments)]
 fn run(
     source: &LuaSource,

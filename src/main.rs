@@ -282,11 +282,9 @@ impl QueryCmd {
 }
 
 impl StateCmd {
-    /// The request this asks the daemon for.
-    ///
-    /// The values arrive from the shell as JSON text — that is the only spelling
-    /// a terminal has for structured data — and are parsed here, so nothing past
-    /// this point deals in strings.
+    /// The request this asks the daemon for. Values arrive from the shell as
+    /// JSON text and are parsed here, so nothing past this point deals in
+    /// strings.
     fn request(&self) -> errors::Result<ScriptStateRequest> {
         /// The `-` that a shell caller writes for "there is no value here":
         /// absent in `expected`, a removal in `value`. It cannot collide with

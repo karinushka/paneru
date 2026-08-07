@@ -148,11 +148,9 @@ fn swipe_gesture(
         let applied_delta = wheel_delta + gesture_delta * GESTURE_GAIN;
 
         let dt = time.delta_secs_f64();
-        // Deliberately *not* geared by `GESTURE_GAIN`, even though the strip is
-        // travelling at that multiple when the fingers leave. This is a
-        // `delta / dt` estimate off a single frame and is noisy enough already;
-        // multiplying it up made the coast dominate the gesture, carrying the
-        // strip roughly twice as far again as the swipe itself.
+        // Deliberately not geared by `GESTURE_GAIN`: this single-frame velocity
+        // estimate is noisy enough already, and gearing it up made the coast
+        // overshoot the swipe.
         let new_velocity = if has_gesture_event && dt > 0.0 {
             gesture_delta * swipe_sensitivity / dt
         } else {
@@ -227,13 +225,9 @@ pub(super) fn swiping_timeout(
     }
 
     for (entity, mut scroll) in strips {
-        // While the fingers are down, the lift event is the only trustworthy
-        // signal. Inferring the end of a gesture from silence ended it at every
-        // direction change: fingers pause as they reverse, no delta clears
-        // `SWIPE_THRESHOLD`, and the gap looks exactly like a lift. That handed
-        // the still-moving strip to inertia and the auto-center magnet, dropped
-        // `Scrolling` so the border flickered back on mid-slide, and refocused
-        // whatever window happened to be sliding under the cursor.
+        // While fingers are down, only the lift event ends the gesture.
+        // Inferring it from silence misfired on every direction change (a pause
+        // while reversing looks just like a lift).
         let idle_limit = if state.fingers_down {
             LOST_LIFT_BACKSTOP
         } else {
@@ -243,10 +237,8 @@ pub(super) fn swiping_timeout(
             continue;
         }
 
-        // Refocusing under the cursor is what lets a swipe hand focus to the
-        // window it brought over the pointer, so it stays — but only on the
-        // frame the gesture actually ends. Firing it for every frame the strip
-        // spent coasting walked focus across each window that slid past.
+        // Only refocus on the frame the gesture actually ends — firing every
+        // coast frame would walk focus across each window that slid past.
         if scroll.is_user_swiping {
             scroll.is_user_swiping = false;
 

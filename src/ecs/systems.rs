@@ -551,11 +551,7 @@ pub(super) fn retry_front_switch(
 /// Animates window movement.
 /// Fraction of the remaining distance an exponential ease-out consumes in a
 /// frame, given a decay `rate` (per second) and the frame's `delta` in seconds.
-///
-/// Shared by the reposition and resize animators so the two can never drift out
-/// of step. The result is a `Vec2::lerp` factor, hence `f32`: the clamp pins it
-/// to `[0, 1]`, a range `f32` covers in full, so the narrowing costs only
-/// mantissa bits — orders of magnitude below one pixel of motion.
+/// Shared by the reposition and resize animators so the two never drift out of step.
 #[allow(
     clippy::cast_possible_truncation,
     reason = "clamped to [0, 1], well within f32's range; only sub-pixel precision is lost"
@@ -688,12 +684,10 @@ pub(crate) fn pump_events(
         return;
     };
 
-    // Deliberately *not* paced to a frame period. Holding the pass until a
-    // display frame elapsed cut the redundant passes as intended, but it also
-    // put a floor under how soon a pass could start: an event landing just after
-    // the pump returned waited out the rest of the period before anything moved.
-    // That reads as latency, and latency is worse than the redundant work it
-    // was buying back.
+    // Deliberately not paced to a frame period: waiting a full period put a
+    // floor under how soon a pump could start, so an event landing right after
+    // one returned had to wait out the rest of it. That latency is worse than
+    // the redundant work skipping the wait costs.
     platform.pump_cocoa_event_loop(f64::from(*timeout) / 1000.0);
 
     let deadline = Instant::now() + PUMP_BUDGET;

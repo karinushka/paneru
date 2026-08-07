@@ -18,7 +18,9 @@ use crate::ecs::{
     ActiveWorkspaceMarker, MissionControlActive, Position, Scrolling, SendMessageTrigger,
 };
 use crate::errors::Result;
-use crate::events::Event;
+use bevy::ecs::schedule::common_conditions::on_message;
+
+use crate::events::{Event, InputEvent};
 use crate::manager::{Window, WindowManager};
 use crate::platform::Modifiers;
 use crate::util::round_px;
@@ -45,12 +47,22 @@ impl Plugin for ScrollEventsPlugin {
             mission_control.is_none_or(|active| !active.0)
         };
 
+        // The two gesture systems only act on an input event, so a frame
+        // carrying none can skip them and everything they would have fetched.
+        //
+        // The rest of the chain is deliberately left ungated: inertia, the snap
+        // force and the integrator run precisely when the fingers have stopped
+        // sending events, and `swiping_timeout` exists to notice their absence.
         app.add_systems(
             Update,
             (
-                vertical_swipe_gesture.run_if(mission_control_inactive),
+                vertical_swipe_gesture
+                    .run_if(mission_control_inactive)
+                    .run_if(on_message::<InputEvent>),
                 (
-                    swipe_gesture.run_if(mission_control_inactive),
+                    swipe_gesture
+                        .run_if(mission_control_inactive)
+                        .run_if(on_message::<InputEvent>),
                     apply_inertia,
                     apply_snap_force,
                     scrolling_integrator,
@@ -64,7 +76,7 @@ impl Plugin for ScrollEventsPlugin {
 }
 #[instrument(level = Level::TRACE, skip_all)]
 fn swipe_gesture(
-    mut messages: MessageReader<Event>,
+    mut messages: MessageReader<InputEvent>,
     active_display: ActiveDisplay,
     mut active_workspace: Single<
         (Entity, &Position, Option<&mut Scrolling>),
@@ -74,8 +86,21 @@ fn swipe_gesture(
     config: Res<Config>,
     mut commands: Commands,
 ) {
+    // How far a full-trackpad swipe carries the strip, in viewport widths, at
+    // sensitivity 1.0. Fingers travel a few centimetres and the strip has to
+    // cross a display, so the gesture is geared up.
+    //
+    // This used to be applied by accident: `scrolling_integrator` added a
+    // velocity built from this same delta on top of the direct write. Removing
+    // that double integration — which is what made a reversal fight itself —
+    // cut how far a swipe reached, so the gearing is now explicit. The value is
+    // the one that reproduces the old travel exactly rather than a derivation:
+    // the accidental version compounded a lagging EMA over several frames and
+    // delivered appreciably more than the doubling it looked like.
+    const GESTURE_GAIN: f64 = 3.0;
+
     let swipe_sensitivity = config.swipe_sensitivity();
-    let mut total_delta = 0.0;
+    let mut wheel_delta = 0.0;
     let mut gesture_delta = 0.0;
     let mut touchpad_down = false;
     let mut has_scroll_event = false;
@@ -90,14 +115,15 @@ fn swipe_gesture(
     let scroll_scale = SCROLL_SCALE_LOWER
         + ((SCROLL_SCALE_UPPER - SCROLL_SCALE_LOWER) / SCROLL_FULL_RANGE) * swipe_sensitivity;
 
-    for event in messages.read() {
+    for InputEvent(event) in messages.read() {
         match event {
             Event::TouchpadDown => {
                 touchpad_down = true;
-                total_delta = 0.0;
+                wheel_delta = 0.0;
+                gesture_delta = 0.0;
             }
             Event::Scroll { delta } => {
-                total_delta += *delta * scroll_scale;
+                wheel_delta += *delta * scroll_scale;
                 has_scroll_event = true;
             }
             Event::Swipe { delta, fingers }
@@ -105,7 +131,6 @@ fn swipe_gesture(
                     .swipe_gesture_fingers()
                     .is_some_and(|fingers_configured| fingers_configured == *fingers) =>
             {
-                total_delta += delta;
                 gesture_delta += delta;
                 has_scroll_event = true;
                 has_gesture_event = true;
@@ -133,7 +158,14 @@ fn swipe_gesture(
             SwipeGestureDirection::Reversed => 1.0,
         };
 
+        let applied_delta = wheel_delta + gesture_delta * GESTURE_GAIN;
+
         let dt = time.delta_secs_f64();
+        // Deliberately *not* geared by `GESTURE_GAIN`, even though the strip is
+        // travelling at that multiple when the fingers leave. This is a
+        // `delta / dt` estimate off a single frame and is noisy enough already;
+        // multiplying it up made the coast dominate the gesture, carrying the
+        // strip roughly twice as far again as the swipe itself.
         let new_velocity = if has_gesture_event && dt > 0.0 {
             gesture_delta * swipe_sensitivity / dt
         } else {
@@ -152,46 +184,99 @@ fn swipe_gesture(
             scrolling.is_user_swiping = true;
             scrolling.last_event = time.elapsed();
             scrolling.position +=
-                total_delta * viewport_width * direction_modifier * swipe_sensitivity;
+                applied_delta * viewport_width * direction_modifier * swipe_sensitivity;
         } else if let Ok(mut entity_commands) = commands.get_entity(*entity) {
             entity_commands.try_insert(Scrolling {
                 velocity: new_velocity,
                 position: f64::from(position.0.x)
-                    + total_delta * viewport_width * direction_modifier * swipe_sensitivity,
+                    + applied_delta * viewport_width * direction_modifier * swipe_sensitivity,
                 is_user_swiping: true,
                 last_event: time.elapsed(),
+                applied: position.0.x,
             });
         }
     }
 }
+/// Whether the fingers are believed to still be on the trackpad, tracked across
+/// frames so [`swiping_timeout`] knows which end-of-gesture signal to trust.
+#[derive(Default)]
+pub(super) struct GestureLift {
+    /// A `TouchpadDown` arrived without its matching `TouchpadUp`.
+    fingers_down: bool,
+}
+#[allow(clippy::too_many_arguments)]
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn swiping_timeout(
     strips: Populated<(Entity, &mut Scrolling), With<LayoutStrip>>,
+    mut messages: MessageReader<InputEvent>,
     active_display: ActiveDisplay,
     time: Res<Time>,
+    config: Res<Config>,
     window_manager: Res<WindowManager>,
+    mut state: Local<GestureLift>,
     mut commands: Commands,
 ) {
+    /// How long a wheel-driven scroll may go quiet before it counts as over.
+    /// There is no lift event on that path, so silence is the only signal.
     const FINGER_LIFT_THRESHOLD: Duration = Duration::from_millis(50);
+    /// The same, for a gesture whose fingers are down. Only a backstop against
+    /// a lost `TouchpadUp`: without one, a dropped lift would leave the strip
+    /// swiping forever — no inertia, no snap, no border.
+    const LOST_LIFT_BACKSTOP: Duration = Duration::from_secs(1);
     const MIN_VELOCITY_PX: f64 = 5.0;
     let dt = time.delta_secs_f64();
     let viewport_width = f64::from(active_display.bounds().width());
 
+    let mut lifted = false;
+    for InputEvent(event) in messages.read() {
+        match event {
+            Event::TouchpadDown => state.fingers_down = true,
+            Event::TouchpadUp => {
+                state.fingers_down = false;
+                lifted = true;
+            }
+            _ => (),
+        }
+    }
+
     for (entity, mut scroll) in strips {
-        if time.elapsed().abs_diff(scroll.last_event) > FINGER_LIFT_THRESHOLD {
+        // While the fingers are down, the lift event is the only trustworthy
+        // signal. Inferring the end of a gesture from silence ended it at every
+        // direction change: fingers pause as they reverse, no delta clears
+        // `SWIPE_THRESHOLD`, and the gap looks exactly like a lift. That handed
+        // the still-moving strip to inertia and the auto-center magnet, dropped
+        // `Scrolling` so the border flickered back on mid-slide, and refocused
+        // whatever window happened to be sliding under the cursor.
+        let idle_limit = if state.fingers_down {
+            LOST_LIFT_BACKSTOP
+        } else {
+            FINGER_LIFT_THRESHOLD
+        };
+        if !lifted && time.elapsed().abs_diff(scroll.last_event) <= idle_limit {
+            continue;
+        }
+
+        // Refocusing under the cursor is what lets a swipe hand focus to the
+        // window it brought over the pointer, so it stays — but only on the
+        // frame the gesture actually ends. Firing it for every frame the strip
+        // spent coasting walked focus across each window that slid past.
+        if scroll.is_user_swiping {
             scroll.is_user_swiping = false;
 
-            if scroll.velocity.abs() * dt * viewport_width < MIN_VELOCITY_PX
-                && let Ok(mut entity_commands) = commands.get_entity(entity)
+            if config.focus_follows_mouse()
+                && let Some(point) = window_manager.cursor_position()
             {
-                entity_commands.try_remove::<Scrolling>();
-            }
-            if let Some(point) = window_manager.cursor_position() {
                 commands.trigger(SendMessageTrigger(Event::MouseMoved {
                     point,
                     modifiers: Modifiers::empty(),
                 }));
             }
+        }
+
+        if scroll.velocity.abs() * dt * viewport_width < MIN_VELOCITY_PX
+            && let Ok(mut entity_commands) = commands.get_entity(entity)
+        {
+            entity_commands.try_remove::<Scrolling>();
         }
     }
 }
@@ -279,6 +364,15 @@ fn scrolling_integrator(
     };
 
     let scroll = &mut *strip;
+    // Velocity is the coast after the fingers leave. While they are still down
+    // `swipe_gesture` has already written their movement straight into
+    // `position`, and integrating on top of that applied it a second time — at
+    // roughly double distance, with the extra half coming from an EMA three
+    // frames behind the hand. Reversing direction left that stale half pulling
+    // the other way until it caught up.
+    if scroll.is_user_swiping {
+        return;
+    }
     if scroll.velocity.abs() > 0.0001 {
         scroll.position += scroll.velocity * dt * viewport_width * direction_modifier;
     }
@@ -293,17 +387,41 @@ fn apply_scrolling_constraints(
     let viewport = active_display.actual_bounds(&config);
     let (strip, ref mut position, ref mut scroll) = *strip;
 
+    // Anything else that moves the strip — `reshuffle_layout_strip` bringing a
+    // stacked window back into view, `ensure_visible_in_strip`, the animator
+    // stepping either of them along — writes `Position` directly. This system
+    // owns `Position` the rest of the time, so a scroll left in flight wrote its
+    // own stale offset straight back over that move and the strip never got
+    // there. A `Position` that no longer matches what was last written here came
+    // from one of those, and it wins: adopt it and drop the coast.
+    if position.x != scroll.applied {
+        scroll.position = f64::from(position.x);
+        scroll.velocity = 0.0;
+    }
+
     let get_window_frame = |entity| windows.moving_frame(entity);
+    let rounded = round_px(scroll.position);
     if let Some(clamped_offset) = clamp_viewport_offset(
-        round_px(scroll.position),
+        rounded,
         strip,
         &windows,
         &get_window_frame,
         &viewport,
         &config,
     ) {
-        position.x = clamped_offset;
-        scroll.position = f64::from(clamped_offset);
+        // Only the on-screen origin is whole pixels. Rounding `scroll.position`
+        // too — as writing the clamped value back unconditionally did — threw
+        // away the fraction every frame, so motion slower than half a pixel per
+        // frame accumulated to nothing and then arrived all at once. Snap it
+        // only when the clamp actually moved the strip, which is what pins it
+        // at the edges.
+        if clamped_offset != rounded {
+            scroll.position = f64::from(clamped_offset);
+        }
+        if position.x != clamped_offset {
+            position.x = clamped_offset;
+        }
+        scroll.applied = clamped_offset;
     } else {
         scroll.velocity = 0.0;
     }
@@ -366,7 +484,7 @@ struct VerticalGestureState {
 }
 #[instrument(level = Level::TRACE, skip_all)]
 fn vertical_swipe_gesture(
-    mut messages: MessageReader<Event>,
+    mut messages: MessageReader<InputEvent>,
     active_display: ActiveDisplay,
     config: Res<Config>,
     mut commands: Commands,
@@ -386,7 +504,7 @@ fn vertical_swipe_gesture(
         state.fired = false;
     }
 
-    for event in messages.read() {
+    for InputEvent(event) in messages.read() {
         match event {
             Event::VerticalScrollTick { delta } => {
                 switch_virtual_workspace(*delta, &config, &mut commands);

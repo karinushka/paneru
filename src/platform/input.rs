@@ -146,6 +146,10 @@ impl Touch {
 }
 
 const SWIPE_THRESHOLD: f64 = 0.001;
+/// How far the hand must travel, as a fraction of the trackpad, before the
+/// gesture's axis is settled. Comfortably above the roll a finger makes as it
+/// lands and well inside the first tenth of any deliberate swipe.
+const AXIS_COMMIT_TRAVEL: f64 = 0.02;
 const GESTURE_MINIMAL_FINGERS: usize = 3;
 
 /// `InputHandler` manages low-level input events from the macOS `CGEventTap`.
@@ -173,6 +177,10 @@ pub(super) struct InputHandler {
     /// underneath. Either way that event's horizontal motion was lost, which is
     /// the stutter. A swipe picks a direction once and keeps it.
     gesture_axis: Option<SwipeAxis>,
+    /// Travel accumulated since the gesture began, on each axis. What
+    /// [`SwipeAxis::dominant`] is asked about when deciding
+    /// [`Self::gesture_axis`].
+    gesture_travel: (f64, f64),
     // Prevents from being Unpin automatically
     _pin: PhantomPinned,
 }
@@ -199,6 +207,7 @@ impl InputHandler {
             tap_port: None,
             last_swipe: None,
             gesture_axis: None,
+            gesture_travel: (0.0, 0.0),
             _pin: PhantomPinned,
         }
     }
@@ -366,6 +375,16 @@ impl InputHandler {
         false
     }
 
+    /// Whether a gesture along `axis` is one paneru acts on. A vertical gesture
+    /// with vertical swiping switched off is handed to macOS whole (see
+    /// [`Self::handle_swipe`]), so its scroll events must reach the window too.
+    fn consumes_axis(&self, axis: SwipeAxis) -> bool {
+        match axis {
+            SwipeAxis::Horizontal => true,
+            SwipeAxis::Vertical => self.config.swipe_vertical(),
+        }
+    }
+
     /// Handles scroll wheel events. If configured modifier is held, it transforms the scroll into a swipe event.
     fn handle_scroll_wheel(&mut self, event: &CGEvent) -> bool {
         let h_delta = CGEvent::double_value_field(
@@ -376,6 +395,27 @@ impl InputHandler {
             Some(event),
             CGEventField::ScrollWheelEventFixedPtDeltaAxis1,
         );
+
+        let event_axis = SwipeAxis::dominant(h_delta, v_delta);
+
+        // A gesture in progress drives the strip, and macOS mirrors that same
+        // finger movement as ordinary scroll events. Intercepting the gesture
+        // does not stop them, and without a modifier held the checks below let
+        // them straight through — so the window under the pointer scrolled along
+        // with the strip for the whole swipe. While the gesture owns an axis,
+        // nothing else on that axis may act on it, momentum-marked or not.
+        //
+        // Bounded by the same window as the momentum suppression below: a
+        // gesture whose end phase never arrives must not silence an axis
+        // indefinitely.
+        if self.gesture_axis == Some(event_axis)
+            && self.consumes_axis(event_axis)
+            && self
+                .last_swipe
+                .is_some_and(|(when, _)| when.elapsed() < GESTURE_MOMENTUM_WINDOW)
+        {
+            return true;
+        }
 
         // Drop the momentum macOS keeps synthesising after a gesture, so it does
         // not scroll whatever the swipe just landed on.
@@ -389,7 +429,7 @@ impl InputHandler {
         // end cannot silence that axis forever.
         if let Some((when, axis)) = self.last_swipe
             && when.elapsed() < GESTURE_MOMENTUM_WINDOW
-            && axis == SwipeAxis::dominant(h_delta, v_delta)
+            && axis == event_axis
             && is_momentum(event)
         {
             return true;
@@ -467,6 +507,7 @@ impl InputHandler {
         {
             _ = events.send(Event::TouchpadUp);
             self.gesture_axis = None;
+            self.gesture_travel = (0.0, 0.0);
             self.finger_position = None;
             return false;
         }
@@ -478,6 +519,7 @@ impl InputHandler {
         if fingers.iter().any(|finger| finger.began) {
             // A fresh gesture: nothing carries over from the last one.
             self.gesture_axis = None;
+            self.gesture_travel = (0.0, 0.0);
             if let Some(events) = &self.events {
                 _ = events.send(Event::TouchpadDown);
             }
@@ -487,6 +529,12 @@ impl InputHandler {
             return false;
         }
 
+        // Only the current sample has to be settled. Requiring the previous one
+        // to be settled as well — to avoid measuring across the roll a finger
+        // makes as it lands — cost an extra event at the start of every gesture,
+        // and a gesture begun from rest and finished quickly could be swallowed
+        // whole before any delta was believed. Whatever that guard was worth, it
+        // was not worth needing to swipe twice.
         if fingers.iter().all(|finger| !finger.began)
             && let Some(prev) = &self.finger_position
         {
@@ -503,22 +551,28 @@ impl InputHandler {
 
             let x_sum: f64 = x_deltas.iter().sum();
             let y_sum: f64 = y_deltas.iter().sum();
-            let moved = x_sum.abs().max(y_sum.abs()) > SWIPE_THRESHOLD;
+            self.gesture_travel.0 += x_sum;
+            self.gesture_travel.1 += y_sum;
 
-            // The first event that actually travels decides the direction; the
-            // rest of the gesture follows it.
-            let axis = match self.gesture_axis {
-                Some(axis) => Some(axis),
-                None if moved => {
-                    let axis = SwipeAxis::dominant(x_sum, y_sum);
-                    self.gesture_axis = Some(axis);
-                    Some(axis)
-                }
-                // Still settling — no direction to commit to yet.
-                None => None,
-            };
+            // Decided on where the hand has got to since the gesture began, not
+            // on the first event to clear `SWIPE_THRESHOLD`.
+            //
+            // That threshold is a thousandth of the pad, and the first delta of
+            // a gesture is measured across the roll a finger makes as it lands.
+            // A roll that came out vertically dominant latched the whole gesture
+            // to vertical — and with vertical swiping off, the arm below hands a
+            // vertical gesture to macOS wholesale, so the swipe did nothing at
+            // all. Landing differently next time, it committed horizontally and
+            // worked, which is why it took two swipes.
+            //
+            // Until enough travel has accumulated to be sure, the axis follows
+            // whichever way the hand has gone so far and is free to change its
+            // mind; motion is still reported either way, so nothing is lost
+            // waiting for the decision.
+            let (axis, committed) = decide_axis(self.gesture_travel, self.gesture_axis);
+            self.gesture_axis = committed;
 
-            if let (Some(axis), Some(events)) = (axis, &self.events) {
+            if let Some(events) = &self.events {
                 // Tested on the travel of the whole hand rather than of every
                 // finger. Requiring each one to clear the threshold every event
                 // meant a single finger easing off dropped that event outright,
@@ -527,22 +581,26 @@ impl InputHandler {
                     SwipeAxis::Horizontal if x_sum.abs() > SWIPE_THRESHOLD => {
                         _ = events.send(Event::Swipe {
                             delta: x_sum,
-                            fingers: x_deltas.len(),
+                            fingers: fingers.len(),
                         });
                         self.last_swipe = Some((Instant::now(), SwipeAxis::Horizontal));
                     }
                     SwipeAxis::Vertical if y_sum.abs() > SWIPE_THRESHOLD => {
-                        if !self.config.swipe_vertical() {
-                            // Committed to a direction this build does not
-                            // handle, so the whole gesture goes to macOS rather
-                            // than alternating between us and it.
+                        if self.config.swipe_vertical() {
+                            _ = events.send(Event::VerticalSwipe {
+                                delta: y_sum,
+                                fingers: fingers.len(),
+                            });
+                            self.last_swipe = Some((Instant::now(), SwipeAxis::Vertical));
+                        } else if committed.is_some() {
+                            // A settled vertical gesture this build does not
+                            // handle goes to macOS whole, rather than alternating
+                            // between us and it. Only once settled, though:
+                            // handing it over on a guess would give away a swipe
+                            // that was about to turn out horizontal, which is
+                            // what made a gesture from rest do nothing at all.
                             return false;
                         }
-                        _ = events.send(Event::VerticalSwipe {
-                            delta: y_sum,
-                            fingers: y_deltas.len(),
-                        });
-                        self.last_swipe = Some((Instant::now(), SwipeAxis::Vertical));
                     }
                     _ => (),
                 }
@@ -604,6 +662,27 @@ impl InputHandler {
                     .ok()
             })
             .is_some()
+    }
+}
+
+/// Which way a gesture is going, and whether that is settled yet.
+///
+/// Returns the axis to act on now, and the axis to remember as committed —
+/// `None` while the hand has not yet travelled far enough to be sure.
+///
+/// Split out because the decision is the whole gesture's: once committed, every
+/// later event follows it, and a wrong commitment cannot be taken back until the
+/// fingers lift.
+fn decide_axis(travel: (f64, f64), committed: Option<SwipeAxis>) -> (SwipeAxis, Option<SwipeAxis>) {
+    if let Some(axis) = committed {
+        return (axis, Some(axis));
+    }
+    let (x, y) = travel;
+    let axis = SwipeAxis::dominant(x, y);
+    if x.abs().max(y.abs()) > AXIS_COMMIT_TRAVEL {
+        (axis, Some(axis))
+    } else {
+        (axis, None)
     }
 }
 
@@ -745,6 +824,39 @@ mod tests {
             get_modifiers(CGEventFlags(NX_DEVICEFNKEYMASK)),
             Modifiers::FN
         );
+    }
+
+    #[test]
+    fn axis_is_not_committed_on_the_roll_a_finger_makes_as_it_lands() {
+        // Landing noise: a hair of travel, vertically dominant. Acted on, but
+        // not committed to — the gesture has said nothing yet.
+        let (axis, committed) = decide_axis((0.001, 0.004), None);
+        assert_eq!(axis, SwipeAxis::Vertical);
+        assert_eq!(committed, None);
+    }
+
+    #[test]
+    fn an_uncommitted_axis_follows_the_accumulated_travel() {
+        // The same gesture once the hand has actually moved sideways: the early
+        // vertical reading is outvoted rather than latched.
+        let (axis, committed) = decide_axis((0.015, 0.004), None);
+        assert_eq!(axis, SwipeAxis::Horizontal);
+        assert_eq!(committed, None);
+    }
+
+    #[test]
+    fn axis_commits_once_the_hand_has_travelled_far_enough() {
+        let (axis, committed) = decide_axis((0.05, 0.004), None);
+        assert_eq!(axis, SwipeAxis::Horizontal);
+        assert_eq!(committed, Some(SwipeAxis::Horizontal));
+    }
+
+    #[test]
+    fn a_committed_axis_is_kept_however_the_travel_later_reads() {
+        // Mid-swipe the hand can wander; the gesture does not change its mind.
+        let (axis, committed) = decide_axis((0.05, 0.9), Some(SwipeAxis::Horizontal));
+        assert_eq!(axis, SwipeAxis::Horizontal);
+        assert_eq!(committed, Some(SwipeAxis::Horizontal));
     }
 
     #[test]

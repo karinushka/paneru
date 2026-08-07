@@ -9,3 +9,4 @@ CLAUDE.md
 **/.DS_Store
 flamegraph.svg
 cargo-flamegraph.trace
+test.sh

@@ -23,7 +23,7 @@ use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, WindowCtx, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker, Initializing,
-    NativeFullscreenMarker, Position, RefreshWindowSizes, RepositionMarker, Scrolling,
+    NativeFullscreenMarker, Position, RaiseWindow, RefreshWindowSizes, RepositionMarker, Scrolling,
     SelectedVirtualMarker, SpawnCommandsExt, Timeout, Unmanaged,
 };
 use crate::errors::Result;
@@ -1172,11 +1172,11 @@ pub(crate) fn show_active_workspace(
         }
 
         if config.virtual_workspace_animations() {
-            if let Some(entity) = focus
-                && strip.contains(*entity)
+            if let Some(focus) = *focus
+                && strip.contains(focus)
             {
-                spawn_restore_focus_guard(*entity, &mut commands);
-                commands.focus_entity(*entity, false);
+                spawn_restore_focus_guard(focus, &mut commands);
+                commands.focus_entity(focus, false);
             }
 
             commands.reposition_entity(*activated, *origin);
@@ -1191,11 +1191,15 @@ pub(crate) fn show_active_workspace(
         }
 
         // Focus on the previous window
-        if let Some(entity) = focus
-            && strip.contains(*entity)
+        if let Some(focus) = *focus
+            && strip.contains(focus)
         {
-            spawn_restore_focus_guard(*entity, &mut commands);
-            commands.focus_entity(*entity, false);
+            spawn_restore_focus_guard(focus, &mut commands);
+
+            commands.trigger(RaiseWindow {
+                entity: focus,
+                with_strip: true,
+            });
         }
     }
 }

@@ -458,6 +458,12 @@ pub struct SendMessageTrigger(pub Event);
 #[derive(BevyEvent)]
 pub struct RestoreWindowState;
 
+#[derive(BevyEvent)]
+pub struct RaiseWindow {
+    pub entity: Entity,
+    pub with_strip: bool,
+}
+
 pub trait SpawnCommandsExt {
     fn reposition_entity(&mut self, entity: Entity, origin: Origin);
 

@@ -10,6 +10,7 @@ use bevy::ecs::query::{Added, Has, With};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::system::{Commands, Populated, Query, Res, Single};
+use bevy::math::IRect;
 use bevy::prelude::Event as BevyEvent;
 use bevy::time::common_conditions::on_timer;
 use tracing::{Level, debug, error, instrument, trace, warn};
@@ -20,7 +21,8 @@ use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, GlobalState, WindowCtx, Windows};
 use crate::ecs::workspace::RestoreFocusMarker;
 use crate::ecs::{
-    ActiveWorkspaceMarker, Scrolling, SendMessageTrigger, SpawnCommandsExt, StrayFocusEvent,
+    ActiveWorkspaceMarker, Bounds, Position, RaiseWindow, Scrolling, SendMessageTrigger,
+    SpawnCommandsExt, StrayFocusEvent,
 };
 use crate::events::Event;
 use crate::manager::{Application, Display, Window, WindowManager};
@@ -106,7 +108,8 @@ impl Plugin for FocusEventsPlugin {
             .add_observer(maintain_focus_singleton)
             .add_observer(virtual_strip_activated)
             .add_observer(stray_focus_observer)
-            .add_observer(focus_window_trigger);
+            .add_observer(focus_window_trigger)
+            .add_observer(raise_window_trigger);
     }
 }
 
@@ -309,6 +312,44 @@ fn focus_window_trigger(trigger: On<FocusWindow>, windows: Windows, apps: Query<
     } else {
         window.focus_with_raise(psn);
     }
+}
+
+fn raise_window_trigger(
+    trigger: On<RaiseWindow>,
+    windows: Query<(Entity, &Window, &Position, &Bounds)>,
+    active_display: ActiveDisplay,
+    config: Res<Config>,
+) {
+    let RaiseWindow { entity, with_strip } = *trigger.event();
+
+    let Ok((focus, window, _, _)) = windows.get(entity) else {
+        return;
+    };
+
+    if with_strip {
+        let viewport = active_display.actual_bounds(&config);
+        let strip = active_display.active_strip();
+        strip
+            .all_windows()
+            .into_iter()
+            .filter_map(|entity| {
+                if entity == focus {
+                    None
+                } else {
+                    windows.get(entity).ok()
+                }
+            })
+            .filter(|(_, _, origin, size)| {
+                let frame = IRect::from_corners(origin.0, origin.0 + size.0);
+                viewport.intersect(frame).width() > 50
+            })
+            .for_each(|(_, window, _, _)| {
+                window.raise_without_focus();
+            });
+    }
+
+    // Raise the focused window last, because raised windows get OS focus events.
+    window.raise_without_focus();
 }
 
 #[instrument(level = Level::DEBUG, skip_all)]

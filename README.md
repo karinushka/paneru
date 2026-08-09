@@ -194,6 +194,22 @@ $ paneru install
 $ paneru start
 ```
 
+### Installing an app launcher
+
+To start Paneru from Spotlight, Alfred, Raycast, or another application launcher,
+install the lightweight app wrapper:
+
+```shell
+$ paneru install-app
+```
+
+This creates `$HOME/Applications/Paneru.app`. Opening the app starts the
+installed Paneru launch agent and exits immediately. Remove the wrapper with:
+
+```shell
+$ paneru uninstall-app
+```
+
 ### Running in the foreground
 
 ```shell

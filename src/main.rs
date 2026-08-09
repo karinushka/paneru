@@ -53,7 +53,8 @@ pub struct Paneru {
 
 /// `SubCmd` enumerates the available command-line subcommands for `paneru`.
 /// These subcommands allow users to launch the daemon, install/uninstall it as a service,
-/// start/stop/restart the service, or send commands to a running daemon.
+/// install/uninstall its app launcher, start/stop/restart the service, or send commands to
+/// a running daemon.
 #[derive(Clone, Debug, Default, Subcommand)]
 pub enum SubCmd {
     /// Launches the `paneru` daemon directly in the console (default behavior).
@@ -68,6 +69,12 @@ pub enum SubCmd {
 
     /// Reinstalls the `paneru` background service.
     Reinstall,
+
+    /// Installs a Paneru app launcher to `~/Applications`.
+    InstallApp,
+
+    /// Uninstalls the Paneru app launcher from `~/Applications`.
+    UninstallApp,
 
     /// Starts the `paneru` background service.
     Start,
@@ -170,6 +177,8 @@ fn main() -> Result<()> {
         SubCmd::Install => service()?.install()?,
         SubCmd::Uninstall => service()?.uninstall()?,
         SubCmd::Reinstall => service()?.reinstall()?,
+        SubCmd::InstallApp => platform::app_launcher::AppLauncher::try_new()?.install()?,
+        SubCmd::UninstallApp => platform::app_launcher::AppLauncher::try_new()?.uninstall()?,
         SubCmd::Start => service()?.start()?,
         SubCmd::Stop => service()?.stop()?,
         SubCmd::Restart => service()?.restart()?,

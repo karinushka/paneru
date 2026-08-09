@@ -190,10 +190,10 @@ Virtual workspaces can also be navigated using trackpad gestures. If `[swipe.ges
 
 | Action | Description |
 | :--- | :--- |
-| `window_virtual_north` / `_south` | Switch to the previous/next virtual workspace (row of windows). |
+| `window_virtual_north` / `_south` / `_first` / `_last` | Switch to the previous/next or first/last virtual workspace (row of windows). `_east` or `_west` are aliases for `_north` and `_south`. |
 | `window_virtualnum_<number>` | Switch directly to the numbered virtual workspace. |
-| `window_virtualmove_north` / `_south` | Move currently focused window to the previous/next virtual workspace and follow it. |
-| `window_virtualsend_north` / `_south` | Move currently focused window to the previous/next virtual workspace but stay on the current one. |
+| `window_virtualmove_north` / `_south` / `_first` / `_last` | Move currently focused window to the previous/next or first/last virtual workspace and follow it. `_east` or `_west` are aliases for `_north` and `_south`. |
+| `window_virtualsend_north` / `_south` / `_first` / `_last` | Move currently focused window to the previous/next or first/last virtual workspace but stay on the current one. `_east` or `_west` are aliases for `_north` and `_south`. |
 | `window_virtualmovenum_<number>` | Move currently focused window to the numbered virtual workspace and follow it. |
 | `window_virtualsendnum_<number>` | Move currently focused window to the numbered virtual workspace but stay on the current one. |
 

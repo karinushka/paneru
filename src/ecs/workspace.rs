@@ -876,6 +876,7 @@ fn mid_strip_slot(
 
 /// Handles the keybinding for switching between virtual workspaces. Moving South
 /// creates a new workspace if the current one is populated and auto-create is on.
+#[allow(clippy::too_many_lines)]
 #[instrument(level = Level::DEBUG, skip_all)]
 fn switch_virtual_workspace_bind(
     mut messages: MessageReader<Event>,
@@ -907,7 +908,7 @@ fn switch_virtual_workspace_bind(
 
     let current_index = rows.iter().position(|(_, _, active)| *active).unwrap_or(0);
     let next_index = match operation {
-        Operation::Virtual(Direction::South) => {
+        Operation::Virtual(Direction::South | Direction::East) => {
             if current_index + 1 < rows.len() {
                 current_index + 1
             } else if active_display.active_strip().len() != 0
@@ -928,7 +929,9 @@ fn switch_virtual_workspace_bind(
                 current_index
             }
         }
-        Operation::Virtual(Direction::North) => current_index.saturating_sub(1),
+        Operation::Virtual(Direction::North | Direction::West) => current_index.saturating_sub(1),
+        Operation::Virtual(Direction::First) => 0,
+        Operation::Virtual(Direction::Last) => rows.len().saturating_sub(1),
         Operation::VirtualNumber(target_virtual_index) => {
             let Some(index) = rows
                 .iter()
@@ -1032,7 +1035,7 @@ fn move_virtual_workspace_bind(
     let current_index = rows.iter().position(|(_, _, active)| *active).unwrap_or(0);
 
     let (target_virtual_index, move_focus) = match operation {
-        Operation::VirtualMove(Direction::South, move_focus)
+        Operation::VirtualMove(Direction::South | Direction::East, move_focus)
             if active_display.active_strip().len() > 1 =>
         {
             if config.create_workspace_automatically() && current_index + 1 < rows.len() {
@@ -1041,11 +1044,24 @@ fn move_virtual_workspace_bind(
                 (current_virtual_index + 1, *move_focus)
             }
         }
-        Operation::VirtualMove(Direction::North, move_focus) => {
+        Operation::VirtualMove(Direction::North | Direction::West, move_focus) => {
             if current_virtual_index == 0 {
                 return;
             }
             (current_virtual_index - 1, *move_focus)
+        }
+        Operation::VirtualMove(Direction::First, move_focus) => {
+            if current_virtual_index == 0 {
+                return;
+            }
+            (0, *move_focus)
+        }
+        Operation::VirtualMove(Direction::Last, move_focus) => {
+            let last_virtual_index = rows.last().map_or(0, |(_, strip, _)| strip.virtual_index);
+            if current_virtual_index == last_virtual_index {
+                return;
+            }
+            (last_virtual_index, *move_focus)
         }
         Operation::VirtualMoveNumber(target_virtual_index, move_focus) => {
             if *target_virtual_index == current_virtual_index {

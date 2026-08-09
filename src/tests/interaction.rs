@@ -2080,3 +2080,79 @@ fn test_own_window_move_echo_is_ignored() {
         "the echo of our own move must not be read back over the animation"
     );
 }
+
+#[test]
+fn test_virtual_directions_first_last_east_west() {
+    use crate::config::{Config, MainOptions};
+
+    let config: Config = (
+        MainOptions {
+            reap_empty_workspaces: Some(false),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    let commands = vec![
+        // iteration 0: Create VW1
+        Event::Command {
+            command: Command::Window(Operation::VirtualAdd),
+        },
+        // iteration 1: Create VW2
+        Event::Command {
+            command: Command::Window(Operation::VirtualAdd),
+        },
+        // iteration 2: Switch First -> VW0
+        Event::Command {
+            command: Command::Window(Operation::Virtual(Direction::First)),
+        },
+        // iteration 3: Switch East (alias for South/next) -> VW1
+        Event::Command {
+            command: Command::Window(Operation::Virtual(Direction::East)),
+        },
+        // iteration 4: Switch Last -> VW2
+        Event::Command {
+            command: Command::Window(Operation::Virtual(Direction::Last)),
+        },
+        // iteration 5: Switch West (alias for North/prev) -> VW1
+        Event::Command {
+            command: Command::Window(Operation::Virtual(Direction::West)),
+        },
+        // iteration 6: Switch First -> VW0
+        Event::Command {
+            command: Command::Window(Operation::Virtual(Direction::First)),
+        },
+        // iteration 7: Move focused window to Last with Follow -> moves to VW2 & follows to VW2
+        Event::Command {
+            command: Command::Window(Operation::VirtualMove(Direction::Last, MoveFocus::Follow)),
+        },
+        // iteration 8: Move focused window to First with Follow -> moves to VW0 & follows to VW0
+        Event::Command {
+            command: Command::Window(Operation::VirtualMove(Direction::First, MoveFocus::Follow)),
+        },
+    ];
+
+    let assert_active_vw = |expected: u32| {
+        move |world: &mut World, _state: MockState| {
+            let mut query = world.query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>();
+            let active = query
+                .iter(world)
+                .find_map(|(strip, active)| active.then_some(strip.virtual_index))
+                .expect("an active virtual strip");
+            assert_eq!(active, expected);
+        }
+    };
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(6)
+        .on_iteration(2, assert_active_vw(0))
+        .on_iteration(3, assert_active_vw(1))
+        .on_iteration(4, assert_active_vw(2))
+        .on_iteration(5, assert_active_vw(1))
+        .on_iteration(6, assert_active_vw(0))
+        .on_iteration(7, assert_active_vw(2))
+        .on_iteration(8, assert_active_vw(0))
+        .run(commands);
+}

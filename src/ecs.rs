@@ -5,7 +5,6 @@ use bevy::MinimalPlugins;
 use bevy::app::App as BevyApp;
 use bevy::app::{First, Last, PostUpdate, PreUpdate, Startup};
 use bevy::ecs::hierarchy::ChildOf;
-use bevy::ecs::lifecycle::RemovedComponents;
 use bevy::ecs::query::{Added, Changed, With};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::common_conditions::{not, resource_exists};
@@ -77,11 +76,11 @@ pub fn register_systems(app: &mut bevy::app::App) {
     let vw_indicator_dirty =
         |strip_changed: Query<(), (With<ActiveWorkspaceMarker>, Changed<LayoutStrip>)>,
          focus_gained: Query<(), Added<FocusedMarker>>,
-         mut focus_lost: RemovedComponents<FocusedMarker>,
+         workspace_changed: Query<(), Added<ActiveWorkspaceMarker>>,
          focused_moved: Query<(), (With<FocusedMarker>, Changed<Position>)>| {
             !strip_changed.is_empty()
                 || !focus_gained.is_empty()
-                || focus_lost.read().next().is_some()
+                || !workspace_changed.is_empty()
                 || !focused_moved.is_empty()
         };
     let native_tabs_enabled =

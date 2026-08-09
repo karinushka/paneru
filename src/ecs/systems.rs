@@ -892,11 +892,12 @@ pub(super) fn update_overlays(
 
     // Find the focused managed window's absolute CG frame.
     // Skip floating/unmanaged windows — no overlay or border for those.
-    let (focused_abs_cg, focused_window_id) = if let Some((window, _, unmanaged)) = windows
+    let (focused_abs_cg, focused_window_id) = if let Some((window, entity, unmanaged)) = windows
         .focused()
         .and_then(|(_, entity)| windows.get_managed(entity))
         && unmanaged.is_none()
         && !window.is_full_screen()
+        && active_strip.contains(entity)
     {
         let frame = window.frame();
         let h_pad = window.horizontal_padding();
@@ -914,9 +915,8 @@ pub(super) fn update_overlays(
 
         (focused_abs_cg, window.id())
     } else {
-        // No managed window has focus — hide the overlay rather than
-        // dimming everything (e.g. during startup or when only floating
-        // windows exist).
+        // No managed window on the active workspace has focus — hide the overlay rather than
+        // dimming everything or drawing a ghost border around an off-screen window.
         overlay_mgr.hide_all();
         return;
     };

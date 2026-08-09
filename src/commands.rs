@@ -19,8 +19,8 @@ use crate::ecs::layout::{Column, LayoutStrip, StackItem, clamp_origin_to_viewpor
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Windows};
 use crate::ecs::{
     ActiveDisplayMarker, ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker,
-    FullWidthMarker, NativeFullscreenMarker, SelectedVirtualMarker, SendMessageTrigger,
-    SpawnCommandsExt, Timeout, Unmanaged,
+    FullWidthMarker, NativeFullscreenMarker, RaiseWindow, SelectedVirtualMarker,
+    SendMessageTrigger, SpawnCommandsExt, Timeout, Unmanaged,
 };
 use crate::events::Event;
 use crate::manager::{Application, Display, Origin, Size, Window, WindowManager, origin_from};
@@ -454,9 +454,12 @@ fn command_raise_floating(
         .filter(|entity| is_visible_float(*entity))
         .or_else(|| visible_floats.first().copied());
 
-    for (window, entity) in windows.iter() {
+    for (_, entity) in windows.iter() {
         if is_visible_float(entity) && Some(entity) != target {
-            window.raise_without_focus();
+            commands.trigger(RaiseWindow {
+                entity,
+                with_strip: false,
+            });
         }
     }
 
@@ -525,25 +528,21 @@ fn command_toggle_floating_layer(
             .or_else(|| active_strip.all_columns().into_iter().next())
     };
 
-    let mut raise = |entity: Entity| {
-        if Some(entity) == target {
-            return;
-        }
-        if let Some(window) = windows.get(entity) {
-            window.raise_without_focus();
-        }
-    };
     if floating_front {
         windows
             .iter()
             .filter_map(|(_, e)| visible_float(e).then_some(e))
-            .for_each(raise);
-    } else {
-        active_strip.all_windows().into_iter().for_each(&mut raise);
-    }
-
-    if let Some(entity) = target {
-        commands.focus_entity(entity, true);
+            .for_each(|entity| {
+                commands.trigger(RaiseWindow {
+                    entity,
+                    with_strip: false,
+                });
+            });
+    } else if let Some(entity) = target {
+        commands.trigger(RaiseWindow {
+            entity,
+            with_strip: true,
+        });
     }
 
     debug!("floating layer -> front: {floating_front}");

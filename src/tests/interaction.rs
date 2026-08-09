@@ -1883,6 +1883,7 @@ fn test_stack_unstack_brings_focused_window_into_view() {
 
     let config: Config = (
         MainOptions {
+            focus_follows_mouse: Some(false),
             auto_center: Some(false),
             animation_speed: Some(10000.0),
             swipe_gesture_fingers: Some(3),
@@ -1897,6 +1898,9 @@ fn test_stack_unstack_brings_focused_window_into_view() {
 
     let commands = vec![
         Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
         // Swipe windows 0 and 1 off screen.
         Event::Swipe {
             delta: 0.3,
@@ -1917,20 +1921,17 @@ fn test_stack_unstack_brings_focused_window_into_view() {
         Event::Command {
             command: Command::Window(Operation::Stack(false)),
         },
-        Event::Command {
-            command: Command::PrintState,
-        },
     ];
 
     harness
-        .on_iteration(2, check_if_offscreen)
-        .on_iteration(3, |world, _state| {
+        .on_iteration(3, check_if_offscreen)
+        .on_iteration(4, |world, _state| {
             // Check that both window are stacked and moved into view.
             assert_window_at!(world, 0, 0, 20);
             assert_window_at!(world, 1, 0, 394);
         })
         .on_iteration(5, check_if_offscreen)
-        .on_iteration(6, |world, _state| {
+        .on_iteration(7, |world, _state| {
             // Check that both window are stacked and moved into view.
             assert_window_at!(world, 1, 0, 20);
         })

@@ -4,6 +4,7 @@ use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::With;
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::system::{Commands, Local, Query, Res, Single};
+use bevy::time::Time;
 use std::time::{Duration, Instant};
 use tracing::{debug, trace, warn};
 
@@ -82,16 +83,20 @@ fn is_in_corner_dead_zone(
 /// * `focused_window` - A query for the currently focused window.
 /// * `main_cid` - The main connection ID resource.
 /// * `config` - The optional configuration resource.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 fn mouse_moved_trigger(
     mut messages: MessageReader<InputEvent>,
     windows: Windows,
     displays: Query<(&Display, Option<&DockPosition>)>,
     window_manager: Res<WindowManager>,
     config: Res<Config>,
+    time: Res<Time>,
     mut global_state: GlobalState,
     mut commands: Commands,
+    mut last_find_query: Local<Option<Duration>>,
 ) {
+    const FIND_WINDOW_THROTTLE: Duration = Duration::from_millis(50);
+
     for InputEvent(event) in messages.read() {
         let Event::MouseMoved { point, modifiers } = event else {
             continue;
@@ -126,13 +131,27 @@ fn mouse_moved_trigger(
             continue;
         }
         let pointer = origin_from(*point);
-        if windows
-            .focused()
-            .is_some_and(|(window, _)| window.frame().contains(pointer))
+        if let Some((focused, _)) = windows.focused()
+            && focused.frame().contains(pointer)
         {
-            trace!("pointer still inside focused window");
+            let has_overlap = windows
+                .iter()
+                .any(|(w, _)| w.id() != focused.id() && w.frame().contains(pointer));
+            if !has_overlap {
+                trace!("pointer unambiguously inside focused window.");
+                continue;
+            }
+        }
+
+        let now = time.elapsed();
+        if let Some(last_time) = *last_find_query
+            && now.saturating_sub(last_time) < FIND_WINDOW_THROTTLE
+        {
+            trace!("find_window_at_point throttled.");
             continue;
         }
+        *last_find_query = Some(now);
+
         let Ok(window_id) = window_manager.find_window_at_point(point) else {
             debug!("can not find window at point {point:?}");
             continue;

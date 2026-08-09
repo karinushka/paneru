@@ -352,6 +352,7 @@ impl OverlayManager {
 struct FlashMessageViewIvars {
     opacity: f32,
     message: Retained<NSString>,
+    is_badge: bool,
 }
 
 define_class!(
@@ -367,31 +368,51 @@ define_class!(
         fn draw_rect(&self, _dirty_rect: NSRect) {
             let ivars = self.ivars();
             let bounds = self.bounds();
+            let is_badge = ivars.is_badge;
 
-            // 1. Draw semi-transparent bezel (dark gray/black)
+            // 1. Draw semi-transparent bezel
             let bezel_color = NSColor::colorWithSRGBRed_green_blue_alpha(
-                0.1, 0.1, 0.1,
-                CGFloat::from(ivars.opacity * 0.8),
+                0.12, 0.12, 0.12,
+                CGFloat::from(ivars.opacity * 0.88),
             );
             bezel_color.setFill();
-            let radius = 12.0;
+            let radius = if is_badge {
+                24.0
+            } else {
+                bounds.size.height / 2.0
+            };
             let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
                 bounds, radius, radius,
             );
             path.fill();
 
+            // Draw subtle border for contrast
+            let border_color = NSColor::colorWithSRGBRed_green_blue_alpha(
+                1.0, 1.0, 1.0,
+                CGFloat::from(ivars.opacity * 0.15),
+            );
+            border_color.setStroke();
+            path.setLineWidth(1.0);
+            path.stroke();
+
             // 2. Draw text
-            let font_size = bounds.size.height * 0.8; // Scale font with bezel
-            let font = NSFont::systemFontOfSize(font_size);
-            let color = NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, CGFloat::from(ivars.opacity));
+            let font = if is_badge {
+                NSFont::boldSystemFontOfSize(bounds.size.height * 0.62)
+            } else {
+                NSFont::systemFontOfSize(30.0)
+            };
+            let color = NSColor::colorWithSRGBRed_green_blue_alpha(
+                1.0, 1.0, 1.0,
+                CGFloat::from(ivars.opacity * 0.95),
+            );
 
             let paragraph_style = unsafe {
                 let style = NSParagraphStyle::defaultParagraphStyle().mutableCopy();
                 let _: () = msg_send![&style, setAlignment: 1isize]; // Center (NSTextAlignmentCenter = 1)
+                let _: () = msg_send![&style, setLineBreakMode: 4isize]; // NSLineBreakByTruncatingTail = 4
                 style
             };
 
-            // Using manual attribute keys as they might be missing from the crate's high-level API
             let attr_str: Retained<NSAttributedString> = unsafe {
                 let font_key = NSString::from_str("NSFont");
                 let color_key = NSString::from_str("NSColor");
@@ -405,24 +426,31 @@ define_class!(
                 ];
 
                 let attributes = NSDictionary::from_slices(&keys, &objects);
-
-                // Using raw msg_send as the high-level wrapper might have trait bound issues
                 let alloc = NSAttributedString::alloc();
                 msg_send![alloc, initWithString: &*ivars.message, attributes: &*attributes]
             };
 
-            let text_size = unsafe {
-                let size: NSSize = msg_send![&attr_str, size];
-                size
-            };
+            let text_size: NSSize = unsafe { msg_send![&attr_str, size] };
 
-            let text_rect = NSRect::new(
-                NSPoint::new(
-                    bounds.origin.x + (bounds.size.width - text_size.width) / 2.0,
-                    bounds.origin.y + (bounds.size.height - text_size.height) / 2.0,
-                ),
-                text_size
-            );
+            let text_rect = if is_badge {
+                NSRect::new(
+                    NSPoint::new(
+                        bounds.origin.x + (bounds.size.width - text_size.width) / 2.0,
+                        bounds.origin.y + (bounds.size.height - text_size.height) / 2.0,
+                    ),
+                    text_size,
+                )
+            } else {
+                let h_pad = 24.0;
+                let available_width = (bounds.size.width - (2.0 * h_pad)).max(1.0);
+                NSRect::new(
+                    NSPoint::new(
+                        bounds.origin.x + h_pad,
+                        bounds.origin.y + (bounds.size.height - text_size.height) / 2.0,
+                    ),
+                    NSSize::new(available_width, text_size.height),
+                )
+            };
 
             unsafe {
                 let _: () = msg_send![&attr_str, drawInRect: text_rect];
@@ -432,10 +460,17 @@ define_class!(
 );
 
 impl FlashMessageView {
-    fn new(mtm: MainThreadMarker, frame: NSRect, message: &str, opacity: f32) -> Retained<Self> {
+    fn new(
+        mtm: MainThreadMarker,
+        frame: NSRect,
+        message: &str,
+        opacity: f32,
+        is_badge: bool,
+    ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(FlashMessageViewIvars {
             opacity,
             message: NSString::from_str(message),
+            is_badge,
         });
         unsafe { msg_send![super(this), initWithFrame: frame] }
     }
@@ -453,11 +488,30 @@ impl FlashMessageManager {
 
     #[allow(clippy::cast_precision_loss)]
     pub fn show(&mut self, message: &str, opacity: f32, top_right_abs_cg: NSPoint) {
-        const INDICATOR_BOX_RATIO: f64 = 0.2;
+        let is_badge = message.chars().count() <= 2;
         let screen_h = primary_screen_height(self.mtm);
-        let indicator_size = screen_h * INDICATOR_BOX_RATIO;
-        let width = (message.len() as f64 * 15.0).clamp(indicator_size, 3.0 * indicator_size);
-        let size = NSSize::new(width, indicator_size);
+
+        let size = if is_badge {
+            NSSize::new(150.0, 150.0)
+        } else {
+            let font = NSFont::systemFontOfSize(30.0);
+            let font_key = NSString::from_str("NSFont");
+            let keys = [&*font_key];
+            let objects = [&*font as &AnyObject];
+            let attributes = NSDictionary::from_slices(&keys, &objects);
+            let msg_ns = NSString::from_str(message);
+            let attr_str: Retained<NSAttributedString> = unsafe {
+                let alloc = NSAttributedString::alloc();
+                msg_send![alloc, initWithString: &*msg_ns, attributes: &*attributes]
+            };
+            let text_size: NSSize = unsafe { msg_send![&attr_str, size] };
+            let horizontal_padding = 48.0;
+            let max_width = 780.0;
+            let min_width = 140.0;
+            let width = (text_size.width + horizontal_padding).clamp(min_width, max_width);
+            NSSize::new(width, 64.0)
+        };
+
         let padding = 20.0;
 
         let cocoa_origin_x = top_right_abs_cg.x - size.width - padding;
@@ -471,6 +525,7 @@ impl FlashMessageManager {
                 NSRect::new(NSPoint::new(0.0, 0.0), size),
                 message,
                 opacity,
+                is_badge,
             );
             window.setContentView(Some(&view));
             window.setFrame_display(frame, true);
@@ -483,6 +538,7 @@ impl FlashMessageManager {
                 NSRect::new(NSPoint::new(0.0, 0.0), size),
                 message,
                 opacity,
+                is_badge,
             );
             window.setContentView(Some(&view));
             window.orderFront(None::<&AnyObject>);

@@ -87,7 +87,7 @@
         commonArgs
         // {
           inherit pname;
-          cargoExtraArgs = "--features lua,${luaFeature defaultLua}";
+          cargoExtraArgs = "--no-default-features --features lua,${luaFeature defaultLua}";
           nativeBuildInputs = [ pkgs.pkg-config ];
           buildInputs = [
             pkgs.apple-sdk.privateFrameworksHook
@@ -126,7 +126,8 @@
             buildInputs = lib.optional enableLua lua;
           };
 
-          cargoExtraArgs = lib.optionalString enableLua "--features lua,${luaFeature lua}";
+          cargoExtraArgs =
+            "--no-default-features " + lib.optionalString enableLua "--features lua,${luaFeature lua}";
 
           # --- Loadable Lua C module, as a function of the interpreter -------
           #

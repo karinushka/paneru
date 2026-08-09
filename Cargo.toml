@@ -34,12 +34,12 @@ serde_json = "1.0"
 pedantic = "warn"
 
 # `lua` builds in the `init.lua` scripting runtime (`paneru.on`/
-# `paneru.bind`). Off by default; build with `--features lua,vendored,luajit`
-# to include it. Exactly one ABI feature must be picked alongside `lua` (same
-# convention as `crates/lua`) — `luajit` is the one to pick unless you have a
-# reason not to: handlers run on the event path, and its tracing JIT is worth
-# roughly an order of magnitude there over the reference interpreter. The
-# `lua5x` features remain for scripts needing 5.2+ semantics LuaJIT lacks.
+# `paneru.bind`). On by default alongside `vendored`. Exactly one ABI feature
+# must be picked alongside `lua` (same convention as `crates/lua`) — `luajit`
+# is the one to pick unless you have a reason not to: handlers run on the event
+# path, and its tracing JIT is worth roughly an order of magnitude there over
+# the reference interpreter. The `lua5x` features remain for scripts needing
+# 5.2+ semantics LuaJIT lacks.
 #
 # Lua 5.1 and Luau are deliberately not offered. The world-access calls
 # (`paneru.query*`, the window set, `paneru.state`) are async, which means the
@@ -49,15 +49,21 @@ pedantic = "warn"
 # same machinery (mlua gates several of its async APIs off both).
 #
 # `vendored` builds the interpreter from source rather than linking one the
-# system already has, and is what a plain `cargo build` wants. Leave it off
-# where the build already supplies an interpreter and its headers (the Nix
-# package does, via pkg-config): building it from source there fails anyway,
-# because `luajit-src` copies its sources out of the read-only Nix store and
-# then cannot write to the copy.
+# system already has, and is enabled by default so a plain `cargo build`
+# works out-of-the-box without requiring system Lua headers or pkg-config.
+# Leave it off (e.g. `--no-default-features --features lua`) where the build
+# environment already supplies an interpreter and its headers via pkg-config
+# (the Nix package does): building it from source there fails anyway, because
+# `luajit-src` copies its sources out of the read-only Nix store and then
+# cannot write to the copy.
 [features]
-default = []
+default = ["lua", "vendored"]
 vendored = ["mlua/vendored"]
 lua = [
+  "lua-base",
+  "luajit",
+]
+lua-base = [
   "dep:mlua",
   "dep:paneru-lua",
   "dep:async-executor",

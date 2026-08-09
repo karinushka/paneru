@@ -112,6 +112,18 @@ $ cargo build --release
 $ cargo install --path .
 ```
 
+By default, Paneru builds with the embedded Lua runtime using a vendored LuaJIT compiled from source, requiring no system-wide Lua installation or `pkg-config` setup.
+
+If you prefer to link against a system- or version-manager-installed Lua (e.g. via `mise`, `asdf`, or Homebrew), disable default features and pass `--features lua`, making sure `PKG_CONFIG_PATH` contains the directory with `luajit.pc`:
+
+```shell
+# When using mise:
+$ PKG_CONFIG_PATH="$(mise where luajit)/lib/pkgconfig:$PKG_CONFIG_PATH" cargo build --release --no-default-features --features lua
+
+# When using Homebrew:
+$ cargo build --release --no-default-features --features lua
+```
+
 It can run directly from the command line or as a service.
 Note that you will need to grant accessibility privileges to the binary.
 

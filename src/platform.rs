@@ -25,6 +25,7 @@ use process::ProcessHandler;
 pub use process::ProcessSerialNumber;
 pub use workspace::WorkspaceObserver;
 
+pub(crate) mod app_launcher;
 mod display;
 pub(crate) mod input;
 mod mission_control;

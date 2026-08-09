@@ -55,9 +55,13 @@ pedantic = "warn"
 # because `luajit-src` copies its sources out of the read-only Nix store and
 # then cannot write to the copy.
 [features]
-default = []
+default = ["lua"]
 vendored = ["mlua/vendored"]
 lua = [
+  "lua-base",
+  "luajit",
+]
+lua-base = [
   "dep:mlua",
   "dep:paneru-lua",
   "dep:async-executor",

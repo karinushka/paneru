@@ -473,6 +473,7 @@ impl Task<'_> {
 mod tests {
     use super::*;
     use crate::ecs::state::{PaneruActiveState, PaneruVirtualWorkspaceState, PaneruWindowState};
+    use crate::lua::convert::WindowSpawnPayload;
     use paneru_shared_types::windowset::{LayoutOp, WinID};
 
     /// How long a test waits for the worker before calling it wedged. Generous:
@@ -1562,6 +1563,37 @@ mod tests {
         assert!(
             thread.is_finished(),
             "the worker should stop with its handle"
+        );
+    }
+
+    #[test]
+    fn window_spawned_event_is_dispatched_to_lua() {
+        let worker = worker(
+            r#"
+            paneru.on("window_spawned", function(event, ws)
+                paneru.flash(event.type .. ":" .. tostring(event.window_id) .. ":" .. event.title .. ":" .. event.app_name)
+            end)
+        "#,
+        );
+        let event = LuaEvent::WindowSpawned(WindowSpawnPayload {
+            window_id: 42,
+            pid: 100,
+            app_name: "Ghostty".into(),
+            bundle_id: "com.mitchellh.ghostty".into(),
+            title: "Terminal".into(),
+            frame: paneru_shared_types::state::Frame {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 600,
+            },
+            floating: false,
+            managed: true,
+        });
+        worker.send_events(vec![event]);
+        assert_eq!(
+            next_flash(&worker, "window_spawned"),
+            "window_spawned:42:Terminal:Ghostty"
         );
     }
 }

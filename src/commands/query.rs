@@ -125,6 +125,7 @@ impl StateBroadcastIntent {
                         ),
                 } => intent.virtual_workspace_changed = true,
                 Event::WindowCreated { .. }
+                | Event::WindowSpawned { .. }
                 | Event::WindowDestroyed { .. }
                 | Event::WindowMinimized { .. }
                 | Event::WindowDeminimized { .. }

@@ -11,7 +11,7 @@ use crate::config::Config;
 use crate::ecs::state::StateQueryKind;
 use crate::errors::Result;
 use crate::platform::{
-    EventLoopWaker, Modifiers, ProcessSerialNumber, WinID, WorkspaceId, WorkspaceObserver,
+    EventLoopWaker, Modifiers, Pid, ProcessSerialNumber, WinID, WorkspaceId, WorkspaceObserver,
 };
 use crate::util::AXUIWrapper;
 
@@ -83,6 +83,17 @@ pub enum Event {
 
     /// A window has been created.
     WindowCreated { element: CFRetained<AXUIWrapper> },
+    /// A window has been fully spawned and populated in the window manager.
+    WindowSpawned {
+        window_id: WinID,
+        pid: Pid,
+        app_name: String,
+        bundle_id: String,
+        title: String,
+        frame: paneru_shared_types::state::Frame,
+        floating: bool,
+        managed: bool,
+    },
     /// A window has been destroyed. `source` records which notification
     /// reported it; see [`DestroySource`].
     WindowDestroyed {

@@ -32,6 +32,7 @@ pub enum LuaEvent {
     ApplicationVisible { pid: Pid },
     ApplicationHidden { pid: Pid },
 
+    WindowSpawned(WindowSpawnPayload),
     WindowDestroyed { window_id: WinID },
     WindowFocused { window_id: WinID },
     WindowMoved { window_id: WinID },
@@ -87,6 +88,19 @@ pub struct MousePayload {
     pub modifiers: u32,
 }
 
+/// Enriched payload for [`LuaEvent::WindowSpawned`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WindowSpawnPayload {
+    pub window_id: WinID,
+    pub pid: Pid,
+    pub app_name: String,
+    pub bundle_id: String,
+    pub title: String,
+    pub frame: paneru_shared_types::state::Frame,
+    pub floating: bool,
+    pub managed: bool,
+}
+
 /// An [`Event`] that carries something Lua cannot see — an `AppKit` handle, a
 /// socket, a config — or that is internal plumbing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +128,25 @@ impl TryFrom<&Event> for LuaEvent {
             Event::ApplicationVisible { pid } => LuaEvent::ApplicationVisible { pid: *pid },
             Event::ApplicationHidden { pid } => LuaEvent::ApplicationHidden { pid: *pid },
 
+            Event::WindowSpawned {
+                window_id,
+                pid,
+                app_name,
+                bundle_id,
+                title,
+                frame,
+                floating,
+                managed,
+            } => LuaEvent::WindowSpawned(WindowSpawnPayload {
+                window_id: *window_id,
+                pid: *pid,
+                app_name: app_name.clone(),
+                bundle_id: bundle_id.clone(),
+                title: title.clone(),
+                frame: *frame,
+                floating: *floating,
+                managed: *managed,
+            }),
             Event::WindowDestroyed { window_id, .. } => LuaEvent::WindowDestroyed {
                 window_id: *window_id,
             },
@@ -238,6 +271,7 @@ impl LuaEvent {
         "application_deactivated",
         "application_visible",
         "application_hidden",
+        "window_spawned",
         "window_destroyed",
         "window_focused",
         "window_moved",
@@ -320,6 +354,21 @@ mod tests {
             LuaEvent::ApplicationDeactivated { pid: 1 },
             LuaEvent::ApplicationVisible { pid: 1 },
             LuaEvent::ApplicationHidden { pid: 1 },
+            LuaEvent::WindowSpawned(WindowSpawnPayload {
+                window_id: 1,
+                pid: 1,
+                app_name: "test".into(),
+                bundle_id: "test".into(),
+                title: "test".into(),
+                frame: paneru_shared_types::state::Frame {
+                    x: 0,
+                    y: 0,
+                    width: 100,
+                    height: 100,
+                },
+                floating: false,
+                managed: true,
+            }),
             LuaEvent::WindowDestroyed { window_id: 1 },
             LuaEvent::WindowFocused { window_id: 1 },
             LuaEvent::WindowMoved { window_id: 1 },

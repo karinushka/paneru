@@ -1041,6 +1041,16 @@ pub(super) fn spawn_window_trigger(
             WidthRatio(f64::from(frame.width()) / f64::from(active_display.bounds().width()));
         let layout_position = LayoutPosition::default();
 
+        let title = window.title().unwrap_or_default();
+        let app_name = app.name().to_string();
+        let bundle_id = app.bundle_id().unwrap_or_default().clone();
+        let window_frame = paneru_shared_types::state::Frame {
+            x: frame.min.x,
+            y: frame.min.y,
+            width: frame.width(),
+            height: frame.height(),
+        };
+
         // Insert the window into the internal Bevy state.
         // This insertion triggers window attributes observer.
         commands.spawn((
@@ -1051,6 +1061,17 @@ pub(super) fn spawn_window_trigger(
             layout_position,
             ChildOf(app_entity),
         ));
+
+        commands.trigger(SendMessageTrigger(Event::WindowSpawned {
+            window_id,
+            pid,
+            app_name,
+            bundle_id,
+            title,
+            frame: window_frame,
+            floating: false,
+            managed: true,
+        }));
     }
 
     if initializing.is_none() && restore.is_some() {

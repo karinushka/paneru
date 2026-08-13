@@ -9,7 +9,7 @@ use bevy::ecs::observer::On;
 use bevy::ecs::query::{Added, Has, With};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
-use bevy::ecs::system::{Commands, Populated, Query, Res, Single};
+use bevy::ecs::system::{Commands, Populated, Query, Res, ResMut, Single};
 use bevy::math::IRect;
 use bevy::prelude::Event as BevyEvent;
 use bevy::time::common_conditions::on_timer;
@@ -42,6 +42,7 @@ pub struct TierMemory {
 /// (`forget_workspace`) to bound the map.
 #[derive(Default, Resource)]
 pub struct FocusHistory {
+    pub pending_focus: Option<Entity>,
     by_workspace: HashMap<WorkspaceId, TierMemory>,
 }
 
@@ -73,6 +74,9 @@ impl FocusHistory {
     }
 
     pub fn forget(&mut self, entity: Entity) {
+        if self.pending_focus == Some(entity) {
+            self.pending_focus = None;
+        }
         for slot in self.by_workspace.values_mut() {
             if slot.last_managed == Some(entity) {
                 slot.last_managed = None;
@@ -106,6 +110,7 @@ impl Plugin for FocusEventsPlugin {
         app.add_observer(dim_remove_window_trigger)
             .add_observer(dim_window_trigger)
             .add_observer(maintain_focus_singleton)
+            .add_observer(detect_focus_rejection)
             .add_observer(virtual_strip_activated)
             .add_observer(stray_focus_observer)
             .add_observer(focus_window_trigger)
@@ -144,6 +149,35 @@ fn maintain_focus_singleton(
         config.set_skip_reshuffle(false);
     }
     config.set_ffm_flag(None);
+}
+
+#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
+fn detect_focus_rejection(
+    trigger: On<Add, FocusedMarker>,
+    mut focus_history: ResMut<FocusHistory>,
+    mut workspaces: Query<(Entity, &mut LayoutStrip)>,
+    mut commands: Commands,
+) {
+    let actual_entity = trigger.entity;
+    let Some(target_entity) = focus_history.pending_focus.take() else {
+        return;
+    };
+    if actual_entity == target_entity {
+        return;
+    }
+
+    debug!(
+        "focus rejection detected: requested {target_entity}, got {actual_entity}. Floating {target_entity}."
+    );
+    if let Ok(mut entity_commands) = commands.get_entity(target_entity) {
+        entity_commands.try_insert(Unmanaged::Floating);
+    }
+    for (_, mut strip) in &mut workspaces {
+        if strip.contains(target_entity) {
+            strip.remove(target_entity);
+        }
+    }
+    // commands.reshuffle_around(actual_entity);
 }
 
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
@@ -468,5 +502,35 @@ mod tests {
         history.forget_workspace(1);
 
         assert_eq!(history.last_managed(1), None);
+    }
+
+    #[test]
+    fn focus_rejection_floats_target_and_clears_pending_focus() {
+        let mut world = World::new();
+        let target = world.spawn(()).id();
+        let actual = world.spawn(()).id();
+
+        let mut strip = LayoutStrip::default();
+        strip.append(target);
+        strip.append(actual);
+        world.spawn(strip);
+
+        let history = FocusHistory {
+            pending_focus: Some(target),
+            ..Default::default()
+        };
+        world.insert_resource(history);
+
+        world.add_observer(detect_focus_rejection);
+
+        // Focus arrives on actual instead of requested target
+        world.entity_mut(actual).insert(FocusedMarker);
+
+        assert!(
+            world
+                .get::<Unmanaged>(target)
+                .is_some_and(|u| matches!(u, Unmanaged::Floating))
+        );
+        assert_eq!(world.resource::<FocusHistory>().pending_focus, None);
     }
 }

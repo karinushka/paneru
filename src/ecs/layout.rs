@@ -6,9 +6,9 @@ use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::query::{Changed, Has, Or, With, Without};
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::schedule::common_conditions::{not, resource_exists};
-use bevy::ecs::system::{Commands, ParamSet, Populated, Query, Res};
+use bevy::ecs::system::{Commands, Populated, Query, Res};
 use bevy::math::IRect;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use stdext::function_name;
 use tracing::{Level, instrument, trace};
 
@@ -42,22 +42,6 @@ type StripPlacements<'w, 's> = Query<
 /// Displays paired with the Dock's current edge, which is what turns a display's
 /// raw bounds into the usable viewport.
 type DisplayViewports<'w, 's> = Query<'w, 's, (&'static Display, Option<&'static DockPosition>)>;
-
-/// `p0`: windows whose frame moved this tick. `p1`: writes that frame onto
-/// their tab group siblings. Must be a `ParamSet` since `p1` aliases `p0` mutably.
-type TabGroupFrames<'w, 's> = ParamSet<
-    'w,
-    's,
-    (
-        Query<
-            'static,
-            'static,
-            (Entity, &'static Position, &'static Bounds),
-            (With<Window>, Or<(Changed<Bounds>, Changed<Position>)>),
-        >,
-        Query<'static, 'static, (&'static mut Position, &'static mut Bounds), With<Window>>,
-    ),
->;
 
 /// Windows whose size or origin changed this tick — either one means the strip
 /// holding them has to re-run its layout.
@@ -117,7 +101,6 @@ impl Plugin for LayoutEventsPlugin {
                 // Wait for finish_setup before tiling: until then every window
                 // sits in the active strip regardless of its real display.
                 (
-                    sync_tab_group_frames,
                     layout_sizes_changed,
                     layout_strip_changed,
                     reshuffle_layout_strip,
@@ -945,37 +928,6 @@ fn binpack_heights(heights: &[i32], min_height: i32, total_height: i32) -> Optio
     }
 
     Some(output)
-}
-
-#[instrument(level = Level::DEBUG, skip_all)]
-fn sync_tab_group_frames(mut windows: TabGroupFrames, workspaces: Query<&LayoutStrip>) {
-    let updates = windows
-        .p0()
-        .into_iter()
-        .filter_map(|(entity, Position(position), Bounds(bounds))| {
-            workspaces
-                .iter()
-                .find_map(|strip| strip.tab_group(entity))
-                .map(move |tab_group| {
-                    tab_group.into_iter().filter_map(move |sibling| {
-                        (sibling != entity).then_some((sibling, (*position, *bounds)))
-                    })
-                })
-        })
-        .flatten()
-        .collect::<HashMap<_, _>>();
-
-    for (entity, (source_position, source_bounds)) in updates {
-        let mut write_windows = windows.p1();
-        if let Ok((mut position, mut bounds)) = write_windows.get_mut(entity) {
-            if position.0 != source_position {
-                position.0 = source_position;
-            }
-            if bounds.0 != source_bounds {
-                bounds.0 = source_bounds;
-            }
-        }
-    }
 }
 
 /// Watches for size changes to windows and if they are changed, signals to the layout strip.

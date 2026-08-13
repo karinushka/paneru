@@ -386,6 +386,10 @@ where
     };
 
     let left_snap = strip_position(layout_strip.last());
+    // `first()`, not `get(1)`: the right-hand bound is where the *first* column
+    // snaps to the right edge. Keying it to the second column both stopped a
+    // column short and made a single-column strip fall through to the
+    // edge-snapping branches below, since `get(1)` errors when len == 1.
     let right_snap = strip_position(layout_strip.first());
 
     Some(

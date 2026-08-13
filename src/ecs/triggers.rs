@@ -100,7 +100,7 @@ pub(super) fn front_switched_trigger(
         let Some((BProcess(process), children)) =
             processes.iter().find(|process| &process.0.psn() == psn)
         else {
-            error!("Unable to find process with PSN {psn:?}");
+            debug!("Unable to find process with PSN {psn:?}");
             continue;
         };
 

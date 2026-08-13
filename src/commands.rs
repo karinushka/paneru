@@ -5,7 +5,7 @@ use bevy::ecs::entity::{Entity, EntityHashSet};
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::{Has, With, Without};
-use bevy::ecs::system::{Commands, Query, Res, Single};
+use bevy::ecs::system::{Commands, Query, Res, ResMut, Single};
 use bevy::math::IRect;
 use tracing::{Level, instrument};
 use tracing::{debug, error, info};
@@ -255,6 +255,7 @@ fn command_move_focus(
     workspaces: Query<(&LayoutStrip, Entity, Option<&NativeFullscreenMarker>)>,
     active_display: ActiveDisplay,
     window_manager: Res<WindowManager>,
+    mut focus_history: ResMut<FocusHistory>,
     mut commands: Commands,
 ) {
     let Some(Operation::Focus(direction)) =
@@ -284,6 +285,7 @@ fn command_move_focus(
 
         if let Some(entity) = strip.and_then(|strip| strip.last().ok().and_then(|col| col.top())) {
             debug!("fullscreen: swap raising {entity}");
+            focus_history.pending_focus = Some(entity);
             commands.focus_entity(entity, true);
         }
         return;
@@ -304,6 +306,7 @@ fn command_move_focus(
             active_strip.id(),
             active_display.bounds(),
         ) {
+            focus_history.pending_focus = Some(entity);
             commands.focus_entity(entity, true);
         }
         return;
@@ -345,6 +348,7 @@ fn command_move_focus(
     };
 
     if let Some(entity) = candidate {
+        focus_history.pending_focus = Some(entity);
         commands.focus_entity(entity, true);
         // Explicitly reshuffle so the target window is brought into view.
         // This avoids a race where focus-follows-mouse leaves skip_reshuffle

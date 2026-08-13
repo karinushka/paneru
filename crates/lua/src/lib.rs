@@ -102,7 +102,11 @@ pub fn install(lua: &Lua, paneru: &Table, dispatch: &Dispatch) -> Result<()> {
 }
 
 /// One `paneru.match{…}` call: compiles the spec into a Lua predicate.
-fn matcher(lua: &Lua, spec: Table) -> Result<Function> {
+///
+/// # Errors
+///
+/// Returns a Lua runtime error if regex compilation fails or an unknown field is present.
+pub fn matcher(lua: &Lua, spec: Table) -> Result<Function> {
     let pattern = |field: &str| -> Result<Option<Regex>> {
         let Some(pattern) = spec.get::<Option<String>>(field)? else {
             return Ok(None);
@@ -128,11 +132,16 @@ fn matcher(lua: &Lua, spec: Table) -> Result<Function> {
     }
 
     lua.create_function(move |_, window: Table| {
-        let matches = |regex: &Option<Regex>, field: &str| -> Result<bool> {
+        let matches = |regex: &Option<Regex>, fields: &[&str]| -> Result<bool> {
             let Some(regex) = regex else {
                 return Ok(true);
             };
-            Ok(regex.is_match(&window.get::<String>(field)?))
+            for field in fields {
+                if let Ok(val) = window.get::<String>(*field) {
+                    return Ok(regex.is_match(&val));
+                }
+            }
+            Ok(false)
         };
         let flag = |want: Option<bool>, field: &str| -> Result<bool> {
             match want {
@@ -140,9 +149,9 @@ fn matcher(lua: &Lua, spec: Table) -> Result<Function> {
                 None => Ok(true),
             }
         };
-        Ok(matches(&app, "app_name")?
-            && matches(&bundle, "bundle_id")?
-            && matches(&title, "title")?
+        Ok(matches(&app, &["app_name", "app"])?
+            && matches(&bundle, &["bundle_id", "bundle"])?
+            && matches(&title, &["title"])?
             && flag(floating, "floating")?
             && flag(managed, "managed")?)
     })

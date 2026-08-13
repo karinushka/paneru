@@ -397,13 +397,24 @@ fn run(
                         let Some((name, table)) = convert::event_table(runtime.lua(), event) else {
                             continue;
                         };
-                        for handler in runtime.event_handlers(&name) {
+                        for entry in runtime.event_handlers(&name) {
+                            if let Some(ref filter) = entry.filter {
+                                match filter.call::<bool>(&table) {
+                                    Ok(true) => {}
+                                    Ok(false) => continue,
+                                    Err(err) => {
+                                        error!("lua event filter for '{name}': {err}");
+                                        continue;
+                                    }
+                                }
+                            }
                             let task = Task {
                                 runtime: Rc::clone(&runtime),
                                 to_main: to_main.clone(),
                                 has_handlers,
                             };
-                            let (name, table) = (name.clone(), table.clone());
+                            let (name, table, handler) =
+                                (name.clone(), table.clone(), entry.handler.clone());
                             executor
                                 .spawn(async move {
                                     task.runtime.dispatch_event(&name, &table, &handler).await;
@@ -1594,6 +1605,58 @@ mod tests {
         assert_eq!(
             next_flash(&worker, "window_spawned"),
             "window_spawned:42:Terminal:Ghostty"
+        );
+    }
+
+    #[test]
+    fn filtered_window_spawned_event_only_fires_on_match() {
+        let worker = worker(
+            r#"
+            paneru.on("window_spawned", { bundle = "libreoffice" }, function(event, ws)
+                paneru.flash("matched:" .. event.app_name)
+            end)
+        "#,
+        );
+        let ghostty_event = LuaEvent::WindowSpawned(WindowSpawnPayload {
+            window_id: 1,
+            pid: 100,
+            app_name: "Ghostty".into(),
+            bundle_id: "com.mitchellh.ghostty".into(),
+            title: "Terminal".into(),
+            frame: paneru_shared_types::state::Frame {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 600,
+            },
+            floating: false,
+            managed: true,
+        });
+        let libreoffice_event = LuaEvent::WindowSpawned(WindowSpawnPayload {
+            window_id: 2,
+            pid: 200,
+            app_name: "LibreOffice".into(),
+            bundle_id: "org.libreoffice.script".into(),
+            title: "Document".into(),
+            frame: paneru_shared_types::state::Frame {
+                x: 0,
+                y: 0,
+                width: 300,
+                height: 300,
+            },
+            floating: false,
+            managed: true,
+        });
+
+        // Non-matching event should not trigger flash
+        worker.send_events(vec![ghostty_event]);
+        assert!(worker.outbox.try_recv().is_err());
+
+        // Matching event should trigger flash
+        worker.send_events(vec![libreoffice_event]);
+        assert_eq!(
+            next_flash(&worker, "libreoffice match"),
+            "matched:LibreOffice"
         );
     }
 }

@@ -40,7 +40,11 @@ impl CommandReader {
     ///
     /// Returns an error if another Paneru daemon already owns the name.
     pub fn start(self) -> Result<()> {
-        let receiver = Receiver::<Request>::bind(&service_name())?;
+        let receiver = Receiver::<Request>::bind(&service_name()).inspect_err(|_| {
+            error!(
+                "can not register a Mach port - maybe another Paneru instance is already running?"
+            );
+        })?;
 
         thread::spawn(move || {
             // Parks this one thread for the process lifetime; each request is

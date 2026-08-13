@@ -169,8 +169,8 @@ quit = "ctrl + alt - q"
 ```
 
 Alternatively, the embedded Lua runtime can declare the entire configuration
-via `paneru.setup{...}`, making the TOML file optional — see
-[Configuration from Lua](./CONFIGURATION.md#configuration-from-lua):
+via `paneru.setup{...}`, making the TOML file optional — see the
+**[Lua Scripting Guide](./SCRIPTING.md)**:
 
 ```lua
 -- init.lua
@@ -357,7 +357,7 @@ scripts, `cron` jobs, or other automation tools:
 - More commands for manipulating windows: finegrained size adjustments, touchpad resizing, etc.
 - Deeper scriptability building on the embedded Lua runtime, which already
   supports full configuration (`paneru.setup`), event hooks (`paneru.on`),
-  keybindings (`paneru.bind`), and state queries.
+  keybindings (`paneru.bind`), and state queries — see the **[Lua Scripting Guide](./SCRIPTING.md)**.
 
 ## Communication
 

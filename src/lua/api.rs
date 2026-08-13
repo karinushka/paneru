@@ -21,7 +21,9 @@ use paneru_lua as shared;
 use paneru_shared_types::script_state::{ScriptStateWrite, WriteOutcome};
 
 use super::convert::LuaEvent;
-use super::runtime::{Outbox, SharedRegistry, from_lua_value, store_error, to_lua_value};
+use super::runtime::{
+    HandlerEntry, Outbox, SharedRegistry, from_lua_value, store_error, to_lua_value,
+};
 use super::world::DispatchWorld;
 use crate::commands::Command;
 use crate::config::{Config, config_from_lua, resolve_chord};
@@ -172,23 +174,62 @@ pub(super) fn install(
     };
     paneru.set("exec", exec)?;
 
-    // paneru.on(event_name, handler) — run `handler` on every matching event.
-    // Unknown names are rejected here rather than silently never firing.
+    // paneru.on(event_name, [filter,] handler) — run `handler` on matching events.
+    // Accepts either (name, handler), (name, filter_table, handler), or (name, filter_fn, handler).
     let on = {
         let registry = Rc::clone(registry);
-        lua.create_function(move |_, (name, handler): (String, mlua::Function)| {
+        lua.create_function(move |lua, args: mlua::Variadic<Value>| {
+            if args.len() < 2 || args.len() > 3 {
+                return Err(mlua::Error::RuntimeError(
+                    "paneru.on requires 2 or 3 arguments: (event_name, [filter,] handler)".into(),
+                ));
+            }
+            let name = match &args[0] {
+                Value::String(s) => s.to_str()?.to_string(),
+                _ => {
+                    return Err(mlua::Error::RuntimeError(
+                        "paneru.on: expected event name string as 1st argument".into(),
+                    ));
+                }
+            };
             if !LuaEvent::is_known(&name) {
                 return Err(mlua::Error::RuntimeError(format!(
                     "paneru.on: unknown event '{name}'; known events are {}",
                     LuaEvent::NAMES.join(", ")
                 )));
             }
+
+            let (filter, handler) = if args.len() == 2 {
+                let Value::Function(handler) = args[1].clone() else {
+                    return Err(mlua::Error::RuntimeError(
+                        "paneru.on: expected handler function as 2nd argument".into(),
+                    ));
+                };
+                (None, handler)
+            } else {
+                let Value::Function(handler) = args[2].clone() else {
+                    return Err(mlua::Error::RuntimeError(
+                        "paneru.on: expected handler function as 3rd argument".into(),
+                    ));
+                };
+                let filter_fn = match &args[1] {
+                    Value::Table(table) => Some(shared::matcher(lua, table.clone())?),
+                    Value::Function(f) => Some(f.clone()),
+                    _ => {
+                        return Err(mlua::Error::RuntimeError(
+                            "paneru.on: expected table or function as filter".into(),
+                        ));
+                    }
+                };
+                (filter_fn, handler)
+            };
+
             registry
                 .borrow_mut()
                 .handlers
                 .entry(name)
                 .or_default()
-                .push(handler);
+                .push(HandlerEntry { filter, handler });
             Ok(())
         })?
     };

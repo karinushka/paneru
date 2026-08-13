@@ -84,12 +84,18 @@ fn prepend_env_path(package: &Table, field: &str, env_var: &str) -> mlua::Result
     Ok(())
 }
 
+#[derive(Clone)]
+pub(super) struct HandlerEntry {
+    pub(super) filter: Option<Function>,
+    pub(super) handler: Function,
+}
+
 /// Everything the script registered, kept on the Rust side so dispatch never
 /// has to reach back into Lua globals to find a callback.
 #[derive(Default)]
 pub(super) struct Registry {
     /// `paneru.on` handlers, in registration order per event name.
-    pub(super) handlers: HashMap<String, Vec<Function>>,
+    pub(super) handlers: HashMap<String, Vec<HandlerEntry>>,
     /// `paneru.bind` handlers indexed by `id - 1`: a Lua function, or a command
     /// string to run as-is.
     pub(super) binds: Vec<Value>,
@@ -192,7 +198,7 @@ impl LuaRuntime {
     /// Cloned out of the registry rather than borrowed: they are dispatched
     /// concurrently and one may register another, so nothing may be holding the
     /// borrow while they run.
-    pub(super) fn event_handlers(&self, name: &str) -> Vec<Function> {
+    pub(super) fn event_handlers(&self, name: &str) -> Vec<HandlerEntry> {
         self.registry
             .borrow()
             .handlers
@@ -545,7 +551,10 @@ mod tests {
         let (name, table) = convert::event_to_lua(runtime.lua(), &Event::SpaceChanged).unwrap();
         let extract = || Ok(Arc::new(test_state()));
         for handler in runtime.event_handlers(&name) {
-            world.drive(&extract, runtime.dispatch_event(&name, &table, &handler));
+            world.drive(
+                &extract,
+                runtime.dispatch_event(&name, &table, &handler.handler),
+            );
         }
         assert_eq!(drained_commands(&runtime).len(), 1);
     }

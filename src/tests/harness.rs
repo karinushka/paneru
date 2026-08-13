@@ -41,7 +41,6 @@ const COMMAND_WINDOW: Duration = Duration::from_millis(500);
 /// simulated time per command fixed instead of silently rescaling every
 /// timing-sensitive expectation in the suite.
 const UPDATES_PER_COMMAND: usize = (COMMAND_WINDOW.as_millis() / FRAME.as_millis()) as usize;
-
 type VerifierFunc = Box<dyn FnMut(&mut World, MockState)>;
 pub(crate) struct TestHarness {
     pub(crate) app: App,

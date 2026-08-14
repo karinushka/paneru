@@ -20,7 +20,7 @@ use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
 use crate::manager::{check_ax_privilege, check_separate_spaces};
 use crate::platform::display::PinnedDisplayHandler;
-use crate::platform::input::PinnedInputHandler;
+use crate::platform::input::{PinnedInputHandler, TapHealth};
 use crate::platform::notify::{NotifyHandler, PinnedNotifyHandler};
 use crate::platform::process::PinnedProcessHandler;
 use display::DisplayHandler;
@@ -335,6 +335,17 @@ impl PlatformCallbacks {
         self.workspace_observer.start();
 
         self.events.send(Event::ProcessesLoaded)
+    }
+
+    /// Checks the input tap still delivers events and revives it when it does
+    /// not. See `InputHandler::ensure_tap_alive`.
+    pub fn ensure_input_tap_alive(&mut self) -> TapHealth {
+        let Some(handler) = self.event_handler.as_mut() else {
+            return TapHealth::Failed;
+        };
+        // Safety: the handler is pinned in its Box for the life of the daemon,
+        // and reviving the tap does not move it.
+        unsafe { handler.as_mut().get_unchecked_mut() }.ensure_tap_alive()
     }
 
     /// Returns `true` when at least one event was dispatched this pass.

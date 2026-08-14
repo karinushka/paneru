@@ -4,7 +4,9 @@ use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_app_kit::{NSEvent, NSEventType, NSTouch, NSTouchPhase};
-use objc2_core_foundation::{CFMachPort, CFRetained, CFRunLoop, kCFRunLoopCommonModes};
+use objc2_core_foundation::{
+    CFMachPort, CFRetained, CFRunLoop, CFRunLoopSource, kCFRunLoopCommonModes,
+};
 use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventFlags, CGEventTapLocation, CGEventTapOptions,
     CGEventTapPlacement, CGEventTapProxy, CGEventType,
@@ -18,7 +20,7 @@ use std::ptr::null_mut;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 use stdext::function_name;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::commands::Command;
 use crate::config::Config;
@@ -99,6 +101,18 @@ pub fn set_lua_keybinds(keys: Vec<(u8, Modifiers, u32)>) {
 const SWIPE_THRESHOLD: f64 = 0.001;
 const GESTURE_MINIMAL_FINGERS: usize = 3;
 
+/// Outcome of an event tap health check.
+///
+/// A dead tap is silent: the socket keeps answering and windows keep tiling on
+/// command, so only an explicit check distinguishes it from a healthy daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TapHealth {
+    Healthy,
+    Reenabled,
+    Rebuilt,
+    Failed,
+}
+
 /// `InputHandler` manages low-level input events from the macOS `CGEventTap`.
 /// It intercepts keyboard and mouse events, processes gestures, and dispatches them as higher-level `Event`s.
 pub(super) struct InputHandler {
@@ -110,6 +124,9 @@ pub(super) struct InputHandler {
     finger_position: Option<Vec<Touch>>,
     /// The `CFMachPort` representing the `CGEventTap`.
     tap_port: Option<CFRetained<CFMachPort>>,
+    /// Run loop source feeding `tap_port`. Retained so the tap can be torn down
+    /// and rebuilt when macOS invalidates the mach port across a sleep cycle.
+    run_loop_source: Option<CFRetained<CFRunLoopSource>>,
     /// Timestamp of the last swipe gesture event. Scroll wheel events
     /// are suppressed for a short window after this to prevent the OS from
     /// scrolling windows underneath (including momentum scroll after finger lift).
@@ -138,6 +155,7 @@ impl InputHandler {
             config,
             finger_position: None,
             tap_port: None,
+            run_loop_source: None,
             last_swipe_time: None,
             _pin: PhantomPinned,
         }
@@ -149,6 +167,26 @@ impl InputHandler {
     ///
     /// `Ok(())` if the event tap is created and started successfully, otherwise `Err(Error)`.
     pub(super) fn start(self) -> Result<PinnedInputHandler> {
+        let mut pinned = Box::pin(self);
+        // Safety: the handler stays pinned in its Box for the life of the
+        // daemon, so the pointer handed to the tap callback stays valid.
+        unsafe { pinned.as_mut().get_unchecked_mut() }.install_tap()?;
+
+        Ok(scopeguard::guard(
+            pinned,
+            Box::new(|mut handler: Pin<Box<Self>>| {
+                info!("Unregistering event_handler");
+                // Safety: as above. Tearing the tap down does not move it.
+                unsafe { handler.as_mut().get_unchecked_mut() }.uninstall_tap();
+            }),
+        ))
+    }
+
+    /// Creates the `CGEventTap` and wires its mach port into the main run loop.
+    ///
+    /// The caller must keep `self` pinned: the tap callback holds a raw pointer
+    /// back to this handler and dereferences it on every event.
+    fn install_tap(&mut self) -> Result<()> {
         let mouse_event_mask = (1 << CGEventType::MouseMoved.0)
             | (1 << CGEventType::LeftMouseDown.0)
             | (1 << CGEventType::LeftMouseUp.0)
@@ -160,51 +198,91 @@ impl InputHandler {
             | (1 << NSEventType::Gesture.0)
             | (1 << CGEventType::KeyDown.0);
 
-        let mut pinned = Box::pin(self);
-        let this = unsafe { NonNull::new_unchecked(pinned.as_mut().get_unchecked_mut()) }.as_ptr();
-        unsafe {
-            (*this).tap_port = CGEvent::tap_create(
+        let this = NonNull::from(&mut *self).as_ptr();
+        let port = unsafe {
+            CGEvent::tap_create(
                 CGEventTapLocation::HIDEventTap,
                 CGEventTapPlacement::HeadInsertEventTap,
                 CGEventTapOptions::Default,
                 mouse_event_mask,
                 Some(Self::callback),
                 this.cast(),
-            );
-        };
-        if pinned.tap_port.is_none() {
-            return Err(Error::PermissionDenied(format!(
-                "{}: Can not create EventTap.",
-                function_name!()
-            )));
+            )
         }
+        .ok_or_else(|| {
+            Error::PermissionDenied(format!("{}: Can not create EventTap.", function_name!()))
+        })?;
 
-        let (run_loop_source, main_loop) =
-            CFMachPort::new_run_loop_source(None, pinned.tap_port.as_deref(), 0)
-                .zip(CFRunLoop::main())
-                .ok_or(Error::PermissionDenied(format!(
+        let (run_loop_source, main_loop) = CFMachPort::new_run_loop_source(None, Some(&port), 0)
+            .zip(CFRunLoop::main())
+            .ok_or_else(|| {
+                Error::PermissionDenied(format!(
                     "{}: Unable to create run loop source",
                     function_name!()
-                )))?;
-        let loop_mode = unsafe { kCFRunLoopCommonModes };
-        CFRunLoop::add_source(&main_loop, Some(&run_loop_source), loop_mode);
+                ))
+            })?;
+        CFRunLoop::add_source(&main_loop, Some(&run_loop_source), unsafe {
+            kCFRunLoopCommonModes
+        });
 
-        let port = pinned
-            .tap_port
-            .clone()
-            .ok_or(Error::PermissionDenied(format!(
-                "{}: invalid tap port.",
-                function_name!()
-            )))?;
-        Ok(scopeguard::guard(
-            pinned,
-            Box::new(move |_: Pin<Box<Self>>| {
-                info!("Unregistering event_handler");
-                CFRunLoop::remove_source(&main_loop, Some(&run_loop_source), loop_mode);
-                CFMachPort::invalidate(&port);
-                CGEvent::tap_enable(&port, false);
-            }),
-        ))
+        self.tap_port = Some(port);
+        self.run_loop_source = Some(run_loop_source);
+        Ok(())
+    }
+
+    fn uninstall_tap(&mut self) {
+        if let Some(run_loop_source) = self.run_loop_source.take()
+            && let Some(main_loop) = CFRunLoop::main()
+        {
+            CFRunLoop::remove_source(&main_loop, Some(&run_loop_source), unsafe {
+                kCFRunLoopCommonModes
+            });
+        }
+        if let Some(port) = self.tap_port.take()
+            && port.is_valid()
+        {
+            CGEvent::tap_enable(&port, false);
+            CFMachPort::invalidate(&port);
+        }
+    }
+
+    /// Verifies the tap still delivers events, and revives it when it does not.
+    ///
+    /// macOS can invalidate the tap's mach port across a sleep cycle without
+    /// ever delivering `TapDisabled` to the callback. No further event then
+    /// reaches the callback, so the re-arm branch there can never fire and the
+    /// tap stays dead until the daemon restarts. Re-enabling an invalid port is
+    /// a no-op, so that case needs a full rebuild.
+    pub(super) fn ensure_tap_alive(&mut self) -> TapHealth {
+        let Some(port) = self.tap_port.clone().filter(|port| port.is_valid()) else {
+            return self.rebuild_tap();
+        };
+
+        if CGEvent::tap_is_enabled(&port) {
+            return TapHealth::Healthy;
+        }
+
+        CGEvent::tap_enable(&port, true);
+        if CGEvent::tap_is_enabled(&port) {
+            warn!("event tap was disabled, re-enabled it");
+            TapHealth::Reenabled
+        } else {
+            self.rebuild_tap()
+        }
+    }
+
+    fn rebuild_tap(&mut self) -> TapHealth {
+        self.uninstall_tap();
+        match self.install_tap() {
+            Ok(()) => {
+                warn!("event tap was unusable, rebuilt it");
+                TapHealth::Rebuilt
+            }
+            Err(err) => {
+                error!("unable to rebuild event tap: {err}");
+                TapHealth::Failed
+            }
+        }
     }
 
     /// The C-callback function for the `CGEventTap`. It dispatches to the `input_handler` method.
@@ -250,6 +328,20 @@ impl InputHandler {
     ///
     /// `true` if the event should be intercepted (not passed further), `false` otherwise.
     fn input_handler(&mut self, event_type: CGEventType, event: &CGEvent) -> bool {
+        // Re-arm before any early return can swallow it. This is the only
+        // notice macOS gives that it switched the tap off, and dropping it
+        // leaves paneru deaf for the rest of the process lifetime.
+        if matches!(
+            event_type,
+            CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
+        ) {
+            warn!("Tap Disabled, re-enabling");
+            if let Some(port) = &self.tap_port {
+                CGEvent::tap_enable(port, true);
+            }
+            return false;
+        }
+
         let Some(events) = &self.events else {
             return false;
         };
@@ -258,13 +350,6 @@ impl InputHandler {
         let modifiers = get_modifiers(flags);
 
         let result = match event_type {
-            CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
-                info!("Tap Disabled");
-                if let Some(port) = &self.tap_port {
-                    CGEvent::tap_enable(port, true);
-                }
-                Ok(())
-            }
             CGEventType::LeftMouseDown | CGEventType::RightMouseDown => {
                 let point = CGEvent::location(Some(event));
                 events.send(Event::MouseDown { point, modifiers })

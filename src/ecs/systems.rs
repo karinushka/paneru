@@ -37,6 +37,7 @@ use crate::manager::{
     Application, Display, Process, Window, WindowManager, WindowOS, bruteforce_windows,
 };
 use crate::overlay::{FlashMessageManager, OverlayManager};
+use crate::platform::input::TapHealth;
 use crate::platform::{PlatformCallbacks, WinID};
 
 /// Processes and applications still inside their spawn grace period, with the
@@ -84,6 +85,7 @@ const ANIAMTE_SNAP_THRESHOLD: f32 = 5.0;
 const LOOP_MAX_TIMEOUT_FRAME_ACTIVE_MS: u32 = 16;
 const LOOP_MAX_TIMEOUT_LOWPOWER_MS: u32 = 500;
 const LOOP_MAX_TIMEOUT_MS: u32 = 50;
+const TAP_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const LOOP_TIMEOUT_STEP: u32 = 1;
 
 /// How long [`pump_events`] may spend draining the incoming channel before it
@@ -671,6 +673,7 @@ pub(crate) fn demux_input_events(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn pump_events(
     mut exit: MessageWriter<AppExit>,
     mut messages: MessageWriter<Event>,
@@ -679,6 +682,7 @@ pub(crate) fn pump_events(
     platform: Option<NonSendMut<Pin<Box<PlatformCallbacks>>>>,
     activity: FrameActivity,
     mut timeout: Local<u32>,
+    mut last_tap_check: Local<Option<Instant>>,
 ) {
     let Some((ref mut platform, incoming_events)) = platform.zip(incoming_events) else {
         // No platform interface or incoming event pipe - probably executing in a unit test.
@@ -694,6 +698,7 @@ pub(crate) fn pump_events(
     let deadline = Instant::now() + PUMP_BUDGET;
     let mut received_events = Vec::new();
     let mut pending_mouse = None;
+    let mut woke = false;
 
     // `true` when the channel went quiet, `false` when a cap sent us home with
     // events still queued. Only the quiet case may back the poll timeout off.
@@ -721,6 +726,7 @@ pub(crate) fn pump_events(
                 return;
             }
             Ok(event) => {
+                woke |= matches!(event, Event::SystemWoke { .. });
                 if matches!(event, Event::MouseMoved { .. }) {
                     pending_mouse = Some(event);
                 } else {
@@ -750,6 +756,18 @@ pub(crate) fn pump_events(
     } else {
         // Still backed up: come straight back rather than sleeping on it.
         *timeout = LOOP_TIMEOUT_STEP;
+    }
+
+    // macOS can invalidate the event tap while the machine sleeps without ever
+    // notifying the callback, which kills every keybinding, click and swipe
+    // while the socket and the layout engine carry on as normal. Waking is the
+    // usual trigger, so sweep on a slow timer too for the deaths without one.
+    if woke || last_tap_check.is_none_or(|last| last.elapsed() >= TAP_HEALTH_CHECK_INTERVAL) {
+        *last_tap_check = Some(Instant::now());
+        match platform.ensure_input_tap_alive() {
+            TapHealth::Healthy => {}
+            health => warn!("input tap not healthy (woke={woke}), recovery: {health:?}"),
+        }
     }
 }
 

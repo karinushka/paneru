@@ -150,7 +150,6 @@ pub struct LuaRuntime {
 /// garbage on every call after the first few. (Only threads that finished are
 /// recyclable under `LuaJIT`; a handler that errors out simply gets a fresh one.)
 const THREAD_POOL_SIZE: usize = 64;
-
 impl LuaRuntime {
     /// Builds a runtime by reading and executing the script at `path`.
     pub fn from_file(path: &Path, world: &Rc<DispatchWorld>) -> mlua::Result<Self> {

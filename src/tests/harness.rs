@@ -26,6 +26,22 @@ use crate::platform::{Pid, WinID, WorkspaceId};
 
 use super::*;
 
+/// Simulated frame length, chosen to sit just under
+/// `LOOP_MAX_TIMEOUT_FRAME_ACTIVE_MS` — the interval `pump_events` actually
+/// paces to once a frame is active, which is when the scroll integrator runs.
+/// A coarser tick would land above that integrator's step cap and exercise
+/// clamped physics production never sees.
+const FRAME: Duration = Duration::from_millis(20);
+
+/// How much simulated time each command in [`TestHarness::run`] is given to
+/// play out.
+const COMMAND_WINDOW: Duration = Duration::from_millis(500);
+
+/// Derived rather than written out, so that retuning [`FRAME`] keeps the
+/// simulated time per command fixed instead of silently rescaling every
+/// timing-sensitive expectation in the suite.
+const UPDATES_PER_COMMAND: usize = (COMMAND_WINDOW.as_millis() / FRAME.as_millis()) as usize;
+
 type VerifierFunc = Box<dyn FnMut(&mut World, MockState)>;
 pub(crate) struct TestHarness {
     pub(crate) app: App,
@@ -174,11 +190,29 @@ impl TestHarness {
         self
     }
 
+    /// Runs the app for `duration` of simulated time, draining the mock
+    /// platform's events each frame just as [`Self::run`] does.
+    ///
+    /// Waits on a deadline — a grace timer expiring, an animation reaching its
+    /// target — have to be expressed in time, not in a frame count: a frame is
+    /// [`FRAME`] long, so a bare `for _ in 0..10 { app.update() }` silently
+    /// changes how long it waits whenever that constant is retuned.
+    pub(crate) fn advance(&mut self, duration: Duration) {
+        let frames = duration.as_millis().div_ceil(FRAME.as_millis());
+        for _ in 0..frames {
+            self.app.update();
+
+            for event in self.mock_state.drain_events() {
+                self.app.world_mut().write_message::<Event>(event);
+            }
+        }
+    }
+
     pub(crate) fn run(&mut self, commands: Vec<Event>) {
         for (iteration, command) in commands.into_iter().enumerate() {
             self.app.world_mut().write_message::<Event>(command);
 
-            for _ in 0..5 {
+            for _ in 0..UPDATES_PER_COMMAND {
                 self.app.update();
 
                 // Drain and process events from our virtual OS
@@ -235,9 +269,7 @@ fn setup_world() -> App {
         .add_plugins(DisplayEventsPlugin)
         .add_plugins((register_triggers, register_systems, register_commands));
 
-    bevy_app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
-        100,
-    )));
+    bevy_app.insert_resource(TimeUpdateStrategy::ManualDuration(FRAME));
 
     bevy_app
 }

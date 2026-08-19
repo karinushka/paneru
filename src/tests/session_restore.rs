@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use bevy::ecs::query::Has;
 use bevy::prelude::*;
 
@@ -414,9 +416,8 @@ fn test_restore_resource_is_removed_after_grace_period() {
             columns: vec![SavedColumn::Single(saved_window(0))],
         }]));
 
-    for _ in 0..5 {
-        harness.app.update();
-    }
+    // Well inside the two-second default grace period.
+    harness.advance(Duration::from_millis(500));
 
     assert!(
         harness
@@ -425,9 +426,8 @@ fn test_restore_resource_is_removed_after_grace_period() {
             .contains_resource::<crate::ecs::restore::SessionRestore>()
     );
 
-    for _ in 0..30 {
-        harness.app.update();
-    }
+    // And comfortably past the far end of it.
+    harness.advance(Duration::from_secs(3));
 
     assert!(
         !harness

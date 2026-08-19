@@ -34,14 +34,100 @@ use paneru_shared_types::windowset_lua::returned_ops;
 struct ExecJob {
     program: String,
     args: Vec<String>,
-    reply: async_channel::Sender<std::io::Result<std::process::Output>>,
+    reply: async_channel::Sender<std::io::Result<ExecOutput>>,
 }
 
-/// How many `paneru.exec` commands may run at once. A fixed worker pool
-/// rather than a thread per call; four is enough that one slow command
-/// doesn't hold up the rest, since these are waits on other processes, not
-/// work.
-const EXEC_WORKERS: usize = 4;
+/// What one finished `paneru.exec` command produced.
+///
+/// Deliberately not [`std::process::Output`]: the exit status can be genuinely
+/// unknown while the output is still real, which an `ExitStatus` has no way to
+/// say. See [`run_exec_job`].
+struct ExecOutput {
+    code: Option<i32>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// Runs one command to completion, tolerating a child reaped out from under us.
+///
+/// [`std::process::Command::output`] spawns, drains the pipes and then waits —
+/// and it is the wait that is not safe to trust here. paneru shares a process
+/// with `AppKit`, and a framework that installs its own `SIGCHLD` disposition can
+/// reap our child before we get to it; the wait then fails with `ECHILD` even
+/// though the program ran perfectly. `output()` reports that as an error and
+/// throws away everything the child wrote.
+///
+/// A failed `paneru.exec` raises a Lua error, and a Lua error aborts the whole
+/// handler — so a lost reap does not merely lose an exit code, it stops the
+/// rest of the handler from running. A `window_focused` handler that repaints a
+/// bar stops repainting it, halfway through, on every event.
+///
+/// So spawn by hand and treat the pipes as the source of truth: they reach EOF
+/// when the child's ends close, which is when it exits. Only the status is
+/// allowed to come back unknown.
+fn run_exec_job(program: &str, args: &[String]) -> std::io::Result<ExecOutput> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    // Both pipes have to be drained at once. Reading one to EOF while the child
+    // fills the other's buffer deadlocks: it blocks on a write we are not
+    // reading, we block on a read it will never reach.
+    let mut errors = child.stderr.take();
+    let draining = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        if let Some(pipe) = errors.as_mut() {
+            let _ = pipe.read_to_end(&mut buffer);
+        }
+        buffer
+    });
+    let mut stdout = Vec::new();
+    if let Some(pipe) = child.stdout.as_mut() {
+        let _ = pipe.read_to_end(&mut stdout);
+    }
+    // A panic in the reader is not worth failing the command over; an empty
+    // stderr is the same answer the old code gave when it could not read one.
+    let stderr = draining.join().unwrap_or_default();
+
+    // Both pipes are at EOF, so the child has already finished. All that is
+    // left to collect is its status.
+    let code = match child.wait() {
+        Ok(status) => status.code(),
+        // Already reaped elsewhere. The command ran and the output above is
+        // real, so report it as run with an unknown status (`code = nil` in
+        // Lua, exactly as a signal-killed child already reports) rather than
+        // failing the handler.
+        Err(err) if err.raw_os_error() == Some(libc::ECHILD) => None,
+        Err(err) => return Err(err),
+    };
+
+    Ok(ExecOutput {
+        code,
+        stdout,
+        stderr,
+    })
+}
+
+/// How many `paneru.exec` commands may run at once when the machine's
+/// parallelism cannot be determined. These are waits on other processes
+/// rather than work, so a handful is enough that one slow command doesn't
+/// hold up the rest.
+const DEFAULT_EXEC_WORKERS: usize = 4;
+
+/// The size of the `paneru.exec` worker pool: a fixed pool rather than a
+/// thread per call, sized like every other thread pool in the process — from
+/// the machine's available parallelism, the same figure bevy's task pools
+/// use. Falls back to [`DEFAULT_EXEC_WORKERS`] on the platforms and cgroup
+/// setups where that number is unavailable.
+fn exec_workers() -> usize {
+    std::thread::available_parallelism().map_or(DEFAULT_EXEC_WORKERS, std::num::NonZeroUsize::get)
+}
 
 /// Starts the pool that runs `paneru.exec` commands.
 ///
@@ -51,15 +137,13 @@ const EXEC_WORKERS: usize = 4;
 /// reload gets a fresh pool rather than the old script's queued work.
 fn spawn_exec_pool() -> async_channel::Sender<ExecJob> {
     let (jobs, queue) = async_channel::unbounded::<ExecJob>();
-    for worker in 0..EXEC_WORKERS {
+    for worker in 0..exec_workers() {
         let queue = queue.clone();
         let spawned = std::thread::Builder::new()
             .name(format!("paneru-lua-exec-{worker}"))
             .spawn(move || {
                 while let Ok(job) = queue.recv_blocking() {
-                    let output = std::process::Command::new(&job.program)
-                        .args(&job.args)
-                        .output();
+                    let output = run_exec_job(&job.program, &job.args);
                     // The handler that asked may already be gone; its reply
                     // channel closing is not an error worth reporting.
                     let _ = job.reply.send_blocking(output);
@@ -159,7 +243,7 @@ pub(super) fn install(
                     .map_err(|err| mlua::Error::RuntimeError(format!("exec: {err}")))?;
 
                 let result = lua.create_table()?;
-                result.set("code", output.status.code())?;
+                result.set("code", output.code)?;
                 result.set(
                     "stdout",
                     String::from_utf8_lossy(&output.stdout).into_owned(),

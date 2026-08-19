@@ -355,7 +355,7 @@ where
     };
 
     let left_snap = strip_position(layout_strip.last());
-    let right_snap = strip_position(layout_strip.get(1));
+    let right_snap = strip_position(layout_strip.first());
 
     Some(
         if continuous_swipe && let Some((left_snap, right_snap)) = left_snap.zip(right_snap) {

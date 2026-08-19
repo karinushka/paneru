@@ -412,6 +412,10 @@ pub(super) fn application_event_trigger(
         match event {
             Event::ApplicationLaunched { psn, observer } if find_process(*psn).is_none() => {
                 let process: BProcess = Process::new(psn, observer.clone()).into();
+                if process.pid() == 0 {
+                    debug!("Skipping process with PID 0 (likely kernel_task).");
+                    continue;
+                }
                 let timeout = Timeout::new(
                     Duration::from_secs(PROCESS_READY_TIMEOUT_SEC),
                     Some(format!(

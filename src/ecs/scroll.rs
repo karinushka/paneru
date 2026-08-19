@@ -27,6 +27,25 @@ use crate::util::round_px;
 
 pub struct ScrollEventsPlugin;
 
+/// Upper bound on the timestep used to *advance* the strip.
+///
+/// `Time::<Virtual>` is deliberately given a 10s `max_delta` (see [`crate::ecs`])
+/// so `elapsed()` keeps tracking wall-clock across a stalled frame — the
+/// finger-lift timeout below depends on that. It is the wrong bound for
+/// integration: a frame delayed by a blocking AX round trip would otherwise
+/// advance the strip by `velocity * dt * viewport_width` in one step and slam
+/// it into the far clamp bound. Integrate at most one 30fps frame per update,
+/// however long the frame actually took.
+const MAX_STEP_SECS: f64 = 1.0 / 30.0;
+
+/// Lower bound on the timestep used to *derive* a velocity from a gesture delta.
+///
+/// Here the true delta is what we want — a backlog drained after a stall really
+/// does represent that much finger travel over that much time. The hazard is
+/// the opposite one: on a catch-up frame `dt` approaches zero, and
+/// `gesture_delta / dt` diverges.
+const MIN_STEP_SECS: f64 = 1.0 / 1000.0;
+
 /// The on-screen strip, its origin, and the scroll state being applied to it.
 type ScrollingStrip<'w, 's> = Single<
     'w,
@@ -141,8 +160,10 @@ fn swipe_gesture(
             SwipeGestureDirection::Reversed => 1.0,
         };
 
-        let dt = time.delta_secs_f64();
-        let new_velocity = if has_gesture_event && dt > 0.0 {
+        // Floored, not capped: dividing by the real elapsed time is correct
+        // here, but a catch-up frame can drive `dt` arbitrarily close to zero.
+        let dt = time.delta_secs_f64().max(MIN_STEP_SECS);
+        let new_velocity = if has_gesture_event {
             gesture_delta * swipe_sensitivity / dt
         } else {
             0.0
@@ -183,7 +204,9 @@ pub(super) fn swiping_timeout(
 ) {
     const FINGER_LIFT_THRESHOLD: Duration = Duration::from_millis(50);
     const MIN_VELOCITY_PX: f64 = 5.0;
-    let dt = time.delta_secs_f64();
+    // Predicts the distance the integrator is about to move, so it has to use
+    // the same bounded step the integrator does.
+    let dt = time.delta_secs_f64().min(MAX_STEP_SECS);
     let viewport_width = f64::from(active_display.bounds().width());
 
     for (entity, mut scroll) in strips {
@@ -218,6 +241,9 @@ fn apply_inertia(
         }
 
         if scroll.velocity.abs() > 0.001 {
+            // Unbounded on purpose: decay is monotonic toward zero, so a long
+            // frame can only shed more momentum, never overshoot. After a stall
+            // that is what we want.
             let decay_rate = config.swipe_deceleration();
             scroll.velocity *= (-decay_rate * dt).exp();
         } else {
@@ -268,8 +294,13 @@ fn apply_snap_force(
 
     let dist_to_snap = f64::from(position.x - target_offset);
     if dist_to_snap.abs() < snap_threshold {
-        let dt = time.delta_secs_f64();
-        scroll.position -= dist_to_snap * dt * CENTER_MAGNETIC_FORCE;
+        // This is an exponential approach, and it only pulls *toward* the
+        // target while the factor stays under 1. Past that it overshoots to the
+        // far side; at a 10s delta it would fling the strip 100x the distance
+        // the wrong way. Clamping the factor rather than `dt` keeps that true
+        // for any timestep and any `CENTER_MAGNETIC_FORCE`.
+        let approach = (time.delta_secs_f64() * CENTER_MAGNETIC_FORCE).min(1.0);
+        scroll.position -= dist_to_snap * approach;
     }
 }
 
@@ -280,7 +311,7 @@ fn scrolling_integrator(
     active_display: ActiveDisplay,
     config: Res<Config>,
 ) {
-    let dt = time.delta_secs_f64();
+    let dt = time.delta_secs_f64().min(MAX_STEP_SECS);
     let viewport = active_display.actual_bounds(&config);
     let viewport_width = f64::from(viewport.width());
 

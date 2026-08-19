@@ -19,6 +19,7 @@ use objc2_core_graphics::{
 use std::path::Path;
 use std::ptr::null_mut;
 use std::slice::from_raw_parts_mut;
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use stdext::function_name;
 use tracing::{Level, debug, error, instrument, trace, warn};
@@ -719,6 +720,53 @@ fn existing_application_window_list(
 /// cannot hold up initialisation, which waits on these tasks.
 const BRUTEFORCE_BUDGET: Duration = Duration::from_millis(250);
 
+/// How many applications may run [`bruteforce_windows`] at the same time.
+///
+/// Each loop iteration is a synchronous, private-API AX round trip. Letting
+/// every newly discovered app brute-force in parallel is bounded only by the
+/// async compute pool's thread count (one per core), and a burst of that
+/// many concurrent AX round trips at startup has been enough to pin tccd and
+/// wedge `WindowServer`'s main thread past the watchdog's timeout. Capping
+/// concurrency keeps the aggregate call rate bounded no matter how many apps
+/// need a scan.
+const MAX_CONCURRENT_BRUTEFORCE: usize = 2;
+
+/// Blocking counting semaphore gating concurrent [`bruteforce_windows`] scans.
+struct BruteforceGate {
+    available: Mutex<usize>,
+    freed: Condvar,
+}
+
+impl BruteforceGate {
+    fn get() -> &'static BruteforceGate {
+        static GATE: OnceLock<BruteforceGate> = OnceLock::new();
+        GATE.get_or_init(|| BruteforceGate {
+            available: Mutex::new(MAX_CONCURRENT_BRUTEFORCE),
+            freed: Condvar::new(),
+        })
+    }
+
+    /// Blocks until a scan slot is free, then reserves it until the returned
+    /// guard is dropped.
+    fn acquire(&self) -> BruteforcePermit<'_> {
+        let mut available = self.available.lock().expect("gate mutex poisoned");
+        while *available == 0 {
+            available = self.freed.wait(available).expect("gate mutex poisoned");
+        }
+        *available -= 1;
+        BruteforcePermit(self)
+    }
+}
+
+struct BruteforcePermit<'a>(&'a BruteforceGate);
+
+impl Drop for BruteforcePermit<'_> {
+    fn drop(&mut self) {
+        *self.0.available.lock().expect("gate mutex poisoned") += 1;
+        self.0.freed.notify_one();
+    }
+}
+
 /// Attempts to find and add unresolved windows for a given application by brute-forcing `element_id` values.
 /// This is a workaround for macOS API limitations that do not return `AXUIElementRef` for windows on inactive spaces.
 ///
@@ -738,6 +786,9 @@ pub fn bruteforce_windows(
     const BUFSIZE: isize = 0x14;
     let mut found_windows = Vec::new();
     debug!("{pid} has unresolved window on other desktops, bruteforcing them.");
+
+    // Blocks until fewer than `MAX_CONCURRENT_BRUTEFORCE` apps are scanning.
+    let _permit = BruteforceGate::get().acquire();
 
     //
     // NOTE: MacOS API does not return AXUIElementRef of windows on inactive spaces. However,

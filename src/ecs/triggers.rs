@@ -875,10 +875,11 @@ pub(super) fn window_destroyed_trigger(
         // the app's AX window list is still warm for a moment after the close. Re-checking them
         // raced the window back to life, leaving the entity in the strip and a permanent gap where
         // the window had been.
-        if matches!(source, DestroySource::SpaceNotification)
-            && window.role().is_ok()
-        {
-            debug!("Window {} still present, this was SLS workspace change.", window.id());
+        if matches!(source, DestroySource::SpaceNotification) && window.role().is_ok() {
+            debug!(
+                "Window {} still present, this was SLS workspace change.",
+                window.id()
+            );
             continue;
         }
 

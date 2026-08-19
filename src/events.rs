@@ -213,7 +213,7 @@ pub enum Event {
     /// A client has subscribed to state events. Carries the channel they are
     /// pushed to, which outlives the request that delivered it.
     StateSubscribe {
-        subscriber: Arc<paneru_mach_ipc::Subscriber>,
+        subscriber: Arc<async_mach_ports::Subscriber>,
     },
 
     /// A client has read or written the script state store. Answered

@@ -10,6 +10,7 @@ use bevy::ecs::query::{Added, Has, With, Without};
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::schedule::common_conditions::{not, resource_exists};
 use bevy::ecs::system::{Commands, Local, ParamSet, Populated, Query, Res, ResMut, Single};
+use bevy::math::IRect;
 use bevy::time::common_conditions::on_timer;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -126,6 +127,50 @@ pub(super) struct VirtualMoveMarker {
 pub(crate) struct PreviousStripPosition {
     pub origin: Origin,
     pub focus: Option<Entity>,
+}
+
+/// Where a floating window sat before its row was parked. The layout moves a
+/// row's tiled windows off screen by moving the row; a float has no slot in it,
+/// so it has to be parked by hand — and put back by hand when the row returns.
+#[derive(Component, Clone, Copy, Debug)]
+pub(crate) struct ParkedFloat(pub Origin);
+
+/// Moves a row's floats off screen with it, remembering where they were.
+fn park_floats(
+    entities: &[Entity],
+    bounds: IRect,
+    windows: &Windows,
+    parked: &Query<&ParkedFloat>,
+    commands: &mut Commands,
+) {
+    for entity in entities {
+        if parked.get(*entity).is_ok() {
+            continue;
+        }
+        let Some((_, _, Some(Unmanaged::Floating))) = windows.get_managed(*entity) else {
+            continue;
+        };
+        let Some(frame) = windows.moving_frame(*entity) else {
+            continue;
+        };
+        if let Ok(mut entity_commands) = commands.get_entity(*entity) {
+            entity_commands.try_insert(ParkedFloat(frame.min));
+        }
+        commands.reposition_entity(*entity, bounds.max - PARKED_STRIP_SLIVER);
+    }
+}
+
+/// Brings a row's parked floats back to where they were.
+fn unpark_floats(entities: &[Entity], parked: &Query<&ParkedFloat>, commands: &mut Commands) {
+    for entity in entities {
+        let Ok(ParkedFloat(origin)) = parked.get(*entity) else {
+            continue;
+        };
+        commands.reposition_entity(*entity, *origin);
+        if let Ok(mut entity_commands) = commands.get_entity(*entity) {
+            entity_commands.try_remove::<ParkedFloat>();
+        }
+    }
 }
 
 /// Guard spawned alongside the re-focus of a restored strip's remembered
@@ -462,7 +507,10 @@ fn windows_not_in_strips<F: Fn(WinID) -> Option<Entity>>(
             for id in ids {
                 if let Some(entity) = find_window(id) {
                     // If window exists in any of the active workspace rows.
-                    if strips.iter().any(|strip| strip.contains(entity)) {
+                    // Detached members count: a float parked on a row of this
+                    // space has not moved anywhere, and re-appending it would
+                    // tile it.
+                    if strips.iter().any(|strip| strip.holds(entity)) {
                         continue;
                     }
                     moved.push(entity);
@@ -484,7 +532,7 @@ fn find_orphaned_workspaces(
     let present = window_manager.present_displays();
 
     for (orphan, orphan_entity, timeout, child) in orphans {
-        if orphan.len() == 0 {
+        if orphan.is_vacant() {
             if let Ok(mut cmd) = commands.get_entity(orphan_entity) {
                 cmd.try_despawn();
             }
@@ -507,7 +555,7 @@ fn find_orphaned_workspaces(
         if timeout.timer.is_finished() {
             // Rescue windows from orphaned strips before despawning by floating them.
             debug!("Rescue windows from timed out orphan {}.", orphan.id());
-            for lost_window in orphan.all_windows() {
+            for lost_window in orphan.held_windows() {
                 if let Ok(mut cmd) = commands.get_entity(lost_window) {
                     cmd.try_insert(Unmanaged::Floating);
                 }
@@ -554,7 +602,7 @@ pub(crate) fn cleanup_unordered_windows(
         .iter()
         .flat_map(|strip| {
             strip
-                .all_windows()
+                .held_windows()
                 .into_iter()
                 .filter(|entity| !strip.tabbed(*entity))
         })
@@ -686,12 +734,13 @@ fn cleanup_selected_space_marker(
     });
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn handle_virtual_window_moves(
     moved_windows: Populated<(Entity, &VirtualMoveMarker), With<Window>>,
     mut workspaces: MovableStrips,
     windows: Windows,
     mut scrollings: Query<&mut Scrolling>,
+    parked_floats: Query<&ParkedFloat>,
     active_display: Single<(Entity, &Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
     config: Res<Config>,
     mut commands: Commands,
@@ -723,6 +772,13 @@ fn handle_virtual_window_moves(
             (strip.id() == workspace_id && strip.virtual_index == target_idx).then_some(entity)
         });
 
+        // A window the layout does not own (floating, minimised) keeps that
+        // status across the move: the destination takes it as a detached
+        // member, so it belongs to the workspace without claiming a column.
+        let moving_detached = windows
+            .get_managed(window_entity)
+            .is_some_and(|(_, _, unmanaged)| unmanaged.is_some());
+
         // Must be captured before strip.remove below.
         let source_neighbour =
             workspaces
@@ -732,6 +788,14 @@ fn handle_virtual_window_moves(
                     strip
                         .left_neighbour(window_entity)
                         .or_else(|| strip.right_neighbour(window_entity))
+                        // A detached window stands beside nothing, so it leaves
+                        // no hole behind: whatever the row is showing is what
+                        // the user goes on looking at.
+                        .or_else(|| {
+                            moving_detached
+                                .then(|| strip.first().ok().and_then(|column| column.top()))
+                                .flatten()
+                        })
                 });
         // If source will be empty after the move, Stay becomes Follow
         // since there's nothing left to look at.
@@ -766,7 +830,13 @@ fn handle_virtual_window_moves(
                 workspace_id
             );
             let mut new_strip = LayoutStrip::new(workspace_id, target_idx);
-            new_strip.append_tab_group(&moving_entities);
+            if moving_detached {
+                for moving_entity in &moving_entities {
+                    new_strip.detach(*moving_entity);
+                }
+            } else {
+                new_strip.append_tab_group(&moving_entities);
+            }
 
             let mut spawned = commands.spawn_layout_strip(new_strip, origin, display_entity, false);
             if stay {
@@ -797,9 +867,15 @@ fn handle_virtual_window_moves(
         // Move the window before moving markers to avoid being detected as a moved window.
         for (entity, mut strip, _, _, _) in &mut workspaces {
             if entity == target_entity {
-                match mid_placement {
-                    Some((slot, _)) => strip.insert_tab_group_at(slot, &moving_entities),
-                    None => strip.append_tab_group(&moving_entities),
+                if moving_detached {
+                    for moving_entity in &moving_entities {
+                        strip.detach(*moving_entity);
+                    }
+                } else {
+                    match mid_placement {
+                        Some((slot, _)) => strip.insert_tab_group_at(slot, &moving_entities),
+                        None => strip.append_tab_group(&moving_entities),
+                    }
                 }
             } else {
                 for moving_entity in &moving_entities {
@@ -857,6 +933,22 @@ fn handle_virtual_window_moves(
                 commands.focus_entity(window_entity, false);
             }
         }
+        // The float changed rows without the layout touching it: park it if the
+        // row it landed on is not the one on screen, bring it back if it is.
+        if moving_detached {
+            if stay {
+                park_floats(
+                    &moving_entities,
+                    active_display.bounds(),
+                    &windows,
+                    &parked_floats,
+                    &mut commands,
+                );
+            } else {
+                unpark_floats(&moving_entities, &parked_floats, &mut commands);
+            }
+        }
+
         debug!(
             "Moved window {} to virtual workspace {}",
             window_entity, target_idx
@@ -1143,12 +1235,14 @@ fn column_closest_to_center(
 }
 
 #[instrument(level = Level::DEBUG, skip_all)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn show_active_workspace(
     activated: Single<Entity, Added<ActiveWorkspaceMarker>>,
     windows: Windows,
     mut workspaces: RestorableStrips,
     displays: Query<(&Display, Option<&DockPosition>)>,
     focus_markers: Query<Ref<FocusedMarker>>,
+    parked_floats: Query<&ParkedFloat>,
     config: Res<Config>,
     mut commands: Commands,
 ) {
@@ -1188,6 +1282,17 @@ pub(crate) fn show_active_workspace(
 
         let bounds = active_display.bounds();
 
+        // The row's floats have no slot in the layout, so moving the row does
+        // not take them along: park them by hand or they stay on screen over
+        // the row the user switched to.
+        park_floats(
+            strip.detached(),
+            bounds,
+            &windows,
+            &parked_floats,
+            &mut commands,
+        );
+
         if let Ok(mut cmd) = commands.get_entity(entity) {
             cmd.try_remove::<Scrolling>()
                 .try_remove::<RepositionMarker>()
@@ -1206,6 +1311,8 @@ pub(crate) fn show_active_workspace(
         return;
     };
     debug!("showing virtual workspace {} ({})", strip.id(), *activated);
+
+    unpark_floats(strip.detached(), &parked_floats, &mut commands);
 
     // If no previous strip position exists, then the workspace was not hidden.
     if let Some(PreviousStripPosition { origin, focus }) = previous_position {
@@ -1365,7 +1472,7 @@ fn reap_empty_virtual_workspaces(
     for (entity, strip) in rows {
         if entity != changed_entity
             && strip.virtual_index > 0
-            && strip.len() == 0
+            && strip.is_vacant()
             && let Ok(mut entity_commands) = commands.get_entity(entity)
         {
             entity_commands.try_despawn();

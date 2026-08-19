@@ -759,6 +759,85 @@ fn test_focus_recovers_when_focused_window_is_outside_strip() {
         .run(commands);
 }
 
+/// A background native tab that ended up with a column of its own is folded
+/// back into the column of the tab that is showing, so the strip stops holding
+/// a slot nothing can ever appear in.
+#[test]
+fn test_stray_background_tab_is_folded_into_the_visible_tab() {
+    use bevy::ecs::system::RunSystemOnce as _;
+
+    use crate::ecs::{Bounds, Position};
+
+    let mut harness = TestHarness::new().with_windows(2);
+    for _ in 0..3 {
+        harness.app.update();
+    }
+
+    // Window 1 is a background tab of window 0: same app, same frame, and the
+    // window server does not report it on screen.
+    harness.mock_state.update_window(1, |window| {
+        window.visible = false;
+    });
+
+    let world = harness.app.world_mut();
+    let leader = find_window_entity(0, world);
+    let background = find_window_entity(1, world);
+    let position = world.get::<Position>(leader).expect("a position").clone();
+    let bounds = world.get::<Bounds>(leader).expect("bounds").clone();
+    world.entity_mut(background).insert((position, bounds));
+
+    {
+        let mut strips = world.query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>();
+        let strip = strips.single(world).expect("one active strip");
+        assert_eq!(strip.len(), 2, "the tabs start out in columns of their own");
+    }
+
+    world
+        .run_system_once(crate::ecs::systems::regroup_stray_native_tabs)
+        .expect("the regrouping system runs");
+
+    let mut strips = world.query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>();
+    let strip = strips.single(world).expect("one active strip");
+    assert_eq!(strip.len(), 1, "the stray column is gone");
+    assert!(strip.tabbed(background), "the background tab is a tab now");
+    assert!(strip.tabbed(leader));
+}
+
+/// An app with native tabs answers "which window is focused?" with whichever
+/// member of the tab group it decided to show, so the id on a focus event can
+/// already be out of date. Paneru has to follow the app to that window; drop
+/// the event and the strip stays parked where it was, which is what makes
+/// Cmd-Tab into a tabbed terminal look like nothing happened.
+#[test]
+fn test_focus_event_follows_the_window_the_app_says_is_focused() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::WindowFocused { window_id: 0 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    TestHarness::new()
+        .with_windows(2)
+        .on_iteration(1, |world, state| {
+            assert_eq!(focused_window_id(world), 0);
+            // The app has moved on to its other window without telling us.
+            state.set_focused_window(1);
+        })
+        .on_iteration(3, |world, _state| {
+            assert_eq!(
+                focused_window_id(world),
+                1,
+                "the focus event must follow the app to the window it actually focused",
+            );
+        })
+        .run(commands);
+}
+
 #[test]
 fn test_focus_west_from_outside_strip_enters_at_last_column() {
     let commands = vec![

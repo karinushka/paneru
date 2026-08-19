@@ -102,6 +102,7 @@ fn test_state_serialization() {
             strips: vec![SavedStrip {
                 virtual_index: 0,
                 columns: vec![SavedColumn::Single(window)],
+                floating: vec![],
             }],
         }],
     };
@@ -137,6 +138,7 @@ fn test_state_restoration() {
             strips: vec![SavedStrip {
                 virtual_index: 1,
                 columns: vec![SavedColumn::Single(window)],
+                floating: vec![],
             }],
         }],
     };
@@ -184,6 +186,46 @@ fn test_state_extraction() {
     } else {
         panic!("Expected SavedColumn::Single");
     }
+}
+
+/// Floating a window frees its column but not its membership: the row still
+/// owns it, and the saved state carries it so a restart puts it back.
+#[test]
+fn test_state_extraction_saves_a_float_with_its_row() {
+    use crate::commands::{Command, Operation};
+    use crate::tests::harness::TestHarness;
+
+    let harness = TestHarness::new().with_windows(2);
+
+    let commands = vec![
+        Event::Command {
+            command: Command::Window(Operation::Manage),
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    harness
+        .on_iteration(2, |world, _state| {
+            let mut system_state: StateExtractionState<'_, '_> = SystemState::new(world);
+            let (workspaces, displays, windows, apps) =
+                system_state.get(world).expect("failed to get world state");
+            let state = PaneruState::extract(&workspaces, &displays, &windows, &apps);
+
+            let strip = &state.workspaces[0].strips[0];
+            assert_eq!(
+                strip.columns.len(),
+                1,
+                "the float gives up its column so the tiling closes the gap"
+            );
+            assert_eq!(
+                strip.floating.len(),
+                1,
+                "but the row still owns it, and saves it"
+            );
+        })
+        .run(commands);
 }
 
 #[test]
@@ -362,6 +404,7 @@ fn restore_plan_compacts_missing_windows_and_preserves_active_virtual_row() {
                     "com.example.missing",
                     "Missing",
                 ))],
+                floating: vec![],
             },
             SavedStrip {
                 virtual_index: 1,
@@ -383,6 +426,7 @@ fn restore_plan_compacts_missing_windows_and_preserves_active_virtual_row() {
                         ]),
                     ]),
                 ],
+                floating: vec![],
             },
         ],
     }]);
@@ -438,10 +482,12 @@ fn restore_plan_prefers_later_hard_match_over_earlier_fallback_match() {
             SavedStrip {
                 virtual_index: 0,
                 columns: vec![SavedColumn::Single(saved_a)],
+                floating: vec![],
             },
             SavedStrip {
                 virtual_index: 1,
                 columns: vec![SavedColumn::Single(saved_b)],
+                floating: vec![],
             },
         ],
     }]);
@@ -481,6 +527,7 @@ fn restore_plan_skips_ambiguous_fallback_match() {
         strips: vec![SavedStrip {
             virtual_index: 0,
             columns: vec![SavedColumn::Single(saved)],
+            floating: vec![],
         }],
     }]);
     let current = vec![
@@ -692,8 +739,85 @@ fn test_query_state_includes_configured_floating_windows() {
     assert!(state.virtual_workspaces[0].windows[0].floating);
 }
 
+/// A scratchpad round trip: a float stashed on another row parks off screen
+/// with it, stays owned by it, and comes back where it was when the row is
+/// shown again.
 #[test]
-fn test_query_state_tracks_float_after_virtual_workspace_is_reaped() {
+fn test_stashed_float_parks_and_returns() {
+    use crate::commands::{Command, MoveFocus, Operation};
+    use crate::ecs::layout::PARKED_STRIP_SLIVER;
+    use crate::tests::harness::TestHarness;
+
+    let harness = TestHarness::new().with_windows(2);
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        // Float window 0, then stash it on the next row without following it.
+        Event::Command {
+            command: Command::Window(Operation::Manage),
+        },
+        Event::Command {
+            command: Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Stay)),
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        // Bring the row it was stashed on into view.
+        Event::Command {
+            command: Command::Window(Operation::VirtualNumber(1)),
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    harness
+        .on_iteration(3, |world, _state| {
+            let float = crate::tests::harness::find_window_entity(0, world);
+            let mut query = world.query::<&LayoutStrip>();
+            let stash = query
+                .iter(world)
+                .find(|strip| strip.virtual_index == 1)
+                .expect("the stash row exists");
+
+            assert!(stash.holds(float), "the stash row owns the float");
+            assert!(
+                !stash.contains(float),
+                "without giving it a column in the layout"
+            );
+
+            let mut windows = world.query::<&crate::manager::Window>();
+            let frame = windows
+                .iter(world)
+                .find(|window| window.id() == 0)
+                .expect("window 0")
+                .frame();
+            assert_eq!(
+                frame.min.y,
+                TEST_DISPLAY_HEIGHT - PARKED_STRIP_SLIVER,
+                "a stashed float parks off screen with its row"
+            );
+        })
+        .on_iteration(5, |world, _state| {
+            let mut windows = world.query::<&crate::manager::Window>();
+            let frame = windows
+                .iter(world)
+                .find(|window| window.id() == 0)
+                .expect("window 0")
+                .frame();
+            assert!(
+                frame.min.y < TEST_DISPLAY_HEIGHT - PARKED_STRIP_SLIVER,
+                "showing the row brings its float back on screen, got {frame:?}"
+            );
+        })
+        .run(commands);
+}
+
+/// A float belongs to the row it was floated on: the row survives the reap
+/// that would otherwise take it, the float goes out of view with it, and it
+/// comes back to the same row rather than following the user around.
+#[test]
+fn test_query_state_keeps_float_on_its_virtual_workspace() {
     use crate::commands::{Command, MoveFocus, Operation};
     use crate::config::{Config, MainOptions};
     use crate::tests::harness::TestHarness;
@@ -742,16 +866,21 @@ fn test_query_state_tracks_float_after_virtual_workspace_is_reaped() {
                 .expect("active virtual workspace");
 
             assert_eq!(state.active.virtual_workspace_number, Some(1));
-            assert_eq!(state.active.focused_window_id, Some(0));
             assert!(
-                !state.virtual_workspaces.iter().any(|workspace| {
-                    workspace.native_workspace_id == TEST_WORKSPACE_ID && workspace.number == 2
-                }),
-                "the empty remembered row should be reaped"
+                active.windows.is_empty(),
+                "the float belongs to the row it was floated on, not this one"
             );
-            assert_eq!(active.windows.len(), 1);
-            assert!(active.windows[0].focused);
-            assert!(active.windows[0].floating);
+
+            let parked = state
+                .virtual_workspaces
+                .iter()
+                .find(|workspace| {
+                    workspace.native_workspace_id == TEST_WORKSPACE_ID && workspace.number == 2
+                })
+                .expect("the row holding the float is not reaped");
+            assert_eq!(parked.windows.len(), 1);
+            assert_eq!(parked.windows[0].window_id, 0);
+            assert!(parked.windows[0].floating);
         })
         .on_iteration(4, |world, state| {
             state.update_window(0, |window| window.workspace_id = TEST_WORKSPACE_ID + 1);

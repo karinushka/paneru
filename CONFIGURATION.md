@@ -37,7 +37,7 @@ General behavior settings for the window manager.
 | `window_resize_cycle` | Boolean | `true` | If disabled, `window_resize` and `window_shrink` (and their `window_vertical_*` counterparts) stop at the largest/smallest preset instead of cycling back. |
 | `mouse_resize_modifier` | String | *None* | If enabled allows window resizing using mouse movement. For example `cmd + shift` will allow resizing of the window when holding those keys. Proximity of the pointer to left or right window edge determines which side will be adjusted. |
 | `reap_empty_workspaces` | String | `false` | If enabled, a virtual workspace without any windows will be removed. |
-| `disable_native_tabs` | Boolean | `false` | If enabled, Paneru will not auto-merge a newly-spawned window into a tab group with an existing same-app sibling that shares its frame. Use this if you find unrelated windows being grouped together. |
+| `disable_native_tabs` | Boolean | `false` | If enabled, Paneru will not auto-merge a window into a tab group with an existing same-app sibling that shares its frame. Merging happens when the window is created, and again for a background tab that the window server stops showing while a sibling of the same app holds the same frame — an app that hides its old tab a moment late would otherwise leave a column nothing can appear in. Use this if you find unrelated windows being grouped together. |
 | `virtual_workspace_animations` | Boolean | `false` | If enabled, Paneru will animate virtual workspace swaps. Off by default, because people use virtual workspaces due to the slow animation of the native macOS workspaces. |
 | `insert_windows_mid_strip` | Boolean | `false` | When moving a window to another virtual workspace, insert it at the column matching its current on-screen position (keeping it where you see it and shifting the rest) instead of appending it to the end of the destination strip. |
 | `create_virtual_workspace_automatically` | Boolean | `false` | Automatically creates a new virtual workspace when using `window_virtual_south `or Southward gesture controls. |
@@ -222,6 +222,14 @@ around at the start or the end.
 
 Moving the last window out of the virtual row, will "collapse it".
 
+A floating window belongs to the row it was floated on. It gives up its column
+so the tiling closes the gap, but the row keeps it: it goes off screen when you
+switch rows, comes back where it was when you return, follows a
+`window_virtualsend*` to another row, and is saved with that row by session
+restore. A row that holds nothing but floats is not collapsed. This is what
+makes a scripted scratchpad — a pad parked on a row you never look at — stay
+put instead of being left behind on screen.
+
 Virtual workspaces can also be navigated using trackpad gestures. If `[swipe.gesture]` is configured, a vertical 3/4-finger swipe will switch between virtual workspace rows, while horizontal swipes continue to scroll the strip as usual. For mouse users, see the `vertical_modifier` option under `[swipe.scroll]`.
 
 | Action | Description |
@@ -355,6 +363,7 @@ The saved session includes:
 - native workspace ids
 - virtual workspace rows and the selected row per native workspace
 - layout structure: singles, stacks, tabs, and fullscreen strips
+- floating windows, with the virtual row they were parked on
 - display/screen association
 - window identity for matching across restarts
 

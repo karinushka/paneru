@@ -19,13 +19,13 @@ use super::{FocusedMarker, MouseHeldMarker, SystemTheme, Unmanaged};
 use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, GlobalState, WindowCtx, Windows};
-use crate::ecs::workspace::RestoreFocusMarker;
+use crate::ecs::workspace::{ParkedFloat, RestoreFocusMarker};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, Position, RaiseWindow, Scrolling, SendMessageTrigger,
     SpawnCommandsExt, StrayFocusEvent,
 };
 use crate::events::Event;
-use crate::manager::{Application, Display, Window, WindowManager};
+use crate::manager::{Application, Display, Origin, Window, WindowManager};
 use crate::platform::WorkspaceId;
 
 const REFRESH_WINDOW_CHECK_FREQ_MS: u64 = 1000;
@@ -114,7 +114,8 @@ impl Plugin for FocusEventsPlugin {
             .add_observer(virtual_strip_activated)
             .add_observer(stray_focus_observer)
             .add_observer(focus_window_trigger)
-            .add_observer(raise_window_trigger);
+            .add_observer(raise_window_trigger)
+            .add_observer(recover_offscreen_focused_float);
     }
 }
 
@@ -151,11 +152,55 @@ fn maintain_focus_singleton(
     config.set_ffm_flag(None);
 }
 
+/// Whether two windows are members of one native tab group: the app shows one
+/// of them at a time, and focusing any of them can leave the focus on the one
+/// the app decided to show.
+///
+/// The strip knows the ones it has already grouped. The rest are recognised the
+/// same way [`super::systems::detect_tabbed_windows`] recognises them in the
+/// first place: same app, same frame.
+fn shares_a_tab_group(
+    workspaces: &Query<(Entity, &mut LayoutStrip)>,
+    windows: &Windows,
+    target: Entity,
+    actual: Entity,
+) -> bool {
+    if workspaces.iter().any(|(_, strip)| {
+        strip
+            .tab_group(target)
+            .is_some_and(|group| group.contains(&actual))
+    }) {
+        return true;
+    }
+
+    let parent_of = |entity: Entity| {
+        windows
+            .get(entity)
+            .and_then(|window| windows.find_parent(window.id()))
+            .map(|(_, _, parent)| parent)
+    };
+    let (Some(target_app), Some(actual_app)) = (parent_of(target), parent_of(actual)) else {
+        return false;
+    };
+    if target_app != actual_app {
+        return false;
+    }
+
+    windows
+        .frame(target)
+        .zip(windows.frame(actual))
+        .is_some_and(|(target_frame, actual_frame)| {
+            target_frame.min.chebyshev_distance(actual_frame.min) <= 1
+                && target_frame.size().chebyshev_distance(actual_frame.size()) <= 1
+        })
+}
+
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn detect_focus_rejection(
     trigger: On<Add, FocusedMarker>,
     mut focus_history: ResMut<FocusHistory>,
     mut workspaces: Query<(Entity, &mut LayoutStrip)>,
+    windows: Windows,
     mut commands: Commands,
 ) {
     let actual_entity = trigger.entity;
@@ -166,6 +211,16 @@ fn detect_focus_rejection(
         return;
     }
 
+    // Native tabs share one slot: asking for a background tab makes the app
+    // select it, and the focus notification names whichever tab of the group
+    // the app ended up showing. That is the app doing what was asked, not
+    // refusing it — floating the window here is how a tabbed terminal ends up
+    // scattered across the layout as windows nothing tiles.
+    if shares_a_tab_group(&workspaces, &windows, target_entity, actual_entity) {
+        debug!("focus landed on tab sibling {actual_entity} of {target_entity}; not a rejection.");
+        return;
+    }
+
     debug!(
         "focus rejection detected: requested {target_entity}, got {actual_entity}. Floating {target_entity}."
     );
@@ -173,11 +228,66 @@ fn detect_focus_rejection(
         entity_commands.try_insert(Unmanaged::Floating);
     }
     for (_, mut strip) in &mut workspaces {
-        if strip.contains(target_entity) {
-            strip.remove(target_entity);
+        if strip.holds(target_entity) {
+            strip.detach(target_entity);
         }
     }
     // commands.reshuffle_around(actual_entity);
+}
+
+/// How much of a window has to be showing for it to count as reachable.
+const RECOVERABLE_SLIVER: i32 = 20;
+
+/// Brings a floating window that has taken focus back onto the screen when it
+/// is not on any display at all.
+///
+/// A float has no slot in the layout, so nothing else moves it: one stranded
+/// off screen — parked with a row that has since been reaped, left behind by an
+/// app that reopened it where it was last session — takes focus on Cmd-Tab and
+/// stays invisible, which reads as the switch simply not working. A float
+/// parked with its own hidden row is off screen on purpose and is left to the
+/// row logic, which puts it back when the row is shown.
+#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
+fn recover_offscreen_focused_float(
+    trigger: On<Add, FocusedMarker>,
+    parked: Query<&ParkedFloat>,
+    displays: Query<&Display>,
+    active_display: ActiveDisplay,
+    mut ctx: WindowCtx,
+) {
+    let entity = trigger.event().entity;
+    let Some((_, _, Some(Unmanaged::Floating))) = ctx.windows.get_managed(entity) else {
+        return;
+    };
+    if parked.get(entity).is_ok() {
+        return;
+    }
+    let Some(frame) = ctx.windows.moving_frame(entity) else {
+        return;
+    };
+
+    let reachable = displays.iter().any(|display| {
+        let showing = display.bounds().intersect(frame);
+        showing.width() >= RECOVERABLE_SLIVER && showing.height() >= RECOVERABLE_SLIVER
+    });
+    if reachable {
+        return;
+    }
+
+    let bounds = active_display.bounds();
+    let size = frame.size();
+    let origin = Origin::new(
+        frame
+            .min
+            .x
+            .clamp(bounds.min.x, (bounds.max.x - size.x).max(bounds.min.x)),
+        frame
+            .min
+            .y
+            .clamp(bounds.min.y, (bounds.max.y - size.y).max(bounds.min.y)),
+    );
+    debug!("focused float {entity} was off screen at {frame:?}; recovering to {origin}");
+    ctx.commands.reposition_entity(entity, origin);
 }
 
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
@@ -502,6 +612,42 @@ mod tests {
         history.forget_workspace(1);
 
         assert_eq!(history.last_managed(1), None);
+    }
+
+    /// Native tabs share a slot: the app answering with a sibling of the tab
+    /// group is it doing what was asked, so the requested window must keep its
+    /// place in the layout.
+    #[test]
+    fn focus_landing_on_a_tab_sibling_is_not_a_rejection() {
+        let mut world = World::new();
+        let target = world.spawn(()).id();
+        let sibling = world.spawn(()).id();
+
+        let mut strip = LayoutStrip::default();
+        strip.append(target);
+        strip
+            .convert_to_tabs(target, sibling)
+            .expect("target is in the strip");
+        world.spawn(strip);
+
+        world.insert_resource(FocusHistory {
+            pending_focus: Some(target),
+            ..Default::default()
+        });
+        world.add_observer(detect_focus_rejection);
+
+        world.entity_mut(sibling).insert(FocusedMarker);
+
+        assert!(
+            world.get::<Unmanaged>(target).is_none(),
+            "a tab sibling taking the focus must not float the requested tab"
+        );
+        let mut strips = world.query::<&LayoutStrip>();
+        assert!(
+            strips.single(&world).expect("one strip").contains(target),
+            "and must not take it out of the layout"
+        );
+        assert_eq!(world.resource::<FocusHistory>().pending_focus, None);
     }
 
     #[test]

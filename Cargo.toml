@@ -21,10 +21,9 @@ default-members = ["."]
 [workspace.dependencies]
 cfg-if = "1.0.4"
 futures-lite = "2.6"
-mach2 = "0.6"
+async-mach-ports = "0.1.0"
 mlua = { version = "0.12", default-features = false, features = ["serialize"] }
 paneru-lua = { path = "crates/lua" }
-paneru-mach-ipc = { path = "crates/mach_ipc" }
 paneru-shared-types = { path = "crates/shared_types" }
 regex = "1.12"
 serde = { version = "1.0", features = ["derive", "rc"] }
@@ -144,7 +143,6 @@ objc2-app-kit = { version = "0.3", features = [
 ] }
 objc2-core-foundation = { version = "0.3", features = ["CFRunLoop"] }
 objc2-core-graphics = "0.3"
-paneru-mach-ipc = { workspace = true }
 paneru-shared-types = { workspace = true }
 paneru-lua = { workspace = true, optional = true }
 objc2-quartz-core = { version = "0.3", features = [
@@ -170,6 +168,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ctrlc = { version = "3.5", features = ["termination"] }
 xdg = "3.0"
 mockall = "0.15"
+async-mach-ports = { workspace = true }
 [build-dependencies]
 cfg-if = { workspace = true}
 

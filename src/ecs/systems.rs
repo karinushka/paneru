@@ -818,7 +818,12 @@ pub(crate) fn gather_initial_processes(
         match receiver.recv().expect("error reading initial processes") {
             Event::ProcessesLoaded | Event::Exit => break,
             Event::ApplicationLaunched { psn, observer } => {
-                initial_processes.push(Process::new(&psn, observer.clone()).into());
+                let process: BProcess = Process::new(&psn, observer.clone()).into();
+                if process.pid() != 0 {
+                    initial_processes.push(process);
+                } else {
+                    debug!("Skipping process with PID 0 (likely kernel_task).");
+                }
             }
             Event::InitialConfig(config) => {
                 // If there is a display menubar override, apply it to newly created displays.

@@ -412,6 +412,10 @@ pub(super) fn application_event_trigger(
         match event {
             Event::ApplicationLaunched { psn, observer } if find_process(*psn).is_none() => {
                 let process: BProcess = Process::new(psn, observer.clone()).into();
+                if process.pid() == 0 {
+                    debug!("Skipping process with PID 0 (likely kernel_task).");
+                    continue;
+                }
                 let timeout = Timeout::new(
                     Duration::from_secs(PROCESS_READY_TIMEOUT_SEC),
                     Some(format!(
@@ -871,10 +875,11 @@ pub(super) fn window_destroyed_trigger(
         // the app's AX window list is still warm for a moment after the close. Re-checking them
         // raced the window back to life, leaving the entity in the strip and a permanent gap where
         // the window had been.
-        if matches!(source, DestroySource::SpaceNotification)
-            && window.role().is_ok()
-        {
-            debug!("Window {} still present, this was SLS workspace change.", window.id());
+        if matches!(source, DestroySource::SpaceNotification) && window.role().is_ok() {
+            debug!(
+                "Window {} still present, this was SLS workspace change.",
+                window.id()
+            );
             continue;
         }
 

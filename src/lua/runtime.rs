@@ -17,7 +17,7 @@ use std::path::Path;
 use std::rc::Rc;
 
 use mlua::prelude::{FromLua, IntoLua};
-use mlua::{AnyUserData, Function, Lua, Table, Value};
+use mlua::{AnyUserData, Function, Lua, LuaOptions, StdLib, Table, Value};
 use paneru_shared_types::windowset::WindowSet;
 use tracing::{error, warn};
 
@@ -138,6 +138,19 @@ pub struct LuaRuntime {
     built_config: Option<Config>,
 }
 
+/// How many finished coroutines mlua keeps around to run the next async
+/// callback with.
+///
+/// Every world-access call a script makes (`paneru.query*`, the window set,
+/// `paneru.state`, `paneru.exec`) is an async callback, and mlua runs each one
+/// on its own Lua thread. Left at mlua's default of zero, that thread is
+/// created and collected per call; these calls sit on the event path, where a
+/// single handler can make several. Recycling caps the churn at a fixed set of
+/// thread objects, which is cheap to hold and saves the allocation and the
+/// garbage on every call after the first few. (Only threads that finished are
+/// recyclable under `LuaJIT`; a handler that errors out simply gets a fresh one.)
+const THREAD_POOL_SIZE: usize = 64;
+
 impl LuaRuntime {
     /// Builds a runtime by reading and executing the script at `path`.
     pub fn from_file(path: &Path, world: &Rc<DispatchWorld>) -> mlua::Result<Self> {
@@ -151,7 +164,12 @@ impl LuaRuntime {
         // SAFETY: the runtime is confined to the thread that built it, and
         // unsafe libs are what let a script `require` a C module such as
         // sketchybar's.
-        let lua = unsafe { Lua::unsafe_new() };
+        let lua = unsafe {
+            Lua::unsafe_new_with(
+                StdLib::ALL,
+                LuaOptions::new().thread_pool_size(THREAD_POOL_SIZE),
+            )
+        };
         extend_lua_search_paths(&lua)?;
         let outbox = Rc::new(RefCell::new(Outbox::default()));
         let registry = SharedRegistry::default();

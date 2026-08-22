@@ -17,8 +17,11 @@ use std::{
 use stdext::function_name;
 use tracing::{error, info, warn};
 
-use self::decorations::BorderRadiusOption;
+use self::decorations::{
+    BorderRadiusOption, DescriptorStyle, IndicatorFormat, IndicatorStyle, MenubarOrientation,
+};
 use self::swipe::SwipeGestureDirection;
+
 #[cfg(test)]
 use crate::commands::{MoveFocus, Operation, ResizeDirection};
 use crate::{
@@ -852,6 +855,110 @@ impl Config {
         self.options()
             .create_virtual_workspace_automatically
             .is_some_and(|enabled| enabled)
+    }
+    pub fn menubar_orientation(&self) -> MenubarOrientation {
+        self.inner()
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.menu.as_ref())
+            .and_then(|menubar| menubar.orientation)
+            .unwrap_or(MenubarOrientation::Default)
+    }
+    pub fn menubar_gradient(&self) -> Vec<(f64, f64, f64)> {
+        self.inner()
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.menu.as_ref())
+            .and_then(|menubar| menubar.colors.as_ref())
+            .into_iter()
+            .flatten()
+            .map(|hex_string| parse_hex_color(hex_string))
+            .collect()
+    }
+    pub fn menubar_gradient_angle(&self) -> f64 {
+        self.inner()
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.menu.as_ref())
+            .and_then(|menubar| menubar.angle)
+            .unwrap_or(90.0)
+    }
+    pub fn menubar_descriptor_style(&self) -> DescriptorStyle {
+        self.inner()
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.menu.as_ref())
+            .and_then(|menubar| menubar.descriptor.as_ref())
+            .and_then(|descriptor_options| descriptor_options.style)
+            .unwrap_or(DescriptorStyle::Symbol)
+    }
+    pub fn menubar_descriptor_text(&self) -> String {
+        self.inner()
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.menu.as_ref())
+            .and_then(|menubar| menubar.descriptor.as_ref())
+            .and_then(|descriptor_options| descriptor_options.text.clone())
+            .unwrap_or(String::from("VW"))
+    }
+    pub fn menubar_descriptor_symbol(&self) -> String {
+        self.inner()
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.menu.as_ref())
+            .and_then(|menubar| menubar.descriptor.as_ref())
+            .and_then(|descriptor_options| descriptor_options.symbol.clone())
+            .unwrap_or(String::from("fish.fill"))
+    }
+    pub fn menubar_indicator_style(&self) -> IndicatorStyle {
+        self.inner()
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.menu.as_ref())
+            .and_then(|menubar| menubar.indicator.as_ref())
+            .and_then(|indicator| indicator.style)
+            .unwrap_or(IndicatorStyle::Mono)
+    }
+    pub fn menubar_indicator_format(&self) -> IndicatorFormat {
+        self.inner()
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.menu.as_ref())
+            .and_then(|menubar| menubar.indicator.as_ref())
+            .and_then(|indicator| indicator.format)
+            .unwrap_or(IndicatorFormat::Default)
+    }
+    pub fn menubar_indicator_font_size(&self) -> f64 {
+        const DEFAULT_FONT_SIZE: f64 = 13.0;
+        const MIN_FONT_SIZE: f64 = 1.0;
+        const MAX_FONT_SIZE: f64 = 24.0;
+        self.inner()
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.menu.as_ref())
+            .and_then(|menubar| menubar.indicator.as_ref())
+            .and_then(|indicator| indicator.font_size)
+            .filter(|font_size| font_size.is_finite())
+            .unwrap_or(DEFAULT_FONT_SIZE)
+            .clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
+    }
+    pub fn menubar_indicator_active_character(&self) -> char {
+        self.inner()
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.menu.as_ref())
+            .and_then(|menubar| menubar.indicator.as_ref())
+            .and_then(|indicator| indicator.active_character)
+            .unwrap_or('☉')
+    }
+    pub fn menubar_indicator_inactive_character(&self) -> char {
+        self.inner()
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.menu.as_ref())
+            .and_then(|menubar| menubar.indicator.as_ref())
+            .and_then(|indicator| indicator.inactive_character)
+            .unwrap_or('○')
     }
 }
 

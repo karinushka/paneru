@@ -100,6 +100,37 @@ workspace_menu_status = false
 workspace_popup_status = true
 ```
 
+### `[decorations.menu]`
+
+Basic settings for the menubar display.
+
+| Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `orientation` | String | `'default'` | Which of the menubar elements appears first, the descriptor `'default'` or the indicator `'flipped'`. |
+| `colors` | [String] | `['#FFFFFF']` | An array of hex colors defining a linear gradient (left to right) coloring the menubar display. Set a solid color by including only one element. |
+| `angle` | Float | `90.0` | The angle (in degrees) of the gradient. |
+
+### `[decorations.menu.descriptor]`
+Settings for the descriptor component of the menubar display. The descriptor component is a visual marker for the Paneru menubar item.
+| Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `style` | String | `'symbol'` | Composition of the descriptor. Options are any SF Symbol `'symbol'`, any string of text `'text'`, both of those `'both'`, or nothing `'hidden'` |
+| `text` | String | `'VW'` | Text shown if `'text'` or `'both'` style is selected. |
+| `symbol` | String | `'fish.fill'` | SF Symbol shown if `'symbol'` or `'both'` style is selected. SF Symbol names can be found in the [SF Symbols App](https://developer.apple.com/sf-symbols/), in the Xcode library, or in a variety of places online. |
+
+### `[decorations.menu.indicator]`
+Settings for the indicator component of the menubar display. The indicator component shows your current (and optionally all active) virtual workspace(s).
+
+**Important Note: The `'unicode'` format can only differentiate between active and inactive workspaces, so it is incompatible with the `'mono'` style and will fall back to `'default'`.**
+
+| Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `style` | String | `'mono'` | Whether the indicator displays all virtual workspaces `'multi'`, or only your current workspace `'mono'`. |
+| `format` | String | `'default'` | The format of the character(s) which represent your virtual workspace(s).<br>Options are regular numbers `'default'`, Roman numerals `'roman'`, or any pair of Unicode characters `'unicode'`. |
+| `font_size` | Float (2.0 to 24.0) | `13.0` | Font size of the indicator in point. |
+| `active_character` | Char | `'☉'` | The Unicode character which represents an active workspace in the `'unicode'` format. |
+| `inactive_character` | Char | `'○'` | The Unicode character which represents an inactive workspace in the `'unicode'` format. |
+
 
 ### `[decorations.inactive.dim] (Native macOS Dimming)`
 

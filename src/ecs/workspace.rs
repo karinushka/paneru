@@ -22,9 +22,9 @@ use crate::ecs::focus::FocusHistory;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, WindowCtx, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker, Initializing,
-    NativeFullscreenMarker, Position, RaiseWindow, RefreshWindowSizes, RepositionMarker, Scrolling,
-    SelectedVirtualMarker, SpawnCommandsExt, Timeout, Unmanaged,
+    ActiveWorkspaceMarker, DockPosition, FocusedMarker, Initializing, NativeFullscreenMarker,
+    Position, RaiseWindow, RefreshWindowSizes, RepositionMarker, Scrolling, SelectedVirtualMarker,
+    SpawnCommandsExt, Timeout, Unmanaged,
 };
 use crate::errors::Result;
 use crate::events::Event;
@@ -545,7 +545,7 @@ fn find_orphaned_workspaces(
 
 fn refresh_workspace_window_sizes(
     layout_strip: Populated<(&RefreshWindowSizes, &LayoutStrip, Entity, &ChildOf)>,
-    mut windows: Query<(Entity, &mut Window, &mut Bounds, Option<&Unmanaged>)>,
+    mut windows: Query<(Entity, &mut Window, Option<&Unmanaged>)>,
     displays: Query<(&Display, Option<&DockPosition>)>,
     window_manager: Res<WindowManager>,
     config: Res<Config>,
@@ -569,17 +569,18 @@ fn refresh_workspace_window_sizes(
 
         // Resize windows for the new display dimensions.
         for entity in strip.all_windows() {
-            let Ok((_, ref mut window, ref mut bounds, _)) = windows.get_mut(entity) else {
+            let Ok((_, ref mut window, _)) = windows.get_mut(entity) else {
                 continue;
             };
-            if bounds.x > viewport.width() || bounds.y > viewport.height() {
-                let clamped_size = Size::new(
-                    bounds.x.clamp(0, viewport.width()),
-                    bounds.y.clamp(0, viewport.height()),
-                );
-                debug!("refreshing window {} size to {clamped_size}", window.id());
-                commands.resize_entity(entity, clamped_size);
-            }
+            let Ok(frame) = window.update_frame() else {
+                continue;
+            };
+            let clamped_size = Size::new(
+                frame.width().clamp(0, viewport.width()),
+                frame.height().clamp(0, viewport.height()),
+            );
+            debug!("resizing window {} size to {clamped_size}", window.id());
+            commands.resize_entity(entity, clamped_size);
 
             in_workspace.retain(|window_id| *window_id != window.id());
         }
@@ -590,7 +591,7 @@ fn refresh_workspace_window_sizes(
             .filter_map(|window_id| {
                 windows
                     .iter()
-                    .find_map(|(entity, window, _, unmanaged)| {
+                    .find_map(|(entity, window, unmanaged)| {
                         (window_id == window.id()).then_some(unmanaged.zip(Some(entity)))
                     })
                     .flatten()

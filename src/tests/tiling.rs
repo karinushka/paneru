@@ -310,6 +310,39 @@ fn test_floating_window_does_not_hold_a_slot_in_the_strip() {
         .run(commands);
 }
 
+#[test]
+fn test_unordered_window_releases_its_layout_space() {
+    TestHarness::new()
+        .with_windows(3)
+        .on_iteration(0, |_world, state| {
+            // Mark window 1 as unordered on the display server (e.g. closed by app without AX destroy event).
+            state.set_window_unordered(1, true);
+        })
+        .on_iteration(3, |world, _state| {
+            let mut query = world.query::<&crate::manager::Window>();
+            assert!(
+                query.iter(world).all(|window| window.id() != 1),
+                "unordered window 1 should be removed within periodic check"
+            );
+            assert_eq!(window_x(world, 0), 0);
+            assert_eq!(window_x(world, 2), TEST_WINDOW_WIDTH);
+        })
+        .run(vec![
+            Event::Command {
+                command: Command::PrintState,
+            },
+            Event::Command {
+                command: Command::PrintState,
+            },
+            Event::Command {
+                command: Command::PrintState,
+            },
+            Event::Command {
+                command: Command::PrintState,
+            },
+        ]);
+}
+
 /// The same invariant for a window floated by a config rule rather than by the
 /// toggle. This is the path that runs while the window is being spawned, so it
 /// races the strip insertion the tiling path is doing at the same time.

@@ -24,10 +24,10 @@ use crate::ecs::params::{ActiveDisplay, WindowCtx, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, DockPosition, FocusedMarker, Initializing, NativeFullscreenMarker,
     Position, RaiseWindow, RefreshWindowSizes, RepositionMarker, Scrolling, SelectedVirtualMarker,
-    SpawnCommandsExt, Timeout, Unmanaged,
+    SendMessageTrigger, SpawnCommandsExt, Timeout, Unmanaged,
 };
 use crate::errors::Result;
-use crate::events::Event;
+use crate::events::{DestroySource, Event};
 use crate::manager::{Application, Display, Origin, Size, Window, WindowManager};
 use crate::platform::{WinID, WorkspaceId};
 
@@ -539,6 +539,35 @@ fn find_orphaned_workspaces(
             cmd.try_remove::<Timeout>()
                 .insert(ChildOf(target_entity))
                 .insert(RefreshWindowSizes::default());
+        }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn cleanup_unordered_windows(
+    windows: Query<&Window>,
+    workspaces: Query<&LayoutStrip>,
+    window_manager: Res<WindowManager>,
+    mut commands: Commands,
+) {
+    let windows = workspaces
+        .iter()
+        .flat_map(|strip| {
+            strip
+                .all_windows()
+                .into_iter()
+                .filter(|entity| !strip.tabbed(*entity))
+        })
+        .filter_map(|entity| windows.get(entity).ok());
+
+    for window in windows {
+        let window_id = window.id();
+        if window_manager.window_is_unordered(window_id) {
+            debug!("Window {window_id} is unordered; removing it.");
+            commands.trigger(SendMessageTrigger(Event::WindowDestroyed {
+                window_id,
+                source: DestroySource::Accessibility,
+            }));
         }
     }
 }

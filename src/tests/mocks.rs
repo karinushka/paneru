@@ -88,6 +88,7 @@ struct MockStateInner {
     /// Windows that are gone but which the app's AX window list still reports,
     /// modelling the lag real apps show right after a window closes.
     stale_window_ids: HashMap<WinID, Pid>,
+    unordered_windows: HashSet<WinID>,
 }
 
 #[derive(Clone)]
@@ -107,7 +108,17 @@ impl MockState {
                 cursor_position: Origin::ZERO,
                 event_queue: VecDeque::new(),
                 stale_window_ids: HashMap::new(),
+                unordered_windows: HashSet::new(),
             })),
+        }
+    }
+
+    pub fn set_window_unordered(&self, window_id: WinID, unordered: bool) {
+        let mut inner = self.inner.force_write();
+        if unordered {
+            inner.unordered_windows.insert(window_id);
+        } else {
+            inner.unordered_windows.remove(&window_id);
         }
     }
 
@@ -629,8 +640,14 @@ impl MockState {
         Application::new(Box::new(ma))
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn create_window_manager(&self) -> MockWindowManagerApi {
         let mut wm = MockWindowManagerApi::new();
+
+        let s = self.clone();
+        wm.expect_window_is_unordered().returning(move |window_id| {
+            s.inner.force_read().unordered_windows.contains(&window_id)
+        });
 
         let s = self.clone();
         wm.expect_active_display_id()

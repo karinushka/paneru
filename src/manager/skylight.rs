@@ -36,6 +36,9 @@ unsafe extern "C" {
     /// extern int SLSMainConnectionID(void);
     pub fn SLSMainConnectionID() -> ConnID;
 
+    /// Reports whether a window is currently ordered into the window list.
+    pub fn SLSWindowIsOrderedIn(cid: ConnID, window_id: WinID, ordered_in: &mut u8) -> OSStatus;
+
     /// Retrieves the bounding rectangle (`CGRect`) of a window.
     ///
     /// # Arguments

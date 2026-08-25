@@ -68,6 +68,7 @@ pub(crate) use triggers::apply_config_side_effects;
 /// * `app` - The Bevy application to register the systems with.
 #[allow(clippy::too_many_lines)]
 pub fn register_systems(app: &mut bevy::app::App) {
+    const CLOSED_WINDOW_CHECK_FREQ_MS: u64 = 1000;
     const LOW_POWER_MODE_CHECK_SEC: u64 = 60;
 
     let not_swiping = |scrolling: Query<&Scrolling, With<ActiveWorkspaceMarker>>| {
@@ -145,6 +146,9 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::add_launched_application,
             systems::fresh_marker_cleanup,
             systems::timeout_ticker,
+            workspace::cleanup_unordered_windows
+                .run_if(not(resource_exists::<Initializing>))
+                .run_if(on_timer(Duration::from_millis(CLOSED_WINDOW_CHECK_FREQ_MS))),
             systems::retry_front_switch,
             systems::update_low_power_state
                 .run_if(resource_exists::<LowPowerMode>)

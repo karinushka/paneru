@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use crate::commands::{Command, Direction, Operation, ResizeDirection};
 use crate::config::{Config, MainOptions, WindowParams};
 use crate::ecs::layout::LayoutStrip;
@@ -479,6 +481,33 @@ fn test_floating_window_does_not_hold_a_slot_in_the_strip() {
             assert_eq!(window_x(world, 2), TEST_WINDOW_WIDTH);
         })
         .run(commands);
+}
+
+#[test]
+fn test_unordered_window_releases_its_layout_space() {
+    let mut harness = TestHarness::new().with_windows(3);
+
+    // Allow initial layout to settle.
+    harness.advance(Duration::from_millis(100));
+    assert_eq!(window_x(harness.app.world_mut(), 0), 0);
+    assert_eq!(window_x(harness.app.world_mut(), 1), TEST_WINDOW_WIDTH);
+    assert_eq!(window_x(harness.app.world_mut(), 2), TEST_WINDOW_WIDTH * 2);
+
+    // Window 1 disappears silently from the OS (unordered on WindowServer and dead in AX).
+    harness.mock_state.os_vanish_window(1);
+
+    // Step past the 1-second periodic CLOSED_WINDOW_CHECK_FREQ timer.
+    harness.advance(Duration::from_millis(1100));
+
+    let mut query = harness.app.world_mut().query::<&crate::manager::Window>();
+    assert!(
+        query
+            .iter(harness.app.world())
+            .all(|window| window.id() != 1),
+        "unordered window 1 should be removed within periodic check"
+    );
+    assert_eq!(window_x(harness.app.world_mut(), 0), 0);
+    assert_eq!(window_x(harness.app.world_mut(), 2), TEST_WINDOW_WIDTH);
 }
 
 /// The same invariant for a window floated by a config rule rather than by the

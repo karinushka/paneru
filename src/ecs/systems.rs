@@ -1361,6 +1361,65 @@ pub(crate) fn detect_tabbed_windows(
     }
 }
 
+/// Listens for focus events for unknown window IDs and attempts to auto-discover
+/// and manage them on the fly (e.g., when a user clicks an unmanaged tab or window).
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn auto_discover_unmanaged_focused_windows(
+    mut messages: MessageReader<Event>,
+    windows: Query<&Window>,
+    apps: Query<&Application>,
+    config: Res<Config>,
+    mut cache: Local<HashSet<WinID>>,
+    mut commands: Commands,
+) {
+    const CACHE_CLEANUP_SIZE: usize = 1000;
+    if cache.len() > CACHE_CLEANUP_SIZE {
+        cache.clear();
+    }
+
+    for event in messages.read() {
+        let Event::WindowFocused { window_id } = *event else {
+            continue;
+        };
+
+        if windows.iter().any(|w| w.id() == window_id) || cache.contains(&window_id) {
+            continue;
+        }
+
+        trace!("Focus event for unknown window id {window_id}; attempting on-the-fly discovery.");
+
+        let mut discovered = None;
+        let (frontmost, non_frontmost): (Vec<_>, Vec<_>) =
+            apps.iter().partition(|app| app.is_frontmost());
+
+        for app in frontmost.into_iter().chain(non_frontmost) {
+            if let Some(window) = app.focused_window(&config)
+                && window.id() == window_id
+            {
+                debug!("Discovered unknown focused window {window_id} via focused_window.");
+                discovered = Some(window);
+                break;
+            }
+
+            let window_list = app.window_list(&config);
+            if let Some(window) = window_list.into_iter().find(|w| w.id() == window_id) {
+                debug!("Discovered unknown focused window {window_id} via window_list scan.");
+                discovered = Some(window);
+                break;
+            }
+        }
+
+        if let Some(window) = discovered {
+            commands.trigger(SpawnWindowTrigger(vec![window]));
+        } else {
+            trace!(
+                "Failed to discover manageable window for focused ID {window_id}; caching as unmanageable."
+            );
+            cache.insert(window_id);
+        }
+    }
+}
+
 #[cfg(all(test, feature = "lua"))]
 mod tests {
     use std::sync::mpsc::channel;

@@ -150,6 +150,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
             workspace::cleanup_unordered_windows
                 .run_if(not(resource_exists::<Initializing>))
                 .run_if(on_timer(Duration::from_millis(CLOSED_WINDOW_CHECK_FREQ_MS))),
+            systems::auto_discover_unmanaged_focused_windows,
             systems::retry_front_switch,
             systems::update_low_power_state
                 .run_if(resource_exists::<LowPowerMode>)

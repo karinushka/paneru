@@ -577,6 +577,17 @@ impl MockState {
         });
 
         let s = self.clone();
+        ma.expect_focused_window().returning(move |_config| {
+            let inner = s.inner.force_read();
+            let focused_id = inner.apps.get(&pid).and_then(|a| a.focused_window_id)?;
+            if inner.windows.contains_key(&focused_id) {
+                Some(s.create_window(focused_id))
+            } else {
+                None
+            }
+        });
+
+        let s = self.clone();
         ma.expect_bundle_id().returning(move || {
             s.inner
                 .force_read()

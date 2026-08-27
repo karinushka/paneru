@@ -196,9 +196,13 @@ pub trait AXUIAttributes {
             .map(|value| CFBoolean::value(&value))
     }
 
-    fn focused_window_id(&self) -> Result<WinID> {
+    fn focused_window_element(&self) -> Result<CFRetained<AXUIWrapper>> {
         let axname = CFString::from_static_str(kAXFocusedWindowAttribute);
         self.get_attribute::<AXUIWrapper>(&axname)
+    }
+
+    fn focused_window_id(&self) -> Result<WinID> {
+        self.focused_window_element()
             .and_then(|focused| ax_window_id(focused.as_ptr()))
     }
 

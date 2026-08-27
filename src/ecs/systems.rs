@@ -371,7 +371,7 @@ pub(super) fn add_launched_process(
     config: Res<Config>,
     mut commands: Commands,
 ) {
-    const APP_OBSERVABLE_TIMEOUT_SEC: u64 = 5;
+    const APP_OBSERVABLE_TIMEOUT: Duration = Duration::from_secs(10);
     let mut already_seen = HashSet::new();
 
     for (entity, mut process, children) in fresh_processes {
@@ -408,9 +408,10 @@ pub(super) fn add_launched_process(
 
         if app.observe().is_ok_and(|good| good) {
             let timeout = Timeout::new(
-                Duration::from_secs(APP_OBSERVABLE_TIMEOUT_SEC),
+                APP_OBSERVABLE_TIMEOUT,
                 Some(format!(
-                    "{app} did not become observable in {APP_OBSERVABLE_TIMEOUT_SEC}s.",
+                    "{app} did not become observable in {}s.",
+                    APP_OBSERVABLE_TIMEOUT.as_secs()
                 )),
                 &mut commands,
             );

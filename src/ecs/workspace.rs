@@ -1196,6 +1196,7 @@ pub(crate) fn show_active_workspace(
         {
             spawn_restore_focus_guard(focus, &mut commands);
 
+            commands.focus_entity(focus, false);
             commands.trigger(RaiseWindow {
                 entity: focus,
                 with_strip: true,

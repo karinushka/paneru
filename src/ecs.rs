@@ -69,6 +69,7 @@ pub(crate) use triggers::apply_config_side_effects;
 #[allow(clippy::too_many_lines)]
 pub fn register_systems(app: &mut bevy::app::App) {
     const LOW_POWER_MODE_CHECK_SEC: u64 = 60;
+    const APP_OBSERVABILITY_CHECK_FREQ: Duration = Duration::from_millis(200);
 
     let not_swiping = |scrolling: Query<&Scrolling, With<ActiveWorkspaceMarker>>| {
         scrolling
@@ -141,8 +142,8 @@ pub fn register_systems(app: &mut bevy::app::App) {
             )
                 .chain()
                 .run_if(resource_exists::<Initializing>),
-            systems::add_launched_process,
-            systems::add_launched_application,
+            systems::add_launched_process.run_if(on_timer(APP_OBSERVABILITY_CHECK_FREQ)),
+            systems::add_launched_application.run_if(on_timer(APP_OBSERVABILITY_CHECK_FREQ)),
             systems::fresh_marker_cleanup,
             systems::timeout_ticker,
             systems::retry_front_switch,

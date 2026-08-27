@@ -2245,3 +2245,48 @@ fn test_virtual_directions_first_last_east_west() {
         .on_iteration(8, assert_active_vw(0))
         .run(commands);
 }
+
+/// Focusing an unknown window (e.g. clicking an unmanaged tab or window)
+/// must trigger auto-discovery and manage it on the fly into ECS.
+#[test]
+fn test_auto_discover_unmanaged_focused_window() {
+    let events = vec![
+        // Iteration 0: Boot with 1 managed window (window 0).
+        Event::Command {
+            command: Command::PrintState,
+        },
+        // Iteration 1: Send focus event for unmanaged window 1.
+        Event::WindowFocused { window_id: 1 },
+    ];
+
+    TestHarness::new()
+        .with_windows(1)
+        .on_iteration(0, |world, state| {
+            // Verify window 1 is not in ECS yet.
+            let mut query = world.query::<&crate::manager::Window>();
+            let is_managed = query.iter(world).any(|w| w.id() == 1);
+            assert!(!is_managed, "Window 1 should not be managed yet");
+
+            // Spawn window 1 in mock state without sending AX notification to Paneru (unmanaged tab).
+            state.spawn_window(
+                TEST_PROCESS_ID,
+                TEST_WORKSPACE_ID,
+                1,
+                bevy::math::IRect::from_corners(
+                    bevy::math::IVec2::new(0, 0),
+                    bevy::math::IVec2::new(400, 400),
+                ),
+            );
+            state.focus_window(1);
+        })
+        .on_iteration(1, |world, _state| {
+            // Verify window 1 is now auto-discovered and managed in ECS.
+            let mut query = world.query::<&crate::manager::Window>();
+            let is_managed = query.iter(world).any(|w| w.id() == 1);
+            assert!(
+                is_managed,
+                "Window 1 should be auto-discovered and managed in ECS after receiving focus"
+            );
+        })
+        .run(events);
+}

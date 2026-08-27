@@ -146,6 +146,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::add_launched_application.run_if(on_timer(APP_OBSERVABILITY_CHECK_FREQ)),
             systems::fresh_marker_cleanup,
             systems::timeout_ticker,
+            systems::auto_discover_unmanaged_focused_windows,
             systems::retry_front_switch,
             systems::update_low_power_state
                 .run_if(resource_exists::<LowPowerMode>)

@@ -10,7 +10,9 @@ use objc2_core_foundation::{CFRetained, CFString, kCFRunLoopCommonModes};
 use std::ffi::c_void;
 use std::pin::Pin;
 use std::ptr::null_mut;
-use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::mpsc::{Sender, channel};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError, RwLock};
+use std::thread;
 use stdext::sync::rw_lock::RwLockExt;
 
 use stdext::function_name;
@@ -376,6 +378,74 @@ enum ObserverType {
 
 /// `ObserverContext` holds the `EventSender` and the `ObserverType`,
 /// which are used within the `AXObserver` callback to dispatch accessibility events.
+/// An application notification whose window is not named yet.
+#[derive(Clone, Copy, Debug)]
+enum WindowNotification {
+    Focused,
+    Moved,
+    Resized,
+    MenuOpened,
+    MenuClosed,
+}
+
+impl WindowNotification {
+    fn from_name(notification: &str) -> Option<Self> {
+        match notification {
+            accessibility_sys::kAXFocusedWindowChangedNotification
+            | accessibility_sys::kAXFocusedUIElementChangedNotification => Some(Self::Focused),
+            accessibility_sys::kAXWindowMovedNotification => Some(Self::Moved),
+            accessibility_sys::kAXWindowResizedNotification => Some(Self::Resized),
+            accessibility_sys::kAXMenuOpenedNotification => Some(Self::MenuOpened),
+            accessibility_sys::kAXMenuClosedNotification => Some(Self::MenuClosed),
+            _ => None,
+        }
+    }
+
+    fn into_event(self, window_id: WinID) -> Event {
+        match self {
+            Self::Focused => Event::WindowFocused { window_id },
+            Self::Moved => Event::WindowMoved { window_id },
+            Self::Resized => Event::WindowResized { window_id },
+            Self::MenuOpened => Event::MenuOpened { window_id },
+            Self::MenuClosed => Event::MenuClosed { window_id },
+        }
+    }
+}
+
+struct PendingNotification {
+    kind: WindowNotification,
+    element: CFRetained<AXUIWrapper>,
+    events: EventSender,
+}
+
+/// Names the window behind each pending notification, off the run loop and in
+/// arrival order.
+///
+/// `_AXUIElementGetWindow` blocks on a round trip into the app that sent the
+/// notification. Called straight from the observer callback it holds the run
+/// loop, and the `CGEventTap` callback shares that run loop, so a slow app turns
+/// every lookup into keystroke latency.
+///
+/// One thread rather than a task pool: two focus notifications resolving out of
+/// order would leave paneru chasing the wrong window.
+static RESOLVER: LazyLock<Mutex<Sender<PendingNotification>>> = LazyLock::new(|| {
+    let (tx, rx) = channel::<PendingNotification>();
+    thread::Builder::new()
+        .name("ax-window-resolver".into())
+        .spawn(move || {
+            for pending in rx {
+                match ax_window_id(pending.element.as_ptr()) {
+                    Ok(window_id) => {
+                        _ = pending.events.send(pending.kind.into_event(window_id));
+                    }
+                    Err(err) => debug!("naming window for {:?}: {err}", pending.kind),
+                }
+            }
+        })
+        .expect("spawning the AX window resolver should succeed");
+    Mutex::new(tx)
+});
+
 struct ObserverContext {
     events: EventSender,
     which: ObserverType,
@@ -416,26 +486,24 @@ impl ObserverContext {
             return;
         }
 
-        let Ok(window_id) =
-            ax_window_id(element).inspect_err(|err| debug!("notification {notification}: {err}"))
-        else {
+        let Some(kind) = WindowNotification::from_name(notification) else {
+            error!("unhandled application notification: {notification:?}");
             return;
         };
-        let event = match notification {
-            accessibility_sys::kAXFocusedWindowChangedNotification
-            | accessibility_sys::kAXFocusedUIElementChangedNotification => {
-                Event::WindowFocused { window_id }
-            }
-            accessibility_sys::kAXWindowMovedNotification => Event::WindowMoved { window_id },
-            accessibility_sys::kAXWindowResizedNotification => Event::WindowResized { window_id },
-            accessibility_sys::kAXMenuOpenedNotification => Event::MenuOpened { window_id },
-            accessibility_sys::kAXMenuClosedNotification => Event::MenuClosed { window_id },
-            _ => {
-                error!("unhandled application notification: {notification:?}");
-                return;
-            }
+        let Ok(element) = AXUIWrapper::retain(element).inspect_err(|err| {
+            error!("invalid element {element:?}: {err}");
+        }) else {
+            return;
         };
-        _ = self.events.send(event);
+
+        _ = RESOLVER
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .send(PendingNotification {
+                kind,
+                element,
+                events: self.events.clone(),
+            });
     }
 
     /// Notifies the event sender about a window-level accessibility event.

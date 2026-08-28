@@ -13,7 +13,7 @@ use crate::ecs::{
 use crate::ecs::{RepositionMarker, SpawnWindowTrigger};
 use crate::events::Event;
 use crate::manager::{Origin, Size, Window};
-use crate::platform::Modifiers;
+use crate::platform::{Modifiers, WinID};
 use crate::{assert_focused, assert_window_at, assert_window_size};
 
 use super::*;
@@ -1415,6 +1415,81 @@ fn test_virtual_workspace_switch_no_horizontal_slide_no_animations() {
         "strip x must equal the pre-switch scroll position after VW switch-back (no sideways slide). \
          Expected {strip_x_after_scroll}, got {strip_x_final}"
     );
+}
+
+/// Switching virtual workspaces with `virtual_workspace_animations = false` must
+/// restore keyboard focus to the workspace's remembered window. Regression test:
+/// the non-animation path of `show_active_workspace` only triggered
+/// `RaiseWindow` without calling `focus_entity`, so `FocusedMarker` stayed on a
+/// window of the hidden workspace and the first directional focus command after
+/// the switch was consumed by the re-enter-strip fallback instead of moving
+/// focus.
+#[test]
+fn test_virtual_workspace_switch_restores_focus_no_animations() {
+    let config: Config = (
+        MainOptions {
+            virtual_workspace_animations: Some(false),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    let mut h = TestHarness::new()
+        .with_config(config)
+        .with_windows(4)
+        .with_focused_window(0);
+
+    let pump_event = |h: &mut TestHarness, ev: Event| {
+        h.app.world_mut().write_message::<Event>(ev);
+        for _ in 0..8 {
+            h.app.update();
+            for e in h.mock_state.drain_events() {
+                h.app.world_mut().write_message::<Event>(e);
+            }
+        }
+    };
+    let pump = |h: &mut TestHarness, c: Command| pump_event(h, Event::Command { command: c });
+    // Focus a window through the mock OS: updates the app's focused window and
+    // queues ApplicationFrontSwitched + WindowFocused events.
+    let focus = |h: &mut TestHarness, id: WinID| {
+        h.mock_state.focus_window(id);
+        for _ in 0..8 {
+            h.app.update();
+            for e in h.mock_state.drain_events() {
+                h.app.world_mut().write_message::<Event>(e);
+            }
+        }
+    };
+
+    // Boot the strip and settle focus on window 0.
+    pump(&mut h, Command::PrintState);
+    assert_focused!(h.app.world_mut(), 0);
+
+    // Build VW1 out of windows 2 and 3, staying on VW0.
+    for id in [2, 3] {
+        focus(&mut h, id);
+        pump(
+            &mut h,
+            Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Stay)),
+        );
+    }
+    focus(&mut h, 0);
+
+    // Visit VW1 and focus window 2 there, so VW0 is hidden with window 0 as
+    // its remembered focus and VW1 later records window 2.
+    pump(&mut h, Command::Window(Operation::VirtualNumber(1)));
+    focus(&mut h, 2);
+    assert_focused!(h.app.world_mut(), 2);
+
+    // Switch back to VW0: focus must return to window 0 immediately, without
+    // any further focus command.
+    pump(&mut h, Command::Window(Operation::VirtualNumber(0)));
+    assert_focused!(h.app.world_mut(), 0);
+
+    // Switch to VW1 again: focus must return to its remembered window 2.
+    pump(&mut h, Command::Window(Operation::VirtualNumber(1)));
+    assert_focused!(h.app.world_mut(), 2);
 }
 
 /// When a strip is mid-animation (has a `RepositionMarker`) at the moment the

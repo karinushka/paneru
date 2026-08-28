@@ -1200,6 +1200,11 @@ pub(crate) fn show_active_workspace(
                 entity: focus,
                 with_strip: true,
             });
+            // RaiseWindow only re-orders the windows; restore keyboard focus
+            // too, otherwise the focus marker stays on a window of the hidden
+            // workspace until the next explicit focus command. Focus after
+            // raising: raise_window_trigger must raise this window last.
+            commands.focus_entity(focus, false);
         }
     }
 }

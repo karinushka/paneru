@@ -11,8 +11,9 @@ use bevy::math::IRect;
 use bevy::tasks::AsyncComputeTaskPool;
 use bevy::tasks::futures_lite::future;
 use bevy::time::Time;
+use objc2_core_foundation::CFRetained;
 use objc2_foundation::NSPoint;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::pin::Pin;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::time::{Duration, Instant};
@@ -38,6 +39,7 @@ use crate::manager::{
 };
 use crate::overlay::{FlashMessageManager, OverlayManager};
 use crate::platform::{PlatformCallbacks, WinID};
+use crate::util::AXUIWrapper;
 
 /// Processes and applications still inside their spawn grace period, with the
 /// `FreshMarker` that says whether the spawn actually completed in time.
@@ -96,6 +98,17 @@ const LOOP_TIMEOUT_STEP: u32 = 1;
 /// leftover events stay in the channel for the next frame to pick up.
 const PUMP_BUDGET: Duration = Duration::from_millis(4);
 const PUMP_MAX_EVENTS: usize = 256;
+
+/// How long [`window_creation_event`] may spend building windows before it has
+/// to hand the frame back.
+///
+/// Building one reads Accessibility attributes, and each read blocks on a round
+/// trip into the owning app. The system runs on a worker the main thread parks
+/// on, and a parked main thread stops servicing the `CFRunLoop`, so a burst
+/// drained in one go starves the `CGEventTap` callback until macOS switches the
+/// tap off. Nothing is dropped when the budget is hit: the remainder waits in a
+/// queue for the next frame.
+const WINDOW_CREATION_BUDGET: Duration = Duration::from_millis(200);
 
 /// Gathers all present displays and spawns them as entities in the Bevy world.
 /// The currently active display (identified by `window_manager.active_display_id()`) is marked with `ActiveDisplayMarker`.
@@ -1247,19 +1260,29 @@ pub(crate) fn update_low_power_state(low_power_mode: Option<ResMut<LowPowerMode>
 }
 
 #[instrument(level = Level::DEBUG, skip_all)]
-pub(crate) fn window_creation_event(mut messages: MessageReader<Event>, mut commands: Commands) {
-    for event in messages.read() {
-        let Event::WindowCreated { element } = event else {
-            continue;
-        };
+pub(crate) fn window_creation_event(
+    mut messages: MessageReader<Event>,
+    mut commands: Commands,
+    mut pending: Local<VecDeque<CFRetained<AXUIWrapper>>>,
+) {
+    pending.extend(messages.read().filter_map(|event| match event {
+        Event::WindowCreated { element } => Some(element.clone()),
+        _ => None,
+    }));
 
-        if let Ok(window) = WindowOS::new(element)
+    let started = Instant::now();
+    while let Some(element) = pending.pop_front() {
+        if let Ok(window) = WindowOS::new(&element)
             .inspect_err(|err| {
                 trace!("not adding window {element:?}: {err}");
             })
             .map(|window| Window::new(Box::new(window)))
         {
             commands.trigger(SpawnWindowTrigger(vec![window]));
+        }
+
+        if started.elapsed() >= WINDOW_CREATION_BUDGET {
+            break;
         }
     }
 }

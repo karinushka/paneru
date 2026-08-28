@@ -1,6 +1,6 @@
 use accessibility_sys::{
-    AXObserverRef, AXUIElementCreateApplication, AXUIElementRef, AXUIElementSetMessagingTimeout,
-    kAXErrorSuccess,
+    AXObserverRef, AXUIElementCreateApplication, AXUIElementCreateSystemWide, AXUIElementRef,
+    AXUIElementSetMessagingTimeout, kAXErrorSuccess,
 };
 use bevy::ecs::component::Component;
 use core::ptr::NonNull;
@@ -31,6 +31,21 @@ use crate::util::{AXUIAttributes, AXUIWrapper, MacResult, add_run_loop, remove_r
 /// element before giving up. See [`ApplicationOS::new`] for why this is set at
 /// all; the default is six seconds.
 const AX_MESSAGING_TIMEOUT_SEC: f32 = 0.25;
+
+/// Applies [`AX_MESSAGING_TIMEOUT_SEC`] to the process rather than to one
+/// element, and must run before any application is observed.
+///
+/// The call in [`ApplicationOS::new`] binds the element it is given. Per Apple's
+/// `AXUIElement.h` the system-wide element is the one that carries a
+/// process-global default, and an element left at zero "uses the current global
+/// timeout value". Window elements arrive from `AXUIElementCopyAttributeValue`
+/// and are never handed to `AXUIElementSetMessagingTimeout`, so without this
+/// they wait out the six second default instead.
+pub(crate) fn bound_ax_messaging_timeout() -> Result<()> {
+    let system_wide = AXUIWrapper::from_retained(unsafe { AXUIElementCreateSystemWide() })?;
+    unsafe { AXUIElementSetMessagingTimeout(system_wide.as_ptr(), AX_MESSAGING_TIMEOUT_SEC) }
+        .to_result(function_name!())
+}
 
 /// A static `LazyLock` that holds a list of `AXNotification` strings to be observed for application-level events.
 /// These notifications are general events related to an application's lifecycle and state changes,
@@ -192,10 +207,10 @@ impl ApplicationOS {
             let ptr = AXUIElementCreateApplication(process.pid());
             // Without this, a synchronous AX call to an app that stops servicing
             // its accessibility port (beachballing, paused in a debugger) blocks
-            // the main thread for the default six-second timeout, per call. Set
-            // on the application element so it covers every element obtained
-            // through it, windows included; a call that trips it fails with
-            // `kAXErrorCannotComplete`, treated like any other AX error.
+            // the main thread for the default six-second timeout, per call. This
+            // binds the application element; `bound_ax_messaging_timeout` covers
+            // the window elements copied out of it. A call that trips either one
+            // fails with `kAXErrorCannotComplete`, treated like any other AX error.
             AXUIElementSetMessagingTimeout(ptr, AX_MESSAGING_TIMEOUT_SEC);
             AXUIWrapper::retain(ptr)?
         };

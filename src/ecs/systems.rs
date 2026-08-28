@@ -358,7 +358,7 @@ pub(crate) fn finish_setup(
 /// observes the application for events, and adds its windows to the manager.
 /// This system processes `BProcess` entities marked with `FreshMarker`.
 /// If the process is not yet ready, it continues observing it. If ready, it attempts to create and observe an `Application`.
-/// A `Timeout` is added to the application if it takes too long to become observable.
+/// A `Timeout` stops initial window polling if the application does not expose a window in time.
 ///
 /// # Arguments
 ///
@@ -371,7 +371,7 @@ pub(super) fn add_launched_process(
     config: Res<Config>,
     mut commands: Commands,
 ) {
-    const APP_OBSERVABLE_TIMEOUT: Duration = Duration::from_secs(10);
+    const APP_WINDOW_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
     let mut already_seen = HashSet::new();
 
     for (entity, mut process, children) in fresh_processes {
@@ -408,10 +408,10 @@ pub(super) fn add_launched_process(
 
         if app.observe().is_ok_and(|good| good) {
             let timeout = Timeout::new(
-                APP_OBSERVABLE_TIMEOUT,
+                APP_WINDOW_DISCOVERY_TIMEOUT,
                 Some(format!(
-                    "{app} did not become observable in {}s.",
-                    APP_OBSERVABLE_TIMEOUT.as_secs()
+                    "{app} did not expose a window in {}s; stopping initial polling.",
+                    APP_WINDOW_DISCOVERY_TIMEOUT.as_secs()
                 )),
                 &mut commands,
             );
@@ -485,29 +485,35 @@ pub(super) fn fresh_marker_cleanup(cleanup: TimedOutSpawns, mut commands: Comman
     }
 }
 
-/// A Bevy system that ticks `Timeout` timers and despawns entities when their timers finish.
-/// This system is responsible for cleaning up entities that have exceeded their allotted time for an operation.
+/// Ticks `Timeout` timers and cleans up entities whose allotted time has elapsed.
+///
+/// A fresh application has already registered its accessibility observer, so its timeout only
+/// stops initial window polling. Other timed entities retain the usual despawn behavior.
 ///
 /// # Arguments
 ///
-/// * `timers` - A `Populated` query for `(Entity, &mut Timeout)` components.
+/// * `timers` - Timed entities and markers identifying fresh applications.
 /// * `clock` - The Bevy `Time` resource for getting the delta time.
-/// * `commands` - Bevy commands to despawn entities.
+/// * `commands` - Bevy commands used to clean up expired entities.
 pub(super) fn timeout_ticker(
-    timers: Populated<(Entity, &mut Timeout)>,
+    timers: Populated<(Entity, &mut Timeout, Has<Application>, Has<FreshMarker>)>,
     clock: Res<Time>,
     mut commands: Commands,
 ) {
-    for (entity, mut timeout) in timers {
+    for (entity, mut timeout, application, fresh) in timers {
         if timeout.timer.is_finished() {
-            trace!("Despawning entity {entity} due to timeout.");
             if let Some(system_id) = timeout.system_id.take() {
                 commands.run_system(system_id);
                 commands.unregister_system(system_id);
             }
-            trace!("Removing timer {entity}");
             if let Ok(mut entity_commands) = commands.get_entity(entity) {
-                entity_commands.try_despawn();
+                if application && fresh {
+                    trace!("Stopping initial window polling for application {entity}");
+                    entity_commands.try_remove::<(FreshMarker, Timeout)>();
+                } else {
+                    trace!("Despawning entity {entity} due to timeout");
+                    entity_commands.try_despawn();
+                }
             }
         } else {
             timeout.timer.tick(clock.delta());
@@ -1417,6 +1423,54 @@ pub(crate) fn auto_discover_unmanaged_focused_windows(
             );
             cache.insert(window_id);
         }
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use std::time::Duration;
+
+    use bevy::prelude::*;
+
+    use super::timeout_ticker;
+    use crate::ecs::{FreshMarker, Timeout};
+    use crate::manager::{Application, app::MockApplicationApi};
+
+    fn expired_timeout() -> Timeout {
+        let mut timer = Timer::from_seconds(1.0, TimerMode::Once);
+        timer.tick(Duration::from_secs(1));
+        Timeout {
+            timer,
+            system_id: None,
+        }
+    }
+
+    #[test]
+    fn fresh_application_timeout_stops_polling_without_despawning() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_systems(Update, timeout_ticker);
+
+        let application = app
+            .world_mut()
+            .spawn((
+                Application::new(Box::new(MockApplicationApi::new())),
+                FreshMarker,
+                expired_timeout(),
+            ))
+            .id();
+        let ordinary_timeout = app.world_mut().spawn(expired_timeout()).id();
+
+        app.update();
+
+        let application = app
+            .world()
+            .get_entity(application)
+            .expect("application should retain its accessibility observer entity");
+        assert!(application.contains::<Application>());
+        assert!(!application.contains::<FreshMarker>());
+        assert!(!application.contains::<Timeout>());
+        assert!(app.world().get_entity(ordinary_timeout).is_err());
     }
 }
 

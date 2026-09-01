@@ -3,7 +3,7 @@ use std::time::Duration;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 
-use crate::commands::{Command, MouseMove, MoveFocus, Operation};
+use crate::commands::{Command, Direction, MouseMove, MoveFocus, Operation};
 use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::{ActiveWorkspaceMarker, DockPosition, RefreshWindowSizes, Timeout};
@@ -473,6 +473,67 @@ fn test_wake_refreshes_active_workspace() {
             assert!(
                 refreshed,
                 "wake should mark the active workspace for a window-size refresh"
+            );
+        })
+        .run(commands);
+}
+
+#[test]
+fn test_vertical_swap_within_stack_stays_on_display() {
+    // Regression test: with a display arranged *below* the active one, a
+    // `Swap(South)` inside a stack used to swap the two windows and then
+    // immediately send the focused one to the display below, because the
+    // "is there anything left to swap with?" check ran against the layout
+    // after the swap had already happened.
+    let mut harness = TestHarness::new().with_windows(2);
+    harness.mock_state.add_display(
+        EXT_DISPLAY_ID,
+        IRect::new(
+            0,
+            TEST_DISPLAY_HEIGHT,
+            EXT_DISPLAY_WIDTH,
+            TEST_DISPLAY_HEIGHT + EXT_DISPLAY_HEIGHT,
+        ),
+        vec![EXT_WORKSPACE_ID],
+    );
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::Last)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Stack(true)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::North)),
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::Window(Operation::Swap(Direction::South)),
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    harness
+        .on_iteration(4, |world, state| {
+            assert_on_workspace!(world, 0, TEST_WORKSPACE_ID);
+            assert_on_workspace!(world, 1, TEST_WORKSPACE_ID);
+            assert_eq!(state.active_display(), TEST_DISPLAY_ID);
+        })
+        .on_iteration(6, |world, state| {
+            assert_on_workspace!(world, 0, TEST_WORKSPACE_ID);
+            assert_on_workspace!(world, 1, TEST_WORKSPACE_ID);
+            assert_not_on_workspace!(world, 0, EXT_WORKSPACE_ID);
+            assert_not_on_workspace!(world, 1, EXT_WORKSPACE_ID);
+            assert_eq!(
+                state.active_display(),
+                TEST_DISPLAY_ID,
+                "swapping inside a stack must not move focus to another display"
             );
         })
         .run(commands);

@@ -606,7 +606,8 @@ fn command_swap_focus(
     // stays put and per-window animation slides the window into the slot.
     // Only when the slot would fall off the edge does the strip scroll —
     // and only by the shortfall.
-    if let Some(window) = handler() {
+    let swapped = handler();
+    if let Some(window) = swapped {
         commands.ensure_visible(window);
     } else {
         debug!(
@@ -616,11 +617,12 @@ fn command_swap_focus(
         );
     }
 
-    if windows
-        .focused()
-        .and_then(|(_, current)| get_window_in_direction(direction, current, active_strip))
-        .is_none()
-    {
+    // Only fall through to the neighbouring display when there was nothing to
+    // swap with in the first place. Re-querying the strip here would look at
+    // the layout *after* the swap, where the window has by definition no
+    // neighbour left in that direction - which sent every successful vertical
+    // swap straight on to the other display.
+    if swapped.is_none() {
         // Check if the movement can swap to another display.
         let bounds = active_display.bounds();
         let Some(other_display) = active_display.other().next() else {

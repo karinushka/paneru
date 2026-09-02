@@ -12,7 +12,7 @@ use objc2_core_graphics::CGDirectDisplayID;
 use tracing::{Level, info, instrument, warn};
 
 use crate::config::{Config, MissingWindowBehavior};
-use crate::ecs::layout::LayoutStrip;
+use crate::ecs::layout::{LayoutStrip, PARKED_STRIP_SLIVER};
 use crate::ecs::params::{WindowCtx, Windows};
 use crate::ecs::state::{
     PaneruState, SavedColumn, SavedStackItem, SavedStrip, SavedWindow, SavedWorkspace,
@@ -540,7 +540,7 @@ pub(super) fn restore_window_state(
         let origin = if is_global_active {
             display.bounds().min
         } else {
-            display.bounds().max - 10
+            display.bounds().max - PARKED_STRIP_SLIVER
         };
         let previous = PreviousStripPosition {
             origin: display.bounds().min,

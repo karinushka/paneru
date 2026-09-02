@@ -257,6 +257,9 @@ $ paneru send-cmd <command> [args...]
 | `window resize`            | Cycle through `preset_column_widths`             |
 | `window grow`              | Grow to the next preset width                    |
 | `window shrink`            | Shrink to the previous preset width              |
+| `window vertical resize`   | Cycle a stacked window through `preset_stack_heights` |
+| `window vertical grow`     | Grow a stacked window to the next preset height  |
+| `window vertical shrink`   | Shrink a stacked window to the previous preset height |
 | `window fullwidth`         | Toggle full-width mode for the focused window    |
 | `window manage`            | Toggle managed/floating state                    |
 | `window equalize`          | Distribute equal heights in the focused stack    |
@@ -297,6 +300,9 @@ $ paneru send-cmd window balance
 
 # Cycle backward through preset widths.
 $ paneru send-cmd window shrink
+
+# Grow the focused window's height inside its stack.
+$ paneru send-cmd window vertical grow
 
 # Jump to the left-most window.
 $ paneru send-cmd window focus first

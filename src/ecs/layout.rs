@@ -23,6 +23,10 @@ use crate::manager::{Display, Origin, Size, Window};
 use crate::platform::WorkspaceId;
 use crate::util::round_px;
 
+/// The floor every window in a column is packed against. Heights that would
+/// starve a sibling below it make [`binpack_heights`] fall back to averaging.
+pub(crate) const MIN_WINDOW_HEIGHT: i32 = 200;
+
 pub struct LayoutEventsPlugin;
 
 /// A strip, its entity, origin, display, and whether it's the active one.
@@ -727,8 +731,6 @@ impl LayoutStrip {
     where
         W: Fn(Entity) -> Option<IRect>,
     {
-        const MIN_WINDOW_HEIGHT: i32 = 200;
-
         self.column_positions(get_window_frame)
             .filter_map(move |(column, position)| {
                 let items: Vec<StackItem> = match column {

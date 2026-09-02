@@ -491,6 +491,10 @@ impl Config {
         self.options().preset_column_widths
     }
 
+    pub fn preset_stack_heights(&self) -> Vec<f64> {
+        self.options().preset_stack_heights
+    }
+
     pub fn swipe_gesture_direction(&self) -> SwipeGestureDirection {
         let config = self.inner();
         config
@@ -1056,6 +1060,10 @@ pub struct MainOptions {
     /// A list of preset column widths (as ratios) used for resizing windows.
     #[serde(default = "default_preset_column_widths")]
     pub preset_column_widths: Vec<f64>,
+    /// A list of preset heights (as ratios of the viewport) used when resizing
+    /// a window vertically inside a stack.
+    #[serde(default = "default_preset_stack_heights")]
+    pub preset_stack_heights: Vec<f64>,
     /// The animation speed for window movements in pixels per second.
     pub animation_speed: Option<f64>,
     /// Automatically center the window when switching focus with keyboard.
@@ -1104,7 +1112,8 @@ pub struct MainOptions {
     /// fully invisible. E.g. 0.5 = tolerate up to 50% hidden.
     pub window_hidden_ratio: Option<f64>,
 
-    /// Whether grow/shrink cycles back when reaching the end of presets.
+    /// Whether grow/shrink cycles back when reaching the end of presets. Applies
+    /// to both the horizontal and the vertical resize commands.
     /// Default: true (cycles). Set to false to stop at the limits.
     pub window_resize_cycle: Option<bool>,
 
@@ -1136,6 +1145,12 @@ pub struct MainOptions {
 /// Returns a default set of column widths.
 pub fn default_preset_column_widths() -> Vec<f64> {
     vec![0.25, 0.33333, 0.50, 0.66667, 0.75, 1.0, 1.5, 2.0]
+}
+
+/// Returns a default set of stacked window heights. Unlike widths there is no
+/// vertical scrolling, so ratios never exceed the viewport.
+pub fn default_preset_stack_heights() -> Vec<f64> {
+    vec![0.25, 0.33333, 0.50, 0.66667, 0.75]
 }
 
 /// `Keybinding` represents a keyboard shortcut and the command it triggers.
@@ -1939,6 +1954,31 @@ fn test_parse_resize_commands() {
 }
 
 #[test]
+fn test_parse_vertical_resize_commands() {
+    assert!(matches!(
+        parse_command(&["window", "vertical"]).unwrap(),
+        Command::Window(Operation::ResizeVertical(ResizeDirection::Grow))
+    ));
+    assert!(matches!(
+        parse_command(&["window", "vertical", "resize"]).unwrap(),
+        Command::Window(Operation::ResizeVertical(ResizeDirection::Grow))
+    ));
+    assert!(matches!(
+        parse_command(&["window", "vertical", "grow"]).unwrap(),
+        Command::Window(Operation::ResizeVertical(ResizeDirection::Grow))
+    ));
+    assert!(matches!(
+        parse_command(&["window", "vertical", "shrink"]).unwrap(),
+        Command::Window(Operation::ResizeVertical(ResizeDirection::Shrink))
+    ));
+    assert!(matches!(
+        parse_command(&["window", "vertical", "resize", "shrink"]).unwrap(),
+        Command::Window(Operation::ResizeVertical(ResizeDirection::Shrink))
+    ));
+    assert!(parse_command(&["window", "vertical", "wider"]).is_err());
+}
+
+#[test]
 fn test_parse_restart_command() {
     assert!(matches!(
         parse_command(&["restart"]).unwrap(),
@@ -2252,13 +2292,18 @@ mod lua_setup_tests {
         let config = config_from_source(
             r"return {
                 default_workspaces = 3,
-                options = { sliver_width = 9, focus_follows_mouse = false },
+                options = {
+                    sliver_width = 9,
+                    focus_follows_mouse = false,
+                    preset_stack_heights = { 0.3, 0.7 },
+                },
                 padding = { top = 10, bottom = 4 },
             }",
         );
         assert_eq!(config.default_workspaces(), 3);
         assert_eq!(config.sliver_width(), 9);
         assert!(!config.focus_follows_mouse());
+        assert_eq!(config.preset_stack_heights(), vec![0.3, 0.7]);
         let (top, _right, bottom, _left) = config.edge_padding();
         assert_eq!((top, bottom), (10, 4));
     }

@@ -15,7 +15,9 @@ mod query;
 use crate::config::Config;
 use crate::ecs::display::FloatingLayer;
 use crate::ecs::focus::FocusHistory;
-use crate::ecs::layout::{Column, LayoutStrip, StackItem, clamp_origin_to_viewport};
+use crate::ecs::layout::{
+    Column, LayoutStrip, MIN_WINDOW_HEIGHT, StackItem, clamp_origin_to_viewport,
+};
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Windows};
 use crate::ecs::{
     ActiveDisplayMarker, ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker,
@@ -76,6 +78,7 @@ pub fn register_commands(app: &mut bevy::app::App) {
             print_internal_state_handler,
             mouse_to_next_display,
             resize_window,
+            resize_window_vertical,
             command_center_window,
             full_width_window,
             to_next_display,
@@ -772,6 +775,120 @@ fn resize_window(
 
     commands.resize_entity(entity, size);
     commands.reshuffle_around(entity);
+}
+
+/// Cycles the focused window's height through `preset_stack_heights`, letting
+/// the neighbour below (or above, when the window is last) absorb the
+/// difference.
+///
+/// Only stacks are eligible: `binpack_heights` stretches a column's lone member
+/// to the full strip height, so a height written anywhere else is overwritten on
+/// the next layout pass.
+fn resize_window_vertical(
+    mut messages: MessageReader<Event>,
+    windows: Windows,
+    active_display: ActiveDisplay,
+    config: Res<Config>,
+    mut commands: Commands,
+) {
+    let Some(&Operation::ResizeVertical(direction)) =
+        filter_window_operations(&mut messages, |op| {
+            matches!(op, Operation::ResizeVertical(_))
+        })
+        .next()
+    else {
+        return;
+    };
+
+    let Some((_, entity)) = windows.focused() else {
+        return;
+    };
+
+    let strip = active_display.active_strip();
+    let Some(Column::Stack(items)) = strip
+        .index_of(entity)
+        .ok()
+        .and_then(|index| strip.get(index).ok())
+    else {
+        return;
+    };
+    let Some(position) = items.iter().position(|item| item.contains(entity)) else {
+        return;
+    };
+    let neighbour = if position + 1 < items.len() {
+        position + 1
+    } else if position > 0 {
+        position - 1
+    } else {
+        return;
+    };
+
+    // Pending resizes count: holding the key down must keep advancing through
+    // the presets instead of re-reading a mid-animation height.
+    let Some((frame, neighbour_frame)) = items[position]
+        .top()
+        .and_then(|entity| windows.moving_frame(entity))
+        .zip(
+            items[neighbour]
+                .top()
+                .and_then(|entity| windows.moving_frame(entity)),
+        )
+    else {
+        return;
+    };
+
+    let pair = frame.height() + neighbour_frame.height();
+    if pair < 2 * MIN_WINDOW_HEIGHT {
+        return;
+    }
+
+    let viewport = active_display.actual_bounds(&config);
+    let current_ratio = f64::from(frame.height()) / f64::from(viewport.height());
+    let heights = config.preset_stack_heights();
+    let fallback = *heights.first().unwrap_or(&0.5);
+    let cycle = config.window_resize_cycle();
+    // The presets are assumed sorted ascending, and the `0.05` dead-band keeps
+    // float noise from re-selecting the preset the window is already at.
+    let next_ratio = match direction {
+        ResizeDirection::Grow => heights
+            .iter()
+            .copied()
+            .find(|&r| r > current_ratio + 0.05)
+            .unwrap_or_else(|| {
+                if cycle {
+                    fallback
+                } else {
+                    *heights.last().unwrap_or(&fallback)
+                }
+            }),
+        ResizeDirection::Shrink => heights
+            .iter()
+            .rev()
+            .copied()
+            .find(|&r| r < current_ratio - 0.05)
+            .unwrap_or_else(|| {
+                if cycle {
+                    *heights.last().unwrap_or(&fallback)
+                } else {
+                    fallback
+                }
+            }),
+    };
+    let new_height = round_px(next_ratio * f64::from(viewport.height()))
+        .clamp(MIN_WINDOW_HEIGHT, pair - MIN_WINDOW_HEIGHT);
+
+    // Leaving the pair's total untouched is what makes the new height survive
+    // `binpack_heights`, which hands the column's last item the remainder.
+    for (item, height) in [
+        (&items[position], new_height),
+        (&items[neighbour], pair - new_height),
+    ] {
+        for entity in item.window_iter() {
+            if let Some(size) = windows.size(entity) {
+                commands.resize_entity(entity, size.with_y(height));
+            }
+        }
+    }
 }
 
 fn full_width_window(

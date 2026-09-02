@@ -729,11 +729,8 @@ fn handle_virtual_window_moves(
             let visible_origin = viewport.min;
             // mid-strip: keep the lone window at its current x.
             let shown = Origin::new(moved_left.unwrap_or(visible_origin.x), visible_origin.y);
-            let origin = if stay {
-                viewport.max - PARKED_STRIP_SLIVER
-            } else {
-                shown
-            };
+            let parked = viewport.max - PARKED_STRIP_SLIVER;
+            let origin = if stay { parked } else { shown };
             debug!(
                 "Creating new virtual row {target_idx} on workspace {}",
                 workspace_id

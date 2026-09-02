@@ -149,7 +149,7 @@ impl<'de> Deserialize<'de> for Direction {
     }
 }
 
-/// Direction used when cycling preset resize widths.
+/// Direction used when cycling preset resize widths and heights.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResizeDirection {
@@ -225,6 +225,9 @@ pub enum Operation {
     Center,
     /// Resizes the focused window in the given direction.
     Resize(ResizeDirection),
+    /// Cycles the focused window's height through the preset stack heights.
+    /// Only applies to windows inside a stack.
+    ResizeVertical(ResizeDirection),
     /// Resizes the focused window to an exact display-width ratio.
     SetWidth(f64),
     /// Toggles the focused window to full width or a preset width.

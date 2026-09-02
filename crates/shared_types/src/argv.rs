@@ -79,6 +79,14 @@ fn parse_operation(argv: &[&str]) -> Result<Operation> {
         ),
         "grow" => Operation::Resize(ResizeDirection::Grow),
         "shrink" => Operation::Resize(ResizeDirection::Shrink),
+        // `window_vertical_resize` / `_grow` / `_shrink`, plus the explicit
+        // `window_vertical_resize_shrink` mirroring `window_resize_shrink`.
+        "vertical" => Operation::ResizeVertical(match argv.get(1).copied() {
+            None | Some("resize") => argv
+                .get(2)
+                .map_or(Ok(ResizeDirection::Grow), |arg| ResizeDirection::parse(arg))?,
+            Some(arg) => ResizeDirection::parse(arg)?,
+        }),
         "fullwidth" => Operation::FullWidth,
         "manage" => Operation::Manage,
         "equalize" => Operation::Equalize,
@@ -170,6 +178,9 @@ impl Operation {
             Operation::Swap(direction) => vec!["swap".to_string(), direction.token()],
             Operation::Center => owned(&["center"]),
             Operation::Resize(direction) => owned(&["resize", direction.token()]),
+            Operation::ResizeVertical(direction) => {
+                owned(&["vertical", "resize", direction.token()])
+            }
             // `SetWidth` comes from window rules, not from a command line; it has
             // no argv verb, so encode it as the equivalent full-width toggle.
             Operation::SetWidth(_) | Operation::FullWidth => owned(&["fullwidth"]),
@@ -224,6 +235,8 @@ mod tests {
             Operation::Swap(Direction::West),
             Operation::Center,
             Operation::Resize(ResizeDirection::Shrink),
+            Operation::ResizeVertical(ResizeDirection::Grow),
+            Operation::ResizeVertical(ResizeDirection::Shrink),
             Operation::FullWidth,
             Operation::ToNextDisplay(MoveFocus::Follow),
             Operation::ToNextDisplay(MoveFocus::Stay),

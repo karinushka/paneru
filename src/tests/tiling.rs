@@ -209,6 +209,152 @@ fn test_window_resize_grow_and_shrink_cycle() {
         .run(commands);
 }
 
+/// Stacks two windows, then cycles the focused one's height through the
+/// presets. The window above it — the only neighbour, since the focused one is
+/// last in the stack — absorbs the whole difference, and the column keeps
+/// filling the viewport.
+#[test]
+fn test_window_vertical_resize_grow_and_shrink_cycle() {
+    // The viewport is `TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT` tall and the
+    // two stacked windows split it evenly to start with.
+    const VIEWPORT_HEIGHT: i32 = TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT;
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 }, // 0
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::First)),
+        }, // 1
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        }, // 2
+        Event::Command {
+            command: Command::Window(Operation::Stack(true)),
+        }, // 3
+        Event::Command {
+            command: Command::Window(Operation::ResizeVertical(ResizeDirection::Grow)),
+        }, // 4
+        Event::Command {
+            command: Command::Window(Operation::ResizeVertical(ResizeDirection::Grow)),
+        }, // 5
+        Event::Command {
+            command: Command::Window(Operation::ResizeVertical(ResizeDirection::Shrink)),
+        }, // 6
+    ];
+
+    let config: Config = (
+        MainOptions {
+            preset_stack_heights: vec![0.3, 0.5, 0.7],
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(2)
+        .on_iteration(3, |world, _state| {
+            assert_window_size!(world, 0, TEST_WINDOW_WIDTH, VIEWPORT_HEIGHT / 2);
+            assert_window_size!(world, 1, TEST_WINDOW_WIDTH, VIEWPORT_HEIGHT / 2);
+        })
+        .on_iteration(4, |world, _state| {
+            // 0.7 of the viewport, with window 0 giving up exactly the delta.
+            assert_window_size!(world, 1, TEST_WINDOW_WIDTH, 524);
+            assert_window_size!(world, 0, TEST_WINDOW_WIDTH, VIEWPORT_HEIGHT - 524);
+        })
+        .on_iteration(5, |world, _state| {
+            // Past the last preset, so it cycles back to the smallest.
+            assert_window_size!(world, 1, TEST_WINDOW_WIDTH, 224);
+            assert_window_size!(world, 0, TEST_WINDOW_WIDTH, VIEWPORT_HEIGHT - 224);
+        })
+        .on_iteration(6, |world, _state| {
+            // Below the smallest preset, so shrinking cycles to the largest.
+            assert_window_size!(world, 1, TEST_WINDOW_WIDTH, 524);
+            assert_window_size!(world, 0, TEST_WINDOW_WIDTH, VIEWPORT_HEIGHT - 524);
+        })
+        .run(commands);
+}
+
+/// A preset that would starve the neighbour is clamped to leave it the minimum
+/// window height, rather than letting the binpacker average the column.
+#[test]
+fn test_window_vertical_resize_leaves_the_neighbour_its_minimum() {
+    const VIEWPORT_HEIGHT: i32 = TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT;
+    const MIN_WINDOW_HEIGHT: i32 = 200;
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::First)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Stack(true)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::ResizeVertical(ResizeDirection::Grow)),
+        },
+    ];
+
+    let config: Config = (
+        MainOptions {
+            // 0.9 of the viewport would leave the neighbour 75px.
+            preset_stack_heights: vec![0.5, 0.9],
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(2)
+        .on_iteration(4, |world, _state| {
+            assert_window_size!(
+                world,
+                1,
+                TEST_WINDOW_WIDTH,
+                VIEWPORT_HEIGHT - MIN_WINDOW_HEIGHT
+            );
+            assert_window_size!(world, 0, TEST_WINDOW_WIDTH, MIN_WINDOW_HEIGHT);
+        })
+        .run(commands);
+}
+
+/// Outside a stack the binpacker always stretches a column's lone member to the
+/// full viewport, so the command is a no-op there.
+#[test]
+fn test_window_vertical_resize_is_a_noop_outside_a_stack() {
+    const VIEWPORT_HEIGHT: i32 = TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT;
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::ResizeVertical(ResizeDirection::Shrink)),
+        },
+    ];
+
+    let config: Config = (
+        MainOptions {
+            preset_stack_heights: vec![0.3, 0.5, 0.7],
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(2)
+        .on_iteration(1, |world, _state| {
+            assert_window_size!(world, 0, TEST_WINDOW_WIDTH, VIEWPORT_HEIGHT);
+            assert_window_size!(world, 1, TEST_WINDOW_WIDTH, VIEWPORT_HEIGHT);
+        })
+        .run(commands);
+}
+
 #[test]
 fn test_window_can_resize_to_two_display_widths_and_scroll() {
     let commands = vec![

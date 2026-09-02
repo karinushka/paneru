@@ -170,6 +170,7 @@ fn window_table(lua: &Lua, dispatch: &Dispatch) -> Result<Table> {
         directional(lua, dispatch, "window.swap", Operation::Swap)?,
     )?;
     window.set("resize", resize(lua, dispatch)?)?;
+    window.set("vertical_resize", vertical_resize(lua, dispatch)?)?;
     window.set(
         "next_display",
         follower(lua, dispatch, Operation::ToNextDisplay)?,
@@ -188,6 +189,14 @@ fn window_table(lua: &Lua, dispatch: &Dispatch) -> Result<Table> {
         ("full_width", Operation::FullWidth),
         ("grow", Operation::Resize(ResizeDirection::Grow)),
         ("shrink", Operation::Resize(ResizeDirection::Shrink)),
+        (
+            "vertical_grow",
+            Operation::ResizeVertical(ResizeDirection::Grow),
+        ),
+        (
+            "vertical_shrink",
+            Operation::ResizeVertical(ResizeDirection::Shrink),
+        ),
         ("raise_floating", Operation::RaiseFloating),
         ("toggle_float_layer", Operation::ToggleFloatingLayer),
     ] {
@@ -292,6 +301,16 @@ fn resize(lua: &Lua, dispatch: &Dispatch) -> Result<Function> {
     lua.create_function(move |lua, opts: Value| {
         let direction = ResizeOpts::read(lua, &opts)?;
         dispatch(lua, Command::Window(Operation::Resize(direction)))
+    })
+}
+
+/// `paneru.window.vertical_resize{ direction = "grow" }`, the height sibling of
+/// [`resize`], also defaulting to growing.
+fn vertical_resize(lua: &Lua, dispatch: &Dispatch) -> Result<Function> {
+    let dispatch = Rc::clone(dispatch);
+    lua.create_function(move |lua, opts: Value| {
+        let direction = ResizeOpts::read(lua, &opts)?;
+        dispatch(lua, Command::Window(Operation::ResizeVertical(direction)))
     })
 }
 
@@ -486,22 +505,27 @@ mod tests {
         assert!(run(r#"paneru.window.focus({ direction = "sideways" })"#).is_err());
         assert!(run("paneru.window.focus({})").is_err());
         assert!(run(r#"paneru.window.resize({ direction = "wider" })"#).is_err());
+        assert!(run(r#"paneru.window.vertical_resize({ direction = "taller" })"#).is_err());
         assert!(run(r#"paneru.run("not a command")"#).is_err());
     }
 
     #[test]
     fn defaults_match_the_documented_behaviour() {
-        let commands = run(r"
+        let commands = run(r#"
             paneru.window.resize()
+            paneru.window.vertical_resize()
+            paneru.window.vertical_resize("shrink")
             paneru.window.next_display()
             paneru.window.next_display({ follow = false })
-        ")
+        "#)
         .unwrap();
 
         assert_eq!(
             debug(&commands),
             debug(&[
                 Command::Window(Operation::Resize(ResizeDirection::Grow)),
+                Command::Window(Operation::ResizeVertical(ResizeDirection::Grow)),
+                Command::Window(Operation::ResizeVertical(ResizeDirection::Shrink)),
                 Command::Window(Operation::ToNextDisplay(MoveFocus::Follow)),
                 Command::Window(Operation::ToNextDisplay(MoveFocus::Stay)),
             ])

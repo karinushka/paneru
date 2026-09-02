@@ -41,6 +41,7 @@ paneru.setup {
     focus_follows_mouse = true,
     sliver_width = 5,
     animation_speed = 12.0,   -- write floats with a decimal point
+    preset_stack_heights = { 0.25, 0.5, 0.75 },
   },
   padding = { top = 10, bottom = 10, left = 8, right = 8 },
   swipe = { sensitivity = 0.4, scroll = { modifier = "alt" } },

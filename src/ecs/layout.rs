@@ -25,6 +25,12 @@ use crate::util::round_px;
 
 pub struct LayoutEventsPlugin;
 
+/// How much of a hidden virtual workspace stays on its own display. Hiding a
+/// workspace parks its strip this many pixels inside the display's bottom-right
+/// corner, which keeps a small sliver on screen: macOS reassigns a window whose
+/// frame has left the display entirely to whichever display it landed on.
+pub(crate) const PARKED_STRIP_SLIVER: i32 = 10;
+
 /// A strip, its entity, origin, display, and whether it's the active one.
 /// Shared by [`reshuffle_layout_strip`] and [`ensure_visible_in_strip`].
 type StripPlacements<'w, 's> = Query<
@@ -1358,6 +1364,19 @@ fn position_layout_windows(
             }
         }
 
+        // Keep the window anchored to its own display. The parked strip origin
+        // only accounts for the first window: everything sitting below it in a
+        // stack picks up that offset on top of the corner and lands past the
+        // bottom edge, fully inside the display underneath. macOS then adopts
+        // the window onto that display, and showing the workspace again brings
+        // it back there instead of here. Park those at the corner as well.
+        let park_row = viewport.max.y - PARKED_STRIP_SLIVER;
+        if frame.min.y > park_row {
+            let height = frame.height();
+            frame.min.y = park_row;
+            frame.max.y = park_row + height;
+        }
+
         if bounds.0 != frame.size() {
             bounds.0 = frame.size();
         }
@@ -1373,7 +1392,14 @@ fn position_layout_windows(
             // strip's current position, so the two motions compose: e.g., on swap, the focused
             // window's target converges back to its old visual position as the strip settles, while
             // the other window slides past.
-            let offscreen_move = position.0.y.abs_diff(frame.min.y) > vertical_move_threshold;
+            // Parking and un-parking have to snap as one move. The clamp above
+            // leaves the lower stack members a short hop from their visible
+            // slot, which the distance threshold alone reads as an ordinary
+            // layout change - they would slide across the screen while the
+            // window above them teleports.
+            let parking = frame.min.y >= park_row || position.0.y >= park_row;
+            let offscreen_move =
+                parking || position.0.y.abs_diff(frame.min.y) > vertical_move_threshold;
             if context.swiping || offscreen_move && !config.virtual_workspace_animations() {
                 position.0 = frame.min;
                 if let Ok(mut entity_commands) = commands.get_entity(entity) {

@@ -5,7 +5,7 @@ use bevy::time::TimeUpdateStrategy;
 
 use crate::commands::{Command, Direction, MouseMove, MoveFocus, Operation};
 use crate::config::Config;
-use crate::ecs::layout::LayoutStrip;
+use crate::ecs::layout::{LayoutStrip, PARKED_STRIP_SLIVER};
 use crate::ecs::{ActiveWorkspaceMarker, DockPosition, RefreshWindowSizes, Timeout};
 use crate::events::Event;
 use crate::manager::{Display, Origin, Size};
@@ -535,6 +535,80 @@ fn test_vertical_swap_within_stack_stays_on_display() {
                 TEST_DISPLAY_ID,
                 "swapping inside a stack must not move focus to another display"
             );
+        })
+        .run(commands);
+}
+
+#[test]
+fn test_hidden_stack_stays_off_the_display_below() {
+    // Regression test: hiding a virtual workspace parks its strip at the
+    // display's bottom-right corner. Windows below the strip origin - the
+    // lower members of a stack - used to land past the bottom edge entirely,
+    // inside the display underneath, which macOS then adopts them onto. The
+    // window came back on the wrong display once the workspace was shown
+    // again.
+    let mut harness = TestHarness::new().with_windows(2);
+    harness.mock_state.add_display(
+        EXT_DISPLAY_ID,
+        IRect::new(
+            0,
+            TEST_DISPLAY_HEIGHT,
+            EXT_DISPLAY_WIDTH,
+            TEST_DISPLAY_HEIGHT + EXT_DISPLAY_HEIGHT,
+        ),
+        vec![EXT_WORKSPACE_ID],
+    );
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::Last)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Stack(true)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::VirtualNumber(1)),
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::Window(Operation::VirtualNumber(0)),
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    harness
+        .on_iteration(4, |world, _state| {
+            // Hidden, but still parked on their own display: every window keeps
+            // its origin above the top edge of the display below.
+            let mut query = world.query::<&crate::manager::Window>();
+            for window in query.iter(world) {
+                let frame = window.frame();
+                assert!(
+                    frame.min.y < TEST_DISPLAY_HEIGHT,
+                    "window {} parked at {:?}, inside the display below",
+                    window.id(),
+                    frame
+                );
+                assert_eq!(
+                    frame.min.y,
+                    TEST_DISPLAY_HEIGHT - PARKED_STRIP_SLIVER,
+                    "window {} should park on the corner sliver",
+                    window.id()
+                );
+            }
+        })
+        .on_iteration(6, |world, _state| {
+            assert_on_workspace!(world, 0, TEST_WORKSPACE_ID);
+            assert_on_workspace!(world, 1, TEST_WORKSPACE_ID);
+            assert_not_on_workspace!(world, 0, EXT_WORKSPACE_ID);
+            assert_not_on_workspace!(world, 1, EXT_WORKSPACE_ID);
+            assert_window_at!(world, 0, 400, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 1, 400, 394);
         })
         .run(commands);
 }

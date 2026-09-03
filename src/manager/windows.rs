@@ -181,6 +181,18 @@ pub struct WindowOS {
     /// `kAXTitleChangedNotification`. Missing that notification is the one
     /// way this can go stale.
     title: RwLock<Option<String>>,
+
+    /// `AXRole` and `AXSubrole`, cached because reading either is a synchronous
+    /// cross-process call and [`crate::ecs::state::SavedWindow::from_entity`]
+    /// wants both for every window on each periodic save — enough round trips
+    /// to stall the main thread for hundreds of milliseconds on a busy system.
+    ///
+    /// `OnceLock` rather than the `RwLock` above: unlike a title, neither
+    /// changes over an element's lifetime, so there is nothing to invalidate.
+    /// Only successful reads populate these, so a window that transiently fails
+    /// to answer is retried rather than cached as broken.
+    role: OnceLock<String>,
+    subrole: OnceLock<String>,
 }
 
 impl WindowOS {
@@ -228,6 +240,8 @@ impl WindowOS {
             app_reference: OnceLock::new(),
             enhanced_ui_absent: AtomicBool::new(false),
             title: RwLock::new(None),
+            role: OnceLock::new(),
+            subrole: OnceLock::new(),
         };
 
         let forced = window.is_forced_manage(config, bundle_id);
@@ -554,7 +568,11 @@ impl WindowApi for WindowOS {
     ///
     /// `Ok(String)` with the window role if successful, otherwise `Err(Error)`.
     fn role(&self) -> Result<String> {
-        self.ax_element.role()
+        if let Some(cached) = self.role.get() {
+            return Ok(cached.clone());
+        }
+        let role = self.ax_element.role()?;
+        Ok(self.role.get_or_init(|| role).clone())
     }
 
     /// Retrieves the subrole of the window (e.g., "`AXStandardWindow`").
@@ -563,7 +581,11 @@ impl WindowApi for WindowOS {
     ///
     /// `Ok(String)` with the window subrole if successful, otherwise `Err(Error)`.
     fn subrole(&self) -> Result<String> {
-        self.ax_element.subrole()
+        if let Some(cached) = self.subrole.get() {
+            return Ok(cached.clone());
+        }
+        let subrole = self.ax_element.subrole()?;
+        Ok(self.subrole.get_or_init(|| subrole).clone())
     }
 
     #[instrument(level = Level::DEBUG, ret)]

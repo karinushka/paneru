@@ -267,6 +267,22 @@ pub struct ReshuffleAroundMarker;
 #[derive(Component)]
 pub struct EnsureVisibleMarker;
 
+/// Marks a [`LayoutStrip`](crate::ecs::layout::LayoutStrip) whose offset was
+/// placed deliberately by the user (`Operation::Center`, `Operation::Snap`)
+/// rather than derived from a window frame. While it is present and still
+/// current, `reshuffle_layout_strip` leaves the offset alone — edge invariant
+/// included — for any window that is already fully visible.
+///
+/// Currency is a value comparison, not change detection: the animator writes
+/// `Position` every frame and `layout_sizes_changed` turns that into a
+/// `LayoutStrip` change, so a tick would go stale immediately. `signature`
+/// holds the ordered column tops with their target widths, which survives
+/// scrolling and tab reordering but not an add, remove, reorder or resize.
+#[derive(Component, Debug)]
+pub struct ManualStripOffset {
+    pub signature: Vec<(Entity, i32)>,
+}
+
 #[derive(Component, Debug)]
 pub struct Scrolling {
     pub velocity: f64,

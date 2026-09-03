@@ -332,8 +332,13 @@ pub(super) fn window_focused_trigger(
             if restored_focus {
                 continue;
             }
+            // A repeat focus event for the window that already holds focus (a
+            // new browser tab, an app re-activating) is not new layout
+            // information, so it must not re-derive the strip offset — that
+            // threw away a manual centering. Expose the window if it has been
+            // scrolled off an edge, and otherwise leave the strip alone.
             if !global_state.skip_reshuffle() && !global_state.initializing() {
-                ctx.commands.reshuffle_around(entity);
+                ctx.commands.ensure_visible(entity);
             }
             continue;
         }

@@ -16,7 +16,8 @@ use crate::config::Config;
 use crate::ecs::params::Windows;
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, DockPosition, EnsureVisibleMarker, Initializing, LayoutPosition,
-    Position, RepositionMarker, ReshuffleAroundMarker, Scrolling, SpawnCommandsExt,
+    ManualStripOffset, Position, RepositionMarker, ReshuffleAroundMarker, Scrolling,
+    SpawnCommandsExt,
 };
 use crate::errors::{Error, Result};
 use crate::manager::{Display, Origin, Size, Window};
@@ -35,7 +36,8 @@ pub struct LayoutEventsPlugin;
 /// frame has left the display entirely to whichever display it landed on.
 pub(crate) const PARKED_STRIP_SLIVER: i32 = 10;
 
-/// A strip, its entity, origin, display, and whether it's the active one.
+/// A strip, its entity, origin, display, whether it's the active one, and the
+/// offset it is animating toward if a move is already in flight.
 /// Shared by [`reshuffle_layout_strip`] and [`ensure_visible_in_strip`].
 type StripPlacements<'w, 's> = Query<
     'w,
@@ -46,6 +48,7 @@ type StripPlacements<'w, 's> = Query<
         &'static Position,
         &'static ChildOf,
         Option<Ref<'static, ActiveWorkspaceMarker>>,
+        Option<&'static RepositionMarker>,
     ),
 >;
 
@@ -101,6 +104,38 @@ pub(crate) fn clamp_origin_to_viewport(origin: Origin, size: Size, viewport: IRe
     let minimum = viewport.min.min(far_edge);
     let maximum = viewport.min.max(far_edge);
     origin.clamp(minimum, maximum)
+}
+
+/// How far a stored width may drift before a [`ManualStripOffset`] counts as
+/// stale. `window_resized_update_frame` writes back the OS geometry, which can
+/// land a pixel or two off the size the layout asked for.
+const SIGNATURE_WIDTH_TOLERANCE: i32 = 2;
+
+/// Fingerprints the shape of a strip for [`ManualStripOffset`]: the ordered
+/// column tops with the widths they are heading for.
+///
+/// Column tops only, so promoting a tab or a stacked window to the front of its
+/// column — which happens on every focus event — is not a layout change. Widths
+/// from `moving_frame`, so a resize counts once it is requested rather than
+/// once per animation frame. Neither depends on the strip's offset, which is
+/// the point: scrolling must not invalidate a deliberate placement.
+pub(crate) fn strip_signature(strip: &LayoutStrip, windows: &Windows) -> Vec<(Entity, i32)> {
+    strip
+        .all_columns()
+        .into_iter()
+        .filter_map(|entity| {
+            windows
+                .moving_frame(entity)
+                .map(|frame| (entity, frame.width()))
+        })
+        .collect()
+}
+
+fn signature_matches(current: &[(Entity, i32)], stored: &[(Entity, i32)]) -> bool {
+    current.len() == stored.len()
+        && current.iter().zip(stored).all(|(now, before)| {
+            now.0 == before.0 && (now.1 - before.1).abs() <= SIGNATURE_WIDTH_TOLERANCE
+        })
 }
 
 impl Plugin for LayoutEventsPlugin {
@@ -1023,6 +1058,7 @@ fn layout_strip_changed(
 fn reshuffle_layout_strip(
     markers: Query<(Entity, &LayoutPosition), With<ReshuffleAroundMarker>>,
     strips: StripPlacements,
+    manual_offsets: Query<&ManualStripOffset>,
     displays: DisplayViewports,
     windows: Windows,
     config: Res<Config>,
@@ -1032,7 +1068,7 @@ fn reshuffle_layout_strip(
         if let Ok(mut cmd) = commands.get_entity(entity) {
             cmd.try_remove::<ReshuffleAroundMarker>();
         }
-        let Some((strip, strip_entity, active_strip, child, active_marker)) =
+        let Some((strip, strip_entity, active_strip, child, active_marker, strip_reposition)) =
             strips.into_iter().find(|strip| strip.0.contains(entity))
         else {
             return;
@@ -1052,6 +1088,31 @@ fn reshuffle_layout_strip(
 
         let size = frame.size();
         let visible_width = display_bounds.intersect(frame).width();
+
+        // A deliberate offset (center, snap) outranks the derived one, but only
+        // while the window this reshuffle is about is still fully on screen: a
+        // focus event for a window scrolled past an edge has to bring it back,
+        // and at that point the placement is stale. Project against the strip's
+        // *target* offset — mid-animation the window's own frame is a tick
+        // behind a strip that is still moving.
+        if let Ok(manual) = manual_offsets.get(strip_entity) {
+            // The offset only ever meant "the user placed *this* layout here",
+            // so a strip that has since gained, lost, reordered or resized a
+            // column no longer has a placement to keep.
+            let current = strip_signature(strip, &windows);
+            let strip_target = strip_reposition.map_or(active_strip.0, |reposition| reposition.0);
+            let projected = layout_position.0 + strip_target;
+            if signature_matches(&current, &manual.signature)
+                && clamp_origin_to_viewport(projected, size, display_bounds) == projected
+            {
+                trace!("reshuffle_layout_strip: keeping manual offset on {strip_entity}");
+                return;
+            }
+            trace!("reshuffle_layout_strip: manual offset on {strip_entity} is stale");
+            if let Ok(mut cmd) = commands.get_entity(strip_entity) {
+                cmd.try_remove::<ManualStripOffset>();
+            }
+        }
 
         // Expose the window by clamping it into the viewport.
         frame.min = clamp_origin_to_viewport(frame.min, size, display_bounds);
@@ -1128,21 +1189,23 @@ fn ensure_visible_in_strip(
         if let Ok(mut cmd) = commands.get_entity(entity) {
             cmd.try_remove::<EnsureVisibleMarker>();
         }
-        let Some((_, strip_entity, strip_position, child, active_marker)) =
+        // Each marker is independent, and its own marker was already consumed
+        // above: bailing out of the loop would silently drop the rest.
+        let Some((_, strip_entity, strip_position, child, active_marker, _)) =
             strips.into_iter().find(|s| s.0.contains(entity))
         else {
-            return;
+            continue;
         };
 
         if active_marker.is_some_and(|m| m.is_added()) {
             trace!("ensure_visible_in_strip: skipping newly active workspace {strip_entity}");
-            return;
+            continue;
         }
         let Ok((display, dock)) = displays.get(child.parent()) else {
-            return;
+            continue;
         };
         let Some(size) = windows.size(entity) else {
-            return;
+            continue;
         };
         let viewport = display.actual_display_bounds(dock, &config);
 
@@ -1152,10 +1215,17 @@ fn ensure_visible_in_strip(
         // the strip target equals its current position — no movement.
         let clamped_min = clamp_origin_to_viewport(candidate_min, size, viewport);
         if clamped_min == candidate_min {
-            return;
+            continue;
         }
-        let strip_target = (clamped_min - layout_position.0).with_y(strip_position.0.y);
+        // Both axes come from the clamp: it is still the minimum shortfall, and
+        // keeping the strip's own y here would silently drop the vertical
+        // correction for a window sitting above the menu bar.
+        let strip_target = clamped_min - layout_position.0;
         trace!("ensure_visible_in_strip: entity {entity}, scroll strip to {strip_target}");
+        // Scrolling to expose a window overrides whatever the user placed here.
+        if let Ok(mut cmd) = commands.get_entity(strip_entity) {
+            cmd.try_remove::<ManualStripOffset>();
+        }
         commands.reposition_entity(strip_entity, strip_target);
     }
 }
@@ -1418,6 +1488,19 @@ fn position_layout_windows(
 mod tests {
     use super::*;
     use bevy::prelude::*;
+
+    #[test]
+    fn signature_tolerates_pixel_drift_but_not_a_reshape() {
+        let mut world = World::new();
+        let first = world.spawn_empty().id();
+        let second = world.spawn_empty().id();
+        let stored = vec![(first, 400), (second, 400)];
+
+        assert!(signature_matches(&[(first, 401), (second, 399)], &stored));
+        assert!(!signature_matches(&[(first, 420), (second, 400)], &stored));
+        assert!(!signature_matches(&[(second, 400), (first, 400)], &stored));
+        assert!(!signature_matches(&[(first, 400)], &stored));
+    }
 
     #[test]
     fn clamp_origin_supports_oversized_windows() {

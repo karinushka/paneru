@@ -15,7 +15,8 @@ use crate::config::swipe::SwipeGestureDirection;
 use crate::ecs::layout::{Column, LayoutStrip};
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, MissionControlActive, Position, Scrolling, SendMessageTrigger,
+    ActiveWorkspaceMarker, ManualStripOffset, MissionControlActive, Position, Scrolling,
+    SendMessageTrigger,
 };
 use crate::errors::Result;
 use bevy::ecs::schedule::common_conditions::on_message;
@@ -146,6 +147,12 @@ fn swipe_gesture(
     }
 
     let (entity, position, scrolling) = &mut *active_workspace;
+
+    // The user is driving the strip by hand now, so an earlier deliberate
+    // placement (center, snap) no longer describes where they want it.
+    if let Ok(mut entity_commands) = commands.get_entity(*entity) {
+        entity_commands.try_remove::<ManualStripOffset>();
+    }
 
     if touchpad_down && let Some(scrolling) = scrolling.as_mut() {
         scrolling.velocity = 0.0;

@@ -4,11 +4,12 @@ use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 
 use crate::commands::{Command, Direction, MouseMove, MoveFocus, Operation};
-use crate::config::Config;
+use crate::config::{Config, MainOptions};
 use crate::ecs::layout::{LayoutStrip, PARKED_STRIP_SLIVER};
 use crate::ecs::{ActiveWorkspaceMarker, DockPosition, RefreshWindowSizes, Timeout};
 use crate::events::Event;
-use crate::manager::{Display, Origin, Size};
+use crate::manager::{Display, Origin, Size, Window};
+use crate::platform::WinID;
 use crate::{assert_not_on_workspace, assert_on_workspace, assert_window_at, assert_window_size};
 
 use super::*;
@@ -609,6 +610,79 @@ fn test_hidden_stack_stays_off_the_display_below() {
             assert_not_on_workspace!(world, 1, EXT_WORKSPACE_ID);
             assert_window_at!(world, 0, 400, TEST_MENUBAR_HEIGHT);
             assert_window_at!(world, 1, 400, 394);
+        })
+        .run(commands);
+}
+
+/// Focusing a window on another display and coming back must not re-derive the
+/// strip offset on the display we left: the centering the user asked for there
+/// is still what they want to see when they return.
+#[test]
+fn test_center_survives_display_round_trip() {
+    let config: Config = (
+        MainOptions {
+            auto_center: Some(false),
+            continuous_swipe: Some(false),
+            animation_speed: Some(10000.0),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    let centered = (TEST_DISPLAY_WIDTH - TEST_WINDOW_WIDTH) / 2;
+    let window_x = |world: &mut World, id: WinID| -> i32 {
+        let mut query = world.query::<&Window>();
+        query
+            .iter(world)
+            .find(|window| window.id() == id)
+            .expect("window not found")
+            .frame()
+            .min
+            .x
+    };
+
+    let commands = vec![
+        // 0: boot with focus on window 0.
+        Event::MenuOpened { window_id: 0 },
+        // 1: center it on the main display.
+        Event::Command {
+            command: Command::Window(Operation::Center),
+        },
+        // 2: focus moves to the window on the external display.
+        Event::Command {
+            command: Command::PrintState,
+        },
+        // 3: and back to window 0.
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    TestHarness::new()
+        .with_config(config)
+        .with_display(
+            EXT_DISPLAY_ID,
+            IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+            vec![EXT_WORKSPACE_ID],
+        )
+        .with_windows(4)
+        .with_workspace_window(100, EXT_WORKSPACE_ID, |window| {
+            window.workspace_id = EXT_WORKSPACE_ID;
+        })
+        .on_iteration(1, move |world, state| {
+            assert_eq!(window_x(world, 0), centered, "window 0 must be centered");
+            state.focus_window(100);
+        })
+        .on_iteration(2, move |_world, state| {
+            state.focus_window(0);
+        })
+        .on_iteration(3, move |world, _state| {
+            assert_eq!(
+                window_x(world, 0),
+                centered,
+                "returning from another display must not undo the centering"
+            );
         })
         .run(commands);
 }

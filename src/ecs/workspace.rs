@@ -22,9 +22,9 @@ use crate::ecs::focus::FocusHistory;
 use crate::ecs::layout::{LayoutStrip, PARKED_STRIP_SLIVER};
 use crate::ecs::params::{ActiveDisplay, WindowCtx, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, DockPosition, FocusedMarker, Initializing, NativeFullscreenMarker,
-    Position, RaiseWindow, RefreshWindowSizes, RepositionMarker, Scrolling, SelectedVirtualMarker,
-    SpawnCommandsExt, Timeout, Unmanaged,
+    ActiveWorkspaceMarker, DockPosition, FocusedMarker, Initializing, ManualStripOffset,
+    NativeFullscreenMarker, Position, RaiseWindow, RefreshWindowSizes, RepositionMarker, Scrolling,
+    SelectedVirtualMarker, SpawnCommandsExt, Timeout, Unmanaged,
 };
 use crate::errors::Result;
 use crate::events::Event;
@@ -1151,7 +1151,8 @@ pub(crate) fn show_active_workspace(
 
         if let Ok(mut cmd) = commands.get_entity(entity) {
             cmd.try_remove::<Scrolling>()
-                .try_remove::<RepositionMarker>();
+                .try_remove::<RepositionMarker>()
+                .try_remove::<ManualStripOffset>();
         }
 
         if config.virtual_workspace_animations() {

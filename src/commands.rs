@@ -16,12 +16,12 @@ use crate::config::Config;
 use crate::ecs::display::FloatingLayer;
 use crate::ecs::focus::FocusHistory;
 use crate::ecs::layout::{
-    Column, LayoutStrip, MIN_WINDOW_HEIGHT, StackItem, clamp_origin_to_viewport,
+    Column, LayoutStrip, MIN_WINDOW_HEIGHT, StackItem, clamp_origin_to_viewport, strip_signature,
 };
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Windows};
 use crate::ecs::{
     ActiveDisplayMarker, ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker,
-    FullWidthMarker, NativeFullscreenMarker, RaiseWindow, SelectedVirtualMarker,
+    FullWidthMarker, ManualStripOffset, NativeFullscreenMarker, RaiseWindow, SelectedVirtualMarker,
     SendMessageTrigger, SpawnCommandsExt, Timeout, Unmanaged,
 };
 use crate::events::Event;
@@ -649,6 +649,23 @@ fn command_swap_focus(
     }
 }
 
+/// Records that the user placed this strip's offset by hand, so
+/// `reshuffle_layout_strip` keeps it instead of re-deriving one from the
+/// focused window's frame. The mark is dropped again as soon as the strip's
+/// shape changes, the user swipes, or a window has to be scrolled into view.
+fn mark_manual_offset(
+    strip_entity: Entity,
+    strip: &LayoutStrip,
+    windows: &Windows,
+    commands: &mut Commands,
+) {
+    if let Ok(mut entity_commands) = commands.get_entity(strip_entity) {
+        entity_commands.try_insert(ManualStripOffset {
+            signature: strip_signature(strip, windows),
+        });
+    }
+}
+
 /// Centers the focused window on the active display.
 fn command_center_window(
     mut messages: MessageReader<Event>,
@@ -674,9 +691,19 @@ fn command_center_window(
         if active_display.active_strip().contains(entity)
             && let Some(layout_position) = windows.layout_position(entity)
         {
-            // Directly reposition the strip (bypasses hidden_ratio check).
+            // Directly reposition the strip (bypasses hidden_ratio check), and
+            // record the placement as deliberate so a later reshuffle — a
+            // repeated focus event, a return from another display — does not
+            // re-derive the offset and undo the centering.
             let strip_position = origin - layout_position.0;
-            commands.reposition_entity(active_display.active_strip_entity(), strip_position);
+            let strip_entity = active_display.active_strip_entity();
+            commands.reposition_entity(strip_entity, strip_position);
+            mark_manual_offset(
+                strip_entity,
+                active_display.active_strip(),
+                &windows,
+                &mut commands,
+            );
         } else {
             commands.reposition_entity(entity, origin);
         }
@@ -1312,7 +1339,14 @@ fn snap_window(
     frame.max = frame.min + size;
 
     let strip_position = frame.min - layout_position.0;
-    commands.reposition_entity(active_display.active_strip_entity(), strip_position);
+    let strip_entity = active_display.active_strip_entity();
+    commands.reposition_entity(strip_entity, strip_position);
+    mark_manual_offset(
+        strip_entity,
+        active_display.active_strip(),
+        &windows,
+        &mut commands,
+    );
 }
 
 #[instrument(level = Level::DEBUG, skip_all)]

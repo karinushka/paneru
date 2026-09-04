@@ -267,6 +267,9 @@ pub enum Operation {
     /// Flips `FloatingLayer`, raises the other windows in the new top tier,
     /// and focuses the tier's last-focused window.
     ToggleFloatingLayer,
+    /// Copies a `[windows]` configuration rule for the focused window to the
+    /// clipboard. Never produced by parsing; the menu bar issues it directly.
+    CopyRule,
 }
 
 /// Defines operations that can be performed on the mouse.

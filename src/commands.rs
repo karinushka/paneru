@@ -13,6 +13,7 @@ use tracing::{debug, error, info};
 mod query;
 
 use crate::config::Config;
+use crate::config::snippet::{RuleSubject, SnippetDialect, window_rule_snippet};
 use crate::ecs::display::FloatingLayer;
 use crate::ecs::focus::FocusHistory;
 use crate::ecs::layout::{
@@ -95,6 +96,13 @@ pub fn register_commands(app: &mut bevy::app::App) {
             snap_window,
         ),
     );
+    // A separate registration because the tuple above is already at Bevy's
+    // 20-system limit.
+    //
+    // A default dialect so the mock harness has one; the real app overwrites it
+    // once it knows whether a Lua script took over the configuration.
+    app.init_resource::<SnippetDialect>();
+    app.add_systems(PreUpdate, copy_window_rule);
 }
 
 pub fn filter_window_operations<'a, F: Fn(&Operation) -> bool>(
@@ -1000,6 +1008,55 @@ fn manage_window(
     {
         strip.append(entity);
         commands.reshuffle_around(entity);
+    }
+}
+
+/// Copies a `[windows]` configuration rule for the focused window to the
+/// clipboard, so the user can paste a working starting point instead of
+/// guessing the app's bundle id and transcribing the title into a regex.
+fn copy_window_rule(
+    mut messages: MessageReader<Event>,
+    windows: Windows,
+    apps: Query<&Application>,
+    dialect: Res<SnippetDialect>,
+    mut commands: Commands,
+) {
+    if filter_window_operations(&mut messages, |op| matches!(op, Operation::CopyRule))
+        .next()
+        .is_none()
+    {
+        return;
+    }
+
+    let Some((window, app)) = windows
+        .focused()
+        .and_then(|(window, _)| windows.find_parent(window.id()))
+        .and_then(|(window, _, app_entity)| Some((window, apps.get(app_entity).ok()?)))
+    else {
+        debug!("no focused window to copy a rule for");
+        return;
+    };
+
+    let bundle_id = app.bundle_id().unwrap_or_default();
+    let title = window.title().unwrap_or_default();
+    let role = window.role().unwrap_or_default();
+    let subrole = window.subrole().unwrap_or_default();
+    let snippet = window_rule_snippet(
+        *dialect,
+        &RuleSubject {
+            app_name: app.name(),
+            bundle_id: &bundle_id,
+            title: &title,
+            role: &role,
+            subrole: &subrole,
+        },
+    );
+
+    if crate::pasteboard::copy_to_clipboard(&snippet) {
+        info!("copied window rule for {}", app.name());
+        commands.flash_message("Window rule copied".to_owned(), 1.5);
+    } else {
+        error!("unable to copy the window rule to the clipboard");
     }
 }
 

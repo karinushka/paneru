@@ -21,6 +21,7 @@ mod lua;
 mod manager;
 mod menubar;
 mod overlay;
+mod pasteboard;
 mod platform;
 mod reader;
 mod util;

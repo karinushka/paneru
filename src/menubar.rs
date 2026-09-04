@@ -62,6 +62,11 @@ define_class!(
             self.send_command(Command::Window(Operation::Manage));
         }
 
+        #[unsafe(method(copyWindowRule:))]
+        fn copy_window_rule(&self, _: &NSMenuItem) {
+            self.send_command(Command::Window(Operation::CopyRule));
+        }
+
         #[unsafe(method(openAccessibilitySettings:))]
         fn open_accessibility_settings(&self, _: &NSMenuItem) {
             if let Err(error) = std::process::Command::new("/usr/bin/open")
@@ -117,6 +122,7 @@ pub struct MenuBarManager {
     width_items: Vec<(i32, Retained<NSMenuItem>)>,
     managed_window_items: Vec<Retained<NSMenuItem>>,
     manage_item: Option<Retained<NSMenuItem>>,
+    copy_rule_item: Option<Retained<NSMenuItem>>,
     configured_widths: Vec<i32>,
     current_content: Option<MenuBarContent>,
 }
@@ -163,6 +169,7 @@ impl MenuBarManager {
             width_items: Vec::new(),
             managed_window_items: Vec::new(),
             manage_item: None,
+            copy_rule_item: None,
             configured_widths: Vec::new(),
             current_content: None,
         }
@@ -219,6 +226,9 @@ impl MenuBarManager {
         if let Some(manage_item) = &self.manage_item {
             manage_item.setEnabled(enablement.toggle_managed);
         }
+        if let Some(copy_rule_item) = &self.copy_rule_item {
+            copy_rule_item.setEnabled(enablement.toggle_managed);
+        }
         for (percentage, item) in &self.width_items {
             let selected = focused_width_ratio
                 .is_some_and(|ratio| (ratio.mul_add(100.0, -f64::from(*percentage))).abs() < 1.0);
@@ -243,6 +253,7 @@ impl MenuBarManager {
         self.width_items.clear();
         self.managed_window_items.clear();
         self.manage_item = None;
+        self.copy_rule_item = None;
 
         let status = self.add_item("Paneru — Running", None);
         status.setEnabled(false);
@@ -262,6 +273,9 @@ impl MenuBarManager {
         let manage = self.add_item("Toggle Managed", Some(sel!(toggleManaged:)));
         self.managed_window_items.push(center);
         self.manage_item = Some(manage);
+
+        self.menu.addItem(&NSMenuItem::separatorItem(self.mtm));
+        self.copy_rule_item = Some(self.add_item("Copy Window Rule", Some(sel!(copyWindowRule:))));
 
         self.menu.addItem(&NSMenuItem::separatorItem(self.mtm));
         self.add_item("Quit Paneru", Some(sel!(quitPaneru:)));

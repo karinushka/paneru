@@ -147,14 +147,14 @@ fn parse_mouse_move(argv: &[&str]) -> Result<MouseMove> {
 impl Command {
     /// The argv encoding of this command, as understood by [`parse_command`].
     ///
-    /// [`Command::Lua`] and [`Command::Layout`] have no encoding — they are
-    /// only ever issued in-process — and yield `None`.
+    /// [`Command::Lua`], [`Command::Layout`] and [`Operation::CopyRule`] have no
+    /// encoding — they are only ever issued in-process — and yield `None`.
     #[must_use]
     pub fn to_argv(&self) -> Option<Vec<String>> {
         let argv = match self {
             Command::Window(operation) => {
                 let mut argv = vec!["window".to_string()];
-                argv.extend(operation.to_argv());
+                argv.extend(operation.to_argv()?);
                 argv
             }
             Command::Mouse(MouseMove::ToNextDisplay) => {
@@ -170,10 +170,11 @@ impl Command {
 }
 
 impl Operation {
-    /// The argv tail following `window`, e.g. `["focus", "east"]`.
-    fn to_argv(&self) -> Vec<String> {
+    /// The argv tail following `window`, e.g. `["focus", "east"]`. `None` for
+    /// operations the command line cannot express.
+    fn to_argv(&self) -> Option<Vec<String>> {
         let owned = |args: &[&str]| args.iter().map(|arg| (*arg).to_string()).collect();
-        match self {
+        let argv = match self {
             Operation::Focus(direction) => vec!["focus".to_string(), direction.token()],
             Operation::Swap(direction) => vec!["swap".to_string(), direction.token()],
             Operation::Center => owned(&["center"]),
@@ -213,7 +214,10 @@ impl Operation {
             Operation::FocusManaged => owned(&["focus", "managed"]),
             Operation::RaiseFloating => owned(&["raise", "floating"]),
             Operation::ToggleFloatingLayer => owned(&["togglefloatlayer"]),
-        }
+            // Issued only by the menu bar; there is no verb to parse back.
+            Operation::CopyRule => return None,
+        };
+        Some(argv)
     }
 }
 

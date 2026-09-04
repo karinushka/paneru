@@ -1174,8 +1174,17 @@ pub(crate) fn show_active_workspace(
             entity_commands.try_remove::<PreviousStripPosition>();
         }
 
+        // A window of this strip already holding focus is what activated it in
+        // the first place - a Cmd-Tab straight into one of its windows. The
+        // remembered focus is a fallback for a plain workspace switch, so it
+        // must not pull focus away from that window.
+        let keeps_focus = windows
+            .focused()
+            .is_some_and(|(_, current_focus)| strip.contains(current_focus));
+
         if config.virtual_workspace_animations() {
-            if let Some(focus) = *focus
+            if !keeps_focus
+                && let Some(focus) = *focus
                 && strip.contains(focus)
             {
                 spawn_restore_focus_guard(focus, &mut commands);
@@ -1187,9 +1196,7 @@ pub(crate) fn show_active_workspace(
             position.0 = *origin;
         }
 
-        if let Some((_, current_focus)) = windows.focused()
-            && strip.contains(current_focus)
-        {
+        if keeps_focus {
             return;
         }
 

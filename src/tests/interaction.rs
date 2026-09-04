@@ -2543,3 +2543,88 @@ fn test_center_dropped_on_user_swipe() {
         })
         .run(commands);
 }
+
+/// Cmd-Tab into an app parked on another virtual workspace must land focus on
+/// that app's window. Regression: with `virtual_workspace_animations = true`,
+/// the animated branch of `show_active_workspace` restored the strip's
+/// remembered focus unconditionally, so activating the strip through a focus
+/// event immediately yanked focus onto whatever was focused there last.
+#[test]
+fn test_focus_into_hidden_virtual_workspace_keeps_target_window() {
+    let config: Config = (
+        MainOptions {
+            animation_speed: Some(30.0),
+            virtual_workspace_animations: Some(true),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    let commands = vec![
+        // 0: boot.
+        Event::MenuOpened { window_id: 0 },
+        // 1: window 2 takes focus.
+        Event::Command {
+            command: Command::PrintState,
+        },
+        // 2: park it on VW1.
+        Event::Command {
+            command: Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Stay)),
+        },
+        // 3: window 3 takes focus.
+        Event::Command {
+            command: Command::PrintState,
+        },
+        // 4: park it on VW1 too, leaving VW1 = [2, 3].
+        Event::Command {
+            command: Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Stay)),
+        },
+        // 5: visit VW1.
+        Event::Command {
+            command: Command::Window(Operation::VirtualNumber(1)),
+        },
+        // 6: focus window 3 there, so that is what VW1 remembers.
+        Event::Command {
+            command: Command::PrintState,
+        },
+        // 7: back to VW0, parking VW1.
+        Event::Command {
+            command: Command::Window(Operation::VirtualNumber(0)),
+        },
+        // 8: the Cmd-Tab into window 2 queued below plays out here.
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(4)
+        .on_iteration(0, |_world, state| {
+            state.focus_window(2);
+        })
+        .on_iteration(1, |world, _state| {
+            assert_focused!(world, 2);
+        })
+        .on_iteration(2, |_world, state| {
+            state.focus_window(3);
+        })
+        .on_iteration(3, |world, _state| {
+            assert_focused!(world, 3);
+        })
+        .on_iteration(5, |_world, state| {
+            state.focus_window(3);
+        })
+        .on_iteration(6, |world, _state| {
+            assert_focused!(world, 3);
+        })
+        .on_iteration(7, |_world, state| {
+            // Cmd-Tab straight into window 2, the other window on VW1.
+            state.focus_window(2);
+        })
+        .on_iteration(8, |world, _state| {
+            assert_focused!(world, 2);
+        })
+        .run(commands);
+}

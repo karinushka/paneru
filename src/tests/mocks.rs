@@ -159,6 +159,18 @@ impl MockState {
         self.create_window(id)
     }
 
+    /// Moves the app's focused window without emitting the notifications a
+    /// real focus change would produce.
+    pub fn set_focused_window(&self, id: WinID) {
+        let mut inner = self.inner.force_write();
+        let Some(pid) = inner.windows.get(&id).map(|window| window.pid) else {
+            return;
+        };
+        if let Some(app) = inner.apps.get_mut(&pid) {
+            app.focused_window_id = Some(id);
+        }
+    }
+
     pub fn focus_window(&self, id: WinID) {
         let mut inner = self.inner.force_write();
         if let Some(win) = inner.windows.get(&id) {
@@ -541,7 +553,19 @@ impl MockState {
         // Fill in remaining defaults
         mw.expect_element().return_const(None);
         mw.expect_raise_without_focus().return_const(());
-        mw.expect_focus_without_raise().return_const(());
+
+        // Focusing without raising still moves the OS focus, it just leaves the
+        // window order alone. Only the app's idea of its focused window changes
+        // here: the notification that follows in the real thing is what
+        // `focus_window` models, and callers of this already act on their own
+        // request. Dropping even this much left the app reporting the previous
+        // window, which made `window_focused_trigger` discard events for the
+        // window that had actually been focused.
+        let s = self.clone();
+        mw.expect_focus_without_raise()
+            .returning(move |_psn, _focused, _focused_psn| {
+                s.set_focused_window(id);
+            });
         mw.expect_set_padding().return_const(());
 
         Window::new(Box::new(mw))

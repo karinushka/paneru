@@ -37,6 +37,7 @@ use crate::{platform::CFStringRef, util::AXUIWrapper};
 
 pub mod decorations;
 pub mod padding;
+pub mod snippet;
 pub mod swipe;
 
 /// A `LazyLock` that determines the path to the application's configuration file.

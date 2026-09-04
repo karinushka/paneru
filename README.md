@@ -35,6 +35,9 @@ https://github.com/user-attachments/assets/793e7eaa-7909-4086-8380-1fb7861f8780
   workspaces to stay organized within each context.
 - **Menu bar workspace indicator:** Shows the currently active virtual
   workspace in the macOS menu bar.
+- **Copy Window Rule:** A menu bar entry that puts a ready-to-paste
+  `[windows]` configuration rule for the focused window on the clipboard, so
+  you never have to guess an app's bundle id.
 - **Startup session restore:** Restores managed window layouts, virtual
   workspaces, and display assignments from the last saved state when Paneru
   starts.

@@ -297,6 +297,30 @@ horizontal_padding = 5
 bindings_passthrough = ["ctrl-h", "ctrl-l"]
 ```
 
+### Copying a rule from the menu bar
+
+Neither the bundle ID nor the exact window title is visible anywhere in the UI,
+so the Paneru menu bar has a **Copy Window Rule** entry. It puts a rule for the
+currently focused window on the clipboard, ready to paste:
+
+```toml
+[windows.ghostty]
+bundle_id = "com.mitchellh.ghostty"
+title = "^paneru — zsh$"
+# title = ".*"   # all windows of this app
+# app: Ghostty  role: AXWindow  subrole: AXStandardWindow
+# floating = true
+# manage = true
+# width = 0.5
+```
+
+The two matchers are live; everything else is a comment for you to uncomment.
+`title` is anchored and regex-escaped so it matches only this window — swap in
+the commented `.*` to cover every window of the app instead. The `app`, `role`
+and `subrole` line is there to tell one pasted rule from the next; none of those
+are matchable. When an `init.lua` is in charge, the snippet is written as a Lua
+table instead of TOML.
+
 ### Forcing management of LSUIElement or non-standard windows
 
 Some applications (e.g., BetterTouchTool, ProtonVPN) are flagged as background apps

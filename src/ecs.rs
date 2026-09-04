@@ -25,6 +25,7 @@ use derive_more::{Deref, DerefMut};
 use tracing::{Level, error, instrument, warn};
 
 use crate::commands::register_commands;
+use crate::config::snippet::SnippetDialect;
 use crate::config::{CONFIGURATION_FILE, Config, WindowParams};
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::state::PaneruState;
@@ -703,6 +704,14 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         .insert_non_send(flash_message_manager)
         .insert_non_send(menu_bar_manager)
         .insert_non_send(receiver);
+
+    // `CONFIGURATION_FILE` is `None` exactly when an `init.lua` took the TOML
+    // file out of play, so copied rules have to be written in Lua instead.
+    app.insert_resource(if CONFIGURATION_FILE.is_none() {
+        SnippetDialect::Lua
+    } else {
+        SnippetDialect::Toml
+    });
 
     if let Some(previous_state) =
         PaneruState::load_from_file(&PaneruState::default_state_file_path())

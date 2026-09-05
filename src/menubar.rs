@@ -438,8 +438,14 @@ impl MenuBarManager {
     ) -> Option<Retained<NSStackView>> {
         let current = current?;
         let style = config.menubar_indicator_style();
+        // Both formats that distinguish the active workspace from the rest say
+        // nothing on their own, so a single-item indicator - `mono`, `paged` -
+        // falls back to numbers.
         let format = match (style, config.menubar_indicator_format()) {
-            (IndicatorStyle::Mono, IndicatorFormat::Unicode) => IndicatorFormat::Default,
+            (
+                IndicatorStyle::Mono | IndicatorStyle::Paged,
+                IndicatorFormat::Unicode | IndicatorFormat::Marked,
+            ) => IndicatorFormat::Default,
             (_, format) => format,
         };
 
@@ -462,6 +468,12 @@ impl MenuBarManager {
                     stack.addArrangedSubview(&field);
                 }
             }
+            IndicatorStyle::Paged => {
+                let last = paged_last_index(all.len());
+                stack.addArrangedSubview(&self.format_indicator(config, format, current, true));
+                stack.addArrangedSubview(&self.indicator_field(config, "/", false));
+                stack.addArrangedSubview(&self.format_indicator(config, format, last, false));
+            }
         }
         Some(stack)
     }
@@ -473,23 +485,30 @@ impl MenuBarManager {
         virtual_index: u32,
         is_active: bool,
     ) -> Retained<NSTextField> {
-        let label = match format {
-            IndicatorFormat::Default => virtual_workspace_label(virtual_index),
-            IndicatorFormat::Roman => roman_numeral(virtual_index.saturating_add(1)),
-            IndicatorFormat::Unicode => if is_active {
-                config.menubar_indicator_active_character()
-            } else {
-                config.menubar_indicator_inactive_character()
-            }
-            .to_string(),
-        };
+        let label = indicator_label(
+            format,
+            virtual_index,
+            is_active,
+            config.menubar_indicator_active_character(),
+            config.menubar_indicator_inactive_character(),
+        );
+        self.indicator_field(
+            config,
+            &label,
+            is_active && format != IndicatorFormat::Unicode,
+        )
+    }
+
+    /// One label of the indicator, bold when it stands for the active
+    /// workspace.
+    fn indicator_field(&self, config: &Config, label: &str, bold: bool) -> Retained<NSTextField> {
         let font_size = config.menubar_indicator_font_size();
-        let font = if is_active && format != IndicatorFormat::Unicode {
+        let font = if bold {
             NSFont::boldSystemFontOfSize(font_size)
         } else {
             NSFont::systemFontOfSize(font_size)
         };
-        let field = NSTextField::labelWithString(&NSString::from_str(&label), self.mtm);
+        let field = NSTextField::labelWithString(&NSString::from_str(label), self.mtm);
         field.setFont(Some(&font));
         field
     }
@@ -596,6 +615,35 @@ pub(crate) fn virtual_workspace_label(virtual_index: u32) -> String {
     (virtual_index + 1).to_string()
 }
 
+/// What a single indicator position reads as.
+fn indicator_label(
+    format: IndicatorFormat,
+    virtual_index: u32,
+    is_active: bool,
+    active_character: char,
+    inactive_character: char,
+) -> String {
+    match format {
+        IndicatorFormat::Default => virtual_workspace_label(virtual_index),
+        IndicatorFormat::Roman => roman_numeral(virtual_index.saturating_add(1)),
+        IndicatorFormat::Unicode => if is_active {
+            active_character
+        } else {
+            inactive_character
+        }
+        .to_string(),
+        IndicatorFormat::Marked if is_active => virtual_workspace_label(virtual_index),
+        IndicatorFormat::Marked => inactive_character.to_string(),
+    }
+}
+
+/// The index the paged indicator's total is formatted from: the workspace
+/// count reads as the last workspace's own label, so it goes through the same
+/// formatter and comes out Roman when the format asks for it.
+fn paged_last_index(count: usize) -> u32 {
+    u32::try_from(count.max(1) - 1).unwrap_or(u32::MAX)
+}
+
 fn roman_numeral(value: u32) -> String {
     const NUMERALS: [(u32, &str); 7] = [
         (50, "L"),
@@ -696,8 +744,9 @@ mod tests {
     use objc2_core_foundation::{CGPoint, CGSize};
 
     use super::{
-        WindowMenuEnablement, normalized_width_percentages, roman_numeral, unit_point_for_angle,
-        virtual_workspace_label, window_menu_enablement,
+        IndicatorFormat, WindowMenuEnablement, indicator_label, normalized_width_percentages,
+        paged_last_index, roman_numeral, unit_point_for_angle, virtual_workspace_label,
+        window_menu_enablement,
     };
 
     const EPSILON: f64 = 1e-9;
@@ -715,6 +764,66 @@ mod tests {
     fn virtual_workspace_label_is_one_based() {
         assert_eq!(virtual_workspace_label(0), "1");
         assert_eq!(virtual_workspace_label(4), "5");
+    }
+
+    #[test]
+    fn paged_total_reads_as_the_last_workspace_label() {
+        assert_eq!(
+            indicator_label(
+                IndicatorFormat::Default,
+                paged_last_index(4),
+                false,
+                '☉',
+                '○'
+            ),
+            "4"
+        );
+        assert_eq!(
+            indicator_label(IndicatorFormat::Roman, paged_last_index(4), false, '☉', '○'),
+            "IV"
+        );
+        // A lone workspace still reads as "1 / 1" rather than underflowing.
+        assert_eq!(
+            indicator_label(
+                IndicatorFormat::Default,
+                paged_last_index(1),
+                false,
+                '☉',
+                '○'
+            ),
+            "1"
+        );
+        assert_eq!(
+            indicator_label(
+                IndicatorFormat::Default,
+                paged_last_index(0),
+                false,
+                '☉',
+                '○'
+            ),
+            "1"
+        );
+    }
+
+    #[test]
+    fn marked_labels_number_the_active_workspace_among_marks() {
+        let marks: Vec<String> = [0, 1, 2, 3]
+            .into_iter()
+            .map(|index| indicator_label(IndicatorFormat::Marked, index, index == 1, '☉', '·'))
+            .collect();
+        assert_eq!(marks, ["·", "2", "·", "·"]);
+    }
+
+    #[test]
+    fn unicode_labels_only_distinguish_active_from_inactive() {
+        assert_eq!(
+            indicator_label(IndicatorFormat::Unicode, 2, true, '☉', '○'),
+            "☉"
+        );
+        assert_eq!(
+            indicator_label(IndicatorFormat::Unicode, 2, false, '☉', '○'),
+            "○"
+        );
     }
 
     #[test]

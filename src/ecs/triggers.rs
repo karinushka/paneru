@@ -1196,11 +1196,12 @@ pub(super) fn apply_window_positions(
             continue;
         }
 
-        // During startup, the window is already inserted into some strip.
+        // During startup, the window is already inserted into some strip by finish_setup.
         let allready_inserted = workspaces
             .iter_mut()
             .find_map(|(strip, _)| strip.contains(entity).then_some(strip));
-        if allready_inserted.is_none()
+        if initializing.is_none()
+            && allready_inserted.is_none()
             && let Some(mut strip) = workspaces
                 .iter_mut()
                 .find_map(|(strip, active)| active.then_some(strip))

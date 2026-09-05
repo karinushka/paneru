@@ -168,6 +168,7 @@ impl Plugin for LayoutEventsPlugin {
                 )
                     .chain()
                     .after(super::systems::finish_setup)
+                    .after(super::triggers::apply_window_positions)
                     .before(super::workspace::show_active_workspace)
                     .run_if(not(resource_exists::<Initializing>)),
             ),

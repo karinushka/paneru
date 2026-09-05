@@ -135,7 +135,8 @@ pub fn register_systems(app: &mut bevy::app::App) {
                 systems::detect_tabbed_windows.run_if(native_tabs_enabled),
                 triggers::apply_window_positions,
             )
-                .chain(),
+                .chain()
+                .after(systems::finish_setup),
             (
                 systems::add_existing_process,
                 systems::add_existing_application,

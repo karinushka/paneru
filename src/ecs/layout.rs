@@ -138,6 +138,19 @@ fn signature_matches(current: &[(Entity, i32)], stored: &[(Entity, i32)]) -> boo
         })
 }
 
+/// The strip offset that shows all of a window sitting at `layout` within the
+/// strip, starting from `origin` and moving no further than the window's
+/// shortfall past a viewport edge. Returns `origin` unchanged when the window
+/// already fits.
+pub(crate) fn origin_exposing(
+    layout: Origin,
+    size: Size,
+    origin: Origin,
+    viewport: IRect,
+) -> Origin {
+    clamp_origin_to_viewport(layout + origin, size, viewport) - layout
+}
+
 impl Plugin for LayoutEventsPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
@@ -1504,6 +1517,31 @@ mod tests {
         assert!(!signature_matches(&[(first, 420), (second, 400)], &stored));
         assert!(!signature_matches(&[(second, 400), (first, 400)], &stored));
         assert!(!signature_matches(&[(first, 400)], &stored));
+    }
+
+    #[test]
+    fn origin_exposing_moves_only_by_the_shortfall() {
+        let viewport = IRect::new(0, 0, 1000, 800);
+        let size = Size::new(400, 700);
+
+        // Window at layout x 0 with the strip scrolled 600px to the left sits
+        // entirely off-screen; the strip has to come back to 0.
+        assert_eq!(
+            origin_exposing(Origin::new(0, 0), size, Origin::new(-600, 0), viewport),
+            Origin::new(0, 0)
+        );
+
+        // A window past the right edge only moves by what hangs over it.
+        assert_eq!(
+            origin_exposing(Origin::new(800, 0), size, Origin::ZERO, viewport),
+            Origin::new(-200, 0)
+        );
+
+        // Already fully visible: the offset is left alone.
+        assert_eq!(
+            origin_exposing(Origin::new(100, 0), size, Origin::new(50, 0), viewport),
+            Origin::new(50, 0)
+        );
     }
 
     #[test]

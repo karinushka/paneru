@@ -268,7 +268,7 @@ pub enum Operation {
     /// and focuses the tier's last-focused window.
     ToggleFloatingLayer,
     /// Copies a `[windows]` configuration rule for the focused window to the
-    /// clipboard. Never produced by parsing; the menu bar issues it directly.
+    /// clipboard.
     CopyRule,
 }
 

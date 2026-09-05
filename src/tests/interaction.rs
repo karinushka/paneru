@@ -2720,3 +2720,37 @@ fn test_focus_into_hidden_virtual_workspace_exposes_target_window() {
         })
         .run(commands);
 }
+
+/// Invoking `Operation::CopyRule` copies a valid window rule snippet
+/// for the focused window to the clipboard.
+#[test]
+fn test_copy_window_rule_command() {
+    let commands = vec![
+        // 0: boot with focus on window 0.
+        Event::MenuOpened { window_id: 0 },
+        // 1: copy window rule for the focused window.
+        Event::Command {
+            command: Command::Window(Operation::CopyRule),
+        },
+    ];
+
+    TestHarness::new()
+        .with_windows(1)
+        .on_iteration(1, |_world, _state| {
+            let copied = crate::pasteboard::get_test_clipboard()
+                .expect("clipboard should have been populated");
+            assert!(
+                copied.contains("[windows.testapp]") || copied.contains("windows = {"),
+                "copied snippet should contain window rule, got: {copied}"
+            );
+            assert!(
+                copied.contains("bundle_id = \"test\""),
+                "copied snippet should contain bundle id, got: {copied}"
+            );
+            assert!(
+                copied.contains("title = \"^Window 0$\""),
+                "copied snippet should contain exact anchored window title, got: {copied}"
+            );
+        })
+        .run(commands);
+}

@@ -199,6 +199,7 @@ https://github.com/karinushka/paneru/blob/3790b01f8d65df5d9000142db7cf25f9270dcc
 | `window_snap` | Snap an overflowing window into the viewport. |
 | `window_raise_floating` | Make the floating windows layer visible on the current workspace. |
 | `window_togglefloatlayer` | Selectively move the floating windows in front or behind of the workspace windows. |
+| `window_copyrule` | Copy a window rule template for the focused window to the clipboard. |
 | `quit` | Exit Paneru. |
 | `restart` | Restart the Paneru service (`paneru restart`). |
 
@@ -297,11 +298,13 @@ horizontal_padding = 5
 bindings_passthrough = ["ctrl-h", "ctrl-l"]
 ```
 
-### Copying a rule from the menu bar
+### Copying a window rule
 
 Neither the bundle ID nor the exact window title is visible anywhere in the UI,
-so the Paneru menu bar has a **Copy Window Rule** entry. It puts a rule for the
-currently focused window on the clipboard, ready to paste:
+so the Paneru menu bar has a **Copy Window Rule** entry. You can also trigger it
+via a keybinding (e.g., `window_copyrule = "ctrl + alt - c"`) or run it from the
+command line (`paneru window copyrule`). It puts a rule for the currently focused
+window on the clipboard, ready to paste:
 
 ```toml
 [windows.ghostty]

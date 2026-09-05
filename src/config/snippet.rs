@@ -84,10 +84,36 @@ pub fn window_rule_snippet(dialect: SnippetDialect, subject: &RuleSubject<'_>) -
 }
 
 /// Turns an application name into a table key: lowercased, with every run of
-/// non-alphanumerics collapsed into a single underscore.
+/// non-alphanumerics collapsed into a single underscore. A leading digit is
+/// expanded into an English word so the key stays a valid bare identifier in
+/// both TOML and Lua.
 fn rule_key(app_name: &str) -> String {
-    let mut key = String::with_capacity(app_name.len());
+    let mut key = String::with_capacity(app_name.len() + 4);
+    let mut first_alnum = true;
+
     for character in app_name.chars() {
+        if first_alnum {
+            if character.is_whitespace() || !character.is_alphanumeric() {
+                continue;
+            }
+            first_alnum = false;
+            match character {
+                '0' => key.push_str("zero"),
+                '1' => key.push_str("one"),
+                '2' => key.push_str("two"),
+                '3' => key.push_str("three"),
+                '4' => key.push_str("four"),
+                '5' => key.push_str("five"),
+                '6' => key.push_str("six"),
+                '7' => key.push_str("seven"),
+                '8' => key.push_str("eight"),
+                '9' => key.push_str("nine"),
+                c if c.is_ascii_alphanumeric() => key.push(c.to_ascii_lowercase()),
+                _ => {}
+            }
+            continue;
+        }
+
         if character.is_ascii_alphanumeric() {
             key.push(character.to_ascii_lowercase());
         } else if !key.ends_with('_') {
@@ -259,7 +285,8 @@ mod tests {
     fn rule_keys_are_sanitized() {
         assert_eq!(rule_key("Ghostty"), "ghostty");
         assert_eq!(rule_key("Visual Studio Code"), "visual_studio_code");
-        assert_eq!(rule_key("1Password 8"), "1password_8");
+        assert_eq!(rule_key("1Password 8"), "onepassword_8");
+        assert_eq!(rule_key("7-Zip"), "seven_zip");
         assert_eq!(rule_key("  —  "), "window");
         assert_eq!(rule_key(""), "window");
     }

@@ -192,7 +192,10 @@ fn apply(
             // width picker) does the real work — pixel size, viewport
             // clamping, stacked siblings, reshuffle — but only for the
             // focused window, so route through it when we can.
-            if windows.focused().is_some_and(|(_, focused)| focused == entity) {
+            if windows
+                .focused()
+                .is_some_and(|(_, focused)| focused == entity)
+            {
                 commands.trigger(SendMessageTrigger(Event::Command {
                     command: Command::Window(Operation::SetWidth(ratio)),
                 }));

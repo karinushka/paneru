@@ -1508,6 +1508,73 @@ fn test_virtual_workspace_switch_restores_focus_without_animations() {
     );
 }
 
+/// Switching virtual workspaces with `virtual_workspace_animations = true`
+/// must switch focus to the remembered window of the destination workspace
+/// and spawn exactly one focus guard.
+#[test]
+fn test_virtual_workspace_switch_restores_focus_with_animations() {
+    let config: Config = (
+        MainOptions {
+            virtual_workspace_animations: Some(true),
+            animation_speed: Some(30.0),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    let mut h = TestHarness::new().with_config(config).with_windows(3);
+
+    let pump_event = |h: &mut TestHarness, ev: Event| {
+        h.app.world_mut().write_message::<Event>(ev);
+        for _ in 0..8 {
+            h.app.update();
+            for e in h.mock_state.drain_events() {
+                h.app.world_mut().write_message::<Event>(e);
+            }
+        }
+    };
+    let pump = |h: &mut TestHarness, c: Command| pump_event(h, Event::Command { command: c });
+
+    // Boot: Window 0 is focused on VW0.
+    pump(&mut h, Command::PrintState);
+
+    // Move Window 0 to VW1 with MoveFocus::Stay.
+    pump(
+        &mut h,
+        Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Stay)),
+    );
+
+    // Focus on VW0 shifted to Window 1.
+    let focused_on_vw0 = {
+        let world = h.app.world_mut();
+        let mut query = world.query_filtered::<&crate::manager::Window, With<FocusedMarker>>();
+        query.iter(world).next().map(|w| w.id())
+    };
+    assert_eq!(focused_on_vw0, Some(1));
+
+    // Switch to VW1: Window 0 should be focused and exactly one guard spawned.
+    pump(&mut h, Command::Window(Operation::VirtualNumber(1)));
+
+    let (focused_on_vw1, guard_count) = {
+        let world = h.app.world_mut();
+        let mut query = world.query_filtered::<&crate::manager::Window, With<FocusedMarker>>();
+        let focused = query.iter(world).next().map(|w| w.id());
+        let mut guards = world.query::<&crate::ecs::workspace::RestoreFocusMarker>();
+        let count = guards.iter(world).count();
+        (focused, count)
+    };
+    assert_eq!(
+        focused_on_vw1,
+        Some(0),
+        "focus should switch to Window 0 when activating VW1 with animations enabled"
+    );
+    assert_eq!(
+        guard_count, 1,
+        "exactly one restore focus guard should be spawned during workspace switch"
+    );
+}
+
 /// When a strip is mid-animation (has a `RepositionMarker`) at the moment the
 /// user switches to another virtual workspace, the animation must stop
 /// immediately. Previously the `RepositionMarker` was left on the hidden strip

@@ -1221,14 +1221,6 @@ pub(crate) fn show_active_workspace(
             .unwrap_or(*origin);
 
         if config.virtual_workspace_animations() {
-            if !keeps_focus
-                && let Some(focus) = *focus
-                && strip.contains(focus)
-            {
-                spawn_restore_focus_guard(focus, &mut commands);
-                commands.focus_entity(focus, false);
-            }
-
             commands.reposition_entity(*activated, origin);
         } else {
             position.0 = origin;

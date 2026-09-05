@@ -10,7 +10,6 @@ use bevy::ecs::query::{Added, Has, With, Without};
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::schedule::common_conditions::{not, resource_exists};
 use bevy::ecs::system::{Commands, Local, ParamSet, Populated, Query, Res, ResMut, Single};
-use bevy::math::IRect;
 use bevy::time::common_conditions::on_timer;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -20,7 +19,7 @@ use super::{ActiveDisplayMarker, SpawnWindowTrigger};
 use crate::commands::{Direction, MoveFocus, Operation, filter_window_operations};
 use crate::config::Config;
 use crate::ecs::focus::FocusHistory;
-use crate::ecs::layout::{LayoutStrip, PARKED_STRIP_SLIVER, clamp_origin_to_viewport};
+use crate::ecs::layout::{LayoutStrip, PARKED_STRIP_SLIVER, origin_exposing};
 use crate::ecs::params::{ActiveDisplay, WindowCtx, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, DockPosition, FocusedMarker, Initializing, ManualStripOffset,
@@ -1094,21 +1093,27 @@ fn move_virtual_workspace_bind(
     debug!("Moving {focused_entity} to new virtual space {target_virtual_index}");
 }
 
-/// The strip offset that shows all of `focus`, starting from `origin` and
-/// moving no further than the window's shortfall past a viewport edge.
-fn origin_exposing(
-    focus: Entity,
-    origin: Origin,
-    viewport: IRect,
+/// The column of `strip` whose window sits nearest the display's horizontal
+/// centre. Stands in for the focus a strip never had when it is parked, so
+/// that returning to it lands on whatever the user was looking at.
+fn column_closest_to_center(
+    strip: &LayoutStrip,
+    display: &Display,
     windows: &Windows,
-) -> Option<Origin> {
-    let layout = windows.layout_position(focus)?.0;
-    let size = windows.size(focus)?;
-    Some(clamp_origin_to_viewport(layout + origin, size, viewport) - layout)
+) -> Option<Entity> {
+    let display_center = display.bounds().center().x;
+    strip
+        .all_columns()
+        .into_iter()
+        .filter_map(|candidate| {
+            let center = windows.moving_frame(candidate)?.center().x;
+            Some((candidate, (center - display_center).abs()))
+        })
+        .min_by_key(|(_, distance)| *distance)
+        .map(|(candidate, _)| candidate)
 }
 
 #[instrument(level = Level::DEBUG, skip_all)]
-#[allow(clippy::too_many_lines)]
 pub(crate) fn show_active_workspace(
     activated: Single<Entity, Added<ActiveWorkspaceMarker>>,
     windows: Windows,
@@ -1139,18 +1144,7 @@ pub(crate) fn show_active_workspace(
             let mut focus =
                 current_focus.and_then(|(_, entity)| strip.contains(entity).then_some(entity));
             if focus.is_none() {
-                let display_center = active_display.bounds().center().x;
-                let closest = strip
-                    .all_columns()
-                    .into_iter()
-                    .filter_map(|candidate| {
-                        let center = windows.moving_frame(candidate)?.center().x;
-                        let distance = (center - display_center).abs();
-                        Some((candidate, distance))
-                    })
-                    .min_by_key(|(_, dist)| *dist)
-                    .map(|min| min.0);
-                focus = closest;
+                focus = column_closest_to_center(strip, active_display, &windows);
                 debug!("No previous focus, taking centered one {focus:?}.");
             }
 
@@ -1218,13 +1212,11 @@ pub(crate) fn show_active_workspace(
         // its `ActiveWorkspaceMarker` is added.
         let origin = arriving_focus
             .and_then(|focus_entity| {
+                let layout = windows.layout_position(focus_entity)?.0;
+                let size = windows.size(focus_entity)?;
                 let (display, dock) = displays.get(child.parent()).ok()?;
-                origin_exposing(
-                    focus_entity,
-                    *origin,
-                    display.actual_display_bounds(dock, &config),
-                    &windows,
-                )
+                let viewport = display.actual_display_bounds(dock, &config);
+                Some(origin_exposing(layout, size, *origin, viewport))
             })
             .unwrap_or(*origin);
 

@@ -1191,7 +1191,7 @@ fn ensure_visible_in_strip(
         }
         // Each marker is independent, and its own marker was already consumed
         // above: bailing out of the loop would silently drop the rest.
-        let Some((_, strip_entity, strip_position, child, active_marker, _)) =
+        let Some((_, strip_entity, strip_position, child, active_marker, strip_reposition)) =
             strips.into_iter().find(|s| s.0.contains(entity))
         else {
             continue;
@@ -1209,8 +1209,12 @@ fn ensure_visible_in_strip(
         };
         let viewport = display.actual_display_bounds(dock, &config);
 
-        // Where the entity would appear if the strip stays put.
-        let candidate_min = layout_position.0 + strip_position.0;
+        // Where the entity would appear once the strip settles. Mid-animation
+        // the strip's current position is on its way somewhere else, so the
+        // target offset is what the window's slot will actually be measured
+        // against - the same projection `reshuffle_layout_strip` makes.
+        let strip_target = strip_reposition.map_or(strip_position.0, |reposition| reposition.0);
+        let candidate_min = layout_position.0 + strip_target;
         // Clamp into the viewport. If already on-screen, this is a no-op and
         // the strip target equals its current position — no movement.
         let clamped_min = clamp_origin_to_viewport(candidate_min, size, viewport);
@@ -1220,13 +1224,13 @@ fn ensure_visible_in_strip(
         // Both axes come from the clamp: it is still the minimum shortfall, and
         // keeping the strip's own y here would silently drop the vertical
         // correction for a window sitting above the menu bar.
-        let strip_target = clamped_min - layout_position.0;
-        trace!("ensure_visible_in_strip: entity {entity}, scroll strip to {strip_target}");
+        let scroll_to = clamped_min - layout_position.0;
+        trace!("ensure_visible_in_strip: entity {entity}, scroll strip to {scroll_to}");
         // Scrolling to expose a window overrides whatever the user placed here.
         if let Ok(mut cmd) = commands.get_entity(strip_entity) {
             cmd.try_remove::<ManualStripOffset>();
         }
-        commands.reposition_entity(strip_entity, strip_target);
+        commands.reposition_entity(strip_entity, scroll_to);
     }
 }
 

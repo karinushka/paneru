@@ -1,5 +1,5 @@
 use bevy::app::{App, Plugin, PostUpdate, PreUpdate, Update};
-use bevy::ecs::change_detection::DetectChangesMut;
+use bevy::ecs::change_detection::{DetectChanges as _, DetectChangesMut, Ref};
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
@@ -10,6 +10,7 @@ use bevy::ecs::query::{Added, Has, With, Without};
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::schedule::common_conditions::{not, resource_exists};
 use bevy::ecs::system::{Commands, Local, ParamSet, Populated, Query, Res, ResMut, Single};
+use bevy::math::IRect;
 use bevy::time::common_conditions::on_timer;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -19,7 +20,7 @@ use super::{ActiveDisplayMarker, SpawnWindowTrigger};
 use crate::commands::{Direction, MoveFocus, Operation, filter_window_operations};
 use crate::config::Config;
 use crate::ecs::focus::FocusHistory;
-use crate::ecs::layout::{LayoutStrip, PARKED_STRIP_SLIVER};
+use crate::ecs::layout::{LayoutStrip, PARKED_STRIP_SLIVER, clamp_origin_to_viewport};
 use crate::ecs::params::{ActiveDisplay, WindowCtx, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, DockPosition, FocusedMarker, Initializing, ManualStripOffset,
@@ -1093,12 +1094,27 @@ fn move_virtual_workspace_bind(
     debug!("Moving {focused_entity} to new virtual space {target_virtual_index}");
 }
 
+/// The strip offset that shows all of `focus`, starting from `origin` and
+/// moving no further than the window's shortfall past a viewport edge.
+fn origin_exposing(
+    focus: Entity,
+    origin: Origin,
+    viewport: IRect,
+    windows: &Windows,
+) -> Option<Origin> {
+    let layout = windows.layout_position(focus)?.0;
+    let size = windows.size(focus)?;
+    Some(clamp_origin_to_viewport(layout + origin, size, viewport) - layout)
+}
+
 #[instrument(level = Level::DEBUG, skip_all)]
+#[allow(clippy::too_many_lines)]
 pub(crate) fn show_active_workspace(
     activated: Single<Entity, Added<ActiveWorkspaceMarker>>,
     windows: Windows,
     mut workspaces: RestorableStrips,
-    displays: Query<&Display>,
+    displays: Query<(&Display, Option<&DockPosition>)>,
+    focus_markers: Query<Ref<FocusedMarker>>,
     config: Res<Config>,
     mut commands: Commands,
 ) {
@@ -1116,7 +1132,7 @@ pub(crate) fn show_active_workspace(
         .filter(|(entity, _, strip, _, _, _)| strip.id() == workspace_id && *entity != *activated);
 
     for (entity, mut position, strip, child, previous, moving) in current_workspace {
-        let Ok(active_display) = displays.get(child.parent()) else {
+        let Ok((active_display, _)) = displays.get(child.parent()) else {
             continue;
         };
         if previous.is_none() {
@@ -1162,7 +1178,7 @@ pub(crate) fn show_active_workspace(
         }
     }
 
-    let Ok((_, mut position, strip, _, previous_position, _)) = workspaces.get_mut(*activated)
+    let Ok((_, mut position, strip, child, previous_position, _)) = workspaces.get_mut(*activated)
     else {
         return;
     };
@@ -1178,9 +1194,39 @@ pub(crate) fn show_active_workspace(
         // the first place - a Cmd-Tab straight into one of its windows. The
         // remembered focus is a fallback for a plain workspace switch, so it
         // must not pull focus away from that window.
-        let keeps_focus = windows
+        let focused = windows
             .focused()
-            .is_some_and(|(_, current_focus)| strip.contains(current_focus));
+            .map(|(_, entity)| entity)
+            .filter(|entity| strip.contains(*entity));
+        let keeps_focus = focused.is_some();
+
+        // Only a focus that arrived with this activation gets the strip moved
+        // for it. A window that held focus all along - switching back from an
+        // empty workspace, say - keeps the offset the user left behind, even
+        // if they had scrolled it out of sight.
+        let arriving_focus = focused.filter(|entity| {
+            focus_markers
+                .get(*entity)
+                .is_ok_and(|marker| marker.is_added())
+        });
+
+        // The saved origin describes where the strip sat when it was parked,
+        // which says nothing about the window that just took focus: it can
+        // easily land mostly off-screen. Scroll the strip the minimum amount
+        // needed to expose it, the same correction `ensure_visible_in_strip`
+        // makes - it cannot do it here, because it skips a strip on the frame
+        // its `ActiveWorkspaceMarker` is added.
+        let origin = arriving_focus
+            .and_then(|focus_entity| {
+                let (display, dock) = displays.get(child.parent()).ok()?;
+                origin_exposing(
+                    focus_entity,
+                    *origin,
+                    display.actual_display_bounds(dock, &config),
+                    &windows,
+                )
+            })
+            .unwrap_or(*origin);
 
         if config.virtual_workspace_animations() {
             if !keeps_focus
@@ -1191,12 +1237,20 @@ pub(crate) fn show_active_workspace(
                 commands.focus_entity(focus, false);
             }
 
-            commands.reposition_entity(*activated, *origin);
+            commands.reposition_entity(*activated, origin);
         } else {
-            position.0 = *origin;
+            position.0 = origin;
         }
 
         if keeps_focus {
+            // The layout of a strip that has just been unparked can still
+            // settle over the next frames (widths recomputed, windows the
+            // workspace picked up while it was hidden). Re-check the arriving
+            // window then: `ensure_visible_in_strip` only scrolls if the slot
+            // it ends up in really falls off an edge.
+            if let Some(focus_entity) = arriving_focus {
+                commands.ensure_visible(focus_entity);
+            }
             return;
         }
 

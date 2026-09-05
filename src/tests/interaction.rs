@@ -2628,3 +2628,95 @@ fn test_focus_into_hidden_virtual_workspace_keeps_target_window() {
         })
         .run(commands);
 }
+
+/// Cmd-Tab into a window left hanging off the edge of a hidden virtual
+/// workspace must scroll that workspace's strip far enough to show all of it.
+/// Regression: `show_active_workspace` restored the strip to the offset it had
+/// when it was parked, which says nothing about the window that just took
+/// focus, and `window_hidden_ratio` lets the reshuffle leave a window that far
+/// over an edge alone - so nothing brought it back.
+#[test]
+fn test_focus_into_hidden_virtual_workspace_exposes_target_window() {
+    /// How far window 2 hangs off the left edge while VW1 is parked: a
+    /// quarter of it, which `window_hidden_ratio` below tolerates.
+    const OVERHANG: i32 = TEST_WINDOW_WIDTH / 4;
+
+    let config: Config = (
+        MainOptions {
+            animation_speed: Some(10000.0),
+            virtual_workspace_animations: Some(true),
+            auto_center: Some(false),
+            // A reshuffle may leave a window up to half hidden where it is,
+            // so exposing this one is down to the workspace restore itself.
+            window_hidden_ratio: Some(0.5),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    // Park windows 2 to 5 on VW1: four 400px columns on a 1024px display, so
+    // the strip is wider than the screen and has somewhere to scroll to.
+    let mut commands = vec![Event::MenuOpened { window_id: 0 }];
+    for _ in 0..4 {
+        commands.push(Event::Command {
+            command: Command::PrintState,
+        });
+        commands.push(Event::Command {
+            command: Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Stay)),
+        });
+    }
+    commands.extend([
+        // 9: visit VW1.
+        Event::Command {
+            command: Command::Window(Operation::VirtualNumber(1)),
+        },
+        // 10: the strip is dragged left below, leaving window 2 hanging off.
+        Event::Command {
+            command: Command::PrintState,
+        },
+        // 11: park VW1 at that offset.
+        Event::Command {
+            command: Command::Window(Operation::VirtualNumber(0)),
+        },
+        // 12: the Cmd-Tab into window 2 queued below plays out here.
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ]);
+
+    let focus_next = |id: WinID| move |_world: &mut World, state: MockState| state.focus_window(id);
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(6)
+        .on_iteration(0, focus_next(2))
+        .on_iteration(2, focus_next(3))
+        .on_iteration(4, focus_next(4))
+        .on_iteration(6, focus_next(5))
+        .on_iteration(8, focus_next(5))
+        .on_iteration(9, move |world, _state| {
+            // Slide VW1 so window 2 hangs off the left edge by a quarter.
+            let strip_entity = active_strip_entity(world);
+            world
+                .entity_mut(strip_entity)
+                .insert(Position(Origin::new(-OVERHANG, TEST_MENUBAR_HEIGHT)));
+        })
+        .on_iteration(10, move |world, _state| {
+            assert_eq!(
+                window_x(world, 2),
+                -OVERHANG,
+                "test setup: window 2 must hang off the left edge before parking"
+            );
+        })
+        // Cmd-Tab straight into window 2, now that VW1 is parked.
+        .on_iteration(11, focus_next(2))
+        .on_iteration(12, |world, _state| {
+            assert_focused!(world, 2);
+            assert_eq!(
+                window_x(world, 2),
+                0,
+                "the workspace restore must show all of the window it was activated for"
+            );
+        })
+        .run(commands);
+}

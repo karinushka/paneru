@@ -399,6 +399,31 @@ fn test_window_can_resize_to_two_display_widths_and_scroll() {
         .run(commands);
 }
 
+/// A `LayoutOp::SetWidth` handed back by a Lua handler must resize the focused
+/// window just like the interactive `Operation::SetWidth` path, instead of only
+/// storing a `WidthRatio` that nothing consumes and the next bounds sync
+/// overwrites from the live frame.
+#[test]
+fn test_lua_set_width_layout_op_resizes_the_focused_window() {
+    use paneru_shared_types::windowset::LayoutOp;
+
+    const VIEWPORT_HEIGHT: i32 = TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT;
+
+    let commands = vec![Event::Command {
+        command: Command::Layout(vec![LayoutOp::SetWidth {
+            window: 0,
+            ratio: 0.5,
+        }]),
+    }];
+
+    TestHarness::new()
+        .with_windows(1)
+        .on_iteration(2, |world, _state| {
+            assert_window_size!(world, 0, TEST_DISPLAY_WIDTH / 2, VIEWPORT_HEIGHT);
+        })
+        .run(commands);
+}
+
 fn assert_oversized_window_is_pannable(world: &mut World, id: i32) {
     let mut query = world.query::<&crate::manager::Window>();
     let window = query

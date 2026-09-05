@@ -185,6 +185,19 @@ fn apply(
                     }
                 }
             }
+            // A stored ratio does not resize anything by itself: no system
+            // reacts to `WidthRatio` changes, and the next bounds sync
+            // recomputes it from the live frame, discarding the request. The
+            // interactive resize path (`resize_window`, used by the menubar
+            // width picker) does the real work — pixel size, viewport
+            // clamping, stacked siblings, reshuffle — but only for the
+            // focused window, so route through it when we can.
+            if windows.focused().is_some_and(|(_, focused)| focused == entity) {
+                commands.trigger(SendMessageTrigger(Event::Command {
+                    command: Command::Window(Operation::SetWidth(ratio)),
+                }));
+                return;
+            }
             commands.reshuffle_around(entity);
         }
 

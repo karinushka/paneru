@@ -122,12 +122,12 @@ Settings for the descriptor component of the menubar display. The descriptor com
 ### `[decorations.menu.indicator]`
 Settings for the indicator component of the menubar display. The indicator component shows your current (and optionally all active) virtual workspace(s).
 
-**Important Note: The `'unicode'` format can only differentiate between active and inactive workspaces, so it is incompatible with the `'mono'` style and will fall back to `'default'`.**
+**Important Note: The `'unicode'` and `'marked'` formats only mean anything next to the workspaces they are not, so they are incompatible with the single-item `'mono'` and `'paged'` styles and will fall back to `'default'`.**
 
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `style` | String | `'mono'` | Whether the indicator displays all virtual workspaces `'multi'`, or only your current workspace `'mono'`. |
-| `format` | String | `'default'` | The format of the character(s) which represent your virtual workspace(s).<br>Options are regular numbers `'default'`, Roman numerals `'roman'`, or any pair of Unicode characters `'unicode'`. |
+| `style` | String | `'mono'` | Whether the indicator displays all virtual workspaces `'multi'`, only your current workspace `'mono'`, or your current workspace over how many there are `'paged'` (`2 / 4`). |
+| `format` | String | `'default'` | The format of the character(s) which represent your virtual workspace(s).<br>Options are regular numbers `'default'`, Roman numerals `'roman'`, any pair of Unicode characters `'unicode'`, or the inactive Unicode character with the active workspace shown as its number `'marked'` (`· 2 · ·`). |
 | `font_size` | Float (2.0 to 24.0) | `13.0` | Font size of the indicator in point. |
 | `active_character` | Char | `'☉'` | The Unicode character which represents an active workspace in the `'unicode'` format. |
 | `inactive_character` | Char | `'○'` | The Unicode character which represents an inactive workspace in the `'unicode'` format. |

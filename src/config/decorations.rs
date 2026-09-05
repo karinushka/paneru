@@ -97,6 +97,9 @@ pub enum IndicatorFormat {
     Roman,
     // If set must define active/inactive char. Only relevant for multi style
     Unicode,
+    // Inactive workspaces as the inactive char, the active one as its number.
+    // Only relevant for multi style
+    Marked,
 }
 #[derive(Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -109,6 +112,8 @@ pub enum MenubarOrientation {
 pub enum IndicatorStyle {
     Mono,
     Multi,
+    // The active workspace over how many there are: "2 / 4".
+    Paged,
 }
 #[derive(Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]

@@ -582,6 +582,8 @@ pub(crate) fn rewatch_configs(
 }
 
 pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<BevyApp> {
+    crate::manager::app::bound_ax_messaging_timeout()?;
+
     let window_manager: Box<dyn WindowManagerApi> = Box::new(WindowManagerOS::new(sender.clone()));
 
     // Discover (or create) the Lua init script first: whether it exists decides

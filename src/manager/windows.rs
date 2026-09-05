@@ -232,30 +232,27 @@ impl WindowOS {
 
         let forced = window.is_forced_manage(config, bundle_id);
 
-        if window.is_unknown() && !forced {
+        // Unlike the title above, role and subrole are not cached, so every read
+        // is another blocking round trip into an app that may already be wedged.
+        // Read each once and reach for the role only while it can still change
+        // the verdict.
+        let subrole = window.subrole().unwrap_or_default();
+        if subrole == kAXUnknownSubrole && !forced {
             return Err(Error::invalid_window(&format!(
-                "Ignoring AXUnknown window, id: {}, role {}, subrole {}",
-                window.id(),
-                window.role().unwrap_or_default(),
-                window.subrole().unwrap_or_default(),
+                "Ignoring AXUnknown window, id: {id}, subrole {subrole}"
             )));
         }
 
-        if !window.is_real() && !forced {
+        let role = window.role().unwrap_or_default();
+        if !Self::is_real(&role, &subrole) && !forced {
             return Err(Error::invalid_window(&format!(
-                "Ignoring non-real window, id: {}, role {}, subrole {}",
-                window.id(),
-                window.role().unwrap_or_default(),
-                window.subrole().unwrap_or_default(),
+                "Ignoring non-real window, id: {id}, role {role}, subrole {subrole}"
             )));
         }
 
         trace!(
-            "created {} title: {} role: {} subrole: {}",
-            window.id(),
+            "created {id} title: {} role: {role} subrole: {subrole}",
             window.title().unwrap_or_default(),
-            window.role().unwrap_or_default(),
-            window.subrole().unwrap_or_default(),
         );
         Ok(window)
     }
@@ -272,29 +269,15 @@ impl WindowOS {
             .any(|params| params.manage.is_some_and(|manage| manage))
     }
 
-    /// Checks if the window's subrole is "`AXUnknownSubrole`".
-    ///
-    /// # Returns
-    ///
-    /// `true` if the subrole is unknown, `false` otherwise.
-    fn is_unknown(&self) -> bool {
-        self.subrole()
-            .is_ok_and(|subrole| subrole.eq(kAXUnknownSubrole))
-    }
-
     /// Checks if the window is a "real" window based on its role and subrole.
     /// It considers standard and floating window subroles as real.
     ///
     /// # Returns
     ///
     /// `true` if the window is real, `false` otherwise.
-    fn is_real(&self) -> bool {
-        let role = self.role().ok();
-        let subrole = self.subrole().ok();
-
-        subrole.as_deref() == Some(kAXStandardWindowSubrole)
-            || (role.as_deref() == Some(kAXWindowRole)
-                && subrole.as_deref() == Some(kAXFloatingWindowSubrole))
+    fn is_real(role: &str, subrole: &str) -> bool {
+        subrole == kAXStandardWindowSubrole
+            || (role == kAXWindowRole && subrole == kAXFloatingWindowSubrole)
     }
 
     fn app_reference(&self) -> Option<CFRetained<AXUIWrapper>> {

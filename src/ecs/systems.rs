@@ -976,6 +976,7 @@ pub(super) struct OverlayWindowConfigCache {
     detected_border_radius: Option<f64>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn update_overlays(
     // Gating lives in the `overlay_dirty` run condition (strip change *or*
     // focus change); this query just resolves the current active workspace.
@@ -986,6 +987,7 @@ pub(super) fn update_overlays(
     mission_control_active: Res<MissionControlActive>,
     config: Res<Config>,
     mut window_config_cache: Local<OverlayWindowConfigCache>,
+    window_manager: Res<WindowManager>,
 ) {
     use crate::overlay::BorderParams;
     use objc2_foundation::{NSPoint, NSRect, NSSize};
@@ -1013,19 +1015,30 @@ pub(super) fn update_overlays(
         return;
     }
 
+    let Some((window, entity)) = windows.focused() else {
+        return;
+    };
+    let focused_window_id = window.id();
+    let show_overlay = !window.is_full_screen()
+        && (active_strip.contains(entity)
+            // if the window is floating, check whether it's present in the workspace.
+            || window_manager
+                .windows_in_workspace(active_strip.id())
+                .is_ok_and(|ids| ids.contains(&focused_window_id)));
+
+    if !show_overlay {
+        // No managed window on the active workspace has focus — hide the overlay rather than
+        // dimming everything or drawing a ghost border around an off-screen window.
+        overlay_mgr.hide_all();
+        return;
+    }
+
     // Find the focused managed window's absolute CG frame.
-    // Skip floating/unmanaged windows — no overlay or border for those.
-    let (focused_abs_cg, focused_window_id) = if let Some((window, entity, unmanaged)) = windows
-        .focused()
-        .and_then(|(_, entity)| windows.get_managed(entity))
-        && unmanaged.is_none()
-        && !window.is_full_screen()
-        && active_strip.contains(entity)
-    {
+    let focused_abs_cg = {
         let frame = window.frame();
         let h_pad = window.horizontal_padding();
         let v_pad = window.vertical_padding();
-        let focused_abs_cg = Some(NSRect::new(
+        Some(NSRect::new(
             NSPoint::new(
                 f64::from(frame.min.x + h_pad),
                 f64::from(frame.min.y + v_pad),
@@ -1034,14 +1047,7 @@ pub(super) fn update_overlays(
                 f64::from(frame.width() - 2 * h_pad),
                 f64::from(frame.height() - 2 * v_pad),
             ),
-        ));
-
-        (focused_abs_cg, window.id())
-    } else {
-        // No managed window on the active workspace has focus — hide the overlay rather than
-        // dimming everything or drawing a ghost border around an off-screen window.
-        overlay_mgr.hide_all();
-        return;
+        ))
     };
 
     let border_params = if border_enabled {

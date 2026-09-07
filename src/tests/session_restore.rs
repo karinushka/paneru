@@ -47,6 +47,7 @@ fn test_startup_restore_rebuilds_virtual_workspace_layout() {
                     SavedColumn::Single(saved_window(0)),
                     SavedColumn::Single(saved_window(1)),
                 ],
+                floating: vec![],
             }],
         }],
     };
@@ -80,6 +81,56 @@ fn test_startup_restore_rebuilds_virtual_workspace_layout() {
     assert!(matches!(columns[1], Column::Single(_)));
 }
 
+/// A float parked on a row is saved with that row and comes back floating on
+/// it, instead of being left behind wherever it happened to be sitting.
+#[test]
+fn test_startup_restore_brings_back_a_parked_float() {
+    let mut harness = TestHarness::new().with_windows(2);
+
+    harness.world().insert_resource(PaneruState {
+        version: 2,
+        timestamp: 123_456_789,
+        active_display_id: Some(TEST_DISPLAY_ID),
+        displays: vec![saved_display(TEST_DISPLAY_ID, true)],
+        workspaces: vec![SavedWorkspace {
+            workspace_id: TEST_WORKSPACE_ID,
+            display_id: Some(TEST_DISPLAY_ID),
+            active_virtual_index: Some(0),
+            strips: vec![SavedStrip {
+                virtual_index: 0,
+                columns: vec![SavedColumn::Single(saved_window(0))],
+                floating: vec![saved_window(1)],
+            }],
+        }],
+    });
+
+    for _ in 0..5 {
+        harness.app.update();
+    }
+
+    let world = harness.world();
+    let float = find_window_entity(1, world);
+    let tiled = find_window_entity(0, world);
+
+    assert!(
+        matches!(world.get::<Unmanaged>(float), Some(Unmanaged::Floating)),
+        "the restored float must come back floating"
+    );
+
+    let mut query = world.query::<&LayoutStrip>();
+    let strip = query
+        .iter(world)
+        .find(|strip| strip.id() == TEST_WORKSPACE_ID)
+        .expect("restored row");
+
+    assert!(strip.holds(float), "the row still owns the float");
+    assert!(
+        !strip.contains(float),
+        "the float must not claim a column of its own"
+    );
+    assert_eq!(strip.all_windows(), vec![tiled]);
+}
+
 #[test]
 fn test_startup_restore_keeps_unmatched_windows_on_the_restored_row() {
     let mut harness = TestHarness::new().with_windows(2);
@@ -96,6 +147,7 @@ fn test_startup_restore_keeps_unmatched_windows_on_the_restored_row() {
             strips: vec![SavedStrip {
                 virtual_index: 0,
                 columns: vec![SavedColumn::Single(saved_window(0))],
+                floating: vec![],
             }],
         }],
     });
@@ -146,6 +198,7 @@ fn test_startup_restore_keeps_fullscreen_separate_from_unmatched_windows() {
             strips: vec![SavedStrip {
                 virtual_index: 0,
                 columns: vec![SavedColumn::Fullscreen(saved_window(0))],
+                floating: vec![],
             }],
         }],
     });
@@ -203,6 +256,7 @@ fn test_startup_restore_prefers_existing_workspace_parent_before_saved_or_active
             strips: vec![SavedStrip {
                 virtual_index: 0,
                 columns: vec![SavedColumn::Single(saved_window(200))],
+                floating: vec![],
             }],
         }],
     });
@@ -275,6 +329,7 @@ fn test_startup_restore_preserves_saved_display_when_present() {
             strips: vec![SavedStrip {
                 virtual_index: 0,
                 columns: vec![SavedColumn::Single(saved_window(300))],
+                floating: vec![],
             }],
         }],
     });
@@ -345,6 +400,7 @@ fn test_startup_restore_keeps_current_native_workspace_active_across_multiple_wo
                 strips: vec![SavedStrip {
                     virtual_index: 0,
                     columns: vec![SavedColumn::Single(saved_window(100))],
+                    floating: vec![],
                 }],
             },
             SavedWorkspace {
@@ -354,6 +410,7 @@ fn test_startup_restore_keeps_current_native_workspace_active_across_multiple_wo
                 strips: vec![SavedStrip {
                     virtual_index: 0,
                     columns: vec![SavedColumn::Single(saved_window(300))],
+                    floating: vec![],
                 }],
             },
         ],
@@ -414,6 +471,7 @@ fn test_restore_resource_is_removed_after_grace_period() {
         .insert_resource(state_with_strips(vec![SavedStrip {
             virtual_index: 0,
             columns: vec![SavedColumn::Single(saved_window(0))],
+            floating: vec![],
         }]));
 
     // Well inside the two-second default grace period.
@@ -458,6 +516,7 @@ enabled = false
         .insert_resource(state_with_strips(vec![SavedStrip {
             virtual_index: 1,
             columns: vec![SavedColumn::Single(saved_window(0))],
+            floating: vec![],
         }]));
 
     for _ in 0..5 {
@@ -492,6 +551,7 @@ fn test_startup_restore_uses_first_restored_row_when_active_metadata_is_missing(
     let mut state = state_with_strips(vec![SavedStrip {
         virtual_index: 2,
         columns: vec![SavedColumn::Single(saved_window(0))],
+        floating: vec![],
     }]);
     state.workspaces[0].active_virtual_index = None;
     harness.world().insert_resource(state);
@@ -524,6 +584,7 @@ fn test_startup_restore_overrides_floating_config_for_matched_window() {
         .insert_resource(state_with_strips(vec![SavedStrip {
             virtual_index: 0,
             columns: vec![SavedColumn::Single(saved_window(0))],
+            floating: vec![],
         }]));
 
     for _ in 0..5 {
@@ -547,6 +608,7 @@ fn test_late_startup_window_restores_during_grace_period() {
         .insert_resource(state_with_strips(vec![SavedStrip {
             virtual_index: 1,
             columns: vec![SavedColumn::Single(saved_window(99))],
+            floating: vec![],
         }]));
 
     let commands = vec![
@@ -610,10 +672,12 @@ fn test_startup_restore_keeps_one_selected_row_and_hides_inactive_rows() {
                 SavedStrip {
                     virtual_index: 0,
                     columns: vec![SavedColumn::Single(saved_window(0))],
+                    floating: vec![],
                 },
                 SavedStrip {
                     virtual_index: 1,
                     columns: vec![SavedColumn::Single(saved_window(1))],
+                    floating: vec![],
                 },
             ],
         }],

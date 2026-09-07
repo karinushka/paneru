@@ -28,7 +28,7 @@ use paneru_shared_types::wire::Response;
 /// learn a subscriber is gone via a plain atomic flag instead of a lock shared
 /// with that task.
 struct Subscriber {
-    channel: Arc<paneru_mach_ipc::Subscriber>,
+    channel: Arc<async_mach_ports::Subscriber>,
     alive: Arc<AtomicBool>,
 }
 
@@ -439,7 +439,7 @@ fn state_event_broadcast_handler(
                 // The subscriber's process is gone; reaped on the next
                 // broadcast. This is a real signal from the kernel rather than
                 // a write error a merely slow reader would also produce.
-                Err(paneru_mach_ipc::Error::PeerGone) => {
+                Err(async_mach_ports::Error::PeerGone) => {
                     subscriber.alive.store(false, Ordering::Relaxed);
                     break;
                 }

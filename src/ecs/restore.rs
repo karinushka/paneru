@@ -129,6 +129,8 @@ pub(crate) struct PlannedStrip {
     pub display_id: Option<CGDirectDisplayID>,
     pub virtual_index: u32,
     pub columns: Vec<PlannedColumn>,
+    /// Windows the row owns without laying out: floats that were parked here.
+    pub detached: Vec<Entity>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -136,6 +138,8 @@ pub(crate) struct RestorePlan {
     pub strips: Vec<PlannedStrip>,
     pub active_virtual_by_workspace: HashMap<WorkspaceId, u32>,
     pub consumed_entities: HashSet<Entity>,
+    /// The subset of `consumed_entities` that comes back floating.
+    pub floating_entities: HashSet<Entity>,
     pub ignored_missing_windows: usize,
     pub skipped_ambiguous_matches: usize,
 }
@@ -191,11 +195,20 @@ impl<'a> RestorePlanner<'a> {
             .filter_map(|column| self.plan_column(column, current, plan))
             .collect::<Vec<_>>();
 
-        (!columns.is_empty()).then_some(PlannedStrip {
+        let mut detached = Vec::new();
+        for saved in &strip.floating {
+            if let Some(entity) = self.match_window(saved, current, plan) {
+                plan.floating_entities.insert(entity);
+                detached.push(entity);
+            }
+        }
+
+        (!columns.is_empty() || !detached.is_empty()).then_some(PlannedStrip {
             workspace_id: workspace.workspace_id,
             display_id: workspace.display_id,
             virtual_index: strip.virtual_index,
             columns,
+            detached,
         })
     }
 
@@ -321,8 +334,13 @@ fn saved_windows_in_state(state: &PaneruState) -> impl Iterator<Item = &SavedWin
         .workspaces
         .iter()
         .flat_map(|workspace| &workspace.strips)
-        .flat_map(|strip| &strip.columns)
-        .flat_map(saved_windows_in_column)
+        .flat_map(|strip| {
+            strip
+                .columns
+                .iter()
+                .flat_map(saved_windows_in_column)
+                .chain(strip.floating.iter())
+        })
 }
 
 fn saved_windows_in_column(column: &SavedColumn) -> Box<dyn Iterator<Item = &SavedWindow> + '_> {
@@ -460,12 +478,12 @@ pub(super) fn restore_window_state(
         let had_consumed_window = plan
             .consumed_entities
             .iter()
-            .any(|entity| strip.contains(*entity));
+            .any(|entity| strip.holds(*entity));
         for entity in &plan.consumed_entities {
             strip.remove(*entity);
         }
 
-        if had_consumed_window && strip.all_windows().is_empty() {
+        if had_consumed_window && strip.is_vacant() {
             emptied_existing_strips.insert(entity);
         }
     }
@@ -478,7 +496,11 @@ pub(super) fn restore_window_state(
 
     for entity in &plan.consumed_entities {
         if let Ok(mut entity_commands) = ctx.commands.get_entity(*entity) {
-            entity_commands.try_remove::<Unmanaged>();
+            if plan.floating_entities.contains(entity) {
+                entity_commands.try_insert(Unmanaged::Floating);
+            } else {
+                entity_commands.try_remove::<Unmanaged>();
+            }
         }
     }
 
@@ -498,7 +520,7 @@ pub(super) fn restore_window_state(
         };
 
         let mut strip = layout_strip_from_plan(planned);
-        if strip.all_windows().is_empty() {
+        if strip.is_vacant() {
             continue;
         }
 
@@ -567,14 +589,19 @@ pub(super) fn restore_window_state(
 }
 
 fn layout_strip_from_plan(planned: &PlannedStrip) -> LayoutStrip {
-    if let [PlannedColumn::Fullscreen(entity)] = planned.columns.as_slice() {
+    let mut strip = if let [PlannedColumn::Fullscreen(entity)] = planned.columns.as_slice() {
         let mut strip = LayoutStrip::fullscreen(planned.workspace_id, *entity);
         strip.virtual_index = planned.virtual_index;
-        return strip;
-    }
+        strip
+    } else {
+        let mut strip = LayoutStrip::new(planned.workspace_id, planned.virtual_index);
+        apply_planned_columns(&mut strip, &planned.columns);
+        strip
+    };
 
-    let mut strip = LayoutStrip::new(planned.workspace_id, planned.virtual_index);
-    apply_planned_columns(&mut strip, &planned.columns);
+    for entity in &planned.detached {
+        strip.detach(*entity);
+    }
     strip
 }
 

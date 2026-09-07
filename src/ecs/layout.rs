@@ -357,6 +357,11 @@ pub struct LayoutStrip {
     id: WorkspaceId,
     pub virtual_index: u32,
     columns: VecDeque<Column>,
+    /// Windows the strip still owns but does not lay out: floated, minimised or
+    /// hidden. They keep their workspace membership — so a script, the state
+    /// file and the workspace switcher can still find them — without taking a
+    /// column slot and leaving a gap in the tiling.
+    detached: Vec<Entity>,
 }
 
 impl LayoutStrip {
@@ -365,6 +370,7 @@ impl LayoutStrip {
             id,
             virtual_index,
             columns: VecDeque::new(),
+            detached: Vec::new(),
         }
     }
 
@@ -375,7 +381,54 @@ impl LayoutStrip {
             id,
             virtual_index: 0,
             columns,
+            detached: Vec::new(),
         }
+    }
+
+    /// Takes `entity` out of the tiling layout while keeping it on the strip.
+    /// The column it occupied closes up; membership survives.
+    pub fn detach(&mut self, entity: Entity) {
+        self.remove_column(entity);
+        if !self.detached.contains(&entity) {
+            self.detached.push(entity);
+        }
+    }
+
+    /// Puts a detached window back under the layout's control, at the end of
+    /// the strip. A no-op for a window the strip never held detached.
+    pub fn attach(&mut self, entity: Entity) -> bool {
+        if !self.is_detached(entity) {
+            return false;
+        }
+        self.append(entity);
+        true
+    }
+
+    /// Whether the strip owns `entity` but is not laying it out.
+    pub fn is_detached(&self, entity: Entity) -> bool {
+        self.detached.contains(&entity)
+    }
+
+    /// Whether the strip owns `entity` at all, laid out or not. `contains` is
+    /// the layout-only question; this is the membership one.
+    pub fn holds(&self, entity: Entity) -> bool {
+        self.contains(entity) || self.is_detached(entity)
+    }
+
+    pub fn detached(&self) -> &[Entity] {
+        &self.detached
+    }
+
+    /// Every window the strip owns, detached ones included.
+    pub fn held_windows(&self) -> Vec<Entity> {
+        let mut windows = self.all_windows();
+        windows.extend(self.detached.iter().copied());
+        windows
+    }
+
+    /// Whether the strip owns nothing at all — the test for despawning it.
+    pub fn is_vacant(&self) -> bool {
+        self.columns.is_empty() && self.detached.is_empty()
     }
 
     /// Finds the index of a window within the pane.
@@ -420,6 +473,7 @@ impl LayoutStrip {
     ///   the window is appended to the end.
     /// * `entity` - Entity of the window to insert.
     pub fn insert_at(&mut self, index: usize, entity: Entity) {
+        self.detached.retain(|held| *held != entity);
         if index >= self.len() {
             self.columns.push_back(Column::Single(entity));
         } else {
@@ -436,11 +490,17 @@ impl LayoutStrip {
         if self.contains(entity) {
             return;
         }
+        self.detached.retain(|held| *held != entity);
         self.columns.push_back(Column::Single(entity));
     }
 
     pub(crate) fn append_strip(&mut self, other: &mut Self) {
         self.columns.append(&mut other.columns);
+        for entity in other.detached.drain(..) {
+            if !self.detached.contains(&entity) && !self.contains(entity) {
+                self.detached.push(entity);
+            }
+        }
     }
 
     pub fn append_tab_group(&mut self, entities: &[Entity]) {
@@ -526,6 +586,13 @@ impl LayoutStrip {
     ///
     /// * `entity` - Entity of the window to remove.
     pub fn remove(&mut self, entity: Entity) {
+        self.detached.retain(|held| *held != entity);
+        self.remove_column(entity);
+    }
+
+    /// Takes the window out of the column list only, leaving any detached
+    /// membership alone.
+    fn remove_column(&mut self, entity: Entity) {
         let removed = self
             .index_of(entity)
             .ok()
@@ -1632,6 +1699,40 @@ mod tests {
         assert_eq!(strip.index_of(entities[0]).unwrap(), 0);
         assert_eq!(strip.index_of(entities[1]).unwrap(), 1);
         assert_eq!(strip.index_of(entities[2]).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_detached_window_keeps_membership_without_a_column() {
+        let (_world, mut strip, entities) = setup_world_and_strip();
+        let detached = entities[1];
+
+        strip.detach(detached);
+
+        assert_eq!(strip.len(), 2, "the column closes up behind it");
+        assert!(!strip.contains(detached));
+        assert!(strip.is_detached(detached));
+        assert!(strip.holds(detached), "the strip still owns it");
+        assert!(!strip.is_vacant());
+        assert_eq!(strip.all_windows(), vec![entities[0], entities[2]]);
+        assert!(strip.held_windows().contains(&detached));
+
+        assert!(strip.attach(detached), "attaching gives it a column back");
+        assert_eq!(strip.len(), 3);
+        assert!(strip.contains(detached));
+        assert!(!strip.is_detached(detached));
+        assert!(!strip.attach(detached), "attaching twice is a no-op");
+    }
+
+    #[test]
+    fn test_removing_a_detached_window_drops_its_membership() {
+        let (_world, mut strip, entities) = setup_world_and_strip();
+        let detached = entities[0];
+
+        strip.detach(detached);
+        strip.remove(detached);
+
+        assert!(!strip.holds(detached));
+        assert_eq!(strip.held_windows(), vec![entities[1], entities[2]]);
     }
 
     #[test]

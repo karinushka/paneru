@@ -10,8 +10,8 @@
 use std::rc::Rc;
 use std::sync::{LazyLock, Mutex};
 
+use async_mach_ports::{RecvPort, SendPort, Sender};
 use mlua::prelude::*;
-use paneru_mach_ipc::{RecvPort, SendPort, Sender};
 use paneru_shared_types::commands::Command;
 use paneru_shared_types::script_state::ScriptStateWrite;
 use paneru_shared_types::script_value::ScriptValue;
@@ -35,7 +35,7 @@ fn service_name() -> String {
 
 fn connect() -> LuaResult<Sender<Request>> {
     Sender::connect(&service_name()).map_err(|err| match err {
-        paneru_mach_ipc::Error::NotRunning => {
+        async_mach_ports::Error::NotRunning => {
             LuaError::RuntimeError("paneru is not running".to_string())
         }
         other => LuaError::external(other),
@@ -275,7 +275,7 @@ fn subscribe(
         let event = match stream.recv_blocking() {
             Ok(delivery) => delivery.value,
             // The daemon is gone; the subscription ends.
-            Err(paneru_mach_ipc::Error::PeerGone) => break,
+            Err(async_mach_ports::Error::PeerGone) => break,
             Err(err) => return Err(LuaError::external(err)),
         };
 

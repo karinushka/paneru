@@ -64,6 +64,11 @@ pub struct SavedWorkspace {
 pub struct SavedStrip {
     pub virtual_index: u32,
     pub columns: Vec<SavedColumn>,
+    /// Windows the strip owns without laying out — floats parked on this row,
+    /// scratchpads included. Saved so they come back where they were instead
+    /// of being left behind wherever they happened to be sitting.
+    #[serde(default)]
+    pub floating: Vec<SavedWindow>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -261,9 +266,25 @@ impl PaneruState {
             if active_workspace {
                 workspace.active_virtual_index = Some(strip.virtual_index);
             }
+            // Only genuine floats: a minimised or hidden window is re-detected
+            // as such on the next start, and restoring it as a float would put
+            // it back on screen.
+            let saved_floating = strip
+                .detached()
+                .iter()
+                .filter(|entity| {
+                    matches!(
+                        windows.get_managed(**entity),
+                        Some((_, _, Some(Unmanaged::Floating)))
+                    )
+                })
+                .filter_map(|entity| SavedWindow::from_entity(*entity, windows, apps))
+                .collect();
+
             workspace.strips.push(SavedStrip {
                 virtual_index: strip.virtual_index,
                 columns: saved_columns,
+                floating: saved_floating,
             });
         }
 
@@ -458,6 +479,7 @@ impl QueryStateParams<'_, '_> {
 /// windows, this keeps the strip's column structure — needed for `ws:swap`,
 /// `ws:east`, `ws:stack` and friends to know what is beside what.
 impl QueryStateParams<'_, '_> {
+    #[allow(clippy::too_many_lines)]
     pub fn extract_window_set(&self) -> crate::errors::Result<WindowSet> {
         use paneru_shared_types::windowset::{ColumnSet, DisplaySet, WorkspaceSet};
 
@@ -467,6 +489,30 @@ impl QueryStateParams<'_, '_> {
             .workspaces
             .iter()
             .find_map(|(_, strip, active, _)| active.then_some(strip.id()));
+
+        // Every window some row already owns, laid out or detached: rows on the
+        // same native space all see the same floats, and a float belongs to the
+        // one row that holds it.
+        let live_spaces = live_space_windows(
+            self.workspaces.iter().map(|(_, strip, active, selected)| {
+                (
+                    strip.id(),
+                    active || selected && active_workspace_id != Some(strip.id()),
+                )
+            }),
+            &self.window_manager,
+        )?;
+        let held: HashSet<Entity> = self
+            .workspaces
+            .iter()
+            .flat_map(|(_, strip, _, _)| {
+                let live = live_spaces.get(&strip.id());
+                strip
+                    .held_windows()
+                    .into_iter()
+                    .filter(move |entity| still_on_space(live, *entity, &self.windows))
+            })
+            .collect();
 
         // Group the workspace strips by the display entity that owns them, so
         // each display can be built with its own workspaces in one pass.
@@ -520,14 +566,28 @@ impl QueryStateParams<'_, '_> {
                 });
             }
 
-            // Floating windows the strip never knew about.
+            // Floats the strip owns without laying out. They keep workspace
+            // membership, so they belong to this row and no other — unless the
+            // window server says they left the space entirely.
+            floating.extend(
+                strip
+                    .detached()
+                    .iter()
+                    .filter(|entity| {
+                        still_on_space(live_spaces.get(&strip.id()), **entity, &self.windows)
+                    })
+                    .filter_map(|entity| self.window_record(*entity, focused_entity, sliver_width))
+                    .filter(|record| record.floating),
+            );
+
+            // Floating windows no strip ever knew about.
             floating.extend(
                 floating_entities
                     .into_iter()
                     .filter_map(|window_id| {
                         let (_, entity) = self.windows.find(window_id)?;
                         let (_, _, unmanaged) = self.windows.get_managed(entity)?;
-                        (matches!(unmanaged, Some(Unmanaged::Floating)) && !strip.contains(entity))
+                        (matches!(unmanaged, Some(Unmanaged::Floating)) && !held.contains(&entity))
                             .then_some(entity)
                     })
                     .filter_map(|entity| self.window_record(entity, focused_entity, sliver_width)),
@@ -637,6 +697,43 @@ pub trait QueryState: std::marker::Sized {
     ) -> crate::errors::Result<Self>;
 }
 
+/// The windows the window server currently reports on each native space that
+/// has a row on screen. The row a float belongs to is the daemon's business,
+/// but which *space* it is actually on is the window server's: a float dragged
+/// to another space has to stop being claimed by the row it left.
+///
+/// Only spaces with a visible row are asked about — the read goes out to the
+/// window server — so a space with no answer keeps whatever its rows claim.
+fn live_space_windows(
+    strips: impl Iterator<Item = (WorkspaceId, bool)>,
+    window_manager: &WindowManager,
+) -> crate::errors::Result<HashMap<WorkspaceId, HashSet<WinID>>> {
+    let mut spaces: HashMap<WorkspaceId, HashSet<WinID>> = HashMap::new();
+    for (workspace_id, visible) in strips {
+        if visible && !spaces.contains_key(&workspace_id) {
+            spaces.insert(
+                workspace_id,
+                window_manager
+                    .windows_in_workspace(workspace_id)?
+                    .into_iter()
+                    .collect(),
+            );
+        }
+    }
+    Ok(spaces)
+}
+
+/// Whether a row may still claim a detached window, given what the window
+/// server says about its space.
+fn still_on_space(live: Option<&HashSet<WinID>>, entity: Entity, windows: &Windows) -> bool {
+    let Some(live) = live else {
+        return true;
+    };
+    windows
+        .get(entity)
+        .is_some_and(|window| live.contains(&window.id()))
+}
+
 /// Builds the query/subscribe state document from the ECS world.
 ///
 /// A free function rather than an inherent method because [`PaneruQueryState`]
@@ -666,6 +763,30 @@ impl QueryState for PaneruQueryState {
             .iter()
             .find_map(|(_, strip, active, _)| active.then_some(strip.id()));
 
+        // Every window some row already owns, laid out or detached. A floating
+        // window belongs to exactly one row, so the space-wide enumeration
+        // below must not hand it to a second one: rows on the same native
+        // space all see it.
+        let live_spaces = live_space_windows(
+            workspaces.iter().map(|(_, strip, active, selected)| {
+                (
+                    strip.id(),
+                    active || selected && active_workspace_id != Some(strip.id()),
+                )
+            }),
+            window_manager,
+        )?;
+        let held: HashSet<Entity> = workspaces
+            .iter()
+            .flat_map(|(_, strip, _, _)| {
+                let live = live_spaces.get(&strip.id());
+                strip
+                    .held_windows()
+                    .into_iter()
+                    .filter(move |entity| still_on_space(live, *entity, windows))
+            })
+            .collect();
+
         let mut virtual_workspaces = Vec::new();
         let mut workspace_max_numbers: HashMap<WorkspaceId, u32> = HashMap::new();
         let mut active = PaneruActiveState {
@@ -674,23 +795,33 @@ impl QueryState for PaneruQueryState {
         };
 
         for (child, strip, active_workspace, selected_workspace) in workspaces {
-            let floating = if active_workspace
-                || selected_workspace && active_workspace_id != Some(strip.id())
-            {
-                window_manager.windows_in_workspace(strip.id())?
+            let live = live_spaces.get(&strip.id());
+            let reads_space =
+                active_workspace || selected_workspace && active_workspace_id != Some(strip.id());
+            let space_floats = if reads_space {
+                live.cloned().unwrap_or_default()
             } else {
-                Vec::new()
-            }
-            .into_iter()
-            .filter_map(|window_id| {
+                HashSet::new()
+            };
+            let floating = space_floats.into_iter().filter_map(|window_id| {
                 let (_, entity) = windows.find(window_id)?;
                 let (_, _, unmanaged) = windows.get_managed(entity)?;
-                (matches!(unmanaged, Some(Unmanaged::Floating)) && !strip.contains(entity))
+                (matches!(unmanaged, Some(Unmanaged::Floating)) && !held.contains(&entity))
                     .then_some(entity)
+            });
+            // Detached members are on the row without being laid out. Only the
+            // floats among them are reported: a minimised or hidden window was
+            // never part of this document.
+            let detached_floats = strip.detached().iter().copied().filter(|entity| {
+                matches!(
+                    windows.get_managed(*entity),
+                    Some((_, _, Some(Unmanaged::Floating)))
+                ) && still_on_space(live, *entity, windows)
             });
             let row_windows = strip
                 .all_windows()
                 .into_iter()
+                .chain(detached_floats)
                 .chain(floating)
                 .filter_map(|entity| {
                     let (window, _, unmanaged) = windows.get_managed(entity)?;

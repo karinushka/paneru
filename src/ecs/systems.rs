@@ -25,7 +25,7 @@ use super::{
 
 use crate::config::{Config, decorations::BorderRadiusOption};
 use crate::ecs::display::FloatingLayer;
-use crate::ecs::layout::LayoutStrip;
+use crate::ecs::layout::{Column, LayoutStrip};
 use crate::ecs::params::{ActiveDisplay, FrameActivity, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, BruteforceWindows, FlashMessage, FocusedMarker, Initializing,
@@ -83,8 +83,14 @@ type ResizableWindows<'w, 's> = Query<
 
 const ANIAMTE_SNAP_THRESHOLD: f32 = 5.0;
 const LOOP_MAX_TIMEOUT_FRAME_ACTIVE_MS: u32 = 16;
-const LOOP_MAX_TIMEOUT_LOWPOWER_MS: u32 = 500;
-const LOOP_MAX_TIMEOUT_MS: u32 = 50;
+const LOOP_MAX_TIMEOUT_LOWPOWER_MS: u32 = 2000;
+// Real events (input, IPC, workspace changes, ...) wake the pump immediately
+// via `EventLoopWaker`, so this only bounds how late the free-running 1s
+// `on_timer` systems (`recover_lost_focus`, workspace refresh) can land, and
+// how long a dead event tap can go unnoticed between the 30s health sweeps.
+// Kept well under both: with no genuine work to do, this used to run the
+// whole schedule 20 times a second.
+const LOOP_MAX_TIMEOUT_MS: u32 = 500;
 const TAP_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const LOOP_TIMEOUT_STEP: u32 = 1;
 
@@ -317,14 +323,17 @@ pub(crate) fn finish_setup(
             continue;
         };
 
-        // Preserve the order - do not flush existing windows.
-        for entity in strip.all_windows() {
+        // Preserve the order - do not flush existing windows. Detached
+        // (floating, minimised) members count as present: they belong to the
+        // strip without being laid out, so they must neither be dropped here
+        // nor pulled back into a column.
+        for entity in strip.held_windows() {
             if !workspace_windows.iter().any(|(_, e)| *e == entity) {
                 strip.remove(entity);
             }
         }
         for (_, entity) in workspace_windows {
-            if !strip.contains(entity) {
+            if !strip.holds(entity) {
                 strip.append(entity);
             }
         }
@@ -1286,6 +1295,125 @@ pub(crate) fn window_creation_event(mut messages: MessageReader<Event>, mut comm
         {
             commands.trigger(SpawnWindowTrigger(vec![window]));
         }
+    }
+}
+
+/// Managed windows whose geometry has settled: nothing in flight, so two of them
+/// sharing a frame really do share it.
+type SettledWindows<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static Window,
+        &'static Position,
+        &'static Bounds,
+        &'static ChildOf,
+    ),
+    (
+        Without<Unmanaged>,
+        Without<RepositionMarker>,
+        Without<ResizeMarker>,
+    ),
+>;
+
+/// Folds a background native tab that ended up in a column of its own back into
+/// the column of the tab that is actually showing.
+///
+/// [`detect_tabbed_windows`] catches this when the tab window is created, but
+/// only when the app has already stopped showing the sibling by then. Ghostty
+/// does not always oblige, and the leftover column is a slot in the strip that
+/// can never show anything: focus lands in it, the strip scrolls to it, and
+/// there is nothing there.
+///
+/// Deliberately narrow. Two managed windows of one app share a frame exactly
+/// only when they share a column, which is what this is repairing, and the
+/// window server reports a background tab as not on screen while an occluded
+/// window still counts as on screen.
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn regroup_stray_native_tabs(
+    windows: SettledWindows,
+    mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    window_manager: Res<WindowManager>,
+    mission_control: Res<MissionControlActive>,
+    mut commands: Commands,
+) {
+    if mission_control.0 {
+        return;
+    }
+    let Some(mut strip) = workspaces
+        .iter_mut()
+        .find_map(|(strip, active)| active.then_some(strip))
+    else {
+        return;
+    };
+    let Some(on_screen) = window_manager.windows_on_screen() else {
+        return;
+    };
+
+    // Column tops only: a window sharing a column is already grouped, and
+    // stacked siblings never share a frame.
+    let tops = strip.all_columns();
+    // Only a column of its own can be a stray: pulling a window out of a stack
+    // or an existing tab group would break a grouping the user set up.
+    let strays = strip
+        .columns()
+        .filter_map(|column| match column {
+            Column::Single(entity) => Some(*entity),
+            Column::Stack(_) | Column::Tabs(_) | Column::Fullscren(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let columns = tops
+        .into_iter()
+        .filter_map(|entity| windows.get(entity).ok())
+        .map(
+            |(entity, window, Position(position), Bounds(bounds), child)| {
+                (
+                    entity,
+                    on_screen.contains(&window.id()),
+                    *position,
+                    *bounds,
+                    child.parent(),
+                )
+            },
+        )
+        .collect::<Vec<_>>();
+
+    let mut regrouped = Vec::new();
+    for (hidden, on_screen_now, position, bounds, app) in &columns {
+        if *on_screen_now || regrouped.contains(hidden) || !strays.contains(hidden) {
+            continue;
+        }
+        let Some((leader, ..)) = columns.iter().find(
+            |(
+                candidate,
+                candidate_on_screen,
+                candidate_position,
+                candidate_bounds,
+                candidate_app,
+            )| {
+                *candidate_on_screen
+                    && candidate != hidden
+                    && candidate_app == app
+                    && candidate_position.chebyshev_distance(*position) <= 1
+                    && candidate_bounds.chebyshev_distance(*bounds) <= 1
+            },
+        ) else {
+            continue;
+        };
+
+        debug!("stray native tab {hidden} folded into the column of {leader}");
+        if strip
+            .convert_to_tabs(*leader, *hidden)
+            .inspect_err(|err| error!("Failed to convert to tabs: {err}"))
+            .is_ok()
+        {
+            regrouped.push(*hidden);
+        }
+    }
+
+    if let Some(leader) = regrouped.first() {
+        commands.reshuffle_around(*leader);
     }
 }
 

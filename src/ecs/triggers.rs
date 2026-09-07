@@ -204,6 +204,7 @@ pub(super) fn theme_change_trigger(
 /// * `global_state` - Focus-follows-mouse and reshuffle flags.
 /// * `ctx` - Window queries, configuration and the command buffer.
 #[instrument(level = Level::DEBUG, skip_all)]
+#[allow(clippy::too_many_lines)]
 pub(super) fn window_focused_trigger(
     mut messages: MessageReader<Event>,
     applications: Query<&Application>,
@@ -235,6 +236,39 @@ pub(super) fn window_focused_trigger(
             continue;
         };
 
+        // Guard against stale focus events: a delayed one (from
+        // RetryFrontSwitch or a dont_focus re-assertion) must not pull
+        // FocusedMarker back after focus has moved to another app.
+        if !app.is_frontmost() {
+            continue;
+        }
+
+        // Within the app, the window it says is focused wins over the id the
+        // event carries, which may be a moment out of date. An app with native
+        // tabs in particular answers with whichever member of the tab group it
+        // decided to show. Follow it to that window rather than dropping the
+        // event: dropping it leaves the strip parked where it was, so Cmd-Tab
+        // into a tabbed terminal looks like nothing happened.
+        let (window, entity, window_id) = match app.focused_window_id() {
+            Ok(current) if current != window_id => {
+                match ctx.windows.find_parent(current) {
+                    Some((current_window, current_entity, current_parent))
+                        if current_parent == parent =>
+                    {
+                        debug!(
+                            "app {} reports window {current} focused, not {window_id}; following it",
+                            app.name()
+                        );
+                        (current_window, current_entity, current)
+                    }
+                    // Nothing we track answers to that id, so the event really
+                    // is stale.
+                    _ => continue,
+                }
+            }
+            _ => (window, entity, window_id),
+        };
+
         // Always keep passthrough in sync. An internal focus_entity call races
         // with the OS WindowFocused event; without this the passthrough keys
         // remain stale from a previously focused window.
@@ -244,20 +278,6 @@ pub(super) fn window_focused_trigger(
             .windows
             .focused()
             .is_some_and(|(focused, _)| focused.id() == window_id);
-
-        // Guard against stale focus events. Without these checks, delayed
-        // events (e.g. from RetryFrontSwitch or dont_focus re-assertions)
-        // can pull FocusedMarker back to an old window after focus has moved on.
-        //
-        // 1. Cross-app: skip if the window's app is no longer frontmost.
-        // 2. Same-app: skip if the app's current focused window differs from
-        //    this event's window_id (the event is outdated).
-        if !app.is_frontmost() {
-            continue;
-        }
-        if app.focused_window_id().is_ok_and(|id| id != window_id) {
-            continue;
-        }
 
         let managed = ctx
             .windows
@@ -284,7 +304,9 @@ pub(super) fn window_focused_trigger(
             if active {
                 active_workspace_id = Some(strip.id());
             }
-            if owner.is_none() && strip.contains(entity) {
+            // `holds`, so a float parked on another row is followed back to
+            // the row that owns it instead of being focused where it stands.
+            if owner.is_none() && strip.holds(entity) {
                 if let Ok(index) = strip.index_of(entity)
                     && let Some(column) = strip.get_column_mut(index)
                 {
@@ -396,7 +418,7 @@ pub(super) fn mission_control_trigger(
                         window_manager.windows_in_workspace(active_strip.id())
                 {
                     let moved_windows = active_strip
-                        .all_windows()
+                        .held_windows()
                         .into_iter()
                         .filter_map(|entity| windows.get(entity).zip(Some(entity)))
                         .filter(|(window, _)| !present_windows.contains(&window.id()));
@@ -604,15 +626,22 @@ pub(super) fn window_unmanaged_trigger(
     // is actually looking at.
     let parked_out_of_view = workspaces
         .iter()
-        .any(|(strip, active)| !active && strip.contains(entity));
+        .any(|(strip, active)| !active && strip.holds(entity));
 
-    // Drop the strip membership first, before anything below can bail early —
-    // a floating window still reserves column space in the strip otherwise,
-    // leaving a gap that never closes on its own.
+    // Free the column slot first, before anything below can bail early — a
+    // floating window that keeps one leaves a gap that never closes on its own.
+    // Detach rather than remove: the strip goes on owning the window, so it
+    // still belongs to a workspace, still gets saved, and does not turn into a
+    // window nothing tracks.
+    let mut held = false;
     for (mut strip, _) in &mut workspaces {
-        if strip.contains(entity) {
-            strip.remove(entity);
+        if strip.holds(entity) {
+            strip.detach(entity);
+            held = true;
         }
+    }
+    if !held && let Some((mut strip, _)) = workspaces.iter_mut().find(|(_, active)| *active) {
+        strip.detach(entity);
     }
 
     let Some((display, dock)) = active_display.map(|display| *display) else {
@@ -709,7 +738,7 @@ pub(super) fn window_minimized_trigger(
             }
             if strip.contains(entity) {
                 remember_managed_strip(entity, &strip, &mut commands);
-                strip.remove(entity);
+                strip.detach(entity);
             }
         }
     }
@@ -1187,7 +1216,7 @@ pub(super) fn apply_window_positions(
                 .iter_mut()
                 .find_map(|(strip, _)| strip.contains(entity).then_some(strip))
             {
-                strip.remove(entity);
+                strip.detach(entity);
             }
             if let Ok(mut entity_commands) = ctx.commands.get_entity(entity) {
                 // Avoid managing window if it's floating.
@@ -1332,7 +1361,10 @@ pub(super) fn window_removal_trigger(
 ) {
     let entity = trigger.event().entity;
 
-    if let Some(mut strip) = workspaces.iter_mut().find(|strip| strip.contains(entity)) {
+    // `holds`, not `contains`: a detached member (a float, a minimised window)
+    // has no column but is still owned by the strip, and leaving its entity
+    // behind would keep a dead window on the row for ever.
+    if let Some(mut strip) = workspaces.iter_mut().find(|strip| strip.holds(entity)) {
         debug!(
             "Removing despawned entity {entity} from strip {}",
             strip.id()

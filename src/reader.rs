@@ -6,9 +6,9 @@
 //! [`Event`] for the world, and the ones that expect an answer carry a reply
 //! channel the answering system fills in.
 
+use async_mach_ports::{Delivery, Receiver, Reply as MachReply};
 use bevy::tasks::{IoTaskPool, TaskPool};
 use futures_lite::StreamExt;
-use paneru_mach_ipc::{Delivery, Receiver, Reply as MachReply};
 use paneru_shared_types::wire::{Request, service_name};
 use std::sync::Arc;
 use std::thread;

@@ -968,6 +968,20 @@ fn give_away_focus(
     config: &mut GlobalState,
     commands: &mut Commands,
 ) {
+    if active_strip.is_tabbed_display(entity)
+        && let Some(sibling) = active_strip.tab_display_sibling(entity)
+    {
+        // Closing/losing focus on the active tab of a paneru-tabbed-display
+        // stack must focus the next tab, not fall through to the
+        // nearest-column search below — that search returns one
+        // representative entity per column, and this column's own entry
+        // was `entity` itself, so it would otherwise jump to an unrelated
+        // neighbouring column.
+        config.set_ffm_flag(None);
+        commands.focus_entity(sibling, true);
+        return;
+    }
+
     if active_strip.tabbed(entity) {
         // Do not give away focus for tabbed windows.
         // Remaining tab gets the focus.

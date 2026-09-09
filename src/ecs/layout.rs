@@ -362,6 +362,18 @@ pub struct LayoutStrip {
     /// file and the workspace switcher can still find them — without taking a
     /// column slot and leaving a gap in the tiling.
     detached: Vec<Entity>,
+    /// Entities belonging to a `Column::Stack` currently displayed as tabs
+    /// (one visible, sharing the full column rect) instead of split heights.
+    /// Membership, not a `Column` variant — a Stack is "tabbed" iff any of
+    /// its member entities is in this set; the invariant that either all or
+    /// none of one Stack's members are present is maintained by
+    /// `toggle_tabbed_display` and by the cleanup in `remove_column`/
+    /// `unstack`/`stack`. This is deliberately independent of
+    /// `Column::Tabs`/`StackItem::Tabs` (native-OS-tab detection, see
+    /// `tabbed`/`tab_group` below) and of `LayoutStrip::tabbed()`, which
+    /// callers like `apply_window_positions`/`give_away_focus` already key
+    /// off for that unrelated feature.
+    tabbed_stacks: EntityHashSet,
 }
 
 impl LayoutStrip {
@@ -371,6 +383,7 @@ impl LayoutStrip {
             virtual_index,
             columns: VecDeque::new(),
             detached: Vec::new(),
+            tabbed_stacks: EntityHashSet::default(),
         }
     }
 
@@ -382,6 +395,7 @@ impl LayoutStrip {
             virtual_index: 0,
             columns,
             detached: Vec::new(),
+            tabbed_stacks: EntityHashSet::default(),
         }
     }
 
@@ -604,6 +618,7 @@ impl LayoutStrip {
                     // Already removed from self.columns.
                 }
                 Column::Stack(mut stack) => {
+                    self.tabbed_stacks.remove(&entity);
                     for item in &mut stack {
                         match item {
                             StackItem::Single(_) => {}
@@ -619,6 +634,12 @@ impl LayoutStrip {
                     if stack.len() > 1 {
                         self.columns.insert(index, Column::Stack(stack));
                     } else if let Some(remaining_item) = stack.first() {
+                        // A single surviving item can no longer be a tabbed
+                        // display (nothing left to switch between) — drop
+                        // its membership so a stale entry can't linger.
+                        for e in remaining_item.window_iter() {
+                            self.tabbed_stacks.remove(&e);
+                        }
                         match remaining_item {
                             StackItem::Single(id) => {
                                 self.columns.insert(index, Column::Single(*id));
@@ -747,6 +768,21 @@ impl LayoutStrip {
         };
 
         let target_column = self.columns.remove(index - 1).unwrap();
+        // If the column being merged into is already a tabbed display, the
+        // newly-joined items must join `tabbed_stacks` too — otherwise the
+        // merged Stack would end up with a mix of tabbed and split members,
+        // which `relative_positions`'s tabbed-column geometry branch isn't
+        // designed to represent.
+        if let Column::Stack(items) = &target_column
+            && items
+                .iter()
+                .flat_map(StackItem::window_iter)
+                .any(|e| self.tabbed_stacks.contains(&e))
+        {
+            for item in &items_to_stack {
+                self.tabbed_stacks.extend(item.window_iter());
+            }
+        }
         let new_column = match target_column {
             Column::Fullscren(_) => return Ok(()),
             Column::Single(id) => {
@@ -784,6 +820,12 @@ impl LayoutStrip {
 
             let removed_item = items.remove(item_index);
 
+            // The unstacked item no longer shares a column with its former
+            // stack-mates, so it can't remain part of a tabbed display.
+            for e in removed_item.window_iter() {
+                self.tabbed_stacks.remove(&e);
+            }
+
             // Re-insert the unstacked item as a single/tabs panel
             let unstacked_column = match removed_item {
                 StackItem::Single(id) => Column::Single(id),
@@ -794,6 +836,11 @@ impl LayoutStrip {
             // Re-insert the modified stack (if not empty) at the original position
             if !items.is_empty() {
                 let new_column = if items.len() == 1 {
+                    // A single surviving item can no longer be a tabbed
+                    // display — drop its membership (see remove_column).
+                    for e in items[0].window_iter() {
+                        self.tabbed_stacks.remove(&e);
+                    }
                     match items.remove(0) {
                         StackItem::Single(id) => Column::Single(id),
                         StackItem::Tabs(tabs) => Column::Tabs(tabs),
@@ -863,14 +910,28 @@ impl LayoutStrip {
                     Column::Tabs(tabs) => vec![StackItem::Tabs(tabs.clone())],
                 };
 
-                let current_heights = items
-                    .iter()
-                    .filter_map(|item| item.top().and_then(get_window_frame))
-                    .map(|frame| frame.height())
-                    .collect::<Vec<_>>();
+                // A tabbed display shares one frame across every member,
+                // sized to the whole column — the same "shared frame" idiom
+                // this function already uses for native-tab `StackItem::Tabs`
+                // members, just applied to the whole outer Stack. This also
+                // sidesteps `binpack_heights`'s `MIN_WINDOW_HEIGHT` capacity
+                // limit entirely, since it isn't called for this branch.
+                let is_tabbed_column = matches!(column, Column::Stack(_))
+                    && items
+                        .iter()
+                        .flat_map(StackItem::window_iter)
+                        .any(|e| self.tabbed_stacks.contains(&e));
 
-                let heights =
-                    binpack_heights(&current_heights, MIN_WINDOW_HEIGHT, layout_strip_height)?;
+                let heights = if is_tabbed_column {
+                    vec![layout_strip_height; items.len()]
+                } else {
+                    let current_heights = items
+                        .iter()
+                        .filter_map(|item| item.top().and_then(get_window_frame))
+                        .map(|frame| frame.height())
+                        .collect::<Vec<_>>();
+                    binpack_heights(&current_heights, MIN_WINDOW_HEIGHT, layout_strip_height)?
+                };
 
                 // Every window in a column shares the master's (top item's)
                 // width, so a window stacked onto a master of a different width
@@ -896,7 +957,9 @@ impl LayoutStrip {
                         frame.min.y = next_y;
                         frame.max.y = frame.min.y + height;
 
-                        next_y = frame.max.y;
+                        if !is_tabbed_column {
+                            next_y = frame.max.y;
+                        }
 
                         // Return ALL windows in the item with the same frame
                         let results = item.window_iter().map(|e| (e, frame)).collect::<Vec<_>>();
@@ -974,6 +1037,59 @@ impl LayoutStrip {
         self.columns
             .front()
             .is_some_and(|column| matches!(column, Column::Fullscren(_)))
+    }
+
+    /// Toggles tabbed display (one window visible at a time, sharing the
+    /// full column rect) for the `Column::Stack` containing `entity`.
+    /// Returns `None` — not applicable, nothing changed — unless `entity` is
+    /// in a `Stack` with more than one item; matches niri, where the toggle
+    /// is only meaningful on a column that actually holds multiple windows.
+    /// `None` is distinct from `Some(false)` (successfully toggled *off*) so
+    /// callers can tell "did nothing" from "turned tabs off" instead of
+    /// reporting both the same way.
+    ///
+    /// Returns `Some(is_tabbed)` — whether the column is tabbed after the
+    /// call — when the toggle actually applied.
+    pub fn toggle_tabbed_display(&mut self, entity: Entity) -> Option<bool> {
+        let index = self.index_of(entity).ok()?;
+        let Column::Stack(items) = self.get(index).ok()? else {
+            return None;
+        };
+        if items.len() < 2 {
+            return None;
+        }
+        let members: Vec<Entity> = items.iter().flat_map(StackItem::window_iter).collect();
+        let now_tabbed = !members.iter().any(|e| self.tabbed_stacks.contains(e));
+        if now_tabbed {
+            self.tabbed_stacks.extend(members);
+        } else {
+            for member in members {
+                self.tabbed_stacks.remove(&member);
+            }
+        }
+        Some(now_tabbed)
+    }
+
+    /// Whether `entity` belongs to a `Column::Stack` currently displayed as
+    /// tabs. Independent of `tabbed()` (native-OS-tab detection).
+    pub fn is_tabbed_display(&self, entity: Entity) -> bool {
+        self.tabbed_stacks.contains(&entity)
+    }
+
+    /// Given `entity` in a tabbed `Column::Stack`, returns the next tab,
+    /// falling back to the previous one when `entity` is last. Used only by
+    /// the close-active-tab focus fallback — normal cycling reuses
+    /// `Operation::Focus` North/South directly.
+    pub fn tab_display_sibling(&self, entity: Entity) -> Option<Entity> {
+        let index = self.index_of(entity).ok()?;
+        let Column::Stack(items) = self.get(index).ok()? else {
+            return None;
+        };
+        let pos = items.iter().position(|item| item.contains(entity))?;
+        items
+            .get(pos + 1)
+            .or_else(|| pos.checked_sub(1).and_then(|p| items.get(p)))
+            .and_then(StackItem::top)
     }
 }
 
@@ -1917,6 +2033,181 @@ mod tests {
         // e3 (single) gets full viewport height.
         let e3_frame = out.iter().find(|(e, _)| *e == entities[3]).unwrap().1;
         assert_eq!(e3_frame.height(), 600);
+    }
+
+    #[test]
+    fn test_toggle_tabbed_display_marks_and_unmarks_all_stack_members() {
+        let mut world = World::new();
+        let entities = world.spawn_batch(vec![(), (), ()]).collect::<Vec<Entity>>();
+
+        let mut strip = LayoutStrip::default();
+        for &e in &entities {
+            strip.append(e);
+        }
+        strip.stack(entities[1]).unwrap();
+        strip.stack(entities[2]).unwrap();
+
+        assert!(entities.iter().all(|&e| !strip.is_tabbed_display(e)));
+
+        let now_tabbed = strip.toggle_tabbed_display(entities[1]);
+        assert_eq!(now_tabbed, Some(true));
+        assert!(entities.iter().all(|&e| strip.is_tabbed_display(e)));
+
+        let now_tabbed = strip.toggle_tabbed_display(entities[0]);
+        assert_eq!(now_tabbed, Some(false));
+        assert!(entities.iter().all(|&e| !strip.is_tabbed_display(e)));
+    }
+
+    #[test]
+    fn test_toggle_tabbed_display_noop_on_single_column() {
+        let mut world = World::new();
+        let entity = world.spawn_empty().id();
+
+        let mut strip = LayoutStrip::default();
+        strip.append(entity);
+
+        assert_eq!(
+            strip.toggle_tabbed_display(entity),
+            None,
+            "toggling a lone Single column must be a no-op, not report 'off'"
+        );
+        assert!(!strip.is_tabbed_display(entity));
+    }
+
+    #[test]
+    fn test_tabbed_stack_shares_full_column_frame() {
+        let mut world = World::new();
+        let entities = world.spawn_batch(vec![(), (), ()]).collect::<Vec<Entity>>();
+
+        let mut strip = LayoutStrip::default();
+        for &e in &entities {
+            strip.append(e);
+        }
+        strip.stack(entities[1]).unwrap();
+        strip.stack(entities[2]).unwrap();
+        strip.toggle_tabbed_display(entities[1]);
+
+        let get_window_frame = |_| Some(IRect::new(0, 0, 400, 300));
+        let out: Vec<_> = strip.relative_positions(700, &get_window_frame).collect();
+
+        assert_eq!(out.len(), 3);
+        for (_, frame) in &out {
+            assert_eq!(frame.min.y, 0, "every tab must start at the column's top");
+            assert_eq!(
+                frame.height(),
+                700,
+                "every tab must fill the full column height"
+            );
+            assert_eq!(frame.width(), 400);
+        }
+        // All three must be at the identical x too (same column slot).
+        let xs: std::collections::HashSet<_> = out.iter().map(|(_, f)| f.min.x).collect();
+        assert_eq!(xs.len(), 1, "every tab must share the same column x");
+    }
+
+    #[test]
+    fn test_tabbed_stack_untoggle_restores_split_heights() {
+        let mut world = World::new();
+        let entities = world.spawn_batch(vec![(), (), ()]).collect::<Vec<Entity>>();
+
+        let mut strip = LayoutStrip::default();
+        for &e in &entities {
+            strip.append(e);
+        }
+        strip.stack(entities[1]).unwrap();
+        strip.stack(entities[2]).unwrap();
+
+        let get_window_frame = |_| Some(IRect::new(0, 0, 400, 200));
+
+        strip.toggle_tabbed_display(entities[1]);
+        strip.toggle_tabbed_display(entities[1]);
+
+        let out: Vec<_> = strip.relative_positions(600, &get_window_frame).collect();
+        let heights: Vec<_> = out.iter().map(|(_, f)| f.height()).collect();
+        assert_eq!(
+            heights.iter().sum::<i32>(),
+            600,
+            "heights must fill the viewport"
+        );
+        assert!(
+            heights.iter().any(|&h| h != 600),
+            "split display must not leave every window at full column height"
+        );
+    }
+
+    /// Regression: an earlier version of tabbed-display support reordered
+    /// the outer `Vec<StackItem>` on every focus change (mirroring how
+    /// native-tab `Column::move_to_front` reorders `StackItem::Tabs`), so
+    /// `Column::top()` would track the active tab. That broke cycling:
+    /// `get_window_in_direction`'s North/South arms walk the stack purely by
+    /// stable index, so reordering it out from under them made focus jump
+    /// unpredictably instead of advancing. Tabbed-display columns must never
+    /// reorder — `Column::top()` intentionally stays whatever the first item
+    /// was, and the true "active tab" is tracked only by `FocusedMarker`.
+    #[test]
+    fn test_toggle_tabbed_display_never_reorders_the_stack() {
+        let mut world = World::new();
+        let entities = world.spawn_batch(vec![(), (), ()]).collect::<Vec<Entity>>();
+
+        let mut strip = LayoutStrip::default();
+        for &e in &entities {
+            strip.append(e);
+        }
+        strip.stack(entities[1]).unwrap();
+        strip.stack(entities[2]).unwrap();
+        strip.toggle_tabbed_display(entities[1]);
+
+        let index = strip.index_of(entities[2]).unwrap();
+        let Column::Stack(items) = strip.get(index).unwrap() else {
+            panic!("expected a Stack column");
+        };
+        let order: Vec<_> = items.iter().filter_map(StackItem::top).collect();
+        assert_eq!(
+            order, entities,
+            "toggling tabbed display must not reorder the stack"
+        );
+    }
+
+    #[test]
+    fn test_tab_display_sibling_falls_back_at_ends() {
+        let mut world = World::new();
+        let entities = world.spawn_batch(vec![(), (), ()]).collect::<Vec<Entity>>();
+
+        let mut strip = LayoutStrip::default();
+        for &e in &entities {
+            strip.append(e);
+        }
+        strip.stack(entities[1]).unwrap();
+        strip.stack(entities[2]).unwrap();
+        strip.toggle_tabbed_display(entities[1]);
+
+        assert_eq!(strip.tab_display_sibling(entities[0]), Some(entities[1]));
+        assert_eq!(strip.tab_display_sibling(entities[1]), Some(entities[2]));
+        // Last item falls back to the previous one instead of wrapping.
+        assert_eq!(strip.tab_display_sibling(entities[2]), Some(entities[1]));
+    }
+
+    #[test]
+    fn test_removing_from_tabbed_stack_collapsing_to_single_clears_membership() {
+        let mut world = World::new();
+        let entities = world.spawn_batch(vec![(), ()]).collect::<Vec<Entity>>();
+
+        let mut strip = LayoutStrip::default();
+        for &e in &entities {
+            strip.append(e);
+        }
+        strip.stack(entities[1]).unwrap();
+        strip.toggle_tabbed_display(entities[1]);
+        assert!(strip.is_tabbed_display(entities[0]));
+
+        strip.remove(entities[1]);
+
+        assert!(
+            !strip.is_tabbed_display(entities[0]),
+            "a lone surviving window can't remain a tabbed display"
+        );
+        let index = strip.index_of(entities[0]).unwrap();
+        assert!(matches!(strip.get(index).unwrap(), Column::Single(_)));
     }
 
     #[test]

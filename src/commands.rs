@@ -102,7 +102,7 @@ pub fn register_commands(app: &mut bevy::app::App) {
     // A default dialect so the mock harness has one; the real app overwrites it
     // once it knows whether a Lua script took over the configuration.
     app.init_resource::<SnippetDialect>();
-    app.add_systems(PreUpdate, copy_window_rule);
+    app.add_systems(PreUpdate, (copy_window_rule, toggle_tabbed_display_handler));
 }
 
 pub fn filter_window_operations<'a, F: Fn(&Operation) -> bool>(
@@ -1446,6 +1446,46 @@ pub fn stack_windows_handler(
         // edge-clamp in reshuffle_layout_strip keeps the strip pinned so the
         // leftmost window touches the left edge and the rightmost the right.
         commands.reshuffle_around(entity);
+    }
+}
+
+/// Toggles the focused window's stack between a normal split display and a
+/// tabbed display (one window visible at a time, sharing the full column
+/// rect — cycle with the existing `Focus` North/South directions). A no-op
+/// on anything that isn't a multi-window `Column::Stack`.
+#[instrument(level = Level::DEBUG, skip_all)]
+pub fn toggle_tabbed_display_handler(
+    mut messages: MessageReader<Event>,
+    windows: Windows,
+    mut active_display: ActiveDisplayMut,
+    mut commands: Commands,
+) {
+    if filter_window_operations(&mut messages, |op| {
+        matches!(op, Operation::ToggleTabbedDisplay)
+    })
+    .next()
+    .is_none()
+    {
+        return;
+    }
+
+    if let Some((_, entity, unmanaged)) = windows
+        .focused()
+        .and_then(|(_, entity)| windows.get_managed(entity))
+        && unmanaged.is_none()
+    {
+        let strip = active_display.active_strip();
+        // `None` means the toggle wasn't applicable (not in a multi-window
+        // Stack) — stay silent rather than reporting it the same way as a
+        // real "turned tabs off", which previously made repeated presses on
+        // a non-stacked window look like a stuck toggle.
+        if let Some(now_tabbed) = strip.toggle_tabbed_display(entity) {
+            commands.reshuffle_around(entity);
+            commands.flash_message(
+                if now_tabbed { "Tabs on" } else { "Tabs off" }.to_string(),
+                1.0,
+            );
+        }
     }
 }
 

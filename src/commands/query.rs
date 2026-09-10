@@ -19,7 +19,7 @@ use crate::ecs::state::{
 use crate::ecs::{ActiveWorkspaceMarker, FocusedMarker, Unmanaged};
 use crate::events::Event;
 use crate::platform::WinID;
-use paneru_shared_types::wire::Response;
+use paneru_shared_types::wire::{self, Response};
 
 /// One connected `paneru subscribe` client.
 ///
@@ -28,7 +28,7 @@ use paneru_shared_types::wire::Response;
 /// learn a subscriber is gone via a plain atomic flag instead of a lock shared
 /// with that task.
 struct Subscriber {
-    channel: Arc<async_mach_ports::Subscriber>,
+    channel: Arc<wire::Subscriber>,
     alive: Arc<AtomicBool>,
 }
 
@@ -439,7 +439,7 @@ fn state_event_broadcast_handler(
                 // The subscriber's process is gone; reaped on the next
                 // broadcast. This is a real signal from the kernel rather than
                 // a write error a merely slow reader would also produce.
-                Err(async_mach_ports::Error::PeerGone) => {
+                Err(wire::Error::PeerGone) => {
                     subscriber.alive.store(false, Ordering::Relaxed);
                     break;
                 }

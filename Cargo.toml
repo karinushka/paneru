@@ -21,7 +21,8 @@ default-members = ["."]
 [workspace.dependencies]
 cfg-if = "1.0.4"
 futures-lite = "2.6"
-async-mach-ports = "0.1"
+async-mach-ports = "0.3"
+rmp-serde = "1.2"
 mlua = { version = "0.12", default-features = false, features = ["serialize"] }
 paneru-lua = { path = "crates/lua" }
 paneru-shared-types = { path = "crates/shared_types" }
@@ -166,6 +167,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ctrlc = { version = "3.5", features = ["termination"] }
 xdg = "3.0"
 mockall = "0.15"
-async-mach-ports = { workspace = true }
 [build-dependencies]
 cfg-if = { workspace = true}

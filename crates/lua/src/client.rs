@@ -10,7 +10,6 @@
 use std::rc::Rc;
 use std::sync::{LazyLock, Mutex};
 
-use async_mach_ports::{RecvPort, SendPort, Sender};
 use mlua::prelude::*;
 use paneru_shared_types::commands::Command;
 use paneru_shared_types::script_state::ScriptStateWrite;
@@ -18,26 +17,23 @@ use paneru_shared_types::script_value::ScriptValue;
 use paneru_shared_types::state::{StateEvent, StateQueryKind};
 use paneru_shared_types::windowset_lua::returned_ops;
 use paneru_shared_types::wire::{
-    Request, Response, ScriptStateRequest, ScriptStateResponse, WriteOutcome,
+    self as wire, Error as WireError, RecvPort, Request, Response, ScriptStateRequest,
+    ScriptStateResponse, SendPort, Sender, WriteOutcome,
 };
 
 /// The active service name, seeded from the shared default and mutable via
 /// `set_service_name`.
-static SERVICE: LazyLock<Mutex<String>> =
-    LazyLock::new(|| Mutex::new(paneru_shared_types::wire::service_name()));
+static SERVICE: LazyLock<Mutex<String>> = LazyLock::new(|| Mutex::new(wire::service_name()));
 
 fn service_name() -> String {
-    SERVICE.lock().map_or_else(
-        |_| paneru_shared_types::wire::SERVICE_NAME.to_string(),
-        |guard| guard.clone(),
-    )
+    SERVICE
+        .lock()
+        .map_or_else(|_| wire::SERVICE_NAME.to_string(), |guard| guard.clone())
 }
 
 fn connect() -> LuaResult<Sender<Request>> {
-    Sender::connect(&service_name()).map_err(|err| match err {
-        async_mach_ports::Error::NotRunning => {
-            LuaError::RuntimeError("paneru is not running".to_string())
-        }
+    wire::connect(&service_name()).map_err(|err| match err {
+        WireError::NotRunning => LuaError::RuntimeError("paneru is not running".to_string()),
         other => LuaError::external(other),
     })
 }
@@ -65,7 +61,7 @@ fn dispatch(_: &Lua, command: Command) -> LuaResult<bool> {
     Ok(true)
 }
 
-fn query_payload(kind: StateQueryKind) -> LuaResult<paneru_shared_types::wire::QueryPayload> {
+fn query_payload(kind: StateQueryKind) -> LuaResult<wire::QueryPayload> {
     match call(&Request::Query(kind))? {
         Response::Query(payload) => Ok(payload),
         other => Err(unexpected(&other)),
@@ -275,7 +271,7 @@ fn subscribe(
         let event = match stream.recv_blocking() {
             Ok(delivery) => delivery.value,
             // The daemon is gone; the subscription ends.
-            Err(async_mach_ports::Error::PeerGone) => break,
+            Err(WireError::PeerGone) => break,
             Err(err) => return Err(LuaError::external(err)),
         };
 

@@ -1,6 +1,6 @@
 use bevy::app::AppExit;
 use bevy::ecs::change_detection::{DetectChanges, DetectChangesMut};
-use bevy::ecs::entity::Entity;
+use bevy::ecs::entity::{Entity, EntityHashMap};
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::query::{Added, Changed, Has, Or, With, Without};
@@ -1314,6 +1314,18 @@ type SettledWindows<'w, 's> = Query<
     ),
 >;
 
+/// Whether the app is showing `window_id` right now.
+///
+/// Two signals, because neither alone covers a native tab: the window server
+/// stops listing a window it has ordered out, and an app drops a background tab
+/// from its accessibility list while the window server still calls that tab on
+/// screen. Ghostty does the latter. An empty accessibility list is an app that
+/// did not answer, not an app showing nothing.
+fn app_shows_window(ax_window_ids: &[WinID], on_screen: &[WinID], window_id: WinID) -> bool {
+    on_screen.contains(&window_id)
+        && (ax_window_ids.is_empty() || ax_window_ids.contains(&window_id))
+}
+
 /// Folds a background native tab that ended up in a column of its own back into
 /// the column of the tab that is actually showing.
 ///
@@ -1324,12 +1336,13 @@ type SettledWindows<'w, 's> = Query<
 /// there is nothing there.
 ///
 /// Deliberately narrow. Two managed windows of one app share a frame exactly
-/// only when they share a column, which is what this is repairing, and the
-/// window server reports a background tab as not on screen while an occluded
-/// window still counts as on screen.
+/// only when they share a column, which is what this is repairing, and
+/// [`app_shows_window`] is what tells a background tab from a window the user
+/// can see.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn regroup_stray_native_tabs(
     windows: SettledWindows,
+    apps: Query<&Application>,
     mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     window_manager: Res<WindowManager>,
     mission_control: Res<MissionControlActive>,
@@ -1360,36 +1373,45 @@ pub(crate) fn regroup_stray_native_tabs(
             Column::Stack(_) | Column::Tabs(_) | Column::Fullscren(_) => None,
         })
         .collect::<Vec<_>>();
+    // One accessibility round trip per app, not per window: this runs on a timer
+    // and the call crosses into the app.
+    let mut ax_windows: EntityHashMap<Vec<WinID>> = EntityHashMap::default();
     let columns = tops
         .into_iter()
         .filter_map(|entity| windows.get(entity).ok())
         .map(
             |(entity, window, Position(position), Bounds(bounds), child)| {
+                let app = child.parent();
+                let ax_window_ids = ax_windows.entry(app).or_insert_with(|| {
+                    apps.get(app)
+                        .map(|app| app.ax_window_ids())
+                        .unwrap_or_default()
+                });
                 (
                     entity,
-                    on_screen.contains(&window.id()),
+                    app_shows_window(ax_window_ids, &on_screen, window.id()),
                     *position,
                     *bounds,
-                    child.parent(),
+                    app,
                 )
             },
         )
         .collect::<Vec<_>>();
 
     let mut regrouped = Vec::new();
-    for (hidden, on_screen_now, position, bounds, app) in &columns {
-        if *on_screen_now || regrouped.contains(hidden) || !strays.contains(hidden) {
+    for (hidden, showing, position, bounds, app) in &columns {
+        if *showing || regrouped.contains(hidden) || !strays.contains(hidden) {
             continue;
         }
         let Some((leader, ..)) = columns.iter().find(
             |(
                 candidate,
-                candidate_on_screen,
+                candidate_showing,
                 candidate_position,
                 candidate_bounds,
                 candidate_app,
             )| {
-                *candidate_on_screen
+                *candidate_showing
                     && candidate != hidden
                     && candidate_app == app
                     && candidate_position.chebyshev_distance(*position) <= 1
@@ -1417,7 +1439,7 @@ pub(crate) fn regroup_stray_native_tabs(
 pub(crate) fn detect_tabbed_windows(
     created: Populated<(Entity, &Position, &Bounds, &ChildOf), Added<Window>>,
     windows: Query<(Entity, &Window, &Position, &Bounds, &ChildOf), With<Window>>,
-    apps: Query<Entity, With<Application>>,
+    apps: Query<(Entity, &Application)>,
     mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     window_manager: Res<WindowManager>,
     active_display: Single<&Display, With<ActiveDisplayMarker>>,
@@ -1432,9 +1454,13 @@ pub(crate) fn detect_tabbed_windows(
     };
 
     for (entity, Position(position), Bounds(bounds), child) in created {
-        let Ok(app_entity) = apps.get(child.parent()) else {
+        let Ok((app_entity, app)) = apps.get(child.parent()) else {
             continue;
         };
+        let on_screen = window_manager.windows_on_screen().unwrap_or_default();
+        let ax_window_ids = app.ax_window_ids();
+        // A leader the app has stopped showing is the tab this one replaced.
+        let hidden_leader = |leader_id| !app_shows_window(&ax_window_ids, &on_screen, leader_id);
 
         // First find all the windows which have the same size and the same parent app.
         // .. and in the same workspace.
@@ -1452,8 +1478,11 @@ pub(crate) fn detect_tabbed_windows(
         let tabbed = same_size
             .iter()
             .find_map(|(leader, window, Position(leader_position), _, _)| {
-                // If the window has a positional match, it's tabbed!
-                (leader_position.chebyshev_distance(*position) <= 1)
+                // If the window has a positional match, it's tabbed! The hidden
+                // test belongs here rather than after the search: a group the
+                // app is already showing one member of would otherwise be
+                // picked and then rejected, hiding the sibling that matches.
+                (leader_position.chebyshev_distance(*position) <= 1 && hidden_leader(window.id()))
                     .then_some((*leader, window.id()))
             })
             .or_else(|| {
@@ -1473,9 +1502,7 @@ pub(crate) fn detect_tabbed_windows(
             });
 
         if let Some((leader, leader_id)) = tabbed
-            && window_manager
-                .windows_on_screen()
-                .is_some_and(|ids| !ids.contains(&leader_id))
+            && hidden_leader(leader_id)
             && let Some((mut strip, _)) =
                 workspaces.iter_mut().find(|strip| strip.0.contains(leader))
             && strip.contains(leader)

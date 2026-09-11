@@ -803,6 +803,82 @@ fn test_stray_background_tab_is_folded_into_the_visible_tab() {
     assert!(strip.tabbed(leader));
 }
 
+/// Ghostty keeps every background tab in the window server's on-screen list,
+/// so "not on screen" never becomes true and the fold above cannot fire. What
+/// it does do is drop the background tab from its accessibility window list,
+/// which is the signal this leans on instead.
+#[test]
+fn test_on_screen_background_tab_is_folded_into_the_visible_tab() {
+    use bevy::ecs::system::RunSystemOnce as _;
+
+    use crate::ecs::{Bounds, Position};
+
+    let mut harness = TestHarness::new().with_windows(2);
+    for _ in 0..3 {
+        harness.app.update();
+    }
+
+    // Both windows stay on screen, exactly as the window server reports a
+    // Ghostty tab group. Only the app's accessibility list tells them apart.
+    harness.mock_state.set_background_tab(1, true);
+
+    let world = harness.app.world_mut();
+    let leader = find_window_entity(0, world);
+    let background = find_window_entity(1, world);
+    let position = world.get::<Position>(leader).expect("a position").clone();
+    let bounds = world.get::<Bounds>(leader).expect("bounds").clone();
+    world.entity_mut(background).insert((position, bounds));
+
+    {
+        let mut strips = world.query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>();
+        let strip = strips.single(world).expect("one active strip");
+        assert_eq!(strip.len(), 2, "the tabs start out in columns of their own");
+    }
+
+    world
+        .run_system_once(crate::ecs::systems::regroup_stray_native_tabs)
+        .expect("the regrouping system runs");
+
+    let mut strips = world.query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>();
+    let strip = strips.single(world).expect("one active strip");
+    assert_eq!(strip.len(), 1, "the stray column is gone");
+    assert!(strip.tabbed(background), "the background tab is a tab now");
+    assert!(strip.tabbed(leader));
+}
+
+/// An app that does not answer an accessibility window list query must not be
+/// read as showing nothing: every window of that app would fold into one
+/// column.
+#[test]
+fn test_silent_accessibility_list_does_not_fold_visible_windows() {
+    use bevy::ecs::system::RunSystemOnce as _;
+
+    use crate::ecs::{Bounds, Position};
+
+    let mut harness = TestHarness::new().with_windows(2);
+    for _ in 0..3 {
+        harness.app.update();
+    }
+
+    harness.mock_state.set_background_tab(0, true);
+    harness.mock_state.set_background_tab(1, true);
+
+    let world = harness.app.world_mut();
+    let leader = find_window_entity(0, world);
+    let other = find_window_entity(1, world);
+    let position = world.get::<Position>(leader).expect("a position").clone();
+    let bounds = world.get::<Bounds>(leader).expect("bounds").clone();
+    world.entity_mut(other).insert((position, bounds));
+
+    world
+        .run_system_once(crate::ecs::systems::regroup_stray_native_tabs)
+        .expect("the regrouping system runs");
+
+    let mut strips = world.query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>();
+    let strip = strips.single(world).expect("one active strip");
+    assert_eq!(strip.len(), 2, "both windows keep their own column");
+}
+
 /// An app with native tabs answers "which window is focused?" with whichever
 /// member of the tab group it decided to show, so the id on a focus event can
 /// already be out of date. Paneru has to follow the app to that window; drop

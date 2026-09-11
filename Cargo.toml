@@ -144,6 +144,10 @@ objc2-core-foundation = { version = "0.3", features = ["CFRunLoop"] }
 objc2-core-graphics = "0.3"
 paneru-shared-types = { workspace = true }
 paneru-lua = { workspace = true, optional = true }
+spyglass = { path = "../spyglass/crates/spyglass", default-features = false, features = [
+  "skylight","accessibility","appkit","cg-display","event-tap","mach","serde","proven"
+] }
+spyglass-macros = { path = "../spyglass/crates/spyglass-macros" }
 objc2-quartz-core = { version = "0.3", features = [
   "CALayer",
   "objc2-core-foundation",

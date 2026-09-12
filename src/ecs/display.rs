@@ -63,6 +63,7 @@ type RefreshedWindows<'w, 's> = Query<
         Entity,
         &'static mut Window,
         &'static mut LayoutPosition,
+        &'static mut Position,
         &'static mut Bounds,
         Option<&'static Unmanaged>,
     ),
@@ -230,8 +231,14 @@ fn retile_changed_viewports(
                 .unwrap_or_default();
 
             for entity in strip.all_windows() {
-                let Ok((_, ref mut window, ref mut layout_position, ref mut bounds, _)) =
-                    windows.get_mut(entity)
+                let Ok((
+                    _,
+                    ref mut window,
+                    ref mut layout_position,
+                    ref mut position,
+                    ref mut bounds,
+                    _,
+                )) = windows.get_mut(entity)
                 else {
                     continue;
                 };
@@ -241,6 +248,12 @@ fn retile_changed_viewports(
                 let Ok(frame) = window.update_frame() else {
                     continue;
                 };
+                // AppKit pushes a window it can no longer fit up against the
+                // top of the visible area. The layout still holds the right
+                // origin, but nothing resends an origin that did not change.
+                if frame.min != position.0 {
+                    position.set_changed();
+                }
                 let (full_width, focused) = window_state.get(entity).unwrap_or_default();
                 let width = if full_width {
                     viewport.width()
@@ -263,7 +276,7 @@ fn retile_changed_viewports(
                 .filter_map(|window_id| {
                     windows
                         .iter()
-                        .find_map(|(entity, window, _, _, unmanaged)| {
+                        .find_map(|(entity, window, _, _, _, unmanaged)| {
                             (window_id == window.id())
                                 .then_some(unmanaged.zip(Some((entity, window.frame()))))
                         })

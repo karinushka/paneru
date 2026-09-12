@@ -779,6 +779,39 @@ fn test_dock_appearing_retiles_the_active_workspace() {
 }
 
 #[test]
+fn test_dock_appearing_puts_back_a_window_appkit_pushed_up() {
+    let mut harness = TestHarness::new().with_windows(1);
+    harness.advance(Duration::from_secs(1));
+    assert_window_at!(harness.world(), 0, 0, TEST_MENUBAR_HEIGHT);
+
+    // AppKit keeps a window inside the new visible area by shoving it up
+    // against the menubar before the Dock has finished appearing.
+    harness.mock_state.update_window(0, |data| {
+        let size = data.frame.size();
+        data.frame.min.y = TEST_MENUBAR_HEIGHT - 8;
+        data.frame.max = data.frame.min + size;
+    });
+    let display = harness
+        .world()
+        .query_filtered::<Entity, With<Display>>()
+        .single(harness.world())
+        .expect("display");
+    harness
+        .world()
+        .entity_mut(display)
+        .insert(DockPosition::Bottom(80));
+    harness.advance(Duration::from_secs(1));
+
+    assert_window_at!(harness.world(), 0, 0, TEST_MENUBAR_HEIGHT);
+    assert_window_size!(
+        harness.world(),
+        0,
+        TEST_WINDOW_WIDTH,
+        TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT - 80
+    );
+}
+
+#[test]
 fn test_hiding_the_menubar_gives_the_strip_the_top_edge() {
     let mut harness = TestHarness::new().with_windows(1);
     harness.advance(Duration::from_secs(1));

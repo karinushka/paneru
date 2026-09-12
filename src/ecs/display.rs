@@ -9,7 +9,7 @@ use bevy::ecs::observer::On;
 use bevy::ecs::query::{Changed, Has, Or, With, Without};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::system::ResMut;
-use bevy::ecs::system::{Commands, Local, NonSend, Populated, Query, Res};
+use bevy::ecs::system::{Commands, Local, NonSend, Query, Res};
 use bevy::math::IRect;
 use bevy::platform::collections::HashSet;
 use bevy::time::Time;
@@ -47,6 +47,11 @@ const CHROME_POLL: Duration = Duration::from_millis(250);
 struct ChromeWatch {
     settling: Duration,
     since_read: Duration,
+    /// Set on the tick a chrome event lands and again when the watch expires.
+    /// The refresh runs on both regardless of whether the usable area came out
+    /// different, because macOS moves windows during the transition even when
+    /// the area it leaves them ends up the same.
+    force: bool,
 }
 
 /// Windows as a viewport change needs them: the live frame to re-read, and the
@@ -66,8 +71,7 @@ type RefreshedWindows<'w, 's> = Query<
 
 /// Displays whose geometry was touched this tick, either the display itself or
 /// the edge the Dock sits on.
-type ResurveyedDisplays<'w, 's> =
-    Populated<'w, 's, Entity, Or<(Changed<Display>, Changed<DockPosition>)>>;
+type ResurveyedDisplays<'w, 's> = Query<'w, 's, (), Or<(Changed<Display>, Changed<DockPosition>)>>;
 
 pub struct DisplayEventsPlugin;
 
@@ -154,15 +158,18 @@ fn chrome_change_handler(
     }) {
         watch.settling = CHROME_SETTLE;
         watch.since_read = CHROME_POLL;
+        watch.force = true;
     } else if watch.settling.is_zero() {
+        watch.force = false;
         return;
     } else {
         let delta = clock.delta();
         watch.settling = watch.settling.saturating_sub(delta);
         watch.since_read = watch.since_read.saturating_add(delta);
+        watch.force = watch.settling.is_zero();
     }
 
-    if watch.since_read < CHROME_POLL {
+    if watch.since_read < CHROME_POLL && !watch.force {
         return;
     }
     watch.since_read = Duration::ZERO;
@@ -179,7 +186,7 @@ fn chrome_change_handler(
 #[instrument(level = Level::DEBUG, skip_all)]
 fn retile_changed_viewports(
     touched: ResurveyedDisplays,
-    displays: Query<(&Display, Option<&DockPosition>)>,
+    displays: Query<(Entity, &Display, Option<&DockPosition>)>,
     mut strips: Query<(&mut LayoutStrip, &mut Position, &ChildOf), With<ActiveWorkspaceMarker>>,
     mut windows: RefreshedWindows,
     window_state: Query<(Has<FullWidthMarker>, Has<FocusedMarker>), With<Window>>,
@@ -189,22 +196,23 @@ fn retile_changed_viewports(
     mut viewports: Local<HashMap<Entity, IRect>>,
     mut commands: Commands,
 ) {
+    if !watch.force && watch.settling.is_zero() && touched.is_empty() {
+        return;
+    }
     viewports.retain(|entity, _| displays.contains(*entity));
-    for display_entity in touched {
-        let Ok((display, dock)) = displays.get(display_entity) else {
-            continue;
-        };
+    for (display_entity, display, dock) in displays {
         let viewport = display.actual_display_bounds(dock, &config);
-        if viewports
-            .insert(display_entity, viewport)
-            .is_none_or(|previous| previous == viewport)
-        {
+        let previous = viewports.insert(display_entity, viewport);
+        let moved = previous.is_some_and(|previous| previous != viewport);
+        if !moved && !watch.force {
             continue;
         }
-        let display_id = display.id();
-        debug!("display {display_id} usable area is now {viewport:?}");
-        // The area just moved, so another move may still be coming.
-        watch.settling = CHROME_SETTLE;
+        if moved {
+            let display_id = display.id();
+            debug!("display {display_id} usable area is now {viewport:?}");
+            // The area just moved, so another move may still be coming.
+            watch.settling = CHROME_SETTLE;
+        }
 
         for (mut strip, mut position, child) in &mut strips {
             if child.parent() != display_entity {

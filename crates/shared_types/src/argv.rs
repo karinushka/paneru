@@ -93,6 +93,7 @@ fn parse_operation(argv: &[&str]) -> Result<Operation> {
         "balance" => Operation::Balance,
         "stack" => Operation::Stack(true),
         "unstack" => Operation::Stack(false),
+        "tabbeddisplay" => Operation::ToggleTabbedDisplay,
         "nextdisplay" => Operation::ToNextDisplay(MoveFocus::Follow),
         "nextdisplaysend" => Operation::ToNextDisplay(MoveFocus::Stay),
         "snap" => Operation::Snap,
@@ -195,6 +196,7 @@ impl Operation {
             Operation::Manage => owned(&["manage"]),
             Operation::Stack(true) => owned(&["stack"]),
             Operation::Stack(false) => owned(&["unstack"]),
+            Operation::ToggleTabbedDisplay => owned(&["tabbeddisplay"]),
             Operation::Snap => owned(&["snap"]),
             Operation::Virtual(direction) => vec!["virtual".to_string(), direction.token()],
             Operation::FocusOrVirtual(direction) => {
@@ -253,6 +255,7 @@ mod tests {
             Operation::Manage,
             Operation::Stack(true),
             Operation::Stack(false),
+            Operation::ToggleTabbedDisplay,
             Operation::Snap,
             Operation::Virtual(Direction::First),
             Operation::FocusOrVirtual(Direction::North),

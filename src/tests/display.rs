@@ -1,3 +1,5 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use bevy::prelude::*;
@@ -733,4 +735,95 @@ fn test_hidden_menu_bar_retains_notch_and_configured_insets() {
     assert_eq!(display.bounds().min.y, 32);
     display.set_menubar_height_override(Some(48));
     assert_eq!(display.bounds().min.y, 48);
+}
+
+#[test]
+fn test_dock_appearing_retiles_the_active_workspace() {
+    let mut harness = TestHarness::new().with_windows(1);
+    harness.advance(Duration::from_secs(1));
+    let display = harness
+        .world()
+        .query_filtered::<Entity, With<Display>>()
+        .single(harness.world())
+        .expect("display");
+    assert_window_size!(
+        harness.world(),
+        0,
+        TEST_WINDOW_WIDTH,
+        TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT
+    );
+
+    harness
+        .world()
+        .entity_mut(display)
+        .insert(DockPosition::Bottom(80));
+    harness.advance(Duration::from_secs(1));
+    assert_window_size!(
+        harness.world(),
+        0,
+        TEST_WINDOW_WIDTH,
+        TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT - 80
+    );
+
+    harness
+        .world()
+        .entity_mut(display)
+        .insert(DockPosition::Hidden);
+    harness.advance(Duration::from_secs(1));
+    assert_window_size!(
+        harness.world(),
+        0,
+        TEST_WINDOW_WIDTH,
+        TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT
+    );
+}
+
+#[test]
+fn test_hiding_the_menubar_gives_the_strip_the_top_edge() {
+    let mut harness = TestHarness::new().with_windows(1);
+    harness.advance(Duration::from_secs(1));
+    assert_window_at!(harness.world(), 0, 0, TEST_MENUBAR_HEIGHT);
+
+    let display = harness
+        .world()
+        .query_filtered::<Entity, With<Display>>()
+        .single(harness.world())
+        .expect("display");
+    harness
+        .world()
+        .get_mut::<Display>(display)
+        .expect("display component")
+        .set_menubar_height(0);
+    harness.advance(Duration::from_secs(1));
+
+    assert_window_at!(harness.world(), 0, 0, 0);
+    assert_window_size!(harness.world(), 0, TEST_WINDOW_WIDTH, TEST_DISPLAY_HEIGHT);
+}
+
+#[test]
+fn test_chrome_events_re_read_the_geometry_until_it_settles() {
+    let mut harness = TestHarness::new().with_windows(1);
+    harness.advance(Duration::from_secs(1));
+
+    let reads = Arc::new(AtomicUsize::new(0));
+    let observed = reads.clone();
+    harness
+        .app
+        .add_observer(move |_: On<crate::ecs::ReadDisplayProperties>| {
+            observed.fetch_add(1, Ordering::Relaxed);
+        });
+
+    harness
+        .world()
+        .write_message(Event::ScreenParametersChanged);
+    harness.app.update();
+    assert_eq!(reads.load(Ordering::Relaxed), 1);
+
+    // AppKit updates visibleFrame after the notification, so the reads keep
+    // coming for the settling window and then stop.
+    harness.advance(Duration::from_millis(750));
+    let settled = reads.load(Ordering::Relaxed);
+    assert!(settled > 1, "expected repeated reads, got {settled}");
+    harness.advance(Duration::from_secs(1));
+    assert_eq!(reads.load(Ordering::Relaxed), settled);
 }

@@ -255,7 +255,8 @@ impl TryFrom<&Event> for LuaEvent {
             | Event::StateQuery { .. }
             | Event::WindowSetQuery { .. }
             | Event::StateSubscribe { .. }
-            | Event::ScriptState { .. } => return Err(NotMarshallable),
+            | Event::ScriptState { .. }
+            | Event::ScreenParametersChanged => return Err(NotMarshallable),
         })
     }
 }
@@ -508,5 +509,6 @@ mod tests {
             )
             .is_none()
         );
+        assert!(event_to_lua(&lua, &Event::ScreenParametersChanged).is_none());
     }
 }

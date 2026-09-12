@@ -108,7 +108,9 @@ impl Display {
         } else if visible_frame.width() < self.bounds.width() {
             DockPosition::Right(self.bounds.max.x - visible_frame.max.x)
         } else if visible_frame.height() < self.bounds.height() - self.menubar_height {
-            DockPosition::Bottom(self.bounds.height() - visible_frame.height() - self.menubar_height)
+            DockPosition::Bottom(
+                self.bounds.height() - visible_frame.height() - self.menubar_height,
+            )
         } else {
             DockPosition::Hidden
         }

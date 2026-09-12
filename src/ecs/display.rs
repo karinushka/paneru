@@ -1,14 +1,16 @@
 use bevy::app::{App, Plugin, PreUpdate, Update};
+use bevy::ecs::change_detection::DetectChangesMut;
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::lifecycle::Add;
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::observer::On;
-use bevy::ecs::query::{Has, With};
-use bevy::ecs::system::{Commands, Local, NonSend, Query, Res};
+use bevy::ecs::query::{Changed, Has, Or, With};
+use bevy::ecs::system::{Commands, Local, NonSend, Populated, Query, Res};
 use bevy::math::IRect;
 use bevy::platform::collections::HashSet;
+use bevy::time::Time;
 use objc2_app_kit::NSScreen;
 use objc2_core_graphics::CGDirectDisplayID;
 use std::collections::HashMap;
@@ -19,7 +21,8 @@ use tracing::{Level, debug, error, instrument, warn};
 use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::{
-    ActiveDisplayMarker, ReadDisplayProperties, SendMessageTrigger, SpawnCommandsExt, Timeout,
+    ActiveDisplayMarker, ActiveWorkspaceMarker, DockPosition, Position, ReadDisplayProperties,
+    SendMessageTrigger, SpawnCommandsExt, Timeout,
 };
 use crate::events::Event;
 use crate::manager::{Display, WindowManager, irect_from};
@@ -28,12 +31,17 @@ use crate::util::{read_screen_property, round_px};
 
 const ORPHANED_SPACES_TIMEOUT_SEC: u64 = 30;
 
+/// Displays whose geometry was touched this tick, either the display itself or
+/// the edge the Dock sits on.
+type ResurveyedDisplays<'w, 's> =
+    Populated<'w, 's, Entity, Or<(Changed<Display>, Changed<DockPosition>)>>;
+
 pub struct DisplayEventsPlugin;
 
 impl Plugin for DisplayEventsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(PreUpdate, display_change_handler);
-        app.add_systems(Update, reconcile_displays)
+        app.add_systems(PreUpdate, (display_change_handler, chrome_change_handler));
+        app.add_systems(Update, (reconcile_displays, retile_changed_viewports))
             .add_observer(read_display_properties_trigger)
             .add_observer(cleanup_active_display_marker);
     }
@@ -87,6 +95,81 @@ fn display_change_handler(
         }
     }
     commands.trigger(SendMessageTrigger(Event::SpaceChanged));
+}
+
+/// Toggling Dock or menubar auto-hide changes `visibleFrame` without raising a
+/// display event, so nothing would re-read the geometry. The notification also
+/// lands before `AppKit` has updated `visibleFrame`, hence the settling window
+/// rather than a single read; `retile_changed_viewports` reacts once the usable
+/// area actually moves.
+fn chrome_change_handler(
+    mut messages: MessageReader<Event>,
+    mut settling: Local<Duration>,
+    clock: Res<Time>,
+    displays: Query<Entity, With<Display>>,
+    mut commands: Commands,
+) {
+    const CHROME_SETTLE: Duration = Duration::from_millis(750);
+
+    if messages.read().any(|event| {
+        matches!(
+            event,
+            Event::ScreenParametersChanged
+                | Event::MenuBarHiddenChanged { .. }
+                | Event::DockDidChangePref { .. }
+                | Event::DockDidRestart { .. }
+        )
+    }) {
+        *settling = CHROME_SETTLE;
+    } else if settling.is_zero() {
+        return;
+    } else {
+        *settling = settling.saturating_sub(clock.delta());
+    }
+
+    for entity in displays {
+        commands.trigger(ReadDisplayProperties(entity));
+    }
+}
+
+/// Re-tiles the active workspace of any display whose usable area moved. Both
+/// the menubar and the Dock can take or give back space without a display event
+/// behind it, so the strip keeps its old viewport until something recomputes
+/// it, and meanwhile macOS is free to shove the windows around itself.
+#[instrument(level = Level::DEBUG, skip_all)]
+fn retile_changed_viewports(
+    touched: ResurveyedDisplays,
+    displays: Query<(&Display, Option<&DockPosition>)>,
+    mut strips: Query<(&mut LayoutStrip, &mut Position, &ChildOf), With<ActiveWorkspaceMarker>>,
+    config: Res<Config>,
+    mut viewports: Local<HashMap<Entity, IRect>>,
+) {
+    viewports.retain(|entity, _| displays.contains(*entity));
+    for display_entity in touched {
+        let Ok((display, dock)) = displays.get(display_entity) else {
+            continue;
+        };
+        let viewport = display.actual_display_bounds(dock, &config);
+        if viewports
+            .insert(display_entity, viewport)
+            .is_none_or(|previous| previous == viewport)
+        {
+            continue;
+        }
+        let display_id = display.id();
+        debug!("display {display_id} usable area is now {viewport:?}");
+        for (mut strip, mut position, child) in &mut strips {
+            if child.parent() != display_entity {
+                continue;
+            }
+            // The strip origin carries the menubar inset, and marking the strip
+            // re-binpacks the columns into the height that is left.
+            if position.0.y != viewport.min.y {
+                position.0.y = viewport.min.y;
+            }
+            strip.set_changed();
+        }
+    }
 }
 
 /// Full reconciliation of the ECS display set against the OS truth.

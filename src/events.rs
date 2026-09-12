@@ -191,6 +191,8 @@ pub enum Event {
     MenuClosed { window_id: WinID },
     /// The visibility of the menu bar has changed.
     MenuBarHiddenChanged { msg: String },
+    /// The screen layout or its usable area has changed.
+    ScreenParametersChanged,
     /// The system has woken from sleep.
     SystemWoke { msg: String },
 

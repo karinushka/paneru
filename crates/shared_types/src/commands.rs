@@ -242,6 +242,11 @@ pub enum Operation {
     Manage,
     /// Stacks or unstacks a window. The boolean indicates whether to stack (`true`) or unstack (`false`).
     Stack(bool),
+    /// Toggles the focused window's stack between a normal split display
+    /// (all windows visible, sharing height) and a tabbed display (one
+    /// window visible at a time, sharing the full column). Cycle tabs with
+    /// the existing `Focus` North/South directions.
+    ToggleTabbedDisplay,
     /// Resizes and repositions the focused window to fit within the visible viewport
     /// (including edge padding).
     Snap,

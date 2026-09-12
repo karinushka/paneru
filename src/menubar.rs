@@ -603,7 +603,9 @@ impl MenuBarManager {
         image_view.setImage(Some(&image));
         image_view.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
         image_view.setFrameSize(scaled);
-        image_view.setContentTintColor(Some(&*NSColor::whiteColor()));
+        if config.menubar_has_external_gradient() {
+            image_view.setContentTintColor(Some(&*NSColor::whiteColor()));
+        }
         Some(image_view)
     }
 

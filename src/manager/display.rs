@@ -107,10 +107,8 @@ impl Display {
             DockPosition::Left(visible_frame.min.x - self.bounds.min.x)
         } else if visible_frame.width() < self.bounds.width() {
             DockPosition::Right(self.bounds.max.x - visible_frame.max.x)
-        } else if visible_frame.height() < self.bounds.height() - self.menubar_height() {
-            DockPosition::Bottom(
-                self.bounds.height() - visible_frame.height() - self.menubar_height(),
-            )
+        } else if visible_frame.height() < self.bounds.height() - self.menubar_height {
+            DockPosition::Bottom(self.bounds.height() - visible_frame.height() - self.menubar_height)
         } else {
             DockPosition::Hidden
         }
@@ -130,6 +128,10 @@ impl Display {
         self.menubar_height_override
             .unwrap_or(self.menubar_height)
             .max(self.notch_height)
+    }
+
+    pub fn set_menubar_height(&mut self, height: i32) {
+        self.menubar_height = height;
     }
 
     pub fn set_menubar_height_override(&mut self, height: Option<i32>) {

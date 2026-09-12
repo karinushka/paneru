@@ -715,3 +715,22 @@ fn test_empty_baseline_row_survives_display_removal() {
         })
         .run(commands);
 }
+
+#[test]
+fn test_dock_height_is_independent_of_menu_bar_override() {
+    let mut display = Display::new(1, IRect::new(0, 0, 1024, 768), 20);
+    display.set_menubar_height_override(Some(40));
+    let dock = display.locate_dock(&IRect::new(0, 80, 1024, 748));
+    assert!(matches!(dock, DockPosition::Bottom(80)), "{dock:?}");
+}
+
+#[test]
+fn test_hidden_menu_bar_retains_notch_and_configured_insets() {
+    let mut display = Display::new(1, IRect::new(0, 0, 1024, 768), 24);
+    display.set_menubar_height(0);
+    assert_eq!(display.bounds().min.y, 0);
+    display.set_notch_height(32);
+    assert_eq!(display.bounds().min.y, 32);
+    display.set_menubar_height_override(Some(48));
+    assert_eq!(display.bounds().min.y, 48);
+}

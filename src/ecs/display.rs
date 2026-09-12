@@ -380,6 +380,19 @@ fn read_display_properties_trigger(
         display.set_notch_height(height);
     }
 
+    // SLSGetDisplayMenubarHeight keeps reporting the nominal height while the
+    // menubar is set to auto-hide. The gap between frame and visibleFrame is
+    // what actually occupies the top edge, and it is zero while it is hidden.
+    let menubar = read_screen_property(&screens, display_id, |screen| {
+        let frame = screen.frame();
+        let visible = screen.visibleFrame();
+        round_px((frame.origin.y + frame.size.height) - (visible.origin.y + visible.size.height))
+    });
+    if let Some(height) = menubar {
+        debug!("menubar inset on display {display_id}: {height}");
+        display.set_menubar_height(height);
+    }
+
     let dock = read_screen_property(&screens, display_id, |screen| {
         let visible_frame = irect_from(screen.visibleFrame());
         display.locate_dock(&visible_frame)

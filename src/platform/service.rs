@@ -7,6 +7,7 @@ use std::{
 
 use tracing::{info, warn};
 
+use crate::platform::codesign;
 use crate::util::exe_path;
 
 /// The bundle identifier for the `paneru` service.
@@ -87,14 +88,26 @@ impl Service {
                 "existing launch agent detected at `{}`, skipping installation",
                 plist_path.display()
             );
+            self.sign_binary();
             return Ok(());
         }
+
+        self.sign_binary();
 
         let mut plist = fs::File::create(plist_path)?;
         plist.write_all(self.launchd_plist().as_bytes())?;
         info!("installed launch agent to `{}`", plist_path.display());
         info!("check logfile /tmp/com.github.karinushka.paneru*.log for potential error messages");
         Ok(())
+    }
+
+    /// Signs the binary the launch agent runs. A failure here is never fatal:
+    /// the service still installs, it just keeps whatever signature it had.
+    fn sign_binary(&self) {
+        let identity = codesign::identity();
+        if let Err(err) = codesign::sign(&self.bin_path, codesign::SERVICE_IDENTIFIER, &identity) {
+            warn!("could not sign `{}`: {err}", self.bin_path.display());
+        }
     }
 
     /// Uninstalls the service by removing its plist file.

@@ -6,7 +6,9 @@ use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::lifecycle::Add;
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::observer::On;
-use bevy::ecs::query::{Changed, Has, Or, With};
+use bevy::ecs::query::{Changed, Has, Or, With, Without};
+use bevy::ecs::resource::Resource;
+use bevy::ecs::system::ResMut;
 use bevy::ecs::system::{Commands, Local, NonSend, Populated, Query, Res};
 use bevy::math::IRect;
 use bevy::platform::collections::HashSet;
@@ -20,16 +22,47 @@ use tracing::{Level, debug, error, instrument, warn};
 
 use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
+use crate::ecs::layout::clamp_origin_to_viewport;
 use crate::ecs::{
-    ActiveDisplayMarker, ActiveWorkspaceMarker, DockPosition, Position, ReadDisplayProperties,
-    SendMessageTrigger, SpawnCommandsExt, Timeout,
+    ActiveDisplayMarker, ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker,
+    FullWidthMarker, LayoutPosition, Position, ReadDisplayProperties, ResizeMarker,
+    SendMessageTrigger, SpawnCommandsExt, Timeout, Unmanaged,
 };
 use crate::events::Event;
-use crate::manager::{Display, WindowManager, irect_from};
+use crate::manager::{Display, Size, Window, WindowManager, irect_from};
 use crate::platform::{PlatformCallbacks, WorkspaceId};
 use crate::util::{read_screen_property, round_px};
 
 const ORPHANED_SPACES_TIMEOUT_SEC: u64 = 30;
+
+/// How long the geometry is re-read after a chrome change, and how often. The
+/// Dock can take several seconds to report its new size, well past the
+/// notification that announced it, so the watch outlives the event by a wide
+/// margin and [`retile_changed_viewports`] re-arms it whenever the usable area
+/// actually moves.
+const CHROME_SETTLE: Duration = Duration::from_secs(10);
+const CHROME_POLL: Duration = Duration::from_millis(250);
+
+#[derive(Default, Resource)]
+struct ChromeWatch {
+    settling: Duration,
+    since_read: Duration,
+}
+
+/// Windows as a viewport change needs them: the live frame to re-read, and the
+/// layout fields that are overwritten from it.
+type RefreshedWindows<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static mut Window,
+        &'static mut LayoutPosition,
+        &'static mut Bounds,
+        Option<&'static Unmanaged>,
+    ),
+    Without<LayoutStrip>,
+>;
 
 /// Displays whose geometry was touched this tick, either the display itself or
 /// the edge the Dock sits on.
@@ -40,6 +73,7 @@ pub struct DisplayEventsPlugin;
 
 impl Plugin for DisplayEventsPlugin {
     fn build(&self, app: &mut App) {
+        app.init_resource::<ChromeWatch>();
         app.add_systems(PreUpdate, (display_change_handler, chrome_change_handler));
         app.add_systems(Update, (reconcile_displays, retile_changed_viewports))
             .add_observer(read_display_properties_trigger)
@@ -104,13 +138,11 @@ fn display_change_handler(
 /// area actually moves.
 fn chrome_change_handler(
     mut messages: MessageReader<Event>,
-    mut settling: Local<Duration>,
+    mut watch: ResMut<ChromeWatch>,
     clock: Res<Time>,
     displays: Query<Entity, With<Display>>,
     mut commands: Commands,
 ) {
-    const CHROME_SETTLE: Duration = Duration::from_millis(750);
-
     if messages.read().any(|event| {
         matches!(
             event,
@@ -120,13 +152,20 @@ fn chrome_change_handler(
                 | Event::DockDidRestart { .. }
         )
     }) {
-        *settling = CHROME_SETTLE;
-    } else if settling.is_zero() {
+        watch.settling = CHROME_SETTLE;
+        watch.since_read = CHROME_POLL;
+    } else if watch.settling.is_zero() {
         return;
     } else {
-        *settling = settling.saturating_sub(clock.delta());
+        let delta = clock.delta();
+        watch.settling = watch.settling.saturating_sub(delta);
+        watch.since_read = watch.since_read.saturating_add(delta);
     }
 
+    if watch.since_read < CHROME_POLL {
+        return;
+    }
+    watch.since_read = Duration::ZERO;
     for entity in displays {
         commands.trigger(ReadDisplayProperties(entity));
     }
@@ -136,13 +175,19 @@ fn chrome_change_handler(
 /// the menubar and the Dock can take or give back space without a display event
 /// behind it, so the strip keeps its old viewport until something recomputes
 /// it, and meanwhile macOS is free to shove the windows around itself.
+#[allow(clippy::too_many_arguments)]
 #[instrument(level = Level::DEBUG, skip_all)]
 fn retile_changed_viewports(
     touched: ResurveyedDisplays,
     displays: Query<(&Display, Option<&DockPosition>)>,
     mut strips: Query<(&mut LayoutStrip, &mut Position, &ChildOf), With<ActiveWorkspaceMarker>>,
+    mut windows: RefreshedWindows,
+    window_state: Query<(Has<FullWidthMarker>, Has<FocusedMarker>), With<Window>>,
+    window_manager: Res<WindowManager>,
+    mut watch: ResMut<ChromeWatch>,
     config: Res<Config>,
     mut viewports: Local<HashMap<Entity, IRect>>,
+    mut commands: Commands,
 ) {
     viewports.retain(|entity, _| displays.contains(*entity));
     for display_entity in touched {
@@ -158,6 +203,9 @@ fn retile_changed_viewports(
         }
         let display_id = display.id();
         debug!("display {display_id} usable area is now {viewport:?}");
+        // The area just moved, so another move may still be coming.
+        watch.settling = CHROME_SETTLE;
+
         for (mut strip, mut position, child) in &mut strips {
             if child.parent() != display_entity {
                 continue;
@@ -167,6 +215,66 @@ fn retile_changed_viewports(
             if position.0.y != viewport.min.y {
                 position.0.y = viewport.min.y;
             }
+
+            let mut in_workspace = window_manager
+                .windows_in_workspace(strip.id())
+                .inspect_err(|err| warn!("getting windows in workspace: {err}"))
+                .unwrap_or_default();
+
+            for entity in strip.all_windows() {
+                let Ok((_, ref mut window, ref mut layout_position, ref mut bounds, _)) =
+                    windows.get_mut(entity)
+                else {
+                    continue;
+                };
+                // macOS may have moved the window while the usable area changed,
+                // so the frame has to be re-read rather than trusted.
+                layout_position.set_changed();
+                let Ok(frame) = window.update_frame() else {
+                    continue;
+                };
+                let (full_width, focused) = window_state.get(entity).unwrap_or_default();
+                let width = if full_width {
+                    viewport.width()
+                } else {
+                    frame.width().clamp(0, viewport.width())
+                };
+                // Layout owns the new size; an old animation target would fight it.
+                bounds.0 = Size::new(width, frame.height().clamp(0, viewport.height()));
+                commands.entity(entity).remove::<ResizeMarker>();
+                if focused {
+                    commands.reshuffle_around(entity);
+                }
+
+                in_workspace.retain(|window_id| *window_id != window.id());
+            }
+
+            // Whatever is left in the workspace sits outside the strip.
+            let floating = in_workspace
+                .into_iter()
+                .filter_map(|window_id| {
+                    windows
+                        .iter()
+                        .find_map(|(entity, window, _, _, unmanaged)| {
+                            (window_id == window.id())
+                                .then_some(unmanaged.zip(Some((entity, window.frame()))))
+                        })
+                        .flatten()
+                })
+                .filter_map(|(unmanaged, window)| {
+                    matches!(unmanaged, Unmanaged::Floating).then_some(window)
+                })
+                .collect::<Vec<_>>();
+            for (window_entity, frame) in floating {
+                let origin = clamp_origin_to_viewport(frame.min, frame.size(), viewport);
+                if origin != frame.min {
+                    debug!("repositioning floating window {window_entity}");
+                    commands.reposition_entity(window_entity, origin);
+                }
+            }
+
+            // Relayout so columns retake a viewport that grew, rather than only
+            // shrinking to fit one that got smaller.
             strip.set_changed();
         }
     }

@@ -819,11 +819,15 @@ fn test_chrome_events_re_read_the_geometry_until_it_settles() {
     harness.app.update();
     assert_eq!(reads.load(Ordering::Relaxed), 1);
 
-    // AppKit updates visibleFrame after the notification, so the reads keep
-    // coming for the settling window and then stop.
-    harness.advance(Duration::from_millis(750));
+    // The Dock can report its new size seconds after the notification, so the
+    // reads have to keep coming well past it.
+    harness.advance(Duration::from_secs(3));
+    let during = reads.load(Ordering::Relaxed);
+    assert!(during > 1, "expected repeated reads, got {during}");
+
+    // They stop once the watch expires, rather than polling forever.
+    harness.advance(Duration::from_secs(12));
     let settled = reads.load(Ordering::Relaxed);
-    assert!(settled > 1, "expected repeated reads, got {settled}");
-    harness.advance(Duration::from_secs(1));
+    harness.advance(Duration::from_secs(2));
     assert_eq!(reads.load(Ordering::Relaxed), settled);
 }

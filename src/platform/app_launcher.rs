@@ -3,11 +3,11 @@ use std::{
     io::{Error, ErrorKind, Result},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 use tracing::info;
 
+use crate::platform::codesign;
 use crate::util::exe_path;
 
 const APP_BUNDLE_NAME: &str = "Paneru.app";
@@ -156,18 +156,11 @@ fn shell_quote(value: &str) -> String {
 }
 
 fn sign_bundle(app_path: &Path) -> Result<()> {
-    let output = Command::new("/usr/bin/codesign")
-        .args(["--force", "--deep", "--sign", "-"])
-        .arg(app_path)
-        .output()?;
-    if output.status.success() {
-        return Ok(());
-    }
-
-    Err(Error::other(format!(
-        "codesign failed: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
-    )))
+    codesign::sign(
+        app_path,
+        codesign::LAUNCHER_IDENTIFIER,
+        &codesign::identity(),
+    )
 }
 
 #[cfg(test)]

@@ -6,7 +6,7 @@ use bevy::app::App as BevyApp;
 use bevy::app::{First, Last, PostUpdate, PreUpdate, Startup};
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::lifecycle::RemovedComponents;
-use bevy::ecs::query::{Added, Changed, With};
+use bevy::ecs::query::{Added, Changed, Or, With};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::SystemCondition;
 use bevy::ecs::schedule::common_conditions::{not, resource_exists};
@@ -60,6 +60,13 @@ pub mod workspace;
 #[cfg(feature = "lua")]
 pub(crate) use triggers::apply_config_side_effects;
 
+/// The focused window was moved or resized this tick, so the highlight around
+/// it is stale.
+type FocusedReframed = (
+    With<FocusedMarker>,
+    Or<(Changed<Position>, Changed<Bounds>)>,
+);
+
 /// Registers the Bevy systems for the `WindowManager`.
 /// This function adds various systems to the `Update` schedule, including event dispatchers,
 /// process/application/window lifecycle management, animation, and periodic watchers.
@@ -86,17 +93,18 @@ pub fn register_systems(app: &mut bevy::app::App) {
     // The overlay must refresh not just when the active strip's layout changes,
     // but also whenever focus moves — including focus *loss* (e.g. switching to
     // an empty virtual workspace), which otherwise leaves a stale outline.
-    // Position changes on the focused window also dirty the overlay so that
-    // dragging a floating window moves the highlight with it.
+    // Position and size changes on the focused window also dirty the overlay,
+    // so dragging a floating window moves the highlight with it and a window
+    // shrinking under a Dock that just appeared does not keep the old outline.
     let vw_indicator_dirty =
         |strip_changed: Query<(), (With<ActiveWorkspaceMarker>, Changed<LayoutStrip>)>,
          focus_gained: Query<(), Added<FocusedMarker>>,
          workspace_changed: Query<(), Added<ActiveWorkspaceMarker>>,
-         focused_moved: Query<(), (With<FocusedMarker>, Changed<Position>)>| {
+         focused_reframed: Query<(), FocusedReframed>| {
             !strip_changed.is_empty()
                 || !focus_gained.is_empty()
                 || !workspace_changed.is_empty()
-                || !focused_moved.is_empty()
+                || !focused_reframed.is_empty()
         };
     // The menu bar additionally shows how many virtual workspaces exist, so it
     // has to redraw when one is created or reaped, neither of which touches the
@@ -190,9 +198,11 @@ pub fn register_systems(app: &mut bevy::app::App) {
             )
                 .chain(),
             (
+                // The overlay draws the frame the window was last told to
+                // have, so it runs after both commits have told it.
                 systems::update_overlays
-                    .after(systems::animate_entities)
-                    .after(systems::animate_resize_entities)
+                    .after(systems::commit_window_position)
+                    .after(systems::commit_window_size)
                     .run_if(dimming_enabled)
                     .run_if(vw_indicator_dirty),
                 systems::update_flash_messages,

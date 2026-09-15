@@ -1,14 +1,18 @@
 use bevy::app::{App, Plugin, PreUpdate, Update};
+use bevy::ecs::change_detection::DetectChangesMut;
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::lifecycle::Add;
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::observer::On;
-use bevy::ecs::query::{Has, With};
+use bevy::ecs::query::{Changed, Has, Or, With, Without};
+use bevy::ecs::resource::Resource;
+use bevy::ecs::system::ResMut;
 use bevy::ecs::system::{Commands, Local, NonSend, Query, Res};
 use bevy::math::IRect;
 use bevy::platform::collections::HashSet;
+use bevy::time::Time;
 use objc2_app_kit::NSScreen;
 use objc2_core_graphics::CGDirectDisplayID;
 use std::collections::HashMap;
@@ -18,22 +22,65 @@ use tracing::{Level, debug, error, instrument, warn};
 
 use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
+use crate::ecs::layout::clamp_origin_to_viewport;
 use crate::ecs::{
-    ActiveDisplayMarker, ReadDisplayProperties, SendMessageTrigger, SpawnCommandsExt, Timeout,
+    ActiveDisplayMarker, ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker,
+    FullWidthMarker, LayoutPosition, Position, ReadDisplayProperties, ResizeMarker,
+    SendMessageTrigger, SpawnCommandsExt, Timeout, Unmanaged,
 };
 use crate::events::Event;
-use crate::manager::{Display, WindowManager, irect_from};
+use crate::manager::{Display, Size, Window, WindowManager, irect_from};
 use crate::platform::{PlatformCallbacks, WorkspaceId};
 use crate::util::{read_screen_property, round_px};
 
 const ORPHANED_SPACES_TIMEOUT_SEC: u64 = 30;
 
+/// How long the geometry is re-read after a chrome change, and how often. The
+/// Dock can take several seconds to report its new size, well past the
+/// notification that announced it, so the watch outlives the event by a wide
+/// margin and [`retile_changed_viewports`] re-arms it whenever the usable area
+/// actually moves.
+const CHROME_SETTLE: Duration = Duration::from_secs(10);
+const CHROME_POLL: Duration = Duration::from_millis(250);
+
+#[derive(Default, Resource)]
+struct ChromeWatch {
+    settling: Duration,
+    since_read: Duration,
+    /// Set on the tick a chrome event lands and again when the watch expires.
+    /// The refresh runs on both regardless of whether the usable area came out
+    /// different, because macOS moves windows during the transition even when
+    /// the area it leaves them ends up the same.
+    force: bool,
+}
+
+/// Windows as a viewport change needs them: the live frame to re-read, and the
+/// layout fields that are overwritten from it.
+type RefreshedWindows<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static mut Window,
+        &'static mut LayoutPosition,
+        &'static mut Position,
+        &'static mut Bounds,
+        Option<&'static Unmanaged>,
+    ),
+    Without<LayoutStrip>,
+>;
+
+/// Displays whose geometry was touched this tick, either the display itself or
+/// the edge the Dock sits on.
+type ResurveyedDisplays<'w, 's> = Query<'w, 's, (), Or<(Changed<Display>, Changed<DockPosition>)>>;
+
 pub struct DisplayEventsPlugin;
 
 impl Plugin for DisplayEventsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(PreUpdate, display_change_handler);
-        app.add_systems(Update, reconcile_displays)
+        app.init_resource::<ChromeWatch>();
+        app.add_systems(PreUpdate, (display_change_handler, chrome_change_handler));
+        app.add_systems(Update, (reconcile_displays, retile_changed_viewports))
             .add_observer(read_display_properties_trigger)
             .add_observer(cleanup_active_display_marker);
     }
@@ -87,6 +134,171 @@ fn display_change_handler(
         }
     }
     commands.trigger(SendMessageTrigger(Event::SpaceChanged));
+}
+
+/// Toggling Dock or menubar auto-hide changes `visibleFrame` without raising a
+/// display event, so nothing would re-read the geometry. The notification also
+/// lands before `AppKit` has updated `visibleFrame`, hence the settling window
+/// rather than a single read; `retile_changed_viewports` reacts once the usable
+/// area actually moves.
+fn chrome_change_handler(
+    mut messages: MessageReader<Event>,
+    mut watch: ResMut<ChromeWatch>,
+    clock: Res<Time>,
+    displays: Query<Entity, With<Display>>,
+    mut commands: Commands,
+) {
+    if messages.read().any(|event| {
+        matches!(
+            event,
+            Event::ScreenParametersChanged
+                | Event::MenuBarHiddenChanged { .. }
+                | Event::DockDidChangePref { .. }
+                | Event::DockDidRestart { .. }
+        )
+    }) {
+        watch.settling = CHROME_SETTLE;
+        watch.since_read = CHROME_POLL;
+        watch.force = true;
+    } else if watch.settling.is_zero() {
+        watch.force = false;
+        return;
+    } else {
+        let delta = clock.delta();
+        watch.settling = watch.settling.saturating_sub(delta);
+        watch.since_read = watch.since_read.saturating_add(delta);
+        watch.force = watch.settling.is_zero();
+    }
+
+    if watch.since_read < CHROME_POLL && !watch.force {
+        return;
+    }
+    watch.since_read = Duration::ZERO;
+    for entity in displays {
+        commands.trigger(ReadDisplayProperties(entity));
+    }
+}
+
+/// Re-tiles the active workspace of any display whose usable area moved. Both
+/// the menubar and the Dock can take or give back space without a display event
+/// behind it, so the strip keeps its old viewport until something recomputes
+/// it, and meanwhile macOS is free to shove the windows around itself.
+#[allow(clippy::too_many_arguments)]
+#[instrument(level = Level::DEBUG, skip_all)]
+fn retile_changed_viewports(
+    touched: ResurveyedDisplays,
+    displays: Query<(Entity, &Display, Option<&DockPosition>)>,
+    mut strips: Query<(&mut LayoutStrip, &mut Position, &ChildOf), With<ActiveWorkspaceMarker>>,
+    mut windows: RefreshedWindows,
+    window_state: Query<(Has<FullWidthMarker>, Has<FocusedMarker>), With<Window>>,
+    window_manager: Res<WindowManager>,
+    mut watch: ResMut<ChromeWatch>,
+    config: Res<Config>,
+    mut viewports: Local<HashMap<Entity, IRect>>,
+    mut commands: Commands,
+) {
+    if !watch.force && watch.settling.is_zero() && touched.is_empty() {
+        return;
+    }
+    viewports.retain(|entity, _| displays.contains(*entity));
+    for (display_entity, display, dock) in displays {
+        let viewport = display.actual_display_bounds(dock, &config);
+        let previous = viewports.insert(display_entity, viewport);
+        let moved = previous.is_some_and(|previous| previous != viewport);
+        if !moved && !watch.force {
+            continue;
+        }
+        if moved {
+            let display_id = display.id();
+            debug!("display {display_id} usable area is now {viewport:?}");
+            // The area just moved, so another move may still be coming.
+            watch.settling = CHROME_SETTLE;
+        }
+
+        for (mut strip, mut position, child) in &mut strips {
+            if child.parent() != display_entity {
+                continue;
+            }
+            // The strip origin carries the menubar inset, and marking the strip
+            // re-binpacks the columns into the height that is left.
+            if position.0.y != viewport.min.y {
+                position.0.y = viewport.min.y;
+            }
+
+            let mut in_workspace = window_manager
+                .windows_in_workspace(strip.id())
+                .inspect_err(|err| warn!("getting windows in workspace: {err}"))
+                .unwrap_or_default();
+
+            for entity in strip.all_windows() {
+                let Ok((
+                    _,
+                    ref mut window,
+                    ref mut layout_position,
+                    ref mut position,
+                    ref mut bounds,
+                    _,
+                )) = windows.get_mut(entity)
+                else {
+                    continue;
+                };
+                // macOS may have moved the window while the usable area changed,
+                // so the frame has to be re-read rather than trusted.
+                layout_position.set_changed();
+                let Ok(frame) = window.update_frame() else {
+                    continue;
+                };
+                // AppKit pushes a window it can no longer fit up against the
+                // top of the visible area. The layout still holds the right
+                // origin, but nothing resends an origin that did not change.
+                if frame.min != position.0 {
+                    position.set_changed();
+                }
+                let (full_width, focused) = window_state.get(entity).unwrap_or_default();
+                let width = if full_width {
+                    viewport.width()
+                } else {
+                    frame.width().clamp(0, viewport.width())
+                };
+                // Layout owns the new size; an old animation target would fight it.
+                bounds.0 = Size::new(width, frame.height().clamp(0, viewport.height()));
+                commands.entity(entity).remove::<ResizeMarker>();
+                if focused {
+                    commands.reshuffle_around(entity);
+                }
+
+                in_workspace.retain(|window_id| *window_id != window.id());
+            }
+
+            // Whatever is left in the workspace sits outside the strip.
+            let floating = in_workspace
+                .into_iter()
+                .filter_map(|window_id| {
+                    windows
+                        .iter()
+                        .find_map(|(entity, window, _, _, _, unmanaged)| {
+                            (window_id == window.id())
+                                .then_some(unmanaged.zip(Some((entity, window.frame()))))
+                        })
+                        .flatten()
+                })
+                .filter_map(|(unmanaged, window)| {
+                    matches!(unmanaged, Unmanaged::Floating).then_some(window)
+                })
+                .collect::<Vec<_>>();
+            for (window_entity, frame) in floating {
+                let origin = clamp_origin_to_viewport(frame.min, frame.size(), viewport);
+                if origin != frame.min {
+                    debug!("repositioning floating window {window_entity}");
+                    commands.reposition_entity(window_entity, origin);
+                }
+            }
+
+            // Relayout so columns retake a viewport that grew, rather than only
+            // shrinking to fit one that got smaller.
+            strip.set_changed();
+        }
+    }
 }
 
 /// Full reconciliation of the ECS display set against the OS truth.
@@ -378,6 +590,19 @@ fn read_display_properties_trigger(
     });
     if let Some(height) = notch {
         display.set_notch_height(height);
+    }
+
+    // SLSGetDisplayMenubarHeight keeps reporting the nominal height while the
+    // menubar is set to auto-hide. The gap between frame and visibleFrame is
+    // what actually occupies the top edge, and it is zero while it is hidden.
+    let menubar = read_screen_property(&screens, display_id, |screen| {
+        let frame = screen.frame();
+        let visible = screen.visibleFrame();
+        round_px((frame.origin.y + frame.size.height) - (visible.origin.y + visible.size.height))
+    });
+    if let Some(height) = menubar {
+        debug!("menubar inset on display {display_id}: {height}");
+        display.set_menubar_height(height);
     }
 
     let dock = read_screen_property(&screens, display_id, |screen| {

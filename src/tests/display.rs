@@ -1,3 +1,5 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use bevy::prelude::*;
@@ -714,4 +716,151 @@ fn test_empty_baseline_row_survives_display_removal() {
             );
         })
         .run(commands);
+}
+
+#[test]
+fn test_dock_height_is_independent_of_menu_bar_override() {
+    let mut display = Display::new(1, IRect::new(0, 0, 1024, 768), 20);
+    display.set_menubar_height_override(Some(40));
+    let dock = display.locate_dock(&IRect::new(0, 80, 1024, 748));
+    assert!(matches!(dock, DockPosition::Bottom(80)), "{dock:?}");
+}
+
+#[test]
+fn test_hidden_menu_bar_retains_notch_and_configured_insets() {
+    let mut display = Display::new(1, IRect::new(0, 0, 1024, 768), 24);
+    display.set_menubar_height(0);
+    assert_eq!(display.bounds().min.y, 0);
+    display.set_notch_height(32);
+    assert_eq!(display.bounds().min.y, 32);
+    display.set_menubar_height_override(Some(48));
+    assert_eq!(display.bounds().min.y, 48);
+}
+
+#[test]
+fn test_dock_appearing_retiles_the_active_workspace() {
+    let mut harness = TestHarness::new().with_windows(1);
+    harness.advance(Duration::from_secs(1));
+    let display = harness
+        .world()
+        .query_filtered::<Entity, With<Display>>()
+        .single(harness.world())
+        .expect("display");
+    assert_window_size!(
+        harness.world(),
+        0,
+        TEST_WINDOW_WIDTH,
+        TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT
+    );
+
+    harness
+        .world()
+        .entity_mut(display)
+        .insert(DockPosition::Bottom(80));
+    harness.advance(Duration::from_secs(1));
+    assert_window_size!(
+        harness.world(),
+        0,
+        TEST_WINDOW_WIDTH,
+        TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT - 80
+    );
+
+    harness
+        .world()
+        .entity_mut(display)
+        .insert(DockPosition::Hidden);
+    harness.advance(Duration::from_secs(1));
+    assert_window_size!(
+        harness.world(),
+        0,
+        TEST_WINDOW_WIDTH,
+        TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT
+    );
+}
+
+#[test]
+fn test_dock_appearing_puts_back_a_window_appkit_pushed_up() {
+    let mut harness = TestHarness::new().with_windows(1);
+    harness.advance(Duration::from_secs(1));
+    assert_window_at!(harness.world(), 0, 0, TEST_MENUBAR_HEIGHT);
+
+    // AppKit keeps a window inside the new visible area by shoving it up
+    // against the menubar before the Dock has finished appearing.
+    harness.mock_state.update_window(0, |data| {
+        let size = data.frame.size();
+        data.frame.min.y = TEST_MENUBAR_HEIGHT - 8;
+        data.frame.max = data.frame.min + size;
+    });
+    let display = harness
+        .world()
+        .query_filtered::<Entity, With<Display>>()
+        .single(harness.world())
+        .expect("display");
+    harness
+        .world()
+        .entity_mut(display)
+        .insert(DockPosition::Bottom(80));
+    harness.advance(Duration::from_secs(1));
+
+    assert_window_at!(harness.world(), 0, 0, TEST_MENUBAR_HEIGHT);
+    assert_window_size!(
+        harness.world(),
+        0,
+        TEST_WINDOW_WIDTH,
+        TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT - 80
+    );
+}
+
+#[test]
+fn test_hiding_the_menubar_gives_the_strip_the_top_edge() {
+    let mut harness = TestHarness::new().with_windows(1);
+    harness.advance(Duration::from_secs(1));
+    assert_window_at!(harness.world(), 0, 0, TEST_MENUBAR_HEIGHT);
+
+    let display = harness
+        .world()
+        .query_filtered::<Entity, With<Display>>()
+        .single(harness.world())
+        .expect("display");
+    harness
+        .world()
+        .get_mut::<Display>(display)
+        .expect("display component")
+        .set_menubar_height(0);
+    harness.advance(Duration::from_secs(1));
+
+    assert_window_at!(harness.world(), 0, 0, 0);
+    assert_window_size!(harness.world(), 0, TEST_WINDOW_WIDTH, TEST_DISPLAY_HEIGHT);
+}
+
+#[test]
+fn test_chrome_events_re_read_the_geometry_until_it_settles() {
+    let mut harness = TestHarness::new().with_windows(1);
+    harness.advance(Duration::from_secs(1));
+
+    let reads = Arc::new(AtomicUsize::new(0));
+    let observed = reads.clone();
+    harness
+        .app
+        .add_observer(move |_: On<crate::ecs::ReadDisplayProperties>| {
+            observed.fetch_add(1, Ordering::Relaxed);
+        });
+
+    harness
+        .world()
+        .write_message(Event::ScreenParametersChanged);
+    harness.app.update();
+    assert_eq!(reads.load(Ordering::Relaxed), 1);
+
+    // The Dock can report its new size seconds after the notification, so the
+    // reads have to keep coming well past it.
+    harness.advance(Duration::from_secs(3));
+    let during = reads.load(Ordering::Relaxed);
+    assert!(during > 1, "expected repeated reads, got {during}");
+
+    // They stop once the watch expires, rather than polling forever.
+    harness.advance(Duration::from_secs(12));
+    let settled = reads.load(Ordering::Relaxed);
+    harness.advance(Duration::from_secs(2));
+    assert_eq!(reads.load(Ordering::Relaxed), settled);
 }

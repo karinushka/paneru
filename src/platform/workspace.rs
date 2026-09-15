@@ -149,6 +149,12 @@ define_class!(
             _ = self.ivars().events.send(msg);
         }
 
+        /// Called when the screen layout or its usable area changes.
+        #[unsafe(method(didChangeScreenParameters:))]
+        fn screen_parameters_changed(&self, _: &NSObject) {
+            _ = self.ivars().events.send(Event::ScreenParametersChanged);
+        }
+
         /// Called when the Dock restarts.
         ///
         /// # Arguments
@@ -331,10 +337,16 @@ impl WorkspaceObserver {
             };
         }
 
-        let methods = [(
-            sel!(didRestartDock:),
-            "NSApplicationDockDidRestartNotification",
-        )];
+        let methods = [
+            (
+                sel!(didRestartDock:),
+                "NSApplicationDockDidRestartNotification",
+            ),
+            (
+                sel!(didChangeScreenParameters:),
+                "NSApplicationDidChangeScreenParametersNotification",
+            ),
+        ];
         let default_center = NSNotificationCenter::defaultCenter();
         for (sel, name) in &methods {
             debug!("registering {} with {name}", *sel);

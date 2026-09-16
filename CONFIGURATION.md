@@ -91,14 +91,9 @@ modifier = "alt"
 window_step = true
 ```
 
-Each accepted input selects one adjacent column and brings its active window into view.
-A large wheel delta still selects only one column. Repeated inputs in the same direction
-are limited to one step every 180 milliseconds. A change of direction can act at once.
-Momentum events do not select more windows. The direction follows `[swipe.gesture].direction`.
-The horizontal axis takes priority; a vertical wheel also works.
-This mode keeps the normal focus behavior for stacks, floating windows, and native full-screen windows.
-It does not change raw trackpad gestures or the `vertical_modifier` shortcut.
-When `window_step` is false or omitted, scroll-wheel input keeps the existing free scrolling behavior.
+Window steps use the current focus commands and scroll direction.
+Repeated inputs in the same direction are limited to one step every 180 milliseconds.
+Momentum is ignored. Trackpad gestures and vertical workspace scrolling keep their existing behavior.
 
 ---
 

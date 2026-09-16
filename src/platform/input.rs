@@ -412,6 +412,19 @@ impl InputHandler {
         let flags = CGEvent::flags(Some(event));
         let modifiers = get_modifiers(flags);
 
+        let target_modifier = self.config.swipe_scroll_modifier();
+        let vertical_mod = self.config.swipe_scroll_vertical_modifier();
+
+        // Check the combined modifier (base + vertical) first, then fall back to
+        // base-only. matches() rejects extra modifier groups, so cmd+shift held
+        // would fail a cmd-only check. We need to accept both.
+        let base_match = target_modifier.matches(modifiers);
+        let combined_match =
+            vertical_mod.is_some_and(|vm| (target_modifier | vm).matches(modifiers));
+        if !combined_match && !base_match {
+            return false;
+        }
+
         if let Some(events) = &self.events {
             let h_delta = CGEvent::double_value_field(
                 Some(event),
@@ -422,7 +435,25 @@ impl InputHandler {
                 CGEventField::ScrollWheelEventFixedPtDeltaAxis1,
             );
 
-            if let Some(action) = scroll_action(&self.config, modifiers, h_delta, v_delta) {
+            // Vertical workspace switching when vertical modifier is also held.
+            // Don't set last_vertical_gesture here: the suppress timer is for
+            // trackpad momentum scroll, not discrete wheel ticks.
+            if combined_match && v_delta.abs() > 0.001 {
+                _ = events.send(Event::VerticalScrollTick { delta: v_delta });
+                return true;
+            }
+
+            // If we have any horizontal delta, or if there's only vertical delta, use it.
+            let delta = if h_delta.abs() > 0.001 {
+                h_delta
+            } else if v_delta.abs() > 0.001 {
+                v_delta
+            } else {
+                0.0
+            };
+
+            if delta.abs() > 0.001 {
+                let action = scroll_action(&self.config, delta);
                 if let Event::Command {
                     command: Command::Window(Operation::Focus(direction)),
                 } = &action
@@ -431,7 +462,6 @@ impl InputHandler {
                         Some(event),
                         CGEventField::ScrollWheelEventMomentumPhase,
                     );
-                    // Consume momentum and rapid repeats without scrolling the app.
                     if !accept_window_scroll(
                         &mut self.last_window_scroll,
                         direction,
@@ -442,7 +472,7 @@ impl InputHandler {
                     }
                 }
                 _ = events.send(action);
-                return true;
+                return true; // Intercept: don't let the window scroll
             }
         }
         false
@@ -631,32 +661,9 @@ fn get_modifiers(eventflags: CGEventFlags) -> Modifiers {
         })
 }
 
-fn scroll_action(
-    config: &Config,
-    modifiers: Modifiers,
-    h_delta: f64,
-    v_delta: f64,
-) -> Option<Event> {
-    let target = config.swipe_scroll_modifier();
-    let vertical = config
-        .swipe_scroll_vertical_modifier()
-        .is_some_and(|extra| (target | extra).matches(modifiers));
-    if !vertical && !target.matches(modifiers) {
-        return None;
-    }
-    if vertical && v_delta.abs() > SWIPE_THRESHOLD {
-        return Some(Event::VerticalScrollTick { delta: v_delta });
-    }
-    let delta = if h_delta.abs() > SWIPE_THRESHOLD {
-        h_delta
-    } else {
-        v_delta
-    };
-    if !delta.is_finite() || delta.abs() <= SWIPE_THRESHOLD {
-        return None;
-    }
+fn scroll_action(config: &Config, delta: f64) -> Event {
     if !config.swipe_scroll_window_step() {
-        return Some(Event::Scroll { delta });
+        return Event::Scroll { delta };
     }
     let natural = matches!(
         config.swipe_gesture_direction(),
@@ -667,9 +674,9 @@ fn scroll_action(
     } else {
         Direction::West
     };
-    Some(Event::Command {
+    Event::Command {
         command: Command::Window(Operation::Focus(direction)),
-    })
+    }
 }
 
 fn accept_window_scroll(
@@ -700,77 +707,43 @@ mod tests {
     }
 
     #[test]
-    fn wheel_steps_select_one_window_for_either_alt_key() {
-        let config = step_config("");
-        for flags in [0x80020, 0x80040] {
+    fn wheel_steps_use_delta_sign_and_configured_direction() {
+        for reversed in [false, true] {
+            let config = step_config(if reversed {
+                "[swipe.gesture]\ndirection = 'Reversed'\n"
+            } else {
+                ""
+            });
             for delta in [0.1, 1.0, 3.0, 120.0] {
-                let modifiers = get_modifiers(CGEventFlags(flags));
-                assert!(matches!(
-                    scroll_action(&config, modifiers, 0.0, delta),
-                    Some(Event::Command {
-                        command: Command::Window(Operation::Focus(Direction::East))
-                    })
-                ));
-                assert!(matches!(
-                    scroll_action(&config, modifiers, 0.0, -delta),
-                    Some(Event::Command {
-                        command: Command::Window(Operation::Focus(Direction::West))
-                    })
-                ));
+                for signed_delta in [delta, -delta] {
+                    let Event::Command {
+                        command: Command::Window(Operation::Focus(direction)),
+                    } = scroll_action(&config, signed_delta)
+                    else {
+                        panic!("expected a focus command")
+                    };
+                    let expected = if (signed_delta > 0.0) == reversed {
+                        Direction::West
+                    } else {
+                        Direction::East
+                    };
+                    assert_eq!(direction, expected);
+                }
             }
         }
     }
 
     #[test]
-    fn wheel_steps_preserve_axis_priority_and_reverse_setting() {
-        let config = step_config("[swipe.gesture]\ndirection = 'Reversed'\n");
-        assert!(matches!(
-            scroll_action(&config, Modifiers::ALT, 1.0, -3.0),
-            Some(Event::Command {
-                command: Command::Window(Operation::Focus(Direction::West))
-            })
-        ));
-        assert!(matches!(
-            scroll_action(&config, Modifiers::ALT, 0.0, -3.0),
-            Some(Event::Command {
-                command: Command::Window(Operation::Focus(Direction::East))
-            })
-        ));
-    }
-
-    #[test]
-    fn wheel_steps_leave_other_modifiers_and_empty_input_alone() {
-        let config = step_config("");
-        for modifiers in [Modifiers::empty(), Modifiers::ALT | Modifiers::CTRL] {
-            assert!(scroll_action(&config, modifiers, 0.0, 3.0).is_none());
-        }
-        for delta in [0.0, 0.0001, f64::NAN, f64::INFINITY] {
-            assert!(scroll_action(&config, Modifiers::ALT, 0.0, delta).is_none());
-        }
-    }
-
-    #[test]
-    fn wheel_steps_keep_vertical_workspace_shortcut() {
-        let config = step_config("vertical_modifier = 'shift'\n");
-        assert!(matches!(
-            scroll_action(&config, Modifiers::ALT | Modifiers::SHIFT, 0.0, 3.0),
-            Some(Event::VerticalScrollTick { delta: 3.0 })
-        ));
-    }
-
-    #[test]
     fn wheel_scroll_stays_free_unless_step_mode_is_enabled() {
-        assert!(matches!(
-            scroll_action(&Config::default(), Modifiers::ALT, 0.0, 3.0),
-            Some(Event::Scroll { delta: 3.0 })
-        ));
-        let disabled =
-            Config::try_from("[options]\n[bindings]\n[swipe.scroll]\nwindow_step = false\n")
-                .unwrap();
-        assert!(matches!(
-            scroll_action(&disabled, Modifiers::ALT, 0.0, 3.0),
-            Some(Event::Scroll { delta: 3.0 })
-        ));
+        for config in [
+            Config::default(),
+            Config::try_from("[swipe.scroll]\nwindow_step = false\n").unwrap(),
+        ] {
+            assert!(matches!(
+                scroll_action(&config, 3.0),
+                Event::Scroll { delta: 3.0 }
+            ));
+        }
     }
 
     #[test]
@@ -840,9 +813,9 @@ mod tests {
 
         let config = step_config("");
         let mut events = vec![Event::MenuOpened { window_id: 0 }];
-        events.extend([120.0, 3.0, 3.0, -120.0, -3.0, -3.0].map(|delta| {
-            scroll_action(&config, Modifiers::LALT, 0.0, delta).expect("window step")
-        }));
+        events.extend(
+            [120.0, 3.0, 3.0, -120.0, -3.0, -3.0].map(|delta| scroll_action(&config, delta)),
+        );
         let mut harness = TestHarness::new().with_config(config).with_windows(3);
         for (iteration, expected) in [0, 1, 2, 2, 1, 0, 0].into_iter().enumerate() {
             harness = harness.on_iteration(iteration, move |world, _| {

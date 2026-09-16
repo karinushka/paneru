@@ -607,7 +607,7 @@ fn gesture_should_intercept(configured_fingers: Option<usize>, actual_fingers: u
     })
 }
 
-// Remote mouse tools can send group flags without left or right flags.
+// Scroll events can omit left and right modifier flags.
 // Use the group only when the event does not specify a side.
 fn get_scroll_modifiers(eventflags: CGEventFlags) -> Modifiers {
     const GROUP_FLAGS: [(Modifiers, u64); 4] = [
@@ -755,8 +755,8 @@ mod tests {
     }
 
     #[test]
-    fn shared_mouse_alt_scroll_matches_generic_binding() {
-        // Deskflow uses the group flag for scroll events from Windows Alt.
+    fn scroll_group_flag_matches_generic_binding() {
+        // A group flag does not identify the left or right key.
         let modifiers = get_scroll_modifiers(CGEventFlags(0x2008_0000));
         assert!(Modifiers::ALT.matches(modifiers));
         // The event does not identify a side. Do not select one.
@@ -765,14 +765,14 @@ mod tests {
     }
 
     #[test]
-    fn shared_mouse_extra_modifier_does_not_trigger_alt_scroll() {
+    fn scroll_extra_modifier_does_not_trigger_alt_binding() {
         let modifiers = get_scroll_modifiers(CGEventFlags(0x200c_0000));
         assert!(!Modifiers::ALT.matches(modifiers));
         assert!((Modifiers::ALT | Modifiers::CTRL).matches(modifiers));
     }
 
     #[test]
-    fn physical_scroll_keeps_the_reported_modifier_side() {
+    fn scroll_keeps_the_reported_modifier_side() {
         let modifiers = get_scroll_modifiers(CGEventFlags(0x0008_0000 | NX_DEVICERALTKEYMASK));
         assert!(Modifiers::ALT.matches(modifiers));
         assert!(Modifiers::RALT.matches(modifiers));
@@ -785,7 +785,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_mouse_scroll_supports_other_modifier_groups() {
+    fn scroll_supports_other_modifier_groups() {
         for (group, flag) in [
             (Modifiers::SHIFT, 0x0002_0000),
             (Modifiers::CTRL, 0x0004_0000),

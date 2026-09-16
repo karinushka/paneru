@@ -22,8 +22,9 @@ use std::time::{Duration, Instant};
 use stdext::function_name;
 use tracing::{error, info, warn};
 
-use crate::commands::Command;
+use crate::commands::{Command, Direction, Operation};
 use crate::config::Config;
+use crate::config::swipe::SwipeGestureDirection;
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
 use crate::platform::Modifiers;
@@ -44,6 +45,9 @@ pub fn set_focused_passthrough(keys: Vec<(u8, Modifiers)>) {
 /// How long to suppress scroll wheel events after a vertical swipe gesture,
 /// covering macOS momentum scroll that continues after finger lift.
 const VERTICAL_GESTURE_SCROLL_SUPPRESS: Duration = Duration::from_millis(1200);
+
+/// Limit repeated wheel inputs while the next window moves into view.
+const WINDOW_SCROLL_INTERVAL: Duration = Duration::from_millis(180);
 
 /// One finger, as a single gesture event saw it. Sampled out of the `NSTouch`
 /// set once per event rather than read repeatedly through Objective-C, since
@@ -131,6 +135,7 @@ pub(super) struct InputHandler {
     /// are suppressed for a short window after this to prevent the OS from
     /// scrolling windows underneath (including momentum scroll after finger lift).
     last_swipe_time: Option<Instant>,
+    last_window_scroll: Option<(Instant, Direction)>,
     // Prevents from being Unpin automatically
     _pin: PhantomPinned,
 }
@@ -157,6 +162,7 @@ impl InputHandler {
             tap_port: None,
             run_loop_source: None,
             last_swipe_time: None,
+            last_window_scroll: None,
             _pin: PhantomPinned,
         }
     }
@@ -391,7 +397,7 @@ impl InputHandler {
         false
     }
 
-    /// Handles scroll wheel events. If configured modifier is held, it transforms the scroll into a swipe event.
+    /// Use the configured modifier to scroll the strip or select an adjacent window.
     fn handle_scroll_wheel(&mut self, event: &CGEvent) -> bool {
         // Suppress scroll events shortly after a swipe gesture to prevent
         // the OS from scrolling windows underneath, including momentum scroll events
@@ -406,19 +412,6 @@ impl InputHandler {
         let flags = CGEvent::flags(Some(event));
         let modifiers = get_modifiers(flags);
 
-        let target_modifier = self.config.swipe_scroll_modifier();
-        let vertical_mod = self.config.swipe_scroll_vertical_modifier();
-
-        // Check the combined modifier (base + vertical) first, then fall back to
-        // base-only. matches() rejects extra modifier groups, so cmd+shift held
-        // would fail a cmd-only check. We need to accept both.
-        let base_match = target_modifier.matches(modifiers);
-        let combined_match =
-            vertical_mod.is_some_and(|vm| (target_modifier | vm).matches(modifiers));
-        if !combined_match && !base_match {
-            return false;
-        }
-
         if let Some(events) = &self.events {
             let h_delta = CGEvent::double_value_field(
                 Some(event),
@@ -429,26 +422,27 @@ impl InputHandler {
                 CGEventField::ScrollWheelEventFixedPtDeltaAxis1,
             );
 
-            // Vertical workspace switching when vertical modifier is also held.
-            // Don't set last_vertical_gesture here: the suppress timer is for
-            // trackpad momentum scroll, not discrete wheel ticks.
-            if combined_match && v_delta.abs() > 0.001 {
-                _ = events.send(Event::VerticalScrollTick { delta: v_delta });
+            if let Some(action) = scroll_action(&self.config, modifiers, h_delta, v_delta) {
+                if let Event::Command {
+                    command: Command::Window(Operation::Focus(direction)),
+                } = &action
+                {
+                    let momentum = CGEvent::integer_value_field(
+                        Some(event),
+                        CGEventField::ScrollWheelEventMomentumPhase,
+                    );
+                    // Consume momentum and rapid repeats without scrolling the app.
+                    if !accept_window_scroll(
+                        &mut self.last_window_scroll,
+                        direction,
+                        momentum != 0,
+                        Instant::now(),
+                    ) {
+                        return true;
+                    }
+                }
+                _ = events.send(action);
                 return true;
-            }
-
-            // If we have any horizontal delta, or if there's only vertical delta, use it.
-            let delta = if h_delta.abs() > 0.001 {
-                h_delta
-            } else if v_delta.abs() > 0.001 {
-                v_delta
-            } else {
-                0.0
-            };
-
-            if delta.abs() > 0.001 {
-                _ = events.send(Event::Scroll { delta });
-                return true; // Intercept: don't let the window scroll
             }
         }
         false
@@ -607,6 +601,64 @@ fn gesture_should_intercept(configured_fingers: Option<usize>, actual_fingers: u
     })
 }
 
+fn scroll_action(
+    config: &Config,
+    modifiers: Modifiers,
+    h_delta: f64,
+    v_delta: f64,
+) -> Option<Event> {
+    let target = config.swipe_scroll_modifier();
+    let vertical = config
+        .swipe_scroll_vertical_modifier()
+        .is_some_and(|extra| (target | extra).matches(modifiers));
+    if !vertical && !target.matches(modifiers) {
+        return None;
+    }
+    if vertical && v_delta.abs() > SWIPE_THRESHOLD {
+        return Some(Event::VerticalScrollTick { delta: v_delta });
+    }
+    let delta = if h_delta.abs() > SWIPE_THRESHOLD {
+        h_delta
+    } else {
+        v_delta
+    };
+    if !delta.is_finite() || delta.abs() <= SWIPE_THRESHOLD {
+        return None;
+    }
+    if !config.swipe_scroll_window_step() {
+        return Some(Event::Scroll { delta });
+    }
+    let natural = matches!(
+        config.swipe_gesture_direction(),
+        SwipeGestureDirection::Natural
+    );
+    let direction = if (delta > 0.0) == natural {
+        Direction::East
+    } else {
+        Direction::West
+    };
+    Some(Event::Command {
+        command: Command::Window(Operation::Focus(direction)),
+    })
+}
+
+fn accept_window_scroll(
+    last: &mut Option<(Instant, Direction)>,
+    direction: &Direction,
+    momentum: bool,
+    now: Instant,
+) -> bool {
+    if momentum
+        || last.as_ref().is_some_and(|(time, previous)| {
+            previous == direction && now.duration_since(*time) < WINDOW_SCROLL_INTERVAL
+        })
+    {
+        return false;
+    }
+    *last = Some((now, direction.clone()));
+    true
+}
+
 fn get_modifiers(eventflags: CGEventFlags) -> Modifiers {
     const MODIFIER_MASKS: [(Modifiers, u64); 8] = [
         (Modifiers::LALT, 0x0000_0020),
@@ -640,6 +692,169 @@ fn get_modifiers(eventflags: CGEventFlags) -> Modifiers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn step_config(extra: &str) -> Config {
+        Config::try_from(format!(
+            "[options]\n[bindings]\n[swipe.scroll]\nmodifier = 'alt'\nwindow_step = true\n{extra}"
+        ).as_str()).expect("valid test config")
+    }
+
+    #[test]
+    fn wheel_steps_select_one_window_for_either_alt_key() {
+        let config = step_config("");
+        for flags in [0x80020, 0x80040] {
+            for delta in [0.1, 1.0, 3.0, 120.0] {
+                let modifiers = get_modifiers(CGEventFlags(flags));
+                assert!(matches!(
+                    scroll_action(&config, modifiers, 0.0, delta),
+                    Some(Event::Command {
+                        command: Command::Window(Operation::Focus(Direction::East))
+                    })
+                ));
+                assert!(matches!(
+                    scroll_action(&config, modifiers, 0.0, -delta),
+                    Some(Event::Command {
+                        command: Command::Window(Operation::Focus(Direction::West))
+                    })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn wheel_steps_preserve_axis_priority_and_reverse_setting() {
+        let config = step_config("[swipe.gesture]\ndirection = 'Reversed'\n");
+        assert!(matches!(
+            scroll_action(&config, Modifiers::ALT, 1.0, -3.0),
+            Some(Event::Command {
+                command: Command::Window(Operation::Focus(Direction::West))
+            })
+        ));
+        assert!(matches!(
+            scroll_action(&config, Modifiers::ALT, 0.0, -3.0),
+            Some(Event::Command {
+                command: Command::Window(Operation::Focus(Direction::East))
+            })
+        ));
+    }
+
+    #[test]
+    fn wheel_steps_leave_other_modifiers_and_empty_input_alone() {
+        let config = step_config("");
+        for modifiers in [Modifiers::empty(), Modifiers::ALT | Modifiers::CTRL] {
+            assert!(scroll_action(&config, modifiers, 0.0, 3.0).is_none());
+        }
+        for delta in [0.0, 0.0001, f64::NAN, f64::INFINITY] {
+            assert!(scroll_action(&config, Modifiers::ALT, 0.0, delta).is_none());
+        }
+    }
+
+    #[test]
+    fn wheel_steps_keep_vertical_workspace_shortcut() {
+        let config = step_config("vertical_modifier = 'shift'\n");
+        assert!(matches!(
+            scroll_action(&config, Modifiers::ALT | Modifiers::SHIFT, 0.0, 3.0),
+            Some(Event::VerticalScrollTick { delta: 3.0 })
+        ));
+    }
+
+    #[test]
+    fn wheel_scroll_stays_free_unless_step_mode_is_enabled() {
+        assert!(matches!(
+            scroll_action(&Config::default(), Modifiers::ALT, 0.0, 3.0),
+            Some(Event::Scroll { delta: 3.0 })
+        ));
+        let disabled =
+            Config::try_from("[options]\n[bindings]\n[swipe.scroll]\nwindow_step = false\n")
+                .unwrap();
+        assert!(matches!(
+            scroll_action(&disabled, Modifiers::ALT, 0.0, 3.0),
+            Some(Event::Scroll { delta: 3.0 })
+        ));
+    }
+
+    #[test]
+    fn wheel_steps_limit_repeats_but_allow_immediate_reversal() {
+        let now = Instant::now();
+        let mut last = None;
+        assert!(accept_window_scroll(
+            &mut last,
+            &Direction::East,
+            false,
+            now
+        ));
+        assert!(!accept_window_scroll(
+            &mut last,
+            &Direction::East,
+            false,
+            now + Duration::from_millis(100)
+        ));
+        assert!(accept_window_scroll(
+            &mut last,
+            &Direction::East,
+            false,
+            now + WINDOW_SCROLL_INTERVAL
+        ));
+        assert!(accept_window_scroll(
+            &mut last,
+            &Direction::West,
+            false,
+            now + WINDOW_SCROLL_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn wheel_momentum_does_not_select_a_window_or_delay_the_next_input() {
+        let now = Instant::now();
+        let mut last = None;
+        assert!(!accept_window_scroll(
+            &mut last,
+            &Direction::East,
+            true,
+            now
+        ));
+        assert!(last.is_none());
+        assert!(accept_window_scroll(
+            &mut last,
+            &Direction::East,
+            false,
+            now
+        ));
+        assert!(!accept_window_scroll(
+            &mut last,
+            &Direction::West,
+            true,
+            now
+        ));
+        assert!(accept_window_scroll(
+            &mut last,
+            &Direction::East,
+            false,
+            now + WINDOW_SCROLL_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn wheel_steps_focus_adjacent_windows_and_stop_at_strip_edges() {
+        use crate::tests::TestHarness;
+
+        let config = step_config("");
+        let mut events = vec![Event::MenuOpened { window_id: 0 }];
+        events.extend([120.0, 3.0, 3.0, -120.0, -3.0, -3.0].map(|delta| {
+            scroll_action(&config, Modifiers::LALT, 0.0, delta).expect("window step")
+        }));
+        let mut harness = TestHarness::new().with_config(config).with_windows(3);
+        for (iteration, expected) in [0, 1, 2, 2, 1, 0, 0].into_iter().enumerate() {
+            harness = harness.on_iteration(iteration, move |world, _| {
+                crate::assert_focused!(world, expected);
+                assert_eq!(
+                    world.query::<&crate::ecs::Scrolling>().iter(world).count(),
+                    0
+                );
+            });
+        }
+        harness.run(events);
+    }
 
     const NX_DEVICELALTKEYMASK: u64 = 0x0000_0020;
     const NX_DEVICERALTKEYMASK: u64 = 0x0000_0040;
@@ -732,6 +947,7 @@ mod tests {
         let generic_alt: u64 = 0x0008_0000;
         assert_eq!(get_modifiers(CGEventFlags(generic_alt)), Modifiers::empty());
     }
+
     #[test]
     fn secondary_fn_flag_is_not_ignored() {
         // Ensure we don't accidentally filter out the fn mask as "device independent"

@@ -601,6 +601,36 @@ fn gesture_should_intercept(configured_fingers: Option<usize>, actual_fingers: u
     })
 }
 
+fn get_modifiers(eventflags: CGEventFlags) -> Modifiers {
+    const MODIFIER_MASKS: [(Modifiers, u64); 8] = [
+        (Modifiers::LALT, 0x0000_0020),
+        (Modifiers::RALT, 0x0000_0040),
+        (Modifiers::LSHIFT, 0x0000_0002),
+        (Modifiers::RSHIFT, 0x0000_0004),
+        (Modifiers::LCMD, 0x0000_0008),
+        (Modifiers::RCMD, 0x0000_0010),
+        (Modifiers::LCTRL, 0x0000_0001),
+        (Modifiers::RCTRL, 0x0000_2000),
+    ];
+
+    // Fn key should be checked for separately, because pressing
+    // some keys (i.e. leftarrow) seems to inadvertently toggling it.
+    if eventflags.0 == NX_DEVICEFNKEYMASK {
+        tracing::debug!("event flags {:#x}", eventflags.0);
+        return Modifiers::FN;
+    }
+
+    MODIFIER_MASKS
+        .iter()
+        .fold(Modifiers::empty(), |modifiers, (modifier, mask)| {
+            if eventflags.0 & mask != 0 {
+                modifiers | *modifier
+            } else {
+                modifiers
+            }
+        })
+}
+
 fn scroll_action(
     config: &Config,
     modifiers: Modifiers,
@@ -657,36 +687,6 @@ fn accept_window_scroll(
     }
     *last = Some((now, direction.clone()));
     true
-}
-
-fn get_modifiers(eventflags: CGEventFlags) -> Modifiers {
-    const MODIFIER_MASKS: [(Modifiers, u64); 8] = [
-        (Modifiers::LALT, 0x0000_0020),
-        (Modifiers::RALT, 0x0000_0040),
-        (Modifiers::LSHIFT, 0x0000_0002),
-        (Modifiers::RSHIFT, 0x0000_0004),
-        (Modifiers::LCMD, 0x0000_0008),
-        (Modifiers::RCMD, 0x0000_0010),
-        (Modifiers::LCTRL, 0x0000_0001),
-        (Modifiers::RCTRL, 0x0000_2000),
-    ];
-
-    // Fn key should be checked for separately, because pressing
-    // some keys (i.e. leftarrow) seems to inadvertently toggling it.
-    if eventflags.0 == NX_DEVICEFNKEYMASK {
-        tracing::debug!("event flags {:#x}", eventflags.0);
-        return Modifiers::FN;
-    }
-
-    MODIFIER_MASKS
-        .iter()
-        .fold(Modifiers::empty(), |modifiers, (modifier, mask)| {
-            if eventflags.0 & mask != 0 {
-                modifiers | *modifier
-            } else {
-                modifiers
-            }
-        })
 }
 
 #[cfg(test)]
@@ -947,7 +947,6 @@ mod tests {
         let generic_alt: u64 = 0x0008_0000;
         assert_eq!(get_modifiers(CGEventFlags(generic_alt)), Modifiers::empty());
     }
-
     #[test]
     fn secondary_fn_flag_is_not_ignored() {
         // Ensure we don't accidentally filter out the fn mask as "device independent"

@@ -404,7 +404,7 @@ impl InputHandler {
         }
 
         let flags = CGEvent::flags(Some(event));
-        let modifiers = get_modifiers(flags);
+        let modifiers = get_scroll_modifiers(flags);
 
         let target_modifier = self.config.swipe_scroll_modifier();
         let vertical_mod = self.config.swipe_scroll_vertical_modifier();
@@ -607,6 +607,27 @@ fn gesture_should_intercept(configured_fingers: Option<usize>, actual_fingers: u
     })
 }
 
+// Remote mouse tools can send group flags without left or right flags.
+// Use the group only when the event does not specify a side.
+fn get_scroll_modifiers(eventflags: CGEventFlags) -> Modifiers {
+    const GROUP_FLAGS: [(Modifiers, u64); 4] = [
+        (Modifiers::ALT, CGEventFlags::MaskAlternate.0),
+        (Modifiers::SHIFT, CGEventFlags::MaskShift.0),
+        (Modifiers::CMD, CGEventFlags::MaskCommand.0),
+        (Modifiers::CTRL, CGEventFlags::MaskControl.0),
+    ];
+
+    GROUP_FLAGS
+        .iter()
+        .fold(get_modifiers(eventflags), |modifiers, (group, flag)| {
+            if !modifiers.intersects(*group) && eventflags.0 & flag != 0 {
+                modifiers | *group
+            } else {
+                modifiers
+            }
+        })
+}
+
 fn get_modifiers(eventflags: CGEventFlags) -> Modifiers {
     const MODIFIER_MASKS: [(Modifiers, u64); 8] = [
         (Modifiers::LALT, 0x0000_0020),
@@ -732,6 +753,48 @@ mod tests {
         let generic_alt: u64 = 0x0008_0000;
         assert_eq!(get_modifiers(CGEventFlags(generic_alt)), Modifiers::empty());
     }
+
+    #[test]
+    fn shared_mouse_alt_scroll_matches_generic_binding() {
+        // Deskflow uses the group flag for scroll events from Windows Alt.
+        let modifiers = get_scroll_modifiers(CGEventFlags(0x2008_0000));
+        assert!(Modifiers::ALT.matches(modifiers));
+        // The event does not identify a side. Do not select one.
+        assert!(!Modifiers::LALT.matches(modifiers));
+        assert!(!Modifiers::RALT.matches(modifiers));
+    }
+
+    #[test]
+    fn shared_mouse_extra_modifier_does_not_trigger_alt_scroll() {
+        let modifiers = get_scroll_modifiers(CGEventFlags(0x200c_0000));
+        assert!(!Modifiers::ALT.matches(modifiers));
+        assert!((Modifiers::ALT | Modifiers::CTRL).matches(modifiers));
+    }
+
+    #[test]
+    fn physical_scroll_keeps_the_reported_modifier_side() {
+        let modifiers = get_scroll_modifiers(CGEventFlags(0x0008_0000 | NX_DEVICERALTKEYMASK));
+        assert!(Modifiers::ALT.matches(modifiers));
+        assert!(Modifiers::RALT.matches(modifiers));
+        assert!(!Modifiers::LALT.matches(modifiers));
+    }
+
+    #[test]
+    fn ordinary_scroll_does_not_trigger_alt_scroll() {
+        assert!(!Modifiers::ALT.matches(get_scroll_modifiers(CGEventFlags(0x2000_0000))));
+    }
+
+    #[test]
+    fn shared_mouse_scroll_supports_other_modifier_groups() {
+        for (group, flag) in [
+            (Modifiers::SHIFT, 0x0002_0000),
+            (Modifiers::CTRL, 0x0004_0000),
+            (Modifiers::CMD, 0x0010_0000),
+        ] {
+            assert!(group.matches(get_scroll_modifiers(CGEventFlags(flag))));
+        }
+    }
+
     #[test]
     fn secondary_fn_flag_is_not_ignored() {
         // Ensure we don't accidentally filter out the fn mask as "device independent"

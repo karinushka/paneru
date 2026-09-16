@@ -69,8 +69,8 @@ pub(crate) use triggers::apply_config_side_effects;
 /// * `app` - The Bevy application to register the systems with.
 #[allow(clippy::too_many_lines)]
 pub fn register_systems(app: &mut bevy::app::App) {
-    const CLOSED_WINDOW_CHECK_FREQ: Duration = Duration::from_millis(1000);
-    const LOW_POWER_MODE_CHECK: Duration = Duration::from_secs(60);
+    const CLOSED_WINDOW_CHECK_FREQ: Duration = Duration::from_secs(1);
+    const LOW_POWER_MODE_CHECK: Duration = Duration::from_mins(1);
     const APP_OBSERVABILITY_CHECK_FREQ: Duration = Duration::from_millis(200);
 
     let not_swiping = |scrolling: Query<&Scrolling, With<ActiveWorkspaceMarker>>| {

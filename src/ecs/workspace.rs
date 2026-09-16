@@ -80,7 +80,7 @@ type RenumberStrips<'w, 's> = ParamSet<
 
 impl Plugin for WorkspaceEventsPlugin {
     fn build(&self, app: &mut App) {
-        const DISPLAY_CHANGE_CHECK_FREQ: Duration = Duration::from_millis(1000);
+        const DISPLAY_CHANGE_CHECK_FREQ: Duration = Duration::from_secs(1);
 
         let reap_workspaces = |config: Option<Res<Config>>| {
             config.is_some_and(|config| config.reap_empty_workspaces())

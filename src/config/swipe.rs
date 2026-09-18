@@ -41,6 +41,9 @@ pub struct GestureOptions {
 
 #[derive(Deserialize, Clone, Debug, Default)]
 pub struct ScrollOptions {
+    /// Select one adjacent window per wheel input. Default: false.
+    pub window_step: Option<bool>,
+
     /// Modifier key(s) required for scroll wheel swiping.
     /// Accepts the same format as keybindings: "alt", "cmd", "alt + cmd", "alt + rcmd" etc.
     #[serde(default, deserialize_with = "deserialize_modifier")]

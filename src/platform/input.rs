@@ -22,8 +22,9 @@ use std::time::{Duration, Instant};
 use stdext::function_name;
 use tracing::{error, info, warn};
 
-use crate::commands::Command;
+use crate::commands::{Command, Direction, Operation};
 use crate::config::Config;
+use crate::config::swipe::SwipeGestureDirection;
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
 use crate::platform::Modifiers;
@@ -44,6 +45,9 @@ pub fn set_focused_passthrough(keys: Vec<(u8, Modifiers)>) {
 /// How long to suppress scroll wheel events after a vertical swipe gesture,
 /// covering macOS momentum scroll that continues after finger lift.
 const VERTICAL_GESTURE_SCROLL_SUPPRESS: Duration = Duration::from_millis(1200);
+
+/// Limit repeated wheel inputs while the next window moves into view.
+const WINDOW_SCROLL_INTERVAL: Duration = Duration::from_millis(180);
 
 /// One finger, as a single gesture event saw it. Sampled out of the `NSTouch`
 /// set once per event rather than read repeatedly through Objective-C, since
@@ -131,6 +135,7 @@ pub(super) struct InputHandler {
     /// are suppressed for a short window after this to prevent the OS from
     /// scrolling windows underneath (including momentum scroll after finger lift).
     last_swipe_time: Option<Instant>,
+    last_window_scroll: Option<(Instant, Direction)>,
     // Prevents from being Unpin automatically
     _pin: PhantomPinned,
 }
@@ -157,6 +162,7 @@ impl InputHandler {
             tap_port: None,
             run_loop_source: None,
             last_swipe_time: None,
+            last_window_scroll: None,
             _pin: PhantomPinned,
         }
     }
@@ -391,7 +397,7 @@ impl InputHandler {
         false
     }
 
-    /// Handles scroll wheel events. If configured modifier is held, it transforms the scroll into a swipe event.
+    /// Use the configured modifier to scroll the strip or select an adjacent window.
     fn handle_scroll_wheel(&mut self, event: &CGEvent) -> bool {
         // Suppress scroll events shortly after a swipe gesture to prevent
         // the OS from scrolling windows underneath, including momentum scroll events
@@ -447,7 +453,25 @@ impl InputHandler {
             };
 
             if delta.abs() > 0.001 {
-                _ = events.send(Event::Scroll { delta });
+                if self.config.swipe_scroll_window_step() {
+                    let direction = scroll_step_direction(&self.config, delta);
+                    let momentum = CGEvent::integer_value_field(
+                        Some(event),
+                        CGEventField::ScrollWheelEventMomentumPhase,
+                    );
+                    if accept_window_scroll(
+                        &mut self.last_window_scroll,
+                        &direction,
+                        momentum != 0,
+                        Instant::now(),
+                    ) {
+                        _ = events.send(Event::Command {
+                            command: Command::Window(Operation::Focus(direction)),
+                        });
+                    }
+                } else {
+                    _ = events.send(Event::Scroll { delta });
+                }
                 return true; // Intercept: don't let the window scroll
             }
         }
@@ -658,9 +682,160 @@ fn get_modifiers(eventflags: CGEventFlags) -> Modifiers {
         })
 }
 
+fn scroll_step_direction(config: &Config, delta: f64) -> Direction {
+    let natural = matches!(
+        config.swipe_gesture_direction(),
+        SwipeGestureDirection::Natural
+    );
+    if (delta > 0.0) == natural {
+        Direction::East
+    } else {
+        Direction::West
+    }
+}
+
+fn accept_window_scroll(
+    last: &mut Option<(Instant, Direction)>,
+    direction: &Direction,
+    momentum: bool,
+    now: Instant,
+) -> bool {
+    if momentum
+        || last.as_ref().is_some_and(|(time, previous)| {
+            previous == direction && now.duration_since(*time) < WINDOW_SCROLL_INTERVAL
+        })
+    {
+        return false;
+    }
+    *last = Some((now, direction.clone()));
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn step_config(extra: &str) -> Config {
+        Config::try_from(format!(
+            "[options]\n[bindings]\n[swipe.scroll]\nmodifier = 'alt'\nwindow_step = true\n{extra}"
+        ).as_str()).expect("valid test config")
+    }
+
+    #[test]
+    fn wheel_steps_use_delta_sign_and_configured_direction() {
+        for reversed in [false, true] {
+            let config = step_config(if reversed {
+                "[swipe.gesture]\ndirection = 'Reversed'\n"
+            } else {
+                ""
+            });
+            for delta in [0.1, 1.0, 3.0, 120.0] {
+                for signed_delta in [delta, -delta] {
+                    let direction = scroll_step_direction(&config, signed_delta);
+                    let expected = if (signed_delta > 0.0) == reversed {
+                        Direction::West
+                    } else {
+                        Direction::East
+                    };
+                    assert_eq!(direction, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wheel_scroll_stays_free_unless_step_mode_is_enabled() {
+        assert!(!Config::default().swipe_scroll_window_step());
+        let disabled = Config::try_from("[swipe.scroll]\nwindow_step = false\n").unwrap();
+        assert!(!disabled.swipe_scroll_window_step());
+        let enabled = Config::try_from("[swipe.scroll]\nwindow_step = true\n").unwrap();
+        assert!(enabled.swipe_scroll_window_step());
+    }
+
+    #[test]
+    fn wheel_steps_limit_repeats_but_allow_immediate_reversal() {
+        let now = Instant::now();
+        let mut last = None;
+        assert!(accept_window_scroll(
+            &mut last,
+            &Direction::East,
+            false,
+            now
+        ));
+        assert!(!accept_window_scroll(
+            &mut last,
+            &Direction::East,
+            false,
+            now + Duration::from_millis(100)
+        ));
+        assert!(accept_window_scroll(
+            &mut last,
+            &Direction::East,
+            false,
+            now + WINDOW_SCROLL_INTERVAL
+        ));
+        assert!(accept_window_scroll(
+            &mut last,
+            &Direction::West,
+            false,
+            now + WINDOW_SCROLL_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn wheel_momentum_does_not_select_a_window_or_delay_the_next_input() {
+        let now = Instant::now();
+        let mut last = None;
+        assert!(!accept_window_scroll(
+            &mut last,
+            &Direction::East,
+            true,
+            now
+        ));
+        assert!(last.is_none());
+        assert!(accept_window_scroll(
+            &mut last,
+            &Direction::East,
+            false,
+            now
+        ));
+        assert!(!accept_window_scroll(
+            &mut last,
+            &Direction::West,
+            true,
+            now
+        ));
+        assert!(accept_window_scroll(
+            &mut last,
+            &Direction::East,
+            false,
+            now + WINDOW_SCROLL_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn wheel_steps_focus_adjacent_windows_and_stop_at_strip_edges() {
+        use crate::tests::TestHarness;
+
+        let config = step_config("");
+        let mut events = vec![Event::MenuOpened { window_id: 0 }];
+        events.extend(
+            [120.0, 3.0, 3.0, -120.0, -3.0, -3.0].map(|delta| Event::Command {
+                command: Command::Window(Operation::Focus(scroll_step_direction(&config, delta))),
+            }),
+        );
+        let mut harness = TestHarness::new().with_config(config).with_windows(3);
+        for (iteration, expected) in [0, 1, 2, 2, 1, 0, 0].into_iter().enumerate() {
+            harness = harness.on_iteration(iteration, move |world, _| {
+                crate::assert_focused!(world, expected);
+                assert_eq!(
+                    world.query::<&crate::ecs::Scrolling>().iter(world).count(),
+                    0
+                );
+            });
+        }
+        harness.run(events);
+    }
 
     const NX_DEVICELALTKEYMASK: u64 = 0x0000_0020;
     const NX_DEVICERALTKEYMASK: u64 = 0x0000_0040;

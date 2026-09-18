@@ -732,6 +732,15 @@ impl Config {
             .and_then(|scroll| scroll.vertical_modifier)
     }
 
+    pub fn swipe_scroll_window_step(&self) -> bool {
+        self.inner()
+            .swipe
+            .as_ref()
+            .and_then(|swipe| swipe.scroll.as_ref())
+            .and_then(|scroll| scroll.window_step)
+            .unwrap_or(false)
+    }
+
     pub fn window_dim_ratio(&self, is_dark: bool) -> Option<f32> {
         let config = self.inner();
         if config

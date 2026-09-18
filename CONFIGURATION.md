@@ -80,7 +80,20 @@ When `fingers_count` is omitted or set below 3, Paneru does not intercept native
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `modifier` | String | `"alt"` | Modifier key(s) required to slide windows with the scroll wheel: `"alt"`, `"rcmd"`, `"ralt + cmd"`, `"lctrl + lalt + cmd"`, etc. |
+| `window_step` | Boolean | `false` | Select one adjacent column per accepted wheel input. This uses the same focus commands as `window_focus_west` and `window_focus_east`. |
 | `vertical_modifier` | String | *None* | Additional modifier key that, when held together with `modifier`, switches virtual workspaces vertically instead of scrolling horizontally. For example, if `modifier = "alt"` and `vertical_modifier = "shift"`, then `alt + scroll` slides windows horizontally and `alt + shift + scroll` switches virtual workspace rows. |
+
+To select windows with Alt + mouse wheel, enable window steps:
+
+```toml
+[swipe.scroll]
+modifier = "alt"
+window_step = true
+```
+
+Window steps use the current focus commands and scroll direction.
+Repeated inputs in the same direction are limited to one step every 180 milliseconds.
+Momentum is ignored. Trackpad gestures and vertical workspace scrolling keep their existing behavior.
 
 ---
 

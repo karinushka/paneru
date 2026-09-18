@@ -200,6 +200,7 @@ pub struct WindowManager(pub Box<dyn WindowManagerApi>);
 pub struct WindowManagerOS {
     main_cid: ConnID,
     event_sender: EventSender,
+    resolver: app::WindowResolver,
 }
 
 impl WindowManagerOS {
@@ -216,10 +217,12 @@ impl WindowManagerOS {
     pub fn new(event_sender: EventSender) -> Self {
         let main_cid = unsafe { SLSMainConnectionID() };
         debug!("My connection id: {main_cid}");
+        let resolver = app::WindowResolver::new(event_sender.clone());
 
         Self {
             main_cid,
             event_sender,
+            resolver,
         }
     }
 
@@ -323,8 +326,13 @@ impl WindowManagerOS {
 impl WindowManagerApi for WindowManagerOS {
     fn new_application(&self, process: &dyn ProcessApi) -> Result<Application> {
         let connection = self.connection_for_process(process.psn());
-        ApplicationOS::new(connection, process, &self.event_sender)
-            .map(|app| Application::new(Box::new(app)))
+        ApplicationOS::new(
+            connection,
+            process,
+            &self.event_sender,
+            self.resolver.sender(),
+        )
+        .map(|app| Application::new(Box::new(app)))
     }
 
     /// Returns child windows of the main window.

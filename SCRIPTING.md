@@ -72,6 +72,21 @@ paneru.setup {
 }
 ```
 
+### Reading the Active Configuration (`paneru.config`)
+
+The active configuration is exposed on `paneru.config`, mirroring the `paneru.setup` schema (`paneru.config.options`, `paneru.config.padding`, `paneru.config.swipe`, `paneru.config.decorations`, `paneru.config.restore`, `paneru.config.windows`, and `paneru.config.default_workspaces`).
+
+- **Pre-populated with defaults:** Even before (or without) calling `paneru.setup`, `paneru.config` is populated with Paneru's built-in defaults (e.g., `paneru.config.options.sliver_width == 5`, `paneru.config.options.preset_column_widths`, etc.).
+- **Merged on `paneru.setup`:** Calling `paneru.setup{...}` merges your configuration table over the resolved defaults (and preserves any extra custom keys you include in the table).
+- **Read-only snapshot semantics:** `paneru.config` is a plain Lua table for inspection by snippets and callbacks. Mutating fields on `paneru.config` directly does **not** change the running window manager's settings unless you pass the modified table back to `paneru.setup(paneru.config)`.
+
+```lua
+paneru.bind("alt - i", function()
+  local widths = paneru.config.options.preset_column_widths
+  paneru.flash("Configured sliver width: " .. tostring(paneru.config.options.sliver_width))
+end)
+```
+
 ### Precedence & Reloading
 
 An `init.lua` disables the TOML entirely, whether or not it calls `paneru.setup`. With `setup`, that table is the configuration; without it, the built-in defaults are used — never a `paneru.toml` sitting next to the script. To keep using TOML, do not create a script.
@@ -82,6 +97,7 @@ Editing and saving `init.lua` hot-reloads the whole configuration (including men
 - Float-valued options (`animation_speed`, border `width`/`opacity`, window `width`, …) should be written with a decimal point (`12.0`, not `12`).
 - A reload that *removes* a previous `paneru.setup` call keeps the last config it produced rather than reverting to TOML.
 - With Nix modules, set `services.paneru.config` to this `init.lua` (Lua source or a path). See [`nix/README.md`](nix/README.md).
+
 
 ---
 

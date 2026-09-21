@@ -329,13 +329,21 @@ pub(super) fn install(
     };
     paneru.set("bind", bind)?;
 
+    // Initialize `paneru.config` with the built-in defaults so scripts can read
+    // `paneru.config.options.*` (and other sections) even before or without a
+    // `paneru.setup` call.
+    let default_config = Config::defaults().unwrap_or_default();
+    paneru.set("config", config_to_lua_table(lua, &default_config)?)?;
+
     // paneru.setup(table) — declare the whole configuration from Lua. Mirrors
     // the TOML sections; a `bindings` sub-table is desugared onto the same
     // path as `paneru.bind` and stripped before the rest is deserialized into
-    // a `Config`.
+    // a `Config`. Updates `paneru.config` with the resolved configuration merged
+    // with the user's table.
     let setup = {
         let registry = Rc::clone(registry);
         let config_cell = Rc::clone(config_cell);
+        let paneru_table = paneru.clone();
         lua.create_function(move |lua, table: Table| {
             if let Some(bindings) = table.get::<Option<Table>>("bindings")? {
                 for pair in bindings.pairs::<String, String>() {
@@ -345,7 +353,10 @@ pub(super) fn install(
                 }
                 table.set("bindings", Value::Nil)?;
             }
-            let config = config_from_lua(lua, Value::Table(table))?;
+            let config = config_from_lua(lua, Value::Table(table.clone()))?;
+            let resolved = config_to_lua_table(lua, &config)?;
+            merge_lua_tables(&resolved, &table)?;
+            paneru_table.set("config", resolved)?;
             *config_cell.borrow_mut() = Some(config);
             Ok(())
         })?
@@ -595,5 +606,132 @@ fn install_script_state(
     })?;
 
     paneru.set("state", state)?;
+    Ok(())
+}
+
+/// Builds a Lua table mirroring the configuration schema with all effective defaults
+/// resolved from `config`.
+fn config_to_lua_table(lua: &Lua, config: &Config) -> mlua::Result<Table> {
+    let root = lua.create_table()?;
+    root.set("default_workspaces", config.default_workspaces())?;
+
+    let options = lua.create_table()?;
+    let raw_opts = config.options();
+    options.set("focus_follows_mouse", config.focus_follows_mouse())?;
+    options.set("mouse_follows_focus", config.mouse_follows_focus())?;
+    options.set("horizontal_mouse_warp", config.horizontal_mouse_warp())?;
+    options.set(
+        "horizontal_mouse_warp_offset",
+        config.horizontal_mouse_warp_offset(),
+    )?;
+    options.set("preset_column_widths", config.preset_column_widths())?;
+    options.set("preset_stack_heights", config.preset_stack_heights())?;
+    options.set("animation_speed", raw_opts.animation_speed)?;
+    options.set("auto_center", config.auto_center())?;
+    options.set("sliver_height", config.sliver_height())?;
+    options.set("sliver_width", config.sliver_width())?;
+    options.set("menubar_height", config.menubar_height())?;
+    options.set("window_hidden_ratio", config.window_hidden_ratio())?;
+    options.set("window_resize_cycle", config.window_resize_cycle())?;
+    options.set("reap_empty_workspaces", config.reap_empty_workspaces())?;
+    options.set("disable_native_tabs", !config.native_tabs_enabled())?;
+    options.set(
+        "virtual_workspace_animations",
+        config.virtual_workspace_animations(),
+    )?;
+    options.set(
+        "insert_windows_mid_strip",
+        config.insert_windows_mid_strip(),
+    )?;
+    options.set(
+        "create_virtual_workspace_automatically",
+        config.create_workspace_automatically(),
+    )?;
+    root.set("options", options)?;
+
+    let padding = lua.create_table()?;
+    let (top, right, bottom, left) = config.edge_padding();
+    padding.set("top", top)?;
+    padding.set("right", right)?;
+    padding.set("bottom", bottom)?;
+    padding.set("left", left)?;
+    root.set("padding", padding)?;
+
+    let swipe = lua.create_table()?;
+    swipe.set("sensitivity", config.swipe_sensitivity())?;
+    swipe.set("deceleration", config.swipe_deceleration())?;
+    swipe.set("continuous", config.continuous_swipe())?;
+
+    let gesture = lua.create_table()?;
+    gesture.set("fingers_count", config.swipe_gesture_fingers())?;
+    let direction_str = match config.swipe_gesture_direction() {
+        crate::config::swipe::SwipeGestureDirection::Natural => "Natural",
+        crate::config::swipe::SwipeGestureDirection::Reversed => "Reversed",
+    };
+    gesture.set("direction", direction_str)?;
+    gesture.set("vertical", config.swipe_vertical())?;
+    swipe.set("gesture", gesture)?;
+
+    let scroll = lua.create_table()?;
+    scroll.set("window_step", config.swipe_scroll_window_step())?;
+    scroll.set("modifier", "alt")?;
+    swipe.set("scroll", scroll)?;
+    root.set("swipe", swipe)?;
+
+    let decorations = lua.create_table()?;
+    decorations.set("workspace_menu_status", config.workspace_menu_status())?;
+    decorations.set("workspace_popup_status", config.workspace_popup_status())?;
+
+    let active = lua.create_table()?;
+    let border = lua.create_table()?;
+    border.set("enabled", config.border_active_window())?;
+    border.set("opacity", config.border_opacity())?;
+    border.set("width", config.border_width())?;
+    border.set("color", "#FFFFFF")?;
+    active.set("border", border)?;
+    decorations.set("active", active)?;
+
+    let inactive = lua.create_table()?;
+    let dim = lua.create_table()?;
+    dim.set("opacity", config.dim_inactive_opacity())?;
+    dim.set("color", "#000000")?;
+    inactive.set("dim", dim)?;
+    decorations.set("inactive", inactive)?;
+    root.set("decorations", decorations)?;
+
+    let restore = lua.create_table()?;
+    restore.set("enabled", config.restore_enabled())?;
+    restore.set(
+        "startup_grace_ms",
+        u64::try_from(config.restore_startup_grace().as_millis()).unwrap_or(2000),
+    )?;
+    restore.set("missing_windows", "ignore")?;
+    root.set("restore", restore)?;
+
+    let windows = lua.create_table()?;
+    root.set("windows", windows)?;
+
+    Ok(root)
+}
+
+fn is_lua_array(table: &Table) -> bool {
+    table.raw_len() > 0
+}
+
+/// Deep-merges map tables from `src` into `dst`, replacing array tables and
+/// scalar values directly.
+fn merge_lua_tables(dst: &Table, src: &Table) -> mlua::Result<()> {
+    for pair in src.pairs::<Value, Value>() {
+        let (key, src_val) = pair?;
+        if let Value::Table(src_sub) = &src_val
+            && !is_lua_array(src_sub)
+            && let Value::Table(dst_sub) = dst.get::<Value>(key.clone())?
+            && !is_lua_array(&dst_sub)
+        {
+            merge_lua_tables(&dst_sub, src_sub)?;
+        } else {
+            dst.set(key, src_val)?;
+        }
+    }
     Ok(())
 }

@@ -1048,4 +1048,74 @@ mod tests {
             "expected the extra path to be prepended, got {path}"
         );
     }
+
+    #[test]
+    fn paneru_config_has_resolved_defaults_before_setup() {
+        let world = TestWorld::default();
+        let runtime = world
+            .runtime(
+                r"
+                ffm = paneru.config.options.focus_follows_mouse
+                sliver = paneru.config.options.sliver_width
+                presets_len = #paneru.config.options.preset_column_widths
+                pad_top = paneru.config.padding.top
+                ws_count = paneru.config.default_workspaces
+                ",
+            )
+            .expect("script should load");
+
+        let globals = runtime.lua.globals();
+        assert!(globals.get::<bool>("ffm").unwrap());
+        assert_eq!(globals.get::<i32>("sliver").unwrap(), 5);
+        assert_eq!(globals.get::<usize>("presets_len").unwrap(), 8);
+        assert_eq!(globals.get::<i32>("pad_top").unwrap(), 0);
+        assert_eq!(globals.get::<u32>("ws_count").unwrap(), 1);
+    }
+
+    #[test]
+    fn paneru_setup_updates_paneru_config_and_merges_defaults() {
+        let world = TestWorld::default();
+        let runtime = world
+            .runtime(
+                r#"
+                paneru.setup {
+                  default_workspaces = 4,
+                  options = {
+                    focus_follows_mouse = false,
+                    preset_column_widths = { 0.5, 1.0 },
+                    custom_tag = "user_data",
+                  },
+                  padding = { top = 12 },
+                }
+
+                ffm = paneru.config.options.focus_follows_mouse
+                sliver = paneru.config.options.sliver_width
+                presets_len = #paneru.config.options.preset_column_widths
+                custom = paneru.config.options.custom_tag
+                pad_top = paneru.config.padding.top
+                pad_bottom = paneru.config.padding.bottom
+                ws_count = paneru.config.default_workspaces
+
+                paneru.bind("alt - x", function()
+                  if not paneru.config.options.focus_follows_mouse and paneru.config.padding.top == 12 then
+                    paneru.run("window balance")
+                  end
+                end)
+                "#,
+            )
+            .expect("script should load");
+
+        let globals = runtime.lua.globals();
+        assert!(!globals.get::<bool>("ffm").unwrap());
+        assert_eq!(globals.get::<i32>("sliver").unwrap(), 5);
+        assert_eq!(globals.get::<usize>("presets_len").unwrap(), 2);
+        assert_eq!(globals.get::<String>("custom").unwrap(), "user_data");
+        assert_eq!(globals.get::<i32>("pad_top").unwrap(), 12);
+        assert_eq!(globals.get::<i32>("pad_bottom").unwrap(), 0);
+        assert_eq!(globals.get::<u32>("ws_count").unwrap(), 4);
+
+        let extract = || Ok(Arc::new(test_state()));
+        world.drive(&extract, runtime.dispatch_bind(1));
+        assert_eq!(drained_commands(&runtime).len(), 1);
+    }
 }

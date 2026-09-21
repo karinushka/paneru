@@ -611,12 +611,63 @@ fn install_script_state(
 
 /// Builds a Lua table mirroring the configuration schema with all effective defaults
 /// resolved from `config`.
+///
+/// Uses exhaustive destructuring of the option structs (without `..`) so adding a
+/// new field to `MainOptions`, `PaddingOptions`, `SwipeOptions`, `GestureOptions`,
+/// `ScrollOptions`, or `RestoreOptions` fails to compile until handled here.
+#[allow(clippy::too_many_lines)]
 fn config_to_lua_table(lua: &Lua, config: &Config) -> mlua::Result<Table> {
+    use crate::config::{
+        MainOptions, RestoreOptions, format_modifiers,
+        padding::PaddingOptions,
+        swipe::{GestureOptions, ScrollOptions, SwipeOptions},
+    };
+
     let root = lua.create_table()?;
     root.set("default_workspaces", config.default_workspaces())?;
 
     let options = lua.create_table()?;
     let raw_opts = config.options();
+    // Exhaustive destructure: adding any field to `MainOptions` triggers a
+    // compile error until it is explicitly mapped onto `options` below.
+    let MainOptions {
+        focus_follows_mouse: _,
+        mouse_follows_focus: _,
+        horizontal_mouse_warp: _,
+        horizontal_mouse_warp_offset: _,
+        preset_column_widths: _,
+        preset_stack_heights: _,
+        animation_speed,
+        auto_center: _,
+        sliver_height: _,
+        sliver_width: _,
+        padding_top: _,
+        padding_bottom: _,
+        padding_left: _,
+        padding_right: _,
+        dim_inactive_windows: _,
+        dim_inactive_color: _,
+        border_active_window: _,
+        border_color: _,
+        border_opacity: _,
+        border_width: _,
+        border_radius: _,
+        swipe_gesture_fingers: _,
+        swipe_gesture_direction: _,
+        continuous_swipe: _,
+        swipe_sensitivity: _,
+        swipe_deceleration: _,
+        mouse_resize_modifier: _,
+        menubar_height: _,
+        window_hidden_ratio: _,
+        window_resize_cycle: _,
+        reap_empty_workspaces: _,
+        disable_native_tabs: _,
+        virtual_workspace_animations: _,
+        insert_windows_mid_strip: _,
+        create_virtual_workspace_automatically: _,
+    } = &raw_opts;
+
     options.set("focus_follows_mouse", config.focus_follows_mouse())?;
     options.set("mouse_follows_focus", config.mouse_follows_focus())?;
     options.set("horizontal_mouse_warp", config.horizontal_mouse_warp())?;
@@ -626,10 +677,14 @@ fn config_to_lua_table(lua: &Lua, config: &Config) -> mlua::Result<Table> {
     )?;
     options.set("preset_column_widths", config.preset_column_widths())?;
     options.set("preset_stack_heights", config.preset_stack_heights())?;
-    options.set("animation_speed", raw_opts.animation_speed)?;
+    options.set("animation_speed", *animation_speed)?;
     options.set("auto_center", config.auto_center())?;
     options.set("sliver_height", config.sliver_height())?;
     options.set("sliver_width", config.sliver_width())?;
+    options.set(
+        "mouse_resize_modifier",
+        config.mouse_resize_modifier().map(format_modifiers),
+    )?;
     options.set("menubar_height", config.menubar_height())?;
     options.set("window_hidden_ratio", config.window_hidden_ratio())?;
     options.set("window_resize_cycle", config.window_resize_cycle())?;
@@ -649,6 +704,12 @@ fn config_to_lua_table(lua: &Lua, config: &Config) -> mlua::Result<Table> {
     )?;
     root.set("options", options)?;
 
+    let PaddingOptions {
+        top: _,
+        bottom: _,
+        left: _,
+        right: _,
+    } = PaddingOptions::default();
     let padding = lua.create_table()?;
     let (top, right, bottom, left) = config.edge_padding();
     padding.set("top", top)?;
@@ -657,11 +718,23 @@ fn config_to_lua_table(lua: &Lua, config: &Config) -> mlua::Result<Table> {
     padding.set("left", left)?;
     root.set("padding", padding)?;
 
+    let SwipeOptions {
+        sensitivity: _,
+        deceleration: _,
+        continuous: _,
+        gesture: _,
+        scroll: _,
+    } = SwipeOptions::default();
     let swipe = lua.create_table()?;
     swipe.set("sensitivity", config.swipe_sensitivity())?;
     swipe.set("deceleration", config.swipe_deceleration())?;
     swipe.set("continuous", config.continuous_swipe())?;
 
+    let GestureOptions {
+        fingers_count: _,
+        direction: _,
+        vertical: _,
+    } = GestureOptions::default();
     let gesture = lua.create_table()?;
     gesture.set("fingers_count", config.swipe_gesture_fingers())?;
     let direction_str = match config.swipe_gesture_direction() {
@@ -672,9 +745,20 @@ fn config_to_lua_table(lua: &Lua, config: &Config) -> mlua::Result<Table> {
     gesture.set("vertical", config.swipe_vertical())?;
     swipe.set("gesture", gesture)?;
 
+    let ScrollOptions {
+        window_step: _,
+        modifier: _,
+        vertical_modifier: _,
+    } = ScrollOptions::default();
     let scroll = lua.create_table()?;
     scroll.set("window_step", config.swipe_scroll_window_step())?;
-    scroll.set("modifier", "alt")?;
+    scroll.set("modifier", format_modifiers(config.swipe_scroll_modifier()))?;
+    scroll.set(
+        "vertical_modifier",
+        config
+            .swipe_scroll_vertical_modifier()
+            .map(format_modifiers),
+    )?;
     swipe.set("scroll", scroll)?;
     root.set("swipe", swipe)?;
 
@@ -699,6 +783,11 @@ fn config_to_lua_table(lua: &Lua, config: &Config) -> mlua::Result<Table> {
     decorations.set("inactive", inactive)?;
     root.set("decorations", decorations)?;
 
+    let RestoreOptions {
+        enabled: _,
+        startup_grace_ms: _,
+        missing_windows: _,
+    } = RestoreOptions::default();
     let restore = lua.create_table()?;
     restore.set("enabled", config.restore_enabled())?;
     restore.set(
@@ -734,4 +823,130 @@ fn merge_lua_tables(dst: &Table, src: &Table) -> mlua::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{
+        MainOptions, RestoreOptions,
+        padding::PaddingOptions,
+        swipe::{GestureOptions, ScrollOptions, SwipeOptions},
+    };
+
+    /// Legacy top-level keys on `MainOptions` that have moved to dedicated
+    /// `[padding]`, `[decorations]`, and `[swipe]` sub-tables.
+    const LEGACY_MAIN_OPTION_KEYS: &[&str] = &[
+        "padding_top",
+        "padding_bottom",
+        "padding_left",
+        "padding_right",
+        "dim_inactive_windows",
+        "dim_inactive_color",
+        "border_active_window",
+        "border_color",
+        "border_opacity",
+        "border_width",
+        "border_radius",
+        "swipe_gesture_fingers",
+        "swipe_gesture_direction",
+        "continuous_swipe",
+        "swipe_sensitivity",
+        "swipe_deceleration",
+    ];
+
+    fn struct_field_names<T: serde::Serialize + Default>() -> Vec<String> {
+        let serde_json::Value::Object(map) =
+            serde_json::to_value(T::default()).expect("struct should serialize to JSON object")
+        else {
+            panic!("expected JSON object");
+        };
+        map.keys().cloned().collect()
+    }
+
+    #[test]
+    fn config_to_lua_table_covers_every_struct_field() {
+        // Build a config where optional fields without built-in scalar defaults
+        // are populated, so every mapped key in the Lua table is non-nil.
+        let config = Config::try_from(
+            r#"
+            default_workspaces = 2
+
+            [options]
+            horizontal_mouse_warp = 10
+            animation_speed = 12.0
+            mouse_resize_modifier = "alt"
+            menubar_height = 24
+
+            [swipe.gesture]
+            fingers_count = 3
+
+            [swipe.scroll]
+            modifier = "alt"
+            vertical_modifier = "shift"
+            "#,
+        )
+        .expect("valid test config");
+
+        let lua = Lua::new();
+        let root = config_to_lua_table(&lua, &config).expect("config_to_lua_table should succeed");
+
+        let options_table: Table = root.get("options").unwrap();
+        for field in struct_field_names::<MainOptions>() {
+            if LEGACY_MAIN_OPTION_KEYS.contains(&field.as_str()) {
+                continue;
+            }
+            let val: Value = options_table.get(field.as_str()).unwrap();
+            assert!(
+                !val.is_nil(),
+                "MainOptions field '{field}' is missing from paneru.config.options! \
+                 Did you add a new option to MainOptions and forget to set it in config_to_lua_table?"
+            );
+        }
+
+        let padding_table: Table = root.get("padding").unwrap();
+        for field in struct_field_names::<PaddingOptions>() {
+            let val: Value = padding_table.get(field.as_str()).unwrap();
+            assert!(
+                !val.is_nil(),
+                "PaddingOptions field '{field}' is missing from paneru.config.padding!"
+            );
+        }
+
+        let swipe_table: Table = root.get("swipe").unwrap();
+        for field in struct_field_names::<SwipeOptions>() {
+            let val: Value = swipe_table.get(field.as_str()).unwrap();
+            assert!(
+                !val.is_nil(),
+                "SwipeOptions field '{field}' is missing from paneru.config.swipe!"
+            );
+        }
+
+        let gesture_table: Table = swipe_table.get("gesture").unwrap();
+        for field in struct_field_names::<GestureOptions>() {
+            let val: Value = gesture_table.get(field.as_str()).unwrap();
+            assert!(
+                !val.is_nil(),
+                "GestureOptions field '{field}' is missing from paneru.config.swipe.gesture!"
+            );
+        }
+
+        let scroll_table: Table = swipe_table.get("scroll").unwrap();
+        for field in struct_field_names::<ScrollOptions>() {
+            let val: Value = scroll_table.get(field.as_str()).unwrap();
+            assert!(
+                !val.is_nil(),
+                "ScrollOptions field '{field}' is missing from paneru.config.swipe.scroll!"
+            );
+        }
+
+        let restore_table: Table = root.get("restore").unwrap();
+        for field in struct_field_names::<RestoreOptions>() {
+            let val: Value = restore_table.get(field.as_str()).unwrap();
+            assert!(
+                !val.is_nil(),
+                "RestoreOptions field '{field}' is missing from paneru.config.restore!"
+            );
+        }
+    }
 }

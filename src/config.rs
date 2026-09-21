@@ -1161,12 +1161,14 @@ impl InnerConfig {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+#[cfg_attr(test, derive(serde::Serialize))]
 #[serde(rename_all = "snake_case")]
 pub enum MissingWindowBehavior {
     Ignore,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
+#[cfg_attr(test, derive(serde::Serialize))]
 pub struct RestoreOptions {
     pub enabled: Option<bool>,
     pub startup_grace_ms: Option<u64>,
@@ -1176,6 +1178,7 @@ pub struct RestoreOptions {
 /// `MainOptions` represents the primary configuration options for the window manager.
 /// These options control various behaviors such as mouse focus, gesture recognition, and window animation.
 #[derive(Deserialize, Clone, Debug, Default)]
+#[cfg_attr(test, derive(serde::Serialize))]
 pub struct MainOptions {
     /// Enables or disables focus follows mouse behavior.
     pub focus_follows_mouse: Option<bool>,
@@ -1235,6 +1238,7 @@ pub struct MainOptions {
     pub swipe_deceleration: Option<f64>,
     /// The modifier key used for mouse-based window resizing.
     #[serde(default, deserialize_with = "deserialize_modifier")]
+    #[cfg_attr(test, serde(serialize_with = "serialize_modifier"))]
     pub mouse_resize_modifier: Option<Modifiers>,
     /// Override the system menubar height (in pixels).
     /// When set, this value is used instead of the height reported by macOS.
@@ -1434,6 +1438,42 @@ where
     parse_modifiers(&s)
         .map(Some)
         .map_err(|e: Error| serde::de::Error::custom(e.to_string()))
+}
+
+#[cfg(test)]
+#[allow(clippy::ref_option, clippy::trivially_copy_pass_by_ref)]
+pub(crate) fn serialize_modifier<S: serde::Serializer>(
+    val: &Option<Modifiers>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    serializer.serialize_some(&val.as_ref().map(Modifiers::bits))
+}
+
+#[cfg(feature = "lua")]
+pub(crate) fn format_modifiers(modifiers: Modifiers) -> String {
+    let mut rem = modifiers;
+    let mut parts = Vec::new();
+    for (mask, name) in [
+        (Modifiers::ALT, "alt"),
+        (Modifiers::LALT, "lalt"),
+        (Modifiers::RALT, "ralt"),
+        (Modifiers::SHIFT, "shift"),
+        (Modifiers::LSHIFT, "lshift"),
+        (Modifiers::RSHIFT, "rshift"),
+        (Modifiers::CMD, "cmd"),
+        (Modifiers::LCMD, "lcmd"),
+        (Modifiers::RCMD, "rcmd"),
+        (Modifiers::CTRL, "ctrl"),
+        (Modifiers::LCTRL, "lctrl"),
+        (Modifiers::RCTRL, "rctrl"),
+        (Modifiers::FN, "fn"),
+    ] {
+        if rem.contains(mask) {
+            parts.push(name);
+            rem.remove(mask);
+        }
+    }
+    parts.join(" + ")
 }
 
 /// Builds a [`Config`] from the Lua table passed to `paneru.setup{...}`,

@@ -3,12 +3,14 @@ use serde::Deserialize;
 use crate::{config::deserialize_modifier, platform::Modifiers};
 
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
 pub enum SwipeGestureDirection {
     Natural,
     Reversed,
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]
+#[cfg_attr(test, derive(serde::Serialize))]
 pub struct SwipeOptions {
     /// Swipe sensitivity multiplier. Lower values = less distance per finger
     /// movement. Range: 0.1–2.0. Default: 0.35.
@@ -28,6 +30,7 @@ pub struct SwipeOptions {
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]
+#[cfg_attr(test, derive(serde::Serialize))]
 pub struct GestureOptions {
     /// The number of fingers required for swipe gestures to move windows.
     pub fingers_count: Option<usize>,
@@ -40,6 +43,7 @@ pub struct GestureOptions {
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]
+#[cfg_attr(test, derive(serde::Serialize))]
 pub struct ScrollOptions {
     /// Select one adjacent window per wheel input. Default: false.
     pub window_step: Option<bool>,
@@ -47,10 +51,12 @@ pub struct ScrollOptions {
     /// Modifier key(s) required for scroll wheel swiping.
     /// Accepts the same format as keybindings: "alt", "cmd", "alt + cmd", "alt + rcmd" etc.
     #[serde(default, deserialize_with = "deserialize_modifier")]
+    #[cfg_attr(test, serde(serialize_with = "crate::config::serialize_modifier"))]
     pub modifier: Option<Modifiers>,
 
     /// Additional modifier key(s) that, combined with the scroll modifier,
     /// switches virtual workspaces vertically instead of scrolling horizontally.
     #[serde(default, deserialize_with = "deserialize_modifier")]
+    #[cfg_attr(test, serde(serialize_with = "crate::config::serialize_modifier"))]
     pub vertical_modifier: Option<Modifiers>,
 }

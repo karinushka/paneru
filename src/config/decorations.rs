@@ -1,6 +1,7 @@
 use serde::{Deserialize, Deserializer, de};
 
 #[derive(Deserialize, Clone, Debug, Default)]
+#[cfg_attr(test, derive(serde::Serialize))]
 pub struct DecorationsOptions {
     pub active: Option<GeneralDecorationsOptions>,
     pub inactive: Option<GeneralDecorationsOptions>,
@@ -10,12 +11,14 @@ pub struct DecorationsOptions {
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]
+#[cfg_attr(test, derive(serde::Serialize))]
 pub struct GeneralDecorationsOptions {
     pub border: Option<GeneralBorderOptions>,
     pub dim: Option<GeneralDimOptions>,
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]
+#[cfg_attr(test, derive(serde::Serialize))]
 pub struct GeneralBorderOptions {
     /// Is border enabled
     /// Default: false.
@@ -37,6 +40,7 @@ pub struct GeneralBorderOptions {
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]
+#[cfg_attr(test, derive(serde::Serialize))]
 pub struct GeneralDimOptions {
     /// Opacity of the dim overlay on inactive windows (0.0=off, 1.0=fully black).
     /// Default: 0.0 (disabled).
@@ -48,6 +52,7 @@ pub struct GeneralDimOptions {
     pub color: Option<String>,
 }
 #[derive(Deserialize, Debug, Clone, Default)]
+#[cfg_attr(test, derive(serde::Serialize))]
 pub struct MenubarOptions {
     pub orientation: Option<MenubarOrientation>,
     pub colors: Option<Vec<String>>,
@@ -56,6 +61,7 @@ pub struct MenubarOptions {
     pub indicator: Option<MenubarIndicatorOptions>,
 }
 #[derive(Deserialize, Debug, Clone, Default)]
+#[cfg_attr(test, derive(serde::Serialize))]
 pub struct MenubarDescriptorOptions {
     /// How the graphic/text descriptor to the left of the
     /// VW #(s) is displayed. Options are symbol, text, both
@@ -69,6 +75,7 @@ pub struct MenubarDescriptorOptions {
     pub symbol: Option<String>,
 }
 #[derive(Deserialize, Debug, Clone, Copy, Default)]
+#[cfg_attr(test, derive(serde::Serialize))]
 pub struct MenubarIndicatorOptions {
     /// Format for virtual workspace indicator. Options are mono,
     /// which shows just the current workspace, or multi, which
@@ -91,6 +98,7 @@ pub struct MenubarIndicatorOptions {
     pub inactive_character: Option<char>,
 }
 #[derive(Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(test, derive(serde::Serialize))]
 #[serde(rename_all = "lowercase")]
 pub enum IndicatorFormat {
     Default,
@@ -102,12 +110,14 @@ pub enum IndicatorFormat {
     Marked,
 }
 #[derive(Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(test, derive(serde::Serialize))]
 #[serde(rename_all = "lowercase")]
 pub enum MenubarOrientation {
     Default,
     Flipped,
 }
 #[derive(Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(test, derive(serde::Serialize))]
 #[serde(rename_all = "lowercase")]
 pub enum IndicatorStyle {
     Mono,
@@ -116,6 +126,7 @@ pub enum IndicatorStyle {
     Paged,
 }
 #[derive(Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(test, derive(serde::Serialize))]
 #[serde(rename_all = "lowercase")]
 pub enum DescriptorStyle {
     Symbol,
@@ -125,6 +136,7 @@ pub enum DescriptorStyle {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(test, derive(serde::Serialize))]
 pub enum BorderRadiusOption {
     Auto,
     Value(f64),

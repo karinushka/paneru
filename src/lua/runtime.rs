@@ -204,11 +204,19 @@ impl LuaRuntime {
         self.built_config.as_ref()
     }
 
-    /// Whether the script registered any `paneru.on` handler. Building the Lua
-    /// table for an event is the costly step, so a script that only binds keys
-    /// pays nothing for events it can never observe.
-    pub(super) fn has_event_handlers(&self) -> bool {
-        !self.registry.borrow().handlers.is_empty()
+    /// Bitmask of [`LuaEvent`] kinds that have at least one registered
+    /// `paneru.on` handler.
+    ///
+    /// [`LuaEvent`]: super::convert::LuaEvent
+    pub(super) fn subscribed_event_mask(&self) -> u64 {
+        self.registry
+            .borrow()
+            .handlers
+            .iter()
+            .filter(|(_, entries)| !entries.is_empty())
+            .fold(0u64, |mask, (name, _)| {
+                mask | super::convert::LuaEvent::bit_for_name(name)
+            })
     }
 
     /// The handlers registered for `name`, in registration order.

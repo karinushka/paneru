@@ -12,7 +12,7 @@
 //! marshalling.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -141,10 +141,10 @@ pub struct LuaWorker {
     /// separate systems can serve them. See [`WorldRequest`].
     world_queries: Receiver<WorldRequest>,
     store_queries: Receiver<StoreRequest>,
-    /// Mirrors the runtime's `has_event_handlers`, republished after every
-    /// load and reload, so the main thread's fast path never has to ask and
-    /// wait.
-    has_handlers: Arc<AtomicBool>,
+    /// Mirrors the runtime's `subscribed_event_mask`, republished after every
+    /// load, reload, and callback completion, so the main thread's fast path
+    /// filters unsubscribed events without waking the worker.
+    subscribed_events: Arc<AtomicU64>,
     /// The `Config` the loaded script declared through `paneru.setup{...}`,
     /// or `None` if it left configuration to the TOML file.
     built_config: Arc<Mutex<Option<Config>>>,
@@ -170,11 +170,11 @@ impl LuaWorker {
         let (world_tx, world_queries) = unbounded();
         let (store_tx, store_queries) = unbounded();
         let (ready_tx, ready) = bounded(1);
-        let has_handlers = Arc::new(AtomicBool::new(false));
+        let subscribed_events = Arc::new(AtomicU64::new(0));
         let built_config = Arc::new(Mutex::new(None));
 
         let thread = {
-            let has_handlers = Arc::clone(&has_handlers);
+            let subscribed_events = Arc::clone(&subscribed_events);
             let built_config = Arc::clone(&built_config);
             std::thread::Builder::new()
                 .name("paneru-lua".to_string())
@@ -185,7 +185,7 @@ impl LuaWorker {
                         &to_main,
                         &world_tx,
                         &store_tx,
-                        &has_handlers,
+                        &subscribed_events,
                         &built_config,
                         &revision,
                         &ready_tx,
@@ -202,7 +202,7 @@ impl LuaWorker {
             outbox,
             world_queries,
             store_queries,
-            has_handlers,
+            subscribed_events,
             built_config,
             thread: Some(thread),
         }
@@ -220,9 +220,16 @@ impl LuaWorker {
             .clone()
     }
 
+    /// Bitmask of [`LuaEvent`] kinds the loaded script has registered
+    /// `paneru.on` handlers for.
+    pub(super) fn subscribed_event_mask(&self) -> u64 {
+        self.subscribed_events.load(Ordering::Relaxed)
+    }
+
     /// Whether the loaded script registered any `paneru.on` handler.
+    #[cfg(test)]
     pub(super) fn has_event_handlers(&self) -> bool {
-        self.has_handlers.load(Ordering::Relaxed)
+        self.subscribed_event_mask() != 0
     }
 
     /// Queues events for dispatch. Never blocks; a send only fails once the
@@ -362,7 +369,7 @@ fn run(
     to_main: &Sender<FromLua>,
     world_queries: &Sender<WorldRequest>,
     store_queries: &Sender<StoreRequest>,
-    has_handlers: &AtomicBool,
+    subscribed_events: &AtomicU64,
     built_config: &Mutex<Option<Config>>,
     revision: &ScriptStateRevision,
     ready: &Sender<()>,
@@ -373,7 +380,7 @@ fn run(
         Arc::clone(revision),
     ));
     let loaded = load(source, &world);
-    has_handlers.store(loaded.has_event_handlers(), Ordering::Relaxed);
+    subscribed_events.store(loaded.subscribed_event_mask(), Ordering::Relaxed);
     if let Some(config) = loaded.built_config() {
         publish_config(built_config, config);
     }
@@ -394,10 +401,15 @@ fn run(
                 ToLua::Events(events) => {
                     let runtime = Rc::clone(&current.borrow());
                     for event in &events {
-                        let Some((name, table)) = convert::event_table(runtime.lua(), event) else {
+                        let name = event.name();
+                        let handlers = runtime.event_handlers(name);
+                        if handlers.is_empty() {
+                            continue;
+                        }
+                        let Some((_, table)) = convert::event_table(runtime.lua(), event) else {
                             continue;
                         };
-                        for entry in runtime.event_handlers(&name) {
+                        for entry in handlers {
                             if let Some(ref filter) = entry.filter {
                                 match filter.call::<bool>(&table) {
                                     Ok(true) => {}
@@ -411,10 +423,10 @@ fn run(
                             let task = Task {
                                 runtime: Rc::clone(&runtime),
                                 to_main: to_main.clone(),
-                                has_handlers,
+                                subscribed_events,
                             };
                             let (name, table, handler) =
-                                (name.clone(), table.clone(), entry.handler.clone());
+                                (name.to_owned(), table.clone(), entry.handler.clone());
                             executor
                                 .spawn(async move {
                                     task.runtime.dispatch_event(&name, &table, &handler).await;
@@ -430,7 +442,7 @@ fn run(
                         let task = Task {
                             runtime: Rc::clone(&runtime),
                             to_main: to_main.clone(),
-                            has_handlers,
+                            subscribed_events,
                         };
                         executor
                             .spawn(async move {
@@ -444,7 +456,8 @@ fn run(
                     if let Some(rebuilt) = reload(&path, &world, to_main, built_config) {
                         *current.borrow_mut() = Rc::new(rebuilt);
                     }
-                    has_handlers.store(current.borrow().has_event_handlers(), Ordering::Relaxed);
+                    let current_ref = current.borrow();
+                    subscribed_events.store(current_ref.subscribed_event_mask(), Ordering::Relaxed);
                 }
                 ToLua::Shutdown => break,
             }
@@ -457,7 +470,7 @@ fn run(
 struct Task<'a> {
     runtime: Rc<LuaRuntime>,
     to_main: Sender<FromLua>,
-    has_handlers: &'a AtomicBool,
+    subscribed_events: &'a AtomicU64,
 }
 
 impl Task<'_> {
@@ -475,8 +488,8 @@ impl Task<'_> {
         for (message, duration) in flashes {
             flash(&self.to_main, message, duration);
         }
-        self.has_handlers
-            .store(self.runtime.has_event_handlers(), Ordering::Relaxed);
+        self.subscribed_events
+            .store(self.runtime.subscribed_event_mask(), Ordering::Relaxed);
     }
 }
 

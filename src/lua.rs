@@ -87,13 +87,17 @@ pub fn dispatch_lua_events(worker: Option<Res<LuaWorker>>, mut reader: MessageRe
     };
     // No `paneru.on` handlers means nothing consumes these events; just
     // advance past them.
-    if !worker.has_event_handlers() {
+    let mask = worker.subscribed_event_mask();
+    if mask == 0 {
         for _ in reader.read() {}
         return;
     }
     let events: Vec<convert::LuaEvent> = reader
         .read()
-        .filter_map(|event| convert::LuaEvent::try_from(event).ok())
+        .filter_map(|event| {
+            let lua_event = convert::LuaEvent::try_from(event).ok()?;
+            (mask & convert::LuaEvent::bit_for_name(lua_event.name()) != 0).then_some(lua_event)
+        })
         .collect();
     if events.is_empty() {
         return;

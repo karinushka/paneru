@@ -371,6 +371,10 @@ pub struct Timeout {
     pub timer: Timer,
     /// An optional system to execute on timeout.
     pub system_id: Option<SystemId>,
+    /// Optional custom expiry action. When `None`, the owning entity is
+    /// despawned on timeout; when `Some`, the callback runs on the entity
+    /// (e.g. removing temporary marker components without despawning the entity).
+    pub on_expire: Option<fn(&mut EntityCommands)>,
 }
 
 impl Timeout {
@@ -386,28 +390,40 @@ impl Timeout {
     ///
     /// A new `Timeout` instance.
     pub fn new(duration: Duration, message: Option<String>, commands: &mut Commands) -> Self {
-        let timer = Timer::from_seconds(duration.as_secs_f32(), bevy::time::TimerMode::Once);
-        if let Some(message) = message {
-            let callback = move || {
+        let timer = Timer::new(duration, bevy::time::TimerMode::Once);
+        let system_id = message.map(|message| {
+            commands.register_system(move || {
                 tracing::debug!("{message}");
-            };
-            let system_id = Some(commands.register_system(callback));
+            })
+        });
+        Self {
+            timer,
+            system_id,
+            on_expire: None,
+        }
+    }
 
-            Self { timer, system_id }
-        } else {
-            Self {
-                timer,
-                system_id: None,
-            }
+    /// Creates a timeout attached to an existing entity that removes `Timeout`
+    /// and `C` when the timer expires instead of despawning the entity.
+    #[must_use]
+    pub fn for_component<C: Component>(duration: Duration) -> Self {
+        let timer = Timer::new(duration, bevy::time::TimerMode::Once);
+        Self {
+            timer,
+            system_id: None,
+            on_expire: Some(|entity_commands| {
+                entity_commands.try_remove::<(Self, C)>();
+            }),
         }
     }
 
     /// Creates an action timeout, which oneshots a provided system id.
     pub fn callback(duration: Duration, system_id: SystemId, commands: &mut Commands) {
-        let timer = Timer::from_seconds(duration.as_secs_f32(), bevy::time::TimerMode::Once);
+        let timer = Timer::new(duration, bevy::time::TimerMode::Once);
         commands.spawn(Self {
             timer,
             system_id: Some(system_id),
+            on_expire: None,
         });
     }
 }
@@ -420,6 +436,12 @@ pub struct StrayFocusEvent(pub WinID);
 /// an `ApplicationFrontSwitched` event (e.g. transient `kAXErrorCannotComplete`).
 #[derive(Component)]
 pub struct RetryFrontSwitch(pub Entity);
+
+/// Marker component attached to a window after a keyboard focus request to
+/// verify whether the application accepted or rejected focus once the settle
+/// [`Timeout`] completes.
+#[derive(Component)]
+pub struct VerifyFocus;
 
 #[derive(Component)]
 pub struct BruteforceWindows(Task<Vec<Window>>);

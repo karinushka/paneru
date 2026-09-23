@@ -216,6 +216,12 @@ pub(super) fn window_focused_trigger(
 ) {
     const STRAY_FOCUS_RETRY_SEC: u64 = 2;
 
+    let initial_focused = ctx
+        .windows
+        .focused()
+        .map(|(window, entity)| (entity, window.id()));
+    let mut current_focused = initial_focused;
+
     for event in messages.read() {
         let Event::WindowFocused { window_id } = *event else {
             continue;
@@ -274,10 +280,7 @@ pub(super) fn window_focused_trigger(
         // remain stale from a previously focused window.
         update_passthrough(window, app, &ctx.config);
 
-        let already_focused = ctx
-            .windows
-            .focused()
-            .is_some_and(|(focused, _)| focused.id() == window_id);
+        let already_focused = current_focused.is_some_and(|(_, id)| id == window_id);
 
         let managed = ctx
             .windows
@@ -363,10 +366,19 @@ pub(super) fn window_focused_trigger(
             continue;
         }
 
-        if let Ok(mut entity_commands) = ctx.commands.get_entity(entity) {
-            entity_commands.try_insert(FocusedMarker);
-            debug!("window {} ({entity}) focused.", window.id());
-        }
+        current_focused = Some((entity, window_id));
+    }
+
+    // Apply `FocusedMarker` at most once for the final target in this frame's
+    // batch: queueing `try_insert(FocusedMarker)` for multiple entities in one
+    // deferred command buffer causes `maintain_focus_singleton` to queue
+    // `try_remove::<FocusedMarker>()` on both of them, stripping focus entirely.
+    if let Some((entity, window_id)) = current_focused
+        && current_focused != initial_focused
+        && let Ok(mut entity_commands) = ctx.commands.get_entity(entity)
+    {
+        entity_commands.try_insert(FocusedMarker);
+        debug!("window {window_id} ({entity}) focused.");
     }
 }
 

@@ -506,14 +506,18 @@ pub(super) fn timeout_ticker(
 ) {
     for (entity, mut timeout) in timers {
         if timeout.timer.is_finished() {
-            trace!("Despawning entity {entity} due to timeout.");
             if let Some(system_id) = timeout.system_id.take() {
                 commands.run_system(system_id);
                 commands.unregister_system(system_id);
             }
-            trace!("Removing timer {entity}");
             if let Ok(mut entity_commands) = commands.get_entity(entity) {
-                entity_commands.try_despawn();
+                if let Some(on_expire) = timeout.on_expire {
+                    trace!("Expiring component timer on {entity}.");
+                    on_expire(&mut entity_commands);
+                } else {
+                    trace!("Despawning entity {entity} due to timeout.");
+                    entity_commands.try_despawn();
+                }
             }
         } else {
             timeout.timer.tick(clock.delta());

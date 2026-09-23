@@ -5,7 +5,7 @@ use bevy::ecs::entity::{Entity, EntityHashSet};
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::{Has, With, Without};
-use bevy::ecs::system::{Commands, Query, Res, ResMut, Single};
+use bevy::ecs::system::{Commands, Query, Res, Single};
 use bevy::math::IRect;
 use tracing::{Level, instrument};
 use tracing::{debug, error, info};
@@ -260,13 +260,30 @@ fn nearest_float_in_direction(
 /// # Returns
 ///
 /// `Some(Entity)` with the entity of the newly focused window, otherwise `None`.
+fn focus_with_verification(
+    entity: Entity,
+    focused_entity: Option<Entity>,
+    commands: &mut Commands,
+) {
+    if focused_entity != Some(entity)
+        && let Ok(mut entity_commands) = commands.get_entity(entity)
+    {
+        entity_commands.try_insert((
+            crate::ecs::VerifyFocus,
+            Timeout::for_component::<crate::ecs::VerifyFocus>(
+                crate::ecs::focus::VERIFY_FOCUS_TIMEOUT,
+            ),
+        ));
+    }
+    commands.focus_entity(entity, true);
+}
+
 fn command_move_focus(
     mut messages: MessageReader<Event>,
     windows: Windows,
     workspaces: Query<(&LayoutStrip, Entity, Option<&NativeFullscreenMarker>)>,
     active_display: ActiveDisplay,
     window_manager: Res<WindowManager>,
-    mut focus_history: ResMut<FocusHistory>,
     mut commands: Commands,
 ) {
     let Some(Operation::Focus(direction)) =
@@ -296,8 +313,7 @@ fn command_move_focus(
 
         if let Some(entity) = strip.and_then(|strip| strip.last().ok().and_then(|col| col.top())) {
             debug!("fullscreen: swap raising {entity}");
-            focus_history.pending_focus = Some(entity);
-            commands.focus_entity(entity, true);
+            focus_with_verification(entity, windows.focused().map(|(_, e)| e), &mut commands);
         }
         return;
     }
@@ -317,8 +333,7 @@ fn command_move_focus(
             active_strip.id(),
             active_display.bounds(),
         ) {
-            focus_history.pending_focus = Some(entity);
-            commands.focus_entity(entity, true);
+            focus_with_verification(entity, Some(focused_entity), &mut commands);
         }
         return;
     }
@@ -359,8 +374,7 @@ fn command_move_focus(
     };
 
     if let Some(entity) = candidate {
-        focus_history.pending_focus = Some(entity);
-        commands.focus_entity(entity, true);
+        focus_with_verification(entity, Some(focused_entity), &mut commands);
         // Explicitly reshuffle so the target window is brought into view.
         // This avoids a race where focus-follows-mouse leaves skip_reshuffle
         // set, causing the WindowFocused handler to skip the reshuffle.

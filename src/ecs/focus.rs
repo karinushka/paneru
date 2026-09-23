@@ -9,13 +9,13 @@ use bevy::ecs::observer::On;
 use bevy::ecs::query::{Added, Has, With};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
-use bevy::ecs::system::{Commands, Populated, Query, Res, ResMut, Single};
+use bevy::ecs::system::{Commands, Populated, Query, Res, Single};
 use bevy::math::IRect;
 use bevy::prelude::Event as BevyEvent;
 use bevy::time::common_conditions::on_timer;
-use tracing::{Level, debug, error, instrument, trace, warn};
+use tracing::{Level, debug, error, info, instrument, trace, warn};
 
-use super::{FocusedMarker, MouseHeldMarker, SystemTheme, Unmanaged};
+use super::{FocusedMarker, MouseHeldMarker, SystemTheme, Timeout, Unmanaged, VerifyFocus};
 use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, GlobalState, WindowCtx, Windows};
@@ -29,6 +29,7 @@ use crate::manager::{Application, Display, Window, WindowManager};
 use crate::platform::WorkspaceId;
 
 const REFRESH_WINDOW_CHECK_FREQ_MS: u64 = 1000;
+pub(crate) const VERIFY_FOCUS_TIMEOUT: Duration = Duration::from_millis(300);
 
 #[derive(Default)]
 pub struct TierMemory {
@@ -42,7 +43,6 @@ pub struct TierMemory {
 /// (`forget_workspace`) to bound the map.
 #[derive(Default, Resource)]
 pub struct FocusHistory {
-    pub pending_focus: Option<Entity>,
     by_workspace: HashMap<WorkspaceId, TierMemory>,
 }
 
@@ -74,9 +74,6 @@ impl FocusHistory {
     }
 
     pub fn forget(&mut self, entity: Entity) {
-        if self.pending_focus == Some(entity) {
-            self.pending_focus = None;
-        }
         for slot in self.by_workspace.values_mut() {
             if slot.last_managed == Some(entity) {
                 slot.last_managed = None;
@@ -97,7 +94,13 @@ pub struct FocusEventsPlugin;
 impl Plugin for FocusEventsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FocusHistory>();
-        app.add_systems(Update, (detect_focus_rejection, fix_window_size_on_focus));
+        app.add_systems(
+            Update,
+            (
+                detect_focus_rejection.before(super::systems::timeout_ticker),
+                fix_window_size_on_focus,
+            ),
+        );
         app.add_systems(
             PostUpdate,
             (
@@ -111,6 +114,7 @@ impl Plugin for FocusEventsPlugin {
         app.add_observer(dim_remove_window_trigger)
             .add_observer(dim_window_trigger)
             .add_observer(maintain_focus_singleton)
+            .add_observer(maintain_verify_focus_singleton)
             .add_observer(virtual_strip_activated)
             .add_observer(stray_focus_observer)
             .add_observer(focus_window_trigger)
@@ -209,45 +213,96 @@ fn fix_window_size_on_focus(
     }
 }
 
-#[instrument(level = Level::DEBUG, skip_all, fields(focused))]
+/// Ensures at most one window entity carries [`VerifyFocus`] at any time, so
+/// rapid focus switching cancels verification on intermediate windows.
+#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
+fn maintain_verify_focus_singleton(
+    trigger: On<Add, VerifyFocus>,
+    verifying: Query<Entity, With<VerifyFocus>>,
+    mut commands: Commands,
+) {
+    let target = trigger.event().entity;
+    for entity in verifying {
+        if entity != target
+            && let Ok(mut entity_commands) = commands.get_entity(entity)
+        {
+            entity_commands.try_remove::<(Timeout, VerifyFocus)>();
+        }
+    }
+}
+
+#[instrument(level = Level::DEBUG, skip_all)]
 fn detect_focus_rejection(
-    focused: Single<Entity, Added<FocusedMarker>>,
-    mut focus_history: ResMut<FocusHistory>,
+    pending: Populated<(Entity, &Window, &ChildOf, &Timeout), With<VerifyFocus>>,
+    apps: Query<&Application>,
     mut workspaces: Query<(Entity, &mut LayoutStrip)>,
     windows: Windows,
     mut commands: Commands,
 ) {
-    let Some(target_entity) = focus_history.pending_focus.take() else {
-        return;
-    };
-    if *focused == target_entity {
-        return;
-    }
-
-    // Native tabs share one slot: asking for a background tab makes the app
-    // select it, and the focus notification names whichever tab of the group
-    // the app ended up showing. That is the app doing what was asked, not
-    // refusing it — floating the window here is how a tabbed terminal ends up
-    // scattered across the layout as windows nothing tiles.
-    if shares_a_tab_group(&workspaces, &windows, target_entity, *focused) {
-        debug!(
-            "focus landed on tab sibling {} of {target_entity}; not a rejection.",
-            *focused
-        );
-        return;
-    }
-
-    debug!(
-        "focus rejection detected: requested {target_entity}, got {}. Floating {target_entity}.",
-        *focused
-    );
-    if let Ok(mut entity_commands) = commands.get_entity(target_entity) {
-        entity_commands.try_insert(Unmanaged::Floating);
-    }
-    for (_, mut strip) in &mut workspaces {
-        if strip.contains(target_entity) {
-            strip.remove(target_entity);
+    for (target_entity, target_window, child_of, timeout) in &pending {
+        if !timeout.timer.is_finished() {
+            continue;
         }
+        let Ok(app) = apps.get(child_of.parent()) else {
+            continue;
+        };
+        // Only treat as a rejection if the target window's application is
+        // currently frontmost and reports a different window of the same app
+        // as focused.
+        if !app.is_frontmost() {
+            continue;
+        }
+        let Ok(actual_window_id) = app.focused_window_id() else {
+            continue;
+        };
+        if actual_window_id == target_window.id() {
+            continue;
+        }
+        let Some((actual_window, actual_entity, actual_parent)) =
+            windows.find_parent(actual_window_id)
+        else {
+            continue;
+        };
+        if actual_parent != child_of.parent() {
+            continue;
+        }
+        // If focus in the ECS world has already moved to a third window (neither
+        // `target_entity` nor `actual_entity`), do not treat it as a rejection.
+        if windows
+            .focused()
+            .is_some_and(|(_, focused)| focused != target_entity && focused != actual_entity)
+        {
+            continue;
+        }
+
+        // Native tabs share one slot: asking for a background tab makes the app
+        // select it, and the focus notification names whichever tab of the group
+        // the app ended up showing. That is the app doing what was asked, not
+        // refusing it — floating the window here is how a tabbed terminal ends up
+        // scattered across the layout as windows nothing tiles.
+        if shares_a_tab_group(&workspaces, &windows, target_entity, actual_entity) {
+            debug!(
+                "focus landed on tab sibling {actual_entity} of {target_entity}; not a rejection.",
+            );
+            continue;
+        }
+
+        info!(
+            "focus rejection detected: requested window {} ({target_entity}), app focused window {} ({actual_entity}) instead; floating {target_entity}.",
+            target_window.id(),
+            actual_window.id(),
+        );
+        if let Ok(mut entity_commands) = commands.get_entity(target_entity) {
+            entity_commands
+                .try_remove::<(Timeout, VerifyFocus)>()
+                .try_insert(Unmanaged::Floating);
+        }
+        for (_, mut strip) in &mut workspaces {
+            if strip.contains(target_entity) {
+                strip.remove(target_entity);
+            }
+        }
+        commands.focus_entity(actual_entity, false);
     }
 }
 
@@ -401,8 +456,21 @@ fn virtual_strip_activated(
     }
 }
 
-fn focus_window_trigger(trigger: On<FocusWindow>, windows: Windows, apps: Query<&Application>) {
+fn focus_window_trigger(
+    trigger: On<FocusWindow>,
+    windows: Windows,
+    apps: Query<&Application>,
+    verifying: Query<Entity, With<VerifyFocus>>,
+    mut commands: Commands,
+) {
     let FocusWindow { entity, raise } = *trigger.event();
+    for other in verifying {
+        if other != entity
+            && let Ok(mut entity_commands) = commands.get_entity(other)
+        {
+            entity_commands.try_remove::<(Timeout, VerifyFocus)>();
+        }
+    }
     let Some(window) = windows.get(entity) else {
         return;
     };
@@ -466,12 +534,12 @@ fn recover_lost_focus(
     if windows.focused().is_some() {
         return;
     }
-    error!("Lost focus marker, recovering!");
     if let Ok(strip) = active_workspace
         .single()
         .inspect_err(|err| error!("Unable to get current workspace: {err}"))
         && let Some(entity) = strip.first().ok().and_then(|col| col.top())
     {
+        error!("Lost focus marker, recovering!");
         commands.focus_entity(entity, false);
     }
 }
@@ -502,7 +570,37 @@ pub(super) fn stray_focus_observer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::manager::MockWindowApi;
+    use crate::manager::app::MockApplicationApi;
+    use crate::platform::WinID;
     use bevy::ecs::world::World;
+
+    fn spawn_app(world: &mut World, frontmost: bool, focused_id: WinID) -> Entity {
+        let mut api = MockApplicationApi::new();
+        api.expect_is_frontmost().returning(move || frontmost);
+        api.expect_focused_window_id()
+            .returning(move || Ok(focused_id));
+        world.spawn(Application::new(Box::new(api))).id()
+    }
+
+    fn spawn_window(world: &mut World, app: Entity, id: WinID) -> Entity {
+        let mut api = MockWindowApi::new();
+        api.expect_id().returning(move || id);
+        world
+            .spawn((
+                Window::new(Box::new(api)),
+                Position(bevy::math::IVec2::ZERO),
+                Bounds(bevy::math::IVec2::new(800, 600)),
+                ChildOf(app),
+            ))
+            .id()
+    }
+
+    fn expired_verify_timeout() -> Timeout {
+        let mut timeout = Timeout::for_component::<VerifyFocus>(VERIFY_FOCUS_TIMEOUT);
+        timeout.timer.tick(VERIFY_FOCUS_TIMEOUT);
+        timeout
+    }
 
     #[test]
     fn record_and_read_per_tier() {
@@ -581,8 +679,9 @@ mod tests {
     #[test]
     fn focus_landing_on_a_tab_sibling_is_not_a_rejection() {
         let mut world = World::new();
-        let target = world.spawn(()).id();
-        let sibling = world.spawn(()).id();
+        let app = spawn_app(&mut world, true, 2);
+        let target = spawn_window(&mut world, app, 1);
+        let sibling = spawn_window(&mut world, app, 2);
 
         let mut strip = LayoutStrip::default();
         strip.append(target);
@@ -591,13 +690,11 @@ mod tests {
             .expect("target is in the strip");
         world.spawn(strip);
 
-        world.insert_resource(FocusHistory {
-            pending_focus: Some(target),
-            ..Default::default()
-        });
-        let system_id = world.register_system(detect_focus_rejection);
+        world
+            .entity_mut(target)
+            .insert((FocusedMarker, VerifyFocus, expired_verify_timeout()));
 
-        world.entity_mut(sibling).insert(FocusedMarker);
+        let system_id = world.register_system(detect_focus_rejection);
         _ = world.run_system(system_id);
 
         assert!(
@@ -609,30 +706,29 @@ mod tests {
             strips.single(&world).expect("one strip").contains(target),
             "and must not take it out of the layout"
         );
-        assert_eq!(world.resource::<FocusHistory>().pending_focus, None);
     }
 
     #[test]
-    fn focus_rejection_floats_target_and_clears_pending_focus() {
+    fn focus_rejection_floats_target_and_clears_verify_focus() {
         let mut world = World::new();
-        let target = world.spawn(()).id();
-        let actual = world.spawn(()).id();
+        let app = spawn_app(&mut world, true, 2);
+        let target = spawn_window(&mut world, app, 1);
+        let actual = spawn_window(&mut world, app, 2);
+        // Move actual so it does not share a frame with target (not a tab group).
+        world
+            .entity_mut(actual)
+            .insert(Position(bevy::math::IVec2::new(800, 0)));
 
         let mut strip = LayoutStrip::default();
         strip.append(target);
         strip.append(actual);
         world.spawn(strip);
 
-        let history = FocusHistory {
-            pending_focus: Some(target),
-            ..Default::default()
-        };
-        world.insert_resource(history);
+        world
+            .entity_mut(target)
+            .insert((FocusedMarker, VerifyFocus, expired_verify_timeout()));
 
         let system_id = world.register_system(detect_focus_rejection);
-
-        // Focus arrives on actual instead of requested target
-        world.entity_mut(actual).insert(FocusedMarker);
         _ = world.run_system(system_id);
 
         assert!(
@@ -640,6 +736,32 @@ mod tests {
                 .get::<Unmanaged>(target)
                 .is_some_and(|u| matches!(u, Unmanaged::Floating))
         );
-        assert_eq!(world.resource::<FocusHistory>().pending_focus, None);
+        assert!(world.get::<VerifyFocus>(target).is_none());
+        assert!(world.get::<Timeout>(target).is_none());
+    }
+
+    #[test]
+    fn rapid_switching_cancels_verify_focus_on_previous_window() {
+        let mut world = World::new();
+        world.add_observer(maintain_verify_focus_singleton);
+
+        let app = spawn_app(&mut world, true, 2);
+        let first = spawn_window(&mut world, app, 1);
+        let second = spawn_window(&mut world, app, 2);
+
+        world
+            .entity_mut(first)
+            .insert((VerifyFocus, expired_verify_timeout()));
+        world
+            .entity_mut(second)
+            .insert((VerifyFocus, expired_verify_timeout()));
+        world.flush();
+
+        assert!(
+            world.get::<VerifyFocus>(first).is_none(),
+            "arming VerifyFocus on a new window must cancel it on the previous window"
+        );
+        assert!(world.get::<Timeout>(first).is_none());
+        assert!(world.get::<VerifyFocus>(second).is_some());
     }
 }

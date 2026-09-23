@@ -625,6 +625,37 @@ pub(crate) fn rewatch_configs(
     Some(watcher)
 }
 
+/// Runs the Bevy schedule loop with each tick wrapped in an Objective-C
+/// `NSAutoreleasePool`.
+///
+/// `MinimalPlugins`'s default `ScheduleRunnerPlugin` runs `app.update()` in a
+/// bare Rust loop with no pool. While `pump_cocoa_event_loop` wraps
+/// `nextEventMatchingMask` in its own pool, every Bevy system in `Startup`,
+/// `PreUpdate` (after the pump), `Update`, and `PostUpdate` (`OverlayManager`,
+/// `FlashMessageManager`, `MenuBarManager`, `NSScreen`, `NSWorkspace`,
+/// `CoreAnimation` `CATransaction`s) runs outside that pool and would otherwise
+/// push autoreleased objects into the root pool for the lifetime of the daemon.
+fn autorelease_runner(mut app: BevyApp) -> bevy::app::AppExit {
+    if app.plugins_state() != bevy::app::PluginsState::Cleaned {
+        while app.plugins_state() == bevy::app::PluginsState::Adding {
+            bevy::tasks::tick_global_task_pools_on_main_thread();
+        }
+        objc2::rc::autoreleasepool(|_| {
+            app.finish();
+            app.cleanup();
+        });
+    }
+
+    loop {
+        objc2::rc::autoreleasepool(|_| {
+            app.update();
+        });
+        if let Some(exit) = app.should_exit() {
+            return exit;
+        }
+    }
+}
+
 pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<BevyApp> {
     crate::manager::app::bound_ax_messaging_timeout()?;
 
@@ -708,6 +739,8 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
             schedule.set_executor(SingleThreadedExecutor::new());
         });
     }
+
+    app.set_runner(autorelease_runner);
 
     let menu_events = sender.clone();
     let mut platform_callbacks = PlatformCallbacks::new(sender);

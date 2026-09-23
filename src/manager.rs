@@ -839,43 +839,47 @@ pub fn bruteforce_windows(
     // time that app starts.
     let deadline = Instant::now() + BRUTEFORCE_BUDGET;
 
-    for element_id in 0..0x7fffu64 {
-        // Every iteration is a synchronous cross-process AX round trip.
-        if window_list.is_empty() {
-            break;
-        }
-        // Checked periodically only: `Instant::now` can itself be a syscall.
-        if element_id.is_multiple_of(256) && Instant::now() >= deadline {
-            warn!(
-                "{pid}: giving up the brute-force scan at element {element_id} with {} window(s) \
-                 unresolved: {window_list:?}",
-                window_list.len()
-            );
-            break;
-        }
+    // `bruteforce_windows` runs on `AsyncComputeTaskPool` worker threads, which
+    // have no CFRunLoop to drain a thread-local `NSAutoreleasePool`.
+    objc2::rc::autoreleasepool(|_| {
+        for element_id in 0..0x7fffu64 {
+            // Every iteration is a synchronous cross-process AX round trip.
+            if window_list.is_empty() {
+                break;
+            }
+            // Checked periodically only: `Instant::now` can itself be a syscall.
+            if element_id.is_multiple_of(256) && Instant::now() >= deadline {
+                warn!(
+                    "{pid}: giving up the brute-force scan at element {element_id} with {} window(s) \
+                     unresolved: {window_list:?}",
+                    window_list.len()
+                );
+                break;
+            }
 
-        let bytes = element_id.to_ne_bytes();
-        data[0xc..0xc + bytes.len()].copy_from_slice(&bytes);
+            let bytes = element_id.to_ne_bytes();
+            data[0xc..0xc + bytes.len()].copy_from_slice(&bytes);
 
-        let Ok(element_ref) = AXUIWrapper::from_retained(unsafe {
-            _AXUIElementCreateWithRemoteToken(data_ref.as_ref())
-        }) else {
-            continue;
-        };
-        let Some(window_id) = try_ax_window_id(element_ref.as_ptr()) else {
-            continue;
-        };
+            let Ok(element_ref) = AXUIWrapper::from_retained(unsafe {
+                _AXUIElementCreateWithRemoteToken(data_ref.as_ref())
+            }) else {
+                continue;
+            };
+            let Some(window_id) = try_ax_window_id(element_ref.as_ptr()) else {
+                continue;
+            };
 
-        if let Some(index) = window_list.iter().position(|&id| id == window_id) {
-            window_list.remove(index);
-            debug!("Found window {window_id:?}");
-            if let Ok(window) = WindowOS::new_with_config(&element_ref, config, bundle_id)
-                .inspect_err(|err| warn!("{err}"))
-            {
-                found_windows.push(Window::new(Box::new(window)));
+            if let Some(index) = window_list.iter().position(|&id| id == window_id) {
+                window_list.remove(index);
+                debug!("Found window {window_id:?}");
+                if let Ok(window) = WindowOS::new_with_config(&element_ref, config, bundle_id)
+                    .inspect_err(|err| warn!("{err}"))
+                {
+                    found_windows.push(Window::new(Box::new(window)));
+                }
             }
         }
-    }
+    });
     found_windows
 }
 

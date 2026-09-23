@@ -1101,9 +1101,13 @@ pub(super) fn update_overlays(
 pub(super) fn commit_window_position(
     mut moved_windows: Populated<(&mut Window, &Position), Changed<Position>>,
 ) {
+    // `par_iter_mut` runs on `ComputeTaskPool` worker threads, which have no
+    // `CFRunLoop` of their own to drain thread-local autorelease pools.
     moved_windows
         .par_iter_mut()
-        .for_each(|(mut window, position)| window.reposition(position.0));
+        .for_each(|(mut window, position)| {
+            objc2::rc::autoreleasepool(|_| window.reposition(position.0));
+        });
 }
 
 #[instrument(level = Level::TRACE, skip_all)]
@@ -1141,7 +1145,7 @@ pub(super) fn commit_window_size(
         .par_iter_mut()
         .for_each(|(mut window, size, mut width_ratio)| {
             width_ratio.0 = f64::from(size.0.x) / f64::from(display_bounds.width());
-            window.resize(size.0);
+            objc2::rc::autoreleasepool(|_| window.resize(size.0));
         });
 }
 

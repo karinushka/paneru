@@ -213,7 +213,7 @@ fn main() -> Result<()> {
             if !check_ax_privilege() && !wait_for_accessibility(sender.clone(), &receiver) {
                 return Ok(());
             }
-            match setup_bevy_app(sender, receiver) {
+            match objc2::rc::autoreleasepool(|_| setup_bevy_app(sender, receiver)) {
                 Ok(mut app) => {
                     app.run();
                 }

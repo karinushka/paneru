@@ -493,84 +493,86 @@ impl InputHandler {
             return false;
         };
 
-        let Some(ns_event) = NSEvent::eventWithCGEvent(event) else {
-            error!("{}: Unable to convert CGEvent to NSEvent", function_name!());
-            return false;
-        };
-        if ns_event.r#type() != NSEventType::Gesture {
-            return false;
-        }
-
-        // Fingers lifted off touchpad.
-        let phase = ns_event.phase();
-        if (phase.0 & NS_EVENT_PHASE_CANCELLED != 0 || phase.0 & NS_EVENT_PHASE_ENDED != 0)
-            && let Some(events) = &self.events
-        {
-            _ = events.send(Event::TouchpadUp);
-            return false;
-        }
-
-        let fingers = Touch::sample(&ns_event.allTouches());
-        if !gesture_should_intercept(Some(configured_fingers), fingers.len()) {
-            return false;
-        }
-        if fingers.iter().any(|finger| finger.began) {
-            // A fresh gesture: nothing carries over from the last one.
-            if let Some(events) = &self.events {
-                _ = events.send(Event::TouchpadDown);
+        objc2::rc::autoreleasepool(|_| {
+            let Some(ns_event) = NSEvent::eventWithCGEvent(event) else {
+                error!("{}: Unable to convert CGEvent to NSEvent", function_name!());
+                return false;
+            };
+            if ns_event.r#type() != NSEventType::Gesture {
+                return false;
             }
-        }
 
-        if fingers.len() < GESTURE_MINIMAL_FINGERS {
-            return false;
-        }
+            // Fingers lifted off touchpad.
+            let phase = ns_event.phase();
+            if (phase.0 & NS_EVENT_PHASE_CANCELLED != 0 || phase.0 & NS_EVENT_PHASE_ENDED != 0)
+                && let Some(events) = &self.events
+            {
+                _ = events.send(Event::TouchpadUp);
+                return false;
+            }
 
-        if fingers.iter().all(|finger| !finger.began)
-            && let Some(prev) = &self.finger_position
-        {
-            // Match touches by identity rather than relying on NSSet
-            // iteration order, which is not guaranteed to be stable.
-            let (x_deltas, y_deltas): (Vec<f64>, Vec<f64>) = fingers
-                .iter()
-                .filter_map(|current| {
-                    prev.iter()
-                        .find(|previous| previous.is(current))
-                        .map(|previous| (previous.x - current.x, previous.y - current.y))
-                })
-                .unzip();
+            let fingers = Touch::sample(&ns_event.allTouches());
+            if !gesture_should_intercept(Some(configured_fingers), fingers.len()) {
+                return false;
+            }
+            if fingers.iter().any(|finger| finger.began) {
+                // A fresh gesture: nothing carries over from the last one.
+                if let Some(events) = &self.events {
+                    _ = events.send(Event::TouchpadDown);
+                }
+            }
 
-            if let Some(events) = &self.events {
-                let x_sum: f64 = x_deltas.iter().sum();
-                let y_sum: f64 = y_deltas.iter().sum();
+            if fingers.len() < GESTURE_MINIMAL_FINGERS {
+                return false;
+            }
 
-                if x_sum.abs() >= y_sum.abs() {
-                    // Horizontal dominant: use existing swipe path
-                    if x_deltas.iter().all(|p| p.abs() > SWIPE_THRESHOLD) {
-                        _ = events.send(Event::Swipe {
-                            delta: x_sum,
-                            fingers: x_deltas.len(),
+            if fingers.iter().all(|finger| !finger.began)
+                && let Some(prev) = &self.finger_position
+            {
+                // Match touches by identity rather than relying on NSSet
+                // iteration order, which is not guaranteed to be stable.
+                let (x_deltas, y_deltas): (Vec<f64>, Vec<f64>) = fingers
+                    .iter()
+                    .filter_map(|current| {
+                        prev.iter()
+                            .find(|previous| previous.is(current))
+                            .map(|previous| (previous.x - current.x, previous.y - current.y))
+                    })
+                    .unzip();
+
+                if let Some(events) = &self.events {
+                    let x_sum: f64 = x_deltas.iter().sum();
+                    let y_sum: f64 = y_deltas.iter().sum();
+
+                    if x_sum.abs() >= y_sum.abs() {
+                        // Horizontal dominant: use existing swipe path
+                        if x_deltas.iter().all(|p| p.abs() > SWIPE_THRESHOLD) {
+                            _ = events.send(Event::Swipe {
+                                delta: x_sum,
+                                fingers: x_deltas.len(),
+                            });
+                            self.last_swipe_time = Some(Instant::now());
+                        }
+                    } else if y_deltas.iter().all(|p| p.abs() > SWIPE_THRESHOLD) {
+                        if !self.config.swipe_vertical() {
+                            // Do not intercept the vertical swipe
+                            return false;
+                        }
+                        // Vertical dominant: send vertical swipe, intercept the event
+                        _ = events.send(Event::VerticalSwipe {
+                            delta: y_sum,
+                            fingers: y_deltas.len(),
                         });
                         self.last_swipe_time = Some(Instant::now());
                     }
-                } else if y_deltas.iter().all(|p| p.abs() > SWIPE_THRESHOLD) {
-                    if !self.config.swipe_vertical() {
-                        // Do not intercept the vertical swipe
-                        return false;
-                    }
-                    // Vertical dominant: send vertical swipe, intercept the event
-                    _ = events.send(Event::VerticalSwipe {
-                        delta: y_sum,
-                        fingers: y_deltas.len(),
-                    });
-                    self.last_swipe_time = Some(Instant::now());
                 }
             }
-        }
-        self.finger_position = Some(fingers);
+            self.finger_position = Some(fingers);
 
-        // If we have 3 or more fingers on the trackpad, we intercept the event
-        // to prevent it from being interpreted as a scroll by the OS.
-        true
+            // If we have 3 or more fingers on the trackpad, we intercept the event
+            // to prevent it from being interpreted as a scroll by the OS.
+            true
+        })
     }
 
     /// Handles key press events. It determines the modifier mask and attempts to find a matching keybinding in the configuration.

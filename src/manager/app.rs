@@ -223,7 +223,7 @@ impl ApplicationOS {
             // the window elements copied out of it. A call that trips either one
             // fails with `kAXErrorCannotComplete`, treated like any other AX error.
             AXUIElementSetMessagingTimeout(ptr, AX_MESSAGING_TIMEOUT_SEC);
-            AXUIWrapper::retain(ptr)?
+            AXUIWrapper::from_retained(ptr)?
         };
         let bundle_id = process
             .application()

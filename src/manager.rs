@@ -340,7 +340,7 @@ impl WindowManagerApi for WindowManagerOS {
     fn get_associated_windows(&self, window_id: WinID) -> Vec<WinID> {
         trace!("for window {window_id}");
         let windows =
-            unsafe { CFRetained::retain(SLSCopyAssociatedWindows(self.main_cid, window_id)) };
+            unsafe { CFRetained::from_raw(SLSCopyAssociatedWindows(self.main_cid, window_id)) };
         windows.into_iter().filter_map(|id| id.as_i32()).collect()
     }
 
@@ -857,9 +857,9 @@ pub fn bruteforce_windows(
         let bytes = element_id.to_ne_bytes();
         data[0xc..0xc + bytes.len()].copy_from_slice(&bytes);
 
-        let Ok(element_ref) =
-            AXUIWrapper::retain(unsafe { _AXUIElementCreateWithRemoteToken(data_ref.as_ref()) })
-        else {
+        let Ok(element_ref) = AXUIWrapper::from_retained(unsafe {
+            _AXUIElementCreateWithRemoteToken(data_ref.as_ref())
+        }) else {
             continue;
         };
         let Some(window_id) = try_ax_window_id(element_ref.as_ptr()) else {

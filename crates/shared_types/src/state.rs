@@ -257,6 +257,7 @@ impl StateEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wire::{Codec, MessagePack};
 
     #[test]
     fn query_kinds_round_trip_through_their_tokens() {
@@ -297,9 +298,9 @@ mod tests {
         assert!(line.contains(r#""event":"on_screen_changed""#));
         assert!(line.contains(r#""windows":"#));
 
-        let bytes = postcard::to_allocvec(&event).unwrap();
+        let bytes = MessagePack.encode(&event).unwrap();
         assert_eq!(
-            postcard::from_bytes::<StateEvent>(&bytes).unwrap(),
+            MessagePack.decode::<StateEvent>(&bytes).unwrap(),
             event,
             "clients must decode exactly what the daemon emits"
         );

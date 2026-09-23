@@ -89,6 +89,9 @@ struct MockStateInner {
     /// modelling the lag real apps show right after a window closes.
     stale_window_ids: HashMap<WinID, Pid>,
     unordered_windows: HashSet<WinID>,
+    /// Windows the app keeps out of its accessibility window list while the
+    /// window server still reports them on screen: a background native tab.
+    background_tabs: HashSet<WinID>,
 }
 
 #[derive(Clone)]
@@ -109,6 +112,7 @@ impl MockState {
                 event_queue: VecDeque::new(),
                 stale_window_ids: HashMap::new(),
                 unordered_windows: HashSet::new(),
+                background_tabs: HashSet::new(),
             })),
         }
     }
@@ -120,6 +124,19 @@ impl MockState {
             inner.unordered_windows.insert(window_id);
         } else {
             inner.unordered_windows.remove(&window_id);
+        }
+    }
+
+    /// Makes `window_id` a background native tab: on screen as far as the
+    /// window server is concerned, absent from the app's accessibility window
+    /// list. This is what Ghostty does with every tab but the selected one.
+    #[allow(unused)]
+    pub fn set_background_tab(&self, window_id: WinID, background: bool) {
+        let mut inner = self.inner.force_write();
+        if background {
+            inner.background_tabs.insert(window_id);
+        } else {
+            inner.background_tabs.remove(&window_id);
         }
     }
 
@@ -674,6 +691,15 @@ impl MockState {
         let (s, ids) = (self.clone(), window_ids.clone());
         ma.expect_window_list()
             .returning(move |_| ids().into_iter().map(|id| s.create_window(id)).collect());
+
+        let (s, ids) = (self.clone(), window_ids.clone());
+        ma.expect_ax_window_ids().returning(move || {
+            let background = s.inner.force_read().background_tabs.clone();
+            ids()
+                .into_iter()
+                .filter(|id| !background.contains(id))
+                .collect()
+        });
 
         Application::new(Box::new(ma))
     }

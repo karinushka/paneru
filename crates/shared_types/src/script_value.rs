@@ -1,10 +1,10 @@
 //! The value type the script-state store holds.
 //!
-//! Replaces `serde_json::Value`, whose `Deserialize` impl relies on a
-//! self-describing format and so cannot be decoded from postcard's compact
-//! binary wire. [`ScriptValue`]'s derived (de)serialization writes the variant
-//! tag explicitly instead. [`From`] conversions keep JSON working at the edges
-//! (CLI output, on-disk store) where it is still used.
+//! Replaces `serde_json::Value` with a type whose derived (de)serialization
+//! writes the variant tag explicitly, so a stored value round-trips without
+//! leaning on the wire format to describe itself. [`From`] conversions keep
+//! JSON working at the edges (CLI output, on-disk store) where it is still
+//! used.
 
 use std::collections::BTreeMap;
 
@@ -102,12 +102,11 @@ impl From<ScriptValue> for serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wire::{Codec, MessagePack};
     use serde_json::json;
 
-    /// The property the whole type exists for: it survives a non-self-describing
-    /// format, which `serde_json::Value` cannot.
     #[test]
-    fn every_shape_survives_postcard() {
+    fn every_shape_survives_the_wire() {
         let value = ScriptValue::Map(BTreeMap::from([
             ("null".to_string(), ScriptValue::Null),
             ("bool".to_string(), ScriptValue::Bool(true)),
@@ -120,8 +119,8 @@ mod tests {
             ),
         ]));
 
-        let bytes = postcard::to_allocvec(&value).expect("encodes");
-        let decoded: ScriptValue = postcard::from_bytes(&bytes).expect("decodes");
+        let bytes = MessagePack.encode(&value).expect("encodes");
+        let decoded: ScriptValue = MessagePack.decode(&bytes).expect("decodes");
         assert_eq!(decoded, value);
     }
 
@@ -147,8 +146,8 @@ mod tests {
         let stored = ScriptValue::from(json!(id));
         assert_eq!(stored, ScriptValue::Int(id));
 
-        let bytes = postcard::to_allocvec(&stored).expect("encodes");
-        let decoded: ScriptValue = postcard::from_bytes(&bytes).expect("decodes");
+        let bytes = MessagePack.encode(&stored).expect("encodes");
+        let decoded: ScriptValue = MessagePack.decode(&bytes).expect("decodes");
         assert_eq!(decoded, ScriptValue::Int(id));
         assert_eq!(serde_json::Value::from(decoded), json!(id));
     }

@@ -1,8 +1,7 @@
 //! Rendering wire types as the JSON a terminal sees.
 //!
 //! Types derive the ordinary externally tagged serde form (`{"variant": {…}}`)
-//! because `#[serde(tag = "…")]` needs a self-describing format and can't be
-//! decoded from postcard. This flattens that into the documented
+//! rather than `#[serde(tag = "…")]`. This flattens that into the documented
 //! `{"tag": "variant", …}` shape afterwards, so the JSON a client sees is
 //! unchanged.
 

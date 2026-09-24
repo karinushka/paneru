@@ -26,6 +26,8 @@ mod platform;
 mod reader;
 mod util;
 
+pub use paneru::types;
+
 #[cfg(test)]
 mod tests;
 
@@ -36,11 +38,11 @@ use events::{Event, EventSender};
 use client::ClientCommand;
 use ecs::state::StateQueryKind;
 use errors::Result;
-use paneru_shared_types::script_state::ScriptStateWrite;
-use paneru_shared_types::script_value::ScriptValue;
-use paneru_shared_types::wire::ScriptStateRequest;
 use platform::service;
 use reader::CommandReader;
+use types::script_state::ScriptStateWrite;
+use types::script_value::ScriptValue;
+use types::wire::ScriptStateRequest;
 
 use crate::ecs::setup_bevy_app;
 use crate::manager::{check_ax_privilege, request_ax_privilege};

@@ -19,7 +19,7 @@ use crate::ecs::state::{
 use crate::ecs::{ActiveWorkspaceMarker, FocusedMarker, Unmanaged};
 use crate::events::Event;
 use crate::platform::WinID;
-use paneru_shared_types::wire::{self, Response};
+use crate::types::wire::{self, Response};
 
 /// One connected `paneru subscribe` client.
 ///

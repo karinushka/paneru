@@ -778,7 +778,7 @@ fn test_query_state_tracks_float_after_virtual_workspace_is_reaped() {
 #[cfg(feature = "lua")]
 fn extract_window_set(
     world: &mut World,
-) -> crate::errors::Result<paneru_shared_types::windowset::WindowSet> {
+) -> crate::errors::Result<crate::types::windowset::WindowSet> {
     use crate::ecs::state::QueryStateParams;
 
     let mut system_state: SystemState<QueryStateParams> = SystemState::new(world);
@@ -790,7 +790,7 @@ fn extract_window_set(
 #[test]
 fn test_window_set_keeps_the_column_structure_a_flat_query_loses() {
     use crate::tests::harness::TestHarness;
-    use paneru_shared_types::windowset::ColumnKind;
+    use crate::types::windowset::ColumnKind;
 
     let mut harness = TestHarness::new().with_windows(3);
     harness.app.update();
@@ -879,7 +879,7 @@ fn test_window_set_marks_floating_windows_outside_the_strip() {
 fn test_layout_ops_apply_to_the_named_window_not_the_focused_one() {
     use crate::commands::Command;
     use crate::tests::harness::TestHarness;
-    use paneru_shared_types::windowset::LayoutOp;
+    use crate::types::windowset::LayoutOp;
 
     let mut harness = TestHarness::new().with_windows(3);
     harness.app.update();
@@ -925,7 +925,7 @@ fn test_layout_ops_apply_to_the_named_window_not_the_focused_one() {
 fn test_layout_ops_skip_a_vanished_window_and_apply_its_neighbours() {
     use crate::commands::Command;
     use crate::tests::harness::TestHarness;
-    use paneru_shared_types::windowset::LayoutOp;
+    use crate::types::windowset::LayoutOp;
 
     let mut harness = TestHarness::new().with_windows(2);
     harness.app.update();
@@ -962,8 +962,8 @@ fn test_layout_ops_skip_a_vanished_window_and_apply_its_neighbours() {
 fn test_set_frame_places_a_floating_window() {
     use crate::commands::Command;
     use crate::tests::harness::TestHarness;
-    use paneru_shared_types::state::Frame;
-    use paneru_shared_types::windowset::LayoutOp;
+    use crate::types::state::Frame;
+    use crate::types::windowset::LayoutOp;
 
     let mut harness = TestHarness::new().with_windows(1);
     // Let the window settle into the strip first: a window still being added

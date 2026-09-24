@@ -295,7 +295,7 @@ pub fn deprecated_options_in_file(path: &Path) -> Result<Vec<String>> {
 /// "focus", "east"]`), mapping the shared vocabulary crate's parse error into
 /// this crate's configuration error.
 pub fn parse_command(argv: &[&str]) -> Result<Command> {
-    paneru_shared_types::commands::parse_command(argv)
+    crate::types::commands::parse_command(argv)
         .map_err(|err| Error::InvalidConfig(format!("{}: {err}", function_name!())))
 }
 

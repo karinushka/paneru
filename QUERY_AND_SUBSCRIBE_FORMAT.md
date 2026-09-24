@@ -11,8 +11,8 @@ a terminal — and `jq`, and a status bar's shell script — needs text. Anythin
 consuming these commands' output sees exactly the shapes documented here.
 
 A client written in Rust can skip the JSON entirely by using the
-`paneru-shared-types` crate: its `wire::Request` and `wire::Response` are the
-protocol, and `paneru-mach-ipc` is the transport.
+`paneru::types` module (`src/types`): its `wire::Request` and `wire::Response`
+are the protocol, and `async-mach-ports` is the transport.
 
 All query responses are a single JSON document. `subscribe` emits
 line-delimited JSON, with one complete event object per line.

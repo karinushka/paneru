@@ -6,9 +6,9 @@
 //! [`Event`] for the world, and the ones that expect an answer carry a reply
 //! channel the answering system fills in.
 
+use crate::types::wire::{self, Delivery, Reply as MachReply, Request, service_name};
 use bevy::tasks::{IoTaskPool, TaskPool};
 use futures_lite::StreamExt;
-use paneru_shared_types::wire::{self, Delivery, Reply as MachReply, Request, service_name};
 use std::sync::Arc;
 use std::thread;
 use tracing::{error, warn};

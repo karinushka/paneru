@@ -182,7 +182,14 @@ end)
 | `paneru.query_workspaces()` | the virtual workspace rows |
 | `paneru.query_on_screen()` | the windows currently visible |
 
-These are spelled exactly as in the loadable client module (`require("paneru")`, see [`crates/lua`](crates/lua)), so a helper that reads state works unchanged in either host. The payloads are documented in [`QUERY_AND_SUBSCRIBE_FORMAT.md`](QUERY_AND_SUBSCRIBE_FORMAT.md).
+These are spelled exactly as in the loadable client module (`require("paneru")`, implemented in [`src/lua/client.rs`](src/lua/client.rs)), so a helper that reads state works unchanged in either host. The payloads are documented in [`QUERY_AND_SUBSCRIBE_FORMAT.md`](QUERY_AND_SUBSCRIBE_FORMAT.md).
+
+To build the standalone loadable `paneru.so` shared library for an external Lua interpreter (e.g. Lua 5.4 or LuaJIT):
+
+```sh
+cargo build --release --lib --no-default-features --features module,lua54
+ln -sf target/release/libpaneru.dylib paneru.so
+```
 
 State is gathered on demand and at most once per callback, so handlers that never query cost nothing extra. Outside a callback there is no window-manager state to read, so calling one of these at script top level raises an error; call them inside a handler or keybinding callback.
 

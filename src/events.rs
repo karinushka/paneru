@@ -1,8 +1,8 @@
+use crate::types::wire::{Response, ScriptStateRequest};
 use bevy::ecs::message::Message;
 use objc2::rc::Retained;
 use objc2_core_foundation::{CFRetained, CGPoint};
 use objc2_core_graphics::CGDirectDisplayID;
-use paneru_shared_types::wire::{Response, ScriptStateRequest};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
@@ -90,7 +90,7 @@ pub enum Event {
         app_name: String,
         bundle_id: String,
         title: String,
-        frame: paneru_shared_types::state::Frame,
+        frame: crate::types::state::Frame,
         floating: bool,
         managed: bool,
     },
@@ -213,7 +213,7 @@ pub enum Event {
     /// A client has subscribed to state events. Carries the channel they are
     /// pushed to, which outlives the request that delivered it.
     StateSubscribe {
-        subscriber: Arc<paneru_shared_types::wire::Subscriber>,
+        subscriber: Arc<crate::types::wire::Subscriber>,
     },
 
     /// A client has read or written the script state store. Answered

@@ -11,65 +11,40 @@ license = "MIT"
 categories = ["os::macos-apis"]
 keywords = ["macos", "windowmanager", "window", "manager"]
 
-[workspace]
-members = ["crates/*"]
-default-members = ["."]
+[lib]
+name = "paneru"
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
 
-# Versions shared by the daemon, the loadable Lua module and the command crate,
-# so the three can never drift apart. Members add only the features they need
-# (the Lua ABI in particular differs: vendored here, `module` in crates/lua).
-[workspace.dependencies]
-cfg-if = "1.0.4"
-futures-lite = "2.6"
-async-mach-ports = "0.3"
-rmp-serde = "1.2"
-mlua = { version = "0.12", default-features = false, features = ["serialize"] }
-paneru-lua = { path = "crates/lua" }
-paneru-shared-types = { path = "crates/shared_types" }
-regex = "1.13"
-serde = { version = "1.0", features = ["derive", "rc"] }
-serde_json = "1.0"
+[[bin]]
+name = "paneru"
+path = "src/main.rs"
 
 [lints.clippy]
 pedantic = "warn"
 
 # `lua` builds in the `init.lua` scripting runtime (`paneru.on`/
 # `paneru.bind`). On by default alongside `vendored`. Exactly one ABI feature
-# must be picked alongside `lua` (same convention as `crates/lua`) — `luajit`
-# is the one to pick unless you have a reason not to: handlers run on the event
-# path, and its tracing JIT is worth roughly an order of magnitude there over
-# the reference interpreter. The `lua5x` features remain for scripts needing
-# 5.2+ semantics LuaJIT lacks.
+# must be picked alongside `lua` (or `module`) — `luajit` is the one to pick
+# unless you have a reason not to: handlers run on the event path, and its
+# tracing JIT is worth roughly an order of magnitude there over the reference
+# interpreter. The `lua5x` features remain for scripts needing 5.2+ semantics
+# LuaJIT lacks.
 #
-# Lua 5.1 and Luau are deliberately not offered. The world-access calls
-# (`paneru.query*`, the window set, `paneru.state`) are async, which means the
-# interpreter has to be able to yield out of a Rust callback. LuaJIT can —
-# it is resumable across pcall, metamethods and C boundaries — but reference
-# 5.1 cannot yield across a C-call boundary at all, and Luau is missing the
-# same machinery (mlua gates several of its async APIs off both).
-#
-# `vendored` builds the interpreter from source rather than linking one the
-# system already has, and is enabled by default so a plain `cargo build`
-# works out-of-the-box without requiring system Lua headers or pkg-config.
-# Leave it off (e.g. `--no-default-features --features lua`) where the build
-# environment already supplies an interpreter and its headers via pkg-config
-# (the Nix package does): building it from source there fails anyway, because
-# `luajit-src` copies its sources out of the read-only Nix store and then
-# cannot write to the copy.
+# To build the loadable Lua module (`libpaneru.dylib` / `paneru.so` for
+# `require("paneru")` in external Lua interpreters):
+#   cargo build --release --lib --no-default-features --features module,lua54
 [features]
 default = ["lua", "vendored"]
 vendored = ["mlua/vendored"]
+module = ["lua-base", "mlua/module"]
 lua = [
   "lua-base",
   "luajit",
 ]
 lua-base = [
   "dep:mlua",
-  "dep:paneru-lua",
   "dep:async-executor",
-  # Brings in the `FromLua`/`IntoLua` impls the embedded runtime needs to hand
-  # a script the values it stored.
-  "paneru-shared-types/lua",
 ]
 luajit = ["mlua/luajit"]
 lua55 = ["mlua/lua55"]
@@ -100,7 +75,9 @@ async-channel = "2.5"
 # tree via those, so it costs nothing a tokio dependency would not double.
 async-lock = "3.4"
 async-executor = { version = "1.14", optional = true }
-futures-lite = { workspace = true }
+async-mach-ports = "0.3"
+cfg-if = "1.0.4"
+futures-lite = "2.6"
 bevy = { version = "0.19", default-features = false, features = [ "multi_threaded" ] }
 bitflags = "2.13"
 chrono = "0.4"
@@ -113,14 +90,10 @@ derive_more = { version = "2.1", features = ["deref", "deref_mut"] }
 embed_plist = "1.2"
 launchctl = "0.3"
 libc = "0.2"
-# Vendoring is left to the `vendored` feature rather than forced on here, so a
-# build that already has an interpreter to link against can say so.
-#
-# `async` is added only for the daemon: it is the embedded runtime that awaits
-# the main thread for world access. The loadable module in `crates/lua` talks to
-# the daemon over a socket and has nothing to await, so it stays on the plain
-# workspace dependency.
-mlua = { workspace = true, optional = true, features = ["async"] }
+mlua = { version = "0.12", default-features = false, optional = true, features = [
+  "serialize",
+  "async",
+] }
 notify = { version = "8.2", features = ["macos_fsevent"] }
 num_enum = "0.7"
 objc2 = { version = "0.6", features = ["catch-all", "exception"] }
@@ -142,8 +115,6 @@ objc2-app-kit = { version = "0.3", features = [
 ] }
 objc2-core-foundation = { version = "0.3", features = ["CFRunLoop"] }
 objc2-core-graphics = "0.3"
-paneru-shared-types = { workspace = true }
-paneru-lua = { workspace = true, optional = true }
 objc2-quartz-core = { version = "0.3", features = [
   "CALayer",
   "objc2-core-foundation",
@@ -156,10 +127,11 @@ objc2-foundation = { version = "0.3", features = [
   "NSDictionary",
   "NSBundle",
 ] }
-regex = { workspace = true }
+regex = "1.13"
+rmp-serde = "1.2"
 scopeguard = "1.2"
-serde = { workspace = true }
-serde_json = { workspace = true }
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = "1.0"
 stdext = "0.3"
 toml = "1.1"
 tracing = "0.1"
@@ -167,5 +139,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ctrlc = { version = "3.5", features = ["termination"] }
 xdg = "3.0"
 mockall = "0.15"
+
 [build-dependencies]
-cfg-if = { workspace = true}
+cfg-if = "1.0.4"

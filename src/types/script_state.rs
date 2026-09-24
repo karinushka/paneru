@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::script_value::ScriptValue;
+use crate::types::script_value::ScriptValue;
 
 /// How large the serialised store is allowed to get. A script that writes on
 /// every event has no natural stopping point, and the store is saved to disk;
@@ -210,7 +210,7 @@ impl WriteOutcome {
     /// If serialization fails, which should not happen barring a bug in this
     /// type's `Serialize` impl.
     pub fn to_json(&self) -> serde_json::Result<serde_json::Value> {
-        Ok(crate::json::flatten_tag(
+        Ok(crate::types::json::flatten_tag(
             serde_json::to_value(self)?,
             "outcome",
         ))

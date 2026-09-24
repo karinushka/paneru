@@ -96,7 +96,7 @@ pub struct WindowSpawnPayload {
     pub app_name: String,
     pub bundle_id: String,
     pub title: String,
-    pub frame: paneru_shared_types::state::Frame,
+    pub frame: crate::types::state::Frame,
     pub floating: bool,
     pub managed: bool,
 }
@@ -415,7 +415,7 @@ mod tests {
                 app_name: "test".into(),
                 bundle_id: "test".into(),
                 title: "test".into(),
-                frame: paneru_shared_types::state::Frame {
+                frame: crate::types::state::Frame {
                     x: 0,
                     y: 0,
                     width: 100,

@@ -22,6 +22,8 @@ mod runtime;
 mod worker;
 mod world;
 
+pub(crate) use paneru::lua::shared;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 

@@ -24,8 +24,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, error, warn};
 
 use crate::events::Event;
-use paneru_shared_types::script_state::{ScriptState, ScriptStateWrite, WriteOutcome};
-use paneru_shared_types::wire::{Response, ScriptStateRequest, ScriptStateResponse};
+use crate::types::script_state::{ScriptState, ScriptStateWrite, WriteOutcome};
+use crate::types::wire::{Response, ScriptStateRequest, ScriptStateResponse};
 
 pub const SCRIPT_STATE_FILE_NAME: &str = "script-state.json";
 const SUPPORTED_SCRIPT_STATE_VERSION: u32 = 1;
@@ -240,7 +240,7 @@ pub fn script_state_cleanup_on_exit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use paneru_shared_types::script_value::ScriptValue;
+    use crate::types::script_value::ScriptValue;
     use serde_json::json;
 
     fn set(key: &str, value: serde_json::Value) -> ScriptStateWrite {
@@ -349,7 +349,7 @@ mod tests {
     #[test]
     fn an_oversized_value_is_refused_and_leaves_the_store_alone() {
         let mut store = ScriptStateStore::default();
-        let huge = "x".repeat(paneru_shared_types::script_state::MAX_SERIALISED_BYTES + 1);
+        let huge = "x".repeat(crate::types::script_state::MAX_SERIALISED_BYTES + 1);
         assert!(store.apply(&set("big", json!(huge))).is_err());
         assert!(store.state().is_empty());
     }

@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::state::Frame;
+use crate::types::state::Frame;
 
 /// A window's id, as the accessibility layer reports it.
 pub type WinID = i32;

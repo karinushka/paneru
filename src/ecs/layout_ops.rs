@@ -7,12 +7,12 @@
 //! that can't be resolved is logged at debug and skipped without affecting
 //! the rest.
 
+use crate::types::windowset::LayoutOp;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::{Has, Without};
 use bevy::ecs::system::{Commands, Query};
 use bevy::platform::collections::HashSet;
-use paneru_shared_types::windowset::LayoutOp;
 use tracing::debug;
 
 use crate::commands::{Command, MoveFocus, Operation};

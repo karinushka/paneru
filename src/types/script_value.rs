@@ -102,7 +102,7 @@ impl From<ScriptValue> for serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wire::{Codec, MessagePack};
+    use crate::types::wire::{Codec, MessagePack};
     use serde_json::json;
 
     #[test]

@@ -14,7 +14,7 @@
 
 use mlua::{Function, LuaSerdeExt, UserData, UserDataMethods, Value};
 
-use crate::windowset::{LayoutOp, RelativeRect, WinID, WindowSet};
+use crate::types::windowset::{LayoutOp, RelativeRect, WinID, WindowSet};
 
 /// Reads `{ x = …, y = …, width = …, height = … }` as fractions of a display.
 /// Missing fields default to a full-display rect, so `{ width = 0.5 }` is the

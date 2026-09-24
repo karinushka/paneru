@@ -407,7 +407,7 @@ fn test_window_can_resize_to_two_display_widths_and_scroll() {
 /// overwrites from the live frame.
 #[test]
 fn test_lua_set_width_layout_op_resizes_the_focused_window() {
-    use paneru_shared_types::windowset::LayoutOp;
+    use crate::types::windowset::LayoutOp;
 
     const VIEWPORT_HEIGHT: i32 = TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT;
 

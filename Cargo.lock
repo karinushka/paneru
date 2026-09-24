@@ -2682,6 +2682,7 @@ dependencies = [
  "async-channel",
  "async-executor",
  "async-lock",
+ "async-mach-ports",
  "bevy",
  "bitflags",
  "cfg-if",
@@ -2704,9 +2705,8 @@ dependencies = [
  "objc2-core-graphics",
  "objc2-foundation",
  "objc2-quartz-core",
- "paneru-lua",
- "paneru-shared-types",
  "regex",
+ "rmp-serde",
  "scopeguard",
  "serde",
  "serde_json",
@@ -2715,30 +2715,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "xdg",
-]
-
-[[package]]
-name = "paneru-lua"
-version = "0.4.4"
-dependencies = [
- "cfg-if",
- "futures-lite",
- "mlua",
- "paneru-shared-types",
- "regex",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "paneru-shared-types"
-version = "0.4.4"
-dependencies = [
- "async-mach-ports",
- "mlua",
- "rmp-serde",
- "serde",
- "serde_json",
 ]
 
 [[package]]

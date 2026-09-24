@@ -10,15 +10,15 @@
 //! suspends rather than blocking — so nothing here may hold a `RefCell`
 //! borrow across an await.
 
-use paneru_shared_types::script_value::ScriptValue;
+use crate::types::script_value::ScriptValue;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
 
+use crate::types::windowset::WindowSet;
 use mlua::prelude::{FromLua, IntoLua};
 use mlua::{AnyUserData, Function, Lua, LuaOptions, StdLib, Table, Value};
-use paneru_shared_types::windowset::WindowSet;
 use tracing::{error, warn};
 
 use super::api;
@@ -347,10 +347,10 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use crate::types::script_state::{ScriptState, ScriptStateWrite, WriteOutcome};
+    use crate::types::windowset::WindowSet;
     use async_channel::{Receiver, unbounded};
     use futures_lite::future::{block_on, poll_once};
-    use paneru_shared_types::script_state::{ScriptState, ScriptStateWrite, WriteOutcome};
-    use paneru_shared_types::windowset::WindowSet;
 
     use super::super::convert;
     use super::super::worker::{Shared, StoreRequest, WorldRequest};

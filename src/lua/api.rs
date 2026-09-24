@@ -17,8 +17,8 @@ use std::rc::Rc;
 use mlua::{IntoLua, Lua, LuaSerdeExt, Table, Value};
 use tracing::{error, info};
 
-use paneru_lua as shared;
-use paneru_shared_types::script_state::{ScriptStateWrite, WriteOutcome};
+use super::shared;
+use crate::types::script_state::{ScriptStateWrite, WriteOutcome};
 
 use super::convert::LuaEvent;
 use super::runtime::{
@@ -28,7 +28,7 @@ use super::world::DispatchWorld;
 use crate::commands::Command;
 use crate::config::{Config, config_from_lua, resolve_chord};
 use crate::ecs::state::StateQueryKind;
-use paneru_shared_types::windowset_lua::returned_ops;
+use crate::types::windowset_lua::returned_ops;
 
 /// One `paneru.exec` call: what to run, and where the answer goes.
 struct ExecJob {

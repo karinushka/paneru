@@ -3,12 +3,12 @@
 //! produced; the daemon and its clients otherwise speak typed `MessagePack`
 //! values.
 
-use futures_lite::StreamExt;
-use paneru_shared_types::state::{StateEvent, StateQueryKind};
-use paneru_shared_types::wire::{
+use crate::types::state::{StateEvent, StateQueryKind};
+use crate::types::wire::{
     self, Error as WireError, QueryPayload, Request, Response, ScriptStateRequest,
     ScriptStateResponse, SendPort, Sender, service_name,
 };
+use futures_lite::StreamExt;
 
 use crate::errors::{Error, Result};
 
@@ -32,7 +32,7 @@ fn connect() -> Result<Sender<Request>> {
 pub async fn send_command(argv: impl IntoIterator<Item = String>) -> Result<()> {
     let argv = argv.into_iter().collect::<Vec<_>>();
     let borrowed = argv.iter().map(String::as_str).collect::<Vec<_>>();
-    let command = paneru_shared_types::argv::parse_command(&borrowed)?;
+    let command = crate::types::argv::parse_command(&borrowed)?;
 
     connect()?.send(&Request::Command(command)).await?;
     Ok(())

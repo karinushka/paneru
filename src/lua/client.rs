@@ -10,16 +10,16 @@
 use std::rc::Rc;
 use std::sync::{LazyLock, Mutex};
 
-use mlua::prelude::*;
-use paneru_shared_types::commands::Command;
-use paneru_shared_types::script_state::ScriptStateWrite;
-use paneru_shared_types::script_value::ScriptValue;
-use paneru_shared_types::state::{StateEvent, StateQueryKind};
-use paneru_shared_types::windowset_lua::returned_ops;
-use paneru_shared_types::wire::{
+use crate::types::commands::Command;
+use crate::types::script_state::ScriptStateWrite;
+use crate::types::script_value::ScriptValue;
+use crate::types::state::{StateEvent, StateQueryKind};
+use crate::types::windowset_lua::returned_ops;
+use crate::types::wire::{
     self as wire, Error as WireError, RecvPort, Request, Response, ScriptStateRequest,
     ScriptStateResponse, SendPort, Sender, WriteOutcome,
 };
+use mlua::prelude::*;
 
 /// The active service name, seeded from the shared default and mutable via
 /// `set_service_name`.
@@ -319,7 +319,11 @@ fn unexpected(response: &Response) -> LuaError {
 pub fn module(lua: &Lua, version: &str) -> LuaResult<LuaTable> {
     let exports = lua.create_table()?;
 
-    crate::install(lua, &exports, &(Rc::new(dispatch) as crate::Dispatch))?;
+    super::shared::install(
+        lua,
+        &exports,
+        &(Rc::new(dispatch) as super::shared::Dispatch),
+    )?;
 
     exports.set("query", lua.create_function(query)?)?;
     exports.set("query_json", lua.create_function(query_json)?)?;

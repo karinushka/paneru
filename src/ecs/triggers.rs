@@ -1095,7 +1095,7 @@ pub(super) fn spawn_window_trigger(
         let title = window.title().unwrap_or_default();
         let app_name = app.name().to_string();
         let bundle_id = app.bundle_id().unwrap_or_default().clone();
-        let window_frame = paneru_shared_types::state::Frame {
+        let window_frame = crate::types::state::Frame {
             x: frame.min.x,
             y: frame.min.y,
             width: frame.width(),

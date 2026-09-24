@@ -26,8 +26,8 @@ use async_channel::{Sender, bounded};
 
 use super::worker::{Shared, StoreRequest, WorldRequest};
 use crate::ecs::state::PaneruQueryState;
-use paneru_shared_types::script_state::{ScriptState, ScriptStateWrite, WriteOutcome};
-use paneru_shared_types::windowset::WindowSet;
+use crate::types::script_state::{ScriptState, ScriptStateWrite, WriteOutcome};
+use crate::types::windowset::WindowSet;
 
 /// What the worker reported when the main thread has already gone away. Surfaces
 /// inside the handler as an ordinary error, so the script unwinds normally

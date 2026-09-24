@@ -47,15 +47,13 @@
     reason = "mlua callback signatures are by-value by contract"
 )]
 
-pub mod client;
-
 use std::rc::Rc;
 
 use mlua::{Function, Lua, LuaSerdeExt, Result, Table, Value};
 use regex::Regex;
 use serde::Deserialize;
 
-use paneru_shared_types::commands::{
+use crate::types::commands::{
     Command, Direction, MouseMove, MoveFocus, Operation, ResizeDirection, parse_command,
 };
 
@@ -426,7 +424,7 @@ fn scalar_token(value: &Value) -> Result<String> {
 #[cfg(feature = "module")]
 #[mlua::lua_module]
 fn paneru(lua: &Lua) -> Result<Table> {
-    client::module(lua, env!("CARGO_PKG_VERSION"))
+    super::client::module(lua, env!("CARGO_PKG_VERSION"))
 }
 
 #[cfg(test)]

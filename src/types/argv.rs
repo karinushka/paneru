@@ -4,7 +4,7 @@
 //! TOML `[bindings]` keys are split into, so parsing and formatting live
 //! together here and are checked against each other by round-trip tests.
 
-use crate::commands::{
+use crate::types::commands::{
     Command, Direction, MouseMove, MoveFocus, Operation, ResizeDirection,
     parse_virtual_workspace_number,
 };

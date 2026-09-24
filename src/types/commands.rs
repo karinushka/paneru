@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub use crate::argv::{ParseError, parse_command};
+pub use crate::types::argv::{ParseError, parse_command};
 
 /// Represents a cardinal or directional choice for window manipulation.
 ///
@@ -311,5 +311,5 @@ pub enum Command {
     /// Layout operations a Lua handler produced by transforming a `WindowSet`.
     /// Window-addressed, unlike every other command here, and applied
     /// best-effort: see `ecs::layout_ops`. Never produced by parsing.
-    Layout(Vec<crate::windowset::LayoutOp>),
+    Layout(Vec<crate::types::windowset::LayoutOp>),
 }

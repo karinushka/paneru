@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use mlua::prelude::*;
 
-use crate::script_value::ScriptValue;
+use crate::types::script_value::ScriptValue;
 
 impl IntoLua for ScriptValue {
     fn into_lua(self, lua: &Lua) -> LuaResult<LuaValue> {

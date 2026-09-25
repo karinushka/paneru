@@ -5,7 +5,7 @@ use bevy::ecs::lifecycle::{Add, Remove, RemovedComponents};
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Added, Has, With, Without};
-use bevy::ecs::system::{Commands, NonSendMut, Populated, Query, Res, ResMut, Single};
+use bevy::ecs::system::{Commands, NonSendMut, ParamSet, Populated, Query, Res, ResMut, Single};
 use bevy::math::IRect;
 use notify::event::{DataChange, MetadataKind, ModifyKind};
 use notify::{EventKind, Watcher};
@@ -40,6 +40,28 @@ use crate::util::{round_px, symlink_target};
 /// give the usable viewport a window has to be fitted into.
 type ActiveDisplayViewport<'w, 's> =
     Single<'w, 's, (&'static Display, Option<&'static DockPosition>), With<ActiveDisplayMarker>>;
+
+type AddedWindowDefaults<'w, 's> = Populated<
+    'w,
+    's,
+    (
+        &'static mut Window,
+        &'static mut Position,
+        &'static mut Bounds,
+        &'static mut WidthRatio,
+        &'static ChildOf,
+    ),
+    Added<Window>,
+>;
+
+type WindowDefaultsQueries<'w, 's> = ParamSet<
+    'w,
+    's,
+    (
+        AddedWindowDefaults<'static, 'static>,
+        Query<'static, 'static, &'static WidthRatio, With<FocusedMarker>>,
+    ),
+>;
 
 /// Computes the passthrough keybinding set for the given window/app and
 /// publishes it to the input thread. Called on focus change and config reload.
@@ -1133,14 +1155,14 @@ pub(super) fn spawn_window_trigger(
 }
 
 pub(super) fn apply_window_defaults(
-    added: Populated<(&mut Window, &mut Position, &mut Bounds, &ChildOf), Added<Window>>,
+    mut windows: WindowDefaultsQueries,
     apps: Query<(Entity, &Application)>,
-    focused: Query<&WidthRatio, With<FocusedMarker>>,
     active_display: ActiveDisplay,
     config: Res<Config>,
     initializing: Option<Res<Initializing>>,
 ) {
-    for (ref mut window, mut position, mut bounds, child) in added {
+    let focused_ratio = windows.p1().single().ok().map(|ratio| ratio.0);
+    for (ref mut window, mut position, mut bounds, mut width_ratio, child) in windows.p0() {
         let Ok((_, app)) = apps.get(child.parent()) else {
             continue;
         };
@@ -1168,28 +1190,27 @@ pub(super) fn apply_window_defaults(
         let hpadding = properties.horizontal_padding();
         window.set_padding(WindowPadding::Vertical(vpadding.clamp(0, 50)));
         window.set_padding(WindowPadding::Horizontal(hpadding.clamp(0, 50)));
+        let display_width = f64::from(active_display.bounds().width());
         if let Ok(frame) = window.update_frame() {
             position.0 = frame.min;
-            bounds.0 = frame.size();
+            bounds.bypass_change_detection().0 = frame.size();
+            width_ratio.0 = f64::from(frame.width()) / display_width;
         }
 
         // Apply configured width AFTER update_frame so it isn't overwritten.
-        // Use padded display width (matching window_resize command behavior).
+        // WidthRatio and commit_window_size use the display's raw bounds.
         // Safe during init: this only resizes, it doesn't reposition, so a
         // window on an inactive display stays put.
-        let focused_ratio = focused.single().ok().map(|ratio| ratio.0);
         if let Some(width) = properties.width_ratio(focused_ratio) {
-            let display_bounds = active_display.actual_bounds(&config);
-            let (_, pad_right, _, pad_left) = config.edge_padding();
-            let padded_width = display_bounds.width() - pad_left - pad_right;
-            let new_width = round_px(f64::from(padded_width) * width);
+            let new_width = round_px(display_width * width);
             let height = window.frame().height();
             window.resize(Size::new(new_width, height));
             // Re-read the actual OS size: the app may enforce a minimum width
             // that differs from our request.
             if let Ok(frame) = window.update_frame().inspect_err(|err| error!("{err}")) {
                 position.0 = frame.min;
-                bounds.0 = frame.size();
+                bounds.bypass_change_detection().0 = frame.size();
+                width_ratio.0 = f64::from(frame.width()) / display_width;
             }
         }
     }

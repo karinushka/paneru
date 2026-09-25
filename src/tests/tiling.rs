@@ -77,6 +77,36 @@ fn new_window_starts_full_width_after_full_width_focus() {
 }
 
 #[test]
+fn configured_width_uses_raw_display_bounds_with_edge_padding() {
+    let options = MainOptions {
+        padding_left: Some(20),
+        padding_right: Some(30),
+        ..MainOptions::default()
+    };
+    let mut params = WindowParams::new(".*", None);
+    params.width = Some(InitialWindowWidth::Ratio(0.5));
+    let config: Config = (options, vec![params]).into();
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(1)
+        .on_iteration(0, |world, state| {
+            let frame = IRect::new(0, 0, TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+            let window = state.spawn_window(TEST_PROCESS_ID, TEST_WORKSPACE_ID, 1, frame);
+            world.trigger(SpawnWindowTrigger(vec![window]));
+        })
+        .on_iteration(1, |world, _state| {
+            assert_window_size!(world, 1, TEST_DISPLAY_WIDTH / 2, 748);
+            let mut query = world.query::<(&crate::manager::Window, &crate::ecs::WidthRatio)>();
+            let ratio = query
+                .iter(world)
+                .find_map(|(window, ratio)| (window.id() == 1).then_some(ratio.0));
+            assert_eq!(ratio, Some(0.5));
+        })
+        .run(vec![Event::MenuOpened { window_id: 0 }]);
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
 fn test_window_shuffle() {
     const PADDING_LEFT: u16 = 3;

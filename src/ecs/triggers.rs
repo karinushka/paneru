@@ -796,7 +796,9 @@ pub(super) fn window_managed_trigger(
     {
         let properties = WindowProperties::new(app, window, &ctx.config);
 
-        if let Some(width_ratio) = properties.width_ratio() {
+        // Re-managing an existing window (e.g. after un-floating it) retains
+        // its width under the dynamic rule. Fixed rules keep their old behavior.
+        if let Some(width_ratio) = properties.fixed_width_ratio() {
             let (_, pad_right, _, pad_left) = ctx.config.edge_padding();
             let padded_width = display_bounds.width() - pad_left - pad_right;
             let width = round_px(f64::from(padded_width) * width_ratio);
@@ -1133,6 +1135,7 @@ pub(super) fn spawn_window_trigger(
 pub(super) fn apply_window_defaults(
     added: Populated<(&mut Window, &mut Position, &mut Bounds, &ChildOf), Added<Window>>,
     apps: Query<(Entity, &Application)>,
+    focused: Query<&WidthRatio, With<FocusedMarker>>,
     active_display: ActiveDisplay,
     config: Res<Config>,
     initializing: Option<Res<Initializing>>,
@@ -1174,17 +1177,21 @@ pub(super) fn apply_window_defaults(
         // Use padded display width (matching window_resize command behavior).
         // Safe during init: this only resizes, it doesn't reposition, so a
         // window on an inactive display stays put.
-        if let Some(width) = properties.width_ratio() {
+        let focused_ratio = focused.single().ok().map(|ratio| ratio.0);
+        if let Some(width) = properties.width_ratio(focused_ratio) {
             _ = window.update_frame().inspect_err(|err| error!("{err}"));
-            let bounds = active_display.actual_bounds(&config);
+            let display_bounds = active_display.actual_bounds(&config);
             let (_, pad_right, _, pad_left) = config.edge_padding();
-            let padded_width = bounds.width() - pad_left - pad_right;
+            let padded_width = display_bounds.width() - pad_left - pad_right;
             let new_width = round_px(f64::from(padded_width) * width);
             let height = window.frame().height();
             window.resize(Size::new(new_width, height));
             // Re-read the actual OS size: the app may enforce a minimum width
             // that differs from our request.
-            _ = window.update_frame().inspect_err(|err| error!("{err}"));
+            if let Ok(frame) = window.update_frame().inspect_err(|err| error!("{err}")) {
+                position.0 = frame.min;
+                bounds.0 = frame.size();
+            }
         }
     }
 }

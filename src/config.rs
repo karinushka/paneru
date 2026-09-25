@@ -1336,6 +1336,71 @@ impl<'de> Deserialize<'de> for Keybinding {
     }
 }
 
+/// The initial width of a managed window, either fixed or based on the focused window.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(untagged)]
+pub enum InitialWindowWidth {
+    Ratio(f64),
+    Mode(InitialWindowWidthMode),
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InitialWindowWidthMode {
+    ComplementFocused,
+}
+
+impl InitialWindowWidth {
+    pub fn ratio(self, focused_ratio: Option<f64>) -> f64 {
+        match self {
+            Self::Ratio(ratio) => ratio,
+            Self::Mode(InitialWindowWidthMode::ComplementFocused) => {
+                // The first window, or one opened from an almost full-width
+                // window, should occupy the display rather than a tiny sliver.
+                let Some(ratio) = focused_ratio.filter(|ratio| ratio.is_finite() && *ratio > 0.0)
+                else {
+                    return 1.0;
+                };
+                if ratio >= 0.95 { 1.0 } else { 1.0 - ratio }
+            }
+        }
+    }
+}
+
+#[test]
+#[allow(clippy::float_cmp)]
+fn test_initial_window_width_config() {
+    let config = Config::try_from(
+        r#"
+[windows.dynamic]
+title = ".*"
+width = "complement_focused"
+"#,
+    )
+    .expect("dynamic width rule parses");
+    let width = config.find_window_properties("Window 1", "")[0]
+        .width
+        .expect("matched width rule");
+    assert_eq!(width.ratio(Some(0.25)), 0.75);
+    assert_eq!(width.ratio(Some(0.5)), 0.5);
+    assert_eq!(width.ratio(Some(0.95)), 1.0);
+    assert_eq!(width.ratio(Some(1.0)), 1.0);
+    assert_eq!(width.ratio(None), 1.0);
+
+    let config = Config::try_from(
+        r#"
+[windows.fixed]
+title = ".*"
+width = 0.5
+"#,
+    )
+    .expect("fixed width rule still parses");
+    let width = config.find_window_properties("Window 1", "")[0]
+        .width
+        .expect("matched width rule");
+    assert_eq!(width.ratio(Some(0.25)), 0.5);
+}
+
 /// `WindowParams` defines rules and properties for specific windows based on their title or bundle ID.
 /// These parameters can override default window management behavior, such as forcing a window to float or setting its initial index.
 #[derive(Clone, Debug, Deserialize)]
@@ -1355,10 +1420,11 @@ pub struct WindowParams {
     pub vertical_padding: Option<i32>,
     pub horizontal_padding: Option<i32>,
     pub dont_focus: Option<bool>,
-    /// An optional positive initial width ratio relative to the display width.
-    /// Values above 1.0 create an oversized, horizontally scrollable window.
+    /// A positive initial width ratio relative to the display width, or
+    /// `"complement_focused"` to fill the width left by the focused window.
+    /// Fixed ratios above 1.0 create an oversized, horizontally scrollable window.
     /// Overrides the default column width when the window is first managed.
-    pub width: Option<f64>,
+    pub width: Option<InitialWindowWidth>,
     /// Grid placement for floating windows: "cols:rows:x:y:w:h".
     /// Divides the display into a grid and positions the window at the given cell/span.
     pub grid: Option<String>,

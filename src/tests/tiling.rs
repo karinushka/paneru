@@ -1,13 +1,80 @@
 use std::time::Duration;
 
 use crate::commands::{Command, Direction, Operation, ResizeDirection};
-use crate::config::{Config, MainOptions, WindowParams};
+use crate::config::{
+    Config, InitialWindowWidth, InitialWindowWidthMode, MainOptions, WindowParams,
+};
+use crate::ecs::SpawnWindowTrigger;
 use crate::ecs::layout::LayoutStrip;
 use crate::events::Event;
 use crate::{assert_window_at, assert_window_size};
+use bevy::math::IRect;
 use bevy::prelude::*;
 
 use super::*;
+
+#[test]
+fn new_window_starts_at_complement_of_focused_width() {
+    let mut params = WindowParams::new(".*", None);
+    params.width = Some(InitialWindowWidth::Mode(
+        InitialWindowWidthMode::ComplementFocused,
+    ));
+    let config: Config = (MainOptions::default(), vec![params]).into();
+
+    TestHarness::new()
+        .with_windows(1)
+        .with_focused_window(0)
+        .on_iteration(0, move |world, state| {
+            world.insert_resource(config.clone());
+            let frame = IRect::new(0, 0, TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+            let window = state.spawn_window(TEST_PROCESS_ID, TEST_WORKSPACE_ID, 1, frame);
+            world.trigger(SpawnWindowTrigger(vec![window]));
+        })
+        .on_iteration(1, |world, _state| {
+            assert_window_size!(world, 0, TEST_WINDOW_WIDTH, 748);
+            assert_window_size!(world, 1, TEST_DISPLAY_WIDTH - TEST_WINDOW_WIDTH, 748);
+        })
+        .run(vec![
+            Event::MenuOpened { window_id: 0 },
+            Event::Command {
+                command: Command::PrintState,
+            },
+        ]);
+}
+
+#[test]
+fn new_window_starts_full_width_after_full_width_focus() {
+    let mut fixed = WindowParams::new(".*", None);
+    fixed.width = Some(InitialWindowWidth::Ratio(1.0));
+    let fixed_config: Config = (MainOptions::default(), vec![fixed]).into();
+
+    let mut dynamic = WindowParams::new(".*", None);
+    dynamic.width = Some(InitialWindowWidth::Mode(
+        InitialWindowWidthMode::ComplementFocused,
+    ));
+    let dynamic_config: Config = (MainOptions::default(), vec![dynamic]).into();
+
+    TestHarness::new()
+        .with_config(fixed_config)
+        .with_windows(1)
+        .with_focused_window(0)
+        .on_iteration(0, move |world, state| {
+            assert_window_size!(world, 0, TEST_DISPLAY_WIDTH, 748);
+            world.insert_resource(dynamic_config.clone());
+            let frame = IRect::new(0, 0, TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+            let window = state.spawn_window(TEST_PROCESS_ID, TEST_WORKSPACE_ID, 1, frame);
+            world.trigger(SpawnWindowTrigger(vec![window]));
+        })
+        .on_iteration(1, |world, _state| {
+            assert_window_size!(world, 1, TEST_DISPLAY_WIDTH, 748);
+        })
+        .run(vec![
+            Event::MenuOpened { window_id: 0 },
+            Event::Command {
+                command: Command::PrintState,
+            },
+        ]);
+}
 
 #[test]
 #[allow(clippy::too_many_lines)]

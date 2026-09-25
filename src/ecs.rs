@@ -26,7 +26,7 @@ use tracing::{Level, error, instrument, warn};
 
 use crate::commands::register_commands;
 use crate::config::snippet::SnippetDialect;
-use crate::config::{CONFIGURATION_FILE, Config, WindowParams};
+use crate::config::{CONFIGURATION_FILE, Config, InitialWindowWidth, WindowParams};
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::state::PaneruState;
 use crate::errors::Result;
@@ -877,8 +877,18 @@ impl WindowProperties {
             .collect::<Vec<_>>()
     }
 
-    pub fn width_ratio(&self) -> Option<f64> {
-        self.params.iter().find_map(|props| props.width)
+    pub fn width_ratio(&self, focused_ratio: Option<f64>) -> Option<f64> {
+        self.params
+            .iter()
+            .find_map(|props| props.width)
+            .map(|width| width.ratio(focused_ratio))
+    }
+
+    pub fn fixed_width_ratio(&self) -> Option<f64> {
+        match self.params.iter().find_map(|props| props.width) {
+            Some(InitialWindowWidth::Ratio(ratio)) => Some(ratio),
+            _ => None,
+        }
     }
 
     pub fn vertical_padding(&self) -> i32 {

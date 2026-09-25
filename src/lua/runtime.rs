@@ -529,6 +529,24 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)]
+    fn setup_accepts_complement_focused_width() {
+        let world = TestWorld::default();
+        let runtime = world
+            .runtime(
+                r#"paneru.setup{
+                windows = { all = { title = ".*", width = "complement_focused" } },
+            }"#,
+            )
+            .expect("Lua width rule parses");
+        let config = runtime.built_config().expect("setup should build a config");
+        let width = config.find_window_properties("Window 1", "")[0]
+            .width
+            .expect("matched width rule");
+        assert_eq!(width.ratio(Some(0.25)), 0.75);
+    }
+
+    #[test]
     fn no_setup_call_leaves_config_to_toml() {
         let world = TestWorld::default();
         let runtime = world

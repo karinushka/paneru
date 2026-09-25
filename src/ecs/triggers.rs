@@ -1179,7 +1179,6 @@ pub(super) fn apply_window_defaults(
         // window on an inactive display stays put.
         let focused_ratio = focused.single().ok().map(|ratio| ratio.0);
         if let Some(width) = properties.width_ratio(focused_ratio) {
-            _ = window.update_frame().inspect_err(|err| error!("{err}"));
             let display_bounds = active_display.actual_bounds(&config);
             let (_, pad_right, _, pad_left) = config.edge_padding();
             let padded_width = display_bounds.width() - pad_left - pad_right;

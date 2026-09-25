@@ -123,8 +123,11 @@ pub fn register_systems(app: &mut bevy::app::App) {
     app.add_systems(
         PreUpdate,
         (
-            systems::window_creation_event,
             systems::pump_events,
+            // Read creation notifications in the same frame that pumps them.
+            // Otherwise an idle pump can wait up to its next timeout before
+            // the first resize of a newly visible window.
+            systems::window_creation_event.after(systems::pump_events),
             systems::demux_input_events.after(systems::pump_events),
         ),
     );

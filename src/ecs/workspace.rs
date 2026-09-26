@@ -10,6 +10,7 @@ use bevy::ecs::query::{Added, Has, With, Without};
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::schedule::common_conditions::{not, resource_exists};
 use bevy::ecs::system::{Commands, Local, ParamSet, Populated, Query, Res, ResMut, Single};
+use bevy::ecs::world::World;
 use bevy::time::common_conditions::on_timer;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -91,6 +92,12 @@ impl Plugin for WorkspaceEventsPlugin {
             (switch_virtual_workspace_bind, move_virtual_workspace_bind),
         );
         app.add_systems(
+            PreUpdate,
+            find_orphaned_workspaces
+                .after(crate::ecs::display::reconcile_displays)
+                .run_if(on_timer(DISPLAY_CHANGE_CHECK_FREQ)),
+        );
+        app.add_systems(
             Update,
             (
                 renumber_virtual_indexes,
@@ -100,9 +107,6 @@ impl Plugin for WorkspaceEventsPlugin {
                 show_active_workspace,
                 handle_virtual_window_moves,
                 detect_moved_windows.run_if(not(resource_exists::<Initializing>)),
-                find_orphaned_workspaces
-                    .after(crate::ecs::display::reconcile_displays)
-                    .run_if(on_timer(DISPLAY_CHANGE_CHECK_FREQ)),
             ),
         );
         app.add_systems(PostUpdate, workspace_destroyed_handler);
@@ -507,6 +511,7 @@ fn find_orphaned_workspaces(
     mut commands: Commands,
 ) {
     let present = window_manager.present_displays();
+    let mut rehomed = false;
 
     for (orphan, orphan_entity, timeout, child) in orphans {
         // Row 0 is the row every space is created with, so it is re-parented
@@ -564,7 +569,14 @@ fn find_orphaned_workspaces(
 
         if let Ok(mut cmd) = commands.get_entity(orphan_entity) {
             cmd.try_remove::<Timeout>().insert(ChildOf(target_entity));
+            commands.queue(move |world: &mut World| {
+                crate::ecs::display::refresh_reparented_strip(world, orphan_entity);
+            });
+            rehomed = true;
         }
+    }
+    if rehomed {
+        commands.trigger(SendMessageTrigger(Event::DisplayChanged));
     }
 }
 

@@ -99,7 +99,7 @@ fn test_multi_display_lifecycle() {
 
 #[test]
 fn test_multi_workspace_orphaning() {
-    let commands = vec![
+    let mut commands = vec![
         Event::MenuOpened { window_id: 0 },
         Event::Command {
             command: Command::PrintState,
@@ -108,6 +108,9 @@ fn test_multi_workspace_orphaning() {
             display_id: TEST_DISPLAY_ID,
         },
     ];
+    commands.extend((0..6).map(|_| Event::Command {
+        command: Command::PrintState,
+    }));
 
     let workspaces = vec![TEST_WORKSPACE_ID, TEST_WORKSPACE_ID + 1];
     let harness = TestHarness::new().with_display(
@@ -137,7 +140,7 @@ fn test_multi_workspace_orphaning() {
             }
             state.remove_display(TEST_DISPLAY_ID);
         })
-        .on_iteration(2, |world, _state| {
+        .on_iteration(8, |world, _state| {
             let workspace_entities = world
                 .query_filtered::<Entity, With<LayoutStrip>>()
                 .iter(world)
@@ -454,6 +457,245 @@ fn test_wake_reconciles_unplugged_display() {
 }
 
 #[test]
+fn test_display_configuration_reapplies_layout_after_geometry_change() {
+    let mut harness = TestHarness::new().with_windows(1);
+    harness.advance(Duration::from_millis(500));
+    let window_entity = find_window_entity(0, harness.world());
+    let original = harness
+        .world()
+        .get::<Window>(window_entity)
+        .unwrap()
+        .frame();
+
+    let new_height = TEST_DISPLAY_HEIGHT - 100;
+    harness.mock_state.set_display_bounds(
+        TEST_DISPLAY_ID,
+        IRect::new(120, 0, TEST_DISPLAY_WIDTH + 120, new_height),
+    );
+    harness
+        .world()
+        .write_message::<Event>(Event::DisplayConfigured {
+            display_id: TEST_DISPLAY_ID,
+        });
+
+    harness.advance(Duration::from_millis(200));
+    let world = harness.world();
+    let display = world.query::<&Display>().single(world).unwrap();
+    assert_eq!(display.bounds().min.x, 0, "wait for the display to settle");
+
+    harness.advance(Duration::from_millis(1000));
+    let updated = harness
+        .world()
+        .get::<Window>(window_entity)
+        .unwrap()
+        .frame();
+    assert_eq!(updated.min.x, original.min.x + 120);
+    assert_eq!(updated.height(), new_height - TEST_MENUBAR_HEIGHT);
+}
+
+#[test]
+fn test_display_configuration_catches_late_geometry_change() {
+    let mut harness = TestHarness::new().with_windows(1);
+    harness.advance(Duration::from_millis(500));
+    let window_entity = find_window_entity(0, harness.world());
+    let original_x = harness
+        .world()
+        .get::<Window>(window_entity)
+        .unwrap()
+        .frame()
+        .min
+        .x;
+    harness
+        .world()
+        .write_message::<Event>(Event::DisplayConfigured {
+            display_id: TEST_DISPLAY_ID,
+        });
+    // The first settled scan still sees the old display configuration.
+    harness.advance(Duration::from_millis(600));
+
+    harness.mock_state.set_display_bounds(
+        TEST_DISPLAY_ID,
+        IRect::new(90, 0, TEST_DISPLAY_WIDTH + 90, TEST_DISPLAY_HEIGHT),
+    );
+    harness.advance(Duration::from_millis(1300));
+
+    let world = harness.world();
+    let display = world.query::<&Display>().single(world).unwrap();
+    assert_eq!(display.bounds().min.x, 90);
+    assert_eq!(
+        world.get::<Window>(window_entity).unwrap().frame().min.x,
+        original_x + 90
+    );
+}
+
+#[test]
+fn test_transient_empty_display_list_keeps_layout_and_retries() {
+    let mut harness = TestHarness::new().with_windows(1);
+    harness.advance(Duration::from_millis(500));
+    harness.mock_state.remove_display(TEST_DISPLAY_ID);
+    harness
+        .world()
+        .write_message::<Event>(Event::DisplayConfigured {
+            display_id: TEST_DISPLAY_ID,
+        });
+    harness.advance(Duration::from_millis(600));
+
+    let world = harness.world();
+    let display_entity = world
+        .query_filtered::<Entity, With<Display>>()
+        .single(world)
+        .unwrap();
+    let strip_entity = world
+        .query_filtered::<Entity, With<LayoutStrip>>()
+        .single(world)
+        .unwrap();
+    assert_eq!(
+        world.get::<ChildOf>(strip_entity).unwrap().parent(),
+        display_entity
+    );
+
+    harness.mock_state.add_display(
+        TEST_DISPLAY_ID,
+        IRect::new(100, 0, TEST_DISPLAY_WIDTH + 100, TEST_DISPLAY_HEIGHT),
+        vec![TEST_WORKSPACE_ID],
+    );
+    harness.advance(Duration::from_millis(1600));
+    let world = harness.world();
+    let display = world.query::<&Display>().single(world).unwrap();
+    assert_eq!(
+        display.bounds().min.x,
+        100,
+        "retry should use the recovered display"
+    );
+}
+
+#[test]
+fn test_unplug_rehomes_workspace_and_window_on_surviving_display() {
+    let mut harness = TestHarness::new().with_display(
+        EXT_DISPLAY_ID,
+        IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+        vec![EXT_WORKSPACE_ID],
+    );
+    let ext_origin = Origin::new(0, -EXT_DISPLAY_HEIGHT + TEST_MENUBAR_HEIGHT);
+    let frame = IRect::from_corners(
+        ext_origin,
+        ext_origin + Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT),
+    );
+    harness
+        .mock_state
+        .spawn_window(TEST_PROCESS_ID, EXT_WORKSPACE_ID, 100, frame);
+    harness.advance(Duration::from_millis(500));
+
+    harness.mock_state.remove_display(EXT_DISPLAY_ID);
+    harness.mock_state.add_display(
+        TEST_DISPLAY_ID,
+        IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
+        vec![TEST_WORKSPACE_ID, EXT_WORKSPACE_ID],
+    );
+    harness
+        .world()
+        .write_message::<Event>(Event::DisplayRemoved {
+            display_id: EXT_DISPLAY_ID,
+        });
+    harness.advance(Duration::from_millis(1000));
+
+    let world = harness.world();
+    let main = world.query::<(&Display, Entity)>().single(world).unwrap().1;
+    let external_parent = world
+        .query::<(&LayoutStrip, &ChildOf)>()
+        .iter(world)
+        .find(|(strip, _)| strip.id() == EXT_WORKSPACE_ID)
+        .map(|(_, child)| child.parent())
+        .expect("external workspace should remain managed");
+    assert_eq!(external_parent, main);
+    let window_entity = find_window_entity(100, world);
+    let window = world.get::<Window>(window_entity).unwrap();
+    assert!(window.frame().min.y >= TEST_MENUBAR_HEIGHT);
+}
+
+#[test]
+fn test_late_space_rehome_reapplies_window_frame() {
+    let mut harness = TestHarness::new().with_display(
+        EXT_DISPLAY_ID,
+        IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+        vec![EXT_WORKSPACE_ID],
+    );
+    let ext_origin = Origin::new(0, -EXT_DISPLAY_HEIGHT + TEST_MENUBAR_HEIGHT);
+    harness.mock_state.spawn_window(
+        TEST_PROCESS_ID,
+        EXT_WORKSPACE_ID,
+        100,
+        IRect::from_corners(
+            ext_origin,
+            ext_origin + Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT),
+        ),
+    );
+    harness.advance(Duration::from_millis(500));
+    harness.mock_state.remove_display(EXT_DISPLAY_ID);
+    harness
+        .world()
+        .write_message::<Event>(Event::DisplayRemoved {
+            display_id: EXT_DISPLAY_ID,
+        });
+    harness.advance(Duration::from_millis(650));
+
+    let world = harness.world();
+    let orphan = world
+        .query::<(&LayoutStrip, Option<&ChildOf>)>()
+        .iter(world)
+        .find(|(strip, _)| strip.id() == EXT_WORKSPACE_ID)
+        .expect("external workspace should be retained");
+    assert!(orphan.1.is_none(), "workspace should await its new display");
+
+    harness.mock_state.add_display(
+        TEST_DISPLAY_ID,
+        IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
+        vec![TEST_WORKSPACE_ID, EXT_WORKSPACE_ID],
+    );
+    harness.advance(Duration::from_millis(1200));
+
+    let world = harness.world();
+    let external_parent = world
+        .query::<(&LayoutStrip, &ChildOf)>()
+        .iter(world)
+        .find(|(strip, _)| strip.id() == EXT_WORKSPACE_ID)
+        .map(|(_, child)| child.parent())
+        .expect("external workspace should be reparented");
+    let main = world.query::<(&Display, Entity)>().single(world).unwrap().1;
+    assert_eq!(external_parent, main);
+    let window_entity = find_window_entity(100, world);
+    assert!(world.get::<Window>(window_entity).unwrap().frame().min.y >= TEST_MENUBAR_HEIGHT);
+}
+
+#[test]
+fn test_wake_reapplies_window_frame_without_geometry_change() {
+    let mut harness = TestHarness::new().with_windows(1);
+    harness.advance(Duration::from_millis(500));
+    let window_entity = find_window_entity(0, harness.world());
+    let original = harness
+        .world()
+        .get::<Window>(window_entity)
+        .unwrap()
+        .frame();
+
+    harness.mock_state.update_window(0, |window| {
+        window.frame.min.x += 200;
+        window.frame.max.x += 200;
+    });
+    harness
+        .world()
+        .write_message::<Event>(Event::SystemWoke { msg: String::new() });
+    harness.advance(Duration::from_millis(1000));
+
+    let restored = harness
+        .world()
+        .get::<Window>(window_entity)
+        .unwrap()
+        .frame();
+    assert_eq!(restored, original);
+}
+
+#[test]
 fn test_vertical_swap_within_stack_stays_on_display() {
     // Regression test: with a display arranged *below* the active one, a
     // `Swap(South)` inside a stack used to swap the two windows and then
@@ -666,17 +908,20 @@ fn test_center_survives_display_round_trip() {
 /// with no switch or reap path that recreates row 0.
 #[test]
 fn test_empty_baseline_row_survives_display_removal() {
-    let commands = vec![
+    let mut commands = vec![
         Event::Command {
             command: Command::PrintState,
         },
         Event::DisplayRemoved {
             display_id: TEST_DISPLAY_ID,
         },
-        Event::DisplayAdded {
-            display_id: TEST_DISPLAY_ID,
-        },
     ];
+    commands.extend((0..6).map(|_| Event::Command {
+        command: Command::PrintState,
+    }));
+    commands.push(Event::DisplayAdded {
+        display_id: TEST_DISPLAY_ID,
+    });
 
     TestHarness::new()
         .on_iteration(0, |world, state| {
@@ -688,7 +933,7 @@ fn test_empty_baseline_row_survives_display_removal() {
             assert_eq!(strips, vec![0], "the space starts with an empty row 0");
             state.remove_display(TEST_DISPLAY_ID);
         })
-        .on_iteration(1, |world, mut state| {
+        .on_iteration(7, |world, mut state| {
             let entity = world
                 .query_filtered::<Entity, With<LayoutStrip>>()
                 .single(world)
@@ -703,7 +948,7 @@ fn test_empty_baseline_row_survives_display_removal() {
                 vec![TEST_WORKSPACE_ID],
             );
         })
-        .on_iteration(2, |world, _state| {
+        .on_iteration(8, |world, _state| {
             let entity = world
                 .query_filtered::<Entity, With<LayoutStrip>>()
                 .single(world)

@@ -232,6 +232,11 @@ impl MockState {
         );
     }
 
+    pub fn set_display_bounds(&self, id: u32, bounds: IRect) {
+        let mut inner = self.inner.force_write();
+        inner.displays.get_mut(&id).expect("finding display").bounds = bounds;
+    }
+
     #[allow(unused)]
     pub fn remove_display(&self, id: u32) {
         let mut inner = self.inner.force_write();

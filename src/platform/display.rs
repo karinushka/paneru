@@ -109,7 +109,7 @@ impl DisplayHandler {
         display_id: CGDirectDisplayID,
         flags: CGDisplayChangeSummaryFlags,
     ) {
-        debug!("display change {display_id:?}");
+        debug!("display change {display_id:?}: {flags:?}");
         let event = if flags.contains(CGDisplayChangeSummaryFlags::AddFlag) {
             Event::DisplayAdded { display_id }
         } else if flags.contains(CGDisplayChangeSummaryFlags::RemoveFlag) {
@@ -121,8 +121,9 @@ impl DisplayHandler {
         } else if flags.contains(CGDisplayChangeSummaryFlags::BeginConfigurationFlag) {
             Event::DisplayConfigured { display_id }
         } else {
-            warn!("unknown flag {flags:?}.");
-            return;
+            // Changes to the main display, mode or mirroring also need a full
+            // scan, even when macOS does not send an add/remove/move flag.
+            Event::DisplayConfigured { display_id }
         };
         _ = self
             .events

@@ -379,6 +379,13 @@ pub(super) fn install(
     };
     paneru.set("windows", windows)?;
 
+    // The embedded runtime already has the full API. Let scripts use the
+    // conventional `local paneru = require("paneru")` form without looking for
+    // the separately built client extension (`paneru.so`).
+    let package: Table = lua.globals().get("package")?;
+    let loaded: Table = package.get("loaded")?;
+    loaded.set("paneru", paneru)?;
+
     Ok(())
 }
 

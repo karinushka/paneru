@@ -20,6 +20,12 @@ By default, Paneru looks for a Lua script in the following locations (in order):
 
 Like the TOML config, the script is automatically reloaded when the file is saved.
 
+Paneru provides the `paneru` table as a global in `init.lua`. You can also write
+`local paneru = require("paneru")` there; it returns the same embedded API and
+does not need a separate `paneru.so` file. The loadable `paneru.so` client module
+is only for Lua scripts run outside Paneru. Installing the Paneru executable
+with `cargo install` does not install that separate module.
+
 ```lua
 paneru.on("window_focused", function(event, ws)
   paneru.run("window balance")

@@ -529,6 +529,24 @@ mod tests {
     }
 
     #[test]
+    fn require_paneru_uses_embedded_api_without_a_native_module() {
+        let world = TestWorld::default();
+        let runtime = world
+            .runtime(
+                r#"
+                local api = require("paneru")
+                assert(api == paneru)
+                api.setup { options = { sliver_width = 7 } }
+                api.bind("alt - j", "window focus east")
+                "#,
+            )
+            .expect("the embedded API should be available to require");
+
+        assert_eq!(runtime.built_config().unwrap().sliver_width(), 7);
+        assert_eq!(runtime.published_keybinds().len(), 1);
+    }
+
+    #[test]
     fn no_setup_call_leaves_config_to_toml() {
         let world = TestWorld::default();
         let runtime = world

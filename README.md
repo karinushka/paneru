@@ -185,7 +185,10 @@ quit = "ctrl + alt - q"
 
 Alternatively, the embedded Lua runtime can declare the entire configuration
 via `paneru.setup{...}`, making the TOML file optional — see the
-**[Lua Scripting Guide](./SCRIPTING.md)**:
+**[Lua Scripting Guide](./SCRIPTING.md)**.
+
+The `paneru` table is available globally in `init.lua`; `require("paneru")`
+also returns it. No separate `paneru.so` is needed for Paneru's own config.
 
 ```lua
 -- init.lua

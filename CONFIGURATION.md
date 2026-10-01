@@ -296,7 +296,7 @@ accessibility role/subrole.
 | `title` | Regex | **(Required)** Regex pattern to match the window title. |
 | `bundle_id` | String | Optional Bundle ID to match (e.g., `com.apple.Terminal`). |
 | `role` | String | Optional accessibility role to match exactly (e.g., `AXWindow`). A rule with `role` never matches a window that reports none. |
-| `subrole` | String | Optional accessibility subrole to match exactly (e.g., `AXStandardWindow`, `AXDialog`). A rule with `subrole` never matches a window that reports none. |
+| `subrole` | String | Optional accessibility subrole to match exactly (e.g., `AXStandardWindow`, `AXDialog`, `AXFloatingWindow`). A rule with `subrole` never matches a window that reports none. |
 | `floating` | Boolean | Force the window to be floating/unmanaged. |
 | `manage` | Boolean | Force Paneru to manage this app/window even if macOS reports the app as unobservable or the window has a non-standard role/subrole. |
 | `index` | Integer | Preferred position in the strip when spawned. |
@@ -336,6 +336,11 @@ manage = true
 [windows.dialogs]
 title = ".*"
 subrole = "AXDialog"
+floating = true
+
+[windows.floating_window]
+title = ".*"
+subrole = "AXFloatingWindow"
 floating = true
 ```
 

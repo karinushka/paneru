@@ -2369,7 +2369,14 @@ fn test_config_defaults() {
     assert_eq!(config.border_color(), (1.0, 1.0, 1.0));
     assert_eq!(config.border_opacity(), 1.0);
     assert_eq!(config.border_width(), 2.0);
-    assert_eq!(config.border_radius(), BorderRadiusOption::Auto);
+    // Automatic radius detection is only enabled on macOS 26; other
+    // releases use the fixed-radius fallback.
+    let expected_radius = if macos_major_version() == 26 {
+        BorderRadiusOption::Auto
+    } else {
+        BorderRadiusOption::Value(10.0)
+    };
+    assert_eq!(config.border_radius(), expected_radius);
     assert_eq!(config.menubar_height(), None);
 }
 

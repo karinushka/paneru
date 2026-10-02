@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::assert_focused;
-use crate::commands::{Command, Direction, Operation};
+use crate::commands::{Command, Direction, MoveFocus, Operation};
 use crate::config::{Config, MainOptions};
 use crate::events::Event;
 use crate::manager::Window;
@@ -80,4 +80,53 @@ fn keyboard_focus_does_not_warp_mouse_when_disabled() {
     h.advance(Duration::from_secs(1));
     assert_focused!(h.app.world_mut(), 2);
     assert_eq!(h.mock_state.cursor_position(), cursor);
+}
+
+#[test]
+fn virtual_workspace_focus_warps_mouse_to_restored_window() {
+    for animations in [false, true] {
+        let config: Config = (
+            MainOptions {
+                auto_center: Some(true),
+                mouse_follows_focus: Some(true),
+                focus_follows_mouse: Some(false),
+                animation_speed: Some(30.0),
+                virtual_workspace_animations: Some(animations),
+                ..Default::default()
+            },
+            vec![],
+        )
+            .into();
+        let mut h = TestHarness::new().with_config(config).with_windows(3);
+        h.advance(Duration::from_secs(1));
+        h.app.world_mut().write_message(Event::Command {
+            command: Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Stay)),
+        });
+        h.advance(Duration::from_secs(1));
+
+        for (direction, window_id) in [
+            (Direction::South, 0),
+            (Direction::North, 1),
+            (Direction::South, 0),
+        ] {
+            h.app.world_mut().write_message(Event::Command {
+                command: Command::Window(Operation::FocusOrVirtual(direction)),
+            });
+            h.advance(Duration::from_secs(1));
+
+            let world = h.app.world_mut();
+            assert_focused!(world, window_id);
+            let window = world
+                .query::<&Window>()
+                .iter(world)
+                .find(|window| window.id() == window_id)
+                .expect("restored window");
+            let center = window.frame().center();
+            let cursor = h.mock_state.cursor_position();
+            assert!(
+                (cursor - center).abs().max_element() <= 2,
+                "animations {animations}: pointer {cursor:?} missed restored window {window_id} at {center:?}"
+            );
+        }
+    }
 }

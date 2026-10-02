@@ -105,7 +105,9 @@ impl Plugin for FocusEventsPlugin {
             PostUpdate,
             (
                 autocenter_window_on_focus.after(super::systems::animate_resize_entities),
-                mouse_follows_focus.after(super::systems::animate_resize_entities),
+                // Flush the centering commands before reading moving_frame, so
+                // the pointer uses the destination rather than the old position.
+                mouse_follows_focus.after(autocenter_window_on_focus),
                 recover_lost_focus.run_if(on_timer(Duration::from_millis(
                     REFRESH_WINDOW_CHECK_FREQ_MS,
                 ))),

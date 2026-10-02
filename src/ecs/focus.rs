@@ -397,10 +397,12 @@ fn mouse_follows_focus(
             .find(|(strip, _, _, _, _, _)| strip.contains(entity))
         && let Ok(display) = displays.get(child.parent())
     {
-        // Workspace restoration moves the strip before its members are laid
-        // out on a following tick. Project the remembered window's slot onto
-        // the restored strip destination instead of its parked physical frame.
-        let frame = if restored.iter().any(|marker| marker.entity == entity)
+        // Project the window's slot onto the strip destination when the window
+        // does not carry its own auto-center target (workspace restore or
+        // auto-center disabled), since the strip moves before its members are
+        // laid out on a following tick.
+        let frame = if (restored.iter().any(|marker| marker.entity == entity)
+            || !config.auto_center())
             && let Some(layout) = windows.layout_position(entity)
         {
             let origin = layout.0 + reposition.map_or(position.0, |target| target.0);

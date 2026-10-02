@@ -57,6 +57,55 @@ fn keyboard_focus_warps_mouse_to_centered_window() {
 }
 
 #[test]
+fn keyboard_focus_warps_mouse_without_auto_center() {
+    for speed in [12.0, 30.0] {
+        let config: Config = (
+            MainOptions {
+                auto_center: Some(false),
+                mouse_follows_focus: Some(true),
+                focus_follows_mouse: Some(false),
+                animation_speed: Some(speed),
+                ..Default::default()
+            },
+            vec![],
+        )
+            .into();
+        let mut harness = TestHarness::new().with_config(config).with_windows(4);
+        let mut commands = vec![Event::Command {
+            command: Command::PrintState,
+        }];
+
+        // Include jumps to windows partially and completely outside the viewport.
+        for (direction, window_id) in [
+            (Direction::First, 0),
+            (Direction::Last, 3),
+            (Direction::West, 2),
+            (Direction::East, 3),
+            (Direction::First, 0),
+        ] {
+            commands.push(Event::Command {
+                command: Command::Window(Operation::Focus(direction)),
+            });
+            // Allow another command interval for the slower animation to settle.
+            commands.push(Event::Command {
+                command: Command::PrintState,
+            });
+            harness = harness.on_iteration(commands.len() - 1, move |world, state| {
+                assert_focused!(world, window_id);
+                let window = world.query::<&Window>().iter(world)
+                    .find(|window| window.id() == window_id)
+                    .expect("focused window");
+                let center = window.frame().center();
+                let cursor = state.cursor_position();
+                assert!((cursor - center).abs().max_element() <= 2,
+                    "speed {speed}: pointer {cursor:?} missed focused window {window_id} at {center:?}");
+            });
+        }
+        harness.run(commands);
+    }
+}
+
+#[test]
 fn keyboard_focus_does_not_warp_mouse_when_disabled() {
     let config: Config = (
         MainOptions {

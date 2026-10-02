@@ -1,6 +1,6 @@
 [package]
 name = "paneru"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 rust-version = "1.95.0"
 description = "A sliding, tiling window manager for MacOS."
@@ -76,7 +76,7 @@ async-channel = "2.5"
 async-lock = "3.4"
 async-executor = { version = "1.14", optional = true }
 async-mach-ports = "0.3"
-cfg-if = "1.0.4"
+cfg-if = "1.0"
 futures-lite = "2.6"
 bevy = { version = "0.19", default-features = false, features = [ "multi_threaded" ] }
 bitflags = "2.13"
@@ -141,4 +141,4 @@ xdg = "3.0"
 mockall = "0.15"
 
 [build-dependencies]
-cfg-if = "1.0.4"
+cfg-if = "1.0"

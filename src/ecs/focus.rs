@@ -31,8 +31,6 @@ use crate::platform::WorkspaceId;
 const REFRESH_WINDOW_CHECK_FREQ_MS: u64 = 1000;
 pub(crate) const VERIFY_FOCUS_TIMEOUT: Duration = Duration::from_millis(300);
 
-/// The strip's destination is needed when focus returns before its parked
-/// windows have caught up with the restored layout.
 type MouseFocusStrips<'w, 's> = Query<
     'w,
     's,
@@ -120,8 +118,8 @@ impl Plugin for FocusEventsPlugin {
             PostUpdate,
             (
                 autocenter_window_on_focus.after(super::systems::animate_resize_entities),
-                // Flush the centering commands before reading moving_frame, so
-                // the pointer uses the destination rather than the old position.
+                // Bevy must apply the deferred centering commands before
+                // the pointer reads the window's destination.
                 mouse_follows_focus.after(autocenter_window_on_focus),
                 recover_lost_focus.run_if(on_timer(Duration::from_millis(
                     REFRESH_WINDOW_CHECK_FREQ_MS,
@@ -411,8 +409,6 @@ fn mouse_follows_focus(
             frame
         };
         let visible = display.bounds().intersect(frame);
-        // If the overlap is smaller than 50x50, the window is probably hidden
-        // off screen, so do not move the mouse.
         if visible.size().length_squared() > 5000 {
             let origin = visible.center();
             debug!("centering on {} {origin}", window.id());

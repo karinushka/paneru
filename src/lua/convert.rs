@@ -97,6 +97,8 @@ pub struct WindowSpawnPayload {
     pub bundle_id: String,
     pub title: String,
     pub frame: crate::types::state::Frame,
+    pub role: Option<String>,
+    pub subrole: Option<String>,
     pub floating: bool,
     pub managed: bool,
 }
@@ -134,6 +136,8 @@ impl TryFrom<&Event> for LuaEvent {
                 app_name,
                 bundle_id,
                 title,
+                role,
+                subrole,
                 frame,
                 floating,
                 managed,
@@ -143,6 +147,8 @@ impl TryFrom<&Event> for LuaEvent {
                 app_name: app_name.clone(),
                 bundle_id: bundle_id.clone(),
                 title: title.clone(),
+                role: role.clone(),
+                subrole: subrole.clone(),
                 frame: *frame,
                 floating: *floating,
                 managed: *managed,
@@ -415,6 +421,8 @@ mod tests {
                 app_name: "test".into(),
                 bundle_id: "test".into(),
                 title: "test".into(),
+                role: None,
+                subrole: None,
                 frame: crate::types::state::Frame {
                     x: 0,
                     y: 0,
@@ -565,5 +573,32 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn window_spawned_carries_role_and_subrole_to_lua() {
+        let lua = Lua::new();
+        let event = Event::WindowSpawned {
+            window_id: 7,
+            pid: 1,
+            app_name: "Finder".into(),
+            bundle_id: "com.apple.finder".into(),
+            title: "Save".into(),
+            role: Some("AXWindow".into()),
+            subrole: Some("AXDialog".into()),
+            frame: crate::types::state::Frame {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 100,
+            },
+            floating: true,
+            managed: true,
+        };
+
+        let (name, table) = event_to_lua(&lua, &event).expect("window_spawned reaches Lua");
+        assert_eq!(name, "window_spawned");
+        assert_eq!(table.get::<String>("role").unwrap(), "AXWindow");
+        assert_eq!(table.get::<String>("subrole").unwrap(), "AXDialog");
     }
 }

@@ -480,6 +480,8 @@ mod tests {
                 bundle_id: bundle_id.to_string(),
                 app_name: "Test App".to_string(),
                 title: title.to_string(),
+                role: Some("AXWindow".to_string()),
+                subrole: Some("AXStandardWindow".to_string()),
                 focused: active.focused_window_id == Some(window_id),
                 floating: false,
                 display_id: Some(1),

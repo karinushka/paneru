@@ -146,7 +146,7 @@ end)
 
 | Event Name | Description | Event Payload Fields |
 | --- | --- | --- |
-| `window_spawned` | A window was fully spawned and initialized in Paneru | `type`, `window_id`, `pid`, `app_name`, `bundle_id`, `title`, `frame` (`{x, y, width, height}`), `floating`, `managed` |
+| `window_spawned` | A window was fully spawned and initialized in Paneru | `type`, `window_id`, `pid`, `app_name`, `bundle_id`, `title`, `role`, `subrole`, `frame` (`{x, y, width, height}`), `floating`, `managed` |
 | `window_focused` | A window gained focus | `type`, `window_id` |
 | `window_destroyed` | A window was closed / destroyed | `type`, `window_id` |
 | `window_moved` | A window was moved | `type`, `window_id` |

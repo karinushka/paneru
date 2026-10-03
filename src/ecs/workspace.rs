@@ -599,7 +599,7 @@ pub(crate) fn cleanup_unordered_windows(
 
     for window in windows {
         let window_id = window.id();
-        if window_manager.window_is_unordered(window_id) && window.role().is_err() {
+        if window_manager.window_is_unordered(window_id) && !window.is_alive() {
             debug!("Window {window_id} is unordered; removing it.");
             commands.trigger(SendMessageTrigger(Event::WindowDestroyed {
                 window_id,

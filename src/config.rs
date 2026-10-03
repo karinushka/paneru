@@ -419,19 +419,29 @@ impl Config {
             })
     }
 
-    /// Finds window properties for a given `title` and `bundle_id`.
+    /// Finds window properties for a window.
     /// It iterates through configured window parameters and returns all matching rules.
-    /// A rule matches when its bundle ID (if any) and title regex match.
+    /// A rule matches when its title regex matches and each of its bundle ID, role
+    /// and subrole (if set) equals the window's. A rule's role or subrole never
+    /// matches a window that reports none.
     ///
     /// # Arguments
     ///
     /// * `title` - The title of the window to match.
     /// * `bundle_id` - The bundle identifier of the application owning the window.
+    /// * `role` - The window's accessibility role, if it reports one.
+    /// * `subrole` - The window's accessibility subrole, if it reports one.
     ///
     /// # Returns
     ///
     /// A `Vec<WindowParams>` containing all matching window rules.
-    pub fn find_window_properties(&self, title: &str, bundle_id: &str) -> Vec<WindowParams> {
+    pub fn find_window_properties(
+        &self,
+        title: &str,
+        bundle_id: &str,
+        role: Option<&str>,
+        subrole: Option<&str>,
+    ) -> Vec<WindowParams> {
         self.inner()
             .windows
             .as_ref()
@@ -441,7 +451,12 @@ impl Config {
                     .filter(|params| {
                         let bundle_match =
                             params.bundle_id.as_ref().map(|id| id.as_str() == bundle_id);
-                        bundle_match.is_none_or(|m| m) && params.title.is_match(title)
+                        let role_match = params.role.as_deref().map(|r| Some(r) == role);
+                        let subrole_match = params.subrole.as_deref().map(|s| Some(s) == subrole);
+                        bundle_match.is_none_or(|m| m)
+                            && role_match.is_none_or(|m| m)
+                            && subrole_match.is_none_or(|m| m)
+                            && params.title.is_match(title)
                     })
                     .cloned()
                     .collect::<Vec<_>>()
@@ -1378,7 +1393,7 @@ width = "complement_focused"
 "#,
     )
     .expect("dynamic width rule parses");
-    let width = config.find_window_properties("Window 1", "")[0]
+    let width = config.find_window_properties("Window 1", "", None, None)[0]
         .width
         .expect("matched width rule");
     assert_eq!(width.ratio(Some(0.25)), 0.75);
@@ -1395,7 +1410,7 @@ width = 0.5
 "#,
     )
     .expect("fixed width rule still parses");
-    let width = config.find_window_properties("Window 1", "")[0]
+    let width = config.find_window_properties("Window 1", "", None, None)[0]
         .width
         .expect("matched width rule");
     assert_eq!(width.ratio(Some(0.25)), 0.5);
@@ -1410,6 +1425,11 @@ pub struct WindowParams {
     title: Regex,
     /// An optional bundle identifier to match against the application's bundle ID.
     bundle_id: Option<String>,
+    /// An optional accessibility role (e.g. `AXWindow`) the window must report exactly.
+    role: Option<String>,
+    /// An optional accessibility subrole (e.g. `AXStandardWindow`, `AXDialog`) the
+    /// window must report exactly.
+    subrole: Option<String>,
     /// If `true`, the window will be managed as a floating window (not tiled).
     pub floating: Option<bool>,
     /// If `true`, force the process/window to be managed even if macOS reports it as
@@ -1446,6 +1466,8 @@ impl WindowParams {
         Self {
             title: Regex::new(title).unwrap(),
             bundle_id,
+            role: None,
+            subrole: None,
             floating: None,
             manage: None,
             index: None,
@@ -2121,7 +2143,8 @@ index = 1
         Some(Command::Window(Operation::Resize(ResizeDirection::Shrink)))
     ));
 
-    let props = config.find_window_properties("picture in picture", "com.something.apple");
+    let props =
+        config.find_window_properties("picture in picture", "com.something.apple", None, None);
     assert_eq!(props[0].floating, Some(true));
     assert_eq!(props[0].index, Some(1));
 
@@ -2275,6 +2298,8 @@ fn test_grid_ratios() {
     let make = |grid: Option<&str>| WindowParams {
         title: Regex::new(".*").unwrap(),
         bundle_id: None,
+        role: None,
+        subrole: None,
         floating: None,
         manage: None,
         index: None,
@@ -2435,14 +2460,131 @@ floating = true
     let config = Config::try_from(input).expect("config should parse");
 
     // Main window should match the manage rule.
-    let props = config.find_window_properties("BetterTouchTool", "com.hegenberg.BetterTouchTool");
+    let props = config.find_window_properties(
+        "BetterTouchTool",
+        "com.hegenberg.BetterTouchTool",
+        None,
+        None,
+    );
     assert_eq!(props.len(), 1);
     assert_eq!(props[0].manage, Some(true));
 
     // Screenshot window matches the floating rule.
-    let props = config.find_window_properties("Screenshot 1", "com.hegenberg.BetterTouchTool");
+    let props =
+        config.find_window_properties("Screenshot 1", "com.hegenberg.BetterTouchTool", None, None);
     assert_eq!(props.len(), 1);
     assert_eq!(props[0].floating, Some(true));
+}
+
+#[test]
+fn test_window_rules_match_role_and_subrole() {
+    let input = r#"
+[options]
+
+[bindings]
+
+[windows.dialogs]
+title = ".*"
+subrole = "AXDialog"
+floating = true
+
+[windows.sheets]
+title = ".*"
+role = "AXSheet"
+index = 3
+
+[windows.app_standard]
+bundle_id = "com.example.app"
+title = ".*"
+role = "AXWindow"
+subrole = "AXStandardWindow"
+width = 0.5
+
+[windows.plain]
+bundle_id = "com.example.plain"
+title = ".*"
+dont_focus = true
+"#;
+    let config = Config::try_from(input).expect("config should parse");
+    let matched = |title, bundle_id, role, subrole| {
+        let mut names = config
+            .find_window_properties(title, bundle_id, role, subrole)
+            .iter()
+            .map(|params| {
+                if params.floating == Some(true) {
+                    "dialogs"
+                } else if params.index == Some(3) {
+                    "sheets"
+                } else if matches!(params.width, Some(InitialWindowWidth::Ratio(0.5))) {
+                    "app_standard"
+                } else {
+                    "plain"
+                }
+            })
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        names
+    };
+
+    // A subrole-only rule matches any app's dialog, and nothing else.
+    assert_eq!(
+        matched("Save", "com.other", Some("AXWindow"), Some("AXDialog")),
+        vec!["dialogs"]
+    );
+    assert!(
+        matched(
+            "Main",
+            "com.other",
+            Some("AXWindow"),
+            Some("AXStandardWindow")
+        )
+        .is_empty()
+    );
+    // A rule's subrole never matches a window that reports none.
+    assert!(matched("Save", "com.other", Some("AXWindow"), None).is_empty());
+
+    // A role-only rule: the role must match.
+    assert_eq!(
+        matched("Sheet", "com.other", Some("AXSheet"), None),
+        vec!["sheets"]
+    );
+    assert!(matched("Sheet", "com.other", None, None).is_empty());
+
+    // Role and subrole together: both must match, alongside bundle_id.
+    assert_eq!(
+        matched(
+            "Main",
+            "com.example.app",
+            Some("AXWindow"),
+            Some("AXStandardWindow")
+        ),
+        vec!["app_standard"]
+    );
+    assert_eq!(
+        matched(
+            "Save",
+            "com.example.app",
+            Some("AXWindow"),
+            Some("AXDialog")
+        ),
+        vec!["dialogs"],
+        "app_standard's subrole excludes the app's dialog"
+    );
+
+    // A rule without role/subrole matches as before, whatever the window reports.
+    assert_eq!(
+        matched("Main", "com.example.plain", None, None),
+        vec!["plain"]
+    );
+    assert_eq!(
+        matched(
+            "Save",
+            "com.example.plain",
+            Some("AXWindow"),
+            Some("AXDialog")
+        ),
+        vec!["dialogs", "plain"]
+    );
 }
 
 #[test]
@@ -2569,11 +2711,38 @@ mod lua_setup_tests {
                 windows = { term = { title = "kitty", bindings_passthrough = { "ctrl+alt-h" } } },
             }"#,
         );
-        let rules = config.find_window_properties("kitty", "");
+        let rules = config.find_window_properties("kitty", "", None, None);
         assert_eq!(rules.len(), 1);
         assert!(
             !rules[0].passthrough_keys().is_empty(),
             "passthrough chords should resolve to keycodes"
+        );
+    }
+
+    #[test]
+    fn window_rule_role_and_subrole_are_matched() {
+        let config = config_from_source(
+            r#"return {
+                windows = {
+                    dialogs = { title = ".*", subrole = "AXDialog", floating = true },
+                    sheets = { title = ".*", role = "AXSheet", index = 2 },
+                },
+            }"#,
+        );
+
+        let rules = config.find_window_properties("Save", "", Some("AXWindow"), Some("AXDialog"));
+        assert_eq!(rules.len(), 1, "only the subrole rule matches a dialog");
+        assert_eq!(rules[0].floating, Some(true));
+
+        let rules = config.find_window_properties("Sheet", "", Some("AXSheet"), None);
+        assert_eq!(rules.len(), 1, "only the role rule matches a sheet");
+        assert_eq!(rules[0].index, Some(2));
+
+        assert!(
+            config
+                .find_window_properties("Main", "", Some("AXWindow"), Some("AXStandardWindow"))
+                .is_empty(),
+            "neither rule matches a standard window"
         );
     }
 

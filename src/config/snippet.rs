@@ -1,10 +1,10 @@
 //! Generates a ready-to-paste `[windows]` rule for a window.
 //!
-//! Only two fields in a window rule are matchers: `title` (a regex, matched
-//! unanchored) and `bundle_id` (exact string equality). See
-//! [`crate::config::Config::find_window_properties`]. Everything else a rule can
-//! carry is an effect, so the snippet emits the two matchers live and leaves the
-//! rest — plus the window's identity, which no matcher can use — as comments.
+//! Four fields in a window rule are matchers: `title` (a regex, matched
+//! unanchored), and `bundle_id`, `role` and `subrole` (exact string equality).
+//! See [`crate::config::Config::find_window_properties`]. Everything else a rule
+//! can carry is an effect. The snippet emits `title` and `bundle_id` live, and
+//! suggests `role`/`subrole`, the effects and the window's identity as comments.
 
 use bevy::ecs::resource::Resource;
 
@@ -52,6 +52,12 @@ pub fn window_rule_snippet(dialect: SnippetDialect, subject: &RuleSubject<'_>) -
             if wildcard_alternative {
                 lines.push("# title = \".*\"   # all windows of this app".to_owned());
             }
+            if !subject.role.is_empty() {
+                lines.push(format!("# role = \"{}\"", quote(subject.role)));
+            }
+            if !subject.subrole.is_empty() {
+                lines.push(format!("# subrole = \"{}\"", quote(subject.subrole)));
+            }
             lines.push(format!("# {identity}"));
             lines.push("# floating = true".to_owned());
             lines.push("# manage = true".to_owned());
@@ -70,6 +76,12 @@ pub fn window_rule_snippet(dialect: SnippetDialect, subject: &RuleSubject<'_>) -
             lines.push(format!("    title = \"{title}\","));
             if wildcard_alternative {
                 lines.push("    -- title = \".*\",   -- all windows of this app".to_owned());
+            }
+            if !subject.role.is_empty() {
+                lines.push(format!("    -- role = \"{}\",", quote(subject.role)));
+            }
+            if !subject.subrole.is_empty() {
+                lines.push(format!("    -- subrole = \"{}\",", quote(subject.subrole)));
             }
             lines.push(format!("    -- {identity}"));
             lines.push("    -- floating = true,".to_owned());
@@ -155,8 +167,9 @@ fn quote(text: &str) -> String {
     out
 }
 
-/// The comment identifying the window. None of these are matchable, so they are
-/// here only to tell the pasted rule apart from the next one.
+/// The comment identifying the window, to tell the pasted rule apart from the
+/// next one. The app name is not matchable; role and subrole are, and are also
+/// suggested as commented-out matchers.
 fn identity_comment(subject: &RuleSubject<'_>) -> String {
     let name = if subject.app_name.is_empty() {
         "?"
@@ -204,6 +217,8 @@ mod tests {
                 "bundle_id = \"com.mitchellh.ghostty\"\n",
                 "title = \"^paneru$\"\n",
                 "# title = \".*\"   # all windows of this app\n",
+                "# role = \"AXWindow\"\n",
+                "# subrole = \"AXStandardWindow\"\n",
                 "# app: Ghostty  role: AXWindow  subrole: AXStandardWindow\n",
                 "# floating = true\n",
                 "# manage = true\n",
@@ -226,6 +241,8 @@ mod tests {
                 "    bundle_id = \"com.mitchellh.ghostty\",\n",
                 "    title = \"^paneru$\",\n",
                 "    -- title = \".*\",   -- all windows of this app\n",
+                "    -- role = \"AXWindow\",\n",
+                "    -- subrole = \"AXStandardWindow\",\n",
                 "    -- app: Ghostty  role: AXWindow  subrole: AXStandardWindow\n",
                 "    -- floating = true,\n",
                 "    -- manage = true,\n",
@@ -234,6 +251,21 @@ mod tests {
                 "}\n",
             )
         );
+    }
+
+    /// A rule's role/subrole never matches a window that reports none, so an
+    /// unknown one gets no suggestion rather than a rule that can never match.
+    #[test]
+    fn unknown_role_and_subrole_are_not_suggested() {
+        let subject = RuleSubject {
+            role: "",
+            subrole: "",
+            ..subject("Ghostty", "com.mitchellh.ghostty", "paneru")
+        };
+        for dialect in [SnippetDialect::Toml, SnippetDialect::Lua] {
+            let snippet = window_rule_snippet(dialect, &subject);
+            assert!(!snippet.contains("role = "), "{dialect:?}: {snippet}");
+        }
     }
 
     /// The escaping order is the part that can silently go wrong: `regex::escape`

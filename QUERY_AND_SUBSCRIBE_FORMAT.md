@@ -68,6 +68,8 @@ Returns the complete state document.
           "bundle_id": "com.apple.Terminal",
           "app_name": "Terminal",
           "title": "paneru",
+          "role": "AXWindow",
+          "subrole": "AXStandardWindow",
           "focused": true,
           "floating": false
         }
@@ -105,6 +107,8 @@ Returns only the `virtual_workspaces` array from the complete state document.
         "bundle_id": "com.apple.Terminal",
         "app_name": "Terminal",
         "title": "paneru",
+        "role": "AXWindow",
+        "subrole": "AXStandardWindow",
         "focused": true,
         "floating": false
       }
@@ -151,6 +155,8 @@ Returns only the active display, workspace, and focused-window state.
 | `bundle_id` | string | Bundle id for the owning application, or an empty string if unknown. |
 | `app_name` | string | Display name for the owning application, or an empty string if unknown. |
 | `title` | string | Window title, or an empty string if unknown. |
+| `role` | string or null | Accessibility role (e.g. `AXWindow`), or null if the window reports none. |
+| `subrole` | string or null | Accessibility subrole (e.g. `AXStandardWindow`, `AXDialog`), or null if the window reports none. |
 | `focused` | boolean | Whether this window is focused. |
 | `floating` | boolean | Whether this window is unmanaged/floating. |
 

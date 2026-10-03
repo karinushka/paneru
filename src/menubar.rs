@@ -15,7 +15,10 @@ use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
 use objc2_foundation::{NSArray, NSInteger, NSObject, NSString};
 use tracing::warn;
 
-use crate::accessibility_prompt::{AccessibilitySetupAction, show_accessibility_setup};
+use crate::accessibility_prompt::{
+    AccessibilitySetupAction, handle_accessibility_setup_action, permission_pane_name,
+    show_accessibility_setup,
+};
 use crate::commands::{Command, Operation};
 use crate::config::Config;
 use crate::config::decorations::{
@@ -25,7 +28,6 @@ use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::ActiveDisplay;
 use crate::ecs::{Bounds, FocusedMarker, Unmanaged};
 use crate::events::{Event, EventSender};
-use crate::manager::request_ax_privilege;
 use crate::util::round_px;
 
 #[derive(Debug, Clone)]
@@ -72,22 +74,25 @@ define_class!(
                 .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
                 .spawn()
             {
-                warn!(%error, "unable to open Accessibility settings");
+                let pane = permission_pane_name();
+                warn!(%error, pane, "unable to open permission settings");
             }
         }
 
         #[unsafe(method(showAccessibilityInstructions:))]
         fn show_accessibility_instructions(&self, _: &NSMenuItem) {
             let Some(main_thread_marker) = MainThreadMarker::new() else {
-                warn!("unable to show Accessibility instructions outside the main thread");
+                warn!("unable to show setup instructions outside the main thread");
                 return;
             };
 
-            if show_accessibility_setup(main_thread_marker)
-                == AccessibilitySetupAction::Continue
-            {
-                request_ax_privilege();
-            }
+            let action = show_accessibility_setup(main_thread_marker);
+            handle_accessibility_setup_action(action);
+        }
+
+        #[unsafe(method(resetAccessibilityPermission:))]
+        fn reset_accessibility_permission(&self, _: &NSMenuItem) {
+            handle_accessibility_setup_action(AccessibilitySetupAction::ResetAndRetry);
         }
 
         #[unsafe(method(quitPaneru:))]
@@ -182,9 +187,10 @@ impl MenuBarManager {
     }
 
     fn rebuild_accessibility_menu(&mut self) {
+        let pane = permission_pane_name();
         self.menu.removeAllItems();
 
-        let status = self.add_item("Paneru — Accessibility Required", None);
+        let status = self.add_item(&format!("Paneru — {pane} Required"), None);
         status.setEnabled(false);
 
         let hint = self.add_item("Grant access; Paneru will start automatically", None);
@@ -196,8 +202,12 @@ impl MenuBarManager {
             Some(sel!(showAccessibilityInstructions:)),
         );
         self.add_item(
-            "Open Accessibility Settings…",
+            &format!("Open {pane} Settings…"),
             Some(sel!(openAccessibilitySettings:)),
+        );
+        self.add_item(
+            "Reset Permission & Retry…",
+            Some(sel!(resetAccessibilityPermission:)),
         );
 
         self.menu.addItem(&NSMenuItem::separatorItem(self.mtm));

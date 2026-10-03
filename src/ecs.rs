@@ -843,7 +843,13 @@ impl WindowProperties {
     pub fn new(app: &Application, window: &Window, config: &Config) -> Self {
         let bundle_id = app.bundle_id().unwrap_or_default();
         let title = window.title().unwrap_or_default();
-        let params = config.find_window_properties(&title, &bundle_id);
+        // ponytail: a transient AX failure here yields None, so rules keyed on
+        // role/subrole silently miss this window and are never re-matched.
+        // Retry the match once the role becomes readable if this bites.
+        let role = window.role().ok();
+        let subrole = window.subrole().ok();
+        let params =
+            config.find_window_properties(&title, &bundle_id, role.as_deref(), subrole.as_deref());
         Self { params }
     }
 

@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use bevy::prelude::*;
 use objc2_core_foundation::CGPoint;
@@ -520,23 +520,39 @@ impl MockState {
         });
 
         let s = self.clone();
+        // Cached after the first successful read, like `WindowOS::role`, so a
+        // closed window keeps reporting its role here too.
+        let cached_role = Arc::new(OnceLock::<String>::new());
         mw.expect_role().returning(move || {
-            s.inner
+            if let Some(role) = cached_role.get() {
+                return Ok(role.clone());
+            }
+            let role = s
+                .inner
                 .force_read()
                 .windows
                 .get(&id)
                 .map(|w| w.role.clone())
-                .ok_or_else(|| crate::errors::Error::Generic(format!("window {id} not found")))
+                .ok_or_else(|| crate::errors::Error::Generic(format!("window {id} not found")))?;
+            let _ = cached_role.set(role.clone());
+            Ok(role)
         });
 
         let s = self.clone();
+        mw.expect_is_alive()
+            .returning(move || s.inner.force_read().windows.contains_key(&id));
+
+        let s = self.clone();
+        // An empty subrole models a window without an `AXSubrole` attribute,
+        // which AX reports as an error rather than an empty string.
         mw.expect_subrole().returning(move || {
-            Ok(s.inner
+            s.inner
                 .force_read()
                 .windows
                 .get(&id)
                 .map(|w| w.subrole.clone())
-                .unwrap_or_default())
+                .filter(|subrole| !subrole.is_empty())
+                .ok_or_else(|| crate::errors::Error::Generic(format!("window {id} has no subrole")))
         });
 
         let s = self.clone();

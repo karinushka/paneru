@@ -86,8 +86,13 @@ pub trait WindowApi: Send + Sync {
     fn invalidate_title(&self);
     fn identifier(&self) -> Result<String>;
     fn child_role(&self) -> Result<bool>;
+    /// Cached after the first successful read. Not a liveness check: use
+    /// [`Self::is_alive`] for that.
     fn role(&self) -> Result<String>;
     fn subrole(&self) -> Result<String>;
+    /// Whether the window's AX element still answers. Always a fresh
+    /// cross-process read, never cached.
+    fn is_alive(&self) -> bool;
     fn is_minimized(&self) -> bool;
     fn is_full_screen(&self) -> bool;
     fn reposition(&mut self, origin: Origin);
@@ -181,6 +186,15 @@ pub struct WindowOS {
     /// `kAXTitleChangedNotification`. Missing that notification is the one
     /// way this can go stale.
     title: RwLock<Option<String>>,
+
+    /// Role and subrole, cached after the first successful read: both are
+    /// cross-process calls and neither changes over a window's life. Failed
+    /// reads are not cached, so a transiently busy app is asked again.
+    /// Dropped with the `Window` component when the entity despawns.
+    role: OnceLock<String>,
+    /// Never caches `AXUnknown`: some apps report it briefly while a window
+    /// is still being created.
+    subrole: OnceLock<String>,
 }
 
 impl WindowOS {
@@ -228,6 +242,8 @@ impl WindowOS {
             app_reference: OnceLock::new(),
             enhanced_ui_absent: AtomicBool::new(false),
             title: RwLock::new(None),
+            role: OnceLock::new(),
+            subrole: OnceLock::new(),
         };
 
         let forced = window.is_forced_manage(config, bundle_id);
@@ -266,8 +282,16 @@ impl WindowOS {
         let Ok(title) = self.title() else {
             return false;
         };
+        // Same transient-AX-failure caveat as `WindowProperties::new`.
+        let role = self.role().ok();
+        let subrole = self.subrole().ok();
         config
-            .find_window_properties(&title, bundle_id.unwrap_or_default())
+            .find_window_properties(
+                &title,
+                bundle_id.unwrap_or_default(),
+                role.as_deref(),
+                subrole.as_deref(),
+            )
             .iter()
             .any(|params| params.manage.is_some_and(|manage| manage))
     }
@@ -554,7 +578,12 @@ impl WindowApi for WindowOS {
     ///
     /// `Ok(String)` with the window role if successful, otherwise `Err(Error)`.
     fn role(&self) -> Result<String> {
-        self.ax_element.role()
+        if let Some(role) = self.role.get() {
+            return Ok(role.clone());
+        }
+        let role = self.ax_element.role()?;
+        let _ = self.role.set(role.clone());
+        Ok(role)
     }
 
     /// Retrieves the subrole of the window (e.g., "`AXStandardWindow`").
@@ -563,7 +592,24 @@ impl WindowApi for WindowOS {
     ///
     /// `Ok(String)` with the window subrole if successful, otherwise `Err(Error)`.
     fn subrole(&self) -> Result<String> {
-        self.ax_element.subrole()
+        if let Some(subrole) = self.subrole.get() {
+            return Ok(subrole.clone());
+        }
+        let subrole = self.ax_element.subrole()?;
+        if subrole != kAXUnknownSubrole {
+            let _ = self.subrole.set(subrole.clone());
+        }
+        Ok(subrole)
+    }
+
+    /// Reads the role straight from AX, deliberately bypassing the `role`
+    /// cache. `Self::role` keeps returning its stored value after the window
+    /// is gone, so it always looks alive; only a fresh read fails once the
+    /// AX element is torn down. Don't "simplify" this to `self.role().is_ok()`.
+    /// Every window has a role, so a failed read means the element is gone
+    /// rather than that an attribute is missing.
+    fn is_alive(&self) -> bool {
+        self.ax_element.role().is_ok()
     }
 
     #[instrument(level = Level::DEBUG, ret)]

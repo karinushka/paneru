@@ -712,6 +712,8 @@ impl QueryState for PaneruQueryState {
                         bundle_id,
                         app_name,
                         title,
+                        role: window.role().ok(),
+                        subrole: window.subrole().ok(),
                         focused: focused_entity == Some(entity),
                         floating: matches!(unmanaged, Some(Unmanaged::Floating)),
                         display_id: visibility.map(|(display_id, _)| display_id),

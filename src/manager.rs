@@ -22,7 +22,7 @@ use std::slice::from_raw_parts_mut;
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use stdext::function_name;
-use tracing::{Level, debug, error, instrument, trace, warn};
+use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use crate::config::Config;
 use crate::errors::{Error, Result};
@@ -905,6 +905,39 @@ pub fn request_ax_privilege() -> bool {
         let values = [kCFBooleanTrue.unwrap()];
         let opts = CFDictionary::from_slices(&keys, &values);
         AXIsProcessTrustedWithOptions((&raw const *opts).cast())
+    }
+}
+
+/// Resets the TCC Accessibility entry for Paneru (`com.github.karinushka.paneru`).
+///
+/// Rebuilding the binary or switching between Homebrew and Cargo changes the
+/// ad-hoc code-signing hash (`cdhash`), leaving a stale TCC entry that
+/// prevents macOS from honoring the existing toggle or re-displaying the
+/// system prompt until the entry is cleared.
+pub fn reset_ax_privilege() -> bool {
+    match std::process::Command::new("/usr/bin/tccutil")
+        .args(["reset", "Accessibility", crate::platform::service::ID])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            info!(
+                bundle_id = crate::platform::service::ID,
+                "reset TCC Accessibility entry"
+            );
+            true
+        }
+        Ok(output) => {
+            warn!(
+                status = %output.status,
+                stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+                "tccutil reset Accessibility failed"
+            );
+            false
+        }
+        Err(error) => {
+            warn!(%error, "unable to run tccutil to reset Accessibility entry");
+            false
+        }
     }
 }
 

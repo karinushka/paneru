@@ -634,6 +634,8 @@ mod tests {
                     bundle_id: "com.example.app".to_string(),
                     app_name: "Test App".to_string(),
                     title: "window".to_string(),
+                    role: Some("AXWindow".to_string()),
+                    subrole: Some("AXStandardWindow".to_string()),
                     focused: true,
                     floating: false,
                     display_id: Some(1),
@@ -1605,7 +1607,9 @@ mod tests {
             app_name: "Ghostty".into(),
             bundle_id: "com.mitchellh.ghostty".into(),
             title: "Terminal".into(),
-            frame: crate::types::state::Frame {
+            role: None,
+            subrole: None,
+            frame: crate::types::state::Frame {            
                 x: 0,
                 y: 0,
                 width: 800,
@@ -1636,6 +1640,8 @@ mod tests {
             app_name: "Ghostty".into(),
             bundle_id: "com.mitchellh.ghostty".into(),
             title: "Terminal".into(),
+            role: None,
+            subrole: None,
             frame: crate::types::state::Frame {
                 x: 0,
                 y: 0,
@@ -1651,6 +1657,8 @@ mod tests {
             app_name: "LibreOffice".into(),
             bundle_id: "org.libreoffice.script".into(),
             title: "Document".into(),
+            role: None,
+            subrole: None,
             frame: crate::types::state::Frame {
                 x: 0,
                 y: 0,

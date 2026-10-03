@@ -483,7 +483,7 @@ fn test_display_configuration_reapplies_layout_after_geometry_change() {
     let display = world.query::<&Display>().single(world).unwrap();
     assert_eq!(display.bounds().min.x, 0, "wait for the display to settle");
 
-    harness.advance(Duration::from_millis(1000));
+    harness.advance(Duration::from_secs(1));
     let updated = harness
         .world()
         .get::<Window>(window_entity)
@@ -597,7 +597,7 @@ fn test_unplug_rehomes_workspace_and_window_on_surviving_display() {
         .write_message::<Event>(Event::DisplayRemoved {
             display_id: EXT_DISPLAY_ID,
         });
-    harness.advance(Duration::from_millis(1000));
+    harness.advance(Duration::from_secs(1));
 
     let world = harness.world();
     let main = world.query::<(&Display, Entity)>().single(world).unwrap().1;
@@ -685,7 +685,7 @@ fn test_wake_reapplies_window_frame_without_geometry_change() {
     harness
         .world()
         .write_message::<Event>(Event::SystemWoke { msg: String::new() });
-    harness.advance(Duration::from_millis(1000));
+    harness.advance(Duration::from_secs(1));
 
     let restored = harness
         .world()

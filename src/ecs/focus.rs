@@ -21,8 +21,8 @@ use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, GlobalState, WindowCtx, Windows};
 use crate::ecs::workspace::RestoreFocusMarker;
 use crate::ecs::{
-    ActiveWorkspaceMarker, Bounds, Position, RaiseWindow, ResizeMarker, Scrolling,
-    SendMessageTrigger, SpawnCommandsExt, StrayFocusEvent,
+    ActiveWorkspaceMarker, Bounds, Position, RaiseWindow, RepositionMarker, ResizeMarker,
+    Scrolling, SendMessageTrigger, SpawnCommandsExt, StrayFocusEvent,
 };
 use crate::events::Event;
 use crate::manager::{Application, Display, Window, WindowManager};
@@ -30,6 +30,19 @@ use crate::platform::WorkspaceId;
 
 const REFRESH_WINDOW_CHECK_FREQ_MS: u64 = 1000;
 pub(crate) const VERIFY_FOCUS_TIMEOUT: Duration = Duration::from_millis(300);
+
+type MouseFocusStrips<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static LayoutStrip,
+        &'static ChildOf,
+        Option<&'static Scrolling>,
+        Has<ActiveWorkspaceMarker>,
+        &'static Position,
+        Option<&'static RepositionMarker>,
+    ),
+>;
 
 #[derive(Default)]
 pub struct TierMemory {
@@ -105,7 +118,9 @@ impl Plugin for FocusEventsPlugin {
             PostUpdate,
             (
                 autocenter_window_on_focus.after(super::systems::animate_resize_entities),
-                mouse_follows_focus.after(super::systems::animate_resize_entities),
+                // Bevy must apply the deferred centering commands before
+                // the pointer reads the window's destination.
+                mouse_follows_focus.after(autocenter_window_on_focus),
                 recover_lost_focus.run_if(on_timer(Duration::from_millis(
                     REFRESH_WINDOW_CHECK_FREQ_MS,
                 ))),
@@ -343,6 +358,7 @@ fn autocenter_window_on_focus(
 }
 
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
+#[allow(clippy::too_many_arguments)]
 fn mouse_follows_focus(
     focused: Single<Entity, Added<FocusedMarker>>,
     windows: Windows,
@@ -350,12 +366,8 @@ fn mouse_follows_focus(
     config: Res<Config>,
     window_manager: Res<WindowManager>,
     displays: Query<&Display>,
-    workspaces: Query<(
-        &LayoutStrip,
-        &ChildOf,
-        Option<&Scrolling>,
-        Has<ActiveWorkspaceMarker>,
-    )>,
+    workspaces: MouseFocusStrips,
+    restored: Query<&RestoreFocusMarker>,
 ) {
     let entity = *focused;
     let Some(window) = windows.get(entity) else {
@@ -363,7 +375,7 @@ fn mouse_follows_focus(
     };
     if workspaces
         .iter()
-        .find_map(|(_, _, scrolling, active)| if active { scrolling } else { None })
+        .find_map(|(_, _, scrolling, active, _, _)| if active { scrolling } else { None })
         .is_some_and(|scrolling| scrolling.is_user_swiping)
     {
         debug!("Suppressing center mouse due to a swipe");
@@ -380,15 +392,25 @@ fn mouse_follows_focus(
         && !global_state.skip_reshuffle()
         && global_state.ffm_flag().is_none_or(|id| id != window.id())
         && let Some(frame) = windows.moving_frame(entity)
-        && let Some(display_bounds) = workspaces
+        && let Some((_, child, _, _, position, reposition)) = workspaces
             .into_iter()
-            .find_map(|(strip, child, _, _)| strip.contains(entity).then_some(child))
-            .and_then(|child| displays.get(child.parent()).ok())
-            .map(Display::bounds)
+            .find(|(strip, _, _, _, _, _)| strip.contains(entity))
+        && let Ok(display) = displays.get(child.parent())
     {
-        let visible = display_bounds.intersect(frame);
-        // If the overlap is smaller than 50x50, the window is probably hidden
-        // off screen, so do not move the mouse.
+        // Project the window's slot onto the strip destination when the window
+        // does not carry its own auto-center target (workspace restore or
+        // auto-center disabled), since the strip moves before its members are
+        // laid out on a following tick.
+        let frame = if (restored.iter().any(|marker| marker.entity == entity)
+            || !config.auto_center())
+            && let Some(layout) = windows.layout_position(entity)
+        {
+            let origin = layout.0 + reposition.map_or(position.0, |target| target.0);
+            IRect::from_corners(origin, origin + frame.size())
+        } else {
+            frame
+        };
+        let visible = display.bounds().intersect(frame);
         if visible.size().length_squared() > 5000 {
             let origin = visible.center();
             debug!("centering on {} {origin}", window.id());

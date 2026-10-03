@@ -558,7 +558,7 @@ mod tests {
             )
             .expect("Lua width rule parses");
         let config = runtime.built_config().expect("setup should build a config");
-        let width = config.find_window_properties("Window 1", "")[0]
+        let width = config.find_window_properties("Window 1", "", None, None)[0]
             .width
             .expect("matched width rule");
         assert_eq!(width.ratio(Some(0.25)), 0.75);
@@ -652,6 +652,8 @@ mod tests {
                     bundle_id: "com.example.app".to_string(),
                     app_name: "Test App".to_string(),
                     title: "window".to_string(),
+                    role: Some("AXWindow".to_string()),
+                    subrole: Some("AXStandardWindow".to_string()),
                     focused: true,
                     floating: false,
                     display_id: Some(1),
@@ -695,6 +697,33 @@ mod tests {
             "paneru.query should return raw JSON, got {}",
             flashes[2]
         );
+    }
+
+    #[test]
+    fn queried_windows_expose_role_and_subrole() {
+        let world = TestWorld::default();
+        let runtime = world
+            .runtime(
+                r#"
+            paneru.bind("alt - q", function()
+              local window = paneru.query_workspaces()[1].windows[1]
+              paneru.flash(window.role)
+              paneru.flash(window.subrole)
+            end)
+            "#,
+            )
+            .unwrap();
+        let extract = || Ok(Arc::new(test_state()));
+        world.drive(&extract, runtime.dispatch_bind(1));
+
+        let flashes: Vec<String> = runtime
+            .outbox
+            .borrow_mut()
+            .flashes
+            .drain(..)
+            .map(|(message, _)| message)
+            .collect();
+        assert_eq!(flashes, ["AXWindow", "AXStandardWindow"]);
     }
 
     #[test]

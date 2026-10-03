@@ -90,6 +90,10 @@ pub enum Event {
         app_name: String,
         bundle_id: String,
         title: String,
+        /// Accessibility role (e.g. `AXWindow`), when the window reports one.
+        role: Option<String>,
+        /// Accessibility subrole (e.g. `AXDialog`), when the window reports one.
+        subrole: Option<String>,
         frame: crate::types::state::Frame,
         floating: bool,
         managed: bool,

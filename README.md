@@ -73,7 +73,8 @@ inspired by [Niri] and [PaperWM.spoon].
 - Like all non-native window managers for MacOS, Paneru requires accessibility
   access to move windows. Once it runs you may get a dialog window asking for
   permissions. Otherwise check the setting in System Settings under "Privacy &
-  Security -> Accessibility".
+  Security -> Accessibility" (or "Privacy & Security -> Device Control and Data
+  Access" on macOS 27 and later).
 
 - Check your System Settings for "Displays have separate spaces" option. It
   should be enabled - this allows Paneru to manage the workspaces independently.

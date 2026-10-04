@@ -13,10 +13,10 @@ use objc2_core_foundation::{
     CFArray, CFBoolean, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize,
     kCFBooleanFalse, kCFBooleanTrue,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{LazyLock, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::Duration;
 use stdext::function_name;
@@ -34,21 +34,209 @@ use crate::manager::{Origin, Size, irect_from};
 use crate::platform::{Pid, ProcessSerialNumber, WinID, macos_major_version};
 use crate::util::{AXUIAttributes, AXUIWrapper, MacResult};
 
-/// Per-PID ref-count for the `AXEnhancedUserInterface` workaround. Tracks how many
-/// concurrent window operations are in-flight for each app so the attribute is only
-/// re-enabled after the last one completes (safe under `par_iter_mut`).
-static ENHANCED_UI_REFCOUNT: LazyLock<Mutex<HashMap<Pid, usize>>> =
+/// The registry lock only looks up per-app locks; AX calls never hold it.
+static ENHANCED_UI_STATES: LazyLock<Mutex<HashMap<Pid, Arc<Mutex<EnhancedUiState>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Apps observed not to have `AXEnhancedUserInterface` set, so the workaround
-/// above can skip them without asking again.
-///
-/// An `RwLock` rather than a `Mutex`: entries are written once and read by
-/// many concurrent `par_iter_mut` workers afterwards, so readers must not
-/// exclude each other. Entries die with the process, so a relaunch (new pid)
-/// is asked afresh.
-static ENHANCED_UI_ABSENT: LazyLock<RwLock<HashSet<Pid>>> =
-    LazyLock::new(|| RwLock::new(HashSet::new()));
+#[derive(Debug, Default)]
+struct EnhancedUiState {
+    active_operations: usize,
+    /// Permanently cache a confirmed false value, but never an AX read error.
+    absent: bool,
+    /// Retained after a failed restoration so our own false value isn't cached.
+    restore_pending: bool,
+}
+
+impl EnhancedUiState {
+    fn acquire(
+        &mut self,
+        read_enabled: impl FnOnce() -> Result<bool>,
+        disable: impl FnOnce(),
+    ) -> Result<bool> {
+        if self.absent {
+            return Ok(false);
+        }
+        if self.active_operations > 0 {
+            self.active_operations += 1;
+            return Ok(true);
+        }
+        if !self.restore_pending && !read_enabled()? {
+            self.absent = true;
+            return Ok(false);
+        }
+        // AX setters can change app state before returning an error. Once a
+        // write is attempted, owe a restoration even if it reports failure.
+        self.restore_pending = true;
+        disable();
+        self.active_operations = 1;
+        Ok(true)
+    }
+
+    fn release(&mut self, restore: impl FnOnce() -> Result<()>) -> Result<()> {
+        self.active_operations -= 1;
+        if self.active_operations == 0 {
+            restore()?;
+            self.restore_pending = false;
+        }
+        Ok(())
+    }
+}
+
+/// Owns one acquisition, without keeping the PID lock across window operations.
+struct EnhancedUiGuard<F: FnOnce() -> Result<()>> {
+    state: Arc<Mutex<EnhancedUiState>>,
+    restore: Option<F>,
+    pid: Pid,
+}
+
+impl<F: FnOnce() -> Result<()>> Drop for EnhancedUiGuard<F> {
+    fn drop(&mut self) {
+        if let Some(restore) = self.restore.take() {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let result = state.release(restore);
+            trace!(
+                target: "paneru::ax_diagnostics",
+                pid = self.pid,
+                active_operations = state.active_operations,
+                restore_pending = state.restore_pending,
+                "released enhanced UI guard"
+            );
+            let _ = result.inspect_err(|err| {
+                warn!(pid = self.pid, "error restoring enhanced UI: {err}");
+            });
+        }
+    }
+}
+
+fn enhanced_ui_state(pid: Pid) -> Arc<Mutex<EnhancedUiState>> {
+    ENHANCED_UI_STATES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(pid)
+        .or_default()
+        .clone()
+}
+
+/// Retires a terminated app's cached flag and restoration debt before PID reuse.
+/// Outstanding window operations keep their own `Arc` and finish independently.
+pub(crate) fn forget_enhanced_ui_state(pid: Pid) {
+    ENHANCED_UI_STATES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&pid);
+}
+
+fn acquire_enhanced_ui<F: FnOnce() -> Result<()>>(
+    state: Arc<Mutex<EnhancedUiState>>,
+    pid: Pid,
+    read_enabled: impl FnOnce() -> Result<bool>,
+    disable: impl FnOnce() -> Result<()>,
+    restore: F,
+) -> Result<Option<EnhancedUiGuard<F>>> {
+    let mut locked = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let acquired = locked.acquire(read_enabled, || {
+        if let Err(err) = disable() {
+            warn!(
+                pid,
+                "error disabling enhanced UI; retaining restoration guard: {err}"
+            );
+        }
+    })?;
+    trace!(
+        target: "paneru::ax_diagnostics",
+        pid,
+        acquired,
+        active_operations = locked.active_operations,
+        absent = locked.absent,
+        restore_pending = locked.restore_pending,
+        "acquired enhanced UI guard"
+    );
+    drop(locked);
+    Ok(acquired.then(|| EnhancedUiGuard {
+        state,
+        restore: Some(restore),
+        pid,
+    }))
+}
+
+fn read_enhanced_ui(app_element: &CFRetained<AXUIWrapper>) -> Result<bool> {
+    app_element
+        .get_attribute::<CFBoolean>(&CFString::from_static_str("AXEnhancedUserInterface"))
+        .map(|value| CFBoolean::value(&value))
+}
+
+fn verify_enhanced_ui_write(
+    enabled: bool,
+    result: Result<()>,
+    read_enabled: impl FnOnce() -> Result<bool>,
+) -> Result<()> {
+    if result.is_err() && read_enabled().is_ok_and(|observed| observed == enabled) {
+        return Ok(());
+    }
+    result
+}
+
+fn set_enhanced_ui(
+    app_element: &CFRetained<AXUIWrapper>,
+    enabled: bool,
+    pid: Pid,
+    window_id: WinID,
+) -> Result<()> {
+    let value = unsafe {
+        if enabled {
+            kCFBooleanTrue
+        } else {
+            kCFBooleanFalse
+        }
+    };
+    let ax_error = unsafe {
+        AXUIElementSetAttributeValue(
+            app_element.as_ptr(),
+            CFString::from_static_str("AXEnhancedUserInterface").as_ref(),
+            value.unwrap(),
+        )
+    };
+    trace!(
+        target: "paneru::ax_diagnostics",
+        pid,
+        window_id,
+        requested = enabled,
+        ax_error,
+        "AXEnhancedUserInterface write"
+    );
+    verify_enhanced_ui_write(
+        enabled,
+        ax_error.to_result("set AXEnhancedUserInterface"),
+        || {
+            let observed = read_enhanced_ui(app_element);
+            if observed.as_ref().is_ok_and(|value| *value == enabled) {
+                debug!(
+                    pid,
+                    window_id,
+                    requested = enabled,
+                    ax_error,
+                    observed = ?observed,
+                    "AXEnhancedUserInterface changed despite reported error"
+                );
+            } else {
+                warn!(
+                    pid,
+                    window_id,
+                    requested = enabled,
+                    ax_error,
+                    observed = ?observed,
+                    "AXEnhancedUserInterface write failed verification"
+                );
+            }
+            observed
+        },
+    )
+}
 
 /// macOS may partially apply an AX width increase when the requested right edge
 /// would be far outside the display. Moving the partial result left by the
@@ -166,10 +354,11 @@ pub struct WindowOS {
     border_radius: OnceLock<Option<f64>>,
     pid: OnceLock<Result<Pid>>,
     app_reference: OnceLock<Option<CFRetained<AXUIWrapper>>>,
+    enhanced_ui_state: OnceLock<Arc<Mutex<EnhancedUiState>>>,
     /// Set once this window's app is known not to use
     /// `AXEnhancedUserInterface` (the common case), so the steady-state check
     /// in [`Self::disable_enhanced_ui`] is a relaxed atomic load instead of
-    /// contending for the global mutex from every `par_iter_mut` worker.
+    /// acquiring the PID lock from every `par_iter_mut` worker.
     enhanced_ui_absent: AtomicBool,
 
     /// The last title read off the element, cached because reading one is a
@@ -226,6 +415,7 @@ impl WindowOS {
             border_radius: OnceLock::new(),
             pid: OnceLock::new(),
             app_reference: OnceLock::new(),
+            enhanced_ui_state: OnceLock::new(),
             enhanced_ui_absent: AtomicBool::new(false),
             title: RwLock::new(None),
         };
@@ -309,105 +499,52 @@ impl WindowOS {
             .clone()
     }
 
-    /// Disables `AXEnhancedUserInterface` on this window's app if it is currently enabled.
-    ///
-    /// Uses a per-PID ref-count so that concurrent operations on windows of the same app
-    /// (via `par_iter_mut`) keep the attribute disabled until the last caller re-enables it.
-    ///
-    /// This avoids animated move/resize that breaks window management for apps like Chrome,
-    /// Firefox, and Zen Browser when accessibility clients (e.g. Kindavim) enable enhanced UI.
-    fn disable_enhanced_ui(&self) {
-        // Nothing to disable, and nothing to lock or ask: this window's app has
-        // already been found not to use the attribute.
+    /// Suppresses app-driven move/resize animations until the last guard drops.
+    /// The PID lock covers flag/counter transitions, not the window operations.
+    fn disable_enhanced_ui(&self) -> Option<EnhancedUiGuard<impl FnOnce() -> Result<()> + use<>>> {
         if self.enhanced_ui_absent.load(Ordering::Relaxed) {
-            return;
+            return None;
         }
-        let Ok(pid) = self.pid() else { return };
-        // Another window of the same app may have answered the question already.
-        // Taken before the ref-count mutex, since the answer is usually "absent"
-        // and that path should not touch the ref-count at all.
-        if ENHANCED_UI_ABSENT
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains(&pid)
-        {
-            self.enhanced_ui_absent.store(true, Ordering::Relaxed);
-            return;
-        }
-        // Scoped so the lock isn't held across the accessibility calls below:
-        // each is a synchronous round-trip into another process, and holding a
-        // global mutex across them would serialize every `par_iter_mut` worker
-        // behind the slowest app.
-        {
-            let mut counts = ENHANCED_UI_REFCOUNT
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(count) = counts.get_mut(&pid) {
-                *count += 1;
-                return;
+        let pid = self.pid().ok()?;
+        let state = self
+            .enhanced_ui_state
+            .get_or_init(|| enhanced_ui_state(pid))
+            .clone();
+        let app_element = self.app_reference()?;
+        let restore_element = app_element.clone();
+        let window_id = self.id;
+        match acquire_enhanced_ui(
+            state,
+            pid,
+            || {
+                read_enhanced_ui(&app_element).inspect(|enabled| {
+                    debug!(
+                        target: "paneru::ax_diagnostics",
+                        pid,
+                        window_id,
+                        enabled,
+                        "read AXEnhancedUserInterface"
+                    );
+                })
+            },
+            || set_enhanced_ui(&app_element, false, pid, window_id),
+            move || set_enhanced_ui(&restore_element, true, pid, window_id),
+        ) {
+            Ok(guard) => {
+                if guard.is_none() {
+                    debug!(
+                        target: "paneru::ax_diagnostics",
+                        pid,
+                        window_id,
+                        "permanently caching false; skipping enhanced UI workaround"
+                    );
+                    self.enhanced_ui_absent.store(true, Ordering::Relaxed);
+                }
+                guard
             }
-        }
-        let Some(app_element) = self.app_reference() else {
-            return;
-        };
-        let attr = CFString::from_static_str("AXEnhancedUserInterface");
-        let enabled = app_element
-            .get_attribute::<CFBoolean>(&attr)
-            .is_ok_and(|v| CFBoolean::value(&v));
-        if enabled {
-            unsafe {
-                AXUIElementSetAttributeValue(
-                    app_element.as_ptr(),
-                    attr.as_ref(),
-                    kCFBooleanFalse.unwrap(),
-                );
-            }
-            // Incremented rather than set: two windows of the same app can race
-            // here and both owe a matching `reenable_enhanced_ui`; setting 1
-            // would let the second one decrement past zero.
-            *ENHANCED_UI_REFCOUNT
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .entry(pid)
-                .or_insert(0) += 1;
-        } else {
-            ENHANCED_UI_ABSENT
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(pid);
-            self.enhanced_ui_absent.store(true, Ordering::Relaxed);
-        }
-    }
-
-    /// Re-enables `AXEnhancedUserInterface` on this window's app once the last concurrent
-    /// caller has finished. Pairs with [`disable_enhanced_ui`].
-    fn reenable_enhanced_ui(&self) {
-        // Nothing was disabled, so there is no ref-count entry to find and no
-        // reason to take the lock looking for one.
-        if self.enhanced_ui_absent.load(Ordering::Relaxed) {
-            return;
-        }
-        let Ok(pid) = self.pid() else { return };
-        let mut counts = ENHANCED_UI_REFCOUNT
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(count) = counts.get_mut(&pid) else {
-            return;
-        };
-        *count = count.saturating_sub(1);
-        if *count > 0 {
-            return;
-        }
-        counts.remove(&pid);
-        drop(counts);
-        if let Some(app_element) = self.app_reference() {
-            let attr = CFString::from_static_str("AXEnhancedUserInterface");
-            unsafe {
-                AXUIElementSetAttributeValue(
-                    app_element.as_ptr(),
-                    attr.as_ref(),
-                    kCFBooleanTrue.unwrap(),
-                );
+            Err(err) => {
+                warn!(pid, window_id, "error reading enhanced UI: {err}");
+                None
             }
         }
     }
@@ -581,9 +718,8 @@ impl WindowApi for WindowOS {
             trace!("already in position.");
             return;
         }
-        self.disable_enhanced_ui();
+        let _enhanced_ui = self.disable_enhanced_ui();
         self.set_ax_position(origin);
-        self.reenable_enhanced_ui();
     }
 
     #[instrument(level = Level::TRACE)]
@@ -594,7 +730,7 @@ impl WindowApi for WindowOS {
         }
         let previous_frame = self.frame;
         let target_origin = previous_frame.min;
-        self.disable_enhanced_ui();
+        let _enhanced_ui = self.disable_enhanced_ui();
         self.set_ax_size(size);
 
         let mut previous_observed_frame = previous_frame;
@@ -631,7 +767,6 @@ impl WindowApi for WindowOS {
             }
             self.set_ax_position(target_origin);
         }
-        self.reenable_enhanced_ui();
     }
 
     /// Updates the internal `frame` of the window by querying its current position and size from the Accessibility API.
@@ -823,6 +958,461 @@ impl WindowApi for WindowOS {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::Event;
+    use crate::platform::ProcessSerialNumber;
+    use crate::tests::TestHarness;
+    use std::sync::{atomic::AtomicUsize, mpsc};
+
+    #[test]
+    fn enhanced_ui_termination_discards_failed_restoration_before_pid_reuse() {
+        let pid: Pid = 175_003;
+        let psn = ProcessSerialNumber {
+            high: 0,
+            low: pid.cast_unsigned(),
+        };
+        let guard = acquire_enhanced_ui(
+            enhanced_ui_state(pid),
+            pid,
+            || Ok(true),
+            || Ok(()),
+            || Err(Error::Generic("process exited before restoration".into())),
+        )
+        .unwrap()
+        .unwrap();
+        drop(guard);
+
+        TestHarness::new()
+            .with_app(pid, "terminated", "TerminatedApp", |_| {})
+            .on_iteration(0, move |world, _| {
+                assert!(
+                    world
+                        .query::<&crate::ecs::BProcess>()
+                        .iter(world)
+                        .all(|process| process.psn() != psn)
+                );
+                let enabled = AtomicBool::new(false);
+                let reads = AtomicUsize::new(0);
+                let replacement = acquire_enhanced_ui(
+                    enhanced_ui_state(pid),
+                    pid,
+                    || {
+                        reads.fetch_add(1, Ordering::Relaxed);
+                        Ok(enabled.load(Ordering::Relaxed))
+                    },
+                    || {
+                        enabled.store(false, Ordering::Relaxed);
+                        Ok(())
+                    },
+                    || {
+                        enabled.store(true, Ordering::Relaxed);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                drop(replacement);
+                assert_eq!(reads.load(Ordering::Relaxed), 1);
+                assert!(!enabled.load(Ordering::Relaxed));
+            })
+            .run(vec![Event::ApplicationTerminated { psn }]);
+    }
+
+    #[test]
+    fn enhanced_ui_termination_discards_cached_false_before_pid_reuse() {
+        let pid: Pid = 175_004;
+        let guard = acquire_enhanced_ui(
+            enhanced_ui_state(pid),
+            pid,
+            || Ok(false),
+            || panic!("an initially false flag must not be disabled"),
+            || panic!("an initially false flag must not be restored"),
+        )
+        .unwrap();
+        assert!(guard.is_none());
+
+        TestHarness::new()
+            .with_app(pid, "terminated", "TerminatedApp", |_| {})
+            .on_iteration(0, move |_, _| {
+                let enabled = AtomicBool::new(true);
+                let replacement = acquire_enhanced_ui(
+                    enhanced_ui_state(pid),
+                    pid,
+                    || Ok(enabled.load(Ordering::Relaxed)),
+                    || {
+                        enabled.store(false, Ordering::Relaxed);
+                        Ok(())
+                    },
+                    || {
+                        enabled.store(true, Ordering::Relaxed);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                assert!(!enabled.load(Ordering::Relaxed));
+                drop(replacement);
+                assert!(enabled.load(Ordering::Relaxed));
+            })
+            .run(vec![Event::ApplicationTerminated {
+                psn: ProcessSerialNumber {
+                    high: 0,
+                    low: pid.cast_unsigned(),
+                },
+            }]);
+    }
+
+    #[test]
+    fn enhanced_ui_termination_preserves_outstanding_guards_without_sharing_with_reused_pid() {
+        let pid: Pid = 175_005;
+        let old_restorations = Arc::new(AtomicUsize::new(0));
+        let restore_count = old_restorations.clone();
+        let old_guard = acquire_enhanced_ui(
+            enhanced_ui_state(pid),
+            pid,
+            || Ok(true),
+            || Ok(()),
+            move || {
+                restore_count.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            },
+        )
+        .unwrap()
+        .unwrap();
+        let mut old_guard = Some(old_guard);
+
+        TestHarness::new()
+            .with_app(pid, "terminated", "TerminatedApp", |_| {})
+            .on_iteration(0, move |_, _| {
+                let enabled = AtomicBool::new(true);
+                let restorations = AtomicUsize::new(0);
+                let replacement = acquire_enhanced_ui(
+                    enhanced_ui_state(pid),
+                    pid,
+                    || Ok(enabled.load(Ordering::Relaxed)),
+                    || {
+                        enabled.store(false, Ordering::Relaxed);
+                        Ok(())
+                    },
+                    || {
+                        restorations.fetch_add(1, Ordering::Relaxed);
+                        enabled.store(true, Ordering::Relaxed);
+                        Ok(())
+                    },
+                )
+                .unwrap()
+                .unwrap();
+                assert!(!enabled.load(Ordering::Relaxed));
+                drop(old_guard.take());
+                assert_eq!(old_restorations.load(Ordering::Relaxed), 1);
+                assert_eq!(restorations.load(Ordering::Relaxed), 0);
+                assert!(!enabled.load(Ordering::Relaxed));
+                drop(replacement);
+                assert_eq!(restorations.load(Ordering::Relaxed), 1);
+                assert!(enabled.load(Ordering::Relaxed));
+            })
+            .run(vec![Event::ApplicationTerminated {
+                psn: ProcessSerialNumber {
+                    high: 0,
+                    low: pid.cast_unsigned(),
+                },
+            }]);
+    }
+
+    #[test]
+    fn enhanced_ui_overlapping_operations_restore_only_after_last_guard() {
+        let state = Arc::new(Mutex::new(EnhancedUiState::default()));
+        let enabled = AtomicBool::new(true);
+        let restorations = AtomicUsize::new(0);
+        let restore = || {
+            restorations.fetch_add(1, Ordering::Relaxed);
+            enabled.store(true, Ordering::Relaxed);
+            Ok(())
+        };
+        let first = acquire_enhanced_ui(
+            state.clone(),
+            1,
+            || Ok(enabled.load(Ordering::Relaxed)),
+            || {
+                enabled.store(false, Ordering::Relaxed);
+                Ok(())
+            },
+            restore,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            state.try_lock().is_ok(),
+            "window operations must not hold the lock"
+        );
+
+        thread::scope(|scope| {
+            let second = scope
+                .spawn(|| {
+                    acquire_enhanced_ui(
+                        state.clone(),
+                        1,
+                        || panic!("must not read another operation's temporary false"),
+                        || panic!("the app is already disabled"),
+                        restore,
+                    )
+                    .unwrap()
+                    .unwrap()
+                })
+                .join()
+                .unwrap();
+            assert_eq!(state.lock().unwrap().active_operations, 2);
+            drop(first);
+            assert!(!enabled.load(Ordering::Relaxed));
+            assert_eq!(restorations.load(Ordering::Relaxed), 0);
+            drop(second);
+        });
+
+        assert!(enabled.load(Ordering::Relaxed));
+        assert_eq!(restorations.load(Ordering::Relaxed), 1);
+        let state = state.lock().unwrap();
+        assert_eq!(state.active_operations, 0);
+        assert!(!state.absent);
+        assert!(!state.restore_pending);
+    }
+
+    #[test]
+    fn enhanced_ui_flag_transitions_hold_pid_lock() {
+        let state = Arc::new(Mutex::new(EnhancedUiState::default()));
+        let enabled = AtomicBool::new(true);
+        let guard = acquire_enhanced_ui(
+            state.clone(),
+            1,
+            || {
+                assert!(state.try_lock().is_err());
+                Ok(enabled.load(Ordering::Relaxed))
+            },
+            || {
+                enabled.store(false, Ordering::Relaxed);
+                // Another window must not read false before the count is published.
+                assert!(state.try_lock().is_err());
+                Ok(())
+            },
+            || {
+                // Nor after the count reaches zero but before true is restored.
+                assert!(state.try_lock().is_err());
+                enabled.store(true, Ordering::Relaxed);
+                Ok(())
+            },
+        )
+        .unwrap()
+        .unwrap();
+        drop(guard);
+        assert!(enabled.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn enhanced_ui_different_pids_can_transition_independently() {
+        let first_state = enhanced_ui_state(-175_001);
+        assert!(Arc::ptr_eq(&first_state, &enhanced_ui_state(-175_001)));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        thread::scope(|scope| {
+            let first = scope.spawn(move || {
+                let guard = acquire_enhanced_ui(
+                    first_state,
+                    -175_001,
+                    || Ok(true),
+                    || {
+                        entered_tx.send(()).unwrap();
+                        resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                        Ok(())
+                    },
+                    || Ok(()),
+                )
+                .unwrap()
+                .unwrap();
+                drop(guard);
+            });
+            entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let second = acquire_enhanced_ui(
+                enhanced_ui_state(-175_002),
+                -175_002,
+                || Ok(true),
+                || Ok(()),
+                || Ok(()),
+            )
+            .unwrap()
+            .unwrap();
+            drop(second);
+            resume_tx.send(()).unwrap();
+            first.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn enhanced_ui_confirmed_false_is_permanently_cached() {
+        let state = Arc::new(Mutex::new(EnhancedUiState::default()));
+        let guard = acquire_enhanced_ui(
+            state.clone(),
+            1,
+            || Ok(false),
+            || panic!("must not disable an already false flag"),
+            || panic!("must not restore a flag we didn't disable"),
+        )
+        .unwrap();
+        assert!(guard.is_none());
+        drop(guard);
+        let guard = acquire_enhanced_ui(
+            state.clone(),
+            1,
+            || panic!("another window of the same app must use the cached false"),
+            || panic!("cached false must not be disabled"),
+            || panic!("cached false must not be restored"),
+        )
+        .unwrap();
+        assert!(guard.is_none());
+        let state = state.lock().unwrap();
+        assert!(state.absent);
+        assert_eq!(state.active_operations, 0);
+    }
+
+    #[test]
+    fn enhanced_ui_read_errors_are_retried_without_acquiring() {
+        let state = Arc::new(Mutex::new(EnhancedUiState::default()));
+        let read_error = acquire_enhanced_ui(
+            state.clone(),
+            1,
+            || Err(Error::Generic("transient AX read failure".into())),
+            || panic!("a failed read must not disable the flag"),
+            || panic!("a failed acquisition must not restore the flag"),
+        );
+        assert!(read_error.is_err());
+        {
+            let state = state.lock().unwrap();
+            assert!(!state.absent);
+            assert!(!state.restore_pending);
+            assert_eq!(state.active_operations, 0);
+        }
+        let restorations = AtomicUsize::new(0);
+        let guard = acquire_enhanced_ui(
+            state.clone(),
+            1,
+            || Ok(true),
+            || Ok(()),
+            || {
+                restorations.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            },
+        )
+        .unwrap()
+        .unwrap();
+        drop(guard);
+        assert_eq!(restorations.load(Ordering::Relaxed), 1);
+        assert_eq!(state.lock().unwrap().active_operations, 0);
+    }
+
+    #[test]
+    fn enhanced_ui_failed_disable_still_restores_possible_side_effects() {
+        let state = Arc::new(Mutex::new(EnhancedUiState::default()));
+        let enabled = AtomicBool::new(true);
+        let guard = acquire_enhanced_ui(
+            state.clone(),
+            1,
+            || Ok(enabled.load(Ordering::Relaxed)),
+            || {
+                enabled.store(false, Ordering::Relaxed);
+                Err(Error::Generic(
+                    "setter changed state but returned -25208".into(),
+                ))
+            },
+            || {
+                enabled.store(true, Ordering::Relaxed);
+                Ok(())
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!enabled.load(Ordering::Relaxed));
+        assert_eq!(state.lock().unwrap().active_operations, 1);
+        drop(guard);
+        assert!(enabled.load(Ordering::Relaxed));
+        let state = state.lock().unwrap();
+        assert_eq!(state.active_operations, 0);
+        assert!(!state.absent);
+        assert!(!state.restore_pending);
+    }
+
+    #[test]
+    fn enhanced_ui_write_errors_use_readback_to_verify_actual_state() {
+        for requested in [false, true] {
+            assert!(
+                verify_enhanced_ui_write(
+                    requested,
+                    Err(Error::Generic("setter returned -25208".into())),
+                    || Ok(requested),
+                )
+                .is_ok()
+            );
+            assert!(
+                verify_enhanced_ui_write(
+                    requested,
+                    Err(Error::Generic("write rejected".into())),
+                    || Ok(!requested),
+                )
+                .is_err()
+            );
+            assert!(
+                verify_enhanced_ui_write(
+                    requested,
+                    Err(Error::Generic("write failed".into())),
+                    || Err(Error::Generic("read also failed".into())),
+                )
+                .is_err()
+            );
+            assert!(
+                verify_enhanced_ui_write(requested, Ok(()), || {
+                    panic!("successful writes must not incur a readback round-trip")
+                })
+                .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn enhanced_ui_failed_restore_is_retried_without_caching_our_false() {
+        let state = Arc::new(Mutex::new(EnhancedUiState::default()));
+        let enabled = AtomicBool::new(true);
+        let first = acquire_enhanced_ui(
+            state.clone(),
+            1,
+            || Ok(true),
+            || {
+                enabled.store(false, Ordering::Relaxed);
+                Ok(())
+            },
+            || Err(Error::Generic("transient AX restore failure".into())),
+        )
+        .unwrap()
+        .unwrap();
+        drop(first);
+        {
+            let state = state.lock().unwrap();
+            assert_eq!(state.active_operations, 0);
+            assert!(state.restore_pending);
+            assert!(!state.absent);
+        }
+        let retry = acquire_enhanced_ui(
+            state.clone(),
+            1,
+            || panic!("our own unrestored false must not be read or cached"),
+            || Ok(()),
+            || {
+                enabled.store(true, Ordering::Relaxed);
+                Ok(())
+            },
+        )
+        .unwrap()
+        .unwrap();
+        drop(retry);
+        assert!(enabled.load(Ordering::Relaxed));
+        let state = state.lock().unwrap();
+        assert!(!state.absent);
+        assert!(!state.restore_pending);
+        assert_eq!(state.active_operations, 0);
+    }
 
     #[test]
     fn stages_partially_applied_width_growth() {

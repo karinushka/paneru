@@ -32,6 +32,7 @@ use crate::ecs::{
 use crate::events::{DestroySource, Event};
 use crate::manager::{
     Application, Display, Origin, Process, Size, Window, WindowManager, WindowPadding,
+    forget_enhanced_ui_state,
 };
 use crate::platform::WinID;
 use crate::util::{round_px, symlink_target};
@@ -510,10 +511,11 @@ pub(super) fn application_event_trigger(
             }
 
             Event::ApplicationTerminated { psn } => {
-                if let Some((_, entity)) = find_process(*psn)
-                    && let Ok(mut entity_commands) = commands.get_entity(entity)
-                {
-                    entity_commands.try_despawn();
+                if let Some((BProcess(process), entity)) = find_process(*psn) {
+                    forget_enhanced_ui_state(process.pid());
+                    if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                        entity_commands.try_despawn();
+                    }
                 }
             }
             _ => (),

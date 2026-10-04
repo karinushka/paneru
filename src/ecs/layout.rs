@@ -888,7 +888,7 @@ impl LayoutStrip {
                 let column_width = items
                     .first()
                     .and_then(StackItem::top)
-                    .and_then(&get_window_frame)
+                    .and_then(get_window_frame)
                     .map(|frame| frame.width())?;
 
                 let mut next_y = 0;

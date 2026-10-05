@@ -2,11 +2,12 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use bevy::app::{App, Plugin, PostUpdate, Update};
+use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::lifecycle::{Add, Remove};
 use bevy::ecs::observer::On;
-use bevy::ecs::query::{Added, Has, With};
+use bevy::ecs::query::{Added, Has, With, Without};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::system::{Commands, Populated, Query, Res, Single};
@@ -21,8 +22,8 @@ use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, GlobalState, WindowCtx, Windows};
 use crate::ecs::workspace::RestoreFocusMarker;
 use crate::ecs::{
-    ActiveWorkspaceMarker, Bounds, Position, RaiseWindow, RepositionMarker, ResizeMarker,
-    Scrolling, SendMessageTrigger, SpawnCommandsExt, StrayFocusEvent,
+    ActiveWorkspaceMarker, Bounds, Position, RaiseWindow, RepositionMarker, ReshuffleAroundMarker,
+    ResizeMarker, Scrolling, SendMessageTrigger, SpawnCommandsExt, StrayFocusEvent,
 };
 use crate::events::Event;
 use crate::manager::{Application, Display, Window, WindowManager};
@@ -118,6 +119,7 @@ impl Plugin for FocusEventsPlugin {
             PostUpdate,
             (
                 autocenter_window_on_focus.after(super::systems::animate_resize_entities),
+                clear_pending_focus_layout.after(autocenter_window_on_focus),
                 // Bevy must apply the deferred centering commands before
                 // the pointer reads the window's destination.
                 mouse_follows_focus.after(autocenter_window_on_focus),
@@ -143,6 +145,19 @@ pub(super) struct FocusWindow {
     pub raise: bool,
 }
 
+/// Protects command focus until its pending layout has queued movement targets.
+#[derive(Component)]
+pub(super) struct PendingFocusLayout;
+
+fn clear_pending_focus_layout(
+    pending: Populated<Entity, (With<PendingFocusLayout>, Without<ReshuffleAroundMarker>)>,
+    mut commands: Commands,
+) {
+    for entity in pending {
+        commands.entity(entity).try_remove::<PendingFocusLayout>();
+    }
+}
+
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn maintain_focus_singleton(
     trigger: On<Add, FocusedMarker>,
@@ -166,6 +181,9 @@ fn maintain_focus_singleton(
     // Skip reshuffle if caused by mouse - because then it won't center.
     if config.ffm_flag().is_none() {
         config.set_skip_reshuffle(false);
+        commands
+            .entity(focused_entity)
+            .try_insert(PendingFocusLayout);
     }
     config.set_ffm_flag(None);
 }

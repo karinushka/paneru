@@ -90,7 +90,7 @@ pub fn install(lua: &Lua, paneru: &Table, dispatch: &Dispatch) -> Result<()> {
     paneru.set("restart", verb(lua, dispatch, Command::Restart)?)?;
     paneru.set("print_state", verb(lua, dispatch, Command::PrintState)?)?;
 
-    // paneru.match{ app = …, bundle = …, title = …, floating = …, managed = … }
+    // paneru.match{ app = …, bundle = …, title = …, role = …, subrole = …, floating = …, managed = … }
     // builds a predicate over window records, for `ws:find`/`ws:filter`.
     // `app`, `bundle` and `title` are regexes, compiled here so a bad pattern
     // errors at the call site rather than silently matching nothing.
@@ -114,6 +114,8 @@ pub fn matcher(lua: &Lua, spec: Table) -> Result<Function> {
             .map_err(|err| mlua::Error::RuntimeError(format!("paneru.match: {field}: {err}")))
     };
     let (app, bundle, title) = (pattern("app")?, pattern("bundle")?, pattern("title")?);
+    let role: Option<String> = spec.get("role")?;
+    let subrole: Option<String> = spec.get("subrole")?;
     let floating: Option<bool> = spec.get("floating")?;
     let managed: Option<bool> = spec.get("managed")?;
 
@@ -121,7 +123,7 @@ pub fn matcher(lua: &Lua, spec: Table) -> Result<Function> {
         let (key, _) = entry?;
         if !matches!(
             key.as_str(),
-            "app" | "bundle" | "title" | "floating" | "managed"
+            "app" | "bundle" | "title" | "role" | "subrole" | "floating" | "managed"
         ) {
             return Err(mlua::Error::RuntimeError(format!(
                 "paneru.match: unknown field '{key}'"
@@ -141,6 +143,12 @@ pub fn matcher(lua: &Lua, spec: Table) -> Result<Function> {
             }
             Ok(false)
         };
+        let exact = |want: &Option<String>, field: &str| -> bool {
+            let Some(want) = want else {
+                return true;
+            };
+            window.get::<String>(field).is_ok_and(|val| val == *want)
+        };
         let flag = |want: Option<bool>, field: &str| -> Result<bool> {
             match want {
                 Some(want) => Ok(window.get::<bool>(field)? == want),
@@ -150,6 +158,8 @@ pub fn matcher(lua: &Lua, spec: Table) -> Result<Function> {
         Ok(matches(&app, &["app_name", "app"])?
             && matches(&bundle, &["bundle_id", "bundle"])?
             && matches(&title, &["title"])?
+            && exact(&role, "role")
+            && exact(&subrole, "subrole")
             && flag(floating, "floating")?
             && flag(managed, "managed")?)
     })

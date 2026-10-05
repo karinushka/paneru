@@ -1,8 +1,8 @@
 use accessibility_sys::{
     AXUIElementCreateApplication, AXUIElementRef, AXValueCreate, AXValueGetValue,
     kAXFloatingWindowSubrole, kAXPositionAttribute, kAXRaiseAction, kAXSizeAttribute,
-    kAXStandardWindowSubrole, kAXUnknownSubrole, kAXValueTypeCGPoint, kAXValueTypeCGSize,
-    kAXWindowRole,
+    kAXStandardWindowSubrole, kAXUnknownRole, kAXUnknownSubrole, kAXValueTypeCGPoint,
+    kAXValueTypeCGSize, kAXWindowRole,
 };
 use bevy::ecs::component::Component;
 use bevy::math::IRect;
@@ -582,7 +582,9 @@ impl WindowApi for WindowOS {
             return Ok(role.clone());
         }
         let role = self.ax_element.role()?;
-        let _ = self.role.set(role.clone());
+        if role != kAXUnknownRole {
+            let _ = self.role.set(role.clone());
+        }
         Ok(role)
     }
 

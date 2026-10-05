@@ -223,6 +223,8 @@ mod tests {
             app_name: "Test App".to_string(),
             bundle_id: "com.example.test".to_string(),
             title: format!("Window {id}"),
+            role: Some("AXWindow".to_string()),
+            subrole: Some("AXStandardWindow".to_string()),
             frame: Some(Frame {
                 x: 0,
                 y: 0,

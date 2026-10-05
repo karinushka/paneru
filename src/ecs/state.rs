@@ -596,6 +596,8 @@ impl QueryStateParams<'_, '_> {
             app_name: app.name().to_string(),
             bundle_id: app.bundle_id().unwrap_or_default().clone(),
             title: window.title().unwrap_or_default(),
+            role: window.role().ok(),
+            subrole: window.subrole().ok(),
             frame: frame.map(|frame| Frame {
                 x: frame.min.x,
                 y: frame.min.y,

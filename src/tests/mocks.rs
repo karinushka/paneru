@@ -534,7 +534,9 @@ impl MockState {
                 .get(&id)
                 .map(|w| w.role.clone())
                 .ok_or_else(|| crate::errors::Error::Generic(format!("window {id} not found")))?;
-            let _ = cached_role.set(role.clone());
+            if role != accessibility_sys::kAXUnknownRole {
+                let _ = cached_role.set(role.clone());
+            }
             Ok(role)
         });
 
@@ -545,14 +547,25 @@ impl MockState {
         let s = self.clone();
         // An empty subrole models a window without an `AXSubrole` attribute,
         // which AX reports as an error rather than an empty string.
+        let cached_subrole = Arc::new(OnceLock::<String>::new());
         mw.expect_subrole().returning(move || {
-            s.inner
+            if let Some(subrole) = cached_subrole.get() {
+                return Ok(subrole.clone());
+            }
+            let subrole = s
+                .inner
                 .force_read()
                 .windows
                 .get(&id)
                 .map(|w| w.subrole.clone())
                 .filter(|subrole| !subrole.is_empty())
-                .ok_or_else(|| crate::errors::Error::Generic(format!("window {id} has no subrole")))
+                .ok_or_else(|| {
+                    crate::errors::Error::Generic(format!("window {id} has no subrole"))
+                })?;
+            if subrole != accessibility_sys::kAXUnknownSubrole {
+                let _ = cached_subrole.set(subrole.clone());
+            }
+            Ok(subrole)
         });
 
         let s = self.clone();

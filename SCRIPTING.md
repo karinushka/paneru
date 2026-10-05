@@ -269,9 +269,9 @@ A handler that raises partway through changes nothing either, because it never r
 | `ws:east(id)` / `ws:west(id)` | The window one column over |
 | `ws:next(id)` / `ws:prev(id)` | The next/previous window, wrapping |
 
-A window record contains `id`, `app_name`, `bundle_id`, `title`, `frame`, `floating`, `managed`, `visible` and `focused`.
+A window record contains `id`, `app_name`, `bundle_id`, `title`, `role`, `subrole`, `frame`, `floating`, `managed`, `visible` and `focused`.
 
-`paneru.match{ app = …, bundle = …, title = …, floating = …, managed = … }` builds a compiled predicate; `app`, `bundle` and `title` are regular expressions.
+`paneru.match{ app = …, bundle = …, title = …, role = …, subrole = …, floating = …, managed = … }` builds a compiled predicate; `app`, `bundle` and `title` are regular expressions, while `role` and `subrole` match exact strings.
 
 ### Transforming Layout State
 

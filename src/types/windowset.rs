@@ -149,6 +149,11 @@ pub struct WindowRec {
     pub app_name: String,
     pub bundle_id: String,
     pub title: String,
+    /// Accessibility role (e.g. `AXWindow`), when the window reports one.
+    pub role: Option<String>,
+    /// Accessibility subrole (e.g. `AXStandardWindow`, `AXDialog`), when the
+    /// window reports one.
+    pub subrole: Option<String>,
     /// Where it is now, in global display coordinates, when known.
     pub frame: Option<Frame>,
     /// Outside the tiling layout, positioned by hand.
@@ -771,6 +776,8 @@ mod tests {
             app_name: name.to_string(),
             bundle_id: format!("com.example.{name}"),
             title: format!("{name} window"),
+            role: Some("AXWindow".to_string()),
+            subrole: Some("AXStandardWindow".to_string()),
             frame: None,
             floating: false,
             managed: true,

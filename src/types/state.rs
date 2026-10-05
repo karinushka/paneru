@@ -117,6 +117,11 @@ pub struct WindowState {
     pub bundle_id: String,
     pub app_name: String,
     pub title: String,
+    /// Accessibility role (e.g. `AXWindow`), when the window reports one.
+    pub role: Option<String>,
+    /// Accessibility subrole (e.g. `AXStandardWindow`, `AXDialog`), when the
+    /// window reports one.
+    pub subrole: Option<String>,
     pub focused: bool,
     pub floating: bool,
     /// Display the window is (mostly) on, when it overlaps one at all.
@@ -280,6 +285,8 @@ mod tests {
                 bundle_id: "com.example.app".into(),
                 app_name: "Example".into(),
                 title: "window".into(),
+                role: Some("AXWindow".into()),
+                subrole: Some("AXStandardWindow".into()),
                 focused: true,
                 floating: false,
                 display_id: Some(1),
@@ -306,6 +313,48 @@ mod tests {
         );
     }
 
+    /// A daemon from before `role`/`subrole` existed omits them; a newer client
+    /// must still decode its windows, over both JSON and `MessagePack`.
+    #[test]
+    fn window_state_without_role_fields_decodes_as_none() {
+        #[derive(Serialize)]
+        struct OldWindowState {
+            window_id: i32,
+            bundle_id: String,
+            app_name: String,
+            title: String,
+            focused: bool,
+            floating: bool,
+            display_id: Option<u32>,
+            frame: Option<Frame>,
+            visible: bool,
+        }
+        let old = OldWindowState {
+            window_id: 1,
+            bundle_id: "com.example.app".into(),
+            app_name: "Example".into(),
+            title: "window".into(),
+            focused: true,
+            floating: false,
+            display_id: Some(1),
+            frame: None,
+            visible: true,
+        };
+
+        let from_json: WindowState =
+            serde_json::from_str(&serde_json::to_string(&old).unwrap()).unwrap();
+        let from_msgpack: WindowState = MessagePack
+            .decode(&MessagePack.encode(&old).unwrap())
+            .unwrap();
+
+        for window in [from_json, from_msgpack] {
+            assert_eq!(window.window_id, 1);
+            assert_eq!(window.title, "window");
+            assert_eq!(window.role, None);
+            assert_eq!(window.subrole, None);
+        }
+    }
+
     #[test]
     fn on_screen_is_the_visible_subset_ordered_left_to_right() {
         let window = |window_id, x, visible| WindowState {
@@ -313,6 +362,8 @@ mod tests {
             bundle_id: String::new(),
             app_name: String::new(),
             title: String::new(),
+            role: None,
+            subrole: None,
             focused: false,
             floating: false,
             display_id: Some(1),

@@ -586,6 +586,49 @@ fn test_query_state_contract_exposes_active_virtual_workspace_and_windows() {
 }
 
 #[test]
+fn test_query_state_exposes_window_role_and_subrole() {
+    use crate::tests::harness::TestHarness;
+
+    let mut harness = TestHarness::new()
+        .with_windows(1)
+        .with_window(1, |window| window.subrole = "AXDialog".to_string())
+        // An empty mock subrole models a window without an `AXSubrole` attribute.
+        .with_window(2, |window| window.subrole = String::new());
+
+    harness.app.update();
+
+    let state = extract_query_state(harness.world()).expect("query state extraction");
+    let windows = &state.virtual_workspaces[0].windows;
+    let window = |id| {
+        windows
+            .iter()
+            .find(|window| window.window_id == id)
+            .unwrap_or_else(|| panic!("window {id} missing from query state"))
+    };
+
+    assert_eq!(window(0).role.as_deref(), Some("AXWindow"));
+    assert_eq!(window(0).subrole.as_deref(), Some("AXStandardWindow"));
+    assert_eq!(window(1).role.as_deref(), Some("AXWindow"));
+    assert_eq!(window(1).subrole.as_deref(), Some("AXDialog"));
+    assert_eq!(window(2).role.as_deref(), Some("AXWindow"));
+    assert_eq!(window(2).subrole, None);
+
+    let json = serde_json::to_value(&state).expect("query state should serialize");
+    let json_window = |id: i32| {
+        json["virtual_workspaces"][0]["windows"]
+            .as_array()
+            .expect("windows array")
+            .iter()
+            .find(|window| window["window_id"] == id)
+            .unwrap_or_else(|| panic!("window {id} missing from JSON"))
+            .clone()
+    };
+    assert_eq!(json_window(1)["role"], "AXWindow");
+    assert_eq!(json_window(1)["subrole"], "AXDialog");
+    assert!(json_window(2)["subrole"].is_null());
+}
+
+#[test]
 fn test_query_state_includes_floating_windows() {
     use crate::commands::{Command, Operation};
     use crate::tests::harness::TestHarness;

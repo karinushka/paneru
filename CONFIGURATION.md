@@ -288,12 +288,15 @@ structured `paneru query` responses and `paneru subscribe` event stream.
 
 ## 6. Window Rules (`[windows]`)
 
-Define specific behaviors for applications based on their Title or Bundle ID.
+Define specific behaviors for applications based on their Title, Bundle ID, or
+accessibility role/subrole.
 
 | Option | Type | Description |
 | :--- | :--- | :--- |
 | `title` | Regex | **(Required)** Regex pattern to match the window title. |
 | `bundle_id` | String | Optional Bundle ID to match (e.g., `com.apple.Terminal`). |
+| `role` | String | Optional accessibility role to match exactly (e.g., `AXWindow`). A rule with `role` never matches a window that reports none. |
+| `subrole` | String | Optional accessibility subrole to match exactly (e.g., `AXStandardWindow`, `AXDialog`, `AXFloatingWindow`). A rule with `subrole` never matches a window that reports none. |
 | `floating` | Boolean | Force the window to be floating/unmanaged. |
 | `manage` | Boolean | Force Paneru to manage this app/window even if macOS reports the app as unobservable or the window has a non-standard role/subrole. |
 | `index` | Integer | Preferred position in the strip when spawned. |
@@ -318,6 +321,29 @@ horizontal_padding = 5
 bindings_passthrough = ["ctrl-h", "ctrl-l"]
 ```
 
+Windows whose subrole isn't `AXStandardWindow` or `AXFloatingWindow` (e.g.
+`AXDialog`) are ignored by Paneru unless a rule with `manage = true` matches
+them, so a `role`/`subrole` rule for such windows only takes effect for apps that
+are also force-managed.
+
+**Example:**
+```toml
+[windows.xcode]
+title = ".*"
+bundle_id = "com.apple.dt.Xcode"
+manage = true
+
+[windows.dialogs]
+title = ".*"
+subrole = "AXDialog"
+floating = true
+
+[windows.floating_window]
+title = ".*"
+subrole = "AXFloatingWindow"
+floating = true
+```
+
 ### Copying a window rule
 
 Neither the bundle ID nor the exact window title is visible anywhere in the UI,
@@ -331,6 +357,8 @@ window on the clipboard, ready to paste:
 bundle_id = "com.mitchellh.ghostty"
 title = "^paneru — zsh$"
 # title = ".*"   # all windows of this app
+# role = "AXWindow"
+# subrole = "AXStandardWindow"
 # app: Ghostty  role: AXWindow  subrole: AXStandardWindow
 # floating = true
 # manage = true
@@ -340,9 +368,11 @@ title = "^paneru — zsh$"
 The two matchers are live; everything else is a comment for you to uncomment.
 `title` is anchored and regex-escaped so it matches only this window — swap in
 the commented `.*` to cover every window of the app instead. The `app`, `role`
-and `subrole` line is there to tell one pasted rule from the next; none of those
-are matchable. When an `init.lua` is in charge, the snippet is written as a Lua
-table instead of TOML.
+and `subrole` line is there to tell one pasted rule from the next. `role` and
+`subrole` are also offered as commented-out matchers above it (omitted when the
+window doesn't report one); uncomment them to target, say, only an app's
+dialogs (with `manage = true`, see above). When an `init.lua` is in charge, the
+snippet is written as a Lua table instead of TOML.
 
 ### Forcing management of LSUIElement or non-standard windows
 

@@ -354,6 +354,10 @@ changes, title changes, and display changes. See
 [`QUERY_AND_SUBSCRIBE_FORMAT.md`](./QUERY_AND_SUBSCRIBE_FORMAT.md) for the
 full payload contract.
 
+Each window entry includes its accessibility `role` and `subrole` (e.g.
+`AXStandardWindow`, `AXDialog`), which
+[window rules](./CONFIGURATION.md#6-window-rules-windows) can also match on.
+
 #### Scripting ideas
 
 Because `send-cmd` talks to the running daemon, you can drive Paneru from shell

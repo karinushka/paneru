@@ -796,7 +796,7 @@ pub(super) fn window_managed_trigger(
     if ctx
         .windows
         .get(entity)
-        .is_some_and(|window| window.role().is_err())
+        .is_some_and(|window| !window.is_alive())
     {
         // The marker was removed because the windows was destroyed.
         return;
@@ -934,11 +934,11 @@ pub(super) fn window_destroyed_trigger(
         // space, so it needs confirming. A `kAXUIElementDestroyedNotification` means the AX element
         // itself has been torn down and is taken at face value: confirming it against the app is
         // not just unnecessary but actively wrong, because both signals below lag the teardown.
-        // `role()` keeps succeeding on the dead element for apps that outlive their windows, and
+        // `is_alive()` keeps succeeding on the dead element for apps that outlive their windows, and
         // the app's AX window list is still warm for a moment after the close. Re-checking them
         // raced the window back to life, leaving the entity in the strip and a permanent gap where
         // the window had been.
-        if matches!(source, DestroySource::SpaceNotification) && window.role().is_ok() {
+        if matches!(source, DestroySource::SpaceNotification) && window.is_alive() {
             debug!(
                 "Window {} still present, this was SLS workspace change.",
                 window.id()
@@ -1117,6 +1117,8 @@ pub(super) fn spawn_window_trigger(
         let layout_position = LayoutPosition::default();
 
         let title = window.title().unwrap_or_default();
+        let role = window.role().ok();
+        let subrole = window.subrole().ok();
         let app_name = app.name().to_string();
         let bundle_id = app.bundle_id().unwrap_or_default().clone();
         let window_frame = crate::types::state::Frame {
@@ -1143,6 +1145,8 @@ pub(super) fn spawn_window_trigger(
             app_name,
             bundle_id,
             title,
+            role,
+            subrole,
             frame: window_frame,
             floating: false,
             managed: true,

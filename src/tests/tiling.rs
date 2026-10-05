@@ -6,7 +6,7 @@ use crate::config::{
 };
 use crate::ecs::SpawnWindowTrigger;
 use crate::ecs::layout::LayoutStrip;
-use crate::events::Event;
+use crate::events::{DestroySource, Event};
 use crate::{assert_window_at, assert_window_size};
 use bevy::math::IRect;
 use bevy::prelude::*;
@@ -689,6 +689,70 @@ fn test_closing_window_of_live_app_closes_the_gap() {
         .run(commands);
 }
 
+/// A space notification for a window whose AX element is gone is a real close,
+/// not a space change. It must be recognised on its own, without waiting for
+/// the periodic unordered-window sweep, even though `role()` is cached.
+#[test]
+fn test_space_notification_for_dead_window_removes_it() {
+    let mut harness = TestHarness::new().with_windows(3);
+    harness.advance(Duration::from_millis(100));
+
+    harness.mock_state.os_vanish_window(1);
+    harness
+        .app
+        .world_mut()
+        .write_message::<Event>(Event::WindowDestroyed {
+            window_id: 1,
+            source: DestroySource::SpaceNotification,
+        });
+    // Well short of the 1-second CLOSED_WINDOW_CHECK_FREQ sweep, so only the
+    // destroy event can remove the window.
+    harness.advance(Duration::from_millis(60));
+
+    assert!(
+        !window_exists(harness.app.world_mut(), 1),
+        "a space notification for a dead window must remove it"
+    );
+}
+
+/// Closing a floating window despawns it, which removes its `Unmanaged` marker.
+/// That removal must not put the dying window back into the layout strip.
+#[test]
+fn test_closing_floating_window_does_not_reinsert_it_into_the_strip() {
+    let commands = vec![
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    let mut params = WindowParams::new("^Window 1$", None);
+    params.floating = Some(true);
+    let config: Config = (MainOptions::default(), vec![params]).into();
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(3)
+        .on_iteration(0, |_world, state| state.os_close_window(1))
+        .on_iteration(1, |world, _state| {
+            assert!(!window_exists(world, 1), "closed window must be despawned");
+            let mut strips = world.query::<&LayoutStrip>();
+            let entities = strips
+                .iter(world)
+                .flat_map(LayoutStrip::all_windows)
+                .collect::<Vec<_>>();
+            for entity in entities {
+                assert!(
+                    world.get::<crate::manager::Window>(entity).is_some(),
+                    "strip holds {entity}, which is no longer a window"
+                );
+            }
+        })
+        .run(commands);
+}
+
 fn window_x(world: &mut World, id: i32) -> i32 {
     let mut query = world.query::<&crate::manager::Window>();
     query
@@ -703,4 +767,45 @@ fn window_x(world: &mut World, id: i32) -> i32 {
 fn window_exists(world: &mut World, id: i32) -> bool {
     let mut query = world.query::<&crate::manager::Window>();
     query.iter(world).any(|window| window.id() == id)
+}
+
+/// A `subrole` window rule applies its effects only to windows reporting that
+/// subrole: an app's dialog floats while its standard window stays tiled.
+#[test]
+fn test_subrole_window_rule_floats_only_matching_windows() {
+    let config = Config::try_from(
+        r#"
+[options]
+
+[bindings]
+
+[windows.dialogs]
+title = ".*"
+subrole = "AXDialog"
+floating = true
+"#,
+    )
+    .expect("config should parse");
+
+    let commands = vec![Event::Command {
+        command: Command::PrintState,
+    }];
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(1)
+        .with_window(1, |window| window.subrole = "AXDialog".to_string())
+        // Iterations are 0-indexed: this is the only command's iteration.
+        .on_iteration(0, |world, _state| {
+            let is_floating = |world: &mut World, id| {
+                let entity = find_window_entity(id, world);
+                matches!(
+                    world.entity(entity).get::<crate::ecs::Unmanaged>(),
+                    Some(crate::ecs::Unmanaged::Floating)
+                )
+            };
+            assert!(!is_floating(world, 0), "standard window must stay tiled");
+            assert!(is_floating(world, 1), "dialog must float");
+        })
+        .run(commands);
 }

@@ -1,8 +1,8 @@
 use accessibility_sys::{
     AXUIElementCreateApplication, AXUIElementRef, AXValueCreate, AXValueGetValue,
-    kAXFloatingWindowSubrole, kAXPositionAttribute, kAXRaiseAction, kAXSizeAttribute,
-    kAXStandardWindowSubrole, kAXUnknownRole, kAXUnknownSubrole, kAXValueTypeCGPoint,
-    kAXValueTypeCGSize, kAXWindowRole,
+    kAXErrorAttributeUnsupported, kAXErrorNoValue, kAXErrorSuccess, kAXFloatingWindowSubrole,
+    kAXPositionAttribute, kAXRaiseAction, kAXSizeAttribute, kAXStandardWindowSubrole,
+    kAXUnknownRole, kAXUnknownSubrole, kAXValueTypeCGPoint, kAXValueTypeCGSize, kAXWindowRole,
 };
 use bevy::ecs::component::Component;
 use bevy::math::IRect;
@@ -31,7 +31,7 @@ use super::skylight::{
 use crate::config::Config;
 use crate::errors::{Error, Result};
 use crate::manager::{Origin, Size, irect_from};
-use crate::platform::{Pid, ProcessSerialNumber, WinID, macos_major_version};
+use crate::platform::{OSStatus, Pid, ProcessSerialNumber, WinID, macos_major_version};
 use crate::util::{AXUIAttributes, AXUIWrapper, MacResult};
 
 /// The registry lock only looks up per-app locks; AX calls never hold it.
@@ -164,10 +164,30 @@ fn acquire_enhanced_ui<F: FnOnce() -> Result<()>>(
     }))
 }
 
+fn decode_enhanced_ui_read(ax_error: OSStatus, value: Option<bool>) -> Result<bool> {
+    if ax_error == kAXErrorSuccess {
+        value.ok_or_else(|| {
+            Error::InvalidInput("nullptr while getting attribute AXEnhancedUserInterface.".into())
+        })
+    } else if ax_error == kAXErrorAttributeUnsupported || ax_error == kAXErrorNoValue {
+        Ok(false)
+    } else {
+        ax_error
+            .to_result("read AXEnhancedUserInterface")
+            .map(|()| false)
+    }
+}
+
 fn read_enhanced_ui(app_element: &CFRetained<AXUIWrapper>) -> Result<bool> {
-    app_element
-        .get_attribute::<CFBoolean>(&CFString::from_static_str("AXEnhancedUserInterface"))
-        .map(|value| CFBoolean::value(&value))
+    let name = CFString::from_static_str("AXEnhancedUserInterface");
+    let mut attribute: *mut CFType = null_mut();
+    let ax_error =
+        unsafe { AXUIElementCopyAttributeValue(app_element.as_ptr(), &name, &mut attribute) };
+    let value = NonNull::new(attribute).map(|ptr| {
+        let boolean: CFRetained<CFBoolean> = unsafe { CFRetained::from_raw(ptr.cast()) };
+        CFBoolean::value(&boolean)
+    });
+    decode_enhanced_ui_read(ax_error, value)
 }
 
 fn verify_enhanced_ui_write(
@@ -1315,6 +1335,28 @@ mod tests {
         let state = state.lock().unwrap();
         assert!(state.absent);
         assert_eq!(state.active_operations, 0);
+    }
+
+    #[test]
+    fn enhanced_ui_unsupported_and_no_value_reads_are_cached_as_absent() {
+        assert!(!decode_enhanced_ui_read(kAXErrorSuccess, Some(false)).unwrap());
+        assert!(decode_enhanced_ui_read(kAXErrorSuccess, Some(true)).unwrap());
+        assert!(decode_enhanced_ui_read(kAXErrorSuccess, None).is_err());
+        assert!(decode_enhanced_ui_read(accessibility_sys::kAXErrorCannotComplete, None).is_err());
+
+        for code in [kAXErrorAttributeUnsupported, kAXErrorNoValue] {
+            let state = Arc::new(Mutex::new(EnhancedUiState::default()));
+            let guard = acquire_enhanced_ui(
+                state.clone(),
+                1,
+                || decode_enhanced_ui_read(code, None),
+                || panic!("unsupported attribute must not be disabled"),
+                || panic!("unsupported attribute must not be restored"),
+            )
+            .unwrap();
+            assert!(guard.is_none());
+            assert!(state.lock().unwrap().absent);
+        }
     }
 
     #[test]

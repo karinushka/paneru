@@ -10,11 +10,12 @@ use tracing::{debug, trace, warn};
 
 use super::{MouseHeldMarker, Timeout};
 use crate::config::Config;
+use crate::ecs::focus::PendingFocusLayout;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{GlobalState, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, DockPosition, MissionControlActive, Position, Scrolling,
-    SpawnCommandsExt,
+    ActiveWorkspaceMarker, DockPosition, MissionControlActive, Position, RepositionMarker,
+    Scrolling, SpawnCommandsExt,
 };
 use bevy::ecs::schedule::common_conditions::on_message;
 
@@ -93,6 +94,9 @@ fn mouse_moved_trigger(
     mut global_state: GlobalState,
     mut commands: Commands,
     mut last_find_query: Local<Option<Duration>>,
+    pending_focus_layout: Query<(), With<PendingFocusLayout>>,
+    moving: Query<Entity, With<RepositionMarker>>,
+    active_workspaces: Query<(Entity, &LayoutStrip), With<ActiveWorkspaceMarker>>,
 ) {
     const FIND_WINDOW_THROTTLE: Duration = Duration::from_millis(50);
 
@@ -127,6 +131,22 @@ fn mouse_moved_trigger(
         }
         if global_state.ffm_flag().is_some() {
             trace!("ffm_window_id > 0");
+            continue;
+        }
+
+        // Command focus is applied before auto-centering starts in PostUpdate.
+        // Until the strip and its windows settle, hit-testing sees intermediate
+        // geometry and can undo that focus by selecting the previous window.
+        // Mouse-driven focus keeps skip_reshuffle set and remains unaffected.
+        if !global_state.skip_reshuffle()
+            && (!pending_focus_layout.is_empty()
+                || active_workspaces.iter().any(|(entity, strip)| {
+                    moving
+                        .iter()
+                        .any(|moving| moving == entity || strip.contains(moving))
+                }))
+        {
+            trace!("mouse focus suppressed during command-driven slide");
             continue;
         }
         let pointer = origin_from(*point);

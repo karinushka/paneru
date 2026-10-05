@@ -3,8 +3,155 @@ use crate::commands::{Command, Direction, MoveFocus, Operation};
 use crate::config::{Config, MainOptions};
 use crate::events::Event;
 use crate::manager::{Origin, Window};
+use crate::platform::Modifiers;
+use objc2_core_foundation::CGPoint;
+use std::time::Duration;
 
 use super::*;
+
+#[test]
+fn mouse_focus_resumes_after_slide_without_intermediate_mouse_events() {
+    let config: Config = (
+        MainOptions {
+            auto_center: Some(true),
+            focus_follows_mouse: Some(true),
+            animation_speed: Some(30.0),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+    let commands = vec![
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::First)),
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(2)
+        .on_iteration(2, |world, _state| {
+            assert_focused!(world, 0);
+            let previous = find_window_entity(1, world);
+            let center = world.get::<Window>(previous).unwrap().frame().center();
+            world.write_message(Event::MouseMoved {
+                point: CGPoint {
+                    x: f64::from(center.x),
+                    y: f64::from(center.y),
+                },
+                modifiers: Modifiers::empty(),
+            });
+        })
+        .on_iteration(3, |world, _state| assert_focused!(world, 1))
+        .run(commands);
+}
+
+#[test]
+fn keyboard_focus_survives_mouse_movement_during_slide() {
+    for (direction, start, target) in [
+        (Direction::East, Direction::First, 2),
+        (Direction::West, Direction::Last, 0),
+    ] {
+        for (same_frame, mouse_follows_focus, auto_center) in [
+            (false, false, false),
+            (false, true, false),
+            (true, false, false),
+            (true, true, false),
+            (false, false, true),
+            (false, true, true),
+            (true, false, true),
+            (true, true, true),
+        ] {
+            let previous = 1;
+            let config: Config = (
+                MainOptions {
+                    auto_center: Some(auto_center),
+                    mouse_follows_focus: Some(mouse_follows_focus),
+                    focus_follows_mouse: Some(true),
+                    animation_speed: Some(12.0),
+                    ..Default::default()
+                },
+                vec![],
+            )
+                .into();
+            let mut harness = TestHarness::new().with_config(config).with_windows(4);
+            harness.run(vec![
+                Event::Command {
+                    command: Command::PrintState,
+                },
+                Event::Command {
+                    command: Command::Window(Operation::Focus(start.clone())),
+                },
+                Event::Command {
+                    command: Command::Window(Operation::Focus(Direction::Nth(1))),
+                },
+            ]);
+            harness.advance(Duration::from_secs(1));
+            assert_focused!(harness.world(), previous);
+
+            harness.world().write_message(Event::Command {
+                command: Command::Window(Operation::Focus(direction.clone())),
+            });
+            if !same_frame {
+                harness.advance(Duration::from_millis(20));
+                assert_focused!(harness.world(), target);
+                assert!(
+                    harness
+                        .world()
+                        .query::<&crate::ecs::RepositionMarker>()
+                        .iter(harness.world())
+                        .next()
+                        .is_some(),
+                    "the mouse event must arrive during the slide"
+                );
+            }
+
+            let previous_entity = find_window_entity(previous, harness.world());
+            let center = harness
+                .world()
+                .get::<Window>(previous_entity)
+                .unwrap()
+                .frame()
+                .center();
+            harness.world().write_message(Event::MouseMoved {
+                point: CGPoint {
+                    x: f64::from(center.x),
+                    y: f64::from(center.y),
+                },
+                modifiers: Modifiers::empty(),
+            });
+            harness.advance(Duration::from_millis(20));
+            assert_focused!(harness.world(), target);
+            harness.advance(Duration::from_secs(2));
+            assert_focused!(harness.world(), target);
+
+            // Mouse focus must resume once the keyboard-driven slide finishes.
+            let center = harness
+                .world()
+                .get::<Window>(previous_entity)
+                .unwrap()
+                .frame()
+                .center();
+            harness.world().write_message(Event::MouseMoved {
+                point: CGPoint {
+                    x: f64::from(center.x),
+                    y: f64::from(center.y),
+                },
+                modifiers: Modifiers::empty(),
+            });
+            harness.advance(Duration::from_millis(100));
+            assert_focused!(harness.world(), previous);
+        }
+    }
+}
 
 #[test]
 fn keyboard_focus_warps_mouse_to_centered_window() {

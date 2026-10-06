@@ -75,8 +75,20 @@ pub fn size_from(size: CGSize) -> Size {
 }
 
 pub fn irect_from(rect: CGRect) -> IRect {
-    let mid = rect.mid();
-    IRect::from_center_size(origin_from(mid), size_from(rect.size))
+    let origin = origin_from(rect.origin);
+    IRect::from_corners(origin, origin + size_from(rect.size))
+}
+
+#[cfg(test)]
+mod geometry_tests {
+    use super::*;
+
+    #[test]
+    fn odd_sized_ax_frame_keeps_its_origin_and_size() {
+        let frame = CGRect::new(CGPoint::new(0.0, 20.0), CGSize::new(399.0, 701.0));
+
+        assert_eq!(irect_from(frame), IRect::new(0, 20, 399, 721));
+    }
 }
 
 /// Defines the interface for a window manager, abstracting OS-specific operations.

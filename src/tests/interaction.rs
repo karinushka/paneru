@@ -662,6 +662,95 @@ fn test_external_focus_reactivates_hidden_virtual_strip_when_marker_is_stale() {
         .run(commands);
 }
 
+#[test]
+fn test_external_focus_switch_flashes_workspace_number() {
+    TestHarness::new()
+        .with_windows(1)
+        .on_iteration(1, |world, _state| {
+            let mut messages = world.query::<&crate::ecs::FlashMessage>();
+            assert!(
+                messages.iter(world).any(|message| message.0 == "2"),
+                "a Paneru workspace command should still flash the destination number"
+            );
+        })
+        .on_iteration(2, |world, _state| {
+            let mut messages = world.query::<&crate::ecs::FlashMessage>();
+            assert!(
+                messages.iter(world).any(|message| message.0 == "1"),
+                "returning to workspace 1 through external focus should flash its number"
+            );
+        })
+        .run(vec![
+            Event::Command {
+                command: Command::PrintState,
+            },
+            Event::Command {
+                command: Command::Window(Operation::VirtualNumber(1)),
+            },
+            Event::WindowFocused { window_id: 0 },
+        ]);
+}
+
+#[test]
+fn test_native_space_switch_flashes_workspace_number() {
+    let other_space = TEST_WORKSPACE_ID + 1;
+    TestHarness::new()
+        .with_display(
+            TEST_DISPLAY_ID,
+            IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
+            vec![TEST_WORKSPACE_ID, other_space],
+        )
+        .on_iteration(0, move |_world, state| {
+            state.activate_workspace(TEST_DISPLAY_ID, other_space, false);
+        })
+        .on_iteration(1, |world, _state| {
+            let mut messages = world.query::<&crate::ecs::FlashMessage>();
+            assert!(
+                messages.iter(world).any(|message| message.0 == "1"),
+                "switching macOS Spaces should flash the selected virtual workspace number"
+            );
+        })
+        .run(vec![
+            Event::Command {
+                command: Command::PrintState,
+            },
+            Event::SpaceChanged,
+        ]);
+}
+
+#[test]
+fn test_initial_workspace_does_not_flash() {
+    let mut harness = TestHarness::new().with_windows(1);
+    harness.advance(Duration::from_millis(20));
+
+    let world = harness.world();
+    let mut messages = world.query::<&crate::ecs::FlashMessage>();
+    assert!(messages.iter(world).next().is_none());
+}
+
+#[test]
+fn test_workspace_popup_setting_disables_external_switch_flash() {
+    let config = Config::try_from("[decorations]\nworkspace_popup_status = false\n[bindings]\n")
+        .expect("config should parse");
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(1)
+        .on_iteration(2, |world, _state| {
+            let mut messages = world.query::<&crate::ecs::FlashMessage>();
+            assert!(messages.iter(world).next().is_none());
+        })
+        .run(vec![
+            Event::Command {
+                command: Command::PrintState,
+            },
+            Event::Command {
+                command: Command::Window(Operation::VirtualNumber(1)),
+            },
+            Event::WindowFocused { window_id: 0 },
+        ]);
+}
+
 // When the focused window leaves the active strip (e.g. it just became
 // floating, or the OS handed focus to an off-strip window), window_focus
 // east/west must enter the strip from the appropriate side rather than

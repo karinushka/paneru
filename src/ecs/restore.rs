@@ -31,6 +31,10 @@ pub(crate) struct SessionRestore {
     saved_hard_keys: HashSet<WindowHardMatchKey>,
 }
 
+/// Set only while deferred startup restore commands activate saved strips.
+#[derive(Resource)]
+pub(crate) struct RestoringWorkspace;
+
 impl SessionRestore {
     fn new(state: PaneruState, grace: Duration) -> Self {
         let saved_hard_keys = saved_hard_match_keys(&state);
@@ -485,6 +489,7 @@ pub(super) fn restore_window_state(
         }
     }
 
+    ctx.commands.insert_resource(RestoringWorkspace);
     let mut restored_strips = 0;
     for planned in &plan.strips {
         let Some((display_entity, display)) = select_display(
@@ -559,6 +564,7 @@ pub(super) fn restore_window_state(
         }
         restored_strips += 1;
     }
+    ctx.commands.remove_resource::<RestoringWorkspace>();
 
     info!(
         "Session restore applied: matched={}, strips={}, missing={}, ambiguous={}",

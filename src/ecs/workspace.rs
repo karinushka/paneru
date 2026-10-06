@@ -24,6 +24,7 @@ use crate::config::Config;
 use crate::ecs::focus::FocusHistory;
 use crate::ecs::layout::{LayoutStrip, PARKED_STRIP_SLIVER, origin_exposing};
 use crate::ecs::params::{ActiveDisplay, WindowCtx, Windows};
+use crate::ecs::restore::RestoringWorkspace;
 use crate::ecs::{
     ActiveWorkspaceMarker, DockPosition, FocusedMarker, Initializing, ManualStripOffset,
     NativeFullscreenMarker, Position, RaiseWindow, RepositionMarker, Scrolling,
@@ -112,6 +113,7 @@ impl Plugin for WorkspaceEventsPlugin {
         );
         app.add_systems(PostUpdate, workspace_destroyed_handler);
         app.add_observer(cleanup_active_workspace_marker)
+            .add_observer(flash_workspace_on_activation)
             .add_observer(cleanup_selected_space_marker);
     }
 }
@@ -631,6 +633,23 @@ fn cleanup_active_workspace_marker(
     });
 }
 
+fn flash_workspace_on_activation(
+    trigger: On<Add, ActiveWorkspaceMarker>,
+    workspaces: Query<&LayoutStrip>,
+    config: Res<Config>,
+    initializing: Option<Res<Initializing>>,
+    restoring: Option<Res<RestoringWorkspace>>,
+    mut commands: Commands,
+) {
+    if initializing.is_some() || restoring.is_some() || !config.workspace_popup_status() {
+        return;
+    }
+    let Ok(strip) = workspaces.get(trigger.entity) else {
+        return;
+    };
+    commands.flash_message(format!("{}", strip.virtual_index + 1), 1.0);
+}
+
 /// Removes previuos `SelectedVirtualMarker`'s when a new one is inserted.
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn cleanup_selected_space_marker(
@@ -959,9 +978,6 @@ fn switch_virtual_workspace_bind(
                     active_display.entity(),
                     true,
                 );
-                if config.workspace_popup_status() {
-                    commands.flash_message(format!("{}", target_index + 1), 1.0);
-                }
                 return;
             } else {
                 current_index
@@ -982,9 +998,6 @@ fn switch_virtual_workspace_bind(
                     true,
                 );
 
-                if config.workspace_popup_status() {
-                    commands.flash_message(format!("{}", *target_virtual_index + 1), 1.0);
-                }
                 return;
             };
             index
@@ -1004,9 +1017,6 @@ fn switch_virtual_workspace_bind(
                 true,
             );
 
-            if config.workspace_popup_status() {
-                commands.flash_message(format!("{}", next_virtual_index + 1), 1.0);
-            }
             return;
         }
         _ => return,
@@ -1017,13 +1027,8 @@ fn switch_virtual_workspace_bind(
     }
 
     let new_entity = rows[next_index].0;
-    let next_virtual_index = rows[next_index].1.virtual_index;
     if let Ok(mut entity_commands) = commands.get_entity(new_entity) {
         entity_commands.try_insert(ActiveWorkspaceMarker);
-
-        if config.workspace_popup_status() {
-            commands.flash_message(format!("{}", next_virtual_index + 1), 1.0);
-        }
     }
     debug!(
         "Switched virtual workspace on display {} from {} to {}",
@@ -1112,10 +1117,6 @@ fn move_virtual_workspace_bind(
             target_virtual_index,
             move_focus,
         });
-    }
-
-    if move_focus == MoveFocus::Follow && config.workspace_popup_status() {
-        commands.flash_message(format!("{}", target_virtual_index + 1), 1.0);
     }
 
     debug!("Moving {focused_entity} to new virtual space {target_virtual_index}");

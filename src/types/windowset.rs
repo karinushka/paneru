@@ -832,7 +832,7 @@ mod tests {
     #[test]
     fn a_fresh_window_set_has_asked_for_nothing() {
         let set = fixture();
-        assert!(set.ops().is_empty());
+        assert_eq!(set.ops(), []);
         assert!(!set.is_transformed());
     }
 
@@ -885,7 +885,7 @@ mod tests {
 
         assert_eq!(left.ops(), vec![LayoutOp::Focus(2)]);
         assert_eq!(right.ops(), vec![LayoutOp::Focus(3)]);
-        assert!(base.ops().is_empty());
+        assert_eq!(base.ops(), []);
         assert_eq!(base.focused(), Some(1));
     }
 

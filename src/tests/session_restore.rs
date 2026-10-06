@@ -510,6 +510,11 @@ fn test_startup_restore_uses_first_restored_row_when_active_metadata_is_missing(
 
     assert_eq!(active_strips.len(), 1);
     assert_eq!(active_strips[0].virtual_index, 2);
+    let mut messages = world.query::<&crate::ecs::FlashMessage>();
+    assert!(
+        messages.iter(world).next().is_none(),
+        "startup session restoration should not show a workspace switch popup"
+    );
 }
 
 #[test]

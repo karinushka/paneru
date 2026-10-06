@@ -1583,10 +1583,10 @@ fn position_layout_windows(
 
     for (entity, window, layout_position, mut position, mut bounds) in positioned_windows {
         let Some(context) = strip_contexts.get(&entity) else {
-            return;
+            continue;
         };
         let Ok((display, dock)) = displays.get(context.display_entity) else {
-            return;
+            continue;
         };
         let viewport = display.actual_display_bounds(dock, &config);
         // Gets 80% of the display height as threshold.
@@ -1698,6 +1698,149 @@ fn position_layout_windows(
 mod tests {
     use super::*;
     use bevy::prelude::*;
+
+    fn harness_with_orphaned_display() -> crate::tests::TestHarness {
+        use std::time::Duration;
+
+        use crate::events::Event;
+        use crate::tests::{
+            EXT_DISPLAY_HEIGHT, EXT_DISPLAY_ID, EXT_DISPLAY_WIDTH, EXT_WORKSPACE_ID,
+            TEST_DISPLAY_HEIGHT, TEST_DISPLAY_ID, TEST_DISPLAY_WIDTH, TEST_WORKSPACE_ID,
+            TestHarness,
+        };
+
+        let mut harness = TestHarness::new()
+            .with_display(
+                EXT_DISPLAY_ID,
+                IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+                vec![EXT_WORKSPACE_ID],
+            )
+            .with_workspace_window(100, EXT_WORKSPACE_ID, |_| {})
+            .with_window(0, |_| {});
+        // Make the external display active, matching a disconnection while
+        // one of its windows is focused.
+        harness.mock_state.remove_display(TEST_DISPLAY_ID);
+        harness.mock_state.remove_display(EXT_DISPLAY_ID);
+        harness.mock_state.add_display(
+            EXT_DISPLAY_ID,
+            IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+            vec![EXT_WORKSPACE_ID],
+        );
+        harness.mock_state.add_display(
+            TEST_DISPLAY_ID,
+            IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
+            vec![TEST_WORKSPACE_ID],
+        );
+        harness.advance(Duration::from_millis(500));
+
+        harness.mock_state.remove_display(EXT_DISPLAY_ID);
+        harness
+            .world()
+            .write_message::<Event>(Event::DisplayRemoved {
+                display_id: EXT_DISPLAY_ID,
+            });
+        harness.advance(Duration::from_millis(650));
+        harness
+    }
+
+    #[test]
+    fn orphaned_window_does_not_block_other_display_positions() {
+        use bevy::ecs::change_detection::DetectChangesMut;
+
+        use crate::tests::{EXT_WORKSPACE_ID, TEST_WORKSPACE_ID, find_window_entity};
+
+        let mut harness = harness_with_orphaned_display();
+
+        // Keep one system instance so its Changed<LayoutPosition> filter sees
+        // only the changes below, as it would in the normal schedule.
+        let layout_system = harness.world().register_system(position_layout_windows);
+        harness.world().run_system(layout_system).unwrap();
+
+        let orphan = find_window_entity(100, harness.world());
+        let survivor = find_window_entity(0, harness.world());
+        let survivor_strip = harness
+            .world()
+            .query::<(&LayoutStrip, Entity)>()
+            .iter(harness.world())
+            .find(|(strip, _)| strip.id() == TEST_WORKSPACE_ID)
+            .unwrap()
+            .1;
+        harness
+            .world()
+            .get_mut::<Position>(survivor_strip)
+            .unwrap()
+            .0
+            .x += 80;
+        harness
+            .world()
+            .entity_mut(survivor)
+            .remove::<RepositionMarker>();
+        harness
+            .world()
+            .get_mut::<LayoutPosition>(orphan)
+            .unwrap()
+            .set_changed();
+        harness
+            .world()
+            .get_mut::<LayoutPosition>(survivor)
+            .unwrap()
+            .set_changed();
+        harness.world().run_system(layout_system).unwrap();
+
+        assert_eq!(
+            harness
+                .world()
+                .get::<RepositionMarker>(survivor)
+                .map(|marker| marker.0),
+            Some(Origin::new(80, 20)),
+            "an orphaned window must not stop another display's layout update"
+        );
+
+        // A strip may also retain a parent whose display entity is no longer
+        // available while reconciliation is in flight.
+        let orphan_strip = harness
+            .world()
+            .query::<(&LayoutStrip, Entity)>()
+            .iter(harness.world())
+            .find(|(strip, _)| strip.id() == EXT_WORKSPACE_ID)
+            .unwrap()
+            .1;
+        let stale_parent = harness.world().spawn_empty().id();
+        harness
+            .world()
+            .entity_mut(orphan_strip)
+            .insert(ChildOf(stale_parent));
+        harness
+            .world()
+            .get_mut::<Position>(survivor_strip)
+            .unwrap()
+            .0
+            .x += 40;
+        harness
+            .world()
+            .entity_mut(survivor)
+            .remove::<RepositionMarker>();
+        harness
+            .world()
+            .get_mut::<LayoutPosition>(orphan)
+            .unwrap()
+            .set_changed();
+        harness
+            .world()
+            .get_mut::<LayoutPosition>(survivor)
+            .unwrap()
+            .set_changed();
+        harness.world().run_system(layout_system).unwrap();
+
+        assert_eq!(
+            harness
+                .world()
+                .get::<RepositionMarker>(survivor)
+                .map(|marker| marker.0),
+            Some(Origin::new(120, 20)),
+            "a stale display parent must not stop another display's layout update"
+        );
+    }
 
     #[test]
     fn signature_tolerates_pixel_drift_but_not_a_reshape() {

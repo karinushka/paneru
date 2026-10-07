@@ -8,8 +8,8 @@ use crate::commands::{Command, Direction, MoveFocus, Operation};
 use crate::config::{Config, MainOptions, WindowParams, parse_command};
 use crate::ecs::display::FloatingLayer;
 use crate::ecs::{
-    ActiveWorkspaceMarker, FocusedMarker, ManualStripOffset, NativeFullscreenMarker, Position,
-    Unmanaged, layout::LayoutStrip,
+    ActiveDisplayMarker, ActiveWorkspaceMarker, FocusedMarker, ManualStripOffset,
+    NativeFullscreenMarker, Position, Unmanaged, layout::LayoutStrip,
 };
 use crate::ecs::{RepositionMarker, SpawnWindowTrigger};
 use crate::events::Event;
@@ -719,6 +719,52 @@ fn test_native_space_switch_flashes_workspace_number() {
 }
 
 #[test]
+fn test_workspace_popup_uses_final_index_after_activation() {
+    TestHarness::new()
+        .with_windows(1)
+        .on_iteration(0, |world, _state| {
+            let display = world
+                .query_filtered::<Entity, With<ActiveDisplayMarker>>()
+                .single(world)
+                .expect("active display");
+            let strip = world
+                .spawn((
+                    LayoutStrip::new(TEST_WORKSPACE_ID, 0),
+                    Position(Origin::new(0, 0)),
+                    ChildOf(display),
+                    ActiveWorkspaceMarker,
+                ))
+                .id();
+            world
+                .entity_mut(strip)
+                .get_mut::<LayoutStrip>()
+                .expect("new strip")
+                .virtual_index = 1;
+        })
+        .on_iteration(1, |world, _state| {
+            let active_index = world
+                .query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>()
+                .single(world)
+                .expect("active strip")
+                .virtual_index;
+            assert_eq!(active_index, 1);
+            let mut messages = world.query::<&crate::ecs::FlashMessage>();
+            assert!(
+                messages.iter(world).any(|message| message.0 == "2"),
+                "popup should use the settled index, not the value at marker insertion"
+            );
+        })
+        .run(vec![
+            Event::Command {
+                command: Command::PrintState,
+            },
+            Event::Command {
+                command: Command::PrintState,
+            },
+        ]);
+}
+
+#[test]
 fn test_initial_workspace_does_not_flash() {
     let mut harness = TestHarness::new().with_windows(1);
     harness.advance(Duration::from_millis(20));
@@ -729,16 +775,26 @@ fn test_initial_workspace_does_not_flash() {
 }
 
 #[test]
-fn test_workspace_popup_setting_disables_external_switch_flash() {
+fn test_workspace_popup_setting_disables_command_and_external_switch_flashes() {
     let config = Config::try_from("[decorations]\nworkspace_popup_status = false\n[bindings]\n")
         .expect("config should parse");
 
     TestHarness::new()
         .with_config(config)
         .with_windows(1)
+        .on_iteration(1, |world, _state| {
+            let mut messages = world.query::<&crate::ecs::FlashMessage>();
+            assert!(
+                messages.iter(world).next().is_none(),
+                "the workspace command should not flash while popups are disabled"
+            );
+        })
         .on_iteration(2, |world, _state| {
             let mut messages = world.query::<&crate::ecs::FlashMessage>();
-            assert!(messages.iter(world).next().is_none());
+            assert!(
+                messages.iter(world).next().is_none(),
+                "external focus should not flash while popups are disabled"
+            );
         })
         .run(vec![
             Event::Command {
@@ -748,6 +804,37 @@ fn test_workspace_popup_setting_disables_external_switch_flash() {
                 command: Command::Window(Operation::VirtualNumber(1)),
             },
             Event::WindowFocused { window_id: 0 },
+        ]);
+}
+
+#[test]
+fn test_workspace_popup_setting_disables_native_space_switch_flash() {
+    let config = Config::try_from("[decorations]\nworkspace_popup_status = false\n[bindings]\n")
+        .expect("config should parse");
+    let other_space = TEST_WORKSPACE_ID + 1;
+
+    TestHarness::new()
+        .with_config(config)
+        .with_display(
+            TEST_DISPLAY_ID,
+            IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
+            vec![TEST_WORKSPACE_ID, other_space],
+        )
+        .on_iteration(0, move |_world, state| {
+            state.activate_workspace(TEST_DISPLAY_ID, other_space, false);
+        })
+        .on_iteration(1, |world, _state| {
+            let mut messages = world.query::<&crate::ecs::FlashMessage>();
+            assert!(
+                messages.iter(world).next().is_none(),
+                "macOS Space switches should not flash while popups are disabled"
+            );
+        })
+        .run(vec![
+            Event::Command {
+                command: Command::PrintState,
+            },
+            Event::SpaceChanged,
         ]);
 }
 

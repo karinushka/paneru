@@ -17,7 +17,7 @@ use crate::ecs::params::{WindowCtx, Windows};
 use crate::ecs::state::{
     PaneruState, SavedColumn, SavedStackItem, SavedStrip, SavedWindow, SavedWorkspace,
 };
-use crate::ecs::workspace::PreviousStripPosition;
+use crate::ecs::workspace::{PreviousStripPosition, RestoredActivation};
 use crate::ecs::{
     ActiveDisplayMarker, ActiveWorkspaceMarker, RestoreWindowState, SpawnCommandsExt, Unmanaged,
 };
@@ -30,10 +30,6 @@ pub(crate) struct SessionRestore {
     timer: Timer,
     saved_hard_keys: HashSet<WindowHardMatchKey>,
 }
-
-/// Set only while deferred startup restore commands activate saved strips.
-#[derive(Resource)]
-pub(crate) struct RestoringWorkspace;
 
 impl SessionRestore {
     fn new(state: PaneruState, grace: Duration) -> Self {
@@ -489,7 +485,6 @@ pub(super) fn restore_window_state(
         }
     }
 
-    ctx.commands.insert_resource(RestoringWorkspace);
     let mut restored_strips = 0;
     for planned in &plan.strips {
         let Some((display_entity, display)) = select_display(
@@ -559,13 +554,13 @@ pub(super) fn restore_window_state(
             ctx.commands
                 .spawn_layout_strip(strip, origin, display_entity, is_global_active);
 
-        if !is_global_active {
+        if is_global_active {
+            spawned.insert(RestoredActivation);
+        } else {
             spawned.insert(previous);
         }
         restored_strips += 1;
     }
-    ctx.commands.remove_resource::<RestoringWorkspace>();
-
     info!(
         "Session restore applied: matched={}, strips={}, missing={}, ambiguous={}",
         plan.consumed_entities.len(),

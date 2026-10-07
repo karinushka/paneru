@@ -7,8 +7,8 @@ use bevy::ecs::lifecycle::Add;
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Added, Has, With, Without};
-use bevy::ecs::schedule::IntoScheduleConfigs as _;
-use bevy::ecs::schedule::common_conditions::{not, resource_exists};
+use bevy::ecs::schedule::common_conditions::{not, resource_exists, run_once};
+use bevy::ecs::schedule::{IntoScheduleConfigs as _, SystemCondition as _};
 use bevy::ecs::system::{Commands, Local, ParamSet, Populated, Query, Res, ResMut, Single};
 use bevy::ecs::world::World;
 use bevy::time::common_conditions::on_timer;
@@ -24,7 +24,6 @@ use crate::config::Config;
 use crate::ecs::focus::FocusHistory;
 use crate::ecs::layout::{LayoutStrip, PARKED_STRIP_SLIVER, origin_exposing};
 use crate::ecs::params::{ActiveDisplay, WindowCtx, Windows};
-use crate::ecs::restore::RestoringWorkspace;
 use crate::ecs::{
     ActiveWorkspaceMarker, DockPosition, FocusedMarker, Initializing, ManualStripOffset,
     NativeFullscreenMarker, Position, RaiseWindow, RepositionMarker, Scrolling,
@@ -36,6 +35,11 @@ use crate::manager::{Application, Display, Origin, Window, WindowManager};
 use crate::platform::{WinID, WorkspaceId};
 
 pub struct WorkspaceEventsPlugin;
+
+/// Suppresses the popup for a strip activated by startup session restore.
+/// Removed after that activation so later user switches still flash.
+#[derive(Component)]
+pub(crate) struct RestoredActivation;
 
 /// The strip, its origin, whether it's visible, and its saved position, as
 /// [`handle_virtual_window_moves`] needs them to slide a strip to/from its
@@ -87,6 +91,8 @@ impl Plugin for WorkspaceEventsPlugin {
         let reap_workspaces = |config: Option<Res<Config>>| {
             config.is_some_and(|config| config.reap_empty_workspaces())
         };
+        let workspace_activated =
+            |activated: Query<(), Added<ActiveWorkspaceMarker>>| !activated.is_empty();
 
         app.add_systems(
             PreUpdate,
@@ -111,9 +117,16 @@ impl Plugin for WorkspaceEventsPlugin {
                 detect_moved_windows.run_if(not(resource_exists::<Initializing>)),
             ),
         );
-        app.add_systems(PostUpdate, workspace_destroyed_handler);
+        app.add_systems(
+            PostUpdate,
+            (
+                workspace_destroyed_handler,
+                flash_workspace_on_activation
+                    .run_if(run_once.or_else(workspace_activated))
+                    .before(crate::ecs::systems::update_flash_messages),
+            ),
+        );
         app.add_observer(cleanup_active_workspace_marker)
-            .add_observer(flash_workspace_on_activation)
             .add_observer(cleanup_selected_space_marker);
     }
 }
@@ -634,20 +647,22 @@ fn cleanup_active_workspace_marker(
 }
 
 fn flash_workspace_on_activation(
-    trigger: On<Add, ActiveWorkspaceMarker>,
-    workspaces: Query<&LayoutStrip>,
+    active: Single<(Entity, &LayoutStrip, Has<RestoredActivation>), With<ActiveWorkspaceMarker>>,
     config: Res<Config>,
-    initializing: Option<Res<Initializing>>,
-    restoring: Option<Res<RestoringWorkspace>>,
+    mut previous: Local<Option<Entity>>,
     mut commands: Commands,
 ) {
-    if initializing.is_some() || restoring.is_some() || !config.workspace_popup_status() {
+    let (entity, strip, restored) = *active;
+    let switched = previous.replace(entity).is_some_and(|old| old != entity);
+    if restored {
+        if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            entity_commands.try_remove::<RestoredActivation>();
+        }
         return;
     }
-    let Ok(strip) = workspaces.get(trigger.entity) else {
-        return;
-    };
-    commands.flash_message(format!("{}", strip.virtual_index + 1), 1.0);
+    if switched && config.workspace_popup_status() {
+        commands.flash_message(format!("{}", strip.virtual_index + 1), 1.0);
+    }
 }
 
 /// Removes previuos `SelectedVirtualMarker`'s when a new one is inserted.
@@ -1299,10 +1314,9 @@ pub(crate) fn show_active_workspace(
 /// (despawning a strip can leave a gap but never collides). Runs
 /// independently of `reap_empty_workspaces` because without it, duplicate
 /// indices silently break navigation: `switch_virtual_workspace_bind`
-/// sorts rows by `virtual_index` and flashes `next_virtual_index + 1` as
-/// the OSD label, so two rows both at 0 mean South moves between them
-/// while the OSD stays at "1" and North no-ops at the bottom of the
-/// saturating sub.
+/// sorts rows by `virtual_index`, so two rows both at 0 mean South moves
+/// between them while the OSD stays at "1" and North no-ops at the bottom
+/// of the saturating sub.
 ///
 /// Sources of duplicate creation we have to defend against:
 /// - `LayoutStrip::fullscreen` pins `virtual_index` to 0 unconditionally.

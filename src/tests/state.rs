@@ -980,6 +980,45 @@ fn test_layout_ops_apply_to_the_named_window_not_the_focused_one() {
 
 #[cfg(feature = "lua")]
 #[test]
+fn test_layout_op_stack_lands_in_the_named_column() {
+    use crate::commands::Command;
+    use crate::tests::harness::TestHarness;
+    use crate::types::windowset::LayoutOp;
+
+    let mut harness = TestHarness::new().with_windows(3);
+    harness.app.update();
+
+    let columns = |harness: &mut TestHarness| -> Vec<Vec<i32>> {
+        extract_window_set(harness.world())
+            .expect("window set extraction")
+            .current()
+            .expect("an active workspace")
+            .columns
+            .iter()
+            .map(|column| column.windows.iter().map(|window| window.id).collect())
+            .collect()
+    };
+    let before = columns(&mut harness);
+    assert_eq!(before.len(), 3);
+    let (first, middle, last) = (before[0][0], before[1][0], before[2][0]);
+
+    // Onto the first column, not the middle one that sits to its left: the
+    // window set promised the script `onto`'s column, and so should the layout.
+    harness.app.world_mut().write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::Stack {
+            window: last,
+            onto: first,
+            tabs: false,
+        }]),
+    });
+    harness.app.update();
+    harness.app.update();
+
+    assert_eq!(columns(&mut harness), vec![vec![first, last], vec![middle]]);
+}
+
+#[cfg(feature = "lua")]
+#[test]
 fn test_layout_ops_skip_a_vanished_window_and_apply_its_neighbours() {
     use crate::commands::Command;
     use crate::tests::harness::TestHarness;

@@ -20,7 +20,8 @@ use crate::ecs::layout::{Column, LayoutStrip, StackItem};
 use crate::ecs::params::Windows;
 use crate::ecs::workspace::VirtualMoveMarker;
 use crate::ecs::{
-    ActiveWorkspaceMarker, SendMessageTrigger, SpawnCommandsExt, Unmanaged, WidthRatio, Window,
+    ActiveWorkspaceMarker, FullWidthMarker, SendMessageTrigger, SpawnCommandsExt, Unmanaged,
+    WidthRatio, Window,
 };
 use crate::events::Event;
 use crate::manager::{Origin, Size};
@@ -233,9 +234,28 @@ fn apply(
                 debug!(target: "paneru::lua", "skipping {op:?}: the two windows share no strip");
                 return;
             };
+            if strip.index_of(entity).ok() == strip.index_of(onto_entity).ok() {
+                return;
+            }
+            // `LayoutStrip::stack` joins a column onto its left neighbour, so
+            // first bring the window, alone, to just right of `onto`'s column:
+            // the window set told the script it would land in `onto`'s column,
+            // not in whichever one happened to sit to its left.
+            strip.remove(entity);
+            let Ok(index) = strip.index_of(onto_entity) else {
+                return;
+            };
+            strip.insert_at(index + 1, entity);
             if strip.stack(entity).is_err() {
                 debug!(target: "paneru::lua", "skipping {op:?}: the layout refused the stack");
                 return;
+            }
+            // As `window stack` does: a full-width window would keep its width
+            // in a column it now shares.
+            if windows.full_width(entity).is_some()
+                && let Ok(mut entity_commands) = commands.get_entity(entity)
+            {
+                entity_commands.try_remove::<FullWidthMarker>();
             }
             commands.reshuffle_around(entity);
         }

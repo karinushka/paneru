@@ -209,6 +209,17 @@ impl TestHarness {
     }
 
     pub(crate) fn run(&mut self, commands: Vec<Event>) {
+        let unreached: Vec<usize> = self
+            .verifiers
+            .keys()
+            .copied()
+            .filter(|iteration| *iteration >= commands.len())
+            .collect();
+        assert!(
+            unreached.is_empty(),
+            "verifiers for iterations {unreached:?} never run: only {} commands",
+            commands.len()
+        );
         for (iteration, command) in commands.into_iter().enumerate() {
             self.app.world_mut().write_message::<Event>(command);
 

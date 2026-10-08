@@ -740,8 +740,8 @@ fn keyboard_focus_in_same_frame_does_not_stall_later_pages() {
     assert_focused!(h.world(), 3);
 }
 
+/// A swipe leaves the strip coasting; a finger on the touchpad stops it dead.
 #[test]
-#[allow(clippy::float_cmp)]
 fn test_scrolling_stop() {
     let commands = vec![
         Event::MenuOpened { window_id: 0 },
@@ -756,6 +756,8 @@ fn test_scrolling_stop() {
     let config: Config = (
         MainOptions {
             swipe_gesture_fingers: Some(3),
+            // Slow enough to still be coasting a whole command later.
+            swipe_deceleration: Some(0.1),
             ..Default::default()
         },
         vec![],
@@ -765,12 +767,20 @@ fn test_scrolling_stop() {
     TestHarness::new()
         .with_config(config)
         .with_windows(3)
-        .on_iteration(3, |world, _state| {
+        .on_iteration(1, |world, _state| {
             use crate::ecs::Scrolling;
             let mut query = world.query::<&Scrolling>();
-            let scroll = query.single(world).unwrap();
-            assert_eq!(scroll.velocity, 0.0);
-            assert!(scroll.is_user_swiping);
+            let scroll = query.single(world).expect("the strip coasts after a swipe");
+            assert!(scroll.velocity > 0.0);
+            assert!(!scroll.is_user_swiping);
+        })
+        .on_iteration(2, |world, _state| {
+            use crate::ecs::Scrolling;
+            let mut query = world.query::<&Scrolling>();
+            assert!(
+                query.iter(world).next().is_none(),
+                "touching the touchpad stops the strip"
+            );
         })
         .run(commands);
 }
@@ -1767,6 +1777,9 @@ fn focus_unmanaged_ignores_floats_from_other_workspaces() {
         },
         Event::Command {
             command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::FocusUnmanaged),
         },
     ];
 

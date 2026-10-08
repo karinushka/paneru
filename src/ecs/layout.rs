@@ -759,10 +759,18 @@ impl LayoutStrip {
             // Can not stack to the left if left most window already.
             return Ok(());
         }
+        // A native full-screen window keeps its column to itself: checked
+        // before either column is taken out, so neither is lost.
+        if [index, index - 1]
+            .iter()
+            .any(|&at| matches!(self.columns.get(at), Some(Column::Fullscren(_))))
+        {
+            return Ok(());
+        }
 
         let column_to_stack = self.columns.remove(index).unwrap();
         let items_to_stack = match column_to_stack {
-            Column::Fullscren(_) => return Ok(()),
+            Column::Fullscren(_) => unreachable!("checked above"),
             Column::Single(id) => vec![StackItem::Single(id)],
             Column::Tabs(tabs) => vec![StackItem::Tabs(tabs)],
             Column::Stack(items) => items,
@@ -785,7 +793,7 @@ impl LayoutStrip {
             }
         }
         let new_column = match target_column {
-            Column::Fullscren(_) => return Ok(()),
+            Column::Fullscren(_) => unreachable!("checked above"),
             Column::Single(id) => {
                 Column::Stack([vec![StackItem::Single(id)], items_to_stack].concat())
             }
@@ -2035,6 +2043,20 @@ mod tests {
         strip.append(entities[2]);
 
         (world, strip, entities)
+    }
+
+    #[test]
+    fn stack_leaves_a_fullscreen_column_and_its_neighbour_in_place() {
+        let mut world = World::new();
+        let entities = world.spawn_batch(vec![(), ()]).collect::<Vec<Entity>>();
+        let mut strip = LayoutStrip::fullscreen(1, entities[0]);
+        strip.append(entities[1]);
+
+        strip.stack(entities[1]).unwrap();
+
+        assert_eq!(strip.len(), 2);
+        assert!(strip.is_fullscreen());
+        assert_eq!(strip.index_of(entities[1]).unwrap(), 1);
     }
 
     #[test]

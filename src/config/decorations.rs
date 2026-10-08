@@ -54,6 +54,8 @@ pub struct GeneralDimOptions {
 #[derive(Deserialize, Debug, Clone, Default)]
 #[cfg_attr(test, derive(serde::Serialize))]
 pub struct MenubarOptions {
+    /// Show the Paneru menu bar item. Default: true.
+    pub enabled: Option<bool>,
     pub orientation: Option<MenubarOrientation>,
     pub colors: Option<Vec<String>>,
     pub angle: Option<f64>,

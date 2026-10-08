@@ -34,3 +34,12 @@ use crate::events::Event;
 use crate::manager::Window;
 #[allow(unused_imports)]
 use crate::platform::WorkspaceId;
+
+#[test]
+fn showmenu_is_a_direct_subcommand() {
+    use clap::Parser;
+
+    let cli = crate::Paneru::try_parse_from(["paneru", "showmenu"]).unwrap();
+    assert!(matches!(cli.subcmd, Some(crate::SubCmd::ShowMenu)));
+    assert!(crate::Paneru::try_parse_from(["paneru", "showmenu", "extra"]).is_err());
+}

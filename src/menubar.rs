@@ -1,5 +1,8 @@
+use bevy::ecs::change_detection::DetectChanges;
+use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::{Has, With};
-use bevy::ecs::system::{NonSendMut, Query, Res};
+use bevy::ecs::resource::Resource;
+use bevy::ecs::system::{NonSendMut, Query, Res, ResMut};
 use objc2::rc::Retained;
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
@@ -13,6 +16,8 @@ use objc2_app_kit::{
 };
 use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
 use objc2_foundation::{NSArray, NSInteger, NSObject, NSString};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use tracing::warn;
 
 use crate::accessibility_prompt::{
@@ -29,6 +34,83 @@ use crate::ecs::params::ActiveDisplay;
 use crate::ecs::{Bounds, FocusedMarker, Unmanaged};
 use crate::events::{Event, EventSender};
 use crate::util::round_px;
+
+/// A menu or command choice overrides the configuration until changed again.
+#[derive(Debug, Default, Resource, Serialize, Deserialize)]
+pub struct MenuBarVisibility {
+    enabled: Option<bool>,
+}
+
+impl MenuBarVisibility {
+    pub fn enabled(&self, config: &Config) -> bool {
+        self.enabled.unwrap_or_else(|| config.menubar_enabled())
+    }
+
+    fn load(path: &Path) -> Self {
+        let data = match std::fs::read_to_string(path) {
+            Ok(data) => data,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Self::default(),
+            Err(error) => {
+                warn!(%error, path = %path.display(), "unable to read menu bar preference");
+                return Self::default();
+            }
+        };
+        serde_json::from_str(&data).unwrap_or_else(|error| {
+            warn!(%error, path = %path.display(), "ignoring invalid menu bar preference");
+            Self::default()
+        })
+    }
+
+    fn save(&self, path: &Path) -> crate::errors::Result<()> {
+        let data = serde_json::to_string_pretty(self)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let temporary = path.with_extension("json.tmp");
+        std::fs::write(&temporary, data)?;
+        std::fs::rename(temporary, path)?;
+        Ok(())
+    }
+}
+
+#[derive(Resource)]
+pub struct MenuBarPreferenceFile(PathBuf);
+
+pub fn load_menu_bar_preference(app: &mut bevy::app::App) {
+    if let Some(path) = xdg::BaseDirectories::with_prefix("paneru").get_state_file("menu-bar.json")
+    {
+        app.insert_resource(MenuBarVisibility::load(&path))
+            .insert_resource(MenuBarPreferenceFile(path));
+    }
+}
+
+pub fn menu_bar_command_handler(
+    mut messages: MessageReader<Event>,
+    mut visibility: ResMut<MenuBarVisibility>,
+) {
+    for event in messages.read() {
+        if let Event::Command {
+            command: Command::MenuBar(enabled),
+        } = event
+            && visibility.enabled != Some(*enabled)
+        {
+            visibility.enabled = Some(*enabled);
+        }
+    }
+}
+
+pub fn save_menu_bar_preference(
+    visibility: Res<MenuBarVisibility>,
+    file: Option<Res<MenuBarPreferenceFile>>,
+) {
+    if visibility.enabled.is_some()
+        && let Some(file) = file
+    {
+        let _ = visibility.save(&file.0).inspect_err(|error| {
+            warn!(%error, path = %file.0.display(), "unable to save menu bar preference");
+        });
+    }
+}
 
 #[derive(Debug, Clone)]
 struct MenuActionTargetIvars {
@@ -99,6 +181,11 @@ define_class!(
         fn quit_paneru(&self, _: &NSMenuItem) {
             self.send_command(Command::Quit);
         }
+
+        #[unsafe(method(hideMenuBar:))]
+        fn hide_menu_bar(&self, _: &NSMenuItem) {
+            self.send_command(Command::MenuBar(false));
+        }
     }
 );
 
@@ -154,6 +241,12 @@ fn window_menu_enablement(
 }
 
 impl MenuBarManager {
+    fn set_visible(&self, visible: bool) {
+        if self.status_item.isVisible() != visible {
+            self.status_item.setVisible(visible);
+        }
+    }
+
     pub fn new(mtm: MainThreadMarker, events: EventSender) -> Self {
         let status_bar = NSStatusBar::systemStatusBar();
         let status_item = status_bar.statusItemWithLength(NSVariableStatusItemLength);
@@ -162,7 +255,8 @@ impl MenuBarManager {
 
         menu.setAutoenablesItems(false);
         status_item.setMenu(Some(&menu));
-        status_item.setVisible(true);
+        // Wait for the first update to apply the user's visibility setting.
+        status_item.setVisible(false);
 
         Self {
             mtm,
@@ -181,6 +275,7 @@ impl MenuBarManager {
 
     pub fn new_accessibility_required(mtm: MainThreadMarker, events: EventSender) -> Self {
         let mut manager = Self::new(mtm, events);
+        manager.status_item.setVisible(true);
         manager.rebuild_accessibility_menu();
         manager.show_text("!");
         manager
@@ -287,6 +382,10 @@ impl MenuBarManager {
         self.copy_rule_item = Some(self.add_item("Copy Window Rule", Some(sel!(copyWindowRule:))));
 
         self.menu.addItem(&NSMenuItem::separatorItem(self.mtm));
+        let hide = self.add_item("Hide Menu Bar", Some(sel!(hideMenuBar:)));
+        hide.setToolTip(Some(&NSString::from_str(
+            "Show again with: paneru showmenu",
+        )));
         self.add_item("Quit Paneru", Some(sel!(quitPaneru:)));
         self.configured_widths = widths.to_vec();
     }
@@ -640,11 +739,20 @@ pub fn update_menu_bar(
     workspaces: Query<&LayoutStrip>,
     focused: Query<(&Bounds, Has<Unmanaged>), With<FocusedMarker>>,
     config: Res<Config>,
+    visibility: Res<MenuBarVisibility>,
     menu_bar: Option<NonSendMut<MenuBarManager>>,
 ) {
     let Some(mut menu_bar) = menu_bar else {
         return;
     };
+    if config.is_changed() || visibility.is_changed() {
+        menu_bar.current_content = None;
+    }
+    let enabled = visibility.enabled(&config);
+    menu_bar.set_visible(enabled);
+    if !enabled {
+        return;
+    }
     let strip = active_display.active_strip();
     let mut virtual_indices = workspaces
         .iter()
@@ -782,9 +890,82 @@ fn normalized_width_percentages(widths: &[f64]) -> Vec<i32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        IndicatorFormat, WindowMenuEnablement, indicator_label, normalized_width_percentages,
-        paged_last_index, roman_numeral, virtual_workspace_label, window_menu_enablement,
+        Command, Config, Event, IndicatorFormat, MenuBarPreferenceFile, MenuBarVisibility,
+        WindowMenuEnablement, indicator_label, normalized_width_percentages, paged_last_index,
+        roman_numeral, virtual_workspace_label, window_menu_enablement,
     };
+
+    #[test]
+    fn menu_bar_choice_survives_workspace_changes_and_restarts() {
+        use crate::commands::{Direction, Operation};
+        use crate::tests::TestHarness;
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "paneru-menu-preference-{}-{stamp}.json",
+            std::process::id()
+        ));
+        let hidden_path = path.clone();
+        let shown_path = path.clone();
+        let mut harness = TestHarness::new().with_windows(2);
+        harness
+            .app
+            .insert_resource(MenuBarPreferenceFile(path.clone()));
+        harness
+            .on_iteration(0, move |world, _| {
+                let config = world.resource::<Config>();
+                assert!(!world.resource::<MenuBarVisibility>().enabled(config));
+                assert!(!MenuBarVisibility::load(&hidden_path).enabled(config));
+            })
+            .on_iteration(1, |world, _| {
+                assert!(
+                    !world
+                        .resource::<MenuBarVisibility>()
+                        .enabled(world.resource::<Config>())
+                );
+            })
+            .on_iteration(2, move |world, _| {
+                let config = world.resource::<Config>();
+                assert!(world.resource::<MenuBarVisibility>().enabled(config));
+                assert!(MenuBarVisibility::load(&shown_path).enabled(config));
+            })
+            .run(vec![
+                Event::Command {
+                    command: Command::MenuBar(false),
+                },
+                Event::Command {
+                    command: Command::Window(Operation::Focus(Direction::East)),
+                },
+                Event::Command {
+                    command: Command::MenuBar(true),
+                },
+            ]);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn missing_or_invalid_menu_bar_preference_uses_config() {
+        let config =
+            Config::try_from("[options]\n[bindings]\n[decorations.menu]\nenabled = false").unwrap();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("paneru-menu-fallback-{stamp}.json"));
+        assert!(!MenuBarVisibility::load(&path).enabled(&config));
+        MenuBarVisibility {
+            enabled: Some(true),
+        }
+        .save(&path)
+        .unwrap();
+        assert!(MenuBarVisibility::load(&path).enabled(&config));
+        std::fs::write(&path, "invalid JSON").unwrap();
+        assert!(!MenuBarVisibility::load(&path).enabled(&config));
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn virtual_workspace_label_is_one_based() {

@@ -86,6 +86,9 @@ pub fn install(lua: &Lua, paneru: &Table, dispatch: &Dispatch) -> Result<()> {
     )?;
     paneru.set("mouse", mouse)?;
 
+    paneru.set("showmenu", verb(lua, dispatch, Command::MenuBar(true))?)?;
+    paneru.set("hidemenu", verb(lua, dispatch, Command::MenuBar(false))?)?;
+
     paneru.set("quit", verb(lua, dispatch, Command::Quit)?)?;
     paneru.set("restart", verb(lua, dispatch, Command::Restart)?)?;
     paneru.set("print_state", verb(lua, dispatch, Command::PrintState)?)?;
@@ -474,6 +477,8 @@ mod tests {
             paneru.window.focus({ direction = "east" })
             paneru.window.focus({ number = 3 })
             paneru.window.balance()
+            paneru.showmenu()
+            paneru.hidemenu()
             paneru.workspace.move_window({ number = 2, follow = false })
         "#)
         .unwrap();
@@ -484,6 +489,8 @@ mod tests {
                 Command::Window(Operation::Focus(Direction::East)),
                 Command::Window(Operation::Focus(Direction::Nth(2))),
                 Command::Window(Operation::Balance),
+                Command::MenuBar(true),
+                Command::MenuBar(false),
                 Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Stay)),
             ])
         );

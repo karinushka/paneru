@@ -772,6 +772,9 @@ fn config_to_lua_table(lua: &Lua, config: &Config) -> mlua::Result<Table> {
     let decorations = lua.create_table()?;
     decorations.set("workspace_menu_status", config.workspace_menu_status())?;
     decorations.set("workspace_popup_status", config.workspace_popup_status())?;
+    let menu = lua.create_table()?;
+    menu.set("enabled", config.menubar_enabled())?;
+    decorations.set("menu", menu)?;
 
     let active = lua.create_table()?;
     let border = lua.create_table()?;

@@ -9,7 +9,7 @@ use bevy::ecs::lifecycle::RemovedComponents;
 use bevy::ecs::query::{Added, Changed, With};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::SystemCondition;
-use bevy::ecs::schedule::common_conditions::{not, resource_exists};
+use bevy::ecs::schedule::common_conditions::{not, resource_changed, resource_exists};
 use bevy::ecs::schedule::{ScheduleLabel as _, SingleThreadedExecutor};
 use bevy::ecs::system::{Commands, EntityCommands, Query, Res, SystemId};
 use bevy::prelude::Event as BevyEvent;
@@ -201,8 +201,12 @@ pub fn register_systems(app: &mut bevy::app::App) {
                 systems::update_flash_messages,
             )
                 .chain(),
-            crate::menubar::update_menu_bar
-                .run_if(vw_indicator_dirty.or_eager(strip_count_changed)),
+            crate::menubar::update_menu_bar.run_if(
+                vw_indicator_dirty
+                    .or_eager(strip_count_changed)
+                    .or_eager(resource_changed::<Config>)
+                    .or_eager(resource_changed::<crate::menubar::MenuBarVisibility>),
+            ),
         ),
     );
 }
@@ -779,6 +783,8 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         .insert_non_send(flash_message_manager)
         .insert_non_send(menu_bar_manager)
         .insert_non_send(receiver);
+
+    crate::menubar::load_menu_bar_preference(&mut app);
 
     // `CONFIGURATION_FILE` is `None` exactly when an `init.lua` took the TOML
     // file out of play, so copied rules have to be written in Lua instead.

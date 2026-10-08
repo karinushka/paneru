@@ -103,8 +103,7 @@ Visual styling for workspaces, active and inactive windows.
 
 ### Virtual Workspace indicators
 
-Toggles display of the currently active virtual workspace in the menubar or in a brief status popup window. Both are enabled by default.
-(Note: disabling menubar indicator requires a restart)
+Toggles display of the currently active virtual workspace in the menubar or in a brief status popup window. Both are enabled by default. `workspace_menu_status` controls only the workspace indicator; the descriptor and menu remain available.
 
 **Example:**
 ```toml
@@ -120,9 +119,35 @@ Basic settings for the menubar display.
 
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
+| `enabled` | Boolean | `true` | Show the Paneru menu bar item unless a saved menu/command choice overrides it. Set to `false` to hide the entire item, including its descriptor, workspace indicator, and menu, freeing its menu bar space. Changes apply without restarting. |
 | `orientation` | String | `'default'` | Which of the menubar elements appears first, the descriptor `'default'` or the indicator `'flipped'`. |
 | `colors` | [String] | `['#FFFFFF']` | An array of hex colors defining a linear gradient (left to right) coloring the menubar display. Set a solid color by including only one element. |
 | `angle` | Float | `90.0` | The angle (in degrees) of the gradient. |
+
+To hide Paneru from the menu bar:
+
+```toml
+[decorations.menu]
+enabled = false
+```
+
+Or in `init.lua`:
+
+```lua
+paneru.setup {
+  decorations = { menu = { enabled = false } },
+}
+```
+
+You can also click **Hide Menu Bar** in Paneru's menu. This choice is saved across restarts and overrides `enabled`. To show the item again:
+
+```sh
+paneru showmenu
+```
+
+This command shows the item in the running daemon and remembers the new choice. Lua scripts can use `paneru.showmenu()` and `paneru.hidemenu()`, or bind `showmenu` and `hidemenu` to keys. Choices are stored in `$XDG_STATE_HOME/paneru/menu-bar.json` (normally `~/.local/state/paneru/menu-bar.json`); removing this file while Paneru is stopped restores the configuration's behavior.
+
+The permission setup menu remains visible until the required macOS access is granted.
 
 ### `[decorations.menu.descriptor]`
 Settings for the descriptor component of the menubar display. The descriptor component is a visual marker for the Paneru menubar item.

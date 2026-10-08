@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bevy::app::{App, Plugin, PostUpdate, PreUpdate, Update};
+use bevy::ecs::change_detection::DetectChangesMut;
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs;
@@ -218,7 +219,7 @@ fn extract_once<T>(
 /// into the shared handle.
 pub fn drain_lua_outbox(
     worker: Option<Res<LuaWorker>>,
-    config: Option<Res<Config>>,
+    mut config: Option<ResMut<Config>>,
     mut displays: Query<&mut Display>,
     windows: Windows,
     applications: Query<&Application>,
@@ -236,8 +237,10 @@ pub fn drain_lua_outbox(
             FromLua::ConfigChanged => {
                 // Swap into the shared handle, then re-apply the same side
                 // effects a TOML reload does.
-                if let (Some(config), Some(built)) = (config.as_ref(), worker.built_config()) {
+                if let (Some(config), Some(built)) = (config.as_mut(), worker.built_config()) {
                     config.replace_inner_from(&built);
+                    // The inner swap does not mutably dereference the resource.
+                    config.set_changed();
                     apply_config_side_effects(config, &mut displays, &windows, &applications);
                 }
             }
@@ -291,7 +294,79 @@ fn paths_match(changed: &Path, script: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::ecs::schedule::common_conditions::resource_changed;
     use std::cell::Cell;
+
+    #[test]
+    fn reloading_menu_visibility_marks_config_changed() {
+        use crate::tests::TestHarness;
+        use std::sync::atomic::AtomicU64;
+        use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+        #[derive(Resource, Default)]
+        struct ConfigUpdates(usize);
+
+        fn count_config_updates(mut updates: ResMut<ConfigUpdates>) {
+            updates.0 += 1;
+        }
+
+        let worker = LuaWorker::spawn(
+            LuaSource::Inline(String::new()),
+            Arc::new(AtomicU64::new(0)),
+        );
+        let mut harness = TestHarness::new();
+        harness
+            .app
+            .insert_resource(worker)
+            .init_resource::<ConfigUpdates>()
+            .add_systems(Update, drain_lua_outbox)
+            .add_systems(
+                PostUpdate,
+                count_config_updates.run_if(resource_changed::<Config>),
+            );
+        harness.app.update();
+        harness.app.update();
+        assert_eq!(harness.world().resource::<ConfigUpdates>().0, 1);
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let script = std::env::temp_dir().join(format!(
+            "paneru-menu-reload-{}-{stamp}.lua",
+            std::process::id()
+        ));
+        let shared_config = harness.world().resource::<Config>().clone();
+        for enabled in [false, true] {
+            std::fs::write(
+                &script,
+                format!("paneru.setup {{ decorations = {{ menu = {{ enabled = {enabled} }} }} }}"),
+            )
+            .unwrap();
+            harness
+                .world()
+                .resource::<LuaWorker>()
+                .send_reload(script.clone());
+
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while shared_config.menubar_enabled() != enabled {
+                assert!(Instant::now() < deadline, "Lua config reload timed out");
+                harness.app.update();
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            let expected_updates = if enabled { 3 } else { 2 };
+            assert_eq!(
+                harness.world().resource::<ConfigUpdates>().0,
+                expected_updates
+            );
+            harness.app.update();
+            assert_eq!(
+                harness.world().resource::<ConfigUpdates>().0,
+                expected_updates
+            );
+        }
+        std::fs::remove_file(script).unwrap();
+    }
 
     // Many concurrent waiters should share a single read of the world.
     #[test]

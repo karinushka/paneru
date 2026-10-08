@@ -26,10 +26,10 @@ use crate::ecs::workspace::PreviousStripPosition;
 use crate::ecs::{
     ActiveDisplayMarker, EnsureVisibleMarker, FocusedMarker, LayoutPosition, ManualStripOffset,
     Position, ReadDisplayProperties, RepositionMarker, SendMessageTrigger, SpawnCommandsExt,
-    Timeout,
+    Timeout, VerifyWindowSize,
 };
 use crate::events::Event;
-use crate::manager::{Display, WindowManager, irect_from};
+use crate::manager::{Display, Window, WindowManager, irect_from};
 use crate::platform::{PlatformCallbacks, WorkspaceId};
 use crate::util::{read_screen_property, round_px};
 
@@ -83,6 +83,7 @@ fn cleanup_active_display_marker(
 fn display_change_handler(
     mut messages: MessageReader<Event>,
     displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
+    windows: Query<Entity, With<Window>>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
@@ -91,6 +92,12 @@ fn display_change_handler(
         .any(|event| matches!(event, Event::DisplayChanged))
     {
         return;
+    }
+
+    for window in windows {
+        if let Ok(mut cmd) = commands.get_entity(window) {
+            cmd.try_insert(VerifyWindowSize);
+        }
     }
 
     let Ok(active_id) = window_manager.active_display_id() else {

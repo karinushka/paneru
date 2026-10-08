@@ -24,6 +24,7 @@ use crate::ecs::workspace::RestoreFocusMarker;
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, Position, RaiseWindow, RepositionMarker, ReshuffleAroundMarker,
     ResizeMarker, Scrolling, SendMessageTrigger, SpawnCommandsExt, StrayFocusEvent,
+    VerifyWindowSize,
 };
 use crate::events::Event;
 use crate::manager::{Application, Display, Window, WindowManager};
@@ -233,10 +234,18 @@ fn shares_a_tab_group(
 
 #[instrument(level = Level::DEBUG, skip_all, fields(focused))]
 fn fix_window_size_on_focus(
-    focused: Single<Entity, Added<FocusedMarker>>,
+    focused: Single<(Entity, Has<VerifyWindowSize>), Added<FocusedMarker>>,
     mut windows: Query<(&mut Window, &mut Bounds, Has<ResizeMarker>)>,
+    mut commands: Commands,
 ) {
-    if let Ok((mut window, mut bounds, resizing)) = windows.get_mut(*focused)
+    let (entity, verify_size) = *focused;
+    if !verify_size {
+        return;
+    }
+    if let Ok(mut entity_commands) = commands.get_entity(entity) {
+        entity_commands.try_remove::<VerifyWindowSize>();
+    }
+    if let Ok((mut window, mut bounds, resizing)) = windows.get_mut(entity)
         && !resizing
         && let Ok(frame) = window.update_frame()
         && frame.size() != bounds.0

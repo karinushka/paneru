@@ -475,6 +475,11 @@ impl VerifyWindowPosition {
     }
 }
 
+/// Marker attached to windows after a display change so [`focus::fix_window_size_on_focus`]
+/// re-reads their OS frame once when focused instead of polling AX on every focus change.
+#[derive(Component)]
+pub struct VerifyWindowSize;
+
 #[derive(Deref, DerefMut, Resource)]
 pub struct LowPowerMode(pub bool);
 

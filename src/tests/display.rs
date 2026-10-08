@@ -960,3 +960,79 @@ fn test_empty_baseline_row_survives_display_removal() {
         })
         .run(commands);
 }
+
+#[test]
+fn test_fix_window_size_on_focus_only_after_display_change() {
+    use crate::ecs::{Bounds, VerifyWindowSize};
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        Event::DisplayChanged,
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::West)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+    ];
+
+    TestHarness::new()
+        .with_windows(2)
+        .on_iteration(0, |_world, state| {
+            // Silently change window 1's OS width without emitting WindowResized.
+            state.update_window(1, |window| {
+                window.frame.max.x = window.frame.min.x + 600;
+            });
+        })
+        .on_iteration(1, |world, _state| {
+            let win1 = find_window_entity(1, world);
+            assert_eq!(
+                world.get::<Bounds>(win1).expect("win1 bounds").0.x,
+                TEST_WINDOW_WIDTH,
+                "ordinary focus changes must not poll AX to re-read window size"
+            );
+            assert!(world.get::<VerifyWindowSize>(win1).is_none());
+        })
+        .on_iteration(2, |world, _state| {
+            let win0 = find_window_entity(0, world);
+            let win1 = find_window_entity(1, world);
+            assert!(
+                world.get::<VerifyWindowSize>(win0).is_some()
+                    && world.get::<VerifyWindowSize>(win1).is_some(),
+                "DisplayChanged only attaches VerifyWindowSize without immediately polling AX"
+            );
+            assert_eq!(
+                world.get::<Bounds>(win1).expect("win1 bounds").0.x,
+                TEST_WINDOW_WIDTH,
+                "already-focused window is not re-read until it next gains focus"
+            );
+        })
+        .on_iteration(3, |world, _state| {
+            let win0 = find_window_entity(0, world);
+            let win1 = find_window_entity(1, world);
+            assert!(
+                world.get::<VerifyWindowSize>(win0).is_none(),
+                "focusing window 0 consumes its VerifyWindowSize marker"
+            );
+            assert!(
+                world.get::<VerifyWindowSize>(win1).is_some(),
+                "window 1 keeps VerifyWindowSize until it gains focus"
+            );
+        })
+        .on_iteration(4, |world, _state| {
+            let win1 = find_window_entity(1, world);
+            assert_eq!(
+                world.get::<Bounds>(win1).expect("win1 bounds").0.x,
+                600,
+                "focusing window 1 with VerifyWindowSize refreshes its Bounds from AX"
+            );
+            assert!(
+                world.get::<VerifyWindowSize>(win1).is_none(),
+                "window 1's VerifyWindowSize marker is removed after checking"
+            );
+        })
+        .run(commands);
+}

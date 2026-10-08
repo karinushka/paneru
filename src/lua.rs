@@ -70,8 +70,10 @@ impl Plugin for LuaPlugin {
                 // Cocoa.
                 serve_lua_queries.before(crate::ecs::systems::pump_events),
                 serve_lua_store.before(crate::ecs::systems::pump_events),
-                drain_lua_outbox,
-                command_lua_handler,
+                drain_lua_outbox.after(crate::ecs::systems::pump_events),
+                command_lua_handler
+                    .after(crate::ecs::systems::pump_events)
+                    .after(drain_lua_outbox),
             ),
         );
         // ...and again after everything, for reads made during this frame's

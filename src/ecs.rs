@@ -213,7 +213,9 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         Update,
         (
             triggers::front_switched_trigger,
-            triggers::window_focused_trigger,
+            triggers::window_focused_trigger
+                .after(triggers::apply_window_positions)
+                .before(focus::fix_window_size_on_focus),
             triggers::mission_control_trigger,
             triggers::application_event_trigger,
             triggers::dispatch_application_messages,

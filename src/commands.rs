@@ -5,6 +5,7 @@ use bevy::ecs::entity::{Entity, EntityHashSet};
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::{Has, With, Without};
+use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::system::{Commands, Query, Res, Single};
 use bevy::math::IRect;
 use tracing::{Level, instrument};
@@ -62,13 +63,19 @@ pub fn register_commands(app: &mut bevy::app::App) {
     // Registered here (not with the Lua systems) so it's exercised by the mock
     // harness without a running interpreter.
     #[cfg(feature = "lua")]
-    app.add_systems(PreUpdate, crate::ecs::layout_ops::apply_layout_ops);
+    app.add_systems(
+        PreUpdate,
+        crate::ecs::layout_ops::apply_layout_ops.after(crate::ecs::systems::pump_events),
+    );
 
     query::register_query_commands(app);
     // Empty store so the mock harness and saveless runs still have one to
     // answer from; the real app overwrites it from disk.
     app.init_resource::<crate::ecs::script_state::ScriptStateStore>();
-    app.add_systems(PreUpdate, crate::ecs::script_state::script_state_handler);
+    app.add_systems(
+        PreUpdate,
+        crate::ecs::script_state::script_state_handler.after(crate::ecs::systems::pump_events),
+    );
     app.add_systems(
         PreUpdate,
         (
@@ -92,7 +99,8 @@ pub fn register_commands(app: &mut bevy::app::App) {
             command_toggle_floating_layer,
             command_swap_focus,
             snap_window,
-        ),
+        )
+            .after(crate::ecs::systems::pump_events),
     );
     // A separate registration because the tuple above is already at Bevy's
     // 20-system limit.
@@ -100,7 +108,10 @@ pub fn register_commands(app: &mut bevy::app::App) {
     // A default dialect so the mock harness has one; the real app overwrites it
     // once it knows whether a Lua script took over the configuration.
     app.init_resource::<SnippetDialect>();
-    app.add_systems(PreUpdate, (copy_window_rule, toggle_tabbed_display_handler));
+    app.add_systems(
+        PreUpdate,
+        (copy_window_rule, toggle_tabbed_display_handler).after(crate::ecs::systems::pump_events),
+    );
 }
 
 pub fn filter_window_operations<'a, F: Fn(&Operation) -> bool>(

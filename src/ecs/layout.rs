@@ -14,11 +14,11 @@ use tracing::{Level, instrument, trace};
 
 use crate::config::Config;
 use crate::ecs::params::Windows;
-use crate::ecs::workspace::SnapStripMarker;
+use crate::ecs::workspace::{PreviousStripPosition, SnapStripMarker};
 use crate::ecs::{
-    ActiveWorkspaceMarker, Bounds, DockPosition, EnsureVisibleMarker, Initializing, LayoutPosition,
-    ManualStripOffset, Position, RepositionMarker, ReshuffleAroundMarker, Scrolling,
-    SpawnCommandsExt,
+    ActiveWorkspaceMarker, Bounds, DockPosition, EnsureVisibleMarker, FocusedMarker, Initializing,
+    LayoutPosition, ManualStripOffset, Position, RepositionMarker, ReshuffleAroundMarker,
+    Scrolling, SpawnCommandsExt,
 };
 use crate::errors::{Error, Result};
 use crate::manager::{Display, Origin, Size, Window};
@@ -37,8 +37,9 @@ pub struct LayoutEventsPlugin;
 /// frame has left the display entirely to whichever display it landed on.
 pub(crate) const PARKED_STRIP_SLIVER: i32 = 10;
 
-/// A strip, its entity, origin, display, whether it's the active one, and the
-/// offset it is animating toward if a move is already in flight.
+/// A strip, its entity, origin, display, whether it's the active one, any
+/// in-flight target offset, and whether it carries a saved position waiting to
+/// be restored by [`crate::ecs::workspace::show_active_workspace`].
 /// Shared by [`reshuffle_layout_strip`] and [`ensure_visible_in_strip`].
 type StripPlacements<'w, 's> = Query<
     'w,
@@ -50,6 +51,7 @@ type StripPlacements<'w, 's> = Query<
         &'static ChildOf,
         Option<Ref<'static, ActiveWorkspaceMarker>>,
         Option<&'static RepositionMarker>,
+        Has<PreviousStripPosition>,
     ),
 >;
 
@@ -57,9 +59,9 @@ type StripPlacements<'w, 's> = Query<
 /// raw bounds into the usable viewport.
 type DisplayViewports<'w, 's> = Query<'w, 's, (&'static Display, Option<&'static DockPosition>)>;
 
-/// A strip, its entity, its own scroll position, whether it's mid-swipe, and
-/// its parent display. Used by [`position_layout_windows`] to build each
-/// window's [`StripWindowContext`].
+/// A strip, its entity, its own scroll position (and any in-flight target),
+/// whether it's mid-swipe, and its parent display. Used by
+/// [`position_layout_windows`] to build each window's [`StripWindowContext`].
 type StripsForWindowPositioning<'w, 's> = Query<
     'w,
     's,
@@ -67,6 +69,7 @@ type StripsForWindowPositioning<'w, 's> = Query<
         Entity,
         &'static LayoutStrip,
         &'static Position,
+        Option<&'static RepositionMarker>,
         Has<Scrolling>,
         &'static ChildOf,
     ),
@@ -111,6 +114,22 @@ type RepositionedWindows<'w, 's> = Populated<
         &'static mut Bounds,
     ),
     (Changed<LayoutPosition>, With<Window>, Without<LayoutStrip>),
+>;
+
+/// Strips whose position or target offset changed this tick.
+type MovedStrips<'w, 's> =
+    Populated<'w, 's, &'static LayoutStrip, Or<(Changed<Position>, Changed<RepositionMarker>)>>;
+
+/// Windows marked for strip reshuffling, paired with their layout slot and focus state.
+type ReshuffleMarkers<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        Ref<'static, LayoutPosition>,
+        Option<Ref<'static, FocusedMarker>>,
+    ),
+    With<ReshuffleAroundMarker>,
 >;
 
 /// Clamp a window origin to the range where it still touches both viewport
@@ -1119,7 +1138,10 @@ fn binpack_heights(heights: &[i32], min_height: i32, total_height: i32) -> Optio
 
 /// Watches for size changes to windows and if they are changed, signals to the layout strip.
 #[instrument(level = Level::DEBUG, skip_all)]
-fn layout_sizes_changed(changed_sizes: ResizedWindows, workspaces: Query<&mut LayoutStrip>) {
+pub(super) fn layout_sizes_changed(
+    changed_sizes: ResizedWindows,
+    workspaces: Query<&mut LayoutStrip>,
+) {
     let changed_entities = changed_sizes.iter().collect::<EntityHashSet>();
     workspaces.into_iter().for_each(|mut strip| {
         if strip_has_changed_window(&strip, &changed_entities) {
@@ -1159,7 +1181,7 @@ fn stack_item_has_changed_window(item: &StackItem, changed_entities: &EntityHash
 /// Watches for changes to `LayoutStrip` (i.e. a window added or window order changed) and
 /// re-calculates the logical positions of all the windows in the layout strip.
 #[instrument(level = Level::DEBUG, skip_all)]
-fn layout_strip_changed(
+pub(super) fn layout_strip_changed(
     changed_strips: Populated<(&LayoutStrip, &ChildOf), Changed<LayoutStrip>>,
     mut windows: WindowFrames,
     displays: DisplayViewports,
@@ -1199,8 +1221,8 @@ fn layout_strip_changed(
 }
 
 #[instrument(level = Level::DEBUG, skip_all)]
-fn reshuffle_layout_strip(
-    markers: Query<(Entity, &LayoutPosition), With<ReshuffleAroundMarker>>,
+pub(super) fn reshuffle_layout_strip(
+    markers: ReshuffleMarkers,
     strips: StripPlacements,
     manual_offsets: Query<&ManualStripOffset>,
     displays: DisplayViewports,
@@ -1208,110 +1230,130 @@ fn reshuffle_layout_strip(
     config: Res<Config>,
     mut commands: Commands,
 ) {
-    markers.into_iter().for_each(|(entity, layout_position)| {
-        if let Ok(mut cmd) = commands.get_entity(entity) {
-            cmd.try_remove::<ReshuffleAroundMarker>();
-        }
-        let Some((strip, strip_entity, active_strip, child, active_marker, strip_reposition)) =
-            strips.into_iter().find(|strip| strip.0.contains(entity))
-        else {
-            return;
-        };
-
-        if active_marker.is_some_and(|m| m.is_added()) {
-            trace!("reshuffle_layout_strip: skipping newly active workspace {strip_entity}");
-            return;
-        }
-        let Ok((active_display, dock)) = displays.get(child.parent()) else {
-            return;
-        };
-        let display_bounds = active_display.actual_display_bounds(dock, &config);
-        let Some(mut frame) = windows.moving_frame(entity) else {
-            return;
-        };
-
-        let size = frame.size();
-        let visible_width = display_bounds.intersect(frame).width();
-
-        // A deliberate offset (center, snap) outranks the derived one, but only
-        // while the window this reshuffle is about is still fully on screen: a
-        // focus event for a window scrolled past an edge has to bring it back,
-        // and at that point the placement is stale. Project against the strip's
-        // *target* offset — mid-animation the window's own frame is a tick
-        // behind a strip that is still moving.
-        if let Ok(manual) = manual_offsets.get(strip_entity) {
-            // The offset only ever meant "the user placed *this* layout here",
-            // so a strip that has since gained, lost, reordered or resized a
-            // column no longer has a placement to keep.
-            let current = strip_signature(strip, &windows);
-            let strip_target = strip_reposition.map_or(active_strip.0, |reposition| reposition.0);
-            let projected = layout_position.0 + strip_target;
-            if signature_matches(&current, &manual.signature)
-                && clamp_origin_to_viewport(projected, size, display_bounds) == projected
-            {
-                trace!("reshuffle_layout_strip: keeping manual offset on {strip_entity}");
+    markers
+        .into_iter()
+        .for_each(|(entity, layout_position, focused_marker)| {
+            if let Ok(mut cmd) = commands.get_entity(entity) {
+                cmd.try_remove::<ReshuffleAroundMarker>();
+            }
+            let Some((
+                strip,
+                strip_entity,
+                active_strip,
+                child,
+                active_marker,
+                strip_reposition,
+                has_previous_position,
+            )) = strips.into_iter().find(|strip| strip.0.contains(entity))
+            else {
                 return;
-            }
-            trace!("reshuffle_layout_strip: manual offset on {strip_entity} is stale");
-            if let Ok(mut cmd) = commands.get_entity(strip_entity) {
-                cmd.try_remove::<ManualStripOffset>();
-            }
-        }
-
-        // Expose the window by clamping it into the viewport.
-        frame.min = clamp_origin_to_viewport(frame.min, size, display_bounds);
-        frame.max = frame.min + size;
-
-        let mut strip_position = (frame.min - layout_position.0).with_y(display_bounds.min.y);
-
-        // Enforce the edge invariant when auto-center is off: the leftmost
-        // window must touch the left edge and the rightmost the right edge
-        // if more than 1 windows in workspace.
-        if !config.auto_center()
-            && !config.continuous_swipe()
-            && let Some(total_strip_width) = strip
-                .last()
-                .ok()
-                .and_then(|column| column.top())
-                .and_then(|last| {
-                    windows
-                        .layout_position(last)
-                        .map(|position| position.0.x)
-                        .zip(windows.moving_frame(last).map(|frame| frame.width()))
-                })
-                .map(|(last_x, last_width)| last_x + last_width)
-        {
-            strip_position.x = if display_bounds.width() < total_strip_width {
-                strip_position.x.clamp(
-                    display_bounds.max.x - total_strip_width,
-                    display_bounds.min.x,
-                )
-            } else {
-                // Strip fits entirely: pin the leftmost window to the left edge.
-                display_bounds.min.x
             };
-        }
 
-        // Check how much of the window is hidden. Slivers don't count as
-        // meaningfully visible, so subtract sliver_width from the visible
-        // portion. If the hidden fraction is within the allowed ratio, skip.
-        let hidden_ratio = config.window_hidden_ratio();
-        if hidden_ratio > 0.0 {
-            let meaningful = (visible_width - config.sliver_width()).max(0);
-            let visible_fraction = f64::from(meaningful) / f64::from(frame.width().max(1));
-            let hidden_fraction = 1.0 - visible_fraction;
-
-            // Do not move the window if the hidden fraction is lower than threshold
-            // or if the layout strip movement is shorter than the hidden width.
-            let strip_movement = (active_strip.x - strip_position.x).abs();
-            if hidden_fraction <= hidden_ratio && frame.width() - visible_width >= strip_movement {
+            if has_previous_position && active_marker.is_some_and(|m| m.is_added()) {
+                trace!("reshuffle_layout_strip: skipping newly active workspace {strip_entity}");
                 return;
             }
-        }
+            let Ok((active_display, dock)) = displays.get(child.parent()) else {
+                return;
+            };
+            let display_bounds = active_display.actual_display_bounds(dock, &config);
+            let Some(mut frame) = windows.moving_frame(entity) else {
+                return;
+            };
 
-        trace!("reshuffle_layout_strip: triggered for entity {entity}, offset {strip_position}");
-        commands.reposition_entity(strip_entity, strip_position);
-    });
+            let size = frame.size();
+            let strip_target = strip_reposition.map_or(active_strip.0, |reposition| reposition.0);
+            if !config.auto_center()
+                && layout_position.is_changed()
+                && focused_marker.is_some_and(|f| f.is_added())
+            {
+                frame.min = layout_position.0 + strip_target;
+                frame.max = frame.min + size;
+            }
+            let visible_width = display_bounds.intersect(frame).width();
+
+            // A deliberate offset (center, snap) outranks the derived one, but only
+            // while the window this reshuffle is about is still fully on screen: a
+            // focus event for a window scrolled past an edge has to bring it back,
+            // and at that point the placement is stale. Project against the strip's
+            // *target* offset — mid-animation the window's own frame is a tick
+            // behind a strip that is still moving.
+            if let Ok(manual) = manual_offsets.get(strip_entity) {
+                // The offset only ever meant "the user placed *this* layout here",
+                // so a strip that has since gained, lost, reordered or resized a
+                // column no longer has a placement to keep.
+                let current = strip_signature(strip, &windows);
+                let projected = layout_position.0 + strip_target;
+                if signature_matches(&current, &manual.signature)
+                    && clamp_origin_to_viewport(projected, size, display_bounds) == projected
+                {
+                    trace!("reshuffle_layout_strip: keeping manual offset on {strip_entity}");
+                    return;
+                }
+                trace!("reshuffle_layout_strip: manual offset on {strip_entity} is stale");
+                if let Ok(mut cmd) = commands.get_entity(strip_entity) {
+                    cmd.try_remove::<ManualStripOffset>();
+                }
+            }
+
+            // Expose the window by clamping it into the viewport.
+            frame.min = clamp_origin_to_viewport(frame.min, size, display_bounds);
+            frame.max = frame.min + size;
+
+            let mut strip_position = (frame.min - layout_position.0).with_y(display_bounds.min.y);
+
+            // Enforce the edge invariant when auto-center is off: the leftmost
+            // window must touch the left edge and the rightmost the right edge
+            // if more than 1 windows in workspace.
+            if !config.auto_center()
+                && !config.continuous_swipe()
+                && let Some(total_strip_width) = strip
+                    .last()
+                    .ok()
+                    .and_then(|column| column.top())
+                    .and_then(|last| {
+                        windows
+                            .layout_position(last)
+                            .map(|position| position.0.x)
+                            .zip(windows.moving_frame(last).map(|frame| frame.width()))
+                    })
+                    .map(|(last_x, last_width)| last_x + last_width)
+            {
+                strip_position.x = if display_bounds.width() < total_strip_width {
+                    strip_position.x.clamp(
+                        display_bounds.max.x - total_strip_width,
+                        display_bounds.min.x,
+                    )
+                } else {
+                    // Strip fits entirely: pin the leftmost window to the left edge.
+                    display_bounds.min.x
+                };
+            }
+
+            // Check how much of the window is hidden. Slivers don't count as
+            // meaningfully visible, so subtract sliver_width from the visible
+            // portion. If the hidden fraction is within the allowed ratio, skip.
+            let hidden_ratio = config.window_hidden_ratio();
+            if hidden_ratio > 0.0 {
+                let meaningful = (visible_width - config.sliver_width()).max(0);
+                let visible_fraction = f64::from(meaningful) / f64::from(frame.width().max(1));
+                let hidden_fraction = 1.0 - visible_fraction;
+
+                // Do not move the window if the hidden fraction is lower than threshold
+                // or if the layout strip movement is shorter than the hidden width.
+                let strip_movement = (active_strip.x - strip_position.x).abs();
+                if hidden_fraction <= hidden_ratio
+                    && frame.width() - visible_width >= strip_movement
+                {
+                    return;
+                }
+            }
+
+            trace!(
+                "reshuffle_layout_strip: triggered for entity {entity}, offset {strip_position}"
+            );
+            commands.reposition_entity(strip_entity, strip_position);
+        });
 }
 
 /// Scrolls the strip the minimum amount needed to keep `EnsureVisibleMarker`
@@ -1348,13 +1390,21 @@ fn ensure_visible_in_strip(
             .into_iter()
             .find(|s| s.0.contains(entity))
             .map(
-                |(_, strip_entity, strip_position, child, active_marker, strip_reposition)| {
+                |(
+                    _,
+                    strip_entity,
+                    strip_position,
+                    child,
+                    active_marker,
+                    strip_reposition,
+                    has_previous_position,
+                )| {
                     let target = strip_reposition.map_or(strip_position.0, |r| r.0);
                     (
                         strip_entity,
                         child.parent(),
                         target,
-                        active_marker.is_some_and(|m| m.is_added()),
+                        has_previous_position && active_marker.is_some_and(|m| m.is_added()),
                     )
                 },
             )
@@ -1412,11 +1462,11 @@ fn ensure_visible_in_strip(
     }
 }
 
-/// Reacts to changes in the position of the `LayoutStrip` to Display, and if changed,
+/// Reacts to changes in the position or target offset of the `LayoutStrip`, and
 /// marks all the windows in the strip as requiring re-positioning.
 #[instrument(level = Level::DEBUG, skip_all)]
 fn position_layout_strips(
-    moved_strips: Populated<&LayoutStrip, Changed<Position>>,
+    moved_strips: MovedStrips,
     mut windows: Query<&mut LayoutPosition, (With<Window>, Without<LayoutStrip>)>,
 ) {
     for strip in moved_strips {
@@ -1569,12 +1619,15 @@ fn position_layout_windows(
     let offscreen_sliver_width = config.sliver_width();
     let (_, pad_right, _, pad_left) = config.edge_padding();
     let mut strip_contexts = EntityHashMap::default();
-    for (strip_entity, layout_strip, Position(strip_position), swiping, child_of) in &workspaces {
+    for (strip_entity, layout_strip, Position(strip_position), reposition, swiping, child_of) in
+        &workspaces
+    {
         let snap_settling = snap_guards.iter().any(|guard| guard.strip == strip_entity);
+        let strip_target = reposition.map_or(*strip_position, |target| target.0);
         insert_strip_window_contexts(
             &mut strip_contexts,
             layout_strip,
-            *strip_position,
+            strip_target,
             swiping,
             child_of.parent(),
             snap_settling,

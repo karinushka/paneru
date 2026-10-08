@@ -3398,3 +3398,73 @@ fn test_virtual_move_number_recreates_missing_baseline_row() {
         "the moved window should land on a single recreated row 0"
     );
 }
+
+/// Issuing a keyboard focus command to an off-edge window must compute the
+/// strip target, project all window targets against that strip target, and
+/// advance their positions on the very first `app.update()` frame (Frame 0),
+/// rather than lagging by extra frames.
+#[test]
+fn test_focus_command_starts_animation_on_first_frame() {
+    let config: Config = (
+        MainOptions {
+            animation_speed: Some(10.0),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+    let mut harness = TestHarness::new().with_config(config).with_windows(3);
+    harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+
+    let initial_strip_x = {
+        let world = harness.world();
+        world
+            .query_filtered::<&Position, With<ActiveWorkspaceMarker>>()
+            .single(world)
+            .expect("active strip")
+            .x
+    };
+    let initial_win0_x = {
+        let world = harness.world();
+        let entity = find_window_entity(0, world);
+        world.get::<Position>(entity).expect("window 0 pos").x
+    };
+
+    // Issue Focus(Last) to move focus from window 0 (at index 0) to window 2
+    // (at index 2, x=800..1200, partially offscreen right), scrolling the strip on Frame 0.
+    harness
+        .app
+        .world_mut()
+        .write_message::<Event>(Event::Command {
+            command: Command::Window(Operation::Focus(Direction::Last)),
+        });
+
+    // Run a single frame (Frame 0).
+    harness.app.update();
+
+    let world = harness.world();
+    let (strip_pos, strip_reposition) = world
+        .query_filtered::<(&Position, Option<&RepositionMarker>), With<ActiveWorkspaceMarker>>()
+        .single(world)
+        .expect("active strip");
+    assert!(
+        strip_reposition.is_some(),
+        "active strip should have RepositionMarker on Frame 0"
+    );
+    assert_ne!(
+        strip_pos.x, initial_strip_x,
+        "active strip should already have advanced on Frame 0"
+    );
+
+    let win0_entity = find_window_entity(0, world);
+    let win0_pos = world.get::<Position>(win0_entity).expect("window 0 pos");
+    let win0_reposition = world.get::<RepositionMarker>(win0_entity);
+    assert!(
+        win0_reposition.is_some(),
+        "window 0 should have RepositionMarker on Frame 0"
+    );
+    assert_ne!(
+        win0_pos.x, initial_win0_x,
+        "window 0 should already have advanced on Frame 0"
+    );
+}

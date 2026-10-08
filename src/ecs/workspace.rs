@@ -89,7 +89,8 @@ impl Plugin for WorkspaceEventsPlugin {
 
         app.add_systems(
             PreUpdate,
-            (switch_virtual_workspace_bind, move_virtual_workspace_bind),
+            (switch_virtual_workspace_bind, move_virtual_workspace_bind)
+                .after(crate::ecs::systems::pump_events),
         );
         app.add_systems(
             PreUpdate,
@@ -105,7 +106,7 @@ impl Plugin for WorkspaceEventsPlugin {
                 workspace_change_handler,
                 workspace_created_handler,
                 show_active_workspace,
-                handle_virtual_window_moves,
+                handle_virtual_window_moves.before(super::layout::layout_sizes_changed),
                 detect_moved_windows.run_if(not(resource_exists::<Initializing>)),
             ),
         );

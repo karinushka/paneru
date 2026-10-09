@@ -250,6 +250,13 @@ impl MockState {
         self.inner.force_read().active_display_id
     }
 
+    pub(crate) fn activate_display(&self, id: CGDirectDisplayID) {
+        let mut inner = self.inner.force_write();
+        assert!(inner.displays.contains_key(&id), "finding display");
+        inner.active_display_id = id;
+        inner.event_queue.push_back(Event::DisplayChanged);
+    }
+
     pub(crate) fn activate_workspace(
         &self,
         display_id: u32,

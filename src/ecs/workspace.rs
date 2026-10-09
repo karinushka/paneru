@@ -12,7 +12,7 @@ use bevy::ecs::schedule::{IntoScheduleConfigs as _, SystemCondition as _};
 use bevy::ecs::system::{Commands, Local, ParamSet, Populated, Query, Res, ResMut, Single};
 use bevy::ecs::world::World;
 use bevy::time::common_conditions::on_timer;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tracing::{Level, debug, error, instrument, warn};
 
@@ -84,6 +84,19 @@ type RenumberStrips<'w, 's> = ParamSet<
     ),
 >;
 
+/// Workspace identity, display ownership, and popup-specific activation state.
+type PopupStrips<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static LayoutStrip,
+        &'static ChildOf,
+        Has<SelectedVirtualMarker>,
+        Has<RestoredActivation>,
+    ),
+>;
+
 impl Plugin for WorkspaceEventsPlugin {
     fn build(&self, app: &mut App) {
         const DISPLAY_CHANGE_CHECK_FREQ: Duration = Duration::from_secs(1);
@@ -93,6 +106,8 @@ impl Plugin for WorkspaceEventsPlugin {
         };
         let workspace_activated =
             |activated: Query<(), Added<ActiveWorkspaceMarker>>| !activated.is_empty();
+        let display_activated =
+            |activated: Query<(), Added<ActiveDisplayMarker>>| !activated.is_empty();
 
         app.add_systems(
             PreUpdate,
@@ -122,7 +137,11 @@ impl Plugin for WorkspaceEventsPlugin {
             (
                 workspace_destroyed_handler,
                 flash_workspace_on_activation
-                    .run_if(run_once.or_else(workspace_activated))
+                    .run_if(
+                        run_once
+                            .or_else(workspace_activated)
+                            .or_else(display_activated),
+                    )
                     .before(crate::ecs::systems::update_flash_messages),
             ),
         );
@@ -647,13 +666,50 @@ fn cleanup_active_workspace_marker(
 }
 
 fn flash_workspace_on_activation(
-    active: Single<(Entity, &LayoutStrip, Has<RestoredActivation>), With<ActiveWorkspaceMarker>>,
+    active_display: ActiveDisplay,
+    displays: Query<(Entity, &Display)>,
+    strips: PopupStrips,
+    window_manager: Res<WindowManager>,
     config: Res<Config>,
-    mut previous: Local<Option<Entity>>,
+    mut previous_by_display: Local<Option<HashMap<Entity, Entity>>>,
     mut commands: Commands,
 ) {
-    let (entity, strip, restored) = *active;
-    let switched = previous.replace(entity).is_some_and(|old| old != entity);
+    let previous_by_display = previous_by_display.get_or_insert_with(|| {
+        let mut initial = HashMap::new();
+        for (display_entity, display) in &displays {
+            let Ok(space_id) = window_manager.active_display_space(display.id()) else {
+                continue;
+            };
+            let selected = strips
+                .iter()
+                .filter(|(_, strip, parent, _, _)| {
+                    parent.parent() == display_entity && strip.id() == space_id
+                })
+                .min_by_key(|(_, strip, _, selected, _)| (!*selected, strip.virtual_index));
+            if let Some((strip_entity, _, _, _, _)) = selected {
+                initial.insert(display_entity, strip_entity);
+            }
+        }
+        initial
+    });
+
+    let entity = active_display.active_strip_entity();
+    let strip = active_display.active_strip();
+    let Ok((_, _, display, _, restored)) = strips.get(entity) else {
+        return;
+    };
+    if display.parent() != active_display.entity() {
+        // Focus can activate the destination strip before the OS notifies us
+        // which display is active. Re-run when ActiveDisplayMarker moves so the
+        // message is never rendered at the old display's coordinates.
+        return;
+    }
+
+    // Compare only with the strip last active on this display. A focus move
+    // between displays is not a workspace switch on either display.
+    let switched = previous_by_display
+        .insert(display.parent(), entity)
+        .is_some_and(|old| old != entity);
     if restored {
         if let Ok(mut entity_commands) = commands.get_entity(entity) {
             entity_commands.try_remove::<RestoredActivation>();

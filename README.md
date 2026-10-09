@@ -410,6 +410,11 @@ The system is decoupled into three primary layers:
 - **`main` branch**: Contains the stable, released code.
 - **`testing` branch**: Used for experimental features and architectural refactors. This branch is volatile and may be force-pushed.
 
+## Built on Paneru
+
+- [ChainYourMac]: a macOS app built on a fork of Paneru, with a settings GUI
+  and guided setup.
+
 ## Tile Scrollably Elsewhere
 
 Here are some other projects which implement a similar workflow:
@@ -431,3 +436,4 @@ Here are some other projects which implement a similar workflow:
 [hyprslidr]: https://gitlab.com/magus/hyprslidr
 [PaperWM.spoon]: https://github.com/mogenson/PaperWM.spoon
 [Nehir]: https://github.com/Guria/Nehir
+[ChainYourMac]: https://chainyourmac.com

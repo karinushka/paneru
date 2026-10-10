@@ -302,15 +302,21 @@ fn workspace_change_handler(
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn detect_moved_windows(
     activated_workspace: Single<Entity, Added<ActiveWorkspaceMarker>>,
-    mut workspaces: Query<(&mut LayoutStrip, Entity, Has<NativeFullscreenMarker>)>,
+    mut workspaces: Query<(
+        &mut LayoutStrip,
+        Entity,
+        Has<NativeFullscreenMarker>,
+        Option<&ChildOf>,
+    )>,
     apps: Query<&mut Application>,
     window_manager: Res<WindowManager>,
+    reconcile_state: Option<Res<crate::ecs::display::DisplayReconcileState>>,
     mut ignored_windows: Local<HashSet<WinID>>,
     mut ctx: WindowCtx,
 ) {
-    let Ok(workspace_id) = workspaces
+    let Ok((workspace_id, target_display)) = workspaces
         .get(*activated_workspace)
-        .map(|strip| strip.0.id())
+        .map(|(strip, _, _, child)| (strip.id(), child.map(ChildOf::parent)))
     else {
         return;
     };
@@ -370,22 +376,47 @@ fn detect_moved_windows(
         }
     }
 
+    if reconcile_state.is_some_and(|state| state.is_settling()) {
+        return;
+    }
+
+    let moved_set: bevy::ecs::entity::EntityHashSet = moved_windows
+        .iter()
+        .copied()
+        .filter(|&entity| {
+            !workspaces
+                .iter()
+                .any(|(strip, _, fullscreen, _)| fullscreen && strip.contains(entity))
+        })
+        .collect();
+    if moved_set.is_empty() {
+        return;
+    }
+
+    if is_batch_workspace_move(workspace_id, &moved_set, &workspaces)
+        && let Some(display_entity) = target_display
+    {
+        ctx.commands.queue(move |world: &mut World| {
+            crate::ecs::display::migrate_moved_windows_for_space(
+                world,
+                display_entity,
+                workspace_id,
+            );
+        });
+        return;
+    }
+
     for entity in moved_windows {
-        if workspaces
-            .iter()
-            .any(|(strip, _, fullscreen)| fullscreen && strip.contains(entity))
-        {
-            // Do not relocate fullscreen windows, this will happen
-            // during the destructino of their workspace.
+        if !moved_set.contains(&entity) {
             continue;
         }
 
         debug!("Window {entity} moved to workspace {workspace_id}.");
         let moving_entities = workspaces
             .iter()
-            .find_map(|(strip, _, _)| strip.tab_group(entity))
+            .find_map(|(strip, _, _, _)| strip.tab_group(entity))
             .unwrap_or_else(|| vec![entity]);
-        for (mut strip, strip_entity, _) in &mut workspaces {
+        for (mut strip, strip_entity, _, _) in &mut workspaces {
             if strip_entity == *activated_workspace {
                 strip.append_tab_group(&moving_entities);
             } else {
@@ -395,6 +426,38 @@ fn detect_moved_windows(
             }
         }
     }
+}
+
+fn is_batch_workspace_move(
+    workspace_id: WorkspaceId,
+    moved_set: &bevy::ecs::entity::EntityHashSet,
+    workspaces: &Query<(
+        &mut LayoutStrip,
+        Entity,
+        Has<NativeFullscreenMarker>,
+        Option<&ChildOf>,
+    )>,
+) -> bool {
+    workspaces.iter().any(|(strip, _, fullscreen, child)| {
+        if fullscreen || strip.id() == workspace_id {
+            return false;
+        }
+        let matching: Vec<Entity> = strip
+            .all_windows()
+            .into_iter()
+            .filter(|entity| moved_set.contains(entity))
+            .collect();
+        if matching.is_empty() {
+            return false;
+        }
+        if child.is_none() {
+            return true;
+        }
+        let first_group = strip
+            .tab_group(matching[0])
+            .unwrap_or_else(|| vec![matching[0]]);
+        matching.iter().any(|entity| !first_group.contains(entity))
+    })
 }
 
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]

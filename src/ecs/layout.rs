@@ -488,6 +488,56 @@ impl LayoutStrip {
 
     pub(crate) fn append_strip(&mut self, other: &mut Self) {
         self.columns.append(&mut other.columns);
+        self.tabbed_stacks.extend(other.tabbed_stacks.drain());
+    }
+
+    /// Extracts all windows in `moved` from `self` and appends them to `target`,
+    /// preserving column, stack, and tab structure for any column whose members
+    /// all move together.
+    pub(crate) fn extract_windows_into(&mut self, moved: &EntityHashSet, target: &mut Self) {
+        let mut index = 0;
+        while index < self.columns.len() {
+            let all_moving = self.columns[index]
+                .window_iter()
+                .all(|entity| moved.contains(&entity));
+            if all_moving {
+                if let Some(column) = self.columns.remove(index) {
+                    for entity in column.window_iter() {
+                        if self.tabbed_stacks.remove(&entity) {
+                            target.tabbed_stacks.insert(entity);
+                        }
+                    }
+                    target.columns.push_back(column);
+                }
+                continue;
+            }
+
+            let moving_in_col = self.columns[index]
+                .window_iter()
+                .filter(|entity| moved.contains(entity))
+                .collect::<Vec<_>>();
+            if moving_in_col.is_empty() {
+                index += 1;
+                continue;
+            }
+
+            for entity in moving_in_col {
+                if !self.contains(entity) {
+                    continue;
+                }
+                let group = self
+                    .tab_group(entity)
+                    .unwrap_or_else(|| vec![entity])
+                    .into_iter()
+                    .filter(|member| moved.contains(member))
+                    .collect::<Vec<_>>();
+                for member in &group {
+                    self.remove(*member);
+                }
+                target.append_tab_group(&group);
+            }
+            index += 1;
+        }
     }
 
     pub fn append_tab_group(&mut self, entities: &[Entity]) {

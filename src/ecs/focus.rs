@@ -24,6 +24,7 @@ use crate::ecs::workspace::RestoreFocusMarker;
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, Position, RaiseWindow, RepositionMarker, ReshuffleAroundMarker,
     ResizeMarker, Scrolling, SendMessageTrigger, SpawnCommandsExt, StrayFocusEvent,
+    VerifyWindowSize,
 };
 use crate::events::Event;
 use crate::manager::{Application, Display, Window, WindowManager};
@@ -112,17 +113,17 @@ impl Plugin for FocusEventsPlugin {
             Update,
             (
                 detect_focus_rejection.before(super::systems::timeout_ticker),
-                fix_window_size_on_focus,
+                fix_window_size_on_focus.before(super::layout::layout_sizes_changed),
+                autocenter_window_on_focus
+                    .after(super::layout::layout_strip_changed)
+                    .before(super::layout::reshuffle_layout_strip),
             ),
         );
         app.add_systems(
             PostUpdate,
             (
-                autocenter_window_on_focus.after(super::systems::animate_resize_entities),
-                clear_pending_focus_layout.after(autocenter_window_on_focus),
-                // Bevy must apply the deferred centering commands before
-                // the pointer reads the window's destination.
-                mouse_follows_focus.after(autocenter_window_on_focus),
+                clear_pending_focus_layout,
+                mouse_follows_focus.after(super::systems::animate_resize_entities),
                 recover_lost_focus.run_if(on_timer(Duration::from_millis(
                     REFRESH_WINDOW_CHECK_FREQ_MS,
                 ))),
@@ -232,11 +233,19 @@ fn shares_a_tab_group(
 }
 
 #[instrument(level = Level::DEBUG, skip_all, fields(focused))]
-fn fix_window_size_on_focus(
-    focused: Single<Entity, Added<FocusedMarker>>,
+pub(super) fn fix_window_size_on_focus(
+    focused: Single<(Entity, Has<VerifyWindowSize>), Added<FocusedMarker>>,
     mut windows: Query<(&mut Window, &mut Bounds, Has<ResizeMarker>)>,
+    mut commands: Commands,
 ) {
-    if let Ok((mut window, mut bounds, resizing)) = windows.get_mut(*focused)
+    let (entity, verify_size) = *focused;
+    if !verify_size {
+        return;
+    }
+    if let Ok(mut entity_commands) = commands.get_entity(entity) {
+        entity_commands.try_remove::<VerifyWindowSize>();
+    }
+    if let Ok((mut window, mut bounds, resizing)) = windows.get_mut(entity)
         && !resizing
         && let Ok(frame) = window.update_frame()
         && frame.size() != bounds.0
@@ -365,9 +374,10 @@ fn autocenter_window_on_focus(
     }
     if ctx.config.auto_center()
         && let Some((_, _, None)) = ctx.windows.get_managed(entity)
-        && let Some(size) = ctx.windows.size(entity)
-        && let Some(mut origin) = ctx.windows.origin(entity)
+        && let Some(frame) = ctx.windows.moving_frame(entity)
     {
+        let size = frame.size();
+        let mut origin = frame.min;
         let center = active_display.bounds().center();
         origin.x = center.x - size.x / 2;
         ctx.commands.reposition_entity(entity, origin);

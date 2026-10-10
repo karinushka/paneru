@@ -193,7 +193,10 @@ pub(super) fn register_query_commands(app: &mut App) {
 
     app.init_resource::<StateSubscribers>();
     app.init_resource::<StateBroadcastCache>();
-    app.add_systems(PreUpdate, (state_subscribe_handler, state_query_handler));
+    app.add_systems(
+        PreUpdate,
+        (state_subscribe_handler, state_query_handler).after(crate::ecs::systems::pump_events),
+    );
     app.add_systems(
         PostUpdate,
         state_event_broadcast_handler.run_if(active_subscribers),

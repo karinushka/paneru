@@ -208,7 +208,9 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         Update,
         (
             triggers::front_switched_trigger,
-            triggers::window_focused_trigger,
+            triggers::window_focused_trigger
+                .after(triggers::apply_window_positions)
+                .before(focus::fix_window_size_on_focus),
             triggers::mission_control_trigger,
             triggers::application_event_trigger,
             triggers::dispatch_application_messages,
@@ -469,6 +471,11 @@ impl VerifyWindowPosition {
         self.remaining == 0
     }
 }
+
+/// Marker attached to windows after a display change so [`focus::fix_window_size_on_focus`]
+/// re-reads their OS frame once when focused instead of polling AX on every focus change.
+#[derive(Component)]
+pub struct VerifyWindowSize;
 
 #[derive(Deref, DerefMut, Resource)]
 pub struct LowPowerMode(pub bool);

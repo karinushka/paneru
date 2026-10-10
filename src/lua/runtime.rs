@@ -1133,6 +1133,7 @@ mod tests {
                 presets_len = #paneru.config.options.preset_column_widths
                 pad_top = paneru.config.padding.top
                 ws_count = paneru.config.default_workspaces
+                menu_enabled = paneru.config.decorations.menu.enabled
                 ",
             )
             .expect("script should load");
@@ -1143,6 +1144,7 @@ mod tests {
         assert_eq!(globals.get::<usize>("presets_len").unwrap(), 8);
         assert_eq!(globals.get::<i32>("pad_top").unwrap(), 0);
         assert_eq!(globals.get::<u32>("ws_count").unwrap(), 1);
+        assert!(globals.get::<bool>("menu_enabled").unwrap());
     }
 
     #[test]
@@ -1159,6 +1161,7 @@ mod tests {
                     custom_tag = "user_data",
                   },
                   padding = { top = 12 },
+                  decorations = { menu = { enabled = false } },
                 }
 
                 ffm = paneru.config.options.focus_follows_mouse
@@ -1168,6 +1171,7 @@ mod tests {
                 pad_top = paneru.config.padding.top
                 pad_bottom = paneru.config.padding.bottom
                 ws_count = paneru.config.default_workspaces
+                menu_enabled = paneru.config.decorations.menu.enabled
 
                 paneru.bind("alt - x", function()
                   if not paneru.config.options.focus_follows_mouse and paneru.config.padding.top == 12 then
@@ -1186,6 +1190,8 @@ mod tests {
         assert_eq!(globals.get::<i32>("pad_top").unwrap(), 12);
         assert_eq!(globals.get::<i32>("pad_bottom").unwrap(), 0);
         assert_eq!(globals.get::<u32>("ws_count").unwrap(), 4);
+        assert!(!globals.get::<bool>("menu_enabled").unwrap());
+        assert!(!runtime.built_config().unwrap().menubar_enabled());
 
         let extract = || Ok(Arc::new(test_state()));
         world.drive(&extract, runtime.dispatch_bind(1));

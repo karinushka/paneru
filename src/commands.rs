@@ -64,7 +64,9 @@ pub fn register_commands(app: &mut bevy::app::App) {
     app.init_resource::<crate::menubar::MenuBarVisibility>()
         .add_systems(
             PreUpdate,
-            crate::menubar::menu_bar_command_handler.run_if(on_message::<Event>),
+            crate::menubar::menu_bar_command_handler
+                .run_if(on_message::<Event>)
+                .after(crate::ecs::systems::pump_events),
         )
         .add_systems(
             PostUpdate,

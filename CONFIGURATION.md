@@ -239,6 +239,8 @@ https://github.com/karinushka/paneru/blob/3790b01f8d65df5d9000142db7cf25f9270dcc
 | `window_raise_floating` | Make the floating windows layer visible on the current workspace. |
 | `window_togglefloatlayer` | Selectively move the floating windows in front or behind of the workspace windows. |
 | `window_copyrule` | Copy a window rule template for the focused window to the clipboard. |
+| `showmenu` | Show the Paneru menu bar item and remember the choice across restarts. |
+| `hidemenu` | Hide the entire Paneru menu bar item and remember the choice across restarts. |
 | `quit` | Exit Paneru. |
 | `restart` | Restart the Paneru service (`paneru restart`). |
 

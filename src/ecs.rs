@@ -5,7 +5,6 @@ use bevy::MinimalPlugins;
 use bevy::app::App as BevyApp;
 use bevy::app::{First, Last, PostUpdate, PreUpdate, Startup};
 use bevy::ecs::hierarchy::ChildOf;
-use bevy::ecs::lifecycle::RemovedComponents;
 use bevy::ecs::query::{Added, Changed, With};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::SystemCondition;
@@ -36,7 +35,6 @@ use crate::lua;
 use crate::manager::{
     Application, Origin, ProcessApi, Size, Window, WindowManager, WindowManagerApi, WindowManagerOS,
 };
-use crate::menubar::MenuBarManager;
 use crate::overlay::{FlashMessageManager, OverlayManager};
 use crate::platform::{Modifiers, PlatformCallbacks, WinID, WorkspaceId};
 
@@ -97,13 +95,6 @@ pub fn register_systems(app: &mut bevy::app::App) {
                 || !focus_gained.is_empty()
                 || !workspace_changed.is_empty()
                 || !focused_moved.is_empty()
-        };
-    // The menu bar additionally shows how many virtual workspaces exist, so it
-    // has to redraw when one is created or reaped, neither of which touches the
-    // active strip.
-    let strip_count_changed =
-        |added: Query<(), Added<LayoutStrip>>, mut removed: RemovedComponents<LayoutStrip>| {
-            !added.is_empty() || removed.read().next().is_some()
         };
     let native_tabs_enabled =
         |config: Option<Res<Config>>| config.is_none_or(|config| config.native_tabs_enabled());
@@ -202,8 +193,8 @@ pub fn register_systems(app: &mut bevy::app::App) {
             )
                 .chain(),
             crate::menubar::update_menu_bar.run_if(
-                vw_indicator_dirty
-                    .or_eager(strip_count_changed)
+                crate::menubar::menu_bar_dirty
+                    .or_eager(crate::menubar::menu_viewport_dirty)
                     .or_eager(resource_changed::<Config>)
                     .or_eager(resource_changed::<crate::menubar::MenuBarVisibility>),
             ),
@@ -771,20 +762,17 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
 
     app.set_runner(autorelease_runner);
 
+    crate::menubar::load_menu_bar_preference(&mut app);
     let menu_events = sender.clone();
     let mut platform_callbacks = PlatformCallbacks::new(sender);
-    platform_callbacks.setup_handlers()?;
+    let initial_config = platform_callbacks.setup_handlers()?;
     let mtm = platform_callbacks.main_thread_marker;
     let overlay_manager = OverlayManager::new(mtm);
     let flash_message_manager = FlashMessageManager::new(mtm);
-    let menu_bar_manager = MenuBarManager::new(mtm, menu_events);
     app.insert_non_send(platform_callbacks)
         .insert_non_send(overlay_manager)
         .insert_non_send(flash_message_manager)
-        .insert_non_send(menu_bar_manager)
         .insert_non_send(receiver);
-
-    crate::menubar::load_menu_bar_preference(&mut app);
 
     // `CONFIGURATION_FILE` is `None` exactly when an `init.lua` took the TOML
     // file out of play, so copied rules have to be written in Lua instead.
@@ -837,6 +825,8 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         app.insert_resource(lua::LuaScriptPath(path));
         app.add_plugins(lua::LuaPlugin {});
     }
+
+    crate::menubar::setup_menu_bar(&mut app, mtm, menu_events, &initial_config);
 
     Ok(app)
 }

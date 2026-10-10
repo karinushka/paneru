@@ -17,7 +17,7 @@ use crate::ecs::params::{WindowCtx, Windows};
 use crate::ecs::state::{
     PaneruState, SavedColumn, SavedStackItem, SavedStrip, SavedWindow, SavedWorkspace,
 };
-use crate::ecs::workspace::PreviousStripPosition;
+use crate::ecs::workspace::{PreviousStripPosition, RestoredActivation};
 use crate::ecs::{
     ActiveDisplayMarker, ActiveWorkspaceMarker, RestoreWindowState, SpawnCommandsExt, Unmanaged,
 };
@@ -554,12 +554,13 @@ pub(super) fn restore_window_state(
             ctx.commands
                 .spawn_layout_strip(strip, origin, display_entity, is_global_active);
 
-        if !is_global_active {
+        if is_global_active {
+            spawned.insert(RestoredActivation);
+        } else {
             spawned.insert(previous);
         }
         restored_strips += 1;
     }
-
     info!(
         "Session restore applied: matched={}, strips={}, missing={}, ambiguous={}",
         plan.consumed_entities.len(),

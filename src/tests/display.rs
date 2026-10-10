@@ -903,6 +903,146 @@ fn test_center_survives_display_round_trip() {
         .run(commands);
 }
 
+#[test]
+fn focusing_another_display_without_switching_its_workspace_does_not_flash() {
+    let mut harness = TestHarness::new()
+        .with_display(
+            EXT_DISPLAY_ID,
+            IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+            vec![EXT_WORKSPACE_ID],
+        )
+        .with_windows(1)
+        .with_workspace_window(100, EXT_WORKSPACE_ID, |window| {
+            window.workspace_id = EXT_WORKSPACE_ID;
+        });
+    harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+
+    // The focus event can arrive before the active-display notification.
+    harness.mock_state.focus_window(100);
+    harness.advance(Duration::from_millis(60));
+    let world = harness.world();
+    let mut active =
+        world.query_filtered::<&LayoutStrip, With<crate::ecs::ActiveWorkspaceMarker>>();
+    assert_eq!(active.single(world).unwrap().id(), EXT_WORKSPACE_ID);
+    let mut messages = world.query::<&crate::ecs::FlashMessage>();
+    assert!(
+        messages.iter(world).next().is_none(),
+        "focus on another display must not flash on the original display"
+    );
+
+    harness.mock_state.activate_display(EXT_DISPLAY_ID);
+    harness.advance(Duration::from_millis(60));
+    let world = harness.world();
+    let mut messages = world.query::<&crate::ecs::FlashMessage>();
+    assert!(
+        messages.iter(world).next().is_none(),
+        "recognizing the new display must not turn focus into a workspace popup"
+    );
+
+    harness.mock_state.focus_window(0);
+    harness.advance(Duration::from_millis(60));
+    let world = harness.world();
+    let mut messages = world.query::<&crate::ecs::FlashMessage>();
+    assert!(
+        messages.iter(world).next().is_none(),
+        "returning to an unchanged strip must also stay quiet"
+    );
+
+    harness.mock_state.activate_display(TEST_DISPLAY_ID);
+    harness.advance(Duration::from_millis(60));
+    let world = harness.world();
+    let mut messages = world.query::<&crate::ecs::FlashMessage>();
+    assert!(messages.iter(world).next().is_none());
+}
+
+#[test]
+fn focus_south_to_another_display_does_not_flash() {
+    let mut harness = TestHarness::new()
+        .with_display(
+            EXT_DISPLAY_ID,
+            IRect::new(
+                0,
+                TEST_DISPLAY_HEIGHT,
+                EXT_DISPLAY_WIDTH,
+                TEST_DISPLAY_HEIGHT + EXT_DISPLAY_HEIGHT,
+            ),
+            vec![EXT_WORKSPACE_ID],
+        )
+        .with_windows(1)
+        .with_workspace_window(100, EXT_WORKSPACE_ID, |window| {
+            window.workspace_id = EXT_WORKSPACE_ID;
+        });
+    harness.run(vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::South)),
+        },
+    ]);
+
+    let world = harness.world();
+    let mut active =
+        world.query_filtered::<&LayoutStrip, With<crate::ecs::ActiveWorkspaceMarker>>();
+    assert_eq!(active.single(world).unwrap().id(), EXT_WORKSPACE_ID);
+    let mut messages = world.query::<&crate::ecs::FlashMessage>();
+    assert!(
+        messages.iter(world).next().is_none(),
+        "focus_south across displays must not create a workspace popup"
+    );
+}
+
+#[test]
+fn popup_waits_until_the_destination_display_is_active() {
+    let mut harness = TestHarness::new()
+        .with_display(
+            EXT_DISPLAY_ID,
+            IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+            vec![EXT_WORKSPACE_ID],
+        )
+        .with_windows(1)
+        .with_workspace_window(100, EXT_WORKSPACE_ID, |window| {
+            window.workspace_id = EXT_WORKSPACE_ID;
+        });
+    harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+
+    let target = {
+        let world = harness.world();
+        let display = world
+            .query::<(Entity, &Display)>()
+            .iter(world)
+            .find_map(|(entity, display)| (display.id() == EXT_DISPLAY_ID).then_some(entity))
+            .expect("external display");
+        world
+            .spawn((
+                LayoutStrip::new(EXT_WORKSPACE_ID, 1),
+                crate::ecs::Position(Origin::new(0, -EXT_DISPLAY_HEIGHT)),
+                ChildOf(display),
+            ))
+            .id()
+    };
+
+    // Workspace activation arrives while the original display is still marked active.
+    harness
+        .world()
+        .entity_mut(target)
+        .insert(crate::ecs::ActiveWorkspaceMarker);
+    harness.advance(Duration::from_millis(20));
+    let world = harness.world();
+    let mut messages = world.query::<&crate::ecs::FlashMessage>();
+    assert!(
+        messages.iter(world).next().is_none(),
+        "the popup must not render on the old display"
+    );
+
+    harness.mock_state.activate_display(EXT_DISPLAY_ID);
+    harness.advance(Duration::from_millis(60));
+    let world = harness.world();
+    let mut messages = world.query::<&crate::ecs::FlashMessage>();
+    assert!(
+        messages.iter(world).any(|message| message.0 == "2"),
+        "the pending workspace change should flash after display recognition"
+    );
+}
+
 /// An empty row 0 must survive its display going away. Despawning it left the
 /// space renumbered from "2" — the menu bar lists only the rows that exist —
 /// with no switch or reap path that recreates row 0.

@@ -271,7 +271,7 @@ mod tests {
         assert_eq!(decoded.east(1), Some(2));
         // Ops are deliberately not carried: a set off the wire is one nothing
         // has been asked of yet.
-        assert!(decoded.ops().is_empty());
+        assert_eq!(decoded.ops(), []);
     }
 
     #[test]

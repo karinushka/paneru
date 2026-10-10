@@ -490,7 +490,7 @@ fn restore_plan_skips_ambiguous_fallback_match() {
 
     let plan = RestorePlanner::new(&state).plan(&current);
 
-    assert!(plan.strips.is_empty());
+    assert_eq!(plan.strips, []);
     assert!(plan.active_virtual_by_workspace.is_empty());
     assert!(plan.consumed_entities.is_empty());
     assert_eq!(plan.ignored_missing_windows, 0);
@@ -573,9 +573,9 @@ fn test_query_state_contract_exposes_active_virtual_workspace_and_windows() {
     assert_eq!(state.virtual_workspaces[0].windows[0].bundle_id, "test");
     assert!(state.virtual_workspaces[0].windows[0].focused);
     assert_eq!(state.virtual_workspaces[1].number, 2);
-    assert!(state.virtual_workspaces[1].windows.is_empty());
+    assert_eq!(state.virtual_workspaces[1].windows, []);
     assert_eq!(state.virtual_workspaces[2].number, 3);
-    assert!(state.virtual_workspaces[2].windows.is_empty());
+    assert_eq!(state.virtual_workspaces[2].windows, []);
 
     let json = serde_json::to_value(&state).expect("query state should serialize");
     assert_eq!(json["active"]["virtual_workspace_number"], 1);
@@ -810,7 +810,7 @@ fn test_query_state_tracks_float_after_virtual_workspace_is_reaped() {
                 .find(|workspace| workspace.native_workspace_id == TEST_WORKSPACE_ID + 1)
                 .expect("live native workspace");
 
-            assert!(original_workspace.windows.is_empty());
+            assert_eq!(original_workspace.windows, []);
             assert_eq!(live_workspace.windows.len(), 1);
             assert!(live_workspace.windows[0].floating);
         })

@@ -110,6 +110,10 @@ pub enum SubCmd {
     /// Restarts the `paneru` background service.
     Restart,
 
+    /// Shows the Paneru menu bar item and remembers the choice.
+    #[command(name = "showmenu")]
+    ShowMenu,
+
     /// Sends a command via a Unix socket to the running `paneru` daemon.
     SendCmd {
         #[arg(trailing_var_arg = true)]
@@ -237,6 +241,7 @@ fn main() -> Result<()> {
         SubCmd::Start => service()?.start()?,
         SubCmd::Stop => service()?.stop()?,
         SubCmd::Restart => service()?.restart()?,
+        SubCmd::ShowMenu => client::run(ClientCommand::Send(vec!["showmenu".to_string()]))?,
         SubCmd::SendCmd { cmd } => client::run(ClientCommand::Send(cmd))?,
         SubCmd::Query { query } => client::run(ClientCommand::Query(query.kind()))?,
         SubCmd::Subscribe { json: _ } => client::run(ClientCommand::Subscribe)?,

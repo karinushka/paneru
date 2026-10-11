@@ -1,11 +1,12 @@
 use std::time::Duration;
 
-use bevy::app::PreUpdate;
+use bevy::app::{PostUpdate, PreUpdate};
 use bevy::ecs::entity::{Entity, EntityHashSet};
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::{Has, With, Without};
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
+use bevy::ecs::schedule::common_conditions::{on_message, resource_changed};
 use bevy::ecs::system::{Commands, Query, Res, Single};
 use bevy::math::IRect;
 use tracing::{Level, instrument};
@@ -60,6 +61,18 @@ type StripsWithVisibility<'w, 's> = Query<
 >;
 
 pub fn register_commands(app: &mut bevy::app::App) {
+    app.init_resource::<crate::menubar::MenuBarVisibility>()
+        .add_systems(
+            PreUpdate,
+            crate::menubar::menu_bar_command_handler
+                .run_if(on_message::<Event>)
+                .after(crate::ecs::systems::pump_events),
+        )
+        .add_systems(
+            PostUpdate,
+            crate::menubar::save_menu_bar_preference
+                .run_if(resource_changed::<crate::menubar::MenuBarVisibility>),
+        );
     // Registered here (not with the Lua systems) so it's exercised by the mock
     // harness without a running interpreter.
     #[cfg(feature = "lua")]

@@ -1,5 +1,9 @@
-use bevy::ecs::query::{Has, With};
-use bevy::ecs::system::{NonSendMut, Query, Res};
+use bevy::ecs::change_detection::{DetectChanges, DetectChangesMut};
+use bevy::ecs::lifecycle::RemovedComponents;
+use bevy::ecs::message::MessageReader;
+use bevy::ecs::query::{Added, Changed, Has, Or, With};
+use bevy::ecs::resource::Resource;
+use bevy::ecs::system::{NonSendMut, Query, Res, ResMut};
 use objc2::rc::Retained;
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
@@ -13,6 +17,8 @@ use objc2_app_kit::{
 };
 use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
 use objc2_foundation::{NSArray, NSInteger, NSObject, NSString};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use tracing::warn;
 
 use crate::accessibility_prompt::{
@@ -26,9 +32,113 @@ use crate::config::decorations::{
 };
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::ActiveDisplay;
-use crate::ecs::{Bounds, FocusedMarker, Unmanaged};
+use crate::ecs::{
+    ActiveDisplayMarker, ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker, Unmanaged,
+};
 use crate::events::{Event, EventSender};
+use crate::manager::Display;
 use crate::util::round_px;
+
+/// A menu or command choice overrides the configuration until changed again.
+#[derive(Debug, Default, Resource, Serialize, Deserialize)]
+pub struct MenuBarVisibility {
+    enabled: Option<bool>,
+    #[serde(skip)]
+    dirty: bool,
+}
+
+impl MenuBarVisibility {
+    pub fn enabled(&self, config: &Config) -> bool {
+        self.enabled.unwrap_or_else(|| config.menubar_enabled())
+    }
+
+    fn load(path: &Path) -> Self {
+        let data = match std::fs::read_to_string(path) {
+            Ok(data) => data,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Self::default(),
+            Err(error) => {
+                warn!(%error, path = %path.display(), "unable to read menu bar preference");
+                return Self::default();
+            }
+        };
+        serde_json::from_str(&data).unwrap_or_else(|error| {
+            warn!(%error, path = %path.display(), "ignoring invalid menu bar preference");
+            Self::default()
+        })
+    }
+
+    fn save(&self, path: &Path) -> crate::errors::Result<()> {
+        let data = serde_json::to_string_pretty(self)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let temporary = path.with_extension("json.tmp");
+        std::fs::write(&temporary, data)?;
+        std::fs::rename(temporary, path)?;
+        Ok(())
+    }
+}
+
+#[derive(Resource)]
+pub struct MenuBarPreferenceFile(PathBuf);
+
+pub fn load_menu_bar_preference(app: &mut bevy::app::App) {
+    if let Some(path) = xdg::BaseDirectories::with_prefix("paneru").get_state_file("menu-bar.json")
+    {
+        app.insert_resource(MenuBarVisibility::load(&path))
+            .insert_resource(MenuBarPreferenceFile(path));
+    }
+}
+
+pub fn setup_menu_bar(
+    app: &mut bevy::app::App,
+    mtm: MainThreadMarker,
+    events: EventSender,
+    initial_config: &Config,
+) {
+    // Prefer Lua setup when present; otherwise reuse the configuration already
+    // loaded for the event tap rather than reading it again.
+    let config = app
+        .world()
+        .get_resource::<Config>()
+        .unwrap_or(initial_config);
+    let visible = app.world().resource::<MenuBarVisibility>().enabled(config);
+    app.insert_non_send(MenuBarManager::new(mtm, events, visible));
+}
+
+pub fn menu_bar_command_handler(
+    mut messages: MessageReader<Event>,
+    mut visibility: ResMut<MenuBarVisibility>,
+) {
+    for event in messages.read() {
+        if let Event::Command {
+            command: Command::MenuBar(enabled),
+        } = event
+            && visibility.enabled != Some(*enabled)
+        {
+            visibility.enabled = Some(*enabled);
+            visibility.dirty = true;
+        }
+    }
+}
+
+pub fn save_menu_bar_preference(
+    mut visibility: ResMut<MenuBarVisibility>,
+    file: Option<Res<MenuBarPreferenceFile>>,
+) {
+    if !visibility.dirty {
+        return;
+    }
+    let Some(file) = file else {
+        return;
+    };
+    match visibility.save(&file.0) {
+        Ok(()) => visibility.bypass_change_detection().dirty = false,
+        Err(error) => {
+            warn!(%error, path = %file.0.display(), "unable to save menu bar preference");
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 struct MenuActionTargetIvars {
@@ -99,6 +209,11 @@ define_class!(
         fn quit_paneru(&self, _: &NSMenuItem) {
             self.send_command(Command::Quit);
         }
+
+        #[unsafe(method(hideMenuBar:))]
+        fn hide_menu_bar(&self, _: &NSMenuItem) {
+            self.send_command(Command::MenuBar(false));
+        }
     }
 );
 
@@ -129,6 +244,9 @@ pub struct MenuBarManager {
     copy_rule_item: Option<Retained<NSMenuItem>>,
     configured_widths: Vec<i32>,
     current_content: Option<MenuBarContent>,
+    visible: bool,
+    current_enablement: Option<WindowMenuEnablement>,
+    selected_widths: Option<Vec<i32>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -154,7 +272,14 @@ fn window_menu_enablement(
 }
 
 impl MenuBarManager {
-    pub fn new(mtm: MainThreadMarker, events: EventSender) -> Self {
+    fn set_visible(&mut self, visible: bool) {
+        if self.visible != visible {
+            self.status_item.setVisible(visible);
+            self.visible = visible;
+        }
+    }
+
+    pub fn new(mtm: MainThreadMarker, events: EventSender, visible: bool) -> Self {
         let status_bar = NSStatusBar::systemStatusBar();
         let status_item = status_bar.statusItemWithLength(NSVariableStatusItemLength);
         let menu = NSMenu::new(mtm);
@@ -162,7 +287,10 @@ impl MenuBarManager {
 
         menu.setAutoenablesItems(false);
         status_item.setMenu(Some(&menu));
-        status_item.setVisible(true);
+        // AppKit creates a visible item, so the default needs no transaction.
+        if !visible {
+            status_item.setVisible(false);
+        }
 
         Self {
             mtm,
@@ -176,11 +304,14 @@ impl MenuBarManager {
             copy_rule_item: None,
             configured_widths: Vec::new(),
             current_content: None,
+            visible,
+            current_enablement: None,
+            selected_widths: None,
         }
     }
 
     pub fn new_accessibility_required(mtm: MainThreadMarker, events: EventSender) -> Self {
-        let mut manager = Self::new(mtm, events);
+        let mut manager = Self::new(mtm, events, true);
         manager.rebuild_accessibility_menu();
         manager.show_text("!");
         manager
@@ -224,28 +355,33 @@ impl MenuBarManager {
     ) {
         let preset_widths = config.preset_column_widths();
         let widths = normalized_width_percentages(&preset_widths);
-        if self.configured_widths != widths {
+        if self.configured_widths != widths || self.manage_item.is_none() {
             self.rebuild_menu(&widths);
         }
 
         let enablement = window_menu_enablement(has_focused_window, focused_width_ratio);
-        for item in &self.managed_window_items {
-            item.setEnabled(enablement.managed_actions);
+        if self.current_enablement.as_ref() != Some(&enablement) {
+            for item in &self.managed_window_items {
+                item.setEnabled(enablement.managed_actions);
+            }
+            if let Some(manage_item) = &self.manage_item {
+                manage_item.setEnabled(enablement.toggle_managed);
+            }
+            if let Some(copy_rule_item) = &self.copy_rule_item {
+                copy_rule_item.setEnabled(enablement.toggle_managed);
+            }
+            self.current_enablement = Some(enablement);
         }
-        if let Some(manage_item) = &self.manage_item {
-            manage_item.setEnabled(enablement.toggle_managed);
-        }
-        if let Some(copy_rule_item) = &self.copy_rule_item {
-            copy_rule_item.setEnabled(enablement.toggle_managed);
-        }
-        for (percentage, item) in &self.width_items {
-            let selected = focused_width_ratio
-                .is_some_and(|ratio| (ratio.mul_add(100.0, -f64::from(*percentage))).abs() < 1.0);
-            item.setState(if selected {
-                NSControlStateValueOn
-            } else {
-                NSControlStateValueOff
-            });
+        let selected_widths = selected_width_percentages(&widths, focused_width_ratio);
+        if self.selected_widths.as_ref() != Some(&selected_widths) {
+            for (percentage, item) in &self.width_items {
+                item.setState(if selected_widths.contains(percentage) {
+                    NSControlStateValueOn
+                } else {
+                    NSControlStateValueOff
+                });
+            }
+            self.selected_widths = Some(selected_widths);
         }
 
         let current = config.workspace_menu_status().then_some(virtual_index);
@@ -287,8 +423,14 @@ impl MenuBarManager {
         self.copy_rule_item = Some(self.add_item("Copy Window Rule", Some(sel!(copyWindowRule:))));
 
         self.menu.addItem(&NSMenuItem::separatorItem(self.mtm));
+        let hide = self.add_item("Hide Menu Bar", Some(sel!(hideMenuBar:)));
+        hide.setToolTip(Some(&NSString::from_str(
+            "Show again with: paneru showmenu",
+        )));
         self.add_item("Quit Paneru", Some(sel!(quitPaneru:)));
         self.configured_widths = widths.to_vec();
+        self.current_enablement = None;
+        self.selected_widths = None;
     }
 
     fn add_item(&self, title: &str, action: Option<objc2::runtime::Sel>) -> Retained<NSMenuItem> {
@@ -635,16 +777,80 @@ impl Drop for MenuBarManager {
     }
 }
 
+type FocusedMenuChanges = (
+    With<FocusedMarker>,
+    Or<(Added<FocusedMarker>, Changed<Bounds>, Changed<Unmanaged>)>,
+);
+
+/// Position-only animation and swipe frames do not affect menu content.
+pub(crate) fn menu_bar_dirty(
+    strip_changed: Query<(), (With<ActiveWorkspaceMarker>, Changed<LayoutStrip>)>,
+    focus_changed: Query<(), FocusedMenuChanges>,
+    workspace_changed: Query<(), Added<ActiveWorkspaceMarker>>,
+    strips_added: Query<(), Added<LayoutStrip>>,
+    mut focus_lost: RemovedComponents<FocusedMarker>,
+    mut unmanaged_removed: RemovedComponents<Unmanaged>,
+    mut strips_removed: RemovedComponents<LayoutStrip>,
+) -> bool {
+    // Drain every removal reader even when another input already dirtied us.
+    let focus_lost = focus_lost.read().count() > 0;
+    let unmanaged_removed = unmanaged_removed.read().count() > 0;
+    let strips_removed = strips_removed.read().count() > 0;
+    !strip_changed.is_empty()
+        || !focus_changed.is_empty()
+        || !workspace_changed.is_empty()
+        || !strips_added.is_empty()
+        || focus_lost
+        || unmanaged_removed
+        || strips_removed
+}
+
+type MenuViewportChanges = (
+    With<ActiveDisplayMarker>,
+    Or<(
+        Added<ActiveDisplayMarker>,
+        Changed<Display>,
+        Changed<DockPosition>,
+    )>,
+);
+
+pub(crate) fn menu_viewport_dirty(
+    display_changed: Query<(), MenuViewportChanges>,
+    mut dock_removed: RemovedComponents<DockPosition>,
+) -> bool {
+    let dock_removed = dock_removed.read().count() > 0;
+    !display_changed.is_empty() || dock_removed
+}
+
+fn selected_width_percentages(widths: &[i32], ratio: Option<f64>) -> Vec<i32> {
+    widths
+        .iter()
+        .copied()
+        .filter(|percentage| {
+            ratio.is_some_and(|ratio| ratio.mul_add(100.0, -f64::from(*percentage)).abs() < 1.0)
+        })
+        .collect()
+}
+
 pub fn update_menu_bar(
     active_display: ActiveDisplay,
     workspaces: Query<&LayoutStrip>,
     focused: Query<(&Bounds, Has<Unmanaged>), With<FocusedMarker>>,
     config: Res<Config>,
+    visibility: Res<MenuBarVisibility>,
     menu_bar: Option<NonSendMut<MenuBarManager>>,
 ) {
     let Some(mut menu_bar) = menu_bar else {
         return;
     };
+    if config.is_changed() {
+        menu_bar.current_content = None;
+    }
+    let enabled = visibility.enabled(&config);
+    menu_bar.set_visible(enabled);
+    if !enabled {
+        return;
+    }
     let strip = active_display.active_strip();
     let mut virtual_indices = workspaces
         .iter()
@@ -782,9 +988,288 @@ fn normalized_width_percentages(widths: &[f64]) -> Vec<i32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        IndicatorFormat, WindowMenuEnablement, indicator_label, normalized_width_percentages,
-        paged_last_index, roman_numeral, virtual_workspace_label, window_menu_enablement,
+        Command, Config, Event, IndicatorFormat, MenuBarPreferenceFile, MenuBarVisibility,
+        WindowMenuEnablement, indicator_label, normalized_width_percentages, paged_last_index,
+        roman_numeral, virtual_workspace_label, window_menu_enablement,
     };
+
+    #[test]
+    fn menu_bar_choice_survives_workspace_changes_and_restarts() {
+        use crate::commands::{Direction, Operation};
+        use crate::tests::TestHarness;
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "paneru-menu-preference-{}-{stamp}.json",
+            std::process::id()
+        ));
+        let hidden_path = path.clone();
+        let shown_path = path.clone();
+        let mut harness = TestHarness::new().with_windows(2);
+        harness
+            .app
+            .insert_resource(MenuBarPreferenceFile(path.clone()));
+        harness
+            .on_iteration(0, move |world, _| {
+                let config = world.resource::<Config>();
+                assert!(!world.resource::<MenuBarVisibility>().enabled(config));
+                assert!(!MenuBarVisibility::load(&hidden_path).enabled(config));
+            })
+            .on_iteration(1, |world, _| {
+                assert!(
+                    !world
+                        .resource::<MenuBarVisibility>()
+                        .enabled(world.resource::<Config>())
+                );
+            })
+            .on_iteration(2, move |world, _| {
+                let config = world.resource::<Config>();
+                assert!(world.resource::<MenuBarVisibility>().enabled(config));
+                assert!(MenuBarVisibility::load(&shown_path).enabled(config));
+            })
+            .run(vec![
+                Event::Command {
+                    command: Command::MenuBar(false),
+                },
+                Event::Command {
+                    command: Command::Window(Operation::Focus(Direction::East)),
+                },
+                Event::Command {
+                    command: Command::MenuBar(true),
+                },
+            ]);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn missing_or_invalid_menu_bar_preference_uses_config() {
+        let config =
+            Config::try_from("[options]\n[bindings]\n[decorations.menu]\nenabled = false").unwrap();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("paneru-menu-fallback-{stamp}.json"));
+        assert!(!MenuBarVisibility::load(&path).enabled(&config));
+        MenuBarVisibility {
+            enabled: Some(true),
+            ..MenuBarVisibility::default()
+        }
+        .save(&path)
+        .unwrap();
+        assert!(MenuBarVisibility::load(&path).enabled(&config));
+        std::fs::write(&path, "invalid JSON").unwrap();
+        assert!(!MenuBarVisibility::load(&path).enabled(&config));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn loaded_menu_preference_is_not_rewritten_until_a_new_choice() {
+        use crate::tests::TestHarness;
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("paneru-menu-loaded-{stamp}.json"));
+        let original = "{ \"enabled\": false }\n";
+        std::fs::write(&path, original).unwrap();
+        let mut harness = TestHarness::new();
+        harness
+            .app
+            .insert_resource(MenuBarVisibility::load(&path))
+            .insert_resource(MenuBarPreferenceFile(path.clone()));
+        harness.app.update();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert!(!path.with_extension("json.tmp").exists());
+
+        harness.world().write_message(Event::Command {
+            command: Command::MenuBar(false),
+        });
+        harness.app.update();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+
+        harness.world().write_message(Event::Command {
+            command: Command::MenuBar(true),
+        });
+        harness.app.update();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(MenuBarVisibility::load(&path).enabled(harness.world().resource::<Config>()));
+        assert!(!saved.contains("dirty"));
+        assert!(!harness.world().resource::<MenuBarVisibility>().dirty);
+
+        // A repeated show command must not rewrite an already saved choice.
+        let shown = "{ \"enabled\": true }\n";
+        std::fs::write(&path, shown).unwrap();
+        harness.world().write_message(Event::Command {
+            command: Command::MenuBar(true),
+        });
+        harness.app.update();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), shown);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn menu_updates_ignore_position_animation_but_track_menu_inputs() {
+        use crate::ecs::layout::LayoutStrip;
+        use crate::ecs::{ActiveWorkspaceMarker, Bounds, FocusedMarker, Position, Unmanaged};
+        use bevy::app::{App, PostUpdate};
+        use bevy::ecs::{resource::Resource, schedule::IntoScheduleConfigs, system::ResMut};
+        use bevy::math::IVec2;
+
+        #[derive(Resource, Default)]
+        struct Updates(usize);
+        fn count(mut updates: ResMut<Updates>) {
+            updates.0 += 1;
+        }
+        let mut app = App::new();
+        app.init_resource::<Updates>()
+            .add_systems(PostUpdate, count.run_if(super::menu_bar_dirty));
+        let strip = app
+            .world_mut()
+            .spawn((LayoutStrip::new(1, 0), ActiveWorkspaceMarker))
+            .id();
+        let window = app
+            .world_mut()
+            .spawn((
+                Bounds(IVec2::new(400, 600)),
+                Position(IVec2::ZERO),
+                FocusedMarker,
+            ))
+            .id();
+        app.update();
+        assert_eq!(app.world().resource::<Updates>().0, 1);
+        for x in 1..=30 {
+            app.world_mut().get_mut::<Position>(window).unwrap().0.x = x;
+            app.update();
+        }
+        assert_eq!(app.world().resource::<Updates>().0, 1);
+        app.world_mut().get_mut::<Bounds>(window).unwrap().0.x = 500;
+        app.update();
+        assert_eq!(app.world().resource::<Updates>().0, 2);
+        app.world_mut()
+            .entity_mut(window)
+            .insert(Unmanaged::Floating);
+        app.update();
+        assert_eq!(app.world().resource::<Updates>().0, 3);
+        app.world_mut().entity_mut(window).remove::<Unmanaged>();
+        app.update();
+        assert_eq!(app.world().resource::<Updates>().0, 4);
+        app.world_mut().entity_mut(window).remove::<FocusedMarker>();
+        app.update();
+        assert_eq!(app.world().resource::<Updates>().0, 5);
+        app.world_mut().get_mut::<Bounds>(window).unwrap().0.x = 600;
+        app.update();
+        assert_eq!(app.world().resource::<Updates>().0, 5);
+        app.world_mut().entity_mut(window).insert(FocusedMarker);
+        app.update();
+        assert_eq!(app.world().resource::<Updates>().0, 6);
+        app.world_mut()
+            .get_mut::<LayoutStrip>(strip)
+            .unwrap()
+            .virtual_index = 1;
+        app.update();
+        assert_eq!(app.world().resource::<Updates>().0, 7);
+        let offscreen = app.world_mut().spawn(LayoutStrip::new(1, 2)).id();
+        app.update();
+        assert_eq!(app.world().resource::<Updates>().0, 8);
+        app.world_mut().despawn(offscreen);
+        app.update();
+        assert_eq!(app.world().resource::<Updates>().0, 9);
+        app.update();
+        assert_eq!(app.world().resource::<Updates>().0, 9);
+    }
+
+    #[test]
+    fn menu_commands_apply_in_the_same_tick_as_pumped_events() {
+        use crate::tests::TestHarness;
+        use bevy::app::PreUpdate;
+        use bevy::ecs::{message::MessageWriter, schedule::IntoScheduleConfigs, system::Local};
+
+        // Inject a command immediately before the real pump. The handler must
+        // run after the pump and see it in this update, including its condition.
+        fn incoming(mut events: MessageWriter<Event>, mut sent: Local<bool>) {
+            if !*sent {
+                events.write(Event::Command {
+                    command: Command::MenuBar(false),
+                });
+                *sent = true;
+            }
+        }
+        let mut harness = TestHarness::new();
+        harness
+            .app
+            .add_systems(PreUpdate, incoming.before(crate::ecs::systems::pump_events));
+        harness.app.update();
+        let world = harness.world();
+        assert!(
+            !world
+                .resource::<MenuBarVisibility>()
+                .enabled(world.resource::<Config>())
+        );
+    }
+
+    #[test]
+    fn menu_width_state_tracks_display_and_dock_changes() {
+        use crate::ecs::{ActiveDisplayMarker, DockPosition};
+        use crate::manager::Display;
+        use bevy::app::{App, PostUpdate};
+        use bevy::ecs::{resource::Resource, schedule::IntoScheduleConfigs, system::ResMut};
+        use bevy::math::IRect;
+
+        #[derive(Resource, Default)]
+        struct Updates(usize);
+        fn count(mut updates: ResMut<Updates>) {
+            updates.0 += 1;
+        }
+        let mut app = App::new();
+        app.init_resource::<Updates>()
+            .add_systems(PostUpdate, count.run_if(super::menu_viewport_dirty));
+        let display = app
+            .world_mut()
+            .spawn((
+                Display::new(1, IRect::new(0, 0, 1024, 768), 20),
+                ActiveDisplayMarker,
+            ))
+            .id();
+        app.update();
+        app.update();
+        assert_eq!(app.world().resource::<Updates>().0, 1);
+        app.world_mut()
+            .entity_mut(display)
+            .insert(DockPosition::Left(50));
+        app.update();
+        assert_eq!(app.world().resource::<Updates>().0, 2);
+        app.world_mut().entity_mut(display).remove::<DockPosition>();
+        app.update();
+        assert_eq!(app.world().resource::<Updates>().0, 3);
+        app.world_mut()
+            .get_mut::<Display>(display)
+            .unwrap()
+            .set_menubar_height_override(Some(30));
+        app.update();
+        assert_eq!(app.world().resource::<Updates>().0, 4);
+        app.update();
+        assert_eq!(app.world().resource::<Updates>().0, 4);
+    }
+
+    #[test]
+    fn width_selection_keeps_the_existing_tolerance() {
+        let widths = [33, 34, 50, 67];
+        assert_eq!(
+            super::selected_width_percentages(&widths, Some(0.33333)),
+            [33, 34]
+        );
+        assert_eq!(
+            super::selected_width_percentages(&widths, Some(0.335)),
+            [33, 34]
+        );
+        assert_eq!(super::selected_width_percentages(&widths, Some(0.5)), [50]);
+        assert!(super::selected_width_percentages(&widths, None).is_empty());
+    }
 
     #[test]
     fn virtual_workspace_label_is_one_based() {

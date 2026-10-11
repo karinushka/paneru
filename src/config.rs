@@ -885,6 +885,14 @@ impl Config {
             .create_virtual_workspace_automatically
             .is_some_and(|enabled| enabled)
     }
+    pub fn menubar_enabled(&self) -> bool {
+        self.inner()
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.menu.as_ref())
+            .and_then(|menubar| menubar.enabled)
+            .is_none_or(|enabled| enabled)
+    }
     pub fn menubar_orientation(&self) -> MenubarOrientation {
         self.inner()
             .decorations
@@ -2403,6 +2411,31 @@ fn test_config_defaults() {
     };
     assert_eq!(config.border_radius(), expected_radius);
     assert_eq!(config.menubar_height(), None);
+    assert!(config.menubar_enabled());
+}
+
+#[test]
+fn test_menubar_enabled_is_independent_of_workspace_indicator() {
+    for menu_options in [
+        "",
+        "[decorations.menu]\n",
+        "[decorations.menu]\nenabled = true",
+    ] {
+        let config = Config::try_from(
+            format!(
+                "[options]\n[bindings]\n[decorations]\nworkspace_menu_status = false\n{menu_options}"
+            )
+            .as_str(),
+        )
+        .expect("config should parse");
+        assert!(config.menubar_enabled());
+        assert!(!config.workspace_menu_status());
+    }
+
+    let config = Config::try_from("[options]\n[bindings]\n[decorations.menu]\nenabled = false")
+        .expect("config should parse");
+    assert!(!config.menubar_enabled());
+    assert!(config.workspace_menu_status());
 }
 
 #[test]

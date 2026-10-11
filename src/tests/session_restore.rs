@@ -3,7 +3,7 @@ use std::time::Duration;
 use bevy::ecs::query::Has;
 use bevy::prelude::*;
 
-use crate::commands::Command;
+use crate::commands::{Command, Operation};
 use crate::config::{Config, MainOptions, WindowParams};
 use crate::ecs::layout::{Column, LayoutStrip};
 use crate::ecs::state::{
@@ -510,6 +510,11 @@ fn test_startup_restore_uses_first_restored_row_when_active_metadata_is_missing(
 
     assert_eq!(active_strips.len(), 1);
     assert_eq!(active_strips[0].virtual_index, 2);
+    let mut messages = world.query::<&crate::ecs::FlashMessage>();
+    assert!(
+        messages.iter(world).next().is_none(),
+        "startup session restoration should not show a workspace switch popup"
+    );
 }
 
 #[test]
@@ -557,6 +562,12 @@ fn test_late_startup_window_restores_during_grace_period() {
         Event::Command {
             command: Command::PrintState,
         },
+        Event::Command {
+            command: Command::Window(Operation::VirtualNumber(0)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::VirtualNumber(1)),
+        },
     ];
 
     harness
@@ -590,6 +601,19 @@ fn test_late_startup_window_restores_during_grace_period() {
                 restored.is_some(),
                 "late startup window should restore into saved row"
             );
+            let mut messages = world.query::<&crate::ecs::FlashMessage>();
+            assert!(
+                messages.iter(world).next().is_none(),
+                "late startup restoration should not show a workspace switch popup"
+            );
+        })
+        .on_iteration(3, |world, _state| {
+            let mut messages = world.query::<&crate::ecs::FlashMessage>();
+            assert!(messages.iter(world).any(|message| message.0 == "1"));
+        })
+        .on_iteration(4, |world, _state| {
+            let mut messages = world.query::<&crate::ecs::FlashMessage>();
+            assert!(messages.iter(world).any(|message| message.0 == "2"));
         })
         .run(commands);
 }

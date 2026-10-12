@@ -1268,10 +1268,7 @@ mod tests {
             [33, 34]
         );
         assert_eq!(super::selected_width_percentages(&widths, Some(0.5)), [50]);
-        assert_eq!(
-            super::selected_width_percentages(&widths, None),
-            Vec::<i32>::new()
-        );
+        assert!(super::selected_width_percentages(&widths, None).is_empty());
     }
 
     #[test]

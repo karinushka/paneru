@@ -134,11 +134,6 @@ impl<I> SwipeAccumulator<I> {
 
         let x_sum: f64 = deltas.iter().map(|(x, _)| x).sum();
         let y_sum: f64 = deltas.iter().map(|(_, y)| y).sum();
-        #[allow(
-            clippy::cast_precision_loss,
-            reason = "a gesture cannot have enough fingers to lose precision"
-        )]
-        let finger_count = deltas.len() as f64;
         // Once a gesture has begun, the movement of _any_ finger is enough to warrant a swipe.
         let horizontally_moved_fingers = deltas
             .iter()
@@ -149,10 +144,9 @@ impl<I> SwipeAccumulator<I> {
             .filter(|(_, y)| y.abs() > SWIPE_THRESHOLD)
             .count();
         let movement = if x_sum.abs() >= y_sum.abs() {
-            (horizontally_moved_fingers > 0)
-                .then_some(SwipeMovement::Horizontal(x_sum / finger_count))
+            (horizontally_moved_fingers > 0).then_some(SwipeMovement::Horizontal(x_sum))
         } else {
-            (vertically_moved_fingers > 0).then_some(SwipeMovement::Vertical(y_sum / finger_count))
+            (vertically_moved_fingers > 0).then_some(SwipeMovement::Vertical(y_sum))
         };
         if movement.is_some() {
             self.anchors = touches;
@@ -812,9 +806,9 @@ mod tests {
         assert_eq!(swipe.sample(three_fingers(0.0), |a, b| a == b), None);
         assert_eq!(swipe.sample(three_fingers(0.0002), |a, b| a == b), None);
         assert_eq!(swipe.sample(three_fingers(0.0004), |a, b| a == b), None);
-        assert_horizontal(swipe.sample(three_fingers(0.0006), |a, b| a == b), -0.0006);
+        assert_horizontal(swipe.sample(three_fingers(0.0006), |a, b| a == b), -0.0018);
         assert_eq!(swipe.sample(three_fingers(0.0008), |a, b| a == b), None);
-        assert_horizontal(swipe.sample(three_fingers(0.0012), |a, b| a == b), -0.0006);
+        assert_horizontal(swipe.sample(three_fingers(0.0012), |a, b| a == b), -0.0018);
     }
 
     #[test]
@@ -846,7 +840,7 @@ mod tests {
         assert_eq!(swipe.sample(replacement, |a, b| a == b), None);
         let mut next = three_fingers(0.0026);
         next[2].identity = 3;
-        assert_horizontal(swipe.sample(next, |a, b| a == b), -0.0006);
+        assert_horizontal(swipe.sample(next, |a, b| a == b), -0.0018);
     }
 
     #[test]
@@ -856,22 +850,22 @@ mod tests {
         let mut first = three_fingers(0.0003);
         first.reverse();
         assert_eq!(swipe.sample(first, |a, b| a == b), None);
-        assert_horizontal(swipe.sample(three_fingers(0.0006), |a, b| a == b), -0.0006);
+        assert_horizontal(swipe.sample(three_fingers(0.0006), |a, b| a == b), -0.0018);
     }
 
     #[test]
     fn sustained_swipe_continues_when_one_finger_lags() {
         let mut swipe = SwipeAccumulator::default();
         swipe.sample(three_fingers(0.0), |a, b| a == b);
-        assert_horizontal(swipe.sample(three_fingers(0.002), |a, b| a == b), -0.002);
+        assert_horizontal(swipe.sample(three_fingers(0.002), |a, b| a == b), -0.006);
 
         let mut next = three_fingers(0.004);
         next[2].x = 0.002;
-        assert_horizontal(swipe.sample(next, |a, b| a == b), -0.004 / 3.0);
+        assert_horizontal(swipe.sample(next, |a, b| a == b), -0.004);
 
         let mut next = three_fingers(0.006);
         next[2].x = 0.002;
-        assert_horizontal(swipe.sample(next, |a, b| a == b), -0.004 / 3.0);
+        assert_horizontal(swipe.sample(next, |a, b| a == b), -0.004);
     }
 
     #[test]
@@ -880,7 +874,7 @@ mod tests {
         swipe.sample(three_fingers(0.0), |a, b| a == b);
         let mut one_finger_moves = three_fingers(0.0);
         one_finger_moves[0].x = 0.02;
-        assert_horizontal(swipe.sample(one_finger_moves, |a, b| a == b), -0.02 / 3.0);
+        assert_horizontal(swipe.sample(one_finger_moves, |a, b| a == b), -0.02);
     }
 
     #[test]
@@ -900,7 +894,7 @@ mod tests {
         let Some(SwipeMovement::Vertical(delta)) = movement else {
             panic!("expected vertical swipe, got {movement:?}");
         };
-        assert!((delta + 0.002).abs() < 1e-12);
+        assert!((delta + 0.006).abs() < 1e-12);
     }
 
     fn step_config(extra: &str) -> Config {
@@ -1181,9 +1175,9 @@ mod tests {
         let mut swipe = SwipeAccumulator::default();
         swipe.sample(three_fingers(0.0), |a, b| a == b);
         assert!(!should_reset_swipe_anchors(0, swipe.anchors.len()));
-        assert_horizontal(swipe.sample(three_fingers(0.0006), |a, b| a == b), -0.0006);
+        assert_horizontal(swipe.sample(three_fingers(0.0006), |a, b| a == b), -0.0018);
         assert!(!should_reset_swipe_anchors(0, swipe.anchors.len()));
-        assert_horizontal(swipe.sample(three_fingers(0.0012), |a, b| a == b), -0.0006);
+        assert_horizontal(swipe.sample(three_fingers(0.0012), |a, b| a == b), -0.0018);
     }
 
     #[test]

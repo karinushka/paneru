@@ -394,7 +394,9 @@ where
     };
 
     let left_snap = strip_position(layout_strip.last());
-    let right_snap = strip_position(layout_strip.first());
+    // NOTE: this snaps to the second window on purpose.
+    // For a single colum workspace this will return None
+    let right_snap = strip_position(layout_strip.get(1));
 
     Some(
         if continuous_swipe && let Some((left_snap, right_snap)) = left_snap.zip(right_snap) {

@@ -809,3 +809,64 @@ floating = true
         })
         .run(commands);
 }
+
+/// Regression test: during startup (`Initializing`), `apply_window_defaults` and
+/// `apply_window_positions` must classify floating windows as `Unmanaged::Floating`
+/// *before* `finish_setup` populates the workspace strip and selects the initial
+/// focused window. Otherwise, a floating window that appears first in the
+/// workspace window list is treated as managed by `finish_setup` and steals
+/// `FocusedMarker` from the first tiled window, or `finish_setup` removes
+/// `Initializing` before `apply_window_positions` runs and causes startup
+/// windows to be treated as runtime spawns.
+#[test]
+fn test_startup_floating_window_does_not_steal_initial_focus_or_enter_strip() {
+    let mut params = WindowParams::new("^Window 0$", None);
+    params.floating = Some(true);
+    let config: Config = (MainOptions::default(), vec![params]).into();
+
+    let commands = vec![Event::Command {
+        command: Command::PrintState,
+    }];
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(3)
+        .on_iteration(0, |world, _state| {
+            let win0 = find_window_entity(0, world);
+            let win1 = find_window_entity(1, world);
+            let win2 = find_window_entity(2, world);
+
+            assert!(
+                matches!(
+                    world.entity(win0).get::<crate::ecs::Unmanaged>(),
+                    Some(crate::ecs::Unmanaged::Floating)
+                ),
+                "window 0 must be marked Unmanaged::Floating during startup"
+            );
+            assert!(
+                world
+                    .entity(win0)
+                    .get::<crate::ecs::FocusedMarker>()
+                    .is_none(),
+                "floating window 0 must not receive initial FocusedMarker"
+            );
+            assert!(
+                world
+                    .entity(win1)
+                    .get::<crate::ecs::FocusedMarker>()
+                    .is_some(),
+                "first tiled window (1) must receive initial FocusedMarker"
+            );
+
+            let mut strips = world.query::<&LayoutStrip>();
+            let strip = strips.single(world).expect("single active strip");
+            assert_eq!(
+                strip.all_windows(),
+                vec![win1, win2],
+                "strip must contain only tiled windows in workspace order without holes"
+            );
+            assert_window_at!(world, 1, 0, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 2, TEST_WINDOW_WIDTH, TEST_MENUBAR_HEIGHT);
+        })
+        .run(commands);
+}

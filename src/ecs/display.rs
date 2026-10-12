@@ -65,7 +65,7 @@ impl Plugin for DisplayEventsPlugin {
                 PreUpdate,
                 (display_change_handler, reconcile_displays)
                     .chain()
-                    .after(super::systems::pump_events),
+                    .in_set(super::PreUpdateSet::Dispatch),
             )
             .add_observer(read_display_properties_trigger)
             .add_observer(cleanup_active_display_marker);

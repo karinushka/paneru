@@ -16,7 +16,7 @@ use crate::ecs::layout::{Column, LayoutStrip};
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, ManualStripOffset, MissionControlActive, Position, Scrolling,
-    SendMessageTrigger,
+    SendMessageTrigger, UpdateSet,
 };
 use crate::errors::Result;
 use bevy::ecs::schedule::common_conditions::on_message;
@@ -85,7 +85,8 @@ impl Plugin for ScrollEventsPlugin {
                     swiping_timeout,
                 )
                     .chain(),
-            ),
+            )
+                .in_set(UpdateSet::Input),
         );
     }
 }

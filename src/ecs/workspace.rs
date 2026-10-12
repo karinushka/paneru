@@ -114,11 +114,12 @@ impl Plugin for WorkspaceEventsPlugin {
         app.add_systems(
             PreUpdate,
             (switch_virtual_workspace_bind, move_virtual_workspace_bind)
-                .after(crate::ecs::systems::pump_events),
+                .in_set(super::PreUpdateSet::Dispatch),
         );
         app.add_systems(
             PreUpdate,
             find_orphaned_workspaces
+                .in_set(super::PreUpdateSet::Dispatch)
                 .after(crate::ecs::display::reconcile_displays)
                 .run_if(on_timer(DISPLAY_CHANGE_CHECK_FREQ)),
         );
@@ -129,16 +130,21 @@ impl Plugin for WorkspaceEventsPlugin {
                 reap_empty_virtual_workspaces.run_if(reap_workspaces),
                 workspace_change_handler,
                 workspace_created_handler,
-                show_active_workspace,
-                handle_virtual_window_moves.before(super::layout::layout_sizes_changed),
+                handle_virtual_window_moves,
                 detect_moved_windows.run_if(not(resource_exists::<Initializing>)),
-            ),
+            )
+                .in_set(super::UpdateSet::Events),
+        );
+        app.add_systems(
+            Update,
+            show_active_workspace.in_set(super::UpdateSet::Workspace),
         );
         app.add_systems(
             PostUpdate,
             (
-                workspace_destroyed_handler,
+                workspace_destroyed_handler.in_set(super::PostUpdateSet::Bookkeeping),
                 flash_workspace_on_activation
+                    .in_set(super::PostUpdateSet::Ui)
                     .run_if(workspace_or_display_activated)
                     .before(crate::ecs::systems::update_flash_messages),
             ),

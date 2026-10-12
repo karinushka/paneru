@@ -69,18 +69,27 @@ impl Plugin for LuaPlugin {
                 // Before the pump so a read left outstanding from last frame is
                 // answered before the main thread goes back to sleep waiting on
                 // Cocoa.
-                serve_lua_queries.before(crate::ecs::systems::pump_events),
-                serve_lua_store.before(crate::ecs::systems::pump_events),
-                drain_lua_outbox.after(crate::ecs::systems::pump_events),
-                command_lua_handler
-                    .after(crate::ecs::systems::pump_events)
-                    .after(drain_lua_outbox),
+                serve_lua_queries
+                    .in_set(crate::ecs::PreUpdateSet::Pump)
+                    .before(crate::ecs::systems::pump_events),
+                serve_lua_store
+                    .in_set(crate::ecs::PreUpdateSet::Pump)
+                    .before(crate::ecs::systems::pump_events),
+                (drain_lua_outbox, command_lua_handler)
+                    .chain()
+                    .in_set(crate::ecs::PreUpdateSet::Dispatch),
             ),
         );
         // ...and again after everything, for reads made during this frame's
         // `Update` dispatch.
-        app.add_systems(PostUpdate, (serve_lua_queries, serve_lua_store));
-        app.add_systems(Update, (dispatch_lua_events, lua_reload_system));
+        app.add_systems(
+            PostUpdate,
+            (serve_lua_queries, serve_lua_store).in_set(crate::ecs::PostUpdateSet::Bookkeeping),
+        );
+        app.add_systems(
+            Update,
+            (dispatch_lua_events, lua_reload_system).in_set(crate::ecs::UpdateSet::Housekeeping),
+        );
     }
 }
 

@@ -65,12 +65,13 @@ pub fn register_commands(app: &mut bevy::app::App) {
         .add_systems(
             PreUpdate,
             crate::menubar::menu_bar_command_handler
-                .run_if(on_message::<Event>)
-                .after(crate::ecs::systems::pump_events),
+                .in_set(crate::ecs::PreUpdateSet::Dispatch)
+                .run_if(on_message::<Event>),
         )
         .add_systems(
             PostUpdate,
             crate::menubar::save_menu_bar_preference
+                .in_set(crate::ecs::PostUpdateSet::Bookkeeping)
                 .run_if(resource_changed::<crate::menubar::MenuBarVisibility>),
         );
     // Registered here (not with the Lua systems) so it's exercised by the mock
@@ -78,7 +79,7 @@ pub fn register_commands(app: &mut bevy::app::App) {
     #[cfg(feature = "lua")]
     app.add_systems(
         PreUpdate,
-        crate::ecs::layout_ops::apply_layout_ops.after(crate::ecs::systems::pump_events),
+        crate::ecs::layout_ops::apply_layout_ops.in_set(crate::ecs::PreUpdateSet::Dispatch),
     );
 
     query::register_query_commands(app);
@@ -87,7 +88,7 @@ pub fn register_commands(app: &mut bevy::app::App) {
     app.init_resource::<crate::ecs::script_state::ScriptStateStore>();
     app.add_systems(
         PreUpdate,
-        crate::ecs::script_state::script_state_handler.after(crate::ecs::systems::pump_events),
+        crate::ecs::script_state::script_state_handler.in_set(crate::ecs::PreUpdateSet::Dispatch),
     );
     app.add_systems(
         PreUpdate,
@@ -113,7 +114,7 @@ pub fn register_commands(app: &mut bevy::app::App) {
             command_swap_focus,
             snap_window,
         )
-            .after(crate::ecs::systems::pump_events),
+            .in_set(crate::ecs::PreUpdateSet::Dispatch),
     );
     // A separate registration because the tuple above is already at Bevy's
     // 20-system limit.
@@ -123,7 +124,8 @@ pub fn register_commands(app: &mut bevy::app::App) {
     app.init_resource::<SnippetDialect>();
     app.add_systems(
         PreUpdate,
-        (copy_window_rule, toggle_tabbed_display_handler).after(crate::ecs::systems::pump_events),
+        (copy_window_rule, toggle_tabbed_display_handler)
+            .in_set(crate::ecs::PreUpdateSet::Dispatch),
     );
 }
 

@@ -3463,58 +3463,52 @@ fn test_copy_window_rule_command() {
 /// could never switch back to workspace "1".
 #[test]
 fn test_virtual_number_recreates_missing_baseline_row() {
-    let mut h = TestHarness::new().with_windows(2);
-    let pump = |h: &mut TestHarness, c: Command| {
-        h.app
-            .world_mut()
-            .write_message::<Event>(Event::Command { command: c });
-        for _ in 0..8 {
-            h.app.update();
-            for e in h.mock_state.drain_events() {
-                h.app.world_mut().write_message::<Event>(e);
-            }
-        }
-    };
+    let commands = vec![
+        Event::Command {
+            command: Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Follow)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Follow)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::VirtualNumber(0)),
+        },
+    ];
 
     // Move both windows onto row 1 and switch there, then drop row 0 the way a
     // display change does, leaving the space numbered from "2".
-    for _ in 0..2 {
-        pump(
-            &mut h,
-            Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Follow)),
-        );
-    }
-    let world = h.world();
-    let row_zero = world
-        .query::<(Entity, &LayoutStrip)>()
-        .iter(world)
-        .find(|(_, strip)| strip.virtual_index == 0)
-        .map(|(entity, _)| entity)
-        .expect("row 0 should still exist before it is dropped");
-    world.entity_mut(row_zero).despawn();
+    TestHarness::new()
+        .with_windows(2)
+        .on_iteration(2, |world, _state| {
+            let row_zero = world
+                .query::<(Entity, &LayoutStrip)>()
+                .iter(world)
+                .find(|(_, strip)| strip.virtual_index == 0)
+                .map(|(entity, _)| entity)
+                .expect("row 0 should still exist before it is dropped");
+            world.entity_mut(row_zero).despawn();
 
-    let world = h.world();
-    let indexes = world
-        .query::<&LayoutStrip>()
-        .iter(world)
-        .map(|strip| strip.virtual_index)
-        .collect::<Vec<_>>();
-    assert_eq!(indexes, vec![1], "only row 1 should be left");
-
-    pump(&mut h, Command::Window(Operation::VirtualNumber(0)));
-
-    let world = h.world();
-    let recreated = world
-        .query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>()
-        .iter(world)
-        .filter(|(strip, _)| strip.virtual_index == 0)
-        .map(|(_, active)| active)
-        .collect::<Vec<_>>();
-    assert_eq!(
-        recreated,
-        vec![true],
-        "virtualnum 0 should recreate row 0 and make it active"
-    );
+            let indexes = world
+                .query::<&LayoutStrip>()
+                .iter(world)
+                .map(|strip| strip.virtual_index)
+                .collect::<Vec<_>>();
+            assert_eq!(indexes, vec![1], "only row 1 should be left");
+        })
+        .on_iteration(3, |world, _state| {
+            let recreated = world
+                .query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>()
+                .iter(world)
+                .filter(|(strip, _)| strip.virtual_index == 0)
+                .map(|(_, active)| active)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                recreated,
+                vec![true],
+                "virtualnum 0 should recreate row 0 and make it active"
+            );
+        })
+        .run(commands);
 }
 
 /// Moving a window to a missing row spawns it — row 0 included. Row 0 used to
@@ -3522,57 +3516,49 @@ fn test_virtual_number_recreates_missing_baseline_row() {
 /// a window back to workspace "1".
 #[test]
 fn test_virtual_move_number_recreates_missing_baseline_row() {
-    let mut h = TestHarness::new().with_windows(2);
-    let pump = |h: &mut TestHarness, c: Command| {
-        h.app
-            .world_mut()
-            .write_message::<Event>(Event::Command { command: c });
-        for _ in 0..8 {
-            h.app.update();
-            for e in h.mock_state.drain_events() {
-                h.app.world_mut().write_message::<Event>(e);
-            }
-        }
-    };
+    let commands = vec![
+        Event::Command {
+            command: Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Follow)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Follow)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::VirtualMoveNumber(0, MoveFocus::Follow)),
+        },
+    ];
 
     // Park both windows on row 1 and drop the emptied row 0 the way a display
     // change does, leaving the space numbered from "2".
-    for _ in 0..2 {
-        pump(
-            &mut h,
-            Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Follow)),
-        );
-    }
-    let world = h.world();
-    let row_zero = world
-        .query::<(Entity, &LayoutStrip)>()
-        .iter(world)
-        .find(|(_, strip)| strip.virtual_index == 0)
-        .map(|(entity, _)| entity)
-        .expect("row 0 should still exist before it is dropped");
-    world.entity_mut(row_zero).despawn();
-
-    pump(
-        &mut h,
-        Command::Window(Operation::VirtualMoveNumber(0, MoveFocus::Follow)),
-    );
-
-    let world = h.world();
-    let focused = world
-        .query_filtered::<Entity, With<FocusedMarker>>()
-        .single(world)
-        .expect("the followed window should be focused");
-    let recreated = world
-        .query::<&LayoutStrip>()
-        .iter(world)
-        .filter(|strip| strip.virtual_index == 0)
-        .map(|strip| strip.contains(focused))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        recreated,
-        vec![true],
-        "the moved window should land on a single recreated row 0"
-    );
+    TestHarness::new()
+        .with_windows(2)
+        .on_iteration(2, |world, _state| {
+            let row_zero = world
+                .query::<(Entity, &LayoutStrip)>()
+                .iter(world)
+                .find(|(_, strip)| strip.virtual_index == 0)
+                .map(|(entity, _)| entity)
+                .expect("row 0 should still exist before it is dropped");
+            world.entity_mut(row_zero).despawn();
+        })
+        .on_iteration(3, |world, _state| {
+            let focused = world
+                .query_filtered::<Entity, With<FocusedMarker>>()
+                .single(world)
+                .expect("the followed window should be focused");
+            let recreated = world
+                .query::<&LayoutStrip>()
+                .iter(world)
+                .filter(|strip| strip.virtual_index == 0)
+                .map(|strip| strip.contains(focused))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                recreated,
+                vec![true],
+                "the moved window should land on a single recreated row 0"
+            );
+        })
+        .run(commands);
 }
 
 /// Issuing a keyboard focus command to an off-edge window must compute the

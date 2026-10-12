@@ -870,3 +870,41 @@ fn test_startup_floating_window_does_not_steal_initial_focus_or_enter_strip() {
         })
         .run(commands);
 }
+
+/// Regression test: stacking an already-focused window (`Operation::Stack(true)`)
+/// when `auto_center = false` and `continuous_swipe = false` must compute the
+/// strip offset from the window's new layout slot (`layout_position.0 + strip_target`)
+/// and clamp the strip to `display_bounds.min.x` (`0`) when the stacked strip fits
+/// inside the viewport, rather than anchoring the strip to the window's pre-stack
+/// `moving_frame` X coordinate (`400`).
+#[test]
+fn test_stacking_focused_window_pins_strip_to_left_edge_when_strip_fits_viewport() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::Last)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Stack(true)),
+        },
+    ];
+
+    TestHarness::new()
+        .with_windows(2)
+        .on_iteration(1, |world, _state| {
+            assert_window_at!(world, 0, 0, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 1, TEST_WINDOW_WIDTH, TEST_MENUBAR_HEIGHT);
+        })
+        .on_iteration(2, |world, _state| {
+            let mut query = world
+                .query_filtered::<&crate::ecs::Position, With<crate::ecs::ActiveWorkspaceMarker>>();
+            let strip_pos = query.single(world).expect("active strip").0;
+            assert_eq!(
+                strip_pos.x, 0,
+                "single-column stacked strip that fits the display must stay pinned at x = 0"
+            );
+            assert_window_at!(world, 0, 0, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 1, 0, 394);
+        })
+        .run(commands);
+}

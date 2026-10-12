@@ -824,8 +824,8 @@ fn test_hidden_stack_stays_off_the_display_below() {
             assert_on_workspace!(world, 1, TEST_WORKSPACE_ID);
             assert_not_on_workspace!(world, 0, EXT_WORKSPACE_ID);
             assert_not_on_workspace!(world, 1, EXT_WORKSPACE_ID);
-            assert_window_at!(world, 0, 400, TEST_MENUBAR_HEIGHT);
-            assert_window_at!(world, 1, 400, 394);
+            assert_window_at!(world, 0, 0, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 1, 0, 394);
         })
         .run(commands);
 }

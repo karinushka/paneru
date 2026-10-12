@@ -331,7 +331,8 @@ pub(super) fn window_focused_trigger(
                 active_workspace_id = Some(strip.id());
             }
             if owner.is_none() && strip.contains(entity) {
-                if let Ok(index) = strip.index_of(entity)
+                if strip.tabbed(entity)
+                    && let Ok(index) = strip.index_of(entity)
                     && let Some(column) = strip.get_column_mut(index)
                 {
                     column.move_to_front(entity);

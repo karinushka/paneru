@@ -375,16 +375,6 @@ fn autocenter_window_on_focus(
     if active_display.active_strip().tabbed(entity) {
         return;
     }
-    if ctx.config.auto_center()
-        && let Some((_, _, None)) = ctx.windows.get_managed(entity)
-        && let Some(frame) = ctx.windows.moving_frame(entity)
-    {
-        let size = frame.size();
-        let mut origin = frame.min;
-        let center = active_display.bounds().center();
-        origin.x = center.x - size.x / 2;
-        ctx.commands.reposition_entity(entity, origin);
-    }
     ctx.commands.reshuffle_around(entity);
 }
 

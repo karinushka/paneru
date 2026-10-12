@@ -92,10 +92,13 @@ pub enum UpdateSet {
     Spawn,
     /// Focus event handling and focus-driven window size verification.
     Focus,
+    /// Workspace visibility restoration (`show_active_workspace`). Runs after
+    /// `Events`, `Spawn`, and `Focus` have flushed any `ActiveWorkspaceMarker`
+    /// additions, and before `Layout` so newly unparked strips have their
+    /// on-screen `Position` before window layout positions are computed.
+    Workspace,
     /// Tiling layout calculation (`LayoutEventsPlugin`).
     Layout,
-    /// Post-layout workspace visibility restoration (`show_active_workspace`).
-    Workspace,
     /// Timers, marker cleanup, state persistence, and Lua event forwarding.
     Housekeeping,
 }
@@ -168,8 +171,8 @@ pub fn register_systems(app: &mut bevy::app::App) {
             UpdateSet::Events,
             UpdateSet::Spawn,
             UpdateSet::Focus,
-            UpdateSet::Layout,
             UpdateSet::Workspace,
+            UpdateSet::Layout,
             UpdateSet::Housekeeping,
         )
             .chain(),

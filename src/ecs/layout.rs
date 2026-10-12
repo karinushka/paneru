@@ -126,7 +126,7 @@ type ReshuffleMarkers<'w, 's> = Query<
     's,
     (
         Entity,
-        Ref<'static, LayoutPosition>,
+        &'static LayoutPosition,
         Option<Ref<'static, FocusedMarker>>,
     ),
     With<ReshuffleAroundMarker>,
@@ -1313,10 +1313,7 @@ pub(super) fn reshuffle_layout_strip(
 
             let size = frame.size();
             let strip_target = strip_reposition.map_or(active_strip.0, |reposition| reposition.0);
-            if !config.auto_center()
-                && layout_position.is_changed()
-                && focused_marker.is_some_and(|f| f.is_added())
-            {
+            if !config.auto_center() && focused_marker.is_some_and(|f| f.is_added()) {
                 frame.min = layout_position.0 + strip_target;
                 frame.max = frame.min + size;
             }

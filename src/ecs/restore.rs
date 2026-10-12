@@ -19,7 +19,8 @@ use crate::ecs::state::{
 };
 use crate::ecs::workspace::{PreviousStripPosition, RestoredActivation};
 use crate::ecs::{
-    ActiveDisplayMarker, ActiveWorkspaceMarker, RestoreWindowState, SpawnCommandsExt, Unmanaged,
+    ActiveDisplayMarker, ActiveWorkspaceMarker, Position, RestoreWindowState,
+    SelectedVirtualMarker, SpawnCommandsExt, Unmanaged,
 };
 use crate::manager::{Application, Display, Window};
 use crate::platform::{Pid, WinID, WorkspaceId};
@@ -528,23 +529,30 @@ pub(super) fn restore_window_state(
             .get(&planned.workspace_id)
             .is_some_and(|active| *active == planned.virtual_index);
         let is_global_active = is_active && active_workspace_ids.contains(&planned.workspace_id);
-        if is_active {
-            for (entity, strip, _, _) in &mut workspaces {
-                if strip.id() == planned.workspace_id
-                    && !emptied_existing_strips.contains(&entity)
-                    && is_global_active
-                    && let Ok(mut entity_commands) = ctx.commands.get_entity(entity)
-                {
-                    entity_commands.try_remove::<ActiveWorkspaceMarker>();
-                }
-            }
-        }
-
         let origin = if is_global_active {
             display.bounds().min
         } else {
             display.bounds().max - PARKED_STRIP_SLIVER
         };
+        if is_active {
+            let parked = display.bounds().max - PARKED_STRIP_SLIVER;
+            for (entity, strip, _, _) in &mut workspaces {
+                if strip.id() == planned.workspace_id
+                    && !emptied_existing_strips.contains(&entity)
+                    && let Ok(mut entity_commands) = ctx.commands.get_entity(entity)
+                {
+                    let existing_previous = PreviousStripPosition {
+                        origin: display.bounds().min,
+                        focus: strip.all_windows().first().copied(),
+                    };
+                    entity_commands
+                        .try_remove::<ActiveWorkspaceMarker>()
+                        .try_remove::<SelectedVirtualMarker>()
+                        .try_insert((Position(parked), existing_previous));
+                }
+            }
+        }
+
         let previous = PreviousStripPosition {
             origin: display.bounds().min,
             focus: strip.all_windows().first().copied(),
@@ -557,6 +565,9 @@ pub(super) fn restore_window_state(
         if is_global_active {
             spawned.insert(RestoredActivation);
         } else {
+            if !is_active {
+                spawned.remove::<SelectedVirtualMarker>();
+            }
             spawned.insert(previous);
         }
         restored_strips += 1;

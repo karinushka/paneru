@@ -1712,15 +1712,101 @@ fn toggle_floating_layer_flips_state() {
         .with_config(Config::default())
         .with_windows(3)
         .on_iteration(0, |world, _state| {
-            assert!(!current_layer(world).front);
+            assert!(current_layer(world).front, "floats start in front");
         })
         .on_iteration(1, |world, _state| {
-            assert!(current_layer(world).front);
-        })
-        .on_iteration(2, |world, _state| {
             assert!(!current_layer(world).front);
         })
+        .on_iteration(2, |world, _state| {
+            assert!(current_layer(world).front);
+        })
         .run(commands);
+}
+
+/// Raising the strip on coming back to a virtual workspace buries every float
+/// behind the tiles: it raises each visible tile, so a float that sat over
+/// them ends up under all of them. Floats go back over the other tiles
+/// afterwards, still under the focused window, unless the layer was sent
+/// behind on purpose.
+fn raises_after_switching_back(layer_behind: bool) -> (Vec<WinID>, WinID) {
+    let config = Config::try_from(
+        r#"
+[options]
+
+[bindings]
+
+[windows.dialogs]
+title = ".*"
+subrole = "AXDialog"
+floating = true
+"#,
+    )
+    .expect("config should parse");
+
+    // Window 0 goes to workspace 1, which leaves it holding the focus when
+    // workspace 0 is shown again.
+    let mut commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Stay)),
+        },
+    ];
+    if layer_behind {
+        commands.push(Event::Command {
+            command: Command::Window(Operation::ToggleFloatingLayer),
+        });
+    }
+    commands.extend([
+        Event::Command {
+            command: Command::Window(Operation::VirtualNumber(1)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::VirtualNumber(0)),
+        },
+    ]);
+    let (away, back) = (commands.len() - 2, commands.len() - 1);
+
+    let seen = std::rc::Rc::new(std::cell::RefCell::new((Vec::new(), 0)));
+    let read = seen.clone();
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(5)
+        .with_window(9, |window| window.subrole = "AXDialog".to_string())
+        .on_iteration(away, |_world, state| {
+            // Whatever the way there raised doesn't count.
+            let _ = state.take_raised();
+        })
+        .on_iteration(back, move |world, state| {
+            let mut query = world.query::<(&Window, Has<crate::ecs::FocusedMarker>)>();
+            let focused = query
+                .iter(world)
+                .find_map(|(window, focused)| focused.then_some(window.id()))
+                .expect("a window is focused");
+            *read.borrow_mut() = (state.take_raised(), focused);
+        })
+        .run(commands);
+    let seen = seen.borrow();
+    (seen.0.clone(), seen.1)
+}
+
+#[test]
+fn switching_back_raises_floats_over_the_tiles_and_under_the_focused_one() {
+    let (raised, focused) = raises_after_switching_back(false);
+    assert!(raised.contains(&9), "the float is raised again: {raised:?}");
+    assert_eq!(raised.last(), Some(&focused), "focused is raised last");
+    // Every tile but the focused one comes before the float.
+    assert_eq!(
+        raised.iter().rev().nth(1),
+        Some(&9),
+        "the float is raised just before the focused: {raised:?}"
+    );
+}
+
+#[test]
+fn switching_back_leaves_floats_behind_when_the_layer_is() {
+    let (raised, _) = raises_after_switching_back(true);
+    assert!(!raised.is_empty(), "the strip is raised");
+    assert!(!raised.contains(&9), "the float stays behind: {raised:?}");
 }
 
 #[test]

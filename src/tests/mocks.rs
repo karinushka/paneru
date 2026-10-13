@@ -98,6 +98,9 @@ struct MockStateInner {
     /// Windows the app keeps out of its accessibility window list while the
     /// window server still reports them on screen: a background native tab.
     background_tabs: HashSet<WinID>,
+    /// Windows raised without focus, in order, so a test can check what ends
+    /// up in front of what.
+    raised: Vec<WinID>,
 }
 
 #[derive(Clone)]
@@ -119,8 +122,14 @@ impl MockState {
                 stale_window_ids: HashMap::new(),
                 unordered_windows: HashSet::new(),
                 background_tabs: HashSet::new(),
+                raised: Vec::new(),
             })),
         }
+    }
+
+    /// The windows raised since this was last called, in the order they were.
+    pub fn take_raised(&self) -> Vec<WinID> {
+        std::mem::take(&mut self.inner.force_write().raised)
     }
 
     #[allow(dead_code)]
@@ -636,7 +645,9 @@ impl MockState {
 
         // Fill in remaining defaults
         mw.expect_element().return_const(None);
-        mw.expect_raise_without_focus().return_const(());
+        let s = self.clone();
+        mw.expect_raise_without_focus()
+            .returning(move || s.inner.force_write().raised.push(id));
 
         // Focusing without raising still moves the OS focus, it just leaves the
         // window order alone. Only the app's idea of its focused window changes

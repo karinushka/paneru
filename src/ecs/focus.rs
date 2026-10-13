@@ -21,7 +21,9 @@ use std::pin::Pin;
 use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{FocusedMarker, MouseHeldMarker, SystemTheme, Timeout, Unmanaged, VerifyFocus};
+use crate::commands::visible_floating_entities;
 use crate::config::Config;
+use crate::ecs::display::FloatingLayer;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, GlobalState, WindowCtx, Windows};
 use crate::ecs::scroll::{PageGestureState, PageInFlight};
@@ -692,6 +694,9 @@ fn focus_window_trigger(
 fn raise_window_trigger(
     trigger: On<RaiseWindow>,
     windows: Query<(Entity, &Window, &Position, &Bounds)>,
+    all_windows: Windows,
+    floating_layers: Query<&FloatingLayer>,
+    window_manager: Res<WindowManager>,
     active_display: ActiveDisplay,
     config: Res<Config>,
 ) {
@@ -721,6 +726,30 @@ fn raise_window_trigger(
             .for_each(|(_, window, _, _)| {
                 window.raise_without_focus();
             });
+
+        // Raising the strip buried the floats, which a workspace switch would
+        // otherwise leave behind every tile. They go back over the other
+        // tiles, still under the focused window, unless the workspace has
+        // sent them behind on purpose.
+        let workspace_id = strip.id();
+        let floats_in_front = floating_layers
+            .iter()
+            .find(|layer| layer.workspace_id == workspace_id)
+            .is_none_or(|layer| layer.front);
+        if floats_in_front {
+            visible_floating_entities(
+                &all_windows,
+                &window_manager,
+                workspace_id,
+                active_display.bounds(),
+            )
+            .into_iter()
+            .filter(|&entity| entity != focus && !strip.contains(entity))
+            .filter_map(|entity| windows.get(entity).ok())
+            .for_each(|(_, window, _, _)| {
+                window.raise_without_focus();
+            });
+        }
     }
 
     // Raise the focused window last, because raised windows get OS focus events.

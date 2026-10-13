@@ -321,7 +321,8 @@ fn pick_nearest_in_direction(
         .map(|(entity, _)| entity)
 }
 
-fn visible_floating_entities(
+/// Floating windows of `workspace_id` that are on `display_bounds`.
+pub(crate) fn visible_floating_entities(
     windows: &Windows,
     window_manager: &WindowManager,
     workspace_id: WorkspaceId,
@@ -721,9 +722,11 @@ fn command_toggle_floating_layer(
             }
         })
         .unwrap_or_else(|| {
-            let layer = FloatingLayer::new(workspace_id);
+            // Started in front, so this first toggle puts it behind.
+            let mut layer = FloatingLayer::new(workspace_id);
+            layer.flip();
             commands.spawn((layer, ChildOf(active_display.entity())));
-            false
+            layer.front
         });
 
     let visible_floats =

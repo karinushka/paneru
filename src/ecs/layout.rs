@@ -17,7 +17,7 @@ use crate::ecs::params::Windows;
 use crate::ecs::workspace::{PreviousStripPosition, SnapStripMarker};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, DockPosition, EnsureVisibleMarker, Initializing, LayoutPosition,
-    ManualStripOffset, Position, RepositionMarker, ReshuffleAroundMarker, Scrolling,
+    ManualStripOffset, Position, RepositionMarker, ReshuffleAroundMarker, ResizeMarker, Scrolling,
     SpawnCommandsExt,
 };
 use crate::errors::{Error, Result};
@@ -76,12 +76,13 @@ type StripsForWindowPositioning<'w, 's> = Query<
     With<LayoutStrip>,
 >;
 
-/// Windows whose size changed this tick — the strip holding them has to re-run
-/// its layout.
-type ResizedWindows<'w, 's> = Populated<'w, 's, Entity, (Changed<Bounds>, With<Window>)>;
+/// Windows whose size or target size changed this tick — the strip holding them
+/// has to re-run its layout.
+type ResizedWindows<'w, 's> =
+    Populated<'w, 's, Entity, (Or<(Changed<Bounds>, Changed<ResizeMarker>)>, With<Window>)>;
 
-/// Window frames as the layout writes them: the current origin, and the size and
-/// slot the layout pass is free to overwrite.
+/// Window frames as the layout writes them: the current origin, the size and
+/// slot the layout pass is free to overwrite, and any in-flight resize target.
 type WindowFrames<'w, 's> = Query<
     'w,
     's,
@@ -89,6 +90,7 @@ type WindowFrames<'w, 's> = Query<
         &'static Position,
         &'static mut Bounds,
         &'static mut LayoutPosition,
+        Option<&'static ResizeMarker>,
     ),
     (Without<LayoutStrip>, With<Window>),
 >;
@@ -104,6 +106,7 @@ type RepositionedWindows<'w, 's> = Populated<
         &'static LayoutPosition,
         &'static mut Position,
         &'static mut Bounds,
+        Option<&'static ResizeMarker>,
     ),
     (Changed<LayoutPosition>, With<Window>, Without<LayoutStrip>),
 >;
@@ -1222,7 +1225,10 @@ pub(super) fn layout_strip_changed(
     let get_window_frame = |entity| {
         windows
             .get(entity)
-            .map(|(position, bounds, _)| IRect::from_corners(position.0, position.0 + bounds.0))
+            .map(|(position, bounds, _, resize)| {
+                let size = resize.map_or(bounds.0, |resize| resize.0);
+                IRect::from_corners(position.0, position.0 + size)
+            })
             .ok()
     };
 
@@ -1241,11 +1247,11 @@ pub(super) fn layout_strip_changed(
         .collect::<Vec<_>>();
 
     for (entity, frame) in changed {
-        if let Ok((_, mut bounds, mut layout_position)) = windows.get_mut(entity) {
+        if let Ok((_, mut bounds, mut layout_position, resize)) = windows.get_mut(entity) {
             if layout_position.0 != frame.min {
                 layout_position.0 = frame.min;
             }
-            if bounds.0 != frame.size() {
+            if resize.is_none() && bounds.0 != frame.size() {
                 bounds.0 = frame.size();
             }
         }
@@ -1316,9 +1322,15 @@ pub(super) fn reshuffle_layout_strip(
             );
             return;
         }
-        let Some(size) = windows.moving_frame(entity).map(|frame| frame.size()) else {
+        let Some(frame) = windows.moving_frame(entity) else {
             return;
         };
+        let size = frame.size();
+        // When a window is being resized (`ResizeMarker` present), keep its
+        // visual center anchored (`frame.center()`) unless `auto_center` or the
+        // edge invariant overrides it; for non-resize reshuffles, project from
+        // its logical slot in the strip (`layout_position.0 + strip_target`).
+        let resizing = windows.size(entity).is_some_and(|current| current != size);
 
         let display_bounds = ctx.display_bounds;
         let projected_min = layout_position.0 + ctx.strip_target;
@@ -1355,11 +1367,14 @@ pub(super) fn reshuffle_layout_strip(
         }
 
         // Derive the window's target origin: centered horizontally when
-        // auto_center is enabled, otherwise clamped into the viewport from its
-        // logical slot in the strip.
+        // auto_center is enabled, centered around its current frame when
+        // resizing in place, or clamped into the viewport from its logical slot
+        // in the strip.
         let mut desired_min = projected_min;
         if config.auto_center() {
             desired_min.x = ctx.raw_display_bounds.center().x - size.x / 2;
+        } else if resizing && let Some(current_frame) = windows.frame(entity) {
+            desired_min.x = IRect::from_center_size(current_frame.center(), size).min.x;
         }
         let clamped_min = clamp_origin_to_viewport(desired_min, size, display_bounds);
 
@@ -1669,7 +1684,7 @@ fn position_layout_windows(
         );
     }
 
-    for (entity, window, layout_position, mut position, mut bounds) in positioned_windows {
+    for (entity, window, layout_position, mut position, mut bounds, resize) in positioned_windows {
         let Some(context) = strip_contexts.get(&entity) else {
             continue;
         };
@@ -1686,7 +1701,8 @@ fn position_layout_windows(
         // h_pad to the virtual x, so subtract it here so the OS window
         // lands exactly sliver_width pixels from the screen edge.
         let h_pad = window.horizontal_padding();
-        let mut frame = IRect::from_corners(layout_position.0, layout_position.0 + bounds.0);
+        let target_size = resize.map_or(bounds.0, |resize| resize.0);
+        let mut frame = IRect::from_corners(layout_position.0, layout_position.0 + target_size);
         let width = frame.width();
         frame.min += context.strip_position;
         frame.max += context.strip_position;
@@ -1738,7 +1754,7 @@ fn position_layout_windows(
             frame.max.y = park_row + height;
         }
 
-        if bounds.0 != frame.size() {
+        if resize.is_none() && bounds.0 != frame.size() {
             bounds.0 = frame.size();
         }
 

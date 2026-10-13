@@ -28,7 +28,7 @@ use crate::ecs::{
     SendMessageTrigger, SpawnCommandsExt, Timeout, Unmanaged,
 };
 use crate::events::Event;
-use crate::manager::{Application, Display, Origin, Size, Window, WindowManager, origin_from};
+use crate::manager::{Application, Display, Size, Window, WindowManager, origin_from};
 use crate::platform::WorkspaceId;
 use crate::util::round_px;
 
@@ -829,13 +829,6 @@ fn resize_window(
     let new_width = round_px(next_ratio * f64::from(viewport.width()));
     let size = Size::new(new_width, frame.height());
 
-    let origin = clamp_origin_to_viewport(
-        IRect::from_center_size(frame.center(), size).min,
-        size,
-        viewport,
-    );
-    commands.reposition_entity(entity, origin);
-
     // Resize all windows in the column so stacked siblings share the new width.
     let strip = active_display.active_strip();
     if let Some(Column::Stack(stack)) = strip
@@ -1011,7 +1004,6 @@ fn full_width_window(
         if let Ok(mut entity_commands) = commands.get_entity(entity) {
             entity_commands.try_insert(FullWidthMarker { width_ratio });
         }
-        commands.reposition_entity(entity, Origin::new(viewport.min.x, viewport.min.y));
         commands.resize_entity(entity, Size::new(viewport.width(), viewport.height()));
         commands.reshuffle_around(entity);
     }

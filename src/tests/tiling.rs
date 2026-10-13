@@ -284,6 +284,7 @@ fn test_window_resize_grow_and_shrink_cycle() {
     let config: Config = (
         MainOptions {
             preset_column_widths: vec![0.25, 0.5, 0.75],
+            continuous_swipe: Some(false),
             ..Default::default()
         },
         vec![],
@@ -905,6 +906,95 @@ fn test_stacking_focused_window_pins_strip_to_left_edge_when_strip_fits_viewport
             );
             assert_window_at!(world, 0, 0, TEST_MENUBAR_HEIGHT);
             assert_window_at!(world, 1, 0, 394);
+        })
+        .run(commands);
+}
+
+#[test]
+fn test_window_resize_moves_subsequent_windows_in_strip() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Resize(ResizeDirection::Grow)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Resize(ResizeDirection::Shrink)),
+        },
+    ];
+
+    let config: Config = (
+        MainOptions {
+            preset_column_widths: vec![0.25, 0.5, 0.75],
+            continuous_swipe: Some(false),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(3)
+        .on_iteration(0, |world, _state| {
+            assert_window_at!(world, 0, 0, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 1, 400, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 2, 800, TEST_MENUBAR_HEIGHT);
+        })
+        .on_iteration(1, |world, _state| {
+            // Window 0 grows from 400 -> 512; windows 1 and 2 must shift right.
+            assert_window_size!(world, 0, 512, 748);
+            assert_window_at!(world, 0, 0, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 1, 512, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 2, 912, TEST_MENUBAR_HEIGHT);
+        })
+        .on_iteration(2, |world, _state| {
+            // Window 0 shrinks from 512 -> 256; windows 1 and 2 must shift left.
+            assert_window_size!(world, 0, 256, 748);
+            assert_window_at!(world, 0, 0, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 1, 256, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 2, 656, TEST_MENUBAR_HEIGHT);
+        })
+        .run(commands);
+}
+
+#[test]
+fn test_window_resize_middle_column_centers_around_window_and_shifts_strip() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Resize(ResizeDirection::Shrink)),
+        },
+    ];
+
+    let config: Config = (
+        MainOptions {
+            preset_column_widths: vec![0.25, 0.5, 0.75],
+            continuous_swipe: Some(true),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(3)
+        .on_iteration(1, |world, _state| {
+            assert_window_at!(world, 0, 0, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 1, 400, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 2, 800, TEST_MENUBAR_HEIGHT);
+        })
+        .on_iteration(2, |world, _state| {
+            // Window 1 shrinks from 400 -> 256 around its center (600):
+            // its new screen x is 600 - 128 = 472, so the strip shifts right
+            // by +72: window 0 moves to 72, window 1 to 472, and window 2 to 728.
+            assert_window_size!(world, 1, 256, 748);
+            assert_window_at!(world, 0, 72, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 1, 472, TEST_MENUBAR_HEIGHT);
+            assert_window_at!(world, 2, 728, TEST_MENUBAR_HEIGHT);
         })
         .run(commands);
 }

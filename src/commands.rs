@@ -881,6 +881,7 @@ fn command_center_window(
     windows: Windows,
     active_display: ActiveDisplay,
     window_manager: Res<WindowManager>,
+    config: Res<Config>,
     mut commands: Commands,
 ) {
     if filter_window_operations(&mut messages, |op| matches!(op, Operation::Center))
@@ -917,7 +918,12 @@ fn command_center_window(
             commands.reposition_entity(entity, origin);
         }
 
-        window_manager.warp_mouse(active_display.bounds().center());
+        // Centering moves the window, not the pointer, unless the pointer is
+        // asked to follow focus. Warping regardless also re-associates the
+        // pointer, which undoes a hold another app has on it mid-gesture.
+        if config.mouse_follows_focus() {
+            window_manager.warp_mouse(active_display.bounds().center());
+        }
     }
 }
 

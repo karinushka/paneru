@@ -1,6 +1,7 @@
 use std::{
     env, fs,
     io::{Error, ErrorKind, Result, Write},
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
 };
@@ -219,6 +220,7 @@ impl Service {
         ))?;
         Command::new(bin_path)
             .arg("restart")
+            .process_group(0)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -262,6 +264,81 @@ fn start_commands(service: &launchctl::Service, bootstrapped: bool) -> Vec<Vec<&
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        env, fs,
+        os::unix::process::CommandExt,
+        process::{Command, Stdio},
+        thread,
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    };
+
+    const FIXTURE_DIR: &str = "PANERU_TEST_SERVICE_HELPER_DIR";
+
+    #[test]
+    fn helper_has_its_own_process_group() {
+        if env::var_os(FIXTURE_DIR).is_some() {
+            super::Service::request_restart().unwrap();
+            let mut status = 0;
+            let pid = unsafe { libc::waitpid(-1, &raw mut status, 0) };
+            assert!(
+                pid > 0,
+                "cannot reap helper: {}",
+                std::io::Error::last_os_error()
+            );
+            assert!(
+                libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+                "helper failed: {status:#x}"
+            );
+            return;
+        }
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let dir = env::temp_dir().join(format!(
+            "paneru-service-{}-{}",
+            std::process::id(),
+            unique.as_nanos()
+        ));
+        fs::create_dir(&dir).unwrap();
+        let _cleanup = scopeguard::guard((), |()| {
+            let _ = fs::remove_dir_all(&dir);
+        });
+        let child = Command::new(env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("platform::service::tests::helper_has_its_own_process_group")
+            .arg("--nocapture")
+            .env(FIXTURE_DIR, &dir)
+            .process_group(0)
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap();
+        let daemon_pid = child.id().to_string();
+        let mut child = scopeguard::guard(child, |mut child| {
+            let _ = child.kill();
+            let _ = child.wait();
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "daemon fixture failed: {status}");
+                break;
+            }
+            assert!(Instant::now() < deadline, "daemon fixture timed out");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let report = fs::read_to_string(dir.join("helper")).unwrap();
+        let (helper_pid, group) = report.trim().split_once(' ').unwrap();
+        assert_eq!(group, helper_pid, "helper must lead its own process group");
+        assert_ne!(group, daemon_pid, "helper must leave the daemon group");
+    }
+
+    /// Runs inside the helper, which libtest's `restart` filter selects.
+    #[test]
+    fn restart() {
+        if let Some(dir) = env::var_os(FIXTURE_DIR) {
+            let report = format!("{} {}\n", std::process::id(), unsafe { libc::getpgrp() });
+            fs::write(std::path::Path::new(&dir).join("helper"), report).unwrap();
+        }
+    }
+
     use super::start_commands;
 
     fn service() -> launchctl::Service {

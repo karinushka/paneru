@@ -273,10 +273,24 @@ mod tests {
     };
 
     const FIXTURE_DIR: &str = "PANERU_TEST_SERVICE_HELPER_DIR";
-    const TIMEOUT: Duration = Duration::from_secs(10);
 
     #[test]
     fn helper_has_its_own_process_group() {
+        if env::var_os(FIXTURE_DIR).is_some() {
+            super::Service::request_restart().unwrap();
+            let mut status = 0;
+            let pid = unsafe { libc::waitpid(-1, &raw mut status, 0) };
+            assert!(
+                pid > 0,
+                "cannot reap helper: {}",
+                std::io::Error::last_os_error()
+            );
+            assert!(
+                libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+                "helper failed: {status:#x}"
+            );
+            return;
+        }
         let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
         let dir = env::temp_dir().join(format!(
             "paneru-service-{}-{}",
@@ -288,18 +302,20 @@ mod tests {
             let _ = fs::remove_dir_all(&dir);
         });
         let child = Command::new(env::current_exe().unwrap())
-            .args(["--exact", "platform::service::tests::daemon", "--nocapture"])
+            .arg("--exact")
+            .arg("platform::service::tests::helper_has_its_own_process_group")
+            .arg("--nocapture")
             .env(FIXTURE_DIR, &dir)
             .process_group(0)
             .stdin(Stdio::null())
             .spawn()
             .unwrap();
-        let daemon_pid = child.id();
+        let daemon_pid = child.id().to_string();
         let mut child = scopeguard::guard(child, |mut child| {
             let _ = child.kill();
             let _ = child.wait();
         });
-        let deadline = Instant::now() + TIMEOUT;
+        let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             if let Some(status) = child.try_wait().unwrap() {
                 assert!(status.success(), "daemon fixture failed: {status}");
@@ -309,50 +325,18 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         let report = fs::read_to_string(dir.join("helper")).unwrap();
-        let (process_id, group) = report.trim().split_once(' ').unwrap();
-        let process_id: u32 = process_id.parse().unwrap();
-        let group: u32 = group.parse().unwrap();
-        assert_eq!(group, process_id, "helper must lead its own process group");
+        let (helper_pid, group) = report.trim().split_once(' ').unwrap();
+        assert_eq!(group, helper_pid, "helper must lead its own process group");
         assert_ne!(group, daemon_pid, "helper must leave the daemon group");
     }
 
-    #[test]
-    fn daemon() {
-        if env::var_os(FIXTURE_DIR).is_none() {
-            return;
-        }
-        super::Service::request_restart().unwrap();
-        let deadline = Instant::now() + TIMEOUT / 2;
-        loop {
-            let mut status = 0;
-            let pid = unsafe { libc::waitpid(-1, &raw mut status, libc::WNOHANG) };
-            assert!(
-                pid >= 0,
-                "cannot reap helper: {}",
-                std::io::Error::last_os_error()
-            );
-            if pid > 0 {
-                assert!(libc::WIFEXITED(status));
-                assert_eq!(libc::WEXITSTATUS(status), 0);
-                break;
-            }
-            assert!(Instant::now() < deadline, "helper fixture timed out");
-            thread::sleep(Duration::from_millis(10));
-        }
-    }
-
+    /// Runs inside the helper, which libtest's `restart` filter selects.
     #[test]
     fn restart() {
-        let Some(dir) = env::var_os(FIXTURE_DIR) else {
-            return;
-        };
-        let process_id = std::process::id();
-        let group = unsafe { libc::getpgrp() };
-        fs::write(
-            std::path::PathBuf::from(dir).join("helper"),
-            format!("{process_id} {group}\n"),
-        )
-        .unwrap();
+        if let Some(dir) = env::var_os(FIXTURE_DIR) {
+            let report = format!("{} {}\n", std::process::id(), unsafe { libc::getpgrp() });
+            fs::write(std::path::Path::new(&dir).join("helper"), report).unwrap();
+        }
     }
 
     use super::start_commands;

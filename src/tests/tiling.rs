@@ -998,3 +998,51 @@ fn test_window_resize_middle_column_centers_around_window_and_shifts_strip() {
         })
         .run(commands);
 }
+
+#[test]
+fn test_full_width_centers_and_fills_viewport_when_window_was_partially_offscreen() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Center),
+        },
+        Event::Command {
+            command: Command::Window(Operation::FullWidth),
+        },
+        Event::Command {
+            command: Command::Window(Operation::FullWidth),
+        },
+    ];
+
+    let config: Config = (
+        MainOptions {
+            window_hidden_ratio: Some(0.5),
+            continuous_swipe: Some(true),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(2)
+        .on_iteration(1, |world, _state| {
+            // Window 0 (width 400) is centered at x = 312.
+            assert_window_at!(world, 0, 312, TEST_MENUBAR_HEIGHT);
+        })
+        .on_iteration(2, |world, _state| {
+            // Even when `window_hidden_ratio` is set (312 / 1024 = 0.30 < 0.5)
+            // and window 0 was off-origin, `FullWidth` must bring it fully on
+            // screen (`x = 0`, `width = 1024`).
+            assert_window_size!(world, 0, 1024, 748);
+            assert_window_at!(world, 0, 0, TEST_MENUBAR_HEIGHT);
+        })
+        .on_iteration(3, |world, _state| {
+            // Toggling `FullWidth` off restores the original width (400) and
+            // centers it in place (`512 - 200 = 312`).
+            assert_window_size!(world, 0, 400, 748);
+            assert_window_at!(world, 0, 312, TEST_MENUBAR_HEIGHT);
+        })
+        .run(commands);
+}

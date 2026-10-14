@@ -352,6 +352,12 @@ impl Windows<'_, '_> {
             .map(|(_, _, size, _, _, _)| size.0)
     }
 
+    pub fn is_resizing(&self, entity: Entity) -> bool {
+        self.positions
+            .get(entity)
+            .is_ok_and(|(_, _, _, _, _, resize)| resize.is_some())
+    }
+
     pub fn width_ratio(&self, entity: Entity) -> Option<f64> {
         self.positions
             .get(entity)

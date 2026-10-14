@@ -1330,7 +1330,7 @@ pub(super) fn reshuffle_layout_strip(
         // visual center anchored (`frame.center()`) unless `auto_center` or the
         // edge invariant overrides it; for non-resize reshuffles, project from
         // its logical slot in the strip (`layout_position.0 + strip_target`).
-        let resizing = windows.size(entity).is_some_and(|current| current != size);
+        let resizing = windows.is_resizing(entity);
 
         let display_bounds = ctx.display_bounds;
         let projected_min = layout_position.0 + ctx.strip_target;
@@ -1348,7 +1348,8 @@ pub(super) fn reshuffle_layout_strip(
             // so a strip that has since gained, lost, reordered or resized a
             // column no longer has a placement to keep.
             let current = strip_signature(ctx.strip, &windows);
-            if signature_matches(&current, &manual.signature)
+            if !resizing
+                && signature_matches(&current, &manual.signature)
                 && clamp_origin_to_viewport(projected_min, size, display_bounds) == projected_min
             {
                 trace!(
@@ -1409,10 +1410,10 @@ pub(super) fn reshuffle_layout_strip(
             };
         }
 
-        // Check how much of the window is hidden.If the hidden fraction is
-        // within the allowed ratio, skip.
+        // Check how much of the window is hidden. If the hidden fraction is
+        // within the allowed ratio (and we are not resizing it), skip.
         let hidden_ratio = config.window_hidden_ratio();
-        if hidden_ratio > 0.0 {
+        if !resizing && hidden_ratio > 0.0 {
             let visible_fraction = f64::from(visible_width) / f64::from(size.x.max(1));
             let hidden_fraction = 1.0 - visible_fraction;
 

@@ -990,6 +990,7 @@ fn full_width_window(
         let w = round_px(marker.width_ratio * f64::from(viewport.width()));
         let bounds = active_display.actual_bounds(&config).size().with_x(w);
         commands.resize_entity(entity, bounds);
+        commands.reshuffle_around(entity);
     } else {
         let strip = active_display.active_strip();
         if strip

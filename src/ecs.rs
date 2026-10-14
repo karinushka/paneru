@@ -4,6 +4,7 @@ use std::time::Duration;
 use bevy::MinimalPlugins;
 use bevy::app::App as BevyApp;
 use bevy::app::{First, Last, PostUpdate, PreUpdate, Startup};
+use bevy::ecs::change_detection::DetectChanges;
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::query::{Added, Changed, With};
 use bevy::ecs::resource::Resource;
@@ -133,24 +134,24 @@ pub fn register_systems(app: &mut bevy::app::App) {
             .next()
             .is_none_or(|marker| !marker.is_user_swiping)
     };
-    let dimming_enabled = |config: Option<Res<Config>>| {
-        config
-            .is_some_and(|config| config.has_dim_inactive_color() || config.border_active_window())
-    };
-    // The overlay must refresh not just when the active strip's layout changes,
-    // but also whenever focus moves — including focus *loss* (e.g. switching to
-    // an empty virtual workspace), which otherwise leaves a stale outline.
-    // Position changes on the focused window also dirty the overlay so that
-    // dragging a floating window moves the highlight with it.
-    let vw_indicator_dirty =
-        |strip_changed: Query<(), (With<ActiveWorkspaceMarker>, Changed<LayoutStrip>)>,
+    let overlays_dirty =
+        |config: Option<Res<Config>>,
+         theme: Option<Res<SystemTheme>>,
+         strip_changed: Query<(), (With<ActiveWorkspaceMarker>, Changed<LayoutStrip>)>,
          focus_gained: Query<(), Added<FocusedMarker>>,
          workspace_changed: Query<(), Added<ActiveWorkspaceMarker>>,
          focused_moved: Query<(), (With<FocusedMarker>, Changed<Position>)>| {
-            !strip_changed.is_empty()
-                || !focus_gained.is_empty()
-                || !workspace_changed.is_empty()
-                || !focused_moved.is_empty()
+            let Some(config) = config else {
+                return false;
+            };
+            let enabled = config.has_dim_inactive_color() || config.border_active_window();
+            config.is_changed()
+                || (enabled
+                    && (theme.is_some_and(|theme| theme.is_changed())
+                        || !strip_changed.is_empty()
+                        || !focus_gained.is_empty()
+                        || !workspace_changed.is_empty()
+                        || !focused_moved.is_empty()))
         };
     let native_tabs_enabled =
         |config: Option<Res<Config>>| config.is_none_or(|config| config.native_tabs_enabled());
@@ -294,9 +295,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
         PostUpdate,
         (
             (
-                systems::update_overlays
-                    .run_if(dimming_enabled)
-                    .run_if(vw_indicator_dirty),
+                systems::update_overlays.run_if(overlays_dirty),
                 systems::update_flash_messages,
             )
                 .chain(),
@@ -1028,5 +1027,84 @@ impl WindowProperties {
             .iter()
             .find_map(|props| props.horizontal_padding)
             .unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::SystemTheme;
+    use crate::{config::Config, tests::TestHarness};
+    use bevy::prelude::*;
+
+    fn overlays_last_run(harness: &TestHarness) -> bevy::ecs::change_detection::Tick {
+        let target = IntoSystem::into_system(crate::ecs::systems::update_overlays).system_type();
+        let schedules = harness.app.world().resource::<Schedules>();
+        let mut systems = schedules.get(PostUpdate).unwrap().systems().unwrap();
+        systems
+            .find(|(_, system)| system.system_type() == target)
+            .map(|(_, system)| system.get_last_run())
+            .unwrap()
+    }
+
+    fn border_config(enabled: bool) -> Config {
+        Config::try_from(&*format!(
+            "[options]\n[bindings]\n[decorations.active.border]\nenabled = {enabled}"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn overlays_rerun_on_theme_and_config_changes_only() {
+        let mut harness = TestHarness::new()
+            .with_config(border_config(true))
+            .with_windows(1);
+        harness
+            .world()
+            .insert_resource(SystemTheme { is_dark: false });
+        harness.advance(Duration::from_secs(1));
+
+        let overlay_runs_after = |harness: &mut TestHarness, change: &dyn Fn(&mut World)| {
+            let before = overlays_last_run(harness);
+            change(harness.world());
+            harness.app.update();
+            overlays_last_run(harness) != before
+        };
+
+        assert!(!overlay_runs_after(&mut harness, &|_| {}), "idle frame");
+        assert!(overlay_runs_after(&mut harness, &|world| {
+            world.resource_mut::<SystemTheme>().is_dark = true;
+        }));
+        assert!(
+            !overlay_runs_after(&mut harness, &|_| {}),
+            "idle frame after theme change"
+        );
+        assert!(overlay_runs_after(&mut harness, &|world| {
+            world.insert_resource(border_config(true));
+        }));
+        assert!(overlay_runs_after(&mut harness, &|world| {
+            world.insert_resource(border_config(false));
+        }));
+        assert!(
+            !overlay_runs_after(&mut harness, &|world| {
+                world.resource_mut::<SystemTheme>().is_dark = false;
+            }),
+            "theme change while disabled"
+        );
+    }
+
+    #[test]
+    fn overlays_run_without_system_theme() {
+        let mut harness = TestHarness::new()
+            .with_config(border_config(true))
+            .with_windows(1);
+        harness.advance(Duration::from_secs(1));
+        assert!(harness.world().get_resource::<SystemTheme>().is_none());
+
+        let before = overlays_last_run(&harness);
+        harness.world().insert_resource(border_config(true));
+        harness.app.update();
+        assert_ne!(overlays_last_run(&harness), before);
     }
 }

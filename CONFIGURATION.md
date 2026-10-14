@@ -520,6 +520,7 @@ Draws a colored border around the currently focused window.
 | :--- | :--- | :--- | :--- |
 | `enabled` | Boolean | `false` | Enable the active window border. |
 | `color` | String (Hex) | `"#FFFFFF"` | Hex color for the active window border. |
+| `color_night` | String (Hex) | *color* | Hex color for the active window border when macOS is in Dark Mode. |
 | `opacity` | Float (0.0–1.0) | `1.0` | Opacity of the active window border. |
 | `width` | Float (px) | `2.0` | Width of the border in pixels. |
 | `radius` | Number/String | `"auto"` | Corner radius in pixels or `"auto"` to match system. |
@@ -529,9 +530,15 @@ Draws a colored border around the currently focused window.
 [decorations.active.border]
 enabled = true
 color = "#89b4fa"
+color_night = "#cba6f7"
 width = 2.0
 radius = 12.0
 ```
+
+In Dark Mode, the border uses `color_night`.
+If `color_night` is not set, the border uses `color`, then the legacy `border_color` option, then white.
+In Light Mode, the border ignores `color_night`.
+The border changes color immediately when the macOS appearance changes.
 
 > **Tip:** You can override the `border_radius` for specific applications in the `[windows]` section. See [Window Rules](#6-window-rules).
 

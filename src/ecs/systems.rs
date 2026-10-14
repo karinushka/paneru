@@ -30,7 +30,8 @@ use crate::ecs::params::{ActiveDisplay, FrameActivity, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, BruteforceWindows, FlashMessage, FocusedMarker, Initializing,
     LowPowerMode, MissionControlActive, Position, ReadDisplayProperties, RestoreWindowState,
-    Scrolling, SendMessageTrigger, SpawnCommandsExt, Unmanaged, WidthRatio, WindowProperties,
+    Scrolling, SendMessageTrigger, SpawnCommandsExt, SystemTheme, Unmanaged, WidthRatio,
+    WindowProperties,
 };
 use crate::events::{Event, InputEvent};
 use crate::manager::{
@@ -995,14 +996,13 @@ pub(super) struct OverlayWindowConfigCache {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn update_overlays(
-    // Gating lives in the `overlay_dirty` run condition (strip change *or*
-    // focus change); this query just resolves the current active workspace.
     active_workspace: Populated<(Has<Scrolling>, &LayoutStrip), With<ActiveWorkspaceMarker>>,
     windows: Windows,
     applications: Query<&Application>,
     overlay_mgr: Option<NonSendMut<OverlayManager>>,
     mission_control_active: Res<MissionControlActive>,
     config: Res<Config>,
+    theme: Option<Res<SystemTheme>>,
     mut window_config_cache: Local<OverlayWindowConfigCache>,
     window_manager: Res<WindowManager>,
 ) {
@@ -1087,7 +1087,7 @@ pub(super) fn update_overlays(
         };
 
         Some(BorderParams {
-            color: config.border_color(),
+            color: config.border_color(theme.is_some_and(|theme| theme.is_dark)),
             opacity: config.border_opacity(),
             width: config.border_width(),
             radius: window_config_cache

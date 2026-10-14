@@ -26,6 +26,9 @@ pub struct GeneralBorderOptions {
     /// Hex color for the window border, e.g. "#FF0000".
     /// Default: "#FFFFFF" (white).
     pub color: Option<String>,
+    /// Hex color for the window border when in Dark Mode.
+    /// Default: `color`.
+    pub color_night: Option<String>,
     /// Opacity of the window border (0.0–1.0).
     /// Default: 1.0.
     pub opacity: Option<f64>,

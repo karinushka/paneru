@@ -606,14 +606,17 @@ impl Config {
             .unwrap_or(false)
     }
 
-    pub fn border_color(&self) -> (f64, f64, f64) {
+    pub fn border_color(&self, is_dark: bool) -> (f64, f64, f64) {
         let config = self.inner();
-        config
+        let border = config
             .decorations
             .as_ref()
             .and_then(|decorations| decorations.active.as_ref())
-            .and_then(|active| active.border.as_ref())
-            .and_then(|border| border.color.as_deref())
+            .and_then(|active| active.border.as_ref());
+        border
+            .filter(|_| is_dark)
+            .and_then(|border| border.color_night.as_deref())
+            .or(border.and_then(|border| border.color.as_deref()))
             .or(config.options.border_color.as_deref())
             .map_or((1.0, 1.0, 1.0), parse_hex_color)
     }
@@ -2393,13 +2396,47 @@ fn test_parse_hex_color_malformed_hex() {
 }
 
 #[test]
+fn test_border_color_night_fallback() {
+    const RED: (f64, f64, f64) = (1.0, 0.0, 0.0);
+    const GREEN: (f64, f64, f64) = (0.0, 1.0, 0.0);
+    const BLUE: (f64, f64, f64) = (0.0, 0.0, 1.0);
+    const WHITE: (f64, f64, f64) = (1.0, 1.0, 1.0);
+    let cases = [
+        ("color = '#FF0000'\ncolor_night = '#00FF00'", "", RED, GREEN),
+        ("color = '#FF0000'", "border_color = '#0000FF'", RED, RED),
+        (
+            "color_night = '#00FF00'",
+            "border_color = '#0000FF'",
+            BLUE,
+            GREEN,
+        ),
+        ("color_night = '#00FF00'", "", WHITE, GREEN),
+        ("", "border_color = '#0000FF'", BLUE, BLUE),
+        ("", "", WHITE, WHITE),
+    ];
+    for (border, legacy, light, dark) in cases {
+        let config = Config::try_from(&*format!(
+            "[options]\n{legacy}\n[bindings]\n[decorations.active.border]\n{border}"
+        ))
+        .unwrap();
+        assert_eq!(
+            config.border_color(false),
+            light,
+            "light: {border} {legacy}"
+        );
+        assert_eq!(config.border_color(true), dark, "dark: {border} {legacy}");
+    }
+}
+
+#[test]
 #[allow(clippy::float_cmp)]
 fn test_config_defaults() {
     let config = Config::default();
     assert_eq!(config.dim_inactive_opacity(), 0.0);
     assert_eq!(config.dim_inactive_color(), (0.0, 0.0, 0.0));
     assert!(!config.border_active_window());
-    assert_eq!(config.border_color(), (1.0, 1.0, 1.0));
+    assert_eq!(config.border_color(false), (1.0, 1.0, 1.0));
+    assert_eq!(config.border_color(true), (1.0, 1.0, 1.0));
     assert_eq!(config.border_opacity(), 1.0);
     assert_eq!(config.border_width(), 2.0);
     // Automatic radius detection is only enabled on macOS 26; other

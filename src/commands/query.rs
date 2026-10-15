@@ -500,6 +500,7 @@ mod tests {
                 visible: true,
                 column: Some(0),
                 row: Some(0),
+                tabbed: false,
             })
             .collect();
 

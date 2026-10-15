@@ -782,6 +782,7 @@ impl QueryState for PaneruQueryState {
                         visible: visibility.is_some_and(|(_, visible)| visible),
                         column,
                         row,
+                        tabbed: strip.is_tabbed_display(entity),
                     })
                 })
                 .collect::<Vec<_>>();

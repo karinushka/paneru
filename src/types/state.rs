@@ -111,6 +111,7 @@ pub struct Frame {
 }
 
 /// A window, as reported by queries and subscription events.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct WindowState {
     pub window_id: i32,
@@ -138,6 +139,11 @@ pub struct WindowState {
     /// Zero-based row of a tiled window within its column, top to bottom.
     /// Windows tabbed together share a row.
     pub row: Option<u32>,
+    /// Whether the window's stack is shown as tabs (`window tabbeddisplay`):
+    /// its windows share one frame, though each keeps its own row. Missing
+    /// from a daemon that predates it.
+    #[serde(default)]
+    pub tabbed: bool,
 }
 
 impl QueryState {
@@ -305,6 +311,7 @@ mod tests {
                 visible: true,
                 column: Some(0),
                 row: Some(0),
+                tabbed: false,
             }],
             active: ActiveState::default(),
         };
@@ -360,6 +367,7 @@ mod tests {
             assert_eq!(window.title, "window");
             assert_eq!(window.role, None);
             assert_eq!(window.subrole, None);
+            assert!(!window.tabbed);
         }
     }
 
@@ -384,6 +392,7 @@ mod tests {
             visible,
             column: None,
             row: None,
+            tabbed: false,
         };
 
         let state = QueryState {

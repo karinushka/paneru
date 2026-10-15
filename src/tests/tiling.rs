@@ -1833,3 +1833,147 @@ fn new_window_on_active_space_keeps_after_focus_placement() {
             },
         ]);
 }
+
+/// A harness with `count` windows and `auto_center` as given, settled.
+fn balance_harness(count: i32, auto_center: bool) -> TestHarness {
+    balance_harness_with(
+        count,
+        MainOptions {
+            auto_center: Some(auto_center),
+            ..Default::default()
+        },
+    )
+}
+
+fn balance_harness_with(count: i32, options: MainOptions) -> TestHarness {
+    let config: Config = (options, vec![]).into();
+    let mut h = TestHarness::new().with_config(config).with_windows(count);
+    balance_pump(&mut h, Command::PrintState);
+    h
+}
+
+/// A second of simulated time: long enough for any resize or slide to land.
+fn balance_settle(h: &mut TestHarness) {
+    h.advance(Duration::from_secs(1));
+}
+
+fn balance_pump(h: &mut TestHarness, command: Command) {
+    h.app
+        .world_mut()
+        .write_message::<Event>(Event::Command { command });
+    balance_settle(h);
+}
+
+fn balance_focus(h: &mut TestHarness, id: crate::platform::WinID) {
+    h.mock_state.focus_window(id);
+    balance_settle(h);
+}
+
+/// Window `id`'s frame as it was last placed.
+fn balance_frame(h: &mut TestHarness, id: crate::platform::WinID) -> IRect {
+    let world = h.app.world_mut();
+    let mut query = world.query::<&crate::manager::Window>();
+    query
+        .iter(world)
+        .find(|w| w.id() == id)
+        .expect("window not found")
+        .frame()
+}
+
+/// Gives each window its width, focuses `focused`, balances, and checks the
+/// focused window kept its place on screen while the others took its width.
+fn assert_balance_keeps_focused_in_place(
+    h: &mut TestHarness,
+    widths: &[(crate::platform::WinID, f64)],
+    focused: crate::platform::WinID,
+    ids: &[crate::platform::WinID],
+) {
+    for &(id, ratio) in widths {
+        balance_focus(h, id);
+        balance_pump(h, Command::Window(Operation::SetWidth(ratio)));
+    }
+    balance_focus(h, focused);
+    let before = balance_frame(h, focused);
+
+    balance_pump(h, Command::Window(Operation::Balance));
+
+    let after = balance_frame(h, focused);
+    assert_eq!(
+        after.min.x, before.min.x,
+        "focused window moved: {before:?} -> {after:?}"
+    );
+    for &id in ids {
+        assert_eq!(
+            balance_frame(h, id).width(),
+            before.width(),
+            "window {id} width"
+        );
+    }
+}
+
+#[test]
+fn balance_keeps_focused_in_place_when_others_were_wider() {
+    for auto_center in [true, false] {
+        let mut h = balance_harness(4, auto_center);
+        assert_balance_keeps_focused_in_place(&mut h, &[(2, 0.25)], 2, &[0, 1, 2, 3]);
+    }
+}
+
+#[test]
+fn balance_keeps_focused_in_place_when_others_were_narrower() {
+    for auto_center in [true, false] {
+        let mut h = balance_harness(4, auto_center);
+        assert_balance_keeps_focused_in_place(
+            &mut h,
+            &[(0, 0.25), (1, 0.25), (3, 0.25), (2, 0.5)],
+            2,
+            &[0, 1, 2, 3],
+        );
+    }
+}
+
+#[test]
+fn balance_of_first_column_leaves_it_in_place() {
+    for auto_center in [true, false] {
+        let mut h = balance_harness(4, auto_center);
+        assert_balance_keeps_focused_in_place(&mut h, &[(0, 0.25)], 0, &[0, 1, 2, 3]);
+    }
+}
+
+#[test]
+fn balance_keeps_focused_in_place_after_a_stack() {
+    for auto_center in [true, false] {
+        let mut h = balance_harness(5, auto_center);
+        // Window 1 onto window 0's column: a stack left of the focused window.
+        balance_focus(&mut h, 1);
+        balance_pump(&mut h, Command::Window(Operation::Stack(true)));
+        assert_balance_keeps_focused_in_place(&mut h, &[(3, 0.25)], 3, &[0, 2, 3, 4]);
+    }
+}
+
+/// With `auto_center` and continuous swipes off, a strip that fits after
+/// balancing is pinned to the left edge, measured by its new width rather
+/// than the old.
+#[test]
+fn balance_pins_a_strip_that_now_fits_to_the_left_edge() {
+    let mut h = balance_harness_with(
+        3,
+        MainOptions {
+            auto_center: Some(false),
+            continuous_swipe: Some(false),
+            ..Default::default()
+        },
+    );
+    balance_focus(&mut h, 2);
+    balance_pump(&mut h, Command::Window(Operation::SetWidth(0.25)));
+    balance_pump(&mut h, Command::Window(Operation::Balance));
+
+    let first = balance_frame(&mut h, 0);
+    let last = balance_frame(&mut h, 2);
+    assert_eq!(first.width(), last.width());
+    assert_eq!(first.min.x, 0, "first window off the left edge: {first:?}");
+    assert!(
+        last.max.x <= TEST_DISPLAY_WIDTH,
+        "strip overflows: {last:?}"
+    );
+}

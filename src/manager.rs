@@ -8,8 +8,8 @@ use derive_more::{DerefMut, with_trait::Deref};
 use mockall::automock;
 use notify::{RecursiveMode, Watcher};
 use objc2_core_foundation::{
-    CFArray, CFDictionary, CFMutableData, CFNumber, CFNumberType, CFRetained, CFString, CFType,
-    CGPoint, CGRect, CGSize, kCFBooleanTrue,
+    CFArray, CFBoolean, CFDictionary, CFMutableData, CFNumber, CFNumberType, CFRetained, CFString,
+    CFType, CGPoint, CGRect, CGSize, kCFBooleanTrue,
 };
 use objc2_core_graphics::{
     CGAssociateMouseAndMouseCursorPosition, CGDirectDisplayID, CGDisplayBounds,
@@ -903,6 +903,19 @@ pub fn bruteforce_windows(
 /// `true` if Accessibility privileges are granted, `false` otherwise.
 pub fn check_ax_privilege() -> bool {
     unsafe { AXIsProcessTrusted() }
+}
+
+/// Whether the login session's screen is locked. While it is, Accessibility
+/// answers for no application's windows, so a scan then finds none.
+pub fn screen_is_locked() -> bool {
+    let Some(session) = objc2_core_graphics::CGSessionCopyCurrentDictionary() else {
+        return false;
+    };
+    let session = unsafe { session.cast_unchecked::<CFString, CFType>() };
+    session
+        .get(&CFString::from_static_str("CGSSessionScreenIsLocked"))
+        .and_then(|value| value.downcast_ref::<CFBoolean>().map(CFBoolean::value))
+        .unwrap_or(false)
 }
 
 /// Requests Accessibility privileges once through the native macOS prompt.

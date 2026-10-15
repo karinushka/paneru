@@ -3894,7 +3894,7 @@ fn test_virtual_number_recreates_missing_baseline_row() {
     // display change does, leaving the space numbered from "2".
     TestHarness::new()
         .with_windows(2)
-        .on_iteration(2, |world, _state| {
+        .on_iteration(1, |world, _state| {
             let row_zero = world
                 .query::<(Entity, &LayoutStrip)>()
                 .iter(world)
@@ -3910,7 +3910,7 @@ fn test_virtual_number_recreates_missing_baseline_row() {
                 .collect::<Vec<_>>();
             assert_eq!(indexes, vec![1], "only row 1 should be left");
         })
-        .on_iteration(3, |world, _state| {
+        .on_iteration(2, |world, _state| {
             let recreated = world
                 .query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>()
                 .iter(world)
@@ -3947,7 +3947,7 @@ fn test_virtual_move_number_recreates_missing_baseline_row() {
     // change does, leaving the space numbered from "2".
     TestHarness::new()
         .with_windows(2)
-        .on_iteration(2, |world, _state| {
+        .on_iteration(1, |world, _state| {
             let row_zero = world
                 .query::<(Entity, &LayoutStrip)>()
                 .iter(world)
@@ -3956,7 +3956,7 @@ fn test_virtual_move_number_recreates_missing_baseline_row() {
                 .expect("row 0 should still exist before it is dropped");
             world.entity_mut(row_zero).despawn();
         })
-        .on_iteration(3, |world, _state| {
+        .on_iteration(2, |world, _state| {
             let focused = world
                 .query_filtered::<Entity, With<FocusedMarker>>()
                 .single(world)

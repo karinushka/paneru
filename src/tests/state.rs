@@ -681,6 +681,44 @@ fn test_query_state_reports_each_tiled_window_column_and_row() {
 }
 
 #[test]
+fn test_query_state_reports_a_stack_shown_as_tabs() {
+    use crate::tests::harness::TestHarness;
+
+    let mut harness = TestHarness::new().with_windows(3);
+    harness.app.update();
+
+    let world = harness.world();
+    let mut strips = world.query_filtered::<&mut LayoutStrip, With<ActiveWorkspaceMarker>>();
+    let mut strip = strips.single_mut(world).expect("active workspace");
+    let last = strip.all_windows()[2];
+    strip
+        .stack(last)
+        .expect("the last column stacks onto its neighbour");
+    let tabbed = |world: &mut World| {
+        extract_query_state(world)
+            .expect("query state extraction")
+            .virtual_workspaces[0]
+            .windows
+            .iter()
+            .map(|window| window.tabbed)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(tabbed(world), vec![false, false, false], "a split stack");
+
+    let mut strip = strips.single_mut(world).expect("active workspace");
+    assert_eq!(strip.toggle_tabbed_display(last), Some(true));
+    assert_eq!(
+        tabbed(world),
+        vec![false, true, true],
+        "every window of the stack, and only those, is shown as a tab"
+    );
+
+    let mut strip = strips.single_mut(world).expect("active workspace");
+    assert_eq!(strip.toggle_tabbed_display(last), Some(false));
+    assert_eq!(tabbed(world), vec![false, false, false], "split again");
+}
+
+#[test]
 fn test_query_state_assigns_float_only_to_active_row() {
     use crate::commands::{Command, Operation};
     use crate::tests::harness::TestHarness;

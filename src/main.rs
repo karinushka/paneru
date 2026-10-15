@@ -3,10 +3,11 @@
     reason = "Bevy system and mlua callback signatures are by-value by contract"
 )]
 
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 mod accessibility_prompt;
@@ -45,7 +46,7 @@ use types::script_value::ScriptValue;
 use types::wire::ScriptStateRequest;
 
 use crate::ecs::setup_bevy_app;
-use crate::manager::check_ax_privilege;
+use crate::manager::{check_ax_privilege, screen_is_locked};
 use crate::menubar::MenuBarManager;
 use crate::platform::PlatformCallbacks;
 use accessibility_prompt::{
@@ -221,6 +222,9 @@ fn main() -> Result<()> {
             if !check_ax_privilege() && !wait_for_accessibility(sender.clone(), &receiver) {
                 return Ok(());
             }
+            if !wait_for_unlock(&receiver, screen_is_locked, Duration::from_millis(500)) {
+                return Ok(());
+            }
             match objc2::rc::autoreleasepool(|_| setup_bevy_app(sender, receiver)) {
                 Ok(mut app) => {
                     app.run();
@@ -282,6 +286,32 @@ fn wait_for_accessibility(sender: EventSender, receiver: &Receiver<Event>) -> bo
             Err(TryRecvError::Empty) => {}
         }
     }
+}
+
+/// Waits while `locked` says the screen is locked, as it is when the service
+/// restarts behind the lock screen: a scan then finds no windows, nothing scans
+/// again on unlock, and the session restore, matching none, would leave the
+/// saved layout to be overwritten by an empty one. `false` if asked to quit.
+fn wait_for_unlock(receiver: &Receiver<Event>, locked: impl Fn() -> bool, poll: Duration) -> bool {
+    if !locked() {
+        return true;
+    }
+    info!("The screen is locked: waiting for it to be unlocked before finding windows.");
+    while locked() {
+        match receiver.recv_timeout(poll) {
+            Ok(
+                Event::Exit
+                | Event::Command {
+                    command: commands::Command::Quit,
+                },
+            )
+            | Err(RecvTimeoutError::Disconnected) => return false,
+            Ok(event) => warn!(?event, "ignoring event while the screen is locked"),
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+    }
+    info!("The screen is unlocked.");
+    true
 }
 
 impl QueryCmd {

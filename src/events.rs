@@ -139,7 +139,12 @@ pub enum Event {
     },
 
     /// A swipe gesture has been detected.
-    Swipe { delta: f64, fingers: usize },
+    Swipe {
+        delta: f64,
+        fingers: usize,
+        /// Signed mean horizontal finger travel in centimeters.
+        distance_cm: f64,
+    },
 
     /// A vertical trackpad gesture (accumulates delta to threshold before firing).
     VerticalSwipe { delta: f64, fingers: usize },
@@ -203,6 +208,12 @@ pub enum Event {
 
     /// A command has been issued to the window manager.
     Command { command: Command },
+
+    /// One gesture-earned focus step, routed through the regular focus handler.
+    PageFocus {
+        direction: crate::commands::Direction,
+        generation: u64,
+    },
 
     /// A structured state query has been issued by a client.
     StateQuery {

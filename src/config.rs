@@ -536,6 +536,33 @@ impl Config {
             .or(config.options.swipe_gesture_fingers)
     }
 
+    pub fn swipe_gesture_paging(&self) -> bool {
+        self.inner()
+            .swipe
+            .as_ref()
+            .and_then(|swipe| swipe.gesture.as_ref())
+            .and_then(|gesture| gesture.paging)
+            .unwrap_or(false)
+    }
+
+    pub fn swipe_gesture_page_distance_cm(&self) -> f64 {
+        self.inner()
+            .swipe
+            .as_ref()
+            .and_then(|swipe| swipe.gesture.as_ref())
+            .and_then(|gesture| gesture.page_distance_cm)
+            .unwrap_or(2.0)
+    }
+
+    pub fn swipe_gesture_haptics(&self) -> bool {
+        self.inner()
+            .swipe
+            .as_ref()
+            .and_then(|swipe| swipe.gesture.as_ref())
+            .and_then(|gesture| gesture.haptics)
+            .unwrap_or(true)
+    }
+
     pub fn swipe_vertical(&self) -> bool {
         let config = self.inner();
         config
@@ -2826,5 +2853,36 @@ mod lua_setup_tests {
     fn non_table_argument_is_rejected() {
         let lua = Lua::new();
         assert!(config_from_lua(&lua, mlua::Value::Integer(3)).is_err());
+    }
+}
+
+#[test]
+fn gesture_paging_defaults_and_overrides_are_resolved() {
+    let defaults = Config::default();
+    assert!(!defaults.swipe_gesture_paging());
+    assert_eq!(defaults.swipe_gesture_page_distance_cm(), 2.0);
+    assert!(defaults.swipe_gesture_haptics());
+
+    let enabled = Config::try_from(
+        "[swipe.gesture]\npaging = true\npage_distance_cm = 3.5\nhaptics = false\n",
+    )
+    .unwrap();
+    assert!(enabled.swipe_gesture_paging());
+    assert_eq!(enabled.swipe_gesture_page_distance_cm(), 3.5);
+    assert!(!enabled.swipe_gesture_haptics());
+
+    let disabled = Config::try_from("[swipe.gesture]\npaging = false\nhaptics = true\n").unwrap();
+    assert!(!disabled.swipe_gesture_paging());
+    assert!(disabled.swipe_gesture_haptics());
+}
+
+#[test]
+fn gesture_page_distance_rejects_nonpositive_and_nonfinite_values() {
+    for value in ["0", "-1", "nan", "inf", "-inf"] {
+        let source = format!("[swipe.gesture]\npage_distance_cm = {value}\n");
+        assert!(
+            Config::try_from(source.as_str()).is_err(),
+            "accepted {value}"
+        );
     }
 }

@@ -1,12 +1,21 @@
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, de};
 
-use crate::{config::deserialize_modifier, platform::Modifiers};
+use crate::{commands::Direction, config::deserialize_modifier, platform::Modifiers};
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[cfg_attr(test, derive(serde::Serialize))]
 pub enum SwipeGestureDirection {
     Natural,
     Reversed,
+}
+
+pub(crate) fn focus_direction(gesture_direction: SwipeGestureDirection, delta: f64) -> Direction {
+    let natural = matches!(gesture_direction, SwipeGestureDirection::Natural);
+    if (delta > 0.0) == natural {
+        Direction::East
+    } else {
+        Direction::West
+    }
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]
@@ -40,6 +49,29 @@ pub struct GestureOptions {
 
     /// Whether to intercept vertical swipes.
     pub vertical: Option<bool>,
+
+    /// Focus one adjacent window per configured horizontal finger distance.
+    pub paging: Option<bool>,
+
+    /// Finger travel required for one page. Default: 2 cm.
+    #[serde(default, deserialize_with = "positive_distance_cm")]
+    pub page_distance_cm: Option<f64>,
+
+    /// Play a haptic pulse for each confirmed paging focus change. Default: true.
+    pub haptics: Option<bool>,
+}
+
+fn positive_distance_cm<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let distance = Option::<f64>::deserialize(deserializer)?;
+    if distance.is_some_and(|distance| !distance.is_finite() || distance <= 0.0) {
+        return Err(de::Error::custom(
+            "page_distance_cm must be finite and greater than zero",
+        ));
+    }
+    Ok(distance)
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]

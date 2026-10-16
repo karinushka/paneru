@@ -1,17 +1,20 @@
-use bevy::app::{App, Plugin, Update};
+use bevy::app::{App, Plugin, PreUpdate, Update};
 use bevy::ecs::entity::Entity;
-use bevy::ecs::message::MessageReader;
+use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::query::{With, Without};
+use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
-use bevy::ecs::system::{Commands, Local, Populated, Res, Single};
+use bevy::ecs::schedule::SystemCondition as _;
+use bevy::ecs::system::{Commands, Local, Populated, Res, ResMut, Single};
 use bevy::math::IRect;
 use bevy::time::Time;
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 use tracing::{Level, instrument};
 
 use crate::commands::{Command, Direction, Operation};
 use crate::config::Config;
-use crate::config::swipe::SwipeGestureDirection;
+use crate::config::swipe::{SwipeGestureDirection, focus_direction};
 use crate::ecs::layout::{Column, LayoutStrip};
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
@@ -27,6 +30,117 @@ use crate::platform::Modifiers;
 use crate::util::round_px;
 
 pub struct ScrollEventsPlugin;
+
+const PAGE_GESTURE_TIMEOUT: Duration = Duration::from_millis(150);
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PageInFlight {
+    Dispatched,
+    AwaitingFocus {
+        target: Entity,
+        deadline: Option<Duration>,
+    },
+}
+
+#[derive(Default, Resource)]
+pub(crate) struct PageGestureState {
+    accumulated_cm: f64,
+    pending: VecDeque<(Direction, u64)>,
+    pub(crate) in_flight: Option<PageInFlight>,
+    last_event: Option<Duration>,
+    active: bool,
+    config: Option<(bool, Option<usize>, SwipeGestureDirection, f64, bool)>,
+    pub(crate) generation: u64,
+}
+
+impl PageGestureState {
+    pub(crate) fn reset(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.accumulated_cm = 0.0;
+        self.pending.clear();
+        self.in_flight = None;
+        self.last_event = None;
+        self.active = false;
+    }
+
+    fn has_work(&self) -> bool {
+        self.active || !self.pending.is_empty() || self.in_flight.is_some()
+    }
+
+    pub(crate) fn await_focus(&mut self, target: Entity) {
+        self.in_flight = Some(PageInFlight::AwaitingFocus {
+            target,
+            deadline: None,
+        });
+    }
+
+    fn earn_steps(&mut self, threshold_cm: f64, gesture_direction: SwipeGestureDirection) {
+        let travel = self.accumulated_cm.abs();
+        if travel < threshold_cm {
+            return;
+        }
+        let direction = focus_direction(gesture_direction, self.accumulated_cm);
+        // Saturating float-to-integer conversion bounds an implausibly large
+        // gesture while preserving the earned count for normal device input.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let steps = (travel / threshold_cm).floor() as u64;
+        let remainder = travel % threshold_cm;
+        self.accumulated_cm = self.accumulated_cm.signum() * remainder;
+        if let Some((last_direction, count)) = self.pending.back_mut()
+            && *last_direction == direction
+            && let Some(merged) = count.checked_add(steps)
+        {
+            *count = merged;
+            return;
+        }
+        self.pending.push_back((direction, steps));
+    }
+
+    fn next_step(&mut self) -> Option<Direction> {
+        let (direction, count) = self.pending.front_mut()?;
+        let direction = direction.clone();
+        *count -= 1;
+        if *count == 0 {
+            self.pending.pop_front();
+        }
+        Some(direction)
+    }
+}
+
+fn paging_active(state: Res<PageGestureState>) -> bool {
+    state.has_work()
+}
+
+#[cfg(test)]
+mod paging_tests {
+    use super::*;
+
+    #[test]
+    fn large_swipe_preserves_every_earned_step_without_expanding_the_queue() {
+        let mut state = PageGestureState {
+            accumulated_cm: 80.5,
+            ..Default::default()
+        };
+        state.earn_steps(2.0, SwipeGestureDirection::Natural);
+        assert_eq!(state.pending.len(), 1);
+        assert!((state.accumulated_cm - 0.5).abs() < f64::EPSILON);
+
+        let expected = focus_direction(SwipeGestureDirection::Natural, 1.0);
+        for _ in 0..40 {
+            assert_eq!(state.next_step(), Some(expected.clone()));
+        }
+        assert_eq!(state.next_step(), None);
+    }
+
+    #[test]
+    fn in_flight_focus_keeps_paging_system_active_after_finger_lift() {
+        let state = PageGestureState {
+            in_flight: Some(PageInFlight::Dispatched),
+            ..Default::default()
+        };
+        assert!(state.has_work());
+    }
+}
 
 /// Upper bound on the timestep used to *advance* the strip.
 ///
@@ -61,9 +175,18 @@ type ScrollingStrip<'w, 's> = Single<
 
 impl Plugin for ScrollEventsPlugin {
     fn build(&self, app: &mut App) {
+        app.init_resource::<PageGestureState>();
         let mission_control_inactive = |mission_control: Option<Res<MissionControlActive>>| {
             mission_control.is_none_or(|active| !active.0)
         };
+
+        app.add_systems(
+            PreUpdate,
+            paging_gesture
+                .run_if(mission_control_inactive)
+                .run_if(on_message::<InputEvent>.or_else(paging_active))
+                .after(super::systems::demux_input_events),
+        );
 
         // Only the two gesture systems are gated on an input event. The rest of
         // the chain (inertia, snap force, integrator) must keep running after
@@ -88,6 +211,84 @@ impl Plugin for ScrollEventsPlugin {
             )
                 .in_set(UpdateSet::Input),
         );
+    }
+}
+
+pub(crate) fn paging_gesture(
+    mut messages: MessageReader<InputEvent>,
+    active_workspace: Single<Entity, With<ActiveWorkspaceMarker>>,
+    config: Res<Config>,
+    time: Res<Time>,
+    mut state: ResMut<PageGestureState>,
+    mut events: MessageWriter<Event>,
+    mut commands: Commands,
+) {
+    let current_config = (
+        config.swipe_gesture_paging(),
+        config.swipe_gesture_fingers(),
+        config.swipe_gesture_direction(),
+        config.swipe_gesture_page_distance_cm(),
+        config.swipe_gesture_haptics(),
+    );
+    if state.config.as_ref() != Some(&current_config) {
+        state.reset();
+        state.config = Some(current_config.clone());
+    }
+    if !current_config.0 {
+        return;
+    }
+
+    if state
+        .last_event
+        .is_some_and(|last| time.elapsed().abs_diff(last) > PAGE_GESTURE_TIMEOUT)
+    {
+        state.accumulated_cm = 0.0;
+        state.last_event = None;
+        state.active = false;
+    }
+
+    for InputEvent(event) in messages.read() {
+        match event {
+            Event::TouchpadDown => {
+                state.reset();
+                state.active = true;
+            }
+            Event::TouchpadUp => {
+                state.accumulated_cm = 0.0;
+                state.last_event = None;
+                state.active = false;
+            }
+            Event::Swipe {
+                distance_cm,
+                fingers,
+                ..
+            } if Some(*fingers) == current_config.1 => {
+                state.last_event = Some(time.elapsed());
+                state.active = true;
+                if !distance_cm.is_finite() {
+                    continue;
+                }
+                state.accumulated_cm += *distance_cm;
+                if !state.accumulated_cm.is_finite() {
+                    state.accumulated_cm = 0.0;
+                    continue;
+                }
+                commands.entity(*active_workspace).try_remove::<Scrolling>();
+                state.earn_steps(current_config.3, current_config.2.clone());
+            }
+            Event::Swipe { .. } => state.reset(),
+            _ => {}
+        }
+    }
+
+    if state.in_flight.is_none()
+        && let Some(direction) = state.next_step()
+    {
+        state.in_flight = Some(PageInFlight::Dispatched);
+        events.write(Event::PageFocus {
+            direction,
+            generation: state.generation,
+        });
     }
 }
 
@@ -129,10 +330,11 @@ fn swipe_gesture(
                 total_delta += *delta * scroll_scale;
                 has_scroll_event = true;
             }
-            Event::Swipe { delta, fingers }
+            Event::Swipe { delta, fingers, .. }
                 if config
                     .swipe_gesture_fingers()
-                    .is_some_and(|fingers_configured| fingers_configured == *fingers) =>
+                    .is_some_and(|fingers_configured| fingers_configured == *fingers)
+                    && !config.swipe_gesture_paging() =>
             {
                 total_delta += delta;
                 gesture_delta += delta;

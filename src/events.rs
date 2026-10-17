@@ -209,12 +209,6 @@ pub enum Event {
     /// A command has been issued to the window manager.
     Command { command: Command },
 
-    /// One gesture-earned focus step, routed through the regular focus handler.
-    PageFocus {
-        direction: crate::commands::Direction,
-        generation: u64,
-    },
-
     /// A structured state query has been issued by a client.
     StateQuery {
         kind: StateQueryKind,

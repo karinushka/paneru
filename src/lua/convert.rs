@@ -258,7 +258,6 @@ impl TryFrom<&Event> for LuaEvent {
             | Event::ApplicationFrontSwitched { .. }
             | Event::WindowCreated { .. }
             | Event::Command { .. }
-            | Event::PageFocus { .. }
             | Event::StateQuery { .. }
             | Event::WindowSetQuery { .. }
             | Event::StateSubscribe { .. }

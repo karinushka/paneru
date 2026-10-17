@@ -563,6 +563,27 @@ impl Config {
             .unwrap_or(true)
     }
 
+    pub(crate) fn swipe_paging_config(
+        &self,
+    ) -> (bool, Option<usize>, SwipeGestureDirection, f64, bool) {
+        let config = self.inner();
+        let gesture = config
+            .swipe
+            .as_ref()
+            .and_then(|swipe| swipe.gesture.as_ref());
+        let paging = gesture.and_then(|g| g.paging).unwrap_or(false);
+        let fingers = gesture
+            .and_then(|g| g.fingers_count)
+            .or(config.options.swipe_gesture_fingers);
+        let direction = gesture
+            .and_then(|g| g.direction.clone())
+            .or_else(|| config.options.swipe_gesture_direction.clone())
+            .unwrap_or(SwipeGestureDirection::Natural);
+        let distance_cm = gesture.and_then(|g| g.page_distance_cm).unwrap_or(2.0);
+        let haptics = gesture.and_then(|g| g.haptics).unwrap_or(true);
+        (paging, fingers, direction, distance_cm, haptics)
+    }
+
     pub fn swipe_vertical(&self) -> bool {
         let config = self.inner();
         config

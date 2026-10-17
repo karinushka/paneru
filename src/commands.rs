@@ -22,7 +22,7 @@ use crate::ecs::layout::{
     Column, LayoutStrip, MIN_WINDOW_HEIGHT, StackItem, clamp_origin_to_viewport, strip_signature,
 };
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Windows};
-use crate::ecs::scroll::{PageGestureState, PageInFlight};
+use crate::ecs::scroll::{PageFocusRequest, PageGestureState, PageInFlight};
 use crate::ecs::{
     ActiveDisplayMarker, ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker,
     FullWidthMarker, ManualStripOffset, NativeFullscreenMarker, Position, RaiseWindow,
@@ -64,6 +64,7 @@ type StripsWithVisibility<'w, 's> = Query<
 
 #[derive(SystemParam)]
 struct PagingFocusParams<'w, 's> {
+    page_requests: MessageReader<'w, 's, PageFocusRequest>,
     page_state: ResMut<'w, PageGestureState>,
     config: Res<'w, Config>,
     strip_positions:
@@ -117,7 +118,7 @@ pub fn register_commands(app: &mut bevy::app::App) {
             balance_strip,
             manage_window,
             stack_windows_handler,
-            command_move_focus.after(crate::ecs::scroll::paging_gesture),
+            command_move_focus,
             command_focus_unmanaged,
             command_focus_managed,
             command_raise_floating,
@@ -301,12 +302,12 @@ fn focus_with_verification(
     paging: Option<&mut PageGestureState>,
     commands: &mut Commands,
 ) {
-    if let Some(paging) = paging {
-        paging.await_focus(entity);
-    }
     if focused_entity != Some(entity)
         && let Ok(mut entity_commands) = commands.get_entity(entity)
     {
+        if let Some(paging) = paging {
+            paging.await_focus(entity);
+        }
         entity_commands.try_insert((
             crate::ecs::VerifyFocus,
             Timeout::for_component::<crate::ecs::VerifyFocus>(
@@ -363,22 +364,25 @@ fn command_move_focus(
     mut paging: PagingFocusParams,
     mut commands: Commands,
 ) {
-    let Some((direction, is_page)) = messages.read().find_map(|event| match event {
-        Event::Command {
-            command: Command::Window(Operation::Focus(direction)),
-        } => Some((direction, false)),
-        Event::PageFocus {
-            direction,
-            generation,
-        } if *generation == paging.page_state.generation
-            && matches!(paging.page_state.in_flight, Some(PageInFlight::Dispatched)) =>
-        {
-            Some((direction, true))
-        }
-        _ => None,
-    }) else {
+    let Some((direction, is_page)) =
+        filter_window_operations(&mut messages, |op| matches!(op, Operation::Focus(_)))
+            .find_map(|op| match op {
+                Operation::Focus(direction) => Some((direction.clone(), false)),
+                _ => None,
+            })
+            .or_else(|| {
+                let generation = paging.page_state.generation;
+                let dispatched =
+                    matches!(paging.page_state.in_flight, Some(PageInFlight::Dispatched));
+                paging.page_requests.read().find_map(|req| {
+                    (dispatched && req.generation == generation)
+                        .then(|| (req.direction.clone(), true))
+                })
+            })
+    else {
         return;
     };
+    let direction = &direction;
     if is_page {
         paging.page_state.in_flight = None;
     }

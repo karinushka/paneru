@@ -14,7 +14,7 @@ use crate::ecs::{
 use crate::ecs::{RepositionMarker, SpawnWindowTrigger};
 use crate::events::Event;
 use crate::manager::{Origin, Size, Window};
-use crate::platform::{Modifiers, WinID};
+use crate::platform::{Modifiers, Pid, WinID};
 use crate::{assert_focused, assert_window_at, assert_window_size};
 
 use super::*;
@@ -3502,6 +3502,50 @@ fn test_auto_discover_unmanaged_focused_window() {
             assert!(
                 is_managed,
                 "Window 1 should be auto-discovered and managed in ECS after receiving focus"
+            );
+        })
+        .run(events);
+}
+
+/// Discovery asks only the app that owns the focused window, as the window
+/// server has it: asking the others in turn held every keystroke behind the
+/// input tap for as long as the unresponsive ones took to time out.
+#[test]
+fn test_auto_discover_asks_only_the_owner() {
+    const OWNER: Pid = TEST_PROCESS_ID + 1;
+    let events = vec![
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::WindowFocused { window_id: 1 },
+    ];
+
+    TestHarness::new()
+        .with_windows(1)
+        .with_app(OWNER, "owner", "Owner", |app| app.is_frontmost = false)
+        .on_iteration(0, |_world, state| {
+            state.spawn_window(
+                OWNER,
+                TEST_WORKSPACE_ID,
+                1,
+                bevy::math::IRect::from_corners(
+                    bevy::math::IVec2::new(0, 0),
+                    bevy::math::IVec2::new(400, 400),
+                ),
+            );
+            state.update_app(OWNER, |app| app.focused_window_id = Some(1));
+            state.take_app_reads(TEST_PROCESS_ID);
+        })
+        .on_iteration(1, |world, state| {
+            let mut query = world.query::<&crate::manager::Window>();
+            assert!(
+                query.iter(world).any(|w| w.id() == 1),
+                "Window 1 should be discovered in the app that owns it"
+            );
+            assert_eq!(
+                state.take_app_reads(TEST_PROCESS_ID),
+                0,
+                "The frontmost app doesn't own window 1 and shouldn't be asked"
             );
         })
         .run(events);

@@ -36,10 +36,10 @@ pub use display::Display;
 pub use process::{Process, ProcessApi};
 pub use skylight::AXUIElementCopyAttributeValue;
 use skylight::{
-    _AXUIElementCreateWithRemoteToken, SLSCopyActiveMenuBarDisplayIdentifier,
+    _AXUIElementCreateWithRemoteToken, SLSConnectionGetPID, SLSCopyActiveMenuBarDisplayIdentifier,
     SLSCopyAssociatedWindows, SLSCopyManagedDisplaySpaces, SLSCopyWindowsWithOptionsAndTags,
     SLSFindWindowAndOwner, SLSGetConnectionIDForPSN, SLSGetCurrentCursorLocation,
-    SLSGetDisplayMenubarHeight, SLSGetSpaceManagementMode, SLSMainConnectionID,
+    SLSGetDisplayMenubarHeight, SLSGetSpaceManagementMode, SLSGetWindowOwner, SLSMainConnectionID,
     SLSManagedDisplayGetCurrentSpace, SLSSpaceGetType, SLSWindowIsOrderedIn,
     SLSWindowIteratorAdvance, SLSWindowIteratorGetAttributes, SLSWindowIteratorGetParentID,
     SLSWindowIteratorGetTags, SLSWindowIteratorGetWindowID, SLSWindowQueryResultCopyWindows,
@@ -201,6 +201,10 @@ pub trait WindowManagerApi: Send + Sync {
     fn dim_windows(&self, windows: &[WinID], level: f32);
 
     fn windows_on_screen(&self) -> Option<Vec<WinID>>;
+
+    /// Returns the process that owns a window, as the window server has it:
+    /// asks no application, so an unresponsive one can't stall the caller.
+    fn window_owner(&self, window_id: WinID) -> Option<Pid>;
 }
 
 /// `WindowManager` is a Bevy resource that holds a boxed `WindowManagerApi` trait object.
@@ -607,6 +611,18 @@ impl WindowManagerApi for WindowManagerOS {
                 })
                 .collect::<Vec<_>>()
         })
+    }
+
+    fn window_owner(&self, window_id: WinID) -> Option<Pid> {
+        let mut connection: ConnID = 0;
+        unsafe { SLSGetWindowOwner(self.main_cid, window_id, &mut connection) }
+            .to_result(function_name!())
+            .ok()?;
+        let mut pid: Pid = 0;
+        unsafe { SLSConnectionGetPID(connection, &mut pid) }
+            .to_result(function_name!())
+            .ok()?;
+        (pid != 0).then_some(pid)
     }
 }
 

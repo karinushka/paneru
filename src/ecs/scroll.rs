@@ -1,6 +1,6 @@
 use bevy::app::{App, Plugin, PreUpdate, Update};
 use bevy::ecs::entity::Entity;
-use bevy::ecs::message::{MessageReader, MessageWriter};
+use bevy::ecs::message::{Message, MessageReader, MessageWriter};
 use bevy::ecs::query::{With, Without};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
@@ -18,8 +18,8 @@ use crate::config::swipe::{SwipeGestureDirection, focus_direction};
 use crate::ecs::layout::{Column, LayoutStrip};
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
-    ActiveWorkspaceMarker, ManualStripOffset, MissionControlActive, Position, Scrolling,
-    SendMessageTrigger, UpdateSet,
+    ActiveWorkspaceMarker, ManualStripOffset, MissionControlActive, Position, PreUpdateSet,
+    Scrolling, SendMessageTrigger, UpdateSet,
 };
 use crate::errors::Result;
 use bevy::ecs::schedule::common_conditions::on_message;
@@ -32,6 +32,13 @@ use crate::util::round_px;
 pub struct ScrollEventsPlugin;
 
 const PAGE_GESTURE_TIMEOUT: Duration = Duration::from_millis(150);
+
+/// One gesture-earned focus step, routed to [`crate::commands::command_move_focus`].
+#[derive(Message, Debug, Clone)]
+pub(crate) struct PageFocusRequest {
+    pub(crate) direction: Direction,
+    pub(crate) generation: u64,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum PageInFlight {
@@ -107,8 +114,13 @@ impl PageGestureState {
     }
 }
 
-fn paging_active(state: Res<PageGestureState>) -> bool {
+fn paging_enabled(config: Res<Config>, state: Res<PageGestureState>) -> bool {
+    config.swipe_gesture_paging() || state.has_work() || state.config.as_ref().is_some_and(|c| c.0)
+}
+
+fn paging_active(config: Res<Config>, state: Res<PageGestureState>) -> bool {
     state.has_work()
+        || (!config.swipe_gesture_paging() && state.config.as_ref().is_some_and(|c| c.0))
 }
 
 #[cfg(test)]
@@ -176,6 +188,7 @@ type ScrollingStrip<'w, 's> = Single<
 impl Plugin for ScrollEventsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PageGestureState>();
+        app.add_message::<PageFocusRequest>();
         let mission_control_inactive = |mission_control: Option<Res<MissionControlActive>>| {
             mission_control.is_none_or(|active| !active.0)
         };
@@ -183,9 +196,11 @@ impl Plugin for ScrollEventsPlugin {
         app.add_systems(
             PreUpdate,
             paging_gesture
+                .in_set(PreUpdateSet::Demux)
+                .after(super::systems::demux_input_events)
                 .run_if(mission_control_inactive)
-                .run_if(on_message::<InputEvent>.or_else(paging_active))
-                .after(super::systems::demux_input_events),
+                .run_if(paging_enabled)
+                .run_if(on_message::<InputEvent>.or_else(paging_active)),
         );
 
         // Only the two gesture systems are gated on an input event. The rest of
@@ -214,22 +229,16 @@ impl Plugin for ScrollEventsPlugin {
     }
 }
 
-pub(crate) fn paging_gesture(
+fn paging_gesture(
     mut messages: MessageReader<InputEvent>,
     active_workspace: Single<Entity, With<ActiveWorkspaceMarker>>,
     config: Res<Config>,
     time: Res<Time>,
     mut state: ResMut<PageGestureState>,
-    mut events: MessageWriter<Event>,
+    mut events: MessageWriter<PageFocusRequest>,
     mut commands: Commands,
 ) {
-    let current_config = (
-        config.swipe_gesture_paging(),
-        config.swipe_gesture_fingers(),
-        config.swipe_gesture_direction(),
-        config.swipe_gesture_page_distance_cm(),
-        config.swipe_gesture_haptics(),
-    );
+    let current_config = config.swipe_paging_config();
     if state.config.as_ref() != Some(&current_config) {
         state.reset();
         state.config = Some(current_config.clone());
@@ -285,7 +294,7 @@ pub(crate) fn paging_gesture(
         && let Some(direction) = state.next_step()
     {
         state.in_flight = Some(PageInFlight::Dispatched);
-        events.write(Event::PageFocus {
+        events.write(PageFocusRequest {
             direction,
             generation: state.generation,
         });

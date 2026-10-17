@@ -524,13 +524,14 @@ fn paging_lift_discards_only_fractional_travel() {
 fn paging_ignores_a_stale_focus_request_after_gesture_reset() {
     let config = Config::try_from("[swipe.gesture]\nfingers_count = 3\npaging = true\n").unwrap();
     let mut h = TestHarness::new().with_config(config).with_windows(3);
-    h.run(vec![
-        Event::MenuOpened { window_id: 0 },
-        Event::PageFocus {
+    h.run(vec![Event::MenuOpened { window_id: 0 }]);
+
+    h.world()
+        .write_message(crate::ecs::scroll::PageFocusRequest {
             direction: crate::commands::Direction::East,
             generation: 0,
-        },
-    ]);
+        });
+    h.advance(Duration::from_millis(20));
     assert_focused!(h.world(), 0);
 }
 

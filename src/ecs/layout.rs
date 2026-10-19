@@ -17,8 +17,8 @@ use crate::ecs::params::Windows;
 use crate::ecs::workspace::{PreviousStripPosition, SnapStripMarker};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, DockPosition, EnsureVisibleMarker, Initializing, LayoutPosition,
-    ManualStripOffset, Position, RepositionMarker, ReshuffleAroundMarker, ResizeMarker, Scrolling,
-    SpawnCommandsExt,
+    ManualStripOffset, Position, RepositionMarker, ReshuffleAroundMarker, ResizeAnchor,
+    ResizeMarker, Scrolling, SpawnCommandsExt,
 };
 use crate::errors::{Error, Result};
 use crate::manager::{Display, Origin, Size, Window};
@@ -1299,10 +1299,12 @@ fn resolve_strip_scroll_context<'a>(
 }
 
 #[instrument(level = Level::DEBUG, skip_all)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn reshuffle_layout_strip(
     markers: ReshuffleMarkers,
     strips: StripPlacements,
     manual_offsets: Query<&ManualStripOffset>,
+    anchors: Query<&ResizeAnchor>,
     displays: DisplayViewports,
     windows: Windows,
     config: Res<Config>,
@@ -1327,10 +1329,15 @@ pub(super) fn reshuffle_layout_strip(
         };
         let size = frame.size();
         // When a window is being resized (`ResizeMarker` present), keep its
-        // visual center anchored (`frame.center()`) unless `auto_center` or the
+        // visual center anchored (its `ResizeAnchor`) unless `auto_center` or the
         // edge invariant overrides it; for non-resize reshuffles, project from
         // its logical slot in the strip (`layout_position.0 + strip_target`).
         let resizing = windows.is_resizing(entity);
+        let resize_center = anchors
+            .get(entity)
+            .map(|anchor| anchor.0)
+            .ok()
+            .or_else(|| windows.frame(entity).map(|frame| frame.center().x));
 
         let display_bounds = ctx.display_bounds;
         let projected_min = layout_position.0 + ctx.strip_target;
@@ -1374,8 +1381,8 @@ pub(super) fn reshuffle_layout_strip(
         let mut desired_min = projected_min;
         if config.auto_center() {
             desired_min.x = ctx.raw_display_bounds.center().x - size.x / 2;
-        } else if resizing && let Some(current_frame) = windows.frame(entity) {
-            desired_min.x = IRect::from_center_size(current_frame.center(), size).min.x;
+        } else if resizing && let Some(center) = resize_center {
+            desired_min.x = center - size.x / 2;
         }
         let clamped_min = clamp_origin_to_viewport(desired_min, size, display_bounds);
 

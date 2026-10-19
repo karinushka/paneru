@@ -3,10 +3,12 @@ use std::time::Duration;
 use bevy::app::{PostUpdate, PreUpdate};
 use bevy::ecs::entity::{Entity, EntityHashSet};
 use bevy::ecs::hierarchy::ChildOf;
+use bevy::ecs::lifecycle::Add;
 use bevy::ecs::message::{MessageReader, MessageWriter};
-use bevy::ecs::query::{Has, With, Without};
-use bevy::ecs::schedule::IntoScheduleConfigs as _;
+use bevy::ecs::observer::On;
+use bevy::ecs::query::{Has, Or, With, Without};
 use bevy::ecs::schedule::common_conditions::{on_message, resource_changed};
+use bevy::ecs::schedule::{IntoScheduleConfigs as _, SystemCondition};
 use bevy::ecs::system::{Commands, Query, Res, ResMut, Single, SystemParam};
 use bevy::math::IRect;
 use tracing::{Level, instrument};
@@ -24,12 +26,12 @@ use crate::ecs::layout::{
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Windows};
 use crate::ecs::scroll::{PageFocusRequest, PageGestureState, PageInFlight};
 use crate::ecs::{
-    ActiveDisplayMarker, ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker,
+    ActiveDisplayMarker, ActiveWorkspaceMarker, AwaitResize, Bounds, DockPosition, FocusedMarker,
     FullWidthMarker, ManualStripOffset, NativeFullscreenMarker, Position, RaiseWindow,
-    RepositionMarker, SelectedVirtualMarker, SendMessageTrigger, SpawnCommandsExt, Timeout,
-    Unmanaged,
+    RepositionMarker, ResizeAnchor, SelectedVirtualMarker, SendMessageTrigger, SpawnCommandsExt,
+    Timeout, Unmanaged,
 };
-use crate::events::Event;
+use crate::events::{Event, InputEvent};
 use crate::manager::{Application, Display, Origin, Size, Window, WindowManager, origin_from};
 use crate::platform::WorkspaceId;
 use crate::util::round_px;
@@ -139,6 +141,76 @@ pub fn register_commands(app: &mut bevy::app::App) {
         (copy_window_rule, toggle_tabbed_display_handler)
             .in_set(crate::ecs::PreUpdateSet::Dispatch),
     );
+    app.add_systems(
+        PreUpdate,
+        cancel_resize_intent
+            .after(crate::ecs::PreUpdateSet::Dispatch)
+            .run_if(on_message::<Event>.or_eager(on_message::<InputEvent>)),
+    );
+    app.add_observer(cancel_resize_intent_on_focus);
+}
+
+type ResizeIntents<'w, 's> = Query<'w, 's, Entity, Or<(With<ResizeAnchor>, With<AwaitResize>)>>;
+
+fn cancel_resize_intent(
+    mut messages: MessageReader<Event>,
+    mut inputs: MessageReader<InputEvent>,
+    intents: ResizeIntents,
+    config: Res<Config>,
+    mut commands: Commands,
+) {
+    let mut interrupted = false;
+    for event in messages.read() {
+        if let Event::Command { command } = event {
+            interrupted |= match command {
+                Command::Window(
+                    Operation::Resize(_)
+                    | Operation::SetWidth(_)
+                    | Operation::ResizeVertical(_)
+                    | Operation::FullWidth,
+                )
+                | Command::PrintState
+                | Command::Lua(_) => false,
+                Command::Layout(ops) => ops
+                    .iter()
+                    .any(|op| !matches!(op, crate::types::windowset::LayoutOp::SetWidth { .. })),
+                _ => true,
+            };
+        }
+    }
+    let mouse_resize = config.mouse_resize_modifier();
+    for InputEvent(event) in inputs.read() {
+        interrupted |= match event {
+            Event::Swipe { .. }
+            | Event::Scroll { .. }
+            | Event::VerticalSwipe { .. }
+            | Event::VerticalScrollTick { .. }
+            | Event::MouseDragged { .. } => true,
+            Event::MouseMoved { modifiers, .. } => {
+                mouse_resize.is_some_and(|modifier| modifier.matches(*modifiers))
+            }
+            _ => false,
+        };
+    }
+    if interrupted {
+        for entity in intents {
+            if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                entity_commands.try_remove::<(ResizeAnchor, AwaitResize)>();
+            }
+        }
+    }
+}
+
+fn cancel_resize_intent_on_focus(
+    _trigger: On<Add, FocusedMarker>,
+    intents: ResizeIntents,
+    mut commands: Commands,
+) {
+    for entity in intents {
+        if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            entity_commands.try_remove::<(ResizeAnchor, AwaitResize)>();
+        }
+    }
 }
 
 pub fn filter_window_operations<'a, F: Fn(&Operation) -> bool>(

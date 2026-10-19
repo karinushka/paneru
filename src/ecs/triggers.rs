@@ -1,12 +1,13 @@
 use bevy::ecs::change_detection::DetectChangesMut;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
-use bevy::ecs::lifecycle::{Add, Remove, RemovedComponents};
+use bevy::ecs::lifecycle::{Add, Insert, Remove, RemovedComponents};
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Added, Has, With, Without};
 use bevy::ecs::system::{Commands, NonSendMut, ParamSet, Populated, Query, Res, ResMut, Single};
 use bevy::math::IRect;
+use bevy::time::{Time, Timer, TimerMode};
 use notify::event::{DataChange, MetadataKind, ModifyKind};
 use notify::{EventKind, Watcher};
 use std::cmp::Ordering;
@@ -25,9 +26,9 @@ use crate::ecs::params::{ActiveDisplay, GlobalState, WindowCtx, Windows};
 use crate::ecs::state::PaneruState;
 use crate::ecs::workspace::RestoreFocusMarker;
 use crate::ecs::{
-    ActiveWorkspaceMarker, Bounds, DockPosition, Initializing, LayoutPosition, Position,
-    ResizeMarker, RestoreWindowState, Scrolling, SendMessageTrigger, SpawnCommandsExt,
-    VerifyWindowPosition, WidthRatio, WindowProperties,
+    ActiveWorkspaceMarker, AwaitResize, Bounds, DockPosition, Initializing, LayoutPosition,
+    Position, RepositionMarker, ResizeAnchor, ResizeMarker, RestoreWindowState, Scrolling,
+    SendMessageTrigger, SpawnCommandsExt, VerifyWindowPosition, WidthRatio, WindowProperties,
 };
 use crate::events::{DestroySource, Event};
 use crate::manager::{
@@ -1442,15 +1443,92 @@ pub(super) fn cleanup_timeout_trigger(
     }
 }
 
+/// How long a slow app has to apply a requested size before the window counts
+/// as having refused it.
+const RESIZE_REFUSAL_TIMEOUT: Duration = Duration::from_secs(1);
+
+type UnanchoredWindows<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Position,
+        Option<&'static RepositionMarker>,
+        &'static Bounds,
+        Option<&'static AwaitResize>,
+    ),
+    Without<ResizeAnchor>,
+>;
+
+type ResizedWindows<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut Window,
+        &'static Position,
+        Option<&'static RepositionMarker>,
+        &'static mut Bounds,
+        Option<&'static ResizeAnchor>,
+    ),
+>;
+
+type RefusedResizes<'w, 's> = Populated<
+    'w,
+    's,
+    (
+        Entity,
+        &'static mut Window,
+        &'static Position,
+        Option<&'static RepositionMarker>,
+        &'static mut AwaitResize,
+        Has<FocusedMarker>,
+    ),
+>;
+
+/// Records the center a window resizes around. A resize that starts while an
+/// earlier one waits on the app, with the window still in place, keeps the
+/// earlier center.
+pub(super) fn record_resize_anchor(
+    trigger: On<Insert, ResizeMarker>,
+    windows: UnanchoredWindows,
+    mut commands: Commands,
+) {
+    let entity = trigger.event().entity;
+    let Ok((position, reposition, bounds, waiting)) = windows.get(entity) else {
+        return;
+    };
+    let x = destination_x(position, reposition);
+    let center = waiting.filter(|waiting| waiting.x == x).map_or_else(
+        || {
+            IRect::from_corners(position.0, position.0 + bounds.0)
+                .center()
+                .x
+        },
+        |waiting| x + waiting.anchor_offset,
+    );
+    if let Ok(mut entity_commands) = commands.get_entity(entity) {
+        entity_commands.try_insert(ResizeAnchor(center));
+        entity_commands.try_remove::<AwaitResize>();
+    }
+}
+
 pub(super) fn window_resize_verifier(
     mut removed: RemovedComponents<ResizeMarker>,
-    mut windows: Query<(&mut Window, &Position, &mut Bounds)>,
+    resizing: Query<(), With<ResizeMarker>>,
+    mut windows: ResizedWindows,
     layout_strips: Query<&LayoutStrip>,
     mut commands: Commands,
 ) {
     use std::cmp::Ordering;
     for entity in removed.read() {
-        let Ok((mut window, _, mut bounds)) = windows.get_mut(entity) else {
+        if resizing.contains(entity) {
+            continue;
+        }
+        let Ok(mut entity_commands) = commands.get_entity(entity) else {
+            continue;
+        };
+        entity_commands.try_remove::<ResizeAnchor>();
+        let Ok((mut window, position, reposition, mut bounds, anchor)) = windows.get_mut(entity)
+        else {
             continue;
         };
         let Ok(frame) = window.update_frame() else {
@@ -1460,11 +1538,7 @@ pub(super) fn window_resize_verifier(
         let actual_size = frame.size();
         let expected_size = bounds.0;
 
-        // note: macOS loves to make window sizes to even numbers, so we treat actual+1 as equal.
-        let width_ord = fuzzy_equal(actual_size.x, expected_size.x);
-        let height_ord = fuzzy_equal(actual_size.y, expected_size.y);
-
-        if width_ord == Ordering::Equal && height_ord == Ordering::Equal {
+        if sizes_match(actual_size, expected_size) {
             continue;
         }
         debug!(
@@ -1474,6 +1548,15 @@ pub(super) fn window_resize_verifier(
             expected_size,
             actual_size,
         );
+        if let Some(anchor) = anchor {
+            let x = destination_x(position, reposition);
+            entity_commands.try_insert(AwaitResize {
+                timer: Timer::new(RESIZE_REFUSAL_TIMEOUT, TimerMode::Once),
+                requested: expected_size,
+                x,
+                anchor_offset: anchor.0 - x,
+            });
+        }
         bounds.0 = actual_size;
 
         // we may hitting minimum width constraint on this window or this window isn't resizable.
@@ -1483,7 +1566,7 @@ pub(super) fn window_resize_verifier(
         //
         // note that those windows might have max window constraints or isn't resiable.
         // so we need to ignore cases where windows are failing to expand to the target.
-        if width_ord == Ordering::Less {
+        if fuzzy_equal(actual_size.x, expected_size.x) == Ordering::Less {
             let Some(column) = layout_strips.iter().find_map(|strip| {
                 strip
                     .index_of(entity)
@@ -1496,7 +1579,7 @@ pub(super) fn window_resize_verifier(
             let get_window_frame = |entity| {
                 windows
                     .get(entity)
-                    .map(|(_, position, bounds)| {
+                    .map(|(_, position, _, bounds, _)| {
                         IRect::from_corners(position.0, position.0 + bounds.0)
                     })
                     .ok()
@@ -1518,6 +1601,45 @@ pub(super) fn window_resize_verifier(
                 });
         }
     }
+}
+
+/// Puts the strip back around a focused window whose app kept its own size
+/// for [`RESIZE_REFUSAL_TIMEOUT`]. The strip was placed for the requested size,
+/// and a resize to the size the app kept places it around the window's center
+/// from before the refused resize. A window that has moved since then stays
+/// where it is.
+pub(super) fn settle_refused_resize(
+    mut waiting: RefusedResizes,
+    time: Res<Time>,
+    mut commands: Commands,
+) {
+    for (entity, mut window, position, reposition, mut wait, focused) in &mut waiting {
+        if !wait.timer.tick(time.delta()).is_finished() {
+            continue;
+        }
+        let in_place = focused && destination_x(position, reposition) == wait.x;
+        let refused_size = window
+            .update_frame()
+            .ok()
+            .map(|frame| frame.size())
+            .filter(|size| in_place && !sizes_match(*size, wait.requested));
+        if let Some(size) = refused_size {
+            commands.resize_entity(entity, size);
+            commands.reshuffle_around(entity);
+        } else if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            entity_commands.try_remove::<AwaitResize>();
+        }
+    }
+}
+
+fn destination_x(position: &Position, reposition: Option<&RepositionMarker>) -> i32 {
+    reposition.map_or(position.0.x, |target| target.0.x)
+}
+
+fn sizes_match(actual: Size, expected: Size) -> bool {
+    // note: macOS loves to make window sizes to even numbers, so we treat actual+1 as equal.
+    fuzzy_equal(actual.x, expected.x) == Ordering::Equal
+        && fuzzy_equal(actual.y, expected.y) == Ordering::Equal
 }
 
 fn fuzzy_equal<N>(actual_size: N, expected_size: N) -> Ordering

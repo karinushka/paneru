@@ -1313,6 +1313,9 @@ pub(super) fn reshuffle_layout_strip(
     markers.into_iter().for_each(|(entity, layout_position)| {
         if let Ok(mut cmd) = commands.get_entity(entity) {
             cmd.try_remove::<ReshuffleAroundMarker>();
+            if !windows.is_resizing(entity) {
+                cmd.try_remove::<ResizeAnchor>();
+            }
         }
         let Some(ctx) = resolve_strip_scroll_context(entity, &strips, &displays, &config) else {
             return;
@@ -1332,7 +1335,7 @@ pub(super) fn reshuffle_layout_strip(
         // visual center anchored (its `ResizeAnchor`) unless `auto_center` or the
         // edge invariant overrides it; for non-resize reshuffles, project from
         // its logical slot in the strip (`layout_position.0 + strip_target`).
-        let resizing = windows.is_resizing(entity);
+        let resizing = windows.is_resizing(entity) || anchors.contains(entity);
         let resize_center = anchors
             .get(entity)
             .map(|anchor| anchor.0)

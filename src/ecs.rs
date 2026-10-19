@@ -349,6 +349,7 @@ pub fn register_triggers(app: &mut bevy::app::App) {
             triggers::refresh_configuration_trigger,
             triggers::theme_change_trigger,
             triggers::window_resize_verifier,
+            triggers::settle_refused_resize,
         )
             .in_set(UpdateSet::Events),
     );
@@ -365,6 +366,7 @@ pub fn register_triggers(app: &mut bevy::app::App) {
         .add_observer(triggers::send_message_trigger)
         .add_observer(triggers::window_removal_trigger)
         .add_observer(triggers::cleanup_timeout_trigger)
+        .add_observer(triggers::record_resize_anchor)
         .add_observer(restore::restore_window_state);
 }
 
@@ -400,6 +402,26 @@ pub struct RepositionMarker(pub Origin);
 /// Component representing a request to resize a window.
 #[derive(Component, Debug, Deref, DerefMut)]
 pub struct ResizeMarker(pub Size);
+
+/// A window whose app had not applied the requested size when its resize
+/// animation ended. A slow app may still apply it, so the window counts as
+/// having refused it only once the timer runs out.
+#[derive(Component, Debug)]
+pub struct AwaitResize {
+    pub timer: Timer,
+    pub requested: Size,
+    /// Where the refused resize placed the window's left edge. Once anything
+    /// else moves the window, the wait no longer applies.
+    pub x: i32,
+    /// The window's `ResizeAnchor`, relative to `x`.
+    pub anchor_offset: i32,
+}
+
+/// The horizontal center a window had before its current run of resizes. The
+/// layout keeps a resizing window centered on it, so a size the app refuses
+/// puts the window back where it was.
+#[derive(Component, Debug)]
+pub struct ResizeAnchor(pub i32);
 
 /// Marker component indicating that windows around the marked entity need to be reshuffled.
 #[derive(Component)]

@@ -749,10 +749,11 @@ impl SpawnCommandsExt for Commands<'_, '_> {
         display_entity: Entity,
         active: bool,
     ) -> EntityCommands<'_> {
+        let is_default_virtual = layout_strip.virtual_index == 0;
         let mut spawned = self.spawn((layout_strip, Position(origin), ChildOf(display_entity)));
         if active {
             spawned.insert(ActiveWorkspaceMarker);
-        } else {
+        } else if is_default_virtual {
             spawned.insert(SelectedVirtualMarker);
         }
         spawned

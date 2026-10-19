@@ -297,6 +297,9 @@ pub(crate) fn finish_setup(
 
     let mut focused_managed_window = false;
     for (mut strip, active_strip, _) in &mut workspaces {
+        if strip.virtual_index != 0 {
+            continue;
+        }
         debug!("space {}: before refresh {strip:?}", strip.id());
         let workspace_windows = window_manager
             .windows_in_workspace(strip.id())

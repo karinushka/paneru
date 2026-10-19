@@ -1531,3 +1531,80 @@ fn test_remove_display_populates_empty_first_workspace_on_surviving_display() {
         })
         .run(commands);
 }
+
+#[test]
+fn test_mouse_to_next_display_preserves_selected_virtual_workspace() {
+    use crate::assert_focused;
+    use crate::commands::{Direction, MoveFocus, Operation};
+    use crate::ecs::{ActiveWorkspaceMarker, SelectedVirtualMarker};
+    use bevy::ecs::query::Has;
+
+    let config = Config::try_from("default_workspaces = 3\n").unwrap();
+    let display_bounds = IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0);
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 100 },
+        // Move window 100 to VW 2 (virtual_index 1) while staying on VW 1 (virtual_index 0) with window 101.
+        Event::Command {
+            command: Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Stay)),
+        },
+        // Switch to VW 2 (virtual_index 1) and back to VW 1 (virtual_index 0) on the primary display.
+        Event::Command {
+            command: Command::Window(Operation::Virtual(Direction::South)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Virtual(Direction::North)),
+        },
+        // Move mouse/focus to the secondary display.
+        Event::Command {
+            command: Command::Mouse(MouseMove::ToNextDisplay),
+        },
+        // Move mouse/focus back to the primary display: must land on VW 1 (window 101), not VW 2 (window 100).
+        Event::Command {
+            command: Command::Mouse(MouseMove::ToNextDisplay),
+        },
+    ];
+
+    TestHarness::new()
+        .with_config(config)
+        .with_display(EXT_DISPLAY_ID, display_bounds, vec![EXT_WORKSPACE_ID])
+        .with_workspace_window(100, TEST_WORKSPACE_ID, |_| {})
+        .with_workspace_window(101, TEST_WORKSPACE_ID, |_| {})
+        .with_workspace_window(200, EXT_WORKSPACE_ID, |data| {
+            data.frame = IRect::from_corners(
+                Origin::new(0, -EXT_DISPLAY_HEIGHT),
+                Origin::new(TEST_WINDOW_WIDTH, -EXT_DISPLAY_HEIGHT + TEST_WINDOW_HEIGHT),
+            );
+        })
+        .on_iteration(3, |world, _state| {
+            let selected_primary: Vec<u32> = world
+                .query::<(&LayoutStrip, Has<SelectedVirtualMarker>)>()
+                .iter(world)
+                .filter_map(|(s, sel)| {
+                    (s.id() == TEST_WORKSPACE_ID && sel).then_some(s.virtual_index)
+                })
+                .collect();
+            assert_eq!(
+                selected_primary,
+                vec![0],
+                "VW 1 must remain selected on primary display"
+            );
+        })
+        .on_iteration(4, |world, _state| {
+            assert_focused!(world, 200);
+        })
+        .on_iteration(5, |world, _state| {
+            assert_focused!(world, 101);
+            let active_virtual: Option<u32> = world
+                .query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>()
+                .iter(world)
+                .next()
+                .map(|s| s.virtual_index);
+            assert_eq!(
+                active_virtual,
+                Some(0),
+                "returning to primary display must keep VW 1 active"
+            );
+        })
+        .run(commands);
+}

@@ -1327,7 +1327,7 @@ fn to_next_display(
 fn mouse_to_next_display(
     mut messages: MessageReader<Event>,
     windows: Windows,
-    layout_strips: Query<(&LayoutStrip, Entity)>,
+    layout_strips: Query<(&LayoutStrip, Entity, Has<SelectedVirtualMarker>)>,
     displays: Query<&Display>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
@@ -1356,7 +1356,13 @@ fn mouse_to_next_display(
     let Some((other_strip, _)) = window_manager
         .active_display_space(other.id())
         .ok()
-        .and_then(|id| layout_strips.iter().find(|(strip, _)| strip.id() == id))
+        .and_then(|id| {
+            layout_strips
+                .iter()
+                .filter(|(strip, _, _)| strip.id() == id)
+                .min_by_key(|(strip, _, selected)| (!*selected, strip.virtual_index))
+                .map(|(strip, entity, _)| (strip, entity))
+        })
     else {
         return;
     };

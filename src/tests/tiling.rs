@@ -1000,6 +1000,374 @@ fn test_window_resize_middle_column_centers_around_window_and_shifts_strip() {
         .run(commands);
 }
 
+fn focused_middle_window_with_min_width(min_width: i32) -> TestHarness {
+    focused_middle_window_with(min_width, true)
+}
+
+fn focused_middle_window_with(min_width: i32, continuous_swipe: bool) -> TestHarness {
+    let config: Config = (
+        MainOptions {
+            preset_column_widths: vec![0.25, 0.5, 0.75],
+            continuous_swipe: Some(continuous_swipe),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+    let mut harness = TestHarness::new()
+        .with_config(config)
+        .with_window(0, |_| {})
+        .with_window(1, |window| window.min_width = min_width)
+        .with_window(2, |_| {});
+    harness.run(vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+    ]);
+    harness
+}
+
+fn shrink() -> Event {
+    Event::Command {
+        command: Command::Window(Operation::Resize(ResizeDirection::Shrink)),
+    }
+}
+
+#[test]
+fn test_window_resize_refused_by_the_app_leaves_the_strip_in_place() {
+    let mut harness = focused_middle_window_with_min_width(400);
+
+    for _ in 0..2 {
+        harness.run(vec![shrink()]);
+        harness.advance(Duration::from_secs(2));
+        let world = harness.world();
+        assert_window_size!(world, 1, 400, 748);
+        assert_window_at!(world, 0, 0, TEST_MENUBAR_HEIGHT);
+        assert_window_at!(world, 1, 400, TEST_MENUBAR_HEIGHT);
+        assert_window_at!(world, 2, 800, TEST_MENUBAR_HEIGHT);
+    }
+}
+
+#[test]
+fn test_window_resize_refused_with_edge_snapping_leaves_the_strip_in_place() {
+    let config: Config = (
+        MainOptions {
+            preset_column_widths: vec![0.25, 0.5, 0.75],
+            continuous_swipe: Some(false),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+    let mut harness = TestHarness::new()
+        .with_config(config)
+        .with_window(0, |_| {})
+        .with_window(1, |_| {})
+        .with_window(2, |window| window.min_width = 400);
+    let focus_east = || Event::Command {
+        command: Command::Window(Operation::Focus(Direction::East)),
+    };
+    harness.run(vec![
+        Event::MenuOpened { window_id: 0 },
+        focus_east(),
+        focus_east(),
+        shrink(),
+    ]);
+    harness.advance(Duration::from_secs(2));
+
+    let world = harness.world();
+    assert_window_size!(world, 2, 400, 748);
+    assert_window_at!(world, 0, -176, TEST_MENUBAR_HEIGHT);
+    assert_window_at!(world, 1, 224, TEST_MENUBAR_HEIGHT);
+    assert_window_at!(world, 2, 624, TEST_MENUBAR_HEIGHT);
+}
+
+#[test]
+fn test_window_resize_pressed_again_while_refused_starts_from_the_kept_width() {
+    let mut harness = focused_middle_window_with_min_width(400);
+
+    harness.run(vec![shrink()]);
+    harness.advance(Duration::from_millis(300));
+    harness.run(vec![shrink()]);
+    harness.advance(Duration::from_secs(2));
+
+    let world = harness.world();
+    assert_window_size!(world, 1, 400, 748);
+    assert_window_at!(world, 0, 0, TEST_MENUBAR_HEIGHT);
+    assert_window_at!(world, 1, 400, TEST_MENUBAR_HEIGHT);
+    assert_window_at!(world, 2, 800, TEST_MENUBAR_HEIGHT);
+}
+
+#[test]
+fn test_window_resize_refused_with_a_late_resize_notification_leaves_the_strip_in_place() {
+    let mut harness = focused_middle_window_with_min_width(400);
+
+    harness.run(vec![shrink()]);
+    harness
+        .mock_state
+        .os_resize_window(1, crate::manager::Size::new(400, 748));
+    harness.advance(Duration::from_secs(2));
+
+    let world = harness.world();
+    assert_window_size!(world, 1, 400, 748);
+    assert_window_at!(world, 0, 0, TEST_MENUBAR_HEIGHT);
+    assert_window_at!(world, 1, 400, TEST_MENUBAR_HEIGHT);
+    assert_window_at!(world, 2, 800, TEST_MENUBAR_HEIGHT);
+}
+
+#[test]
+fn test_window_resize_refused_then_centered_stays_centered() {
+    let mut harness = focused_middle_window_with_min_width(400);
+
+    harness.run(vec![
+        shrink(),
+        Event::Command {
+            command: Command::Window(Operation::Center),
+        },
+    ]);
+    harness.advance(Duration::from_secs(2));
+
+    let world = harness.world();
+    assert_window_size!(world, 1, 400, 748);
+    assert_window_at!(world, 1, 312, TEST_MENUBAR_HEIGHT);
+}
+
+#[test]
+fn test_window_resize_refused_then_centered_during_animation_keeps_the_new_placement() {
+    for rate in [8.0, 12.0, 20.0] {
+        let mut harness = focused_middle_window_with_min_width(400);
+        let config: Config = (
+            MainOptions {
+                preset_column_widths: vec![0.25, 0.5, 0.75],
+                continuous_swipe: Some(true),
+                animation_speed: Some(rate),
+                ..Default::default()
+            },
+            vec![],
+        )
+            .into();
+        harness.world().insert_resource(config);
+        harness.world().write_message::<Event>(shrink());
+        harness.advance(Duration::from_millis(100));
+        harness.run(vec![Event::Command {
+            command: Command::Window(Operation::Center),
+        }]);
+        harness.advance(Duration::from_millis(50));
+        let centered_x = {
+            let world = harness.world();
+            let entity = find_window_entity(1, world);
+            let position = world.get::<crate::ecs::Position>(entity).unwrap();
+            world
+                .get::<crate::ecs::RepositionMarker>(entity)
+                .map_or(position.0.x, |target| target.0.x)
+        };
+        harness.advance(Duration::from_secs(4));
+
+        let world = harness.world();
+        assert_window_size!(world, 1, 400, 748);
+        assert_window_at!(world, 1, centered_x, TEST_MENUBAR_HEIGHT);
+    }
+}
+
+#[test]
+fn test_window_resize_after_center_during_animation_uses_a_fresh_center() {
+    let mut harness = focused_middle_window_with_min_width(400);
+    let config: Config = (
+        MainOptions {
+            preset_column_widths: vec![0.25, 0.5, 0.75],
+            continuous_swipe: Some(true),
+            animation_speed: Some(8.0),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+    harness.world().insert_resource(config);
+    harness.world().write_message::<Event>(shrink());
+    harness.advance(Duration::from_millis(100));
+    harness.world().write_message::<Event>(Event::Command {
+        command: Command::Window(Operation::Center),
+    });
+    harness.advance(Duration::from_millis(100));
+    let fresh_center = {
+        let world = harness.world();
+        let entity = find_window_entity(1, world);
+        let position = world.get::<crate::ecs::Position>(entity).unwrap().0;
+        let size = world.get::<crate::ecs::Bounds>(entity).unwrap().0;
+        IRect::from_corners(position, position + size).center().x
+    };
+    assert_ne!(fresh_center, 600);
+    harness.world().write_message::<Event>(Event::Command {
+        command: Command::Window(Operation::SetWidth(0.25)),
+    });
+    harness.advance(Duration::from_secs(4));
+
+    let world = harness.world();
+    assert_window_size!(world, 1, 400, 748);
+    assert_window_at!(world, 1, fresh_center - 200, TEST_MENUBAR_HEIGHT);
+}
+
+#[test]
+fn test_window_resize_started_on_the_next_frame_keeps_the_original_center() {
+    let mut harness = focused_middle_window_with_min_width(400);
+    harness.world().write_message::<Event>(shrink());
+    harness.advance(Duration::from_millis(20));
+    harness.world().write_message::<Event>(Event::Command {
+        command: Command::Window(Operation::SetWidth(0.75)),
+    });
+    harness.advance(Duration::from_secs(2));
+
+    let world = harness.world();
+    assert_window_size!(world, 1, 768, 748);
+    assert_window_at!(world, 1, 216, TEST_MENUBAR_HEIGHT);
+}
+
+#[test]
+fn test_window_resize_mixed_with_center_in_one_frame_does_not_correct_later() {
+    for center_first in [false, true] {
+        let mut harness = focused_middle_window_with_min_width(400);
+        let center = Event::Command {
+            command: Command::Window(Operation::Center),
+        };
+        let resize = Event::Command {
+            command: Command::Window(Operation::SetWidth(0.25)),
+        };
+        let events = if center_first {
+            [center, resize]
+        } else {
+            [resize, center]
+        };
+        for event in events {
+            harness.world().write_message::<Event>(event);
+        }
+        harness.advance(Duration::from_millis(100));
+        let placed_x = {
+            let world = harness.world();
+            let entity = find_window_entity(1, world);
+            world.get::<crate::ecs::Position>(entity).unwrap().0.x
+        };
+        harness.advance(Duration::from_secs(2));
+
+        let world = harness.world();
+        assert_window_size!(world, 1, 400, 748);
+        assert_window_at!(world, 1, placed_x, TEST_MENUBAR_HEIGHT);
+    }
+}
+
+#[test]
+#[cfg(feature = "lua")]
+fn test_window_resize_lua_width_continuations_preserve_the_original_center() {
+    use crate::types::windowset::LayoutOp;
+
+    for start_with_cli in [false, true] {
+        let mut harness = focused_middle_window_with_min_width(400);
+        if start_with_cli {
+            harness.run(vec![shrink()]);
+        }
+        let resize = || Event::Command {
+            command: Command::Layout(vec![LayoutOp::SetWidth {
+                window: 1,
+                ratio: 0.25,
+            }]),
+        };
+        harness.run(vec![resize(), resize(), resize()]);
+        harness.advance(Duration::from_secs(2));
+
+        let world = harness.world();
+        assert_window_size!(world, 1, 400, 748);
+        assert_window_at!(world, 1, 400, TEST_MENUBAR_HEIGHT);
+    }
+}
+
+#[test]
+#[cfg(feature = "lua")]
+fn test_window_resize_lua_callback_invocation_preserves_pending_recovery() {
+    let mut harness = focused_middle_window_with_min_width(400);
+    harness.run(vec![shrink()]);
+    harness.world().write_message::<Event>(Event::Command {
+        command: Command::Lua(0),
+    });
+    harness.advance(Duration::from_millis(20));
+    harness.run(vec![shrink()]);
+    harness.advance(Duration::from_secs(2));
+
+    let world = harness.world();
+    assert_window_size!(world, 1, 400, 748);
+    assert_window_at!(world, 1, 400, TEST_MENUBAR_HEIGHT);
+}
+
+#[test]
+fn test_window_resize_refused_then_focus_moved_away_and_back_keeps_the_new_placement() {
+    let mut harness = focused_middle_window_with_min_width(400);
+    let focus = |direction| Event::Command {
+        command: Command::Window(Operation::Focus(direction)),
+    };
+
+    harness.run(vec![
+        shrink(),
+        focus(Direction::East),
+        focus(Direction::West),
+    ]);
+    harness.advance(Duration::from_secs(2));
+
+    let world = harness.world();
+    assert_window_size!(world, 1, 400, 748);
+    assert_window_at!(world, 1, 224, TEST_MENUBAR_HEIGHT);
+}
+
+#[test]
+fn test_window_resize_refused_at_the_left_edge_keeps_the_window_flush() {
+    let config: Config = (
+        MainOptions {
+            preset_column_widths: vec![0.25, 0.5, 0.75],
+            continuous_swipe: Some(true),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+    let mut harness = TestHarness::new()
+        .with_config(config)
+        .with_window(0, |window| window.max_width = 400)
+        .with_window(1, |_| {})
+        .with_window(2, |_| {});
+
+    harness.run(vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Resize(ResizeDirection::Grow)),
+        },
+    ]);
+    harness.advance(Duration::from_secs(2));
+
+    let world = harness.world();
+    assert_window_size!(world, 0, 400, 748);
+    assert_window_at!(world, 0, 0, TEST_MENUBAR_HEIGHT);
+    assert_window_at!(world, 1, 400, TEST_MENUBAR_HEIGHT);
+    assert_window_at!(world, 2, 800, TEST_MENUBAR_HEIGHT);
+}
+
+#[test]
+fn test_window_resize_applied_late_by_the_app_keeps_its_placement() {
+    let mut harness = focused_middle_window_with_min_width(400);
+
+    harness.run(vec![shrink()]);
+    harness
+        .mock_state
+        .update_window(1, |window| window.min_width = 0);
+    harness
+        .mock_state
+        .os_resize_window(1, crate::manager::Size::new(256, 748));
+    harness.advance(Duration::from_secs(2));
+
+    let world = harness.world();
+    assert_window_size!(world, 1, 256, 748);
+    assert_window_at!(world, 0, 72, TEST_MENUBAR_HEIGHT);
+    assert_window_at!(world, 1, 472, TEST_MENUBAR_HEIGHT);
+    assert_window_at!(world, 2, 728, TEST_MENUBAR_HEIGHT);
+}
+
 #[test]
 fn test_full_width_centers_and_fills_viewport_when_window_was_partially_offscreen() {
     let commands = vec![

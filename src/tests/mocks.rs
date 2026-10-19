@@ -45,6 +45,10 @@ pub(crate) struct MockWindowData {
     pub(crate) horizontal_padding: i32,
     pub(crate) vertical_padding: i32,
     pub(crate) child_role: bool,
+    /// The narrowest width the app accepts, like an `NSWindow.minSize`.
+    pub(crate) min_width: i32,
+    /// The widest width the app accepts, or no limit when zero.
+    pub(crate) max_width: i32,
 }
 
 impl Default for MockWindowData {
@@ -65,6 +69,8 @@ impl Default for MockWindowData {
             horizontal_padding: 0,
             vertical_padding: 0,
             child_role: false,
+            min_width: 0,
+            max_width: 0,
         }
     }
 }
@@ -465,7 +471,13 @@ impl MockState {
         mw.expect_resize().returning(move |size| {
             let mut inner = s.inner.force_write();
             if let Some(w) = inner.windows.get_mut(&id) {
-                w.frame.max = w.frame.min + size;
+                let max_width = if w.max_width > 0 {
+                    w.max_width
+                } else {
+                    i32::MAX
+                };
+                let width = size.x.max(w.min_width).min(max_width);
+                w.frame.max = w.frame.min + size.with_x(width);
             }
         });
 

@@ -349,7 +349,7 @@ pub fn register_triggers(app: &mut bevy::app::App) {
             triggers::refresh_configuration_trigger,
             triggers::theme_change_trigger,
             triggers::window_resize_verifier,
-            triggers::settle_refused_resize,
+            triggers::settle_refused_resize.after(triggers::window_resize_verifier),
         )
             .in_set(UpdateSet::Events),
     );

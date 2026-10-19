@@ -1468,6 +1468,7 @@ type ResizedWindows<'w, 's> = Query<
         Option<&'static RepositionMarker>,
         &'static mut Bounds,
         Option<&'static ResizeAnchor>,
+        Has<FocusedMarker>,
     ),
 >;
 
@@ -1476,11 +1477,9 @@ type RefusedResizes<'w, 's> = Populated<
     's,
     (
         Entity,
-        &'static mut Window,
         &'static Position,
         Option<&'static RepositionMarker>,
         &'static mut AwaitResize,
-        Has<FocusedMarker>,
     ),
 >;
 
@@ -1527,7 +1526,7 @@ pub(super) fn window_resize_verifier(
             continue;
         };
         entity_commands.try_remove::<ResizeAnchor>();
-        let Ok((mut window, position, reposition, mut bounds, anchor)) = windows.get_mut(entity)
+        let Ok((mut window, position, reposition, mut bounds, anchor, _)) = windows.get_mut(entity)
         else {
             continue;
         };
@@ -1579,7 +1578,7 @@ pub(super) fn window_resize_verifier(
             let get_window_frame = |entity| {
                 windows
                     .get(entity)
-                    .map(|(_, position, _, bounds, _)| {
+                    .map(|(_, position, _, bounds, _, _)| {
                         IRect::from_corners(position.0, position.0 + bounds.0)
                     })
                     .ok()
@@ -1603,31 +1602,85 @@ pub(super) fn window_resize_verifier(
     }
 }
 
-/// Puts the strip back around a focused window whose app kept its own size
-/// for [`RESIZE_REFUSAL_TIMEOUT`]. The strip was placed for the requested size,
-/// and a resize to the size the app kept places it around the window's center
-/// from before the refused resize. A window that has moved since then stays
-/// where it is.
+/// Reconciles the native column after grace and restores placement around its
+/// focused member if any member still refuses the requested size.
 pub(super) fn settle_refused_resize(
     mut waiting: RefusedResizes,
+    mut windows: ResizedWindows,
+    resizing: Query<(), With<ResizeMarker>>,
+    layout_strips: Query<&LayoutStrip>,
     time: Res<Time>,
     mut commands: Commands,
 ) {
-    for (entity, mut window, position, reposition, mut wait, focused) in &mut waiting {
+    for (entity, position, reposition, mut wait) in &mut waiting {
         if !wait.timer.tick(time.delta()).is_finished() {
             continue;
         }
-        let in_place = focused && destination_x(position, reposition) == wait.x;
-        let refused_size = window
-            .update_frame()
-            .ok()
-            .map(|frame| frame.size())
-            .filter(|size| in_place && !sizes_match(*size, wait.requested));
-        if let Some(size) = refused_size {
-            commands.resize_entity(entity, size);
-            commands.reshuffle_around(entity);
-        } else if let Ok(mut entity_commands) = commands.get_entity(entity) {
+        let column = layout_strips.iter().find_map(|strip| {
+            strip
+                .index_of(entity)
+                .ok()
+                .and_then(|idx| strip.get(idx).ok())
+        });
+        if column
+            .as_ref()
+            .is_some_and(|column| column.window_iter().any(|member| resizing.contains(member)))
+        {
+            continue;
+        }
+        if let Ok(mut entity_commands) = commands.get_entity(entity) {
             entity_commands.try_remove::<AwaitResize>();
+        }
+        if destination_x(position, reposition) != wait.x {
+            continue;
+        }
+        let Some(column) = column else {
+            continue;
+        };
+        let mut owner = None;
+        let mut refused = false;
+        let mut complete = true;
+        let mut column_width = 0;
+        for member in column.window_iter() {
+            let Ok((mut window, position, reposition, mut bounds, _, focused)) =
+                windows.get_mut(member)
+            else {
+                complete = false;
+                continue;
+            };
+            let Ok(frame) = window.update_frame() else {
+                complete = false;
+                continue;
+            };
+            let size = frame.size();
+            column_width = column_width.max(size.x);
+            if bounds.0 != size {
+                bounds.0 = size;
+            }
+            if member == entity {
+                refused = !sizes_match(size, wait.requested);
+            }
+            if focused && destination_x(position, reposition) == wait.x {
+                owner = Some(member);
+            }
+        }
+        if !complete {
+            continue;
+        }
+        // Layout uses the master's width for every stack member. Keep the
+        // widest accepted width so a refusing sibling cannot be overwritten.
+        for member in column.window_iter() {
+            if let Ok((_, _, _, mut bounds, _, _)) = windows.get_mut(member)
+                && bounds.0.x != column_width
+            {
+                bounds.0.x = column_width;
+            }
+        }
+        if refused && let Some(owner) = owner {
+            if let Ok(mut entity_commands) = commands.get_entity(owner) {
+                entity_commands.try_insert(ResizeAnchor(wait.x + wait.anchor_offset));
+            }
+            commands.reshuffle_around(owner);
         }
     }
 }

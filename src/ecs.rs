@@ -6,7 +6,8 @@ use bevy::app::App as BevyApp;
 use bevy::app::{First, Last, PostUpdate, PreUpdate, Startup};
 use bevy::ecs::change_detection::DetectChanges;
 use bevy::ecs::hierarchy::ChildOf;
-use bevy::ecs::query::{Added, Changed, With};
+use bevy::ecs::lifecycle::RemovedComponents;
+use bevy::ecs::query::{Added, Changed, Or, With};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::SystemCondition;
 use bevy::ecs::schedule::common_conditions::{not, resource_changed, resource_exists};
@@ -115,6 +116,26 @@ pub enum PostUpdateSet {
     Bookkeeping,
 }
 
+type OverlayStripChanged<'w, 's> = Query<
+    'w,
+    's,
+    (),
+    (
+        With<ActiveWorkspaceMarker>,
+        Or<(Changed<LayoutStrip>, Added<Scrolling>)>,
+    ),
+>;
+
+type OverlayFocusedMoved<'w, 's> = Query<
+    'w,
+    's,
+    (),
+    (
+        With<FocusedMarker>,
+        Or<(Changed<Position>, Changed<Bounds>)>,
+    ),
+>;
+
 /// Registers the Bevy systems for the `WindowManager`.
 /// This function adds various systems to the `Update` schedule, including event dispatchers,
 /// process/application/window lifecycle management, animation, and periodic watchers.
@@ -134,25 +155,29 @@ pub fn register_systems(app: &mut bevy::app::App) {
             .next()
             .is_none_or(|marker| !marker.is_user_swiping)
     };
-    let overlays_dirty =
-        |config: Option<Res<Config>>,
-         theme: Option<Res<SystemTheme>>,
-         strip_changed: Query<(), (With<ActiveWorkspaceMarker>, Changed<LayoutStrip>)>,
-         focus_gained: Query<(), Added<FocusedMarker>>,
-         workspace_changed: Query<(), Added<ActiveWorkspaceMarker>>,
-         focused_moved: Query<(), (With<FocusedMarker>, Changed<Position>)>| {
-            let Some(config) = config else {
-                return false;
-            };
-            let enabled = config.has_dim_inactive_color() || config.border_active_window();
-            config.is_changed()
-                || (enabled
-                    && (theme.is_some_and(|theme| theme.is_changed())
-                        || !strip_changed.is_empty()
-                        || !focus_gained.is_empty()
-                        || !workspace_changed.is_empty()
-                        || !focused_moved.is_empty()))
+    let overlays_dirty = |config: Option<Res<Config>>,
+                          theme: Option<Res<SystemTheme>>,
+                          mission_control: Option<Res<MissionControlActive>>,
+                          strip_changed: OverlayStripChanged,
+                          mut scrolling_removed: RemovedComponents<Scrolling>,
+                          focus_gained: Query<(), Added<FocusedMarker>>,
+                          workspace_changed: Query<(), Added<ActiveWorkspaceMarker>>,
+                          focused_moved: OverlayFocusedMoved| {
+        let scrolling_ended = scrolling_removed.read().count() > 0;
+        let Some(config) = config else {
+            return false;
         };
+        let enabled = config.has_dim_inactive_color() || config.border_active_window();
+        config.is_changed()
+            || (enabled
+                && (theme.is_some_and(|theme| theme.is_changed())
+                    || mission_control.is_some_and(|mc| mc.is_changed())
+                    || scrolling_ended
+                    || !strip_changed.is_empty()
+                    || !focus_gained.is_empty()
+                    || !workspace_changed.is_empty()
+                    || !focused_moved.is_empty()))
+    };
     let native_tabs_enabled =
         |config: Option<Res<Config>>| config.is_none_or(|config| config.native_tabs_enabled());
 
@@ -1106,5 +1131,53 @@ mod tests {
         harness.world().insert_resource(border_config(true));
         harness.app.update();
         assert_ne!(overlays_last_run(&harness), before);
+    }
+
+    #[test]
+    fn overlays_rerun_when_scrolling_starts_and_stops() {
+        let mut harness = TestHarness::new()
+            .with_config(border_config(true))
+            .with_windows(1);
+        harness.advance(Duration::from_secs(1));
+
+        let strip_entity = harness
+            .world()
+            .query_filtered::<Entity, With<super::ActiveWorkspaceMarker>>()
+            .single(harness.world())
+            .unwrap();
+
+        let overlay_runs_after = |harness: &mut TestHarness, change: &dyn Fn(&mut World)| {
+            let before = overlays_last_run(harness);
+            change(harness.world());
+            harness.app.update();
+            overlays_last_run(harness) != before
+        };
+
+        assert!(!overlay_runs_after(&mut harness, &|_| {}), "idle frame");
+        assert!(
+            overlay_runs_after(&mut harness, &|world| {
+                world.entity_mut(strip_entity).insert(super::Scrolling {
+                    velocity: 0.0,
+                    position: 0.0,
+                    is_user_swiping: false,
+                    last_event: Duration::from_secs(1),
+                });
+            }),
+            "overlay must rerun to hide when Scrolling starts"
+        );
+        assert!(
+            !overlay_runs_after(&mut harness, &|_| {}),
+            "idle frame while Scrolling persists without window movement"
+        );
+        assert!(
+            overlay_runs_after(&mut harness, &|world| {
+                world.entity_mut(strip_entity).remove::<super::Scrolling>();
+            }),
+            "overlay must rerun to reappear when Scrolling ends"
+        );
+        assert!(
+            !overlay_runs_after(&mut harness, &|_| {}),
+            "idle frame after Scrolling ends"
+        );
     }
 }

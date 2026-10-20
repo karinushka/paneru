@@ -156,9 +156,16 @@ fn cancel_resize_intent(
     mut messages: MessageReader<Event>,
     mut inputs: MessageReader<InputEvent>,
     intents: ResizeIntents,
+    focused: Query<&Window, With<FocusedMarker>>,
     config: Res<Config>,
     mut commands: Commands,
 ) {
+    if intents.is_empty() {
+        messages.clear();
+        inputs.clear();
+        return;
+    }
+    let focused_id = focused.single().ok().map(|window| window.id());
     let mut interrupted = false;
     for event in messages.read() {
         if let Event::Command { command } = event {
@@ -171,9 +178,13 @@ fn cancel_resize_intent(
                 )
                 | Command::PrintState
                 | Command::Lua(_) => false,
-                Command::Layout(ops) => ops
-                    .iter()
-                    .any(|op| !matches!(op, crate::types::windowset::LayoutOp::SetWidth { .. })),
+                Command::Layout(ops) => ops.iter().any(|op| {
+                    !matches!(
+                        op,
+                        crate::types::windowset::LayoutOp::SetWidth { window, .. }
+                            if Some(*window) == focused_id
+                    )
+                }),
                 _ => true,
             };
         }

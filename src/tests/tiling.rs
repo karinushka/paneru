@@ -1282,6 +1282,34 @@ fn test_window_resize_lua_width_continuations_preserve_the_original_center() {
 
 #[test]
 #[cfg(feature = "lua")]
+fn test_window_resize_lua_width_on_unfocused_window_cancels_pending_recovery() {
+    use crate::types::windowset::LayoutOp;
+
+    let mut harness = focused_middle_window_with_min_width(400);
+    harness.run(vec![
+        shrink(),
+        Event::Command {
+            command: Command::Layout(vec![LayoutOp::SetWidth {
+                window: 0,
+                ratio: 0.5,
+            }]),
+        },
+    ]);
+    let placed_x = {
+        let world = harness.world();
+        let entity = find_window_entity(1, world);
+        assert!(world.get::<crate::ecs::AwaitResize>(entity).is_none());
+        world.get::<crate::ecs::Position>(entity).unwrap().0.x
+    };
+    harness.advance(Duration::from_secs(2));
+
+    let world = harness.world();
+    assert_window_size!(world, 1, 400, 748);
+    assert_window_at!(world, 1, placed_x, TEST_MENUBAR_HEIGHT);
+}
+
+#[test]
+#[cfg(feature = "lua")]
 fn test_window_resize_lua_callback_invocation_preserves_pending_recovery() {
     let mut harness = focused_middle_window_with_min_width(400);
     harness.run(vec![shrink()]);

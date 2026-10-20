@@ -16,7 +16,6 @@ use bevy::platform::collections::HashSet;
 use tracing::debug;
 
 use crate::commands::{Command, MoveFocus, Operation};
-use crate::ecs::focus::FocusWindow;
 use crate::ecs::layout::{Column, LayoutStrip, StackItem};
 use crate::ecs::params::Windows;
 use crate::ecs::workspace::VirtualMoveMarker;
@@ -80,10 +79,7 @@ fn apply(
     match op {
         LayoutOp::Focus(_) => {
             let entity = entity.expect("Focus names a window");
-            commands.trigger(FocusWindow {
-                entity,
-                raise: true,
-            });
+            commands.focus_entity(entity, true);
         }
 
         LayoutOp::Swap(_, other) => {

@@ -296,7 +296,7 @@ fn nearest_float_in_direction(
 /// # Returns
 ///
 /// `Some(Entity)` with the entity of the newly focused window, otherwise `None`.
-fn focus_with_verification(
+pub(crate) fn focus_with_verification(
     entity: Entity,
     focused_entity: Option<Entity>,
     paging: Option<&mut PageGestureState>,
@@ -309,7 +309,7 @@ fn focus_with_verification(
             paging.await_focus(entity);
         }
         entity_commands.try_insert((
-            crate::ecs::VerifyFocus,
+            crate::ecs::VerifyFocus::default(),
             Timeout::for_component::<crate::ecs::VerifyFocus>(
                 crate::ecs::focus::VERIFY_FOCUS_TIMEOUT,
             ),

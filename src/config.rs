@@ -545,6 +545,7 @@ impl Config {
             .unwrap_or(false)
     }
 
+    #[cfg(any(feature = "lua", test))]
     pub fn swipe_gesture_page_distance_cm(&self) -> f64 {
         self.inner()
             .swipe

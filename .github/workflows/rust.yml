@@ -8,6 +8,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # ⬇️ FORCE RUSTC TO USE XCODE'S LEGITIMATE SDK ⬇️
+  SDKROOT: /Applications/Xcode_16.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk
 
 jobs:
   build:
@@ -18,7 +20,7 @@ jobs:
     - name: Set up Xcode version
       uses: maxim-lobanov/setup-xcode@v1
       with:
-        xcode-version: 'latest-stable'
+        xcode-version: '16.0' # Pinning to 16 matching the SDKROOT path above
 
     - run: rustup update
     - run: cargo build --release --verbose

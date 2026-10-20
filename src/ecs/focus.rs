@@ -16,6 +16,7 @@ use bevy::math::IRect;
 use bevy::prelude::Event as BevyEvent;
 use bevy::time::Time;
 use bevy::time::common_conditions::on_timer;
+use bevy::time::{Timer, TimerMode};
 use std::pin::Pin;
 use tracing::{Level, debug, error, info, instrument, trace, warn};
 
@@ -36,6 +37,8 @@ use crate::platform::WorkspaceId;
 
 const REFRESH_WINDOW_CHECK_FREQ_MS: u64 = 1000;
 pub(crate) const VERIFY_FOCUS_TIMEOUT: Duration = Duration::from_millis(300);
+/// How long a busy application gets to answer the repeated focus request.
+const VERIFY_FOCUS_AGAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 type MouseFocusStrips<'w, 's> = Query<
     'w,
@@ -418,13 +421,13 @@ fn maintain_verify_focus_singleton(
 
 #[instrument(level = Level::DEBUG, skip_all)]
 fn detect_focus_rejection(
-    pending: Populated<(Entity, &Window, &ChildOf, &Timeout), With<VerifyFocus>>,
+    mut pending: Populated<(Entity, &Window, &ChildOf, &mut Timeout, &mut VerifyFocus)>,
     apps: Query<&Application>,
     mut workspaces: Query<(Entity, &mut LayoutStrip)>,
     windows: Windows,
     mut commands: Commands,
 ) {
-    for (target_entity, target_window, child_of, timeout) in &pending {
+    for (target_entity, target_window, child_of, mut timeout, mut verify) in &mut pending {
         if !timeout.timer.is_finished() {
             continue;
         }
@@ -469,6 +472,25 @@ fn detect_focus_rejection(
             debug!(
                 "focus landed on tab sibling {actual_entity} of {target_entity}; not a rejection.",
             );
+            continue;
+        }
+
+        // A busy application, such as a browser playing video, can take longer
+        // than the first wait to act on the request, and then still reports the
+        // window it had focused before. Ask once more and wait longer, so only
+        // an application that keeps refusing gets its window floated.
+        if !verify.asked_again {
+            debug!(
+                "app focused window {} instead of {}; asking again.",
+                actual_window.id(),
+                target_window.id(),
+            );
+            verify.asked_again = true;
+            timeout.timer = Timer::new(VERIFY_FOCUS_AGAIN_TIMEOUT, TimerMode::Once);
+            commands.trigger(FocusWindow {
+                entity: target_entity,
+                raise: true,
+            });
             continue;
         }
 
@@ -757,6 +779,8 @@ mod tests {
     use crate::manager::app::MockApplicationApi;
     use crate::platform::WinID;
     use bevy::ecs::world::World;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicI32, Ordering};
 
     fn spawn_app(world: &mut World, frontmost: bool, focused_id: WinID) -> Entity {
         let mut api = MockApplicationApi::new();
@@ -764,6 +788,47 @@ mod tests {
         api.expect_focused_window_id()
             .returning(move || Ok(focused_id));
         world.spawn(Application::new(Box::new(api))).id()
+    }
+
+    /// An app whose focused window the test can change between frames.
+    fn spawn_app_with_focus(world: &mut World, focused_id: Arc<AtomicI32>) -> Entity {
+        let mut api = MockApplicationApi::new();
+        api.expect_is_frontmost().returning(|| true);
+        api.expect_focused_window_id()
+            .returning(move || Ok(focused_id.load(Ordering::SeqCst)));
+        world.spawn(Application::new(Box::new(api))).id()
+    }
+
+    /// Lets the verify timer run out again, as the next frames would.
+    fn expire_verify_timer(world: &mut World, entity: Entity) {
+        let mut timeout = world.get_mut::<Timeout>(entity).expect("verify timer");
+        let remaining = timeout.timer.remaining();
+        timeout.timer.tick(remaining);
+    }
+
+    /// Two windows of one app side by side in a strip, the target asked for focus.
+    fn two_columns_verifying(world: &mut World, app: Entity) -> (Entity, Entity) {
+        let target = spawn_window(world, app, 1);
+        let actual = spawn_window(world, app, 2);
+        // Move actual so it does not share a frame with target (not a tab group).
+        world
+            .entity_mut(actual)
+            .insert(Position(bevy::math::IVec2::new(800, 0)));
+        let mut strip = LayoutStrip::default();
+        strip.append(target);
+        strip.append(actual);
+        world.spawn(strip);
+        world.entity_mut(target).insert((
+            FocusedMarker,
+            VerifyFocus::default(),
+            expired_verify_timeout(),
+        ));
+        (target, actual)
+    }
+
+    fn in_strip(world: &mut World, entity: Entity) -> bool {
+        let mut strips = world.query::<&LayoutStrip>();
+        strips.single(world).expect("one strip").contains(entity)
     }
 
     fn spawn_window(world: &mut World, app: Entity, id: WinID) -> Entity {
@@ -873,9 +938,11 @@ mod tests {
             .expect("target is in the strip");
         world.spawn(strip);
 
-        world
-            .entity_mut(target)
-            .insert((FocusedMarker, VerifyFocus, expired_verify_timeout()));
+        world.entity_mut(target).insert((
+            FocusedMarker,
+            VerifyFocus::default(),
+            expired_verify_timeout(),
+        ));
 
         let system_id = world.register_system(detect_focus_rejection);
         _ = world.run_system(system_id);
@@ -891,27 +958,187 @@ mod tests {
         );
     }
 
+    /// An app that is still busy when the first wait ends reports the window it
+    /// had focused before. That is not a refusal yet: the request is repeated
+    /// and the window keeps its place in the layout.
+    #[test]
+    fn a_slow_app_is_asked_again_instead_of_floating_the_window() {
+        let mut world = World::new();
+        let asked = Arc::new(AtomicI32::new(0));
+        let counter = asked.clone();
+        world.add_observer(move |trigger: On<FocusWindow>| {
+            assert!(trigger.event().raise);
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        let app = spawn_app(&mut world, true, 2);
+        let (target, _) = two_columns_verifying(&mut world, app);
+
+        let system_id = world.register_system(detect_focus_rejection);
+        _ = world.run_system(system_id);
+
+        assert!(world.get::<Unmanaged>(target).is_none());
+        assert!(in_strip(&mut world, target));
+        assert_eq!(asked.load(Ordering::SeqCst), 1, "focus is requested again");
+        assert!(
+            world
+                .get::<VerifyFocus>(target)
+                .is_some_and(|v| v.asked_again)
+        );
+        let timeout = world.get::<Timeout>(target).expect("still verifying");
+        assert_eq!(timeout.timer.remaining(), VERIFY_FOCUS_AGAIN_TIMEOUT);
+    }
+
+    /// The case from the field: a browser playing video answers late, then
+    /// focuses the requested window. It must stay tiled.
+    #[test]
+    fn a_slow_app_that_answers_late_keeps_the_window_tiled() {
+        let mut world = World::new();
+        let focused = Arc::new(AtomicI32::new(2));
+        let app = spawn_app_with_focus(&mut world, focused.clone());
+        let (target, _) = two_columns_verifying(&mut world, app);
+        let system_id = world.register_system(detect_focus_rejection);
+
+        _ = world.run_system(system_id);
+        focused.store(1, Ordering::SeqCst);
+        expire_verify_timer(&mut world, target);
+        _ = world.run_system(system_id);
+
+        assert!(world.get::<Unmanaged>(target).is_none());
+        assert!(in_strip(&mut world, target));
+    }
+
+    /// Runs the detector and the timer system in their production order, one
+    /// frame after `ms` milliseconds.
+    fn run_frame(world: &mut World, schedule: &mut bevy::ecs::schedule::Schedule, ms: u64) {
+        world
+            .resource_mut::<bevy::time::Time>()
+            .advance_by(Duration::from_millis(ms));
+        schedule.run(world);
+    }
+
+    fn verify_schedule(world: &mut World) -> bevy::ecs::schedule::Schedule {
+        world.insert_resource(bevy::time::Time::<()>::default());
+        world.add_observer(|_: On<FocusWindow>| {});
+        let mut schedule = bevy::ecs::schedule::Schedule::default();
+        schedule.add_systems(
+            (
+                detect_focus_rejection,
+                super::super::systems::timeout_ticker,
+            )
+                .chain(),
+        );
+        schedule
+    }
+
+    fn arm_fresh_verify(world: &mut World, target: Entity) {
+        world.entity_mut(target).insert((
+            VerifyFocus::default(),
+            Timeout::for_component::<VerifyFocus>(VERIFY_FOCUS_TIMEOUT),
+        ));
+    }
+
+    /// With the real timer system, the repeated request keeps the verification
+    /// alive through the retry frame, and a late answer ends it cleanly.
+    #[test]
+    fn a_late_answer_ends_the_verification_with_the_timer_system() {
+        let mut world = World::new();
+        let focused = Arc::new(AtomicI32::new(2));
+        let app = spawn_app_with_focus(&mut world, focused.clone());
+        let (target, _) = two_columns_verifying(&mut world, app);
+        arm_fresh_verify(&mut world, target);
+        let mut schedule = verify_schedule(&mut world);
+
+        run_frame(&mut world, &mut schedule, 350);
+        run_frame(&mut world, &mut schedule, 16);
+        assert!(
+            world
+                .get::<VerifyFocus>(target)
+                .is_some_and(|v| v.asked_again),
+            "the retry frame must not expire the verification"
+        );
+
+        focused.store(1, Ordering::SeqCst);
+        run_frame(&mut world, &mut schedule, 1100);
+        run_frame(&mut world, &mut schedule, 16);
+
+        assert!(
+            world.get_entity(target).is_ok(),
+            "the window entity survives"
+        );
+        assert!(world.get::<VerifyFocus>(target).is_none());
+        assert!(world.get::<Timeout>(target).is_none());
+        assert!(world.get::<Unmanaged>(target).is_none());
+        assert!(in_strip(&mut world, target));
+    }
+
+    /// With the real timer system, an app that keeps refusing gets the window
+    /// floated after the second wait, and the verification is cleared.
+    #[test]
+    fn a_repeated_refusal_floats_the_window_with_the_timer_system() {
+        let mut world = World::new();
+        let app = spawn_app(&mut world, true, 2);
+        let (target, _) = two_columns_verifying(&mut world, app);
+        arm_fresh_verify(&mut world, target);
+        let mut schedule = verify_schedule(&mut world);
+
+        run_frame(&mut world, &mut schedule, 350);
+        run_frame(&mut world, &mut schedule, 16);
+        run_frame(&mut world, &mut schedule, 500);
+        assert!(
+            world.get::<Unmanaged>(target).is_none(),
+            "the second wait has not ended yet"
+        );
+        run_frame(&mut world, &mut schedule, 600);
+        run_frame(&mut world, &mut schedule, 16);
+
+        assert!(matches!(
+            world.get::<Unmanaged>(target),
+            Some(Unmanaged::Floating)
+        ));
+        assert!(!in_strip(&mut world, target));
+        assert!(world.get::<VerifyFocus>(target).is_none());
+        assert!(world.get::<Timeout>(target).is_none());
+    }
+
+    /// A new focus request on the same window replaces the old verification,
+    /// so the retry flag from an earlier request does not carry over.
+    #[test]
+    fn a_new_request_starts_a_fresh_verification() {
+        let mut world = World::new();
+        let app = spawn_app(&mut world, true, 2);
+        let (target, _) = two_columns_verifying(&mut world, app);
+        let system_id = world.register_system(detect_focus_rejection);
+        _ = world.run_system(system_id);
+        assert!(
+            world
+                .get::<VerifyFocus>(target)
+                .is_some_and(|v| v.asked_again)
+        );
+
+        let rearm = world.register_system(move |mut commands: Commands| {
+            crate::commands::focus_with_verification(target, None, None, &mut commands);
+        });
+        world.add_observer(|_: On<FocusWindow>| {});
+        _ = world.run_system(rearm);
+
+        assert!(
+            world
+                .get::<VerifyFocus>(target)
+                .is_some_and(|v| !v.asked_again)
+        );
+        let timeout = world.get::<Timeout>(target).expect("verifying");
+        assert_eq!(timeout.timer.remaining(), VERIFY_FOCUS_TIMEOUT);
+    }
+
     #[test]
     fn focus_rejection_floats_target_and_clears_verify_focus() {
         let mut world = World::new();
         let app = spawn_app(&mut world, true, 2);
-        let target = spawn_window(&mut world, app, 1);
-        let actual = spawn_window(&mut world, app, 2);
-        // Move actual so it does not share a frame with target (not a tab group).
-        world
-            .entity_mut(actual)
-            .insert(Position(bevy::math::IVec2::new(800, 0)));
-
-        let mut strip = LayoutStrip::default();
-        strip.append(target);
-        strip.append(actual);
-        world.spawn(strip);
-
-        world
-            .entity_mut(target)
-            .insert((FocusedMarker, VerifyFocus, expired_verify_timeout()));
-
+        let (target, _) = two_columns_verifying(&mut world, app);
         let system_id = world.register_system(detect_focus_rejection);
+
+        _ = world.run_system(system_id);
+        expire_verify_timer(&mut world, target);
         _ = world.run_system(system_id);
 
         assert!(
@@ -919,6 +1146,7 @@ mod tests {
                 .get::<Unmanaged>(target)
                 .is_some_and(|u| matches!(u, Unmanaged::Floating))
         );
+        assert!(!in_strip(&mut world, target));
         assert!(world.get::<VerifyFocus>(target).is_none());
         assert!(world.get::<Timeout>(target).is_none());
     }
@@ -934,10 +1162,10 @@ mod tests {
 
         world
             .entity_mut(first)
-            .insert((VerifyFocus, expired_verify_timeout()));
+            .insert((VerifyFocus::default(), expired_verify_timeout()));
         world
             .entity_mut(second)
-            .insert((VerifyFocus, expired_verify_timeout()));
+            .insert((VerifyFocus::default(), expired_verify_timeout()));
         world.flush();
 
         assert!(

@@ -35,7 +35,8 @@ use crate::ecs::{
 };
 use crate::events::{Event, InputEvent};
 use crate::manager::{
-    Application, Display, Process, Window, WindowManager, WindowOS, bruteforce_windows,
+    Application, Display, Origin, Process, Size, Window, WindowManager, WindowOS,
+    bruteforce_windows,
 };
 use crate::overlay::{FlashMessageManager, OverlayManager};
 use crate::platform::input::TapHealth;
@@ -1362,6 +1363,26 @@ fn app_shows_window(ax_window_ids: &[WinID], on_screen: &[WinID], window_id: Win
         && (ax_window_ids.is_empty() || ax_window_ids.contains(&window_id))
 }
 
+/// One settled column top on the active strip, collected before any OS/AX queries.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ColumnTopCandidate {
+    entity: Entity,
+    window_id: WinID,
+    position: Origin,
+    bounds: Size,
+    app: Entity,
+    is_single: bool,
+}
+
+impl ColumnTopCandidate {
+    fn shares_frame_with(&self, other: &Self) -> bool {
+        self.entity != other.entity
+            && self.app == other.app
+            && self.position.chebyshev_distance(other.position) <= 1
+            && self.bounds.chebyshev_distance(other.bounds) <= 1
+    }
+}
+
 /// Folds a background native tab that ended up in a column of its own back into
 /// the column of the tab that is actually showing.
 ///
@@ -1382,6 +1403,7 @@ pub(crate) fn regroup_stray_native_tabs(
     mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     window_manager: Res<WindowManager>,
     mission_control: Res<MissionControlActive>,
+    mut last_snapshot: Local<Vec<ColumnTopCandidate>>,
     mut commands: Commands,
 ) {
     if mission_control.0 {
@@ -1393,81 +1415,99 @@ pub(crate) fn regroup_stray_native_tabs(
     else {
         return;
     };
+
+    // Column tops only: a window sharing a column is already grouped, and
+    // stacked siblings never share a frame. Only a column of its own can be a
+    // stray: pulling a window out of a stack or an existing tab group would
+    // break a grouping the user set up.
+    let candidates = strip
+        .columns()
+        .filter_map(|column| {
+            let is_single = matches!(column, Column::Single(_));
+            let entity = column.top()?;
+            let (_, window, Position(position), Bounds(bounds), child) =
+                windows.get(entity).ok()?;
+            Some(ColumnTopCandidate {
+                entity,
+                window_id: window.id(),
+                position: *position,
+                bounds: *bounds,
+                app: child.parent(),
+                is_single,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if *last_snapshot == candidates {
+        return;
+    }
+
+    // Pre-filter in pure ECS before making any WindowServer or Accessibility IPC
+    // calls: only apps that actually have a `Column::Single` sharing its frame
+    // with another column top of the same app can possibly have a stray tab.
+    let has_overlapping_stray = candidates.iter().any(|stray| {
+        stray.is_single
+            && candidates
+                .iter()
+                .any(|other| stray.shares_frame_with(other))
+    });
+    last_snapshot.clone_from(&candidates);
+    if !has_overlapping_stray {
+        return;
+    }
+
     let Some(on_screen) = window_manager.windows_on_screen() else {
         return;
     };
 
-    // Column tops only: a window sharing a column is already grouped, and
-    // stacked siblings never share a frame.
-    let tops = strip.all_columns();
-    // Only a column of its own can be a stray: pulling a window out of a stack
-    // or an existing tab group would break a grouping the user set up.
-    let strays = strip
-        .columns()
-        .filter_map(|column| match column {
-            Column::Single(entity) => Some(*entity),
-            Column::Stack(_) | Column::Tabs(_) | Column::Fullscren(_) => None,
-        })
-        .collect::<Vec<_>>();
-    // One accessibility round trip per app, not per window: this runs on a timer
-    // and the call crosses into the app.
+    // One accessibility round trip per candidate app, not for every app on the
+    // strip: this runs on a timer and the call crosses into the app.
     let mut ax_windows: EntityHashMap<Vec<WinID>> = EntityHashMap::default();
-    let columns = tops
-        .into_iter()
-        .filter_map(|entity| windows.get(entity).ok())
-        .map(
-            |(entity, window, Position(position), Bounds(bounds), child)| {
-                let app = child.parent();
-                let ax_window_ids = ax_windows.entry(app).or_insert_with(|| {
-                    apps.get(app)
-                        .map(|app| app.ax_window_ids())
-                        .unwrap_or_default()
-                });
-                (
-                    entity,
-                    app_shows_window(ax_window_ids, &on_screen, window.id()),
-                    *position,
-                    *bounds,
-                    app,
-                )
-            },
-        )
+    let showing = candidates
+        .iter()
+        .map(|candidate| {
+            let has_overlap = candidates
+                .iter()
+                .any(|other| candidate.shares_frame_with(other));
+            if !has_overlap {
+                return false;
+            }
+            let ax_window_ids = ax_windows.entry(candidate.app).or_insert_with(|| {
+                apps.get(candidate.app)
+                    .map(|app| app.ax_window_ids())
+                    .unwrap_or_default()
+            });
+            app_shows_window(ax_window_ids, &on_screen, candidate.window_id)
+        })
         .collect::<Vec<_>>();
 
     let mut regrouped = Vec::new();
-    for (hidden, showing, position, bounds, app) in &columns {
-        if *showing || regrouped.contains(hidden) || !strays.contains(hidden) {
+    for (idx, hidden) in candidates.iter().enumerate() {
+        if showing[idx] || regrouped.contains(&hidden.entity) || !hidden.is_single {
             continue;
         }
-        let Some((leader, ..)) = columns.iter().find(
-            |(
-                candidate,
-                candidate_showing,
-                candidate_position,
-                candidate_bounds,
-                candidate_app,
-            )| {
-                *candidate_showing
-                    && candidate != hidden
-                    && candidate_app == app
-                    && candidate_position.chebyshev_distance(*position) <= 1
-                    && candidate_bounds.chebyshev_distance(*bounds) <= 1
-            },
-        ) else {
+        let Some((leader_idx, _)) = candidates.iter().enumerate().find(|(cand_idx, candidate)| {
+            showing[*cand_idx] && hidden.shares_frame_with(candidate)
+        }) else {
             continue;
         };
+        let leader = candidates[leader_idx].entity;
 
-        debug!("stray native tab {hidden} folded into the column of {leader}");
+        debug!(
+            "stray native tab {} folded into the column of {leader}",
+            hidden.entity
+        );
         if strip
-            .convert_to_tabs(*leader, *hidden)
+            .convert_to_tabs(leader, hidden.entity)
             .inspect_err(|err| error!("Failed to convert to tabs: {err}"))
             .is_ok()
         {
-            regrouped.push(*hidden);
+            regrouped.push(hidden.entity);
         }
     }
 
     if let Some(leader) = regrouped.first() {
+        last_snapshot.clear();
         commands.reshuffle_around(*leader);
     }
 }

@@ -487,10 +487,7 @@ fn detect_focus_rejection(
             );
             verify.asked_again = true;
             timeout.timer = Timer::new(VERIFY_FOCUS_AGAIN_TIMEOUT, TimerMode::Once);
-            commands.trigger(FocusWindow {
-                entity: target_entity,
-                raise: true,
-            });
+            commands.focus_entity(target_entity, true);
             continue;
         }
 

@@ -458,6 +458,7 @@ impl QueryStateParams<'_, '_> {
 /// windows, this keeps the strip's column structure — needed for `ws:swap`,
 /// `ws:east`, `ws:stack` and friends to know what is beside what.
 impl QueryStateParams<'_, '_> {
+    #[allow(clippy::unnecessary_wraps)]
     pub fn extract_window_set(&self) -> crate::errors::Result<WindowSet> {
         use crate::types::windowset::{ColumnSet, DisplaySet, WorkspaceSet};
 
@@ -470,17 +471,18 @@ impl QueryStateParams<'_, '_> {
 
         // Group the workspace strips by the display entity that owns them, so
         // each display can be built with its own workspaces in one pass.
+        let has_floating = has_floating_windows(&self.windows);
         let mut strips_by_display: HashMap<Entity, Vec<WorkspaceSet>> = HashMap::new();
         for (child, strip, active_workspace, selected_workspace) in self.workspaces {
             // Only ask for floating windows on a workspace that's actually
             // showing, since this read goes out to the window server.
-            let floating_entities = if active_workspace
-                || selected_workspace && active_workspace_id != Some(strip.id())
-            {
-                self.window_manager.windows_in_workspace(strip.id())?
-            } else {
-                Vec::new()
-            };
+            let query_space =
+                active_workspace || selected_workspace && active_workspace_id != Some(strip.id());
+            let floating_entities = untracked_floating_in_space(
+                &self.window_manager,
+                strip.id(),
+                has_floating && query_space,
+            );
 
             // A window stays tracked by the strip after it's floated (so it can
             // be re-tiled later), so it's the `Floating` marker — not strip
@@ -612,6 +614,31 @@ impl QueryStateParams<'_, '_> {
     }
 }
 
+fn has_floating_windows(windows: &Windows) -> bool {
+    windows.iter().any(|(_, entity)| {
+        matches!(
+            windows.get_managed(entity),
+            Some((_, _, Some(Unmanaged::Floating)))
+        )
+    })
+}
+
+fn untracked_floating_in_space(
+    window_manager: &WindowManager,
+    workspace_id: WorkspaceId,
+    should_query: bool,
+) -> Vec<WinID> {
+    if !should_query {
+        return Vec::new();
+    }
+    window_manager
+        .windows_in_workspace(workspace_id)
+        .inspect_err(|err| {
+            debug!("unable to query windows on workspace {workspace_id}: {err}");
+        })
+        .unwrap_or_default()
+}
+
 /// How a layout column arranges its windows, in the vocabulary a script sees.
 fn column_kind(column: &Column) -> crate::types::windowset::ColumnKind {
     use crate::types::windowset::ColumnKind;
@@ -644,7 +671,7 @@ pub trait QueryState: std::marker::Sized {
 /// A free function rather than an inherent method because [`PaneruQueryState`]
 /// belongs to the shared protocol crate, which knows nothing about the ECS.
 impl QueryState for PaneruQueryState {
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::unnecessary_wraps)]
     fn extract(
         workspaces: &Query<(
             &ChildOf,
@@ -675,14 +702,15 @@ impl QueryState for PaneruQueryState {
             ..PaneruActiveState::default()
         };
 
+        let has_floating = has_floating_windows(windows);
         for (child, strip, active_workspace, selected_workspace) in workspaces {
-            let floating = if active_workspace
-                || selected_workspace && active_workspace_id != Some(strip.id())
-            {
-                window_manager.windows_in_workspace(strip.id())?
-            } else {
-                Vec::new()
-            }
+            let query_space =
+                active_workspace || selected_workspace && active_workspace_id != Some(strip.id());
+            let floating = untracked_floating_in_space(
+                window_manager,
+                strip.id(),
+                has_floating && query_space,
+            )
             .into_iter()
             .filter_map(|window_id| {
                 let (_, entity) = windows.find(window_id)?;

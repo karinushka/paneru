@@ -696,12 +696,20 @@ fn test_query_state_assigns_float_only_to_active_row() {
 }
 
 #[test]
-fn test_query_state_propagates_workspace_query_failure() {
+fn test_query_state_tolerates_workspace_query_failure() {
+    use crate::config::{Config, MainOptions, WindowParams};
     use crate::errors::Error;
     use crate::manager::MockWindowManagerApi;
     use crate::tests::harness::TestHarness;
 
-    let mut harness = TestHarness::new().with_windows(1);
+    let mut params = WindowParams::new(".*", Some("test".to_string()));
+    params.floating = Some(true);
+    let config: Config = (MainOptions::default(), vec![params]).into();
+    let mut harness = TestHarness::new()
+        .with_config(config)
+        .with_windows(1)
+        .with_workspace_window(1, TEST_WORKSPACE_ID, |_| {});
+    harness.app.update();
     harness.app.update();
 
     let mut window_manager = MockWindowManagerApi::new();
@@ -712,9 +720,16 @@ fn test_query_state_propagates_workspace_query_failure() {
         .world()
         .insert_resource(WindowManager(Box::new(window_manager)));
 
-    let error = extract_query_state(harness.world()).expect_err("workspace query should fail");
+    let state =
+        extract_query_state(harness.world()).expect("query state should survive workspace failure");
+    assert_eq!(state.virtual_workspaces.len(), 1);
 
-    assert_eq!(error.to_string(), "Generic error: workspace query failed");
+    #[cfg(feature = "lua")]
+    {
+        let set = extract_window_set(harness.world())
+            .expect("window set should survive workspace failure");
+        assert_eq!(set.displays().len(), 1);
+    }
 }
 
 #[test]

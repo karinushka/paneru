@@ -260,6 +260,10 @@ pub fn register_systems(app: &mut bevy::app::App) {
     app.add_systems(
         Update,
         (
+            systems::retry_application_observers.run_if(on_timer(CLOSED_WINDOW_CHECK_FREQ)),
+            systems::recover_windowless_applications
+                .run_if(not(resource_exists::<Initializing>))
+                .run_if(on_timer(CLOSED_WINDOW_CHECK_FREQ)),
             systems::add_launched_process.run_if(on_timer(APP_OBSERVABILITY_CHECK_FREQ)),
             systems::add_launched_application.run_if(on_timer(APP_OBSERVABILITY_CHECK_FREQ)),
             (

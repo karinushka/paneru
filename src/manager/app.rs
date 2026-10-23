@@ -177,6 +177,7 @@ pub struct ApplicationOS {
     pid: Pid,
     connection: Option<ConnID>,
     handler: AxObserverHandler,
+    pending_notifications: &'static [&'static str],
     bundle_id: Option<String>,
     name: String,
 }
@@ -236,6 +237,7 @@ impl ApplicationOS {
             pid: process.pid(),
             connection,
             handler: AxObserverHandler::new(process.pid(), events.clone(), resolver)?,
+            pending_notifications: &AX_NOTIFICATIONS,
             bundle_id,
             name: process.name().to_string(),
         })
@@ -330,9 +332,13 @@ impl ApplicationApi for ApplicationOS {
     ///
     /// `Ok(bool)` where `true` means all observers were successfully registered and `retry` list is empty, otherwise `Err(Error)`.
     fn observe(&mut self) -> Result<bool> {
-        self.handler
-            .add_observer(&self.element, &AX_NOTIFICATIONS, ObserverType::Application)
-            .map(|retry| retry.is_empty())
+        let retry = self.handler.add_observer(
+            &self.element,
+            self.pending_notifications,
+            ObserverType::Application,
+        )?;
+        self.pending_notifications = retry;
+        Ok(retry.is_empty())
     }
 
     /// Registers observers for specific window-level accessibility notifications (e.g., `kAXUIElementDestroyedNotification`).
@@ -352,7 +358,7 @@ impl ApplicationApi for ApplicationOS {
                     &AX_WINDOW_NOTIFICATIONS,
                     ObserverType::Window(window.id()),
                 )
-                .map(|retry| retry.is_empty())
+                .map(<[&str]>::is_empty)
         } else {
             Err(Error::InvalidWindow)
         }
@@ -591,6 +597,27 @@ impl Drop for AxObserverHandler {
     }
 }
 
+// AX startup can block each registration until the messaging timeout.
+// Stop at the first unresponsive call instead of blocking for the whole
+// batch. Keep the successful prefix and retry the unattempted suffix.
+fn register_notification_batch<'a>(
+    notifications: &'a [&'static str],
+    mut add: impl FnMut(&'static str) -> i32,
+) -> (usize, &'a [&'static str]) {
+    let mut added = 0;
+    for (index, name) in notifications.iter().enumerate() {
+        match add(name) {
+            accessibility_sys::kAXErrorSuccess
+            | accessibility_sys::kAXErrorNotificationAlreadyRegistered => added += 1,
+            accessibility_sys::kAXErrorCannotComplete => {
+                return (added, &notifications[index..]);
+            }
+            _ => {}
+        }
+    }
+    (added, &[])
+}
+
 impl AxObserverHandler {
     /// Creates a new `AxObserverHandler` instance for a given process ID.
     /// It creates an `AXObserver` and adds its run loop source to the main run loop.
@@ -637,44 +664,38 @@ impl AxObserverHandler {
     /// # Returns
     ///
     /// `Ok(Vec<&str>)` containing a list of notifications that could not be registered (retries), otherwise `Err(Error)`.
-    pub fn add_observer(
+    pub fn add_observer<'a>(
         &mut self,
         element: &AXUIWrapper,
-        notifications: &[&'static str],
+        notifications: &'a [&'static str],
         which: ObserverType,
-    ) -> Result<Vec<&str>> {
+    ) -> Result<&'a [&'static str]> {
         let observer: AXObserverRef = self.observer.as_ptr();
         let context_ptr = self.get_or_insert_context(which).as_ptr();
 
-        // TODO: retry re-registering these.
-        let mut retry = vec![];
-        let added = notifications
-            .iter()
-            .filter_map(|name| {
-                debug!("adding {name} {element:x?} {observer:?}");
-                let notification = CFString::from_static_str(name);
-                match unsafe {
-                    AXObserverAddNotification(
-                        observer,
-                        element.as_ptr(),
-                        &notification,
-                        context_ptr.cast(),
-                    )
-                } {
-                    accessibility_sys::kAXErrorSuccess
-                    | accessibility_sys::kAXErrorNotificationAlreadyRegistered => Some(*name),
-                    accessibility_sys::kAXErrorCannotComplete => {
-                        retry.push(*name);
-                        None
-                    }
-                    result => {
-                        error!("error adding {name} {element:x?} {observer:?}: {result}");
-                        None
-                    }
-                }
-            })
-            .collect::<Vec<_>>();
-        if added.is_empty() {
+        let (added, retry) = register_notification_batch(notifications, |name| {
+            debug!("adding {name} {element:x?} {observer:?}");
+            let notification = CFString::from_static_str(name);
+            let result = unsafe {
+                AXObserverAddNotification(
+                    observer,
+                    element.as_ptr(),
+                    &notification,
+                    context_ptr.cast(),
+                )
+            };
+            if !matches!(
+                result,
+                accessibility_sys::kAXErrorSuccess
+                    | accessibility_sys::kAXErrorNotificationAlreadyRegistered
+                    | accessibility_sys::kAXErrorCannotComplete
+            ) {
+                error!("error adding {name} {element:x?} {observer:?}: {result}");
+            }
+            result
+        });
+        // A transiently busy app is retryable even before any subscription succeeds.
+        if added == 0 && retry.is_empty() {
             Err(Error::PermissionDenied(format!(
                 "{}: unable to register any observers!",
                 function_name!()
@@ -799,5 +820,57 @@ mod tests {
 
         assert_eq!(reused, first);
         assert_eq!(handler.contexts.as_ref().force_read().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod notification_batch_tests {
+    use super::register_notification_batch;
+    use accessibility_sys::{
+        kAXErrorCannotComplete, kAXErrorNotificationAlreadyRegistered,
+        kAXErrorNotificationUnsupported, kAXErrorSuccess,
+    };
+
+    #[test]
+    fn observer_batch_stops_at_first_unresponsive_call() {
+        let mut calls = 0;
+        let (added, retry) = register_notification_batch(&["A", "B", "C"], |_| {
+            calls += 1;
+            kAXErrorCannotComplete
+        });
+        assert_eq!(calls, 1);
+        assert_eq!(added, 0);
+        assert_eq!(retry, ["A", "B", "C"]);
+    }
+
+    #[test]
+    fn observer_batch_preserves_registered_prefix_and_unattempted_suffix() {
+        for success in [kAXErrorSuccess, kAXErrorNotificationAlreadyRegistered] {
+            let mut calls = 0;
+            let (added, retry) = register_notification_batch(&["A", "B", "C"], |_| {
+                calls += 1;
+                if calls == 1 {
+                    success
+                } else {
+                    kAXErrorCannotComplete
+                }
+            });
+            assert_eq!(calls, 2);
+            assert_eq!(added, 1);
+            assert_eq!(retry, ["B", "C"]);
+        }
+    }
+
+    #[test]
+    fn observer_batch_ignores_unsupported_notifications() {
+        let (added, retry) = register_notification_batch(&["A", "B", "C"], |name| {
+            if name == "A" {
+                kAXErrorNotificationUnsupported
+            } else {
+                kAXErrorSuccess
+            }
+        });
+        assert_eq!(added, 2);
+        assert_eq!(retry, [] as [&str; 0]);
     }
 }

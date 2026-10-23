@@ -476,6 +476,29 @@ pub(super) fn mission_control_trigger(
 
 /// Dispatches process-related messages, such as application launch and termination.
 ///
+const PROCESS_READY_TIMEOUT_SEC: u64 = 5;
+
+fn process_ready_timeout(name: &str, commands: &mut Commands) -> Timeout {
+    let timeout = Timeout::new(
+        Duration::from_secs(PROCESS_READY_TIMEOUT_SEC),
+        Some(format!(
+            "Process '{name}' did not become ready in {PROCESS_READY_TIMEOUT_SEC}s.",
+        )),
+        commands,
+    );
+    // Stop rapid polling after the grace period, but keep Process and its
+    // finishedLaunching/activationPolicy KVO so a late readiness notification
+    // can resume discovery within the recovery window.
+    Timeout {
+        on_expire: Some(|entity| {
+            entity.try_remove::<(FreshMarker, Timeout)>();
+        }),
+        ..timeout
+    }
+}
+
+/// Handles application launch and termination events.
+///
 /// # Arguments
 ///
 /// * `trigger` - The Bevy event trigger containing the application event.
@@ -486,7 +509,6 @@ pub(super) fn application_event_trigger(
     processes: Query<(&BProcess, Entity)>,
     mut commands: Commands,
 ) {
-    const PROCESS_READY_TIMEOUT_SEC: u64 = 5;
     let find_process = |psn| {
         processes
             .iter()
@@ -495,21 +517,32 @@ pub(super) fn application_event_trigger(
 
     for event in messages.read() {
         match event {
-            Event::ApplicationLaunched { psn, observer } if find_process(*psn).is_none() => {
+            Event::ApplicationLaunched { psn, observer } => {
+                if let Some((BProcess(process), entity)) = find_process(*psn) {
+                    // Readiness KVO uses the same message as the initial launch.
+                    // Re-arm an existing process instead of ignoring that signal.
+                    let timeout = process_ready_timeout(process.name(), &mut commands);
+                    if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                        entity_commands.try_insert((
+                            FreshMarker,
+                            crate::ecs::systems::PendingWindowRecovery::default(),
+                            timeout,
+                        ));
+                    }
+                    continue;
+                }
                 let process: BProcess = Process::new(psn, observer.clone()).into();
                 if process.pid() == 0 {
                     debug!("Skipping process with PID 0 (likely kernel_task).");
                     continue;
                 }
-                let timeout = Timeout::new(
-                    Duration::from_secs(PROCESS_READY_TIMEOUT_SEC),
-                    Some(format!(
-                        "Process '{}' did not become ready in {PROCESS_READY_TIMEOUT_SEC}s.",
-                        process.name()
-                    )),
-                    &mut commands,
-                );
-                commands.spawn((FreshMarker, timeout, process));
+                let timeout = process_ready_timeout(process.name(), &mut commands);
+                commands.spawn((
+                    FreshMarker,
+                    crate::ecs::systems::PendingWindowRecovery::default(),
+                    timeout,
+                    process,
+                ));
             }
 
             Event::ApplicationTerminated { psn } => {
@@ -1134,6 +1167,9 @@ pub(super) fn spawn_window_trigger(
 
         // Insert the window into the internal Bevy state.
         // This insertion triggers window attributes observer.
+        if let Ok(mut app_commands) = commands.get_entity(app_entity) {
+            app_commands.try_remove::<crate::ecs::systems::PendingWindowRecovery>();
+        }
         commands.spawn((
             position,
             bounds,

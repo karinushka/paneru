@@ -656,6 +656,14 @@ impl MockState {
     }
 
     pub fn create_application(&self, pid: Pid) -> Application {
+        self.create_application_with_observer(pid, || Ok(true))
+    }
+
+    pub fn create_application_with_observer(
+        &self,
+        pid: Pid,
+        observe: impl FnMut() -> crate::errors::Result<bool> + Send + 'static,
+    ) -> Application {
         let mut ma = MockApplicationApi::new();
         let s = self.clone();
 
@@ -720,7 +728,7 @@ impl MockState {
                 .and_then(|a| a.connection)
         });
 
-        ma.expect_observe().returning(|| Ok(true));
+        ma.expect_observe().returning(observe);
         ma.expect_observe_window().returning(|_| Ok(true));
         ma.expect_unobserve_window().return_const(());
         let s = self.clone();

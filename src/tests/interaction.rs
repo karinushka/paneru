@@ -19,6 +19,70 @@ use crate::{assert_focused, assert_window_at, assert_window_size};
 
 use super::*;
 
+// Exercise late AX readiness through the production lifecycle.
+#[test]
+fn delayed_application_keeps_observer_and_discovers_late_window() {
+    use crate::ecs::{BProcess, FreshMarker, Timeout};
+    use crate::manager::Application;
+
+    let mut harness = TestHarness::new().with_windows(1);
+    harness.advance(Duration::from_secs(1));
+    let pid = 42;
+    harness.mock_state.spawn_app(pid, "org.gnu.Emacs", "Emacs");
+    let mut wm = harness.mock_state.create_window_manager();
+    let state = harness.mock_state.clone();
+    wm.expect_new_application()
+        .returning(move |process| Ok(state.create_application(process.pid())));
+    harness
+        .world()
+        .insert_resource(crate::manager::WindowManager(Box::new(wm)));
+    let process = harness.mock_state.create_process(pid);
+    harness
+        .world()
+        .spawn((BProcess(Box::new(process)), FreshMarker));
+    harness.advance(Duration::from_secs(12));
+    let world = harness.world();
+    let app_entity = world
+        .query::<(Entity, &Application)>()
+        .iter(world)
+        .find(|(_, app)| app.pid() == pid)
+        .map(|(entity, _)| entity)
+        .expect("timeout must retain application and AX observer");
+    assert!(world.get::<FreshMarker>(app_entity).is_none());
+    assert!(world.get::<Timeout>(app_entity).is_none());
+    assert!(
+        world
+            .get::<crate::ecs::systems::PendingWindowRecovery>(app_entity)
+            .is_some()
+    );
+
+    // No second creation/focus event: AX becomes usable after polling expires.
+    harness.mock_state.spawn_window(
+        pid,
+        TEST_WORKSPACE_ID,
+        42,
+        IRect::new(0, 0, TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT),
+    );
+    harness.advance(Duration::from_secs(2));
+    find_window_entity(42, harness.world());
+    harness.advance(Duration::from_secs(2));
+    let world = harness.world();
+    assert!(
+        world
+            .get::<crate::ecs::systems::PendingWindowRecovery>(app_entity)
+            .is_none(),
+        "window discovery must clear post-launch recovery polling"
+    );
+    assert_eq!(
+        world
+            .query::<&Window>()
+            .iter(world)
+            .filter(|w| w.id() == 42)
+            .count(),
+        1
+    );
+}
+
 #[derive(Resource, Default)]
 struct PagingHapticCount(usize);
 
@@ -3979,5 +4043,91 @@ fn test_focus_command_starts_animation_on_first_frame() {
     assert_ne!(
         win0_pos.x, initial_win0_x,
         "window 0 should already have advanced on Frame 0"
+    );
+}
+
+// Captured live Emacs relaunch failed registration before an
+// Application entity existed. Retry the same observer rather than recreating it.
+#[test]
+fn observer_registration_failure_keeps_application() {
+    observer_registration_recovery(true);
+}
+
+#[test]
+fn observer_registration_partial_keeps_application() {
+    observer_registration_recovery(false);
+}
+
+fn observer_registration_recovery(all_failed: bool) {
+    use crate::ecs::{BProcess, FreshMarker};
+    use crate::manager::{Application, WindowManager};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    let mut harness = TestHarness::new().with_windows(1);
+    harness.advance(Duration::from_secs(1));
+    let pid = 44;
+    harness.mock_state.spawn_app(pid, "org.gnu.Emacs", "Emacs");
+    let ready = Arc::new(AtomicBool::new(false));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut wm = harness.mock_state.create_window_manager();
+    let state = harness.mock_state.clone();
+    let app_ready = ready.clone();
+    let app_calls = calls.clone();
+    wm.expect_new_application()
+        .times(1)
+        .returning(move |process| {
+            let ready = app_ready.clone();
+            let calls = app_calls.clone();
+            Ok(
+                state.create_application_with_observer(process.pid(), move || {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    if ready.load(Ordering::Relaxed) {
+                        Ok(true)
+                    } else if all_failed {
+                        Err(crate::errors::Error::Generic(
+                            "AX temporarily unavailable".into(),
+                        ))
+                    } else {
+                        Ok(false)
+                    }
+                }),
+            )
+        });
+    harness.world().insert_resource(WindowManager(Box::new(wm)));
+    let process = harness.mock_state.create_process(pid);
+    harness
+        .world()
+        .spawn((BProcess(Box::new(process)), FreshMarker));
+    harness.advance(Duration::from_millis(200));
+    let world = harness.world();
+    assert!(
+        world
+            .query::<&Application>()
+            .iter(world)
+            .any(|app| app.pid() == pid),
+        "failed registration must retain Application and its observer"
+    );
+
+    harness.advance(Duration::from_secs(12));
+    // Poll windows independently of successful subscription. There is no
+    // creation/focus notification to rescue this launch.
+    harness.mock_state.spawn_window(
+        pid,
+        TEST_WORKSPACE_ID,
+        44,
+        IRect::new(0, 0, TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT),
+    );
+    harness.advance(Duration::from_secs(2));
+    find_window_entity(44, harness.world());
+    assert!(calls.load(Ordering::Relaxed) > 1, "registration must retry");
+
+    ready.store(true, Ordering::Relaxed);
+    harness.advance(Duration::from_secs(2));
+    let settled_calls = calls.load(Ordering::Relaxed);
+    harness.advance(Duration::from_secs(2));
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        settled_calls,
+        "successful registration must stop retrying"
     );
 }

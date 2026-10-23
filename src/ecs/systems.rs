@@ -42,6 +42,45 @@ use crate::overlay::{FlashMessageManager, OverlayManager};
 use crate::platform::input::TapHealth;
 use crate::platform::{PlatformCallbacks, WinID};
 
+// Keep partially registered observers alive during slow AX startup.
+// A separate, low-frequency retry must not gate discovery of usable windows.
+#[derive(bevy::ecs::component::Component)]
+pub(super) struct PendingApplicationObservation;
+
+// Bounded post-launch recovery budget (in 1s ticks) for newly launched
+// processes and applications whose initial `FreshMarker` grace period expired
+// before readiness, observer registration, or their first window settled.
+#[derive(bevy::ecs::component::Component)]
+pub(crate) struct PendingWindowRecovery(u32);
+
+const WINDOW_RECOVERY_ATTEMPTS: u32 = 60;
+
+impl Default for PendingWindowRecovery {
+    fn default() -> Self {
+        Self(WINDOW_RECOVERY_ATTEMPTS)
+    }
+}
+
+type RecoverableApplications<'w, 's> = Populated<
+    'w,
+    's,
+    (
+        Entity,
+        Option<&'static Application>,
+        Option<&'static ChildOf>,
+        Option<&'static mut PendingWindowRecovery>,
+        Has<PendingApplicationObservation>,
+    ),
+    (
+        Without<Children>,
+        Without<FreshMarker>,
+        Or<(
+            With<PendingWindowRecovery>,
+            With<PendingApplicationObservation>,
+        )>,
+    ),
+>;
+
 /// Processes and applications still inside their spawn grace period, with the
 /// `FreshMarker` that says whether the spawn actually completed in time.
 type TimedOutSpawns<'w, 's> = Populated<
@@ -246,7 +285,11 @@ pub(crate) fn add_existing_application(
     for (mut app, entity) in fresh_apps {
         let mut offscreen_windows = vec![];
 
-        if app.observe().is_ok_and(|result| result)
+        let observed = app.observe().is_ok_and(|result| result);
+        if !observed && let Ok(mut entity_commands) = commands.get_entity(entity) {
+            entity_commands.try_insert(PendingApplicationObservation);
+        }
+        if observed
             && let Ok((found_windows, offscreen)) = window_manager
                 .find_existing_application_windows(&mut app, &spaces, &config)
                 .inspect_err(|err| warn!("{err}"))
@@ -425,7 +468,7 @@ pub(super) fn add_launched_process(
         if children {
             // Process already has an attached Application, so finish.
             if let Ok(mut entity_commands) = commands.get_entity(entity) {
-                entity_commands.try_remove::<FreshMarker>();
+                entity_commands.try_remove::<(FreshMarker, PendingWindowRecovery)>();
             }
             continue;
         }
@@ -435,18 +478,42 @@ pub(super) fn add_launched_process(
             return;
         };
 
-        if app.observe().is_ok_and(|good| good) {
-            let timeout = Timeout::new(
-                APP_OBSERVABLE_TIMEOUT,
-                Some(format!(
-                    "{app} did not become observable in {}s.",
-                    APP_OBSERVABLE_TIMEOUT.as_secs()
-                )),
-                &mut commands,
+        if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            entity_commands.try_remove::<(FreshMarker, PendingWindowRecovery)>();
+        }
+
+        // Process readiness precedes usable AX during Emacs startup.
+        // Keep this Application even when subscriptions fail; poll windows separately.
+        let observed = app.observe().is_ok_and(|good| good);
+        let timeout = Timeout::new(
+            APP_OBSERVABLE_TIMEOUT,
+            Some(format!(
+                "{app} did not become observable in {}s.",
+                APP_OBSERVABLE_TIMEOUT.as_secs()
+            )),
+            &mut commands,
+        );
+        // Timing out AX discovery must not destroy the app's
+        // observer. Slow Emacs startup can outlast this grace period.
+        let timeout = Timeout {
+            on_expire: Some(|entity| {
+                entity.try_remove::<(FreshMarker, Timeout)>();
+            }),
+            ..timeout
+        };
+        let mut entity_commands = commands.spawn((
+            app,
+            FreshMarker,
+            PendingWindowRecovery::default(),
+            timeout,
+            ChildOf(entity),
+        ));
+        if !observed {
+            entity_commands.insert(PendingApplicationObservation);
+            debug!(
+                "retaining application with pending observers {}",
+                process.name()
             );
-            commands.spawn((app, FreshMarker, timeout, ChildOf(entity)));
-        } else {
-            debug!("failed to register some observers {}", process.name());
         }
     }
 }
@@ -490,6 +557,62 @@ pub(super) fn add_launched_application(
             debug!("removing FreshMarker from {entity}: windows already created via AXCreated");
             if let Ok(mut entity_commands) = commands.get_entity(entity) {
                 entity_commands.try_remove::<FreshMarker>();
+            }
+        }
+    }
+}
+
+/// Retry on the retained Application, preserving already registered callbacks.
+pub(super) fn retry_application_observers(
+    mut apps: Populated<(Entity, &mut Application), With<PendingApplicationObservation>>,
+    mut commands: Commands,
+) {
+    for (entity, mut app) in &mut apps {
+        if app.observe().is_ok_and(|ready| ready) {
+            if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                entity_commands.try_remove::<PendingApplicationObservation>();
+            }
+            debug!("application observers ready for pid {}", app.pid());
+        }
+    }
+}
+
+// Creation notifications can arrive while AX is unresponsive,
+// or before update_frame can read a usable rect. Retaining an observer alone
+// cannot replay that event. Retry newly launched applications with no managed
+// children at one-second intervals for a bounded recovery window, and despawn
+// headless or permanently unobservable processes once that window expires.
+pub(super) fn recover_windowless_applications(
+    mut apps: RecoverableApplications,
+    config: Res<Config>,
+    mut commands: Commands,
+) {
+    for (entity, app, child_of, recovery, pending_observation) in &mut apps {
+        if let Some(app) = app {
+            let windows = app.window_list(&config);
+            if !windows.is_empty() {
+                commands.trigger(SpawnWindowTrigger(windows));
+                continue;
+            }
+        }
+        if let Some(mut recovery) = recovery {
+            recovery.0 = recovery.0.saturating_sub(1);
+            if recovery.0 > 0 {
+                continue;
+            }
+            let despawn_target = if app.is_none() {
+                Some(entity)
+            } else if pending_observation {
+                Some(child_of.map_or(entity, ChildOf::parent))
+            } else {
+                None
+            };
+            if let Some(target) = despawn_target {
+                if let Ok(mut entity_commands) = commands.get_entity(target) {
+                    entity_commands.try_despawn();
+                }
+            } else if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                entity_commands.try_remove::<PendingWindowRecovery>();
             }
         }
     }

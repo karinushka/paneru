@@ -364,3 +364,93 @@ impl Drop for WorkspaceObserver {
         }
     }
 }
+
+#[cfg(test)]
+mod delayed_readiness_tests {
+    use super::*;
+    use crate::ecs::BProcess;
+    use crate::manager::{Application, WindowManager};
+    use crate::tests::{TEST_WORKSPACE_ID, TestHarness};
+    use std::time::Duration;
+
+    #[test]
+    fn readiness_notification_resumes_retained_process() {
+        let mut harness = TestHarness::new().with_windows(1);
+        harness.advance(Duration::from_secs(1));
+        let pid = 43;
+        harness.mock_state.spawn_app(pid, "org.gnu.Emacs", "Emacs");
+        let process = harness.mock_state.create_process(pid);
+        let psn = crate::manager::ProcessApi::psn(&process);
+        // Initial readiness polling has expired, leaving its KVO observer alive.
+        harness.world().spawn(BProcess(Box::new(process)));
+        let mut wm = harness.mock_state.create_window_manager();
+        let state = harness.mock_state.clone();
+        wm.expect_new_application()
+            .returning(move |process| Ok(state.create_application(process.pid())));
+        harness.world().insert_resource(WindowManager(Box::new(wm)));
+        harness.mock_state.spawn_window(
+            pid,
+            TEST_WORKSPACE_ID,
+            43,
+            bevy::math::IRect::new(0, 0, 400, 600),
+        );
+        let (events, _receiver) = crate::events::EventSender::new();
+        let observer = WorkspaceObserver::new(events);
+        harness
+            .world()
+            .write_message(crate::events::Event::ApplicationLaunched { psn, observer });
+        harness.advance(Duration::from_secs(2));
+        let world = harness.world();
+        assert!(
+            world
+                .query::<&Application>()
+                .iter(world)
+                .any(|app| app.pid() == pid),
+            "late readiness must resume an existing process"
+        );
+        crate::tests::find_window_entity(43, harness.world());
+    }
+
+    #[test]
+    fn headless_process_is_despawned_after_recovery_window() {
+        let mut harness = TestHarness::new().with_windows(1);
+        harness.advance(Duration::from_secs(1));
+        let pid: i32 = 45;
+        let mut process = crate::manager::MockProcessApi::new();
+        process.expect_pid().return_const(pid);
+        process
+            .expect_psn()
+            .return_const(crate::platform::ProcessSerialNumber {
+                high: 0,
+                low: pid.cast_unsigned(),
+            });
+        process
+            .expect_name()
+            .return_const("headless-helper".to_string());
+        process.expect_ready().returning(|| false);
+        harness.world().spawn((
+            BProcess(Box::new(process)),
+            crate::ecs::systems::PendingWindowRecovery::default(),
+        ));
+
+        harness.advance(Duration::from_secs(10));
+        let world = harness.world();
+        assert!(
+            world
+                .query::<&BProcess>()
+                .iter(world)
+                .any(|p| p.pid() == pid),
+            "process must remain retained during the recovery window"
+        );
+
+        harness.advance(Duration::from_secs(55));
+        let world = harness.world();
+        assert!(
+            !world
+                .query::<&BProcess>()
+                .iter(world)
+                .any(|p| p.pid() == pid),
+            "headless process must be despawned once the recovery window expires"
+        );
+    }
+}

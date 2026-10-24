@@ -1291,16 +1291,38 @@ pub(super) fn verify_window_position(
     }
 }
 
+/// Resizes windows whose `Bounds` changed, keeping each one's width as a
+/// share of the display its strip is on: a strip on the display without
+/// focus is sized for its own, and a share of the other would grow or shrink
+/// the window wherever it went next. A window in no strip is of the active
+/// display.
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn commit_window_size(
     active_display: ActiveDisplay,
-    mut resized_windows: Populated<(&mut Window, &Bounds, &mut WidthRatio), Changed<Bounds>>,
+    strips: Query<(&LayoutStrip, &ChildOf)>,
+    displays: Query<&Display>,
+    mut resized_windows: Populated<
+        (Entity, &mut Window, &Bounds, &mut WidthRatio),
+        Changed<Bounds>,
+    >,
 ) {
-    let display_bounds = active_display.bounds();
+    let fallback = active_display.bounds().width();
+    let widths: EntityHashMap<i32> = resized_windows
+        .iter()
+        .map(|(entity, ..)| {
+            let width = strips
+                .iter()
+                .find(|(strip, _)| strip.contains(entity))
+                .and_then(|(_, parent)| displays.get(parent.parent()).ok())
+                .map_or(fallback, |display| display.bounds().width());
+            (entity, width)
+        })
+        .collect();
     resized_windows
         .par_iter_mut()
-        .for_each(|(mut window, size, mut width_ratio)| {
-            width_ratio.0 = f64::from(size.0.x) / f64::from(display_bounds.width());
+        .for_each(|(entity, mut window, size, mut width_ratio)| {
+            let width = widths.get(&entity).copied().unwrap_or(fallback);
+            width_ratio.0 = f64::from(size.0.x) / f64::from(width);
             objc2::rc::autoreleasepool(|_| window.resize(size.0));
         });
 }

@@ -1180,7 +1180,9 @@ fn empty_the_second_with(
 fn test_a_workspace_emptied_behind_the_active_one_is_reaped_and_the_numbers_keep_their_gap() {
     use crate::tests::harness::TestHarness;
 
-    let mut harness = TestHarness::new().with_config(reaping(true)).with_windows(3);
+    let mut harness = TestHarness::new()
+        .with_config(reaping(true))
+        .with_windows(3);
     empty_the_second(&mut harness);
 
     // Three stays three: a script that remembered "3" still finds its
@@ -1203,7 +1205,9 @@ fn test_a_workspace_emptied_behind_the_active_one_is_reaped_and_the_numbers_keep
 fn test_an_emptied_workspace_stays_with_reaping_off() {
     use crate::tests::harness::TestHarness;
 
-    let mut harness = TestHarness::new().with_config(reaping(false)).with_windows(3);
+    let mut harness = TestHarness::new()
+        .with_config(reaping(false))
+        .with_windows(3);
     empty_the_second(&mut harness);
 
     assert_eq!(workspace_numbers(harness.world()), vec![1, 2, 3]);
@@ -1216,7 +1220,9 @@ fn test_the_active_workspace_stays_when_its_last_window_closes() {
     use crate::tests::harness::TestHarness;
     use crate::types::windowset::LayoutOp;
 
-    let mut harness = TestHarness::new().with_config(reaping(true)).with_windows(2);
+    let mut harness = TestHarness::new()
+        .with_config(reaping(true))
+        .with_windows(2);
     harness.advance(std::time::Duration::from_millis(100));
     harness.app.world_mut().write_message(Event::Command {
         command: Command::Layout(vec![LayoutOp::MoveToWorkspace {
@@ -1242,7 +1248,9 @@ fn test_the_active_workspace_stays_when_its_last_window_closes() {
 fn test_a_workspace_shown_on_its_display_stays_when_emptied() {
     use crate::tests::harness::TestHarness;
 
-    let mut harness = TestHarness::new().with_config(reaping(true)).with_windows(3);
+    let mut harness = TestHarness::new()
+        .with_config(reaping(true))
+        .with_windows(3);
     // As another display's shown workspace is marked once it's not the
     // active one.
     let mut select_second = |world: &mut World| {
@@ -1268,17 +1276,16 @@ fn test_a_workspace_made_empty_stays() {
     use crate::tests::harness::TestHarness;
     use crate::types::windowset::LayoutOp;
 
-    let mut harness = TestHarness::new().with_config(reaping(true)).with_windows(1);
+    let mut harness = TestHarness::new()
+        .with_config(reaping(true))
+        .with_windows(1);
     harness.advance(std::time::Duration::from_millis(100));
     // Viewing a number past the last makes it, empty, and shows it; viewing
     // the first again leaves it to the existing reap, which takes it then.
     harness.app.world_mut().write_message(Event::Command {
-        command: Command::Layout(vec![LayoutOp::View {
-            workspace: 2,
-        }]),
+        command: Command::Layout(vec![LayoutOp::View { workspace: 2 }]),
     });
     harness.advance(std::time::Duration::from_millis(300));
 
     assert_eq!(workspace_numbers(harness.world()), vec![1, 2]);
 }
-

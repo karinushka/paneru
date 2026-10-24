@@ -1608,3 +1608,54 @@ fn test_mouse_to_next_display_preserves_selected_virtual_workspace() {
         })
         .run(commands);
 }
+
+/// A window's width is kept as a share of its own display, not of the one
+/// with focus: 960 wide on the 1920 monitor is half, though the laptop has
+/// focus.
+#[test]
+fn test_a_window_keeps_its_share_of_its_own_display() {
+    let mut harness = TestHarness::new();
+    harness.mock_state.add_display(
+        EXT_DISPLAY_ID,
+        IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+        vec![EXT_WORKSPACE_ID],
+    );
+    let ext_origin = Origin::new(0, -EXT_DISPLAY_HEIGHT + TEST_MENUBAR_HEIGHT);
+    let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+    harness.mock_state.spawn_window(
+        TEST_PROCESS_ID,
+        EXT_WORKSPACE_ID,
+        100,
+        IRect::from_corners(ext_origin, ext_origin + size),
+    );
+    harness.mock_state.spawn_window(
+        TEST_PROCESS_ID,
+        TEST_WORKSPACE_ID,
+        200,
+        IRect::from_corners(Origin::new(0, 0), Size::new(0, 0) + size),
+    );
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 200 },
+        Event::MenuOpened { window_id: 200 },
+        Event::MenuOpened { window_id: 200 },
+    ];
+    harness
+        .on_iteration(1, |world, _state| {
+            let entity = crate::tests::harness::find_window_entity(100, world);
+            let mut bounds = world.get_mut::<crate::ecs::Bounds>(entity).expect("bounds");
+            bounds.0.x = EXT_DISPLAY_WIDTH / 2;
+        })
+        .on_iteration(2, |world, _state| {
+            let entity = crate::tests::harness::find_window_entity(100, world);
+            let ratio = world
+                .get::<crate::ecs::WidthRatio>(entity)
+                .expect("ratio")
+                .0;
+            assert!(
+                (ratio - 0.5).abs() < 0.01,
+                "half the monitor's width is a share of 0.5, not {ratio}"
+            );
+        })
+        .run(commands);
+}

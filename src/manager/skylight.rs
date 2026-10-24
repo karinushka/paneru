@@ -6,7 +6,7 @@ use objc2_core_foundation::{
 };
 use objc2_core_graphics::{CGDirectDisplayID, CGError};
 
-use crate::platform::{CFStringRef, ConnID, OSStatus, ProcessSerialNumber, WinID};
+use crate::platform::{CFStringRef, ConnID, OSStatus, Pid, ProcessSerialNumber, WinID};
 
 #[link(name = "SkyLight", kind = "framework")]
 unsafe extern "C" {
@@ -392,6 +392,37 @@ unsafe extern "C" {
         psn: &ProcessSerialNumber,
         psn_cid: &mut ConnID,
     ) -> CGError;
+
+    /// Retrieves the connection ID of the process that owns a window.
+    ///
+    /// # Arguments
+    ///
+    /// * `cid` - The main connection ID.
+    /// * `wid` - The `WinID` of the window.
+    /// * `wid_cid` - A mutable reference to a `ConnID` where the owner's connection ID will be stored.
+    ///
+    /// # Returns
+    ///
+    /// A `CGError` indicating success or failure.
+    ///
+    /// # Original signature
+    /// extern `CGError` SLSGetWindowOwner(int cid, `uint32_t` wid, int *`wid_cid`);
+    pub fn SLSGetWindowOwner(cid: ConnID, wid: WinID, wid_cid: &mut ConnID) -> CGError;
+
+    /// Retrieves the process ID behind a connection.
+    ///
+    /// # Arguments
+    ///
+    /// * `cid` - The `ConnID` of the connection.
+    /// * `pid` - A mutable reference to a `Pid` where the process ID will be stored.
+    ///
+    /// # Returns
+    ///
+    /// A `CGError` indicating success or failure.
+    ///
+    /// # Original signature
+    /// extern `CGError` SLSConnectionGetPID(int cid, `pid_t` *pid);
+    pub fn SLSConnectionGetPID(cid: ConnID, pid: &mut Pid) -> CGError;
 
     /// Sets the frontmost process with additional options and a target window ID.
     /// This function brings the specified process to the front and can optionally focus on a specific window within that process.

@@ -12,7 +12,7 @@ use bevy::ecs::schedule::common_conditions::{not, resource_exists};
 use bevy::ecs::system::{Commands, Local, ParamSet, Populated, Query, Res, ResMut, Single};
 use bevy::ecs::world::World;
 use bevy::time::common_conditions::on_timer;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tracing::{Level, debug, error, instrument, warn};
 
@@ -128,6 +128,10 @@ impl Plugin for WorkspaceEventsPlugin {
             (
                 renumber_virtual_indexes,
                 reap_empty_virtual_workspaces.run_if(reap_workspaces),
+                reap_emptied_virtual_workspaces
+                    .run_if(reap_workspaces)
+                    .run_if(not(resource_exists::<Initializing>))
+                    .run_if(not(resource_exists::<super::restore::SessionRestore>)),
                 workspace_change_handler,
                 workspace_created_handler,
                 handle_virtual_window_moves,
@@ -1485,6 +1489,46 @@ fn renumber_virtual_indexes(mut set: RenumberStrips) {
             rows[i].1.virtual_index = probe;
         }
     }
+}
+
+/// Removes a workspace as its last window leaves it, while another is shown:
+/// otherwise it lingers, empty, until the active workspace next changes, and
+/// next/previous step into it. Only one that has had windows goes: one made
+/// empty (`default_workspaces`, a restore's place, a switch to a new number)
+/// is somewhere to go, and stays until it's left, as `reap_empty_virtual_workspaces`
+/// has it. Neither the first, nor one a display shows.
+fn reap_emptied_virtual_workspaces(
+    strips: Query<(
+        Entity,
+        &LayoutStrip,
+        Has<ActiveWorkspaceMarker>,
+        Has<SelectedVirtualMarker>,
+    )>,
+    mut lengths: Local<HashMap<Entity, usize>>,
+    mut commands: Commands,
+) {
+    let mut seen = HashMap::with_capacity(lengths.len());
+    for (entity, strip, active, selected) in &strips {
+        let len = strip.len();
+        let had = lengths.get(&entity).copied().unwrap_or(0);
+        if had > 0
+            && len == 0
+            && !active
+            && !selected
+            && strip.virtual_index > 0
+            && let Ok(mut entity_commands) = commands.get_entity(entity)
+        {
+            debug!(
+                "reaping virtual workspace {} of space {}, emptied",
+                strip.virtual_index,
+                strip.id()
+            );
+            entity_commands.try_despawn();
+            continue;
+        }
+        seen.insert(entity, len);
+    }
+    *lengths = seen;
 }
 
 fn reap_empty_virtual_workspaces(

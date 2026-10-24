@@ -14,7 +14,7 @@ use crate::ecs::{
 use crate::ecs::{RepositionMarker, SpawnWindowTrigger};
 use crate::events::Event;
 use crate::manager::{Origin, Size, Window};
-use crate::platform::{Modifiers, WinID};
+use crate::platform::{Modifiers, Pid, WinID};
 use crate::{assert_focused, assert_window_at, assert_window_size};
 
 use super::*;
@@ -740,8 +740,8 @@ fn keyboard_focus_in_same_frame_does_not_stall_later_pages() {
     assert_focused!(h.world(), 3);
 }
 
+/// A swipe leaves the strip coasting; a finger on the touchpad stops it dead.
 #[test]
-#[allow(clippy::float_cmp)]
 fn test_scrolling_stop() {
     let commands = vec![
         Event::MenuOpened { window_id: 0 },
@@ -756,6 +756,8 @@ fn test_scrolling_stop() {
     let config: Config = (
         MainOptions {
             swipe_gesture_fingers: Some(3),
+            // Slow enough to still be coasting a whole command later.
+            swipe_deceleration: Some(0.1),
             ..Default::default()
         },
         vec![],
@@ -765,12 +767,20 @@ fn test_scrolling_stop() {
     TestHarness::new()
         .with_config(config)
         .with_windows(3)
-        .on_iteration(3, |world, _state| {
+        .on_iteration(1, |world, _state| {
             use crate::ecs::Scrolling;
             let mut query = world.query::<&Scrolling>();
-            let scroll = query.single(world).unwrap();
-            assert_eq!(scroll.velocity, 0.0);
-            assert!(scroll.is_user_swiping);
+            let scroll = query.single(world).expect("the strip coasts after a swipe");
+            assert!(scroll.velocity > 0.0);
+            assert!(!scroll.is_user_swiping);
+        })
+        .on_iteration(2, |world, _state| {
+            use crate::ecs::Scrolling;
+            let mut query = world.query::<&Scrolling>();
+            assert!(
+                query.iter(world).next().is_none(),
+                "touching the touchpad stops the strip"
+            );
         })
         .run(commands);
 }
@@ -1702,15 +1712,101 @@ fn toggle_floating_layer_flips_state() {
         .with_config(Config::default())
         .with_windows(3)
         .on_iteration(0, |world, _state| {
-            assert!(!current_layer(world).front);
+            assert!(current_layer(world).front, "floats start in front");
         })
         .on_iteration(1, |world, _state| {
-            assert!(current_layer(world).front);
-        })
-        .on_iteration(2, |world, _state| {
             assert!(!current_layer(world).front);
         })
+        .on_iteration(2, |world, _state| {
+            assert!(current_layer(world).front);
+        })
         .run(commands);
+}
+
+/// Raising the strip on coming back to a virtual workspace buries every float
+/// behind the tiles: it raises each visible tile, so a float that sat over
+/// them ends up under all of them. Floats go back over the other tiles
+/// afterwards, still under the focused window, unless the layer was sent
+/// behind on purpose.
+fn raises_after_switching_back(layer_behind: bool) -> (Vec<WinID>, WinID) {
+    let config = Config::try_from(
+        r#"
+[options]
+
+[bindings]
+
+[windows.dialogs]
+title = ".*"
+subrole = "AXDialog"
+floating = true
+"#,
+    )
+    .expect("config should parse");
+
+    // Window 0 goes to workspace 1, which leaves it holding the focus when
+    // workspace 0 is shown again.
+    let mut commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Stay)),
+        },
+    ];
+    if layer_behind {
+        commands.push(Event::Command {
+            command: Command::Window(Operation::ToggleFloatingLayer),
+        });
+    }
+    commands.extend([
+        Event::Command {
+            command: Command::Window(Operation::VirtualNumber(1)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::VirtualNumber(0)),
+        },
+    ]);
+    let (away, back) = (commands.len() - 2, commands.len() - 1);
+
+    let seen = std::rc::Rc::new(std::cell::RefCell::new((Vec::new(), 0)));
+    let read = seen.clone();
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(5)
+        .with_window(9, |window| window.subrole = "AXDialog".to_string())
+        .on_iteration(away, |_world, state| {
+            // Whatever the way there raised doesn't count.
+            let _ = state.take_raised();
+        })
+        .on_iteration(back, move |world, state| {
+            let mut query = world.query::<(&Window, Has<crate::ecs::FocusedMarker>)>();
+            let focused = query
+                .iter(world)
+                .find_map(|(window, focused)| focused.then_some(window.id()))
+                .expect("a window is focused");
+            *read.borrow_mut() = (state.take_raised(), focused);
+        })
+        .run(commands);
+    let seen = seen.borrow();
+    (seen.0.clone(), seen.1)
+}
+
+#[test]
+fn switching_back_raises_floats_over_the_tiles_and_under_the_focused_one() {
+    let (raised, focused) = raises_after_switching_back(false);
+    assert!(raised.contains(&9), "the float is raised again: {raised:?}");
+    assert_eq!(raised.last(), Some(&focused), "focused is raised last");
+    // Every tile but the focused one comes before the float.
+    assert_eq!(
+        raised.iter().rev().nth(1),
+        Some(&9),
+        "the float is raised just before the focused: {raised:?}"
+    );
+}
+
+#[test]
+fn switching_back_leaves_floats_behind_when_the_layer_is() {
+    let (raised, _) = raises_after_switching_back(true);
+    assert!(!raised.is_empty(), "the strip is raised");
+    assert!(!raised.contains(&9), "the float stays behind: {raised:?}");
 }
 
 #[test]
@@ -1767,6 +1863,9 @@ fn focus_unmanaged_ignores_floats_from_other_workspaces() {
         },
         Event::Command {
             command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::FocusUnmanaged),
         },
     ];
 
@@ -3408,6 +3507,50 @@ fn test_auto_discover_unmanaged_focused_window() {
         .run(events);
 }
 
+/// Discovery asks only the app that owns the focused window, as the window
+/// server has it: asking the others in turn held every keystroke behind the
+/// input tap for as long as the unresponsive ones took to time out.
+#[test]
+fn test_auto_discover_asks_only_the_owner() {
+    const OWNER: Pid = TEST_PROCESS_ID + 1;
+    let events = vec![
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::WindowFocused { window_id: 1 },
+    ];
+
+    TestHarness::new()
+        .with_windows(1)
+        .with_app(OWNER, "owner", "Owner", |app| app.is_frontmost = false)
+        .on_iteration(0, |_world, state| {
+            state.spawn_window(
+                OWNER,
+                TEST_WORKSPACE_ID,
+                1,
+                bevy::math::IRect::from_corners(
+                    bevy::math::IVec2::new(0, 0),
+                    bevy::math::IVec2::new(400, 400),
+                ),
+            );
+            state.update_app(OWNER, |app| app.focused_window_id = Some(1));
+            state.take_app_reads(TEST_PROCESS_ID);
+        })
+        .on_iteration(1, |world, state| {
+            let mut query = world.query::<&crate::manager::Window>();
+            assert!(
+                query.iter(world).any(|w| w.id() == 1),
+                "Window 1 should be discovered in the app that owns it"
+            );
+            assert_eq!(
+                state.take_app_reads(TEST_PROCESS_ID),
+                0,
+                "The frontmost app doesn't own window 1 and shouldn't be asked"
+            );
+        })
+        .run(events);
+}
+
 /// The centering config the manual-offset tests share: `auto_center` off and
 /// `continuous_swipe` off is the combination that arms the edge invariant in
 /// `reshuffle_layout_strip`, which is what used to snap a centered strip back
@@ -3894,7 +4037,7 @@ fn test_virtual_number_recreates_missing_baseline_row() {
     // display change does, leaving the space numbered from "2".
     TestHarness::new()
         .with_windows(2)
-        .on_iteration(2, |world, _state| {
+        .on_iteration(1, |world, _state| {
             let row_zero = world
                 .query::<(Entity, &LayoutStrip)>()
                 .iter(world)
@@ -3910,7 +4053,7 @@ fn test_virtual_number_recreates_missing_baseline_row() {
                 .collect::<Vec<_>>();
             assert_eq!(indexes, vec![1], "only row 1 should be left");
         })
-        .on_iteration(3, |world, _state| {
+        .on_iteration(2, |world, _state| {
             let recreated = world
                 .query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>()
                 .iter(world)
@@ -3947,7 +4090,7 @@ fn test_virtual_move_number_recreates_missing_baseline_row() {
     // change does, leaving the space numbered from "2".
     TestHarness::new()
         .with_windows(2)
-        .on_iteration(2, |world, _state| {
+        .on_iteration(1, |world, _state| {
             let row_zero = world
                 .query::<(Entity, &LayoutStrip)>()
                 .iter(world)
@@ -3956,7 +4099,7 @@ fn test_virtual_move_number_recreates_missing_baseline_row() {
                 .expect("row 0 should still exist before it is dropped");
             world.entity_mut(row_zero).despawn();
         })
-        .on_iteration(3, |world, _state| {
+        .on_iteration(2, |world, _state| {
             let focused = world
                 .query_filtered::<Entity, With<FocusedMarker>>()
                 .single(world)

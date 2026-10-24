@@ -98,6 +98,12 @@ struct MockStateInner {
     /// Windows the app keeps out of its accessibility window list while the
     /// window server still reports them on screen: a background native tab.
     background_tabs: HashSet<WinID>,
+    /// Windows raised without focus, in order, so a test can check what ends
+    /// up in front of what.
+    raised: Vec<WinID>,
+    /// How many times each app has been asked for its focused window or its
+    /// window list, so a test can check who a lookup bothers.
+    app_reads: HashMap<Pid, usize>,
 }
 
 #[derive(Clone)]
@@ -119,8 +125,15 @@ impl MockState {
                 stale_window_ids: HashMap::new(),
                 unordered_windows: HashSet::new(),
                 background_tabs: HashSet::new(),
+                raised: Vec::new(),
+                app_reads: HashMap::new(),
             })),
         }
+    }
+
+    /// The windows raised since this was last called, in the order they were.
+    pub fn take_raised(&self) -> Vec<WinID> {
+        std::mem::take(&mut self.inner.force_write().raised)
     }
 
     #[allow(dead_code)]
@@ -131,6 +144,12 @@ impl MockState {
         } else {
             inner.unordered_windows.remove(&window_id);
         }
+    }
+
+    /// How many times `pid` has been asked for its focused window or window
+    /// list since this was last called.
+    pub fn take_app_reads(&self, pid: Pid) -> usize {
+        self.inner.force_write().app_reads.remove(&pid).unwrap_or(0)
     }
 
     /// Makes `window_id` a background native tab: on screen as far as the
@@ -636,7 +655,9 @@ impl MockState {
 
         // Fill in remaining defaults
         mw.expect_element().return_const(None);
-        mw.expect_raise_without_focus().return_const(());
+        let s = self.clone();
+        mw.expect_raise_without_focus()
+            .returning(move || s.inner.force_write().raised.push(id));
 
         // Focusing without raising still moves the OS focus, it just leaves the
         // window order alone. Only the app's idea of its focused window changes
@@ -683,6 +704,7 @@ impl MockState {
 
         let s = self.clone();
         ma.expect_focused_window().returning(move |_config| {
+            *s.inner.force_write().app_reads.entry(pid).or_default() += 1;
             let inner = s.inner.force_read();
             let focused_id = inner.apps.get(&pid).and_then(|a| a.focused_window_id)?;
             if inner.windows.contains_key(&focused_id) {
@@ -750,8 +772,10 @@ impl MockState {
         };
 
         let (s, ids) = (self.clone(), window_ids.clone());
-        ma.expect_window_list()
-            .returning(move |_| ids().into_iter().map(|id| s.create_window(id)).collect());
+        ma.expect_window_list().returning(move |_| {
+            *s.inner.force_write().app_reads.entry(pid).or_default() += 1;
+            ids().into_iter().map(|id| s.create_window(id)).collect()
+        });
 
         let (s, ids) = (self.clone(), window_ids.clone());
         ma.expect_ax_window_ids().returning(move || {
@@ -859,6 +883,16 @@ impl MockState {
                 .copied()
                 .collect::<Vec<_>>();
             Some(windows)
+        });
+
+        let s = self.clone();
+        wm.expect_window_owner().returning(move |window_id| {
+            let inner = s.inner.force_read();
+            inner
+                .windows
+                .get(&window_id)
+                .map(|w| w.pid)
+                .or_else(|| inner.stale_window_ids.get(&window_id).copied())
         });
 
         let s = self.clone();

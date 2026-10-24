@@ -820,7 +820,7 @@ impl FloatingLayer {
     pub fn new(workspace_id: WorkspaceId) -> Self {
         Self {
             workspace_id,
-            front: false,
+            front: true,
         }
     }
 

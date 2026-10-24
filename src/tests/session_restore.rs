@@ -927,3 +927,40 @@ fn saved_window(window_id: i32) -> SavedWindow {
         subrole: "AXStandardWindow".to_string(),
     }
 }
+
+#[test]
+fn test_startup_waits_for_the_screen_to_be_unlocked() {
+    let (_sender, receiver) = crate::events::EventSender::new();
+    let polls = std::cell::Cell::new(0);
+    let locked = || {
+        polls.set(polls.get() + 1);
+        polls.get() <= 3
+    };
+    assert!(crate::wait_for_unlock(
+        &receiver,
+        locked,
+        Duration::from_millis(1)
+    ));
+    assert_eq!(polls.get(), 4, "it looks again until the lock is gone");
+}
+
+#[test]
+fn test_startup_goes_on_at_once_when_the_screen_is_unlocked() {
+    let (_sender, receiver) = crate::events::EventSender::new();
+    assert!(crate::wait_for_unlock(
+        &receiver,
+        || false,
+        Duration::from_secs(60)
+    ));
+}
+
+#[test]
+fn test_startup_waiting_for_the_unlock_quits_when_asked() {
+    let (sender, receiver) = crate::events::EventSender::new();
+    sender.send(crate::events::Event::Exit).unwrap();
+    assert!(!crate::wait_for_unlock(
+        &receiver,
+        || true,
+        Duration::from_millis(1)
+    ));
+}

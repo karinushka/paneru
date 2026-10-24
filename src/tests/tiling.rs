@@ -7,7 +7,7 @@ use crate::config::{
 use crate::ecs::SpawnWindowTrigger;
 use crate::ecs::layout::LayoutStrip;
 use crate::events::{DestroySource, Event};
-use crate::{assert_window_at, assert_window_size};
+use crate::{assert_focused, assert_window_at, assert_window_size};
 use bevy::math::IRect;
 use bevy::prelude::*;
 
@@ -103,7 +103,12 @@ fn configured_width_uses_raw_display_bounds_with_edge_padding() {
                 .find_map(|(window, ratio)| (window.id() == 1).then_some(ratio.0));
             assert_eq!(ratio, Some(0.5));
         })
-        .run(vec![Event::MenuOpened { window_id: 0 }]);
+        .run(vec![
+            Event::MenuOpened { window_id: 0 },
+            Event::Command {
+                command: Command::PrintState,
+            },
+        ]);
 }
 
 #[test]
@@ -510,17 +515,53 @@ fn test_lua_set_width_layout_op_resizes_the_focused_window() {
 
     const VIEWPORT_HEIGHT: i32 = TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT;
 
-    let commands = vec![Event::Command {
-        command: Command::Layout(vec![LayoutOp::SetWidth {
-            window: 0,
-            ratio: 0.5,
-        }]),
-    }];
+    let commands = vec![
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::Layout(vec![LayoutOp::SetWidth {
+                window: 0,
+                ratio: 0.5,
+            }]),
+        },
+    ];
 
     TestHarness::new()
         .with_windows(1)
-        .on_iteration(2, |world, _state| {
+        .on_iteration(1, |world, _state| {
             assert_window_size!(world, 0, TEST_DISPLAY_WIDTH / 2, VIEWPORT_HEIGHT);
+        })
+        .run(commands);
+}
+
+/// A `LayoutOp::SetWidth` names its window, so it must resize that window even
+/// when another one holds the focus, and leave the focused one alone.
+#[test]
+fn test_lua_set_width_layout_op_resizes_an_unfocused_window() {
+    use crate::types::windowset::LayoutOp;
+
+    const VIEWPORT_HEIGHT: i32 = TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT;
+
+    let commands = vec![
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::Layout(vec![LayoutOp::SetWidth {
+                window: 1,
+                ratio: 0.5,
+            }]),
+        },
+    ];
+
+    TestHarness::new()
+        .with_windows(2)
+        .with_focused_window(0)
+        .on_iteration(1, |world, _state| {
+            assert_focused!(world, 0);
+            assert_window_size!(world, 0, TEST_WINDOW_WIDTH, VIEWPORT_HEIGHT);
+            assert_window_size!(world, 1, TEST_DISPLAY_WIDTH / 2, VIEWPORT_HEIGHT);
         })
         .run(commands);
 }

@@ -70,6 +70,8 @@ pub(crate) struct CurrentWindowIdentity {
     pub identifier: String,
     pub role: String,
     pub subrole: String,
+    /// Space of the strip holding the window at restore time; `None` when it is in no strip yet.
+    pub workspace_id: Option<WorkspaceId>,
 }
 
 impl CurrentWindowIdentity {
@@ -88,6 +90,7 @@ impl CurrentWindowIdentity {
             identifier: "main".to_string(),
             role: "AXWindow".to_string(),
             subrole: "AXStandardWindow".to_string(),
+            workspace_id: None,
         }
     }
 }
@@ -171,10 +174,16 @@ impl<'a> RestorePlanner<'a> {
         current: &[CurrentWindowIdentity],
         plan: &mut RestorePlan,
     ) -> Vec<PlannedStrip> {
+        // A window already on another Space stays there; unknown Space matches as before.
+        let on_workspace = current
+            .iter()
+            .filter(|w| w.workspace_id.is_none_or(|id| id == workspace.workspace_id))
+            .cloned()
+            .collect::<Vec<_>>();
         workspace
             .strips
             .iter()
-            .filter_map(|strip| self.plan_strip(workspace, strip, current, plan))
+            .filter_map(|strip| self.plan_strip(workspace, strip, &on_workspace, plan))
             .collect()
     }
 
@@ -433,7 +442,17 @@ pub(super) fn restore_window_state(
         restoration
     };
 
-    let current = current_window_identities(&ctx.windows, &apps, restoration);
+    let window_workspaces = workspaces
+        .iter()
+        .flat_map(|(_, strip, _, _)| {
+            let id = strip.id();
+            strip
+                .all_windows()
+                .into_iter()
+                .map(move |entity| (entity, id))
+        })
+        .collect::<HashMap<_, _>>();
+    let current = current_window_identities(&ctx.windows, &apps, restoration, &window_workspaces);
     let plan = RestorePlanner::new(restoration).plan(&current);
 
     if plan.consumed_entities.is_empty() {
@@ -599,6 +618,7 @@ fn current_window_identities(
     windows: &Windows,
     apps: &Query<&Application>,
     restoration: &PaneruState,
+    window_workspaces: &HashMap<Entity, WorkspaceId>,
 ) -> Vec<CurrentWindowIdentity> {
     let mut current = windows
         .managed_iter()
@@ -613,6 +633,7 @@ fn current_window_identities(
                 identifier: String::new(),
                 role: String::new(),
                 subrole: String::new(),
+                workspace_id: window_workspaces.get(&entity).copied(),
             })
         })
         .collect::<Vec<_>>();

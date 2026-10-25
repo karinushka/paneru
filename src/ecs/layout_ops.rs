@@ -18,7 +18,7 @@ use tracing::debug;
 
 use crate::commands::{Command, MoveFocus, Operation};
 use crate::config::Config;
-use crate::ecs::layout::LayoutStrip;
+use crate::ecs::layout::{Column, LayoutStrip};
 use crate::ecs::params::Windows;
 use crate::ecs::workspace::VirtualMoveMarker;
 use crate::ecs::{
@@ -272,7 +272,16 @@ fn apply(
                 debug!(target: "paneru::lua", "skipping {op:?}: the two windows share no strip");
                 return;
             };
-            if strip.index_of(entity).ok() == strip.index_of(onto_entity).ok() {
+            let (Ok(entity_index), Ok(onto_index)) =
+                (strip.index_of(entity), strip.index_of(onto_entity))
+            else {
+                return;
+            };
+            if entity_index == onto_index
+                || [entity_index, onto_index]
+                    .iter()
+                    .any(|&at| matches!(strip.get(at), Ok(Column::Fullscren(_))))
+            {
                 return;
             }
             // `LayoutStrip::stack` joins a column onto its left neighbour, so

@@ -159,6 +159,8 @@ Returns only the active display, workspace, and focused-window state.
 | `subrole` | string or null | Accessibility subrole (e.g. `AXStandardWindow`, `AXDialog`, `AXFloatingWindow`), or null if the window reports none. |
 | `focused` | boolean | Whether this window is focused. |
 | `floating` | boolean | Whether this window is unmanaged/floating. |
+| `column` | number or null | Zero-based column of a tiled window in its strip, left to right; `null` for floating windows. |
+| `row` | number or null | Zero-based row of a tiled window within its column, top to bottom; windows tabbed together share a row. |
 
 Paneru may include empty `windows` arrays for missing virtual workspace numbers
 inside a native workspace so integrations can render stable numbered slots.

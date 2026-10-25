@@ -659,6 +659,8 @@ mod tests {
                     display_id: Some(1),
                     frame: None,
                     visible: true,
+                    column: Some(0),
+                    row: Some(0),
                 }],
             }],
         }

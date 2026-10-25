@@ -132,6 +132,12 @@ pub struct WindowState {
     /// hidden, and showing more than the sliver Paneru leaves poking out for
     /// off-screen windows.
     pub visible: bool,
+    /// Zero-based column of a tiled window in its strip, left to right; `None`
+    /// for floating windows.
+    pub column: Option<u32>,
+    /// Zero-based row of a tiled window within its column, top to bottom.
+    /// Windows tabbed together share a row.
+    pub row: Option<u32>,
 }
 
 impl QueryState {
@@ -297,6 +303,8 @@ mod tests {
                     height: 600,
                 }),
                 visible: true,
+                column: Some(0),
+                row: Some(0),
             }],
             active: ActiveState::default(),
         };
@@ -374,6 +382,8 @@ mod tests {
                 height: 100,
             }),
             visible,
+            column: None,
+            row: None,
         };
 
         let state = QueryState {

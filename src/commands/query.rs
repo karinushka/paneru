@@ -497,6 +497,8 @@ mod tests {
                     height: 600,
                 }),
                 visible: true,
+                column: Some(0),
+                row: Some(0),
             })
             .collect();
 

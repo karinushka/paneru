@@ -4,8 +4,8 @@ use crate::commands::{Command, Direction, Operation, ResizeDirection};
 use crate::config::{
     Config, InitialWindowWidth, InitialWindowWidthMode, MainOptions, WindowParams,
 };
-use crate::ecs::SpawnWindowTrigger;
 use crate::ecs::layout::LayoutStrip;
+use crate::ecs::{ActiveWorkspaceMarker, SpawnWindowTrigger};
 use crate::events::{DestroySource, Event};
 use crate::{assert_focused, assert_window_at, assert_window_size};
 use bevy::math::IRect;
@@ -1552,4 +1552,72 @@ fn test_full_width_centers_and_fills_viewport_when_window_was_partially_offscree
             assert_window_at!(world, 0, 312, TEST_MENUBAR_HEIGHT);
         })
         .run(commands);
+}
+
+#[test]
+fn new_window_on_inactive_space_joins_that_space_strip() {
+    const OTHER_WORKSPACE_ID: WorkspaceId = 3;
+
+    TestHarness::new()
+        .with_display(
+            TEST_DISPLAY_ID,
+            IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
+            vec![TEST_WORKSPACE_ID, OTHER_WORKSPACE_ID],
+        )
+        .with_windows(1)
+        .on_iteration(0, |world, state| {
+            let frame = IRect::new(0, 0, TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+            let window = state.spawn_window(TEST_PROCESS_ID, OTHER_WORKSPACE_ID, 1, frame);
+            world.trigger(SpawnWindowTrigger(vec![window]));
+        })
+        .on_iteration(1, |world, _state| {
+            let mut strips = world.query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>();
+            let new_window = find_window_entity(1, world);
+            let mut active_ids = vec![];
+            for (strip, active) in strips.iter(world) {
+                if active {
+                    active_ids.push(strip.id());
+                }
+                assert_eq!(
+                    strip.contains(new_window),
+                    strip.id() == OTHER_WORKSPACE_ID,
+                    "window 1 must only be in the strip of its own Space (strip {})",
+                    strip.id()
+                );
+            }
+            assert_eq!(active_ids, vec![TEST_WORKSPACE_ID]);
+        })
+        .run(vec![
+            Event::MenuOpened { window_id: 0 },
+            Event::Command {
+                command: Command::PrintState,
+            },
+        ]);
+}
+
+#[test]
+fn new_window_on_active_space_keeps_after_focus_placement() {
+    TestHarness::new()
+        .with_windows(2)
+        .with_focused_window(0)
+        .on_iteration(0, |world, state| {
+            let frame = IRect::new(0, 0, TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+            let window = state.spawn_window(TEST_PROCESS_ID, TEST_WORKSPACE_ID, 2, frame);
+            world.trigger(SpawnWindowTrigger(vec![window]));
+        })
+        .on_iteration(1, |world, _state| {
+            let new_window = find_window_entity(2, world);
+            let mut strips = world.query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>();
+            let (strip, _) = strips
+                .iter(world)
+                .find(|(_, active)| *active)
+                .expect("active strip");
+            assert_eq!(strip.index_of(new_window).ok(), Some(1));
+        })
+        .run(vec![
+            Event::MenuOpened { window_id: 0 },
+            Event::Command {
+                command: Command::PrintState,
+            },
+        ]);
 }

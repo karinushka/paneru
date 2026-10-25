@@ -536,6 +536,7 @@ fn current_window(
         identifier: "main".to_string(),
         role: "AXWindow".to_string(),
         subrole: "AXStandardWindow".to_string(),
+        workspace_id: None,
     }
 }
 

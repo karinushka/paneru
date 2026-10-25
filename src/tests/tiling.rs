@@ -732,6 +732,171 @@ fn test_closing_window_of_live_app_closes_the_gap() {
         .run(commands);
 }
 
+/// Closing the focused window focuses its right neighbour, wherever the strip
+/// is scrolled; at the right edge, its left one.
+#[test]
+fn test_closing_focused_window_focuses_its_right_neighbour() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::Last)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::West)),
+        }, // 2
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        }, // 4
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        }, // 6
+    ];
+
+    TestHarness::new()
+        .with_windows(5)
+        .on_iteration(2, |world, state| {
+            assert_focused!(world, 3);
+            state.os_close_window(3);
+        })
+        .on_iteration(4, |world, state| {
+            assert!(!window_exists(world, 3), "closed window must be dropped");
+            assert_focused!(world, 4);
+            state.os_close_window(4);
+        })
+        .on_iteration(6, |world, _state| {
+            assert!(!window_exists(world, 4), "closed window must be dropped");
+            assert_focused!(world, 2);
+        })
+        .run(commands);
+}
+
+/// Closing the focused window of a stack focuses the one below it, and the
+/// stack's bottom one the one above, so focus stays in the column.
+#[test]
+fn test_closing_focused_window_in_a_stack_stays_in_the_stack() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Stack(true)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Stack(true)),
+        }, // 4: 0, 1 and 2 stacked, 2 focused
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::North)),
+        }, // 5
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        }, // 7
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        }, // 9
+    ];
+
+    TestHarness::new()
+        .with_windows(4)
+        .on_iteration(5, |world, state| {
+            assert_focused!(world, 1);
+            state.os_close_window(1);
+        })
+        .on_iteration(7, |world, state| {
+            assert!(!window_exists(world, 1), "closed window must be dropped");
+            assert_focused!(world, 2);
+            state.os_close_window(2);
+        })
+        .on_iteration(9, |world, _state| {
+            assert!(!window_exists(world, 2), "closed window must be dropped");
+            assert_focused!(world, 0);
+        })
+        .run(commands);
+}
+
+/// A window opened beside the focused one hands focus back to it on closing,
+/// unless focus has been to another column since.
+#[test]
+fn test_closing_a_new_window_returns_focus_to_its_opener() {
+    let open = |world: &mut World, state: &MockState, id| {
+        let frame = IRect::new(0, 0, TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+        let window = state.spawn_window(TEST_PROCESS_ID, TEST_WORKSPACE_ID, id, frame);
+        world.trigger(SpawnWindowTrigger(vec![window]));
+        // macOS focuses a window as it opens.
+        state.focus_window(id);
+    };
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        }, // 2
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        }, // 4
+        Event::Command {
+            command: Command::PrintState,
+        }, // 5
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::West)),
+        }, // 7
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        }, // 9
+    ];
+
+    TestHarness::new()
+        .with_windows(3)
+        .with_focused_window(0)
+        .on_iteration(0, move |world, state| open(world, &state, 3))
+        .on_iteration(2, |world, state| {
+            assert_eq!(strip_column(world, 3), Some(1), "opened beside window 0");
+            assert_focused!(world, 3);
+            state.os_close_window(3);
+        })
+        .on_iteration(4, move |world, state| {
+            assert!(!window_exists(world, 3), "closed window must be dropped");
+            assert_focused!(world, 0);
+            open(world, &state, 4);
+        })
+        .on_iteration(5, |world, _state| assert_focused!(world, 4))
+        .on_iteration(7, |world, state| {
+            assert_focused!(world, 4);
+            state.os_close_window(4);
+        })
+        .on_iteration(9, |world, _state| {
+            assert!(!window_exists(world, 4), "closed window must be dropped");
+            assert_focused!(world, 1);
+        })
+        .run(commands);
+}
+
 /// A space notification for a window whose AX element is gone is a real close,
 /// not a space change. It must be recognised on its own, without waiting for
 /// the periodic unordered-window sweep, even though `role()` is cached.
@@ -841,6 +1006,17 @@ fn window_x(world: &mut World, id: i32) -> i32 {
         .frame()
         .min
         .x
+}
+
+fn strip_column(world: &mut World, id: i32) -> Option<usize> {
+    let entity = world
+        .query::<(Entity, &crate::manager::Window)>()
+        .iter(world)
+        .find_map(|(entity, window)| (window.id() == id).then_some(entity))?;
+    world
+        .query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>()
+        .iter(world)
+        .find_map(|strip| strip.index_of(entity).ok())
 }
 
 fn window_exists(world: &mut World, id: i32) -> bool {

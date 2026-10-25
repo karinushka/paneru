@@ -1000,6 +1000,33 @@ impl LayoutStrip {
         })
     }
 
+    /// The window to take over focus from `entity` as it goes, as niri picks
+    /// it: the one below it in its stack, else the one above; else `opener`,
+    /// the window it was opened from, if that is still in the column to its
+    /// left; else the column to its right, or at the strip's right edge the
+    /// one to its left.
+    pub fn heir(&self, entity: Entity, opener: Option<Entity>) -> Option<Entity> {
+        let index = self.index_of(entity).ok()?;
+        if let Ok(Column::Stack(items)) = self.get(index)
+            && let Some(pos) = items.iter().position(|item| item.contains(entity))
+        {
+            let mate = items
+                .get(pos + 1)
+                .or_else(|| pos.checked_sub(1).and_then(|above| items.get(above)))
+                .and_then(StackItem::top);
+            if mate.is_some() {
+                return mate;
+            }
+        }
+        if let Some(opener) = opener
+            && self.index_of(opener).is_ok_and(|at| at + 1 == index)
+        {
+            return Some(opener);
+        }
+        self.right_neighbour(entity)
+            .or_else(|| self.left_neighbour(entity))
+    }
+
     pub fn above(&self, entity: Entity) -> Option<Entity> {
         let index = self.index_of(entity).ok()?;
         let column = self.get(index).ok()?;

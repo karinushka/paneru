@@ -20,7 +20,9 @@ use bevy::time::{Timer, TimerMode};
 use std::pin::Pin;
 use tracing::{Level, debug, error, info, instrument, trace, warn};
 
-use super::{FocusedMarker, MouseHeldMarker, SystemTheme, Timeout, Unmanaged, VerifyFocus};
+use super::{
+    FocusedMarker, MouseHeldMarker, OpenedFrom, SystemTheme, Timeout, Unmanaged, VerifyFocus,
+};
 use crate::commands::visible_floating_entities;
 use crate::config::Config;
 use crate::ecs::display::FloatingLayer;
@@ -157,6 +159,7 @@ impl Plugin for FocusEventsPlugin {
         app.add_observer(dim_remove_window_trigger)
             .add_observer(dim_window_trigger)
             .add_observer(maintain_focus_singleton)
+            .add_observer(forget_openers)
             .add_observer(maintain_verify_focus_singleton)
             .add_observer(virtual_strip_activated)
             .add_observer(stray_focus_observer)
@@ -335,6 +338,26 @@ fn maintain_focus_singleton(
             .try_insert(PendingFocusLayout);
     }
     config.set_ffm_flag(None);
+}
+
+/// Focus reaching another column of a strip forgets where that strip's windows
+/// were opened from, as niri does.
+fn forget_openers(
+    trigger: On<Add, FocusedMarker>,
+    openers: Populated<Entity, With<OpenedFrom>>,
+    workspaces: Query<&LayoutStrip>,
+    mut commands: Commands,
+) {
+    let focused = trigger.event().entity;
+    let Some(strip) = workspaces.iter().find(|strip| strip.contains(focused)) else {
+        return;
+    };
+    let column = strip.index_of(focused).ok();
+    for entity in &openers {
+        if strip.contains(entity) && strip.index_of(entity).ok() != column {
+            commands.entity(entity).try_remove::<OpenedFrom>();
+        }
+    }
 }
 
 /// Whether two windows are members of one native tab group: the app shows one

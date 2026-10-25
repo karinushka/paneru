@@ -516,6 +516,11 @@ pub enum Unmanaged {
     Hidden,
 }
 
+/// The window a window was opened from, as the column to its right. Closing
+/// it before focus moves to another column hands focus back there.
+#[derive(Clone, Component, Copy, Debug)]
+pub struct OpenedFrom(pub Entity);
+
 #[derive(Clone, Component, Copy, Debug)]
 pub struct PreviousManagedStrip {
     pub workspace_id: WorkspaceId,

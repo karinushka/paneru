@@ -103,6 +103,28 @@ pub use crate::types::state::{
     WindowState as PaneruWindowState,
 };
 
+/// Each tiled window's column in the strip and row within that column, both
+/// zero-based. Tabs share their row; a stack's tab group is one row of it.
+fn strip_positions(strip: &LayoutStrip) -> HashMap<Entity, (u32, u32)> {
+    let mut positions = HashMap::new();
+    for (column, windows) in (0u32..).zip(strip.columns()) {
+        match windows {
+            Column::Single(entity) | Column::Fullscren(entity) => {
+                positions.insert(*entity, (column, 0));
+            }
+            Column::Tabs(tabs) => {
+                positions.extend(tabs.iter().map(|&entity| (entity, (column, 0))));
+            }
+            Column::Stack(items) => {
+                for (row, item) in (0u32..).zip(items) {
+                    positions.extend(item.window_iter().map(|entity| (entity, (column, row))));
+                }
+            }
+        }
+    }
+    positions
+}
+
 /// Resolves which display a window frame is on and whether more than a sliver of
 /// it is showing there. Returns `None` when the frame misses every display.
 fn window_visibility(
@@ -704,6 +726,7 @@ impl QueryState for PaneruQueryState {
 
         let has_floating = has_floating_windows(windows);
         for (child, strip, active_workspace, selected_workspace) in workspaces {
+            let positions = strip_positions(strip);
             let query_space =
                 active_workspace || selected_workspace && active_workspace_id != Some(strip.id());
             let floating = untracked_floating_in_space(
@@ -754,6 +777,8 @@ impl QueryState for PaneruQueryState {
                             height: frame.height(),
                         }),
                         visible: visibility.is_some_and(|(_, visible)| visible),
+                        column: positions.get(&entity).map(|&(column, _)| column),
+                        row: positions.get(&entity).map(|&(_, row)| row),
                     })
                 })
                 .collect::<Vec<_>>();

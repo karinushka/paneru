@@ -647,6 +647,37 @@ fn test_query_state_includes_floating_windows() {
     assert_eq!(state.virtual_workspaces[0].windows.len(), 1);
     assert!(state.virtual_workspaces[0].windows[0].focused);
     assert!(state.virtual_workspaces[0].windows[0].floating);
+    assert_eq!(state.virtual_workspaces[0].windows[0].column, None);
+    assert_eq!(state.virtual_workspaces[0].windows[0].row, None);
+}
+
+#[test]
+fn test_query_state_reports_each_tiled_window_column_and_row() {
+    use crate::tests::harness::TestHarness;
+
+    let mut harness = TestHarness::new().with_windows(3);
+    harness.app.update();
+
+    let world = harness.world();
+    let mut strips = world.query_filtered::<&mut LayoutStrip, With<ActiveWorkspaceMarker>>();
+    let mut strip = strips.single_mut(world).expect("active workspace");
+    let last = strip.all_windows()[2];
+    strip
+        .stack(last)
+        .expect("the last column stacks onto its neighbour");
+
+    let state = extract_query_state(world).expect("query state extraction");
+    let positions = state.virtual_workspaces[0]
+        .windows
+        .iter()
+        .map(|window| (window.column, window.row))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        positions,
+        vec![(Some(0), Some(0)), (Some(1), Some(0)), (Some(1), Some(1))],
+        "a stacked window shares its column and sits in the row below"
+    );
 }
 
 #[test]

@@ -1019,6 +1019,65 @@ fn test_layout_op_stack_lands_in_the_named_column() {
 
 #[cfg(feature = "lua")]
 #[test]
+fn test_layout_op_stack_onto_fullscreen_column_leaves_window_in_place() {
+    use crate::commands::Command;
+    use crate::ecs::ActiveWorkspaceMarker;
+    use crate::tests::harness::{TestHarness, find_window_entity};
+    use crate::types::windowset::LayoutOp;
+
+    let mut harness = TestHarness::new().with_windows(3);
+    harness.app.update();
+
+    let columns = |harness: &mut TestHarness| -> Vec<Vec<i32>> {
+        extract_window_set(harness.world())
+            .expect("window set extraction")
+            .current()
+            .expect("an active workspace")
+            .columns
+            .iter()
+            .map(|column| column.windows.iter().map(|window| window.id).collect())
+            .collect()
+    };
+    let before = columns(&mut harness);
+    assert_eq!(before.len(), 3);
+    let (first, middle, last) = (before[0][0], before[1][0], before[2][0]);
+
+    let first_entity = find_window_entity(first, harness.world());
+    let middle_entity = find_window_entity(middle, harness.world());
+    let last_entity = find_window_entity(last, harness.world());
+    {
+        let world = harness.world();
+        let strip_entity = world
+            .query_filtered::<Entity, (With<LayoutStrip>, With<ActiveWorkspaceMarker>)>()
+            .single(world)
+            .expect("active strip");
+        let mut strip = world
+            .get_mut::<LayoutStrip>(strip_entity)
+            .expect("layout strip");
+        *strip = LayoutStrip::fullscreen(TEST_WORKSPACE_ID, first_entity);
+        strip.append(middle_entity);
+        strip.append(last_entity);
+    }
+
+    harness.app.world_mut().write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::Stack {
+            window: last,
+            onto: first,
+            tabs: false,
+        }]),
+    });
+    harness.app.update();
+    harness.app.update();
+
+    assert_eq!(
+        columns(&mut harness),
+        vec![vec![first], vec![middle], vec![last]],
+        "refused fullscreen stack must not move `last` next to `first`"
+    );
+}
+
+#[cfg(feature = "lua")]
+#[test]
 fn test_layout_ops_skip_a_vanished_window_and_apply_its_neighbours() {
     use crate::commands::Command;
     use crate::tests::harness::TestHarness;

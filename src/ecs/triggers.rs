@@ -15,7 +15,7 @@ use std::time::Duration;
 use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
-    ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, MissionControlActive,
+    ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, MissionControlActive, OpenedFrom,
     PreviousManagedStrip, RetryFrontSwitch, SelectedVirtualMarker, SpawnWindowTrigger,
     StrayFocusEvent, SystemTheme, Timeout, Unmanaged,
 };
@@ -777,6 +777,7 @@ pub(super) fn window_minimized_trigger(
     windows: Windows,
     workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     active_display: Single<&Display, With<ActiveDisplayMarker>>,
+    openers: Query<&OpenedFrom>,
     mut config: GlobalState,
     mut commands: Commands,
 ) {
@@ -786,11 +787,14 @@ pub(super) fn window_minimized_trigger(
     {
         debug!("Entity {entity} is minimized or hidden.");
         let display_bounds = active_display.bounds();
+        let opener = openers.get(entity).ok().map(|opened| opened.0);
+        commands.entity(entity).try_remove::<OpenedFrom>();
 
         for (mut strip, active) in workspaces {
             if active {
                 give_away_focus(
                     entity,
+                    opener,
                     &windows,
                     &strip,
                     &display_bounds,
@@ -946,8 +950,10 @@ pub(super) fn window_managed_trigger(
 /// * `global_state` - Focus-follows-mouse and reshuffle flags.
 /// * `focus_history` - Per-workspace record of what was focused last.
 /// * `windows` - A query for all windows with their parent.
+/// * `openers` - The window each window was opened from, if any.
 /// * `commands` - Bevy commands to despawn entities and trigger events.
 #[instrument(level = Level::DEBUG, skip_all)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn window_destroyed_trigger(
     mut messages: MessageReader<Event>,
     active_display: ActiveDisplay,
@@ -955,6 +961,7 @@ pub(super) fn window_destroyed_trigger(
     mut global_state: GlobalState,
     mut focus_history: ResMut<FocusHistory>,
     windows: Windows,
+    openers: Query<&OpenedFrom>,
     mut commands: Commands,
 ) {
     for event in messages.read() {
@@ -992,6 +999,7 @@ pub(super) fn window_destroyed_trigger(
 
         give_away_focus(
             entity,
+            openers.get(entity).ok().map(|opened| opened.0),
             &windows,
             active_display.active_strip(),
             &active_display.bounds(),
@@ -1026,6 +1034,7 @@ pub(super) fn invalidate_window_title(mut messages: MessageReader<Event>, window
 /// Moves the focus away to a neighbour window.
 fn give_away_focus(
     entity: Entity,
+    opener: Option<Entity>,
     windows: &Windows,
     active_strip: &LayoutStrip,
     viewport: &IRect,
@@ -1051,18 +1060,29 @@ fn give_away_focus(
         // Remaining tab gets the focus.
         return;
     }
+    // The focused window going hands focus to its heir, so where focus lands
+    // never depends on where the strip happens to be scrolled. One going
+    // behind it leaves focus nearest the middle, where it most likely
+    // already is.
+    let focused = windows
+        .focused()
+        .is_some_and(|(_, focused)| focused == entity);
+    let heir = focused.then(|| active_strip.heir(entity, opener)).flatten();
     let display_center = viewport.center().x;
-    let closest = active_strip
-        .all_columns()
-        .into_iter()
-        .filter(|&candidate| candidate != entity)
-        .filter_map(|candidate| {
-            let center = windows.moving_frame(candidate)?.center().x;
-            let distance = (center - display_center).abs();
-            Some((candidate, distance))
+    let closest = heir
+        .or_else(|| {
+            active_strip
+                .all_columns()
+                .into_iter()
+                .filter(|&candidate| candidate != entity)
+                .filter_map(|candidate| {
+                    let center = windows.moving_frame(candidate)?.center().x;
+                    let distance = (center - display_center).abs();
+                    Some((candidate, distance))
+                })
+                .min_by_key(|(_, dist)| *dist)
+                .map(|(e, _)| e)
         })
-        .min_by_key(|(_, dist)| *dist)
-        .map(|(e, _)| e)
         .or_else(|| {
             // Fallback when no candidate has a usable frame: pick any other
             // column in the strip. Without this, losing focus on the only
@@ -1305,6 +1325,22 @@ fn home_strip(
     Some((active_entity, true))
 }
 
+/// Marks `entity` as opened from the focused window when it landed in the
+/// column right of it.
+fn remember_opener(
+    entity: Entity,
+    strip: &LayoutStrip,
+    windows: &Windows,
+    commands: &mut Commands,
+) {
+    if let Some((_, opener)) = windows.focused()
+        && let (Ok(at), Ok(from)) = (strip.index_of(entity), strip.index_of(opener))
+        && from + 1 == at
+    {
+        commands.entity(entity).try_insert(OpenedFrom(opener));
+    }
+}
+
 #[instrument(level = Level::DEBUG, skip_all)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn apply_window_positions(
@@ -1406,6 +1442,7 @@ pub(super) fn apply_window_positions(
                     }
                     None => strip.append(entity),
                 }
+                remember_opener(entity, &strip, &ctx.windows, &mut ctx.commands);
             } else {
                 // The window opened on a Space the user is not looking at.
                 debug!("New window {entity} appended to inactive {}", *strip);

@@ -276,7 +276,7 @@ fn wait_for_accessibility(sender: EventSender, receiver: &Receiver<Event>) -> bo
     );
 
     loop {
-        platform_callbacks.pump_cocoa_event_loop(1.0);
+        platform_callbacks.pump_cocoa_event_loop(1.0, None);
 
         if check_ax_privilege() {
             return true;

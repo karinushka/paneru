@@ -796,6 +796,42 @@ fn test_closing_floating_window_does_not_reinsert_it_into_the_strip() {
         .run(commands);
 }
 
+// 2026-10-26: A captured Emacs popup disappeared just before focus jumped to
+// the other half-screen tile. Closing an unfocused popup must preserve focus.
+#[test]
+fn test_closing_unfocused_popup_preserves_editor_focus() {
+    let mut tiled = WindowParams::new(".*", None);
+    tiled.width = Some(InitialWindowWidth::Ratio(0.5));
+    let mut popup = WindowParams::new("^Window 2$", None);
+    popup.floating = Some(true);
+    popup.dont_focus = Some(true);
+    let config: Config = (MainOptions::default(), vec![tiled, popup]).into();
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(3)
+        .on_iteration(0, |_world, state| state.focus_window(1))
+        .on_iteration(1, |world, state| {
+            assert_focused!(world, 1);
+            state.os_close_window(2);
+        })
+        .on_iteration(2, |world, _state| {
+            assert!(!window_exists(world, 2), "closed popup must be removed");
+            assert_focused!(world, 1);
+        })
+        .run(vec![
+            Event::Command {
+                command: Command::PrintState,
+            },
+            Event::Command {
+                command: Command::PrintState,
+            },
+            Event::Command {
+                command: Command::PrintState,
+            },
+        ]);
+}
+
 fn window_x(world: &mut World, id: i32) -> i32 {
     let mut query = world.query::<&crate::manager::Window>();
     query

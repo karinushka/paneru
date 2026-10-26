@@ -114,6 +114,7 @@ objc2-app-kit = { version = "0.3", features = [
 objc2-core-foundation = { version = "0.3", features = ["CFRunLoop"] }
 objc2-core-graphics = "0.3"
 objc2-quartz-core = { version = "0.3", features = [
+  "CADisplayLink",
   "CALayer",
   "CAAnimation",
   "CABase",

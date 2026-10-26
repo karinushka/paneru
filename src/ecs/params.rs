@@ -217,12 +217,14 @@ pub struct FrameActivity<'w, 's> {
 }
 
 impl FrameActivity<'_, '_> {
+    pub fn has_layout_motion(&self) -> bool {
+        !self.repositioning.is_empty() || !self.resizing.is_empty() || !self.scrolling.is_empty()
+    }
+
     /// Returns `true` while any window is being moved, resized or scrolled, or
     /// a flash message is on screen — i.e. while frames still need drawing.
     pub fn mid_frame(&self) -> bool {
-        !self.repositioning.is_empty()
-            || !self.resizing.is_empty()
-            || !self.scrolling.is_empty()
+        self.has_layout_motion()
             || !self.flash_messages.is_empty()
             || self
                 .overview

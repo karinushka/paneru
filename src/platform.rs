@@ -7,19 +7,22 @@ use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSEvent, NSEventMask, NSEventModifierFlags,
     NSEventType,
 };
-use objc2_core_foundation::CFString;
+use objc2_core_foundation::{CFRunLoop, CFRunLoopRunResult, CFString, kCFRunLoopDefaultMode};
+use objc2_core_graphics::CGDirectDisplayID;
 use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSPoint, NSProcessInfo};
 use std::ffi::{c_short, c_void};
 use std::pin::Pin;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tracing::error;
+use std::time::{Duration, Instant};
+use tracing::{error, trace};
 
 use crate::config::{CONFIGURATION_FILE, Config};
 use crate::errors::{Error, Result};
 use crate::events::{Event, EventSender};
 use crate::manager::{check_ax_privilege, check_separate_spaces};
 use crate::platform::display::PinnedDisplayHandler;
+use crate::platform::frame_pacer::DisplayFramePacer;
 use crate::platform::input::{PinnedInputHandler, TapHealth};
 use crate::platform::notify::{NotifyHandler, PinnedNotifyHandler};
 use crate::platform::process::PinnedProcessHandler;
@@ -32,6 +35,7 @@ pub use workspace::WorkspaceObserver;
 
 pub(crate) mod app_launcher;
 mod display;
+mod frame_pacer;
 pub(crate) mod haptics;
 pub(crate) mod input;
 mod mission_control;
@@ -236,6 +240,31 @@ impl Default for EventLoopWaker {
     }
 }
 
+/// Upper bound on a single display-link wait. A display that is asleep,
+/// disconnected or mid-reconfiguration stops delivering callbacks; past this
+/// the pass gives up and drains normally rather than wedging the daemon.
+const DISPLAY_LINK_SAFETY_TIMEOUT: Duration = Duration::from_millis(50);
+
+fn wait_for_display_callback(
+    budget: Duration,
+    frame_fired: impl Fn() -> bool,
+    mut run_loop: impl FnMut(Duration) -> CFRunLoopRunResult,
+) -> bool {
+    let start = Instant::now();
+    while !frame_fired() {
+        let remaining = budget.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
+            return false;
+        }
+        if run_loop(remaining) != CFRunLoopRunResult::HandledSource {
+            // An empty, stopped or timed-out run loop can't keep this wait
+            // alive. A display callback may still have fired on its last turn.
+            return frame_fired();
+        }
+    }
+    true
+}
+
 /// `PlatformCallbacks` aggregates and manages all platform-specific event handlers and observers.
 /// It serves as the central point for setting up and running macOS-specific interactions with the window manager.
 pub struct PlatformCallbacks {
@@ -254,6 +283,8 @@ pub struct PlatformCallbacks {
     /// Handler for Core Graphics display reconfiguration events.
     display_handler: Option<PinnedDisplayHandler>,
     notify_handler: Option<PinnedNotifyHandler>,
+    /// Paces active frames to the refresh of the display being animated on.
+    frame_pacer: DisplayFramePacer,
 }
 
 impl PlatformCallbacks {
@@ -293,6 +324,7 @@ impl PlatformCallbacks {
             display_handler: None,
             notify_handler: None,
             events,
+            frame_pacer: DisplayFramePacer::new(main_thread_marker),
         })
     }
 
@@ -352,16 +384,66 @@ impl PlatformCallbacks {
         unsafe { handler.as_mut().get_unchecked_mut() }.ensure_tap_alive()
     }
 
+    /// Blocks until the active display's link fires, or the safety timeout
+    /// expires. Returns `true` when a frame callback actually arrived.
+    ///
+    /// The link is a run-loop source, not an `NSEvent`, so
+    /// `nextEventMatchingMask:` cannot wait on it. Driving the run loop
+    /// directly still services the window-server source, which leaves any
+    /// `NSEvent` it produced queued for the drain that follows.
+    fn wait_for_frame(&self) -> bool {
+        let fired = wait_for_display_callback(
+            DISPLAY_LINK_SAFETY_TIMEOUT,
+            || self.frame_pacer.frame_fired(),
+            |remaining| {
+                CFRunLoop::run_in_mode(
+                    unsafe { kCFRunLoopDefaultMode },
+                    remaining.as_secs_f64(),
+                    true,
+                )
+            },
+        );
+        if !fired {
+            trace!("display link wait ended without a callback");
+        }
+        fired
+    }
+
     /// Returns `true` when at least one event was dispatched this pass.
-    pub fn pump_cocoa_event_loop(&mut self, timeout: f64) -> bool {
+    ///
+    /// When given `display_id`, use that display as the clock for this
+    /// pass. Fall back to `timeout` when its link is unavailable.
+    pub fn pump_cocoa_event_loop(
+        &mut self,
+        timeout: f64,
+        display_id: Option<CGDirectDisplayID>,
+    ) -> bool {
         // Re-armed before the wait, not after it — see [`EventLoopWaker::rearm`].
         self.events.waker().rearm();
 
+        // Falls through to the ramped timeout below when there is no frame in
+        // flight, on macOS 13, or when the link could not be created.
+        let paced = display_id.is_some_and(|id| self.frame_pacer.arm(id));
+
         autoreleasepool(|_| {
+            if paced {
+                if self.wait_for_frame() {
+                    self.frame_pacer.pause();
+                } else {
+                    self.frame_pacer.fall_back_to_timer();
+                }
+            }
+
             // Only the *first* dequeue may block. Once something has arrived,
             // the rest of the queue is drained with an already-past deadline so
             // the pass ends as soon as the queue is empty.
-            let mut deadline = NSDate::dateWithTimeIntervalSinceNow(timeout);
+            //
+            // A paced pass has already done its waiting, so it only drains.
+            let mut deadline = if paced {
+                NSDate::distantPast()
+            } else {
+                NSDate::dateWithTimeIntervalSinceNow(timeout)
+            };
             let mut dispatched = false;
 
             // nextEventMatchingMask:untilDate:inMode:dequeue:
@@ -447,6 +529,58 @@ pub fn macos_major_version() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::Modifiers;
+
+    #[test]
+    fn display_wait_ignores_one_unrelated_source() {
+        use std::cell::Cell;
+
+        use super::{CFRunLoopRunResult, Duration, wait_for_display_callback};
+
+        let calls = Cell::new(0);
+        assert!(wait_for_display_callback(
+            Duration::from_secs(30),
+            || calls.get() == 2,
+            |_| {
+                calls.set(calls.get() + 1);
+                CFRunLoopRunResult::HandledSource
+            },
+        ));
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn display_wait_falls_back_when_the_run_loop_finishes_stops_or_times_out() {
+        use super::{CFRunLoopRunResult, Duration, wait_for_display_callback};
+
+        for result in [
+            CFRunLoopRunResult::Finished,
+            CFRunLoopRunResult::Stopped,
+            CFRunLoopRunResult::TimedOut,
+        ] {
+            let mut calls = 0;
+            assert!(!wait_for_display_callback(
+                Duration::from_secs(30),
+                || false,
+                |_| {
+                    calls += 1;
+                    assert_eq!(calls, 1, "a terminal result must stop the wait");
+                    result
+                },
+            ));
+            assert_eq!(calls, 1);
+        }
+    }
+
+    #[test]
+    fn display_wait_does_not_reenter_after_the_deadline() {
+        use super::{Duration, wait_for_display_callback};
+
+        assert!(!wait_for_display_callback(
+            Duration::ZERO,
+            || false,
+            |_| { panic!("must not run the loop with no time remaining") }
+        ));
+    }
 
     #[test]
     fn macos_major_version_returns_valid() {

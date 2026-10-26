@@ -910,6 +910,7 @@ pub(crate) fn pump_events(
     incoming_events: Option<NonSend<Receiver<Event>>>,
     platform: Option<NonSendMut<Pin<Box<PlatformCallbacks>>>>,
     activity: FrameActivity,
+    active_display: Query<&Display, With<ActiveDisplayMarker>>,
     mut timeout: Local<u32>,
     mut last_tap_check: Local<Option<Instant>>,
 ) {
@@ -918,11 +919,13 @@ pub(crate) fn pump_events(
         return;
     };
 
-    // Deliberately not paced to a frame period: waiting a full period put a
-    // floor under how soon a pump could start, so an event landing right after
-    // one returned had to wait out the rest of it. That latency is worse than
-    // the redundant work skipping the wait costs.
-    platform.pump_cocoa_event_loop(f64::from(*timeout) / 1000.0);
+    // Paced passes wait for the display. Idle passes retain the event-driven
+    // timeout so input or IPC can wake them immediately.
+    let paced_display = activity
+        .has_layout_motion()
+        .then(|| active_display.single().ok().map(Display::id))
+        .flatten();
+    platform.pump_cocoa_event_loop(f64::from(*timeout) / 1000.0, paced_display);
 
     let deadline = Instant::now() + PUMP_BUDGET;
     let mut received_events = Vec::new();

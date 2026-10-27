@@ -354,8 +354,11 @@ fn forget_openers(
     };
     let column = strip.index_of(focused).ok();
     for entity in &openers {
-        if strip.contains(entity) && strip.index_of(entity).ok() != column {
-            commands.entity(entity).try_remove::<OpenedFrom>();
+        if strip.contains(entity)
+            && strip.index_of(entity).ok() != column
+            && let Ok(mut entity_commands) = commands.get_entity(entity)
+        {
+            entity_commands.try_remove::<OpenedFrom>();
         }
     }
 }

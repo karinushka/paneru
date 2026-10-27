@@ -788,7 +788,9 @@ pub(super) fn window_minimized_trigger(
         debug!("Entity {entity} is minimized or hidden.");
         let display_bounds = active_display.bounds();
         let opener = openers.get(entity).ok().map(|opened| opened.0);
-        commands.entity(entity).try_remove::<OpenedFrom>();
+        if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            entity_commands.try_remove::<OpenedFrom>();
+        }
 
         for (mut strip, active) in workspaces {
             if active {
@@ -1070,15 +1072,10 @@ fn give_away_focus(
         return;
     }
     // The focused window going hands focus to its heir, so where focus lands
-    // never depends on where the strip happens to be scrolled. One going
-    // behind it leaves focus nearest the middle, where it most likely
-    // already is.
-    let focused = windows
-        .focused()
-        .is_some_and(|(_, focused)| focused == entity);
-    let heir = focused.then(|| active_strip.heir(entity, opener)).flatten();
+    // never depends on where the strip happens to be scrolled.
     let display_center = viewport.center().x;
-    let closest = heir
+    let closest = active_strip
+        .heir(entity, opener)
         .or_else(|| {
             active_strip
                 .all_columns()
@@ -1345,8 +1342,9 @@ fn remember_opener(
     if let Some((_, opener)) = windows.focused()
         && let (Ok(at), Ok(from)) = (strip.index_of(entity), strip.index_of(opener))
         && from + 1 == at
+        && let Ok(mut entity_commands) = commands.get_entity(entity)
     {
-        commands.entity(entity).try_insert(OpenedFrom(opener));
+        entity_commands.try_insert(OpenedFrom(opener));
     }
 }
 

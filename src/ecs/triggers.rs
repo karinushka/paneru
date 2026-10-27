@@ -1032,6 +1032,15 @@ fn give_away_focus(
     config: &mut GlobalState,
     commands: &mut Commands,
 ) {
+    // 2026-10-26: Dismissing an unfocused Emacs popup must not select another
+    // tile. Only the disappearing window that owns focus can give it away.
+    if windows
+        .focused()
+        .is_none_or(|(_, focused)| focused != entity)
+    {
+        return;
+    }
+
     if active_strip.is_tabbed_display(entity)
         && let Some(sibling) = active_strip.tab_display_sibling(entity)
     {

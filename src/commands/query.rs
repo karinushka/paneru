@@ -134,7 +134,8 @@ impl StateBroadcastIntent {
                         Command::Window(
                             Operation::VirtualMove(_, _)
                             | Operation::VirtualMoveNumber(_, _)
-                            | Operation::Swap(_),
+                            | Operation::Swap(_)
+                            | Operation::Stack(_),
                         ),
                 } => intent.windows_changed = true,
                 Event::WindowFocused { .. } => intent.window_focused = true,
@@ -747,5 +748,17 @@ mod tests {
         assert_eq!(intent.display_changes, vec![Some(2)]);
         assert!(intent.requires_state());
         assert!(!intent.is_empty());
+
+        for op in [Operation::Stack(true), Operation::Stack(false)] {
+            let stack_intent = StateBroadcastIntent::from_events(
+                [PaneruEvent::Command {
+                    command: Command::Window(op),
+                }]
+                .iter(),
+                StateBroadcastSignals::default(),
+            );
+            assert!(stack_intent.windows_changed);
+            assert!(stack_intent.on_screen_changed);
+        }
     }
 }

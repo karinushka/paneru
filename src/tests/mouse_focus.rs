@@ -1,10 +1,13 @@
 use crate::commands::{Command, Direction, MoveFocus, Operation};
 use crate::config::{Config, MainOptions};
+use crate::ecs::layout::LayoutStrip;
+use crate::ecs::{ActiveWorkspaceMarker, FocusedMarker, RepositionMarker};
 use crate::events::Event;
 use crate::manager::{Origin, Window, WindowManager};
 use crate::platform::Modifiers;
 use crate::{assert_focused, assert_on_workspace};
 use bevy::math::IRect;
+use bevy::prelude::{Entity, With, Without};
 use objc2_core_foundation::CGPoint;
 use std::time::Duration;
 
@@ -663,4 +666,63 @@ fn clicking_partially_offscreen_focused_window_brings_it_into_view() {
             );
         })
         .run(commands);
+}
+
+/// Switching to an empty workspace slides the old one's windows out under the
+/// pointer. Mouse focus must not pick one up on its way out, which switched
+/// straight back to the workspace being left.
+#[test]
+fn mouse_focus_ignores_windows_sliding_out_of_view() {
+    let config: Config = (
+        MainOptions {
+            focus_follows_mouse: Some(true),
+            mouse_follows_focus: Some(false),
+            animation_speed: Some(12.0),
+            virtual_workspace_animations: Some(true),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+    let mut harness = TestHarness::new().with_config(config).with_windows(3);
+    harness.run(vec![Event::Command {
+        command: Command::PrintState,
+    }]);
+    harness.advance(Duration::from_secs(1));
+    let unfocused = {
+        let world = harness.world();
+        let mut query = world.query_filtered::<Entity, (With<Window>, Without<FocusedMarker>)>();
+        query.iter(world).next().expect("an unfocused window")
+    };
+
+    harness.world().write_message(Event::Command {
+        command: Command::Window(Operation::VirtualNumber(1)),
+    });
+    harness.advance(Duration::from_millis(20));
+    assert!(
+        harness.world().get::<RepositionMarker>(unfocused).is_some(),
+        "the mouse event must arrive while the window slides out"
+    );
+    let center = harness
+        .world()
+        .get::<Window>(unfocused)
+        .unwrap()
+        .frame()
+        .center();
+    harness.world().write_message(Event::MouseMoved {
+        point: CGPoint {
+            x: f64::from(center.x),
+            y: f64::from(center.y),
+        },
+        modifiers: Modifiers::empty(),
+    });
+    harness.advance(Duration::from_secs(1));
+
+    let world = harness.world();
+    let mut active = world.query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>();
+    let strip = active.single(world).expect("one active workspace");
+    assert_eq!(
+        strip.virtual_index, 1,
+        "the pointer over a window sliding out must not switch back to its workspace"
+    );
 }

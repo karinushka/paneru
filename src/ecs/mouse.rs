@@ -77,6 +77,20 @@ fn is_in_corner_dead_zone(
     point.x >= bounds.max.x - CORNER_DEAD_ZONE_PX && point.y >= bounds.max.y - CORNER_DEAD_ZONE_PX
 }
 
+/// Whether `entity` belongs to a workspace being switched away from and is
+/// still on its way out. It stays under the pointer as it slides, and focusing
+/// it would switch straight back.
+fn sliding_out_of_view(
+    entity: Entity,
+    moving: &Query<Entity, With<RepositionMarker>>,
+    active_workspaces: &Query<(Entity, &LayoutStrip), With<ActiveWorkspaceMarker>>,
+) -> bool {
+    moving.contains(entity)
+        && !active_workspaces
+            .iter()
+            .any(|(_, strip)| strip.contains(entity))
+}
+
 /// Handles mouse moved events.
 ///
 /// If "focus follows mouse" is enabled, this function finds the window under the cursor and
@@ -189,6 +203,10 @@ fn mouse_moved_trigger(
             trace!("can not find focused window: {window_id}");
             continue;
         };
+        if sliding_out_of_view(entity, &moving, &active_workspaces) {
+            trace!("mouse focus suppressed on a window sliding out of view");
+            continue;
+        }
 
         let child_window = window_manager
             .get_associated_windows(window_id)

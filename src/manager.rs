@@ -796,7 +796,6 @@ pub fn bruteforce_windows(
 ) -> Vec<Window> {
     const MAGIC: u32 = 0x636f_636f;
     const BUFSIZE: isize = 0x14;
-    let mut found_windows = Vec::new();
     debug!("{pid} has unresolved window on other desktops, bruteforcing them.");
 
     // Blocks until fewer than `MAX_CONCURRENT_BRUTEFORCE` apps are scanning.
@@ -811,7 +810,7 @@ pub fn bruteforce_windows(
 
     let Some(data_ref) = CFMutableData::new(None, BUFSIZE) else {
         error!("error creating mutable data");
-        return found_windows;
+        return Vec::new();
     };
     CFMutableData::increase_length(data_ref.deref().into(), BUFSIZE);
 
@@ -835,45 +834,114 @@ pub fn bruteforce_windows(
     // `bruteforce_windows` runs on `AsyncComputeTaskPool` worker threads, which
     // have no CFRunLoop to drain a thread-local `NSAutoreleasePool`.
     objc2::rc::autoreleasepool(|_| {
-        for element_id in 0..0x7fffu64 {
-            // Every iteration is a synchronous cross-process AX round trip.
-            if window_list.is_empty() {
-                break;
-            }
-            // Checked periodically only: `Instant::now` can itself be a syscall.
-            if element_id.is_multiple_of(256) && Instant::now() >= deadline {
-                warn!(
-                    "{pid}: giving up the brute-force scan at element {element_id} with {} window(s) \
-                     unresolved: {window_list:?}",
-                    window_list.len()
-                );
-                break;
-            }
-
-            let bytes = element_id.to_ne_bytes();
-            data[0xc..0xc + bytes.len()].copy_from_slice(&bytes);
-
-            let Ok(element_ref) = AXUIWrapper::from_retained(unsafe {
-                _AXUIElementCreateWithRemoteToken(data_ref.as_ref())
-            }) else {
-                continue;
-            };
-            let Some(window_id) = try_ax_window_id(element_ref.as_ptr()) else {
-                continue;
-            };
-
-            if let Some(index) = window_list.iter().position(|&id| id == window_id) {
-                window_list.remove(index);
-                debug!("Found window {window_id:?}");
-                if let Ok(window) = WindowOS::new_with_config(&element_ref, config, bundle_id)
+        let (found_windows, end) = scan_elements(
+            &mut window_list,
+            deadline,
+            |element_id| {
+                // Every call is a synchronous cross-process AX round trip.
+                let bytes = element_id.to_ne_bytes();
+                data[0xc..0xc + bytes.len()].copy_from_slice(&bytes);
+                let element_ref = AXUIWrapper::from_retained(unsafe {
+                    _AXUIElementCreateWithRemoteToken(data_ref.as_ref())
+                })
+                .ok()?;
+                let window_id = try_ax_window_id(element_ref.as_ptr())?;
+                Some((window_id, element_ref))
+            },
+            |element_ref| {
+                WindowOS::new_with_config(&element_ref, config, bundle_id)
                     .inspect_err(|err| warn!("{err}"))
-                {
-                    found_windows.push(Window::new(Box::new(window)));
-                }
-            }
+                    .ok()
+                    .map(|window| Window::new(Box::new(window)))
+            },
+        );
+        if end != ScanEnd::Resolved {
+            warn!(
+                "{pid}: giving up the brute-force scan ({end:?}) with {} window(s) unresolved: \
+                 {window_list:?}",
+                window_list.len()
+            );
         }
-    });
-    found_windows
+        found_windows
+    })
+}
+
+/// Why [`scan_elements`] stopped.
+#[derive(Debug, PartialEq, Eq)]
+enum ScanEnd {
+    /// Every listed window resolved.
+    Resolved,
+    /// The scan tried every element id below 0x7fff.
+    Exhausted,
+    /// [`BRUTEFORCE_BUDGET`] ran out at this element id.
+    Deadline(u64),
+}
+
+/// Walks element ids upward from 0. `element_at` looks up the window an
+/// element belongs to, and each element of a window still in `window_list` is
+/// handed to `accept`. A window leaves the list only once `accept` takes one
+/// of its elements, because an app can list a child element with the window's
+/// id before the window itself.
+fn scan_elements<E, T>(
+    window_list: &mut Vec<WinID>,
+    deadline: Instant,
+    mut element_at: impl FnMut(u64) -> Option<(WinID, E)>,
+    mut accept: impl FnMut(E) -> Option<T>,
+) -> (Vec<T>, ScanEnd) {
+    let mut found = Vec::new();
+    for element_id in 0..0x7fffu64 {
+        if window_list.is_empty() {
+            return (found, ScanEnd::Resolved);
+        }
+        // Checked periodically only: `Instant::now` can itself be a syscall.
+        if element_id.is_multiple_of(256) && Instant::now() >= deadline {
+            return (found, ScanEnd::Deadline(element_id));
+        }
+        let Some((window_id, element)) = element_at(element_id) else {
+            continue;
+        };
+        if let Some(index) = window_list.iter().position(|&id| id == window_id)
+            && let Some(window) = accept(element)
+        {
+            window_list.remove(index);
+            debug!("Found window {window_id:?}");
+            found.push(window);
+        }
+    }
+    let end = if window_list.is_empty() {
+        ScanEnd::Resolved
+    } else {
+        ScanEnd::Exhausted
+    };
+    (found, end)
+}
+
+#[cfg(test)]
+mod scan_tests {
+    use std::time::{Duration, Instant};
+
+    use super::{ScanEnd, scan_elements};
+    use crate::platform::WinID;
+
+    #[test]
+    fn scan_keeps_looking_for_a_window_after_an_element_it_rejects() {
+        let mut window_list = vec![40966];
+
+        let (found, end) = scan_elements(
+            &mut window_list,
+            Instant::now() + Duration::from_secs(60),
+            |element_id| match element_id {
+                10 => Some((40966, "AXOutline")),
+                12 => Some((40966, "AXWindow")),
+                _ => None,
+            },
+            |role| (role == "AXWindow").then_some(role),
+        );
+
+        assert_eq!(found, vec!["AXWindow"]);
+        assert_eq!(end, ScanEnd::Resolved);
+        assert_eq!(window_list, Vec::<WinID>::new());
+    }
 }
 
 /// Checks if the application has Accessibility privileges without showing UI.

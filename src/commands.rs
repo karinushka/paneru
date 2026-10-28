@@ -416,14 +416,31 @@ fn active_focus_candidate(
     focused_entity: Entity,
     active_strip: &LayoutStrip,
     workspaces: &Query<(&LayoutStrip, Entity, Option<&NativeFullscreenMarker>)>,
+    history: Option<&FocusHistory>,
 ) -> Option<Entity> {
+    let column_index = match direction {
+        Direction::First => Some(0),
+        Direction::Last => Some(active_strip.len().checked_sub(1)?),
+        Direction::Nth(index) => Some(*index),
+        Direction::East | Direction::West | Direction::North | Direction::South => None,
+    };
+    if let Some(index) = column_index {
+        let landing = active_strip.column_at(index)?;
+        if let Some(history) = history
+            && !active_strip.is_tabbed_display(landing)
+            && let Some(column @ Column::Stack(_)) = active_strip.columns().nth(index)
+        {
+            return history.last_focused_in(column);
+        }
+        return Some(landing);
+    }
+
     // Enter the active strip from the appropriate side when focus is outside it.
     if !active_strip.contains(focused_entity) {
         return match direction {
-            Direction::East | Direction::First => active_strip.first(),
-            Direction::West | Direction::Last => active_strip.last(),
-            Direction::Nth(index) => active_strip.column_at(*index),
-            Direction::North | Direction::South => None,
+            Direction::East => active_strip.first(),
+            Direction::West => active_strip.last(),
+            _ => None,
         };
     }
 
@@ -479,7 +496,15 @@ fn floating_focus_target(
         .as_ref()
         .and_then(|history| history.last_managed(active_strip.id()))
         .filter(|entity| active_strip.contains(*entity))
-        .or_else(|| active_focus_candidate(direction, focused_entity, active_strip, workspaces))
+        .or_else(|| {
+            active_focus_candidate(
+                direction,
+                focused_entity,
+                active_strip,
+                workspaces,
+                paging.focus_history.as_deref(),
+            )
+        })
         .or_else(|| active_strip.all_columns().into_iter().next())
         .map(|entity| (entity, true))
 }
@@ -575,9 +600,13 @@ fn command_move_focus(
         return;
     }
 
-    let candidate = active_focus_candidate(direction, focused_entity, active_strip, &workspaces);
-
-    if let Some(entity) = candidate {
+    if let Some(entity) = active_focus_candidate(
+        direction,
+        focused_entity,
+        active_strip,
+        &workspaces,
+        paging.focus_history.as_deref(),
+    ) {
         focus_with_verification(
             entity,
             Some(focused_entity),

@@ -43,8 +43,13 @@ fn test_focus_or_virtual_south_focuses_stack_sibling_before_switching_workspace(
             command: Command::Window(Operation::VirtualNumber(0)),
         },
         // Focus window 0 (top of the 2-item stack), then press South twice.
+        // The column jump returns to window 1, which had focus last, so step
+        // up to window 0.
         Event::Command {
             command: Command::Window(Operation::Focus(Direction::First)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::North)),
         },
         Event::Command {
             command: Command::Window(Operation::FocusOrVirtual(Direction::South)),
@@ -56,7 +61,7 @@ fn test_focus_or_virtual_south_focuses_stack_sibling_before_switching_workspace(
 
     TestHarness::new()
         .with_windows(2)
-        .on_iteration(6, |world, _state| {
+        .on_iteration(7, |world, _state| {
             // First South: a sibling exists below window 0 in the stack, so
             // focus must move to it instead of switching virtual workspace.
             assert_focused!(world, 1);
@@ -66,7 +71,7 @@ fn test_focus_or_virtual_south_focuses_stack_sibling_before_switching_workspace(
                 "focusing a stack sibling must not switch virtual workspace"
             );
         })
-        .on_iteration(7, |world, _state| {
+        .on_iteration(8, |world, _state| {
             // Second South: window 1 is the last stack item, nothing left to
             // focus, so this must fall through to switching workspaces.
             assert_eq!(
@@ -123,8 +128,13 @@ fn test_plain_virtual_south_switches_workspace_even_with_a_stack_sibling() {
         Event::Command {
             command: Command::Window(Operation::VirtualNumber(0)),
         },
+        // The column jump returns to window 1, which had focus last, so step
+        // up to window 0.
         Event::Command {
             command: Command::Window(Operation::Focus(Direction::First)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::North)),
         },
         Event::Command {
             command: Command::Window(Operation::Virtual(Direction::South)),
@@ -133,7 +143,7 @@ fn test_plain_virtual_south_switches_workspace_even_with_a_stack_sibling() {
 
     TestHarness::new()
         .with_windows(2)
-        .on_iteration(6, |world, _state| {
+        .on_iteration(7, |world, _state| {
             assert_focused!(world, 0);
             assert_eq!(
                 active_virtual_index(world),

@@ -288,7 +288,7 @@ $ paneru send-cmd <command> [args...]
 
 | Command                    | Description                                      |
 | -------------------------- | ------------------------------------------------ |
-| `window focus <direction\|number\|managed\|unmanaged>` | Move focus by direction, column number, managed or unmanaged |
+| `window focus <direction\|number\|managed\|unmanaged>` | Move focus by direction, column number, managed or unmanaged. First, last, and numbered jumps restore the last focused window in a split stack |
 | `window swap <direction>`  | Swap the focused window with a neighbour         |
 | `window center`            | Center the focused window on screen              |
 | `window snap`              | Snap the focused window into the visible viewport |

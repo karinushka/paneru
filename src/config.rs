@@ -15,7 +15,7 @@ use std::{
     time::Duration,
 };
 use stdext::function_name;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use self::decorations::{
     BorderRadiusOption, DescriptorStyle, IndicatorFormat, IndicatorStyle, MenubarOrientation,
@@ -42,10 +42,10 @@ pub mod snippet;
 pub mod swipe;
 
 /// A `LazyLock` that determines the path to the application's configuration file.
-/// It checks the `PANERU_CONFIG` environment variable first, then standard XDG locations and user home directory.
-/// If no configuration file is found, a minimal one is created in the user's
-/// XDG configuration directory so a fresh app installation can start with the
-/// built-in defaults.
+/// When `PANERU_CONFIG` is set, it uses only that path. Otherwise it checks the user home directory, then standard XDG locations.
+/// If no configuration file is found, a minimal one is created at
+/// `$PANERU_CONFIG`, or else in the user's XDG configuration directory, so a
+/// fresh app installation can start with the built-in defaults.
 /// The TOML configuration file, if there is one to use. `None` when an
 /// `init.lua` exists, since a script disables the TOML entirely (see
 /// [`Config::defaults`]).
@@ -79,6 +79,9 @@ pub(crate) const SWIPE_SENSITIVITY_CALIBRATION: f64 = 5.0;
 const SWIPE_DECELERATION_CALIBRATION: f64 = 2.0;
 
 fn default_configuration_file() -> std::io::Result<PathBuf> {
+    if let Some(path) = explicit_configuration_file() {
+        return Ok(path);
+    }
     let config_home = env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
@@ -116,19 +119,18 @@ fn create_configuration_file_at(path: &Path) -> std::io::Result<bool> {
     }
 }
 
+fn explicit_configuration_file() -> Option<PathBuf> {
+    env::var_os("PANERU_CONFIG")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
 /// Finds the first existing configuration file from supported locations.
 /// Unlike [`CONFIGURATION_FILE`], this does not panic when no file is found.
+/// When `$PANERU_CONFIG` is set, only that path is checked.
 pub fn discover_configuration_file() -> Option<PathBuf> {
-    if let Ok(path_str) = env::var("PANERU_CONFIG") {
-        let path = PathBuf::from(path_str);
-        if path.exists() {
-            return Some(path);
-        }
-        warn!(
-            "{}: $PANERU_CONFIG is set to {}, but the file does not exist. Falling back to default locations.",
-            function_name!(),
-            path.display()
-        );
+    if let Some(path) = explicit_configuration_file() {
+        return path.exists().then_some(path);
     }
 
     let standard_paths = [
@@ -195,7 +197,7 @@ pub fn discover_lua_file() -> Option<PathBuf> {
         if path.exists() {
             return Some(path);
         }
-        warn!(
+        tracing::warn!(
             "{}: $PANERU_LUA is set to {}, but the file does not exist. Falling back to default locations.",
             function_name!(),
             path.display()
@@ -219,15 +221,15 @@ pub fn discover_lua_file() -> Option<PathBuf> {
 /// Returns the path to the Lua init script, creating a default one at the XDG
 /// location if none exists.
 ///
-/// Returns `Ok(None)` instead if a `paneru.toml` already exists: planting a
-/// script beside an existing TOML would silently override it (see
-/// [`CONFIGURATION_FILE`]).
+/// Returns `Ok(None)` instead if a `paneru.toml` already exists or
+/// `$PANERU_CONFIG` names one: planting a script beside a TOML would silently
+/// override it (see [`CONFIGURATION_FILE`]).
 #[cfg(feature = "lua")]
 pub fn ensure_lua_file() -> std::io::Result<Option<PathBuf>> {
     if let Some(path) = discover_lua_file() {
         return Ok(Some(path));
     }
-    if let Some(toml) = discover_configuration_file() {
+    if let Some(toml) = discover_configuration_file().or_else(explicit_configuration_file) {
         info!(
             "{}: {} is the active configuration; not creating a default init.lua",
             function_name!(),
@@ -2905,6 +2907,116 @@ fn test_first_launch_creates_parseable_config_without_overwriting_it() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), custom);
 
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[cfg(test)]
+const STARTUP_LOOKUP_CHILD: &str = "PANERU_TEST_STARTUP_LOOKUP_CHILD";
+
+/// Child half of [`startup_config_lookup`]. The guard keeps an
+/// `--include-ignored` run from reading the real environment.
+#[test]
+#[ignore = "run by startup_config_lookup in a child process"]
+fn startup_config_lookup_child() {
+    if env::var_os(STARTUP_LOOKUP_CHILD).is_none() {
+        return;
+    }
+    // Same order as `setup_bevy_app`.
+    #[cfg(feature = "lua")]
+    ensure_lua_file().unwrap();
+    let found = CONFIGURATION_FILE
+        .as_deref()
+        .map(|path| path.display().to_string());
+    println!("{STARTUP_LOOKUP_CHILD}={}", found.unwrap_or_default());
+}
+
+/// Resolves the startup configuration in a child test process whose `HOME`,
+/// XDG directories, and `$PANERU_CONFIG` all point into `root`. The lookup
+/// reads process-wide state (the environment and a `LazyLock`), so it cannot
+/// run in this shared test process.
+#[cfg(test)]
+fn startup_config_lookup(root: &Path, explicit: &Path) -> Option<PathBuf> {
+    let output = std::process::Command::new(env::current_exe().unwrap())
+        .args([
+            "config::startup_config_lookup_child",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env(STARTUP_LOOKUP_CHILD, "1")
+        .env("HOME", root.join("home"))
+        .env("XDG_CONFIG_HOME", root.join("xdg"))
+        .env("XDG_CONFIG_DIRS", root.join("xdg-dirs"))
+        .env("PANERU_CONFIG", explicit)
+        .env_remove("PANERU_LUA")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "child lookup failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let found = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{STARTUP_LOOKUP_CHILD}=")))
+        .unwrap_or_else(|| panic!("child lookup did not run:\n{stdout}"));
+    (!found.is_empty()).then(|| PathBuf::from(found))
+}
+
+#[cfg(test)]
+fn scratch_config_root(name: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!(
+        "paneru-{name}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    create_dir_all(root.join("home")).unwrap();
+    root
+}
+
+#[test]
+fn test_explicit_config_path_wins_over_a_config_in_home() {
+    let root = scratch_config_root("explicit-over-home");
+    let standalone = root.join("home").join(".paneru.toml");
+    let custom = "[options]\nauto_center = false\n\n[bindings]\n";
+    std::fs::write(&standalone, custom).unwrap();
+    let explicit = root.join("app").join("paneru.toml");
+
+    assert_eq!(
+        startup_config_lookup(&root, &explicit),
+        Some(explicit.clone())
+    );
+    assert_eq!(
+        std::fs::read_to_string(&explicit).unwrap(),
+        DEFAULT_CONFIGURATION
+    );
+    assert_eq!(std::fs::read_to_string(&standalone).unwrap(), custom);
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn test_missing_explicit_config_is_created_at_that_path() {
+    let root = scratch_config_root("explicit-missing");
+    let explicit = root.join("app").join("paneru.toml");
+
+    assert_eq!(
+        startup_config_lookup(&root, &explicit),
+        Some(explicit.clone())
+    );
+    assert_eq!(
+        std::fs::read_to_string(&explicit).unwrap(),
+        DEFAULT_CONFIGURATION
+    );
+    assert!(
+        !root.join("xdg").exists(),
+        "nothing should be created in the XDG configuration directory"
+    );
+
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

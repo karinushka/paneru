@@ -544,6 +544,13 @@ unsafe extern "C" {
         value: &CFType,
     ) -> OSStatus;
 
+    /// Reports whether an accessibility attribute of a UI element can be set.
+    pub fn AXUIElementIsAttributeSettable(
+        element: AXUIElementRef,
+        attribute: &CFString,
+        settable: &mut u8,
+    ) -> OSStatus;
+
     /// Performs an action on an accessibility UI element.
     ///
     /// # Arguments

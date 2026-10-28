@@ -1555,16 +1555,33 @@ pub(super) fn refresh_configuration_trigger(
 
 pub(super) fn window_removal_trigger(
     trigger: On<Remove, Window>,
-    mut workspaces: Query<&mut LayoutStrip>,
+    mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    windows: Windows,
+    global_state: GlobalState,
+    mut commands: Commands,
 ) {
     let entity = trigger.event().entity;
 
-    if let Some(mut strip) = workspaces.iter_mut().find(|strip| strip.contains(entity)) {
+    if let Some((mut strip, active)) = workspaces
+        .iter_mut()
+        .find(|(strip, _)| strip.contains(entity))
+    {
         debug!(
             "Removing despawned entity {entity} from strip {}",
             strip.id()
         );
         strip.remove(entity);
+
+        // The strip's origin stays put, so closing a column left of the
+        // focused window pulls it left and can push it off screen.
+        if active
+            && !global_state.skip_reshuffle()
+            && !global_state.initializing()
+            && let Some((_, focused)) = windows.focused()
+            && strip.contains(focused)
+        {
+            commands.ensure_visible(focused);
+        }
     }
 }
 

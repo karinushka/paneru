@@ -9,6 +9,9 @@ order):
 3.  `$HOME/.paneru.toml`
 4.  `$XDG_CONFIG_HOME/paneru/paneru.toml`
 
+A nonempty `$PANERU_CONFIG` sets the only TOML path Paneru checks.
+If the file is missing and no Lua script takes precedence, Paneru creates it with the built-in defaults.
+
 The configuration is automatically reloaded when the file is saved.
 
 If an `init.lua` exists (see [Lua Scripting Guide](./SCRIPTING.md)), it takes over

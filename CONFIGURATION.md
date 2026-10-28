@@ -414,7 +414,7 @@ accessibility role/subrole.
 | `bundle_id` | String | Optional Bundle ID to match (e.g., `com.apple.Terminal`). |
 | `role` | String | Optional accessibility role to match exactly (e.g., `AXWindow`). A rule with `role` never matches a window that reports none. |
 | `subrole` | String | Optional accessibility subrole to match exactly (e.g., `AXStandardWindow`, `AXDialog`, `AXFloatingWindow`). A rule with `subrole` never matches a window that reports none. |
-| `floating` | Boolean | Force the window to be floating/unmanaged. |
+| `floating` | Boolean | Force the window to be floating/unmanaged. Without a rule, a window that macOS reports as not resizable floats. Set `floating = false` to tile it instead. |
 | `manage` | Boolean | Force Paneru to manage this app/window even if macOS reports the app as unobservable or the window has a non-standard role/subrole. |
 | `index` | Integer | Preferred position in the strip when spawned. |
 | `desktop` | Integer (`>= 1`) or `"all"` | Native macOS Desktop placement when spawned: sends the window to 1-based Desktop `N` on its display, or `"all"` to float and pin it across all current and future Desktops. |

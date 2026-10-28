@@ -41,6 +41,9 @@ pub(crate) struct MockWindowData {
     pub(crate) subrole: String,
     pub(crate) identifier: String,
     pub(crate) is_full_screen: bool,
+    /// The app does not let the window's size change, as macOS reports for a
+    /// fixed-size dialog.
+    pub(crate) fixed_size: bool,
     pub(crate) border_radius: Option<f64>,
     pub(crate) horizontal_padding: i32,
     pub(crate) vertical_padding: i32,
@@ -74,6 +77,7 @@ impl Default for MockWindowData {
             subrole: "AXStandardWindow".to_string(),
             identifier: "testid".to_string(),
             is_full_screen: false,
+            fixed_size: false,
             border_radius: None,
             horizontal_padding: 0,
             vertical_padding: 0,
@@ -696,6 +700,15 @@ impl MockState {
                 .windows
                 .get(&id)
                 .is_some_and(|w| w.is_full_screen)
+        });
+
+        let s = self.clone();
+        mw.expect_is_resizable().returning(move || {
+            !s.inner
+                .force_read()
+                .windows
+                .get(&id)
+                .is_some_and(|w| w.fixed_size)
         });
 
         let s = self.clone();

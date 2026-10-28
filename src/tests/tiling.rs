@@ -2139,6 +2139,86 @@ floating = true
         .run(commands);
 }
 
+fn spawn_fixed_size_window(world: &mut World, state: &MockState, frame: IRect) {
+    let window = state.spawn_window(TEST_PROCESS_ID, TEST_WORKSPACE_ID, 1, frame);
+    state.update_window(1, |window| window.fixed_size = true);
+    world.trigger(SpawnWindowTrigger(vec![window]));
+}
+
+fn in_any_strip(world: &mut World, id: i32) -> bool {
+    let entity = find_window_entity(id, world);
+    let mut strips = world.query::<&LayoutStrip>();
+    strips.iter(world).any(|strip| strip.contains(entity))
+}
+
+/// A new window whose size macOS reports as not settable, such as a fixed-size
+/// dialog, floats at its own frame instead of being stretched into a column.
+#[test]
+fn test_new_non_resizable_window_floats() {
+    let frame = IRect::new(100, 100, 500, 400);
+    TestHarness::new()
+        .with_windows(1)
+        .with_focused_window(0)
+        .on_iteration(0, move |world, state| {
+            spawn_fixed_size_window(world, &state, frame);
+        })
+        .on_iteration(1, move |world, _state| {
+            assert!(
+                !in_any_strip(world, 1),
+                "a non-resizable window must not take a column"
+            );
+            let entity = find_window_entity(1, world);
+            assert!(
+                matches!(
+                    world.entity(entity).get::<crate::ecs::Unmanaged>(),
+                    Some(crate::ecs::Unmanaged::Floating)
+                ),
+                "a non-resizable window must float"
+            );
+            assert_window_at!(world, 1, frame.min.x, frame.min.y);
+            assert_window_size!(world, 1, frame.width(), frame.height());
+            assert!(in_any_strip(world, 0), "the resizable window stays tiled");
+        })
+        .run(vec![
+            Event::MenuOpened { window_id: 0 },
+            Event::Command {
+                command: Command::PrintState,
+            },
+        ]);
+}
+
+/// A rule with `floating = false` tiles a non-resizable window.
+#[test]
+fn test_rule_tiles_a_non_resizable_window() {
+    let mut params = WindowParams::new("^Window 1$", None);
+    params.floating = Some(false);
+    let config: Config = (MainOptions::default(), vec![params]).into();
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(1)
+        .with_focused_window(0)
+        .on_iteration(0, |world, state| {
+            spawn_fixed_size_window(world, &state, IRect::new(100, 100, 500, 400));
+        })
+        .on_iteration(1, |world, _state| {
+            let entity = find_window_entity(1, world);
+            assert!(
+                world
+                    .entity(entity)
+                    .get::<crate::ecs::Unmanaged>()
+                    .is_none()
+            );
+            assert!(in_any_strip(world, 1), "the rule keeps it tiled");
+        })
+        .run(vec![
+            Event::MenuOpened { window_id: 0 },
+            Event::Command {
+                command: Command::PrintState,
+            },
+        ]);
+}
+
 /// Regression test: during startup (`Initializing`), `apply_window_defaults` and
 /// `apply_window_positions` must classify floating windows as `Unmanaged::Floating`
 /// *before* `finish_setup` populates the workspace strip and selects the initial

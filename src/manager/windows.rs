@@ -26,8 +26,8 @@ use tracing::{Level, debug, instrument, trace, warn};
 
 use super::skylight::{
     _AXUIElementGetWindow, _SLPSSetFrontProcessWithOptions, AXUIElementCopyAttributeValue,
-    AXUIElementPerformAction, AXUIElementSetAttributeValue, SLPSPostEventRecordTo,
-    SLSWindowIteratorAdvance,
+    AXUIElementIsAttributeSettable, AXUIElementPerformAction, AXUIElementSetAttributeValue,
+    SLPSPostEventRecordTo, SLSWindowIteratorAdvance,
 };
 use crate::config::Config;
 use crate::errors::{Error, Result};
@@ -481,6 +481,9 @@ pub trait WindowApi: Send + Sync {
     fn is_alive(&self) -> bool;
     fn is_minimized(&self) -> bool;
     fn is_full_screen(&self) -> bool;
+    /// Whether the app lets the window's size change. A fresh cross-process
+    /// read. A failed read counts as resizable.
+    fn is_resizable(&self) -> bool;
     fn reposition(&mut self, origin: Origin);
     fn resize(&mut self, size: Size);
     fn update_frame(&mut self) -> Result<IRect>;
@@ -968,6 +971,18 @@ impl WindowApi for WindowOS {
 
     fn is_full_screen(&self) -> bool {
         self.ax_element.full_screen().unwrap_or(false)
+    }
+
+    fn is_resizable(&self) -> bool {
+        let mut settable = 0;
+        let result = unsafe {
+            AXUIElementIsAttributeSettable(
+                self.ax_element.as_ptr(),
+                CFString::from_static_str(kAXSizeAttribute).as_ref(),
+                &mut settable,
+            )
+        };
+        result.to_result(function_name!()).is_err() || settable != 0
     }
 
     #[instrument(level = Level::TRACE)]

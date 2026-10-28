@@ -1052,18 +1052,15 @@ pub(super) fn window_managed_trigger(
 /// * `active_display` - The active display and its layout strip.
 /// * `apps` - A query for all applications.
 /// * `global_state` - Focus-follows-mouse and reshuffle flags.
-/// * `focus_history` - Per-workspace record of what was focused last.
 /// * `windows` - A query for all windows with their parent.
 /// * `openers` - The window each window was opened from, if any.
 /// * `commands` - Bevy commands to despawn entities and trigger events.
 #[instrument(level = Level::DEBUG, skip_all)]
-#[allow(clippy::too_many_arguments)]
 pub(super) fn window_destroyed_trigger(
     mut messages: MessageReader<Event>,
     active_display: ActiveDisplay,
     mut apps: Query<&mut Application>,
     mut global_state: GlobalState,
-    mut focus_history: ResMut<FocusHistory>,
     windows: Windows,
     openers: Query<&OpenedFrom>,
     mut commands: Commands,
@@ -1110,7 +1107,6 @@ pub(super) fn window_destroyed_trigger(
             &mut global_state,
             &mut commands,
         );
-        focus_history.forget(entity);
 
         if let Ok(mut entity_commands) = commands.get_entity(entity) {
             entity_commands.try_despawn();
@@ -1699,8 +1695,10 @@ pub(super) fn window_removal_trigger(
     windows: Windows,
     initializing: Option<Res<Initializing>>,
     config: Res<Config>,
+    mut focus_history: ResMut<FocusHistory>,
 ) {
     let entity = trigger.event().entity;
+    focus_history.forget(entity);
     let focused = initializing
         .is_none()
         .then(|| windows.focused().map(|(_, focused)| focused))

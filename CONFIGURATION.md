@@ -256,7 +256,7 @@ https://github.com/karinushka/paneru/blob/3790b01f8d65df5d9000142db7cf25f9270dcc
 | :--- | :--- |
 | `window_focus_west` / `_east` | Focus window to the left/right. |
 | `window_focus_north` / `_south` | Focus window above/below. If no window exists, switches focus to the display in that direction. |
-| `window_focus_first` / `_last` | Jump to the start/end of the strip. |
+| `window_focus_first` / `_last` | Jump to the start/end of the strip. In a split stack, restore the window that had focus last. |
 | `window_focus_managed` | Switch to a previously focused window on this workspace. |
 | `window_focus_unmanaged` | Switch to a previously focused floating window on this workspace. |
 | `window_swap_west` / `_east` | Swap current window with neighbor. |

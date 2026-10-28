@@ -5796,3 +5796,50 @@ fn window_removal_clears_despawned_entity_from_all_strips() {
         "despawning a window must remove it from every strip (duplicate_strip={duplicate_strip:?}, still present in {remaining:?})"
     );
 }
+
+/// Jumping to a column by position (first, last, or a number) focuses the
+/// window that last had focus in that column, as niri does, not the top of
+/// its stack.
+#[test]
+fn test_column_jumps_focus_the_stacks_last_focused_window() {
+    let focus = |direction| Event::Command {
+        command: Command::Window(Operation::Focus(direction)),
+    };
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        focus(Direction::Last),
+        // Column 1 becomes the stack [1, 2], with window 2 focused.
+        Event::Command {
+            command: Command::Window(Operation::Stack(true)),
+        },
+        focus(Direction::First),
+        focus(Direction::Last),
+        focus(Direction::First),
+        focus(Direction::Nth(1)),
+        focus(Direction::North),
+        focus(Direction::First),
+        focus(Direction::Last),
+    ];
+
+    TestHarness::new()
+        .with_windows(3)
+        .on_iteration(2, |world, _state| {
+            let stacked = [1, 2].map(|id| find_window_entity(id, world));
+            let mut strips = world.query::<&LayoutStrip>();
+            assert!(
+                strips
+                    .iter(world)
+                    .any(|strip| stacked.iter().all(|e| strip.index_of(*e).ok() == Some(1))),
+                "windows 1 and 2 share column 1"
+            );
+            assert_focused!(world, 2);
+        })
+        .on_iteration(3, |world, _state| assert_focused!(world, 0))
+        .on_iteration(4, |world, _state| assert_focused!(world, 2))
+        .on_iteration(5, |world, _state| assert_focused!(world, 0))
+        .on_iteration(6, |world, _state| assert_focused!(world, 2))
+        .on_iteration(7, |world, _state| assert_focused!(world, 1))
+        .on_iteration(8, |world, _state| assert_focused!(world, 0))
+        .on_iteration(9, |world, _state| assert_focused!(world, 1))
+        .run(commands);
+}

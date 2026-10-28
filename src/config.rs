@@ -2009,12 +2009,22 @@ fn resolve_keybinding_str(input: &str, virtual_keys: &[(String, u8)]) -> Result<
 }
 
 fn keycode_for_key_name(key: &str, virtual_keys: &[(String, u8)]) -> Option<u8> {
-    virtual_keys
-        .iter()
-        .find(|(k, _)| k == key)
-        .map(|(_, c)| *c)
+    // A keypad key yields to the US position of the same name. On AZERTY only
+    // the keypad types digits, and "1" must still bind the top-row key.
+    let typed_by = |keypad: bool| {
+        virtual_keys
+            .iter()
+            .find(|(k, c)| k == key && is_keypad(*c) == keypad)
+            .map(|(_, c)| *c)
+    };
+    typed_by(false)
         .or_else(|| virtual_keycode().find(|(k, _)| *k == key).map(|(_, c)| *c))
+        .or_else(|| typed_by(true))
         .or_else(|| literal_keycode().find(|(k, _)| *k == key).map(|(_, c)| *c))
+}
+
+fn is_keypad(code: u8) -> bool {
+    virtual_keycode().any(|(name, c)| *c == code && name.starts_with("keypad"))
 }
 
 /// Parses a string containing modifier names (e.g., "alt", "shift", "cmd", "ctrl") separated by "+", and returns their combined bitmask.
@@ -3143,6 +3153,83 @@ window_grow = "alt - minus"
         config.find_keybind(minus_keycode, Modifiers::ALT),
         Some(Command::Window(Operation::Resize(ResizeDirection::Grow)))
     ));
+}
+
+#[test]
+fn test_digit_names_bind_the_top_row_when_only_the_keypad_types_digits() {
+    // The characters French AZERTY types without Shift.
+    let azerty = [
+        (0x00, "q"),
+        (0x06, "w"),
+        (0x0c, "a"),
+        (0x0d, "z"),
+        (0x12, "&"),
+        (0x13, "é"),
+        (0x14, "\""),
+        (0x15, "'"),
+        (0x16, "§"),
+        (0x17, "("),
+        (0x19, "ç"),
+        (0x1a, "è"),
+        (0x1c, "!"),
+        (0x1d, "à"),
+        (0x43, "*"),
+        (0x52, "0"),
+        (0x53, "1"),
+        (0x54, "2"),
+        (0x55, "3"),
+        (0x56, "4"),
+        (0x57, "5"),
+        (0x58, "6"),
+        (0x59, "7"),
+        (0x5b, "8"),
+        (0x5c, "9"),
+    ];
+    let virtual_keys = test_virtual_keymap()
+        .into_iter()
+        .map(
+            |(name, code)| match azerty.iter().find(|(c, _)| *c == code) {
+                Some((_, character)) => ((*character).to_string(), code),
+                None => (name, code),
+            },
+        )
+        .collect::<Vec<_>>();
+    let keycode = |name: &str| keycode_for_key_name(name, &virtual_keys);
+
+    for (digit, top_row) in [
+        ("1", 0x12),
+        ("2", 0x13),
+        ("3", 0x14),
+        ("4", 0x15),
+        ("5", 0x17),
+        ("6", 0x16),
+        ("7", 0x1a),
+        ("8", 0x1c),
+        ("9", 0x19),
+        ("0", 0x1d),
+    ] {
+        assert_eq!(
+            keycode(digit),
+            Some(top_row),
+            "{digit} must bind the top-row key"
+        );
+    }
+    assert_eq!(keycode("&"), Some(0x12));
+    assert_eq!(
+        keycode("a"),
+        Some(0x0c),
+        "a letter must bind the key that types it, not its US position"
+    );
+    assert_eq!(
+        keycode("keypad1"),
+        Some(0x53),
+        "keypad names must still bind the keypad"
+    );
+    assert_eq!(
+        keycode("*"),
+        Some(0x43),
+        "a character that only a keypad key types must still bind that key"
+    );
 }
 
 #[test]

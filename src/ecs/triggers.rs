@@ -821,7 +821,7 @@ pub(super) fn window_unmanaged_trigger(
         let h = round_px(f64::from(display_bounds.height()) * rh);
         ctx.commands.reposition_entity(entity, Origin::new(x, y));
         ctx.commands.resize_entity(entity, Size::new(w, h));
-    } else if initializing.is_none() && !properties.floating() {
+    } else if initializing.is_none() && !properties.floating(window) {
         let max_width = display_bounds.width() * UNMANAGED_MAX_SCREEN_RATIO_NUM
             / UNMANAGED_MAX_SCREEN_RATIO_DEN;
         let max_height = display_bounds.height() * UNMANAGED_MAX_SCREEN_RATIO_NUM
@@ -1365,7 +1365,7 @@ pub(super) fn apply_window_defaults(
         let initializing = initializing.is_some();
 
         // Do not add padding to floating windows.
-        if properties.floating() {
+        if properties.floating(window) {
             // Skip grid_ratios during init: we don't know this window's display.
             if !initializing && let Some((rx, ry, rw, rh)) = properties.grid_ratios() {
                 let bounds = active_display.actual_bounds(&config);
@@ -1528,7 +1528,7 @@ pub(super) fn apply_window_positions(
 
         let properties = WindowProperties::new(app, window, &ctx.config);
 
-        if properties.floating() {
+        if properties.floating(window) {
             if let Some(mut strip) = workspaces
                 .iter_mut()
                 .find_map(|(_, strip, _, _, _, _)| strip.contains(entity).then_some(strip))

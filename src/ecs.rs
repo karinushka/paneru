@@ -1165,14 +1165,15 @@ impl WindowProperties {
         Self { params }
     }
 
-    pub fn floating(&self) -> bool {
+    /// Whether the window floats by rule or because its size cannot be set.
+    pub fn floating(&self, window: &Window) -> bool {
         if matches!(self.desktop(), Some(crate::config::DesktopRuleTarget::All)) {
             return true;
         }
         self.params
             .iter()
             .find_map(|props| props.floating)
-            .unwrap_or(false)
+            .unwrap_or_else(|| !window.is_resizable())
     }
 
     pub fn desktop(&self) -> Option<crate::config::DesktopRuleTarget> {

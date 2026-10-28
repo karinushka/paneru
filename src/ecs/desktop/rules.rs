@@ -84,7 +84,7 @@ pub(super) fn apply_window_desktop_rules(
             entity,
             window.id(),
             rule_target,
-            props.floating(),
+            props.floating(window),
             census,
             &mut bridge,
             &mut world,

@@ -4694,3 +4694,72 @@ fn observer_registration_recovery(all_failed: bool) {
         "successful registration must stop retrying"
     );
 }
+
+/// Quitting while the strip is still animating must not let the animation
+/// write over the frames exit cleanup restores in the same frame.
+#[test]
+fn test_exit_mid_animation_keeps_the_restored_frames() {
+    use bevy::app::{AppExit, Last, PostUpdate};
+    use bevy::ecs::system::RunSystemOnce;
+
+    use crate::manager::Display;
+
+    let config: Config = (
+        MainOptions {
+            animation_speed: Some(8.0),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+    let mut harness = TestHarness::new()
+        .with_config(config)
+        .with_window(0, |window| {
+            window.frame = IRect::new(100, 120, 100 + 700, 120 + 400);
+        })
+        .with_window(1, |window| {
+            window.frame = IRect::new(200, 150, 200 + 700, 150 + 300);
+        });
+    harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+    harness.advance(Duration::from_secs(3));
+    harness.world().write_message::<Event>(Event::Command {
+        command: Command::Window(Operation::Focus(Direction::East)),
+    });
+    harness.advance(Duration::from_millis(40));
+
+    let world = harness.world();
+    assert!(
+        world
+            .query_filtered::<(), With<RepositionMarker>>()
+            .iter(world)
+            .next()
+            .is_some(),
+        "the strip is still animating"
+    );
+
+    // One exit frame. Exit cleanup stands in for `Update`, where it used to
+    // run, because `Update`'s state-saving exit systems would write the real
+    // user state file. The animation's frame writes follow in `PostUpdate`.
+    world.write_message(AppExit::Success);
+    world
+        .run_system_once(crate::ecs::systems::cleanup_on_exit)
+        .expect("running cleanup_on_exit");
+    world.run_schedule(PostUpdate);
+    world.run_schedule(Last);
+
+    let bounds = world
+        .query::<&Display>()
+        .single(world)
+        .expect("one display")
+        .bounds();
+    for window in world.query::<&Window>().iter(world) {
+        let frame = window.frame();
+        let centered = bounds.min + (bounds.size() - frame.size()) / 2;
+        assert_eq!(
+            frame.min,
+            centered,
+            "window {} must stay centered on the display after exit, got {frame:?}",
+            window.id()
+        );
+    }
+}

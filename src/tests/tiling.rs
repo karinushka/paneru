@@ -1185,6 +1185,38 @@ fn test_new_floating_window_takes_focus() {
         ]);
 }
 
+/// A new floating window with a `dont_focus` rule leaves focus where it was.
+#[test]
+fn test_new_floating_window_with_dont_focus_leaves_focus() {
+    let mut params = WindowParams::new("^Window 1$", None);
+    params.floating = Some(true);
+    params.dont_focus = Some(true);
+    let config: Config = (MainOptions::default(), vec![params]).into();
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(1)
+        .with_focused_window(0)
+        .on_iteration(0, |world, state| {
+            let frame = IRect::new(100, 100, 500, 400);
+            let window = state.spawn_window(TEST_PROCESS_ID, TEST_WORKSPACE_ID, 1, frame);
+            state.set_focused_window(1);
+            world.trigger(SpawnWindowTrigger(vec![window]));
+        })
+        .on_iteration(2, |world, _state| {
+            assert_focused!(world, 0);
+        })
+        .run(vec![
+            Event::MenuOpened { window_id: 0 },
+            Event::Command {
+                command: Command::PrintState,
+            },
+            Event::Command {
+                command: Command::PrintState,
+            },
+        ]);
+}
+
 /// Regression test: stacking an already-focused window (`Operation::Stack(true)`)
 /// when `auto_center = false` and `continuous_swipe = false` must compute the
 /// strip offset from the window's new layout slot (`layout_position.0 + strip_target`)

@@ -1349,7 +1349,7 @@ fn remember_opener(
 }
 
 #[instrument(level = Level::DEBUG, skip_all)]
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) fn apply_window_positions(
     added: Populated<Entity, Added<Window>>,
     mut workspaces: Query<(
@@ -1407,6 +1407,15 @@ pub(super) fn apply_window_positions(
             if let Ok(mut entity_commands) = ctx.commands.get_entity(entity) {
                 // Avoid managing window if it's floating.
                 entity_commands.try_insert(Unmanaged::Floating);
+            }
+            // As for a tiled window below: the window may have taken focus
+            // before Paneru tracked its app, so no focus event will follow.
+            if initializing.is_none() && !properties.dont_focus() {
+                debug!("Synthesizing WindowFocused for newly spawned floating window {entity}");
+                ctx.commands
+                    .trigger(SendMessageTrigger(Event::WindowFocused {
+                        window_id: window.id(),
+                    }));
             }
             continue;
         }

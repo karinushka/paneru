@@ -88,9 +88,9 @@ pub fn register_commands(app: &mut bevy::app::App) {
                 .in_set(crate::ecs::PostUpdateSet::Bookkeeping)
                 .run_if(resource_changed::<crate::menubar::MenuBarVisibility>),
         );
-    // Registered here (not with the Lua systems) so it's exercised by the mock
-    // harness without a running interpreter.
-    #[cfg(feature = "lua")]
+    // Registered here (not with the Lua systems) and in every build: an IPC
+    // client's `Request::WindowSetApply` needs no embedded interpreter, and the
+    // mock harness exercises it without one.
     app.add_systems(
         PreUpdate,
         crate::ecs::layout_ops::apply_layout_ops.in_set(crate::ecs::PreUpdateSet::Dispatch),

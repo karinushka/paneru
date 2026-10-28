@@ -4,7 +4,7 @@ use std::time::Duration;
 use bevy::app::{App, Plugin, PostUpdate, Update};
 use bevy::ecs::change_detection::DetectChangesMut;
 use bevy::ecs::component::Component;
-use bevy::ecs::entity::Entity;
+use bevy::ecs::entity::{Entity, EntityHashMap};
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::lifecycle::{Add, Remove};
 use bevy::ecs::message::{Message, MessageReader, MessageWriter};
@@ -28,7 +28,7 @@ use super::{
 use crate::commands::visible_floating_entities;
 use crate::config::Config;
 use crate::ecs::display::FloatingLayer;
-use crate::ecs::layout::LayoutStrip;
+use crate::ecs::layout::{Column, LayoutStrip};
 use crate::ecs::params::{ActiveDisplay, GlobalState, WindowCtx, Windows};
 use crate::ecs::scroll::{PageGestureState, PageInFlight};
 use crate::ecs::workspace::RestoreFocusMarker;
@@ -72,6 +72,10 @@ pub struct TierMemory {
 #[derive(Default, Resource)]
 pub struct FocusHistory {
     by_workspace: HashMap<WorkspaceId, TierMemory>,
+    /// The record count at each managed window's latest focus, so a jump into
+    /// a column can return to the window in it that had focus last.
+    managed_recency: EntityHashMap<u64>,
+    records: u64,
 }
 
 impl FocusHistory {
@@ -83,7 +87,11 @@ impl FocusHistory {
     ) {
         let slot = self.by_workspace.entry(workspace).or_default();
         match unmanaged {
-            None => slot.last_managed = Some(entity),
+            None => {
+                slot.last_managed = Some(entity);
+                self.records += 1;
+                self.managed_recency.insert(entity, self.records);
+            }
             Some(Unmanaged::Floating) => slot.last_floating = Some(entity),
             Some(_) => {}
         }
@@ -101,7 +109,19 @@ impl FocusHistory {
             .and_then(|t| t.last_floating)
     }
 
+    /// The window in `column` that had focus most recently, or its top window
+    /// when none of them has had focus.
+    pub fn last_focused_in(&self, column: &Column) -> Option<Entity> {
+        column
+            .window_iter()
+            .filter_map(|entity| Some((entity, *self.managed_recency.get(&entity)?)))
+            .max_by_key(|(_, recency)| *recency)
+            .map(|(entity, _)| entity)
+            .or_else(|| column.top())
+    }
+
     pub fn forget(&mut self, entity: Entity) {
+        self.managed_recency.remove(&entity);
         for slot in self.by_workspace.values_mut() {
             if slot.last_managed == Some(entity) {
                 slot.last_managed = None;
@@ -1045,6 +1065,67 @@ mod tests {
         assert_eq!(history.last_managed(1), None);
         assert_eq!(history.last_floating(2), None);
         assert_eq!(history.last_managed(2), Some(other));
+    }
+
+    #[test]
+    fn last_focused_in_prefers_the_most_recent_window_then_the_top() {
+        use crate::ecs::layout::StackItem;
+
+        let mut world = World::new();
+        let top = world.spawn(()).id();
+        let bottom = world.spawn(()).id();
+        let column = Column::Stack(vec![StackItem::Single(top), StackItem::Single(bottom)]);
+        let mut history = FocusHistory::default();
+
+        assert_eq!(history.last_focused_in(&column), Some(top));
+
+        history.record(1, top, None);
+        history.record(2, bottom, None);
+        assert_eq!(history.last_focused_in(&column), Some(bottom));
+
+        history.record(1, top, Some(&Unmanaged::Floating));
+        assert_eq!(
+            history.last_focused_in(&column),
+            Some(bottom),
+            "focus while floating does not count as focus in the column"
+        );
+
+        history.forget(bottom);
+        assert_eq!(history.last_focused_in(&column), Some(top));
+    }
+
+    #[test]
+    fn application_exit_forgets_its_windows() {
+        use crate::ecs::BProcess;
+        use crate::events::Event;
+        use crate::manager::Window;
+        use crate::tests::{TEST_WORKSPACE_ID, TestHarness};
+
+        let mut harness = TestHarness::new().with_windows(1);
+        harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+        let world = harness.world();
+        let window = world
+            .query_filtered::<Entity, With<Window>>()
+            .single(world)
+            .expect("one window");
+        world
+            .resource_mut::<FocusHistory>()
+            .record(TEST_WORKSPACE_ID, window, None);
+        let psn = world
+            .query::<&BProcess>()
+            .single(world)
+            .expect("one process")
+            .0
+            .psn();
+
+        world.write_message(Event::ApplicationTerminated { psn });
+        harness.advance(Duration::from_millis(100));
+
+        let world = harness.world();
+        assert!(world.get_entity(window).is_err(), "the window is despawned");
+        let history = world.resource::<FocusHistory>();
+        assert_eq!(history.last_managed(TEST_WORKSPACE_ID), None);
+        assert!(history.managed_recency.is_empty());
     }
 
     #[test]

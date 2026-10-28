@@ -4822,3 +4822,74 @@ fn test_exit_cleanup_leaves_minimized_windows_in_place() {
         "exit cleanup must not move or resize a minimized window"
     );
 }
+
+/// Hiding an app marks its tiled windows `Unmanaged::Hidden` but leaves their
+/// tiled frames, some of them parked at the display edge. Exit cleanup must
+/// still center them, or they come back as slivers when the user unhides the
+/// app after Paneru has quit.
+#[test]
+fn test_exit_cleanup_centers_hidden_app_windows() {
+    use bevy::app::AppExit;
+    use bevy::ecs::system::RunSystemOnce as _;
+
+    const WINDOWS: i32 = 5;
+
+    let commands = vec![
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::ApplicationHidden {
+            pid: TEST_PROCESS_ID,
+        },
+    ];
+
+    TestHarness::new()
+        .with_windows(WINDOWS)
+        .on_iteration(1, |world, _state| {
+            let mut query = world.query::<(&Window, Option<&Unmanaged>)>();
+            let off_screen = query
+                .iter(world)
+                .inspect(|(window, unmanaged)| {
+                    assert!(
+                        matches!(unmanaged, Some(Unmanaged::Hidden)),
+                        "window {} should be hidden with its app",
+                        window.id()
+                    );
+                })
+                .filter(|(window, _)| window.frame().max.x > TEST_DISPLAY_WIDTH)
+                .count();
+            assert!(
+                off_screen > 0,
+                "some windows should reach past the display edge"
+            );
+
+            world.write_message(AppExit::Success);
+            world
+                .run_system_once(crate::ecs::systems::cleanup_on_exit)
+                .expect("running cleanup_on_exit");
+
+            let mut query = world.query::<&Window>();
+            let mut frames = query
+                .iter(world)
+                .map(|window| (window.id(), window.frame()))
+                .collect::<Vec<_>>();
+            frames.sort_by_key(|(id, _)| *id);
+            let centered = frames
+                .iter()
+                .map(|(id, frame)| {
+                    let origin = Origin::new(
+                        (TEST_DISPLAY_WIDTH - frame.width()) / 2,
+                        TEST_MENUBAR_HEIGHT
+                            + (TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT - frame.height()) / 2,
+                    );
+                    (*id, IRect::from_corners(origin, origin + frame.size()))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(frames.len(), WINDOWS as usize);
+            assert_eq!(
+                frames, centered,
+                "exit cleanup must center every hidden window"
+            );
+        })
+        .run(commands);
+}

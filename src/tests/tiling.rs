@@ -1127,6 +1127,64 @@ fn test_startup_floating_window_does_not_steal_initial_focus_or_enter_strip() {
         .run(commands);
 }
 
+/// A new window that opens floating and focused takes focus in Paneru, so
+/// `window_manage` acts on it, not on the window focused before it. macOS does
+/// not report the focus change here, as when the app was not tracked yet.
+#[test]
+fn test_new_floating_window_takes_focus() {
+    let mut params = WindowParams::new("^Window 1$", None);
+    params.floating = Some(true);
+    let config: Config = (MainOptions::default(), vec![params]).into();
+
+    let floating = |world: &mut World, id| {
+        let entity = find_window_entity(id, world);
+        matches!(
+            world.entity(entity).get::<crate::ecs::Unmanaged>(),
+            Some(crate::ecs::Unmanaged::Floating)
+        )
+    };
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(1)
+        .with_focused_window(0)
+        .on_iteration(0, |world, state| {
+            let frame = IRect::new(100, 100, 500, 400);
+            let window = state.spawn_window(TEST_PROCESS_ID, TEST_WORKSPACE_ID, 1, frame);
+            state.set_focused_window(1);
+            world.trigger(SpawnWindowTrigger(vec![window]));
+        })
+        .on_iteration(2, move |world, _state| {
+            assert!(floating(world, 1), "the rule floats window 1");
+        })
+        .on_iteration(4, move |world, _state| {
+            assert!(
+                !floating(world, 0),
+                "window_manage must not float the previously focused window"
+            );
+            assert!(
+                !floating(world, 1),
+                "window_manage must tile the new window"
+            );
+            assert_focused!(world, 1);
+        })
+        .run(vec![
+            Event::MenuOpened { window_id: 0 },
+            Event::Command {
+                command: Command::PrintState,
+            },
+            Event::Command {
+                command: Command::PrintState,
+            },
+            Event::Command {
+                command: Command::Window(Operation::Manage),
+            },
+            Event::Command {
+                command: Command::PrintState,
+            },
+        ]);
+}
+
 /// Regression test: stacking an already-focused window (`Operation::Stack(true)`)
 /// when `auto_center = false` and `continuous_swipe = false` must compute the
 /// strip offset from the window's new layout slot (`layout_position.0 + strip_target`)

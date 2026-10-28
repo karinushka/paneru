@@ -1539,7 +1539,6 @@ fn test_window_resize_mixed_with_center_in_one_frame_does_not_correct_later() {
 }
 
 #[test]
-#[cfg(feature = "lua")]
 fn test_window_resize_lua_width_continuations_preserve_the_original_center() {
     use crate::types::windowset::LayoutOp;
 
@@ -1564,7 +1563,6 @@ fn test_window_resize_lua_width_continuations_preserve_the_original_center() {
 }
 
 #[test]
-#[cfg(feature = "lua")]
 fn test_window_resize_lua_width_on_unfocused_window_cancels_pending_recovery() {
     use crate::types::windowset::LayoutOp;
 

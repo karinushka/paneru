@@ -567,6 +567,12 @@ pub enum Unmanaged {
     Hidden,
 }
 
+/// Marks a minimized window that floated before it was minimized, because
+/// `Unmanaged::Minimized` replaced its `Unmanaged::Floating`. Restoring the
+/// window floats it again instead of tiling it.
+#[derive(Component, Debug)]
+pub struct FloatsWhenRestored;
+
 /// The window a window was opened from, as the column to its right. Closing
 /// it before focus moves to another column hands focus back there.
 #[derive(Clone, Component, Copy, Debug)]

@@ -1064,6 +1064,46 @@ fn test_user_floated_window_stays_floating_after_minimize_and_restore() {
     assert_floats_after_minimize_and_restore(TestHarness::new().with_windows(2), float, 0);
 }
 
+/// A tiled window that is minimized and restored takes a column again.
+#[test]
+fn test_tiled_window_is_tiled_again_after_minimize_and_restore() {
+    let print_state = || Event::Command {
+        command: Command::PrintState,
+    };
+    let in_strip = |world: &mut World| {
+        let entity = find_window_entity(1, world);
+        let mut strips = world.query::<&LayoutStrip>();
+        strips.iter(world).any(|strip| strip.contains(entity))
+    };
+
+    TestHarness::new()
+        .with_windows(2)
+        .on_iteration(1, move |world, state| {
+            assert!(in_strip(world));
+            state.os_minimize_window(1, true);
+        })
+        .on_iteration(2, move |world, state| {
+            assert!(!in_strip(world), "a minimized window leaves the strip");
+            state.os_minimize_window(1, false);
+        })
+        .on_iteration(3, move |world, _state| {
+            assert!(in_strip(world), "the restored window takes a column again");
+            let entity = find_window_entity(1, world);
+            assert!(
+                world
+                    .entity(entity)
+                    .get::<crate::ecs::Unmanaged>()
+                    .is_none()
+            );
+        })
+        .run(vec![
+            print_state(),
+            print_state(),
+            print_state(),
+            print_state(),
+        ]);
+}
+
 // 2026-10-26: A captured Emacs popup disappeared just before focus jumped to
 // the other half-screen tile. Closing an unfocused popup must preserve focus.
 #[test]

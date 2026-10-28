@@ -3075,6 +3075,38 @@ window_grow = "alt - minus"
     ));
 }
 
+#[test]
+fn test_unknown_key_name_does_not_bind_the_a_key() {
+    let input = r#"
+[bindings]
+window_focus_west = ["ctrl+alt-lefarrow", "ctrl+alt-h"]
+window_focus_east = "ctrl+alt-rigtharrow"
+"#;
+    let virtual_keys = test_virtual_keymap();
+    let config = Config {
+        inner: Arc::new(ArcSwap::from_pointee(
+            InnerConfig::parse_config_with_virtual_keys(input, &virtual_keys)
+                .expect("an unknown key name must not reject the whole file"),
+        )),
+    };
+    let keycode = |name: &str| keycode_for_key_name(name, &virtual_keys).unwrap();
+    let chord = Modifiers::CTRL | Modifiers::ALT;
+
+    assert_eq!(keycode("a"), 0);
+    assert_eq!(
+        config.find_keybind(keycode("a"), chord),
+        None,
+        "a mistyped key name must not bind the A key"
+    );
+    assert_eq!(
+        config.find_keybind(keycode("h"), chord),
+        Some(Command::Window(Operation::Focus(
+            crate::commands::Direction::West
+        ))),
+        "the valid chords of the same command must still bind"
+    );
+}
+
 #[cfg(all(test, feature = "lua"))]
 mod lua_setup_tests {
     use super::*;

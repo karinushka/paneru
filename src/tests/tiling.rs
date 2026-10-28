@@ -998,6 +998,65 @@ fn test_closing_unfocused_popup_preserves_editor_focus() {
         ]);
 }
 
+fn assert_shown_whole(world: &mut World, id: i32) {
+    let mut query = world.query::<&crate::manager::Window>();
+    let frame = query
+        .iter(world)
+        .find(|window| window.id() == id)
+        .unwrap_or_else(|| panic!("window {id} not found"))
+        .frame();
+    assert!(
+        frame.min.x >= 0 && frame.max.x <= TEST_DISPLAY_WIDTH,
+        "window {id} must be shown whole on the display, got {frame:?}"
+    );
+}
+
+/// Windows left of the focused one close while it keeps focus. Each close
+/// pulls the columns after it left while the strip's origin stays put, so the
+/// focused window has to be scrolled back into view.
+#[test]
+fn test_focused_survivor_stays_shown_when_windows_left_of_it_close() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::Last)),
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    TestHarness::new()
+        .with_windows(4)
+        .on_iteration(1, |world, state| {
+            assert_focused!(world, 3);
+            assert_shown_whole(world, 3);
+            state.os_close_window(0);
+        })
+        .on_iteration(2, |world, state| {
+            assert!(!window_exists(world, 0));
+            assert_shown_whole(world, 3);
+            state.os_close_window(1);
+        })
+        .on_iteration(3, |world, state| {
+            assert!(!window_exists(world, 1));
+            assert_shown_whole(world, 3);
+            state.os_close_window(2);
+        })
+        .on_iteration(4, |world, _state| {
+            assert!(!window_exists(world, 2));
+            assert_focused!(world, 3);
+            assert_shown_whole(world, 3);
+        })
+        .run(commands);
+}
+
 fn window_x(world: &mut World, id: i32) -> i32 {
     let mut query = world.query::<&crate::manager::Window>();
     query

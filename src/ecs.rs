@@ -611,11 +611,29 @@ pub struct FloatsWhenRestored;
 #[derive(Clone, Component, Copy, Debug)]
 pub struct OpenedFrom(pub Entity);
 
+/// The strip slot a window left when it stopped being managed, so managing it
+/// again returns it there.
 #[derive(Clone, Component, Copy, Debug)]
 pub struct PreviousManagedStrip {
     pub workspace_id: WorkspaceId,
     pub virtual_index: u32,
     pub index: usize,
+    pub rejoin: Rejoin,
+}
+
+impl PreviousManagedStrip {
+    pub fn came_from(&self, strip: &LayoutStrip) -> bool {
+        strip.id() == self.workspace_id && strip.virtual_index == self.virtual_index
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rejoin {
+    /// A restored minimized window returns to its row, even off screen.
+    AnyRow,
+    /// A floating window is tiled where the user is looking, so it returns to
+    /// its slot only while its row is on screen.
+    VisibleRow,
 }
 
 /// Wrapper component for a `ProcessApi` trait object, enabling dynamic dispatch for process-related operations within Bevy.

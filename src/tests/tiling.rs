@@ -884,6 +884,68 @@ fn test_floating_window_does_not_hold_a_slot_in_the_strip() {
         .run(commands);
 }
 
+fn active_strip_window_ids(world: &mut World) -> Vec<i32> {
+    let columns = world
+        .query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>()
+        .single(world)
+        .expect("an active workspace")
+        .all_columns();
+    let mut windows = world.query::<&crate::manager::Window>();
+    columns
+        .into_iter()
+        .map(|entity| windows.get(world, entity).expect("a window").id())
+        .collect()
+}
+
+fn float_and_retile_middle_window(config: Config) {
+    let commands = vec![
+        Event::Command {
+            command: Command::PrintState,
+        }, // 0
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        }, // 1
+        Event::Command {
+            command: Command::Window(Operation::Manage),
+        }, // 2: float window 1
+        Event::Command {
+            command: Command::Window(Operation::Manage),
+        }, // 3: tile it again
+    ];
+
+    let order = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let before = order.clone();
+    let after = order;
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(3)
+        .on_iteration(1, move |world, _state| {
+            assert_focused!(world, 1);
+            *before.borrow_mut() = active_strip_window_ids(world);
+        })
+        .on_iteration(3, move |world, _state| {
+            assert_eq!(
+                active_strip_window_ids(world),
+                *after.borrow(),
+                "the re-tiled window must return to the slot it floated from"
+            );
+        })
+        .run(commands);
+}
+
+#[test]
+fn test_retiled_window_returns_to_its_slot() {
+    float_and_retile_middle_window(Config::default());
+}
+
+/// A rule's `index` places a new window, not one that left its slot to float.
+#[test]
+fn test_retiled_window_returns_to_its_slot_despite_an_insertion_rule() {
+    let mut params = WindowParams::new(".*", None);
+    params.index = Some(0);
+    float_and_retile_middle_window((MainOptions::default(), vec![params]).into());
+}
+
 #[test]
 fn test_unordered_window_releases_its_layout_space() {
     let mut harness = TestHarness::new().with_windows(3);

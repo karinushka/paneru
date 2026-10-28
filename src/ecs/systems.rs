@@ -1047,6 +1047,34 @@ pub(crate) fn window_moved_update_frame(
     }
 }
 
+/// Spawns a process that was already running at startup. One that isn't
+/// Regular yet, such as an app keeping its Dock icon hidden while it sits in
+/// the menu bar, is kept with its activation policy watched (`ready` arms
+/// that), so it is adopted when it turns Regular, as a launched one is.
+pub(crate) fn spawn_initial_process(mut process: BProcess, forced: bool, commands: &mut Commands) {
+    if process.is_observable() || forced {
+        if forced {
+            debug!(
+                "Forcing management of existing process '{}' despite unobservable policy.",
+                process.name()
+            );
+            process.force_manage(true);
+        } else {
+            debug!("Adding existing process {}", process.name());
+        }
+        commands.spawn((ExistingMarker, process));
+    } else if process.ready() {
+        // Turned Regular since `is_observable` asked.
+        commands.spawn((ExistingMarker, process));
+    } else {
+        debug!(
+            "Existing application '{}' is not observable yet, watching its activation policy.",
+            process.name(),
+        );
+        commands.spawn(process);
+    }
+}
+
 pub(crate) fn gather_initial_processes(
     receiver: Option<NonSendMut<Receiver<Event>>>,
     existing_config: Option<Res<Config>>,
@@ -1092,28 +1120,11 @@ pub(crate) fn gather_initial_processes(
         }
     }
 
-    while let Some(mut process) = initial_processes.pop() {
+    while let Some(process) = initial_processes.pop() {
         let forced = effective
             .as_ref()
             .is_some_and(|c| c.should_force_manage_process(&**process));
-
-        if process.is_observable() || forced {
-            if forced {
-                debug!(
-                    "Forcing management of existing process '{}' despite unobservable policy.",
-                    process.name()
-                );
-                process.force_manage(true);
-            } else {
-                debug!("Adding existing process {}", process.name());
-            }
-            commands.spawn((ExistingMarker, process));
-        } else {
-            debug!(
-                "Existing application '{}' is not observable, ignoring it.",
-                process.name(),
-            );
-        }
+        spawn_initial_process(process, forced, &mut commands);
     }
 
     // The input event tap holds its own clone of the `Config` handle from

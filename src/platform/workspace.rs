@@ -411,6 +411,88 @@ mod delayed_readiness_tests {
         crate::tests::find_window_entity(43, harness.world());
     }
 
+    /// An app that hid its Dock icon (Bitwarden in the menu bar) when Paneru
+    /// started is kept and watched, and adopted once it turns Regular.
+    #[test]
+    fn app_without_dock_icon_at_startup_is_adopted_when_it_turns_regular() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let mut harness = TestHarness::new().with_windows(1);
+        harness.advance(Duration::from_secs(1));
+        let pid = 44;
+        harness
+            .mock_state
+            .spawn_app(pid, "com.bitwarden.desktop", "Bitwarden");
+        let regular = Arc::new(AtomicBool::new(false));
+        let mut process = crate::manager::MockProcessApi::new();
+        process.expect_pid().return_const(pid);
+        let psn = crate::platform::ProcessSerialNumber {
+            high: 0,
+            low: pid.cast_unsigned(),
+        };
+        process.expect_psn().return_const(psn);
+        process.expect_name().return_const("Bitwarden".to_string());
+        process.expect_application().return_const(None);
+        let flag = regular.clone();
+        process
+            .expect_is_observable()
+            .returning(move || flag.load(Ordering::SeqCst));
+        let flag = regular.clone();
+        process
+            .expect_ready()
+            .returning(move || flag.load(Ordering::SeqCst));
+
+        {
+            let world = harness.world();
+            let mut commands = world.commands();
+            crate::ecs::systems::spawn_initial_process(
+                BProcess(Box::new(process)),
+                false,
+                &mut commands,
+            );
+            world.flush();
+        }
+        let mut wm = harness.mock_state.create_window_manager();
+        let state = harness.mock_state.clone();
+        wm.expect_new_application()
+            .returning(move |process| Ok(state.create_application(process.pid())));
+        harness.world().insert_resource(WindowManager(Box::new(wm)));
+        harness.mock_state.spawn_window(
+            pid,
+            TEST_WORKSPACE_ID,
+            44,
+            bevy::math::IRect::new(0, 0, 400, 600),
+        );
+        harness.advance(Duration::from_secs(70));
+        let world = harness.world();
+        assert!(
+            world
+                .query::<&BProcess>()
+                .iter(world)
+                .any(|p| p.pid() == pid),
+            "the process must be kept while it waits to turn Regular"
+        );
+
+        // The activation policy KVO fires as the app shows its Dock icon.
+        regular.store(true, Ordering::SeqCst);
+        let (events, _receiver) = crate::events::EventSender::new();
+        let observer = WorkspaceObserver::new(events);
+        harness
+            .world()
+            .write_message(crate::events::Event::ApplicationLaunched { psn, observer });
+        harness.advance(Duration::from_secs(2));
+        let world = harness.world();
+        assert!(
+            world
+                .query::<&Application>()
+                .iter(world)
+                .any(|app| app.pid() == pid),
+            "turning Regular must adopt the app"
+        );
+        crate::tests::find_window_entity(44, harness.world());
+    }
+
     #[test]
     fn headless_process_is_despawned_after_recovery_window() {
         let mut harness = TestHarness::new().with_windows(1);

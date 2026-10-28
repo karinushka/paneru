@@ -2043,6 +2043,12 @@ enum UCKeyAction {
 ///
 /// A `Vec<(String, u8)>` containing the translated key names and their keycodes. Returns an empty vector if an error occurs during keyboard layout fetching.
 fn generate_virtual_keymap() -> Vec<(String, u8)> {
+    // HIToolbox aborts the process when two threads call TIS at once, as
+    // parallel tests do.
+    static TIS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = TIS_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let keyboard = AXUIWrapper::from_retained(unsafe {
         TISCopyCurrentASCIICapableKeyboardLayoutInputSource()
     })

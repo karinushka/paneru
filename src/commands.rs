@@ -1356,7 +1356,7 @@ fn to_next_display(
     let dest = other.bounds().min.with_x(center - size.x / 2);
     commands.reposition_entity(entity, dest);
 
-    if matches!(move_focus, MoveFocus::Follow) {
+    if matches!(move_focus, MoveFocus::Follow) && config.mouse_follows_focus() {
         window_manager.warp_mouse(other.bounds().center());
     }
 

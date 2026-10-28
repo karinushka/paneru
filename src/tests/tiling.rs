@@ -2038,6 +2038,35 @@ fn test_float_ignores_window_macos_no_longer_focuses() {
         .run(commands);
 }
 
+/// An app too busy to answer the focused-window query must not block the
+/// float key, so only a different answer from macOS skips the toggle.
+#[test]
+fn test_float_proceeds_when_the_app_cannot_report_focus() {
+    let commands = vec![
+        Event::Command {
+            command: Command::PrintState,
+        }, // 0
+        Event::Command {
+            command: Command::Window(Operation::Manage),
+        }, // 1
+    ];
+
+    TestHarness::new()
+        .with_windows(2)
+        .with_focused_window(0)
+        .on_iteration(0, |_world, state| {
+            state.update_app(TEST_PROCESS_ID, |app| app.focused_window_id = None);
+        })
+        .on_iteration(1, |world, _state| {
+            let entity = find_window_entity(0, world);
+            assert!(
+                world.get::<crate::ecs::Unmanaged>(entity).is_some(),
+                "window 0 must float when its app cannot report focus"
+            );
+        })
+        .run(commands);
+}
+
 /// macOS can focus another window of the same app before its focus event
 /// reaches the engine. The float key must not float the window the user left.
 #[test]

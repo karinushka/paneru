@@ -1193,6 +1193,7 @@ fn full_width_window(
 fn manage_window(
     mut messages: MessageReader<Event>,
     windows: Windows,
+    apps: Query<&Application>,
     mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     mut commands: Commands,
 ) {
@@ -1209,6 +1210,22 @@ fn manage_window(
     else {
         return;
     };
+    // The focus mark stays on the last managed window while macOS focuses a
+    // window the engine does not manage. Only skip when macOS reports another
+    // window, so an app too busy to answer can still float its window.
+    let focused_elsewhere = windows
+        .find_parent(window.id())
+        .and_then(|(_, _, parent)| apps.get(parent).ok())
+        .is_some_and(|app| {
+            !app.is_frontmost() || app.focused_window_id().is_ok_and(|id| id != window.id())
+        });
+    if focused_elsewhere {
+        debug!(
+            "not toggling window {}: macOS has focused another window",
+            window.id()
+        );
+        return;
+    }
     debug!(
         "window: {} {entity} unmanaged: {}.",
         window.id(),

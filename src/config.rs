@@ -1260,6 +1260,15 @@ impl OneOrMore {
             OneOrMore::Multiple(many) => many.iter_mut().collect::<Vec<_>>(),
         }
     }
+
+    fn retain(&mut self, keep: impl FnMut(&mut Keybinding) -> bool) {
+        let mut many = match std::mem::replace(self, OneOrMore::Multiple(Vec::new())) {
+            OneOrMore::Single(one) => vec![one],
+            OneOrMore::Multiple(many) => many,
+        };
+        many.retain_mut(keep);
+        *self = OneOrMore::Multiple(many);
+    }
 }
 
 /// `InnerConfig` holds the actual configuration data parsed from a file, including options, keybindings, and window parameters.
@@ -1337,14 +1346,19 @@ impl InnerConfig {
             let argv = command.split('_').collect::<Vec<_>>();
             for binding in bindings.all_mut() {
                 binding.command = parse_command(&argv)?;
-
+            }
+            // An unresolved binding keeps the deserialized code 0, which is
+            // the A key, so it must go.
+            bindings.retain(|binding| {
                 if let Some(code) = keycode_for_key_name(&binding.key, virtual_keys) {
                     binding.code = code;
                     info!("bind: {binding:?}");
+                    true
                 } else {
                     error!("{}: invalid key '{}'", function_name!(), &binding.key);
+                    false
                 }
-            }
+            });
         }
 
         // Resolve passthrough keybinding strings into (keycode, modifiers) pairs.

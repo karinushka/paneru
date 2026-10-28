@@ -246,6 +246,56 @@ fn test_next_display_inserts_into_target_strip() {
         .run(commands);
 }
 
+/// A window macOS filled covers its display and ignores the edge padding, so
+/// it is wider than the tiled viewport. Moved to another display, it fits
+/// that display's viewport instead of keeping the extra width past its edge.
+#[test]
+fn test_next_display_fits_a_filled_window_to_the_target_viewport() {
+    const PADDING: u16 = 40;
+    let config: Config = (
+        MainOptions {
+            padding_left: Some(PADDING),
+            padding_right: Some(PADDING),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+    let mut harness = TestHarness::new()
+        .with_config(config)
+        .with_windows(1)
+        .with_display(
+            EXT_DISPLAY_ID,
+            IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+            vec![EXT_WORKSPACE_ID],
+        );
+    harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+    harness
+        .mock_state
+        .os_move_window(0, Origin::new(0, TEST_MENUBAR_HEIGHT));
+    harness.mock_state.os_resize_window(
+        0,
+        Size::new(
+            TEST_DISPLAY_WIDTH,
+            TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT,
+        ),
+    );
+    harness.advance(Duration::from_secs(1));
+
+    harness.run(vec![Event::Command {
+        command: Command::Window(Operation::ToNextDisplay(MoveFocus::Follow)),
+    }]);
+    harness.advance(Duration::from_secs(1));
+
+    let padding = i32::from(PADDING);
+    let frame = harness.mock_state.create_window(0).frame();
+    assert_eq!(
+        (frame.min.x, frame.max.x),
+        (padding, EXT_DISPLAY_WIDTH - padding),
+        "the filled window must fit the target viewport, got {frame:?}"
+    );
+}
+
 #[test]
 fn test_send_next_display_stays_on_source() {
     let mut harness = TestHarness::new();

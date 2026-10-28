@@ -1243,7 +1243,11 @@ impl LayoutStrip {
                         .filter_map(|item| item.top().and_then(get_window_frame))
                         .map(|frame| frame.height())
                         .collect::<Vec<_>>();
-                    binpack_heights(&current_heights, MIN_WINDOW_HEIGHT, layout_strip_height)?
+                    // When binpack gives up, for example on a column too short
+                    // for every window's minimum, an even split still places
+                    // every window rather than leaving the column out.
+                    binpack_heights(&current_heights, MIN_WINDOW_HEIGHT, layout_strip_height)
+                        .unwrap_or_else(|| even_heights(current_heights.len(), layout_strip_height))
                 };
 
                 // Every window in a column shares one width, so a window
@@ -1629,8 +1633,9 @@ fn binpack_heights(heights: &[i32], min_height: i32, total_height: i32) -> Optio
     }
 
     let remaining = i32::try_from(heights.len() - count).ok()?;
-    if remaining > 0 && count > 0 {
-        count -= 1;
+    if remaining > 0 {
+        // Zero when not even the first window kept its height.
+        count = count.checked_sub(1)?;
         output.truncate(count);
         let sum = output.iter().sum::<i32>();
         // Integer division (floor) on purpose: rounding here could make the
@@ -1647,6 +1652,16 @@ fn binpack_heights(heights: &[i32], min_height: i32, total_height: i32) -> Optio
     }
 
     Some(output)
+}
+
+/// `total_height` split into `count` heights that sum to it exactly.
+fn even_heights(count: usize, total_height: i32) -> Vec<i32> {
+    let Ok(count) = i32::try_from(count) else {
+        return vec![];
+    };
+    (0..count)
+        .map(|row| total_height * (row + 1) / count - total_height * row / count)
+        .collect()
 }
 
 /// Watches for size changes to windows and if they are changed, signals to the layout strip.
@@ -2658,6 +2673,17 @@ mod tests {
 
         let out = binpack_heights(&heights, MIN_HEIGHT, 390);
         assert_eq!(out, None);
+
+        // Not even the first window keeps its height.
+        let out = binpack_heights(&[500, 300, 300, 300], MIN_HEIGHT, 390);
+        assert_eq!(out, None);
+    }
+
+    #[test]
+    fn test_even_heights() {
+        assert_eq!(even_heights(3, 1000), vec![333, 333, 334]);
+        assert_eq!(even_heights(4, 748), vec![187, 187, 187, 187]);
+        assert_eq!(even_heights(0, 748), Vec::<i32>::new());
     }
 
     #[test]

@@ -115,7 +115,7 @@ pub fn menu_bar_command_handler(
         if let Event::Command {
             command: Command::MenuBar(enabled),
         } = event
-            && visibility.enabled != Some(*enabled)
+            && (visibility.enabled != Some(*enabled) || visibility.dirty)
         {
             visibility.enabled = Some(*enabled);
             visibility.dirty = true;
@@ -1340,6 +1340,46 @@ mod tests {
         harness.app.update();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), shown);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn repeated_menu_bar_choice_retries_a_failed_save() {
+        use crate::tests::TestHarness;
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("paneru-menu-retry-{}-{stamp}", std::process::id()));
+        // A file where the preference directory belongs makes the save fail.
+        std::fs::write(&directory, "").unwrap();
+        let path = directory.join("menu-bar.json");
+        let (blocked, unsaved, saved) = (directory.clone(), path.clone(), path.clone());
+
+        let mut harness = TestHarness::new();
+        harness
+            .app
+            .insert_resource(MenuBarPreferenceFile(path.clone()));
+        harness
+            .on_iteration(0, move |_, _| {
+                assert!(!unsaved.exists());
+                std::fs::remove_file(&blocked).unwrap();
+                std::fs::create_dir(&blocked).unwrap();
+            })
+            .on_iteration(1, move |world, _| {
+                assert!(saved.exists(), "the repeated choice must be saved");
+                assert!(!MenuBarVisibility::load(&saved).enabled(world.resource::<Config>()));
+            })
+            .run(vec![
+                Event::Command {
+                    command: Command::MenuBar(false),
+                },
+                Event::Command {
+                    command: Command::MenuBar(false),
+                },
+            ]);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

@@ -314,6 +314,35 @@ fn test_window_resize_grow_and_shrink_cycle() {
         .run(commands);
 }
 
+#[test]
+fn test_window_resize_pressed_during_the_animation_advances_to_the_next_preset() {
+    let mut params = WindowParams::new(".*", None);
+    params.width = Some(InitialWindowWidth::Ratio(0.45));
+    let config: Config = (
+        MainOptions {
+            preset_column_widths: vec![0.25, 0.5, 0.75],
+            animation_speed: Some(8.0),
+            ..Default::default()
+        },
+        vec![params],
+    )
+        .into();
+    let mut harness = TestHarness::new().with_config(config).with_windows(1);
+    harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+    harness.advance(Duration::from_secs(2));
+    assert_window_size!(harness.world(), 0, 461, 748);
+
+    let grow = || Event::Command {
+        command: Command::Window(Operation::Resize(ResizeDirection::Grow)),
+    };
+    harness.world().write_message::<Event>(grow());
+    harness.advance(Duration::from_millis(100));
+    harness.world().write_message::<Event>(grow());
+    harness.advance(Duration::from_secs(3));
+
+    assert_window_size!(harness.world(), 0, 256, 748);
+}
+
 /// Stacks two windows, then cycles the focused one's height through the
 /// presets. The window above it — the only neighbour, since the focused one is
 /// last in the stack — absorbs the whole difference, and the column keeps

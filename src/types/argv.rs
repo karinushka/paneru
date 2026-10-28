@@ -77,20 +77,22 @@ fn parse_operation(argv: &[&str]) -> Result<Operation> {
         "togglefloatlayer" => Operation::ToggleFloatingLayer,
         "swap" => Operation::Swap(Direction::parse(argument()?)?),
         "center" => Operation::Center,
-        "resize" => Operation::Resize(
-            argv.get(1)
-                .map_or(Ok(ResizeDirection::Grow), |arg| ResizeDirection::parse(arg))?,
-        ),
+        "resize" => Operation::Resize(resize_direction_or_grow(argv.get(1).copied())?),
         "grow" => Operation::Resize(ResizeDirection::Grow),
         "shrink" => Operation::Resize(ResizeDirection::Shrink),
+        "step" => Operation::ResizeStep(resize_direction_or_grow(argv.get(1).copied())?),
         // `window_vertical_resize` / `_grow` / `_shrink`, plus the explicit
-        // `window_vertical_resize_shrink` mirroring `window_resize_shrink`.
-        "vertical" => Operation::ResizeVertical(match argv.get(1).copied() {
-            None | Some("resize") => argv
-                .get(2)
-                .map_or(Ok(ResizeDirection::Grow), |arg| ResizeDirection::parse(arg))?,
-            Some(arg) => ResizeDirection::parse(arg)?,
-        }),
+        // `window_vertical_resize_shrink` mirroring `window_resize_shrink`, and
+        // `window_vertical_step_grow` / `_shrink`.
+        "vertical" => match argv.get(1).copied() {
+            None | Some("resize") => {
+                Operation::ResizeVertical(resize_direction_or_grow(argv.get(2).copied())?)
+            }
+            Some("step") => {
+                Operation::ResizeVerticalStep(resize_direction_or_grow(argv.get(2).copied())?)
+            }
+            Some(arg) => Operation::ResizeVertical(ResizeDirection::parse(arg)?),
+        },
         "fullwidth" => Operation::FullWidth,
         "manage" => Operation::Manage,
         "equalize" => Operation::Equalize,
@@ -134,6 +136,11 @@ fn parse_operation(argv: &[&str]) -> Result<Operation> {
         ),
         _ => return Err(err()),
     })
+}
+
+/// The resize verbs grow when the direction is omitted.
+fn resize_direction_or_grow(argument: Option<&str>) -> Result<ResizeDirection> {
+    argument.map_or(Ok(ResizeDirection::Grow), ResizeDirection::parse)
 }
 
 /// Resolves a `virtual*` argument that may be a direction or a 1-based number.
@@ -323,6 +330,10 @@ impl Operation {
             Operation::ResizeVertical(direction) => {
                 owned(&["vertical", "resize", direction.token()])
             }
+            Operation::ResizeStep(direction) => owned(&["step", direction.token()]),
+            Operation::ResizeVerticalStep(direction) => {
+                owned(&["vertical", "step", direction.token()])
+            }
             // `SetWidth` comes from window rules, not from a command line; it has
             // no argv verb, so encode it as the equivalent full-width toggle.
             Operation::SetWidth(_) | Operation::FullWidth => owned(&["fullwidth"]),
@@ -481,6 +492,10 @@ mod tests {
             Operation::Resize(ResizeDirection::Shrink),
             Operation::ResizeVertical(ResizeDirection::Grow),
             Operation::ResizeVertical(ResizeDirection::Shrink),
+            Operation::ResizeStep(ResizeDirection::Grow),
+            Operation::ResizeStep(ResizeDirection::Shrink),
+            Operation::ResizeVerticalStep(ResizeDirection::Grow),
+            Operation::ResizeVerticalStep(ResizeDirection::Shrink),
             Operation::FullWidth,
             Operation::ToNextDisplay(MoveFocus::Follow),
             Operation::ToNextDisplay(MoveFocus::Stay),

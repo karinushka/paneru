@@ -672,6 +672,7 @@ fn config_to_lua_table(lua: &Lua, config: &Config) -> mlua::Result<Table> {
         menubar_height: _,
         window_hidden_ratio: _,
         window_resize_cycle: _,
+        window_resize_step: _,
         reap_empty_workspaces: _,
         remember_display_setups: _,
         disable_native_tabs: _,
@@ -704,6 +705,7 @@ fn config_to_lua_table(lua: &Lua, config: &Config) -> mlua::Result<Table> {
     options.set("menubar_height", config.menubar_height())?;
     options.set("window_hidden_ratio", config.window_hidden_ratio())?;
     options.set("window_resize_cycle", config.window_resize_cycle())?;
+    options.set("window_resize_step", config.window_resize_step())?;
     options.set("reap_empty_workspaces", config.reap_empty_workspaces())?;
     options.set("remember_display_setups", config.remember_display_setups())?;
     options.set("disable_native_tabs", !config.native_tabs_enabled())?;

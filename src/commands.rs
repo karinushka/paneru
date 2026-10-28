@@ -180,8 +180,10 @@ fn cancel_resize_intent(
             interrupted |= match command {
                 Command::Window(
                     Operation::Resize(_)
+                    | Operation::ResizeStep(_)
                     | Operation::SetWidth(_)
                     | Operation::ResizeVertical(_)
+                    | Operation::ResizeVerticalStep(_)
                     | Operation::FullWidth,
                 )
                 | Command::PrintState
@@ -987,7 +989,8 @@ fn command_center_window(
     }
 }
 
-/// Resizes the focused window based on preset column widths.
+/// Resizes the focused window to the next or previous preset column width, or
+/// by one `window_resize_step` of the viewport width.
 ///
 /// # Arguments
 ///
@@ -1004,7 +1007,10 @@ fn resize_window(
     mut commands: Commands,
 ) {
     let Some(operation) = filter_window_operations(&mut messages, |op| {
-        matches!(op, Operation::Resize(_) | Operation::SetWidth(_))
+        matches!(
+            op,
+            Operation::Resize(_) | Operation::ResizeStep(_) | Operation::SetWidth(_)
+        )
     })
     .next() else {
         return;
@@ -1055,6 +1061,15 @@ fn resize_window(
                     fallback
                 }
             }),
+        Operation::ResizeStep(direction) => {
+            // Pending resizes count, so a held key keeps stepping.
+            let width = windows.moving_frame(entity).unwrap_or(frame).width();
+            step_ratio(
+                f64::from(width) / f64::from(viewport.width()),
+                *direction,
+                config.window_resize_step(),
+            )
+        }
         _ => return,
     };
 
@@ -1081,9 +1096,18 @@ fn resize_window(
     commands.reshuffle_around(entity);
 }
 
-/// Cycles the focused window's height through `preset_stack_heights`, letting
-/// the neighbour below (or above, when the window is last) absorb the
-/// difference.
+/// One step from `ratio` in `direction`, kept between one step and the full
+/// viewport. A ratio already outside that range never moves further out of it.
+fn step_ratio(ratio: f64, direction: ResizeDirection, step: f64) -> f64 {
+    match direction {
+        ResizeDirection::Grow => (ratio + step).min(ratio.max(1.0)),
+        ResizeDirection::Shrink => (ratio - step).max(ratio.min(step)),
+    }
+}
+
+/// Cycles the focused window's height through `preset_stack_heights`, or
+/// changes it by one `window_resize_step` of the viewport height, letting the
+/// neighbour below (or above, when the window is last) absorb the difference.
 ///
 /// Only stacks are eligible: `binpack_heights` stretches a column's lone member
 /// to the full strip height, so a height written anywhere else is overwritten on
@@ -1095,12 +1119,17 @@ fn resize_window_vertical(
     config: Res<Config>,
     mut commands: Commands,
 ) {
-    let Some(&Operation::ResizeVertical(direction)) =
-        filter_window_operations(&mut messages, |op| {
-            matches!(op, Operation::ResizeVertical(_))
-        })
-        .next()
-    else {
+    let Some((direction, stepped)) = filter_window_operations(&mut messages, |op| {
+        matches!(
+            op,
+            Operation::ResizeVertical(_) | Operation::ResizeVerticalStep(_)
+        )
+    })
+    .find_map(|op| match *op {
+        Operation::ResizeVertical(direction) => Some((direction, false)),
+        Operation::ResizeVerticalStep(direction) => Some((direction, true)),
+        _ => None,
+    }) else {
         return;
     };
 
@@ -1157,6 +1186,7 @@ fn resize_window_vertical(
     // The presets are assumed sorted ascending, and the `0.05` dead-band keeps
     // float noise from re-selecting the preset the window is already at.
     let next_ratio = match direction {
+        _ if stepped => step_ratio(current_ratio, direction, config.window_resize_step()),
         ResizeDirection::Grow => heights
             .iter()
             .copied()

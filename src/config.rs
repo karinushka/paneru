@@ -964,6 +964,15 @@ impl Config {
         self.options().window_resize_cycle.unwrap_or(true)
     }
 
+    /// The share of the viewport that one step resize adds or removes: the
+    /// option when it is above 0 and at most 1, otherwise 0.05.
+    pub fn window_resize_step(&self) -> f64 {
+        self.options()
+            .window_resize_step
+            .filter(|step| step.is_finite() && *step > 0.0 && *step <= 1.0)
+            .unwrap_or(0.05)
+    }
+
     pub fn auto_center(&self) -> bool {
         self.options().auto_center.is_some_and(|center| center)
     }
@@ -1475,6 +1484,10 @@ pub struct MainOptions {
     /// to both the horizontal and the vertical resize commands.
     /// Default: true (cycles). Set to false to stop at the limits.
     pub window_resize_cycle: Option<bool>,
+
+    /// The share of the viewport width or height (0.0-1.0) that the step
+    /// resize commands add or remove. Default: 0.05.
+    pub window_resize_step: Option<f64>,
 
     /// If enabled, an empty virtual workspace will be removed.
     /// Default: true.
@@ -2594,6 +2607,54 @@ fn test_parse_vertical_resize_commands() {
         Command::Window(Operation::ResizeVertical(ResizeDirection::Shrink))
     ));
     assert!(parse_command(&["window", "vertical", "wider"]).is_err());
+}
+
+#[test]
+fn test_parse_step_resize_commands() {
+    let parse = |key: &str| parse_command(&key.split('_').collect::<Vec<_>>()).unwrap();
+    assert!(matches!(
+        parse("window_step"),
+        Command::Window(Operation::ResizeStep(ResizeDirection::Grow))
+    ));
+    assert!(matches!(
+        parse("window_step_grow"),
+        Command::Window(Operation::ResizeStep(ResizeDirection::Grow))
+    ));
+    assert!(matches!(
+        parse("window_step_shrink"),
+        Command::Window(Operation::ResizeStep(ResizeDirection::Shrink))
+    ));
+    assert!(matches!(
+        parse("window_vertical_step"),
+        Command::Window(Operation::ResizeVerticalStep(ResizeDirection::Grow))
+    ));
+    assert!(matches!(
+        parse("window_vertical_step_grow"),
+        Command::Window(Operation::ResizeVerticalStep(ResizeDirection::Grow))
+    ));
+    assert!(matches!(
+        parse("window_vertical_step_shrink"),
+        Command::Window(Operation::ResizeVerticalStep(ResizeDirection::Shrink))
+    ));
+    assert!(parse_command(&["window", "step", "wider"]).is_err());
+}
+
+#[test]
+fn test_window_resize_step_falls_back_to_five_points() {
+    let step = |options: &str| {
+        Config::try_from(format!("[options]\n{options}\n[bindings]\n").as_str())
+            .unwrap()
+            .window_resize_step()
+    };
+    assert!((step("") - 0.05).abs() < f64::EPSILON);
+    assert!((step("window_resize_step = 0.1") - 0.1).abs() < f64::EPSILON);
+    assert!((step("window_resize_step = 1.0") - 1.0).abs() < f64::EPSILON);
+    for invalid in ["0.0", "-0.1", "1.5"] {
+        assert!(
+            (step(&format!("window_resize_step = {invalid}")) - 0.05).abs() < f64::EPSILON,
+            "window_resize_step = {invalid} must fall back to the default"
+        );
+    }
 }
 
 #[test]

@@ -1401,9 +1401,13 @@ fn to_next_display(
                 // Preserve the window's width ratio relative to the target
                 // display's usable viewport (dock- and padding-adjusted), so a
                 // fixed dock is accounted for consistently with the source.
-                let width = width_ratio.map_or(bounds.x, |ratio| {
-                    round_px(ratio * f64::from(viewport_bounds.width()))
-                });
+                // A window wider than its old viewport, such as one macOS
+                // filled, fits the new viewport instead of overflowing it.
+                let width = width_ratio
+                    .map_or(bounds.x, |ratio| {
+                        round_px(ratio * f64::from(viewport_bounds.width()))
+                    })
+                    .min(viewport_bounds.width());
                 let size = Size::new(width, viewport_bounds.height());
                 commands.resize_entity(moved_window, size);
                 commands.reshuffle_around(moved_window);

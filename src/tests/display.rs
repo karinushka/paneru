@@ -3086,3 +3086,125 @@ fn test_next_display_rapid_round_trip_keeps_window_and_skips_stale_resize() {
         "stale refresh_size from Display 2 must not resize window 0 back to Display 2's height: {frame:?}"
     );
 }
+
+const EAST_DISPLAY_ID: u32 = 3;
+const EAST_WORKSPACE_ID: u64 = 30;
+const EAST_DISPLAY_BOUNDS: IRect = IRect {
+    min: IVec2::new(TEST_DISPLAY_WIDTH, 0),
+    max: IVec2::new(TEST_DISPLAY_WIDTH + 1440, 900),
+};
+const NORTH_DISPLAY_BOUNDS: IRect = IRect {
+    min: IVec2::new(0, -EXT_DISPLAY_HEIGHT),
+    max: IVec2::new(EXT_DISPLAY_WIDTH, 0),
+};
+
+/// Parses `argv` the way `paneru send-cmd` does.
+fn send_cmd(argv: &str) -> Event {
+    let argv = argv.split(' ').collect::<Vec<_>>();
+    let command = crate::types::commands::parse_command(&argv)
+        .unwrap_or_else(|err| panic!("{argv:?}: {err}"));
+    Event::Command { command }
+}
+
+/// The laptop display with one monitor above it (window 100) and one to its
+/// right (window 300).
+fn harness_with_displays_north_and_east() -> TestHarness {
+    TestHarness::new()
+        .with_display(EXT_DISPLAY_ID, NORTH_DISPLAY_BOUNDS, vec![EXT_WORKSPACE_ID])
+        .with_display(
+            EAST_DISPLAY_ID,
+            EAST_DISPLAY_BOUNDS,
+            vec![EAST_WORKSPACE_ID],
+        )
+        .with_windows(1)
+        .with_workspace_window(100, EXT_WORKSPACE_ID, |data| {
+            data.frame = IRect::new(0, -EXT_DISPLAY_HEIGHT, TEST_WINDOW_WIDTH, -200);
+        })
+        .with_workspace_window(300, EAST_WORKSPACE_ID, |data| {
+            data.frame = IRect::new(
+                EAST_DISPLAY_BOUNDS.min.x,
+                0,
+                EAST_DISPLAY_BOUNDS.min.x + TEST_WINDOW_WIDTH,
+                EAST_DISPLAY_BOUNDS.max.y,
+            );
+        })
+}
+
+#[test]
+fn test_focus_display_follows_the_physical_arrangement() {
+    use crate::assert_focused;
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        send_cmd("window focusdisplay west"),
+        send_cmd("window focusdisplay east"),
+        Event::Command {
+            command: Command::PrintState,
+        },
+        send_cmd("window focusdisplay west"),
+        Event::Command {
+            command: Command::PrintState,
+        },
+        send_cmd("window focusdisplay north"),
+    ];
+
+    harness_with_displays_north_and_east()
+        .on_iteration(1, |world, state| {
+            assert_focused!(world, 0);
+            assert_eq!(state.active_display(), TEST_DISPLAY_ID);
+        })
+        .on_iteration(2, |world, state| {
+            assert_focused!(world, 300);
+            assert!(EAST_DISPLAY_BOUNDS.contains(state.cursor_position()));
+            // macOS reports the display change once a window there has focus.
+            state.activate_display(EAST_DISPLAY_ID);
+        })
+        .on_iteration(4, |world, state| {
+            assert_focused!(world, 0);
+            assert!(
+                IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT)
+                    .contains(state.cursor_position())
+            );
+            state.activate_display(TEST_DISPLAY_ID);
+        })
+        .on_iteration(6, |world, state| {
+            assert_focused!(world, 100);
+            assert!(NORTH_DISPLAY_BOUNDS.contains(state.cursor_position()));
+        })
+        .run(commands);
+}
+
+#[test]
+fn test_move_display_follows_the_physical_arrangement() {
+    use crate::assert_focused;
+
+    for (direction, workspace, bounds) in [
+        ("north", EXT_WORKSPACE_ID, NORTH_DISPLAY_BOUNDS),
+        ("east", EAST_WORKSPACE_ID, EAST_DISPLAY_BOUNDS),
+    ] {
+        let commands = vec![
+            Event::MenuOpened { window_id: 0 },
+            send_cmd("window movedisplay west"),
+            send_cmd(&format!("window movedisplay {direction}")),
+        ];
+
+        harness_with_displays_north_and_east()
+            .on_iteration(1, |world, _state| {
+                assert_on_workspace!(world, 0, TEST_WORKSPACE_ID);
+            })
+            .on_iteration(2, move |world, state| {
+                assert_on_workspace!(world, 0, workspace);
+                assert!(
+                    bounds.contains(state.cursor_position()),
+                    "the pointer follows the window to the {direction} display"
+                );
+                for other in [TEST_WORKSPACE_ID, EXT_WORKSPACE_ID, EAST_WORKSPACE_ID] {
+                    if other != workspace {
+                        assert_not_on_workspace!(world, 0, other);
+                    }
+                }
+                assert_focused!(world, 0);
+            })
+            .run(commands);
+    }
+}

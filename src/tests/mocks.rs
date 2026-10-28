@@ -11,7 +11,7 @@ use crate::events::{DestroySource, Event};
 use crate::manager::app::MockApplicationApi;
 use crate::manager::{
     Application, Display, MockProcessApi, MockWindowApi, MockWindowManagerApi, Origin, Size,
-    Window, origin_from, origin_to,
+    Window, WindowPadding, origin_from, origin_to,
 };
 use crate::platform::{Modifiers, Pid, ProcessSerialNumber, WinID, WorkspaceId};
 
@@ -44,6 +44,9 @@ pub(crate) struct MockWindowData {
     pub(crate) border_radius: Option<f64>,
     pub(crate) horizontal_padding: i32,
     pub(crate) vertical_padding: i32,
+    /// The last horizontal and vertical padding the engine set, which the
+    /// mock does not apply to its frames.
+    pub(crate) padding_set: (Option<i32>, Option<i32>),
     pub(crate) child_role: bool,
     /// The narrowest width the app accepts, like an `NSWindow.minSize`.
     pub(crate) min_width: i32,
@@ -68,6 +71,7 @@ impl Default for MockWindowData {
             border_radius: None,
             horizontal_padding: 0,
             vertical_padding: 0,
+            padding_set: (None, None),
             child_role: false,
             min_width: 0,
             max_width: 0,
@@ -671,7 +675,15 @@ impl MockState {
             .returning(move |_psn, _focused, _focused_psn| {
                 s.set_focused_window(id);
             });
-        mw.expect_set_padding().return_const(());
+        let s = self.clone();
+        mw.expect_set_padding().returning(move |padding| {
+            if let Some(window) = s.inner.force_write().windows.get_mut(&id) {
+                match padding {
+                    WindowPadding::Horizontal(padding) => window.padding_set.0 = Some(padding),
+                    WindowPadding::Vertical(padding) => window.padding_set.1 = Some(padding),
+                }
+            }
+        });
 
         Window::new(Box::new(mw))
     }

@@ -1020,6 +1020,58 @@ fn strip_column(world: &mut World, id: i32) -> Option<usize> {
         .find_map(|strip| strip.index_of(entity).ok())
 }
 
+fn padding_set(state: &MockState, id: i32) -> (Option<i32>, Option<i32>) {
+    let mut set = (None, None);
+    state.update_window(id, |window| set = window.padding_set);
+    set
+}
+
+/// `apply_window_defaults` pads only a window that opens tiled, so a window
+/// that opens floating has to get its padding when it is tiled.
+#[test]
+fn test_window_tiled_from_floating_gets_its_padding() {
+    let mut floating = WindowParams::new("^Window 1$", Some("test".to_string()));
+    floating.floating = Some(true);
+    let mut padded = WindowParams::new(".*", None);
+    padded.horizontal_padding = Some(4);
+    padded.vertical_padding = Some(4);
+    let config: Config = (MainOptions::default(), vec![floating, padded]).into();
+
+    let commands = vec![
+        Event::Command {
+            command: Command::PrintState,
+        }, // 0
+        Event::Command {
+            command: Command::PrintState,
+        }, // 1
+        Event::Command {
+            command: Command::Window(Operation::Manage),
+        }, // 2: tile window 1
+    ];
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(2)
+        .on_iteration(0, |_world, state| state.focus_window(1))
+        .on_iteration(1, |world, state| {
+            assert_focused!(world, 1);
+            let entity = find_window_entity(1, world);
+            assert!(world.entity(entity).contains::<crate::ecs::Unmanaged>());
+            assert_eq!(padding_set(&state, 0), (Some(4), Some(4)));
+            assert_eq!(padding_set(&state, 1), (None, None));
+        })
+        .on_iteration(2, |world, state| {
+            let entity = find_window_entity(1, world);
+            assert!(!world.entity(entity).contains::<crate::ecs::Unmanaged>());
+            assert_eq!(
+                padding_set(&state, 1),
+                (Some(4), Some(4)),
+                "a window tiled from floating must get its padding"
+            );
+        })
+        .run(commands);
+}
+
 fn window_exists(world: &mut World, id: i32) -> bool {
     let mut query = world.query::<&crate::manager::Window>();
     query.iter(world).any(|window| window.id() == id)

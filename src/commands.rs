@@ -966,7 +966,10 @@ fn resize_window(
     }
 
     let viewport = active_display.actual_bounds(&config);
-    let current_ratio = f64::from(frame.width()) / f64::from(viewport.width());
+    // Pending resizes count: a press during the animation must advance from the
+    // width already requested, not a mid-animation width.
+    let pending_width = windows.moving_frame(entity).unwrap_or(frame).width();
+    let current_ratio = f64::from(pending_width) / f64::from(viewport.width());
     let widths = config.preset_column_widths();
     let fallback = *widths.first().unwrap_or(&0.5);
     let cycle = config.window_resize_cycle();

@@ -766,6 +766,72 @@ fn test_query_state_assigns_float_only_to_active_row() {
 }
 
 #[test]
+fn test_query_state_shown_is_the_row_each_space_shows() {
+    use crate::tests::EXT_WORKSPACE_ID;
+    use crate::tests::harness::TestHarness;
+
+    let mut harness = TestHarness::new().with_windows(1);
+    harness.app.update();
+
+    let world = harness.world();
+    let display_entity = world
+        .query_filtered::<Entity, With<ActiveDisplayMarker>>()
+        .single(world)
+        .expect("active display");
+    let (active_strip_entity, active_index) = world
+        .query_filtered::<(Entity, &LayoutStrip), With<ActiveWorkspaceMarker>>()
+        .single(world)
+        .map(|(entity, strip)| (entity, strip.virtual_index))
+        .expect("active workspace");
+
+    // On the focused space, a selection that has moved off the active row
+    // leaves the active row the one shown.
+    world
+        .entity_mut(active_strip_entity)
+        .remove::<SelectedVirtualMarker>();
+    world.spawn((
+        LayoutStrip::new(TEST_WORKSPACE_ID, active_index + 1),
+        ChildOf(display_entity),
+        SelectedVirtualMarker,
+    ));
+    // A space without focus shows its selected row, not its lowest-numbered.
+    for index in 0..3 {
+        let mut strip = world.spawn((
+            LayoutStrip::new(EXT_WORKSPACE_ID, index),
+            ChildOf(display_entity),
+        ));
+        if index == 2 {
+            strip.insert(SelectedVirtualMarker);
+        }
+    }
+
+    let state = extract_query_state(world).expect("query state extraction");
+    let shown = |space: u64, number: u32| {
+        state
+            .virtual_workspaces
+            .iter()
+            .find(|row| row.native_workspace_id == space && row.number == number)
+            .unwrap_or_else(|| panic!("row {space}/{number} missing from the query state"))
+            .shown
+    };
+
+    assert!(shown(TEST_WORKSPACE_ID, active_index + 1), "the active row");
+    assert!(
+        !shown(TEST_WORKSPACE_ID, active_index + 2),
+        "selected, not active"
+    );
+    assert!(
+        !shown(EXT_WORKSPACE_ID, 1),
+        "parked, though lowest-numbered"
+    );
+    assert!(!shown(EXT_WORKSPACE_ID, 2), "parked");
+    assert!(
+        shown(EXT_WORKSPACE_ID, 3),
+        "selected on a space without focus"
+    );
+}
+
+#[test]
 fn test_query_state_tolerates_workspace_query_failure() {
     use crate::config::{Config, MainOptions, WindowParams};
     use crate::errors::Error;

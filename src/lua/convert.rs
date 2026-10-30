@@ -532,6 +532,7 @@ mod tests {
                 delta: 1.5,
                 fingers: 3,
                 distance_cm: 0.0,
+                elapsed_secs: None,
             },
         )
         .expect("swipe should marshal");

@@ -471,6 +471,7 @@ fn test_window_can_resize_to_two_display_widths_and_scroll() {
             delta: 0.3,
             fingers: 3,
             distance_cm: 0.0,
+            elapsed_secs: None,
         },
         Event::Command {
             command: Command::Window(Operation::Snap),

@@ -70,6 +70,12 @@ pub static CONFIGURATION_FILE: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
 });
 
 const DEFAULT_CONFIGURATION: &str = "# Paneru configuration\n\n[options]\n\n[bindings]\n";
+// The documented 0.1–2.0 range predates normalized touch deltas; scale the
+// resolved value once so every swipe consumer sees the same calibration.
+const SWIPE_SENSITIVITY_CALIBRATION: f64 = 5.0;
+// The configured 1–10 range predates the current time-based inertia. Map it
+// to a stronger per-second decay rate while keeping the control linear.
+const SWIPE_DECELERATION_CALIBRATION: f64 = 2.0;
 
 fn default_configuration_file() -> std::io::Result<PathBuf> {
     let config_home = env::var_os("XDG_CONFIG_HOME")
@@ -726,6 +732,7 @@ impl Config {
             .or(config.options.swipe_sensitivity)
             .unwrap_or(0.35)
             .clamp(0.1, 2.0)
+            * SWIPE_SENSITIVITY_CALIBRATION
     }
 
     pub fn continuous_swipe(&self) -> bool {
@@ -748,6 +755,7 @@ impl Config {
             .or(config.options.swipe_deceleration)
             .unwrap_or(4.0)
             .clamp(1.0, 10.0)
+            * SWIPE_DECELERATION_CALIBRATION
     }
 
     pub fn mouse_resize_modifier(&self) -> Option<Modifiers> {
@@ -2215,8 +2223,12 @@ index = 1
     ));
 
     let defaults = Config::default();
-    assert_eq!(defaults.swipe_sensitivity(), 0.35);
-    assert_eq!(defaults.swipe_deceleration(), 4.0);
+    assert_eq!(defaults.swipe_sensitivity(), 1.75);
+    assert_eq!(defaults.swipe_deceleration(), 8.0);
+
+    let fastest = Config::try_from("[swipe]\nsensitivity = 2.0\ndeceleration = 10.0\n").unwrap();
+    assert_eq!(fastest.swipe_sensitivity(), 10.0);
+    assert_eq!(fastest.swipe_deceleration(), 20.0);
 }
 
 #[test]

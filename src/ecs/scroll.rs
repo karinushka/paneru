@@ -32,6 +32,54 @@ use crate::util::round_px;
 pub struct ScrollEventsPlugin;
 
 const PAGE_GESTURE_TIMEOUT: Duration = Duration::from_millis(150);
+// AppKit can emit a touch-phase update tens of microseconds after the prior
+// event while reporting millimeters of older finger motion. Such an interval
+// is useful for position but cannot estimate a sustained release velocity.
+const MIN_VELOCITY_SAMPLE_SECS: f64 = 0.004;
+
+fn swipe_direction_modifier(direction: SwipeGestureDirection) -> f64 {
+    match direction {
+        SwipeGestureDirection::Natural => -1.0,
+        SwipeGestureDirection::Reversed => 1.0,
+    }
+}
+
+fn scroll_wheel_scale(swipe_sensitivity: f64) -> f64 {
+    const SCROLL_SCALE_UPPER: f64 = 0.15;
+    const SCROLL_SCALE_LOWER: f64 = 0.005;
+    const SCROLL_FULL_RANGE: f64 = 2.0;
+    SCROLL_SCALE_LOWER
+        + ((SCROLL_SCALE_UPPER - SCROLL_SCALE_LOWER) / SCROLL_FULL_RANGE) * swipe_sensitivity
+}
+
+struct VelocitySamples {
+    delta: f64,
+    elapsed_secs: Option<f64>,
+    count: usize,
+}
+
+impl Default for VelocitySamples {
+    fn default() -> Self {
+        Self {
+            delta: 0.0,
+            elapsed_secs: Some(0.0),
+            count: 0,
+        }
+    }
+}
+
+impl VelocitySamples {
+    fn add(&mut self, delta: f64, elapsed_secs: Option<f64>) {
+        if elapsed_secs.is_some_and(|elapsed| elapsed < MIN_VELOCITY_SAMPLE_SECS) {
+            return;
+        }
+        self.delta += delta;
+        self.count += 1;
+        self.elapsed_secs = self
+            .elapsed_secs
+            .and_then(|total| elapsed_secs.map(|elapsed| total + elapsed));
+    }
+}
 
 /// One gesture-earned focus step, routed to [`crate::commands::command_move_focus`].
 #[derive(Message, Debug, Clone)]
@@ -315,38 +363,44 @@ fn swipe_gesture(
 ) {
     let swipe_sensitivity = config.swipe_sensitivity();
     let mut total_delta = 0.0;
-    let mut gesture_delta = 0.0;
+    let mut velocity_samples = VelocitySamples::default();
     let mut touchpad_down = false;
+    let mut touchpad_up = false;
     let mut has_scroll_event = false;
     let mut has_gesture_event = false;
 
     // Normalization: Touchpad deltas are typically small fractions.
     // Scroll wheel deltas can be larger. We scale it down slightly
     // to match the "feel" of a finger swipe.
-    const SCROLL_SCALE_UPPER: f64 = 0.15;
-    const SCROLL_SCALE_LOWER: f64 = 0.005;
-    const SCROLL_FULL_RANGE: f64 = 2.0;
-    let scroll_scale = SCROLL_SCALE_LOWER
-        + ((SCROLL_SCALE_UPPER - SCROLL_SCALE_LOWER) / SCROLL_FULL_RANGE) * swipe_sensitivity;
+    let scroll_scale = scroll_wheel_scale(swipe_sensitivity);
 
     for InputEvent(event) in messages.read() {
         match event {
             Event::TouchpadDown => {
                 touchpad_down = true;
+                touchpad_up = false;
                 total_delta = 0.0;
+            }
+            Event::TouchpadUp => {
+                touchpad_up = true;
             }
             Event::Scroll { delta } => {
                 total_delta += *delta * scroll_scale;
                 has_scroll_event = true;
             }
-            Event::Swipe { delta, fingers, .. }
-                if config
-                    .swipe_gesture_fingers()
-                    .is_some_and(|fingers_configured| fingers_configured == *fingers)
-                    && !config.swipe_gesture_paging() =>
+            Event::Swipe {
+                delta,
+                fingers,
+                elapsed_secs,
+                ..
+            } if config
+                .swipe_gesture_fingers()
+                .is_some_and(|fingers_configured| fingers_configured == *fingers)
+                && !config.swipe_gesture_paging() =>
             {
+                touchpad_up = false;
                 total_delta += delta;
-                gesture_delta += delta;
+                velocity_samples.add(*delta, *elapsed_secs);
                 has_scroll_event = true;
                 has_gesture_event = true;
             }
@@ -354,7 +408,7 @@ fn swipe_gesture(
         }
     }
 
-    if !touchpad_down && !has_scroll_event {
+    if !touchpad_down && !touchpad_up && !has_scroll_event {
         return;
     }
 
@@ -362,28 +416,34 @@ fn swipe_gesture(
 
     // The user is driving the strip by hand now, so an earlier deliberate
     // placement (center, snap) no longer describes where they want it.
-    if let Ok(mut entity_commands) = commands.get_entity(*entity) {
+    if (touchpad_down || has_scroll_event)
+        && let Ok(mut entity_commands) = commands.get_entity(*entity)
+    {
         entity_commands.try_remove::<ManualStripOffset>();
     }
 
     if touchpad_down && let Some(scrolling) = scrolling.as_mut() {
-        scrolling.velocity = 0.0;
+        // A replacement finger can report Began before the gesture ends.
+        // Only a new touch after coasting has started should cancel inertia.
+        if !scrolling.is_user_swiping {
+            scrolling.velocity = 0.0;
+        }
         scrolling.is_user_swiping = true;
         scrolling.last_event = time.elapsed();
     }
 
     if has_scroll_event {
         let viewport_width = f64::from(active_display.bounds().width());
-        let direction_modifier = match config.swipe_gesture_direction() {
-            SwipeGestureDirection::Natural => -1.0,
-            SwipeGestureDirection::Reversed => 1.0,
-        };
+        let direction_modifier = swipe_direction_modifier(config.swipe_gesture_direction());
 
-        // Floored, not capped: dividing by the real elapsed time is correct
-        // here, but a catch-up frame can drive `dt` arbitrarily close to zero.
-        let dt = time.delta_secs_f64().max(MIN_STEP_SECS);
-        let new_velocity = if has_gesture_event {
-            gesture_delta * swipe_sensitivity / dt
+        // Gesture samples carry the time spanned by their finger displacement.
+        // An ECS frame can process them much sooner (or later) than that span.
+        let dt = velocity_samples
+            .elapsed_secs
+            .unwrap_or_else(|| time.delta_secs_f64().max(MIN_STEP_SECS));
+        let velocity_sample_valid = velocity_samples.count > 0 && dt > 0.0;
+        let new_velocity = if velocity_sample_valid {
+            velocity_samples.delta * swipe_sensitivity / dt
         } else {
             0.0
         };
@@ -391,9 +451,11 @@ fn swipe_gesture(
         if let Some(scrolling) = scrolling.as_mut() {
             // Native modifier-scroll events already include macOS momentum.
             // Add synthetic inertia only for raw multi-finger gestures.
-            scrolling.velocity = if has_gesture_event {
+            scrolling.velocity = if velocity_sample_valid {
                 // Smoothen gesture velocity changes using EMA.
                 0.3 * new_velocity + 0.7 * scrolling.velocity
+            } else if has_gesture_event {
+                scrolling.velocity
             } else {
                 0.0
             };
@@ -406,35 +468,46 @@ fn swipe_gesture(
                 velocity: new_velocity,
                 position: f64::from(position.0.x)
                     + total_delta * viewport_width * direction_modifier * swipe_sensitivity,
-                is_user_swiping: true,
+                is_user_swiping: !touchpad_up,
                 last_event: time.elapsed(),
             });
         }
+    }
+    if touchpad_up && let Some(scrolling) = scrolling.as_mut() {
+        scrolling.is_user_swiping = false;
     }
 }
 
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn swiping_timeout(
-    strips: Populated<(Entity, &mut Scrolling), With<LayoutStrip>>,
+    strips: Populated<(Entity, &Scrolling), With<LayoutStrip>>,
     active_display: ActiveDisplay,
     time: Res<Time>,
+    config: Res<Config>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
     const FINGER_LIFT_THRESHOLD: Duration = Duration::from_millis(50);
     const MIN_VELOCITY_PX: f64 = 5.0;
-    // Predicts the distance the integrator is about to move, so it has to use
-    // the same bounded step the integrator does.
-    let dt = time.delta_secs_f64().min(MAX_STEP_SECS);
     let viewport_width = f64::from(active_display.bounds().width());
 
-    for (entity, mut scroll) in strips {
-        if time.elapsed().abs_diff(scroll.last_event) > FINGER_LIFT_THRESHOLD {
-            scroll.is_user_swiping = false;
+    for (entity, scroll) in strips {
+        let since_last_event = time.elapsed().abs_diff(scroll.last_event);
+        if since_last_event > FINGER_LIFT_THRESHOLD {
+            if scroll.is_user_swiping {
+                // Silence cannot prove the fingers lifted. Drop stale state
+                // without ever converting it into a coast.
+                if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                    entity_commands.try_remove::<Scrolling>();
+                }
+                continue;
+            }
 
-            if scroll.velocity.abs() * dt * viewport_width < MIN_VELOCITY_PX
-                && let Ok(mut entity_commands) = commands.get_entity(entity)
-            {
+            // Under exponential decay, velocity / decay_rate is the total
+            // distance still to come. A short frame says nothing about that.
+            let remaining_px = scroll.velocity.abs() * viewport_width / config.swipe_deceleration();
+            let remove = remaining_px < MIN_VELOCITY_PX;
+            if remove && let Ok(mut entity_commands) = commands.get_entity(entity) {
                 entity_commands.try_remove::<Scrolling>();
             }
             if let Some(point) = window_manager.cursor_position() {
@@ -535,13 +608,12 @@ fn scrolling_integrator(
     let viewport_width = f64::from(viewport.width());
 
     // Direction modifier: Natural moves strip left (negative offset) for positive delta (finger left)
-    let direction_modifier = match config.swipe_gesture_direction() {
-        SwipeGestureDirection::Natural => -1.0,
-        SwipeGestureDirection::Reversed => 1.0,
-    };
+    let direction_modifier = swipe_direction_modifier(config.swipe_gesture_direction());
 
     let scroll = &mut *strip;
-    if scroll.velocity.abs() > 0.0001 {
+    // Finger displacement is applied directly by swipe_gesture. Velocity is
+    // reserved for coasting after the gesture, or the same motion is counted twice.
+    if !scroll.is_user_swiping && scroll.velocity.abs() > 0.0001 {
         scroll.position += scroll.velocity * dt * viewport_width * direction_modifier;
     }
 }

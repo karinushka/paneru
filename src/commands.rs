@@ -1713,7 +1713,9 @@ pub fn stack_windows_handler(
         }
 
         // A layout command replaces the touchpad's placement target.
-        commands.entity(strip_entity).try_remove::<Scrolling>();
+        if let Ok(mut entity_commands) = commands.get_entity(strip_entity) {
+            entity_commands.try_remove::<Scrolling>();
+        }
 
         // Stacking/unstacking moves the focused window to a new column slot
         // (onto the left master, or out to its own column on the right).

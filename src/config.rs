@@ -72,7 +72,7 @@ pub static CONFIGURATION_FILE: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
 const DEFAULT_CONFIGURATION: &str = "# Paneru configuration\n\n[options]\n\n[bindings]\n";
 // The documented 0.1–2.0 range predates normalized touch deltas; scale the
 // resolved value once so every swipe consumer sees the same calibration.
-const SWIPE_SENSITIVITY_CALIBRATION: f64 = 5.0;
+pub(crate) const SWIPE_SENSITIVITY_CALIBRATION: f64 = 5.0;
 // The configured 1–10 range predates the current time-based inertia. Map it
 // to a stronger per-second decay rate while keeping the control linear.
 const SWIPE_DECELERATION_CALIBRATION: f64 = 2.0;

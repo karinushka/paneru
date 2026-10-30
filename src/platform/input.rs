@@ -133,7 +133,10 @@ fn swipe_movement<I>(
         Some(SwipeMovement::Horizontal {
             delta: x_sum / moved_fingers,
             distance_cm: physical_swipe_distance_cm(
-                deltas.iter().map(|(x, _, width)| (*x, *width)),
+                deltas
+                    .iter()
+                    .filter(|(x, _, _)| x.abs() > SWIPE_THRESHOLD)
+                    .map(|(x, _, width)| (*x, *width)),
             ),
         })
     } else {

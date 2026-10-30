@@ -47,9 +47,10 @@ fn swipe_direction_modifier(direction: SwipeGestureDirection) -> f64 {
 fn scroll_wheel_scale(swipe_sensitivity: f64) -> f64 {
     const SCROLL_SCALE_UPPER: f64 = 0.15;
     const SCROLL_SCALE_LOWER: f64 = 0.005;
-    const SCROLL_FULL_RANGE: f64 = 2.0;
-    SCROLL_SCALE_LOWER
-        + ((SCROLL_SCALE_UPPER - SCROLL_SCALE_LOWER) / SCROLL_FULL_RANGE) * swipe_sensitivity
+    const SCROLL_FULL_RANGE: f64 = 2.0 * crate::config::SWIPE_SENSITIVITY_CALIBRATION;
+    (SCROLL_SCALE_LOWER
+        + ((SCROLL_SCALE_UPPER - SCROLL_SCALE_LOWER) / SCROLL_FULL_RANGE) * swipe_sensitivity)
+        / crate::config::SWIPE_SENSITIVITY_CALIBRATION
 }
 
 struct VelocitySamples {
@@ -507,14 +508,16 @@ pub(super) fn swiping_timeout(
             // distance still to come. A short frame says nothing about that.
             let remaining_px = scroll.velocity.abs() * viewport_width / config.swipe_deceleration();
             let remove = remaining_px < MIN_VELOCITY_PX;
-            if remove && let Ok(mut entity_commands) = commands.get_entity(entity) {
-                entity_commands.try_remove::<Scrolling>();
-            }
-            if let Some(point) = window_manager.cursor_position() {
-                commands.trigger(SendMessageTrigger(Event::MouseMoved {
-                    point,
-                    modifiers: Modifiers::empty(),
-                }));
+            if remove {
+                if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                    entity_commands.try_remove::<Scrolling>();
+                }
+                if let Some(point) = window_manager.cursor_position() {
+                    commands.trigger(SendMessageTrigger(Event::MouseMoved {
+                        point,
+                        modifiers: Modifiers::empty(),
+                    }));
+                }
             }
         }
     }

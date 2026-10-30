@@ -144,6 +144,9 @@ pub enum Event {
         fingers: usize,
         /// Signed mean horizontal finger travel in centimeters.
         distance_cm: f64,
+        /// Elapsed source-event time since the finger positions used as the
+        /// displacement anchor. `None` is for synthetic events without a clock.
+        elapsed_secs: Option<f64>,
     },
 
     /// A vertical trackpad gesture (accumulates delta to threshold before firing).

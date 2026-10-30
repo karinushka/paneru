@@ -155,7 +155,7 @@ impl ActiveDisplay<'_, '_> {
 /// It allows systems to modify the active display and its associated `LayoutStrip`s.
 #[derive(SystemParam)]
 pub struct ActiveDisplayMut<'w, 's> {
-    strip: Single<'w, 's, &'static mut LayoutStrip, With<ActiveWorkspaceMarker>>,
+    strip: Single<'w, 's, (&'static mut LayoutStrip, Entity), With<ActiveWorkspaceMarker>>,
     /// The single active `Display` component, marked with `ActiveDisplayMarker`.
     display: Single<
         'w,
@@ -182,7 +182,11 @@ impl ActiveDisplayMut<'_, '_> {
     }
 
     pub fn active_strip(&mut self) -> &mut LayoutStrip {
-        &mut self.strip
+        &mut self.strip.0
+    }
+
+    pub fn active_strip_entity(&self) -> Entity {
+        self.strip.1
     }
 
     /// Returns the `CGRect` representing the bounds of the active display.

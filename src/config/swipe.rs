@@ -21,11 +21,13 @@ pub(crate) fn focus_direction(gesture_direction: SwipeGestureDirection, delta: f
 #[derive(Deserialize, Clone, Debug, Default)]
 #[cfg_attr(test, derive(serde::Serialize))]
 pub struct SwipeOptions {
-    /// Swipe sensitivity multiplier. Lower values = less distance per finger
-    /// movement. Range: 0.1–2.0. Default: 0.35.
+    /// Swipe sensitivity multiplier. The resolved value is calibrated by 5×
+    /// for normalized finger coordinates.
+    /// Range: 0.1–2.0. Default: 0.35.
     pub sensitivity: Option<f64>,
 
-    /// Swipe inertia deceleration rate. Higher values = faster stop.
+    /// Swipe inertia deceleration rate. The resolved rate is calibrated by 2×
+    /// so higher values stop more quickly.
     /// Range: 1.0–10.0. Default: 4.0.
     pub deceleration: Option<f64>,
 

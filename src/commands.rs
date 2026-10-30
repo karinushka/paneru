@@ -28,8 +28,8 @@ use crate::ecs::scroll::{PageFocusRequest, PageGestureState, PageInFlight};
 use crate::ecs::{
     ActiveDisplayMarker, ActiveWorkspaceMarker, AwaitResize, Bounds, DockPosition, FocusedMarker,
     FullWidthMarker, ManualStripOffset, NativeFullscreenMarker, Position, RaiseWindow,
-    RepositionMarker, ResizeAnchor, SelectedVirtualMarker, SendMessageTrigger, SpawnCommandsExt,
-    Timeout, Unmanaged,
+    RepositionMarker, ResizeAnchor, Scrolling, SelectedVirtualMarker, SendMessageTrigger,
+    SpawnCommandsExt, Timeout, Unmanaged,
 };
 use crate::events::{Event, InputEvent};
 use crate::manager::{Application, Display, Origin, Size, Window, WindowManager, origin_from};
@@ -1701,12 +1701,19 @@ pub fn stack_windows_handler(
         {
             entity_commands.try_remove::<FullWidthMarker>();
         }
+        let strip_entity = active_display.active_strip_entity();
         let strip = active_display.active_strip();
-        if *stack {
-            _ = strip.stack(entity);
+        let changed = if *stack {
+            strip.stack(entity)
         } else {
-            _ = strip.unstack(entity);
+            strip.unstack(entity)
+        };
+        if changed.is_err() {
+            return;
         }
+
+        // A layout command replaces the touchpad's placement target.
+        commands.entity(strip_entity).try_remove::<Scrolling>();
 
         // Stacking/unstacking moves the focused window to a new column slot
         // (onto the left master, or out to its own column on the right).

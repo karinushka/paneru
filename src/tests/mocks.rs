@@ -904,6 +904,7 @@ impl MockState {
             .returning(move || Some(origin_to(s.inner.force_read().cursor_position)));
 
         wm.expect_get_associated_windows().return_const(vec![]);
+        wm.expect_dim_windows().return_const(());
 
         let s = self.clone();
         wm.expect_find_window_at_point().returning(move |at_point| {

@@ -1340,16 +1340,19 @@ pub(super) fn commit_window_size(
 
 /// Restores user-visible window state before Paneru shuts down: clears any
 /// brightness dim, removes the dim/border overlay window, and centers every
-/// managed window on the display its frame center falls in.
-pub(super) fn cleanup_on_exit(
+/// managed window on its own display: the one whose strip holds it, else the
+/// one its frame center falls in. A hidden workspace's windows are parked off
+/// screen, where their centers lie in another display or in none.
+pub(crate) fn cleanup_on_exit(
     mut exit_events: MessageReader<AppExit>,
-    mut all_windows: Query<&mut Window>,
+    mut all_windows: Query<(Entity, &mut Window)>,
+    strips: Query<(&LayoutStrip, &ChildOf)>,
     displays: Query<&Display>,
     window_manager: Res<WindowManager>,
     mut overlay_mgr: Option<NonSendMut<OverlayManager>>,
 ) {
     for _ in exit_events.read() {
-        let ids = all_windows.iter().map(|w| w.id()).collect::<Vec<_>>();
+        let ids = all_windows.iter().map(|(_, w)| w.id()).collect::<Vec<_>>();
         info!("exit cleanup: restoring {} window(s)", ids.len());
         window_manager.dim_windows(&ids, 0.0);
 
@@ -1362,18 +1365,25 @@ pub(super) fn cleanup_on_exit(
             return;
         }
 
-        for mut window in &mut all_windows {
+        for (entity, mut window) in &mut all_windows {
             let frame = window.frame();
             let center = frame.center();
-            let bounds = display_bounds
+            let bounds = strips
                 .iter()
-                .find(|b| {
-                    center.x >= b.min.x
-                        && center.x <= b.max.x
-                        && center.y >= b.min.y
-                        && center.y <= b.max.y
+                .find(|(strip, _)| strip.contains(entity))
+                .and_then(|(_, parent)| displays.get(parent.parent()).ok())
+                .map(Display::bounds)
+                .or_else(|| {
+                    display_bounds
+                        .iter()
+                        .find(|b| {
+                            center.x >= b.min.x
+                                && center.x <= b.max.x
+                                && center.y >= b.min.y
+                                && center.y <= b.max.y
+                        })
+                        .copied()
                 })
-                .copied()
                 .unwrap_or(display_bounds[0]);
 
             let mut size = frame.size();

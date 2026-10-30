@@ -1186,7 +1186,7 @@ impl InnerConfig {
             return Ok(config);
         }
 
-        let virtual_keys = generate_virtual_keymap();
+        let virtual_keys = keymap_for_config_parsing();
         Self::parse_config_with_virtual_keys(input, &virtual_keys)
     }
 
@@ -1708,7 +1708,17 @@ pub(crate) fn prime_virtual_keymap() {
 /// happened (harmless in unit tests, rare elsewhere).
 #[cfg(feature = "lua")]
 fn virtual_keymap() -> &'static [(String, u8)] {
-    VIRTUAL_KEYMAP.get_or_init(generate_virtual_keymap)
+    VIRTUAL_KEYMAP.get_or_init(keymap_for_config_parsing)
+}
+
+#[cfg(not(test))]
+fn keymap_for_config_parsing() -> Vec<(String, u8)> {
+    generate_virtual_keymap()
+}
+
+#[cfg(test)]
+fn keymap_for_config_parsing() -> Vec<(String, u8)> {
+    test_virtual_keymap()
 }
 
 /// Resolves a keybinding string like `"ctrl+alt-h"` into a `(keycode, Modifiers)` pair.

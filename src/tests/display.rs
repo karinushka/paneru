@@ -830,6 +830,59 @@ fn test_hidden_stack_stays_off_the_display_below() {
         .run(commands);
 }
 
+/// Paneru's exit cleanup centers each window on its own display. A hidden
+/// workspace's windows are parked at the display's bottom-right corner, so
+/// their centers lie in the display below; they used to be centered there.
+#[test]
+fn test_exit_keeps_hidden_windows_on_their_display() {
+    use bevy::ecs::system::RunSystemOnce as _;
+
+    let mut harness = TestHarness::new().with_windows(2);
+    harness.mock_state.add_display(
+        EXT_DISPLAY_ID,
+        IRect::new(
+            0,
+            TEST_DISPLAY_HEIGHT,
+            EXT_DISPLAY_WIDTH,
+            TEST_DISPLAY_HEIGHT + EXT_DISPLAY_HEIGHT,
+        ),
+        vec![EXT_WORKSPACE_ID],
+    );
+
+    let commands = vec![
+        Event::Command {
+            command: Command::Window(Operation::VirtualNumber(1)),
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    harness
+        .on_iteration(1, |world, _state| {
+            // Run the cleanup alone: a frame would also run the exit save,
+            // which writes the user's real state file.
+            world.write_message(AppExit::Success);
+            world
+                .run_system_once(crate::ecs::systems::cleanup_on_exit)
+                .expect("the exit cleanup runs");
+            world.resource_mut::<Messages<AppExit>>().clear();
+
+            let display = IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT);
+            let mut query = world.query::<&crate::manager::Window>();
+            for window in query.iter(world) {
+                let frame = window.frame();
+                assert!(
+                    display.contains(frame.min) && display.contains(frame.max),
+                    "window {} centered at {:?}, off its own display",
+                    window.id(),
+                    frame
+                );
+            }
+        })
+        .run(commands);
+}
+
 /// Focusing a window on another display and coming back must not re-derive the
 /// strip offset on the display we left: the centering the user asked for there
 /// is still what they want to see when they return.

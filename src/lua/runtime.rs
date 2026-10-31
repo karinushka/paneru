@@ -647,6 +647,7 @@ mod tests {
                 number: 1,
                 native_workspace_id: 10,
                 active: true,
+                shown: true,
                 windows: vec![PaneruWindowState {
                     window_id: 7,
                     bundle_id: "com.example.app".to_string(),
@@ -661,6 +662,7 @@ mod tests {
                     visible: true,
                     column: Some(0),
                     row: Some(0),
+                    tabbed: false,
                 }],
             }],
         }

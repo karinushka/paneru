@@ -681,6 +681,44 @@ fn test_query_state_reports_each_tiled_window_column_and_row() {
 }
 
 #[test]
+fn test_query_state_reports_a_stack_shown_as_tabs() {
+    use crate::tests::harness::TestHarness;
+
+    let mut harness = TestHarness::new().with_windows(3);
+    harness.app.update();
+
+    let world = harness.world();
+    let mut strips = world.query_filtered::<&mut LayoutStrip, With<ActiveWorkspaceMarker>>();
+    let mut strip = strips.single_mut(world).expect("active workspace");
+    let last = strip.all_windows()[2];
+    strip
+        .stack(last)
+        .expect("the last column stacks onto its neighbour");
+    let tabbed = |world: &mut World| {
+        extract_query_state(world)
+            .expect("query state extraction")
+            .virtual_workspaces[0]
+            .windows
+            .iter()
+            .map(|window| window.tabbed)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(tabbed(world), vec![false, false, false], "a split stack");
+
+    let mut strip = strips.single_mut(world).expect("active workspace");
+    assert_eq!(strip.toggle_tabbed_display(last), Some(true));
+    assert_eq!(
+        tabbed(world),
+        vec![false, true, true],
+        "every window of the stack, and only those, is shown as a tab"
+    );
+
+    let mut strip = strips.single_mut(world).expect("active workspace");
+    assert_eq!(strip.toggle_tabbed_display(last), Some(false));
+    assert_eq!(tabbed(world), vec![false, false, false], "split again");
+}
+
+#[test]
 fn test_query_state_assigns_float_only_to_active_row() {
     use crate::commands::{Command, Operation};
     use crate::tests::harness::TestHarness;
@@ -725,6 +763,72 @@ fn test_query_state_assigns_float_only_to_active_row() {
 
     assert_eq!(occurrences, 1);
     assert_eq!(active.windows[0].window_id, 0);
+}
+
+#[test]
+fn test_query_state_shown_is_the_row_each_space_shows() {
+    use crate::tests::EXT_WORKSPACE_ID;
+    use crate::tests::harness::TestHarness;
+
+    let mut harness = TestHarness::new().with_windows(1);
+    harness.app.update();
+
+    let world = harness.world();
+    let display_entity = world
+        .query_filtered::<Entity, With<ActiveDisplayMarker>>()
+        .single(world)
+        .expect("active display");
+    let (active_strip_entity, active_index) = world
+        .query_filtered::<(Entity, &LayoutStrip), With<ActiveWorkspaceMarker>>()
+        .single(world)
+        .map(|(entity, strip)| (entity, strip.virtual_index))
+        .expect("active workspace");
+
+    // On the focused space, a selection that has moved off the active row
+    // leaves the active row the one shown.
+    world
+        .entity_mut(active_strip_entity)
+        .remove::<SelectedVirtualMarker>();
+    world.spawn((
+        LayoutStrip::new(TEST_WORKSPACE_ID, active_index + 1),
+        ChildOf(display_entity),
+        SelectedVirtualMarker,
+    ));
+    // A space without focus shows its selected row, not its lowest-numbered.
+    for index in 0..3 {
+        let mut strip = world.spawn((
+            LayoutStrip::new(EXT_WORKSPACE_ID, index),
+            ChildOf(display_entity),
+        ));
+        if index == 2 {
+            strip.insert(SelectedVirtualMarker);
+        }
+    }
+
+    let state = extract_query_state(world).expect("query state extraction");
+    let shown = |space: u64, number: u32| {
+        state
+            .virtual_workspaces
+            .iter()
+            .find(|row| row.native_workspace_id == space && row.number == number)
+            .unwrap_or_else(|| panic!("row {space}/{number} missing from the query state"))
+            .shown
+    };
+
+    assert!(shown(TEST_WORKSPACE_ID, active_index + 1), "the active row");
+    assert!(
+        !shown(TEST_WORKSPACE_ID, active_index + 2),
+        "selected, not active"
+    );
+    assert!(
+        !shown(EXT_WORKSPACE_ID, 1),
+        "parked, though lowest-numbered"
+    );
+    assert!(!shown(EXT_WORKSPACE_ID, 2), "parked");
+    assert!(
+        shown(EXT_WORKSPACE_ID, 3),
+        "selected on a space without focus"
+    );
 }
 
 #[test]

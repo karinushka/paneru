@@ -500,6 +500,7 @@ mod tests {
                 visible: true,
                 column: Some(0),
                 row: Some(0),
+                tabbed: false,
             })
             .collect();
 
@@ -511,6 +512,7 @@ mod tests {
                 number: virtual_workspace_number,
                 native_workspace_id: 10,
                 active: true,
+                shown: true,
                 windows,
             }],
         }

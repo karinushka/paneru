@@ -135,7 +135,8 @@ impl StateBroadcastIntent {
                             Operation::VirtualMove(_, _)
                             | Operation::VirtualMoveNumber(_, _)
                             | Operation::Swap(_)
-                            | Operation::Stack(_),
+                            | Operation::Stack(_)
+                            | Operation::ToggleTabbedDisplay,
                         ),
                 } => intent.windows_changed = true,
                 Event::WindowFocused { .. } => intent.window_focused = true,
@@ -751,7 +752,11 @@ mod tests {
         assert!(intent.requires_state());
         assert!(!intent.is_empty());
 
-        for op in [Operation::Stack(true), Operation::Stack(false)] {
+        for op in [
+            Operation::Stack(true),
+            Operation::Stack(false),
+            Operation::ToggleTabbedDisplay,
+        ] {
             let stack_intent = StateBroadcastIntent::from_events(
                 [PaneruEvent::Command {
                     command: Command::Window(op),

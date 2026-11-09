@@ -242,6 +242,17 @@ pub enum Operation {
     Manage,
     /// Stacks or unstacks a window. The boolean indicates whether to stack (`true`) or unstack (`false`).
     Stack(bool),
+    /// Consumes the column to the right of the focused window's column into
+    /// it, appending the consumed column's item(s) below whatever is
+    /// already there. Mirror of `Stack(true)` in the opposite direction —
+    /// the focused window's own column survives at its position; the
+    /// neighbor's does not.
+    Consume,
+    /// Pulls the focused window out of its stack into its own column to
+    /// the right — mechanically identical to `Stack(false)` — but leaves
+    /// focus on a sibling remaining in the stack instead of following the
+    /// ejected window.
+    Expel,
     /// Toggles the focused window's stack between a normal split display
     /// (all windows visible, sharing height) and a tabbed display (one
     /// window visible at a time, sharing the full column). Cycle tabs with

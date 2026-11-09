@@ -138,7 +138,12 @@ pub fn register_commands(app: &mut bevy::app::App) {
     app.init_resource::<SnippetDialect>();
     app.add_systems(
         PreUpdate,
-        (copy_window_rule, toggle_tabbed_display_handler)
+        (
+            copy_window_rule,
+            toggle_tabbed_display_handler,
+            consume_windows_handler,
+            expel_windows_handler,
+        )
             .in_set(crate::ecs::PreUpdateSet::Dispatch),
     );
     app.add_systems(
@@ -1723,6 +1728,89 @@ pub fn stack_windows_handler(
         // edge-clamp in reshuffle_layout_strip keeps the strip pinned so the
         // leftmost window touches the left edge and the rightmost the right.
         commands.reshuffle_around(entity);
+    }
+}
+
+/// Pulls the column to the right of the focused window's column into it —
+/// the mirror of `window_stack` in the opposite direction. The focused
+/// window's own column survives at its position and never moves, so
+/// (unlike `window_stack`/`window_unstack`) focus doesn't need to be
+/// touched here at all.
+#[instrument(level = Level::DEBUG, skip_all)]
+pub fn consume_windows_handler(
+    mut messages: MessageReader<Event>,
+    windows: Windows,
+    mut active_display: ActiveDisplayMut,
+    mut commands: Commands,
+) {
+    if filter_window_operations(&mut messages, |op| matches!(op, Operation::Consume))
+        .next()
+        .is_none()
+    {
+        return;
+    }
+
+    if let Some((_, entity, unmanaged)) = windows
+        .focused()
+        .and_then(|(_, entity)| windows.get_managed(entity))
+        && unmanaged.is_none()
+    {
+        if windows.full_width(entity).is_some()
+            && let Ok(mut entity_commands) = commands.get_entity(entity)
+        {
+            entity_commands.try_remove::<FullWidthMarker>();
+        }
+        let strip = active_display.active_strip();
+        _ = strip.consume(entity);
+        commands.reshuffle_around(entity);
+    }
+}
+
+/// Pulls the focused window out of its stack into its own column to the
+/// right — mechanically identical to `window_unstack` — but leaves focus
+/// on a sibling remaining in the stack instead of following the ejected
+/// window out.
+#[instrument(level = Level::DEBUG, skip_all)]
+pub fn expel_windows_handler(
+    mut messages: MessageReader<Event>,
+    windows: Windows,
+    mut active_display: ActiveDisplayMut,
+    mut commands: Commands,
+) {
+    if filter_window_operations(&mut messages, |op| matches!(op, Operation::Expel))
+        .next()
+        .is_none()
+    {
+        return;
+    }
+
+    if let Some((_, entity, unmanaged)) = windows
+        .focused()
+        .and_then(|(_, entity)| windows.get_managed(entity))
+        && unmanaged.is_none()
+    {
+        if windows.full_width(entity).is_some()
+            && let Ok(mut entity_commands) = commands.get_entity(entity)
+        {
+            entity_commands.try_remove::<FullWidthMarker>();
+        }
+        let strip = active_display.active_strip();
+        // Compute the sibling to keep focus on *before* unstacking — the
+        // structural position `entity` occupies now is exactly what's
+        // needed to find it, and it's gone once `unstack` removes `entity`
+        // from the stack. Prefer the next item, falling back to the
+        // previous one when `entity` is last — same order
+        // `tab_display_sibling` uses for the analogous tabbed-display case.
+        let sibling = get_window_in_direction(&Direction::South, entity, strip)
+            .or_else(|| get_window_in_direction(&Direction::North, entity, strip));
+        _ = strip.unstack(entity);
+
+        if let Some(sibling) = sibling {
+            focus_with_verification(sibling, Some(entity), None, &mut commands);
+            commands.reshuffle_around(sibling);
+        } else {
+            commands.reshuffle_around(entity);
+        }
     }
 }
 

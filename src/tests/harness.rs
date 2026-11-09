@@ -14,6 +14,7 @@ use crate::ecs::focus::FocusEventsPlugin;
 use crate::ecs::layout::LayoutEventsPlugin;
 use crate::ecs::mouse::MouseEventsPlugin;
 use crate::ecs::scroll::ScrollEventsPlugin;
+use crate::ecs::setups::DisplaySetupsPlugin;
 use crate::ecs::state::PaneruState;
 use crate::ecs::workspace::WorkspaceEventsPlugin;
 use crate::ecs::{
@@ -278,6 +279,7 @@ fn setup_world() -> App {
         .add_plugins(LayoutEventsPlugin)
         .add_plugins(FocusEventsPlugin)
         .add_plugins(DisplayEventsPlugin)
+        .add_plugins(DisplaySetupsPlugin)
         .add_plugins((register_triggers, register_systems, register_commands));
 
     bevy_app.insert_resource(TimeUpdateStrategy::ManualDuration(FRAME));

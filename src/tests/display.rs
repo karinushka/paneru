@@ -2603,3 +2603,124 @@ fn test_hotplug_width_snapshot_expires_with_unresolved_orphan() {
         0
     );
 }
+
+const THIRD_DISPLAY_ID: u32 = 3;
+const THIRD_WORKSPACE_ID: u64 = 30;
+
+fn ext_display_bounds() -> IRect {
+    IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0)
+}
+
+fn third_display_bounds() -> IRect {
+    IRect::new(
+        0,
+        TEST_DISPLAY_HEIGHT,
+        EXT_DISPLAY_WIDTH,
+        TEST_DISPLAY_HEIGHT + EXT_DISPLAY_HEIGHT,
+    )
+}
+
+/// The harness adds the external display first, so it is the "next" display.
+fn with_stacked_displays(harness: TestHarness) -> TestHarness {
+    harness
+        .with_display(EXT_DISPLAY_ID, ext_display_bounds(), vec![EXT_WORKSPACE_ID])
+        .with_display(
+            THIRD_DISPLAY_ID,
+            third_display_bounds(),
+            vec![THIRD_WORKSPACE_ID],
+        )
+}
+
+fn window_commands(operation: Operation) -> Vec<Event> {
+    vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::Window(operation),
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ]
+}
+
+#[test]
+fn test_display_move_targets_the_named_display() {
+    with_stacked_displays(TestHarness::new().with_windows(1))
+        .on_iteration(1, |world, _state| {
+            assert_on_workspace!(world, 0, TEST_WORKSPACE_ID);
+        })
+        .on_iteration(2, |world, _state| {
+            assert_on_workspace!(world, 0, THIRD_WORKSPACE_ID);
+            assert_not_on_workspace!(world, 0, EXT_WORKSPACE_ID);
+            assert_not_on_workspace!(world, 0, TEST_WORKSPACE_ID);
+        })
+        .run(window_commands(Operation::ToDisplay(
+            THIRD_DISPLAY_ID,
+            MoveFocus::Follow,
+        )));
+}
+
+#[test]
+fn test_display_send_moves_the_window_and_keeps_the_source_active() {
+    with_stacked_displays(TestHarness::new().with_windows(2))
+        .on_iteration(2, |world, state| {
+            assert_on_workspace!(world, 0, THIRD_WORKSPACE_ID);
+            assert_not_on_workspace!(world, 0, TEST_WORKSPACE_ID);
+            assert_on_workspace!(world, 1, TEST_WORKSPACE_ID);
+            assert_eq!(state.active_display(), TEST_DISPLAY_ID);
+        })
+        .run(window_commands(Operation::ToDisplay(
+            THIRD_DISPLAY_ID,
+            MoveFocus::Stay,
+        )));
+}
+
+#[test]
+fn test_display_move_to_an_unknown_display_keeps_the_window() {
+    with_stacked_displays(TestHarness::new().with_windows(1))
+        .on_iteration(3, |world, _state| {
+            assert_on_workspace!(world, 0, TEST_WORKSPACE_ID);
+        })
+        .run(window_commands(Operation::ToDisplay(99, MoveFocus::Follow)));
+}
+
+#[test]
+fn test_vertical_swap_moves_to_the_nearest_display_in_that_direction() {
+    for (direction, workspace, other) in [
+        (Direction::South, THIRD_WORKSPACE_ID, EXT_WORKSPACE_ID),
+        (Direction::North, EXT_WORKSPACE_ID, THIRD_WORKSPACE_ID),
+    ] {
+        with_stacked_displays(TestHarness::new().with_windows(1))
+            .on_iteration(3, move |world, _state| {
+                assert_on_workspace!(world, 0, workspace);
+                assert_not_on_workspace!(world, 0, other);
+                assert_not_on_workspace!(world, 0, TEST_WORKSPACE_ID);
+            })
+            .run(window_commands(Operation::Swap(direction)));
+    }
+}
+
+#[test]
+fn test_vertical_focus_moves_the_pointer_to_the_nearest_display_in_that_direction() {
+    for (direction, bounds) in [
+        (Direction::South, third_display_bounds()),
+        (Direction::North, ext_display_bounds()),
+    ] {
+        let label = format!("{direction:?}");
+        with_stacked_displays(TestHarness::new().with_windows(1))
+            .on_iteration(3, move |_world, state| {
+                let cursor = state.cursor_position();
+                assert!(
+                    bounds.contains(cursor),
+                    "focus {label} left the pointer at {cursor:?}, outside {bounds:?}"
+                );
+            })
+            .run(window_commands(Operation::Focus(direction)));
+    }
+}

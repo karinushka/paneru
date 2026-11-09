@@ -563,21 +563,30 @@ fn command_move_focus(
         return;
     }
 
-    // Check if the movement can switch to another display.
-    let Some(other_display) = active_display.other().next() else {
+    let Some(target) =
+        display_in_direction(active_display.bounds(), active_display.other(), direction)
+    else {
         return;
     };
-    let change_display = match direction {
-        Direction::North => active_display.bounds().min.y > other_display.bounds().min.y,
-        Direction::South => active_display.bounds().min.y < other_display.bounds().min.y,
-        _ => false,
-    };
-    debug!("moving focus to another display: {change_display}");
-    if change_display {
-        commands.trigger(SendMessageTrigger(Event::Command {
-            command: Command::Mouse(MouseMove::ToNextDisplay),
-        }));
-    }
+    debug!("moving focus to display {target}");
+    commands.trigger(SendMessageTrigger(Event::Command {
+        command: Command::Mouse(MouseMove::ToDisplay(target)),
+    }));
+}
+
+fn display_in_direction<D: std::ops::Deref<Target = Display>>(
+    bounds: IRect,
+    others: impl Iterator<Item = D>,
+    direction: &Direction,
+) -> Option<u32> {
+    others
+        .filter(|display| match direction {
+            Direction::North => display.bounds().min.y < bounds.min.y,
+            Direction::South => display.bounds().min.y > bounds.min.y,
+            _ => false,
+        })
+        .min_by_key(|display| (display.bounds().min.y - bounds.min.y).abs())
+        .map(|display| display.id())
 }
 
 fn focus_from_fullscreen(
@@ -869,22 +878,14 @@ fn command_swap_focus(
     // neighbour left in that direction - which sent every successful vertical
     // swap straight on to the other display.
     if swapped.is_none() {
-        // Check if the movement can swap to another display.
         let bounds = active_display.bounds();
-        let Some(other_display) = active_display.other().next() else {
+        let Some(target) = display_in_direction(bounds, active_display.other(), direction) else {
             return;
         };
-        let change_display = match direction {
-            Direction::North => bounds.min.y > other_display.bounds().min.y,
-            Direction::South => bounds.min.y < other_display.bounds().min.y,
-            _ => false,
-        };
-        debug!("swapping window to another display: {change_display}");
-        if change_display {
-            commands.trigger(SendMessageTrigger(Event::Command {
-                command: Command::Window(Operation::ToNextDisplay(MoveFocus::Follow)),
-            }));
-        }
+        debug!("swapping window to display {target}");
+        commands.trigger(SendMessageTrigger(Event::Command {
+            command: Command::Window(Operation::ToDisplay(target, MoveFocus::Follow)),
+        }));
     }
 }
 
@@ -1359,12 +1360,14 @@ fn to_next_display(
     config: Res<Config>,
     mut commands: Commands,
 ) {
-    let Some(Operation::ToNextDisplay(move_focus)) =
-        filter_window_operations(&mut messages, |op| {
-            matches!(op, Operation::ToNextDisplay(_))
-        })
-        .next()
-    else {
+    let Some((target, move_focus)) = filter_window_operations(&mut messages, |op| {
+        matches!(op, Operation::ToNextDisplay(_) | Operation::ToDisplay(..))
+    })
+    .find_map(|op| match op {
+        Operation::ToNextDisplay(move_focus) => Some((None, *move_focus)),
+        Operation::ToDisplay(id, move_focus) => Some((Some(*id), *move_focus)),
+        _ => None,
+    }) else {
         return;
     };
 
@@ -1385,8 +1388,12 @@ fn to_next_display(
     // for on both the source and target displays.
     let source_viewport_width = active_display.actual_bounds(&config).width();
 
-    let Some(other) = active_display.other().next() else {
-        debug!("no other display to move window to.");
+    let other = match target {
+        Some(id) => active_display.other().find(|display| display.id() == id),
+        None => active_display.other().next(),
+    };
+    let Some(other) = other else {
+        debug!("no other display to move window to: {target:?}.");
         return;
     };
 
@@ -1469,7 +1476,7 @@ fn to_next_display(
     }
 }
 
-/// Moves the mouse pointer to the next available display.
+/// Moves the mouse pointer to the next available display, or to a named one.
 #[instrument(level = Level::DEBUG, skip_all)]
 fn mouse_to_next_display(
     mut messages: MessageReader<Event>,
@@ -1479,25 +1486,28 @@ fn mouse_to_next_display(
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
-    if !messages.read().any(|event| {
-        matches!(
-            event,
-            Event::Command {
-                command: Command::Mouse(MouseMove::ToNextDisplay),
-            }
-        )
-    }) {
+    let Some(target) = messages.read().find_map(|event| match event {
+        Event::Command {
+            command: Command::Mouse(MouseMove::ToNextDisplay),
+        } => Some(None),
+        Event::Command {
+            command: Command::Mouse(MouseMove::ToDisplay(id)),
+        } => Some(Some(*id)),
+        _ => None,
+    }) else {
         return;
-    }
+    };
 
     let Some(cursor_position) = window_manager.cursor_position().map(origin_from) else {
         return;
     };
-    let Some(other) = displays
-        .into_iter()
-        .find(|display| !display.bounds().contains(cursor_position))
-    else {
-        debug!("no other display to move mouse to.");
+    let Some(other) = displays.into_iter().find(|display| {
+        target.map_or_else(
+            || !display.bounds().contains(cursor_position),
+            |id| display.id() == id,
+        )
+    }) else {
+        debug!("no other display to move mouse to: {target:?}.");
         return;
     };
     let Some((other_strip, _)) = window_manager

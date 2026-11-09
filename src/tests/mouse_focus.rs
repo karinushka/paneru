@@ -370,3 +370,76 @@ fn window_center_warps_mouse_only_when_it_follows_focus() {
             .run(commands);
     }
 }
+
+#[test]
+fn click_focus_leaves_the_pointer_where_the_user_clicked() {
+    for focus_after_release in [false, true] {
+        let config: Config = (
+            MainOptions {
+                auto_center: Some(true),
+                mouse_follows_focus: Some(true),
+                focus_follows_mouse: Some(false),
+                animation_speed: Some(30.0),
+                ..Default::default()
+            },
+            vec![],
+        )
+            .into();
+        let pointer = std::sync::Arc::new(std::sync::Mutex::new(Origin::ZERO));
+        let recorded = pointer.clone();
+        let commands = vec![
+            Event::Command {
+                command: Command::PrintState,
+            },
+            Event::Command {
+                command: Command::PrintState,
+            },
+            Event::Command {
+                command: Command::PrintState,
+            },
+        ];
+        TestHarness::new()
+            .with_config(config)
+            .with_windows(3)
+            .on_iteration(0, move |world, state| {
+                assert_focused!(world, 0);
+                *recorded.lock().expect("pointer lock") = state.cursor_position();
+                let clicked = find_window_entity(1, world);
+                let corner =
+                    world.get::<Window>(clicked).unwrap().frame().min + Origin::new(10, 10);
+                let point = CGPoint {
+                    x: f64::from(corner.x),
+                    y: f64::from(corner.y),
+                };
+                world.write_message(Event::MouseDown {
+                    point,
+                    modifiers: Modifiers::empty(),
+                });
+                if focus_after_release {
+                    world.write_message(Event::MouseUp {
+                        point,
+                        modifiers: Modifiers::empty(),
+                    });
+                }
+                state.focus_window(1);
+            })
+            .on_iteration(1, move |world, _state| {
+                assert_focused!(world, 1);
+                if !focus_after_release {
+                    world.write_message(Event::MouseUp {
+                        point: CGPoint { x: 0.0, y: 0.0 },
+                        modifiers: Modifiers::empty(),
+                    });
+                }
+            })
+            .on_iteration(2, move |world, state| {
+                assert_focused!(world, 1);
+                assert_eq!(
+                    state.cursor_position(),
+                    *pointer.lock().expect("pointer lock"),
+                    "focus after release {focus_after_release}: a click focus moved the pointer"
+                );
+            })
+            .run(commands);
+    }
+}

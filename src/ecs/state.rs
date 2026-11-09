@@ -42,6 +42,8 @@ pub struct SavedDisplay {
     pub bounds: SavedRect,
     pub active: bool,
     pub workspace_ids: Vec<WorkspaceId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -93,6 +95,9 @@ pub struct SavedWindow {
     pub identifier: String,
     pub role: String,
     pub subrole: String,
+    // Relative to the usable display width, as `LayoutOp::SetWidth` reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width_ratio: Option<f64>,
 }
 
 // These wire-format types live in the shared `paneru_shared_types` crate;
@@ -167,6 +172,7 @@ impl SavedWindow {
         let app = apps.get(app_entity).ok()?;
 
         Some(Self {
+            width_ratio: None,
             window_id: window.id(),
             pid: window.pid().ok()?,
             psn: app.psn(),
@@ -304,6 +310,7 @@ impl PaneruState {
         let displays = displays
             .iter()
             .map(|(display, entity, active)| SavedDisplay {
+                uuid: None,
                 display_id: display.id(),
                 bounds: display.bounds().into(),
                 active,

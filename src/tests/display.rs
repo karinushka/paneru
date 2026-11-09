@@ -1662,6 +1662,60 @@ fn test_mouse_to_next_display_preserves_selected_virtual_workspace() {
         .run(commands);
 }
 
+#[test]
+fn test_horizontal_mouse_warp_also_warps_a_drag() {
+    let config: Config = (
+        MainOptions {
+            horizontal_mouse_warp: Some(1),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+    let above = IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0);
+    let edge = objc2_core_foundation::CGPoint {
+        x: f64::from(TEST_DISPLAY_WIDTH - 1),
+        y: f64::from(TEST_DISPLAY_HEIGHT / 2),
+    };
+    let modifiers = crate::platform::Modifiers::empty();
+    for event in [
+        Event::MouseMoved {
+            point: edge,
+            modifiers,
+        },
+        Event::MouseDragged {
+            point: edge,
+            modifiers,
+        },
+    ] {
+        let label = format!("{event:?}");
+        let commands = vec![
+            Event::MenuOpened { window_id: 0 },
+            Event::Command {
+                command: Command::PrintState,
+            },
+            Event::Command {
+                command: Command::PrintState,
+            },
+        ];
+        TestHarness::new()
+            .with_config(config.clone())
+            .with_windows(1)
+            .with_display(EXT_DISPLAY_ID, above, vec![EXT_WORKSPACE_ID])
+            .on_iteration(1, move |world, _state| {
+                world.write_message(event.clone());
+            })
+            .on_iteration(2, move |_world, state| {
+                let cursor = state.cursor_position();
+                assert!(
+                    above.contains(cursor),
+                    "{label} at the right edge left the pointer at {cursor:?}"
+                );
+            })
+            .run(commands);
+    }
+}
+
 /// A window's width is kept as a share of its own display, not of the one
 /// with focus: 960 wide on the 1920 monitor is half, though the laptop has
 /// focus.

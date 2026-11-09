@@ -30,6 +30,7 @@ pub(crate) struct SessionRestore {
     state: PaneruState,
     timer: Timer,
     saved_hard_keys: HashSet<WindowHardMatchKey>,
+    cross_space: bool,
 }
 
 impl SessionRestore {
@@ -39,6 +40,18 @@ impl SessionRestore {
             state,
             timer: Timer::new(grace, TimerMode::Once),
             saved_hard_keys,
+            cross_space: false,
+        }
+    }
+
+    pub(crate) fn is_cross_space(&self) -> bool {
+        self.cross_space
+    }
+
+    pub(crate) fn for_setup(state: PaneruState, grace: Duration) -> Self {
+        Self {
+            cross_space: true,
+            ..Self::new(state, grace)
         }
     }
 }
@@ -442,8 +455,13 @@ pub(super) fn restore_window_state(
         restoration
     };
 
+    // An unknown space matches any saved space. Thus a setup restore can move windows across displays.
+    let cross_space = session
+        .as_deref()
+        .is_some_and(|session| session.cross_space);
     let window_workspaces = workspaces
         .iter()
+        .filter(|_| !cross_space)
         .flat_map(|(_, strip, _, _)| {
             let id = strip.id();
             strip

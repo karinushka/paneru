@@ -49,6 +49,7 @@ pub mod params;
 pub(crate) mod restore;
 pub mod script_state;
 pub mod scroll;
+pub(crate) mod setups;
 pub mod state;
 pub(crate) mod systems;
 mod triggers;
@@ -976,6 +977,7 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
     // Overwrites the empty store `register_commands` put there, which is what
     // the mock harness keeps: only the real app reads the user's file.
     app.insert_resource(script_state::ScriptStateStore::load());
+    app.insert_resource(setups::DisplaySetups::load());
 
     // Do not insert this in mocks.
     app.insert_resource(LowPowerMode(false));

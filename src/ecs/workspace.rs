@@ -159,7 +159,9 @@ impl Plugin for WorkspaceEventsPlugin {
                 workspace_change_handler,
                 workspace_created_handler,
                 handle_virtual_window_moves,
-                detect_moved_windows.run_if(not(resource_exists::<Initializing>)),
+                detect_moved_windows
+                    .run_if(not(resource_exists::<Initializing>))
+                    .run_if(no_setup_restore),
             )
                 .in_set(super::UpdateSet::Events),
         );
@@ -363,6 +365,11 @@ fn workspace_change_handler(
     {
         entity_commands.try_insert(ActiveWorkspaceMarker);
     }
+}
+
+// macOS reports a window on its old space until a setup restore moves its frame.
+fn no_setup_restore(session: Option<Res<super::restore::SessionRestore>>) -> bool {
+    !session.is_some_and(|session| session.is_cross_space())
 }
 
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]

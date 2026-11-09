@@ -181,6 +181,10 @@ impl ActiveDisplayMut<'_, '_> {
         self.other_displays.iter_mut()
     }
 
+    pub fn strip(&self) -> &LayoutStrip {
+        &self.strip.0
+    }
+
     pub fn active_strip(&mut self) -> &mut LayoutStrip {
         &mut self.strip.0
     }

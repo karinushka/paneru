@@ -519,6 +519,9 @@ fn is_batch_workspace_move(
 fn workspace_destroyed_handler(
     mut messages: MessageReader<Event>,
     mut workspaces: Populated<(&mut LayoutStrip, Entity, Option<&NativeFullscreenMarker>)>,
+    parents: Query<&ChildOf, With<LayoutStrip>>,
+    displays: Query<&Display>,
+    window_manager: Res<WindowManager>,
     mut focus_history: ResMut<FocusHistory>,
     mut commands: Commands,
 ) {
@@ -536,6 +539,30 @@ fn workspace_destroyed_handler(
         else {
             continue;
         };
+
+        // macOS deletes the spaces of a removed display and moves their windows later.
+        // Keep the strip, so that display reconciliation can move the windows in order.
+        if fullscreen.is_none()
+            && let Ok((strip, _, _)) = workspaces.get(entity)
+            && strip.len() > 0
+        {
+            let parent = parents.get(entity).ok().map(ChildOf::parent);
+            let display_present = parent
+                .and_then(|parent| displays.get(parent).ok())
+                .is_some_and(|display| {
+                    window_manager
+                        .present_displays()
+                        .iter()
+                        .any(|(present, _)| present.id() == display.id())
+                });
+            if !display_present {
+                debug!("Workspace destroyed {space_id} with its display; keeping its windows");
+                if let Some(parent) = parent {
+                    crate::ecs::display::orphan_strip(strip, entity, parent, &mut commands);
+                }
+                continue;
+            }
+        }
 
         if let Some((
             window,

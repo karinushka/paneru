@@ -712,6 +712,29 @@ fn add_display(
     );
 }
 
+/// After the orphan timeout, the windows of the strip float.
+pub(crate) fn orphan_strip(
+    strip: &LayoutStrip,
+    entity: Entity,
+    display_entity: Entity,
+    commands: &mut Commands,
+) {
+    let timeout = Timeout::new(
+        Duration::from_secs(ORPHANED_SPACES_TIMEOUT_SEC),
+        Some(format!(
+            "Orphaned strip {} ({strip}) could not be re-inserted after {ORPHANED_SPACES_TIMEOUT_SEC}s.",
+            strip.id()
+        )),
+        commands,
+    );
+    if let Ok(mut commands) = commands.get_entity(entity) {
+        commands.try_insert(timeout);
+    }
+    if let Ok(mut commands) = commands.get_entity(display_entity) {
+        commands.detach_child(entity);
+    }
+}
+
 #[instrument(level = Level::DEBUG, skip_all, fields(display_id))]
 fn remove_display(
     display: &Display,
@@ -738,20 +761,7 @@ fn remove_display(
             "orphaning strip {} after removal of display {display_id}.",
             strip.id(),
         );
-        let timeout = Timeout::new(
-            Duration::from_secs(ORPHANED_SPACES_TIMEOUT_SEC),
-            Some(format!(
-                "Orphaned strip {} ({strip}) could not be re-inserted after {ORPHANED_SPACES_TIMEOUT_SEC}s.",
-                strip.id()
-            )),
-            commands,
-        );
-        if let Ok(mut commands) = commands.get_entity(entity) {
-            commands.try_insert(timeout);
-        }
-        if let Ok(mut commands) = commands.get_entity(display_entity) {
-            commands.detach_child(entity);
-        }
+        orphan_strip(strip, entity, display_entity, commands);
     }
 
     if let Ok(mut commands) = commands.get_entity(display_entity) {

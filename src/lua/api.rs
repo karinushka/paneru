@@ -669,6 +669,7 @@ fn config_to_lua_table(lua: &Lua, config: &Config) -> mlua::Result<Table> {
         window_hidden_ratio: _,
         window_resize_cycle: _,
         reap_empty_workspaces: _,
+        remember_display_setups: _,
         disable_native_tabs: _,
         virtual_workspace_animations: _,
         insert_windows_mid_strip: _,
@@ -696,6 +697,7 @@ fn config_to_lua_table(lua: &Lua, config: &Config) -> mlua::Result<Table> {
     options.set("window_hidden_ratio", config.window_hidden_ratio())?;
     options.set("window_resize_cycle", config.window_resize_cycle())?;
     options.set("reap_empty_workspaces", config.reap_empty_workspaces())?;
+    options.set("remember_display_setups", config.remember_display_setups())?;
     options.set("disable_native_tabs", !config.native_tabs_enabled())?;
     options.set(
         "virtual_workspace_animations",

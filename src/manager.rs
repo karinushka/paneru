@@ -120,6 +120,8 @@ pub trait WindowManagerApi: Send + Sync {
     ///
     /// A `Vec<Display>` containing `Display` objects for all present displays.
     fn present_displays(&self) -> Vec<(Display, Vec<WorkspaceId>)>;
+    /// Returns the UUID of a display, which stays the same when the display reconnects.
+    fn display_uuid(&self, display_id: CGDirectDisplayID) -> Option<String>;
     /// Retrieves the `CGDirectDisplayID` of the active menu bar display.
     ///
     /// # Returns
@@ -367,6 +369,12 @@ impl WindowManagerApi for WindowManagerOS {
     ///
     /// A `Vec<Self>` containing `Display` objects for all present displays.
     #[instrument(level = Level::DEBUG, skip_all, ret)]
+    fn display_uuid(&self, display_id: CGDirectDisplayID) -> Option<String> {
+        Display::uuid_from_id(display_id)
+            .ok()
+            .map(|uuid| uuid.to_string())
+    }
+
     fn present_displays(&self) -> Vec<(Display, Vec<WorkspaceId>)> {
         let mut count = 0u32;
         unsafe {

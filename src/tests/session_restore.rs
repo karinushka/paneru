@@ -27,6 +27,7 @@ fn test_startup_restore_rebuilds_virtual_workspace_layout() {
         timestamp: 123_456_789,
         active_display_id: Some(TEST_DISPLAY_ID),
         displays: vec![SavedDisplay {
+            uuid: None,
             display_id: TEST_DISPLAY_ID,
             bounds: SavedRect {
                 min_x: 0,
@@ -931,6 +932,7 @@ fn workspace_rows_state(
 
 fn saved_display(display_id: u32, active: bool) -> SavedDisplay {
     SavedDisplay {
+        uuid: None,
         display_id,
         bounds: SavedRect {
             min_x: 0,
@@ -983,6 +985,7 @@ fn restored_strip_display_parent(
 
 fn saved_window(window_id: i32) -> SavedWindow {
     SavedWindow {
+        width_ratio: None,
         window_id,
         pid: TEST_PROCESS_ID,
         psn: ProcessSerialNumber { high: 1, low: 2 },

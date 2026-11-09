@@ -70,6 +70,7 @@ fn extract_query_state(world: &mut World) -> crate::errors::Result<PaneruQuerySt
 #[test]
 fn test_state_serialization() {
     let window = SavedWindow {
+        width_ratio: None,
         window_id: 1,
         pid: 123,
         psn: ProcessSerialNumber { high: 0, low: 1 },
@@ -85,6 +86,7 @@ fn test_state_serialization() {
         timestamp: 123_456_789,
         active_display_id: Some(TEST_DISPLAY_ID),
         displays: vec![SavedDisplay {
+            uuid: None,
             display_id: TEST_DISPLAY_ID,
             bounds: SavedRect {
                 min_x: 0,
@@ -115,6 +117,7 @@ fn test_state_serialization() {
 #[test]
 fn test_state_restoration() {
     let window = SavedWindow {
+        width_ratio: None,
         window_id: 1,
         pid: 123,
         psn: ProcessSerialNumber { high: 0, low: 1 },
@@ -216,6 +219,7 @@ fn test_state_serializes_display_and_active_virtual_workspace() {
     assert_eq!(
         state.displays,
         vec![SavedDisplay {
+            uuid: None,
             display_id: TEST_DISPLAY_ID,
             bounds: SavedRect {
                 min_x: 0,
@@ -301,6 +305,7 @@ fn test_state_save_is_loadable_from_path() {
         timestamp: 123_456_789,
         active_display_id: Some(TEST_DISPLAY_ID),
         displays: vec![SavedDisplay {
+            uuid: None,
             display_id: TEST_DISPLAY_ID,
             bounds: SavedRect {
                 min_x: 0,
@@ -509,6 +514,7 @@ fn restore_state(workspaces: Vec<SavedWorkspace>) -> PaneruState {
 
 fn saved_window(window_id: WinID, pid: Pid, bundle_id: &str, title: &str) -> SavedWindow {
     SavedWindow {
+        width_ratio: None,
         window_id,
         pid,
         psn: ProcessSerialNumber { high: 0, low: 1 },

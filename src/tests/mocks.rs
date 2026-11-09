@@ -825,6 +825,8 @@ impl MockState {
             });
 
         let s = self.clone();
+        wm.expect_display_uuid()
+            .returning(|display_id| Some(format!("display-{display_id}")));
         wm.expect_present_displays().returning(move || {
             s.inner
                 .force_read()

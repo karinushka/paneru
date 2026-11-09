@@ -817,6 +817,10 @@ impl LayoutStrip {
             for member in items_to_stack.iter().flat_map(StackItem::window_iter) {
                 self.tabbed_stacks.insert(member, active);
             }
+        } else {
+            for member in items_to_stack.iter().flat_map(StackItem::window_iter) {
+                self.tabbed_stacks.remove(&member);
+            }
         }
         let new_column = match target_column {
             Column::Fullscren(_) => unreachable!("checked above"),
@@ -833,6 +837,75 @@ impl LayoutStrip {
         Ok(())
     }
 
+    /// Consumes the column to the right of `entity`'s column into it. The
+    /// column survives at its own position; its own item(s) stay on top,
+    /// the consumed column's item(s) join the bottom. No-op if there is no
+    /// column to the right, or if either column is a `Column::Fullscren` —
+    /// checked *before* anything is removed from `self.columns`, unlike
+    /// `stack`'s equivalent guards, so a Fullscreen column can never be
+    /// silently dropped from the strip.
+    ///
+    /// # Arguments
+    ///
+    /// * `entity` - Entity of the window whose column should consume its
+    ///   right neighbor.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if consuming succeeded or wasn't needed, otherwise
+    /// `Err(Error)` if the window is not found.
+    pub fn consume(&mut self, entity: Entity) -> Result<()> {
+        let index = self.index_of(entity)?;
+        if index + 1 >= self.columns.len() {
+            // Nothing to the right to consume.
+            return Ok(());
+        }
+        if matches!(self.columns.get(index), Some(Column::Fullscren(_)))
+            || matches!(self.columns.get(index + 1), Some(Column::Fullscren(_)))
+        {
+            return Ok(());
+        }
+
+        let own_column = self.columns.remove(index).unwrap();
+        // After removing `index`, whatever was at `index + 1` has shifted
+        // down to `index`.
+        let neighbor_column = self.columns.remove(index).unwrap();
+
+        let own_items = match own_column {
+            Column::Single(id) => vec![StackItem::Single(id)],
+            Column::Tabs(tabs) => vec![StackItem::Tabs(tabs)],
+            Column::Stack(items) => items,
+            Column::Fullscren(_) => unreachable!("guarded above"),
+        };
+        let neighbor_items = match neighbor_column {
+            Column::Single(id) => vec![StackItem::Single(id)],
+            Column::Tabs(tabs) => vec![StackItem::Tabs(tabs)],
+            Column::Stack(items) => items,
+            Column::Fullscren(_) => unreachable!("guarded above"),
+        };
+
+        // Same `tabbed_stacks` bookkeeping `stack` does for its own merge,
+        // checked against the surviving (own) column instead of the target —
+        // see `stack`'s equivalent comment above.
+        if let Some(active) = own_items
+            .iter()
+            .flat_map(StackItem::window_iter)
+            .find_map(|e| self.tabbed_stacks.get(&e).copied())
+        {
+            for member in neighbor_items.iter().flat_map(StackItem::window_iter) {
+                self.tabbed_stacks.insert(member, active);
+            }
+        } else {
+            for member in neighbor_items.iter().flat_map(StackItem::window_iter) {
+                self.tabbed_stacks.remove(&member);
+            }
+        }
+
+        self.columns
+            .insert(index, Column::Stack([own_items, neighbor_items].concat()));
+        Ok(())
+    }
+
     /// Unstacks the window with the given ID from its entity stack.
     /// If the window is in a single panel, no action is taken.
     ///
@@ -845,46 +918,45 @@ impl LayoutStrip {
     /// `Ok(())` if the unstacking is successful or not needed, otherwise `Err(Error)` if the window is not found.
     pub fn unstack(&mut self, entity: Entity) -> Result<()> {
         let index = self.index_of(entity)?;
-        let column = self.columns.remove(index).unwrap();
-
-        if let Column::Stack(mut items) = column {
-            let item_index = items
-                .iter()
-                .position(|item| item.contains(entity))
-                .ok_or(Error::NotFound(format!("Entity {entity} not in stack")))?;
-
-            let removed_item = items.remove(item_index);
-
-            // The unstacked item no longer shares a column with its former
-            // stack-mates, so it can't remain part of a tabbed display.
-            let removed: Vec<Entity> = removed_item.window_iter().collect();
-            self.reconcile_tabbed_stacks_after_departure(&removed, &items);
-
-            // Re-insert the unstacked item as a single/tabs panel
-            let unstacked_column = match removed_item {
-                StackItem::Single(id) => Column::Single(id),
-                StackItem::Tabs(tabs) => Column::Tabs(tabs),
-            };
-            self.columns.insert(index, unstacked_column);
-
-            // Re-insert the modified stack (if not empty) at the original position
-            if !items.is_empty() {
-                let new_column = if items.len() == 1 {
-                    match items.remove(0) {
-                        StackItem::Single(id) => Column::Single(id),
-                        StackItem::Tabs(tabs) => Column::Tabs(tabs),
-                    }
-                } else {
-                    Column::Stack(items)
-                };
-                self.columns.insert(index, new_column);
-            }
-            Ok(())
-        } else {
-            // Not in a stack, put it back
-            self.columns.insert(index, column);
-            Ok(())
+        if !matches!(self.columns.get(index), Some(Column::Stack(_))) {
+            return Ok(());
         }
+        let Some(Column::Stack(mut items)) = self.columns.remove(index) else {
+            unreachable!("checked above");
+        };
+
+        let item_index = items
+            .iter()
+            .position(|item| item.contains(entity))
+            .ok_or(Error::NotFound(format!("Entity {entity} not in stack")))?;
+
+        let removed_item = items.remove(item_index);
+
+        // The unstacked item no longer shares a column with its former
+        // stack-mates, so it can't remain part of a tabbed display.
+        let removed: Vec<Entity> = removed_item.window_iter().collect();
+        self.reconcile_tabbed_stacks_after_departure(&removed, &items);
+
+        // Re-insert the unstacked item as a single/tabs panel
+        let unstacked_column = match removed_item {
+            StackItem::Single(id) => Column::Single(id),
+            StackItem::Tabs(tabs) => Column::Tabs(tabs),
+        };
+        self.columns.insert(index, unstacked_column);
+
+        // Re-insert the modified stack (if not empty) at the original position
+        if !items.is_empty() {
+            let new_column = if items.len() == 1 {
+                match items.remove(0) {
+                    StackItem::Single(id) => Column::Single(id),
+                    StackItem::Tabs(tabs) => Column::Tabs(tabs),
+                }
+            } else {
+                Column::Stack(items)
+            };
+            self.columns.insert(index, new_column);
+        }
+        Ok(())
     }
 
     /// Returns a vector of all window IDs present in all panels within the pane, maintaining their order.
@@ -2284,6 +2356,79 @@ mod tests {
         assert_eq!(strip.index_of(entities[1]).unwrap(), 0);
         assert_eq!(strip.index_of(entities[0]).unwrap(), 1);
         assert_eq!(strip.index_of(entities[2]).unwrap(), 2);
+    }
+
+    /// `consume` is the mirror of `stack` in the opposite direction: the
+    /// acting entity's own column survives at its position, the neighbor
+    /// to its *right* disappears into it, and the acting entity's own
+    /// item(s) stay on top (the consumed neighbor's items join the bottom).
+    #[test]
+    fn test_window_pane_consume() {
+        let (_world, mut strip, entities) = setup_world_and_strip();
+
+        // [0] consumes [1] (its right neighbor).
+        strip.consume(entities[0]).unwrap();
+        assert_eq!(strip.len(), 2);
+        assert_eq!(strip.index_of(entities[0]).unwrap(), 0);
+        assert_eq!(strip.index_of(entities[1]).unwrap(), 0); // Both in the same panel
+        assert_eq!(strip.index_of(entities[2]).unwrap(), 1);
+
+        match strip.get(0).unwrap() {
+            Column::Stack(stack) => {
+                assert_eq!(stack.len(), 2);
+                assert_eq!(
+                    stack[0],
+                    StackItem::Single(entities[0]),
+                    "consumer stays on top"
+                );
+                assert_eq!(
+                    stack[1],
+                    StackItem::Single(entities[1]),
+                    "the consumed neighbor joins the bottom"
+                );
+            }
+            Column::Single(_) | Column::Fullscren(_) | Column::Tabs(_) => {
+                panic!("Expected a stack")
+            }
+        }
+    }
+
+    #[test]
+    fn test_consume_is_a_noop_with_no_right_neighbor() {
+        let (_world, mut strip, entities) = setup_world_and_strip();
+
+        // entities[2] is the last column — nothing to its right.
+        strip.consume(entities[2]).unwrap();
+        assert_eq!(strip.len(), 3);
+        assert_eq!(strip.index_of(entities[0]).unwrap(), 0);
+        assert_eq!(strip.index_of(entities[1]).unwrap(), 1);
+        assert_eq!(strip.index_of(entities[2]).unwrap(), 2);
+    }
+
+    /// Regression guard: `stack` removes both the mover's and the target's
+    /// columns from `self.columns` before checking whether either is
+    /// `Column::Fullscren`, and (per investigation) would silently drop
+    /// them from the strip forever if that branch were ever hit. `consume`
+    /// must not reproduce that landmine — it must recognize a Fullscreen
+    /// column on either side and refuse to touch anything.
+    #[test]
+    fn test_consume_never_drops_a_fullscreen_column() {
+        let (_world, mut strip, entities) = setup_world_and_strip();
+        // Directly overwrite entities[1]'s column with a Fullscreen one —
+        // not reachable through any real caller today (`Column::Fullscren`
+        // only ever occupies a strip alone), but `consume` must still be
+        // defensive rather than rely on that invariant holding forever.
+        strip.columns[1] = Column::Fullscren(entities[1]);
+
+        // Neighbor (index + 1) is Fullscreen.
+        strip.consume(entities[0]).unwrap();
+        assert_eq!(strip.len(), 3, "no column may be lost");
+        assert!(matches!(strip.get(1).unwrap(), Column::Fullscren(_)));
+
+        // Own column is Fullscreen.
+        strip.consume(entities[1]).unwrap();
+        assert_eq!(strip.len(), 3, "no column may be lost");
+        assert!(matches!(strip.get(1).unwrap(), Column::Fullscren(_)));
     }
 
     #[test]

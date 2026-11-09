@@ -266,6 +266,7 @@ A handler that raises partway through changes nothing either, because it never r
 | `ws:columns([n])` | The columns of a workspace, each a list of window IDs |
 | `ws:column_of(id)` / `ws:workspace_of(id)` | The column index / workspace number a window is on |
 | `ws:display_of(id)` | The display a window is on: `{ id, active, x, y, width, height }` |
+| `ws:displays()` | Every display in the same form, also a display with no windows. Pass an `id` to `window displaymove <id>` |
 | `ws:east(id)` / `ws:west(id)` | The window one column over |
 | `ws:next(id)` / `ws:prev(id)` | The next/previous window, wrapping |
 

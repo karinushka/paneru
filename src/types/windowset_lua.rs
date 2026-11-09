@@ -14,7 +14,18 @@
 
 use mlua::{Function, LuaSerdeExt, UserData, UserDataMethods, Value};
 
-use crate::types::windowset::{LayoutOp, RelativeRect, WinID, WindowSet};
+use crate::types::windowset::{DisplaySet, LayoutOp, RelativeRect, WinID, WindowSet};
+
+fn display_table(lua: &mlua::Lua, display: &DisplaySet) -> mlua::Result<mlua::Table> {
+    let table = lua.create_table()?;
+    table.set("id", display.id)?;
+    table.set("active", display.active)?;
+    table.set("x", display.frame.x)?;
+    table.set("y", display.frame.y)?;
+    table.set("width", display.frame.width)?;
+    table.set("height", display.frame.height)?;
+    Ok(table)
+}
 
 /// Reads `{ x = …, y = …, width = …, height = … }` as fractions of a display.
 /// Missing fields default to a full-display rect, so `{ width = 0.5 }` is the
@@ -120,17 +131,17 @@ impl UserData for WindowSet {
         // The whole display record, so a script can work out pixel geometry
         // itself when fractions are not enough.
         methods.add_method("display_of", |lua, this, id: WinID| {
-            let Some(display) = this.display_of(id) else {
-                return Ok(Value::Nil);
-            };
-            let table = lua.create_table()?;
-            table.set("id", display.id)?;
-            table.set("active", display.active)?;
-            table.set("x", display.frame.x)?;
-            table.set("y", display.frame.y)?;
-            table.set("width", display.frame.width)?;
-            table.set("height", display.frame.height)?;
-            Ok(Value::Table(table))
+            this.display_of(id).map_or(Ok(Value::Nil), |display| {
+                display_table(lua, display).map(Value::Table)
+            })
+        });
+
+        // Unlike `display_of`, this includes a display with no windows.
+        methods.add_method("displays", |lua, this, ()| {
+            this.displays()
+                .iter()
+                .map(|display| display_table(lua, display))
+                .collect::<mlua::Result<Vec<_>>>()
         });
 
         methods.add_method("east", |_, this, id: WinID| Ok(this.east(id)));
@@ -214,5 +225,46 @@ impl UserData for WindowSet {
         });
 
         methods.add_method("unstack", |_, this, id: WinID| Ok(this.unstack(id)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::types::state::Frame;
+    use crate::types::windowset::{DisplaySet, WindowSet};
+
+    fn empty_display(id: u32, x: i32) -> DisplaySet {
+        DisplaySet {
+            id,
+            frame: Frame {
+                x,
+                y: 0,
+                width: 100,
+                height: 50,
+            },
+            active: id == 1,
+            workspaces: Arc::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn displays_lists_every_display_including_empty_ones() {
+        let lua = mlua::Lua::new();
+        let set = WindowSet::new(vec![empty_display(1, 0), empty_display(3, 100)], None);
+        lua.globals().set("ws", set).expect("set the window set");
+        let (ids, second_x, first_active): (Vec<u32>, i32, bool) = lua
+            .load(
+                "local displays = ws:displays()
+                 local ids = {}
+                 for index, display in ipairs(displays) do ids[index] = display.id end
+                 return ids, displays[2].x, displays[1].active",
+            )
+            .eval()
+            .expect("run the script");
+        assert_eq!(ids, vec![1, 3]);
+        assert_eq!(second_x, 100);
+        assert!(first_active);
     }
 }

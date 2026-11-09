@@ -402,7 +402,7 @@ fn horizontal_warp_mouse_trigger(
     const VELOCITY_FRESHNESS: Duration = Duration::from_millis(80);
 
     for InputEvent(event) in messages.read() {
-        let Event::MouseMoved { point, .. } = event else {
+        let (Event::MouseMoved { point, .. } | Event::MouseDragged { point, .. }) = event else {
             continue;
         };
 

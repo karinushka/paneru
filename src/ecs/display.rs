@@ -73,7 +73,6 @@ impl Plugin for DisplayEventsPlugin {
             )
             .add_observer(read_display_properties_trigger)
             .add_observer(cleanup_active_display_marker);
-        crate::ecs::setups::register(app);
     }
 }
 

@@ -130,6 +130,7 @@ impl Plugin for FocusEventsPlugin {
             Update,
             (
                 detect_focus_rejection.in_set(super::UpdateSet::Events),
+                handle_tab_indicator_click.in_set(super::UpdateSet::Events),
                 fix_window_size_on_focus.in_set(super::UpdateSet::Focus),
                 autocenter_window_on_focus
                     .in_set(super::UpdateSet::Layout)
@@ -734,6 +735,23 @@ fn update_tabbed_active_on_focus(
                     layout_position.set_changed();
                 }
             }
+        }
+    }
+}
+
+/// Focuses the tab clicked in the tab indicator
+/// (`Event::TabIndicatorClicked`), like a keyboard tab switch.
+fn handle_tab_indicator_click(
+    mut messages: MessageReader<Event>,
+    windows: Windows,
+    mut commands: Commands,
+) {
+    for event in messages.read() {
+        let Event::TabIndicatorClicked { window_id } = event else {
+            continue;
+        };
+        if let Some((_, entity)) = windows.find(*window_id) {
+            commands.focus_entity(entity, true);
         }
     }
 }

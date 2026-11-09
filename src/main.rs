@@ -25,6 +25,7 @@ mod overlay;
 mod pasteboard;
 mod platform;
 mod reader;
+mod tab_indicator;
 mod util;
 
 pub use paneru::types;

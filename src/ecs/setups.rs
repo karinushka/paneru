@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use bevy::app::{App, Update};
+use bevy::app::{App, Plugin, Update};
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::observer::On;
@@ -106,22 +106,26 @@ impl DisplaySetups {
     }
 }
 
-pub(crate) fn register(app: &mut App) {
-    app.init_resource::<DisplaySetups>()
-        .add_systems(
-            Update,
-            (
-                note_layout_change,
-                capture_setup
-                    .run_if(on_timer(CAPTURE_CHECK))
-                    .run_if(not(resource_exists::<Initializing>))
-                    .run_if(not(resource_exists::<SessionRestore>))
-                    .run_if(|reconcile: Res<DisplayReconcileState>| reconcile.is_idle()),
+pub struct DisplaySetupsPlugin;
+
+impl Plugin for DisplaySetupsPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<DisplaySetups>()
+            .add_systems(
+                Update,
+                (
+                    note_layout_change,
+                    capture_setup
+                        .run_if(on_timer(CAPTURE_CHECK))
+                        .run_if(not(resource_exists::<Initializing>))
+                        .run_if(not(resource_exists::<SessionRestore>))
+                        .run_if(|reconcile: Res<DisplayReconcileState>| reconcile.is_idle()),
+                )
+                    .chain()
+                    .run_if(|config: Res<Config>| config.remember_display_setups()),
             )
-                .chain()
-                .run_if(|config: Res<Config>| config.remember_display_setups()),
-        )
-        .add_observer(restore_setup);
+            .add_observer(restore_setup);
+    }
 }
 
 pub(crate) fn setup_key(window_manager: &WindowManager) -> Option<String> {

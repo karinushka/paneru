@@ -922,6 +922,7 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         .add_plugins(layout::LayoutEventsPlugin)
         .add_plugins(focus::FocusEventsPlugin)
         .add_plugins(display::DisplayEventsPlugin)
+        .add_plugins(setups::DisplaySetupsPlugin)
         .add_plugins((register_triggers, register_systems, register_commands));
 
     // Run every schedule inline rather than fanning systems out across the task

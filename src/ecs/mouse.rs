@@ -8,7 +8,7 @@ use bevy::time::Time;
 use std::time::{Duration, Instant};
 use tracing::{debug, trace, warn};
 
-use super::{MouseHeldMarker, Timeout};
+use super::{ClickFocusMarker, MouseHeldMarker, Timeout};
 use crate::config::Config;
 use crate::ecs::focus::PendingFocusLayout;
 use crate::ecs::layout::LayoutStrip;
@@ -213,6 +213,9 @@ fn mouse_moved_trigger(
     }
 }
 
+// An app can send the focus notification after the user releases the button.
+const CLICK_FOCUS_GRACE: Duration = Duration::from_secs(1);
+
 /// Handles mouse down events.
 ///
 /// This function finds the window at the click point. If the window is not fully visible,
@@ -263,6 +266,9 @@ fn mouse_down_trigger(
                 entity_commands.try_despawn();
             }
         }
+
+        let grace = Timeout::new(CLICK_FOCUS_GRACE, None, &mut commands);
+        commands.spawn((ClickFocusMarker(entity), grace));
 
         if config.window_hidden_ratio() >= 1.0 {
             // At max hidden ratio, never reshuffle on click.

@@ -667,6 +667,10 @@ pub struct SkipReshuffle(pub bool);
 #[derive(Component)]
 pub struct MouseHeldMarker(pub Entity);
 
+/// A focus change that this click causes does not move the pointer.
+#[derive(Component)]
+pub struct ClickFocusMarker(pub Entity);
+
 /// Resource indicating whether Mission Control is currently active.
 #[derive(Resource)]
 pub struct MissionControlActive(pub bool);

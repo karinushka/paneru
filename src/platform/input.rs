@@ -62,6 +62,13 @@ struct Touch<I> {
     ended: bool,
 }
 
+/// Whether any finger in `fingers` is one of `claimed`.
+fn shares_finger<I>(fingers: &[Touch<I>], claimed: &[I], same: impl Fn(&I, &I) -> bool) -> bool {
+    fingers
+        .iter()
+        .any(|finger| claimed.iter().any(|c| same(c, &finger.identity)))
+}
+
 impl Touch<Retained<AnyObject>> {
     /// Samples the whole set in one pass.
     fn sample(touches: &NSSet<NSTouch>) -> Vec<Self> {
@@ -197,6 +204,11 @@ pub(super) struct InputHandler {
     /// The overview was already told this sequence's scrub is over (fingers
     /// started lifting); the rest of the sequence is swallowed.
     overview_released: bool,
+    /// The fingers that started the overview's sequence. The claim lasts
+    /// while any of them is still down: macOS restarts the gesture when the
+    /// finger count changes, and may then report the remaining fingers as
+    /// newly began, so phases alone can't tell the sequence apart.
+    overview_touches: Vec<Retained<AnyObject>>,
     /// The `CFMachPort` representing the `CGEventTap`.
     tap_port: Option<CFRetained<CFMachPort>>,
     /// Run loop source feeding `tap_port`. Retained so the tap can be torn down
@@ -234,6 +246,7 @@ impl InputHandler {
             last_swipe_sample_timestamp: None,
             overview_tracking: false,
             overview_released: false,
+            overview_touches: Vec::new(),
             tap_port: None,
             run_loop_source: None,
             last_swipe_time: None,
@@ -592,20 +605,24 @@ impl InputHandler {
         overview_fingers: Option<usize>,
         timestamp: f64,
     ) -> Option<bool> {
+        if fingers.is_empty() {
+            // AppKit interleaves empty touch sets; they don't mean a lift.
+            return Some(true);
+        }
         if self.overview_released {
-            // Fingers landing again after a release start a new sequence (the
-            // phase-ended event that would have closed this one went missing).
-            if fingers.iter().any(|finger| finger.began) {
+            // Swallowed while any finger of the overview's sequence is down.
+            // Only fingers that are all new start a new sequence.
+            if !shares_finger(fingers, &self.overview_touches, |a, b| {
+                // SAFETY: NSTouch identities conform to NSObject and answer isEqual:.
+                unsafe { msg_send![&**a, isEqual: &**b] }
+            }) {
                 self.overview_tracking = false;
                 self.overview_released = false;
+                self.overview_touches.clear();
                 self.previous_touches.clear();
                 self.last_swipe_sample_timestamp = None;
                 return None;
             }
-            return Some(true);
-        }
-        if fingers.is_empty() {
-            // AppKit interleaves empty touch sets; they don't mean a lift.
             return Some(true);
         }
         // Every finger ended, or one lifted first: the scrub is over. The
@@ -703,6 +720,7 @@ impl InputHandler {
                 // yet, so the first movement doesn't wait on captures.
                 self.overview_tracking = true;
                 self.overview_released = false;
+                self.overview_touches = fingers.iter().map(|f| f.identity.clone()).collect();
                 self.previous_touches = fingers;
                 self.last_swipe_sample_timestamp = Some(timestamp);
                 if let Some(events) = &self.events {
@@ -940,6 +958,33 @@ mod tests {
                 ended: false,
             })
             .collect()
+    }
+
+    #[test]
+    fn overview_claim_lasts_while_any_of_its_fingers_is_down() {
+        let claimed = [0, 1, 2, 3];
+        let same = |a: &usize, b: &usize| a == b;
+        // One finger lifted: the three left are still the overview's, even
+        // if macOS restarts the gesture and reports them as began.
+        let mut rest = three_fingers(0.0);
+        for f in &mut rest {
+            f.began = true;
+        }
+        assert!(shares_finger(&rest, &claimed, same));
+        // A single original finger left among new ones still holds it.
+        let mut mixed = three_fingers(0.0);
+        mixed[0].identity = 10;
+        mixed[1].identity = 11;
+        assert!(shares_finger(&mixed, &claimed, same));
+        // All new fingers: a new sequence.
+        let fresh: Vec<_> = three_fingers(0.0)
+            .into_iter()
+            .map(|mut f| {
+                f.identity += 20;
+                f
+            })
+            .collect();
+        assert!(!shares_finger(&fresh, &claimed, same));
     }
 
     fn movement(previous: &[Touch<usize>], current: &[Touch<usize>]) -> Option<SwipeMovement> {

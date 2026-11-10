@@ -1,5 +1,5 @@
 use bevy::app::{App, Plugin, Update};
-use bevy::ecs::change_detection::{DetectChanges, DetectChangesMut, Ref};
+use bevy::ecs::change_detection::DetectChangesMut;
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::{Entity, EntityHashMap, EntityHashSet};
 use bevy::ecs::hierarchy::ChildOf;
@@ -16,9 +16,9 @@ use crate::config::Config;
 use crate::ecs::params::Windows;
 use crate::ecs::workspace::{PreviousStripPosition, SnapStripMarker};
 use crate::ecs::{
-    ActiveWorkspaceMarker, Bounds, DockPosition, EnsureVisibleMarker, Initializing, LayoutPosition,
-    ManualStripOffset, Position, RepositionMarker, ReshuffleAroundMarker, ResizeAnchor,
-    ResizeMarker, Scrolling, SpawnCommandsExt,
+    Bounds, DockPosition, EnsureVisibleMarker, Initializing, LayoutPosition, ManualStripOffset,
+    Position, RepositionMarker, ReshuffleAroundMarker, ResizeAnchor, ResizeMarker, Scrolling,
+    SpawnCommandsExt,
 };
 use crate::errors::{Error, Result};
 use crate::manager::{Display, Origin, Size, Window};
@@ -37,9 +37,9 @@ pub struct LayoutEventsPlugin;
 /// frame has left the display entirely to whichever display it landed on.
 pub(crate) const PARKED_STRIP_SLIVER: i32 = 10;
 
-/// A strip, its entity, origin, display, whether it's the active one, any
-/// in-flight target offset, and whether it carries a saved position waiting to
-/// be restored by [`crate::ecs::workspace::show_active_workspace`].
+/// A strip, its entity, origin, display, any in-flight target offset, and
+/// whether it carries a saved position waiting to be restored by
+/// [`crate::ecs::workspace::show_active_workspace`].
 /// Shared by [`reshuffle_layout_strip`] and [`ensure_visible_in_strip`].
 type StripPlacements<'w, 's> = Query<
     'w,
@@ -49,7 +49,6 @@ type StripPlacements<'w, 's> = Query<
         Entity,
         &'static Position,
         &'static ChildOf,
-        Option<Ref<'static, ActiveWorkspaceMarker>>,
         Option<&'static RepositionMarker>,
         Has<PreviousStripPosition>,
     ),
@@ -1311,15 +1310,8 @@ fn resolve_strip_scroll_context<'a>(
     displays: &DisplayViewports,
     config: &Config,
 ) -> Option<StripScrollContext<'a>> {
-    let (
-        strip,
-        strip_entity,
-        strip_position,
-        child,
-        active_marker,
-        strip_reposition,
-        has_previous_position,
-    ) = strips.into_iter().find(|strip| strip.0.contains(entity))?;
+    let (strip, strip_entity, strip_position, child, strip_reposition, has_previous_position) =
+        strips.into_iter().find(|strip| strip.0.contains(entity))?;
     let (display, dock) = displays.get(child.parent()).ok()?;
     let strip_target = strip_reposition.map_or(strip_position.0, |reposition| reposition.0);
     Some(StripScrollContext {
@@ -1329,7 +1321,11 @@ fn resolve_strip_scroll_context<'a>(
         strip_target,
         display_bounds: display.actual_display_bounds(dock, config),
         raw_display_bounds: display.bounds(),
-        is_new_activation: has_previous_position && active_marker.is_some_and(|m| m.is_added()),
+        // A strip with `PreviousStripPosition` is either parked off-screen or
+        // on the first tick of activation (before `show_active_workspace`
+        // removes the component), so layout reshuffles must not pull it onto
+        // the visible viewport.
+        is_new_activation: has_previous_position,
     })
 }
 

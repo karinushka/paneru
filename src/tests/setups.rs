@@ -62,6 +62,7 @@ fn unplug(harness: &mut TestHarness) {
     harness.advance(SETTLE);
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn test_each_display_setup_gets_its_own_layout_back() {
     let config: Config = (
@@ -156,11 +157,35 @@ fn test_each_display_setup_gets_its_own_layout_back() {
         Some(laptop_layout),
         "a capture on the dual setup never writes the laptop layout"
     );
+    let ext_parked = world
+        .query::<(
+            &LayoutStrip,
+            Option<&crate::ecs::workspace::PreviousStripPosition>,
+        )>()
+        .iter(world)
+        .any(|(strip, prev)| strip.id() == RETURNED_EXT_WORKSPACE_ID && prev.is_some());
+    assert!(
+        !ext_parked,
+        "the secondary display's active strip must not be marked as parked"
+    );
 
     unplug(&mut harness);
     assert_eq!(
         strips_on(harness.world(), TEST_WORKSPACE_ID).first(),
         Some(&(0, vec![1, 0])),
         "the laptop's own order returns, not the order of the migration"
+    );
+    let world = harness.world();
+    let row1_pos = world
+        .query::<(&LayoutStrip, &crate::ecs::Position)>()
+        .iter(world)
+        .find_map(|(strip, pos)| {
+            (strip.id() == TEST_WORKSPACE_ID && strip.virtual_index == 1).then_some(pos.0)
+        })
+        .expect("restored parked row 1 on the laptop");
+    assert_eq!(
+        row1_pos.y,
+        TEST_DISPLAY_HEIGHT - crate::ecs::layout::PARKED_STRIP_SLIVER,
+        "parked row 1 must stay parked off-screen after width restoration"
     );
 }

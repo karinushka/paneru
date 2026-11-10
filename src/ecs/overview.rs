@@ -429,8 +429,7 @@ fn overview_follow_layout(
                 layout: &entry.layout,
             })
             .collect();
-        manager.build(&scenes, &info);
-        manager.set_progress(1.0);
+        manager.build(&scenes, &info, 1.0);
     }
     state.displays = entries;
 }
@@ -450,7 +449,7 @@ fn open(state: &mut OverviewState, manager: &mut OverviewManager, scene: &Scene)
             layout: &entry.layout,
         })
         .collect();
-    manager.build(&scenes, &info);
+    manager.build(&scenes, &info, 0.0);
     state.displays = entries;
     state.progress = 0.0;
     state.spring = None;

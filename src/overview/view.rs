@@ -761,7 +761,9 @@ impl OverviewManager {
             viewport
                 .layer
                 .setBorderColor(Some(&color(0.45, 0.65, 1.0, 0.9)));
-            viewport.set_ring(strip.active);
+            // The focused card carries the ring; outlining the row's "screen"
+            // as well read as a second, misplaced focus border.
+            viewport.set_ring(false);
             container.layer.addSublayer(&viewport.layer);
             viewport.set(0.0);
 
@@ -945,7 +947,7 @@ impl OverviewManager {
             let (rest, open) = container_frames(layout);
             panel.container.morph(rest, open, spring);
             for (row, strip) in panel.rows.iter_mut().zip(&layout.strips) {
-                row.viewport.set_ring(strip.active);
+                row.viewport.set_ring(false);
                 row.viewport
                     .morph(strip.viewport_rest, strip.viewport_overview, spring);
                 let label = strip.label.offset(0.0, 6.0);

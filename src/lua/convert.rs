@@ -263,6 +263,7 @@ impl TryFrom<&Event> for LuaEvent {
             | Event::StateSubscribe { .. }
             | Event::ScriptState { .. }
             | Event::OverviewClick { .. }
+            | Event::OverviewScroll { .. }
             | Event::OverviewDismiss
             | Event::OverviewTransitionDone { .. }
             | Event::OverviewSwipe { .. }

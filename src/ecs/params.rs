@@ -210,6 +210,7 @@ pub struct FrameActivity<'w, 's> {
     scrolling: Query<'w, 's, (), With<Scrolling>>,
     flash_messages: Query<'w, 's, (), With<FlashMessage>>,
     overview: Option<bevy::ecs::system::NonSend<'w, crate::overview::view::OverviewManager>>,
+    overview_state: Option<Res<'w, crate::ecs::overview::OverviewState>>,
 }
 
 impl FrameActivity<'_, '_> {
@@ -224,6 +225,11 @@ impl FrameActivity<'_, '_> {
                 .overview
                 .as_ref()
                 .is_some_and(|overview| overview.has_pending_captures())
+            // The blur ramp is stepped from the main loop while a spring runs.
+            || self
+                .overview_state
+                .as_ref()
+                .is_some_and(|state| state.is_animating())
     }
 }
 

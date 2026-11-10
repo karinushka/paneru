@@ -56,8 +56,6 @@ use crate::events::{Event, EventSender};
 
 /// Blur of the wallpaper backdrop, in points.
 const BACKDROP_BLUR: f64 = 40.0;
-/// Blur behind translucent windows, about what macOS and terminals use.
-const WINDOW_BLUR: f64 = 20.0;
 /// Corner radius and focus ring width of a card when fully open, in points.
 const CARD_RADIUS: f64 = 10.0;
 const RING_WIDTH: f64 = 2.5;
@@ -295,8 +293,7 @@ fn ci_filter(name: &str, inputs: &[(&str, &AnyObject)]) -> Option<Retained<AnyOb
 }
 
 /// Blurs `image` (a display-wide capture, `width` points across) by
-/// `radius` points, the way the `WindowServer` blurs what is behind a
-/// translucent window. Rendered once on the CPU side at a quarter of the
+/// `radius` points, for the backdrop. Rendered once on the CPU side at a quarter of the
 /// size: a blurred image has no detail to lose, and the result is cheap to
 /// show in many layers. Edges are clamped so they don't darken.
 fn blurred(image: &CGImage, width: f64, radius: f64) -> Option<CFRetained<CGImage>> {
@@ -614,7 +611,7 @@ define_class!(
 
 struct Card {
     animated: Animated,
-    /// The window's snapshot, above `under`.
+    /// The window's snapshot.
     content: Retained<CALayer>,
     window_id: i32,
     /// On the active row: captured at full resolution, before showing.
@@ -726,9 +723,6 @@ struct Screen {
     wallpaper: Vec<Retained<CALayer>>,
     /// Layers showing the wallpaper as heavily blurred as the backdrop.
     backdrop: Vec<Retained<CALayer>>,
-    /// Layers under each card showing the wallpaper as translucent windows
-    /// blur it, so see-through windows don't come out grey.
-    under: Vec<Retained<CALayer>>,
     menubar: Vec<Retained<CALayer>>,
     /// Menu bar height, if the display has one.
     menubar_height: Option<f64>,
@@ -826,7 +820,6 @@ impl OverviewManager {
             let mut screen = Screen {
                 wallpaper: Vec::new(),
                 backdrop: Vec::new(),
-                under: Vec::new(),
                 menubar: Vec::new(),
                 menubar_height: menubar.map(|(_, f)| f.h),
             };
@@ -851,19 +844,14 @@ impl OverviewManager {
                 let key = format!("wallpaper {id}");
                 let index = self.target(screen.wallpaper, false, true, false, &key);
                 jobs.push((Rank::Screen, index, shot));
-                for (layers, radius, rank) in [
-                    (screen.under, WINDOW_BLUR, Rank::Screen),
-                    (screen.backdrop, BACKDROP_BLUR, Rank::Backdrop),
-                ] {
-                    let shot = Shot::Blurred {
-                        id: *id,
-                        width: b.w,
-                        radius,
-                    };
-                    let key = format!("wallpaper {id} blurred {radius}");
-                    let index = self.target(layers, false, true, false, &key);
-                    jobs.push((rank, index, shot));
-                }
+                let shot = Shot::Blurred {
+                    id: *id,
+                    width: b.w,
+                    radius: BACKDROP_BLUR,
+                };
+                let key = format!("wallpaper {id} blurred");
+                let index = self.target(screen.backdrop, false, true, false, &key);
+                jobs.push((Rank::Backdrop, index, shot));
             }
             if let Some((_, rect)) = menubar {
                 let shot = Shot::Region { rect: *rect, below };
@@ -1168,7 +1156,12 @@ impl OverviewManager {
             for window in &strip.windows {
                 let covered =
                     !window.floating && floating_frames.iter().any(|f| f.intersects(&window.rest));
-                let screen_rect = (strip.active && display.encloses(&window.rest) && !covered)
+                // Floating windows are captured on their own: one can sit
+                // behind tiled windows, and its region would show them.
+                let screen_rect = (strip.active
+                    && !window.floating
+                    && display.encloses(&window.rest)
+                    && !covered)
                     .then(|| window.rest.offset(b.x, b.y));
                 let distance = if window.floating {
                     None
@@ -1184,18 +1177,6 @@ impl OverviewManager {
                 card.layer
                     .setBorderColor(Some(&color(0.45, 0.65, 1.0, 1.0)));
                 card.set_ring(window.focused);
-                // What a translucent window shows through: the wallpaper
-                // patch behind it, blurred. Laid out in the card's bounds,
-                // which are the window's size at its layout position.
-                let under = CALayer::new();
-                let local = window.layout;
-                under.setFrame(CGRect::new(
-                    CGPoint::new(-local.x, -local.y),
-                    CGSize::new(b.w, b.h),
-                ));
-                under.setContentsGravity(unsafe { kCAGravityResize });
-                card.layer.addSublayer(&under);
-                screen.under.push(under);
                 let content = CALayer::new();
                 content.setFrame(CGRect::new(
                     CGPoint::new(0.0, 0.0),
@@ -1443,7 +1424,7 @@ mod tests {
         let context = std::ptr::NonNull::new(raw).map(|ptr| unsafe { CFRetained::from_raw(ptr) });
         let image = CGBitmapContextCreateImage(context.as_deref()).expect("image");
         // A 400 px image of a 200 pt wide display (2x).
-        let out = blurred(&image, 200.0, WINDOW_BLUR).expect("blurred image");
+        let out = blurred(&image, 200.0, BACKDROP_BLUR).expect("blurred image");
         assert_eq!(CGImage::width(Some(&out)), 100);
         assert_eq!(CGImage::height(Some(&out)), 50);
     }

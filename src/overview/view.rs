@@ -296,8 +296,9 @@ impl OverviewManager {
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         for scene in scenes {
-            let panel = self.build_panel(scene, primary_h);
-            self.panels.push(panel);
+            if let Some(panel) = self.build_panel(scene, primary_h) {
+                self.panels.push(panel);
+            }
         }
         CATransaction::commit();
 
@@ -320,6 +321,13 @@ impl OverviewManager {
         }
     }
 
+    pub fn has_pending_captures(&self) -> bool {
+        self.panels
+            .iter()
+            .flat_map(|panel| panel.cards.iter())
+            .any(|card| !card.captured)
+    }
+
     /// Captures every card still showing a placeholder. Spread over frames
     /// by the caller via `budget`, since each capture blocks the main thread
     /// (Core Animation keeps animating on the render server meanwhile).
@@ -338,7 +346,7 @@ impl OverviewManager {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn build_panel<K>(&self, scene: &DisplayScene<'_, K>, primary_h: f64) -> Panel {
+    fn build_panel<K>(&self, scene: &DisplayScene<'_, K>, primary_h: f64) -> Option<Panel> {
         let mtm = self.mtm;
         let b = scene.cg_bounds;
         let cocoa = NSRect::new(
@@ -375,7 +383,10 @@ impl OverviewManager {
         );
         view.setWantsLayer(true);
         window.setContentView(Some(&view));
-        let root = view.layer().expect("layer-backed view");
+        let Some(root) = view.layer() else {
+            warn!("overview: content view has no backing layer");
+            return None;
+        };
         let scale = window.backingScaleFactor();
 
         // Y-down container so every rect maps 1:1.
@@ -480,12 +491,12 @@ impl OverviewManager {
             chrome.push(clip);
         }
 
-        Panel {
+        Some(Panel {
             window,
             backdrop,
             chrome,
             cards,
-        }
+        })
     }
 
     fn layers(&self) -> impl Iterator<Item = &Animated> {
@@ -505,6 +516,9 @@ impl OverviewManager {
             layer.set(p);
         }
         CATransaction::commit();
+        // Push the frame to the render server now rather than at the end of
+        // the run-loop pass, so scrubbing doesn't trail the fingers.
+        CATransaction::flush();
     }
 
     /// Springs every layer from `spring.from` to `spring.to` on the render

@@ -238,9 +238,13 @@ impl Plugin for ScrollEventsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PageGestureState>();
         app.add_message::<PageFocusRequest>();
-        let mission_control_inactive = |mission_control: Option<Res<MissionControlActive>>| {
-            mission_control.is_none_or(|active| !active.0)
-        };
+        // The overview owns the trackpad while it is up, like Mission Control.
+        let mission_control_inactive =
+            |mission_control: Option<Res<MissionControlActive>>,
+             overview: Option<Res<crate::ecs::overview::OverviewState>>| {
+                mission_control.is_none_or(|active| !active.0)
+                    && overview.is_none_or(|overview| !overview.is_active())
+            };
 
         app.add_systems(
             PreUpdate,

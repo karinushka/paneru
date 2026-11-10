@@ -209,6 +209,7 @@ pub struct FrameActivity<'w, 's> {
     resizing: Query<'w, 's, (), With<ResizeMarker>>,
     scrolling: Query<'w, 's, (), With<Scrolling>>,
     flash_messages: Query<'w, 's, (), With<FlashMessage>>,
+    overview: Option<bevy::ecs::system::NonSend<'w, crate::overview::view::OverviewManager>>,
 }
 
 impl FrameActivity<'_, '_> {
@@ -219,6 +220,10 @@ impl FrameActivity<'_, '_> {
             || !self.resizing.is_empty()
             || !self.scrolling.is_empty()
             || !self.flash_messages.is_empty()
+            || self
+                .overview
+                .as_ref()
+                .is_some_and(|overview| overview.has_pending_captures())
     }
 }
 

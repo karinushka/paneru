@@ -2812,6 +2812,7 @@ dependencies = [
  "async-mach-ports",
  "bevy",
  "bitflags",
+ "block2",
  "cfg-if",
  "clap",
  "crossbeam-channel",

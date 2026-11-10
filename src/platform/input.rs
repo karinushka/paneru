@@ -57,6 +57,8 @@ struct Touch<I> {
     device_width_points: f64,
     /// Whether the finger landed this event, which starts a new sample series.
     began: bool,
+    /// Whether the finger lifted (or was cancelled) this event.
+    ended: bool,
 }
 
 impl Touch<Retained<AnyObject>> {
@@ -72,6 +74,9 @@ impl Touch<Retained<AnyObject>> {
                     y: position.y,
                     device_width_points: touch.deviceSize().width,
                     began: touch.phase() == NSTouchPhase::Began,
+                    ended: touch
+                        .phase()
+                        .intersects(NSTouchPhase::Ended | NSTouchPhase::Cancelled),
                 }
             })
             .collect()
@@ -615,7 +620,25 @@ impl InputHandler {
             }
 
             let fingers = Touch::sample(&ns_event.allTouches());
-            let overview = overview_fingers == Some(fingers.len());
+            // The phase-ended event above doesn't always arrive. The touches
+            // say it too: every finger ended, or the finger count changed
+            // (one lifted first). Either way the overview scrub is over, or
+            // it would be left stuck half-open.
+            if self.overview_tracking
+                && !fingers.is_empty()
+                && (fingers.iter().all(|finger| finger.ended)
+                    || overview_fingers != Some(fingers.len()))
+            {
+                self.overview_tracking = false;
+                self.previous_touches.clear();
+                self.last_swipe_sample_timestamp = None;
+                if let Some(events) = &self.events {
+                    _ = events.send(Event::OverviewSwipeEnd);
+                }
+                return true;
+            }
+            let overview = overview_fingers == Some(fingers.len())
+                && !fingers.iter().all(|finger| finger.ended);
             if !overview && !gesture_should_intercept(configured_fingers, fingers.len()) {
                 // AppKit interleaves phase events with an empty touch set
                 // between usable samples. They do not mean the fingers lifted.
@@ -858,6 +881,7 @@ mod tests {
                 y: 0.0,
                 device_width_points: 144.0,
                 began: false,
+                ended: false,
             })
             .collect()
     }
@@ -971,6 +995,7 @@ mod tests {
                     y,
                     device_width_points: 144.0,
                     began: false,
+                    ended: false,
                 })
                 .collect::<Vec<_>>()
         };

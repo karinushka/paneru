@@ -229,7 +229,7 @@ impl FrameActivity<'_, '_> {
             || self
                 .overview_state
                 .as_ref()
-                .is_some_and(|state| state.is_animating())
+                .is_some_and(|state| state.needs_frames())
     }
 }
 

@@ -9,7 +9,7 @@
 //! follows it (`overview_follow_layout`).
 
 use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bevy::app::{App, Last, PreUpdate, Update};
 use bevy::ecs::entity::Entity;
@@ -43,6 +43,10 @@ use crate::overview::{
 /// trackpad's height opens the overview fully.
 const GESTURE_GAIN: f64 = 1.8;
 
+/// A scrub that hears nothing for this long is treated as released: the
+/// fingers lifted but the end of the gesture never reached us.
+const SCRUB_TIMEOUT: Duration = Duration::from_millis(400);
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Phase {
     #[default]
@@ -70,6 +74,8 @@ pub struct OverviewState {
     generation: u64,
     gesture_raw: f64,
     gesture_velocity: f64,
+    /// When the last scrub sample arrived; see [`SCRUB_TIMEOUT`].
+    last_sample: Option<Instant>,
 }
 
 impl OverviewState {
@@ -87,9 +93,13 @@ impl OverviewState {
         self.phase != Phase::Closed
     }
 
-    /// A spring is running, so per-frame work (the blur ramp) is needed.
-    pub fn is_animating(&self) -> bool {
-        matches!(self.phase, Phase::Opening | Phase::Closing)
+    /// The main loop must keep ticking: a spring runs, or a scrub is in
+    /// progress and its watchdog has to be able to fire.
+    pub fn needs_frames(&self) -> bool {
+        matches!(
+            self.phase,
+            Phase::Opening | Phase::Closing | Phase::Scrubbing
+        )
     }
 }
 
@@ -122,10 +132,14 @@ pub fn register_overview(app: &mut App) {
 /// the running spring, and fill in hidden-row snapshots one at a time (each
 /// capture blocks the main thread for several milliseconds, which would
 /// stall gesture tracking if done in one go).
-fn overview_tick(state: Res<OverviewState>, manager: Option<NonSendMut<OverviewManager>>) {
+fn overview_tick(mut state: ResMut<OverviewState>, manager: Option<NonSendMut<OverviewManager>>) {
     let Some(mut manager) = manager else {
         return;
     };
+    if scrub_timed_out(&state, Instant::now()) {
+        debug!("overview: scrub went quiet, releasing");
+        release(&mut state, &mut manager);
+    }
     match state.phase {
         Phase::Opening | Phase::Closing => manager.set_blur(state.current().0),
         Phase::Open => manager.set_blur(1.0),
@@ -225,13 +239,12 @@ fn overview_handler(
                     state.gesture_velocity = 0.3 * sample + 0.7 * state.gesture_velocity;
                 }
                 state.progress = rubber_band(state.gesture_raw);
+                state.last_sample = Some(Instant::now());
                 manager.set_progress(state.progress);
             }
 
             Event::OverviewSwipeEnd if state.phase == Phase::Scrubbing => {
-                let (p, v) = (state.progress, state.gesture_velocity);
-                let target = if release_opens(p, v) { 1.0 } else { 0.0 };
-                settle(&mut state, &mut manager, target, v);
+                release(&mut state, &mut manager);
             }
 
             Event::OverviewClick { point }
@@ -271,6 +284,22 @@ fn overview_handler(
             _ => {}
         }
     }
+}
+
+/// Ends a scrub: open or close depending on where and how fast it was let go.
+fn release(state: &mut OverviewState, manager: &mut OverviewManager) {
+    let (p, v) = (state.progress, state.gesture_velocity);
+    let target = if release_opens(p, v) { 1.0 } else { 0.0 };
+    state.last_sample = None;
+    settle(state, manager, target, v);
+}
+
+/// Whether a scrub has gone without samples for longer than [`SCRUB_TIMEOUT`].
+fn scrub_timed_out(state: &OverviewState, now: Instant) -> bool {
+    state.phase == Phase::Scrubbing
+        && state
+            .last_sample
+            .is_none_or(|last| now.saturating_duration_since(last) > SCRUB_TIMEOUT)
 }
 
 /// Springs from wherever the overview is now to `target`.
@@ -604,4 +633,49 @@ fn visible_windows(strip: &LayoutStrip) -> impl Iterator<Item = Entity> + '_ {
             Column::Stack(items) => items.iter().filter_map(StackItem::top).collect(),
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scrubbing(last_sample: Option<Instant>) -> OverviewState {
+        OverviewState {
+            phase: Phase::Scrubbing,
+            last_sample,
+            ..OverviewState::default()
+        }
+    }
+
+    #[test]
+    fn a_quiet_scrub_times_out() {
+        let now = Instant::now();
+        let fresh = scrubbing(Some(now));
+        assert!(!scrub_timed_out(&fresh, now + Duration::from_millis(100)));
+        assert!(scrub_timed_out(
+            &fresh,
+            now + SCRUB_TIMEOUT + Duration::from_millis(1)
+        ));
+        // A scrub that never got a sample (opened by a grab) is released too.
+        assert!(scrub_timed_out(&scrubbing(None), now));
+    }
+
+    #[test]
+    fn only_scrubs_time_out() {
+        let now = Instant::now();
+        for phase in [Phase::Closed, Phase::Opening, Phase::Open, Phase::Closing] {
+            let state = OverviewState {
+                phase,
+                last_sample: Some(now),
+                ..OverviewState::default()
+            };
+            assert!(!scrub_timed_out(&state, now + Duration::from_secs(5)));
+        }
+    }
+
+    #[test]
+    fn scrubbing_keeps_the_loop_awake() {
+        assert!(scrubbing(None).needs_frames());
+        assert!(!OverviewState::default().needs_frames());
+    }
 }

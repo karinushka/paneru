@@ -621,6 +621,13 @@ struct Card {
     best: bool,
     /// Capture order (lower first), see [`Rank`].
     rank: Rank,
+    /// Where the window is on screen (absolute CG), when it can be captured
+    /// as a screen region instead of on its own: fully on screen, on the
+    /// active row, and not under a floating window. A region capture shows
+    /// what is really there, including the blur macOS draws behind a
+    /// translucent window, which a capture of the window alone renders as
+    /// flat grey.
+    screen_rect: Option<Rect>,
 }
 
 /// Capture order, most important first. The focused window and the ones
@@ -800,7 +807,6 @@ impl OverviewManager {
         self.targets.clear();
         self.outstanding = 0;
         self.gates = 0;
-        let below = self.retired.first().map(|panel| panel.window_number);
         let primary_h = primary_screen_height(self.mtm);
         let mut jobs: Vec<(Rank, usize, Shot)> = Vec::new();
 
@@ -827,6 +833,16 @@ impl OverviewManager {
             let Some(panel) = self.build_panel(scene, primary_h, &mut screen) else {
                 continue;
             };
+            // Region captures are taken from below everything of ours on
+            // this display: the previous build's panel if one is still up,
+            // else this (still transparent) panel.
+            let below = Some(
+                self.retired
+                    .get(self.panels.len())
+                    .map_or(panel.window_number, |old| old.window_number),
+            );
+            panel.window.setAlphaValue(0.0);
+            panel.window.orderFrontRegardless();
             if let Some((id, _)) = wallpaper {
                 let shot = Shot::Window {
                     id: *id,
@@ -856,10 +872,13 @@ impl OverviewManager {
                 jobs.push((Rank::Row, index, shot));
             }
             for card in &panel.cards {
-                let shot = Shot::Window {
-                    id: card.window_id,
-                    best: card.best,
-                };
+                let shot = card.screen_rect.map_or(
+                    Shot::Window {
+                        id: card.window_id,
+                        best: card.best,
+                    },
+                    |rect| Shot::Region { rect, below },
+                );
                 let key = format!("window {}", card.window_id);
                 let fresh = card.rank.wants_fresh();
                 let index = self.target(vec![card.content.clone()], true, card.best, fresh, &key);
@@ -993,7 +1012,7 @@ impl OverviewManager {
                 self.gates
             );
             for panel in &self.panels {
-                panel.window.orderFrontRegardless();
+                panel.window.setAlphaValue(1.0);
                 panel.window.makeKeyWindow();
             }
             for panel in self.retired.drain(..) {
@@ -1138,8 +1157,19 @@ impl OverviewManager {
                 .iter()
                 .filter(|w| !w.floating)
                 .position(|w| w.focused);
+            let floating_frames: Vec<Rect> = strip
+                .windows
+                .iter()
+                .filter(|w| w.floating)
+                .map(|w| w.rest)
+                .collect();
+            let display = Rect::new(0.0, 0.0, b.w, b.h);
             let mut column = 0;
             for window in &strip.windows {
+                let covered =
+                    !window.floating && floating_frames.iter().any(|f| f.intersects(&window.rest));
+                let screen_rect = (strip.active && display.encloses(&window.rest) && !covered)
+                    .then(|| window.rest.offset(b.x, b.y));
                 let distance = if window.floating {
                     None
                 } else {
@@ -1186,6 +1216,7 @@ impl OverviewManager {
                     window_id: window.window_id,
                     best: strip.active,
                     rank,
+                    screen_rect,
                 };
                 if window.floating {
                     floating.push(entry);

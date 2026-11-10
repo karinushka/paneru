@@ -7,7 +7,7 @@
 //!    ├─ tint                       opacity 0 → 1
 //!    └─ container                  vertical scroll
 //!       ├─ per row: viewport       the row's "screen": wallpaper, shrinks
-//!       │           label          fades in
+//!       │           bar            menu bar, fades out
 //!       │           pan            horizontal pan of the row's columns
 //!       │           └─ tiled cards
 //!       └─ floating cards          above every row, not panned
@@ -29,7 +29,7 @@ use std::time::Instant;
 
 use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, class, define_class, msg_send};
 use objc2_app_kit::{
     NSBackingStoreType, NSColor, NSEvent, NSPanel, NSScreen, NSScreenSaverWindowLevel, NSView,
@@ -41,8 +41,8 @@ use objc2_core_graphics::{
 };
 use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize, NSString};
 use objc2_quartz_core::{
-    CALayer, CAMediaTiming as _, CASpringAnimation, CATextLayer, CATransaction, kCAAlignmentLeft,
-    kCAGravityResize, kCAGravityResizeAspectFill, kCATruncationEnd,
+    CALayer, CAMediaTiming as _, CASpringAnimation, CATransaction, kCAGravityResize,
+    kCAGravityResizeAspectFill,
 };
 use tracing::{debug, warn};
 
@@ -51,6 +51,8 @@ use crate::events::{Event, EventSender};
 use crate::platform::ConnID;
 
 /// Background blur radius when fully open.
+/// Blur of the wallpaper backdrop, in points.
+const BACKDROP_BLUR: f64 = 40.0;
 const BLUR_RADIUS: f64 = 60.0;
 /// Corner radius and focus ring width of a card when fully open, in points.
 const CARD_RADIUS: f64 = 10.0;
@@ -189,6 +191,18 @@ pub fn window_server_info() -> WindowServerInfo {
 }
 
 // ── Small CA helpers ────────────────────────────────────────────────────
+
+/// A `CIGaussianBlur` filter for `CALayer.filters`, if Core Image is there.
+fn gaussian_blur(radius: f64) -> Option<Retained<AnyObject>> {
+    let class = AnyClass::get(c"CIFilter")?;
+    let name = NSString::from_str("CIGaussianBlur");
+    let filter: Option<Retained<AnyObject>> = unsafe { msg_send![class, filterWithName: &*name] };
+    let filter = filter?;
+    let key = NSString::from_str("inputRadius");
+    let value = ns_number(radius);
+    let _: () = unsafe { msg_send![&*filter, setValue: &*value, forKey: &*key] };
+    Some(filter)
+}
 
 fn color(r: f64, g: f64, b: f64, a: f64) -> CFRetained<CGColor> {
     CGColor::new_srgb(r, g, b, a)
@@ -476,7 +490,9 @@ struct Card {
 
 struct RowLayers {
     viewport: Animated,
-    label: Animated,
+    /// The menu bar inside the row's screen: there at the start so the
+    /// overlay matches the real screen, gone once open.
+    bar: Option<Animated>,
     pan: Animated,
 }
 
@@ -484,6 +500,7 @@ struct Panel {
     window: Retained<OverviewPanel>,
     window_number: i32,
     blur: i32,
+    backdrop: Animated,
     tint: Animated,
     container: Animated,
     rows: Vec<RowLayers>,
@@ -492,13 +509,13 @@ struct Panel {
 
 impl Panel {
     fn layers(&self) -> impl Iterator<Item = &Animated> {
-        std::iter::once(&self.tint)
-            .chain(std::iter::once(&self.container))
-            .chain(
-                self.rows
-                    .iter()
-                    .flat_map(|row| [&row.viewport, &row.label, &row.pan]),
-            )
+        [&self.backdrop, &self.tint, &self.container]
+            .into_iter()
+            .chain(self.rows.iter().flat_map(|row| {
+                [Some(&row.viewport), row.bar.as_ref(), Some(&row.pan)]
+                    .into_iter()
+                    .flatten()
+            }))
             .chain(self.cards.iter().map(|card| &card.animated))
     }
 }
@@ -711,9 +728,34 @@ impl OverviewManager {
         root.addSublayer(&flipped);
 
         let full = Rect::new(0.0, 0.0, b.w, b.h);
+        // niri's backdrop: the wallpaper, heavily blurred, fading in over the
+        // real screen. Oversized so the blur's soft edges stay off-screen.
+        let bleed = BACKDROP_BLUR * 3.0;
+        let backdrop_rect = Rect::new(-bleed, -bleed, b.w + 2.0 * bleed, b.h + 2.0 * bleed);
+        let backdrop = Animated::new(CALayer::new(), backdrop_rect, backdrop_rect, (0.0, 1.0));
+        if let Some(image) = screen.wallpaper {
+            set_contents(&backdrop.layer, image);
+            backdrop
+                .layer
+                .setContentsGravity(unsafe { kCAGravityResizeAspectFill });
+            if let Some(blur) = gaussian_blur(BACKDROP_BLUR) {
+                view.setLayerUsesCoreImageFilters(true);
+                unsafe {
+                    backdrop
+                        .layer
+                        .setFilters(Some(&NSArray::from_retained_slice(&[blur])));
+                }
+                // Blur once, then reuse the bitmap while it fades.
+                backdrop.layer.setShouldRasterize(true);
+                backdrop.layer.setRasterizationScale(scale);
+            }
+        }
+        flipped.addSublayer(&backdrop.layer);
+        backdrop.set(0.0);
+
         let tint = Animated::new(CALayer::new(), full, full, (0.0, 1.0));
         tint.layer
-            .setBackgroundColor(Some(&color(0.02, 0.02, 0.04, 0.35)));
+            .setBackgroundColor(Some(&color(0.0, 0.0, 0.0, 0.15)));
         flipped.addSublayer(&tint.layer);
         tint.set(0.0);
 
@@ -743,18 +785,18 @@ impl OverviewManager {
                     .setBackgroundColor(Some(&color(0.2, 0.22, 0.26, 1.0)));
             }
             viewport.layer.setMasksToBounds(true);
-            // The menu bar shrinks with the row's screen. The viewport's
-            // bounds are the display's, so it sits at its real place.
-            if let Some((image, height)) = screen.menubar {
-                let bar = CALayer::new();
-                bar.setFrame(CGRect::new(
-                    CGPoint::new(0.0, 0.0),
-                    CGSize::new(viewport.base.0, height),
-                ));
-                set_contents(&bar, image);
-                bar.setContentsGravity(unsafe { kCAGravityResize });
-                viewport.layer.addSublayer(&bar);
-            }
+            // The menu bar shrinks with the row's screen, fading out as it
+            // goes. The viewport's bounds are the display's, so it sits at
+            // its real place.
+            let bar = screen.menubar.map(|(image, height)| {
+                let rect = Rect::new(0.0, 0.0, viewport.base.0, height);
+                let bar = Animated::new(CALayer::new(), rect, rect, (1.0, 0.0));
+                set_contents(&bar.layer, image);
+                bar.layer.setContentsGravity(unsafe { kCAGravityResize });
+                viewport.layer.addSublayer(&bar.layer);
+                bar.set(0.0);
+                bar
+            });
             viewport
                 .layer
                 .setCornerRadius(viewport.open_points(CARD_RADIUS));
@@ -766,24 +808,6 @@ impl OverviewManager {
             viewport.set_ring(false);
             container.layer.addSublayer(&viewport.layer);
             viewport.set(0.0);
-
-            let label = CATextLayer::new();
-            let text = NSString::from_str(&format!("Workspace {}", strip.virtual_index + 1));
-            unsafe { label.setString(Some(&text)) };
-            label.setFontSize(13.0);
-            label.setForegroundColor(Some(&color(0.92, 0.93, 0.95, 1.0)));
-            label.setAlignmentMode(unsafe { kCAAlignmentLeft });
-            label.setTruncationMode(unsafe { kCATruncationEnd });
-            label.setContentsScale(scale);
-            let label_rect = strip.label.offset(0.0, 6.0);
-            let label = Animated::new(
-                Retained::into_super(label),
-                label_rect,
-                label_rect,
-                (0.0, 1.0),
-            );
-            container.layer.addSublayer(&label.layer);
-            label.set(0.0);
 
             let (pan_rest, pan_open) = pan_frames(size, strip.pan);
             let pan = Animated::new(CALayer::new(), pan_rest, pan_open, (1.0, 1.0));
@@ -821,11 +845,7 @@ impl OverviewManager {
                     tiled.push(entry);
                 }
             }
-            rows.push(RowLayers {
-                viewport,
-                label,
-                pan,
-            });
+            rows.push(RowLayers { viewport, bar, pan });
         }
         // Floating windows go above every row.
         for card in &floating {
@@ -838,6 +858,7 @@ impl OverviewManager {
             window,
             window_number,
             blur: 0,
+            backdrop,
             tint,
             container,
             rows,
@@ -950,8 +971,6 @@ impl OverviewManager {
                 row.viewport.set_ring(false);
                 row.viewport
                     .morph(strip.viewport_rest, strip.viewport_overview, spring);
-                let label = strip.label.offset(0.0, 6.0);
-                row.label.morph(label, label, spring);
                 let (rest, open) = pan_frames(layout.size, strip.pan);
                 row.pan.morph(rest, open, spring);
             }

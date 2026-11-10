@@ -114,7 +114,7 @@ impl Default for Metrics {
         Self {
             top_padding: 48.0,
             bottom_padding: 40.0,
-            label_height: 28.0,
+            label_height: 0.0,
             section_gap: 20.0,
             ribbon_padding: 24.0,
             visible_rows: 2.0,

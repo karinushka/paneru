@@ -122,6 +122,11 @@ impl Display {
         bounds
     }
 
+    /// The whole display, menu bar included (`bounds` starts below it).
+    pub fn screen_bounds(&self) -> IRect {
+        self.bounds
+    }
+
     pub fn width(&self) -> i32 {
         self.bounds().width()
     }

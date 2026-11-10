@@ -469,7 +469,9 @@ fn gather(scene: &Scene, info: Option<&WindowServerInfo>) -> Vec<DisplayEntry> {
     let metrics = Metrics::default();
     let mut entries = Vec::new();
     for (display_entity, display, dock) in &scene.displays {
-        let bounds = display.bounds();
+        // The whole screen, menu bar included: the overview covers it, and
+        // the wallpaper and menu bar windows are matched to its corner.
+        let bounds = display.screen_bounds();
         let viewport = display.actual_display_bounds(dock, &scene.config);
         let size = (f64::from(bounds.width()), f64::from(bounds.height()));
         let origin = (f64::from(bounds.min.x), f64::from(bounds.min.y));

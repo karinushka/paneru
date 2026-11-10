@@ -129,9 +129,7 @@ pub fn register_overview(app: &mut App) {
 }
 
 /// Per-frame work while the overview is up: release a scrub that went quiet,
-/// and fill in hidden-row snapshots one at a time (each
-/// capture blocks the main thread for several milliseconds, which would
-/// stall gesture tracking if done in one go).
+/// and pick up the snapshots that landed from the background captures.
 fn overview_tick(mut state: ResMut<OverviewState>, manager: Option<NonSendMut<OverviewManager>>) {
     let Some(mut manager) = manager else {
         return;
@@ -140,7 +138,7 @@ fn overview_tick(mut state: ResMut<OverviewState>, manager: Option<NonSendMut<Ov
         debug!("overview: scrub went quiet, releasing");
         release(&mut state, &mut manager);
     }
-    manager.capture_pending(1);
+    manager.poll_captures();
 }
 
 type StripQuery<'w, 's> = Query<

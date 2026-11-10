@@ -675,8 +675,14 @@ impl InputHandler {
                 self.last_swipe_sample_timestamp = None;
                 if let Some(events) = &self.events {
                     _ = events.send(Event::TouchpadUp);
-                    let released = std::mem::take(&mut self.overview_released);
-                    if std::mem::take(&mut self.overview_tracking) && !released {
+                    // macOS also ends the gesture when the finger count
+                    // changes (one finger lifts), with the rest still down.
+                    // So this ends the overview's scrub but keeps claiming
+                    // the sequence: only a finger landing again (see
+                    // `overview_sample`) starts a new one, otherwise the
+                    // remaining fingers would drive the strip gestures.
+                    if self.overview_tracking && !self.overview_released {
+                        self.overview_released = true;
                         _ = events.send(Event::OverviewSwipeEnd);
                     }
                 }

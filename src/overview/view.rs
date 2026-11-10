@@ -26,7 +26,8 @@
 //! changing the layer structure.
 
 use std::collections::HashMap;
-use std::time::Instant;
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use objc2::rc::Retained;
@@ -98,34 +99,69 @@ fn snapshot(window_id: i32, best: bool) -> Option<CFRetained<CGImage>> {
     std::ptr::NonNull::new(raw).map(|ptr| unsafe { CFRetained::from_raw(ptr) })
 }
 
-/// Best-resolution snapshots of several windows at once. Each capture is a
-/// round trip to the `WindowServer` taking tens of milliseconds, and they
-/// overlap well, so running them side by side cuts the time the main
-/// thread is blocked at the start of a swipe to about the slowest one.
-fn snapshot_all(ids: &[i32]) -> Vec<Option<CFRetained<CGImage>>> {
-    // Handed back as addresses: a `CGImage` is immutable and safe to share
-    // between threads, the wrapper type just doesn't say so.
-    let raw: Vec<usize> = std::thread::scope(|scope| {
-        let handles: Vec<_> = ids
-            .iter()
-            .map(|&id| {
-                scope.spawn(move || {
-                    snapshot(id, true)
-                        .map_or(0, |image| CFRetained::into_raw(image).as_ptr() as usize)
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|handle| handle.join().unwrap_or(0))
-            .collect()
+// ── Background captures ─────────────────────────────────────────────────
+
+/// One capture to run off the main thread.
+#[derive(Clone, Copy)]
+enum Shot {
+    Window {
+        id: i32,
+        best: bool,
+    },
+    /// A composited screen region, optionally from below one of our panels.
+    Region {
+        rect: Rect,
+        below: Option<i32>,
+    },
+}
+
+impl Shot {
+    fn take(self) -> Option<CFRetained<CGImage>> {
+        match self {
+            Self::Window { id, best } => snapshot(id, best),
+            Self::Region { rect, below } => snapshot_region(&rect, below),
+        }
+    }
+}
+
+/// Where a capture's image goes once it lands.
+struct Target {
+    layers: Vec<Retained<CALayer>>,
+    /// Drop the placeholder colour (cards) once the image is in.
+    clear_background: bool,
+    /// Needed before the panels are shown (the active row's windows, the
+    /// wallpaper, the menu bar): without them the overlay wouldn't match
+    /// the real screen it covers.
+    gate: bool,
+    /// Key in [`OverviewManager::cache`], and the log name.
+    key: String,
+}
+
+/// How long the panels wait for gating captures before showing anyway.
+const REVEAL_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// A capture result: (batch, target index, retained `CGImage` address or 0).
+/// The image travels as an address: a `CGImage` is immutable and safe to
+/// share between threads, the wrapper type just doesn't say so.
+type Landed = (u64, usize, usize);
+
+fn spawn_shots(tx: &Sender<Landed>, batch: u64, shots: Vec<(usize, Shot)>) {
+    let tx = tx.clone();
+    std::thread::spawn(move || {
+        for (index, shot) in shots {
+            let addr = shot
+                .take()
+                .map_or(0, |image| CFRetained::into_raw(image).as_ptr() as usize);
+            if let Err(err) = tx.send((batch, index, addr)) {
+                release_landed(err.0.2);
+                return;
+            }
+        }
     });
-    raw.into_iter()
-        .map(|addr| {
-            std::ptr::NonNull::new(addr as *mut CGImage)
-                .map(|ptr| unsafe { CFRetained::from_raw(ptr) })
-        })
-        .collect()
+}
+
+fn release_landed(addr: usize) -> Option<CFRetained<CGImage>> {
+    std::ptr::NonNull::new(addr as *mut CGImage).map(|ptr| unsafe { CFRetained::from_raw(ptr) })
 }
 
 /// Everything on screen inside `rect` (absolute CG), composited — e.g. the
@@ -151,18 +187,6 @@ pub struct WindowServerInfo {
     wallpapers: Vec<(i32, Rect)>,
     /// The `WindowServer`'s per-display menu bars.
     menubars: Vec<(i32, Rect)>,
-}
-
-impl WindowServerInfo {
-    /// The image of the first window in `list` sitting at the display's
-    /// top-left corner.
-    fn capture_at(list: &[(i32, Rect)], display: &Rect) -> Option<(CFRetained<CGImage>, Rect)> {
-        list.iter()
-            .find(|(_, frame)| {
-                (frame.x - display.x).abs() < 1.0 && (frame.y - display.y).abs() < 1.0
-            })
-            .and_then(|(id, frame)| snapshot(*id, true).map(|image| (image, *frame)))
-    }
 }
 
 fn get(dict: &AnyObject, key: &str) -> Option<Retained<AnyObject>> {
@@ -516,8 +540,8 @@ define_class!(
 struct Card {
     animated: Animated,
     window_id: i32,
+    /// On the active row: captured at full resolution, before showing.
     best: bool,
-    captured: bool,
 }
 
 struct RowLayers {
@@ -556,13 +580,33 @@ pub struct OverviewManager {
     sender: EventSender,
     panels: Vec<Panel>,
     generation: u64,
+    /// Identifies the current build's captures; results of older builds
+    /// are dropped.
+    batch: u64,
+    targets: Vec<Option<Target>>,
+    /// Captures of this batch not landed yet, and how many of them gate.
+    outstanding: usize,
+    gates: usize,
+    /// Set while the built panels wait (ordered out) for their gating
+    /// captures; see [`REVEAL_TIMEOUT`].
+    reveal_since: Option<Instant>,
+    /// Panels of a previous build, kept on screen until the new ones show.
+    retired: Vec<Panel>,
+    tx: Sender<Landed>,
+    rx: Receiver<Landed>,
+    /// The last image of everything captured ("window 42", "wallpaper 7",
+    /// "menu bar 0,0"). A build shows these straight away, so the overview
+    /// appears at once and the fresh captures fade in over them.
+    cache: HashMap<String, CFRetained<CGImage>>,
 }
 
-/// Screen furniture captured once per display and shared by every row.
-struct Screen<'a> {
-    wallpaper: Option<&'a CGImage>,
-    /// Menu bar image and its height.
-    menubar: Option<(&'a CGImage, f64)>,
+/// Where the wallpaper and the menu bar go in one panel, filled in when
+/// their captures land.
+struct Screen {
+    wallpaper: Vec<Retained<CALayer>>,
+    menubar: Vec<Retained<CALayer>>,
+    /// Menu bar height, if the display has one.
+    menubar_height: Option<f64>,
 }
 
 /// One display to show: its absolute CG bounds and the computed layout.
@@ -592,119 +636,222 @@ fn card_order<K>(layout: &DisplayLayout<K>) -> impl Iterator<Item = &super::Wind
 
 impl OverviewManager {
     pub fn new(mtm: MainThreadMarker, sender: EventSender) -> Self {
+        let (tx, rx) = channel();
         Self {
             mtm,
             sender,
             panels: Vec::new(),
             generation: 0,
+            batch: 0,
+            targets: Vec::new(),
+            outstanding: 0,
+            gates: 0,
+            reveal_since: None,
+            retired: Vec::new(),
+            tx,
+            rx,
+            cache: HashMap::new(),
         }
     }
 
-    /// Builds the layer trees at progress 0, sitting exactly over the real
-    /// screen, and orders the panels in. Captures the wallpaper and the
-    /// active rows' windows synchronously first so the hand-off from real
-    /// screen to cards is invisible; the rest are filled in later by
-    /// [`Self::capture_pending`].
+    /// Builds the layer trees at `progress` without blocking: every capture
+    /// (windows, wallpaper, menu bar) runs on background threads. The panels
+    /// are shown once the captures that make them match the real screen
+    /// have landed (or after [`REVEAL_TIMEOUT`]); until then the real screen
+    /// stays visible. Panels of a previous build stay up until then too, so
+    /// a rebuild while open never flashes.
     pub fn build<K>(
         &mut self,
         scenes: &[DisplayScene<'_, K>],
         info: &WindowServerInfo,
         progress: f64,
     ) {
-        // Old panels (a rebuild while open) stay up until the new ones are
-        // in front, so the real screen never flashes through.
         let old = std::mem::take(&mut self.panels);
+        // A build superseding one still waiting: its panels never showed.
+        if self.reveal_since.is_none() {
+            self.retired.extend(old);
+        } else {
+            for panel in old {
+                panel.window.orderOut(None);
+            }
+        }
+        self.batch += 1;
+        self.targets.clear();
+        self.outstanding = 0;
+        self.gates = 0;
+        let below = self.retired.first().map(|panel| panel.window_number);
         let primary_h = primary_screen_height(self.mtm);
-        let start = Instant::now();
+        let mut gating = Vec::new();
+        let mut later = Vec::new();
+
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         for scene in scenes {
             let b = scene.cg_bounds;
-            let wallpaper = WindowServerInfo::capture_at(&info.wallpapers, &b);
-            // The band the menu bar occupies, captured from under any panel
-            // still up from before (a rebuild while open).
-            let below = old.first().map(|panel| panel.window_number);
-            let menubar = info
-                .menubars
-                .iter()
-                .find(|(_, f)| (f.x - b.x).abs() < 1.0 && (f.y - b.y).abs() < 1.0)
-                .and_then(|(_, f)| snapshot_region(f, below).map(|image| (image, *f)));
+            let at_corner = |f: &Rect| (f.x - b.x).abs() < 1.0 && (f.y - b.y).abs() < 1.0;
+            let wallpaper = info.wallpapers.iter().find(|(_, f)| at_corner(f));
+            let menubar = info.menubars.iter().find(|(_, f)| at_corner(f));
             if wallpaper.is_none() {
                 warn!(
                     "overview: no wallpaper found for display at ({}, {})",
                     b.x, b.y
                 );
             }
-            if menubar.is_none() {
-                warn!(
-                    "overview: no menu bar found for display at ({}, {})",
-                    b.x, b.y
-                );
-            }
-            let screen = Screen {
-                wallpaper: wallpaper.as_ref().map(|(image, _)| &**image),
-                menubar: menubar.as_ref().map(|(image, frame)| (&**image, frame.h)),
+            let mut screen = Screen {
+                wallpaper: Vec::new(),
+                menubar: Vec::new(),
+                menubar_height: menubar.map(|(_, f)| f.h),
             };
-            if let Some(panel) = self.build_panel(scene, primary_h, &screen) {
-                self.panels.push(panel);
+            let Some(panel) = self.build_panel(scene, primary_h, &mut screen) else {
+                continue;
+            };
+            if let Some((id, _)) = wallpaper {
+                let shot = Shot::Window {
+                    id: *id,
+                    best: true,
+                };
+                gating.push((
+                    self.target(screen.wallpaper, false, true, &format!("wallpaper {id}")),
+                    shot,
+                ));
             }
-        }
-        let mut active: Vec<_> = self
-            .panels
-            .iter_mut()
-            .flat_map(|p| p.cards.iter_mut())
-            .filter(|card| card.best)
-            .collect();
-        let count = active.len();
-        let ids: Vec<_> = active.iter().map(|card| card.window_id).collect();
-        for (card, image) in active.iter_mut().zip(snapshot_all(&ids)) {
-            card.captured = true;
-            if let Some(image) = image {
-                set_contents(&card.animated.layer, &image);
-                card.animated.layer.setBackgroundColor(None);
-            } else {
-                warn!("overview: no snapshot for window {}", card.window_id);
+            if let Some((_, rect)) = menubar {
+                let shot = Shot::Region { rect: *rect, below };
+                let key = format!("menu bar {},{}", rect.x, rect.y);
+                gating.push((self.target(screen.menubar, false, true, &key), shot));
             }
-        }
-        if progress > 0.0 {
-            for layer in self.layers() {
-                layer.set(progress);
+            for card in &panel.cards {
+                let shot = Shot::Window {
+                    id: card.window_id,
+                    best: card.best,
+                };
+                let key = format!("window {}", card.window_id);
+                let index = self.target(vec![card.animated.layer.clone()], true, card.best, &key);
+                if card.best {
+                    gating.push((index, shot));
+                } else {
+                    later.push((index, shot));
+                }
             }
+            if progress > 0.0 {
+                for layer in panel.layers() {
+                    layer.set(progress);
+                }
+            }
+            self.panels.push(panel);
         }
         CATransaction::commit();
-        debug!(
-            "overview: built with {count} active captures in {:?}",
-            start.elapsed()
-        );
 
-        for panel in &self.panels {
-            panel.window.orderFrontRegardless();
-            panel.window.makeKeyWindow();
-        }
-        for panel in old {
-            panel.window.orderOut(None);
-        }
-    }
-
-    pub fn has_pending_captures(&self) -> bool {
-        self.panels
+        // Forget windows that are gone.
+        let live: std::collections::HashSet<_> = self
+            .targets
             .iter()
-            .flat_map(|panel| panel.cards.iter())
-            .any(|card| !card.captured)
+            .flatten()
+            .map(|target| target.key.clone())
+            .collect();
+        self.cache.retain(|key, _| live.contains(key));
+
+        // Each gating capture is a round trip to the WindowServer of tens of
+        // milliseconds; they overlap well, so each gets its own thread. The
+        // rest share one, behind them.
+        for shot in gating {
+            spawn_shots(&self.tx, self.batch, vec![shot]);
+        }
+        spawn_shots(&self.tx, self.batch, later);
+        self.reveal_since = Some(Instant::now());
+        self.poll_captures();
     }
 
-    /// Captures up to `budget` cards still showing a placeholder. Each
-    /// capture blocks the main thread for several milliseconds (Core
-    /// Animation keeps animating on the render server meanwhile).
-    pub fn capture_pending(&mut self, budget: usize) {
-        let pending = self
-            .panels
-            .iter_mut()
-            .flat_map(|p| p.cards.iter_mut())
-            .filter(|card| !card.captured)
-            .take(budget);
-        for card in pending {
-            capture(card);
+    fn target(
+        &mut self,
+        layers: Vec<Retained<CALayer>>,
+        clear: bool,
+        gate: bool,
+        key: &str,
+    ) -> usize {
+        // A cached image goes in now, and then the capture no longer holds
+        // the panels back.
+        let cached = self.cache.get(key);
+        if let Some(image) = cached {
+            for layer in &layers {
+                set_contents(layer, image);
+                if clear {
+                    layer.setBackgroundColor(None);
+                }
+            }
+        }
+        let gate = gate && cached.is_none();
+        self.outstanding += 1;
+        self.gates += usize::from(gate);
+        self.targets.push(Some(Target {
+            layers,
+            clear_background: clear,
+            gate,
+            key: key.to_owned(),
+        }));
+        self.targets.len() - 1
+    }
+
+    /// Whether captures are still in flight or the panels wait to show, so
+    /// the main loop has to keep ticking.
+    pub fn has_pending_captures(&self) -> bool {
+        self.outstanding > 0 || self.reveal_since.is_some()
+    }
+
+    /// Applies the captures that landed, and shows the panels once they are
+    /// ready. Never blocks.
+    pub fn poll_captures(&mut self) {
+        let mut landed = false;
+        // Once visible, fresh images cross-fade over the cached ones.
+        let visible = self.reveal_since.is_none();
+        CATransaction::begin();
+        CATransaction::setDisableActions(!visible);
+        CATransaction::setAnimationDuration(0.2);
+        while let Ok((batch, index, addr)) = self.rx.try_recv() {
+            let image = release_landed(addr);
+            if batch != self.batch {
+                continue;
+            }
+            let Some(target) = self.targets.get_mut(index).and_then(Option::take) else {
+                continue;
+            };
+            landed = true;
+            self.outstanding = self.outstanding.saturating_sub(1);
+            if target.gate {
+                self.gates = self.gates.saturating_sub(1);
+            }
+            let Some(image) = image else {
+                warn!("overview: no snapshot for {}", target.key);
+                continue;
+            };
+            for layer in &target.layers {
+                set_contents(layer, &image);
+                if target.clear_background {
+                    layer.setBackgroundColor(None);
+                }
+            }
+            self.cache.insert(target.key, image);
+        }
+        CATransaction::commit();
+        if landed {
+            CATransaction::flush();
+        }
+        if let Some(since) = self.reveal_since
+            && (self.gates == 0 || since.elapsed() > REVEAL_TIMEOUT)
+        {
+            self.reveal_since = None;
+            debug!(
+                "overview: shown after {:?} ({} captures still pending)",
+                since.elapsed(),
+                self.gates
+            );
+            for panel in &self.panels {
+                panel.window.orderFrontRegardless();
+                panel.window.makeKeyWindow();
+            }
+            for panel in self.retired.drain(..) {
+                panel.window.orderOut(None);
+            }
         }
     }
 
@@ -713,7 +860,7 @@ impl OverviewManager {
         &self,
         scene: &DisplayScene<'_, K>,
         primary_h: f64,
-        screen: &Screen<'_>,
+        screen: &mut Screen,
     ) -> Option<Panel> {
         let mtm = self.mtm;
         let b = scene.cg_bounds;
@@ -778,23 +925,21 @@ impl OverviewManager {
         backdrop
             .layer
             .setBackgroundColor(Some(&color(0.08, 0.09, 0.11, 1.0)));
-        if let Some(image) = screen.wallpaper {
-            set_contents(&backdrop.layer, image);
-            backdrop
-                .layer
-                .setContentsGravity(unsafe { kCAGravityResizeAspectFill });
-            if let Some(blur) = gaussian_blur(BACKDROP_BLUR) {
-                view.setLayerUsesCoreImageFilters(true);
-                unsafe {
-                    backdrop
-                        .layer
-                        .setFilters(Some(&NSArray::from_retained_slice(&[blur])));
-                }
-                // Blur once, then reuse the bitmap while it fades.
-                backdrop.layer.setShouldRasterize(true);
-                backdrop.layer.setRasterizationScale(scale);
+        backdrop
+            .layer
+            .setContentsGravity(unsafe { kCAGravityResizeAspectFill });
+        if let Some(blur) = gaussian_blur(BACKDROP_BLUR) {
+            view.setLayerUsesCoreImageFilters(true);
+            unsafe {
+                backdrop
+                    .layer
+                    .setFilters(Some(&NSArray::from_retained_slice(&[blur])));
             }
+            // Blur once, then reuse the bitmap.
+            backdrop.layer.setShouldRasterize(true);
+            backdrop.layer.setRasterizationScale(scale);
         }
+        screen.wallpaper.push(backdrop.layer.clone());
         flipped.addSublayer(&backdrop.layer);
         backdrop.set(0.0);
 
@@ -819,24 +964,21 @@ impl OverviewManager {
                 strip.viewport_overview,
                 (1.0, 1.0),
             );
-            if let Some(image) = screen.wallpaper {
-                set_contents(&viewport.layer, image);
-                viewport
-                    .layer
-                    .setContentsGravity(unsafe { kCAGravityResizeAspectFill });
-            } else {
-                viewport
-                    .layer
-                    .setBackgroundColor(Some(&color(0.2, 0.22, 0.26, 1.0)));
-            }
+            viewport
+                .layer
+                .setContentsGravity(unsafe { kCAGravityResizeAspectFill });
+            viewport
+                .layer
+                .setBackgroundColor(Some(&color(0.2, 0.22, 0.26, 1.0)));
+            screen.wallpaper.push(viewport.layer.clone());
             viewport.layer.setMasksToBounds(true);
             // The menu bar shrinks with the row's screen, fading out as it
             // goes. The viewport's bounds are the display's, so it sits at
             // its real place.
-            let bar = screen.menubar.map(|(image, height)| {
+            let bar = screen.menubar_height.map(|height| {
                 let rect = Rect::new(0.0, 0.0, viewport.base.0, height);
                 let bar = Animated::new(CALayer::new(), rect, rect, (1.0, 0.0));
-                set_contents(&bar.layer, image);
+                screen.menubar.push(bar.layer.clone());
                 bar.layer.setContentsGravity(unsafe { kCAGravityResize });
                 viewport.layer.addSublayer(&bar.layer);
                 bar.set(0.0);
@@ -878,7 +1020,6 @@ impl OverviewManager {
                     animated: card,
                     window_id: window.window_id,
                     best: strip.active,
-                    captured: false,
                 };
                 if window.floating {
                     floating.push(entry);
@@ -1019,20 +1160,16 @@ impl OverviewManager {
     }
 
     pub fn teardown(&mut self) {
-        for panel in self.panels.drain(..) {
+        for panel in self.panels.drain(..).chain(self.retired.drain(..)) {
             panel.window.orderOut(None);
         }
+        // Whatever is still in flight lands in an old batch and is dropped.
+        self.batch += 1;
+        self.targets.clear();
+        self.outstanding = 0;
+        self.gates = 0;
+        self.reveal_since = None;
     }
-}
-
-fn capture(card: &mut Card) {
-    card.captured = true;
-    let Some(image) = snapshot(card.window_id, card.best) else {
-        warn!("overview: no snapshot for window {}", card.window_id);
-        return;
-    };
-    set_contents(&card.animated.layer, &image);
-    card.animated.layer.setBackgroundColor(None);
 }
 
 /// Height of the display whose Cocoa frame sits at the origin; anchors the

@@ -372,8 +372,9 @@ fn no_setup_restore(session: Option<Res<super::restore::SessionRestore>>) -> boo
     !session.is_some_and(|session| session.is_cross_space())
 }
 
+#[allow(clippy::too_many_lines)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
-fn detect_moved_windows(
+pub(crate) fn detect_moved_windows(
     activated_workspace: Single<Entity, Added<ActiveWorkspaceMarker>>,
     mut workspaces: Query<(
         &mut LayoutStrip,
@@ -481,6 +482,15 @@ fn detect_moved_windows(
 
     for entity in moved_windows {
         if !moved_set.contains(&entity) {
+            continue;
+        }
+
+        // A parked tab's off-screen position can look like a move to another
+        // display; don't split the group over it.
+        if workspaces
+            .iter()
+            .any(|(strip, _, _, _)| strip.is_parked_tab(entity))
+        {
             continue;
         }
 

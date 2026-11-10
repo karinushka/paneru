@@ -22,7 +22,7 @@ use crate::commands::{
 };
 use crate::config::Config;
 use crate::ecs::focus::FocusHistory;
-use crate::ecs::layout::{LayoutStrip, PARKED_STRIP_SLIVER, origin_exposing};
+use crate::ecs::layout::{LayoutStrip, origin_exposing};
 use crate::ecs::params::{ActiveDisplay, WindowCtx, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, DockPosition, FocusedMarker, Initializing, ManualStripOffset,
@@ -904,7 +904,7 @@ fn handle_virtual_window_moves(
             let visible_origin = viewport.min;
             // mid-strip: keep the lone window at its current x.
             let shown = Origin::new(moved_left.unwrap_or(visible_origin.x), visible_origin.y);
-            let parked = viewport.max - PARKED_STRIP_SLIVER;
+            let parked = viewport.max - config.parked_strip_margin();
             let origin = if stay { parked } else { shown };
             debug!(
                 "Creating new virtual row {target_idx} on workspace {}",
@@ -1350,9 +1350,9 @@ pub(crate) fn show_active_workspace(
         }
 
         if config.virtual_workspace_animations() {
-            commands.reposition_entity(entity, bounds.max - PARKED_STRIP_SLIVER);
+            commands.reposition_entity(entity, bounds.max - config.parked_strip_margin());
         } else {
-            position.0 = bounds.max - PARKED_STRIP_SLIVER;
+            position.0 = bounds.max - config.parked_strip_margin();
         }
     }
 

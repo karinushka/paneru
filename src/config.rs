@@ -500,6 +500,10 @@ impl Config {
         i32::from(self.options().sliver_width.unwrap_or(5)).max(1)
     }
 
+    pub fn parked_strip_margin(&self) -> i32 {
+        i32::from(self.options().parked_strip_margin.unwrap_or(10)).max(0)
+    }
+
     pub fn edge_padding(&self) -> (i32, i32, i32, i32) {
         let config = self.inner();
         let o = &config.options;
@@ -1293,6 +1297,10 @@ pub struct MainOptions {
     /// Width of off-screen window slivers in pixels.
     /// Default: 5 pixels.
     pub sliver_width: Option<u16>,
+    /// How far a hidden (parked) strip sits from its display's bottom-right
+    /// corner, in pixels.
+    /// Default: 10 pixels.
+    pub parked_strip_margin: Option<u16>,
     /// Legacy top-level padding (deprecated; use `[padding]`).
     pub padding_top: Option<u16>,
     pub padding_bottom: Option<u16>,

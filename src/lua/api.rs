@@ -648,6 +648,7 @@ fn config_to_lua_table(lua: &Lua, config: &Config) -> mlua::Result<Table> {
         auto_center: _,
         sliver_height: _,
         sliver_width: _,
+        parked_strip_margin: _,
         padding_top: _,
         padding_bottom: _,
         padding_left: _,
@@ -688,6 +689,7 @@ fn config_to_lua_table(lua: &Lua, config: &Config) -> mlua::Result<Table> {
     options.set("auto_center", config.auto_center())?;
     options.set("sliver_height", config.sliver_height())?;
     options.set("sliver_width", config.sliver_width())?;
+    options.set("parked_strip_margin", config.parked_strip_margin())?;
     options.set(
         "mouse_resize_modifier",
         config.mouse_resize_modifier().map(format_modifiers),

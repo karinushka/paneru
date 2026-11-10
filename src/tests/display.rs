@@ -5,7 +5,7 @@ use bevy::time::TimeUpdateStrategy;
 
 use crate::commands::{Command, Direction, MouseMove, MoveFocus, Operation};
 use crate::config::{Config, MainOptions};
-use crate::ecs::layout::{LayoutStrip, PARKED_STRIP_SLIVER};
+use crate::ecs::layout::LayoutStrip;
 use crate::ecs::{DockPosition, Timeout};
 use crate::events::Event;
 use crate::manager::{Display, Origin, Size, Window};
@@ -813,7 +813,8 @@ fn test_hidden_stack_stays_off_the_display_below() {
                 );
                 assert_eq!(
                     frame.min.y,
-                    TEST_DISPLAY_HEIGHT - PARKED_STRIP_SLIVER,
+                    // Matches the default `parked_strip_margin` config value.
+                    TEST_DISPLAY_HEIGHT - 10,
                     "window {} should park on the corner sliver",
                     window.id()
                 );

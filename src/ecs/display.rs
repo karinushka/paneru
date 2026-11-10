@@ -458,7 +458,7 @@ fn place_extracted_strip(
         ));
     } else {
         world.spawn((
-            Position(display_bounds.max - PARKED_STRIP_SLIVER),
+            Position(display_bounds.max - parked_strip_margin(world)),
             PreviousStripPosition {
                 origin: display_bounds.min,
                 focus,
@@ -611,6 +611,14 @@ pub(crate) fn refresh_reparented_strip(world: &mut World, strip_entity: Entity) 
     refresh_strip_layout(world, strip_entity, None, focused);
 }
 
+/// The configured `parked_strip_margin`, or its default when no `Config` is
+/// loaded yet.
+fn parked_strip_margin(world: &World) -> i32 {
+    world
+        .get_resource::<Config>()
+        .map_or(PARKED_STRIP_SLIVER, Config::parked_strip_margin)
+}
+
 fn refresh_strip_layout(
     world: &mut World,
     strip_entity: Entity,
@@ -628,9 +636,10 @@ fn refresh_strip_layout(
         world.entity_mut(strip_entity).remove::<ManualStripOffset>();
     }
     let hidden = world.get::<PreviousStripPosition>(strip_entity).is_some();
+    let parked = display_bounds.max - parked_strip_margin(world);
     if let Some(mut position) = world.get_mut::<Position>(strip_entity) {
         let origin = if hidden {
-            display_bounds.max - PARKED_STRIP_SLIVER
+            parked
         } else if let Some(previous_bounds) = previous_bounds {
             position.0 + display_bounds.min - previous_bounds.min
         } else {
@@ -647,7 +656,7 @@ fn refresh_strip_layout(
     }
     if let Some(mut target) = world.get_mut::<RepositionMarker>(strip_entity) {
         target.0 = if hidden {
-            display_bounds.max - PARKED_STRIP_SLIVER
+            parked
         } else {
             previous_bounds.map_or(display_bounds.min, |bounds| {
                 target.0 + display_bounds.min - bounds.min

@@ -1793,7 +1793,7 @@ fn position_layout_windows(
         // bottom edge, fully inside the display underneath. macOS then adopts
         // the window onto that display, and showing the workspace again brings
         // it back there instead of here. Park those at the corner as well.
-        let park_row = viewport.max.y - PARKED_STRIP_SLIVER;
+        let park_row = viewport.max.y - config.parked_strip_margin();
         if frame.min.y > park_row {
             let height = frame.height();
             frame.min.y = park_row;

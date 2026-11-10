@@ -2,7 +2,7 @@ use crate::assert_focused;
 use crate::commands::{Command, Direction, MoveFocus, Operation};
 use crate::config::{Config, MainOptions};
 use crate::events::Event;
-use crate::manager::{Origin, Window};
+use crate::manager::{Origin, Window, WindowManager};
 use crate::platform::Modifiers;
 use objc2_core_foundation::CGPoint;
 use std::time::Duration;
@@ -397,16 +397,23 @@ fn click_focus_leaves_the_pointer_where_the_user_clicked() {
             Event::Command {
                 command: Command::PrintState,
             },
+            Event::Command {
+                command: Command::Window(Operation::Focus(Direction::West)),
+            },
+            Event::Command {
+                command: Command::Window(Operation::Focus(Direction::East)),
+            },
         ];
         TestHarness::new()
             .with_config(config)
             .with_windows(3)
             .on_iteration(0, move |world, state| {
                 assert_focused!(world, 0);
-                *recorded.lock().expect("pointer lock") = state.cursor_position();
                 let clicked = find_window_entity(1, world);
                 let corner =
                     world.get::<Window>(clicked).unwrap().frame().min + Origin::new(10, 10);
+                world.resource::<WindowManager>().warp_mouse(corner);
+                *recorded.lock().expect("pointer lock") = corner;
                 let point = CGPoint {
                     x: f64::from(corner.x),
                     y: f64::from(corner.y),
@@ -432,12 +439,32 @@ fn click_focus_leaves_the_pointer_where_the_user_clicked() {
                     });
                 }
             })
-            .on_iteration(2, move |world, state| {
+            .on_iteration(2, {
+                let pointer = pointer.clone();
+                move |world, state| {
+                    assert_focused!(world, 1);
+                    assert_eq!(
+                        state.cursor_position(),
+                        *pointer.lock().expect("pointer lock"),
+                        "focus after release {focus_after_release}: a click focus moved the pointer"
+                    );
+                }
+            })
+            .on_iteration(3, {
+                let pointer = pointer.clone();
+                move |world, _state| {
+                    assert_focused!(world, 0);
+                    let corner = Origin::new(10, 10);
+                    world.resource::<WindowManager>().warp_mouse(corner);
+                    *pointer.lock().expect("pointer lock") = corner;
+                }
+            })
+            .on_iteration(4, move |world, state| {
                 assert_focused!(world, 1);
-                assert_eq!(
+                assert_ne!(
                     state.cursor_position(),
                     *pointer.lock().expect("pointer lock"),
-                    "focus after release {focus_after_release}: a click focus moved the pointer"
+                    "subsequent keyboard focus back to the clicked window must still warp the pointer"
                 );
             })
             .run(commands);

@@ -354,6 +354,7 @@ fn scroll(
     } else {
         entry.layout.scroll_by(-dy)
     };
+    debug!("overview: scroll dx={dx:.1} dy={dy:.1} moved={moved}");
     if moved {
         manager.apply_offsets(index, &entry.layout);
     }

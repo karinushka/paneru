@@ -755,6 +755,7 @@ fn vertical_swipe_gesture(
     // during horizontal swipes doesn't trigger a workspace switch.
     let threshold = 0.15 / config.swipe_sensitivity();
     if state.accumulated.abs() >= threshold {
+        tracing::debug!(target: "paneru::gesture", "row switch from swipe, {:.3}", state.accumulated);
         switch_virtual_workspace(state.accumulated, &config, &mut commands);
         state.accumulated = 0.0;
         state.fired = true;

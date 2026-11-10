@@ -1,7 +1,7 @@
 use bevy::app::{App, Plugin, Update};
 use bevy::ecs::entity::Entity;
 use bevy::ecs::message::MessageReader;
-use bevy::ecs::query::With;
+use bevy::ecs::query::{Or, With};
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::system::{Commands, Local, Query, Res, Single};
 use bevy::time::Time;
@@ -216,6 +216,9 @@ fn mouse_moved_trigger(
 // An app can send the focus notification after the user releases the button.
 const CLICK_FOCUS_GRACE: Duration = Duration::from_secs(1);
 
+type StaleClickMarkers<'w, 's> =
+    Query<'w, 's, Entity, Or<(With<MouseHeldMarker>, With<ClickFocusMarker>)>>;
+
 /// Handles mouse down events.
 ///
 /// This function finds the window at the click point. If the window is not fully visible,
@@ -234,7 +237,7 @@ fn mouse_down_trigger(
     active_workspace: Query<(Entity, Option<&Scrolling>), With<ActiveWorkspaceMarker>>,
     window_manager: Res<WindowManager>,
     config: Res<Config>,
-    mouse_held: Query<Entity, With<MouseHeldMarker>>,
+    stale_markers: StaleClickMarkers,
     mut commands: Commands,
 ) {
     for InputEvent(event) in messages.read() {
@@ -261,14 +264,19 @@ fn mouse_down_trigger(
         }
 
         // Clean up any stale marker from a previous click.
-        for held in &mouse_held {
-            if let Ok(mut entity_commands) = commands.get_entity(held) {
+        for marker in &stale_markers {
+            if let Ok(mut entity_commands) = commands.get_entity(marker) {
                 entity_commands.try_despawn();
             }
         }
 
-        let grace = Timeout::new(CLICK_FOCUS_GRACE, None, &mut commands);
-        commands.spawn((ClickFocusMarker(entity), grace));
+        if windows
+            .focused()
+            .is_none_or(|(_, focused)| focused != entity)
+        {
+            let grace = Timeout::new(CLICK_FOCUS_GRACE, None, &mut commands);
+            commands.spawn((ClickFocusMarker(entity), grace));
+        }
 
         if config.window_hidden_ratio() >= 1.0 {
             // At max hidden ratio, never reshuffle on click.

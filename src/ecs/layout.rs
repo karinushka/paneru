@@ -370,6 +370,28 @@ impl Iterator for ColumnWindowIter<'_> {
     }
 }
 
+/// A group of windows that relocates together, returned by
+/// [`LayoutStrip::relocation_group`]. The variants need different re-insertion
+/// (`append_tab_group` vs `append_tabbed_stack`), so don't flatten them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RelocationGroup {
+    /// A native-OS tab group (`Column::Tabs`/`StackItem::Tabs`).
+    NativeTabs(Vec<Entity>),
+    /// A tabbed-display `Column::Stack` and its active tab.
+    TabbedStack {
+        members: Vec<Entity>,
+        active: Entity,
+    },
+}
+
+impl RelocationGroup {
+    pub fn members(&self) -> &[Entity] {
+        match self {
+            Self::NativeTabs(members) | Self::TabbedStack { members, .. } => members,
+        }
+    }
+}
+
 /// `LayoutStrip` manages a horizontal strip of `Panel`s, where each panel can contain a single window or a stack of windows.
 /// It provides methods for manipulating the arrangement and access to windows within the pane.
 #[derive(Component, Debug, Default)]
@@ -1107,6 +1129,57 @@ impl LayoutStrip {
         self.columns
             .front()
             .is_some_and(|column| matches!(column, Column::Fullscren(_)))
+    }
+
+    /// Returns the group `entity` must relocate with when it moves to another
+    /// strip: its native tab group (checked first), else its tabbed-display
+    /// stack. `None` if ungrouped, so the caller moves `entity` alone.
+    pub fn relocation_group(&self, entity: Entity) -> Option<RelocationGroup> {
+        if let Some(group) = self.tab_group(entity) {
+            return Some(RelocationGroup::NativeTabs(group));
+        }
+        let active = self.active_tab(entity)?;
+        let index = self.index_of(entity).ok()?;
+        let Column::Stack(items) = self.get(index).ok()? else {
+            return None;
+        };
+        let members = items.iter().flat_map(StackItem::window_iter).collect();
+        Some(RelocationGroup::TabbedStack { members, active })
+    }
+
+    /// Inserts `entities` at column `index` (clamped) as a tabbed-display
+    /// `Column::Stack` with `active` as the visible tab.
+    pub fn insert_tabbed_stack_at(&mut self, index: usize, entities: &[Entity], active: Entity) {
+        let group = dedup_entities(entities);
+        if group.is_empty() {
+            return;
+        }
+
+        for entity in &group {
+            self.remove(*entity);
+        }
+
+        let index = index.min(self.len());
+        if group.len() == 1 {
+            self.insert_at(index, group[0]);
+            return;
+        }
+
+        let items = group
+            .iter()
+            .map(|&entity| StackItem::Single(entity))
+            .collect();
+        if index >= self.len() {
+            self.columns.push_back(Column::Stack(items));
+        } else {
+            self.columns.insert(index, Column::Stack(items));
+        }
+        _ = self.toggle_tabbed_display(active);
+    }
+
+    /// Appends `entities` as a tabbed-display `Column::Stack`.
+    pub fn append_tabbed_stack(&mut self, entities: &[Entity], active: Entity) {
+        self.insert_tabbed_stack_at(self.len(), entities, active);
     }
 
     /// Toggles tabbed display (one window visible at a time, sharing the
@@ -2983,6 +3056,132 @@ mod tests {
         assert_eq!(strip.tab_group(e1), Some(vec![e2, e1]));
         assert_eq!(strip.tab_group(e2), Some(vec![e2, e1]));
         assert_eq!(strip.tab_group(e3), None);
+    }
+
+    #[test]
+    fn test_relocation_group_prefers_native_tabs_over_tabbed_display() {
+        let mut world = World::new();
+        let e1 = world.spawn_empty().id();
+        let e2 = world.spawn_empty().id();
+        let e3 = world.spawn_empty().id();
+
+        let mut strip = LayoutStrip::default();
+        strip.append(e1);
+        strip.convert_to_tabs(e1, e2).unwrap();
+        strip.append(e3);
+
+        assert_eq!(
+            strip.relocation_group(e1),
+            Some(RelocationGroup::NativeTabs(vec![e2, e1]))
+        );
+        assert_eq!(
+            strip.relocation_group(e2),
+            Some(RelocationGroup::NativeTabs(vec![e2, e1]))
+        );
+        assert_eq!(strip.relocation_group(e3), None);
+    }
+
+    #[test]
+    fn test_relocation_group_returns_the_whole_tabbed_display_stack() {
+        let mut world = World::new();
+        let entities = world.spawn_batch(vec![(), (), ()]).collect::<Vec<Entity>>();
+
+        let mut strip = LayoutStrip::default();
+        for &e in &entities {
+            strip.append(e);
+        }
+        strip.stack(entities[1]).unwrap();
+        strip.stack(entities[2]).unwrap();
+        strip.toggle_tabbed_display(entities[1]);
+
+        for &e in &entities {
+            assert_eq!(
+                strip.relocation_group(e),
+                Some(RelocationGroup::TabbedStack {
+                    members: entities.clone(),
+                    active: entities[1],
+                }),
+                "every member of the tabbed stack should report the same group and active tab"
+            );
+        }
+    }
+
+    #[test]
+    fn test_relocation_group_is_none_for_an_ordinary_stack_or_lone_window() {
+        let mut world = World::new();
+        let entities = world.spawn_batch(vec![(), ()]).collect::<Vec<Entity>>();
+        let lone = world.spawn_empty().id();
+
+        let mut strip = LayoutStrip::default();
+        for &e in &entities {
+            strip.append(e);
+        }
+        strip.stack(entities[1]).unwrap();
+        strip.append(lone);
+
+        // Stacked, but never toggled into tabbed display.
+        assert_eq!(strip.relocation_group(entities[0]), None);
+        assert_eq!(strip.relocation_group(entities[1]), None);
+        // Not grouped by either mechanism at all.
+        assert_eq!(strip.relocation_group(lone), None);
+    }
+
+    #[test]
+    fn test_append_tabbed_stack_recreates_the_group_with_its_active_tab() {
+        let mut world = World::new();
+        let entities = world.spawn_batch(vec![(), (), ()]).collect::<Vec<Entity>>();
+
+        let mut strip = LayoutStrip::default();
+        strip.append_tabbed_stack(&entities, entities[2]);
+
+        match strip.get(0).unwrap() {
+            Column::Stack(items) => {
+                assert_eq!(
+                    items
+                        .iter()
+                        .flat_map(StackItem::window_iter)
+                        .collect::<Vec<_>>(),
+                    entities
+                );
+            }
+            other => panic!("expected a Stack column, got {other:?}"),
+        }
+        assert!(entities.iter().all(|&e| strip.is_tabbed_display(e)));
+        assert_eq!(strip.active_tab(entities[0]), Some(entities[2]));
+    }
+
+    #[test]
+    fn test_insert_tabbed_stack_at_places_group_and_removes_prior_membership() {
+        let mut world = World::new();
+        let entities = world.spawn_batch(vec![(), (), ()]).collect::<Vec<Entity>>();
+        let other = world.spawn_empty().id();
+
+        let mut strip = LayoutStrip::default();
+        // entities[0] is already in the strip and must not be duplicated.
+        strip.append(entities[0]);
+        strip.append(other);
+
+        strip.insert_tabbed_stack_at(0, &entities, entities[1]);
+
+        assert_eq!(
+            strip.len(),
+            2,
+            "the group must not leave a stale column behind"
+        );
+        match strip.get(0).unwrap() {
+            Column::Stack(items) => {
+                assert_eq!(
+                    items
+                        .iter()
+                        .flat_map(StackItem::window_iter)
+                        .collect::<Vec<_>>(),
+                    entities
+                );
+            }
+            other => panic!("expected a Stack column, got {other:?}"),
+        }
+        assert_eq!(strip.active_tab(entities[0]), Some(entities[1]));
+        assert!(matches!(strip.get(1).unwrap(), Column::Single(id) if id == other));
     }
 
     #[test]

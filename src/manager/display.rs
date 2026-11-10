@@ -122,6 +122,7 @@ impl Display {
         bounds
     }
 
+    /// The whole display, menu bar included (`bounds` starts below it).
     pub fn frame(&self) -> IRect {
         self.bounds
     }

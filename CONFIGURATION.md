@@ -76,8 +76,17 @@ Configure trackpad gestures and scroll-wheel window sliding.
 | `paging` | Boolean | `false` | Focus one adjacent window for each horizontal gesture threshold instead of sliding the strip freely. |
 | `page_distance_cm` | Positive float | `2.0` | Approximate horizontal finger travel in centimeters required for each page when `paging = true`. |
 | `haptics` | Boolean | `true` | Emit a haptic pulse after each confirmed paging focus change. Set to `false` to disable pulses. |
+| `overview_fingers` | Integer | *None* | Number of fingers for the overview gesture: swipe up to open it, down to close. Must be 3 or more and differ from `fingers_count`; unset disables the gesture (the `overview` command still works). |
 
 When `fingers_count` is omitted or set below 3, Paneru does not intercept native macOS gestures. If macOS uses three-finger horizontal swipes for Spaces, prefer `[swipe.scroll]` with a modifier or configure a different finger count.
+
+macOS uses four-finger vertical swipes for Mission Control and App Exposé by default. To use `overview_fingers = 4`, turn those off in System Settings → Trackpad → More Gestures, otherwise macOS takes the gesture first.
+
+```toml
+[swipe.gesture]
+fingers_count = 3
+overview_fingers = 4
+```
 
 Paging estimates physical distance from the trackpad's reported device size. The centimeter threshold may feel slightly different across devices; adjust `page_distance_cm` to suit your trackpad. Haptics require compatible hardware and may be suppressed by macOS when fingers are no longer touching it.
 

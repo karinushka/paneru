@@ -59,6 +59,11 @@ impl Rect {
     }
 }
 
+/// Whether an overview panel is up. Read by the event tap (off the ECS) so
+/// scroll gestures go to the overview instead of paneru's strip scrolling,
+/// its post-swipe suppression, or the window underneath.
+pub static OVERVIEW_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 // ── Inputs ──────────────────────────────────────────────────────────────
 
 /// One window as the ECS sees it.
@@ -159,6 +164,9 @@ pub struct DisplayLayout<K> {
     pub scroll: f64,
     /// Vertical margins the stack scrolls within.
     pub margins: (f64, f64),
+    /// Horizontal span (display-local) paneru keeps a focused window inside;
+    /// see `reanchor`. Defaults to the full display width.
+    pub work_area: (f64, f64),
     pub strips: Vec<StripPlacement<K>>,
 }
 
@@ -262,6 +270,7 @@ pub fn layout_display<K: Clone>(
         scale,
         scroll: 0.0,
         margins: (top, bottom),
+        work_area: (0.0, width),
         strips: placements,
     }
 }
@@ -276,21 +285,32 @@ impl<K> DisplayLayout<K> {
         })
     }
 
-    /// Scrolls the stack, clamped so it can't leave the margins. Returns
-    /// whether anything moved.
+    /// Scrolls the stack. The range always lets the first and the last row
+    /// be brought to the middle of the display, and extends to the margins
+    /// when the stack overflows. Returns whether anything moved.
     pub fn scroll_by(&mut self, dy: f64) -> bool {
-        let (Some(first), Some(last)) = (self.strips.first(), self.strips.last()) else {
-            return false;
-        };
-        let (top, bottom) = self.margins;
-        let content_top = first.label.y;
-        let content_bottom = last.viewport_overview.y + last.viewport_overview.h;
-        let min = (content_top - top).min(0.0);
-        let max = (content_bottom - (self.size.1 - bottom)).max(0.0);
+        let (min, max) = self.scroll_range();
         let next = (self.scroll + dy).clamp(min, max);
         let moved = (next - self.scroll).abs() > f64::EPSILON;
         self.scroll = next;
         moved
+    }
+
+    /// The `(min, max)` scroll the stack can take.
+    pub fn scroll_range(&self) -> (f64, f64) {
+        let (Some(first), Some(last)) = (self.strips.first(), self.strips.last()) else {
+            return (0.0, 0.0);
+        };
+        let (top, bottom) = self.margins;
+        let middle = top + (self.size.1 - top - bottom) / 2.0;
+        let centre = |s: &StripPlacement<K>| s.viewport_overview.y + s.viewport_overview.h / 2.0;
+        let content_top = first.label.y;
+        let content_bottom = last.viewport_overview.y + last.viewport_overview.h;
+        let min = (content_top - top).min(centre(first) - middle).min(0.0);
+        let max = (content_bottom - (self.size.1 - bottom))
+            .max(centre(last) - middle)
+            .max(0.0);
+        (min, max)
     }
 
     /// Pans one strip's tiled columns, clamped so the outermost columns can
@@ -375,11 +395,20 @@ pub fn hit_test<K: Clone>(layout: &DisplayLayout<K>, x: f64, y: f64) -> Hit<K> {
 }
 
 /// Re-anchors a layout on another row so closing into it lands its windows
-/// on the full display while the other rows slide off. The target row's
-/// windows rest at their layout frames (their real position after the
-/// switch) rather than wherever they are parked now.
+/// where paneru will really put them while the other rows slide off.
+///
+/// Tiled windows rest at their layout frames. When `focus` names a window
+/// of that row, the row is first shifted the way paneru scrolls a strip to
+/// expose a newly focused window (by the shortfall only, see
+/// `layout::origin_exposing`), so picking a card that was scrolled out of
+/// view doesn't land on the old scroll and then jump. Floating windows keep
+/// their rest frames: they don't move.
 #[allow(clippy::cast_precision_loss, reason = "row counts are tiny")]
-pub fn reanchor<K: Clone>(layout: &mut DisplayLayout<K>, virtual_index: u32) {
+pub fn reanchor<K: Clone + PartialEq>(
+    layout: &mut DisplayLayout<K>,
+    virtual_index: u32,
+    focus: Option<&K>,
+) {
     let Some(anchor) = layout
         .strips
         .iter()
@@ -388,17 +417,40 @@ pub fn reanchor<K: Clone>(layout: &mut DisplayLayout<K>, virtual_index: u32) {
         return;
     };
     let height = layout.size.1;
+    let work_area = layout.work_area;
     for (row, strip) in layout.strips.iter_mut().enumerate() {
         let row_offset = (row as f64 - anchor as f64) * height;
         let was_active = strip.active;
         strip.active = row == anchor;
         strip.viewport_rest = Rect::new(0.0, row_offset, layout.size.0, height);
+        let shift = if strip.active {
+            focus
+                .and_then(|key| strip.windows.iter().find(|w| !w.floating && &w.key == key))
+                .map_or(0.0, |w| exposing_shift(&w.layout, work_area))
+        } else {
+            0.0
+        };
+        // Staying on the row that was open with nothing to scroll: the
+        // windows go back exactly where they were taken from.
+        let unmoved = was_active && strip.active && shift.abs() < 0.5;
         for window in &mut strip.windows {
-            if !(was_active && strip.active) {
-                window.rest = window.layout.offset(0.0, row_offset);
+            if unmoved || (window.floating && strip.active) {
+                continue;
             }
+            let dx = if window.floating { 0.0 } else { shift };
+            window.rest = window.layout.offset(dx, row_offset);
         }
     }
+}
+
+/// Horizontal shift that brings `frame` inside `area`, moving only by what
+/// hangs over an edge — the same clamp as `layout::clamp_origin_to_viewport`
+/// (a window wider than the area may sit anywhere that keeps it covering).
+pub fn exposing_shift(frame: &Rect, area: (f64, f64)) -> f64 {
+    let (left, right) = area;
+    let far = right - frame.w;
+    let (min, max) = (left.min(far), left.max(far));
+    frame.x.clamp(min, max) - frame.x
 }
 
 // ── Transition spring ───────────────────────────────────────────────────
@@ -620,7 +672,7 @@ mod tests {
     #[test]
     fn reanchor_moves_target_row_to_full_screen() {
         let mut layout = layout_display(SIZE, &strips(), 1.0, &Metrics::default());
-        reanchor(&mut layout, 0);
+        reanchor(&mut layout, 0, None);
         let target = &layout.strips[0];
         assert!(target.active);
         assert_eq!(target.viewport_rest, Rect::new(0.0, 0.0, SIZE.0, SIZE.1));
@@ -675,8 +727,134 @@ mod tests {
                 virtual_index: 1
             }
         );
-        // Two rows fit, so the stack has nothing to scroll.
+        // Two rows fit, but the stack still scrolls far enough to bring the
+        // last row to the middle, and no further.
+        assert!(layout.scroll_by(500.0));
         assert!(!layout.scroll_by(500.0));
+    }
+
+    fn centre_y(layout: &DisplayLayout<u32>, row: usize) -> f64 {
+        let v = &layout.strips[row].viewport_overview;
+        v.y + v.h / 2.0 - layout.scroll
+    }
+
+    #[test]
+    fn scroll_reaches_the_middle_for_every_row_when_rows_fit() {
+        let mut layout = layout_display(SIZE, &strips(), 1.0, &Metrics::default());
+        let (top, bottom) = layout.margins;
+        let middle = top + (SIZE.1 - top - bottom) / 2.0;
+        layout.scroll_by(-10_000.0);
+        assert!((centre_y(&layout, 0) - middle).abs() < 1e-6);
+        layout.scroll_by(10_000.0);
+        assert!((centre_y(&layout, 1) - middle).abs() < 1e-6);
+        // Scrolled to the last row, hit testing follows the content.
+        let w = layout.strips[1].windows[0].overview;
+        assert_eq!(
+            hit_test(&layout, w.x + 5.0, w.y - layout.scroll + 5.0),
+            Hit::Window {
+                key: 2,
+                virtual_index: 1
+            }
+        );
+    }
+
+    #[test]
+    fn scroll_range_covers_overflowing_stacks_to_the_margins() {
+        let many: Vec<_> = (0..6)
+            .map(|i| StripInput::<u32> {
+                virtual_index: i,
+                active: i == 0,
+                windows: vec![],
+            })
+            .collect();
+        let mut layout = layout_display(SIZE, &many, 1.0, &Metrics::default());
+        layout.scroll_by(10_000.0);
+        let last = &layout.strips[5].viewport_overview;
+        let (_, bottom) = layout.margins;
+        // The last row can at least reach the bottom margin.
+        assert!(last.y + last.h - layout.scroll <= SIZE.1 - bottom + 1e-6);
+    }
+
+    #[test]
+    fn exposing_shift_matches_paneru_clamp() {
+        let area = (0.0, 1000.0);
+        let frame = |x, w| Rect::new(x, 0.0, w, 700.0);
+        // Fully off to the left comes back to the edge.
+        assert_eq!(exposing_shift(&frame(-600.0, 400.0), area), 600.0);
+        // Past the right edge moves only by the overhang.
+        assert_eq!(exposing_shift(&frame(800.0, 400.0), area), -200.0);
+        // Already visible: no move.
+        assert_eq!(exposing_shift(&frame(100.0, 400.0), area), 0.0);
+        // Oversized windows only move until they cover the area.
+        assert_eq!(exposing_shift(&frame(300.0, 2048.0), (0.0, 1024.0)), -300.0);
+        assert_eq!(
+            exposing_shift(&frame(-1600.0, 2048.0), (0.0, 1024.0)),
+            576.0
+        );
+        assert_eq!(exposing_shift(&frame(-600.0, 2048.0), (0.0, 1024.0)), 0.0);
+    }
+
+    #[test]
+    fn picking_an_offscreen_card_in_the_open_row_lands_on_the_scrolled_strip() {
+        let mut layout = layout_display(SIZE, &strips(), 1.0, &Metrics::default());
+        // Window 3 sits at 1700..2500, past the right edge of a 1600 display.
+        reanchor(&mut layout, 1, Some(&3));
+        let row = &layout.strips[1];
+        assert!(row.active);
+        // Paneru scrolls the strip left by the overhang (900).
+        assert!((row.windows[1].rest.x - 800.0).abs() < 1e-6);
+        assert!((row.windows[0].rest.x - -900.0).abs() < 1e-6);
+        assert!((row.windows[0].rest.y - 30.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn picking_a_visible_card_in_the_open_row_keeps_the_real_frames() {
+        let mut layout = layout_display(SIZE, &strips(), 1.0, &Metrics::default());
+        reanchor(&mut layout, 1, Some(&2));
+        let row = &layout.strips[1];
+        assert_eq!(row.windows[0].rest, Rect::new(0.0, 30.0, 800.0, 970.0));
+        // The parked sliver stays parked.
+        assert_eq!(row.windows[1].rest, Rect::new(1590.0, 30.0, 800.0, 970.0));
+    }
+
+    #[test]
+    fn picking_an_offscreen_card_in_a_hidden_row_activates_and_scrolls_it() {
+        let mut rows = strips();
+        rows[0].windows = vec![window(1, 0.0, None), window(4, -1200.0, None)];
+        let mut layout = layout_display(SIZE, &rows, 1.0, &Metrics::default());
+        reanchor(&mut layout, 0, Some(&4));
+        let (target, other) = (&layout.strips[0], &layout.strips[1]);
+        assert!(target.active && !other.active);
+        assert!((target.windows[1].rest.x - 0.0).abs() < 1e-6);
+        assert!((target.windows[0].rest.x - 1200.0).abs() < 1e-6);
+        // The row that was open slides off below at its layout frames.
+        assert!((other.windows[1].rest.x - 1700.0).abs() < 1e-6);
+        assert!((other.windows[1].rest.y - (30.0 + SIZE.1)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn exposing_respects_the_work_area() {
+        let mut layout = layout_display(SIZE, &strips(), 1.0, &Metrics::default());
+        layout.work_area = (8.0, 1592.0);
+        reanchor(&mut layout, 1, Some(&3));
+        assert!((layout.strips[1].windows[1].rest.x - 792.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn floating_windows_stay_put_when_the_row_scrolls() {
+        let mut rows = strips();
+        let float = Rect::new(400.0, 200.0, 500.0, 400.0);
+        rows[1].windows.push(WindowInput {
+            key: 7,
+            window_id: 7,
+            layout_frame: float,
+            real_frame: Some(float),
+            floating: true,
+            focused: false,
+        });
+        let mut layout = layout_display(SIZE, &rows, 1.0, &Metrics::default());
+        reanchor(&mut layout, 1, Some(&3));
+        assert_eq!(layout.strips[1].windows[2].rest, float);
     }
 
     #[test]

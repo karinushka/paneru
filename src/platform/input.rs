@@ -463,6 +463,35 @@ impl InputHandler {
 
     /// Use the configured modifier to scroll the strip or select an adjacent window.
     fn handle_scroll_wheel(&mut self, event: &CGEvent) -> bool {
+        // The open overview owns every scroll: it pans and scrolls its
+        // strips, and nothing should reach the windows behind it.
+        if crate::overview::OVERVIEW_OPEN.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Some(events) = &self.events {
+                let field = |f| CGEvent::double_value_field(Some(event), f);
+                let precise = CGEvent::integer_value_field(
+                    Some(event),
+                    CGEventField::ScrollWheelEventIsContinuous,
+                ) != 0;
+                // Trackpads report points; wheels report lines.
+                let (dx, dy) = if precise {
+                    (
+                        field(CGEventField::ScrollWheelEventPointDeltaAxis2),
+                        field(CGEventField::ScrollWheelEventPointDeltaAxis1),
+                    )
+                } else {
+                    (
+                        field(CGEventField::ScrollWheelEventFixedPtDeltaAxis2) * 12.0,
+                        field(CGEventField::ScrollWheelEventFixedPtDeltaAxis1) * 12.0,
+                    )
+                };
+                _ = events.send(Event::OverviewScroll {
+                    point: CGEvent::location(Some(event)),
+                    dx,
+                    dy,
+                });
+            }
+            return true;
+        }
         // Suppress scroll events shortly after a swipe gesture to prevent
         // the OS from scrolling windows underneath, including momentum scroll events
         // that arrive after finger lift.

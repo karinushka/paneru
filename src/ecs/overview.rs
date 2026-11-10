@@ -8,6 +8,7 @@
 //! overview is open, hotkeys keep driving the real layout and the overview
 //! follows it (`overview_follow_layout`).
 
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use bevy::app::{App, Last, PreUpdate, Update};
@@ -34,8 +35,8 @@ use crate::events::Event;
 use crate::manager::{Display, Window};
 use crate::overview::view::{DisplayScene, OverviewManager, WindowServerInfo, window_server_info};
 use crate::overview::{
-    DisplayLayout, Hit, Metrics, Rect, SPRING_RESPONSE, Spring, StripInput, WindowInput, hit_test,
-    layout_display, reanchor, release_opens, rubber_band, same_geometry,
+    DisplayLayout, Hit, Metrics, OVERVIEW_OPEN, Rect, SPRING_RESPONSE, Spring, StripInput,
+    WindowInput, hit_test, layout_display, reanchor, release_opens, rubber_band, same_geometry,
 };
 
 /// Progress per unit of normalized vertical finger travel: ~55% of the
@@ -239,7 +240,9 @@ fn overview_handler(
                 select(&mut state, &mut manager, *point, &mut commands);
             }
 
-            Event::OverviewScroll { point, dx, dy } if state.phase == Phase::Open => {
+            Event::OverviewScroll { point, dx, dy }
+                if matches!(state.phase, Phase::Open | Phase::Opening) =>
+            {
                 scroll(&mut state, &mut manager, *point, *dx, *dy);
             }
 
@@ -255,6 +258,7 @@ fn overview_handler(
                 match state.phase {
                     Phase::Closing => {
                         manager.teardown();
+                        OVERVIEW_OPEN.store(false, Ordering::Relaxed);
                         *state = OverviewState {
                             generation: state.generation,
                             ..OverviewState::default()
@@ -340,7 +344,7 @@ fn select(
         Hit::Window { key, virtual_index } => {
             debug!("overview: selected window {key} on row {virtual_index}");
             commands.focus_entity(key, true);
-            Some(virtual_index)
+            Some((virtual_index, Some(key)))
         }
         Hit::Strip { virtual_index } => {
             let index = entry
@@ -353,12 +357,12 @@ fn select(
             {
                 entity.try_insert(ActiveWorkspaceMarker);
             }
-            Some(virtual_index)
+            Some((virtual_index, None))
         }
         Hit::Background => None,
     };
-    if let Some(row) = target_row {
-        reanchor(&mut entry.layout, row);
+    if let Some((row, focus)) = target_row {
+        reanchor(&mut entry.layout, row, focus.as_ref());
         let layouts: Vec<_> = state.displays.iter().map(|d| &d.layout).collect();
         manager.retarget(&layouts);
     }
@@ -450,6 +454,7 @@ fn open(state: &mut OverviewState, manager: &mut OverviewManager, scene: &Scene)
         })
         .collect();
     manager.build(&scenes, &info, 0.0);
+    OVERVIEW_OPEN.store(true, Ordering::Relaxed);
     state.displays = entries;
     state.progress = 0.0;
     state.spring = None;
@@ -532,9 +537,14 @@ fn gather(scene: &Scene, info: Option<&WindowServerInfo>) -> Vec<DisplayEntry> {
             });
             strip_entities.push(entity);
         }
+        let mut layout = layout_display(size, &inputs, 1.0, &metrics);
+        layout.work_area = (
+            f64::from(viewport.min.x) - origin.0,
+            f64::from(viewport.max.x) - origin.0,
+        );
         entries.push(DisplayEntry {
             cg_bounds: display_rect,
-            layout: layout_display(size, &inputs, 1.0, &metrics),
+            layout,
             strips: strip_entities,
         });
     }

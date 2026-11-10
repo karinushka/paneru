@@ -56,6 +56,8 @@ use crate::events::{Event, EventSender};
 
 /// Blur of the wallpaper backdrop, in points.
 const BACKDROP_BLUR: f64 = 40.0;
+/// Blur behind translucent windows, about what macOS and terminals use.
+const WINDOW_BLUR: f64 = 20.0;
 /// Corner radius and focus ring width of a card when fully open, in points.
 const CARD_RADIUS: f64 = 10.0;
 const RING_WIDTH: f64 = 2.5;
@@ -116,6 +118,13 @@ enum Shot {
         rect: Rect,
         below: Option<i32>,
     },
+    /// The wallpaper window, blurred by `radius` points on a display
+    /// `width` points wide.
+    Blurred {
+        id: i32,
+        width: f64,
+        radius: f64,
+    },
 }
 
 impl Shot {
@@ -123,6 +132,9 @@ impl Shot {
         match self {
             Self::Window { id, best } => snapshot(id, best),
             Self::Region { rect, below } => snapshot_region(&rect, below),
+            Self::Blurred { id, width, radius } => {
+                snapshot(id, true).and_then(|image| blurred(&image, width, radius))
+            }
         }
     }
 }
@@ -269,16 +281,60 @@ pub fn window_server_info() -> WindowServerInfo {
 
 // ── Small CA helpers ────────────────────────────────────────────────────
 
-/// A `CIGaussianBlur` filter for `CALayer.filters`, if Core Image is there.
-fn gaussian_blur(radius: f64) -> Option<Retained<AnyObject>> {
+/// A Core Image filter by name with its inputs set.
+fn ci_filter(name: &str, inputs: &[(&str, &AnyObject)]) -> Option<Retained<AnyObject>> {
     let class = AnyClass::get(c"CIFilter")?;
-    let name = NSString::from_str("CIGaussianBlur");
+    let name = NSString::from_str(name);
     let filter: Option<Retained<AnyObject>> = unsafe { msg_send![class, filterWithName: &*name] };
     let filter = filter?;
-    let key = NSString::from_str("inputRadius");
-    let value = ns_number(radius);
-    let _: () = unsafe { msg_send![&*filter, setValue: &*value, forKey: &*key] };
+    for (key, value) in inputs {
+        let key = NSString::from_str(key);
+        let _: () = unsafe { msg_send![&*filter, setValue: *value, forKey: &*key] };
+    }
     Some(filter)
+}
+
+/// Blurs `image` (a display-wide capture, `width` points across) by
+/// `radius` points, the way the `WindowServer` blurs what is behind a
+/// translucent window. Rendered once on the CPU side at a quarter of the
+/// size: a blurred image has no detail to lose, and the result is cheap to
+/// show in many layers. Edges are clamped so they don't darken.
+fn blurred(image: &CGImage, width: f64, radius: f64) -> Option<CFRetained<CGImage>> {
+    const SCALE: f64 = 0.25;
+    #[allow(clippy::cast_precision_loss)]
+    let pixels_per_point = CGImage::width(Some(image)) as f64 / width.max(1.0);
+    let ci_image = AnyClass::get(c"CIImage")?;
+    let input: Option<Retained<AnyObject>> =
+        unsafe { msg_send![ci_image, imageWithCGImage: image] };
+    let input = input?;
+    let scale = ns_number(SCALE);
+    let aspect = ns_number(1.0);
+    let small = ci_filter(
+        "CILanczosScaleTransform",
+        &[
+            ("inputImage", &input),
+            ("inputScale", &scale),
+            ("inputAspectRatio", &aspect),
+        ],
+    )?;
+    let small: Option<Retained<AnyObject>> = unsafe { msg_send![&*small, outputImage] };
+    let small = small?;
+    let extent: CGRect = unsafe { msg_send![&*small, extent] };
+    let clamped: Retained<AnyObject> = unsafe { msg_send![&*small, imageByClampingToExtent] };
+    let radius = ns_number(radius * pixels_per_point * SCALE);
+    let blur = ci_filter(
+        "CIGaussianBlur",
+        &[("inputImage", &clamped), ("inputRadius", &radius)],
+    )?;
+    let output: Option<Retained<AnyObject>> = unsafe { msg_send![&*blur, outputImage] };
+    let output = output?;
+    let ci_context = AnyClass::get(c"CIContext")?;
+    let context: Option<Retained<AnyObject>> =
+        unsafe { msg_send![ci_context, contextWithOptions: std::ptr::null::<AnyObject>()] };
+    let context = context?;
+    let raw: *mut CGImage =
+        unsafe { msg_send![&*context, createCGImage: &*output, fromRect: extent] };
+    std::ptr::NonNull::new(raw).map(|ptr| unsafe { CFRetained::from_raw(ptr) })
 }
 
 fn color(r: f64, g: f64, b: f64, a: f64) -> CFRetained<CGColor> {
@@ -558,6 +614,8 @@ define_class!(
 
 struct Card {
     animated: Animated,
+    /// The window's snapshot, above `under`.
+    content: Retained<CALayer>,
     window_id: i32,
     /// On the active row: captured at full resolution, before showing.
     best: bool,
@@ -627,6 +685,11 @@ pub struct OverviewManager {
 /// their captures land.
 struct Screen {
     wallpaper: Vec<Retained<CALayer>>,
+    /// Layers showing the wallpaper as heavily blurred as the backdrop.
+    backdrop: Vec<Retained<CALayer>>,
+    /// Layers under each card showing the wallpaper as translucent windows
+    /// blur it, so see-through windows don't come out grey.
+    under: Vec<Retained<CALayer>>,
     menubar: Vec<Retained<CALayer>>,
     /// Menu bar height, if the display has one.
     menubar_height: Option<f64>,
@@ -685,6 +748,7 @@ impl OverviewManager {
     /// have landed (or after [`REVEAL_TIMEOUT`]); until then the real screen
     /// stays visible. Panels of a previous build stay up until then too, so
     /// a rebuild while open never flashes.
+    #[allow(clippy::too_many_lines)]
     pub fn build<K>(
         &mut self,
         scenes: &[DisplayScene<'_, K>],
@@ -724,6 +788,8 @@ impl OverviewManager {
             }
             let mut screen = Screen {
                 wallpaper: Vec::new(),
+                backdrop: Vec::new(),
+                under: Vec::new(),
                 menubar: Vec::new(),
                 menubar_height: menubar.map(|(_, f)| f.h),
             };
@@ -739,6 +805,18 @@ impl OverviewManager {
                     self.target(screen.wallpaper, false, true, &format!("wallpaper {id}")),
                     shot,
                 ));
+                for (layers, radius) in [
+                    (screen.under, WINDOW_BLUR),
+                    (screen.backdrop, BACKDROP_BLUR),
+                ] {
+                    let shot = Shot::Blurred {
+                        id: *id,
+                        width: b.w,
+                        radius,
+                    };
+                    let key = format!("wallpaper {id} blurred {radius}");
+                    gating.push((self.target(layers, false, true, &key), shot));
+                }
             }
             if let Some((_, rect)) = menubar {
                 let shot = Shot::Region { rect: *rect, below };
@@ -751,7 +829,7 @@ impl OverviewManager {
                     best: card.best,
                 };
                 let key = format!("window {}", card.window_id);
-                let index = self.target(vec![card.animated.layer.clone()], true, card.best, &key);
+                let index = self.target(vec![card.content.clone()], true, card.best, &key);
                 if card.best {
                     gating.push((index, shot));
                 } else {
@@ -949,31 +1027,18 @@ impl OverviewManager {
         root.addSublayer(&flipped);
 
         let full = Rect::new(0.0, 0.0, b.w, b.h);
-        // niri's backdrop: the wallpaper, heavily blurred. Oversized so the blur's soft edges stay off-screen.
-        let bleed = BACKDROP_BLUR * 3.0;
-        let backdrop_rect = Rect::new(-bleed, -bleed, b.w + 2.0 * bleed, b.h + 2.0 * bleed);
-        // Opaque from the start: at progress 0 the active row's screen covers
+        // niri's backdrop: the wallpaper, heavily blurred (pre-rendered, see
+        // `blurred`). Opaque from the start: at progress 0 the active row's screen covers
         // it exactly, and as that shrinks the blur is what's revealed — the
         // real windows behind the panel never show through.
-        let backdrop = Animated::new(CALayer::new(), backdrop_rect, backdrop_rect, (1.0, 1.0));
+        let backdrop = Animated::new(CALayer::new(), full, full, (1.0, 1.0));
         backdrop
             .layer
             .setBackgroundColor(Some(&color(0.08, 0.09, 0.11, 1.0)));
         backdrop
             .layer
             .setContentsGravity(unsafe { kCAGravityResizeAspectFill });
-        if let Some(blur) = gaussian_blur(BACKDROP_BLUR) {
-            view.setLayerUsesCoreImageFilters(true);
-            unsafe {
-                backdrop
-                    .layer
-                    .setFilters(Some(&NSArray::from_retained_slice(&[blur])));
-            }
-            // Blur once, then reuse the bitmap.
-            backdrop.layer.setShouldRasterize(true);
-            backdrop.layer.setRasterizationScale(scale);
-        }
-        screen.wallpaper.push(backdrop.layer.clone());
+        screen.backdrop.push(backdrop.layer.clone());
         flipped.addSublayer(&backdrop.layer);
         backdrop.set(0.0);
 
@@ -1041,10 +1106,27 @@ impl OverviewManager {
                 card.layer
                     .setBorderColor(Some(&color(0.45, 0.65, 1.0, 1.0)));
                 card.set_ring(window.focused);
-                card.layer.setContentsGravity(unsafe { kCAGravityResize });
-                card.layer.setContentsScale(scale);
-                card.layer
-                    .setBackgroundColor(Some(&color(0.3, 0.32, 0.36, 1.0)));
+                // What a translucent window shows through: the wallpaper
+                // patch behind it, blurred. Laid out in the card's bounds,
+                // which are the window's size at its layout position.
+                let under = CALayer::new();
+                let local = window.layout;
+                under.setFrame(CGRect::new(
+                    CGPoint::new(-local.x, -local.y),
+                    CGSize::new(b.w, b.h),
+                ));
+                under.setContentsGravity(unsafe { kCAGravityResize });
+                card.layer.addSublayer(&under);
+                screen.under.push(under);
+                let content = CALayer::new();
+                content.setFrame(CGRect::new(
+                    CGPoint::new(0.0, 0.0),
+                    CGSize::new(card.base.0, card.base.1),
+                ));
+                content.setContentsGravity(unsafe { kCAGravityResize });
+                content.setContentsScale(scale);
+                content.setBackgroundColor(Some(&color(0.3, 0.32, 0.36, 1.0)));
+                card.layer.addSublayer(&content);
                 let parent = if window.floating {
                     &container.layer
                 } else {
@@ -1052,6 +1134,7 @@ impl OverviewManager {
                 };
                 let entry = Card {
                     animated: card,
+                    content,
                     window_id: window.window_id,
                     best: strip.active,
                 };
@@ -1220,4 +1303,46 @@ fn primary_screen_height(mtm: MainThreadMarker) -> f64 {
         }
     }
     fallback.unwrap_or(0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use objc2_core_graphics::{CGBitmapContextCreateImage, CGColorSpace, CGContext};
+
+    unsafe extern "C" {
+        fn CGBitmapContextCreate(
+            data: *mut std::ffi::c_void,
+            width: usize,
+            height: usize,
+            bits_per_component: usize,
+            bytes_per_row: usize,
+            space: &CGColorSpace,
+            bitmap_info: u32,
+        ) -> *mut CGContext;
+    }
+
+    #[test]
+    fn wallpaper_blur_renders_a_quarter_size_image() {
+        // 8 bits per channel, premultiplied alpha first.
+        const PREMULTIPLIED_FIRST: u32 = 2;
+        let space = CGColorSpace::new_device_rgb().expect("colour space");
+        let raw = unsafe {
+            CGBitmapContextCreate(
+                std::ptr::null_mut(),
+                400,
+                200,
+                8,
+                0,
+                &space,
+                PREMULTIPLIED_FIRST,
+            )
+        };
+        let context = std::ptr::NonNull::new(raw).map(|ptr| unsafe { CFRetained::from_raw(ptr) });
+        let image = CGBitmapContextCreateImage(context.as_deref()).expect("image");
+        // A 400 px image of a 200 pt wide display (2x).
+        let out = blurred(&image, 200.0, WINDOW_BLUR).expect("blurred image");
+        assert_eq!(CGImage::width(Some(&out)), 100);
+        assert_eq!(CGImage::height(Some(&out)), 50);
+    }
 }

@@ -183,6 +183,9 @@ pub(super) struct InputHandler {
     previous_touches: Vec<Touch<Retained<AnyObject>>>,
     /// Timestamp of `previous_touches`.
     last_swipe_sample_timestamp: Option<f64>,
+    /// Whether the current touch sequence is driving the overview, so its
+    /// lift can be reported as [`Event::OverviewSwipeEnd`].
+    overview_tracking: bool,
     /// The `CFMachPort` representing the `CGEventTap`.
     tap_port: Option<CFRetained<CFMachPort>>,
     /// Run loop source feeding `tap_port`. Retained so the tap can be torn down
@@ -218,6 +221,7 @@ impl InputHandler {
             config,
             previous_touches: Vec::new(),
             last_swipe_sample_timestamp: None,
+            overview_tracking: false,
             tap_port: None,
             run_loop_source: None,
             last_swipe_time: None,
@@ -540,18 +544,20 @@ impl InputHandler {
 
     /// Handles swipe gesture events. Routes to horizontal `Swipe` or vertical
     /// `VerticalSwipe` based on axis dominance. Returns true to intercept the event.
+    #[allow(clippy::too_many_lines)]
     fn handle_swipe(&mut self, event: &CGEvent) -> bool {
         const NS_EVENT_PHASE_ENDED: usize = 1 << 3; // 8
         const NS_EVENT_PHASE_CANCELLED: usize = 1 << 4; // 16
 
-        let Some(configured_fingers) = self
+        let configured_fingers = self
             .config
             .swipe_gesture_fingers()
-            .filter(|fingers| *fingers >= GESTURE_MINIMAL_FINGERS)
-        else {
+            .filter(|fingers| *fingers >= GESTURE_MINIMAL_FINGERS);
+        let overview_fingers = self.config.overview_gesture_fingers();
+        if configured_fingers.is_none() && overview_fingers.is_none() {
             // No valid gesture is configured, so leave native macOS gestures alone.
             return false;
-        };
+        }
 
         objc2::rc::autoreleasepool(|_| {
             let Some(ns_event) = NSEvent::eventWithCGEvent(event) else {
@@ -572,12 +578,16 @@ impl InputHandler {
                 self.last_swipe_sample_timestamp = None;
                 if let Some(events) = &self.events {
                     _ = events.send(Event::TouchpadUp);
+                    if std::mem::take(&mut self.overview_tracking) {
+                        _ = events.send(Event::OverviewSwipeEnd);
+                    }
                 }
                 return false;
             }
 
             let fingers = Touch::sample(&ns_event.allTouches());
-            if !gesture_should_intercept(Some(configured_fingers), fingers.len()) {
+            let overview = overview_fingers == Some(fingers.len());
+            if !overview && !gesture_should_intercept(configured_fingers, fingers.len()) {
                 // AppKit interleaves phase events with an empty touch set
                 // between usable samples. They do not mean the fingers lifted.
                 // That's why empty finger counts don't trigger a reset.
@@ -606,6 +616,24 @@ impl InputHandler {
                 .replace(timestamp)
                 .map(|previous| (timestamp - previous).max(0.0));
             self.previous_touches = fingers;
+            if overview {
+                // Only the vertical component drives the overview. Touch
+                // positions are Y-up, and the delta is previous - current,
+                // so a swipe up arrives negative.
+                self.overview_tracking = true;
+                if let (Some(SwipeMovement::Vertical(delta)), Some(events)) =
+                    (movement, &self.events)
+                {
+                    _ = events.send(Event::OverviewSwipe {
+                        delta: -delta,
+                        elapsed_secs: elapsed_secs.unwrap_or(0.0),
+                    });
+                }
+                return true;
+            }
+            let Some(configured_fingers) = configured_fingers else {
+                return false;
+            };
             match movement {
                 Some(SwipeMovement::Horizontal { delta, distance_cm }) => {
                     if distance_cm.is_none() && !self.invalid_device_size_warned {

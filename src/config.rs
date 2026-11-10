@@ -591,6 +591,18 @@ impl Config {
         (paging, fingers, direction, distance_cm, haptics)
     }
 
+    /// Finger count for the overview gesture, if enabled and distinct from
+    /// the window-swipe count.
+    pub fn overview_gesture_fingers(&self) -> Option<usize> {
+        let config = self.inner();
+        config
+            .swipe
+            .as_ref()
+            .and_then(|swipe| swipe.gesture.as_ref())
+            .and_then(|gesture| gesture.overview_fingers)
+            .filter(|fingers| *fingers >= 3 && Some(*fingers) != self.swipe_gesture_fingers())
+    }
+
     pub fn swipe_vertical(&self) -> bool {
         let config = self.inner();
         config

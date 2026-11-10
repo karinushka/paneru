@@ -96,6 +96,7 @@ mlua = { version = "0.12", default-features = false, optional = true, features =
 ] }
 notify = { version = "8.2", features = ["macos_fsevent"] }
 num_enum = "0.7"
+block2 = "0.6"
 objc2 = { version = "0.6", features = ["catch-all", "exception"] }
 objc2-app-kit = { version = "0.3", features = [
   "NSHapticFeedback",
@@ -113,11 +114,20 @@ objc2-app-kit = { version = "0.3", features = [
   "NSStringDrawing",
   "NSImage",
   "NSControl",
+  "NSPanel",
+  "NSEvent",
+  "NSResponder",
 ] }
 objc2-core-foundation = { version = "0.3", features = ["CFRunLoop"] }
 objc2-core-graphics = "0.3"
 objc2-quartz-core = { version = "0.3", features = [
   "CALayer",
+  "CAAnimation",
+  "CAMediaTiming",
+  "CAMediaTimingFunction",
+  "CATextLayer",
+  "CATransaction",
+  "block2",
   "objc2-core-foundation",
   "objc2-core-graphics",
 ] }

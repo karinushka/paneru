@@ -744,6 +744,7 @@ fn config_to_lua_table(lua: &Lua, config: &Config) -> mlua::Result<Table> {
         paging: _,
         page_distance_cm: _,
         haptics: _,
+        overview_fingers: _,
     } = GestureOptions::default();
     let gesture = lua.create_table()?;
     gesture.set("fingers_count", config.swipe_gesture_fingers())?;
@@ -756,6 +757,7 @@ fn config_to_lua_table(lua: &Lua, config: &Config) -> mlua::Result<Table> {
     gesture.set("paging", config.swipe_gesture_paging())?;
     gesture.set("page_distance_cm", config.swipe_gesture_page_distance_cm())?;
     gesture.set("haptics", config.swipe_gesture_haptics())?;
+    gesture.set("overview_fingers", config.overview_gesture_fingers())?;
     swipe.set("gesture", gesture)?;
 
     let ScrollOptions {
@@ -899,6 +901,7 @@ mod tests {
             paging = true
             page_distance_cm = 3.0
             haptics = false
+            overview_fingers = 4
 
             [swipe.scroll]
             modifier = "alt"

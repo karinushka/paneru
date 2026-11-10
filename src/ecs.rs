@@ -46,6 +46,7 @@ pub mod layout;
 #[cfg(feature = "lua")]
 pub mod layout_ops;
 pub mod mouse;
+pub mod overview;
 pub mod params;
 pub(crate) mod restore;
 pub mod script_state;
@@ -855,6 +856,7 @@ fn autorelease_runner(mut app: BevyApp) -> bevy::app::AppExit {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<BevyApp> {
     crate::manager::app::bound_ax_messaging_timeout()?;
 
@@ -917,7 +919,12 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         .add_plugins(layout::LayoutEventsPlugin)
         .add_plugins(focus::FocusEventsPlugin)
         .add_plugins(display::DisplayEventsPlugin)
-        .add_plugins((register_triggers, register_systems, register_commands));
+        .add_plugins((
+            register_triggers,
+            register_systems,
+            register_commands,
+            overview::register_overview,
+        ));
 
     // Run every schedule inline rather than fanning systems out across the task
     // pool: the task-pool handoff measured ~45% of main-thread time against
@@ -943,6 +950,7 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
 
     crate::menubar::load_menu_bar_preference(&mut app);
     let menu_events = sender.clone();
+    let overview_events = sender.clone();
     let mut platform_callbacks = PlatformCallbacks::new(sender);
     let initial_config = platform_callbacks.setup_handlers()?;
     let mtm = platform_callbacks.main_thread_marker;
@@ -951,6 +959,10 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
     app.insert_non_send(platform_callbacks)
         .insert_non_send(overlay_manager)
         .insert_non_send(flash_message_manager)
+        .insert_non_send(crate::overview::view::OverviewManager::new(
+            mtm,
+            overview_events,
+        ))
         .insert_non_send(receiver);
 
     // `CONFIGURATION_FILE` is `None` exactly when an `init.lua` took the TOML

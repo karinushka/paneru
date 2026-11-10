@@ -261,7 +261,12 @@ impl TryFrom<&Event> for LuaEvent {
             | Event::StateQuery { .. }
             | Event::WindowSetQuery { .. }
             | Event::StateSubscribe { .. }
-            | Event::ScriptState { .. } => return Err(NotMarshallable),
+            | Event::ScriptState { .. }
+            | Event::OverviewClick { .. }
+            | Event::OverviewDismiss
+            | Event::OverviewTransitionDone { .. }
+            | Event::OverviewSwipe { .. }
+            | Event::OverviewSwipeEnd => return Err(NotMarshallable),
         })
     }
 }

@@ -314,4 +314,6 @@ pub enum Command {
     Layout(Vec<crate::types::windowset::LayoutOp>),
     /// Shows or hides the menu bar item and remembers the choice.
     MenuBar(bool),
+    /// Toggles the niri-style overview of every virtual workspace row.
+    Overview,
 }

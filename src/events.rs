@@ -179,6 +179,8 @@ pub enum Event {
     OverviewSwipeEnd,
     /// The overview's finger count landed on the trackpad (before moving).
     OverviewTouchDown,
+    /// A background overview capture finished; picks it up promptly.
+    OverviewCaptureLanded,
 
     /// A new space (virtual desktop) has been created.
     SpaceCreated { space_id: WorkspaceId },

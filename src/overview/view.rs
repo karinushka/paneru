@@ -26,7 +26,10 @@
 //! changing the layer structure.
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
@@ -145,19 +148,47 @@ const REVEAL_TIMEOUT: Duration = Duration::from_millis(250);
 /// share between threads, the wrapper type just doesn't say so.
 type Landed = (u64, usize, usize);
 
-fn spawn_shots(tx: &Sender<Landed>, batch: u64, shots: Vec<(usize, Shot)>) {
-    let tx = tx.clone();
-    std::thread::spawn(move || {
-        for (index, shot) in shots {
-            let addr = shot
-                .take()
-                .map_or(0, |image| CFRetained::into_raw(image).as_ptr() as usize);
-            if let Err(err) = tx.send((batch, index, addr)) {
-                release_landed(err.0.2);
-                return;
+/// How many captures run at once. Each is a `WindowServer` round trip; a
+/// few in parallel overlap well, dozens just queue up inside it and land
+/// all together.
+const CAPTURE_WORKERS: usize = 4;
+
+/// Runs `shots` in order on a small pool of threads. Each result is sent
+/// back on `tx`, and `wake` gets an event so the main loop picks it up
+/// right away. Workers stop early once `current` moves past `batch`.
+fn spawn_shots(
+    tx: &Sender<Landed>,
+    wake: &EventSender,
+    current: &Arc<AtomicU64>,
+    batch: u64,
+    shots: Vec<(usize, Shot)>,
+) {
+    let queue = Arc::new(Mutex::new(VecDeque::from(shots)));
+    for _ in 0..CAPTURE_WORKERS {
+        let (tx, wake, current, queue) = (tx.clone(), wake.clone(), current.clone(), queue.clone());
+        std::thread::spawn(move || {
+            loop {
+                if current.load(Ordering::Relaxed) != batch {
+                    return;
+                }
+                let job = match queue.lock() {
+                    Ok(mut queue) => queue.pop_front(),
+                    Err(_) => None,
+                };
+                let Some((index, shot)) = job else {
+                    return;
+                };
+                let addr = shot
+                    .take()
+                    .map_or(0, |image| CFRetained::into_raw(image).as_ptr() as usize);
+                if let Err(err) = tx.send((batch, index, addr)) {
+                    release_landed(err.0.2);
+                    return;
+                }
+                _ = wake.send(Event::OverviewCaptureLanded);
             }
-        }
-    });
+        });
+    }
 }
 
 fn release_landed(addr: usize) -> Option<CFRetained<CGImage>> {
@@ -594,6 +625,10 @@ pub struct OverviewManager {
     retired: Vec<Panel>,
     tx: Sender<Landed>,
     rx: Receiver<Landed>,
+    /// `batch`, shared with the capture workers so stale ones stop.
+    current_batch: Arc<AtomicU64>,
+    /// When the current batch was started, for the capture timing log.
+    batch_started: Instant,
     /// The last image of everything captured ("window 42", "wallpaper 7",
     /// "menu bar 0,0"). A build shows these straight away, so the overview
     /// appears at once and the fresh captures fade in over them.
@@ -650,6 +685,8 @@ impl OverviewManager {
             retired: Vec::new(),
             tx,
             rx,
+            current_batch: Arc::new(AtomicU64::new(0)),
+            batch_started: Instant::now(),
             cache: HashMap::new(),
         }
     }
@@ -751,13 +788,17 @@ impl OverviewManager {
             .collect();
         self.cache.retain(|key, _| live.contains(key));
 
-        // Each gating capture is a round trip to the WindowServer of tens of
-        // milliseconds; they overlap well, so each gets its own thread. The
-        // rest share one, behind them.
-        for shot in gating {
-            spawn_shots(&self.tx, self.batch, vec![shot]);
-        }
-        spawn_shots(&self.tx, self.batch, later);
+        // The active rows' windows first, so they show before the rest.
+        self.current_batch.store(self.batch, Ordering::Relaxed);
+        self.batch_started = Instant::now();
+        gating.extend(later);
+        spawn_shots(
+            &self.tx,
+            &self.sender,
+            &self.current_batch,
+            self.batch,
+            gating,
+        );
         self.reveal_since = Some(Instant::now());
         self.poll_captures();
     }
@@ -820,6 +861,11 @@ impl OverviewManager {
             if target.gate {
                 self.gates = self.gates.saturating_sub(1);
             }
+            debug!(
+                "overview: {} landed after {:?}",
+                target.key,
+                self.batch_started.elapsed()
+            );
             let Some(image) = image else {
                 warn!("overview: no snapshot for {}", target.key);
                 continue;
@@ -1165,6 +1211,7 @@ impl OverviewManager {
         }
         // Whatever is still in flight lands in an old batch and is dropped.
         self.batch += 1;
+        self.current_batch.store(self.batch, Ordering::Relaxed);
         self.targets.clear();
         self.outstanding = 0;
         self.gates = 0;

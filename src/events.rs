@@ -165,6 +165,9 @@ pub enum Event {
 
     /// A click on an open overview panel, in absolute CG coordinates.
     OverviewClick { point: CGPoint },
+    /// Scroll over an open overview panel (point in absolute CG coordinates,
+    /// deltas in points, natural direction already applied).
+    OverviewScroll { point: CGPoint, dx: f64, dy: f64 },
     /// Escape/Return pressed while an overview panel had key focus.
     OverviewDismiss,
     /// The overview transition with this generation finished animating.

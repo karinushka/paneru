@@ -50,6 +50,7 @@ const VERTICAL_GESTURE_SCROLL_SUPPRESS: Duration = Duration::from_millis(1200);
 const WINDOW_SCROLL_INTERVAL: Duration = Duration::from_millis(180);
 
 /// One finger, as a single gesture event saw it.
+#[derive(Clone)]
 struct Touch<I> {
     identity: I,
     x: f64,
@@ -188,9 +189,14 @@ pub(super) struct InputHandler {
     previous_touches: Vec<Touch<Retained<AnyObject>>>,
     /// Timestamp of `previous_touches`.
     last_swipe_sample_timestamp: Option<f64>,
-    /// Whether the current touch sequence is driving the overview, so its
-    /// lift can be reported as [`Event::OverviewSwipeEnd`].
+    /// Set once the overview's finger count lands, and held until every
+    /// finger is off: the whole touch sequence belongs to the overview, so
+    /// fingers landing or lifting one at a time never pass through the
+    /// 3-finger strip/row gestures.
     overview_tracking: bool,
+    /// The overview was already told this sequence's scrub is over (fingers
+    /// started lifting); the rest of the sequence is swallowed.
+    overview_released: bool,
     /// The `CFMachPort` representing the `CGEventTap`.
     tap_port: Option<CFRetained<CFMachPort>>,
     /// Run loop source feeding `tap_port`. Retained so the tap can be torn down
@@ -227,6 +233,7 @@ impl InputHandler {
             previous_touches: Vec::new(),
             last_swipe_sample_timestamp: None,
             overview_tracking: false,
+            overview_released: false,
             tap_port: None,
             run_loop_source: None,
             last_swipe_time: None,
@@ -576,6 +583,62 @@ impl InputHandler {
         false
     }
 
+    /// A gesture sample while the touch sequence belongs to the overview.
+    /// Returns whether to intercept the event, or `None` when a new touch
+    /// sequence began and the event should be handled as usual.
+    fn overview_sample(
+        &mut self,
+        fingers: &[Touch<Retained<AnyObject>>],
+        overview_fingers: Option<usize>,
+        timestamp: f64,
+    ) -> Option<bool> {
+        if self.overview_released {
+            // Fingers landing again after a release start a new sequence (the
+            // phase-ended event that would have closed this one went missing).
+            if fingers.iter().any(|finger| finger.began) {
+                self.overview_tracking = false;
+                self.overview_released = false;
+                self.previous_touches.clear();
+                self.last_swipe_sample_timestamp = None;
+                return None;
+            }
+            return Some(true);
+        }
+        if fingers.is_empty() {
+            // AppKit interleaves empty touch sets; they don't mean a lift.
+            return Some(true);
+        }
+        // Every finger ended, or one lifted first: the scrub is over. The
+        // phase-ended event doesn't always arrive, so don't wait for it.
+        if fingers.iter().all(|finger| finger.ended) || overview_fingers != Some(fingers.len()) {
+            self.overview_released = true;
+            self.previous_touches.clear();
+            self.last_swipe_sample_timestamp = None;
+            if let Some(events) = &self.events {
+                _ = events.send(Event::OverviewSwipeEnd);
+            }
+            return Some(true);
+        }
+        let movement = swipe_movement(&self.previous_touches, fingers, |previous, current| {
+            // SAFETY: NSTouch identities conform to NSObject and answer isEqual:.
+            unsafe { msg_send![&**previous, isEqual: &**current] }
+        });
+        let elapsed_secs = self
+            .last_swipe_sample_timestamp
+            .replace(timestamp)
+            .map_or(0.0, |previous| (timestamp - previous).max(0.0));
+        self.previous_touches = fingers.to_vec();
+        // Only the vertical component drives the overview. Touch positions
+        // are Y-up and the delta is previous - current, so up is negative.
+        if let (Some(SwipeMovement::Vertical(delta)), Some(events)) = (movement, &self.events) {
+            _ = events.send(Event::OverviewSwipe {
+                delta: -delta,
+                elapsed_secs,
+            });
+        }
+        Some(true)
+    }
+
     /// Handles swipe gesture events. Routes to horizontal `Swipe` or vertical
     /// `VerticalSwipe` based on axis dominance. Returns true to intercept the event.
     #[allow(clippy::too_many_lines)]
@@ -612,7 +675,8 @@ impl InputHandler {
                 self.last_swipe_sample_timestamp = None;
                 if let Some(events) = &self.events {
                     _ = events.send(Event::TouchpadUp);
-                    if std::mem::take(&mut self.overview_tracking) {
+                    let released = std::mem::take(&mut self.overview_released);
+                    if std::mem::take(&mut self.overview_tracking) && !released {
                         _ = events.send(Event::OverviewSwipeEnd);
                     }
                 }
@@ -620,25 +684,26 @@ impl InputHandler {
             }
 
             let fingers = Touch::sample(&ns_event.allTouches());
-            // The phase-ended event above doesn't always arrive. The touches
-            // say it too: every finger ended, or the finger count changed
-            // (one lifted first). Either way the overview scrub is over, or
-            // it would be left stuck half-open.
             if self.overview_tracking
-                && !fingers.is_empty()
-                && (fingers.iter().all(|finger| finger.ended)
-                    || overview_fingers != Some(fingers.len()))
+                && let Some(intercept) = self.overview_sample(&fingers, overview_fingers, timestamp)
             {
-                self.overview_tracking = false;
-                self.previous_touches.clear();
-                self.last_swipe_sample_timestamp = None;
-                if let Some(events) = &self.events {
-                    _ = events.send(Event::OverviewSwipeEnd);
-                }
-                return true;
+                return intercept;
             }
             let overview = overview_fingers == Some(fingers.len())
                 && !fingers.iter().all(|finger| finger.ended);
+            if overview {
+                // The overview's fingers just landed: claim the sequence and
+                // let the ECS build the overview now, while nothing moves
+                // yet, so the first movement doesn't wait on captures.
+                self.overview_tracking = true;
+                self.overview_released = false;
+                self.previous_touches = fingers;
+                self.last_swipe_sample_timestamp = Some(timestamp);
+                if let Some(events) = &self.events {
+                    _ = events.send(Event::OverviewTouchDown);
+                }
+                return true;
+            }
             if !overview && !gesture_should_intercept(configured_fingers, fingers.len()) {
                 // AppKit interleaves phase events with an empty touch set
                 // between usable samples. They do not mean the fingers lifted.
@@ -668,21 +733,6 @@ impl InputHandler {
                 .replace(timestamp)
                 .map(|previous| (timestamp - previous).max(0.0));
             self.previous_touches = fingers;
-            if overview {
-                // Only the vertical component drives the overview. Touch
-                // positions are Y-up, and the delta is previous - current,
-                // so a swipe up arrives negative.
-                self.overview_tracking = true;
-                if let (Some(SwipeMovement::Vertical(delta)), Some(events)) =
-                    (movement, &self.events)
-                {
-                    _ = events.send(Event::OverviewSwipe {
-                        delta: -delta,
-                        elapsed_secs: elapsed_secs.unwrap_or(0.0),
-                    });
-                }
-                return true;
-            }
             let Some(configured_fingers) = configured_fingers else {
                 return false;
             };

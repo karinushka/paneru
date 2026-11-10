@@ -225,7 +225,7 @@ impl FrameActivity<'_, '_> {
                 .overview
                 .as_ref()
                 .is_some_and(|overview| overview.has_pending_captures())
-            // The blur ramp is stepped from the main loop while a spring runs.
+            // A spring runs, or a scrub's watchdog has to be able to fire.
             || self
                 .overview_state
                 .as_ref()

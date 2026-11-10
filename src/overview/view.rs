@@ -2,8 +2,9 @@
 //! per display above everything, holding a Core Animation layer tree.
 //!
 //! ```text
-//! panel (WindowServer background blur, ramped with progress)
+//! panel
 //! └─ root
+//!    ├─ backdrop                   the wallpaper, blurred (opaque throughout)
 //!    ├─ tint                       opacity 0 → 1
 //!    └─ container                  vertical scroll
 //!       ├─ per row: viewport       the row's "screen": wallpaper, shrinks
@@ -48,12 +49,9 @@ use tracing::{debug, warn};
 
 use super::{DisplayLayout, Rect, Spring};
 use crate::events::{Event, EventSender};
-use crate::platform::ConnID;
 
-/// Background blur radius when fully open.
 /// Blur of the wallpaper backdrop, in points.
 const BACKDROP_BLUR: f64 = 40.0;
-const BLUR_RADIUS: f64 = 60.0;
 /// Corner radius and focus ring width of a card when fully open, in points.
 const CARD_RADIUS: f64 = 10.0;
 const RING_WIDTH: f64 = 2.5;
@@ -69,12 +67,6 @@ unsafe extern "C" {
         window_id: u32,
         image_option: u32,
     ) -> *mut CGImage;
-}
-
-#[link(name = "SkyLight", kind = "framework")]
-unsafe extern "C" {
-    fn SLSMainConnectionID() -> ConnID;
-    fn SLSSetWindowBackgroundBlurRadius(cid: ConnID, wid: i32, radius: i32) -> i32;
 }
 
 const LIST_ON_SCREEN_ONLY: u32 = 1 << 0;
@@ -104,6 +96,36 @@ fn snapshot(window_id: i32, best: bool) -> Option<CFRetained<CGImage>> {
         )
     };
     std::ptr::NonNull::new(raw).map(|ptr| unsafe { CFRetained::from_raw(ptr) })
+}
+
+/// Best-resolution snapshots of several windows at once. Each capture is a
+/// round trip to the `WindowServer` taking tens of milliseconds, and they
+/// overlap well, so running them side by side cuts the time the main
+/// thread is blocked at the start of a swipe to about the slowest one.
+fn snapshot_all(ids: &[i32]) -> Vec<Option<CFRetained<CGImage>>> {
+    // Handed back as addresses: a `CGImage` is immutable and safe to share
+    // between threads, the wrapper type just doesn't say so.
+    let raw: Vec<usize> = std::thread::scope(|scope| {
+        let handles: Vec<_> = ids
+            .iter()
+            .map(|&id| {
+                scope.spawn(move || {
+                    snapshot(id, true)
+                        .map_or(0, |image| CFRetained::into_raw(image).as_ptr() as usize)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap_or(0))
+            .collect()
+    });
+    raw.into_iter()
+        .map(|addr| {
+            std::ptr::NonNull::new(addr as *mut CGImage)
+                .map(|ptr| unsafe { CFRetained::from_raw(ptr) })
+        })
+        .collect()
 }
 
 /// Everything on screen inside `rect` (absolute CG), composited — e.g. the
@@ -266,6 +288,9 @@ struct Animated {
     /// Highlight ring width in bounds space when fully open; it grows in with
     /// progress so nothing outlines the real screen at the start.
     ring: f64,
+    /// Corner radius in bounds space when fully open; grows in like `ring`
+    /// so the full-size frame at progress 0 has square corners.
+    corner: f64,
 }
 
 impl Animated {
@@ -286,6 +311,7 @@ impl Animated {
             opacity,
             base,
             ring: 0.0,
+            corner: 0.0,
         }
     }
 
@@ -320,7 +346,9 @@ impl Animated {
 
     fn set(&self, p: f64) {
         self.apply(&self.frame(p), self.opacity_at(p));
-        self.layer.setBorderWidth(self.ring * p.clamp(0.0, 1.0));
+        let p = p.clamp(0.0, 1.0);
+        self.layer.setBorderWidth(self.ring * p);
+        self.layer.setCornerRadius(self.corner * p);
     }
 
     fn spring_between(&self, a: &Rect, b: &Rect, opacity: (f64, f64), spring: &Spring) {
@@ -365,13 +393,16 @@ impl Animated {
         let (a, b) = (self.frame(spring.from), self.frame(spring.to));
         let opacity = (self.opacity_at(spring.from), self.opacity_at(spring.to));
         self.spring_between(&a, &b, opacity, spring);
-        if self.ring > 0.0 {
-            let ring = |p: f64| self.ring * p.clamp(0.0, 1.0);
-            self.layer.setBorderWidth(ring(spring.to));
+        for (key, full) in [("borderWidth", self.ring), ("cornerRadius", self.corner)] {
+            if full <= 0.0 {
+                continue;
+            }
+            let at = |p: f64| full * p.clamp(0.0, 1.0);
+            set_key_path(&self.layer, key, at(spring.to));
             let grow = spring_anim(
-                "borderWidth",
-                &ns_number(ring(spring.from)),
-                &ns_number(ring(spring.to)),
+                key,
+                &ns_number(at(spring.from)),
+                &ns_number(at(spring.to)),
                 spring,
             );
             self.layer.addAnimation_forKey(&grow, None);
@@ -389,6 +420,7 @@ impl Animated {
             self.spring_between(&from, &overview, (o, o), spring);
         }
         self.layer.setBorderWidth(self.ring);
+        self.layer.setCornerRadius(self.corner);
     }
 }
 
@@ -499,7 +531,6 @@ struct RowLayers {
 struct Panel {
     window: Retained<OverviewPanel>,
     window_number: i32,
-    blur: i32,
     backdrop: Animated,
     tint: Animated,
     container: Animated,
@@ -618,11 +649,21 @@ impl OverviewManager {
                 self.panels.push(panel);
             }
         }
-        let mut count = 0;
-        for card in self.panels.iter_mut().flat_map(|p| p.cards.iter_mut()) {
-            if card.best {
-                capture(card);
-                count += 1;
+        let mut active: Vec<_> = self
+            .panels
+            .iter_mut()
+            .flat_map(|p| p.cards.iter_mut())
+            .filter(|card| card.best)
+            .collect();
+        let count = active.len();
+        let ids: Vec<_> = active.iter().map(|card| card.window_id).collect();
+        for (card, image) in active.iter_mut().zip(snapshot_all(&ids)) {
+            card.captured = true;
+            if let Some(image) = image {
+                set_contents(&card.animated.layer, &image);
+                card.animated.layer.setBackgroundColor(None);
+            } else {
+                warn!("overview: no snapshot for window {}", card.window_id);
             }
         }
         if progress > 0.0 {
@@ -631,7 +672,6 @@ impl OverviewManager {
             }
         }
         CATransaction::commit();
-        self.set_blur(progress);
         debug!(
             "overview: built with {count} active captures in {:?}",
             start.elapsed()
@@ -728,11 +768,16 @@ impl OverviewManager {
         root.addSublayer(&flipped);
 
         let full = Rect::new(0.0, 0.0, b.w, b.h);
-        // niri's backdrop: the wallpaper, heavily blurred, fading in over the
-        // real screen. Oversized so the blur's soft edges stay off-screen.
+        // niri's backdrop: the wallpaper, heavily blurred. Oversized so the blur's soft edges stay off-screen.
         let bleed = BACKDROP_BLUR * 3.0;
         let backdrop_rect = Rect::new(-bleed, -bleed, b.w + 2.0 * bleed, b.h + 2.0 * bleed);
-        let backdrop = Animated::new(CALayer::new(), backdrop_rect, backdrop_rect, (0.0, 1.0));
+        // Opaque from the start: at progress 0 the active row's screen covers
+        // it exactly, and as that shrinks the blur is what's revealed — the
+        // real windows behind the panel never show through.
+        let backdrop = Animated::new(CALayer::new(), backdrop_rect, backdrop_rect, (1.0, 1.0));
+        backdrop
+            .layer
+            .setBackgroundColor(Some(&color(0.08, 0.09, 0.11, 1.0)));
         if let Some(image) = screen.wallpaper {
             set_contents(&backdrop.layer, image);
             backdrop
@@ -797,9 +842,7 @@ impl OverviewManager {
                 bar.set(0.0);
                 bar
             });
-            viewport
-                .layer
-                .setCornerRadius(viewport.open_points(CARD_RADIUS));
+            viewport.corner = viewport.open_points(CARD_RADIUS);
             viewport
                 .layer
                 .setBorderColor(Some(&color(0.45, 0.65, 1.0, 0.9)));
@@ -818,7 +861,7 @@ impl OverviewManager {
                 let mut card =
                     Animated::new(CALayer::new(), window.rest, window.overview, (1.0, 1.0));
                 card.layer.setMasksToBounds(true);
-                card.layer.setCornerRadius(card.open_points(CARD_RADIUS));
+                card.corner = card.open_points(CARD_RADIUS);
                 card.layer
                     .setBorderColor(Some(&color(0.45, 0.65, 1.0, 1.0)));
                 card.set_ring(window.focused);
@@ -857,7 +900,6 @@ impl OverviewManager {
         Some(Panel {
             window,
             window_number,
-            blur: 0,
             backdrop,
             tint,
             container,
@@ -868,25 +910,6 @@ impl OverviewManager {
 
     fn layers(&self) -> impl Iterator<Item = &Animated> {
         self.panels.iter().flat_map(Panel::layers)
-    }
-
-    /// Ramps the `WindowServer` blur behind the panels with progress. Not
-    /// animatable on the render server, so the ECS steps it every frame.
-    pub fn set_blur(&mut self, progress: f64) {
-        #[allow(clippy::cast_possible_truncation)]
-        let radius = (BLUR_RADIUS * progress.clamp(0.0, 1.0)).round() as i32;
-        for panel in &mut self.panels {
-            if panel.blur != radius {
-                panel.blur = radius;
-                unsafe {
-                    SLSSetWindowBackgroundBlurRadius(
-                        SLSMainConnectionID(),
-                        panel.window_number,
-                        radius,
-                    );
-                }
-            }
-        }
     }
 
     /// Jumps every layer to progress `p` (gesture scrubbing).
@@ -901,7 +924,6 @@ impl OverviewManager {
         // Push the frame to the render server now rather than at the end of
         // the run-loop pass, so scrubbing doesn't trail the fingers.
         CATransaction::flush();
-        self.set_blur(p);
     }
 
     /// Springs every layer from `spring.from` to `spring.to` on the render

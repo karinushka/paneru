@@ -1673,22 +1673,38 @@ fn test_horizontal_mouse_warp_also_warps_a_drag() {
     )
         .into();
     let above = IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0);
+    let approach = objc2_core_foundation::CGPoint {
+        x: f64::from(TEST_DISPLAY_WIDTH - 20),
+        y: f64::from(TEST_DISPLAY_HEIGHT / 2),
+    };
     let edge = objc2_core_foundation::CGPoint {
         x: f64::from(TEST_DISPLAY_WIDTH - 1),
         y: f64::from(TEST_DISPLAY_HEIGHT / 2),
     };
     let modifiers = crate::platform::Modifiers::empty();
-    for event in [
-        Event::MouseMoved {
-            point: edge,
-            modifiers,
-        },
-        Event::MouseDragged {
-            point: edge,
-            modifiers,
-        },
+    for (first, second) in [
+        (
+            Event::MouseMoved {
+                point: approach,
+                modifiers,
+            },
+            Event::MouseMoved {
+                point: edge,
+                modifiers,
+            },
+        ),
+        (
+            Event::MouseDragged {
+                point: approach,
+                modifiers,
+            },
+            Event::MouseDragged {
+                point: edge,
+                modifiers,
+            },
+        ),
     ] {
-        let label = format!("{event:?}");
+        let label = format!("{second:?}");
         let commands = vec![
             Event::MenuOpened { window_id: 0 },
             Event::Command {
@@ -1703,7 +1719,8 @@ fn test_horizontal_mouse_warp_also_warps_a_drag() {
             .with_windows(1)
             .with_display(EXT_DISPLAY_ID, above, vec![EXT_WORKSPACE_ID])
             .on_iteration(1, move |world, _state| {
-                world.write_message(event.clone());
+                world.write_message(first.clone());
+                world.write_message(second.clone());
             })
             .on_iteration(2, move |_world, state| {
                 let cursor = state.cursor_position();

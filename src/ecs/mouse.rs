@@ -432,13 +432,13 @@ fn horizontal_warp_mouse_trigger(
             .iter()
             .find(|display| display.bounds().contains(point))
         else {
-            return;
+            continue;
         };
 
         let on_left_edge = (point.x - current_display.bounds().min.x).abs() < EDGE_THRESHOLD;
         let on_right_edge = (current_display.bounds().max.x - point.x).abs() < EDGE_THRESHOLD;
         if !on_left_edge && !on_right_edge {
-            return;
+            continue;
         }
 
         let mut target_displays = displays
@@ -459,7 +459,7 @@ fn horizontal_warp_mouse_trigger(
         target_displays
             .sort_by_key(|display| (display.bounds().min.y - current_display.bounds().min.y).abs());
         let Some(warp_to) = target_displays.first() else {
-            return;
+            continue;
         };
         let target = warp_to.bounds();
 
@@ -499,7 +499,7 @@ fn horizontal_warp_mouse_trigger(
         let signed_offset = config.horizontal_mouse_warp_offset() * direction_sign;
         let target_y = target.min.y + relative_y + signed_offset;
         if target_y < target.min.y || target_y >= target.max.y {
-            return;
+            continue;
         }
 
         let landing = Origin::new(target_x, target_y);

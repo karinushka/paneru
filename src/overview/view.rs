@@ -75,6 +75,8 @@ unsafe extern "C" {
     fn SLSSetWindowBackgroundBlurRadius(cid: ConnID, wid: i32, radius: i32) -> i32;
 }
 
+const LIST_ON_SCREEN_ONLY: u32 = 1 << 0;
+const LIST_ON_SCREEN_BELOW_WINDOW: u32 = 1 << 2;
 const LIST_INCLUDING_WINDOW: u32 = 1 << 3;
 const IMAGE_BOUNDS_IGNORE_FRAMING: u32 = 1 << 0;
 const IMAGE_BEST_RESOLUTION: u32 = 1 << 3;
@@ -99,6 +101,19 @@ fn snapshot(window_id: i32, best: bool) -> Option<CFRetained<CGImage>> {
             IMAGE_BOUNDS_IGNORE_FRAMING | resolution,
         )
     };
+    std::ptr::NonNull::new(raw).map(|ptr| unsafe { CFRetained::from_raw(ptr) })
+}
+
+/// Everything on screen inside `rect` (absolute CG), composited — e.g. the
+/// menu bar together with every status item, which are separate windows.
+/// With `below`, only what sits under that window (our own panel).
+fn snapshot_region(rect: &Rect, below: Option<i32>) -> Option<CFRetained<CGImage>> {
+    let bounds = CGRect::new(CGPoint::new(rect.x, rect.y), CGSize::new(rect.w, rect.h));
+    let (option, window) = match below.and_then(|id| u32::try_from(id).ok()) {
+        Some(id) => (LIST_ON_SCREEN_BELOW_WINDOW, id),
+        None => (LIST_ON_SCREEN_ONLY, 0),
+    };
+    let raw = unsafe { CGWindowListCreateImage(bounds, option, window, IMAGE_BEST_RESOLUTION) };
     std::ptr::NonNull::new(raw).map(|ptr| unsafe { CFRetained::from_raw(ptr) })
 }
 
@@ -234,6 +249,9 @@ struct Animated {
     /// Opacity at progress 0 and 1.
     opacity: (f64, f64),
     base: (f64, f64),
+    /// Highlight ring width in bounds space when fully open; it grows in with
+    /// progress so nothing outlines the real screen at the start.
+    ring: f64,
 }
 
 impl Animated {
@@ -253,7 +271,16 @@ impl Animated {
             overview,
             opacity,
             base,
+            ring: 0.0,
         }
+    }
+
+    fn set_ring(&mut self, on: bool) {
+        self.ring = if on {
+            self.open_points(RING_WIDTH)
+        } else {
+            0.0
+        };
     }
 
     /// Bounds-space length that renders as `points` when fully open.
@@ -279,6 +306,7 @@ impl Animated {
 
     fn set(&self, p: f64) {
         self.apply(&self.frame(p), self.opacity_at(p));
+        self.layer.setBorderWidth(self.ring * p.clamp(0.0, 1.0));
     }
 
     fn spring_between(&self, a: &Rect, b: &Rect, opacity: (f64, f64), spring: &Spring) {
@@ -323,6 +351,17 @@ impl Animated {
         let (a, b) = (self.frame(spring.from), self.frame(spring.to));
         let opacity = (self.opacity_at(spring.from), self.opacity_at(spring.to));
         self.spring_between(&a, &b, opacity, spring);
+        if self.ring > 0.0 {
+            let ring = |p: f64| self.ring * p.clamp(0.0, 1.0);
+            self.layer.setBorderWidth(ring(spring.to));
+            let grow = spring_anim(
+                "borderWidth",
+                &ns_number(ring(spring.from)),
+                &ns_number(ring(spring.to)),
+                spring,
+            );
+            self.layer.addAnimation_forKey(&grow, None);
+        }
     }
 
     /// Moves the open (and rest) frame to new targets, springing from where
@@ -335,6 +374,7 @@ impl Animated {
             let o = self.opacity_at(1.0);
             self.spring_between(&from, &overview, (o, o), spring);
         }
+        self.layer.setBorderWidth(self.ring);
     }
 }
 
@@ -517,8 +557,15 @@ impl OverviewManager {
     /// active rows' windows synchronously first so the hand-off from real
     /// screen to cards is invisible; the rest are filled in later by
     /// [`Self::capture_pending`].
-    pub fn build<K>(&mut self, scenes: &[DisplayScene<'_, K>], info: &WindowServerInfo) {
-        self.teardown();
+    pub fn build<K>(
+        &mut self,
+        scenes: &[DisplayScene<'_, K>],
+        info: &WindowServerInfo,
+        progress: f64,
+    ) {
+        // Old panels (a rebuild while open) stay up until the new ones are
+        // in front, so the real screen never flashes through.
+        let old = std::mem::take(&mut self.panels);
         let primary_h = primary_screen_height(self.mtm);
         let start = Instant::now();
         CATransaction::begin();
@@ -526,7 +573,26 @@ impl OverviewManager {
         for scene in scenes {
             let b = scene.cg_bounds;
             let wallpaper = WindowServerInfo::capture_at(&info.wallpapers, &b);
-            let menubar = WindowServerInfo::capture_at(&info.menubars, &b);
+            // The band the menu bar occupies, captured from under any panel
+            // still up from before (a rebuild while open).
+            let below = old.first().map(|panel| panel.window_number);
+            let menubar = info
+                .menubars
+                .iter()
+                .find(|(_, f)| (f.x - b.x).abs() < 1.0 && (f.y - b.y).abs() < 1.0)
+                .and_then(|(_, f)| snapshot_region(f, below).map(|image| (image, *f)));
+            if wallpaper.is_none() {
+                warn!(
+                    "overview: no wallpaper found for display at ({}, {})",
+                    b.x, b.y
+                );
+            }
+            if menubar.is_none() {
+                warn!(
+                    "overview: no menu bar found for display at ({}, {})",
+                    b.x, b.y
+                );
+            }
             let screen = Screen {
                 wallpaper: wallpaper.as_ref().map(|(image, _)| &**image),
                 menubar: menubar.as_ref().map(|(image, frame)| (&**image, frame.h)),
@@ -542,7 +608,13 @@ impl OverviewManager {
                 count += 1;
             }
         }
+        if progress > 0.0 {
+            for layer in self.layers() {
+                layer.set(progress);
+            }
+        }
         CATransaction::commit();
+        self.set_blur(progress);
         debug!(
             "overview: built with {count} active captures in {:?}",
             start.elapsed()
@@ -551,6 +623,9 @@ impl OverviewManager {
         for panel in &self.panels {
             panel.window.orderFrontRegardless();
             panel.window.makeKeyWindow();
+        }
+        for panel in old {
+            panel.window.orderOut(None);
         }
     }
 
@@ -651,7 +726,7 @@ impl OverviewManager {
         let mut tiled = Vec::new();
         let mut floating = Vec::new();
         for strip in &layout.strips {
-            let viewport = Animated::new(
+            let mut viewport = Animated::new(
                 CALayer::new(),
                 strip.viewport_rest,
                 strip.viewport_overview,
@@ -686,11 +761,7 @@ impl OverviewManager {
             viewport
                 .layer
                 .setBorderColor(Some(&color(0.45, 0.65, 1.0, 0.9)));
-            if strip.active {
-                viewport
-                    .layer
-                    .setBorderWidth(viewport.open_points(RING_WIDTH));
-            }
+            viewport.set_ring(strip.active);
             container.layer.addSublayer(&viewport.layer);
             viewport.set(0.0);
 
@@ -718,14 +789,13 @@ impl OverviewManager {
             pan.set(0.0);
 
             for window in &strip.windows {
-                let card = Animated::new(CALayer::new(), window.rest, window.overview, (1.0, 1.0));
+                let mut card =
+                    Animated::new(CALayer::new(), window.rest, window.overview, (1.0, 1.0));
                 card.layer.setMasksToBounds(true);
                 card.layer.setCornerRadius(card.open_points(CARD_RADIUS));
                 card.layer
                     .setBorderColor(Some(&color(0.45, 0.65, 1.0, 1.0)));
-                if window.focused {
-                    card.layer.setBorderWidth(card.open_points(RING_WIDTH));
-                }
+                card.set_ring(window.focused);
                 card.layer.setContentsGravity(unsafe { kCAGravityResize });
                 card.layer.setContentsScale(scale);
                 card.layer
@@ -875,27 +945,17 @@ impl OverviewManager {
             let (rest, open) = container_frames(layout);
             panel.container.morph(rest, open, spring);
             for (row, strip) in panel.rows.iter_mut().zip(&layout.strips) {
+                row.viewport.set_ring(strip.active);
                 row.viewport
                     .morph(strip.viewport_rest, strip.viewport_overview, spring);
-                let ring = if strip.active {
-                    row.viewport.open_points(RING_WIDTH)
-                } else {
-                    0.0
-                };
-                row.viewport.layer.setBorderWidth(ring);
                 let label = strip.label.offset(0.0, 6.0);
                 row.label.morph(label, label, spring);
                 let (rest, open) = pan_frames(layout.size, strip.pan);
                 row.pan.morph(rest, open, spring);
             }
             for (card, window) in panel.cards.iter_mut().zip(card_order(layout)) {
+                card.animated.set_ring(window.focused);
                 card.animated.morph(window.rest, window.overview, spring);
-                let ring = if window.focused {
-                    card.animated.open_points(RING_WIDTH)
-                } else {
-                    0.0
-                };
-                card.animated.layer.setBorderWidth(ring);
             }
         }
         CATransaction::commit();

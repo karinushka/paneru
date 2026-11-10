@@ -268,7 +268,8 @@ impl TryFrom<&Event> for LuaEvent {
             | Event::OverviewTransitionDone { .. }
             | Event::OverviewSwipe { .. }
             | Event::OverviewSwipeEnd
-            | Event::OverviewTouchDown => return Err(NotMarshallable),
+            | Event::OverviewTouchDown
+            | Event::OverviewCaptureLanded => return Err(NotMarshallable),
         })
     }
 }

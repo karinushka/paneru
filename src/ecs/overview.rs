@@ -237,6 +237,8 @@ fn overview_handler(
                 manager.set_progress(state.progress);
             }
 
+            Event::OverviewCaptureLanded => manager.poll_captures(),
+
             Event::OverviewTouchDown if state.phase == Phase::Closed => {
                 // Build now, at progress 0 (identical to the real screen), so
                 // the first movement only has to move layers.

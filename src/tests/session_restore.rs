@@ -3,11 +3,12 @@ use std::time::Duration;
 use bevy::ecs::query::Has;
 use bevy::prelude::*;
 
-use crate::commands::{Command, Operation};
+use crate::commands::{Command, Direction, Operation};
 use crate::config::{Config, MainOptions, WindowParams};
 use crate::ecs::layout::{Column, LayoutStrip};
 use crate::ecs::state::{
-    PaneruState, SavedColumn, SavedDisplay, SavedRect, SavedStrip, SavedWindow, SavedWorkspace,
+    PaneruState, SavedColumn, SavedDisplay, SavedRect, SavedStackItem, SavedStrip, SavedWindow,
+    SavedWorkspace,
 };
 use crate::ecs::workspace::PreviousStripPosition;
 use crate::ecs::{SpawnWindowTrigger, Unmanaged};
@@ -79,6 +80,252 @@ fn test_startup_restore_rebuilds_virtual_workspace_layout() {
     assert_eq!(columns.len(), 2);
     assert!(matches!(columns[0], Column::Single(_)));
     assert!(matches!(columns[1], Column::Single(_)));
+}
+
+/// A tabbed-display stack restores as tabbed, with the same active tab.
+#[test]
+fn test_startup_restore_brings_back_tabbed_display_state() {
+    let state = PaneruState {
+        version: 3,
+        timestamp: 123_456_789,
+        active_display_id: Some(TEST_DISPLAY_ID),
+        displays: vec![SavedDisplay {
+            uuid: None,
+            display_id: TEST_DISPLAY_ID,
+            bounds: SavedRect {
+                min_x: 0,
+                min_y: TEST_MENUBAR_HEIGHT,
+                max_x: TEST_DISPLAY_WIDTH,
+                max_y: TEST_DISPLAY_HEIGHT,
+            },
+            active: true,
+            workspace_ids: vec![TEST_WORKSPACE_ID],
+        }],
+        workspaces: vec![SavedWorkspace {
+            workspace_id: TEST_WORKSPACE_ID,
+            display_id: Some(TEST_DISPLAY_ID),
+            active_virtual_index: Some(0),
+            strips: vec![SavedStrip {
+                virtual_index: 0,
+                columns: vec![SavedColumn::Stack(
+                    vec![
+                        SavedStackItem::Single(saved_window(0)),
+                        SavedStackItem::Single(saved_window(1)),
+                        SavedStackItem::Single(saved_window(2)),
+                    ],
+                    Some(saved_window(2)),
+                )],
+            }],
+        }],
+    };
+
+    let mut harness = TestHarness::new().with_windows(3).with_state(state);
+
+    for _ in 0..5 {
+        harness.app.update();
+    }
+
+    let world = harness.world();
+    let active_entity = find_window_entity(2, world);
+
+    let mut query = world.query::<(&LayoutStrip, Has<crate::ecs::ActiveWorkspaceMarker>)>();
+    let restored = query
+        .iter(world)
+        .find(|(strip, active)| strip.id() == TEST_WORKSPACE_ID && *active)
+        .map(|(strip, _)| strip)
+        .expect("restored workspace should be active");
+
+    assert!(
+        restored.is_tabbed_display(active_entity),
+        "the restored stack should still be in tabbed display"
+    );
+    assert_eq!(
+        restored.active_tab(active_entity),
+        Some(active_entity),
+        "the previously-active window should still be the active tab"
+    );
+}
+
+/// A tabbed stack on a parked row keeps its active tab when switched into,
+/// rather than taking the row's first-window fallback focus.
+#[test]
+fn test_switching_into_a_restored_parked_tabbed_row_keeps_its_active_tab() {
+    let state = PaneruState {
+        version: 3,
+        timestamp: 123_456_789,
+        active_display_id: Some(TEST_DISPLAY_ID),
+        displays: vec![SavedDisplay {
+            uuid: None,
+            display_id: TEST_DISPLAY_ID,
+            bounds: SavedRect {
+                min_x: 0,
+                min_y: TEST_MENUBAR_HEIGHT,
+                max_x: TEST_DISPLAY_WIDTH,
+                max_y: TEST_DISPLAY_HEIGHT,
+            },
+            active: true,
+            workspace_ids: vec![TEST_WORKSPACE_ID],
+        }],
+        workspaces: vec![SavedWorkspace {
+            workspace_id: TEST_WORKSPACE_ID,
+            display_id: Some(TEST_DISPLAY_ID),
+            // Row 1 is active on restore; row 0 (the tabbed stack) stays parked.
+            active_virtual_index: Some(1),
+            strips: vec![
+                SavedStrip {
+                    virtual_index: 0,
+                    columns: vec![SavedColumn::Stack(
+                        vec![
+                            SavedStackItem::Single(saved_window(0)),
+                            SavedStackItem::Single(saved_window(1)),
+                            SavedStackItem::Single(saved_window(2)),
+                        ],
+                        Some(saved_window(2)),
+                    )],
+                },
+                SavedStrip {
+                    virtual_index: 1,
+                    columns: vec![SavedColumn::Single(saved_window(3))],
+                },
+            ],
+        }],
+    };
+
+    let harness = TestHarness::new().with_windows(4).with_state(state);
+
+    let commands = vec![
+        // iteration 0: let startup restore settle.
+        Event::MenuOpened { window_id: 100 },
+        // iteration 1: switch into the parked tabbed row.
+        Event::Command {
+            command: Command::Window(Operation::Virtual(Direction::First)),
+        },
+    ];
+
+    harness
+        .on_iteration(0, |world, _state| {
+            // OS focus starts on window 0, inside the parked row, which would
+            // skip the fallback-focus path. Focus row 1's window instead.
+            let window0 = crate::tests::harness::find_window_entity(0, world);
+            let window3 = crate::tests::harness::find_window_entity(3, world);
+            world
+                .entity_mut(window0)
+                .remove::<crate::ecs::FocusedMarker>();
+            world.entity_mut(window3).insert(crate::ecs::FocusedMarker);
+        })
+        .on_iteration(1, |world, _state| {
+            let active_entity = crate::tests::harness::find_window_entity(2, world);
+
+            let mut query = world.query::<(&LayoutStrip, Has<crate::ecs::ActiveWorkspaceMarker>)>();
+            let restored = query
+                .iter(world)
+                .find(|(strip, active)| {
+                    strip.id() == TEST_WORKSPACE_ID && strip.virtual_index == 0 && *active
+                })
+                .map(|(strip, _)| strip)
+                .expect("row 0 should be active after switching into it");
+
+            assert!(
+                restored.is_tabbed_display(active_entity),
+                "the row should still be in tabbed display after switching into it"
+            );
+            assert_eq!(
+                restored.active_tab(active_entity),
+                Some(active_entity),
+                "switching into the row must not reset its active tab to the first item"
+            );
+        })
+        .run(commands);
+}
+
+/// Round trip through `PaneruState::extract` into a fresh harness: a tabbed
+/// stack survives a restart as one unit with the same active tab.
+#[test]
+fn test_full_extract_and_restore_round_trip_keeps_the_tabbed_group_and_active_tab() {
+    use bevy::ecs::hierarchy::ChildOf;
+    use bevy::ecs::query::Has;
+    use bevy::ecs::system::SystemState;
+
+    use crate::ecs::params::Windows;
+    use crate::ecs::state::PaneruState;
+    use crate::ecs::{ActiveDisplayMarker, ActiveWorkspaceMarker};
+    use crate::manager::{Application, Display};
+
+    type StateExtractionState<'w, 's> = SystemState<(
+        Query<
+            'w,
+            's,
+            (
+                Option<&'static ChildOf>,
+                &'static LayoutStrip,
+                Has<ActiveWorkspaceMarker>,
+            ),
+        >,
+        Query<'w, 's, (&'static Display, Entity, Has<ActiveDisplayMarker>)>,
+        Windows<'w, 's>,
+        Query<'w, 's, &'static Application>,
+    )>;
+
+    // First "daemon": build a 3-window tabbed stack, active on window 2.
+    let mut first = vec![Event::MenuOpened { window_id: 0 }];
+    first.extend([
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Stack(true)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Stack(true)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::ToggleTabbedDisplay),
+        },
+    ]);
+    let mut harness = TestHarness::new().with_windows(4);
+    harness.run(first);
+
+    let extracted = {
+        let world = harness.world();
+        let mut system_state: StateExtractionState<'_, '_> = SystemState::new(world);
+        let (workspaces, displays, windows, apps) =
+            system_state.get(world).expect("failed to get world state");
+        PaneruState::extract(&workspaces, &displays, &windows, &apps)
+    };
+
+    // Second "daemon", seeded only with the captured state.
+    let mut restarted = TestHarness::new().with_windows(4).with_state(extracted);
+    for _ in 0..5 {
+        restarted.app.update();
+    }
+
+    let world = restarted.world();
+    let entity0 = find_window_entity(0, world);
+    let entity1 = find_window_entity(1, world);
+    let entity2 = find_window_entity(2, world);
+
+    let mut strips = world.query::<&LayoutStrip>();
+    let strip = strips
+        .iter(world)
+        .find(|strip| strip.contains(entity2))
+        .expect("the restored stack should exist");
+
+    assert!(
+        strip.contains(entity0) && strip.contains(entity1),
+        "the whole group must survive the restart together, not split apart"
+    );
+    assert!(
+        strip.is_tabbed_display(entity2),
+        "the stack must come back in tabbed display, not a plain split view"
+    );
+    assert_eq!(
+        strip.active_tab(entity2),
+        Some(entity2),
+        "the active tab must be the one it was before the restart, not the first item"
+    );
 }
 
 #[test]

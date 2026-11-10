@@ -619,6 +619,38 @@ struct Card {
     window_id: i32,
     /// On the active row: captured at full resolution, before showing.
     best: bool,
+    /// Capture order (lower first), see [`Rank`].
+    rank: Rank,
+}
+
+/// Capture order, most important first. The focused window and the ones
+/// next to it are what the eye is on as the overview opens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Rank {
+    Focused,
+    Neighbour,
+    Screen,
+    Row,
+    Backdrop,
+    Hidden,
+}
+
+impl Rank {
+    /// A card's rank from its row and its distance (in tiled columns) to
+    /// the focused window; `None` when the row has no focused window.
+    fn of_card(active: bool, focused: bool, distance: Option<usize>) -> Self {
+        match (active, focused, distance) {
+            (false, ..) => Self::Hidden,
+            (true, true, _) | (true, _, Some(0)) => Self::Focused,
+            (true, _, Some(1)) => Self::Neighbour,
+            _ => Self::Row,
+        }
+    }
+
+    /// Captured fresh before showing even when a cached image exists.
+    fn wants_fresh(self) -> bool {
+        matches!(self, Self::Focused | Self::Neighbour)
+    }
 }
 
 struct RowLayers {
@@ -770,8 +802,7 @@ impl OverviewManager {
         self.gates = 0;
         let below = self.retired.first().map(|panel| panel.window_number);
         let primary_h = primary_screen_height(self.mtm);
-        let mut gating = Vec::new();
-        let mut later = Vec::new();
+        let mut jobs: Vec<(Rank, usize, Shot)> = Vec::new();
 
         CATransaction::begin();
         CATransaction::setDisableActions(true);
@@ -801,13 +832,12 @@ impl OverviewManager {
                     id: *id,
                     best: true,
                 };
-                gating.push((
-                    self.target(screen.wallpaper, false, true, &format!("wallpaper {id}")),
-                    shot,
-                ));
-                for (layers, radius) in [
-                    (screen.under, WINDOW_BLUR),
-                    (screen.backdrop, BACKDROP_BLUR),
+                let key = format!("wallpaper {id}");
+                let index = self.target(screen.wallpaper, false, true, false, &key);
+                jobs.push((Rank::Screen, index, shot));
+                for (layers, radius, rank) in [
+                    (screen.under, WINDOW_BLUR, Rank::Screen),
+                    (screen.backdrop, BACKDROP_BLUR, Rank::Backdrop),
                 ] {
                     let shot = Shot::Blurred {
                         id: *id,
@@ -815,13 +845,15 @@ impl OverviewManager {
                         radius,
                     };
                     let key = format!("wallpaper {id} blurred {radius}");
-                    gating.push((self.target(layers, false, true, &key), shot));
+                    let index = self.target(layers, false, true, false, &key);
+                    jobs.push((rank, index, shot));
                 }
             }
             if let Some((_, rect)) = menubar {
                 let shot = Shot::Region { rect: *rect, below };
                 let key = format!("menu bar {},{}", rect.x, rect.y);
-                gating.push((self.target(screen.menubar, false, true, &key), shot));
+                let index = self.target(screen.menubar, false, true, false, &key);
+                jobs.push((Rank::Row, index, shot));
             }
             for card in &panel.cards {
                 let shot = Shot::Window {
@@ -829,12 +861,9 @@ impl OverviewManager {
                     best: card.best,
                 };
                 let key = format!("window {}", card.window_id);
-                let index = self.target(vec![card.content.clone()], true, card.best, &key);
-                if card.best {
-                    gating.push((index, shot));
-                } else {
-                    later.push((index, shot));
-                }
+                let fresh = card.rank.wants_fresh();
+                let index = self.target(vec![card.content.clone()], true, card.best, fresh, &key);
+                jobs.push((card.rank, index, shot));
             }
             if progress > 0.0 {
                 for layer in panel.layers() {
@@ -854,16 +883,21 @@ impl OverviewManager {
             .collect();
         self.cache.retain(|key, _| live.contains(key));
 
-        // The active rows' windows first, so they show before the rest.
+        // Most important first: the focused window and its neighbours, then
+        // the screen, the rest of the row, and the hidden rows last.
         self.current_batch.store(self.batch, Ordering::Relaxed);
         self.batch_started = Instant::now();
-        gating.extend(later);
+        jobs.sort_by_key(|(rank, ..)| *rank);
+        let queue: Vec<_> = jobs
+            .into_iter()
+            .map(|(_, index, shot)| (index, shot))
+            .collect();
         spawn_shots(
             &self.tx,
             &self.sender,
             &self.current_batch,
             self.batch,
-            gating,
+            queue,
         );
         self.reveal_since = Some(Instant::now());
         self.poll_captures();
@@ -874,10 +908,11 @@ impl OverviewManager {
         layers: Vec<Retained<CALayer>>,
         clear: bool,
         gate: bool,
+        fresh: bool,
         key: &str,
     ) -> usize {
         // A cached image goes in now, and then the capture no longer holds
-        // the panels back.
+        // the panels back, unless `fresh` asks for the real thing first.
         let cached = self.cache.get(key);
         if let Some(image) = cached {
             for layer in &layers {
@@ -887,7 +922,7 @@ impl OverviewManager {
                 }
             }
         }
-        let gate = gate && cached.is_none();
+        let gate = gate && (cached.is_none() || fresh);
         self.outstanding += 1;
         self.gates += usize::from(gate);
         self.targets.push(Some(Target {
@@ -1098,7 +1133,20 @@ impl OverviewManager {
             container.layer.addSublayer(&pan.layer);
             pan.set(0.0);
 
+            let focus = strip
+                .windows
+                .iter()
+                .filter(|w| !w.floating)
+                .position(|w| w.focused);
+            let mut column = 0;
             for window in &strip.windows {
+                let distance = if window.floating {
+                    None
+                } else {
+                    column += 1;
+                    focus.map(|f| f.abs_diff(column - 1))
+                };
+                let rank = Rank::of_card(strip.active, window.focused, distance);
                 let mut card =
                     Animated::new(CALayer::new(), window.rest, window.overview, (1.0, 1.0));
                 card.layer.setMasksToBounds(true);
@@ -1137,6 +1185,7 @@ impl OverviewManager {
                     content,
                     window_id: window.window_id,
                     best: strip.active,
+                    rank,
                 };
                 if window.floating {
                     floating.push(entry);
@@ -1320,6 +1369,28 @@ mod tests {
             space: &CGColorSpace,
             bitmap_info: u32,
         ) -> *mut CGContext;
+    }
+
+    #[test]
+    fn focused_window_and_neighbours_are_captured_first() {
+        assert_eq!(Rank::of_card(true, true, Some(0)), Rank::Focused);
+        assert_eq!(Rank::of_card(true, false, Some(1)), Rank::Neighbour);
+        assert_eq!(Rank::of_card(true, false, Some(2)), Rank::Row);
+        assert_eq!(Rank::of_card(true, false, None), Rank::Row);
+        // A focused floating window has no column but still goes first.
+        assert_eq!(Rank::of_card(true, true, None), Rank::Focused);
+        assert_eq!(Rank::of_card(false, true, Some(0)), Rank::Hidden);
+        let mut ranks = [
+            Rank::Hidden,
+            Rank::Row,
+            Rank::Screen,
+            Rank::Neighbour,
+            Rank::Focused,
+        ];
+        ranks.sort();
+        assert_eq!(ranks.first(), Some(&Rank::Focused));
+        assert!(Rank::Focused.wants_fresh() && Rank::Neighbour.wants_fresh());
+        assert!(!Rank::Row.wants_fresh());
     }
 
     #[test]

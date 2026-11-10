@@ -122,6 +122,7 @@ impl Plugin for DisplaySetupsPlugin {
                         .run_if(|reconcile: Res<DisplayReconcileState>| reconcile.is_idle()),
                 )
                     .chain()
+                    .in_set(super::UpdateSet::Housekeeping)
                     .run_if(|config: Res<Config>| config.remember_display_setups()),
             )
             .add_observer(restore_setup);

@@ -483,10 +483,14 @@ pub(super) fn restore_window_state(
 
     let mut existing_workspace_parents = HashMap::new();
     let mut active_workspace_ids = HashSet::new();
+    let mut active_display_entities = HashSet::new();
     let mut emptied_existing_strips = HashSet::new();
     for (entity, mut strip, child, active) in &mut workspaces {
         if active {
             active_workspace_ids.insert(strip.id());
+            if let Some(child) = child {
+                active_display_entities.insert(child.parent());
+            }
         }
         if let Some(child) = child {
             existing_workspace_parents
@@ -566,7 +570,9 @@ pub(super) fn restore_window_state(
             .get(&planned.workspace_id)
             .is_some_and(|active| *active == planned.virtual_index);
         let is_global_active = is_active && active_workspace_ids.contains(&planned.workspace_id);
-        let origin = if is_global_active {
+        let is_shown =
+            is_global_active || (is_active && !active_display_entities.contains(&display_entity));
+        let origin = if is_shown {
             display.bounds().min
         } else {
             display.bounds().max - PARKED_STRIP_SLIVER
@@ -601,6 +607,8 @@ pub(super) fn restore_window_state(
 
         if is_global_active {
             spawned.insert(RestoredActivation);
+        } else if is_shown {
+            spawned.insert(SelectedVirtualMarker);
         } else {
             if is_active {
                 spawned.insert(SelectedVirtualMarker);

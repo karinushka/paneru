@@ -1,23 +1,24 @@
 //! ECS side of the overview: snapshots the strips into the pure layout,
-//! drives the transition (toggle command, 4-finger scrub, clicks) and hands
-//! frames to the native [`OverviewManager`].
+//! drives the transition (toggle command, 4-finger scrub, clicks, scroll)
+//! and hands frames to the native [`OverviewManager`].
 //!
-//! The real windows are only touched when a selection is made: focusing a
-//! window in a hidden row already activates that row (see
-//! `focus::virtual_strip_activated`), so the regular layout path re-arranges
-//! them behind the overlay while it closes.
+//! The real windows are only touched through the regular paths: selecting
+//! a window focuses it, and focusing a window in a hidden row already
+//! activates that row (see `focus::virtual_strip_activated`). While the
+//! overview is open, hotkeys keep driving the real layout and the overview
+//! follows it (`overview_follow_layout`).
 
 use std::time::Instant;
 
-use bevy::app::{App, PreUpdate, Update};
+use bevy::app::{App, Last, PreUpdate, Update};
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::message::MessageReader;
-use bevy::ecs::query::{Has, With};
+use bevy::ecs::query::{Added, Changed, Has, Or, With, Without};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
-use bevy::ecs::schedule::common_conditions::{not, on_message};
-use bevy::ecs::system::{Commands, NonSendMut, Query, Res, ResMut};
+use bevy::ecs::schedule::common_conditions::on_message;
+use bevy::ecs::system::{Commands, NonSendMut, Query, Res, ResMut, SystemParam};
 use objc2_core_foundation::CGPoint;
 use tracing::debug;
 
@@ -27,14 +28,14 @@ use crate::ecs::layout::{Column, LayoutStrip, StackItem};
 use crate::ecs::workspace::PreviousStripPosition;
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker, LayoutPosition, Position,
-    PreUpdateSet, RepositionMarker, SpawnCommandsExt as _,
+    PreUpdateSet, RepositionMarker, SpawnCommandsExt as _, Unmanaged,
 };
 use crate::events::Event;
 use crate::manager::{Display, Window};
-use crate::overview::view::{DisplayScene, OverviewManager};
+use crate::overview::view::{DisplayScene, OverviewManager, WindowServerInfo, window_server_info};
 use crate::overview::{
     DisplayLayout, Hit, Metrics, Rect, SPRING_RESPONSE, Spring, StripInput, WindowInput, hit_test,
-    layout_display, reanchor, release_opens, rubber_band,
+    layout_display, reanchor, release_opens, rubber_band, same_geometry,
 };
 
 /// Progress per unit of normalized vertical finger travel: ~55% of the
@@ -84,6 +85,11 @@ impl OverviewState {
     pub fn is_active(&self) -> bool {
         self.phase != Phase::Closed
     }
+
+    /// A spring is running, so per-frame work (the blur ramp) is needed.
+    pub fn is_animating(&self) -> bool {
+        matches!(self.phase, Phase::Opening | Phase::Closing)
+    }
 }
 
 /// Run condition: pointer and swipe systems pause while the overview owns
@@ -100,16 +106,31 @@ pub fn register_overview(app: &mut App) {
                 .in_set(PreUpdateSet::Dispatch)
                 .run_if(on_message::<Event>),
         )
-        .add_systems(Update, overview_capture.run_if(not(overview_inactive)));
+        .add_systems(
+            Update,
+            overview_tick.run_if(|state: Res<OverviewState>| state.is_active()),
+        )
+        // After every layout system has written this frame's targets.
+        .add_systems(
+            Last,
+            overview_follow_layout.run_if(|state: Res<OverviewState>| state.phase == Phase::Open),
+        );
 }
 
-/// Fills in hidden-row snapshots one per frame: each capture blocks the main
-/// thread for several milliseconds, which would stall gesture tracking if
-/// done in one go. Core Animation keeps animating meanwhile.
-fn overview_capture(manager: Option<NonSendMut<OverviewManager>>) {
-    if let Some(mut manager) = manager {
-        manager.capture_pending(1);
+/// Per-frame work while the overview is up: ramp the background blur with
+/// the running spring, and fill in hidden-row snapshots one at a time (each
+/// capture blocks the main thread for several milliseconds, which would
+/// stall gesture tracking if done in one go).
+fn overview_tick(state: Res<OverviewState>, manager: Option<NonSendMut<OverviewManager>>) {
+    let Some(mut manager) = manager else {
+        return;
+    };
+    match state.phase {
+        Phase::Opening | Phase::Closing => manager.set_blur(state.current().0),
+        Phase::Open => manager.set_blur(1.0),
+        _ => {}
     }
+    manager.capture_pending(1);
 }
 
 type StripQuery<'w, 's> = Query<
@@ -129,20 +150,32 @@ type StripQuery<'w, 's> = Query<
 type WindowQuery<'w, 's> = Query<
     'w,
     's,
-    (&'static Window, &'static LayoutPosition, &'static Bounds),
-    bevy::ecs::query::Without<LayoutStrip>,
+    (
+        Entity,
+        &'static Window,
+        &'static LayoutPosition,
+        &'static Bounds,
+        Option<&'static Unmanaged>,
+        Has<FocusedMarker>,
+    ),
+    Without<LayoutStrip>,
 >;
 
-#[allow(clippy::too_many_arguments)]
+/// Everything needed to snapshot the ECS into overview layouts.
+#[derive(SystemParam)]
+struct Scene<'w, 's> {
+    displays: Query<'w, 's, (Entity, &'static Display, Option<&'static DockPosition>)>,
+    strips: StripQuery<'w, 's>,
+    windows: WindowQuery<'w, 's>,
+    config: Res<'w, Config>,
+}
+
 fn overview_handler(
     mut messages: MessageReader<Event>,
     mut state: ResMut<OverviewState>,
     manager: Option<NonSendMut<OverviewManager>>,
-    displays: Query<(Entity, &Display, Option<&DockPosition>)>,
-    strips: StripQuery,
-    windows: WindowQuery,
+    scene: Scene,
     focused: Query<Entity, With<FocusedMarker>>,
-    config: Res<Config>,
     mut commands: Commands,
 ) {
     let Some(mut manager) = manager else {
@@ -155,14 +188,7 @@ fn overview_handler(
                 command: Command::Overview,
             } => match state.phase {
                 Phase::Closed => {
-                    if open(
-                        &mut state,
-                        &mut manager,
-                        &displays,
-                        &strips,
-                        &windows,
-                        &config,
-                    ) {
+                    if open(&mut state, &mut manager, &scene) {
                         settle(&mut state, &mut manager, 1.0, 0.0);
                     }
                 }
@@ -178,16 +204,7 @@ fn overview_handler(
             } => {
                 if state.phase == Phase::Closed {
                     // Only an upward swipe opens.
-                    if *delta <= 0.0
-                        || !open(
-                            &mut state,
-                            &mut manager,
-                            &displays,
-                            &strips,
-                            &windows,
-                            &config,
-                        )
-                    {
+                    if *delta <= 0.0 || !open(&mut state, &mut manager, &scene) {
                         continue;
                     }
                     state.gesture_raw = 0.0;
@@ -220,6 +237,10 @@ fn overview_handler(
                 if matches!(state.phase, Phase::Open | Phase::Opening) =>
             {
                 select(&mut state, &mut manager, *point, &mut commands);
+            }
+
+            Event::OverviewScroll { point, dx, dy } if state.phase == Phase::Open => {
+                scroll(&mut state, &mut manager, *point, *dx, *dy);
             }
 
             Event::OverviewDismiss if state.is_active() => {
@@ -269,6 +290,37 @@ fn settle(state: &mut OverviewState, manager: &mut OverviewManager, target: f64,
     };
 }
 
+/// Trackpad scroll inside the open overview: mostly-horizontal motion pans
+/// the strip under the pointer, mostly-vertical scrolls the stack.
+fn scroll(
+    state: &mut OverviewState,
+    manager: &mut OverviewManager,
+    point: CGPoint,
+    dx: f64,
+    dy: f64,
+) {
+    let Some(index) = state
+        .displays
+        .iter()
+        .position(|d| d.cg_bounds.contains(point.x, point.y))
+    else {
+        return;
+    };
+    let entry = &mut state.displays[index];
+    let (x, y) = (point.x - entry.cg_bounds.x, point.y - entry.cg_bounds.y);
+    let moved = if dx.abs() > dy.abs() {
+        entry
+            .layout
+            .strip_at(x, y)
+            .is_some_and(|row| entry.layout.pan_by(row, dx))
+    } else {
+        entry.layout.scroll_by(-dy)
+    };
+    if moved {
+        manager.apply_offsets(index, &entry.layout);
+    }
+}
+
 fn select(
     state: &mut OverviewState,
     manager: &mut OverviewManager,
@@ -313,32 +365,123 @@ fn select(
     settle(state, manager, 0.0, 0.0);
 }
 
+/// While open, re-snapshots the layout whenever paneru changed it (a hotkey
+/// scrolled a strip, switched rows, moved focus) and springs the cards to
+/// their new places, so the overview never shows stale positions.
+#[allow(clippy::type_complexity)]
+fn overview_follow_layout(
+    mut state: ResMut<OverviewState>,
+    manager: Option<NonSendMut<OverviewManager>>,
+    scene: Scene,
+    changed_strips: Query<
+        (),
+        (
+            With<LayoutStrip>,
+            Or<(
+                Changed<LayoutStrip>,
+                Changed<RepositionMarker>,
+                Added<ActiveWorkspaceMarker>,
+                Added<PreviousStripPosition>,
+            )>,
+        ),
+    >,
+    changed_windows: Query<
+        (),
+        (
+            Without<LayoutStrip>,
+            Or<(
+                Changed<LayoutPosition>,
+                Changed<Bounds>,
+                Added<FocusedMarker>,
+            )>,
+        ),
+    >,
+) {
+    let Some(mut manager) = manager else {
+        return;
+    };
+    if changed_strips.is_empty() && changed_windows.is_empty() {
+        return;
+    }
+    let mut entries = gather(&scene, None);
+    let unchanged = entries.len() == state.displays.len()
+        && entries
+            .iter()
+            .zip(&state.displays)
+            .all(|(new, old)| same_geometry(&new.layout, &old.layout));
+    if unchanged {
+        return;
+    }
+    // Keep the user's vertical scroll; per-strip pans give way to the real
+    // strip's own scrolling, which the new layout already reflects.
+    for (new, old) in entries.iter_mut().zip(&state.displays) {
+        new.layout.scroll_by(old.layout.scroll);
+    }
+    let layouts: Vec<_> = entries.iter().map(|e| &e.layout).collect();
+    let spring = Spring::new(0.0, 1.0, 0.0, SPRING_RESPONSE);
+    if !manager.relayout(&layouts, &spring) {
+        // Windows came or went: rebuild in place, fully open.
+        let info = window_server_info();
+        let scenes: Vec<_> = entries
+            .iter()
+            .map(|entry| DisplayScene {
+                cg_bounds: entry.cg_bounds,
+                layout: &entry.layout,
+            })
+            .collect();
+        manager.build(&scenes, &info);
+        manager.set_progress(1.0);
+    }
+    state.displays = entries;
+}
+
 /// Snapshots the ECS into per-display layouts and builds the panels at
 /// progress 0. Returns `false` when there is nothing to show.
-fn open(
-    state: &mut OverviewState,
-    manager: &mut OverviewManager,
-    displays: &Query<(Entity, &Display, Option<&DockPosition>)>,
-    strips: &StripQuery,
-    windows: &WindowQuery,
-    config: &Config,
-) -> bool {
+fn open(state: &mut OverviewState, manager: &mut OverviewManager, scene: &Scene) -> bool {
+    let info = window_server_info();
+    let entries = gather(scene, Some(&info));
+    if entries.is_empty() {
+        return false;
+    }
+    let scenes: Vec<_> = entries
+        .iter()
+        .map(|entry| DisplayScene {
+            cg_bounds: entry.cg_bounds,
+            layout: &entry.layout,
+        })
+        .collect();
+    manager.build(&scenes, &info);
+    state.displays = entries;
+    state.progress = 0.0;
+    state.spring = None;
+    true
+}
+
+/// Builds the overview layout of every display. With `info`, windows of the
+/// active rows start from exactly where the `WindowServer` has them (opening);
+/// without it they rest at their layout targets (following a change while
+/// open, when real windows may be mid-animation).
+fn gather(scene: &Scene, info: Option<&WindowServerInfo>) -> Vec<DisplayEntry> {
     let metrics = Metrics::default();
     let mut entries = Vec::new();
-    for (display_entity, display, dock) in displays {
+    for (display_entity, display, dock) in &scene.displays {
         let bounds = display.bounds();
-        let viewport = display.actual_display_bounds(dock, config);
+        let viewport = display.actual_display_bounds(dock, &scene.config);
         let size = (f64::from(bounds.width()), f64::from(bounds.height()));
         let origin = (f64::from(bounds.min.x), f64::from(bounds.min.y));
+        let display_rect = Rect::new(origin.0, origin.1, size.0, size.1);
+        let local = move |r: Rect| r.offset(-origin.0, -origin.1);
 
-        let Some(workspace) = strips
+        let Some(workspace) = scene
+            .strips
             .iter()
             .find(|s| s.5 && s.6.parent() == display_entity)
             .map(|s| s.1.id())
         else {
             continue;
         };
-        let mut rows: Vec<_> = strips
+        let mut rows: Vec<_> = scene
+            .strips
             .iter()
             .filter(|s| s.6.parent() == display_entity && s.1.id() == workspace)
             .collect();
@@ -352,65 +495,91 @@ fn open(
             } else {
                 previous.map_or(viewport.min, |previous| previous.origin)
             };
-            let window_inputs = visible_windows(strip)
+            let mut windows: Vec<_> = visible_windows(strip)
                 .filter_map(|entity| {
-                    let (window, layout, bounds) = windows.get(entity).ok()?;
-                    let min = layout.0 + strip_origin - bounds_min(origin);
-                    let layout_frame = Rect::new(
+                    let (_, window, layout, bounds, unmanaged, focused) =
+                        scene.windows.get(entity).ok()?;
+                    if matches!(unmanaged, Some(Unmanaged::Floating)) {
+                        return None;
+                    }
+                    let min = layout.0 + strip_origin;
+                    let layout_frame = local(Rect::new(
                         f64::from(min.x),
                         f64::from(min.y),
                         f64::from(bounds.0.x),
                         f64::from(bounds.0.y),
-                    );
-                    let real = window.frame();
-                    let real_frame = Rect::new(
-                        f64::from(real.min.x) - origin.0,
-                        f64::from(real.min.y) - origin.1,
-                        f64::from(real.width()),
-                        f64::from(real.height()),
-                    );
+                    ));
+                    let real_frame = info
+                        .filter(|_| active)
+                        .and_then(|info| info.frames.get(&window.id()))
+                        .map(|frame| local(*frame));
                     Some(WindowInput {
                         key: entity,
                         window_id: window.id(),
                         layout_frame,
-                        real_frame: active.then_some(real_frame),
+                        real_frame,
+                        floating: false,
+                        focused,
                     })
                 })
                 .collect();
+            if active {
+                windows.extend(floating_windows(scene, info, display_rect, local));
+            }
             inputs.push(StripInput {
                 virtual_index: strip.virtual_index,
                 active,
-                windows: window_inputs,
+                windows,
             });
             strip_entities.push(entity);
         }
         entries.push(DisplayEntry {
-            cg_bounds: Rect::new(origin.0, origin.1, size.0, size.1),
+            cg_bounds: display_rect,
             layout: layout_display(size, &inputs, 1.0, &metrics),
             strips: strip_entities,
         });
     }
-    if entries.is_empty() {
-        return false;
-    }
-
-    let scenes: Vec<_> = entries
-        .iter()
-        .map(|entry| DisplayScene {
-            cg_bounds: entry.cg_bounds,
-            layout: &entry.layout,
-        })
-        .collect();
-    manager.build(&scenes);
-    state.displays = entries;
-    state.progress = 0.0;
-    state.spring = None;
-    true
+    entries
 }
 
-fn bounds_min(origin: (f64, f64)) -> crate::manager::Origin {
-    #[allow(clippy::cast_possible_truncation)]
-    crate::manager::Origin::new(origin.0 as i32, origin.1 as i32)
+/// Floating windows on this display, shown on the active row at their real
+/// position. The `WindowServer`'s frame is preferred: it is what the snapshot
+/// is cut to, and only windows it lists as on screen (this space) are shown.
+fn floating_windows<'a>(
+    scene: &'a Scene,
+    info: Option<&'a WindowServerInfo>,
+    display: Rect,
+    local: impl Fn(Rect) -> Rect + 'a,
+) -> impl Iterator<Item = WindowInput<Entity>> + 'a {
+    scene
+        .windows
+        .iter()
+        .filter(|w| matches!(w.4, Some(Unmanaged::Floating)))
+        .filter_map(move |(entity, window, _, _, _, focused)| {
+            let frame = if let Some(info) = info {
+                *info.frames.get(&window.id())?
+            } else {
+                let f = window.frame();
+                Rect::new(
+                    f64::from(f.min.x),
+                    f64::from(f.min.y),
+                    f64::from(f.width()),
+                    f64::from(f.height()),
+                )
+            };
+            let (cx, cy) = (frame.x + frame.w / 2.0, frame.y + frame.h / 2.0);
+            if !display.contains(cx, cy) {
+                return None;
+            }
+            Some(WindowInput {
+                key: entity,
+                window_id: window.id(),
+                layout_frame: local(frame),
+                real_frame: Some(local(frame)),
+                floating: true,
+                focused,
+            })
+        })
 }
 
 /// The windows a strip shows: native tab groups contribute their front tab.

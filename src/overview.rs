@@ -33,6 +33,21 @@ impl Rect {
         Self::new(self.x + dx, self.y + dy, self.w, self.h)
     }
 
+    /// Shrinks about the centre so the width loses `gap`, keeping the aspect.
+    pub fn shrink(&self, gap: f64) -> Self {
+        if self.w <= gap * 2.0 {
+            return *self;
+        }
+        let k = (self.w - gap) / self.w;
+        let (w, h) = (self.w * k, self.h * k);
+        Self::new(
+            self.x + (self.w - w) / 2.0,
+            self.y + (self.h - h) / 2.0,
+            w,
+            h,
+        )
+    }
+
     pub fn lerp(&self, other: &Self, t: f64) -> Self {
         let mix = |a: f64, b: f64| a + (b - a) * t;
         Self::new(
@@ -59,6 +74,10 @@ pub struct WindowInput<K> {
     /// (so the transition starts exactly on top of them). `None` for windows
     /// parked off-screen (hidden rows, inactive tabs).
     pub real_frame: Option<Rect>,
+    /// Floating windows sit above the strip, anchored to its viewport (they
+    /// don't pan with the columns).
+    pub floating: bool,
+    pub focused: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -80,6 +99,9 @@ pub struct Metrics {
     pub ribbon_padding: f64,
     /// How many whole rows (label + strip) fit the display height at zoom 1.
     pub visible_rows: f64,
+    /// Space between neighbouring windows while open, in overview points.
+    /// Cards shrink about their centre (keeping their aspect) to make it.
+    pub card_gap: f64,
 }
 
 impl Default for Metrics {
@@ -91,6 +113,7 @@ impl Default for Metrics {
             section_gap: 20.0,
             ribbon_padding: 24.0,
             visible_rows: 2.0,
+            card_gap: 10.0,
         }
     }
 }
@@ -99,10 +122,14 @@ impl Default for Metrics {
 pub struct WindowPlacement<K> {
     pub key: K,
     pub window_id: i32,
+    /// Display-local frame the window has when its row is active.
+    pub layout: Rect,
     /// Frame while closed (progress 0).
     pub rest: Rect,
-    /// Frame while open (progress 1).
+    /// Frame while open (progress 1), before the strip's pan is applied.
     pub overview: Rect,
+    pub floating: bool,
+    pub focused: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -114,16 +141,24 @@ pub struct StripPlacement<K> {
     /// The scaled-down display viewport ("the screen" of this row).
     pub viewport_rest: Rect,
     pub viewport_overview: Rect,
-    /// Horizontal band the strip's windows are clipped to while open: the
-    /// full display width minus padding, so off-viewport columns peek out.
+    /// The strip's horizontal band: the full display width minus padding, so
+    /// off-viewport columns stay visible on either side.
     pub ribbon: Rect,
+    /// User pan of the tiled columns, in overview points (positive = right).
+    pub pan: f64,
     pub windows: Vec<WindowPlacement<K>>,
 }
 
 #[derive(Clone, Debug)]
 pub struct DisplayLayout<K> {
     pub size: (f64, f64),
+    /// Display → strip scale factor.
+    #[allow(dead_code, reason = "useful to callers; kept for the zoom work")]
     pub scale: f64,
+    /// User scroll of the whole stack, in points (positive = content up).
+    pub scroll: f64,
+    /// Vertical margins the stack scrolls within.
+    pub margins: (f64, f64),
     pub strips: Vec<StripPlacement<K>>,
 }
 
@@ -191,7 +226,8 @@ pub fn layout_display<K: Clone>(
                         viewport_overview.y + local.y * scale,
                         local.w * scale,
                         local.h * scale,
-                    );
+                    )
+                    .shrink(metrics.card_gap * zoom);
                     let rest = window
                         .real_frame
                         .filter(|_| strip.active)
@@ -199,8 +235,11 @@ pub fn layout_display<K: Clone>(
                     WindowPlacement {
                         key: window.key.clone(),
                         window_id: window.window_id,
+                        layout: local,
                         rest,
                         overview,
+                        floating: window.floating,
+                        focused: window.focused,
                     }
                 })
                 .collect();
@@ -212,6 +251,7 @@ pub fn layout_display<K: Clone>(
                 viewport_rest,
                 viewport_overview,
                 ribbon,
+                pan: 0.0,
                 windows,
             }
         })
@@ -220,8 +260,81 @@ pub fn layout_display<K: Clone>(
     DisplayLayout {
         size,
         scale,
+        scroll: 0.0,
+        margins: (top, bottom),
         strips: placements,
     }
+}
+
+impl<K> DisplayLayout<K> {
+    /// Row index whose band contains the display-local point.
+    pub fn strip_at(&self, x: f64, y: f64) -> Option<usize> {
+        let y = y + self.scroll;
+        self.strips.iter().position(|strip| {
+            let band = &strip.ribbon;
+            x >= 0.0 && x < self.size.0 && y >= strip.label.y && y < band.y + band.h
+        })
+    }
+
+    /// Scrolls the stack, clamped so it can't leave the margins. Returns
+    /// whether anything moved.
+    pub fn scroll_by(&mut self, dy: f64) -> bool {
+        let (Some(first), Some(last)) = (self.strips.first(), self.strips.last()) else {
+            return false;
+        };
+        let (top, bottom) = self.margins;
+        let content_top = first.label.y;
+        let content_bottom = last.viewport_overview.y + last.viewport_overview.h;
+        let min = (content_top - top).min(0.0);
+        let max = (content_bottom - (self.size.1 - bottom)).max(0.0);
+        let next = (self.scroll + dy).clamp(min, max);
+        let moved = (next - self.scroll).abs() > f64::EPSILON;
+        self.scroll = next;
+        moved
+    }
+
+    /// Pans one strip's tiled columns, clamped so the outermost columns can
+    /// be brought to (but not past) the band edge.
+    pub fn pan_by(&mut self, row: usize, dx: f64) -> bool {
+        let Some(strip) = self.strips.get_mut(row) else {
+            return false;
+        };
+        let tiled = strip.windows.iter().filter(|w| !w.floating);
+        let (left, right) = tiled.fold((f64::MAX, f64::MIN), |(l, r), w| {
+            (l.min(w.overview.x), r.max(w.overview.x + w.overview.w))
+        });
+        if left > right {
+            return false;
+        }
+        let band = &strip.ribbon;
+        let min = (band.x + band.w - right).min(0.0);
+        let max = (band.x - left).max(0.0);
+        let next = (strip.pan + dx).clamp(min, max);
+        let moved = (next - strip.pan).abs() > f64::EPSILON;
+        strip.pan = next;
+        moved
+    }
+}
+
+/// Whether two layouts put everything in the same place (within half a
+/// point), so a relayout can be skipped.
+pub fn same_geometry<K: PartialEq>(a: &DisplayLayout<K>, b: &DisplayLayout<K>) -> bool {
+    let close = |x: &Rect, y: &Rect| {
+        (x.x - y.x).abs() < 0.5
+            && (x.y - y.y).abs() < 0.5
+            && (x.w - y.w).abs() < 0.5
+            && (x.h - y.h).abs() < 0.5
+    };
+    a.strips.len() == b.strips.len()
+        && a.strips.iter().zip(&b.strips).all(|(s, t)| {
+            s.virtual_index == t.virtual_index
+                && s.active == t.active
+                && close(&s.viewport_overview, &t.viewport_overview)
+                && s.windows.len() == t.windows.len()
+                && s.windows.iter().zip(&t.windows).all(|(w, v)| {
+                    w.key == v.key && w.focused == v.focused && close(&w.overview, &v.overview)
+                })
+        })
 }
 
 /// What a click in the open overview landed on.
@@ -235,17 +348,20 @@ pub enum Hit<K> {
 /// Hit-tests a display-local point against the fully open layout. Windows
 /// win over their strip, and are clipped to the strip's ribbon.
 pub fn hit_test<K: Clone>(layout: &DisplayLayout<K>, x: f64, y: f64) -> Hit<K> {
+    let y = y + layout.scroll;
     for strip in &layout.strips {
         if !strip.ribbon.contains(x, y) {
             continue;
         }
-        // Topmost first: later windows are drawn above earlier ones.
-        if let Some(window) = strip
-            .windows
-            .iter()
-            .rev()
-            .find(|w| w.overview.contains(x, y))
-        {
+        // Floating windows are drawn above the columns; within each group
+        // later windows are drawn above earlier ones.
+        let hit = |w: &&WindowPlacement<K>| {
+            let px = if w.floating { x } else { x - strip.pan };
+            w.overview.contains(px, y)
+        };
+        let floating = strip.windows.iter().rev().filter(|w| w.floating).find(hit);
+        let tiled = || strip.windows.iter().rev().filter(|w| !w.floating).find(hit);
+        if let Some(window) = floating.or_else(tiled) {
             return Hit::Window {
                 key: window.key.clone(),
                 virtual_index: strip.virtual_index,
@@ -272,22 +388,14 @@ pub fn reanchor<K: Clone>(layout: &mut DisplayLayout<K>, virtual_index: u32) {
         return;
     };
     let height = layout.size.1;
-    let scale = layout.scale;
     for (row, strip) in layout.strips.iter_mut().enumerate() {
         let row_offset = (row as f64 - anchor as f64) * height;
         let was_active = strip.active;
         strip.active = row == anchor;
         strip.viewport_rest = Rect::new(0.0, row_offset, layout.size.0, height);
         for window in &mut strip.windows {
-            // Recover the layout frame from the overview frame.
-            let local = Rect::new(
-                (window.overview.x - strip.viewport_overview.x) / scale,
-                (window.overview.y - strip.viewport_overview.y) / scale,
-                window.overview.w / scale,
-                window.overview.h / scale,
-            );
             if !(was_active && strip.active) {
-                window.rest = local.offset(0.0, row_offset);
+                window.rest = window.layout.offset(0.0, row_offset);
             }
         }
     }
@@ -410,6 +518,8 @@ mod tests {
             window_id: key.cast_signed(),
             layout_frame: Rect::new(x, 30.0, 800.0, 970.0),
             real_frame: real,
+            floating: false,
+            focused: false,
         }
     }
 
@@ -518,6 +628,55 @@ mod tests {
         assert!((r.x - 0.0).abs() < 1e-6 && (r.y - 30.0).abs() < 1e-6);
         // The previously active row now rests below.
         assert!((layout.strips[1].windows[0].rest.y - (30.0 + SIZE.1)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cards_get_gaps_without_changing_aspect() {
+        let layout = layout_display(SIZE, &strips(), 1.0, &Metrics::default());
+        let strip = &layout.strips[1];
+        let (a, b) = (&strip.windows[0], &strip.windows[1]);
+        // Columns were edge to edge (0..800, 800..) in layout space.
+        let gap_a_end = a.overview.x + a.overview.w;
+        let neighbour = layout_display(
+            SIZE,
+            &[StripInput {
+                virtual_index: 0,
+                active: true,
+                windows: vec![window(9, 800.0, None)],
+            }],
+            1.0,
+            &Metrics::default(),
+        );
+        let b_start = neighbour.strips[0].windows[0].overview.x;
+        assert!(b_start - gap_a_end > 9.0, "{}", b_start - gap_a_end);
+        let unshrunk = 800.0 / 970.0;
+        assert!((a.overview.w / a.overview.h - unshrunk).abs() < 1e-9);
+        assert!(b.overview.w > 0.0);
+    }
+
+    #[test]
+    fn pan_and_scroll_clamp_and_shift_hit_testing() {
+        let mut rows = strips();
+        rows[1].windows[1].layout_frame.x = 3000.0;
+        let mut layout = layout_display(SIZE, &rows, 1.0, &Metrics::default());
+        // Row 1 has a column far off to the right: panning left is allowed,
+        // panning right isn't (nothing beyond the left edge).
+        assert!(layout.pan_by(1, -10_000.0));
+        let strip = &layout.strips[1];
+        let off = strip.windows[1].overview;
+        let pan = strip.pan;
+        assert!((off.x + off.w + pan - (strip.ribbon.x + strip.ribbon.w)).abs() < 1e-6);
+        assert!(!layout.pan_by(1, 0.0));
+        let (x, y) = (off.x + pan + 5.0, off.y + 5.0);
+        assert_eq!(
+            hit_test(&layout, x, y),
+            Hit::Window {
+                key: 3,
+                virtual_index: 1
+            }
+        );
+        // Two rows fit, so the stack has nothing to scroll.
+        assert!(!layout.scroll_by(500.0));
     }
 
     #[test]

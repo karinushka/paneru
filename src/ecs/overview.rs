@@ -9,14 +9,14 @@
 
 use std::time::Instant;
 
-use bevy::app::{App, PreUpdate};
+use bevy::app::{App, PreUpdate, Update};
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::{Has, With};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
-use bevy::ecs::schedule::common_conditions::on_message;
+use bevy::ecs::schedule::common_conditions::{not, on_message};
 use bevy::ecs::system::{Commands, NonSendMut, Query, Res, ResMut};
 use objc2_core_foundation::CGPoint;
 use tracing::debug;
@@ -86,13 +86,30 @@ impl OverviewState {
     }
 }
 
+/// Run condition: pointer and swipe systems pause while the overview owns
+/// the screen, so clicks on cards don't also reach the windows beneath.
+pub fn overview_inactive(state: Option<Res<OverviewState>>) -> bool {
+    state.is_none_or(|state| !state.is_active())
+}
+
 pub fn register_overview(app: &mut App) {
-    app.init_resource::<OverviewState>().add_systems(
-        PreUpdate,
-        overview_handler
-            .in_set(PreUpdateSet::Dispatch)
-            .run_if(on_message::<Event>),
-    );
+    app.init_resource::<OverviewState>()
+        .add_systems(
+            PreUpdate,
+            overview_handler
+                .in_set(PreUpdateSet::Dispatch)
+                .run_if(on_message::<Event>),
+        )
+        .add_systems(Update, overview_capture.run_if(not(overview_inactive)));
+}
+
+/// Fills in hidden-row snapshots one per frame: each capture blocks the main
+/// thread for several milliseconds, which would stall gesture tracking if
+/// done in one go. Core Animation keeps animating meanwhile.
+fn overview_capture(manager: Option<NonSendMut<OverviewManager>>) {
+    if let Some(mut manager) = manager {
+        manager.capture_pending(1);
+    }
 }
 
 type StripQuery<'w, 's> = Query<
@@ -147,7 +164,6 @@ fn overview_handler(
                         &config,
                     ) {
                         settle(&mut state, &mut manager, 1.0, 0.0);
-                        manager.capture_pending(usize::MAX);
                     }
                 }
                 Phase::Closing => settle(&mut state, &mut manager, 1.0, 0.0),
@@ -177,7 +193,6 @@ fn overview_handler(
                     state.gesture_raw = 0.0;
                     state.gesture_velocity = 0.0;
                     state.phase = Phase::Scrubbing;
-                    manager.capture_pending(usize::MAX);
                 } else if state.phase != Phase::Scrubbing {
                     // Grab a running or settled transition where it is.
                     let (p, _) = state.current();

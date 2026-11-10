@@ -264,11 +264,25 @@ pub(crate) fn get_window_in_direction(
         Direction::West => strip.left_neighbour(entity),
         Direction::East => strip.right_neighbour(entity),
 
-        Direction::First => strip.first().ok().and_then(|column| column.top()),
+        // `top()` ignores the active tab; redirect so we never focus a
+        // parked (off-screen) tabbed-display member.
+        Direction::First => strip
+            .first()
+            .ok()
+            .and_then(|column| column.top())
+            .map(|entity| strip.active_tab(entity).unwrap_or(entity)),
 
-        Direction::Last => strip.last().ok().and_then(|column| column.top()),
+        Direction::Last => strip
+            .last()
+            .ok()
+            .and_then(|column| column.top())
+            .map(|entity| strip.active_tab(entity).unwrap_or(entity)),
 
-        Direction::Nth(index) => strip.get(*index).ok().and_then(|column| column.top()),
+        Direction::Nth(index) => strip
+            .get(*index)
+            .ok()
+            .and_then(|column| column.top())
+            .map(|entity| strip.active_tab(entity).unwrap_or(entity)),
 
         Direction::North => match strip.get(index).ok()? {
             Column::Single(_) | Column::Tabs(_) | Column::Fullscren(_) => None,
@@ -410,7 +424,7 @@ fn active_focus_candidate(
 ) -> Option<Entity> {
     // Enter the active strip from the appropriate side when focus is outside it.
     if !active_strip.contains(focused_entity) {
-        return match direction {
+        let landed = match direction {
             Direction::East | Direction::First => {
                 active_strip.first().ok().and_then(|col| col.top())
             }
@@ -421,6 +435,8 @@ fn active_focus_candidate(
                 .and_then(|column| column.top()),
             Direction::North | Direction::South => None,
         };
+        // `top()` ignores the active tab, as in `get_window_in_direction`.
+        return landed.map(|entity| active_strip.active_tab(entity).unwrap_or(entity));
     }
 
     get_window_in_direction(direction, focused_entity, active_strip).or_else(|| {

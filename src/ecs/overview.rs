@@ -128,8 +128,8 @@ pub fn register_overview(app: &mut App) {
         );
 }
 
-/// Per-frame work while the overview is up: ramp the background blur with
-/// the running spring, and fill in hidden-row snapshots one at a time (each
+/// Per-frame work while the overview is up: release a scrub that went quiet,
+/// and fill in hidden-row snapshots one at a time (each
 /// capture blocks the main thread for several milliseconds, which would
 /// stall gesture tracking if done in one go).
 fn overview_tick(mut state: ResMut<OverviewState>, manager: Option<NonSendMut<OverviewManager>>) {
@@ -139,11 +139,6 @@ fn overview_tick(mut state: ResMut<OverviewState>, manager: Option<NonSendMut<Ov
     if scrub_timed_out(&state, Instant::now()) {
         debug!("overview: scrub went quiet, releasing");
         release(&mut state, &mut manager);
-    }
-    match state.phase {
-        Phase::Opening | Phase::Closing => manager.set_blur(state.current().0),
-        Phase::Open => manager.set_blur(1.0),
-        _ => {}
     }
     manager.capture_pending(1);
 }
@@ -233,7 +228,8 @@ fn overview_handler(
                     state.phase = Phase::Scrubbing;
                 }
                 let step = delta * GESTURE_GAIN;
-                state.gesture_raw += step;
+                // Nothing below closed: swiping down from it just stays put.
+                state.gesture_raw = (state.gesture_raw + step).max(0.0);
                 if *elapsed_secs > 0.0 {
                     let sample = step / elapsed_secs;
                     state.gesture_velocity = 0.3 * sample + 0.7 * state.gesture_velocity;
@@ -241,6 +237,17 @@ fn overview_handler(
                 state.progress = rubber_band(state.gesture_raw);
                 state.last_sample = Some(Instant::now());
                 manager.set_progress(state.progress);
+            }
+
+            Event::OverviewTouchDown if state.phase == Phase::Closed => {
+                // Build now, at progress 0 (identical to the real screen), so
+                // the first movement only has to move layers.
+                if open(&mut state, &mut manager, &scene) {
+                    state.gesture_raw = 0.0;
+                    state.gesture_velocity = 0.0;
+                    state.last_sample = Some(Instant::now());
+                    state.phase = Phase::Scrubbing;
+                }
             }
 
             Event::OverviewSwipeEnd if state.phase == Phase::Scrubbing => {

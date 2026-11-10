@@ -577,13 +577,23 @@ fn mouse_follows_focus(
     displays: Query<&Display>,
     workspaces: MouseFocusStrips,
     restored: Query<&RestoreFocusMarker>,
-    clicked: Query<&ClickFocusMarker>,
+    clicked: Query<(Entity, &ClickFocusMarker)>,
+    mut commands: Commands,
 ) {
     let entity = *focused;
+    let mut click_focused = false;
+    for (marker_entity, marker) in &clicked {
+        if marker.0 == entity {
+            click_focused = true;
+        }
+        if let Ok(mut entity_commands) = commands.get_entity(marker_entity) {
+            entity_commands.try_despawn();
+        }
+    }
     let Some(window) = windows.get(entity) else {
         return;
     };
-    if clicked.iter().any(|marker| marker.0 == entity) {
+    if click_focused {
         debug!("Suppressing center mouse after a click");
         return;
     }

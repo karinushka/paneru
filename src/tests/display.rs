@@ -1911,3 +1911,4 @@ fn test_destroyed_space_on_a_present_display_is_not_orphaned() {
         "a space destroyed on a connected display is dropped, as before"
     );
 }
+

@@ -511,18 +511,6 @@ define_class!(
             _ = self.ivars().sender.send(Event::OverviewClick { point });
         }
 
-        #[unsafe(method(scrollWheel:))]
-        fn scroll_wheel(&self, event: &NSEvent) {
-            let point = self.cg_point(event);
-            // Trackpads report points; wheels report lines.
-            let unit = if event.hasPreciseScrollingDeltas() { 1.0 } else { 12.0 };
-            _ = self.ivars().sender.send(Event::OverviewScroll {
-                point,
-                dx: event.scrollingDeltaX() * unit,
-                dy: event.scrollingDeltaY() * unit,
-            });
-        }
-
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
             // Escape or Return.

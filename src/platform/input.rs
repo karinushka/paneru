@@ -20,7 +20,7 @@ use std::ptr::null_mut;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 use stdext::function_name;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use crate::commands::{Command, Direction, Operation};
 use crate::config::Config;
@@ -760,14 +760,6 @@ impl InputHandler {
             // Fingers lifted off touchpad.
             let phase = ns_event.phase();
             if phase.0 & NS_EVENT_PHASE_CANCELLED != 0 || phase.0 & NS_EVENT_PHASE_ENDED != 0 {
-                if self.overview_tracking {
-                    debug!(
-                        target: "paneru::gesture",
-                        "phase ended ({:#x}) while claimed, released={}",
-                        phase.0,
-                        self.overview_released
-                    );
-                }
                 self.previous_touches.clear();
                 self.invalid_device_size_warned = false;
                 self.last_swipe_sample_timestamp = None;
@@ -792,21 +784,6 @@ impl InputHandler {
             }
 
             let fingers = Touch::sample(&ns_event.allTouches());
-            if self.overview_tracking || overview_fingers == Some(fingers.len()) {
-                debug!(
-                    target: "paneru::gesture",
-                    "phase={:#x} fingers={} began={} ended={} tracking={} released={} claimed={}",
-                    phase.0,
-                    fingers.len(),
-                    fingers.iter().filter(|f| f.began).count(),
-                    fingers.iter().filter(|f| f.ended).count(),
-                    self.overview_tracking,
-                    self.overview_released,
-                    shares_finger(&fingers, &self.overview_touches, |a, b| unsafe {
-                        msg_send![&**a, isEqual: &**b]
-                    }),
-                );
-            }
             if self.overview_tracking
                 && let Some(intercept) = self.overview_sample(&fingers, overview_fingers, timestamp)
             {
@@ -852,7 +829,6 @@ impl InputHandler {
                 }
             }
 
-            let fingers_len = fingers.len();
             let movement = swipe_movement(&self.previous_touches, &fingers, |previous, current| {
                 // SAFETY: NSTouch identities conform to NSObject and answer isEqual:.
                 unsafe { msg_send![&**previous, isEqual: &**current] }
@@ -871,7 +847,6 @@ impl InputHandler {
                         warn!("trackpad did not provide a valid device size for paging");
                         self.invalid_device_size_warned = true;
                     }
-                    debug!(target: "paneru::gesture", "strip swipe, {} fingers, delta {delta:.4}", fingers_len);
                     self.send_swipe(
                         Event::Swipe {
                             delta,
@@ -883,7 +858,6 @@ impl InputHandler {
                     );
                 }
                 Some(SwipeMovement::Vertical(delta)) if self.config.swipe_vertical() => {
-                    debug!(target: "paneru::gesture", "row swipe, {} fingers, delta {delta:.4}", fingers_len);
                     self.send_swipe(
                         Event::VerticalSwipe {
                             delta,

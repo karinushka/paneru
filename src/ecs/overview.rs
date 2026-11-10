@@ -43,9 +43,11 @@ use crate::overview::{
 /// trackpad's height opens the overview fully.
 const GESTURE_GAIN: f64 = 1.8;
 
-/// A scrub that hears nothing for this long is treated as released: the
-/// fingers lifted but the end of the gesture never reached us.
-const SCRUB_TIMEOUT: Duration = Duration::from_millis(400);
+/// Last-resort release for a scrub that hears nothing for this long. Lifts
+/// are normally caught from the touches themselves (see the input
+/// handler), so this only guards against a stuck half-open overview; it is
+/// long enough that pausing mid-swipe doesn't trigger it.
+const SCRUB_TIMEOUT: Duration = Duration::from_millis(1500);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Phase {
@@ -356,7 +358,6 @@ fn scroll(
     } else {
         entry.layout.scroll_by(-dy)
     };
-    debug!("overview: scroll dx={dx:.1} dy={dy:.1} moved={moved}");
     if moved {
         manager.apply_offsets(index, &entry.layout);
     }

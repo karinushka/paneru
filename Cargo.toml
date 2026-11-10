@@ -125,7 +125,6 @@ objc2-quartz-core = { version = "0.3", features = [
   "CAAnimation",
   "CAMediaTiming",
   "CAMediaTimingFunction",
-  "CATextLayer",
   "CATransaction",
   "block2",
   "objc2-core-foundation",

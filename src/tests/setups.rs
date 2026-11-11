@@ -48,6 +48,15 @@ fn saved(world: &World, key: &str) -> Option<crate::ecs::state::PaneruState> {
     world.resource::<DisplaySetups>().saved(key).cloned()
 }
 
+fn assert_width(world: &mut World, id: WinID, expected: i32) {
+    let entity = find_window_entity(id, world);
+    let width = world.get::<Window>(entity).expect("window").frame().width();
+    assert!(
+        (width - expected).abs() <= 2,
+        "window {id}: expected width {expected}, got {width}"
+    );
+}
+
 fn unplug(harness: &mut TestHarness) {
     harness.mock_state.remove_display(EXT_DISPLAY_ID);
     harness
@@ -97,6 +106,17 @@ fn test_each_display_setup_gets_its_own_layout_back() {
         "with no saved laptop layout, the monitor's windows arrive as the next virtual workspace"
     );
 
+    // This setup has no saved record: the base hot-plug path must scale widths.
+    for id in [100, 101] {
+        assert_width(
+            harness.world(),
+            id,
+            crate::util::round_px(
+                f64::from(TEST_WINDOW_WIDTH) / f64::from(EXT_DISPLAY_WIDTH)
+                    * f64::from(TEST_DISPLAY_WIDTH),
+            ),
+        );
+    }
     let world = harness.world();
     let first_row = world
         .query::<(Entity, &LayoutStrip)>()
@@ -109,6 +129,15 @@ fn test_each_display_setup_gets_its_own_layout_back() {
         .get_mut::<LayoutStrip>(first_row)
         .expect("the laptop's first row")
         .swap(0, 1);
+    // Save a deliberate laptop width that differs from the migration result.
+    for id in [100, 101] {
+        let entity = find_window_entity(id, world);
+        world
+            .get_mut::<crate::ecs::Bounds>(entity)
+            .expect("bounds")
+            .0
+            .x = 333;
+    }
     harness.advance(SETTLE);
     let laptop_layout = saved(harness.world(), &laptop).expect("the laptop setup is captured");
 
@@ -141,6 +170,7 @@ fn test_each_display_setup_gets_its_own_layout_back() {
         "the laptop's first row returns to its dual-setup order"
     );
     for window_id in [100, 101] {
+        assert_width(world, window_id, TEST_WINDOW_WIDTH);
         let entity = find_window_entity(window_id, world);
         let center = world
             .get::<Window>(entity)
@@ -188,4 +218,13 @@ fn test_each_display_setup_gets_its_own_layout_back() {
         TEST_DISPLAY_HEIGHT - crate::ecs::layout::PARKED_STRIP_SLIVER,
         "parked row 1 must stay parked off-screen after width restoration"
     );
+    for id in [100, 101] {
+        assert_width(world, id, 333);
+    }
+    // LayoutOp::SetWidth from restoration wins once, without a later replay of
+    // the hot-plug resize replacing it on reconciliation or capture.
+    harness.advance(SETTLE);
+    for id in [100, 101] {
+        assert_width(harness.world(), id, 333);
+    }
 }

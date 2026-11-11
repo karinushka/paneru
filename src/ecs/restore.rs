@@ -128,7 +128,9 @@ impl WindowHardMatchKey {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PlannedColumn {
     Single(Entity),
-    Stack(Vec<PlannedStackItem>),
+    /// The second field is the active tab; `None` if split or if the saved
+    /// active window didn't match.
+    Stack(Vec<PlannedStackItem>, Option<Entity>),
     Tabs(Vec<Entity>),
     Fullscreen(Entity),
 }
@@ -239,30 +241,53 @@ impl<'a> RestorePlanner<'a> {
                     .filter_map(|saved| self.match_window(saved, current, plan))
                     .collect(),
             ),
-            SavedColumn::Stack(items) => compact_stack_items(
-                items
+            SavedColumn::Stack(items, active) => {
+                let mut active_entity = None;
+                let planned_items = items
                     .iter()
-                    .filter_map(|item| self.plan_stack_item(item, current, plan))
-                    .collect(),
-            ),
+                    .filter_map(|item| {
+                        let (planned, matched_active) =
+                            self.plan_stack_item(item, active.as_ref(), current, plan);
+                        if matched_active.is_some() {
+                            active_entity = matched_active;
+                        }
+                        planned
+                    })
+                    .collect();
+                compact_stack_items(planned_items, active_entity)
+            }
         }
     }
 
+    /// Plans one stack item and returns its entity if it is `saved_active`.
+    /// Reuses this match: a second `match_window` would double-consume it.
     fn plan_stack_item(
         &self,
         item: &SavedStackItem,
+        saved_active: Option<&SavedWindow>,
         current: &[CurrentWindowIdentity],
         plan: &mut RestorePlan,
-    ) -> Option<PlannedStackItem> {
+    ) -> (Option<PlannedStackItem>, Option<Entity>) {
         match item {
-            SavedStackItem::Single(saved) => self
-                .match_window(saved, current, plan)
-                .map(PlannedStackItem::Single),
-            SavedStackItem::Tabs(tabs) => compact_stack_tabs(
-                tabs.iter()
-                    .filter_map(|saved| self.match_window(saved, current, plan))
-                    .collect(),
-            ),
+            SavedStackItem::Single(saved) => {
+                let entity = self.match_window(saved, current, plan);
+                let matched_active = entity.filter(|_| saved_active == Some(saved));
+                (entity.map(PlannedStackItem::Single), matched_active)
+            }
+            SavedStackItem::Tabs(tabs) => {
+                let mut matched_active = None;
+                let entities = tabs
+                    .iter()
+                    .filter_map(|saved| {
+                        let entity = self.match_window(saved, current, plan)?;
+                        if saved_active == Some(saved) {
+                            matched_active = Some(entity);
+                        }
+                        Some(entity)
+                    })
+                    .collect();
+                (compact_stack_tabs(entities), matched_active)
+            }
         }
     }
 
@@ -353,7 +378,9 @@ fn saved_windows_in_column(column: &SavedColumn) -> Box<dyn Iterator<Item = &Sav
             Box::new(std::iter::once(saved))
         }
         SavedColumn::Tabs(tabs) => Box::new(tabs.iter()),
-        SavedColumn::Stack(items) => Box::new(items.iter().flat_map(saved_windows_in_stack_item)),
+        SavedColumn::Stack(items, _) => {
+            Box::new(items.iter().flat_map(saved_windows_in_stack_item))
+        }
     }
 }
 
@@ -748,8 +775,8 @@ fn apply_planned_columns(strip: &mut LayoutStrip, columns: &[PlannedColumn]) {
             PlannedColumn::Tabs(entities) => {
                 append_tabs(strip, entities);
             }
-            PlannedColumn::Stack(items) => {
-                append_stack(strip, items);
+            PlannedColumn::Stack(items, active) => {
+                append_stack(strip, items, *active);
             }
         }
     }
@@ -764,7 +791,7 @@ fn append_tabs(strip: &mut LayoutStrip, entities: &[Entity]) -> Option<Entity> {
     Some(leader)
 }
 
-fn append_stack(strip: &mut LayoutStrip, items: &[PlannedStackItem]) {
+fn append_stack(strip: &mut LayoutStrip, items: &[PlannedStackItem], active: Option<Entity>) {
     let mut first = true;
     for item in items {
         let Some(leader) = append_stack_item(strip, item) else {
@@ -775,6 +802,9 @@ fn append_stack(strip: &mut LayoutStrip, items: &[PlannedStackItem]) {
         } else {
             _ = strip.stack(leader);
         }
+    }
+    if let Some(active) = active {
+        _ = strip.toggle_tabbed_display(active);
     }
 }
 
@@ -804,11 +834,15 @@ fn compact_stack_tabs(entities: Vec<Entity>) -> Option<PlannedStackItem> {
     }
 }
 
-fn compact_stack_items(items: Vec<PlannedStackItem>) -> Option<PlannedColumn> {
+fn compact_stack_items(
+    items: Vec<PlannedStackItem>,
+    active: Option<Entity>,
+) -> Option<PlannedColumn> {
     match items.as_slice() {
         [] => None,
+        // A single item can't be tabbed, so `active` is dropped with the stack.
         [PlannedStackItem::Single(entity)] => Some(PlannedColumn::Single(*entity)),
         [PlannedStackItem::Tabs(entities)] => Some(PlannedColumn::Tabs(entities.clone())),
-        _ => Some(PlannedColumn::Stack(items)),
+        _ => Some(PlannedColumn::Stack(items, active)),
     }
 }

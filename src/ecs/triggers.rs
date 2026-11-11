@@ -458,6 +458,11 @@ pub(super) fn mission_control_trigger(
                         .filter_map(|entity| windows.get(entity).zip(Some(entity)))
                         .filter(|(window, _)| !present_windows.contains(&window.id()));
                     for (window, entity) in moved_windows {
+                        // A parked tab's off-screen position can look like
+                        // a move to another display; ignore it.
+                        if active_strip.is_parked_tab(entity) {
+                            continue;
+                        }
                         debug!(
                             "window {} {entity} moved, removing from workspace {}",
                             window.id(),

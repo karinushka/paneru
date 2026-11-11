@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use bevy::app::{App, Plugin, PostUpdate, Update};
+use bevy::ecs::change_detection::DetectChangesMut;
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
@@ -32,9 +33,9 @@ use crate::ecs::params::{ActiveDisplay, GlobalState, WindowCtx, Windows};
 use crate::ecs::scroll::{PageGestureState, PageInFlight};
 use crate::ecs::workspace::RestoreFocusMarker;
 use crate::ecs::{
-    ActiveWorkspaceMarker, Bounds, Position, RaiseWindow, RepositionMarker, ReshuffleAroundMarker,
-    ResizeMarker, Scrolling, SendMessageTrigger, SpawnCommandsExt, StrayFocusEvent,
-    VerifyWindowSize,
+    ActiveWorkspaceMarker, Bounds, LayoutPosition, Position, RaiseWindow, RepositionMarker,
+    ReshuffleAroundMarker, ResizeMarker, Scrolling, SendMessageTrigger, SpawnCommandsExt,
+    StrayFocusEvent, VerifyWindowSize,
 };
 use crate::events::Event;
 use crate::manager::{Application, Display, Window, WindowManager};
@@ -129,6 +130,7 @@ impl Plugin for FocusEventsPlugin {
             Update,
             (
                 detect_focus_rejection.in_set(super::UpdateSet::Events),
+                handle_tab_indicator_click.in_set(super::UpdateSet::Events),
                 fix_window_size_on_focus.in_set(super::UpdateSet::Focus),
                 autocenter_window_on_focus
                     .in_set(super::UpdateSet::Layout)
@@ -163,6 +165,7 @@ impl Plugin for FocusEventsPlugin {
             .add_observer(forget_openers)
             .add_observer(maintain_verify_focus_singleton)
             .add_observer(virtual_strip_activated)
+            .add_observer(update_tabbed_active_on_focus)
             .add_observer(stray_focus_observer)
             .add_observer(focus_window_trigger)
             .add_observer(raise_window_trigger);
@@ -699,6 +702,57 @@ fn virtual_strip_activated(
         && let Ok(mut entity_commands) = commands.get_entity(entity)
     {
         entity_commands.try_insert(ActiveWorkspaceMarker);
+    }
+}
+
+/// Marks a newly-focused tabbed-display member as its group's active tab.
+/// Observes `FocusedMarker` rather than `WindowFocused` so it fires without
+/// waiting for the OS round-trip.
+#[allow(clippy::needless_pass_by_value)]
+fn update_tabbed_active_on_focus(
+    trigger: On<Add, FocusedMarker>,
+    mut workspaces: Query<&mut LayoutStrip>,
+    mut positions: Query<&mut LayoutPosition>,
+) {
+    let entity = trigger.entity;
+    for mut strip in &mut workspaces {
+        // Check via `&self` first so untouched strips aren't marked changed.
+        if strip.is_tabbed_display(entity) && strip.active_tab(entity) != Some(entity) {
+            let members: Vec<Entity> = strip
+                .index_of(entity)
+                .ok()
+                .and_then(|index| strip.get(index).ok())
+                .map(|column| column.window_iter().collect())
+                .unwrap_or_default();
+            strip.set_active_tab(entity);
+
+            // All members share one `LayoutPosition`, so a tab switch alone
+            // changes nothing and `position_layout_windows` (gated on
+            // `Changed<LayoutPosition>`) wouldn't swap the tabs, e.g. when a
+            // `ManualStripOffset` pins the strip. Force the mark.
+            for member in members {
+                if let Ok(mut layout_position) = positions.get_mut(member) {
+                    layout_position.set_changed();
+                }
+            }
+        }
+    }
+}
+
+/// Focuses the tab clicked in the tab indicator
+/// (`Event::TabIndicatorClicked`), like a keyboard tab switch.
+fn handle_tab_indicator_click(
+    mut messages: MessageReader<Event>,
+    windows: Windows,
+    mut commands: Commands,
+) {
+    for event in messages.read() {
+        let Event::TabIndicatorClicked { window_id } = event else {
+            continue;
+        };
+        if let Some((_, entity)) = windows.find(*window_id) {
+            commands.focus_entity(entity, true);
+        }
     }
 }
 

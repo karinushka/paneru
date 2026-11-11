@@ -3,8 +3,8 @@
 # Outputs from `nix build`
 /result
 
-# Claude Code project config
-CLAUDE.md
+# Personal Claude Code instructions
+CLAUDE.local.md
 .direnv
 **/.DS_Store
 flamegraph.svg

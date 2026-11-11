@@ -1176,7 +1176,11 @@ fn full_width_window(
         {
             _ = strip.unstack(entity);
         }
-        let width_ratio = windows.width_ratio(entity).unwrap_or(0.5);
+        // FullWidthMarker restores against the usable viewport, whereas
+        // WidthRatio is maintained against the display's raw bounds.
+        let width_ratio = windows.moving_frame(entity).map_or(0.5, |frame| {
+            f64::from(frame.width()) / f64::from(viewport.width())
+        });
         if let Ok(mut entity_commands) = commands.get_entity(entity) {
             entity_commands.try_insert(FullWidthMarker { width_ratio });
         }

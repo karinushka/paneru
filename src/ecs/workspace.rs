@@ -22,7 +22,7 @@ use crate::commands::{
 };
 use crate::config::Config;
 use crate::ecs::focus::FocusHistory;
-use crate::ecs::layout::{LayoutStrip, PARKED_STRIP_SLIVER, origin_exposing};
+use crate::ecs::layout::{LayoutStrip, PARKED_STRIP_SLIVER, RelocationGroup, origin_exposing};
 use crate::ecs::params::{ActiveDisplay, WindowCtx, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, DockPosition, FocusedMarker, Initializing, ManualStripOffset,
@@ -372,8 +372,9 @@ fn no_setup_restore(session: Option<Res<super::restore::SessionRestore>>) -> boo
     !session.is_some_and(|session| session.is_cross_space())
 }
 
+#[allow(clippy::too_many_lines)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
-fn detect_moved_windows(
+pub(crate) fn detect_moved_windows(
     activated_workspace: Single<Entity, Added<ActiveWorkspaceMarker>>,
     mut workspaces: Query<(
         &mut LayoutStrip,
@@ -484,14 +485,34 @@ fn detect_moved_windows(
             continue;
         }
 
-        debug!("Window {entity} moved to workspace {workspace_id}.");
-        let moving_entities = workspaces
+        // A parked tab's off-screen position can look like a move to another
+        // display; don't split the group over it. A move of the active tab is
+        // honored below and takes the whole group along.
+        if workspaces
             .iter()
-            .find_map(|(strip, _, _, _)| strip.tab_group(entity))
-            .unwrap_or_else(|| vec![entity]);
+            .any(|(strip, _, _, _)| strip.is_parked_tab(entity))
+        {
+            continue;
+        }
+
+        debug!("Window {entity} moved to workspace {workspace_id}.");
+        let group = workspaces
+            .iter()
+            .find_map(|(strip, _, _, _)| strip.relocation_group(entity));
+        let moving_entities = group
+            .as_ref()
+            .map_or_else(|| vec![entity], |group| group.members().to_vec());
         for (mut strip, strip_entity, _, _) in &mut workspaces {
             if strip_entity == *activated_workspace {
-                strip.append_tab_group(&moving_entities);
+                match &group {
+                    Some(RelocationGroup::NativeTabs(members)) => {
+                        strip.append_tab_group(members);
+                    }
+                    Some(RelocationGroup::TabbedStack { members, active }) => {
+                        strip.append_tabbed_stack(members, *active);
+                    }
+                    None => strip.append(entity),
+                }
             } else {
                 for moving_entity in &moving_entities {
                     strip.remove(*moving_entity);
@@ -906,16 +927,33 @@ fn handle_virtual_window_moves(
     let (display_entity, active_display, dock) = *active_display;
     let viewport = active_display.actual_display_bounds(dock, &config);
     for (window_entity, move_marker) in &moved_windows {
-        let moving_entities = workspaces
+        let group = workspaces
             .get(source_entity)
             .ok()
-            .and_then(|(_, strip, _, _, _)| strip.tab_group(window_entity))
-            .unwrap_or_else(|| vec![window_entity]);
+            .and_then(|(_, strip, _, _, _)| strip.relocation_group(window_entity));
+        let moving_entities = group
+            .as_ref()
+            .map_or_else(|| vec![window_entity], |group| group.members().to_vec());
         for moving_entity in &moving_entities {
             if let Ok(mut entity_commands) = commands.get_entity(*moving_entity) {
                 entity_commands.try_remove::<VirtualMoveMarker>();
             }
         }
+        let append_group = |strip: &mut LayoutStrip| match &group {
+            Some(RelocationGroup::NativeTabs(members)) => strip.append_tab_group(members),
+            Some(RelocationGroup::TabbedStack { members, active }) => {
+                strip.append_tabbed_stack(members, *active);
+            }
+            None => strip.append(window_entity),
+        };
+        let insert_group_at = |strip: &mut LayoutStrip, index: usize| match &group {
+            Some(RelocationGroup::NativeTabs(members)) => strip.insert_tab_group_at(index, members),
+            Some(RelocationGroup::TabbedStack { members, active }) => {
+                strip.insert_tabbed_stack_at(index, members, *active);
+            }
+            None => strip.insert_at(index, window_entity),
+        };
+
         let follow = matches!(move_marker.move_focus, MoveFocus::Follow);
 
         let target_idx = move_marker.target_virtual_index;
@@ -966,7 +1004,7 @@ fn handle_virtual_window_moves(
                 workspace_id
             );
             let mut new_strip = LayoutStrip::new(workspace_id, target_idx);
-            new_strip.append_tab_group(&moving_entities);
+            append_group(&mut new_strip);
 
             let mut spawned = commands.spawn_layout_strip(new_strip, origin, display_entity, false);
             if stay {
@@ -998,8 +1036,8 @@ fn handle_virtual_window_moves(
         for (entity, mut strip, _, _, _) in &mut workspaces {
             if entity == target_entity {
                 match mid_placement {
-                    Some((slot, _)) => strip.insert_tab_group_at(slot, &moving_entities),
-                    None => strip.append_tab_group(&moving_entities),
+                    Some((slot, _)) => insert_group_at(&mut strip, slot),
+                    None => append_group(&mut strip),
                 }
             } else {
                 for moving_entity in &moving_entities {

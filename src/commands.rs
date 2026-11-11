@@ -21,7 +21,8 @@ use crate::config::snippet::{RuleSubject, SnippetDialect, window_rule_snippet};
 use crate::ecs::display::FloatingLayer;
 use crate::ecs::focus::{FocusHistory, PageHapticRequest};
 use crate::ecs::layout::{
-    Column, LayoutStrip, MIN_WINDOW_HEIGHT, StackItem, clamp_origin_to_viewport, strip_signature,
+    Column, LayoutStrip, MIN_WINDOW_HEIGHT, RelocationGroup, StackItem, clamp_origin_to_viewport,
+    strip_signature,
 };
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Windows};
 use crate::ecs::scroll::{PageFocusRequest, PageGestureState, PageInFlight};
@@ -264,11 +265,25 @@ pub(crate) fn get_window_in_direction(
         Direction::West => strip.left_neighbour(entity),
         Direction::East => strip.right_neighbour(entity),
 
-        Direction::First => strip.first().ok().and_then(|column| column.top()),
+        // `top()` ignores the active tab; redirect so we never focus a
+        // parked (off-screen) tabbed-display member.
+        Direction::First => strip
+            .first()
+            .ok()
+            .and_then(|column| column.top())
+            .map(|entity| strip.active_tab(entity).unwrap_or(entity)),
 
-        Direction::Last => strip.last().ok().and_then(|column| column.top()),
+        Direction::Last => strip
+            .last()
+            .ok()
+            .and_then(|column| column.top())
+            .map(|entity| strip.active_tab(entity).unwrap_or(entity)),
 
-        Direction::Nth(index) => strip.get(*index).ok().and_then(|column| column.top()),
+        Direction::Nth(index) => strip
+            .get(*index)
+            .ok()
+            .and_then(|column| column.top())
+            .map(|entity| strip.active_tab(entity).unwrap_or(entity)),
 
         Direction::North => match strip.get(index).ok()? {
             Column::Single(_) | Column::Tabs(_) | Column::Fullscren(_) => None,
@@ -410,7 +425,7 @@ fn active_focus_candidate(
 ) -> Option<Entity> {
     // Enter the active strip from the appropriate side when focus is outside it.
     if !active_strip.contains(focused_entity) {
-        return match direction {
+        let landed = match direction {
             Direction::East | Direction::First => {
                 active_strip.first().ok().and_then(|col| col.top())
             }
@@ -421,6 +436,8 @@ fn active_focus_candidate(
                 .and_then(|column| column.top()),
             Direction::North | Direction::South => None,
         };
+        // `top()` ignores the active tab, as in `get_window_in_direction`.
+        return landed.map(|entity| active_strip.active_tab(entity).unwrap_or(entity));
     }
 
     get_window_in_direction(direction, focused_entity, active_strip).or_else(|| {
@@ -797,6 +814,13 @@ fn command_swap_focus(
     let mut handler = || {
         let (_, current) = windows.focused()?;
         let index = active_strip.index_of(current).ok()?;
+        // Reordering tabs North/South is invisible (only the active tab is
+        // shown), so fall through to the cross-display fallback instead.
+        if matches!(direction, Direction::North | Direction::South)
+            && active_strip.is_tabbed_display(current)
+        {
+            return None;
+        }
         let other_window = get_window_in_direction(direction, current, active_strip)?;
         let new_index = active_strip.index_of(other_window).ok()?;
         debug!(
@@ -1367,12 +1391,21 @@ fn to_next_display(
         window_manager.warp_mouse(other.bounds().center());
     }
 
-    // Remove the window from the source strip.
+    // Move a tabbed or native-tab group as one unit. Computed before removal,
+    // since the group can't be determined once its members are gone.
+    let group = active_display.active_strip().relocation_group(entity);
+    let moving_entities = group
+        .as_ref()
+        .map_or_else(|| vec![entity], |group| group.members().to_vec());
+
+    // Remove the group from the source strip.
     let source_neighbour = active_display
         .active_strip()
         .left_neighbour(entity)
         .or_else(|| active_display.active_strip().right_neighbour(entity));
-    active_display.active_strip().remove(entity);
+    for moving_entity in &moving_entities {
+        active_display.active_strip().remove(*moving_entity);
+    }
     if let Some(neighbour) = source_neighbour {
         commands.reshuffle_around(neighbour);
     }
@@ -1389,7 +1422,13 @@ fn to_next_display(
             .iter_mut()
             .find(|(strip, _)| strip.id() == target_space_id)
     {
-        target_strip.append(entity);
+        match &group {
+            Some(RelocationGroup::NativeTabs(members)) => target_strip.append_tab_group(members),
+            Some(RelocationGroup::TabbedStack { members, active }) => {
+                target_strip.append_tabbed_stack(members, *active);
+            }
+            None => target_strip.append(entity),
+        }
         commands.reshuffle_around(entity);
 
         // Add a delayed refresh of the window size - because the other display can have different bounds.

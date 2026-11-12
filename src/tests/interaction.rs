@@ -4859,3 +4859,42 @@ fn test_exit_mid_animation_keeps_the_restored_frames() {
         );
     }
 }
+
+/// AX move echoes can wake the event loop much faster than the display period.
+/// Rounded per-frame feedback used to leave reposition markers stuck forever.
+#[test]
+fn test_focus_animation_finishes_with_one_millisecond_event_intervals() {
+    let config: Config = (
+        MainOptions {
+            animation_speed: Some(16.0),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+    let mut harness = TestHarness::new().with_config(config).with_windows(3);
+    harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+    harness
+        .app
+        .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_millis(1),
+        ));
+    harness.app.world_mut().write_message(Event::Command {
+        command: Command::Window(Operation::Focus(Direction::Last)),
+    });
+    harness.app.update();
+    assert!(
+        harness
+            .world()
+            .query::<&RepositionMarker>()
+            .iter(harness.world())
+            .next()
+            .is_some()
+    );
+    for _ in 0..1000 {
+        harness.app.update();
+    }
+    let world = harness.world();
+    assert_eq!(world.query::<&RepositionMarker>().iter(world).count(), 0);
+    assert_focused!(world, 2);
+}

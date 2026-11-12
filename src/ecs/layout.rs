@@ -1464,8 +1464,12 @@ pub(super) fn reshuffle_layout_strip(
 
             // Do not move the window if the hidden fraction is lower than threshold
             // or if the layout strip movement is shorter than the hidden width.
+            // A window with nothing in view always moves, even at a ratio of 1.0.
             let strip_movement = (ctx.strip_origin.x - strip_position.x).abs();
-            if hidden_fraction <= hidden_ratio && size.x - visible_width >= strip_movement {
+            if visible_width > 0
+                && hidden_fraction <= hidden_ratio
+                && size.x - visible_width >= strip_movement
+            {
                 return;
             }
         }

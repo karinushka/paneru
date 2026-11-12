@@ -1233,6 +1233,102 @@ fn test_window_hidden_ratio() {
     assert!(window.frame().min.x < 0);
 }
 
+/// At `window_hidden_ratio = 1.0` focus moves the strip only for a window that
+/// is fully hidden. Center leaves the window next to the centered one just
+/// past the viewport edge: fully hidden, so focusing it must bring it into
+/// view. The focus arrives the way macOS reports a switch between two windows
+/// of the frontmost app: a focus notification with no app switch.
+#[test]
+fn test_hidden_ratio_one_reveals_a_window_just_past_the_edge() {
+    // (window to center, window to focus, focused window's x once in view)
+    for (centered, focused, revealed_x) in [(0, 2, TEST_DISPLAY_WIDTH - 512), (2, 0, 0)] {
+        let commands = vec![
+            Event::MenuOpened { window_id: 0 },
+            Event::Command {
+                command: Command::Window(Operation::Focus(if centered == 0 {
+                    Direction::First
+                } else {
+                    Direction::Last
+                })),
+            },
+            Event::Command {
+                command: Command::Window(Operation::Center),
+            },
+            Event::WindowFocused { window_id: focused },
+        ];
+
+        let config: Config = (
+            MainOptions {
+                window_hidden_ratio: Some(1.0),
+                animation_speed: Some(10000.0),
+                ..Default::default()
+            },
+            vec![],
+        )
+            .into();
+
+        TestHarness::new()
+            .with_config(config)
+            .with_window(0, |window| window.frame.max.x = 512)
+            .with_window(1, |window| window.frame.max.x = 256)
+            .with_window(2, |window| window.frame.max.x = 512)
+            .on_iteration(2, move |world, state| {
+                // The centered window spans 256..768, so the 256 px middle
+                // window fills the rest of its side and the outer window
+                // starts or ends exactly at the viewport edge.
+                assert_window_at!(world, centered, 256, TEST_MENUBAR_HEIGHT);
+                let middle = window_x(world, 1);
+                assert!(middle == 0 || middle == 768, "middle window at {middle}");
+                state.set_focused_window(focused);
+            })
+            .on_iteration(3, move |world, _state| {
+                assert_focused!(world, focused);
+                assert_window_at!(world, focused, revealed_x, TEST_MENUBAR_HEIGHT);
+            })
+            .run(commands);
+    }
+}
+
+/// A window the running Center animation is about to hide must come into view
+/// on focus, the same as when focus arrives after the animation settles.
+#[test]
+fn test_hidden_ratio_one_reveals_focus_during_center_animation() {
+    for center_duration in [Duration::from_secs(3), Duration::from_millis(60)] {
+        let config: Config = (
+            MainOptions {
+                window_hidden_ratio: Some(1.0),
+                animation_speed: Some(8.0),
+                ..Default::default()
+            },
+            vec![],
+        )
+            .into();
+        let mut harness = TestHarness::new().with_config(config).with_windows(3);
+        harness.run(vec![
+            Event::MenuOpened { window_id: 0 },
+            Event::Command {
+                command: Command::Window(Operation::Focus(Direction::First)),
+            },
+        ]);
+        harness.world().write_message(Event::Command {
+            command: Command::Window(Operation::Center),
+        });
+        harness.advance(center_duration);
+        harness.mock_state.set_focused_window(2);
+        harness
+            .world()
+            .write_message(Event::WindowFocused { window_id: 2 });
+        harness.advance(Duration::from_secs(3));
+
+        assert_focused!(harness.world(), 2);
+        assert_eq!(
+            window_x(harness.world(), 2),
+            TEST_DISPLAY_WIDTH - TEST_WINDOW_WIDTH,
+            "focus {center_duration:?} into the Center animation"
+        );
+    }
+}
+
 #[test]
 fn test_window_swap_brings_focused_into_view() {
     // After Center, id=4 is at the centered position. Swap(Last) bubbles
@@ -4693,4 +4789,73 @@ fn observer_registration_recovery(all_failed: bool) {
         settled_calls,
         "successful registration must stop retrying"
     );
+}
+
+/// Quitting while the strip is still animating must not let the animation
+/// write over the frames exit cleanup restores in the same frame.
+#[test]
+fn test_exit_mid_animation_keeps_the_restored_frames() {
+    use bevy::app::{AppExit, Last, PostUpdate};
+    use bevy::ecs::system::RunSystemOnce;
+
+    use crate::manager::Display;
+
+    let config: Config = (
+        MainOptions {
+            animation_speed: Some(8.0),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+    let mut harness = TestHarness::new()
+        .with_config(config)
+        .with_window(0, |window| {
+            window.frame = IRect::new(100, 120, 100 + 700, 120 + 400);
+        })
+        .with_window(1, |window| {
+            window.frame = IRect::new(200, 150, 200 + 700, 150 + 300);
+        });
+    harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+    harness.advance(Duration::from_secs(3));
+    harness.world().write_message::<Event>(Event::Command {
+        command: Command::Window(Operation::Focus(Direction::East)),
+    });
+    harness.advance(Duration::from_millis(40));
+
+    let world = harness.world();
+    assert!(
+        world
+            .query_filtered::<(), With<RepositionMarker>>()
+            .iter(world)
+            .next()
+            .is_some(),
+        "the strip is still animating"
+    );
+
+    // One exit frame. Exit cleanup stands in for `Update`, where it used to
+    // run, because `Update`'s state-saving exit systems would write the real
+    // user state file. The animation's frame writes follow in `PostUpdate`.
+    world.write_message(AppExit::Success);
+    world
+        .run_system_once(crate::ecs::systems::cleanup_on_exit)
+        .expect("running cleanup_on_exit");
+    world.run_schedule(PostUpdate);
+    world.run_schedule(Last);
+
+    let bounds = world
+        .query::<&Display>()
+        .single(world)
+        .expect("one display")
+        .bounds();
+    for window in world.query::<&Window>().iter(world) {
+        let frame = window.frame();
+        let centered = bounds.min + (bounds.size() - frame.size()) / 2;
+        assert_eq!(
+            frame.min,
+            centered,
+            "window {} must stay centered on the display after exit, got {frame:?}",
+            window.id()
+        );
+    }
 }

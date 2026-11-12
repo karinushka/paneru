@@ -43,7 +43,6 @@ use crate::platform::{Modifiers, PlatformCallbacks, WinID, WorkspaceId};
 pub mod display;
 pub mod focus;
 pub mod layout;
-#[cfg(feature = "lua")]
 pub mod layout_ops;
 pub mod mouse;
 pub mod params;
@@ -294,7 +293,6 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::update_low_power_state
                 .run_if(resource_exists::<LowPowerMode>)
                 .run_if(on_timer(LOW_POWER_MODE_CHECK)),
-            systems::cleanup_on_exit,
             restore::tick_restore_grace,
             state::periodic_state_save.run_if(on_timer(Duration::from_mins(5))),
             state::cleanup_on_exit,
@@ -337,6 +335,10 @@ pub fn register_systems(app: &mut bevy::app::App) {
         )
             .in_set(PostUpdateSet::Ui),
     );
+    // The runner exits only once the whole frame has run, so cleanup has to
+    // come after every system that writes window frames, or a running
+    // animation overwrites the frames it restores.
+    app.add_systems(Last, systems::cleanup_on_exit);
 }
 
 /// Registers all the event triggers for the window manager.
@@ -925,8 +927,8 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
     // inlined. The expensive systems here all take `&mut Window` and are
     // already mutually exclusive, so the fan-out bought little; genuine
     // parallelism (`par_iter_mut`) still goes through `ComputeTaskPool`
-    // directly. `First`/`Last` are included even though unused because an
-    // empty schedule still costs a task-pool scope per frame.
+    // directly. `First` is included even though unused because an empty
+    // schedule still costs a task-pool scope per frame.
     for label in [
         First.intern(),
         PreUpdate.intern(),

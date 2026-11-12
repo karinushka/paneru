@@ -88,9 +88,9 @@ pub fn register_commands(app: &mut bevy::app::App) {
                 .in_set(crate::ecs::PostUpdateSet::Bookkeeping)
                 .run_if(resource_changed::<crate::menubar::MenuBarVisibility>),
         );
-    // Registered here (not with the Lua systems) so it's exercised by the mock
-    // harness without a running interpreter.
-    #[cfg(feature = "lua")]
+    // Registered here (not with the Lua systems) and in every build: an IPC
+    // client's `Request::WindowSetApply` needs no embedded interpreter, and the
+    // mock harness exercises it without one.
     app.add_systems(
         PreUpdate,
         crate::ecs::layout_ops::apply_layout_ops.in_set(crate::ecs::PreUpdateSet::Dispatch),
@@ -966,7 +966,10 @@ fn resize_window(
     }
 
     let viewport = active_display.actual_bounds(&config);
-    let current_ratio = f64::from(frame.width()) / f64::from(viewport.width());
+    // Pending resizes count: a press during the animation must advance from the
+    // width already requested, not a mid-animation width.
+    let pending_width = windows.moving_frame(entity).unwrap_or(frame).width();
+    let current_ratio = f64::from(pending_width) / f64::from(viewport.width());
     let widths = config.preset_column_widths();
     let fallback = *widths.first().unwrap_or(&0.5);
     let cycle = config.window_resize_cycle();
@@ -1356,7 +1359,7 @@ fn to_next_display(
     let dest = other.bounds().min.with_x(center - size.x / 2);
     commands.reposition_entity(entity, dest);
 
-    if matches!(move_focus, MoveFocus::Follow) {
+    if matches!(move_focus, MoveFocus::Follow) && config.mouse_follows_focus() {
         window_manager.warp_mouse(other.bounds().center());
     }
 

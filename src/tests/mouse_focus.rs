@@ -1,9 +1,10 @@
-use crate::assert_focused;
 use crate::commands::{Command, Direction, MoveFocus, Operation};
 use crate::config::{Config, MainOptions};
 use crate::events::Event;
 use crate::manager::{Origin, Window};
 use crate::platform::Modifiers;
+use crate::{assert_focused, assert_on_workspace};
+use bevy::math::IRect;
 use objc2_core_foundation::CGPoint;
 use std::time::Duration;
 
@@ -363,6 +364,45 @@ fn window_center_warps_mouse_only_when_it_follows_focus() {
             .on_iteration(1, move |_, state| {
                 if follows {
                     assert_ne!(state.cursor_position(), Origin::ZERO);
+                } else {
+                    assert_eq!(state.cursor_position(), Origin::ZERO);
+                }
+            })
+            .run(commands);
+    }
+}
+
+/// Moving a window to the next display warps the pointer to that display only
+/// when the pointer follows focus: with it off the pointer stays where it was.
+#[test]
+fn to_next_display_warps_mouse_only_when_it_follows_focus() {
+    let ext_bounds = IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0);
+    for follows in [false, true] {
+        let config: Config = (
+            MainOptions {
+                mouse_follows_focus: Some(follows),
+                focus_follows_mouse: Some(false),
+                ..Default::default()
+            },
+            vec![],
+        )
+            .into();
+        let commands = vec![
+            Event::Command {
+                command: Command::PrintState,
+            },
+            Event::Command {
+                command: Command::Window(Operation::ToNextDisplay(MoveFocus::Follow)),
+            },
+        ];
+        TestHarness::new()
+            .with_config(config)
+            .with_windows(1)
+            .with_display(EXT_DISPLAY_ID, ext_bounds, vec![EXT_WORKSPACE_ID])
+            .on_iteration(1, move |world, state| {
+                assert_on_workspace!(world, 0, EXT_WORKSPACE_ID);
+                if follows {
+                    assert!(ext_bounds.contains(state.cursor_position()));
                 } else {
                     assert_eq!(state.cursor_position(), Origin::ZERO);
                 }

@@ -846,7 +846,11 @@ fn recover_lost_focus(
     if let Ok(strip) = active_workspace
         .single()
         .inspect_err(|err| error!("Unable to get current workspace: {err}"))
-        && let Some(entity) = strip.first().ok().and_then(|col| col.top())
+        && let Some(entity) = strip
+            .first()
+            .ok()
+            .and_then(|col| col.top())
+            .map(|entity| strip.active_tab(entity).unwrap_or(entity))
     {
         error!("Lost focus marker, recovering!");
         commands.focus_entity(entity, false);

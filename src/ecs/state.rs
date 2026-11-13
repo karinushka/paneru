@@ -540,6 +540,7 @@ impl QueryStateParams<'_, '_> {
                     .unwrap_or(1.0);
                 let selected = column
                     .top()
+                    .map(|top| strip.active_tab(top).unwrap_or(top))
                     .and_then(|top| self.windows.get(top).map(|window| window.id()))
                     .and_then(|id| tiled.iter().position(|window| window.id == id))
                     .unwrap_or(0);

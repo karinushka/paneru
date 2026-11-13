@@ -143,12 +143,15 @@ const SIGNATURE_WIDTH_TOLERANCE: i32 = 2;
 /// the point: scrolling must not invalidate a deliberate placement.
 pub(crate) fn strip_signature(strip: &LayoutStrip, windows: &Windows) -> Vec<(Entity, i32)> {
     strip
-        .all_columns()
-        .into_iter()
+        .columns()
+        .filter_map(Column::top)
         .filter_map(|entity| {
-            windows
-                .moving_frame(entity)
-                .map(|frame| (entity, frame.width()))
+            let width = strip
+                .active_tab(entity)
+                .and_then(|active| windows.moving_frame(active))
+                .or_else(|| windows.moving_frame(entity))?
+                .width();
+            Some((entity, width))
         })
         .collect()
 }
@@ -626,9 +629,7 @@ impl LayoutStrip {
                         StackItem::Single(id) => *id != entity,
                         StackItem::Tabs(tabs) => !tabs.is_empty(),
                     });
-                    let remaining: Vec<Entity> =
-                        stack.iter().flat_map(StackItem::window_iter).collect();
-                    self.reconcile_tabbed_stacks_after_departure(&[entity], &remaining);
+                    self.reconcile_tabbed_stacks_after_departure(&[entity], &stack);
                     if stack.len() > 1 {
                         self.columns.insert(index, Column::Stack(stack));
                     } else if let Some(remaining_item) = stack.first() {
@@ -654,13 +655,13 @@ impl LayoutStrip {
         }
     }
 
-    /// Fixes up `tabbed_stacks` after `removed` leave a group: promotes
-    /// `remaining[0]` if the active tab left, and untabs a lone survivor.
-    /// `remaining` must not contain `removed`.
+    /// Fixes up `tabbed_stacks` after `removed` leave a group: promotes the
+    /// first surviving item's top if the active tab left, and untabs when fewer
+    /// than two stack items remain. `remaining_items` must not contain `removed`.
     fn reconcile_tabbed_stacks_after_departure(
         &mut self,
         removed: &[Entity],
-        remaining: &[Entity],
+        remaining_items: &[StackItem],
     ) {
         let group_active = removed
             .iter()
@@ -669,13 +670,12 @@ impl LayoutStrip {
         for e in removed {
             self.tabbed_stacks.remove(e);
         }
-        if remaining.len() < 2 {
-            for e in remaining {
-                self.tabbed_stacks.remove(e);
+        if remaining_items.len() < 2 {
+            for e in remaining_items.iter().flat_map(StackItem::window_iter) {
+                self.tabbed_stacks.remove(&e);
             }
-        } else if was_active {
-            let new_active = remaining[0];
-            for &e in remaining {
+        } else if was_active && let Some(new_active) = remaining_items[0].top() {
+            for e in remaining_items.iter().flat_map(StackItem::window_iter) {
                 self.tabbed_stacks.insert(e, new_active);
             }
         }
@@ -858,8 +858,7 @@ impl LayoutStrip {
             // The unstacked item no longer shares a column with its former
             // stack-mates, so it can't remain part of a tabbed display.
             let removed: Vec<Entity> = removed_item.window_iter().collect();
-            let remaining: Vec<Entity> = items.iter().flat_map(StackItem::window_iter).collect();
-            self.reconcile_tabbed_stacks_after_departure(&removed, &remaining);
+            self.reconcile_tabbed_stacks_after_departure(&removed, &items);
 
             // Re-insert the unstacked item as a single/tabs panel
             let unstacked_column = match removed_item {
@@ -910,7 +909,11 @@ impl LayoutStrip {
     }
 
     pub fn all_columns(&self) -> Vec<Entity> {
-        self.columns.iter().filter_map(Column::top).collect()
+        self.columns
+            .iter()
+            .filter_map(Column::top)
+            .map(|entity| self.landing_entity(entity))
+            .collect()
     }
 
     pub fn id(&self) -> WorkspaceId {
@@ -1055,7 +1058,7 @@ impl LayoutStrip {
         if let Some(opener) = opener
             && self.index_of(opener).is_ok_and(|at| at + 1 == index)
         {
-            return Some(opener);
+            return Some(self.landing_entity(opener));
         }
         self.right_neighbour(entity)
             .or_else(|| self.left_neighbour(entity))
@@ -1354,7 +1357,9 @@ pub(super) fn layout_strip_changed(
 
     for (entity, frame) in changed {
         if let Ok((_, mut bounds, mut layout_position, resize)) = windows.get_mut(entity) {
-            if layout_position.0 != frame.min {
+            if layout_position.0 == frame.min {
+                layout_position.set_changed();
+            } else {
                 layout_position.0 = frame.min;
             }
             if resize.is_none() && bounds.0 != frame.size() {
@@ -2527,7 +2532,7 @@ mod tests {
     /// Regression: a tabbed column's width must not come from a narrower,
     /// still-resizing parked leader.
     #[test]
-    fn test_tabbed_stack_column_width_comes_from_the_active_tab_not_the_leader() {
+    fn test_tabbed_stack_column_width_comes_from_the_widest_member_not_the_leader() {
         let mut world = World::new();
         let entities = world.spawn_batch(vec![(), (), ()]).collect::<Vec<Entity>>();
 
@@ -2556,7 +2561,7 @@ mod tests {
             assert_eq!(
                 frame.width(),
                 900,
-                "every member (including {entity}) must share the active tab's width, \
+                "every member (including {entity}) must share the widest member's width, \
                  not the structural leader's"
             );
         }

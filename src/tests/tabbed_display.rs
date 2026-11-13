@@ -745,3 +745,69 @@ fn test_tab_switch_never_animates_even_with_slow_animation_speed() {
          tab member, even with a slow animation_speed"
     );
 }
+
+#[test]
+fn test_toggling_tabs_on_and_off_while_centered_updates_top_item_position() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Stack(true)),
+        },
+        // Centering pins a `ManualStripOffset` while the stack is still split.
+        Event::Command {
+            command: Command::Window(Operation::Center),
+        },
+        // Toggle tabs on with window 1 focused; window 0 (at y = 0) must be parked.
+        Event::Command {
+            command: Command::Window(Operation::ToggleTabbedDisplay),
+        },
+        // Toggle tabs back off while still centered; window 0 must return on-screen.
+        Event::Command {
+            command: Command::Window(Operation::ToggleTabbedDisplay),
+        },
+    ];
+
+    TestHarness::new()
+        .with_windows(2)
+        .on_iteration(4, |world, _state| {
+            assert!(
+                window_x(world, 0) + TEST_WINDOW_WIDTH > TEST_DISPLAY_WIDTH,
+                "window 0 must be parked off-screen when toggling tabs on while centered"
+            );
+        })
+        .on_iteration(5, |world, _state| {
+            assert_eq!(
+                window_x(world, 0),
+                window_x(world, 1),
+                "window 0 must return to the column x when toggling tabs off while centered"
+            );
+        })
+        .run(commands);
+}
+
+#[test]
+fn test_demoting_tabbed_stack_to_native_tabs_clears_tabbed_display() {
+    let mut world = World::new();
+    let entities = world.spawn_batch(vec![(), (), ()]).collect::<Vec<Entity>>();
+
+    let mut strip = LayoutStrip::default();
+    for &entity in &entities {
+        strip.append(entity);
+    }
+    strip.convert_to_tabs(entities[0], entities[1]).unwrap();
+    strip.stack(entities[2]).unwrap();
+    assert_eq!(strip.toggle_tabbed_display(entities[2]), Some(true));
+
+    strip.remove(entities[2]);
+    assert!(
+        !strip.is_tabbed_display(entities[0]) && !strip.is_tabbed_display(entities[1]),
+        "a single surviving native-tab item demoted to Column::Tabs must not stay in tabbed_stacks"
+    );
+    assert!(
+        !strip.is_parked_tab(entities[0]) && !strip.is_parked_tab(entities[1]),
+        "surviving native tabs must not be marked as parked tabbed-display members"
+    );
+}

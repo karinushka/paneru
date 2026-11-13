@@ -230,7 +230,7 @@ pub(crate) struct SnapStripMarker {
 /// shortly after a switch still animates normally.
 const SNAP_STRIP_GUARD_TIMEOUT: Duration = Duration::from_millis(500);
 
-fn spawn_snap_strip_guard(strip: Entity, commands: &mut Commands) {
+pub(crate) fn spawn_snap_strip_guard(strip: Entity, commands: &mut Commands) {
     let timeout = Timeout::new(SNAP_STRIP_GUARD_TIMEOUT, None, commands);
     commands.spawn((timeout, SnapStripMarker { strip }));
 }

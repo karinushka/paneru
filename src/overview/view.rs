@@ -21,12 +21,12 @@
 //! `CASpringAnimation`s on the render server; gesture scrubbing sets the
 //! model values directly with implicit actions disabled.
 //!
-//! Window contents are static snapshots from `CGWindowListCreateImage`.
-//! Live previews would swap in a `ScreenCaptureKit` stream per card without
-//! changing the layer structure.
+//! Window contents start as static snapshots from `CGWindowListCreateImage`
+//! (instant, cached between opens); `ScreenCaptureKit` streams then replace
+//! them with the live windows (see `live.rs`).
 
-use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -37,8 +37,8 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, class, define_class, msg_send};
 use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSEvent, NSPanel, NSScreen, NSScreenSaverWindowLevel, NSView,
-    NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSBackingStoreType, NSColor, NSEvent, NSFont, NSPanel, NSScreen, NSScreenSaverWindowLevel,
+    NSView, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
@@ -46,11 +46,13 @@ use objc2_core_graphics::{
 };
 use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize, NSString};
 use objc2_quartz_core::{
-    CALayer, CAMediaTiming as _, CASpringAnimation, CATransaction, kCAGravityResize,
-    kCAGravityResizeAspectFill,
+    CABasicAnimation, CACurrentMediaTime, CALayer, CAMediaTiming as _, CASpringAnimation,
+    CATextLayer, CATransaction, kCAAlignmentLeft, kCAFillModeForwards, kCAGravityResize,
+    kCAGravityResizeAspectFill, kCATruncationEnd,
 };
 use tracing::{debug, warn};
 
+use super::live::{Live, Wanted};
 use super::{DisplayLayout, Rect, Spring};
 use crate::events::{Event, EventSender};
 
@@ -148,6 +150,9 @@ struct Target {
     gate: bool,
     /// Key in [`OverviewManager::cache`], and the log name.
     key: String,
+    /// The window a card shows; a late snapshot doesn't cover it once its
+    /// live stream is running.
+    window_id: Option<i32>,
 }
 
 /// How long the panels wait for gating captures before showing anyway.
@@ -334,6 +339,33 @@ fn blurred(image: &CGImage, width: f64, radius: f64) -> Option<CFRetained<CGImag
     std::ptr::NonNull::new(raw).map(|ptr| unsafe { CFRetained::from_raw(ptr) })
 }
 
+/// Size of a row's label text, in points.
+const LABEL_FONT_SIZE: f64 = 15.0;
+
+/// A row's workspace name, in `rect` (overview points): it stays put
+/// while the overview opens and only fades in.
+fn row_label(virtual_index: u32, rect: &Rect, scale: f64) -> Animated {
+    let text = CATextLayer::new();
+    let name = NSString::from_str(&format!(
+        "Workspace {}",
+        crate::menubar::virtual_workspace_label(virtual_index)
+    ));
+    unsafe { text.setString(Some(&name)) };
+    let font = NSFont::boldSystemFontOfSize(LABEL_FONT_SIZE);
+    // SAFETY: NSFont is toll-free bridged to CTFont, a CF object.
+    let font = unsafe { &*Retained::as_ptr(&font).cast::<objc2_core_foundation::CFType>() };
+    unsafe { text.setFont(Some(font)) };
+    text.setFontSize(LABEL_FONT_SIZE);
+    text.setForegroundColor(Some(&color(1.0, 1.0, 1.0, 0.85)));
+    text.setAlignmentMode(unsafe { kCAAlignmentLeft });
+    text.setTruncationMode(unsafe { kCATruncationEnd });
+    text.setContentsScale(scale);
+    // Sit the text on the bottom of the band, just above the strip.
+    let h = (LABEL_FONT_SIZE * 1.3).min(rect.h);
+    let rect = Rect::new(rect.x + 4.0, rect.y + rect.h - h - 2.0, rect.w - 8.0, h);
+    Animated::new(Retained::into_super(text), rect, rect, (0.0, 1.0))
+}
+
 fn color(r: f64, g: f64, b: f64, a: f64) -> CFRetained<CGColor> {
     CGColor::new_srgb(r, g, b, a)
 }
@@ -373,8 +405,29 @@ fn spring_anim(
         anim.setFromValue(Some(from));
         anim.setToValue(Some(to));
     }
-    anim.setDuration(anim.settlingDuration());
+    anim.setDuration(spring.visible_duration());
     anim
+}
+
+const FADE_KEY: &str = "paneru.fade";
+
+/// How long the overlay takes to fade as a close lands.
+const FADE_SECS: f64 = 0.04;
+
+/// Fades `layer` out over the last [`FADE_SECS`] of a close lasting `secs`,
+/// on the render server: the real windows show at the moment the close
+/// lands even when the main thread is too busy to take the overlay down.
+fn fade_out_at_end(layer: &CALayer, secs: f64) {
+    let fade = CABasicAnimation::animationWithKeyPath(Some(&NSString::from_str("opacity")));
+    unsafe {
+        fade.setFromValue(Some(&ns_number(1.0)));
+        fade.setToValue(Some(&ns_number(0.0)));
+    }
+    fade.setBeginTime(CACurrentMediaTime() + (secs - FADE_SECS).max(0.0));
+    fade.setDuration(FADE_SECS.min(secs));
+    fade.setFillMode(unsafe { kCAFillModeForwards });
+    fade.setRemovedOnCompletion(false);
+    layer.addAnimation_forKey(&fade, Some(&NSString::from_str(FADE_KEY)));
 }
 
 fn set_contents(layer: &CALayer, image: &CGImage) {
@@ -566,9 +619,10 @@ define_class!(
 
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
-            // Escape or Return.
-            if matches!(event.keyCode(), 53 | 36) {
-                _ = self.ivars().sender.send(Event::OverviewDismiss);
+            match event.keyCode() {
+                53 => _ = self.ivars().sender.send(Event::OverviewDismiss),
+                36 => _ = self.ivars().sender.send(Event::OverviewAccept),
+                _ => {}
             }
         }
     }
@@ -633,6 +687,8 @@ struct Card {
 enum Rank {
     Focused,
     Neighbour,
+    /// A floating window on the active row: few, on top, and in view.
+    Floating,
     Screen,
     Row,
     Backdrop,
@@ -642,11 +698,12 @@ enum Rank {
 impl Rank {
     /// A card's rank from its row and its distance (in tiled columns) to
     /// the focused window; `None` when the row has no focused window.
-    fn of_card(active: bool, focused: bool, distance: Option<usize>) -> Self {
+    fn of_card(active: bool, focused: bool, floating: bool, distance: Option<usize>) -> Self {
         match (active, focused, distance) {
             (false, ..) => Self::Hidden,
             (true, true, _) | (true, _, Some(0)) => Self::Focused,
             (true, _, Some(1)) => Self::Neighbour,
+            _ if floating => Self::Floating,
             _ => Self::Row,
         }
     }
@@ -663,16 +720,22 @@ struct RowLayers {
     /// overlay matches the real screen, gone once open.
     bar: Option<Animated>,
     pan: Animated,
+    /// The workspace's name above the row, shown once open.
+    label: Animated,
 }
 
 struct Panel {
     window: Retained<OverviewPanel>,
     window_number: i32,
+    /// Parent of every layer below; faded out as a close lands.
+    root: Retained<CALayer>,
     backdrop: Animated,
     tint: Animated,
     container: Animated,
     rows: Vec<RowLayers>,
     cards: Vec<Card>,
+    /// The display's backing scale (pixels per point).
+    scale: f64,
 }
 
 impl Panel {
@@ -680,9 +743,14 @@ impl Panel {
         [&self.backdrop, &self.tint, &self.container]
             .into_iter()
             .chain(self.rows.iter().flat_map(|row| {
-                [Some(&row.viewport), row.bar.as_ref(), Some(&row.pan)]
-                    .into_iter()
-                    .flatten()
+                [
+                    Some(&row.viewport),
+                    row.bar.as_ref(),
+                    Some(&row.pan),
+                    Some(&row.label),
+                ]
+                .into_iter()
+                .flatten()
             }))
             .chain(self.cards.iter().map(|card| &card.animated))
     }
@@ -705,6 +773,8 @@ pub struct OverviewManager {
     reveal_since: Option<Instant>,
     /// Panels of a previous build, kept on screen until the new ones show.
     retired: Vec<Panel>,
+    /// Torn down and off the screen, waiting to be freed.
+    discarded: Vec<Panel>,
     tx: Sender<Landed>,
     rx: Receiver<Landed>,
     /// `batch`, shared with the capture workers so stale ones stop.
@@ -715,7 +785,28 @@ pub struct OverviewManager {
     /// "menu bar 0,0"). A build shows these straight away, so the overview
     /// appears at once and the fresh captures fade in over them.
     cache: HashMap<String, CFRetained<CGImage>>,
+    live: Live,
+    /// Per panel: the windows whose cards are (nearly) on screen.
+    visible: Vec<HashSet<i32>>,
+    /// Upper bound on live streams, most important first (see [`Rank`]);
+    /// each costs GPU time and memory while the overview is up. Config
+    /// `overview.live_previews`.
+    max_live: usize,
+    /// Cards stream while on screen in the overview, or within this
+    /// fraction of a display height of it; streams start and stop as cards
+    /// scroll in and out. Config `overview.live_margin`.
+    live_margin: f64,
+    /// When to bring the live streams in line with what's visible, once a
+    /// scroll has rested; see [`LIVE_SETTLE`].
+    live_due: Option<Instant>,
+    /// A wake-up for `live_due` is on its way.
+    live_wake: Arc<std::sync::atomic::AtomicBool>,
 }
+
+/// How long scrolling has to rest before the live streams follow it: while
+/// it goes on, the running ones keep streaming instead of stopping and
+/// starting as cards pass the edge.
+const LIVE_SETTLE: Duration = Duration::from_millis(150);
 
 /// Where the wallpaper and the menu bar go in one panel, filled in when
 /// their captures land.
@@ -744,6 +835,34 @@ fn pan_frames(size: (f64, f64), pan: f64) -> (Rect, Rect) {
     (full, full.offset(pan, 0.0))
 }
 
+/// Picks at most `max` items from per-display lists so every display gets
+/// its share: each display's best item first (by rank), then each one's
+/// second best, and so on.
+fn share<T>(per_display: impl Iterator<Item = Vec<(Rank, T)>>, max: usize) -> Vec<T> {
+    let mut picked: Vec<(usize, Rank, usize, T)> = Vec::new();
+    for (display, mut items) in per_display.enumerate() {
+        items.sort_by_key(|(rank, _)| *rank);
+        picked.extend(
+            items
+                .into_iter()
+                .enumerate()
+                .map(|(turn, (rank, item))| (turn, rank, display, item)),
+        );
+    }
+    picked.sort_by_key(|(turn, rank, display, _)| (*turn, *rank, *display));
+    picked
+        .into_iter()
+        .take(max)
+        .map(|(.., item)| item)
+        .collect()
+}
+
+fn visible_set<K>(layout: &DisplayLayout<K>, margin: f64) -> HashSet<i32> {
+    super::visible_windows(layout, layout.size.1 * margin)
+        .into_iter()
+        .collect()
+}
+
 /// Cards in the order the panels hold them: every row's tiled windows,
 /// then every floating window (drawn on top).
 fn card_order<K>(layout: &DisplayLayout<K>) -> impl Iterator<Item = &super::WindowPlacement<K>> {
@@ -756,6 +875,7 @@ fn card_order<K>(layout: &DisplayLayout<K>) -> impl Iterator<Item = &super::Wind
 impl OverviewManager {
     pub fn new(mtm: MainThreadMarker, sender: EventSender) -> Self {
         let (tx, rx) = channel();
+        let live_sender = sender.clone();
         Self {
             mtm,
             sender,
@@ -767,11 +887,18 @@ impl OverviewManager {
             gates: 0,
             reveal_since: None,
             retired: Vec::new(),
+            discarded: Vec::new(),
             tx,
             rx,
             current_batch: Arc::new(AtomicU64::new(0)),
             batch_started: Instant::now(),
             cache: HashMap::new(),
+            live: Live::new(mtm, live_sender),
+            visible: Vec::new(),
+            max_live: 4,
+            live_margin: 0.0,
+            live_due: None,
+            live_wake: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -788,6 +915,7 @@ impl OverviewManager {
         info: &WindowServerInfo,
         progress: f64,
     ) {
+        let started = Instant::now();
         let old = std::mem::take(&mut self.panels);
         // A build superseding one still waiting: its panels never showed.
         if self.reveal_since.is_none() {
@@ -803,6 +931,7 @@ impl OverviewManager {
         self.gates = 0;
         let primary_h = primary_screen_height(self.mtm);
         let mut jobs: Vec<(Rank, usize, Shot)> = Vec::new();
+        self.visible.clear();
 
         CATransaction::begin();
         CATransaction::setDisableActions(true);
@@ -870,8 +999,13 @@ impl OverviewManager {
                 let key = format!("window {}", card.window_id);
                 let fresh = card.rank.wants_fresh();
                 let index = self.target(vec![card.content.clone()], true, card.best, fresh, &key);
+                if let Some(target) = self.targets.last_mut().and_then(Option::as_mut) {
+                    target.window_id = Some(card.window_id);
+                }
                 jobs.push((card.rank, index, shot));
             }
+            self.visible
+                .push(visible_set(scene.layout, self.live_margin));
             if progress > 0.0 {
                 for layer in panel.layers() {
                     layer.set(progress);
@@ -907,7 +1041,16 @@ impl OverviewManager {
             queue,
         );
         self.reveal_since = Some(Instant::now());
+        let built = started.elapsed();
+        self.sync_live();
+        let synced = started.elapsed();
         self.poll_captures();
+        debug!(
+            "overview: build took {:?} (panels {built:?}, live {:?}, captures {:?})",
+            started.elapsed(),
+            synced.saturating_sub(built),
+            started.elapsed().saturating_sub(synced),
+        );
     }
 
     fn target(
@@ -937,6 +1080,7 @@ impl OverviewManager {
             clear_background: clear,
             gate,
             key: key.to_owned(),
+            window_id: None,
         }));
         self.targets.len() - 1
     }
@@ -944,12 +1088,21 @@ impl OverviewManager {
     /// Whether captures are still in flight or the panels wait to show, so
     /// the main loop has to keep ticking.
     pub fn has_pending_captures(&self) -> bool {
-        self.outstanding > 0 || self.reveal_since.is_some()
+        self.outstanding > 0 || self.reveal_since.is_some() || self.live.is_pending()
     }
 
     /// Applies the captures that landed, and shows the panels once they are
     /// ready. Never blocks.
     pub fn poll_captures(&mut self) {
+        self.free_discarded();
+        if let Some(due) = self.live_due {
+            if Instant::now() >= due {
+                self.sync_live();
+            } else {
+                self.wake_for_live();
+            }
+        }
+        self.live.poll();
         let mut landed = false;
         // Once visible, fresh images cross-fade over the cached ones.
         let visible = self.reveal_since.is_none();
@@ -978,10 +1131,13 @@ impl OverviewManager {
                 warn!("overview: no snapshot for {}", target.key);
                 continue;
             };
-            for layer in &target.layers {
-                set_contents(layer, &image);
-                if target.clear_background {
-                    layer.setBackgroundColor(None);
+            let live = target.window_id.is_some_and(|id| self.live.is_showing(id));
+            if !live {
+                for layer in &target.layers {
+                    set_contents(layer, &image);
+                    if target.clear_background {
+                        layer.setBackgroundColor(None);
+                    }
                 }
             }
             self.cache.insert(target.key, image);
@@ -1169,7 +1325,7 @@ impl OverviewManager {
                     column += 1;
                     focus.map(|f| f.abs_diff(column - 1))
                 };
-                let rank = Rank::of_card(strip.active, window.focused, distance);
+                let rank = Rank::of_card(strip.active, window.focused, window.floating, distance);
                 let mut card =
                     Animated::new(CALayer::new(), window.rest, window.overview, (1.0, 1.0));
                 card.layer.setMasksToBounds(true);
@@ -1207,7 +1363,15 @@ impl OverviewManager {
                     tiled.push(entry);
                 }
             }
-            rows.push(RowLayers { viewport, bar, pan });
+            let label = row_label(strip.virtual_index, &strip.label, scale);
+            container.layer.addSublayer(&label.layer);
+            label.set(0.0);
+            rows.push(RowLayers {
+                viewport,
+                bar,
+                pan,
+                label,
+            });
         }
         // Floating windows go above every row.
         for card in &floating {
@@ -1219,11 +1383,13 @@ impl OverviewManager {
         Some(Panel {
             window,
             window_number,
+            root: flipped,
             backdrop,
             tint,
             container,
             rows,
             cards: tiled,
+            scale,
         })
     }
 
@@ -1238,6 +1404,11 @@ impl OverviewManager {
         for layer in self.layers() {
             layer.layer.removeAllAnimations();
             layer.set(p);
+        }
+        for panel in &self.panels {
+            panel
+                .root
+                .removeAnimationForKey(&NSString::from_str(FADE_KEY));
         }
         CATransaction::commit();
         // Push the frame to the render server now rather than at the end of
@@ -1262,13 +1433,70 @@ impl OverviewManager {
         for layer in self.layers() {
             layer.animate(spring);
         }
+        let closing = spring.to < 0.5;
+        let shown = spring.visible_duration();
+        for panel in &self.panels {
+            panel
+                .root
+                .removeAnimationForKey(&NSString::from_str(FADE_KEY));
+            if closing {
+                fade_out_at_end(&panel.root, shown);
+            }
+        }
         CATransaction::commit();
         generation
     }
 
     /// Applies a scroll or pan of display `index` immediately (the overview
     /// is open; trackpad scroll events arrive at display rate).
+    /// Live preview limits, see the fields.
+    pub fn set_live_limits(&mut self, max: usize, margin: f64) {
+        self.max_live = max;
+        self.live_margin = margin;
+    }
+
+    /// Streams the windows whose cards are (nearly) on screen.
+    fn sync_live(&mut self) {
+        self.live_due = None;
+        let per_display = self
+            .panels
+            .iter()
+            .zip(&self.visible)
+            .map(|(panel, visible)| {
+                panel
+                    .cards
+                    .iter()
+                    .filter(|card| visible.contains(&card.window_id))
+                    .map(|card| {
+                        // Sharp where the eye is, light elsewhere: cards away
+                        // from the focus are small once open.
+                        let scale = if card.rank.wants_fresh() {
+                            panel.scale
+                        } else {
+                            1.0
+                        };
+                        let want = Wanted {
+                            window_id: card.window_id,
+                            layer: card.content.clone(),
+                            scale,
+                            region: card.screen_rect,
+                        };
+                        (card.rank, want)
+                    })
+                    .collect()
+            });
+        self.live.set(share(per_display, self.max_live));
+    }
+
     pub fn apply_offsets<K>(&mut self, index: usize, layout: &DisplayLayout<K>) {
+        let visible = visible_set(layout, self.live_margin);
+        if let Some(old) = self.visible.get_mut(index)
+            && *old != visible
+        {
+            *old = visible;
+            self.live_due = Some(Instant::now() + LIVE_SETTLE);
+            self.wake_for_live();
+        }
         let Some(panel) = self.panels.get_mut(index) else {
             return;
         };
@@ -1314,6 +1542,7 @@ impl OverviewManager {
                     .morph(strip.viewport_rest, strip.viewport_overview, spring);
                 let (rest, open) = pan_frames(layout.size, strip.pan);
                 row.pan.morph(rest, open, spring);
+                row.label.morph(strip.label, strip.label, spring);
             }
             for (card, window) in panel.cards.iter_mut().zip(card_order(layout)) {
                 card.animated.set_ring(window.focused);
@@ -1321,6 +1550,11 @@ impl OverviewManager {
             }
         }
         CATransaction::commit();
+        self.visible = layouts
+            .iter()
+            .map(|layout| visible_set(layout, self.live_margin))
+            .collect();
+        self.sync_live();
         true
     }
 
@@ -1338,9 +1572,19 @@ impl OverviewManager {
     }
 
     pub fn teardown(&mut self) {
+        let started = Instant::now();
+        // Off the screen first; the layers and images they hold are freed on
+        // the next pass (see `free_discarded`), not while the overlay is
+        // still in front of the windows.
         for panel in self.panels.drain(..).chain(self.retired.drain(..)) {
             panel.window.orderOut(None);
+            self.discarded.push(panel);
         }
+        CATransaction::flush();
+        let hidden = started.elapsed();
+        self.live_due = None;
+        _ = self.sender.send(Event::OverviewCaptureLanded);
+        self.live.stop_all();
         // Whatever is still in flight lands in an old batch and is dropped.
         self.batch += 1;
         self.current_batch.store(self.batch, Ordering::Relaxed);
@@ -1348,6 +1592,35 @@ impl OverviewManager {
         self.outstanding = 0;
         self.gates = 0;
         self.reveal_since = None;
+        debug!(
+            "overview: teardown took {:?} (hidden after {hidden:?})",
+            started.elapsed()
+        );
+    }
+
+    /// Wakes the main loop once [`LIVE_SETTLE`] has passed (it otherwise
+    /// sleeps while the overview sits open), on a short-lived thread: one at
+    /// a time, the next poll asks again if scrolling went on.
+    fn wake_for_live(&self) {
+        if self.live_wake.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let (flag, wake) = (self.live_wake.clone(), self.sender.clone());
+        std::thread::spawn(move || {
+            std::thread::sleep(LIVE_SETTLE);
+            flag.store(false, Ordering::Release);
+            _ = wake.send(Event::OverviewCaptureLanded);
+        });
+    }
+
+    /// Frees the panels [`Self::teardown`] took off the screen.
+    fn free_discarded(&mut self) {
+        if self.discarded.is_empty() {
+            return;
+        }
+        let started = Instant::now();
+        self.discarded.clear();
+        debug!("overview: freeing panels took {:?}", started.elapsed());
     }
 }
 
@@ -1384,14 +1657,43 @@ mod tests {
     }
 
     #[test]
+    fn live_previews_are_shared_between_displays() {
+        let laptop = vec![
+            (Rank::Row, "laptop row"),
+            (Rank::Focused, "laptop focused"),
+            (Rank::Neighbour, "laptop neighbour"),
+        ];
+        let monitor = vec![(Rank::Hidden, "monitor hidden"), (Rank::Row, "monitor row")];
+        let picked = share([laptop, monitor].into_iter(), 4);
+        assert_eq!(
+            picked,
+            [
+                "laptop focused",
+                "monitor row",
+                "laptop neighbour",
+                "monitor hidden"
+            ]
+        );
+        assert_eq!(
+            share(std::iter::once(vec![(Rank::Row, 1)]), 0),
+            Vec::<i32>::new()
+        );
+    }
+
+    #[test]
     fn focused_window_and_neighbours_are_captured_first() {
-        assert_eq!(Rank::of_card(true, true, Some(0)), Rank::Focused);
-        assert_eq!(Rank::of_card(true, false, Some(1)), Rank::Neighbour);
-        assert_eq!(Rank::of_card(true, false, Some(2)), Rank::Row);
-        assert_eq!(Rank::of_card(true, false, None), Rank::Row);
+        assert_eq!(Rank::of_card(true, true, false, Some(0)), Rank::Focused);
+        assert_eq!(Rank::of_card(true, false, false, Some(1)), Rank::Neighbour);
+        assert_eq!(Rank::of_card(true, false, false, Some(2)), Rank::Row);
+        assert_eq!(Rank::of_card(true, false, false, None), Rank::Row);
         // A focused floating window has no column but still goes first.
-        assert_eq!(Rank::of_card(true, true, None), Rank::Focused);
-        assert_eq!(Rank::of_card(false, true, Some(0)), Rank::Hidden);
+        assert_eq!(Rank::of_card(true, true, true, None), Rank::Focused);
+        // Other floating windows beat tiled cards further from the focus.
+        assert_eq!(Rank::of_card(true, false, true, None), Rank::Floating);
+        assert!(Rank::Floating < Rank::Row && Rank::Neighbour < Rank::Floating);
+        assert!(!Rank::Floating.wants_fresh());
+        assert_eq!(Rank::of_card(false, true, false, Some(0)), Rank::Hidden);
+        assert_eq!(Rank::of_card(false, false, true, None), Rank::Hidden);
         let mut ranks = [
             Rank::Hidden,
             Rank::Row,

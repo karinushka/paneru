@@ -88,6 +88,21 @@ fingers_count = 3
 overview_fingers = 4
 ```
 
+### Overview live previews
+
+While the overview is open, windows whose cards are on screen show live, streamed content (ScreenCaptureKit); the rest show snapshots. Streams start and stop as cards scroll in and out of view, and all of them stop when the overview closes. macOS shows its screen-recording indicator while they run.
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `live_previews` | Integer | `4` | Most windows streaming at once, the focused window and its neighbours first. `0` turns live previews off (snapshots only, no ScreenCaptureKit, no recording indicator). |
+| `live_margin` | Float | `0.0` | Keep streaming cards this far past the screen edge, as a fraction of the display height, so cards scrolled just out of view don't stop and restart. |
+
+```toml
+[overview]
+live_previews = 4
+live_margin = 0.0
+```
+
 Paging estimates physical distance from the trackpad's reported device size. The centimeter threshold may feel slightly different across devices; adjust `page_distance_cm` to suit your trackpad. Haptics require compatible hardware and may be suppressed by macOS when fingers are no longer touching it.
 
 To move one window at a time with the existing focus animation:

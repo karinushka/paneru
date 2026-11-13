@@ -123,6 +123,8 @@ objc2-core-graphics = "0.3"
 objc2-quartz-core = { version = "0.3", features = [
   "CALayer",
   "CAAnimation",
+  "CABase",
+  "CATextLayer",
   "CAMediaTiming",
   "CAMediaTimingFunction",
   "CATransaction",
@@ -149,6 +151,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ctrlc = { version = "3.5", features = ["termination"] }
 xdg = "3.0"
 mockall = "0.15"
+dispatch2 = "0.3"
+objc2-core-media = "0.3"
+objc2-core-video = { version = "0.3", features = ["CVPixelBufferIOSurface", "objc2-io-surface"] }
+objc2-io-surface = "0.3"
+objc2-screen-capture-kit = "0.3"
 
 [build-dependencies]
 cfg-if = "1.0"

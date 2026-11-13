@@ -9,6 +9,7 @@
 //! Every rect here is display-local and Y-down (origin at the display's
 //! top-left corner), matching CG screen coordinates minus the display origin.
 
+mod live;
 pub mod view;
 
 /// Display-local, Y-down rectangle in points.
@@ -131,7 +132,7 @@ impl Default for Metrics {
         Self {
             top_padding: 48.0,
             bottom_padding: 40.0,
-            label_height: 0.0,
+            label_height: 26.0,
             section_gap: 20.0,
             ribbon_padding: 24.0,
             visible_rows: 2.0,
@@ -214,16 +215,13 @@ pub fn layout_display<K: Clone>(
     // First pass: stack sections top-down from y = 0.
     let section_h = label_h + strip_h + gap;
     let active_row = strips.iter().position(|s| s.active).unwrap_or(0);
-    let content_h = section_h * strips.len() as f64 - gap;
 
-    // Keep the active strip centred when the stack overflows the display.
+    // Every display opens with its active row in the middle, as niri does,
+    // even when that row is the first or last one (`scroll_range` lets the
+    // user scroll the rest into view).
     let usable = height - top - bottom;
-    let scroll = if content_h <= usable {
-        -(usable - content_h) / 2.0
-    } else {
-        let centre = section_h * active_row as f64 + label_h + strip_h / 2.0;
-        (centre - usable / 2.0).clamp(0.0, content_h - usable)
-    };
+    let centre = section_h * active_row as f64 + label_h + strip_h / 2.0;
+    let scroll = centre - usable / 2.0;
 
     let placements = strips
         .iter()
@@ -330,27 +328,67 @@ impl<K> DisplayLayout<K> {
         (min, max)
     }
 
-    /// Pans one strip's tiled columns, clamped so the outermost columns can
-    /// be brought to (but not past) the band edge.
+    /// Pans one strip's tiled columns within the range paneru itself lets a
+    /// strip scroll (its edge rule): a strip wider than the work area keeps
+    /// its first column at or past the left edge and its last at or past the
+    /// right edge; a narrower one stays pinned left. The current offset is
+    /// always allowed, whatever placed it.
     pub fn pan_by(&mut self, row: usize, dx: f64) -> bool {
+        let (lo, hi) = self.pan_range(row);
         let Some(strip) = self.strips.get_mut(row) else {
             return false;
         };
-        let tiled = strip.windows.iter().filter(|w| !w.floating);
-        let (left, right) = tiled.fold((f64::MAX, f64::MIN), |(l, r), w| {
-            (l.min(w.overview.x), r.max(w.overview.x + w.overview.w))
-        });
-        if left > right {
-            return false;
-        }
-        let band = &strip.ribbon;
-        let min = (band.x + band.w - right).min(0.0);
-        let max = (band.x - left).max(0.0);
-        let next = (strip.pan + dx).clamp(min, max);
+        let next = (strip.pan + dx).clamp(lo, hi);
         let moved = (next - strip.pan).abs() > f64::EPSILON;
         strip.pan = next;
         moved
     }
+
+    /// The `(min, max)` pan of one row, in overview points.
+    pub fn pan_range(&self, row: usize) -> (f64, f64) {
+        let Some(strip) = self.strips.get(row) else {
+            return (0.0, 0.0);
+        };
+        let tiled = strip.windows.iter().filter(|w| !w.floating);
+        let (left, right) = tiled.fold((f64::MAX, f64::MIN), |(l, r), w| {
+            (l.min(w.layout.x), r.max(w.layout.x + w.layout.w))
+        });
+        if left > right {
+            return (0.0, 0.0);
+        }
+        // In display points, then scaled: pans are overview points.
+        let (area_left, area_right) = self.work_area;
+        let pinned_left = area_left - left;
+        let lo = if right - left > area_right - area_left {
+            area_right - right
+        } else {
+            pinned_left
+        };
+        (lo.min(0.0) * self.scale, pinned_left.max(0.0) * self.scale)
+    }
+
+    /// A row's pan in display points: how far committing it moves the strip.
+    pub fn pan_points(&self, row: usize) -> f64 {
+        self.strips
+            .get(row)
+            .map_or(0.0, |strip| strip.pan / self.scale.max(f64::EPSILON))
+    }
+}
+
+/// The row whose strip sits nearest the middle of the screen at the
+/// current scroll: the one the overview closes into.
+pub fn middle_row<K>(layout: &DisplayLayout<K>) -> Option<usize> {
+    let (top, bottom) = layout.margins;
+    let middle = top + (layout.size.1 - top - bottom) / 2.0 + layout.scroll;
+    let distance = |s: &StripPlacement<K>| {
+        (s.viewport_overview.y + s.viewport_overview.h / 2.0 - middle).abs()
+    };
+    layout
+        .strips
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| distance(a).total_cmp(&distance(b)))
+        .map(|(row, _)| row)
 }
 
 /// Whether two layouts put everything in the same place (within half a
@@ -411,6 +449,29 @@ pub fn hit_test<K: Clone>(layout: &DisplayLayout<K>, x: f64, y: f64) -> Hit<K> {
     Hit::Background
 }
 
+/// Windows whose card is on screen (or within `margin` of it, so cards just
+/// scrolled away don't stop and restart) once the overview is fully open,
+/// given the current scroll and pans.
+pub fn visible_windows<K>(layout: &DisplayLayout<K>, margin: f64) -> Vec<i32> {
+    let screen = Rect::new(
+        -margin,
+        layout.scroll - margin,
+        layout.size.0 + 2.0 * margin,
+        layout.size.1 + 2.0 * margin,
+    );
+    layout
+        .strips
+        .iter()
+        .flat_map(|strip| {
+            strip.windows.iter().filter(move |w| {
+                let pan = if w.floating { 0.0 } else { strip.pan };
+                w.overview.offset(pan, 0.0).intersects(&screen)
+            })
+        })
+        .map(|w| w.window_id)
+        .collect()
+}
+
 /// Re-anchors a layout on another row so closing into it lands its windows
 /// where paneru will really put them while the other rows slide off.
 ///
@@ -435,26 +496,31 @@ pub fn reanchor<K: Clone + PartialEq>(
     };
     let height = layout.size.1;
     let work_area = layout.work_area;
+    let scale = layout.scale.max(f64::EPSILON);
     for (row, strip) in layout.strips.iter_mut().enumerate() {
         let row_offset = (row as f64 - anchor as f64) * height;
         let was_active = strip.active;
         strip.active = row == anchor;
         strip.viewport_rest = Rect::new(0.0, row_offset, layout.size.0, height);
+        // What the user panned to is where the strip is left.
+        let pan = strip.pan / scale;
         let shift = if strip.active {
             focus
                 .and_then(|key| strip.windows.iter().find(|w| !w.floating && &w.key == key))
-                .map_or(0.0, |w| exposing_shift(&w.layout, work_area))
+                .map_or(0.0, |w| {
+                    exposing_shift(&w.layout.offset(pan, 0.0), work_area)
+                })
         } else {
             0.0
         };
         // Staying on the row that was open with nothing to scroll: the
         // windows go back exactly where they were taken from.
-        let unmoved = was_active && strip.active && shift.abs() < 0.5;
+        let unmoved = was_active && strip.active && (shift + pan).abs() < 0.5;
         for window in &mut strip.windows {
             if unmoved || (window.floating && strip.active) {
                 continue;
             }
-            let dx = if window.floating { 0.0 } else { shift };
+            let dx = if window.floating { 0.0 } else { pan + shift };
             window.rest = window.layout.offset(dx, row_offset);
         }
     }
@@ -489,6 +555,10 @@ pub struct Spring {
 
 /// Seconds for the spring to get to within ~0.1% of its target.
 pub const SPRING_RESPONSE: f64 = 0.3;
+
+/// Share of a transition's travel left when it ends; see
+/// [`Spring::visible_duration`].
+pub const VISIBLE_REMAINDER: f64 = 0.005;
 
 impl Spring {
     pub fn new(from: f64, to: f64, velocity: f64, response: f64) -> Self {
@@ -529,6 +599,23 @@ impl Spring {
         } else {
             self.velocity / span
         }
+    }
+
+    /// How long the transition is shown for: until what's left of the travel
+    /// is too small to see ([`VISIBLE_REMAINDER`]), well before the spring
+    /// settles in full. The last frame jumps to the target, which a close
+    /// never shows: the overview is gone by then.
+    pub fn visible_duration(&self) -> f64 {
+        let left = VISIBLE_REMAINDER * (self.to - self.from).abs().max(f64::EPSILON);
+        let mut t = 0.0;
+        while t < 3.0 {
+            if (self.value(t) - self.to).abs() < left {
+                break;
+            }
+            t += 1.0 / 240.0;
+        }
+        // A zero duration means Core Animation's default (0.25 s).
+        t.max(1.0 / 120.0)
     }
 
     /// Time until both displacement and velocity are negligible.
@@ -630,9 +717,9 @@ mod tests {
         assert!(a.viewport_overview.y < b.viewport_overview.y);
         assert_eq!(a.viewport_overview.w, b.viewport_overview.w);
         assert!((a.viewport_overview.w - SIZE.0 * layout.scale).abs() < 1e-9);
-        // Everything fits on screen.
+        // The active row (the second) opens fully on screen.
+        assert!(b.label.y >= 0.0);
         assert!(b.viewport_overview.y + b.viewport_overview.h <= SIZE.1);
-        assert!(a.label.y >= 0.0);
     }
 
     #[test]
@@ -672,10 +759,54 @@ mod tests {
             })
             .collect();
         let layout = layout_display(SIZE, &many, 1.0, &Metrics::default());
-        let last = layout.strips.last().unwrap();
-        assert!(last.viewport_overview.y >= 0.0);
-        assert!(last.viewport_overview.y + last.viewport_overview.h <= SIZE.1);
+        let (top, bottom) = layout.margins;
+        let middle = top + (SIZE.1 - top - bottom) / 2.0;
+        assert!((centre_y(&layout, 5) - middle).abs() < 1e-6);
         assert!(layout.strips[0].viewport_overview.y < 0.0);
+    }
+
+    #[test]
+    fn the_row_in_the_middle_is_the_one_closed_into() {
+        let rows: Vec<_> = (0..3)
+            .map(|i| StripInput::<u32> {
+                virtual_index: i,
+                active: i == 1,
+                windows: vec![],
+            })
+            .collect();
+        let mut layout = layout_display(SIZE, &rows, 1.0, &Metrics::default());
+        assert_eq!(middle_row(&layout), Some(1));
+        let step = layout.strips[2].viewport_overview.y - layout.strips[1].viewport_overview.y;
+        layout.scroll_by(step);
+        assert_eq!(middle_row(&layout), Some(2));
+        layout.scroll_by(-2.0 * step);
+        assert_eq!(middle_row(&layout), Some(0));
+        // Short of half a row, it stays.
+        layout.scroll_by(0.4 * step);
+        assert_eq!(middle_row(&layout), Some(0));
+    }
+
+    #[test]
+    fn active_row_opens_in_the_middle_even_first_or_last() {
+        let metrics = Metrics::default();
+        for count in [1, 2, 6] {
+            for active in [0, count - 1] {
+                let rows: Vec<_> = (0..count)
+                    .map(|i| StripInput::<u32> {
+                        virtual_index: i,
+                        active: i == active,
+                        windows: vec![],
+                    })
+                    .collect();
+                let layout = layout_display(SIZE, &rows, 1.0, &metrics);
+                let (top, bottom) = layout.margins;
+                let middle = top + (SIZE.1 - top - bottom) / 2.0;
+                assert!(
+                    (centre_y(&layout, active as usize) - middle).abs() < 1e-6,
+                    "{count} rows, active {active}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -739,13 +870,17 @@ mod tests {
         let mut rows = strips();
         rows[1].windows[1].layout_frame.x = 3000.0;
         let mut layout = layout_display(SIZE, &rows, 1.0, &Metrics::default());
-        // Row 1 has a column far off to the right: panning left is allowed,
-        // panning right isn't (nothing beyond the left edge).
+        // Row 1 has a column far off to the right: panning left is allowed
+        // until that column's right edge meets the screen's (paneru's edge
+        // rule), panning right isn't (nothing beyond the left edge).
         assert!(layout.pan_by(1, -10_000.0));
         let strip = &layout.strips[1];
         let off = strip.windows[1].overview;
         let pan = strip.pan;
-        assert!((off.x + off.w + pan - (strip.ribbon.x + strip.ribbon.w)).abs() < 1e-6);
+        let far = strip.windows[1].layout;
+        assert!((pan - (SIZE.0 - (far.x + far.w)) * layout.scale).abs() < 1e-6);
+        assert!((layout.pan_points(1) - (SIZE.0 - (far.x + far.w))).abs() < 1e-6);
+        assert!(!layout.pan_by(1, -1.0));
         assert!(!layout.pan_by(1, 0.0));
         let (x, y) = (off.x + pan + 5.0, off.y + 5.0);
         assert_eq!(
@@ -755,10 +890,10 @@ mod tests {
                 virtual_index: 1
             }
         );
-        // Two rows fit, but the stack still scrolls far enough to bring the
-        // last row to the middle, and no further.
-        assert!(layout.scroll_by(500.0));
+        // The last row opens in the middle, which is as far down as the
+        // stack scrolls; it still scrolls up to the first row.
         assert!(!layout.scroll_by(500.0));
+        assert!(layout.scroll_by(-500.0));
     }
 
     fn centre_y(layout: &DisplayLayout<u32>, row: usize) -> f64 {
@@ -784,6 +919,35 @@ mod tests {
                 virtual_index: 1
             }
         );
+    }
+
+    #[test]
+    fn visible_windows_follow_scroll_and_pan() {
+        let many: Vec<_> = (0..8)
+            .map(|i| StripInput::<u32> {
+                virtual_index: i,
+                active: i == 0,
+                windows: vec![window(i, 0.0, None), window(100 + i, 6000.0, None)],
+            })
+            .collect();
+        let mut layout = layout_display(SIZE, &many, 1.0, &Metrics::default());
+        layout.scroll_by(-10_000.0);
+        let top = visible_windows(&layout, 0.0);
+        assert!(top.contains(&0));
+        assert!(!top.contains(&7), "the last row is off screen: {top:?}");
+        // Far-right columns only show once their row is panned to them.
+        assert!(!top.contains(&100));
+        assert!(layout.pan_by(0, -10_000.0));
+        assert!(visible_windows(&layout, 0.0).contains(&100));
+        layout.scroll_by(10_000.0);
+        let bottom = visible_windows(&layout, 0.0);
+        assert!(bottom.contains(&7));
+        assert!(
+            !bottom.contains(&0),
+            "the first row is off screen: {bottom:?}"
+        );
+        // A margin keeps cards just past the edge.
+        assert!(visible_windows(&layout, 10_000.0).contains(&0));
     }
 
     #[test]
@@ -895,6 +1059,17 @@ mod tests {
         assert!((spring.value(settle) - 1.0).abs() < 1e-3);
         // Critically damped: never overshoots from rest.
         assert!((0..200).all(|i| spring.value(f64::from(i) / 200.0) <= 1.0 + 1e-9));
+    }
+
+    #[test]
+    fn transitions_end_once_the_rest_is_too_small_to_see() {
+        let spring = Spring::new(1.0, 0.0, 0.0, SPRING_RESPONSE);
+        let shown = spring.visible_duration();
+        assert!(shown < spring.settling_duration() - 0.05, "{shown}");
+        assert!(spring.value(shown).abs() < VISIBLE_REMAINDER);
+        assert!(spring.value(shown - 0.02).abs() >= VISIBLE_REMAINDER);
+        // A transition going nowhere still gets a real duration.
+        assert!(Spring::new(0.0, 0.0, 0.0, SPRING_RESPONSE).visible_duration() > 0.0);
     }
 
     #[test]

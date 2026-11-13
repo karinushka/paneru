@@ -1762,3 +1762,127 @@ fn test_a_window_keeps_its_share_of_its_own_display() {
         })
         .run(commands);
 }
+
+/// Unplugs `EXT_DISPLAY_ID`, which holds window 100, after focusing window 100
+/// (`focus_removed` is true) or window 0 on the surviving display. macOS moves
+/// window 100 to the surviving display, where it becomes a second row.
+fn remove_display_holding_window_100(
+    focus_removed: bool,
+    verify: impl FnMut(&mut World, MockState) + 'static,
+) {
+    let focused = if focus_removed { 100 } else { 0 };
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::WindowFocused { window_id: focused },
+        Event::DisplayRemoved {
+            display_id: EXT_DISPLAY_ID,
+        },
+    ];
+
+    let mut harness = TestHarness::new()
+        .with_display(
+            EXT_DISPLAY_ID,
+            IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+            vec![EXT_WORKSPACE_ID],
+        )
+        .with_windows(2)
+        .with_workspace_window(100, EXT_WORKSPACE_ID, |_| {});
+    harness
+        .app
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            500,
+        )));
+
+    harness
+        .on_iteration(0, move |_world, state| {
+            if focus_removed {
+                state.activate_display(EXT_DISPLAY_ID);
+            }
+            state.set_focused_window(focused);
+        })
+        .on_iteration(1, move |world, state| {
+            crate::assert_focused!(world, focused);
+            state.remove_display(EXT_DISPLAY_ID);
+            state.update_window(100, |w| w.workspace_id = TEST_WORKSPACE_ID);
+        })
+        .on_iteration(2, verify)
+        .run(commands);
+}
+
+/// Each row on the surviving display, in `virtual_index` order: its windows,
+/// and whether it is active, selected, and parked.
+fn surviving_rows(world: &mut World) -> Vec<(Vec<WinID>, bool, bool, bool)> {
+    use crate::ecs::workspace::PreviousStripPosition;
+    use crate::ecs::{ActiveWorkspaceMarker, SelectedVirtualMarker};
+
+    let ids: std::collections::HashMap<Entity, WinID> = world
+        .query::<(Entity, &Window)>()
+        .iter(world)
+        .map(|(entity, window)| (entity, window.id()))
+        .collect();
+    let mut rows: Vec<_> = world
+        .query::<(
+            &LayoutStrip,
+            Has<ActiveWorkspaceMarker>,
+            Has<SelectedVirtualMarker>,
+            Has<PreviousStripPosition>,
+        )>()
+        .iter(world)
+        .filter(|(strip, ..)| strip.id() == TEST_WORKSPACE_ID)
+        .map(|(strip, active, selected, parked)| {
+            (
+                strip.virtual_index,
+                strip.all_windows().iter().map(|e| ids[e]).collect(),
+                active,
+                selected,
+                parked,
+            )
+        })
+        .collect();
+    rows.sort_by_key(|(index, ..)| *index);
+    rows.into_iter()
+        .map(|(_, windows, active, selected, parked)| (windows, active, selected, parked))
+        .collect()
+}
+
+#[test]
+fn test_remove_focused_display_shows_the_focused_window() {
+    remove_display_holding_window_100(true, |world, state| {
+        crate::assert_focused!(world, 100);
+        let focused = state.create_window(100).frame();
+        for id in [0, 1] {
+            let frame = state.create_window(id).frame();
+            assert!(
+                frame.intersect(focused).is_empty(),
+                "window {id} at {frame:?} overlaps the focused window at {focused:?}"
+            );
+        }
+        assert_eq!(
+            focused,
+            IRect::new(
+                0,
+                TEST_MENUBAR_HEIGHT,
+                TEST_WINDOW_WIDTH,
+                TEST_DISPLAY_HEIGHT
+            ),
+            "the focused window takes the first slot of the shown row"
+        );
+    });
+}
+
+#[test]
+fn test_remove_unfocused_display_keeps_the_shown_row() {
+    remove_display_holding_window_100(false, |world, state| {
+        crate::assert_focused!(world, 0);
+        assert_eq!(
+            surviving_rows(world),
+            vec![
+                (vec![0, 1], true, true, false),
+                (vec![100], false, false, true)
+            ],
+        );
+        let parked_y = TEST_DISPLAY_HEIGHT - PARKED_STRIP_SLIVER;
+        assert_eq!(state.create_window(100).frame().min.y, parked_y);
+        assert!(state.create_window(0).frame().min.y < parked_y);
+    });
+}

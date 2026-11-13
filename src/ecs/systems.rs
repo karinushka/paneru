@@ -1340,19 +1340,24 @@ pub(super) fn commit_window_size(
 
 /// Restores user-visible window state before Paneru shuts down: clears any
 /// brightness dim, removes the dim/border overlay window, and centers every
-/// managed window on its own display: the one whose strip holds it, else the
+/// tiled window on its own display: the one whose strip holds it, else the
 /// one its frame center falls in. A hidden workspace's windows are parked off
-/// screen, where their centers lie in another display or in none.
+/// screen, where their centers lie in another display or in none. Hidden apps'
+/// windows still hold tiled frames, so they are centered too. Floating and
+/// minimized windows stay where they are.
 pub(crate) fn cleanup_on_exit(
     mut exit_events: MessageReader<AppExit>,
-    mut all_windows: Query<(Entity, &mut Window)>,
+    mut all_windows: Query<(Entity, &mut Window, Option<&Unmanaged>)>,
     strips: Query<(&LayoutStrip, &ChildOf)>,
     displays: Query<&Display>,
     window_manager: Res<WindowManager>,
     mut overlay_mgr: Option<NonSendMut<OverlayManager>>,
 ) {
     for _ in exit_events.read() {
-        let ids = all_windows.iter().map(|(_, w)| w.id()).collect::<Vec<_>>();
+        let ids = all_windows
+            .iter()
+            .map(|(_, w, _)| w.id())
+            .collect::<Vec<_>>();
         info!("exit cleanup: restoring {} window(s)", ids.len());
         window_manager.dim_windows(&ids, 0.0);
 
@@ -1365,7 +1370,10 @@ pub(crate) fn cleanup_on_exit(
             return;
         }
 
-        for (entity, mut window) in &mut all_windows {
+        for (entity, mut window, unmanaged) in &mut all_windows {
+            if matches!(unmanaged, Some(Unmanaged::Floating | Unmanaged::Minimized)) {
+                continue;
+            }
             let frame = window.frame();
             let center = frame.center();
             let bounds = strips

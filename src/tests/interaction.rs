@@ -4791,6 +4791,205 @@ fn observer_registration_recovery(all_failed: bool) {
     );
 }
 
+/// Exit cleanup must leave a floating window exactly where the user put it,
+/// while a tiled window parked off-screen still comes back onto a display.
+///
+/// Driven directly at the system: sending `AppExit` through the full schedule
+/// also runs the state-saving exit systems, which write the real user state
+/// file.
+#[test]
+fn test_exit_cleanup_leaves_floating_windows_in_place() {
+    use bevy::app::AppExit;
+    use bevy::ecs::system::RunSystemOnce as _;
+
+    const FLOAT_PID: Pid = TEST_PROCESS_ID + 1;
+    const TILED: WinID = 0;
+    const FLOATING: WinID = 1;
+
+    let mut params = WindowParams::new(".*", Some("float.app".to_string()));
+    params.floating = Some(true);
+    let config: Config = (MainOptions::default(), vec![params]).into();
+
+    let mut harness =
+        TestHarness::new()
+            .with_config(config)
+            .with_app(FLOAT_PID, "float.app", "FloatApp", |_| {});
+    let state = harness.mock_state.clone();
+    let tiled = state.spawn_window(
+        TEST_PROCESS_ID,
+        TEST_WORKSPACE_ID,
+        TILED,
+        IRect::new(0, 0, TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT),
+    );
+    let floating = state.spawn_window(
+        FLOAT_PID,
+        TEST_WORKSPACE_ID,
+        FLOATING,
+        IRect::new(37, 41, 37 + 300, 41 + 200),
+    );
+    harness
+        .world()
+        .trigger(SpawnWindowTrigger(vec![tiled, floating]));
+    harness.advance(Duration::from_secs(1));
+
+    let world = harness.world();
+    let floating_entity = find_window_entity(FLOATING, world);
+    assert!(
+        matches!(
+            world.entity(floating_entity).get::<Unmanaged>(),
+            Some(Unmanaged::Floating)
+        ),
+        "the floating rule should apply"
+    );
+
+    // A scrolled strip parks tiled windows past the display edge.
+    state.os_move_window(TILED, Origin::new(TEST_DISPLAY_WIDTH + 500, 100));
+
+    world.write_message(AppExit::Success);
+    world
+        .run_system_once(crate::ecs::systems::cleanup_on_exit)
+        .expect("running cleanup_on_exit");
+
+    let frame_of = |world: &mut World, id: WinID| {
+        world
+            .query::<&Window>()
+            .iter(world)
+            .find(|window| window.id() == id)
+            .expect("window exists")
+            .frame()
+    };
+
+    assert_eq!(
+        frame_of(world, FLOATING),
+        IRect::new(37, 41, 337, 241),
+        "exit cleanup must not move or resize a floating window"
+    );
+
+    let display = IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT);
+    let tiled_frame = frame_of(world, TILED);
+    assert!(
+        display.contains(tiled_frame.min) && display.contains(tiled_frame.max),
+        "exit cleanup must bring a tiled window fully onto a display, got {tiled_frame:?}"
+    );
+}
+
+/// Exit cleanup must leave a minimized window's frame alone, so it comes back
+/// where it was when the user restores it.
+#[test]
+fn test_exit_cleanup_leaves_minimized_windows_in_place() {
+    use bevy::app::AppExit;
+    use bevy::ecs::system::RunSystemOnce as _;
+
+    const MINIMIZED: WinID = 1;
+
+    let mut harness = TestHarness::new().with_windows(2);
+    harness.advance(Duration::from_secs(1));
+    let state = harness.mock_state.clone();
+    state.os_minimize_window(MINIMIZED, true);
+    harness.advance(Duration::from_secs(1));
+
+    let world = harness.world();
+    let entity = find_window_entity(MINIMIZED, world);
+    assert!(
+        matches!(
+            world.entity(entity).get::<Unmanaged>(),
+            Some(Unmanaged::Minimized)
+        ),
+        "the window should be minimized"
+    );
+    let before = world
+        .entity(entity)
+        .get::<Window>()
+        .expect("window")
+        .frame();
+
+    world.write_message(AppExit::Success);
+    world
+        .run_system_once(crate::ecs::systems::cleanup_on_exit)
+        .expect("running cleanup_on_exit");
+
+    let after = world
+        .entity(entity)
+        .get::<Window>()
+        .expect("window")
+        .frame();
+    assert_eq!(
+        after, before,
+        "exit cleanup must not move or resize a minimized window"
+    );
+}
+
+/// Hiding an app marks its tiled windows `Unmanaged::Hidden` but leaves their
+/// tiled frames, some of them parked at the display edge. Exit cleanup must
+/// still center them, or they come back as slivers when the user unhides the
+/// app after Paneru has quit.
+#[test]
+fn test_exit_cleanup_centers_hidden_app_windows() {
+    use bevy::app::AppExit;
+    use bevy::ecs::system::RunSystemOnce as _;
+
+    const WINDOWS: i32 = 5;
+
+    let commands = vec![
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::ApplicationHidden {
+            pid: TEST_PROCESS_ID,
+        },
+    ];
+
+    TestHarness::new()
+        .with_windows(WINDOWS)
+        .on_iteration(1, |world, _state| {
+            let mut query = world.query::<(&Window, Option<&Unmanaged>)>();
+            let off_screen = query
+                .iter(world)
+                .inspect(|(window, unmanaged)| {
+                    assert!(
+                        matches!(unmanaged, Some(Unmanaged::Hidden)),
+                        "window {} should be hidden with its app",
+                        window.id()
+                    );
+                })
+                .filter(|(window, _)| window.frame().max.x > TEST_DISPLAY_WIDTH)
+                .count();
+            assert!(
+                off_screen > 0,
+                "some windows should reach past the display edge"
+            );
+
+            world.write_message(AppExit::Success);
+            world
+                .run_system_once(crate::ecs::systems::cleanup_on_exit)
+                .expect("running cleanup_on_exit");
+
+            let mut query = world.query::<&Window>();
+            let mut frames = query
+                .iter(world)
+                .map(|window| (window.id(), window.frame()))
+                .collect::<Vec<_>>();
+            frames.sort_by_key(|(id, _)| *id);
+            let centered = frames
+                .iter()
+                .map(|(id, frame)| {
+                    let origin = Origin::new(
+                        (TEST_DISPLAY_WIDTH - frame.width()) / 2,
+                        TEST_MENUBAR_HEIGHT
+                            + (TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT - frame.height()) / 2,
+                    );
+                    (*id, IRect::from_corners(origin, origin + frame.size()))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(frames.len(), WINDOWS as usize);
+            assert_eq!(
+                frames, centered,
+                "exit cleanup must center every hidden window"
+            );
+        })
+        .run(commands);
+}
+
 /// Quitting while the strip is still animating must not let the animation
 /// write over the frames exit cleanup restores in the same frame.
 #[test]

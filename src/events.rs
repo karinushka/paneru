@@ -168,8 +168,12 @@ pub enum Event {
     /// Scroll over an open overview panel (point in absolute CG coordinates,
     /// deltas in points, natural direction already applied).
     OverviewScroll { point: CGPoint, dx: f64, dy: f64 },
-    /// Escape/Return pressed while an overview panel had key focus.
+    /// Escape pressed while an overview panel had key focus: close back to
+    /// how things were.
     OverviewDismiss,
+    /// Return pressed while an overview panel had key focus: close into
+    /// what the overview shows.
+    OverviewAccept,
     /// The overview transition with this generation finished animating.
     OverviewTransitionDone { generation: u64 },
     /// Continuous overview gesture progress: vertical finger travel in

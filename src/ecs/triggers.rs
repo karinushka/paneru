@@ -6,6 +6,7 @@ use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Added, Has, With, Without};
 use bevy::ecs::system::{Commands, NonSendMut, ParamSet, Populated, Query, Res, ResMut, Single};
+use bevy::ecs::world::EntityWorldMut;
 use bevy::math::IRect;
 use bevy::time::{Time, Timer, TimerMode};
 use notify::event::{DataChange, MetadataKind, ModifyKind};
@@ -860,6 +861,19 @@ pub(super) fn window_managed_trigger(
             .and_then(|(_, _, parent)| apps.get(parent).ok())
     {
         let properties = WindowProperties::new(app, window, &ctx.config);
+
+        // A window that opened floating never got the padding that
+        // `apply_window_defaults` gives a tiled one.
+        let vertical = properties.vertical_padding().clamp(0, 50);
+        let horizontal = properties.horizontal_padding().clamp(0, 50);
+        if let Ok(mut entity_commands) = ctx.commands.get_entity(entity) {
+            entity_commands.queue_silenced(move |mut entity: EntityWorldMut| {
+                if let Some(mut window) = entity.get_mut::<Window>() {
+                    window.set_padding(WindowPadding::Vertical(vertical));
+                    window.set_padding(WindowPadding::Horizontal(horizontal));
+                }
+            });
+        }
 
         // Re-managing an existing window (e.g. after un-floating it) retains
         // its width under the dynamic rule. Fixed rules keep their old behavior.

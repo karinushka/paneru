@@ -718,6 +718,12 @@ fn test_query_state_reports_a_stack_shown_as_tabs() {
         vec![false, true, true],
         "every window of the stack, and only those, is shown as a tab"
     );
+    let set = extract_window_set(world).expect("window set extraction");
+    assert_eq!(
+        set.current().expect("active workspace").columns[1].selected,
+        1,
+        "window set selected index tracks the active tab of a tabbed stack"
+    );
 
     let mut strip = strips.single_mut(world).expect("active workspace");
     assert_eq!(strip.toggle_tabbed_display(last), Some(false));

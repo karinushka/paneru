@@ -592,7 +592,13 @@ fn focus_from_fullscreen(
             .find_map(|(strip, _, _)| (strip.id() == fullscreen.workspace_id).then_some(strip));
     }
 
-    if let Some(entity) = strip.and_then(|strip| strip.last().ok().and_then(|col| col.top())) {
+    if let Some(entity) = strip.and_then(|strip| {
+        strip
+            .last()
+            .ok()
+            .and_then(|col| col.top())
+            .map(|entity| strip.active_tab(entity).unwrap_or(entity))
+    }) {
         debug!("fullscreen: swap raising {entity}");
         focus_with_verification(
             entity,

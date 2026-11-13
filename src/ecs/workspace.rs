@@ -1502,6 +1502,7 @@ pub(crate) fn show_active_workspace(
         if let Some(focus) = *focus
             && strip.contains(focus)
         {
+            let focus = strip.active_tab(focus).unwrap_or(focus);
             spawn_restore_focus_guard(focus, &mut commands);
 
             commands.focus_entity(focus, false);

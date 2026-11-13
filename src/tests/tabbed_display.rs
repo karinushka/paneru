@@ -812,8 +812,9 @@ fn test_demoting_tabbed_stack_to_native_tabs_clears_tabbed_display() {
     );
 }
 
-/// `Event::TabIndicatorClicked` focuses the clicked window and makes it the
-/// group's active tab.
+/// `Event::TabIndicatorClicked` focuses the clicked window, makes it the
+/// group's active tab, and leaves the mouse cursor at the indicator instead of
+/// warping it to the window center.
 #[test]
 fn test_tab_indicator_click_focuses_and_activates_the_clicked_tab() {
     let mut commands = vec![Event::MenuOpened { window_id: 0 }];
@@ -821,12 +822,20 @@ fn test_tab_indicator_click_focuses_and_activates_the_clicked_tab() {
     commands.push(Event::Command {
         command: Command::Window(Operation::ToggleTabbedDisplay),
     });
+    let before_click = commands.len() - 1;
     // Window 2 is active; click window 0 so ordering can't explain the result.
     commands.push(Event::TabIndicatorClicked { window_id: 0 });
+    let after_click = commands.len() - 1;
 
+    let indicator_cursor = crate::manager::Origin::new(5, 100);
     TestHarness::new()
         .with_windows(4)
-        .on_iteration(commands.len() - 1, |world, _state| {
+        .on_iteration(before_click, move |world, _state| {
+            world
+                .resource::<crate::manager::WindowManager>()
+                .warp_mouse(indicator_cursor);
+        })
+        .on_iteration(after_click, move |world, state| {
             assert_focused!(world, 0);
             assert!(
                 is_tabbed_display(world, 0),
@@ -841,6 +850,11 @@ fn test_tab_indicator_click_focuses_and_activates_the_clicked_tab() {
                 window_x(world, 2) + TEST_WINDOW_WIDTH > TEST_DISPLAY_WIDTH,
                 "the previously-active tab must be parked off past the \
                  display's right edge, not left on-screen"
+            );
+            assert_eq!(
+                state.cursor_position(),
+                indicator_cursor,
+                "clicking the tab indicator must not warp the pointer to the window center"
             );
         })
         .run(commands);

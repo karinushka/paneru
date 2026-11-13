@@ -132,10 +132,16 @@ pub fn tab_segments(indicator: IRect, tab_count: usize, layout: &TabIndicatorLay
     }
 }
 
+fn rect_contains(rect: IRect, point: Origin) -> bool {
+    (rect.min.x..rect.max.x).contains(&point.x) && (rect.min.y..rect.max.y).contains(&point.y)
+}
+
 /// Which segment (if any) a click at `point` lands on. `point` and
 /// `segments` must be in the same coordinate space.
 pub fn hit_test(point: Origin, segments: &[IRect]) -> Option<usize> {
-    segments.iter().position(|segment| segment.contains(point))
+    segments
+        .iter()
+        .position(|segment| rect_contains(*segment, point))
 }
 
 /// Whether `column_rect` is visibly inside `viewport`, so the indicator is
@@ -260,22 +266,29 @@ mod tests {
 
     #[test]
     fn hit_test_boundary_lands_on_exactly_one_segment() {
-        // `IRect::contains` is max-exclusive: a shared edge hits exactly one
-        // segment.
+        // Half-open containment is max-exclusive: even with zero gap between
+        // segments, a shared edge hits only the next segment.
         let indicator = IRect::new(0, 0, 6, 90);
-        let segments = tab_segments(indicator, 3, &layout(TabIndicatorPosition::Left));
+        let zero_gap_layout = TabIndicatorLayout {
+            segment_gap: 0,
+            ..layout(TabIndicatorPosition::Left)
+        };
+        let segments = tab_segments(indicator, 3, &zero_gap_layout);
         let boundary_y = segments[0].max.y;
+        assert_eq!(boundary_y, segments[1].min.y);
 
         let hits: Vec<_> = segments
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.contains(Origin::new(3, boundary_y)))
+            .filter(|(_, s)| rect_contains(**s, Origin::new(3, boundary_y)))
             .map(|(i, _)| i)
             .collect();
-        assert!(
-            hits.len() <= 1,
-            "a boundary point must land on at most one segment"
+        assert_eq!(
+            hits,
+            vec![1],
+            "a shared boundary point must land on exactly the second segment"
         );
+        assert_eq!(hit_test(Origin::new(3, boundary_y), &segments), Some(1));
     }
 
     #[test]

@@ -740,19 +740,34 @@ fn update_tabbed_active_on_focus(
 }
 
 /// Focuses the tab clicked in the tab indicator
-/// (`Event::TabIndicatorClicked`), like a keyboard tab switch.
+/// (`Event::TabIndicatorClicked`), keeping the pointer in place like a normal
+/// window click.
 fn handle_tab_indicator_click(
     mut messages: MessageReader<Event>,
     windows: Windows,
+    stale_markers: super::mouse::StaleClickMarkers,
     mut commands: Commands,
 ) {
     for event in messages.read() {
         let Event::TabIndicatorClicked { window_id } = event else {
             continue;
         };
-        if let Some((_, entity)) = windows.find(*window_id) {
-            commands.focus_entity(entity, true);
+        let Some((_, entity)) = windows.find(*window_id) else {
+            continue;
+        };
+        for marker in &stale_markers {
+            if let Ok(mut entity_commands) = commands.get_entity(marker) {
+                entity_commands.try_despawn();
+            }
         }
+        if windows
+            .focused()
+            .is_none_or(|(_, focused)| focused != entity)
+        {
+            let grace = Timeout::new(Duration::from_secs(1), None, &mut commands);
+            commands.spawn((ClickFocusMarker(entity), grace));
+        }
+        commands.focus_entity(entity, true);
     }
 }
 

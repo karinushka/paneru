@@ -217,7 +217,7 @@ fn mouse_moved_trigger(
 // An app can send the focus notification after the user releases the button.
 const CLICK_FOCUS_GRACE: Duration = Duration::from_secs(1);
 
-type StaleClickMarkers<'w, 's> =
+pub(super) type StaleClickMarkers<'w, 's> =
     Query<'w, 's, Entity, Or<(With<MouseHeldMarker>, With<ClickFocusMarker>)>>;
 
 /// Handles mouse down events.

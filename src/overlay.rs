@@ -735,6 +735,10 @@ impl TabIndicatorManager {
         active_color: (f64, f64, f64),
         inactive_color: (f64, f64, f64),
     ) {
+        if groups.is_empty() {
+            self.remove_all();
+            return;
+        }
         let screen_h = primary_screen_height(self.mtm);
         let mut seen = HashSet::new();
 

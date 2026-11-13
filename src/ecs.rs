@@ -7,7 +7,7 @@ use bevy::app::{First, Last, PostUpdate, PreUpdate, Startup};
 use bevy::ecs::change_detection::DetectChanges;
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::lifecycle::RemovedComponents;
-use bevy::ecs::query::{Added, Changed, Or, With};
+use bevy::ecs::query::{Added, Changed, Or, With, Without};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::SystemCondition;
 use bevy::ecs::schedule::common_conditions::{not, resource_changed, resource_exists};
@@ -136,6 +136,17 @@ type OverlayFocusedMoved<'w, 's> = Query<
     ),
 >;
 
+type TabIndicatorWindowMoved<'w, 's> = Query<
+    'w,
+    's,
+    (),
+    (
+        With<Window>,
+        Without<Unmanaged>,
+        Or<(Changed<Position>, Changed<Bounds>)>,
+    ),
+>;
+
 /// Registers the Bevy systems for the `WindowManager`.
 /// This function adds various systems to the `Update` schedule, including event dispatchers,
 /// process/application/window lifecycle management, animation, and periodic watchers.
@@ -179,22 +190,29 @@ pub fn register_systems(app: &mut bevy::app::App) {
                     || !focused_moved.is_empty()))
     };
     // Not gated on dimming/borders being enabled, unlike the dim overlay.
-    let tab_indicators_dirty = |config: Option<Res<Config>>,
-                                mission_control: Option<Res<MissionControlActive>>,
-                                strip_changed: OverlayStripChanged,
-                                mut scrolling_removed: RemovedComponents<Scrolling>,
-                                focus_gained: Query<(), Added<FocusedMarker>>,
-                                workspace_changed: Query<(), Added<ActiveWorkspaceMarker>>,
-                                focused_moved: OverlayFocusedMoved| {
-        let scrolling_ended = scrolling_removed.read().count() > 0;
-        config.is_some_and(|config| config.is_changed())
-            || mission_control.is_some_and(|mc| mc.is_changed())
-            || scrolling_ended
-            || !strip_changed.is_empty()
-            || !focus_gained.is_empty()
-            || !workspace_changed.is_empty()
-            || !focused_moved.is_empty()
-    };
+    let tab_indicators_dirty =
+        |config: Option<Res<Config>>,
+         menubar: Option<Res<crate::menubar::MenuBarVisibility>>,
+         mission_control: Option<Res<MissionControlActive>>,
+         strip_changed: OverlayStripChanged,
+         mut scrolling_removed: RemovedComponents<Scrolling>,
+         focus_gained: Query<(), Added<FocusedMarker>>,
+         workspace_changed: Query<(), Added<ActiveWorkspaceMarker>>,
+         window_moved: TabIndicatorWindowMoved| {
+            let scrolling_ended = scrolling_removed.read().count() > 0;
+            let Some(config) = config else {
+                return false;
+            };
+            config.is_changed()
+                || (config.tab_indicator_enabled()
+                    && (menubar.is_some_and(|mb| mb.is_changed())
+                        || mission_control.is_some_and(|mc| mc.is_changed())
+                        || scrolling_ended
+                        || !strip_changed.is_empty()
+                        || !focus_gained.is_empty()
+                        || !workspace_changed.is_empty()
+                        || !window_moved.is_empty()))
+        };
     let native_tabs_enabled =
         |config: Option<Res<Config>>| config.is_none_or(|config| config.native_tabs_enabled());
 

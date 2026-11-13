@@ -1455,6 +1455,7 @@ pub(crate) fn cleanup_on_exit(
     displays: Query<&Display>,
     window_manager: Res<WindowManager>,
     mut overlay_mgr: Option<NonSendMut<OverlayManager>>,
+    mut tab_indicator_mgr: Option<NonSendMut<TabIndicatorManager>>,
 ) {
     for _ in exit_events.read() {
         let ids = all_windows
@@ -1466,6 +1467,9 @@ pub(crate) fn cleanup_on_exit(
 
         if let Some(ref mut overlay_mgr) = overlay_mgr {
             overlay_mgr.remove_all();
+        }
+        if let Some(ref mut tab_indicator_mgr) = tab_indicator_mgr {
+            tab_indicator_mgr.remove_all();
         }
 
         let display_bounds = displays.iter().map(Display::bounds).collect::<Vec<_>>();

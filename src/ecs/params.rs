@@ -4,7 +4,6 @@ use bevy::{
         hierarchy::ChildOf,
         query::{With, Without},
         system::{Commands, Query, Res, ResMut, Single, SystemParam},
-        world::Mut,
     },
     math::IRect,
 };
@@ -164,7 +163,7 @@ pub struct ActiveDisplayMut<'w, 's> {
         With<ActiveDisplayMarker>,
     >,
     /// A query for all other `Display` components that are not marked as active.
-    other_displays: Query<'w, 's, &'static mut Display, Without<ActiveDisplayMarker>>,
+    other_displays: Query<'w, 's, &'static Display, Without<ActiveDisplayMarker>>,
 }
 
 impl ActiveDisplayMut<'_, '_> {
@@ -176,9 +175,9 @@ impl ActiveDisplayMut<'_, '_> {
         self.display.2
     }
 
-    /// Returns an iterator over mutable references to all other displays (non-active).
-    pub fn other(&mut self) -> impl Iterator<Item = Mut<'_, Display>> {
-        self.other_displays.iter_mut()
+    /// Returns an iterator over immutable references to all other displays (non-active).
+    pub fn other(&self) -> impl Iterator<Item = &Display> {
+        self.other_displays.iter()
     }
 
     pub fn strip(&self) -> &LayoutStrip {

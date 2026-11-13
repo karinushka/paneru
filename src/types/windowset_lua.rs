@@ -257,9 +257,9 @@ mod tests {
         let (ids, second_x, first_active): (Vec<u32>, i32, bool) = lua
             .load(
                 "local displays = ws:displays()
-                 local ids = {}
-                 for index, display in ipairs(displays) do ids[index] = display.id end
-                 return ids, displays[2].x, displays[1].active",
+                  local ids = {}
+                  for index, display in ipairs(displays) do ids[index] = display.id end
+                  return ids, displays[2].x, displays[1].active",
             )
             .eval()
             .expect("run the script");

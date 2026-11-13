@@ -574,11 +574,14 @@ fn command_move_focus(
     }));
 }
 
-fn display_in_direction<D: std::ops::Deref<Target = Display>>(
+fn display_in_direction<'a>(
     bounds: IRect,
-    others: impl Iterator<Item = D>,
+    others: impl Iterator<Item = &'a Display>,
     direction: &Direction,
 ) -> Option<u32> {
+    if !matches!(direction, Direction::North | Direction::South) {
+        return None;
+    }
     others
         .filter(|display| match direction {
             Direction::North => display.bounds().min.y < bounds.min.y,
@@ -586,7 +589,7 @@ fn display_in_direction<D: std::ops::Deref<Target = Display>>(
             _ => false,
         })
         .min_by_key(|display| (display.bounds().min.y - bounds.min.y).abs())
-        .map(|display| display.id())
+        .map(Display::id)
 }
 
 fn focus_from_fullscreen(
@@ -1420,9 +1423,9 @@ fn to_next_display(
 
     // Remove the window from the source strip.
     let source_neighbour = active_display
-        .active_strip()
+        .strip()
         .left_neighbour(entity)
-        .or_else(|| active_display.active_strip().right_neighbour(entity));
+        .or_else(|| active_display.strip().right_neighbour(entity));
     active_display.active_strip().remove(entity);
     if let Some(neighbour) = source_neighbour {
         commands.reshuffle_around(neighbour);
@@ -1498,15 +1501,17 @@ fn mouse_to_next_display(
         return;
     };
 
-    let Some(cursor_position) = window_manager.cursor_position().map(origin_from) else {
-        return;
+    let other = if let Some(id) = target {
+        displays.into_iter().find(|display| display.id() == id)
+    } else {
+        let Some(cursor_position) = window_manager.cursor_position().map(origin_from) else {
+            return;
+        };
+        displays
+            .into_iter()
+            .find(|display| !display.bounds().contains(cursor_position))
     };
-    let Some(other) = displays.into_iter().find(|display| {
-        target.map_or_else(
-            || !display.bounds().contains(cursor_position),
-            |id| display.id() == id,
-        )
-    }) else {
+    let Some(other) = other else {
         debug!("no other display to move mouse to: {target:?}.");
         return;
     };
@@ -1527,8 +1532,9 @@ fn mouse_to_next_display(
     let visible_width = |frame: IRect| other.bounds().intersect(frame).width();
     let Some((frame, entity)) = other_strip
         .all_windows()
-        .iter()
-        .filter_map(|entity| windows.frame(*entity).zip(Some(*entity)))
+        .into_iter()
+        .filter(|&entity| !other_strip.is_parked_tab(entity))
+        .filter_map(|entity| windows.frame(entity).zip(Some(entity)))
         .max_by(|left, right| {
             if visible_width(left.0) < visible_width(right.0) {
                 std::cmp::Ordering::Less

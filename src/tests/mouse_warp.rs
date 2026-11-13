@@ -175,3 +175,13 @@ fn a_stale_event_after_a_sideways_warp_is_not_a_crossing() {
         "the pointer stays where the sideways warp put it: {cursor:?}"
     );
 }
+
+#[test]
+fn top_pixel_row_of_laptop_belongs_to_laptop_not_monitor_above() {
+    let (before, cursor) = pointer_moves(desk(true), &[(-200, -1500), (200, 0)]);
+    assert_eq!(
+        cursor, before,
+        "y = 0 is the top pixel row of the laptop, not the bottom edge of the left monitor"
+    );
+}
+

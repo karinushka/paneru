@@ -6,7 +6,6 @@ use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::system::{Commands, Local, Query, Res, Single};
 use bevy::math::IRect;
 use bevy::time::Time;
-use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 use tracing::{debug, trace, warn};
 
@@ -398,6 +397,10 @@ pub(super) struct WarpVelocityState {
     last: Option<(Origin, Instant)>,
 }
 
+fn rect_contains(rect: IRect, point: Origin) -> bool {
+    (rect.min.x..rect.max.x).contains(&point.x) && (rect.min.y..rect.max.y).contains(&point.y)
+}
+
 #[derive(Clone, Copy)]
 struct RowDisplay {
     frame: IRect,
@@ -428,14 +431,13 @@ impl WarpDesk {
             return None;
         }
         let lowest = *frames.iter().max_by_key(|frame| frame.min.y)?;
-        let upward = frames
+        let mut upward = frames
             .iter()
-            .filter(|frame| **frame != lowest)
-            .map(|frame| ((frame.min.y, frame.min.x), *frame))
-            .collect::<BTreeMap<_, _>>()
-            .into_values()
-            .rev()
+            .copied()
+            .filter(|frame| *frame != lowest)
             .collect::<Vec<_>>();
+        upward.sort_by_key(|frame| std::cmp::Reverse((frame.min.y, frame.min.x)));
+        upward.dedup_by_key(|frame| (frame.min.y, frame.min.x));
         // The display above the lowest one keeps its macOS x.
         // Thus the native crossing between these two displays agrees with the row.
         let anchor = *upward.first()?;
@@ -477,7 +479,7 @@ impl WarpDesk {
         self.row
             .iter()
             .copied()
-            .find(|display| display.frame.contains(point))
+            .find(|display| rect_contains(display.frame, point))
     }
 
     // macOS moves the pointer across a shared edge without a stop at the edge.
@@ -508,7 +510,7 @@ impl WarpDesk {
     }
 
     fn up_from_lowest(&self, point: Origin, edge: i32, inset: i32) -> Option<Origin> {
-        let on_top_edge = self.lowest.contains(point) && point.y - self.lowest.min.y < edge;
+        let on_top_edge = rect_contains(self.lowest, point) && point.y - self.lowest.min.y < edge;
         let native_above = self
             .member(Origin::new(point.x, self.lowest.min.y - 1))
             .is_some();
@@ -550,9 +552,7 @@ fn horizontal_warp_mouse_trigger(
     /// Stale velocity samples (e.g. from a prior gesture) shouldn't carry.
     const VELOCITY_FRESHNESS: Duration = Duration::from_millis(80);
 
-    let desk = config
-        .horizontal_mouse_warp()
-        .and_then(|direction| WarpDesk::from_displays(&displays, &config, direction));
+    let mut desk: Option<Option<WarpDesk>> = None;
     for InputEvent(event) in messages.read() {
         let (Event::MouseMoved { point, .. } | Event::MouseDragged { point, .. }) = event else {
             continue;
@@ -563,15 +563,18 @@ fn horizontal_warp_mouse_trigger(
 
         // Compute velocity from the previous sample before deciding whether to
         // warp, then refresh the sample so subsequent events build on this one.
-        let velocity_x = state.last.and_then(|(prev, t)| {
+        let recent_previous = state
+            .last
+            .filter(|(_, t)| now.saturating_duration_since(*t) <= VELOCITY_FRESHNESS);
+        let velocity_x = recent_previous.and_then(|(prev, t)| {
             let dt = now.saturating_duration_since(t);
-            if dt.is_zero() || dt > VELOCITY_FRESHNESS {
+            if dt.is_zero() {
                 return None;
             }
             let dx = f64::from(point.x - prev.x);
             Some(dx / dt.as_secs_f64())
         });
-        let previous = state.last.map(|(previous, _)| previous);
+        let previous = recent_previous.map(|(previous, _)| previous);
         state.last = Some((point, now));
 
         let Some(warp_direction) = config.horizontal_mouse_warp() else {
@@ -581,9 +584,12 @@ fn horizontal_warp_mouse_trigger(
             return;
         }
 
-        if let Some(landing) = desk
-            .as_ref()
-            .and_then(|desk| desk.landing(previous, point, EDGE_THRESHOLD, LANDING_INSET))
+        let desk = desk
+            .get_or_insert_with(|| WarpDesk::from_displays(&displays, &config, warp_direction))
+            .as_ref();
+
+        if let Some(landing) =
+            desk.and_then(|desk| desk.landing(previous, point, EDGE_THRESHOLD, LANDING_INSET))
         {
             window_manager.warp_mouse(landing);
             state.last = Some((landing, now));
@@ -596,10 +602,7 @@ fn horizontal_warp_mouse_trigger(
         else {
             continue;
         };
-        if desk
-            .as_ref()
-            .is_some_and(|desk| desk.is_lowest(current_display))
-        {
+        if desk.is_some_and(|desk| desk.is_lowest(current_display)) {
             continue;
         }
 
@@ -611,7 +614,7 @@ fn horizontal_warp_mouse_trigger(
 
         let mut target_displays = displays
             .iter()
-            .filter(|display| desk.as_ref().is_none_or(|desk| !desk.is_lowest(display)))
+            .filter(|display| desk.is_none_or(|desk| !desk.is_lowest(display)))
             .filter(|display| {
                 let above = display.bounds().min.y < current_display.bounds().min.y;
                 let below = display.bounds().min.y > current_display.bounds().min.y;

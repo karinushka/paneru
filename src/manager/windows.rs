@@ -807,22 +807,39 @@ impl WindowApi for WindowOS {
             let Ok(actual_frame) = self.update_frame() else {
                 break;
             };
-            let Some(staging_origin) =
+            if let Some(staging_origin) =
                 resize_staging_origin(previous_observed_frame, actual_frame, size.x)
-            else {
+            {
+                debug!(
+                    attempt,
+                    requested_width = size.x,
+                    actual_width = actual_frame.width(),
+                    staging_x = staging_origin.x,
+                    "retrying partially constrained AX resize from an offscreen origin"
+                );
+                staged = true;
+                previous_observed_frame = actual_frame;
+                self.set_ax_position(staging_origin);
+                self.set_ax_size(size);
+            } else if size.y > previous_frame.height()
+                && actual_frame.height() < size.y
+                && (actual_frame.min.y > target_origin.y
+                    || actual_frame.height() > previous_observed_frame.height())
+            {
+                debug!(
+                    attempt,
+                    requested_height = size.y,
+                    actual_height = actual_frame.height(),
+                    actual_y = actual_frame.min.y,
+                    target_y = target_origin.y,
+                    "retrying vertically constrained AX resize at target origin"
+                );
+                previous_observed_frame = actual_frame;
+                self.set_ax_position(target_origin);
+                self.set_ax_size(size);
+            } else {
                 break;
-            };
-            debug!(
-                attempt,
-                requested_width = size.x,
-                actual_width = actual_frame.width(),
-                staging_x = staging_origin.x,
-                "retrying partially constrained AX resize from an offscreen origin"
-            );
-            staged = true;
-            previous_observed_frame = actual_frame;
-            self.set_ax_position(staging_origin);
-            self.set_ax_size(size);
+            }
         }
 
         if staged {

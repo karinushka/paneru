@@ -963,12 +963,18 @@ pub(super) fn window_resized_update_frame(
         if resizing {
             continue;
         }
-        let Ok(new_frame) = window.update_frame() else {
-            continue;
-        };
         let active_strip = workspaces
             .iter_mut()
             .find(|(strip, _)| strip.contains(entity));
+        if active_strip
+            .as_ref()
+            .is_some_and(|(strip, _)| strip.is_parked_tab(entity))
+        {
+            continue;
+        }
+        let Ok(new_frame) = window.update_frame() else {
+            continue;
+        };
         let tabbed = active_strip
             .as_ref()
             .is_some_and(|strip| strip.0.tabbed(entity));

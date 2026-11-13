@@ -89,7 +89,7 @@ type WindowFrames<'w, 's> = Query<
         &'static Position,
         &'static mut Bounds,
         &'static mut LayoutPosition,
-        Option<&'static ResizeMarker>,
+        Option<&'static mut ResizeMarker>,
     ),
     (Without<LayoutStrip>, With<Window>),
 >;
@@ -1138,6 +1138,9 @@ impl LayoutStrip {
     }
 
     pub fn above(&self, entity: Entity) -> Option<Entity> {
+        if self.is_tabbed_display(entity) {
+            return None;
+        }
         let index = self.index_of(entity).ok()?;
         let column = self.get(index).ok()?;
         match column {
@@ -1435,7 +1438,11 @@ pub(super) fn layout_strip_changed(
             } else {
                 layout_position.0 = frame.min;
             }
-            if resize.is_none() && bounds.0 != frame.size() {
+            if let Some(mut resize) = resize {
+                if resize.0 != frame.size() {
+                    resize.0 = frame.size();
+                }
+            } else if bounds.0 != frame.size() {
                 bounds.0 = frame.size();
             }
         }
@@ -1929,24 +1936,16 @@ fn position_layout_windows(
         frame.max += context.strip_position;
 
         let mut offscreen = false;
-        if context.parked_tab {
-            // Park inactive tabs to the side, not below: a full-height
-            // window parked below lands on (and is adopted by) any display
-            // underneath this one.
+        if context.parked_tab || frame.min.x >= viewport.max.x - h_pad {
+            // Park inactive tabs to the side (not below, where a display
+            // underneath would adopt them), and position windows hidden past
+            // the right edge so sliver_width CG pixels remain visible.
             frame.min.x = viewport.max.x - offscreen_sliver_width + pad_right - h_pad;
             offscreen = true;
         } else if frame.max.x <= viewport.min.x + h_pad {
-            // Window hidden to the left — position so exactly
-            // sliver_width CG pixels are visible from the real
-            // display edge.  The +h_pad accounts for the gap that
-            // reposition() adds, which can leave a window just
-            // inside the viewport edge while its CG frame is fully
-            // past it.
+            // Window hidden to the left — mirror of above. The +h_pad accounts
+            // for the gap that reposition() adds.
             frame.min.x = viewport.min.x - width + offscreen_sliver_width - pad_left + h_pad;
-            offscreen = true;
-        } else if frame.min.x >= viewport.max.x - h_pad {
-            // Window hidden to the right — mirror of above.
-            frame.min.x = viewport.max.x - offscreen_sliver_width + pad_right - h_pad;
             offscreen = true;
         }
         frame.max.x = frame.min.x + width;
@@ -1954,18 +1953,13 @@ fn position_layout_windows(
         // During swipe, keep full height. The vertical sliver inset only
         // applies to horizontally off-screen windows, so they expose just
         // a `sliver_height` fraction of their height at the viewport's
-        // vertical center.
-        if !context.swiping && offscreen {
-            // Don't compress stacked windows vertically when off-screen.
-            // The height reduction corrupts their proportions: when the
-            // column scrolls back on-screen, binpack_heights makes the
-            // last window absorb all remaining space.
-            if !context.stacked {
-                let inset =
-                    round_px(f64::from(viewport.height()) * (1.0 - config.sliver_height()) / 2.0);
-                frame.min.y += inset;
-                frame.max.y += inset;
-            }
+        // vertical center. Don't compress stacked windows vertically when
+        // off-screen, or binpack_heights would corrupt their proportions.
+        if !context.swiping && offscreen && !context.stacked {
+            let inset =
+                round_px(f64::from(viewport.height()) * (1.0 - config.sliver_height()) / 2.0);
+            frame.min.y += inset;
+            frame.max.y += inset;
         }
 
         // Keep the window anchored to its own display. The parked strip origin
@@ -1981,8 +1975,12 @@ fn position_layout_windows(
             frame.max.y = park_row + height;
         }
 
-        if resize.is_none() && bounds.0 != frame.size() {
-            bounds.0 = frame.size();
+        if resize.is_none() {
+            if bounds.0 != frame.size() {
+                bounds.0 = frame.size();
+            } else if !context.parked_tab && was_parked_tab {
+                bounds.set_changed();
+            }
         }
 
         let tab_snap = context.parked_tab

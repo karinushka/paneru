@@ -28,8 +28,8 @@ use crate::ecs::scroll::{PageFocusRequest, PageGestureState, PageInFlight};
 use crate::ecs::{
     ActiveDisplayMarker, ActiveWorkspaceMarker, AwaitResize, Bounds, DockPosition, FocusedMarker,
     FullWidthMarker, ManualStripOffset, NativeFullscreenMarker, Position, RaiseWindow,
-    RepositionMarker, ResizeAnchor, Scrolling, SelectedVirtualMarker, SendMessageTrigger,
-    SpawnCommandsExt, Timeout, Unmanaged,
+    RepositionMarker, ResizeAnchor, ResizeMarker, Scrolling, SelectedVirtualMarker,
+    SendMessageTrigger, SpawnCommandsExt, Timeout, Unmanaged,
 };
 use crate::events::{Event, InputEvent};
 use crate::manager::{Application, Display, Origin, Size, Window, WindowManager, origin_from};
@@ -1083,6 +1083,9 @@ fn resize_window_vertical(
     };
 
     let strip = active_display.active_strip();
+    if strip.is_tabbed_display(entity) {
+        return;
+    }
     let Some(Column::Stack(items)) = strip
         .index_of(entity)
         .ok()
@@ -1573,6 +1576,9 @@ fn equalize_column(
 
     let (_, entity) = *current_focus;
     let active_strip = active_display.active_strip();
+    if active_strip.is_tabbed_display(entity) {
+        return;
+    }
     let Ok(column) = active_strip
         .index_of(entity)
         .and_then(|index| active_strip.get(index))
@@ -1933,11 +1939,22 @@ pub fn toggle_tabbed_display_handler(
         && unmanaged.is_none()
     {
         let strip = active_display.active_strip();
+        let members: Vec<Entity> = strip
+            .index_of(entity)
+            .ok()
+            .and_then(|idx| strip.get(idx).ok())
+            .map(|col| col.window_iter().collect())
+            .unwrap_or_default();
         // `None` means the toggle wasn't applicable (not in a multi-window
         // Stack) — stay silent rather than reporting it the same way as a
         // real "turned tabs off", which previously made repeated presses on
         // a non-stacked window look like a stuck toggle.
         if let Some(now_tabbed) = strip.toggle_tabbed_display(entity) {
+            for member in members {
+                if let Ok(mut entity_commands) = commands.get_entity(member) {
+                    entity_commands.try_remove::<(ResizeMarker, ResizeAnchor, AwaitResize)>();
+                }
+            }
             if now_tabbed && let Ok(mut entity_commands) = commands.get_entity(entity) {
                 entity_commands.try_insert(crate::ecs::ParkedTabMarker);
             }

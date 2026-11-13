@@ -340,18 +340,13 @@ pub fn register_systems(app: &mut bevy::app::App) {
     app.add_systems(
         PostUpdate,
         (
-            (
-                systems::animate_entities,
-                systems::commit_window_position.run_if(not(resource_exists::<Initializing>)),
-                systems::verify_window_position.run_if(not(resource_exists::<Initializing>)),
-            )
-                .chain(),
-            (
-                systems::animate_resize_entities,
-                systems::commit_window_size.run_if(not(resource_exists::<Initializing>)),
-            )
-                .chain(),
+            systems::animate_entities,
+            systems::commit_window_position.run_if(not(resource_exists::<Initializing>)),
+            systems::verify_window_position.run_if(not(resource_exists::<Initializing>)),
+            systems::animate_resize_entities,
+            systems::commit_window_size.run_if(not(resource_exists::<Initializing>)),
         )
+            .chain()
             .in_set(PostUpdateSet::Animate),
     );
     app.add_systems(

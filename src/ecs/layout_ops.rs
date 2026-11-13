@@ -259,7 +259,7 @@ fn apply(
             commands.resize_entity(entity, size);
         }
 
-        LayoutOp::Stack { onto, .. } => {
+        LayoutOp::Stack { onto, tabs, .. } => {
             let entity = entity.expect("Stack names a window");
             let Some((_, onto_entity)) = windows.find(onto) else {
                 debug!(target: "paneru::lua", "skipping {op:?}: window {onto} is gone");
@@ -277,11 +277,22 @@ fn apply(
             else {
                 return;
             };
-            if entity_index == onto_index
-                || [entity_index, onto_index]
-                    .iter()
-                    .any(|&at| matches!(strip.get(at), Ok(Column::Fullscren(_))))
+            if [entity_index, onto_index]
+                .iter()
+                .any(|&at| matches!(strip.get(at), Ok(Column::Fullscren(_))))
             {
+                return;
+            }
+            if entity_index == onto_index {
+                if tabs != strip.is_tabbed_display(entity) {
+                    let active = windows
+                        .focused()
+                        .map(|(_, focused)| focused)
+                        .filter(|&focused| strip.index_of(focused).ok() == Some(entity_index))
+                        .unwrap_or(onto_entity);
+                    strip.toggle_tabbed_display(active);
+                    commands.reshuffle_around(active);
+                }
                 return;
             }
             // `LayoutStrip::stack` joins a column onto its left neighbour, so
@@ -296,6 +307,14 @@ fn apply(
             if strip.stack(entity).is_err() {
                 debug!(target: "paneru::lua", "skipping {op:?}: the layout refused the stack");
                 return;
+            }
+            if tabs != strip.is_tabbed_display(entity) {
+                let active = windows
+                    .focused()
+                    .map(|(_, focused)| focused)
+                    .filter(|&focused| strip.index_of(focused).ok() == Some(index))
+                    .unwrap_or(onto_entity);
+                strip.toggle_tabbed_display(active);
             }
             // As `window stack` does: a full-width window would keep its width
             // in a column it now shares.

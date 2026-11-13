@@ -52,6 +52,10 @@ pub(crate) struct MockWindowData {
     pub(crate) min_width: i32,
     /// The widest width the app accepts, or no limit when zero.
     pub(crate) max_width: i32,
+    /// When true, `resize()` clamps the window's bottom edge to the active
+    /// display's bottom edge and rejects height growth while parked off-screen,
+    /// modelling macOS WindowServer/AppKit frame constraints.
+    pub(crate) clamp_height_to_display: bool,
 }
 
 impl Default for MockWindowData {
@@ -75,6 +79,7 @@ impl Default for MockWindowData {
             child_role: false,
             min_width: 0,
             max_width: 0,
+            clamp_height_to_display: false,
         }
     }
 }
@@ -493,6 +498,10 @@ impl MockState {
         let s = self.clone();
         mw.expect_resize().returning(move |size| {
             let mut inner = s.inner.force_write();
+            let display_bounds = inner
+                .displays
+                .get(&inner.active_display_id)
+                .map(|d| d.bounds);
             if let Some(w) = inner.windows.get_mut(&id) {
                 let max_width = if w.max_width > 0 {
                     w.max_width
@@ -500,7 +509,20 @@ impl MockState {
                     i32::MAX
                 };
                 let width = size.x.max(w.min_width).min(max_width);
-                w.frame.max = w.frame.min + size.with_x(width);
+                let height = if w.clamp_height_to_display
+                    && let Some(bounds) = display_bounds
+                {
+                    let on_screen_horizontally =
+                        w.frame.max.x > bounds.min.x + 20 && w.frame.min.x < bounds.max.x - 20;
+                    if !on_screen_horizontally && size.y > w.frame.height() {
+                        w.frame.height()
+                    } else {
+                        size.y.min((bounds.max.y - w.frame.min.y).max(1))
+                    }
+                } else {
+                    size.y
+                };
+                w.frame.max = w.frame.min + Size::new(width, height);
             }
         });
 

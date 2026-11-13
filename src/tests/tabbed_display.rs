@@ -904,3 +904,163 @@ fn test_centering_a_tabbed_stack_animates_the_active_tab_into_place() {
         "inactive parked tabs must remain snapped off-screen without animating"
     );
 }
+
+/// Regression: on macOS, `AXUIElementSetAttributeValue(kAXSizeAttribute)` clamps
+/// a window's height to `display_bottom - window.min.y` if `commit_window_size`
+/// runs before `commit_window_position` moves a lower stacked window up to the
+/// top of the viewport, and apps can reject height growth while a tab is parked
+/// off-screen. Converting a stack to tabbed display must move the active tab to
+/// the top of the column before resizing it to full height, and re-commit full
+/// height when a parked tab is later switched onto the screen.
+#[test]
+fn test_converting_stack_to_tabbed_gives_full_height_under_macos_screen_clamping() {
+    let mut commands = vec![Event::MenuOpened { window_id: 0 }];
+    stack_first_three(&mut commands);
+    let after_stack = commands.len() - 1;
+    commands.push(Event::Command {
+        command: Command::Window(Operation::ToggleTabbedDisplay),
+    });
+    let after_toggle = commands.len() - 1;
+    // Switch to window 1 (previously in the middle of the stack and parked on toggle).
+    commands.push(Event::Command {
+        command: Command::Window(Operation::Focus(Direction::North)),
+    });
+    let after_switch_1 = commands.len() - 1;
+    // Switch to window 0 (previously at the top of the stack and parked on toggle).
+    commands.push(Event::Command {
+        command: Command::Window(Operation::Focus(Direction::North)),
+    });
+    let after_switch_0 = commands.len() - 1;
+
+    let full_height = TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT;
+
+    let mut harness = TestHarness::new();
+    for id in 0..4 {
+        harness = harness.with_window(id, |w| {
+            w.clamp_height_to_display = true;
+        });
+    }
+
+    harness
+        .on_iteration(after_stack, move |world, _state| {
+            assert!(
+                window_height(world, 2) < full_height,
+                "window 2 must have a reduced stacked height before toggling tabs"
+            );
+        })
+        .on_iteration(after_toggle, move |world, _state| {
+            assert_eq!(
+                window_height(world, 2),
+                full_height,
+                "active tab (window 2, previously at the bottom of the stack) must expand to full height"
+            );
+        })
+        .on_iteration(after_switch_1, move |world, _state| {
+            assert_eq!(
+                window_height(world, 1),
+                full_height,
+                "unparked tab 1 must expand to full height when switched onto the screen"
+            );
+        })
+        .on_iteration(after_switch_0, move |world, _state| {
+            assert_eq!(
+                window_height(world, 0),
+                full_height,
+                "unparked tab 0 must expand to full height when switched onto the screen"
+            );
+        })
+        .run(commands);
+}
+
+/// Regression: an in-flight `ResizeMarker` (e.g. from `Equalize` or a stack
+/// resize) must not block `ToggleTabbedDisplay` from expanding every member of
+/// the column to the full viewport height.
+#[test]
+fn test_toggle_tabbed_display_overrides_inflight_stack_resize_marker() {
+    let config: Config = (
+        MainOptions {
+            animation_speed: Some(3.0),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    let mut h = TestHarness::new().with_config(config).with_windows(3);
+    h.run(vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Stack(true)),
+        },
+    ]);
+
+    let full_height = TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT;
+    let entity0 = find_window_entity(0, h.world());
+    let entity1 = find_window_entity(1, h.world());
+    // Simulate an in-flight 50%-height stack resize (such as from `Equalize`).
+    let half_height = full_height / 2;
+    h.world()
+        .entity_mut(entity0)
+        .insert(crate::ecs::ResizeMarker(crate::manager::Size::new(
+            TEST_WINDOW_WIDTH,
+            half_height,
+        )));
+    h.world()
+        .entity_mut(entity1)
+        .insert(crate::ecs::ResizeMarker(crate::manager::Size::new(
+            TEST_WINDOW_WIDTH,
+            half_height,
+        )));
+
+    h.app.world_mut().write_message::<Event>(Event::Command {
+        command: Command::Window(Operation::ToggleTabbedDisplay),
+    });
+    for _ in 0..4 {
+        h.app.update();
+    }
+
+    assert_window_size!(h.world(), 0, TEST_WINDOW_WIDTH, full_height);
+    assert_window_size!(h.world(), 1, TEST_WINDOW_WIDTH, full_height);
+}
+
+/// Regression: a delayed `WindowResized` notification echoed from a parked
+/// tab's pre-tabbed 50% stacked frame must not overwrite `Bounds` or shrink
+/// the tab above it via `LayoutStrip::above`.
+#[test]
+fn test_delayed_window_resized_for_parked_tab_does_not_shrink_tabbed_stack() {
+    let mut commands = vec![Event::MenuOpened { window_id: 0 }];
+    stack_first_three(&mut commands);
+    commands.push(Event::Command {
+        command: Command::Window(Operation::ToggleTabbedDisplay),
+    });
+
+    let mut h = TestHarness::new().with_windows(4);
+    h.run(commands);
+
+    let full_height = TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT;
+    // Simulate a late OS notification reporting window 1 (parked) at its old
+    // 1/3 stacked height.
+    h.mock_state
+        .os_resize_window(1, crate::manager::Size::new(TEST_WINDOW_WIDTH, 250));
+    for event in h.mock_state.drain_events() {
+        h.app.world_mut().write_message::<Event>(event);
+    }
+    for _ in 0..4 {
+        h.app.update();
+    }
+
+    let entity0 = find_window_entity(0, h.world());
+    let entity1 = find_window_entity(1, h.world());
+    let entity2 = find_window_entity(2, h.world());
+    for (id, entity) in [(0, entity0), (1, entity1), (2, entity2)] {
+        let bounds = h.world().get::<crate::ecs::Bounds>(entity).unwrap().0;
+        assert_eq!(
+            bounds.y, full_height,
+            "tab {id}'s Bounds must remain at full column height ({full_height}), got {}",
+            bounds.y
+        );
+    }
+}

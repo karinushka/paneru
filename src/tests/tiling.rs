@@ -2147,3 +2147,123 @@ fn balance_pins_a_strip_that_now_fits_to_the_left_edge() {
         "strip overflows: {last:?}"
     );
 }
+
+/// The float key acts on the window the engine marks focused. When the user
+/// has switched to a window the engine does not manage, such as one from an
+/// accessory app, that mark still sits on the last managed window. Floating it
+/// would change a window the user is not looking at.
+#[test]
+fn test_float_ignores_window_macos_no_longer_focuses() {
+    const ACCESSORY: i32 = TEST_PROCESS_ID + 1;
+    let manage = || Event::Command {
+        command: Command::Window(Operation::Manage),
+    };
+    let commands = vec![
+        Event::Command {
+            command: Command::PrintState,
+        }, // 0
+        Event::Command {
+            command: Command::PrintState,
+        }, // 1
+        manage(), // 2
+        Event::Command {
+            command: Command::PrintState,
+        }, // 3
+        manage(), // 4
+    ];
+    let floating = |world: &mut World, id| {
+        let entity = find_window_entity(id, world);
+        world.get::<crate::ecs::Unmanaged>(entity).is_some()
+    };
+
+    TestHarness::new()
+        .with_windows(2)
+        .with_focused_window(0)
+        .on_iteration(0, |_world, state| {
+            state.spawn_app(ACCESSORY, "com.example.accessory", "Accessory");
+            let frame = IRect::new(0, 0, TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+            state.spawn_window(ACCESSORY, TEST_WORKSPACE_ID, 9, frame);
+            state.update_app(TEST_PROCESS_ID, |app| app.is_frontmost = false);
+            state.focus_window(9);
+        })
+        .on_iteration(1, |world, _state| {
+            assert_focused!(world, 0);
+        })
+        .on_iteration(2, move |world, state| {
+            assert!(
+                !floating(world, 0),
+                "window 0 must stay tiled while macOS focuses another app"
+            );
+            state.update_app(ACCESSORY, |app| app.is_frontmost = false);
+            state.update_app(TEST_PROCESS_ID, |app| app.is_frontmost = true);
+            state.focus_window(0);
+        })
+        .on_iteration(4, move |world, _state| {
+            assert!(
+                floating(world, 0),
+                "window 0 must float once macOS focuses it again"
+            );
+        })
+        .run(commands);
+}
+
+/// An app too busy to answer the focused-window query must not block the
+/// float key, so only a different answer from macOS skips the toggle.
+#[test]
+fn test_float_proceeds_when_the_app_cannot_report_focus() {
+    let commands = vec![
+        Event::Command {
+            command: Command::PrintState,
+        }, // 0
+        Event::Command {
+            command: Command::Window(Operation::Manage),
+        }, // 1
+    ];
+
+    TestHarness::new()
+        .with_windows(2)
+        .with_focused_window(0)
+        .on_iteration(0, |_world, state| {
+            state.update_app(TEST_PROCESS_ID, |app| app.focused_window_id = None);
+        })
+        .on_iteration(1, |world, _state| {
+            let entity = find_window_entity(0, world);
+            assert!(
+                world.get::<crate::ecs::Unmanaged>(entity).is_some(),
+                "window 0 must float when its app cannot report focus"
+            );
+        })
+        .run(commands);
+}
+
+/// macOS can focus another window of the same app before its focus event
+/// reaches the engine. The float key must not float the window the user left.
+#[test]
+fn test_float_ignores_window_before_its_app_reports_new_focus() {
+    let commands = vec![
+        Event::Command {
+            command: Command::PrintState,
+        }, // 0
+        Event::Command {
+            command: Command::Window(Operation::Manage),
+        }, // 1
+    ];
+
+    TestHarness::new()
+        .with_windows(2)
+        .with_focused_window(0)
+        .on_iteration(0, |_world, state| {
+            state.set_focused_window(1);
+        })
+        .on_iteration(1, |world, _state| {
+            assert_focused!(world, 0);
+            for id in [0, 1] {
+                let entity = find_window_entity(id, world);
+                assert!(
+                    world.get::<crate::ecs::Unmanaged>(entity).is_none(),
+                    "window {id} must stay tiled"
+                );
+            }
+        })
+        .run(commands);
+}

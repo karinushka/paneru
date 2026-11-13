@@ -1938,6 +1938,9 @@ pub fn toggle_tabbed_display_handler(
         // real "turned tabs off", which previously made repeated presses on
         // a non-stacked window look like a stuck toggle.
         if let Some(now_tabbed) = strip.toggle_tabbed_display(entity) {
+            if now_tabbed && let Ok(mut entity_commands) = commands.get_entity(entity) {
+                entity_commands.try_insert(crate::ecs::ParkedTabMarker);
+            }
             commands.reshuffle_around(entity);
             commands.flash_message(
                 if now_tabbed { "Tabs on" } else { "Tabs off" }.to_string(),

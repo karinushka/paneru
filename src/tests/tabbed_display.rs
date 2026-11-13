@@ -859,3 +859,48 @@ fn test_tab_indicator_click_focuses_and_activates_the_clicked_tab() {
         })
         .run(commands);
 }
+
+/// Centering (or otherwise scrolling) a strip with a tabbed stack animates the
+/// active on-screen tab smoothly into place instead of teleporting it on the
+/// first frame, while inactive parked tabs stay snapped off-screen.
+#[test]
+fn test_centering_a_tabbed_stack_animates_the_active_tab_into_place() {
+    let config: Config = (
+        MainOptions {
+            animation_speed: Some(3.0),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    let mut commands = vec![Event::MenuOpened { window_id: 0 }];
+    stack_first_three(&mut commands);
+    commands.push(Event::Command {
+        command: Command::Window(Operation::ToggleTabbedDisplay),
+    });
+
+    let mut h = TestHarness::new().with_config(config).with_windows(4);
+    h.run(commands);
+
+    // Issue `Center` and advance two frames so `position_layout_windows` reacts
+    // to the strip's new `RepositionMarker`.
+    h.app.world_mut().write_message::<Event>(Event::Command {
+        command: Command::Window(Operation::Center),
+    });
+    h.app.update();
+    h.app.update();
+
+    let active_entity = find_window_entity(2, h.world());
+    let parked_0 = find_window_entity(0, h.world());
+    let parked_1 = find_window_entity(1, h.world());
+    assert!(
+        h.world().get::<RepositionMarker>(active_entity).is_some(),
+        "the active tab must animate into its centered position with the strip, not jump immediately"
+    );
+    assert!(
+        h.world().get::<RepositionMarker>(parked_0).is_none()
+            && h.world().get::<RepositionMarker>(parked_1).is_none(),
+        "inactive parked tabs must remain snapped off-screen without animating"
+    );
+}

@@ -17,8 +17,8 @@ use crate::ecs::params::Windows;
 use crate::ecs::workspace::{PreviousStripPosition, SnapStripMarker};
 use crate::ecs::{
     Bounds, DockPosition, EnsureVisibleMarker, Initializing, LayoutPosition, ManualStripOffset,
-    Position, RepositionMarker, ReshuffleAroundMarker, ResizeAnchor, ResizeMarker, Scrolling,
-    SpawnCommandsExt,
+    ParkedTabMarker, Position, RepositionMarker, ReshuffleAroundMarker, ResizeAnchor, ResizeMarker,
+    Scrolling, SpawnCommandsExt,
 };
 use crate::errors::{Error, Result};
 use crate::manager::{Display, Origin, Size, Window};
@@ -106,6 +106,7 @@ type RepositionedWindows<'w, 's> = Populated<
         &'static mut Position,
         &'static mut Bounds,
         Option<&'static ResizeMarker>,
+        Has<ParkedTabMarker>,
     ),
     (Changed<LayoutPosition>, With<Window>, Without<LayoutStrip>),
 >;
@@ -1734,7 +1735,7 @@ struct StripWindowContext {
     /// snap directly to its target in `position_layout_windows`, bypassing
     /// the offscreen/parking magnitude heuristic.
     snap_settling: bool,
-    /// Member of a tabbed-display stack; always snapped, never animated.
+    /// Member of a tabbed-display stack.
     tabbed_display: bool,
     /// Inactive tab; parked off-screen horizontally like a scrolled-off column.
     parked_tab: bool,
@@ -1902,7 +1903,9 @@ fn position_layout_windows(
         );
     }
 
-    for (entity, window, layout_position, mut position, mut bounds, resize) in positioned_windows {
+    for (entity, window, layout_position, mut position, mut bounds, resize, was_parked_tab) in
+        positioned_windows
+    {
         let Some(context) = strip_contexts.get(&entity) else {
             continue;
         };
@@ -1982,17 +1985,31 @@ fn position_layout_windows(
             bounds.0 = frame.size();
         }
 
+        let tab_snap = context.parked_tab
+            || was_parked_tab
+            || (context.tabbed_display && position.0.y != frame.min.y);
+        if context.parked_tab {
+            if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                entity_commands.try_remove::<RepositionMarker>();
+                if !was_parked_tab {
+                    entity_commands.try_insert(ParkedTabMarker);
+                }
+            }
+        } else if was_parked_tab && let Ok(mut entity_commands) = commands.get_entity(entity) {
+            entity_commands.try_remove::<(ParkedTabMarker, RepositionMarker)>();
+        }
+
         if position.0 != frame.min {
             // Direct-assign (snap) when:
             //   - The user is actively swiping: windows must track the finger in lockstep.
             //   - A workspace switch just moved the strip vertically: jumping the full off-screen
             //   distance should be instantaneous.
+            //   - A tab is being parked/unparked or switching inside a tabbed stack (`tab_snap`).
             // Otherwise (programmatic strip animation, or pure layout change), animate toward the
-            // new position so layout changes (swap/add/remove) slide instead of teleport. When the
-            // strip is also being animated, the per-window target is recomputed each tick from the
-            // strip's current position, so the two motions compose: e.g., on swap, the focused
-            // window's target converges back to its old visual position as the strip settles, while
-            // the other window slides past.
+            // new position so layout changes (swap/add/remove/center) slide instead of teleport.
+            // When the strip is also being animated, the per-window target is recomputed each tick
+            // from the strip's target position, so the active tab of a tabbed stack eases into
+            // place alongside surrounding columns.
             // Parking and un-parking have to snap as one move. The clamp above
             // leaves the lower stack members a short hop from their visible
             // slot, which the distance threshold alone reads as an ordinary
@@ -2007,10 +2024,9 @@ fn position_layout_windows(
             // `parking` nor the distance threshold recognizes as
             // restore-driven, since its last position can land close enough
             // to its target. See `SnapStripMarker`.
-            // Tab switches always snap, so the swap is instant.
             if context.swiping
                 || context.snap_settling
-                || context.tabbed_display
+                || tab_snap
                 || offscreen_move && !config.virtual_workspace_animations()
             {
                 position.0 = frame.min;

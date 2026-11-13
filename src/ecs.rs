@@ -544,6 +544,14 @@ pub struct FullWidthMarker {
     pub width_ratio: f64,
 }
 
+/// Marks a window that is currently parked off-screen as an inactive member of
+/// a tabbed-display stack (or transitioning into tabbed display). When the
+/// window next returns to an on-screen slot, `position_layout_windows` snaps it
+/// directly into place instead of animating it in from the display edge, and
+/// removes the marker so subsequent strip movements animate normally.
+#[derive(Component)]
+pub struct ParkedTabMarker;
+
 /// Enum component indicating the unmanaged state of a window.
 #[derive(Component, Debug)]
 pub enum Unmanaged {

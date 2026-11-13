@@ -21,6 +21,7 @@ use self::decorations::{
     BorderRadiusOption, DescriptorStyle, IndicatorFormat, IndicatorStyle, MenubarOrientation,
 };
 use self::swipe::SwipeGestureDirection;
+use crate::tab_indicator::TabIndicatorPosition;
 
 #[cfg(test)]
 use crate::commands::{MoveFocus, Operation, ResizeDirection};
@@ -721,6 +722,72 @@ impl Config {
 
     pub fn menubar_height(&self) -> Option<i32> {
         self.options().menubar_height.map(i32::from)
+    }
+
+    pub fn tab_indicator_enabled(&self) -> bool {
+        self.inner()
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.tab_indicator.as_ref())
+            .and_then(|tab_indicator| tab_indicator.enabled)
+            .unwrap_or(true)
+    }
+
+    pub fn tab_indicator_position(&self) -> TabIndicatorPosition {
+        self.inner()
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.tab_indicator.as_ref())
+            .and_then(|tab_indicator| tab_indicator.position)
+            .unwrap_or_default()
+    }
+
+    pub fn tab_indicator_width(&self) -> f64 {
+        self.inner()
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.tab_indicator.as_ref())
+            .and_then(|tab_indicator| tab_indicator.width)
+            .unwrap_or(6.0)
+            .max(0.0)
+    }
+
+    pub fn tab_indicator_gap(&self) -> f64 {
+        self.inner()
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.tab_indicator.as_ref())
+            .and_then(|tab_indicator| tab_indicator.gap)
+            .unwrap_or(4.0)
+            .max(0.0)
+    }
+
+    pub fn tab_indicator_segment_gap(&self) -> f64 {
+        self.inner()
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.tab_indicator.as_ref())
+            .and_then(|tab_indicator| tab_indicator.segment_gap)
+            .unwrap_or(2.0)
+            .max(0.0)
+    }
+
+    pub fn tab_indicator_active_color(&self) -> (f64, f64, f64) {
+        self.inner()
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.tab_indicator.as_ref())
+            .and_then(|tab_indicator| tab_indicator.active_color.as_deref())
+            .map_or((0.353, 0.784, 0.980), parse_hex_color)
+    }
+
+    pub fn tab_indicator_inactive_color(&self) -> (f64, f64, f64) {
+        self.inner()
+            .decorations
+            .as_ref()
+            .and_then(|decorations| decorations.tab_indicator.as_ref())
+            .and_then(|tab_indicator| tab_indicator.inactive_color.as_deref())
+            .map_or((0.4, 0.4, 0.4), parse_hex_color)
     }
 
     pub fn swipe_sensitivity(&self) -> f64 {

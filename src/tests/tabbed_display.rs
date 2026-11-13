@@ -811,3 +811,37 @@ fn test_demoting_tabbed_stack_to_native_tabs_clears_tabbed_display() {
         "surviving native tabs must not be marked as parked tabbed-display members"
     );
 }
+
+/// `Event::TabIndicatorClicked` focuses the clicked window and makes it the
+/// group's active tab.
+#[test]
+fn test_tab_indicator_click_focuses_and_activates_the_clicked_tab() {
+    let mut commands = vec![Event::MenuOpened { window_id: 0 }];
+    stack_first_three(&mut commands);
+    commands.push(Event::Command {
+        command: Command::Window(Operation::ToggleTabbedDisplay),
+    });
+    // Window 2 is active; click window 0 so ordering can't explain the result.
+    commands.push(Event::TabIndicatorClicked { window_id: 0 });
+
+    TestHarness::new()
+        .with_windows(4)
+        .on_iteration(commands.len() - 1, |world, _state| {
+            assert_focused!(world, 0);
+            assert!(
+                is_tabbed_display(world, 0),
+                "the stack should still be in tabbed display after the click"
+            );
+            assert_eq!(
+                window_y(world, 0),
+                TEST_MENUBAR_HEIGHT,
+                "the clicked tab must be the one on-screen"
+            );
+            assert!(
+                window_x(world, 2) + TEST_WINDOW_WIDTH > TEST_DISPLAY_WIDTH,
+                "the previously-active tab must be parked off past the \
+                 display's right edge, not left on-screen"
+            );
+        })
+        .run(commands);
+}

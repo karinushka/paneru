@@ -37,7 +37,7 @@ use crate::lua;
 use crate::manager::{
     Application, Origin, ProcessApi, Size, Window, WindowManager, WindowManagerApi, WindowManagerOS,
 };
-use crate::overlay::{FlashMessageManager, OverlayManager};
+use crate::overlay::{FlashMessageManager, OverlayManager, TabIndicatorManager};
 use crate::platform::{Modifiers, PlatformCallbacks, WinID, WorkspaceId};
 
 pub mod display;
@@ -177,6 +177,23 @@ pub fn register_systems(app: &mut bevy::app::App) {
                     || !focus_gained.is_empty()
                     || !workspace_changed.is_empty()
                     || !focused_moved.is_empty()))
+    };
+    // Not gated on dimming/borders being enabled, unlike the dim overlay.
+    let tab_indicators_dirty = |config: Option<Res<Config>>,
+                                mission_control: Option<Res<MissionControlActive>>,
+                                strip_changed: OverlayStripChanged,
+                                mut scrolling_removed: RemovedComponents<Scrolling>,
+                                focus_gained: Query<(), Added<FocusedMarker>>,
+                                workspace_changed: Query<(), Added<ActiveWorkspaceMarker>>,
+                                focused_moved: OverlayFocusedMoved| {
+        let scrolling_ended = scrolling_removed.read().count() > 0;
+        config.is_some_and(|config| config.is_changed())
+            || mission_control.is_some_and(|mc| mc.is_changed())
+            || scrolling_ended
+            || !strip_changed.is_empty()
+            || !focus_gained.is_empty()
+            || !workspace_changed.is_empty()
+            || !focused_moved.is_empty()
     };
     let native_tabs_enabled =
         |config: Option<Res<Config>>| config.is_none_or(|config| config.native_tabs_enabled());
@@ -333,6 +350,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
                     .or_eager(resource_changed::<Config>)
                     .or_eager(resource_changed::<crate::menubar::MenuBarVisibility>),
             ),
+            systems::update_tab_indicators.run_if(tab_indicators_dirty),
         )
             .in_set(PostUpdateSet::Ui),
     );
@@ -862,6 +880,7 @@ fn autorelease_runner(mut app: BevyApp) -> bevy::app::AppExit {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<BevyApp> {
     crate::manager::app::bound_ax_messaging_timeout()?;
 
@@ -951,14 +970,17 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
 
     crate::menubar::load_menu_bar_preference(&mut app);
     let menu_events = sender.clone();
+    let tab_indicator_events = sender.clone();
     let mut platform_callbacks = PlatformCallbacks::new(sender);
     let initial_config = platform_callbacks.setup_handlers()?;
     let mtm = platform_callbacks.main_thread_marker;
     let overlay_manager = OverlayManager::new(mtm);
     let flash_message_manager = FlashMessageManager::new(mtm);
+    let tab_indicator_manager = TabIndicatorManager::new(mtm, tab_indicator_events);
     app.insert_non_send(platform_callbacks)
         .insert_non_send(overlay_manager)
         .insert_non_send(flash_message_manager)
+        .insert_non_send(tab_indicator_manager)
         .insert_non_send(receiver);
 
     // `CONFIGURATION_FILE` is `None` exactly when an `init.lua` took the TOML

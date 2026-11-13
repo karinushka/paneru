@@ -1,15 +1,24 @@
+use std::collections::{HashMap, HashSet};
+
+use bevy::math::IRect;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSBackingStoreType, NSBezierPath, NSColor, NSCompositingOperation, NSFloatingWindowLevel,
-    NSFont, NSGraphicsContext, NSParagraphStyle, NSScreen, NSView, NSWindow,
+    NSBackingStoreType, NSBezierPath, NSColor, NSCompositingOperation, NSEvent,
+    NSFloatingWindowLevel, NSFont, NSGraphicsContext, NSParagraphStyle, NSScreen, NSView, NSWindow,
     NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
     NSAttributedString, NSDictionary, NSMutableCopying, NSPoint, NSRect, NSSize, NSString,
 };
+use tracing::warn;
+
+use crate::events::{Event, EventSender};
+use crate::manager::Origin;
+use crate::platform::WinID;
+use crate::tab_indicator::{self, TabIndicatorLayout};
 
 #[derive(Clone, PartialEq)]
 pub struct BorderParams {
@@ -548,6 +557,256 @@ impl FlashMessageManager {
 
     pub fn remove(&mut self) {
         if let Some(window) = self.window.take() {
+            window.orderOut(None::<&AnyObject>);
+        }
+    }
+}
+
+// ── Tab indicator ───────────────────────────────────────────────────────
+
+/// A tabbed-display column on screen: its rect (CG absolute, like
+/// `Window::frame()`) and its tabs in stack order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TabIndicatorGroup {
+    pub column_rect: IRect,
+    pub window_ids: Vec<WinID>,
+    pub active_index: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TabIndicatorWindowParams {
+    /// Size only, so a column that merely moves keeps its view.
+    size: NSSize,
+    /// Segment rects in the view's own local (flipped) coordinates.
+    segments: Vec<IRect>,
+    window_ids: Vec<WinID>,
+    active_index: usize,
+    active_color: (f64, f64, f64),
+    inactive_color: (f64, f64, f64),
+}
+
+#[derive(Debug, Clone)]
+struct TabIndicatorViewIvars {
+    segments: Vec<IRect>,
+    window_ids: Vec<WinID>,
+    active_index: usize,
+    active_color: (f64, f64, f64),
+    inactive_color: (f64, f64, f64),
+    events: EventSender,
+}
+
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PaneruTabIndicatorView"]
+    #[ivars = TabIndicatorViewIvars]
+    #[derive(Debug)]
+    struct TabIndicatorView;
+
+    impl TabIndicatorView {
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _dirty_rect: NSRect) {
+            let ivars = self.ivars();
+            for (index, segment) in ivars.segments.iter().enumerate() {
+                let (r, g, b) = if index == ivars.active_index {
+                    ivars.active_color
+                } else {
+                    ivars.inactive_color
+                };
+                let color = NSColor::colorWithSRGBRed_green_blue_alpha(
+                    r as CGFloat,
+                    g as CGFloat,
+                    b as CGFloat,
+                    1.0,
+                );
+                color.setFill();
+                NSBezierPath::fillRect(irect_to_nsrect(*segment));
+            }
+        }
+
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: &NSEvent) -> bool {
+            true
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            let point_in_window: NSPoint = unsafe { msg_send![event, locationInWindow] };
+            let local: NSPoint = unsafe {
+                msg_send![self, convertPoint: point_in_window, fromView: Option::<&NSView>::None]
+            };
+            let ivars = self.ivars();
+            #[allow(clippy::cast_possible_truncation)]
+            let point = Origin::new(local.x as i32, local.y as i32);
+            let Some(index) = tab_indicator::hit_test(point, &ivars.segments) else {
+                return;
+            };
+            let Some(&window_id) = ivars.window_ids.get(index) else {
+                return;
+            };
+            if let Err(error) = ivars.events.send(Event::TabIndicatorClicked { window_id }) {
+                warn!(%error, "unable to send tab indicator click");
+            }
+        }
+    }
+);
+
+impl TabIndicatorView {
+    fn new(
+        mtm: MainThreadMarker,
+        frame: NSRect,
+        params: &TabIndicatorWindowParams,
+        events: EventSender,
+    ) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(TabIndicatorViewIvars {
+            segments: params.segments.clone(),
+            window_ids: params.window_ids.clone(),
+            active_index: params.active_index,
+            active_color: params.active_color,
+            inactive_color: params.inactive_color,
+            events,
+        });
+        unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+}
+
+fn irect_to_nsrect(rect: IRect) -> NSRect {
+    NSRect::new(
+        NSPoint::new(f64::from(rect.min.x), f64::from(rect.min.y)),
+        NSSize::new(f64::from(rect.width()), f64::from(rect.height())),
+    )
+}
+
+/// Unlike `make_overlay_window`'s dim/flash windows, this one must actually
+/// receive the click that switches tabs.
+fn make_tab_indicator_window(mtm: MainThreadMarker, cocoa_frame: NSRect) -> Retained<NSWindow> {
+    let window = unsafe {
+        NSWindow::initWithContentRect_styleMask_backing_defer(
+            NSWindow::alloc(mtm),
+            cocoa_frame,
+            NSWindowStyleMask::Borderless,
+            NSBackingStoreType::Buffered,
+            false,
+        )
+    };
+    window.setOpaque(false);
+    window.setBackgroundColor(Some(&NSColor::clearColor()));
+    window.setIgnoresMouseEvents(false);
+    window.setHasShadow(false);
+    window.setLevel(NSFloatingWindowLevel);
+    window.setCollectionBehavior(
+        NSWindowCollectionBehavior::Transient
+            | NSWindowCollectionBehavior::IgnoresCycle
+            | NSWindowCollectionBehavior::CanJoinAllSpaces
+            | NSWindowCollectionBehavior::Stationary
+            | NSWindowCollectionBehavior::FullScreenNone,
+    );
+    window
+}
+
+/// One indicator window per on-screen tabbed column, keyed by the group's
+/// leader so it survives active-tab switches.
+pub struct TabIndicatorManager {
+    mtm: MainThreadMarker,
+    events: EventSender,
+    windows: HashMap<WinID, (Retained<NSWindow>, TabIndicatorWindowParams)>,
+}
+
+impl TabIndicatorManager {
+    pub fn new(mtm: MainThreadMarker, events: EventSender) -> Self {
+        Self {
+            mtm,
+            events,
+            windows: HashMap::new(),
+        }
+    }
+
+    /// Syncs the indicator windows to `groups`: stale ones are hidden and
+    /// dropped, unchanged ones only get a frame sync.
+    pub fn update(
+        &mut self,
+        groups: &[TabIndicatorGroup],
+        layout: &TabIndicatorLayout,
+        active_color: (f64, f64, f64),
+        inactive_color: (f64, f64, f64),
+    ) {
+        let screen_h = primary_screen_height(self.mtm);
+        let mut seen = HashSet::new();
+
+        for group in groups {
+            let Some(&leader) = group.window_ids.first() else {
+                continue;
+            };
+            seen.insert(leader);
+
+            let indicator_rect = tab_indicator::indicator_rect(group.column_rect, layout);
+            let segments_abs =
+                tab_indicator::tab_segments(indicator_rect, group.window_ids.len(), layout);
+            let segments = segments_abs
+                .iter()
+                .map(|segment| {
+                    IRect::from_corners(
+                        segment.min - indicator_rect.min,
+                        segment.max - indicator_rect.min,
+                    )
+                })
+                .collect();
+            let frame = cg_abs_to_cocoa(irect_to_nsrect(indicator_rect), screen_h);
+
+            let params = TabIndicatorWindowParams {
+                size: frame.size,
+                segments,
+                window_ids: group.window_ids.clone(),
+                active_index: group.active_index,
+                active_color,
+                inactive_color,
+            };
+
+            if let Some((window, stored)) = self.windows.get_mut(&leader) {
+                if *stored == params {
+                    window.setFrame_display(frame, false);
+                } else {
+                    let view = TabIndicatorView::new(
+                        self.mtm,
+                        NSRect::new(NSPoint::new(0.0, 0.0), frame.size),
+                        &params,
+                        self.events.clone(),
+                    );
+                    window.setContentView(Some(&view));
+                    window.setFrame_display(frame, true);
+                    *stored = params;
+                }
+                window.orderFront(None::<&AnyObject>);
+            } else {
+                let window = make_tab_indicator_window(self.mtm, frame);
+                let view = TabIndicatorView::new(
+                    self.mtm,
+                    NSRect::new(NSPoint::new(0.0, 0.0), frame.size),
+                    &params,
+                    self.events.clone(),
+                );
+                window.setContentView(Some(&view));
+                window.orderFront(None::<&AnyObject>);
+                self.windows.insert(leader, (window, params));
+            }
+        }
+
+        self.windows.retain(|key, (window, _)| {
+            let keep = seen.contains(key);
+            if !keep {
+                window.orderOut(None::<&AnyObject>);
+            }
+            keep
+        });
+    }
+
+    pub fn remove_all(&mut self) {
+        for (_, (window, _)) in self.windows.drain() {
             window.orderOut(None::<&AnyObject>);
         }
     }

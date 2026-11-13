@@ -566,6 +566,28 @@ The border changes color immediately when the macOS appearance changes.
 
 > **Tip:** You can override the `border_radius` for specific applications in the `[windows]` section. See [Window Rules](#6-window-rules).
 
+### `[decorations.tab_indicator]`
+
+A thin clickable strip drawn along one edge of a tabbed-display column (`window_tabbeddisplay`, see [Keybindings](#5-keybindings)) — one segment per tab, the active one highlighted, click a segment to switch straight to that tab.
+
+| Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `enabled` | Bool | `true` | Whether the indicator is drawn on a tabbed column. |
+| `position` | String | `'left'` | Which edge of the column the indicator sits against: `'left'`, `'right'`, `'top'`, or `'bottom'`. |
+| `width` | Float (px) | `6.0` | Thickness of the indicator strip. |
+| `gap` | Float (px) | `4.0` | Gap between the indicator and the column it belongs to. |
+| `segment_gap` | Float (px) | `2.0` | Gap between adjacent tab segments. |
+| `active_color` | String (Hex) | `"#5AC8FA"` | Color of the active tab's segment. |
+| `inactive_color` | String (Hex) | `"#666666"` | Color of inactive tab segments. |
+
+**Example:**
+```toml
+[decorations.tab_indicator]
+position = "left"
+active_color = "#89b4fa"
+inactive_color = "#45475a"
+```
+
 ## 8. Lua Scripting
 
 Paneru embeds a Lua runtime that allows full configuration via `init.lua`, replacing `paneru.toml` entirely. When a Lua configuration or script exists (`$PANERU_LUA`, `$HOME/.paneru.lua`, or `$XDG_CONFIG_HOME/paneru/init.lua`), it takes over completely and no TOML config is read.

@@ -212,6 +212,10 @@ pub enum Event {
     /// A command has been issued to the window manager.
     Command { command: Command },
 
+    /// A tab-indicator segment was clicked. Raw `AppKit` signal, not a
+    /// `Command`, like `MenuOpened`/`MenuClosed`.
+    TabIndicatorClicked { window_id: WinID },
+
     /// A structured state query has been issued by a client.
     StateQuery {
         kind: StateQueryKind,

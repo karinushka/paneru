@@ -25,7 +25,7 @@ use super::{
 
 use crate::config::{Config, decorations::BorderRadiusOption};
 use crate::ecs::display::FloatingLayer;
-use crate::ecs::layout::{Column, LayoutStrip};
+use crate::ecs::layout::{Column, LayoutStrip, StackItem};
 use crate::ecs::params::{ActiveDisplay, FrameActivity, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, BruteforceWindows, FlashMessage, FocusedMarker, Initializing,
@@ -38,9 +38,10 @@ use crate::manager::{
     Application, Display, Origin, Process, Size, Window, WindowManager, WindowOS,
     bruteforce_windows,
 };
-use crate::overlay::{FlashMessageManager, OverlayManager};
+use crate::overlay::{FlashMessageManager, OverlayManager, TabIndicatorGroup, TabIndicatorManager};
 use crate::platform::input::TapHealth;
 use crate::platform::{PlatformCallbacks, WinID};
+use crate::tab_indicator::TabIndicatorLayout;
 
 // Keep partially registered observers alive during slow AX startup.
 // A separate, low-frequency retry must not gate discovery of usable windows.
@@ -1261,6 +1262,108 @@ pub(super) fn update_overlays(
         dim_color,
         focused_abs_cg,
         border_params.as_ref(),
+    );
+}
+
+/// Rebuilds the tab indicators, one per tabbed `Column::Stack` on each
+/// display's active workspace.
+pub(super) fn update_tab_indicators(
+    active_strips: Query<(Has<Scrolling>, &LayoutStrip, &ChildOf), With<ActiveWorkspaceMarker>>,
+    displays: Query<(&Display, Option<&crate::ecs::DockPosition>)>,
+    windows: Windows,
+    tab_indicator_mgr: Option<NonSendMut<TabIndicatorManager>>,
+    mission_control_active: Res<MissionControlActive>,
+    config: Res<Config>,
+) {
+    let Some(mut manager) = tab_indicator_mgr else {
+        return;
+    };
+
+    if !config.tab_indicator_enabled() || mission_control_active.0 {
+        manager.remove_all();
+        return;
+    }
+
+    let layout = TabIndicatorLayout {
+        position: config.tab_indicator_position(),
+        #[allow(clippy::cast_possible_truncation)]
+        width: config.tab_indicator_width() as i32,
+        #[allow(clippy::cast_possible_truncation)]
+        gap: config.tab_indicator_gap() as i32,
+        #[allow(clippy::cast_possible_truncation)]
+        segment_gap: config.tab_indicator_segment_gap() as i32,
+    };
+
+    let mut groups = Vec::new();
+    for (swiping, strip, child_of) in &active_strips {
+        if swiping || strip.is_fullscreen() {
+            continue;
+        }
+        let Ok((display, dock)) = displays.get(child_of.parent()) else {
+            continue;
+        };
+        let viewport = display.actual_display_bounds(dock, &config);
+        for column in strip.columns() {
+            let Column::Stack(items) = column else {
+                continue;
+            };
+            let members: Vec<Entity> = items.iter().flat_map(StackItem::window_iter).collect();
+            let Some(&first) = members.first() else {
+                continue;
+            };
+            if members.len() < 2 || !strip.is_tabbed_display(first) {
+                continue;
+            }
+            let Some(active_entity) = strip.active_tab(first) else {
+                continue;
+            };
+            let Some(active_index) = members.iter().position(|&e| e == active_entity) else {
+                continue;
+            };
+            let Some(active_window) = windows.get(active_entity) else {
+                continue;
+            };
+            let Some(window_ids) = members
+                .iter()
+                .map(|&e| windows.get(e).map(|window| window.id()))
+                .collect::<Option<Vec<crate::platform::WinID>>>()
+            else {
+                continue;
+            };
+
+            // `Window::frame()` includes padding; strip it as `update_overlays`
+            // does, or the indicator drifts toward the neighboring column.
+            let frame = active_window.frame();
+            let h_pad = active_window.horizontal_padding();
+            let v_pad = active_window.vertical_padding();
+            let column_rect = IRect::from_corners(
+                frame.min + Origin::new(h_pad, v_pad),
+                frame.max - Origin::new(h_pad, v_pad),
+            );
+
+            // Skip columns scrolled out of the viewport (beyond the
+            // off-screen sliver).
+            if !crate::tab_indicator::column_is_visible(
+                column_rect,
+                viewport,
+                config.sliver_width(),
+            ) {
+                continue;
+            }
+
+            groups.push(TabIndicatorGroup {
+                column_rect,
+                window_ids,
+                active_index,
+            });
+        }
+    }
+
+    manager.update(
+        &groups,
+        &layout,
+        config.tab_indicator_active_color(),
+        config.tab_indicator_inactive_color(),
     );
 }
 

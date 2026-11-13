@@ -184,4 +184,3 @@ fn top_pixel_row_of_laptop_belongs_to_laptop_not_monitor_above() {
         "y = 0 is the top pixel row of the laptop, not the bottom edge of the left monitor"
     );
 }
-

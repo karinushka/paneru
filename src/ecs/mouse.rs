@@ -4,7 +4,9 @@ use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::{Or, With};
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::system::{Commands, Local, Query, Res, Single};
+use bevy::math::IRect;
 use bevy::time::Time;
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 use tracing::{debug, trace, warn};
 
@@ -396,6 +398,139 @@ pub(super) struct WarpVelocityState {
     last: Option<(Origin, Instant)>,
 }
 
+#[derive(Clone, Copy)]
+struct RowDisplay {
+    frame: IRect,
+    row_offset_x: i32,
+}
+
+struct WarpDesk {
+    row: Vec<RowDisplay>,
+    lowest: IRect,
+}
+
+impl WarpDesk {
+    fn from_displays(
+        displays: &Query<&Display>,
+        config: &Config,
+        warp_direction: i16,
+    ) -> Option<Self> {
+        if !config.horizontal_mouse_warp_lowest_below() {
+            return None;
+        }
+        // The pointer can be in a menu bar, which `Display::bounds` leaves out.
+        let frames = displays.iter().map(Display::frame).collect::<Vec<_>>();
+        Self::new(&frames, warp_direction)
+    }
+
+    fn new(frames: &[IRect], warp_direction: i16) -> Option<Self> {
+        if frames.len() < 3 {
+            return None;
+        }
+        let lowest = *frames.iter().max_by_key(|frame| frame.min.y)?;
+        let upward = frames
+            .iter()
+            .filter(|frame| **frame != lowest)
+            .map(|frame| ((frame.min.y, frame.min.x), *frame))
+            .collect::<BTreeMap<_, _>>()
+            .into_values()
+            .rev()
+            .collect::<Vec<_>>();
+        // The display above the lowest one keeps its macOS x.
+        // Thus the native crossing between these two displays agrees with the row.
+        let anchor = *upward.first()?;
+        let row = upward
+            .iter()
+            .enumerate()
+            .map(|(index, frame)| {
+                let row_min_x = if warp_direction > 0 {
+                    anchor.min.x + upward[..index].iter().map(IRect::width).sum::<i32>()
+                } else {
+                    anchor.max.x - upward[..=index].iter().map(IRect::width).sum::<i32>()
+                };
+                RowDisplay {
+                    frame: *frame,
+                    row_offset_x: row_min_x - frame.min.x,
+                }
+            })
+            .collect();
+        Some(Self { row, lowest })
+    }
+
+    fn is_lowest(&self, display: &Display) -> bool {
+        self.lowest == display.frame()
+    }
+
+    fn landing(
+        &self,
+        previous: Option<Origin>,
+        point: Origin,
+        edge: i32,
+        inset: i32,
+    ) -> Option<Origin> {
+        previous
+            .and_then(|previous| self.row_crossing(previous, point, inset))
+            .or_else(|| self.up_from_lowest(point, edge, inset))
+    }
+
+    fn member(&self, point: Origin) -> Option<RowDisplay> {
+        self.row
+            .iter()
+            .copied()
+            .find(|display| display.frame.contains(point))
+    }
+
+    // macOS moves the pointer across a shared edge without a stop at the edge.
+    // Thus only the previous point shows that the pointer left a row display.
+    fn row_crossing(&self, previous: Origin, point: Origin, inset: i32) -> Option<Origin> {
+        // An event from before a sideways warp still has the old position.
+        // It jumps by the width of a display, which a real crossing does not.
+        const MAX_CROSSING_STEP_X: i32 = 400;
+        let from = self.member(previous)?;
+        let to = self.member(point)?;
+        if to.frame == from.frame || (point.x - previous.x).abs() >= MAX_CROSSING_STEP_X {
+            return None;
+        }
+        let row_x = previous.x + from.row_offset_x;
+        let over_lowest = (self.lowest.min.x..self.lowest.max.x).contains(&row_x);
+        if to.frame.min.y >= from.frame.max.y {
+            Some(if over_lowest {
+                Origin::new(
+                    row_x.clamp(self.lowest.min.x + inset, self.lowest.max.x - 1 - inset),
+                    self.lowest.min.y + inset,
+                )
+            } else {
+                Origin::new(previous.x, from.frame.max.y - 1)
+            })
+        } else {
+            (to.frame.max.y <= from.frame.min.y).then(|| Origin::new(previous.x, from.frame.min.y))
+        }
+    }
+
+    fn up_from_lowest(&self, point: Origin, edge: i32, inset: i32) -> Option<Origin> {
+        let on_top_edge = self.lowest.contains(point) && point.y - self.lowest.min.y < edge;
+        let native_above = self
+            .member(Origin::new(point.x, self.lowest.min.y - 1))
+            .is_some();
+        if !on_top_edge || native_above {
+            return None;
+        }
+        self.row
+            .iter()
+            .find(|display| {
+                (display.frame.min.x + display.row_offset_x
+                    ..display.frame.max.x + display.row_offset_x)
+                    .contains(&point.x)
+            })
+            .map(|display| {
+                Origin::new(
+                    point.x - display.row_offset_x,
+                    display.frame.max.y - 1 - inset,
+                )
+            })
+    }
+}
+
 fn horizontal_warp_mouse_trigger(
     mut messages: MessageReader<InputEvent>,
     displays: Query<&Display>,
@@ -415,6 +550,9 @@ fn horizontal_warp_mouse_trigger(
     /// Stale velocity samples (e.g. from a prior gesture) shouldn't carry.
     const VELOCITY_FRESHNESS: Duration = Duration::from_millis(80);
 
+    let desk = config
+        .horizontal_mouse_warp()
+        .and_then(|direction| WarpDesk::from_displays(&displays, &config, direction));
     for InputEvent(event) in messages.read() {
         let (Event::MouseMoved { point, .. } | Event::MouseDragged { point, .. }) = event else {
             continue;
@@ -433,6 +571,7 @@ fn horizontal_warp_mouse_trigger(
             let dx = f64::from(point.x - prev.x);
             Some(dx / dt.as_secs_f64())
         });
+        let previous = state.last.map(|(previous, _)| previous);
         state.last = Some((point, now));
 
         let Some(warp_direction) = config.horizontal_mouse_warp() else {
@@ -442,12 +581,27 @@ fn horizontal_warp_mouse_trigger(
             return;
         }
 
+        if let Some(landing) = desk
+            .as_ref()
+            .and_then(|desk| desk.landing(previous, point, EDGE_THRESHOLD, LANDING_INSET))
+        {
+            window_manager.warp_mouse(landing);
+            state.last = Some((landing, now));
+            continue;
+        }
+
         let Some(current_display) = displays
             .iter()
             .find(|display| display.bounds().contains(point))
         else {
             continue;
         };
+        if desk
+            .as_ref()
+            .is_some_and(|desk| desk.is_lowest(current_display))
+        {
+            continue;
+        }
 
         let on_left_edge = (point.x - current_display.bounds().min.x).abs() < EDGE_THRESHOLD;
         let on_right_edge = (current_display.bounds().max.x - point.x).abs() < EDGE_THRESHOLD;
@@ -457,6 +611,7 @@ fn horizontal_warp_mouse_trigger(
 
         let mut target_displays = displays
             .iter()
+            .filter(|display| desk.as_ref().is_none_or(|desk| !desk.is_lowest(display)))
             .filter(|display| {
                 let above = display.bounds().min.y < current_display.bounds().min.y;
                 let below = display.bounds().min.y > current_display.bounds().min.y;

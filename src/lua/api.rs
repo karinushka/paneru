@@ -642,6 +642,7 @@ fn config_to_lua_table(lua: &Lua, config: &Config) -> mlua::Result<Table> {
         mouse_follows_focus: _,
         horizontal_mouse_warp: _,
         horizontal_mouse_warp_offset: _,
+        horizontal_mouse_warp_lowest_below: _,
         preset_column_widths: _,
         preset_stack_heights: _,
         animation_speed,
@@ -682,6 +683,10 @@ fn config_to_lua_table(lua: &Lua, config: &Config) -> mlua::Result<Table> {
     options.set(
         "horizontal_mouse_warp_offset",
         config.horizontal_mouse_warp_offset(),
+    )?;
+    options.set(
+        "horizontal_mouse_warp_lowest_below",
+        config.horizontal_mouse_warp_lowest_below(),
     )?;
     options.set("preset_column_widths", config.preset_column_widths())?;
     options.set("preset_stack_heights", config.preset_stack_heights())?;

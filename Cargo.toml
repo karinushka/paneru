@@ -96,6 +96,7 @@ mlua = { version = "0.12", default-features = false, optional = true, features =
 ] }
 notify = { version = "8.2", features = ["macos_fsevent"] }
 num_enum = "0.7"
+block2 = "0.6"
 objc2 = { version = "0.6", features = ["catch-all", "exception"] }
 objc2-app-kit = { version = "0.3", features = [
   "NSHapticFeedback",
@@ -113,11 +114,21 @@ objc2-app-kit = { version = "0.3", features = [
   "NSStringDrawing",
   "NSImage",
   "NSControl",
+  "NSPanel",
+  "NSEvent",
+  "NSResponder",
 ] }
 objc2-core-foundation = { version = "0.3", features = ["CFRunLoop"] }
 objc2-core-graphics = "0.3"
 objc2-quartz-core = { version = "0.3", features = [
   "CALayer",
+  "CAAnimation",
+  "CABase",
+  "CATextLayer",
+  "CAMediaTiming",
+  "CAMediaTimingFunction",
+  "CATransaction",
+  "block2",
   "objc2-core-foundation",
   "objc2-core-graphics",
 ] }
@@ -140,6 +151,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ctrlc = { version = "3.5", features = ["termination"] }
 xdg = "3.0"
 mockall = "0.15"
+dispatch2 = "0.3"
+objc2-core-media = "0.3"
+objc2-core-video = { version = "0.3", features = ["CVPixelBufferIOSurface", "objc2-io-surface"] }
+objc2-io-surface = "0.3"
+objc2-screen-capture-kit = "0.3"
 
 [build-dependencies]
 cfg-if = "1.0"

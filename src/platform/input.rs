@@ -46,10 +46,20 @@ pub fn set_focused_passthrough(keys: Vec<(u8, Modifiers)>) {
 /// covering macOS momentum scroll that continues after finger lift.
 const VERTICAL_GESTURE_SCROLL_SUPPRESS: Duration = Duration::from_millis(1200);
 
+/// Fingers of a 4-finger touch land a few tens of milliseconds apart, so a
+/// touch passes through three fingers first. Strip and row swipes from this
+/// long after a finger landed are held back, and dropped if the overview
+/// claims the touch.
+const LANDING_GRACE_SECS: f64 = 0.08;
+
+/// `kCGScrollPhaseBegan`: the first event of a trackpad scroll.
+const SCROLL_PHASE_BEGAN: i64 = 1;
+
 /// Limit repeated wheel inputs while the next window moves into view.
 const WINDOW_SCROLL_INTERVAL: Duration = Duration::from_millis(180);
 
 /// One finger, as a single gesture event saw it.
+#[derive(Clone)]
 struct Touch<I> {
     identity: I,
     x: f64,
@@ -57,6 +67,21 @@ struct Touch<I> {
     device_width_points: f64,
     /// Whether the finger landed this event, which starts a new sample series.
     began: bool,
+    /// Whether the finger lifted (or was cancelled) this event.
+    ended: bool,
+}
+
+/// Whether a sample at `timestamp` is too soon after a finger landed to
+/// tell a 3-finger swipe from the overview's fingers still arriving.
+fn within_landing_grace(landed: Option<f64>, timestamp: f64) -> bool {
+    landed.is_some_and(|landed| timestamp - landed < LANDING_GRACE_SECS)
+}
+
+/// Whether any finger in `fingers` is one of `claimed`.
+fn shares_finger<I>(fingers: &[Touch<I>], claimed: &[I], same: impl Fn(&I, &I) -> bool) -> bool {
+    fingers
+        .iter()
+        .any(|finger| claimed.iter().any(|c| same(c, &finger.identity)))
 }
 
 impl Touch<Retained<AnyObject>> {
@@ -72,6 +97,9 @@ impl Touch<Retained<AnyObject>> {
                     y: position.y,
                     device_width_points: touch.deviceSize().width,
                     began: touch.phase() == NSTouchPhase::Began,
+                    ended: touch
+                        .phase()
+                        .intersects(NSTouchPhase::Ended | NSTouchPhase::Cancelled),
                 }
             })
             .collect()
@@ -174,6 +202,7 @@ pub(crate) enum TapHealth {
 
 /// `InputHandler` manages low-level input events from the macOS `CGEventTap`.
 /// It intercepts keyboard and mouse events, processes gestures, and dispatches them as higher-level `Event`s.
+#[allow(clippy::struct_excessive_bools, reason = "independent gesture flags")]
 pub(super) struct InputHandler {
     /// The `EventSender` for dispatching input events.
     events: Option<EventSender>,
@@ -183,6 +212,19 @@ pub(super) struct InputHandler {
     previous_touches: Vec<Touch<Retained<AnyObject>>>,
     /// Timestamp of `previous_touches`.
     last_swipe_sample_timestamp: Option<f64>,
+    /// Set once the overview's finger count lands, and held until every
+    /// finger is off: the whole touch sequence belongs to the overview, so
+    /// fingers landing or lifting one at a time never pass through the
+    /// 3-finger strip/row gestures.
+    overview_tracking: bool,
+    /// The overview was already told this sequence's scrub is over (fingers
+    /// started lifting); the rest of the sequence is swallowed.
+    overview_released: bool,
+    /// The fingers that started the overview's sequence. The claim lasts
+    /// while any of them is still down: macOS restarts the gesture when the
+    /// finger count changes, and may then report the remaining fingers as
+    /// newly began, so phases alone can't tell the sequence apart.
+    overview_touches: Vec<Retained<AnyObject>>,
     /// The `CFMachPort` representing the `CGEventTap`.
     tap_port: Option<CFRetained<CFMachPort>>,
     /// Run loop source feeding `tap_port`. Retained so the tap can be torn down
@@ -192,6 +234,17 @@ pub(super) struct InputHandler {
     /// are suppressed for a short window after this to prevent the OS from
     /// scrolling windows underneath (including momentum scroll after finger lift).
     last_swipe_time: Option<Instant>,
+    /// Whether the overview may take the current trackpad scroll stream:
+    /// only one that began after the overview's touch was over. Scrolls
+    /// from the overview's own fingers lifting, and their momentum, are
+    /// dropped instead of scrolling the overview.
+    overview_scroll_live: bool,
+    /// Gesture timestamp of the last finger landing.
+    finger_landed_at: Option<f64>,
+    /// Strip/row swipe events from just after a finger landed, held back in
+    /// case it is the overview's fingers arriving one by one; see
+    /// [`LANDING_GRACE_SECS`].
+    held_swipes: Vec<Event>,
     last_window_scroll: Option<(Instant, Direction)>,
     invalid_device_size_warned: bool,
     // Prevents from being Unpin automatically
@@ -218,9 +271,15 @@ impl InputHandler {
             config,
             previous_touches: Vec::new(),
             last_swipe_sample_timestamp: None,
+            overview_tracking: false,
+            overview_released: false,
+            overview_touches: Vec::new(),
             tap_port: None,
             run_loop_source: None,
             last_swipe_time: None,
+            overview_scroll_live: false,
+            finger_landed_at: None,
+            held_swipes: Vec::new(),
             last_window_scroll: None,
             invalid_device_size_warned: false,
             _pin: PhantomPinned,
@@ -459,6 +518,51 @@ impl InputHandler {
 
     /// Use the configured modifier to scroll the strip or select an adjacent window.
     fn handle_scroll_wheel(&mut self, event: &CGEvent) -> bool {
+        // The open overview owns every scroll: it pans and scrolls its
+        // strips, and nothing should reach the windows behind it.
+        if crate::overview::OVERVIEW_OPEN.load(std::sync::atomic::Ordering::Relaxed) {
+            let int = |f| CGEvent::integer_value_field(Some(event), f);
+            let scroll_phase = int(CGEventField::ScrollWheelEventScrollPhase);
+            let momentum = int(CGEventField::ScrollWheelEventMomentumPhase);
+            if self.overview_tracking {
+                // The overview's fingers are (partly) still down.
+                self.overview_scroll_live = false;
+                return true;
+            }
+            if scroll_phase == SCROLL_PHASE_BEGAN {
+                self.overview_scroll_live = true;
+            }
+            // Wheels report neither phase and always count.
+            let trackpad = scroll_phase != 0 || momentum != 0;
+            if trackpad && !self.overview_scroll_live {
+                return true;
+            }
+            if let Some(events) = &self.events {
+                let field = |f| CGEvent::double_value_field(Some(event), f);
+                let precise = CGEvent::integer_value_field(
+                    Some(event),
+                    CGEventField::ScrollWheelEventIsContinuous,
+                ) != 0;
+                // Trackpads report points; wheels report lines.
+                let (dx, dy) = if precise {
+                    (
+                        field(CGEventField::ScrollWheelEventPointDeltaAxis2),
+                        field(CGEventField::ScrollWheelEventPointDeltaAxis1),
+                    )
+                } else {
+                    (
+                        field(CGEventField::ScrollWheelEventFixedPtDeltaAxis2) * 12.0,
+                        field(CGEventField::ScrollWheelEventFixedPtDeltaAxis1) * 12.0,
+                    )
+                };
+                _ = events.send(Event::OverviewScroll {
+                    point: CGEvent::location(Some(event)),
+                    dx,
+                    dy,
+                });
+            }
+            return true;
+        }
         // Suppress scroll events shortly after a swipe gesture to prevent
         // the OS from scrolling windows underneath, including momentum scroll events
         // that arrive after finger lift.
@@ -538,20 +642,109 @@ impl InputHandler {
         false
     }
 
+    /// Sends a strip/row swipe, or holds it back while a finger has only
+    /// just landed (see [`LANDING_GRACE_SECS`]).
+    fn send_swipe(&mut self, event: Event, timestamp: f64) {
+        if within_landing_grace(self.finger_landed_at, timestamp) {
+            self.held_swipes.push(event);
+            return;
+        }
+        self.flush_held_swipes();
+        if let Some(events) = &self.events {
+            _ = events.send(event);
+            self.last_swipe_time = Some(Instant::now());
+        }
+    }
+
+    fn flush_held_swipes(&mut self) {
+        let held = std::mem::take(&mut self.held_swipes);
+        if held.is_empty() {
+            return;
+        }
+        if let Some(events) = &self.events {
+            for event in held {
+                _ = events.send(event);
+            }
+            self.last_swipe_time = Some(Instant::now());
+        }
+    }
+
+    /// A gesture sample while the touch sequence belongs to the overview.
+    /// Returns whether to intercept the event, or `None` when a new touch
+    /// sequence began and the event should be handled as usual.
+    fn overview_sample(
+        &mut self,
+        fingers: &[Touch<Retained<AnyObject>>],
+        overview_fingers: Option<usize>,
+        timestamp: f64,
+    ) -> Option<bool> {
+        if fingers.is_empty() {
+            // AppKit interleaves empty touch sets; they don't mean a lift.
+            return Some(true);
+        }
+        if self.overview_released {
+            // Swallowed while any finger of the overview's sequence is down.
+            // Only fingers that are all new start a new sequence.
+            if !shares_finger(fingers, &self.overview_touches, |a, b| {
+                // SAFETY: NSTouch identities conform to NSObject and answer isEqual:.
+                unsafe { msg_send![&**a, isEqual: &**b] }
+            }) {
+                self.overview_tracking = false;
+                self.overview_released = false;
+                self.overview_touches.clear();
+                self.previous_touches.clear();
+                self.last_swipe_sample_timestamp = None;
+                return None;
+            }
+            return Some(true);
+        }
+        // Every finger ended, or one lifted first: the scrub is over. The
+        // phase-ended event doesn't always arrive, so don't wait for it.
+        if fingers.iter().all(|finger| finger.ended) || overview_fingers != Some(fingers.len()) {
+            self.overview_released = true;
+            self.previous_touches.clear();
+            self.last_swipe_sample_timestamp = None;
+            if let Some(events) = &self.events {
+                _ = events.send(Event::OverviewSwipeEnd);
+            }
+            return Some(true);
+        }
+        let movement = swipe_movement(&self.previous_touches, fingers, |previous, current| {
+            // SAFETY: NSTouch identities conform to NSObject and answer isEqual:.
+            unsafe { msg_send![&**previous, isEqual: &**current] }
+        });
+        let elapsed_secs = self
+            .last_swipe_sample_timestamp
+            .replace(timestamp)
+            .map_or(0.0, |previous| (timestamp - previous).max(0.0));
+        self.previous_touches = fingers.to_vec();
+        // Only the vertical component drives the overview. Touch positions
+        // are Y-up and the delta is previous - current, so up is negative.
+        if let (Some(SwipeMovement::Vertical(delta)), Some(events)) = (movement, &self.events) {
+            _ = events.send(Event::OverviewSwipe {
+                delta: -delta,
+                elapsed_secs,
+            });
+        }
+        Some(true)
+    }
+
     /// Handles swipe gesture events. Routes to horizontal `Swipe` or vertical
     /// `VerticalSwipe` based on axis dominance. Returns true to intercept the event.
+    #[allow(clippy::too_many_lines)]
     fn handle_swipe(&mut self, event: &CGEvent) -> bool {
         const NS_EVENT_PHASE_ENDED: usize = 1 << 3; // 8
         const NS_EVENT_PHASE_CANCELLED: usize = 1 << 4; // 16
 
-        let Some(configured_fingers) = self
+        let configured_fingers = self
             .config
             .swipe_gesture_fingers()
-            .filter(|fingers| *fingers >= GESTURE_MINIMAL_FINGERS)
-        else {
+            .filter(|fingers| *fingers >= GESTURE_MINIMAL_FINGERS);
+        let overview_fingers = self.config.overview_gesture_fingers();
+        if configured_fingers.is_none() && overview_fingers.is_none() {
             // No valid gesture is configured, so leave native macOS gestures alone.
             return false;
-        };
+        }
 
         objc2::rc::autoreleasepool(|_| {
             let Some(ns_event) = NSEvent::eventWithCGEvent(event) else {
@@ -570,14 +763,52 @@ impl InputHandler {
                 self.previous_touches.clear();
                 self.invalid_device_size_warned = false;
                 self.last_swipe_sample_timestamp = None;
+                // A quick flick shorter than the grace still counts.
+                if !self.overview_tracking {
+                    self.flush_held_swipes();
+                }
                 if let Some(events) = &self.events {
                     _ = events.send(Event::TouchpadUp);
+                    // macOS also ends the gesture when the finger count
+                    // changes (one finger lifts), with the rest still down.
+                    // So this ends the overview's scrub but keeps claiming
+                    // the sequence: only a finger landing again (see
+                    // `overview_sample`) starts a new one, otherwise the
+                    // remaining fingers would drive the strip gestures.
+                    if self.overview_tracking && !self.overview_released {
+                        self.overview_released = true;
+                        _ = events.send(Event::OverviewSwipeEnd);
+                    }
                 }
                 return false;
             }
 
             let fingers = Touch::sample(&ns_event.allTouches());
-            if !gesture_should_intercept(Some(configured_fingers), fingers.len()) {
+            if self.overview_tracking
+                && let Some(intercept) = self.overview_sample(&fingers, overview_fingers, timestamp)
+            {
+                return intercept;
+            }
+            let overview = overview_fingers == Some(fingers.len())
+                && !fingers.iter().all(|finger| finger.ended);
+            if overview {
+                // The overview's fingers just landed: claim the sequence and
+                // let the ECS build the overview now, while nothing moves
+                // yet, so the first movement doesn't wait on captures.
+                self.overview_tracking = true;
+                self.overview_released = false;
+                self.overview_touches = fingers.iter().map(|f| f.identity.clone()).collect();
+                self.previous_touches = fingers;
+                self.last_swipe_sample_timestamp = Some(timestamp);
+                // Swipes from the first fingers to land were the overview's.
+                self.held_swipes.clear();
+                self.overview_scroll_live = false;
+                if let Some(events) = &self.events {
+                    _ = events.send(Event::OverviewTouchDown);
+                }
+                return true;
+            }
+            if !overview && !gesture_should_intercept(configured_fingers, fingers.len()) {
                 // AppKit interleaves phase events with an empty touch set
                 // between usable samples. They do not mean the fingers lifted.
                 // That's why empty finger counts don't trigger a reset.
@@ -588,6 +819,7 @@ impl InputHandler {
                 return false;
             }
             if fingers.iter().any(|finger| finger.began) {
+                self.finger_landed_at = Some(timestamp);
                 self.invalid_device_size_warned = false;
                 // A fresh gesture: nothing carries over from the last one.
                 self.previous_touches.clear();
@@ -606,30 +838,33 @@ impl InputHandler {
                 .replace(timestamp)
                 .map(|previous| (timestamp - previous).max(0.0));
             self.previous_touches = fingers;
+            let Some(configured_fingers) = configured_fingers else {
+                return false;
+            };
             match movement {
                 Some(SwipeMovement::Horizontal { delta, distance_cm }) => {
                     if distance_cm.is_none() && !self.invalid_device_size_warned {
                         warn!("trackpad did not provide a valid device size for paging");
                         self.invalid_device_size_warned = true;
                     }
-                    if let Some(events) = &self.events {
-                        let _ = events.send(Event::Swipe {
+                    self.send_swipe(
+                        Event::Swipe {
                             delta,
                             fingers: configured_fingers,
                             distance_cm: distance_cm.unwrap_or(0.0),
                             elapsed_secs,
-                        });
-                        self.last_swipe_time = Some(Instant::now());
-                    }
+                        },
+                        timestamp,
+                    );
                 }
                 Some(SwipeMovement::Vertical(delta)) if self.config.swipe_vertical() => {
-                    if let Some(events) = &self.events {
-                        let _ = events.send(Event::VerticalSwipe {
+                    self.send_swipe(
+                        Event::VerticalSwipe {
                             delta,
                             fingers: configured_fingers,
-                        });
-                        self.last_swipe_time = Some(Instant::now());
-                    }
+                        },
+                        timestamp,
+                    );
                 }
                 Some(SwipeMovement::Vertical(_)) => return false,
                 None => (),
@@ -801,8 +1036,43 @@ mod tests {
                 y: 0.0,
                 device_width_points: 144.0,
                 began: false,
+                ended: false,
             })
             .collect()
+    }
+
+    #[test]
+    fn swipes_wait_out_the_landing_grace() {
+        assert!(within_landing_grace(Some(10.0), 10.03));
+        assert!(!within_landing_grace(Some(10.0), 10.0 + LANDING_GRACE_SECS));
+        assert!(!within_landing_grace(None, 10.0));
+    }
+
+    #[test]
+    fn overview_claim_lasts_while_any_of_its_fingers_is_down() {
+        let claimed = [0, 1, 2, 3];
+        let same = |a: &usize, b: &usize| a == b;
+        // One finger lifted: the three left are still the overview's, even
+        // if macOS restarts the gesture and reports them as began.
+        let mut rest = three_fingers(0.0);
+        for f in &mut rest {
+            f.began = true;
+        }
+        assert!(shares_finger(&rest, &claimed, same));
+        // A single original finger left among new ones still holds it.
+        let mut mixed = three_fingers(0.0);
+        mixed[0].identity = 10;
+        mixed[1].identity = 11;
+        assert!(shares_finger(&mixed, &claimed, same));
+        // All new fingers: a new sequence.
+        let fresh: Vec<_> = three_fingers(0.0)
+            .into_iter()
+            .map(|mut f| {
+                f.identity += 20;
+                f
+            })
+            .collect();
+        assert!(!shares_finger(&fresh, &claimed, same));
     }
 
     fn movement(previous: &[Touch<usize>], current: &[Touch<usize>]) -> Option<SwipeMovement> {
@@ -914,6 +1184,7 @@ mod tests {
                     y,
                     device_width_points: 144.0,
                     began: false,
+                    ended: false,
                 })
                 .collect::<Vec<_>>()
         };

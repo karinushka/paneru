@@ -163,6 +163,29 @@ pub enum Event {
     /// All fingers are up from the touchpad.
     TouchpadUp,
 
+    /// A click on an open overview panel, in absolute CG coordinates.
+    OverviewClick { point: CGPoint },
+    /// Scroll over an open overview panel (point in absolute CG coordinates,
+    /// deltas in points, natural direction already applied).
+    OverviewScroll { point: CGPoint, dx: f64, dy: f64 },
+    /// Escape pressed while an overview panel had key focus: close back to
+    /// how things were.
+    OverviewDismiss,
+    /// Return pressed while an overview panel had key focus: close into
+    /// what the overview shows.
+    OverviewAccept,
+    /// The overview transition with this generation finished animating.
+    OverviewTransitionDone { generation: u64 },
+    /// Continuous overview gesture progress: vertical finger travel in
+    /// trackpad-normalized units since the previous sample (up is positive).
+    OverviewSwipe { delta: f64, elapsed_secs: f64 },
+    /// The fingers driving an overview gesture lifted.
+    OverviewSwipeEnd,
+    /// The overview's finger count landed on the trackpad (before moving).
+    OverviewTouchDown,
+    /// A background overview capture finished; picks it up promptly.
+    OverviewCaptureLanded,
+
     /// A new space (virtual desktop) has been created.
     SpaceCreated { space_id: WorkspaceId },
     /// A space has been destroyed.

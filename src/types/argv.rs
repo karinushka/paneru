@@ -50,6 +50,7 @@ pub fn parse_command(argv: &[&str]) -> Result<Command> {
         "restart" => Command::Restart,
         "showmenu" if argv.len() == 1 => Command::MenuBar(true),
         "hidemenu" if argv.len() == 1 => Command::MenuBar(false),
+        "overview" if argv.len() == 1 => Command::Overview,
         _ => return Err(ParseError::new(format!("unhandled command '{argv:?}'"))),
     })
 }
@@ -173,6 +174,7 @@ impl Command {
             Command::MenuBar(enabled) => {
                 vec![if *enabled { "showmenu" } else { "hidemenu" }.to_string()]
             }
+            Command::Overview => vec!["overview".to_string()],
             Command::Lua(_) | Command::Layout(_) => return None,
         };
         Some(argv)
@@ -296,6 +298,7 @@ mod tests {
             Command::PrintState,
             Command::MenuBar(true),
             Command::MenuBar(false),
+            Command::Overview,
             Command::Mouse(MouseMove::ToNextDisplay),
         ] {
             assert_eq!(

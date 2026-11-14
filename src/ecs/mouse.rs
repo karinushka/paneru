@@ -49,9 +49,10 @@ impl Plugin for MouseEventsPlugin {
                     mouse_resize_trigger,
                     mouse_down_trigger,
                 )
-                    .run_if(mission_control_inactive),
+                    .run_if(mission_control_inactive)
+                    .run_if(crate::ecs::overview::overview_inactive),
                 mouse_up_trigger,
-                horizontal_warp_mouse_trigger,
+                horizontal_warp_mouse_trigger.run_if(crate::ecs::overview::overview_inactive),
             )
                 .in_set(UpdateSet::Input)
                 .run_if(on_message::<InputEvent>),

@@ -1938,26 +1938,24 @@ pub fn toggle_tabbed_display_handler(
         .and_then(|(_, entity)| windows.get_managed(entity))
         && unmanaged.is_none()
     {
-        let strip = active_display.active_strip();
-        let members: Vec<Entity> = strip
+        // Check via `&LayoutStrip` first so a no-op press on a non-stacked
+        // window doesn't mark `LayoutStrip` changed or flash a message.
+        let strip = active_display.strip();
+        let Some(Column::Stack(items)) = strip
             .index_of(entity)
             .ok()
             .and_then(|idx| strip.get(idx).ok())
-            .map(|col| col.window_iter().collect())
-            .unwrap_or_default();
-        // `None` means the toggle wasn't applicable (not in a multi-window
-        // Stack) — stay silent rather than reporting it the same way as a
-        // real "turned tabs off", which previously made repeated presses on
-        // a non-stacked window look like a stuck toggle.
-        if let Some(now_tabbed) = strip.toggle_tabbed_display(entity) {
-            for member in members {
-                if let Ok(mut entity_commands) = commands.get_entity(member) {
-                    entity_commands.try_remove::<(ResizeMarker, ResizeAnchor, AwaitResize)>();
-                }
+            .filter(|col| matches!(col, Column::Stack(items) if items.len() >= 2))
+        else {
+            return;
+        };
+        for member in items.iter().flat_map(StackItem::window_iter) {
+            if let Ok(mut entity_commands) = commands.get_entity(member) {
+                entity_commands
+                    .try_remove::<(RepositionMarker, ResizeMarker, ResizeAnchor, AwaitResize)>();
             }
-            if now_tabbed && let Ok(mut entity_commands) = commands.get_entity(entity) {
-                entity_commands.try_insert(crate::ecs::ParkedTabMarker);
-            }
+        }
+        if let Some(now_tabbed) = active_display.active_strip().toggle_tabbed_display(entity) {
             commands.reshuffle_around(entity);
             commands.flash_message(
                 if now_tabbed { "Tabs on" } else { "Tabs off" }.to_string(),

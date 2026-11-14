@@ -1023,9 +1023,9 @@ impl LayoutStrip {
                 // limit entirely, since it isn't called for this branch.
                 let is_tabbed_column = matches!(column, Column::Stack(_))
                     && items
-                        .iter()
-                        .flat_map(StackItem::window_iter)
-                        .any(|e| self.tabbed_stacks.contains_key(&e));
+                        .first()
+                        .and_then(StackItem::top)
+                        .is_some_and(|e| self.tabbed_stacks.contains_key(&e));
 
                 let heights = if is_tabbed_column {
                     vec![layout_strip_height; items.len()]
@@ -1201,25 +1201,27 @@ impl LayoutStrip {
     /// call — when the toggle actually applied.
     pub fn toggle_tabbed_display(&mut self, entity: Entity) -> Option<bool> {
         let index = self.index_of(entity).ok()?;
-        let Column::Stack(items) = self.get(index).ok()? else {
+        let Column::Stack(items) = self.columns.get(index)? else {
             return None;
         };
         if items.len() < 2 {
             return None;
         }
-        let members: Vec<Entity> = items.iter().flat_map(StackItem::window_iter).collect();
-        let now_tabbed = !members.iter().any(|e| self.tabbed_stacks.contains_key(e));
-        if now_tabbed {
-            // `entity` becomes the initially visible tab.
-            for member in members {
+        let now_tabbed = !self.tabbed_stacks.contains_key(&entity);
+        for member in items.iter().flat_map(StackItem::window_iter) {
+            if now_tabbed {
+                // `entity` becomes the initially visible tab.
                 self.tabbed_stacks.insert(member, entity);
-            }
-        } else {
-            for member in members {
+            } else {
                 self.tabbed_stacks.remove(&member);
             }
         }
         Some(now_tabbed)
+    }
+
+    /// Whether any `Column::Stack` in this strip is currently displayed as tabs.
+    pub fn has_tabbed_stacks(&self) -> bool {
+        !self.tabbed_stacks.is_empty()
     }
 
     /// Whether `entity` belongs to a `Column::Stack` currently displayed as
@@ -1238,22 +1240,21 @@ impl LayoutStrip {
     /// misattribute a parked tab to a neighbouring display/Space, so
     /// move-detection should ignore such windows.
     pub fn is_parked_tab(&self, entity: Entity) -> bool {
-        self.is_tabbed_display(entity) && self.active_tab(entity) != Some(entity)
+        self.tabbed_stacks
+            .get(&entity)
+            .is_some_and(|&active| active != entity)
     }
 
     /// Makes `entity` its group's visible tab. Returns `false` if it isn't
     /// tabbed or is already active.
     pub fn set_active_tab(&mut self, entity: Entity) -> bool {
-        if self.tabbed_stacks.get(&entity).copied() == Some(entity) {
-            return false;
-        }
-        if !self.tabbed_stacks.contains_key(&entity) {
+        if !self.is_parked_tab(entity) {
             return false;
         }
         let Ok(index) = self.index_of(entity) else {
             return false;
         };
-        let Ok(Column::Stack(items)) = self.get(index) else {
+        let Some(Column::Stack(items)) = self.columns.get(index) else {
             return false;
         };
         for member in items.iter().flat_map(StackItem::window_iter) {
@@ -1748,7 +1749,6 @@ struct StripWindowContext {
     parked_tab: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn insert_strip_window_contexts(
     contexts: &mut EntityHashMap<StripWindowContext>,
     strip: &LayoutStrip,
@@ -1758,38 +1758,14 @@ fn insert_strip_window_contexts(
     snap_settling: bool,
 ) {
     for column in &strip.columns {
-        let tabbed_display = matches!(column, Column::Stack(_))
-            && column.window_iter().any(|e| strip.is_tabbed_display(e));
-        insert_column_window_contexts(
-            contexts,
-            strip,
-            column,
-            strip_position,
-            swiping,
-            display_entity,
-            matches!(column, Column::Stack(_)),
-            snap_settling,
-            tabbed_display,
-        );
-    }
-}
-
-#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
-fn insert_column_window_contexts(
-    contexts: &mut EntityHashMap<StripWindowContext>,
-    strip: &LayoutStrip,
-    column: &Column,
-    strip_position: Origin,
-    swiping: bool,
-    display_entity: Entity,
-    stacked: bool,
-    snap_settling: bool,
-    tabbed_display: bool,
-) {
-    match column {
-        Column::Single(entity) | Column::Fullscren(entity) => {
+        let stacked = matches!(column, Column::Stack(_));
+        let active_tab = stacked
+            .then(|| column.top().and_then(|top| strip.active_tab(top)))
+            .flatten();
+        let tabbed_display = active_tab.is_some();
+        for entity in column.window_iter() {
             contexts.insert(
-                *entity,
+                entity,
                 StripWindowContext {
                     strip_position,
                     swiping,
@@ -1797,86 +1773,9 @@ fn insert_column_window_contexts(
                     stacked,
                     snap_settling,
                     tabbed_display,
-                    parked_tab: strip.is_parked_tab(*entity),
+                    parked_tab: active_tab.is_some_and(|active| active != entity),
                 },
             );
-        }
-        Column::Stack(items) => {
-            for item in items {
-                insert_stack_item_window_contexts(
-                    contexts,
-                    strip,
-                    item,
-                    strip_position,
-                    swiping,
-                    display_entity,
-                    stacked,
-                    snap_settling,
-                    tabbed_display,
-                );
-            }
-        }
-        Column::Tabs(entities) => {
-            for entity in entities {
-                contexts.insert(
-                    *entity,
-                    StripWindowContext {
-                        strip_position,
-                        swiping,
-                        display_entity,
-                        stacked,
-                        snap_settling,
-                        tabbed_display,
-                        parked_tab: strip.is_parked_tab(*entity),
-                    },
-                );
-            }
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
-fn insert_stack_item_window_contexts(
-    contexts: &mut EntityHashMap<StripWindowContext>,
-    strip: &LayoutStrip,
-    item: &StackItem,
-    strip_position: Origin,
-    swiping: bool,
-    display_entity: Entity,
-    stacked: bool,
-    snap_settling: bool,
-    tabbed_display: bool,
-) {
-    match item {
-        StackItem::Single(entity) => {
-            contexts.insert(
-                *entity,
-                StripWindowContext {
-                    strip_position,
-                    swiping,
-                    display_entity,
-                    stacked,
-                    snap_settling,
-                    tabbed_display,
-                    parked_tab: strip.is_parked_tab(*entity),
-                },
-            );
-        }
-        StackItem::Tabs(entities) => {
-            for entity in entities {
-                contexts.insert(
-                    *entity,
-                    StripWindowContext {
-                        strip_position,
-                        swiping,
-                        display_entity,
-                        stacked,
-                        snap_settling,
-                        tabbed_display,
-                        parked_tab: strip.is_parked_tab(*entity),
-                    },
-                );
-            }
         }
     }
 }

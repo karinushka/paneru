@@ -1300,9 +1300,10 @@ pub(super) fn update_tab_indicators(
         segment_gap: config.tab_indicator_segment_gap() as i32,
     };
 
+    let sliver_width = config.sliver_width();
     let mut groups = Vec::new();
     for (swiping, strip, child_of) in &active_strips {
-        if swiping || strip.is_fullscreen() {
+        if swiping || !strip.has_tabbed_stacks() || strip.is_fullscreen() {
             continue;
         }
         let Ok((display, dock)) = displays.get(child_of.parent()) else {
@@ -1313,27 +1314,13 @@ pub(super) fn update_tab_indicators(
             let Column::Stack(items) = column else {
                 continue;
             };
-            let members: Vec<Entity> = items.iter().flat_map(StackItem::window_iter).collect();
-            let Some(&first) = members.first() else {
+            let Some(first) = column.top() else {
                 continue;
             };
-            if members.len() < 2 || !strip.is_tabbed_display(first) {
-                continue;
-            }
             let Some(active_entity) = strip.active_tab(first) else {
                 continue;
             };
-            let Some(active_index) = members.iter().position(|&e| e == active_entity) else {
-                continue;
-            };
             let Some(active_window) = windows.get(active_entity) else {
-                continue;
-            };
-            let Some(window_ids) = members
-                .iter()
-                .map(|&e| windows.get(e).map(|window| window.id()))
-                .collect::<Option<Vec<crate::platform::WinID>>>()
-            else {
                 continue;
             };
 
@@ -1349,13 +1336,25 @@ pub(super) fn update_tab_indicators(
 
             // Skip columns scrolled out of the viewport (beyond the
             // off-screen sliver).
-            if !crate::tab_indicator::column_is_visible(
-                column_rect,
-                viewport,
-                config.sliver_width(),
-            ) {
+            if !crate::tab_indicator::column_is_visible(column_rect, viewport, sliver_width) {
                 continue;
             }
+
+            let mut active_index = None;
+            let mut window_ids = Vec::with_capacity(items.len());
+            for (idx, entity) in items.iter().flat_map(StackItem::window_iter).enumerate() {
+                let Some(window) = windows.get(entity) else {
+                    window_ids.clear();
+                    break;
+                };
+                if entity == active_entity {
+                    active_index = Some(idx);
+                }
+                window_ids.push(window.id());
+            }
+            let Some(active_index) = active_index.filter(|_| window_ids.len() >= 2) else {
+                continue;
+            };
 
             groups.push(TabIndicatorGroup {
                 column_rect,

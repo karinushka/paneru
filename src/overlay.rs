@@ -749,32 +749,28 @@ impl TabIndicatorManager {
             seen.insert(leader);
 
             let indicator_rect = tab_indicator::indicator_rect(group.column_rect, layout);
-            let segments_abs =
-                tab_indicator::tab_segments(indicator_rect, group.window_ids.len(), layout);
-            let segments = segments_abs
-                .iter()
-                .map(|segment| {
-                    IRect::from_corners(
-                        segment.min - indicator_rect.min,
-                        segment.max - indicator_rect.min,
-                    )
-                })
-                .collect();
+            let local_rect = IRect::from_corners(Origin::ZERO, indicator_rect.size());
+            let segments = tab_indicator::tab_segments(local_rect, group.window_ids.len(), layout);
             let frame = cg_abs_to_cocoa(irect_to_nsrect(indicator_rect), screen_h);
 
-            let params = TabIndicatorWindowParams {
-                size: frame.size,
-                segments,
-                window_ids: group.window_ids.clone(),
-                active_index: group.active_index,
-                active_color,
-                inactive_color,
-            };
-
             if let Some((window, stored)) = self.windows.get_mut(&leader) {
-                if *stored == params {
+                if stored.size == frame.size
+                    && stored.active_index == group.active_index
+                    && stored.active_color == active_color
+                    && stored.inactive_color == inactive_color
+                    && stored.window_ids == group.window_ids
+                    && stored.segments == segments
+                {
                     window.setFrame_display(frame, false);
                 } else {
+                    let params = TabIndicatorWindowParams {
+                        size: frame.size,
+                        segments,
+                        window_ids: group.window_ids.clone(),
+                        active_index: group.active_index,
+                        active_color,
+                        inactive_color,
+                    };
                     let view = TabIndicatorView::new(
                         self.mtm,
                         NSRect::new(NSPoint::new(0.0, 0.0), frame.size),
@@ -787,6 +783,14 @@ impl TabIndicatorManager {
                 }
                 window.orderFront(None::<&AnyObject>);
             } else {
+                let params = TabIndicatorWindowParams {
+                    size: frame.size,
+                    segments,
+                    window_ids: group.window_ids.clone(),
+                    active_index: group.active_index,
+                    active_color,
+                    inactive_color,
+                };
                 let window = make_tab_indicator_window(self.mtm, frame);
                 let view = TabIndicatorView::new(
                     self.mtm,

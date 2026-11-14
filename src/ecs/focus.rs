@@ -717,22 +717,18 @@ fn update_tabbed_active_on_focus(
     let entity = trigger.entity;
     for mut strip in &mut workspaces {
         // Check via `&self` first so untouched strips aren't marked changed.
-        if strip.is_tabbed_display(entity) && strip.active_tab(entity) != Some(entity) {
-            let members: Vec<Entity> = strip
-                .index_of(entity)
-                .ok()
-                .and_then(|index| strip.get(index).ok())
-                .map(|column| column.window_iter().collect())
-                .unwrap_or_default();
-            strip.set_active_tab(entity);
-
+        if strip.is_parked_tab(entity) && strip.set_active_tab(entity) {
             // All members share one `LayoutPosition`, so a tab switch alone
             // changes nothing and `position_layout_windows` (gated on
             // `Changed<LayoutPosition>`) wouldn't swap the tabs, e.g. when a
             // `ManualStripOffset` pins the strip. Force the mark.
-            for member in members {
-                if let Ok(mut layout_position) = positions.get_mut(member) {
-                    layout_position.set_changed();
+            if let Ok(index) = strip.index_of(entity)
+                && let Ok(column) = strip.get(index)
+            {
+                for member in column.window_iter() {
+                    if let Ok(mut layout_position) = positions.get_mut(member) {
+                        layout_position.set_changed();
+                    }
                 }
             }
         }

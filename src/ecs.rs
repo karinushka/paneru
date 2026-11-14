@@ -194,6 +194,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
         |config: Option<Res<Config>>,
          menubar: Option<Res<crate::menubar::MenuBarVisibility>>,
          mission_control: Option<Res<MissionControlActive>>,
+         active_strips: Query<&LayoutStrip, With<ActiveWorkspaceMarker>>,
          strip_changed: OverlayStripChanged,
          mut scrolling_removed: RemovedComponents<Scrolling>,
          focus_gained: Query<(), Added<FocusedMarker>>,
@@ -209,9 +210,9 @@ pub fn register_systems(app: &mut bevy::app::App) {
                         || mission_control.is_some_and(|mc| mc.is_changed())
                         || scrolling_ended
                         || !strip_changed.is_empty()
-                        || !focus_gained.is_empty()
                         || !workspace_changed.is_empty()
-                        || !window_moved.is_empty()))
+                        || ((!focus_gained.is_empty() || !window_moved.is_empty())
+                            && active_strips.iter().any(LayoutStrip::has_tabbed_stacks))))
         };
     let native_tabs_enabled =
         |config: Option<Res<Config>>| config.is_none_or(|config| config.native_tabs_enabled());

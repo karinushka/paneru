@@ -24,7 +24,7 @@ use crate::platform::{Pid, ProcessSerialNumber, WinID, WorkspaceId};
 use crate::types::windowset::WindowSet;
 
 pub const STATE_FILE_NAME: &str = "state.json";
-const SUPPORTED_STATE_VERSION: u32 = 2;
+const SUPPORTED_STATE_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Resource)]
 pub struct PaneruState {
@@ -71,7 +71,9 @@ pub struct SavedStrip {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum SavedColumn {
     Single(SavedWindow),
-    Stack(Vec<SavedStackItem>),
+    /// The second field is the active tab of a tabbed-display stack (`None` if
+    /// split). It duplicates one of the stack's `SavedWindow`s.
+    Stack(Vec<SavedStackItem>, Option<SavedWindow>),
     Tabs(Vec<SavedWindow>),
     Fullscreen(SavedWindow),
 }
@@ -252,7 +254,12 @@ impl PaneruState {
                         if saved_items.is_empty() {
                             None
                         } else {
-                            Some(SavedColumn::Stack(saved_items))
+                            let active = items
+                                .iter()
+                                .flat_map(StackItem::window_iter)
+                                .find_map(|e| strip.active_tab(e))
+                                .and_then(|active| SavedWindow::from_entity(active, windows, apps));
+                            Some(SavedColumn::Stack(saved_items, active))
                         }
                     }
                     Column::Tabs(tabs) => {
@@ -381,7 +388,7 @@ impl PaneruState {
                                 ));
                             }
                         }
-                        SavedColumn::Stack(items) => {
+                        SavedColumn::Stack(items, _) => {
                             for item in items {
                                 match item {
                                     SavedStackItem::Single(sw) => {

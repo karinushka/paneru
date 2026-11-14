@@ -261,7 +261,7 @@ fn workspace_with_widths(
                             SavedColumn::Fullscreen(with_width(window))
                         }
                         SavedColumn::Tabs(windows) => SavedColumn::Tabs(with_widths(windows)),
-                        SavedColumn::Stack(items) => SavedColumn::Stack(
+                        SavedColumn::Stack(items, active) => SavedColumn::Stack(
                             items
                                 .iter()
                                 .map(|item| match item {
@@ -273,6 +273,7 @@ fn workspace_with_widths(
                                     }
                                 })
                                 .collect(),
+                            active.as_ref().map(with_width),
                         ),
                     })
                     .collect(),
@@ -350,7 +351,7 @@ fn width_ops(snapshot: &PaneruState) -> Vec<LayoutOp> {
         match column {
             SavedColumn::Single(window) | SavedColumn::Fullscreen(window) => vec![window.clone()],
             SavedColumn::Tabs(windows) => windows.clone(),
-            SavedColumn::Stack(items) => items
+            SavedColumn::Stack(items, _) => items
                 .iter()
                 .flat_map(|item| match item {
                     SavedStackItem::Single(window) => vec![window.clone()],

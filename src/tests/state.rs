@@ -214,7 +214,7 @@ fn test_state_serializes_display_and_active_virtual_workspace() {
 
     let state = PaneruState::extract(&workspaces, &displays, &windows, &apps);
 
-    assert_eq!(state.version, 2);
+    assert_eq!(state.version, 3);
     assert_eq!(state.active_display_id, Some(TEST_DISPLAY_ID));
     assert_eq!(
         state.displays,
@@ -301,7 +301,7 @@ fn test_state_load_rejects_unsupported_version() {
 #[test]
 fn test_state_save_is_loadable_from_path() {
     let state = PaneruState {
-        version: 2,
+        version: 3,
         timestamp: 123_456_789,
         active_display_id: Some(TEST_DISPLAY_ID),
         displays: vec![SavedDisplay {
@@ -375,18 +375,21 @@ fn restore_plan_compacts_missing_windows_and_preserves_active_virtual_row() {
                         saved_window(11, 111, "com.example.missing", "Missing Tab"),
                         saved_window(12, 112, "com.example.editor", "Editor"),
                     ]),
-                    SavedColumn::Stack(vec![
-                        SavedStackItem::Single(saved_window(
-                            13,
-                            113,
-                            "com.example.missing",
-                            "Missing Stack",
-                        )),
-                        SavedStackItem::Tabs(vec![
-                            saved_window(14, 114, "com.example.terminal", "Terminal"),
-                            saved_window(15, 115, "com.example.missing", "Missing Stack Tab"),
-                        ]),
-                    ]),
+                    SavedColumn::Stack(
+                        vec![
+                            SavedStackItem::Single(saved_window(
+                                13,
+                                113,
+                                "com.example.missing",
+                                "Missing Stack",
+                            )),
+                            SavedStackItem::Tabs(vec![
+                                saved_window(14, 114, "com.example.terminal", "Terminal"),
+                                saved_window(15, 115, "com.example.missing", "Missing Stack Tab"),
+                            ]),
+                        ],
+                        None,
+                    ),
                 ],
             },
         ],
@@ -425,6 +428,104 @@ fn restore_plan_compacts_missing_windows_and_preserves_active_virtual_row() {
     );
     assert_eq!(plan.ignored_missing_windows, 4);
     assert_eq!(plan.skipped_ambiguous_matches, 0);
+}
+
+#[test]
+fn restore_plan_carries_the_tabbed_active_entity_when_it_survives() {
+    use crate::ecs::restore::{PlannedColumn, PlannedStackItem, RestorePlanner};
+
+    let mut world = World::new();
+    let top = world.spawn_empty().id();
+    let active = world.spawn_empty().id();
+    let bottom = world.spawn_empty().id();
+
+    let top_saved = saved_window(30, 130, "com.example.top", "Top");
+    let active_saved = saved_window(31, 131, "com.example.active", "Active");
+    let bottom_saved = saved_window(32, 132, "com.example.bottom", "Bottom");
+
+    let state = restore_state(vec![SavedWorkspace {
+        workspace_id: TEST_WORKSPACE_ID,
+        display_id: Some(TEST_DISPLAY_ID),
+        active_virtual_index: Some(0),
+        strips: vec![SavedStrip {
+            virtual_index: 0,
+            columns: vec![SavedColumn::Stack(
+                vec![
+                    SavedStackItem::Single(top_saved.clone()),
+                    SavedStackItem::Single(active_saved.clone()),
+                    SavedStackItem::Single(bottom_saved.clone()),
+                ],
+                Some(active_saved.clone()),
+            )],
+        }],
+    }]);
+    let current = vec![
+        current_window(top, 30, 130, "com.example.top", "Top"),
+        current_window(active, 31, 131, "com.example.active", "Active"),
+        current_window(bottom, 32, 132, "com.example.bottom", "Bottom"),
+    ];
+
+    let plan = RestorePlanner::new(&state).plan(&current);
+
+    assert_eq!(
+        plan.strips[0].columns,
+        vec![PlannedColumn::Stack(
+            vec![
+                PlannedStackItem::Single(top),
+                PlannedStackItem::Single(active),
+                PlannedStackItem::Single(bottom),
+            ],
+            Some(active),
+        )]
+    );
+}
+
+#[test]
+fn restore_plan_drops_the_tabbed_active_entity_when_it_fails_to_match() {
+    use crate::ecs::restore::{PlannedColumn, PlannedStackItem, RestorePlanner};
+
+    let mut world = World::new();
+    let top = world.spawn_empty().id();
+    let bottom = world.spawn_empty().id();
+
+    let top_saved = saved_window(40, 140, "com.example.top", "Top");
+    let active_saved = saved_window(41, 141, "com.example.active", "Active");
+    let bottom_saved = saved_window(42, 142, "com.example.bottom", "Bottom");
+
+    let state = restore_state(vec![SavedWorkspace {
+        workspace_id: TEST_WORKSPACE_ID,
+        display_id: Some(TEST_DISPLAY_ID),
+        active_virtual_index: Some(0),
+        strips: vec![SavedStrip {
+            virtual_index: 0,
+            columns: vec![SavedColumn::Stack(
+                vec![
+                    SavedStackItem::Single(top_saved.clone()),
+                    SavedStackItem::Single(active_saved.clone()),
+                    SavedStackItem::Single(bottom_saved.clone()),
+                ],
+                Some(active_saved),
+            )],
+        }],
+    }]);
+    // The saved active tab ("Active") is missing; only its siblings return.
+    let current = vec![
+        current_window(top, 40, 140, "com.example.top", "Top"),
+        current_window(bottom, 42, 142, "com.example.bottom", "Bottom"),
+    ];
+
+    let plan = RestorePlanner::new(&state).plan(&current);
+
+    assert_eq!(
+        plan.strips[0].columns,
+        vec![PlannedColumn::Stack(
+            vec![
+                PlannedStackItem::Single(top),
+                PlannedStackItem::Single(bottom),
+            ],
+            None,
+        )]
+    );
 }
 
 #[test]

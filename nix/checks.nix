@@ -121,6 +121,14 @@
               <service.json jq -e ".StandardErrorPath == \"/tmp/paneru.err.log\""
               <service.json jq -e ".StandardOutPath == \"/tmp/paneru.log\""
 
+              progPath=`<service.json jq -r ".Program"`
+              echo >&2 "checking Program $progPath is a native binary, not a shell wrapper"
+              test -x "$progPath"
+              if [ "$(head -c 2 "$progPath")" = "#!" ]; then
+                echo >&2 "error: $progPath is a shebang script, which breaks macOS TCC Accessibility attribution"
+                exit 1
+              fi
+
               confPath=`<service.json jq -r ".EnvironmentVariables.PANERU_CONFIG"`
               echo >&2 "checking config in $confPath"
               conf=`<"$confPath" toml2json`

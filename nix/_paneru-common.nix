@@ -50,16 +50,19 @@ let
   );
   wrapPaneru =
     package:
-    pkgs.symlinkJoin {
-      name = "paneru-with-lua-wrapped";
-      paths = [ package ];
-      nativeBuildInputs = [ pkgs.makeWrapper ];
-      passthru = package.passthru;
-      postBuild = ''
-        wrapProgram $out/bin/paneru ${lib.escapeShellArgs makeWrapperArgs}
-      '';
-      inherit (cfg.package) meta;
-    };
+    if makeWrapperArgs == [ ] then
+      package
+    else
+      pkgs.symlinkJoin {
+        name = "paneru-with-lua-wrapped";
+        paths = [ package ];
+        nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
+        passthru = package.passthru;
+        postBuild = ''
+          wrapProgram $out/bin/paneru ${lib.escapeShellArgs makeWrapperArgs}
+        '';
+        inherit (cfg.package) meta;
+      };
 in
 {
   options.services.paneru = {

@@ -104,6 +104,26 @@ fn mouse_moved_trigger(
 ) {
     const FIND_WINDOW_THROTTLE: Duration = Duration::from_millis(50);
 
+    if !config.focus_follows_mouse() || global_state.ffm_flag().is_some() {
+        return;
+    }
+
+    // Command focus is applied before auto-centering starts in PostUpdate.
+    // Until the strip and its windows settle, hit-testing sees intermediate
+    // geometry and can undo that focus by selecting the previous window.
+    // Mouse-driven focus keeps skip_reshuffle set and remains unaffected.
+    if !global_state.skip_reshuffle()
+        && (!pending_focus_layout.is_empty()
+            || active_workspaces.iter().any(|(entity, strip)| {
+                moving
+                    .iter()
+                    .any(|moving| moving == entity || strip.contains(moving))
+            }))
+    {
+        trace!("mouse focus suppressed during command-driven slide");
+        return;
+    }
+
     for InputEvent(event) in messages.read() {
         let Event::MouseMoved { point, modifiers } = event else {
             continue;
@@ -121,39 +141,15 @@ fn mouse_moved_trigger(
         // Corner dead zone: suppress focus events when the cursor sits in
         // the bottom-right of any display (where hidden virtual workspace
         // slivers park). See is_in_corner_dead_zone for details.
-        let cursor = origin_from(*point);
+        let pointer = origin_from(*point);
         if displays.iter().any(|(display, dock)| {
-            display.bounds().contains(cursor)
-                && is_in_corner_dead_zone(cursor, display, dock, &config)
+            display.bounds().contains(pointer)
+                && is_in_corner_dead_zone(pointer, display, dock, &config)
         }) {
             trace!("mouse moved suppressed in corner dead-zone {point:?}");
             continue;
         }
 
-        if !config.focus_follows_mouse() {
-            continue;
-        }
-        if global_state.ffm_flag().is_some() {
-            trace!("ffm_window_id > 0");
-            continue;
-        }
-
-        // Command focus is applied before auto-centering starts in PostUpdate.
-        // Until the strip and its windows settle, hit-testing sees intermediate
-        // geometry and can undo that focus by selecting the previous window.
-        // Mouse-driven focus keeps skip_reshuffle set and remains unaffected.
-        if !global_state.skip_reshuffle()
-            && (!pending_focus_layout.is_empty()
-                || active_workspaces.iter().any(|(entity, strip)| {
-                    moving
-                        .iter()
-                        .any(|moving| moving == entity || strip.contains(moving))
-                }))
-        {
-            trace!("mouse focus suppressed during command-driven slide");
-            continue;
-        }
-        let pointer = origin_from(*point);
         if let Some((focused, _)) = windows.focused()
             && focused.frame().contains(pointer)
         {
@@ -217,7 +213,7 @@ fn mouse_moved_trigger(
 }
 
 // An app can send the focus notification after the user releases the button.
-const CLICK_FOCUS_GRACE: Duration = Duration::from_secs(1);
+pub(super) const CLICK_FOCUS_GRACE: Duration = Duration::from_secs(1);
 
 pub(super) type StaleClickMarkers<'w, 's> =
     Query<'w, 's, Entity, Or<(With<MouseHeldMarker>, With<ClickFocusMarker>)>>;
@@ -608,6 +604,13 @@ fn horizontal_warp_mouse_trigger(
     /// Stale velocity samples (e.g. from a prior gesture) shouldn't carry.
     const VELOCITY_FRESHNESS: Duration = Duration::from_millis(80);
 
+    let Some(warp_direction) = config.horizontal_mouse_warp() else {
+        return;
+    };
+    if displays.count() < 2 {
+        return;
+    }
+
     let mut desk: Option<Option<WarpDesk>> = None;
     for InputEvent(event) in messages.read() {
         let (Event::MouseMoved { point, .. } | Event::MouseDragged { point, .. }) = event else {
@@ -632,13 +635,6 @@ fn horizontal_warp_mouse_trigger(
         });
         let previous = recent_previous.map(|(previous, _)| previous);
         state.last = Some((point, now));
-
-        let Some(warp_direction) = config.horizontal_mouse_warp() else {
-            return;
-        };
-        if displays.count() < 2 {
-            return;
-        }
 
         let desk = desk
             .get_or_insert_with(|| WarpDesk::from_displays(&displays, &config, warp_direction))
@@ -668,7 +664,7 @@ fn horizontal_warp_mouse_trigger(
             continue;
         }
 
-        let mut target_displays = displays
+        let Some(warp_to) = displays
             .iter()
             .filter(|display| desk.is_none_or(|desk| !desk.is_lowest(display)))
             .filter(|display| {
@@ -682,11 +678,8 @@ fn horizontal_warp_mouse_trigger(
                     below
                 }
             })
-            .collect::<Vec<_>>();
-
-        target_displays
-            .sort_by_key(|display| (display.bounds().min.y - current_display.bounds().min.y).abs());
-        let Some(warp_to) = target_displays.first() else {
+            .min_by_key(|display| (display.bounds().min.y - current_display.bounds().min.y).abs())
+        else {
             continue;
         };
         let target = warp_to.bounds();

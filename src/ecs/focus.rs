@@ -130,7 +130,9 @@ impl Plugin for FocusEventsPlugin {
             Update,
             (
                 detect_focus_rejection.in_set(super::UpdateSet::Events),
-                handle_tab_indicator_click.in_set(super::UpdateSet::Events),
+                handle_tab_indicator_click
+                    .in_set(super::UpdateSet::Events)
+                    .run_if(bevy::ecs::schedule::common_conditions::on_message::<Event>),
                 fix_window_size_on_focus.in_set(super::UpdateSet::Focus),
                 autocenter_window_on_focus
                     .in_set(super::UpdateSet::Layout)
@@ -433,6 +435,20 @@ pub(super) fn fix_window_size_on_focus(
     }
 }
 
+fn cancel_other_verify_focus(
+    target: Entity,
+    verifying: &Query<Entity, With<VerifyFocus>>,
+    commands: &mut Commands,
+) {
+    for entity in verifying {
+        if entity != target
+            && let Ok(mut entity_commands) = commands.get_entity(entity)
+        {
+            entity_commands.try_remove::<(Timeout, VerifyFocus)>();
+        }
+    }
+}
+
 /// Ensures at most one window entity carries [`VerifyFocus`] at any time, so
 /// rapid focus switching cancels verification on intermediate windows.
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
@@ -441,14 +457,7 @@ fn maintain_verify_focus_singleton(
     verifying: Query<Entity, With<VerifyFocus>>,
     mut commands: Commands,
 ) {
-    let target = trigger.event().entity;
-    for entity in verifying {
-        if entity != target
-            && let Ok(mut entity_commands) = commands.get_entity(entity)
-        {
-            entity_commands.try_remove::<(Timeout, VerifyFocus)>();
-        }
-    }
+    cancel_other_verify_focus(trigger.event().entity, &verifying, &mut commands);
 }
 
 #[instrument(level = Level::DEBUG, skip_all)]
@@ -600,6 +609,12 @@ fn mouse_follows_focus(
         debug!("Suppressing center mouse after a click");
         return;
     }
+    if !config.mouse_follows_focus()
+        || global_state.skip_reshuffle()
+        || global_state.ffm_flag().is_some_and(|id| id == window.id())
+    {
+        return;
+    }
     if workspaces
         .iter()
         .find_map(|(_, _, scrolling, active, _, _)| if active { scrolling } else { None })
@@ -615,10 +630,7 @@ fn mouse_follows_focus(
         global_state.skip_reshuffle(),
         global_state.ffm_flag()
     );
-    if config.mouse_follows_focus()
-        && !global_state.skip_reshuffle()
-        && global_state.ffm_flag().is_none_or(|id| id != window.id())
-        && let Some(frame) = windows.moving_frame(entity)
+    if let Some(frame) = windows.moving_frame(entity)
         && let Some((_, child, _, _, position, reposition)) = workspaces
             .into_iter()
             .find(|(strip, _, _, _, _, _)| strip.contains(entity))
@@ -760,7 +772,7 @@ fn handle_tab_indicator_click(
             .focused()
             .is_none_or(|(_, focused)| focused != entity)
         {
-            let grace = Timeout::new(Duration::from_secs(1), None, &mut commands);
+            let grace = Timeout::new(super::mouse::CLICK_FOCUS_GRACE, None, &mut commands);
             commands.spawn((ClickFocusMarker(entity), grace));
         }
         commands.focus_entity(entity, true);
@@ -775,13 +787,7 @@ fn focus_window_trigger(
     mut commands: Commands,
 ) {
     let FocusWindow { entity, raise } = *trigger.event();
-    for other in verifying {
-        if other != entity
-            && let Ok(mut entity_commands) = commands.get_entity(other)
-        {
-            entity_commands.try_remove::<(Timeout, VerifyFocus)>();
-        }
-    }
+    cancel_other_verify_focus(entity, &verifying, &mut commands);
     let Some(window) = windows.get(entity) else {
         return;
     };
@@ -817,8 +823,7 @@ fn raise_window_trigger(
         let viewport = active_display.actual_bounds(&config);
         let strip = active_display.active_strip();
         strip
-            .all_windows()
-            .into_iter()
+            .window_iter()
             .filter_map(|entity| {
                 if entity == focus {
                     None

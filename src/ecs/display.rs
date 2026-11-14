@@ -195,7 +195,7 @@ impl Plugin for DisplayEventsPlugin {
 
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn cleanup_active_display_marker(
-    trigger: On<Add, ActiveDisplayMarker>,
+    trigger: On<Add<ActiveDisplayMarker>>,
     displays: Query<(Entity, Has<ActiveDisplayMarker>), With<Display>>,
     mut commands: Commands,
 ) {

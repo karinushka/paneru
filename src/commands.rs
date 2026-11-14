@@ -196,7 +196,7 @@ fn cancel_resize_intent(
     }
     let mouse_resize = config.mouse_resize_modifier();
     for InputEvent(event) in inputs.read() {
-        interrupted |= match event {
+        interrupted |= match &event {
             Event::Swipe { .. }
             | Event::Scroll { .. }
             | Event::VerticalSwipe { .. }
@@ -218,7 +218,7 @@ fn cancel_resize_intent(
 }
 
 fn cancel_resize_intent_on_focus(
-    _trigger: On<Add, FocusedMarker>,
+    _trigger: On<Add<FocusedMarker>>,
     intents: ResizeIntents,
     mut commands: Commands,
 ) {
@@ -236,7 +236,7 @@ pub fn filter_window_operations<'a, F: Fn(&Operation) -> bool>(
     messages.read().filter_map(move |event| {
         if let Event::Command {
             command: Command::Window(op),
-        } = event
+        } = &event
             && filter(op)
         {
             Some(op)
@@ -1475,7 +1475,7 @@ fn mouse_to_next_display(
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
-    let Some(target) = messages.read().find_map(|event| match event {
+    let Some(target) = messages.read().find_map(|event| match &event {
         Event::Command {
             command: Command::Mouse(MouseMove::ToNextDisplay),
         } => Some(None),

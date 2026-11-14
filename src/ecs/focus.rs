@@ -318,7 +318,7 @@ fn clear_pending_focus_layout(
 
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn maintain_focus_singleton(
-    trigger: On<Add, FocusedMarker>,
+    trigger: On<Add<FocusedMarker>>,
     windows: Query<(Entity, Has<FocusedMarker>), With<Window>>,
     mut config: GlobalState,
     mut commands: Commands,
@@ -349,7 +349,7 @@ fn maintain_focus_singleton(
 /// Focus reaching another column of a strip forgets where that strip's windows
 /// were opened from, as niri does.
 fn forget_openers(
-    trigger: On<Add, FocusedMarker>,
+    trigger: On<Add<FocusedMarker>>,
     openers: Populated<Entity, With<OpenedFrom>>,
     workspaces: Query<&LayoutStrip>,
     mut commands: Commands,
@@ -453,7 +453,7 @@ fn cancel_other_verify_focus(
 /// rapid focus switching cancels verification on intermediate windows.
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn maintain_verify_focus_singleton(
-    trigger: On<Add, VerifyFocus>,
+    trigger: On<Add<VerifyFocus>>,
     verifying: Query<Entity, With<VerifyFocus>>,
     mut commands: Commands,
 ) {
@@ -659,7 +659,7 @@ fn mouse_follows_focus(
 }
 
 fn dim_window_trigger(
-    trigger: On<Add, FocusedMarker>,
+    trigger: On<Add<FocusedMarker>>,
     windows: Windows,
     window_manager: Res<WindowManager>,
     config: Res<Config>,
@@ -676,7 +676,7 @@ fn dim_window_trigger(
 }
 
 fn dim_remove_window_trigger(
-    trigger: On<Remove, FocusedMarker>,
+    trigger: On<Remove<FocusedMarker>>,
     windows: Windows,
     active_display: ActiveDisplay,
     window_manager: Res<WindowManager>,
@@ -703,7 +703,7 @@ fn dim_remove_window_trigger(
 
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn virtual_strip_activated(
-    trigger: On<Add, FocusedMarker>,
+    trigger: On<Add<FocusedMarker>>,
     workspaces: Query<(Entity, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     mut commands: Commands,
 ) {
@@ -722,7 +722,7 @@ fn virtual_strip_activated(
 /// waiting for the OS round-trip.
 #[allow(clippy::needless_pass_by_value)]
 fn update_tabbed_active_on_focus(
-    trigger: On<Add, FocusedMarker>,
+    trigger: On<Add<FocusedMarker>>,
     mut workspaces: Query<&mut LayoutStrip>,
     mut positions: Query<&mut LayoutPosition>,
 ) {
@@ -757,7 +757,7 @@ fn handle_tab_indicator_click(
     mut commands: Commands,
 ) {
     for event in messages.read() {
-        let Event::TabIndicatorClicked { window_id } = event else {
+        let Event::TabIndicatorClicked { window_id } = &event else {
             continue;
         };
         let Some((_, entity)) = windows.find(*window_id) else {
@@ -888,7 +888,7 @@ fn recover_lost_focus(
 }
 
 pub(super) fn stray_focus_observer(
-    trigger: On<Add, Window>,
+    trigger: On<Add<Window>>,
     focus_events: Populated<(Entity, &StrayFocusEvent)>,
     windows: Windows,
     mut commands: Commands,

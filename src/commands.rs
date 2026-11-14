@@ -21,8 +21,7 @@ use crate::config::snippet::{RuleSubject, SnippetDialect, window_rule_snippet};
 use crate::ecs::display::FloatingLayer;
 use crate::ecs::focus::{FocusHistory, PageHapticRequest};
 use crate::ecs::layout::{
-    Column, LayoutStrip, MIN_WINDOW_HEIGHT, RelocationGroup, StackItem, clamp_origin_to_viewport,
-    strip_signature,
+    Column, LayoutStrip, MIN_WINDOW_HEIGHT, StackItem, clamp_origin_to_viewport, strip_signature,
 };
 use crate::ecs::params::{ActiveDisplay, ActiveDisplayMut, Windows};
 use crate::ecs::scroll::{PageFocusRequest, PageGestureState, PageInFlight};
@@ -1426,7 +1425,6 @@ fn to_next_display(
     let width_ratio =
         (source_viewport_width > 0).then(|| f64::from(size.x) / f64::from(source_viewport_width));
     let dest = other.bounds().min.with_x(center - size.x / 2);
-    commands.reposition_entity(entity, dest);
 
     if matches!(move_focus, MoveFocus::Follow) && config.mouse_follows_focus() {
         window_manager.warp_mouse(other.bounds().center());
@@ -1434,27 +1432,27 @@ fn to_next_display(
 
     // Move a tabbed or native-tab group as one unit. Computed before removal,
     // since the group can't be determined once its members are gone.
-    let group = active_display.active_strip().relocation_group(entity);
+    let group = active_display.strip().relocation_group(entity);
     let moving_entities = group
         .as_ref()
         .map_or_else(|| vec![entity], |group| group.members().to_vec());
+    for &moving_entity in &moving_entities {
+        commands.reposition_entity(moving_entity, dest);
+    }
 
     // Remove the group from the source strip.
     let source_neighbour = active_display
         .strip()
         .left_neighbour(entity)
         .or_else(|| active_display.strip().right_neighbour(entity));
-    for moving_entity in &moving_entities {
-        active_display.active_strip().remove(*moving_entity);
+    for &moving_entity in &moving_entities {
+        active_display.active_strip().remove(moving_entity);
     }
     if let Some(neighbour) = source_neighbour {
         commands.reshuffle_around(neighbour);
-    }
-
-    if matches!(move_focus, MoveFocus::Stay)
-        && let Some(neighbour) = source_neighbour
-    {
-        commands.focus_entity(neighbour, false);
+        if matches!(move_focus, MoveFocus::Stay) {
+            commands.focus_entity(neighbour, false);
+        }
     }
 
     // Insert into the target display's selected strip.
@@ -1463,13 +1461,7 @@ fn to_next_display(
             .iter_mut()
             .find(|(strip, _)| strip.id() == target_space_id)
     {
-        match &group {
-            Some(RelocationGroup::NativeTabs(members)) => target_strip.append_tab_group(members),
-            Some(RelocationGroup::TabbedStack { members, active }) => {
-                target_strip.append_tabbed_stack(members, *active);
-            }
-            None => target_strip.append(entity),
-        }
+        target_strip.append_relocation_group(entity, group.as_ref());
         commands.reshuffle_around(entity);
 
         // Add a delayed refresh of the window size - because the other display can have different bounds.
@@ -1485,18 +1477,15 @@ fn to_next_display(
             let viewport_bounds = display.actual_display_bounds(dock, &config);
             if let Ok(Bounds(bounds)) = windows.get(moved_window) {
                 debug!("Refreshing size of window {entity}");
-                // Preserve the window's width ratio relative to the target
-                // display's usable viewport (dock- and padding-adjusted), so a
-                // fixed dock is accounted for consistently with the source.
-                // A window wider than its old viewport, such as one macOS
-                // filled, fits the new viewport instead of overflowing it.
                 let width = width_ratio
                     .map_or(bounds.x, |ratio| {
                         round_px(ratio * f64::from(viewport_bounds.width()))
                     })
                     .min(viewport_bounds.width());
                 let size = Size::new(width, viewport_bounds.height());
-                commands.resize_entity(moved_window, size);
+                for &member in &moving_entities {
+                    commands.resize_entity(member, size);
+                }
                 commands.reshuffle_around(moved_window);
             }
         };

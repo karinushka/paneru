@@ -1211,19 +1211,20 @@ impl LayoutStrip {
     }
 
     /// Returns the group `entity` must relocate with when it moves to another
-    /// strip: its native tab group (checked first), else its tabbed-display
-    /// stack. `None` if ungrouped, so the caller moves `entity` alone.
+    /// strip: its tabbed-display stack (checked first in O(1) so a nested
+    /// `StackItem::Tabs` moves with its enclosing tabbed stack), else its
+    /// native tab group. `None` if ungrouped, so the caller moves `entity`
+    /// alone.
     pub fn relocation_group(&self, entity: Entity) -> Option<RelocationGroup> {
-        if let Some(group) = self.tab_group(entity) {
-            return Some(RelocationGroup::NativeTabs(group));
+        if let Some(active) = self.active_tab(entity) {
+            let index = self.index_of(entity).ok()?;
+            let Column::Stack(items) = self.get(index).ok()? else {
+                return None;
+            };
+            let members = items.iter().flat_map(StackItem::window_iter).collect();
+            return Some(RelocationGroup::TabbedStack { members, active });
         }
-        let active = self.active_tab(entity)?;
-        let index = self.index_of(entity).ok()?;
-        let Column::Stack(items) = self.get(index).ok()? else {
-            return None;
-        };
-        let members = items.iter().flat_map(StackItem::window_iter).collect();
-        Some(RelocationGroup::TabbedStack { members, active })
+        self.tab_group(entity).map(RelocationGroup::NativeTabs)
     }
 
     /// Inserts `entities` at column `index` (clamped) as a tabbed-display
@@ -1244,6 +1245,11 @@ impl LayoutStrip {
             return;
         }
 
+        let active = if group.contains(&active) {
+            active
+        } else {
+            group[0]
+        };
         let items = group
             .iter()
             .map(|&entity| StackItem::Single(entity))
@@ -1259,6 +1265,33 @@ impl LayoutStrip {
     /// Appends `entities` as a tabbed-display `Column::Stack`.
     pub fn append_tabbed_stack(&mut self, entities: &[Entity], active: Entity) {
         self.insert_tabbed_stack_at(self.len(), entities, active);
+    }
+
+    /// Inserts `entity` (or its [`RelocationGroup`], if any) at `index`.
+    pub fn insert_relocation_group_at(
+        &mut self,
+        index: usize,
+        entity: Entity,
+        group: Option<&RelocationGroup>,
+    ) {
+        match group {
+            Some(RelocationGroup::NativeTabs(members)) => self.insert_tab_group_at(index, members),
+            Some(RelocationGroup::TabbedStack { members, active }) => {
+                self.insert_tabbed_stack_at(index, members, *active);
+            }
+            None => self.insert_at(index, entity),
+        }
+    }
+
+    /// Appends `entity` (or its [`RelocationGroup`], if any) to the end of the strip.
+    pub fn append_relocation_group(&mut self, entity: Entity, group: Option<&RelocationGroup>) {
+        match group {
+            Some(RelocationGroup::NativeTabs(members)) => self.append_tab_group(members),
+            Some(RelocationGroup::TabbedStack { members, active }) => {
+                self.append_tabbed_stack(members, *active);
+            }
+            None => self.append(entity),
+        }
     }
 
     /// Toggles tabbed display (one window visible at a time, sharing the
@@ -3142,6 +3175,18 @@ mod tests {
             Some(RelocationGroup::NativeTabs(vec![e2, e1]))
         );
         assert_eq!(strip.relocation_group(e3), None);
+
+        // When a native tab item is stacked with e3 and toggled into tabbed
+        // display, relocating any member must move the whole tabbed stack.
+        strip.stack(e3).unwrap();
+        strip.toggle_tabbed_display(e3);
+        assert_eq!(
+            strip.relocation_group(e1),
+            Some(RelocationGroup::TabbedStack {
+                members: vec![e2, e1, e3],
+                active: e3,
+            })
+        );
     }
 
     #[test]

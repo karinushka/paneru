@@ -22,7 +22,7 @@ use crate::commands::{
 };
 use crate::config::Config;
 use crate::ecs::focus::FocusHistory;
-use crate::ecs::layout::{LayoutStrip, PARKED_STRIP_SLIVER, RelocationGroup, origin_exposing};
+use crate::ecs::layout::{LayoutStrip, PARKED_STRIP_SLIVER, origin_exposing};
 use crate::ecs::params::{ActiveDisplay, WindowCtx, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, DockPosition, FocusedMarker, Initializing, ManualStripOffset,
@@ -504,15 +504,7 @@ pub(crate) fn detect_moved_windows(
             .map_or_else(|| vec![entity], |group| group.members().to_vec());
         for (mut strip, strip_entity, _, _) in &mut workspaces {
             if strip_entity == *activated_workspace {
-                match &group {
-                    Some(RelocationGroup::NativeTabs(members)) => {
-                        strip.append_tab_group(members);
-                    }
-                    Some(RelocationGroup::TabbedStack { members, active }) => {
-                        strip.append_tabbed_stack(members, *active);
-                    }
-                    None => strip.append(entity),
-                }
+                strip.append_relocation_group(entity, group.as_ref());
             } else {
                 for moving_entity in &moving_entities {
                     strip.remove(*moving_entity);
@@ -547,10 +539,12 @@ fn is_batch_workspace_move(
         if child.is_none() {
             return true;
         }
-        let first_group = strip
-            .tab_group(matching[0])
-            .unwrap_or_else(|| vec![matching[0]]);
-        matching.iter().any(|entity| !first_group.contains(entity))
+        let first_group = strip.relocation_group(matching[0]);
+        matching.iter().any(|&entity| {
+            !first_group.as_ref().map_or(entity == matching[0], |group| {
+                group.members().contains(&entity)
+            })
+        })
     })
 }
 
@@ -939,20 +933,6 @@ fn handle_virtual_window_moves(
                 entity_commands.try_remove::<VirtualMoveMarker>();
             }
         }
-        let append_group = |strip: &mut LayoutStrip| match &group {
-            Some(RelocationGroup::NativeTabs(members)) => strip.append_tab_group(members),
-            Some(RelocationGroup::TabbedStack { members, active }) => {
-                strip.append_tabbed_stack(members, *active);
-            }
-            None => strip.append(window_entity),
-        };
-        let insert_group_at = |strip: &mut LayoutStrip, index: usize| match &group {
-            Some(RelocationGroup::NativeTabs(members)) => strip.insert_tab_group_at(index, members),
-            Some(RelocationGroup::TabbedStack { members, active }) => {
-                strip.insert_tabbed_stack_at(index, members, *active);
-            }
-            None => strip.insert_at(index, window_entity),
-        };
 
         let follow = matches!(move_marker.move_focus, MoveFocus::Follow);
 
@@ -1004,7 +984,7 @@ fn handle_virtual_window_moves(
                 workspace_id
             );
             let mut new_strip = LayoutStrip::new(workspace_id, target_idx);
-            append_group(&mut new_strip);
+            new_strip.append_relocation_group(window_entity, group.as_ref());
 
             let mut spawned = commands.spawn_layout_strip(new_strip, origin, display_entity, false);
             if stay {
@@ -1021,14 +1001,11 @@ fn handle_virtual_window_moves(
         // Preserve the source strip's scroll position for when the user returns.
         if !stay
             && let Ok(mut entity_commands) = commands.get_entity(source_entity)
-            && let Ok((_, source_strip, position, _, _)) = workspaces.get(source_entity)
+            && let Ok((_, _, position, _, _)) = workspaces.get(source_entity)
         {
-            let focus = source_strip
-                .left_neighbour(window_entity)
-                .or_else(|| source_strip.right_neighbour(window_entity));
             entity_commands.try_insert(PreviousStripPosition {
                 origin: position.0,
-                focus,
+                focus: source_neighbour,
             });
         }
 
@@ -1036,8 +1013,10 @@ fn handle_virtual_window_moves(
         for (entity, mut strip, _, _, _) in &mut workspaces {
             if entity == target_entity {
                 match mid_placement {
-                    Some((slot, _)) => insert_group_at(&mut strip, slot),
-                    None => append_group(&mut strip),
+                    Some((slot, _)) => {
+                        strip.insert_relocation_group_at(slot, window_entity, group.as_ref());
+                    }
+                    None => strip.append_relocation_group(window_entity, group.as_ref()),
                 }
             } else {
                 for moving_entity in &moving_entities {

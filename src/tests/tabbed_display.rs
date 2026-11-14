@@ -313,7 +313,7 @@ fn test_moving_to_another_display_keeps_the_whole_tabbed_group_together() {
         vec![EXT_WORKSPACE_ID],
     );
 
-    harness
+    harness = harness
         .with_windows(4)
         .on_iteration(after_move, |world, _state| {
             let entity0 = find_window_entity(0, world);
@@ -351,8 +351,20 @@ fn test_moving_to_another_display_keeps_the_whole_tabbed_group_together() {
                      (EXT_DISPLAY, negative y), not stay behind on the source one"
                 );
             }
-        })
-        .run(commands);
+        });
+    harness.run(commands);
+
+    // Advance past the 150ms cross-display size refresh and verify every member
+    // of the relocated tabbed stack resized to the target display's dimensions.
+    harness.advance(std::time::Duration::from_millis(500));
+    let expected_height = EXT_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT;
+    for id in [0, 1, 2] {
+        assert_eq!(
+            window_height(harness.world(), id),
+            expected_height,
+            "relocated tab {id} must resize to the target display's viewport height"
+        );
+    }
 }
 
 /// Regression: swap north on a tabbed column must move it to the display

@@ -537,7 +537,7 @@ pub(super) fn restore_window_state(
         // (its windows move onto the restored rows), but despawning it leaves
         // the space numbered from "2" with no row that any later switch or
         // reap path recreates, so it is kept and reused instead.
-        if had_consumed_window && strip.all_windows().is_empty() && strip.virtual_index > 0 {
+        if had_consumed_window && strip.len() == 0 && strip.virtual_index > 0 {
             emptied_existing_strips.insert(entity);
         }
     }
@@ -570,7 +570,7 @@ pub(super) fn restore_window_state(
         };
 
         let mut strip = layout_strip_from_plan(planned);
-        if strip.all_windows().is_empty() {
+        if strip.len() == 0 {
             continue;
         }
 
@@ -613,7 +613,11 @@ pub(super) fn restore_window_state(
                 {
                     let existing_previous = PreviousStripPosition {
                         origin: display.bounds().min,
-                        focus: strip.all_windows().first().copied(),
+                        focus: strip
+                            .first()
+                            .ok()
+                            .and_then(|col| col.top())
+                            .map(|entity| strip.active_tab(entity).unwrap_or(entity)),
                     };
                     entity_commands
                         .try_remove::<ActiveWorkspaceMarker>()
@@ -625,7 +629,11 @@ pub(super) fn restore_window_state(
 
         let previous = PreviousStripPosition {
             origin: display.bounds().min,
-            focus: strip.all_windows().first().copied(),
+            focus: strip
+                .first()
+                .ok()
+                .and_then(|col| col.top())
+                .map(|entity| strip.active_tab(entity).unwrap_or(entity)),
         };
 
         let mut spawned =

@@ -231,17 +231,28 @@ impl PaneruState {
                         SavedWindow::from_entity(*entity, windows, apps).map(SavedColumn::Single)
                     }
                     Column::Stack(items) => {
+                        let active_entity = col.top().and_then(|top| strip.active_tab(top));
+                        let mut active = None;
                         let saved_items = items
                             .iter()
                             .filter_map(|item| match item {
                                 StackItem::Single(entity) => {
-                                    SavedWindow::from_entity(*entity, windows, apps)
-                                        .map(SavedStackItem::Single)
+                                    let saved = SavedWindow::from_entity(*entity, windows, apps)?;
+                                    if active_entity == Some(*entity) {
+                                        active = Some(saved.clone());
+                                    }
+                                    Some(SavedStackItem::Single(saved))
                                 }
                                 StackItem::Tabs(tabs) => {
                                     let saved_tabs: Vec<_> = tabs
                                         .iter()
-                                        .filter_map(|&e| SavedWindow::from_entity(e, windows, apps))
+                                        .filter_map(|&e| {
+                                            let saved = SavedWindow::from_entity(e, windows, apps)?;
+                                            if active_entity == Some(e) {
+                                                active = Some(saved.clone());
+                                            }
+                                            Some(saved)
+                                        })
                                         .collect();
                                     if saved_tabs.is_empty() {
                                         None
@@ -254,11 +265,7 @@ impl PaneruState {
                         if saved_items.is_empty() {
                             None
                         } else {
-                            let active = items
-                                .iter()
-                                .flat_map(StackItem::window_iter)
-                                .find_map(|e| strip.active_tab(e))
-                                .and_then(|active| SavedWindow::from_entity(active, windows, apps));
+                            let active = active.filter(|_| saved_items.len() >= 2);
                             Some(SavedColumn::Stack(saved_items, active))
                         }
                     }

@@ -1757,11 +1757,7 @@ fn active_strip_first_id(world: &mut World) -> i32 {
     let entity = {
         let mut q = world.query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>();
         let strip = q.single(world).expect("a single active strip");
-        strip
-            .first()
-            .expect("strip should have a column")
-            .top()
-            .expect("column should have a top entity")
+        strip.first().expect("strip should have a column")
     };
     entity_to_window_id(world, entity)
 }
@@ -1770,11 +1766,7 @@ fn active_strip_last_id(world: &mut World) -> i32 {
     let entity = {
         let mut q = world.query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>();
         let strip = q.single(world).expect("a single active strip");
-        strip
-            .last()
-            .expect("strip should have a column")
-            .top()
-            .expect("column should have a top entity")
+        strip.last().expect("strip should have a column")
     };
     entity_to_window_id(world, entity)
 }

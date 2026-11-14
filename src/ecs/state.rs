@@ -78,10 +78,32 @@ pub enum SavedColumn {
     Fullscreen(SavedWindow),
 }
 
+impl SavedColumn {
+    pub fn windows(&self) -> impl Iterator<Item = &SavedWindow> {
+        let (slice, stack) = match self {
+            Self::Single(saved) | Self::Fullscreen(saved) => (std::slice::from_ref(saved), &[][..]),
+            Self::Tabs(tabs) => (tabs.as_slice(), &[][..]),
+            Self::Stack(items, _) => (&[][..], items.as_slice()),
+        };
+        slice
+            .iter()
+            .chain(stack.iter().flat_map(SavedStackItem::windows))
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum SavedStackItem {
     Single(SavedWindow),
     Tabs(Vec<SavedWindow>),
+}
+
+impl SavedStackItem {
+    pub fn windows(&self) -> &[SavedWindow] {
+        match self {
+            Self::Single(saved) => std::slice::from_ref(saved),
+            Self::Tabs(tabs) => tabs.as_slice(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -377,64 +399,16 @@ impl PaneruState {
         for workspace in &self.workspaces {
             for strip in &workspace.strips {
                 for (col_idx, column) in strip.columns.iter().enumerate() {
-                    let match_in_col = |sw: &SavedWindow| {
-                        if sw.hard_match(window_id, pid, bundle_id) {
-                            return Some(sw.clone());
-                        }
-                        None
-                    };
-
-                    match column {
-                        SavedColumn::Single(sw) | SavedColumn::Fullscreen(sw) => {
-                            if let Some(matched) = match_in_col(sw) {
-                                return Some((
-                                    workspace.workspace_id,
-                                    strip.virtual_index,
-                                    col_idx,
-                                    matched,
-                                ));
-                            }
-                        }
-                        SavedColumn::Stack(items, _) => {
-                            for item in items {
-                                match item {
-                                    SavedStackItem::Single(sw) => {
-                                        if let Some(matched) = match_in_col(sw) {
-                                            return Some((
-                                                workspace.workspace_id,
-                                                strip.virtual_index,
-                                                col_idx,
-                                                matched,
-                                            ));
-                                        }
-                                    }
-                                    SavedStackItem::Tabs(tabs) => {
-                                        for sw in tabs {
-                                            if let Some(matched) = match_in_col(sw) {
-                                                return Some((
-                                                    workspace.workspace_id,
-                                                    strip.virtual_index,
-                                                    col_idx,
-                                                    matched,
-                                                ));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        SavedColumn::Tabs(tabs) => {
-                            for sw in tabs {
-                                if let Some(matched) = match_in_col(sw) {
-                                    return Some((
-                                        workspace.workspace_id,
-                                        strip.virtual_index,
-                                        col_idx,
-                                        matched,
-                                    ));
-                                }
-                            }
-                        }
+                    if let Some(matched) = column
+                        .windows()
+                        .find(|sw| sw.hard_match(window_id, pid, bundle_id))
+                    {
+                        return Some((
+                            workspace.workspace_id,
+                            strip.virtual_index,
+                            col_idx,
+                            matched.clone(),
+                        ));
                     }
                 }
             }
@@ -764,8 +738,7 @@ impl QueryState for PaneruQueryState {
                     .then_some(entity)
             });
             let row_windows = strip
-                .all_windows()
-                .into_iter()
+                .window_iter()
                 .chain(floating)
                 .filter_map(|entity| {
                     let (window, _, unmanaged) = windows.get_managed(entity)?;

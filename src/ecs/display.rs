@@ -583,7 +583,7 @@ fn place_extracted_strip(
         .map_or(0, |max_idx| max_idx + 1);
 
     extracted.virtual_index = next_virtual_index;
-    let focus = extracted.first().ok().and_then(|col| col.top());
+    let focus = extracted.first();
     let strip_entity = if next_virtual_index == 0 {
         world.spawn((
             Position(display_bounds.min),

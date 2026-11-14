@@ -15,13 +15,12 @@ use tracing::{Level, instrument};
 use crate::commands::{Command, Direction, Operation};
 use crate::config::Config;
 use crate::config::swipe::{SwipeGestureDirection, focus_direction};
-use crate::ecs::layout::{Column, LayoutStrip};
+use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, ManualStripOffset, MissionControlActive, Position, PreUpdateSet,
     Scrolling, SendMessageTrigger, UpdateSet,
 };
-use crate::errors::Result;
 use bevy::ecs::schedule::common_conditions::on_message;
 
 use crate::events::{Event, InputEvent};
@@ -661,8 +660,6 @@ where
 {
     let total_strip_width = layout_strip
         .last()
-        .ok()
-        .and_then(|column| column.top())
         .and_then(|entity| {
             windows
                 .layout_position(entity)
@@ -671,10 +668,8 @@ where
         .map(|(position, frame)| position.x + frame.width())?;
 
     let continuous_swipe = config.continuous_swipe();
-    let strip_position = |column: Result<Column>| {
-        column
-            .ok()
-            .and_then(|column| column.top())
+    let strip_position = |entity: Option<Entity>| {
+        entity
             .and_then(|entity| windows.layout_position(entity))
             .map(|position| position.0.x)
     };
@@ -682,7 +677,7 @@ where
     let left_snap = strip_position(layout_strip.last());
     // NOTE: this snaps to the second window on purpose.
     // For a single colum workspace this will return None
-    let right_snap = strip_position(layout_strip.get(1));
+    let right_snap = strip_position(layout_strip.column_at(1));
 
     Some(
         if continuous_swipe && let Some((left_snap, right_snap)) = left_snap.zip(right_snap) {

@@ -369,28 +369,7 @@ fn saved_windows_in_state(state: &PaneruState) -> impl Iterator<Item = &SavedWin
         .iter()
         .flat_map(|workspace| &workspace.strips)
         .flat_map(|strip| &strip.columns)
-        .flat_map(saved_windows_in_column)
-}
-
-fn saved_windows_in_column(column: &SavedColumn) -> Box<dyn Iterator<Item = &SavedWindow> + '_> {
-    match column {
-        SavedColumn::Single(saved) | SavedColumn::Fullscreen(saved) => {
-            Box::new(std::iter::once(saved))
-        }
-        SavedColumn::Tabs(tabs) => Box::new(tabs.iter()),
-        SavedColumn::Stack(items, _) => {
-            Box::new(items.iter().flat_map(saved_windows_in_stack_item))
-        }
-    }
-}
-
-fn saved_windows_in_stack_item(
-    item: &SavedStackItem,
-) -> Box<dyn Iterator<Item = &SavedWindow> + '_> {
-    match item {
-        SavedStackItem::Single(saved) => Box::new(std::iter::once(saved)),
-        SavedStackItem::Tabs(tabs) => Box::new(tabs.iter()),
-    }
+        .flat_map(SavedColumn::windows)
 }
 
 impl SavedWindow {
@@ -425,24 +404,23 @@ pub(crate) fn matches_startup_restore_state(
     restoration: Option<&PaneruState>,
     config: &Config,
 ) -> bool {
-    if !config.restore_enabled() {
+    if !config.restore_enabled() || (session.is_none() && restoration.is_none()) {
         return false;
     }
 
     let Ok(pid) = window.pid() else {
         return false;
     };
-    let bundle_id = app.bundle_id().unwrap_or_default().clone();
-    let key = WindowHardMatchKey::new(window.id(), pid, bundle_id.clone());
+    let bundle_id = app.bundle_id().unwrap_or_default();
 
     if let Some(session) = session {
+        let key = WindowHardMatchKey::new(window.id(), pid, bundle_id);
         return session.saved_hard_keys.contains(&key);
     }
 
-    let Some(state) = restoration else {
-        return false;
-    };
-    saved_windows_in_state(state).any(|saved| saved.hard_match(window.id(), pid, &bundle_id))
+    restoration.is_some_and(|state| {
+        saved_windows_in_state(state).any(|saved| saved.hard_match(window.id(), pid, &bundle_id))
+    })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -491,14 +469,18 @@ pub(super) fn restore_window_state(
         .filter(|_| !cross_space)
         .flat_map(|(_, strip, _, _)| {
             let id = strip.id();
-            strip
-                .all_windows()
-                .into_iter()
-                .map(move |entity| (entity, id))
+            strip.window_iter().map(move |entity| (entity, id))
         })
         .collect::<HashMap<_, _>>();
-    let current = current_window_identities(&ctx.windows, &apps, restoration, &window_workspaces);
-    let plan = RestorePlanner::new(restoration).plan(&current);
+    let planner = RestorePlanner::new(restoration);
+    let current = current_window_identities(
+        &ctx.windows,
+        &apps,
+        restoration,
+        &planner.saved_hard_keys,
+        &window_workspaces,
+    );
+    let plan = planner.plan(&current);
 
     if plan.consumed_entities.is_empty() {
         info!(
@@ -613,11 +595,7 @@ pub(super) fn restore_window_state(
                 {
                     let existing_previous = PreviousStripPosition {
                         origin: display.bounds().min,
-                        focus: strip
-                            .first()
-                            .ok()
-                            .and_then(|col| col.top())
-                            .map(|entity| strip.active_tab(entity).unwrap_or(entity)),
+                        focus: strip.first(),
                     };
                     entity_commands
                         .try_remove::<ActiveWorkspaceMarker>()
@@ -629,11 +607,7 @@ pub(super) fn restore_window_state(
 
         let previous = PreviousStripPosition {
             origin: display.bounds().min,
-            focus: strip
-                .first()
-                .ok()
-                .and_then(|col| col.top())
-                .map(|entity| strip.active_tab(entity).unwrap_or(entity)),
+            focus: strip.first(),
         };
 
         let mut spawned =
@@ -679,6 +653,7 @@ fn current_window_identities(
     windows: &Windows,
     apps: &Query<&Application>,
     restoration: &PaneruState,
+    saved_hard_keys: &HashSet<WindowHardMatchKey>,
     window_workspaces: &HashMap<Entity, WorkspaceId>,
 ) -> Vec<CurrentWindowIdentity> {
     let mut current = windows
@@ -700,8 +675,7 @@ fn current_window_identities(
         .collect::<Vec<_>>();
 
     if has_saved_fallback_windows(restoration) {
-        let saved_hard_keys = saved_hard_match_keys(restoration);
-        hydrate_fallback_identities(&mut current, windows, &saved_hard_keys);
+        hydrate_fallback_identities(&mut current, windows, saved_hard_keys);
     }
 
     current

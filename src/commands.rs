@@ -269,25 +269,9 @@ pub(crate) fn get_window_in_direction(
         Direction::West => strip.left_neighbour(entity),
         Direction::East => strip.right_neighbour(entity),
 
-        // `top()` ignores the active tab; redirect so we never focus a
-        // parked (off-screen) tabbed-display member.
-        Direction::First => strip
-            .first()
-            .ok()
-            .and_then(|column| column.top())
-            .map(|entity| strip.active_tab(entity).unwrap_or(entity)),
-
-        Direction::Last => strip
-            .last()
-            .ok()
-            .and_then(|column| column.top())
-            .map(|entity| strip.active_tab(entity).unwrap_or(entity)),
-
-        Direction::Nth(index) => strip
-            .get(*index)
-            .ok()
-            .and_then(|column| column.top())
-            .map(|entity| strip.active_tab(entity).unwrap_or(entity)),
+        Direction::First => strip.first(),
+        Direction::Last => strip.last(),
+        Direction::Nth(index) => strip.column_at(*index),
 
         Direction::North => match strip.get(index).ok()? {
             Column::Single(_) | Column::Tabs(_) | Column::Fullscren(_) => None,
@@ -429,19 +413,12 @@ fn active_focus_candidate(
 ) -> Option<Entity> {
     // Enter the active strip from the appropriate side when focus is outside it.
     if !active_strip.contains(focused_entity) {
-        let landed = match direction {
-            Direction::East | Direction::First => {
-                active_strip.first().ok().and_then(|col| col.top())
-            }
-            Direction::West | Direction::Last => active_strip.last().ok().and_then(|col| col.top()),
-            Direction::Nth(index) => active_strip
-                .get(*index)
-                .ok()
-                .and_then(|column| column.top()),
+        return match direction {
+            Direction::East | Direction::First => active_strip.first(),
+            Direction::West | Direction::Last => active_strip.last(),
+            Direction::Nth(index) => active_strip.column_at(*index),
             Direction::North | Direction::South => None,
         };
-        // `top()` ignores the active tab, as in `get_window_in_direction`.
-        return landed.map(|entity| active_strip.active_tab(entity).unwrap_or(entity));
     }
 
     get_window_in_direction(direction, focused_entity, active_strip).or_else(|| {
@@ -454,7 +431,7 @@ fn active_focus_candidate(
                 .find(|(strip, _, fullscreen)| {
                     fullscreen.is_some() && strip.id() != active_strip.id()
                 })
-                .and_then(|(strip, _, _)| strip.get(0).ok().and_then(|col| col.top()))
+                .and_then(|(strip, _, _)| strip.first())
         })
         .flatten()
     })
@@ -609,13 +586,7 @@ fn focus_from_fullscreen(
             .find_map(|(strip, _, _)| (strip.id() == fullscreen.workspace_id).then_some(strip));
     }
 
-    if let Some(entity) = strip.and_then(|strip| {
-        strip
-            .last()
-            .ok()
-            .and_then(|col| col.top())
-            .map(|entity| strip.active_tab(entity).unwrap_or(entity))
-    }) {
+    if let Some(entity) = strip.and_then(LayoutStrip::last) {
         debug!("fullscreen: swap raising {entity}");
         focus_with_verification(
             entity,

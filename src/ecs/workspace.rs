@@ -568,7 +568,7 @@ fn workspace_destroyed_handler(
             .iter()
             .filter(|(strip, _, _, _)| strip.id() == *space_id)
             .map(|(strip, entity, parent, fullscreen)| {
-                let window = strip.first().ok().and_then(|col| col.top());
+                let window = strip.first();
                 (
                     entity,
                     parent.map(ChildOf::parent),

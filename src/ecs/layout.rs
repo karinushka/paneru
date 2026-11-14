@@ -742,28 +742,26 @@ impl LayoutStrip {
         self.columns.len()
     }
 
-    /// Returns the first `Panel` in the pane.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(Panel)` with the first panel, otherwise `Err(Error)` if the pane is empty.
-    pub fn first(&self) -> Result<Column> {
-        self.columns.front().cloned().ok_or(Error::NotFound(format!(
-            "{}: can not find first element.",
-            function_name!()
-        )))
+    /// Returns the landing window entity of column `index` (its active tab for
+    /// a tabbed-display stack, or `top()` otherwise).
+    pub fn column_at(&self, index: usize) -> Option<Entity> {
+        self.columns
+            .get(index)
+            .and_then(Column::top)
+            .map(|entity| self.landing_entity(entity))
     }
 
-    /// Returns the last `Panel` in the pane.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(Panel)` with the last panel, otherwise `Err(Error)` if the pane is empty.
-    pub fn last(&self) -> Result<Column> {
-        self.columns.back().cloned().ok_or(Error::NotFound(format!(
-            "{}: can not find last element.",
-            function_name!()
-        )))
+    /// Returns the landing window entity of the first column in the strip.
+    pub fn first(&self) -> Option<Entity> {
+        self.column_at(0)
+    }
+
+    /// Returns the landing window entity of the last column in the strip.
+    pub fn last(&self) -> Option<Entity> {
+        self.columns
+            .len()
+            .checked_sub(1)
+            .and_then(|i| self.column_at(i))
     }
 
     pub fn right_neighbour(&self, entity: Entity) -> Option<Entity> {
@@ -982,6 +980,12 @@ impl LayoutStrip {
         Ok(())
     }
 
+    /// Iterates over all window entities in the strip in column/row order without
+    /// allocating intermediate per-column vectors.
+    pub fn window_iter(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.columns.iter().flat_map(Column::window_iter)
+    }
+
     /// Returns a vector of all window IDs present in all panels within the pane, maintaining their order.
     /// For stacked panels, all windows in the stack are included.
     ///
@@ -989,14 +993,7 @@ impl LayoutStrip {
     ///
     /// A `Vec<Entity>` containing all window IDs.
     pub fn all_windows(&self) -> Vec<Entity> {
-        self.columns
-            .iter()
-            .flat_map(|column| match column {
-                Column::Single(entity) | Column::Fullscren(entity) => vec![*entity],
-                Column::Stack(items) => items.iter().flat_map(StackItem::window_iter).collect(),
-                Column::Tabs(ids) => ids.clone(),
-            })
-            .collect()
+        self.window_iter().collect()
     }
 
     pub fn get_column_mut(&mut self, index: usize) -> Option<&mut Column> {
@@ -1694,8 +1691,6 @@ pub(super) fn reshuffle_layout_strip(
             && let Some(total_strip_width) = ctx
                 .strip
                 .last()
-                .ok()
-                .and_then(|column| column.top())
                 .and_then(|last| {
                     windows
                         .layout_position(last)
@@ -1830,7 +1825,7 @@ fn position_layout_strips(
     mut windows: Query<&mut LayoutPosition, (With<Window>, Without<LayoutStrip>)>,
 ) {
     for strip in moved_strips {
-        for entity in strip.all_windows() {
+        for entity in strip.window_iter() {
             if let Ok(mut position) = windows.get_mut(entity) {
                 position.set_changed();
             }

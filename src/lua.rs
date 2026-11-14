@@ -64,21 +64,16 @@ pub struct LuaPlugin {}
 impl Plugin for LuaPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
+            bevy::app::First,
+            (serve_lua_queries, serve_lua_store)
+                .in_set(crate::ecs::FirstSet::Pump)
+                .before(crate::ecs::systems::pump_events),
+        );
+        app.add_systems(
             PreUpdate,
-            (
-                // Before the pump so a read left outstanding from last frame is
-                // answered before the main thread goes back to sleep waiting on
-                // Cocoa.
-                serve_lua_queries
-                    .in_set(crate::ecs::PreUpdateSet::Pump)
-                    .before(crate::ecs::systems::pump_events),
-                serve_lua_store
-                    .in_set(crate::ecs::PreUpdateSet::Pump)
-                    .before(crate::ecs::systems::pump_events),
-                (drain_lua_outbox, command_lua_handler)
-                    .chain()
-                    .in_set(crate::ecs::PreUpdateSet::Dispatch),
-            ),
+            (drain_lua_outbox, command_lua_handler)
+                .chain()
+                .in_set(crate::ecs::PreUpdateSet::Dispatch),
         );
         // ...and again after everything, for reads made during this frame's
         // `Update` dispatch.

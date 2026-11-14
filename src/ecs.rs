@@ -60,6 +60,13 @@ pub mod workspace;
 #[cfg(feature = "lua")]
 pub(crate) use triggers::apply_config_side_effects;
 
+/// Work that must precede Bevy's clock update in [`First`].
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FirstSet {
+    /// Answer pending Lua queries and pump OS events before sampling time.
+    Pump,
+}
+
 /// Deterministic execution phases for the [`PreUpdate`] schedule.
 ///
 /// Bevy's topological sort breaks ties between unconstrained systems using its
@@ -70,8 +77,6 @@ pub(crate) use triggers::apply_config_side_effects;
 /// unrelated systems.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PreUpdateSet {
-    /// Answer pending Lua queries from the previous frame and pump OS events.
-    Pump,
     /// Split high-rate pointer/gesture events out of `Messages<Event>` before
     /// command and trigger readers iterate the main queue.
     Demux,
@@ -218,13 +223,14 @@ pub fn register_systems(app: &mut bevy::app::App) {
         |config: Option<Res<Config>>| config.is_none_or(|config| config.native_tabs_enabled());
 
     app.configure_sets(
+        First,
+        FirstSet::Pump
+            .after(bevy::ecs::message::MessageUpdateSystems)
+            .before(bevy::time::TimeSystems),
+    );
+    app.configure_sets(
         PreUpdate,
-        (
-            PreUpdateSet::Pump,
-            PreUpdateSet::Demux,
-            PreUpdateSet::Dispatch,
-        )
-            .chain(),
+        (PreUpdateSet::Demux, PreUpdateSet::Dispatch).chain(),
     );
     app.configure_sets(
         Update,
@@ -261,10 +267,12 @@ pub fn register_systems(app: &mut bevy::app::App) {
     // Registered with `add_message`, not `init_resource`, so the buffer is
     // double-buffered and dropped after a frame like any other message stream.
     app.add_message::<InputEvent>();
+    // Sample Bevy time after the blocking OS wait, so this frame uses its own
+    // elapsed interval rather than the previous frame's sleep.
+    app.add_systems(First, systems::pump_events.in_set(FirstSet::Pump));
     app.add_systems(
         PreUpdate,
         (
-            systems::pump_events.in_set(PreUpdateSet::Pump),
             systems::demux_input_events.in_set(PreUpdateSet::Demux),
             // Read creation notifications in the same frame that pumps them.
             // Otherwise an idle pump can wait up to its next timeout before

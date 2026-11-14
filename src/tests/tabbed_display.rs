@@ -9,7 +9,7 @@ use bevy::prelude::*;
 
 use crate::assert_focused;
 use crate::assert_window_size;
-use crate::commands::{Command, Direction, Operation};
+use crate::commands::{Command, Direction, MoveFocus, Operation};
 use crate::config::{Config, MainOptions};
 use crate::ecs::RepositionMarker;
 use crate::ecs::layout::LayoutStrip;
@@ -230,6 +230,190 @@ fn test_detect_moved_windows_ignores_a_spurious_report_for_a_parked_tab() {
         !other_strip.contains(entity2),
         "the spuriously-reported workspace must not have adopted the parked tab"
     );
+}
+
+/// A real move of the active tab to another workspace takes the whole tabbed
+/// group along, keeping it tabbed with the same active tab.
+#[test]
+fn test_detect_moved_windows_relocates_the_whole_tabbed_group_together() {
+    let mut commands = vec![Event::MenuOpened { window_id: 0 }];
+    stack_first_three(&mut commands);
+    commands.push(Event::Command {
+        command: Command::Window(Operation::ToggleTabbedDisplay),
+    });
+    // Leave window 2 active (no extra focus switch this time).
+
+    let mut harness = TestHarness::new().with_windows(4);
+    harness.run(commands);
+
+    harness
+        .mock_state
+        .update_window(2, |w| w.workspace_id = EXT_WORKSPACE_ID);
+
+    let world = harness.world();
+    activate_new_workspace(world, EXT_WORKSPACE_ID);
+    world
+        .run_system_once(crate::ecs::workspace::detect_moved_windows)
+        .expect("the system should run");
+
+    let (entity0, entity1, entity2) = (
+        find_window_entity(0, world),
+        find_window_entity(1, world),
+        find_window_entity(2, world),
+    );
+    let mut strips = world.query::<&LayoutStrip>();
+    let new_strip = strips
+        .iter(world)
+        .find(|strip| strip.id() == EXT_WORKSPACE_ID)
+        .expect("the destination strip should still exist");
+    assert!(
+        [entity0, entity1, entity2]
+            .iter()
+            .all(|&e| new_strip.contains(e)),
+        "the whole tabbed group must move together, not just the active tab"
+    );
+    assert!(new_strip.is_tabbed_display(entity2));
+    assert_eq!(
+        new_strip.active_tab(entity2),
+        Some(entity2),
+        "the active tab must be preserved across the move"
+    );
+
+    let old_strip = strips
+        .iter(world)
+        .find(|strip| strip.id() == TEST_WORKSPACE_ID)
+        .expect("the original strip should still exist");
+    assert!(
+        [entity0, entity1, entity2]
+            .iter()
+            .all(|&e| !old_strip.contains(e)),
+        "none of the group should be left behind on the original workspace"
+    );
+}
+
+/// Regression: `ToNextDisplay` on a tabbed stack must move the whole group,
+/// not just the focused window.
+#[test]
+fn test_moving_to_another_display_keeps_the_whole_tabbed_group_together() {
+    let mut commands = vec![Event::MenuOpened { window_id: 0 }];
+    stack_first_three(&mut commands);
+    commands.push(Event::Command {
+        command: Command::Window(Operation::ToggleTabbedDisplay),
+    });
+    // Leave window 2 active, then throw the stack to the other display.
+    commands.push(Event::Command {
+        command: Command::Window(Operation::ToNextDisplay(MoveFocus::Stay)),
+    });
+    let after_move = commands.len() - 1;
+
+    let mut harness = TestHarness::new();
+    harness.mock_state.add_display(
+        EXT_DISPLAY_ID,
+        IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+        vec![EXT_WORKSPACE_ID],
+    );
+
+    harness
+        .with_windows(4)
+        .on_iteration(after_move, |world, _state| {
+            let entity0 = find_window_entity(0, world);
+            let entity1 = find_window_entity(1, world);
+            let entity2 = find_window_entity(2, world);
+
+            let mut strips = world.query::<&LayoutStrip>();
+            let target_strip = strips
+                .iter(world)
+                .find(|strip| strip.id() == EXT_WORKSPACE_ID)
+                .expect("the target display's strip should exist");
+            assert!(
+                [entity0, entity1, entity2]
+                    .iter()
+                    .all(|&e| target_strip.contains(e)),
+                "the whole tabbed group must move to the other display together, \
+                 not just the focused window"
+            );
+            assert!(
+                target_strip.is_tabbed_display(entity2),
+                "the stack must still be in tabbed display after the move"
+            );
+            assert_eq!(
+                target_strip.active_tab(entity2),
+                Some(entity2),
+                "the active tab must be preserved across the move"
+            );
+
+            // Parked siblings' frames must physically move too. `EXT_DISPLAY`
+            // spans y in [-1200, 0), so negative y means it landed there.
+            for id in [0, 1] {
+                assert!(
+                    window_y(world, id) < 0,
+                    "window {id} must land on the target display \
+                     (EXT_DISPLAY, negative y), not stay behind on the source one"
+                );
+            }
+        })
+        .run(commands);
+}
+
+/// Regression: swap north on a tabbed column must move it to the display
+/// above in one press, not first spend a press on an invisible tab reorder.
+#[test]
+fn test_swap_north_moves_a_tabbed_column_to_the_display_above_in_one_press() {
+    let mut commands = vec![Event::MenuOpened { window_id: 0 }];
+    // Tab windows 0 and 1, leaving window 1 (the bottom tab) active.
+    commands.push(Event::Command {
+        command: Command::Window(Operation::Focus(Direction::East)),
+    });
+    commands.push(Event::Command {
+        command: Command::Window(Operation::Stack(true)),
+    });
+    commands.push(Event::Command {
+        command: Command::Window(Operation::ToggleTabbedDisplay),
+    });
+    commands.push(Event::Command {
+        command: Command::Window(Operation::Swap(Direction::North)),
+    });
+    let after_swap = commands.len() - 1;
+
+    let mut harness = TestHarness::new();
+    // EXT_DISPLAY sits north of TEST_DISPLAY (negative y).
+    harness.mock_state.add_display(
+        EXT_DISPLAY_ID,
+        IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+        vec![EXT_WORKSPACE_ID],
+    );
+
+    harness
+        .with_windows(2)
+        .on_iteration(after_swap, |world, _state| {
+            let entity0 = find_window_entity(0, world);
+            let entity1 = find_window_entity(1, world);
+
+            let mut strips = world.query::<&LayoutStrip>();
+            let target_strip = strips
+                .iter(world)
+                .find(|strip| strip.id() == EXT_WORKSPACE_ID)
+                .expect("the northern display's strip should exist");
+            assert!(
+                target_strip.contains(entity0) && target_strip.contains(entity1),
+                "a single swap-north press must move the whole tabbed column to the \
+                 display above, not just swap positions within the stack"
+            );
+            assert!(
+                target_strip.is_tabbed_display(entity1),
+                "the stack must still be in tabbed display after the move"
+            );
+
+            let source_strip = strips
+                .iter(world)
+                .find(|strip| strip.id() == TEST_WORKSPACE_ID)
+                .expect("the source strip should still exist");
+            assert!(
+                !source_strip.contains(entity0) && !source_strip.contains(entity1),
+                "neither tab should be left behind on the source display"
+            );
+        })
+        .run(commands);
 }
 
 /// Spawns an empty strip for `workspace_id` and moves `ActiveWorkspaceMarker`

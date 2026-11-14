@@ -1,7 +1,8 @@
 use bevy::app::{App, Plugin, Update};
 use bevy::ecs::entity::Entity;
+use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::message::MessageReader;
-use bevy::ecs::query::{Or, With};
+use bevy::ecs::query::{Has, Or, With};
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::system::{Commands, Local, Query, Res, Single};
 use bevy::math::IRect;
@@ -13,7 +14,7 @@ use super::{ClickFocusMarker, MouseHeldMarker, Timeout};
 use crate::config::Config;
 use crate::ecs::focus::PendingFocusLayout;
 use crate::ecs::layout::LayoutStrip;
-use crate::ecs::params::{GlobalState, Windows};
+use crate::ecs::params::{GlobalState, WindowCtx, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, DockPosition, MissionControlActive, Position, RepositionMarker,
     Scrolling, SpawnCommandsExt, UpdateSet,
@@ -54,6 +55,7 @@ impl Plugin for MouseEventsPlugin {
                 mouse_up_trigger,
                 horizontal_warp_mouse_trigger,
             )
+                .chain()
                 .in_set(UpdateSet::Input)
                 .run_if(on_message::<InputEvent>),
         );
@@ -220,6 +222,52 @@ const CLICK_FOCUS_GRACE: Duration = Duration::from_secs(1);
 pub(super) type StaleClickMarkers<'w, 's> =
     Query<'w, 's, Entity, Or<(With<MouseHeldMarker>, With<ClickFocusMarker>)>>;
 
+type ClickableWorkspaces<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static LayoutStrip,
+        &'static Position,
+        Option<&'static RepositionMarker>,
+        &'static ChildOf,
+        Option<&'static Scrolling>,
+        Has<ActiveWorkspaceMarker>,
+    ),
+>;
+
+fn is_window_obscured_beyond_ratio(
+    entity: Entity,
+    windows: &Windows,
+    workspaces: &ClickableWorkspaces,
+    displays: &Query<(&Display, Option<&DockPosition>)>,
+    config: &Config,
+) -> bool {
+    let Some(((display, dock), strip_target)) = workspaces
+        .iter()
+        .find(|(_, strip, ..)| strip.contains(entity))
+        .and_then(|(_, _, pos, repo, child, _, _)| {
+            let target = repo.map_or(pos.0, |r| r.0);
+            Some((displays.get(child.parent()).ok()?, target))
+        })
+    else {
+        return false;
+    };
+    let (Some(layout_pos), Some(frame)) = (
+        windows.layout_position(entity),
+        windows.moving_frame(entity),
+    ) else {
+        return false;
+    };
+    let size = frame.size();
+    let viewport = display.actual_display_bounds(dock, config);
+    let projected_min = layout_pos.0 + strip_target;
+    let projected_frame = IRect::from_corners(projected_min, projected_min + size);
+    let visible_width = viewport.intersect(projected_frame).width().max(0);
+    let hidden_fraction = 1.0 - f64::from(visible_width) / f64::from(size.x.max(1));
+    visible_width == 0 || hidden_fraction > config.window_hidden_ratio()
+}
+
 /// Handles mouse down events.
 ///
 /// This function finds the window at the click point. If the window is not fully visible,
@@ -234,12 +282,11 @@ pub(super) type StaleClickMarkers<'w, 's> =
 /// * `commands` - Bevy commands to trigger a reshuffle.
 fn mouse_down_trigger(
     mut messages: MessageReader<InputEvent>,
-    windows: Windows,
-    active_workspace: Query<(Entity, Option<&Scrolling>), With<ActiveWorkspaceMarker>>,
+    workspaces: ClickableWorkspaces,
+    displays: Query<(&Display, Option<&DockPosition>)>,
     window_manager: Res<WindowManager>,
-    config: Res<Config>,
     stale_markers: StaleClickMarkers,
-    mut commands: Commands,
+    mut ctx: WindowCtx,
 ) {
     for InputEvent(event) in messages.read() {
         let Event::MouseDown { point, .. } = event else {
@@ -250,15 +297,16 @@ fn mouse_down_trigger(
         let Some((_, entity)) = window_manager
             .find_window_at_point(point)
             .ok()
-            .and_then(|window_id| windows.find(window_id))
+            .and_then(|window_id| ctx.windows.find(window_id))
         else {
             continue;
         };
 
         // Stop any ongoing scroll.
-        for (entity, scroll) in active_workspace {
-            if scroll.is_some()
-                && let Ok(mut entity_commands) = commands.get_entity(entity)
+        for (strip_entity, _, _, _, _, scroll, active) in &workspaces {
+            if active
+                && scroll.is_some()
+                && let Ok(mut entity_commands) = ctx.commands.get_entity(strip_entity)
             {
                 entity_commands.try_remove::<Scrolling>();
             }
@@ -266,26 +314,34 @@ fn mouse_down_trigger(
 
         // Clean up any stale marker from a previous click.
         for marker in &stale_markers {
-            if let Ok(mut entity_commands) = commands.get_entity(marker) {
+            if let Ok(mut entity_commands) = ctx.commands.get_entity(marker) {
                 entity_commands.try_despawn();
             }
         }
 
-        if windows
+        let focused_changed = ctx
+            .windows
             .focused()
-            .is_none_or(|(_, focused)| focused != entity)
-        {
-            let grace = Timeout::new(CLICK_FOCUS_GRACE, None, &mut commands);
-            commands.spawn((ClickFocusMarker(entity), grace));
+            .is_none_or(|(_, focused)| focused != entity);
+        if focused_changed {
+            let grace = Timeout::new(CLICK_FOCUS_GRACE, None, &mut ctx.commands);
+            ctx.commands.spawn((ClickFocusMarker(entity), grace));
         }
 
-        if config.window_hidden_ratio() >= 1.0 {
-            // At max hidden ratio, never reshuffle on click.
-        } else {
+        if ctx.config.window_hidden_ratio() < 1.0
+            && (focused_changed
+                || is_window_obscured_beyond_ratio(
+                    entity,
+                    &ctx.windows,
+                    &workspaces,
+                    &displays,
+                    &ctx.config,
+                ))
+        {
             // Defer reshuffle until mouse-up so the window doesn't shift
             // mid-click. The Timeout auto-despawns if mouse-up is lost.
-            let timeout = Timeout::new(Duration::from_secs(5), None, &mut commands);
-            commands.spawn((MouseHeldMarker(entity), timeout));
+            let timeout = Timeout::new(Duration::from_secs(5), None, &mut ctx.commands);
+            ctx.commands.spawn((MouseHeldMarker(entity), timeout));
         }
     }
 }

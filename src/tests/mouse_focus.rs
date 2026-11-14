@@ -510,3 +510,150 @@ fn click_focus_leaves_the_pointer_where_the_user_clicked() {
             .run(commands);
     }
 }
+
+#[test]
+fn clicking_already_focused_window_does_not_recenter_strip() {
+    use crate::ecs::layout::LayoutStrip;
+    use crate::ecs::{ActiveWorkspaceMarker, Position, RepositionMarker};
+    use bevy::ecs::entity::Entity;
+    use bevy::ecs::query::With;
+
+    let config: Config = (
+        MainOptions {
+            auto_center: Some(true),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(2)
+        .on_iteration(0, |world, _state| {
+            assert_focused!(world, 0);
+            // Simulate the user swiping the active strip slightly off-center (x = 80).
+            let strip_entity = world
+                .query_filtered::<Entity, (With<LayoutStrip>, With<ActiveWorkspaceMarker>)>()
+                .single(world)
+                .expect("active strip");
+            world.entity_mut(strip_entity).remove::<RepositionMarker>();
+            world.get_mut::<Position>(strip_entity).unwrap().0.x = 80;
+            let focused = find_window_entity(0, world);
+            world.entity_mut(focused).remove::<RepositionMarker>();
+            world.get_mut::<Position>(focused).unwrap().0.x = 80;
+            world
+                .get_mut::<Window>(focused)
+                .unwrap()
+                .reposition(Origin::new(80, 0));
+
+            let point = CGPoint { x: 100.0, y: 100.0 };
+            world.write_message(Event::MouseDown {
+                point,
+                modifiers: Modifiers::empty(),
+            });
+            world.write_message(Event::MouseUp {
+                point,
+                modifiers: Modifiers::empty(),
+            });
+        })
+        .on_iteration(2, |world, _state| {
+            assert_focused!(world, 0);
+            let strip_entity = world
+                .query_filtered::<Entity, (With<LayoutStrip>, With<ActiveWorkspaceMarker>)>()
+                .single(world)
+                .expect("active strip");
+            assert_eq!(
+                world.get::<Position>(strip_entity).unwrap().0.x,
+                80,
+                "clicking inside an already-focused window must not snap the strip back to center"
+            );
+            assert!(
+                world.get::<RepositionMarker>(strip_entity).is_none(),
+                "clicking inside an already-focused window must not schedule a strip reposition"
+            );
+        })
+        .run(commands);
+}
+
+#[test]
+fn clicking_partially_offscreen_focused_window_brings_it_into_view() {
+    use crate::ecs::layout::LayoutStrip;
+    use crate::ecs::{ActiveWorkspaceMarker, Position, RepositionMarker};
+    use bevy::ecs::entity::Entity;
+    use bevy::ecs::query::With;
+
+    let config: Config = (
+        MainOptions {
+            auto_center: Some(false),
+            window_hidden_ratio: Some(0.1),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(2)
+        .on_iteration(0, |world, _state| {
+            assert_focused!(world, 0);
+            // Move the active strip to x = -150 so 150px of the 500px window (30% > 10%) is off-screen.
+            let strip_entity = world
+                .query_filtered::<Entity, (With<LayoutStrip>, With<ActiveWorkspaceMarker>)>()
+                .single(world)
+                .expect("active strip");
+            world.entity_mut(strip_entity).remove::<RepositionMarker>();
+            world.get_mut::<Position>(strip_entity).unwrap().0.x = -150;
+            let focused = find_window_entity(0, world);
+            world.entity_mut(focused).remove::<RepositionMarker>();
+            world.get_mut::<Position>(focused).unwrap().0.x = -150;
+            world
+                .get_mut::<Window>(focused)
+                .unwrap()
+                .reposition(Origin::new(-150, 0));
+
+            let point = CGPoint { x: 100.0, y: 100.0 };
+            world.write_message(Event::MouseDown {
+                point,
+                modifiers: Modifiers::empty(),
+            });
+            world.write_message(Event::MouseUp {
+                point,
+                modifiers: Modifiers::empty(),
+            });
+        })
+        .on_iteration(2, |world, _state| {
+            let strip_entity = world
+                .query_filtered::<Entity, (With<LayoutStrip>, With<ActiveWorkspaceMarker>)>()
+                .single(world)
+                .expect("active strip");
+            let strip_target = world.get::<RepositionMarker>(strip_entity).map_or_else(
+                || world.get::<Position>(strip_entity).unwrap().0.x,
+                |r| r.0.x,
+            );
+            assert_eq!(
+                strip_target, 0,
+                "clicking a partially off-screen focused window must bring it fully into view"
+            );
+        })
+        .run(commands);
+}

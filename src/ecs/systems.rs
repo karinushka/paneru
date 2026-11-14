@@ -7,7 +7,7 @@ use bevy::ecs::query::{Added, Changed, Has, Or, With, Without};
 use bevy::ecs::system::{
     Commands, Local, NonSend, NonSendMut, Populated, Query, Res, ResMut, Single,
 };
-use bevy::math::IRect;
+use bevy::math::{IRect, IVec2, Vec2};
 use bevy::tasks::AsyncComputeTaskPool;
 use bevy::tasks::futures_lite::future;
 use bevy::time::Time;
@@ -718,6 +718,30 @@ pub(super) fn retry_front_switch(
 /// scroll integrator's `MAX_STEP_SECS`) so the wakeup frame steps smoothly.
 const MAX_ANIMATION_STEP_SECS: f64 = 1.0 / 30.0;
 
+/// Keep fractional progress between OS pixel writes. Rounding the integrator's
+/// input every frame otherwise discards small steps and can stall indefinitely.
+#[derive(Default)]
+pub(super) struct AnimationProgress {
+    precise: Vec2,
+    written: IVec2,
+}
+
+impl AnimationProgress {
+    fn step(&mut self, current: IVec2, target: IVec2, t: f32, reset: bool) -> (IVec2, bool) {
+        if reset || self.written != current {
+            self.precise = current.as_vec2();
+        }
+        self.precise = self.precise.lerp(target.as_vec2(), t);
+        let finished = (target.as_vec2() - self.precise).length() <= ANIAMTE_SNAP_THRESHOLD;
+        self.written = if finished {
+            target
+        } else {
+            self.precise.round().as_ivec2()
+        };
+        (self.written, finished)
+    }
+}
+
 /// Animates window movement.
 /// Fraction of the remaining distance an exponential ease-out consumes in a
 /// frame, given a decay `rate` (per second) and the frame's `delta` in seconds.
@@ -745,38 +769,43 @@ fn ease_out_factor(rate: f64, delta: f64) -> f32 {
 /// * `commands` - Bevy commands to remove the `RepositionMarker` when animation is complete.
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn animate_entities(
-    animate: Populated<(&mut Position, Entity, &RepositionMarker)>,
+    animate: Populated<(
+        &mut Position,
+        Entity,
+        bevy::ecs::change_detection::Ref<RepositionMarker>,
+    )>,
     time: Res<Time>,
     config: Res<Config>,
     mut commands: Commands,
+    mut progress: Local<EntityHashMap<AnimationProgress>>,
 ) {
+    progress.retain(|entity, _| animate.contains(*entity));
     // Frame-rate-independent exponential smoothing (ease-out).
     // `animation_speed` is the decay rate (per second); higher = snappier.
     let t = ease_out_factor(config.animation_speed(), time.delta_secs_f64());
 
     animate
         .into_iter()
-        .for_each(|(mut position, entity, RepositionMarker(origin))| {
-            let target = origin.as_vec2();
-            let current = position.0.as_vec2();
-            let lerped = current.lerp(target, t);
-
-            // Snap once we're within a pixel of the target (or after one effectively-
-            // complete tick), so the marker is dropped promptly.
-            let finished = (target - lerped).length() <= ANIAMTE_SNAP_THRESHOLD;
-            let new_pos = if finished {
-                *origin
-            } else {
-                lerped.round().as_ivec2()
-            };
+        .for_each(|(mut position, entity, marker)| {
+            let origin = &marker.0;
+            let (new_pos, finished) =
+                progress
+                    .entry(entity)
+                    .or_default()
+                    .step(position.0, *origin, t, marker.is_added());
 
             trace!(
                 "entity {entity} source {} dest {origin} t {t:.3} moving to {new_pos}",
                 position.0,
             );
-            position.0 = new_pos;
-            if finished && let Ok(mut entity_commands) = commands.get_entity(entity) {
-                entity_commands.try_remove::<RepositionMarker>();
+            if position.0 != new_pos {
+                position.0 = new_pos;
+            }
+            if finished {
+                progress.remove(&entity);
+                if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                    entity_commands.try_remove::<RepositionMarker>();
+                }
             }
         });
 }
@@ -793,35 +822,42 @@ pub(super) fn animate_entities(
 /// * `commands` - Bevy commands to remove the `ResizeMarker` when resizing is complete.
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn animate_resize_entities(
-    animate: Populated<(&mut Bounds, Entity, &ResizeMarker)>,
+    animate: Populated<(
+        &mut Bounds,
+        Entity,
+        bevy::ecs::change_detection::Ref<ResizeMarker>,
+    )>,
     time: Res<Time>,
     config: Res<Config>,
     mut commands: Commands,
+    mut progress: Local<EntityHashMap<AnimationProgress>>,
 ) {
+    progress.retain(|entity, _| animate.contains(*entity));
     // Matches animate_entities: exponential ease-out, frame-rate independent.
     let t = ease_out_factor(config.animation_speed(), time.delta_secs_f64());
 
     animate
         .into_iter()
-        .for_each(|(mut bounds, entity, ResizeMarker(size))| {
-            let target = size.as_vec2();
-            let current = bounds.0.as_vec2();
-            let lerped = current.lerp(target, t);
-
-            let finished = (target - lerped).length() <= ANIAMTE_SNAP_THRESHOLD;
-            let new_size = if finished {
-                *size
-            } else {
-                lerped.round().as_ivec2()
-            };
+        .for_each(|(mut bounds, entity, marker)| {
+            let size = &marker.0;
+            let (new_size, finished) =
+                progress
+                    .entry(entity)
+                    .or_default()
+                    .step(bounds.0, *size, t, marker.is_added());
 
             trace!(
                 "entity {entity} source {} dest {size} t {t:.3} resizing to {new_size}",
                 bounds.0,
             );
-            bounds.0 = new_size;
-            if finished && let Ok(mut entity_commands) = commands.get_entity(entity) {
-                entity_commands.try_remove::<ResizeMarker>();
+            if bounds.0 != new_size {
+                bounds.0 = new_size;
+            }
+            if finished {
+                progress.remove(&entity);
+                if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                    entity_commands.try_remove::<ResizeMarker>();
+                }
             }
         });
 }
@@ -2065,5 +2101,55 @@ mod pump_timeout_tests {
                 assert!(timeout <= idle, "waiting {timeout} ms after {idle} ms idle");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod animation_tests {
+    use super::{AnimationProgress, ease_out_factor};
+    use bevy::math::IVec2;
+
+    #[test]
+    fn subpixel_steps_accumulate_and_finish_even_at_short_event_intervals() {
+        // The old rounded recurrence stopped 31 pixels short at this rate.
+        for delta in [0.001, 1.0 / 60.0, 1.0 / 120.0] {
+            let mut progress = AnimationProgress::default();
+            let mut current = IVec2::new(100, 200);
+            let target = IVec2::new(140, 220);
+            let mut finished = false;
+            let mut elapsed = 0.0;
+            while elapsed < 1.0 && !finished {
+                (current, finished) = progress.step(
+                    current,
+                    target,
+                    ease_out_factor(16.0, delta),
+                    elapsed == 0.0,
+                );
+                elapsed += delta;
+            }
+            assert!(finished, "animation stalled with delta {delta}");
+            assert_eq!(current, target);
+        }
+    }
+
+    #[test]
+    fn fractional_progress_does_not_override_external_moves_or_new_animations() {
+        let mut progress = AnimationProgress::default();
+        progress.step(IVec2::ZERO, IVec2::splat(100), 0.25, true);
+        assert_eq!(
+            progress
+                .step(IVec2::splat(200), IVec2::splat(300), 0.5, false)
+                .0,
+            IVec2::splat(250),
+        );
+        // A marker removed and re-added starts at the written pixel, even
+        // when it happens to equal the preceding animation's last write.
+        progress.step(IVec2::ZERO, IVec2::splat(100), 0.254, true);
+        assert_eq!(
+            progress
+                .step(IVec2::splat(25), IVec2::splat(100), 0.0, true)
+                .0,
+            IVec2::splat(25),
+        );
     }
 }

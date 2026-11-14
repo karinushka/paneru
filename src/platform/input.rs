@@ -606,39 +606,49 @@ impl InputHandler {
                 .replace(timestamp)
                 .map(|previous| (timestamp - previous).max(0.0));
             self.previous_touches = fingers;
-            match movement {
-                Some(SwipeMovement::Horizontal { delta, distance_cm }) => {
-                    if distance_cm.is_none() && !self.invalid_device_size_warned {
-                        warn!("trackpad did not provide a valid device size for paging");
-                        self.invalid_device_size_warned = true;
-                    }
-                    if let Some(events) = &self.events {
-                        let _ = events.send(Event::Swipe {
-                            delta,
-                            fingers: configured_fingers,
-                            distance_cm: distance_cm.unwrap_or(0.0),
-                            elapsed_secs,
-                        });
-                        self.last_swipe_time = Some(Instant::now());
-                    }
-                }
-                Some(SwipeMovement::Vertical(delta)) if self.config.swipe_vertical() => {
-                    if let Some(events) = &self.events {
-                        let _ = events.send(Event::VerticalSwipe {
-                            delta,
-                            fingers: configured_fingers,
-                        });
-                        self.last_swipe_time = Some(Instant::now());
-                    }
-                }
-                Some(SwipeMovement::Vertical(_)) => return false,
-                None => (),
-            }
+            self.dispatch_swipe_movement(movement, configured_fingers, elapsed_secs);
 
             // If we have 3 or more fingers on the trackpad, we intercept the event
             // to prevent it from being interpreted as a scroll by the OS.
             true
         })
+    }
+
+    fn dispatch_swipe_movement(
+        &mut self,
+        movement: Option<SwipeMovement>,
+        configured_fingers: usize,
+        elapsed_secs: Option<f64>,
+    ) {
+        match movement {
+            Some(SwipeMovement::Horizontal { delta, distance_cm }) => {
+                if distance_cm.is_none() && !self.invalid_device_size_warned {
+                    warn!("trackpad did not provide a valid device size for paging");
+                    self.invalid_device_size_warned = true;
+                }
+                if let Some(events) = &self.events {
+                    let _ = events.send(Event::Swipe {
+                        delta,
+                        fingers: configured_fingers,
+                        distance_cm: distance_cm.unwrap_or(0.0),
+                        elapsed_secs,
+                    });
+                    self.last_swipe_time = Some(Instant::now());
+                }
+            }
+            Some(SwipeMovement::Vertical(delta)) => {
+                if self.config.swipe_vertical()
+                    && let Some(events) = &self.events
+                {
+                    let _ = events.send(Event::VerticalSwipe {
+                        delta,
+                        fingers: configured_fingers,
+                    });
+                }
+                self.last_swipe_time = Some(Instant::now());
+            }
+            None => (),
+        }
     }
 
     /// Handles key press events. It determines the modifier mask and attempts to find a matching keybinding in the configuration.
@@ -1222,6 +1232,25 @@ mod tests {
         assert_eq!(
             movement(&three_fingers(0.0), &three_fingers(0.0006)[..2]),
             None
+        );
+    }
+
+    #[test]
+    fn disabled_vertical_swipe_suppresses_scroll_without_emitting_vertical_event() {
+        let (sender, receiver) = EventSender::new();
+        let config =
+            Config::try_from("[swipe.gesture]\nfingers_count = 3\nvertical = false\n").unwrap();
+        let mut handler = InputHandler::new(sender, config);
+
+        handler.dispatch_swipe_movement(Some(SwipeMovement::Vertical(0.02)), 3, Some(0.008));
+
+        assert!(
+            receiver.try_recv().is_err(),
+            "vertical = false must not emit Event::VerticalSwipe"
+        );
+        assert!(
+            handler.last_swipe_time.is_some(),
+            "vertical = false must still arm scroll suppression for the configured gesture"
         );
     }
 }

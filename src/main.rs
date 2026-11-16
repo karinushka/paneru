@@ -26,6 +26,7 @@ mod overview;
 mod pasteboard;
 mod platform;
 mod reader;
+mod screen_capture;
 mod tab_indicator;
 mod util;
 

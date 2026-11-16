@@ -216,30 +216,58 @@ pub(crate) fn forget_enhanced_ui_state(pid: Pid) {
         .remove(&pid);
 }
 
-/// Whether any app is waiting for its `AXEnhancedUserInterface` to be restored.
+/// Whether any app's deferred `AXEnhancedUserInterface` restoration is due.
 pub(crate) fn enhanced_ui_restore_pending() -> bool {
+    let now = Instant::now();
     ENHANCED_UI_STATES
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .values()
         .any(|state| {
-            state
-                .try_lock()
-                .map_or(true, |state| state.deferred_restore.is_some())
+            state.try_lock().is_ok_and(|state| {
+                state
+                    .deferred_restore
+                    .as_ref()
+                    .is_some_and(|(due, _)| now >= *due)
+            })
         })
+}
+
+/// Milliseconds until the earliest deferred `AXEnhancedUserInterface`
+/// restoration is due, if any app is waiting for one.
+pub(crate) fn next_enhanced_ui_restore_timeout_ms() -> Option<u32> {
+    let now = Instant::now();
+    ENHANCED_UI_STATES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .values()
+        .filter_map(|state| {
+            let due = state.try_lock().ok()?.deferred_restore.as_ref()?.0;
+            let remaining = due.saturating_duration_since(now).as_millis();
+            Some(u32::try_from(remaining).unwrap_or(u32::MAX).max(1))
+        })
+        .min()
 }
 
 /// Restores `AXEnhancedUserInterface` on every app whose last window operation
 /// finished more than [`ENHANCED_UI_RESTORE_DELAY`] ago, or on all of them when
 /// `force` (on exit, so no app is left with the flag disabled).
 pub(crate) fn restore_deferred_enhanced_ui(force: bool) {
+    let now = Instant::now();
     let states = ENHANCED_UI_STATES
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
+        .filter(|(_, state)| {
+            force
+                || state.try_lock().map_or(true, |s| {
+                    s.deferred_restore
+                        .as_ref()
+                        .is_some_and(|(due, _)| now >= *due)
+                })
+        })
         .map(|(pid, state)| (*pid, state.clone()))
         .collect::<Vec<_>>();
-    let now = Instant::now();
     for (pid, state) in states {
         let mut state = state
             .lock()
@@ -263,7 +291,7 @@ fn acquire_enhanced_ui(
     pid: Pid,
     read_flag: impl FnOnce() -> Result<EnhancedUiFlag>,
     disable: impl FnOnce() -> Result<()>,
-    restore: RestoreFn,
+    make_restore: impl FnOnce() -> RestoreFn,
 ) -> Result<(EnhancedUiAcquired, Option<EnhancedUiGuard>)> {
     let mut locked = state
         .lock()
@@ -288,7 +316,7 @@ fn acquire_enhanced_ui(
     drop(locked);
     let guard = (acquired == EnhancedUiAcquired::Held).then(|| EnhancedUiGuard {
         state,
-        restore: Some(restore),
+        restore: Some(make_restore()),
         pid,
     });
     Ok((acquired, guard))
@@ -701,7 +729,6 @@ impl WindowOS {
             .get_or_init(|| enhanced_ui_state(pid))
             .clone();
         let app_element = self.app_reference()?;
-        let restore_element = app_element.clone();
         let window_id = self.id;
         match acquire_enhanced_ui(
             state,
@@ -718,7 +745,10 @@ impl WindowOS {
                 })
             },
             || set_enhanced_ui(&app_element, false, pid, window_id),
-            Box::new(move || set_enhanced_ui(&restore_element, true, pid, window_id)),
+            || {
+                let restore_element = app_element.clone();
+                Box::new(move || set_enhanced_ui(&restore_element, true, pid, window_id))
+            },
         ) {
             Ok((acquired, guard)) => {
                 if acquired == EnhancedUiAcquired::Unsupported {
@@ -1196,18 +1226,23 @@ mod tests {
 
     use EnhancedUiFlag::{Disabled, Enabled, Unsupported};
 
-    /// A restoration that flips `enabled` back on and counts itself.
-    fn restorer(enabled: &Arc<AtomicBool>, count: &Arc<AtomicUsize>) -> RestoreFn {
-        let (enabled, count) = (enabled.clone(), count.clone());
-        Box::new(move || {
-            count.fetch_add(1, Ordering::Relaxed);
-            enabled.store(true, Ordering::Relaxed);
-            Ok(())
-        })
+    /// A restoration factory that flips `enabled` back on and counts itself.
+    fn restorer<'a>(
+        enabled: &'a Arc<AtomicBool>,
+        count: &'a Arc<AtomicUsize>,
+    ) -> impl FnOnce() -> RestoreFn + 'a {
+        move || {
+            let (enabled, count) = (enabled.clone(), count.clone());
+            Box::new(move || {
+                count.fetch_add(1, Ordering::Relaxed);
+                enabled.store(true, Ordering::Relaxed);
+                Ok(())
+            })
+        }
     }
 
     fn never_restore() -> RestoreFn {
-        Box::new(|| panic!("must not restore a flag we did not disable"))
+        panic!("must not construct a restore closure for a flag we did not disable")
     }
 
     #[allow(
@@ -1311,7 +1346,7 @@ mod tests {
             pid,
             || Ok(Enabled),
             || Ok(()),
-            Box::new(|| Err(Error::Generic("process exited before restoration".into()))),
+            || Box::new(|| Err(Error::Generic("process exited before restoration".into()))),
         )
         .unwrap();
         drop(guard.unwrap());
@@ -1336,7 +1371,7 @@ mod tests {
                         read(&enabled)
                     },
                     || disable(&enabled),
-                    never_restore(),
+                    never_restore,
                 )
                 .unwrap();
                 assert_eq!(acquired, EnhancedUiAcquired::Off);
@@ -1354,7 +1389,7 @@ mod tests {
             pid,
             || Ok(Disabled),
             || panic!("an initially false flag must not be disabled"),
-            never_restore(),
+            never_restore,
         )
         .unwrap();
         assert_eq!(acquired, EnhancedUiAcquired::Off);
@@ -1505,12 +1540,14 @@ mod tests {
                 assert!(state.try_lock().is_err());
                 Ok(())
             },
-            Box::new(move || {
-                // Nor after the count reaches zero but before true is restored.
-                assert!(restore_state.try_lock().is_err());
-                restore_enabled.store(true, Ordering::Relaxed);
-                Ok(())
-            }),
+            || {
+                Box::new(move || {
+                    // Nor after the count reaches zero but before true is restored.
+                    assert!(restore_state.try_lock().is_err());
+                    restore_enabled.store(true, Ordering::Relaxed);
+                    Ok(())
+                })
+            },
         )
         .unwrap();
         drop(guard);
@@ -1535,7 +1572,7 @@ mod tests {
                         resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
                         Ok(())
                     },
-                    Box::new(|| Ok(())),
+                    || Box::new(|| Ok(())),
                 )
                 .unwrap();
                 drop(guard.unwrap());
@@ -1546,7 +1583,7 @@ mod tests {
                 -175_002,
                 || Ok(Enabled),
                 || Ok(()),
-                Box::new(|| Ok(())),
+                || Box::new(|| Ok(())),
             )
             .unwrap();
             drop(second.unwrap());
@@ -1643,7 +1680,7 @@ mod tests {
             1,
             || Err(Error::Generic("transient AX read failure".into())),
             || panic!("a failed read must not disable the flag"),
-            never_restore(),
+            never_restore,
         );
         assert!(read_error.is_err());
         {
@@ -1742,7 +1779,7 @@ mod tests {
             1,
             || Ok(Enabled),
             || disable(&enabled),
-            Box::new(|| Err(Error::Generic("transient AX restore failure".into()))),
+            || Box::new(|| Err(Error::Generic("transient AX restore failure".into()))),
         )
         .unwrap();
         drop(first.unwrap());

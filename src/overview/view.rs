@@ -229,6 +229,9 @@ fn snapshot_region(rect: &Rect, below: Option<i32>) -> Option<CFRetained<CGImage
 #[derive(Default)]
 pub struct WindowServerInfo {
     pub frames: HashMap<i32, Rect>,
+    /// Windows listed as on screen that draw nothing: fully transparent
+    /// (apps such as Chromium park popovers this way) or with no area.
+    pub invisible: HashSet<i32>,
     /// Dock's per-display wallpaper windows.
     wallpapers: Vec<(i32, Rect)>,
     /// The `WindowServer`'s per-display menu bars.
@@ -276,6 +279,10 @@ pub fn window_server_info() -> WindowServerInfo {
         } else if owner == "Window Server" && name == "Menubar" {
             info.menubars.push((id, frame));
         } else {
+            let alpha = get(&entry, "kCGWindowAlpha").map_or(1.0, |n| number(&n));
+            if alpha <= 0.0 || frame.w < 1.0 || frame.h < 1.0 {
+                info.invisible.insert(id);
+            }
             info.frames.insert(id, frame);
         }
     }
@@ -1340,7 +1347,13 @@ impl OverviewManager {
                 ));
                 content.setContentsGravity(unsafe { kCAGravityResize });
                 content.setContentsScale(scale);
-                content.setBackgroundColor(Some(&color(0.3, 0.32, 0.36, 1.0)));
+                // Tiled cards hold their slot with a placeholder until the
+                // image lands. Floating cards sit on top of the rows, so one
+                // whose capture never comes (or is blocked) would just cover
+                // them: leave it clear instead.
+                if !window.floating {
+                    content.setBackgroundColor(Some(&color(0.3, 0.32, 0.36, 1.0)));
+                }
                 card.layer.addSublayer(&content);
                 let parent = if window.floating {
                     &container.layer

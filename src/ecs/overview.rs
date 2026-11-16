@@ -1121,7 +1121,8 @@ fn shown_row(
 
 /// Floating windows on this display, shown on the active row at their real
 /// position. The `WindowServer`'s frame is preferred: it is what the snapshot
-/// is cut to, and only windows it lists as on screen (this space) are shown.
+/// is cut to, and only windows it lists as on screen (this space) and
+/// actually drawing (not fully transparent) are shown.
 fn floating_windows<'a>(
     scene: &'a Scene,
     info: Option<&'a WindowServerInfo>,
@@ -1134,6 +1135,9 @@ fn floating_windows<'a>(
         .filter(|w| matches!(w.4, Some(Unmanaged::Floating)))
         .filter_map(move |(entity, window, _, _, _, focused, _)| {
             let frame = if let Some(info) = info {
+                if info.invisible.contains(&window.id()) {
+                    return None;
+                }
                 *info.frames.get(&window.id())?
             } else {
                 let f = window.frame();

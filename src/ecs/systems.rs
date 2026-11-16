@@ -1482,6 +1482,15 @@ pub(super) fn commit_window_size(
         });
 }
 
+/// Re-enables `AXEnhancedUserInterface` on apps whose windows stopped moving.
+/// Window operations leave it disabled for a short while after the last one so
+/// an animation does not toggle it every frame; this hands it back afterwards.
+/// Gated on [`crate::manager::enhanced_ui_restore_pending`], so it only runs
+/// while a restoration is owed.
+pub(super) fn restore_enhanced_ui() {
+    crate::manager::restore_deferred_enhanced_ui(false);
+}
+
 /// Restores user-visible window state before Paneru shuts down: clears any
 /// brightness dim, removes the dim/border overlay window, and centers every
 /// tiled window on its own display: the one whose strip holds it, else the
@@ -1515,6 +1524,7 @@ pub(crate) fn cleanup_on_exit(
 
         let display_bounds = displays.iter().map(Display::bounds).collect::<Vec<_>>();
         if display_bounds.is_empty() {
+            crate::manager::restore_deferred_enhanced_ui(true);
             return;
         }
 
@@ -1564,6 +1574,9 @@ pub(crate) fn cleanup_on_exit(
             );
             window.reposition(origin);
         }
+        // Hand back every flag the moves above (or a cut-short animation)
+        // left disabled: nothing will run the delayed restoration after this.
+        crate::manager::restore_deferred_enhanced_ui(true);
     }
 }
 

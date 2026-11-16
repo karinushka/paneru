@@ -354,6 +354,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
             systems::verify_window_position.run_if(not(resource_exists::<Initializing>)),
             systems::animate_resize_entities,
             systems::commit_window_size.run_if(not(resource_exists::<Initializing>)),
+            systems::restore_enhanced_ui.run_if(crate::manager::enhanced_ui_restore_pending),
         )
             .chain()
             .in_set(PostUpdateSet::Animate),

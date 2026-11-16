@@ -35,10 +35,12 @@ use std::time::{Duration, Instant};
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject};
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, class, define_class, msg_send};
+use objc2::{
+    AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, class, define_class, msg_send,
+};
 use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSEvent, NSFont, NSPanel, NSScreen, NSScreenSaverWindowLevel,
-    NSView, NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSBackingStoreType, NSColor, NSEvent, NSFont, NSImage, NSPanel, NSScreen,
+    NSScreenSaverWindowLevel, NSView, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
@@ -47,20 +49,25 @@ use objc2_core_graphics::{
 use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize, NSString};
 use objc2_quartz_core::{
     CABasicAnimation, CACurrentMediaTime, CALayer, CAMediaTiming as _, CASpringAnimation,
-    CATextLayer, CATransaction, kCAAlignmentLeft, kCAFillModeForwards, kCAGravityResize,
-    kCAGravityResizeAspectFill, kCATruncationEnd,
+    CATextLayer, CATransaction, kCAAlignmentCenter, kCAAlignmentLeft, kCAFillModeForwards,
+    kCAGravityResize, kCAGravityResizeAspect, kCAGravityResizeAspectFill, kCATruncationEnd,
 };
 use tracing::{debug, warn};
 
 use super::live::{Live, Wanted};
 use super::{DisplayLayout, Rect, Spring};
 use crate::events::{Event, EventSender};
+use crate::platform::Pid;
 
 /// Blur of the wallpaper backdrop, in points.
 const BACKDROP_BLUR: f64 = 40.0;
 /// Corner radius and focus ring width of a card when fully open, in points.
 const CARD_RADIUS: f64 = 10.0;
 const RING_WIDTH: f64 = 2.5;
+/// Without previews: a card's app icon size and title font size when fully
+/// open, in points.
+const ICON_SIZE: f64 = 56.0;
+const TITLE_FONT_SIZE: f64 = 12.0;
 
 // ── WindowServer queries ────────────────────────────────────────────────
 
@@ -104,10 +111,68 @@ fn snapshot(window_id: i32, best: bool) -> Option<CFRetained<CGImage>> {
     std::ptr::NonNull::new(raw).map(|ptr| unsafe { CFRetained::from_raw(ptr) })
 }
 
+/// Decodes an image file (any format `NSImage` reads, HEIC included).
+/// Runs on a capture worker: wallpapers are often 6K and slow to decode.
+fn image_file(path: &str) -> Option<CFRetained<CGImage>> {
+    let path = NSString::from_str(path);
+    let image = NSImage::initWithContentsOfFile(NSImage::alloc(), &path)?;
+    cg_image(&image)
+}
+
+/// The best representation of `image` as a `CGImage`.
+fn cg_image(image: &NSImage) -> Option<CFRetained<CGImage>> {
+    let raw: *mut CGImage = unsafe {
+        msg_send![
+            image,
+            CGImageForProposedRect: std::ptr::null_mut::<NSRect>(),
+            context: std::ptr::null::<AnyObject>(),
+            hints: std::ptr::null::<AnyObject>()
+        ]
+    };
+    // Autoreleased: retain it for ourselves.
+    std::ptr::NonNull::new(raw).map(|ptr| unsafe { CFRetained::retain(ptr) })
+}
+
+/// The desktop picture file of display `display_id`, if it has one (a
+/// solid colour or a dynamic wallpaper may not).
+fn desktop_picture(mtm: MainThreadMarker, display_id: u32) -> Option<String> {
+    let key = NSString::from_str("NSScreenNumber");
+    let screen = NSScreen::screens(mtm).into_iter().find(|screen| {
+        let description = screen.deviceDescription();
+        let number: Option<Retained<AnyObject>> =
+            unsafe { msg_send![&*description, objectForKey: &*key] };
+        number.is_some_and(|n| {
+            let id: u32 = unsafe { msg_send![&*n, unsignedIntValue] };
+            id == display_id
+        })
+    })?;
+    let workspace: Retained<AnyObject> = unsafe { msg_send![class!(NSWorkspace), sharedWorkspace] };
+    let url: Option<Retained<AnyObject>> =
+        unsafe { msg_send![&*workspace, desktopImageURLForScreen: &*screen] };
+    let path: Option<Retained<NSString>> = unsafe { msg_send![&*url?, path] };
+    Some(path?.to_string())
+}
+
+/// The icon of the app with process id `pid`.
+fn app_icon(pid: Pid) -> Option<CFRetained<CGImage>> {
+    let app: Option<Retained<AnyObject>> = unsafe {
+        msg_send![
+            class!(NSRunningApplication),
+            runningApplicationWithProcessIdentifier: pid
+        ]
+    };
+    let icon: Option<Retained<NSImage>> = unsafe { msg_send![&*app?, icon] };
+    let icon = icon?;
+    // Ask for a large representation; the default is 32 points.
+    let size = NSSize::new(ICON_SIZE * 4.0, ICON_SIZE * 4.0);
+    icon.setSize(size);
+    cg_image(&icon)
+}
+
 // ── Background captures ─────────────────────────────────────────────────
 
 /// One capture to run off the main thread.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Shot {
     Window {
         id: i32,
@@ -120,6 +185,12 @@ enum Shot {
     },
     /// The wallpaper window, blurred by `radius` points on a display
     /// `width` points wide.
+    /// An image file (the desktop picture, when windows can't be captured),
+    /// blurred by `(width, radius)` like [`Shot::Blurred`] if given.
+    File {
+        path: String,
+        blur: Option<(f64, f64)>,
+    },
     Blurred {
         id: i32,
         width: f64,
@@ -130,6 +201,13 @@ enum Shot {
 impl Shot {
     fn take(self) -> Option<CFRetained<CGImage>> {
         match self {
+            Self::File { path, blur } => {
+                let image = image_file(&path)?;
+                match blur {
+                    Some((width, radius)) => blurred(&image, width, radius),
+                    None => Some(image),
+                }
+            }
             Self::Window { id, best } => snapshot(id, best),
             Self::Region { rect, below } => snapshot_region(&rect, below),
             Self::Blurred { id, width, radius } => {
@@ -371,6 +449,56 @@ fn row_label(virtual_index: u32, rect: &Rect, scale: f64) -> Animated {
     let h = (LABEL_FONT_SIZE * 1.3).min(rect.h);
     let rect = Rect::new(rect.x + 4.0, rect.y + rect.h - h - 2.0, rect.w - 8.0, h);
     Animated::new(Retained::into_super(text), rect, rect, (0.0, 1.0))
+}
+
+/// A card without a preview: a plain tile with the app icon and the window
+/// title in the middle. Sized in `card`'s bounds space (the window's real
+/// size, scaled down by the card's transform), so it reads the same on
+/// every card once open.
+fn add_tile(
+    content: &CALayer,
+    card: &Animated,
+    title: Option<&str>,
+    icon: Option<&CGImage>,
+    scale: f64,
+) {
+    content.setBackgroundColor(Some(&color(0.22, 0.24, 0.28, 1.0)));
+    let (w, h) = card.base;
+    let icon_size = card.open_points(ICON_SIZE).min(w).min(h);
+    let font_size = card.open_points(TITLE_FONT_SIZE);
+    let gap = card.open_points(8.0);
+    let text_h = font_size * 1.4;
+    let top = (h - icon_size - gap - text_h) / 2.0;
+    if let Some(image) = icon {
+        let layer = CALayer::new();
+        layer.setFrame(CGRect::new(
+            CGPoint::new((w - icon_size) / 2.0, top.max(0.0)),
+            CGSize::new(icon_size, icon_size),
+        ));
+        layer.setContentsGravity(unsafe { kCAGravityResizeAspect });
+        set_contents(&layer, image);
+        content.addSublayer(&layer);
+    }
+    let Some(title) = title.filter(|t| !t.is_empty()) else {
+        return;
+    };
+    let text = CATextLayer::new();
+    unsafe { text.setString(Some(&NSString::from_str(title))) };
+    let font = NSFont::systemFontOfSize(TITLE_FONT_SIZE);
+    // SAFETY: NSFont is toll-free bridged to CTFont, a CF object.
+    let font = unsafe { &*Retained::as_ptr(&font).cast::<objc2_core_foundation::CFType>() };
+    unsafe { text.setFont(Some(font)) };
+    text.setFontSize(font_size);
+    text.setForegroundColor(Some(&color(1.0, 1.0, 1.0, 0.85)));
+    text.setAlignmentMode(unsafe { kCAAlignmentCenter });
+    text.setTruncationMode(unsafe { kCATruncationEnd });
+    text.setContentsScale(scale);
+    let margin = card.open_points(12.0);
+    text.setFrame(CGRect::new(
+        CGPoint::new(margin, (top + icon_size + gap).min(h - text_h)),
+        CGSize::new((w - 2.0 * margin).max(1.0), text_h),
+    ));
+    content.addSublayer(&text);
 }
 
 fn color(r: f64, g: f64, b: f64, a: f64) -> CFRetained<CGColor> {
@@ -808,6 +936,13 @@ pub struct OverviewManager {
     live_due: Option<Instant>,
     /// A wake-up for `live_due` is on its way.
     live_wake: Arc<std::sync::atomic::AtomicBool>,
+    /// Whether windows are captured at all (screen recording permission).
+    /// Without it nothing is captured or streamed: cards are tiles with the
+    /// app icon and title, the wallpaper comes from the desktop picture
+    /// file, and the overview fades in instead of starting from the screen.
+    previews: bool,
+    /// App icons by process id, for the tiles.
+    icons: HashMap<Pid, Option<CFRetained<CGImage>>>,
 }
 
 /// How long scrolling has to rest before the live streams follow it: while
@@ -828,8 +963,16 @@ struct Screen {
 
 /// One display to show: its absolute CG bounds and the computed layout.
 pub struct DisplayScene<'a, K> {
+    pub display_id: u32,
     pub cg_bounds: Rect,
     pub layout: &'a DisplayLayout<K>,
+}
+
+/// What a card shows when windows can't be captured (no screen recording
+/// permission): the window's title and its app's icon.
+pub struct CardLabel {
+    pub title: String,
+    pub pid: Option<Pid>,
 }
 
 fn container_frames<K>(layout: &DisplayLayout<K>) -> (Rect, Rect) {
@@ -906,7 +1049,28 @@ impl OverviewManager {
             live_margin: 0.0,
             live_due: None,
             live_wake: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            previews: true,
+            icons: HashMap::new(),
         }
+    }
+
+    /// Turns window capture on or off (see [`Self::previews`]); applies from
+    /// the next build.
+    pub fn set_previews(&mut self, on: bool) {
+        if self.previews != on {
+            debug!(
+                "overview: window previews {}",
+                if on { "on" } else { "off" }
+            );
+            // Nothing captured under the other setting shows (a revoked
+            // permission); the desktop picture stays cached while off.
+            self.cache.clear();
+        }
+        self.previews = on;
+    }
+
+    pub fn previews(&self) -> bool {
+        self.previews
     }
 
     /// Builds the layer trees at `progress` without blocking: every capture
@@ -920,6 +1084,7 @@ impl OverviewManager {
         &mut self,
         scenes: &[DisplayScene<'_, K>],
         info: &WindowServerInfo,
+        labels: &HashMap<i32, CardLabel>,
         progress: f64,
     ) {
         let started = Instant::now();
@@ -939,6 +1104,9 @@ impl OverviewManager {
         let primary_h = primary_screen_height(self.mtm);
         let mut jobs: Vec<(Rank, usize, Shot)> = Vec::new();
         self.visible.clear();
+        for pid in labels.values().filter_map(|label| label.pid) {
+            self.icons.entry(pid).or_insert_with(|| app_icon(pid));
+        }
 
         CATransaction::begin();
         CATransaction::setDisableActions(true);
@@ -947,7 +1115,7 @@ impl OverviewManager {
             let at_corner = |f: &Rect| (f.x - b.x).abs() < 1.0 && (f.y - b.y).abs() < 1.0;
             let wallpaper = info.wallpapers.iter().find(|(_, f)| at_corner(f));
             let menubar = info.menubars.iter().find(|(_, f)| at_corner(f));
-            if wallpaper.is_none() {
+            if wallpaper.is_none() && self.previews {
                 warn!(
                     "overview: no wallpaper found for display at ({}, {})",
                     b.x, b.y
@@ -959,7 +1127,7 @@ impl OverviewManager {
                 menubar: Vec::new(),
                 menubar_height: menubar.map(|(_, f)| f.h),
             };
-            let Some(panel) = self.build_panel(scene, primary_h, &mut screen) else {
+            let Some(panel) = self.build_panel(scene, primary_h, &mut screen, labels) else {
                 continue;
             };
             // Region captures are taken from below everything of ours on
@@ -972,7 +1140,27 @@ impl OverviewManager {
             );
             panel.window.setAlphaValue(0.0);
             panel.window.orderFrontRegardless();
-            if let Some((id, _)) = wallpaper {
+            if !self.previews {
+                // Without the permission the wallpaper window can't be
+                // captured (nor even found: window names are hidden), but
+                // the desktop picture file can be read.
+                if let Some(path) = desktop_picture(self.mtm, scene.display_id) {
+                    let shot = Shot::File {
+                        path: path.clone(),
+                        blur: None,
+                    };
+                    let key = format!("desktop picture {path}");
+                    let index = self.target(screen.wallpaper, false, false, false, &key);
+                    jobs.push((Rank::Screen, index, shot));
+                    let shot = Shot::File {
+                        blur: Some((b.w, BACKDROP_BLUR)),
+                        path,
+                    };
+                    let key = format!("{key} blurred");
+                    let index = self.target(screen.backdrop, false, false, false, &key);
+                    jobs.push((Rank::Backdrop, index, shot));
+                }
+            } else if let Some((id, _)) = wallpaper {
                 let shot = Shot::Window {
                     id: *id,
                     best: true,
@@ -989,13 +1177,14 @@ impl OverviewManager {
                 let index = self.target(screen.backdrop, false, true, false, &key);
                 jobs.push((Rank::Backdrop, index, shot));
             }
-            if let Some((_, rect)) = menubar {
+            if let Some((_, rect)) = menubar.filter(|_| self.previews) {
                 let shot = Shot::Region { rect: *rect, below };
                 let key = format!("menu bar {},{}", rect.x, rect.y);
                 let index = self.target(screen.menubar, false, true, false, &key);
                 jobs.push((Rank::Row, index, shot));
             }
-            for card in &panel.cards {
+            let previews = self.previews;
+            for card in panel.cards.iter().filter(|_| previews) {
                 let shot = card.screen_rect.map_or(
                     Shot::Window {
                         id: card.window_id,
@@ -1178,6 +1367,7 @@ impl OverviewManager {
         scene: &DisplayScene<'_, K>,
         primary_h: f64,
         screen: &mut Screen,
+        labels: &HashMap<i32, CardLabel>,
     ) -> Option<Panel> {
         let mtm = self.mtm;
         let b = scene.cg_bounds;
@@ -1236,7 +1426,10 @@ impl OverviewManager {
         // `blurred`). Opaque from the start: at progress 0 the active row's screen covers
         // it exactly, and as that shrinks the blur is what's revealed — the
         // real windows behind the panel never show through.
-        let backdrop = Animated::new(CALayer::new(), full, full, (1.0, 1.0));
+        // Without previews nothing matches the real screen at progress 0,
+        // so the backdrop and every row fade in (and out) instead.
+        let shown_at_rest = if self.previews { 1.0 } else { 0.0 };
+        let backdrop = Animated::new(CALayer::new(), full, full, (shown_at_rest, 1.0));
         backdrop
             .layer
             .setBackgroundColor(Some(&color(0.08, 0.09, 0.11, 1.0)));
@@ -1254,7 +1447,12 @@ impl OverviewManager {
         tint.set(0.0);
 
         let (container_rest, container_open) = container_frames(layout);
-        let container = Animated::new(CALayer::new(), container_rest, container_open, (1.0, 1.0));
+        let container = Animated::new(
+            CALayer::new(),
+            container_rest,
+            container_open,
+            (shown_at_rest, 1.0),
+        );
         flipped.addSublayer(&container.layer);
         container.set(0.0);
 
@@ -1351,7 +1549,20 @@ impl OverviewManager {
                 // image lands. Floating cards sit on top of the rows, so one
                 // whose capture never comes (or is blocked) would just cover
                 // them: leave it clear instead.
-                if !window.floating {
+                if !self.previews {
+                    let label = labels.get(&window.window_id);
+                    let icon = label
+                        .and_then(|l| l.pid)
+                        .and_then(|pid| self.icons.get(&pid))
+                        .and_then(Option::as_deref);
+                    add_tile(
+                        &content,
+                        &card,
+                        label.map(|l| l.title.as_str()),
+                        icon,
+                        scale,
+                    );
+                } else if !window.floating {
                     content.setBackgroundColor(Some(&color(0.3, 0.32, 0.36, 1.0)));
                 }
                 card.layer.addSublayer(&content);
@@ -1471,6 +1682,12 @@ impl OverviewManager {
     /// Streams the windows whose cards are (nearly) on screen.
     fn sync_live(&mut self) {
         self.live_due = None;
+        if !self.previews {
+            // Not even listing the windows: that alone can bring up the
+            // permission prompt.
+            self.live.set(Vec::new());
+            return;
+        }
         let per_display = self
             .panels
             .iter()

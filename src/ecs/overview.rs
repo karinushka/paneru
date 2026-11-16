@@ -8,6 +8,7 @@
 //! overview is open, hotkeys keep driving the real layout and the overview
 //! follows it (`overview_follow_layout`).
 
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -37,12 +38,15 @@ use crate::ecs::{
 use crate::events::Event;
 use crate::manager::WindowManager;
 use crate::manager::{Display, Window};
-use crate::overview::view::{DisplayScene, OverviewManager, WindowServerInfo, window_server_info};
+use crate::overview::view::{
+    CardLabel, DisplayScene, OverviewManager, WindowServerInfo, window_server_info,
+};
 use crate::overview::{
     DisplayLayout, Hit, Metrics, OVERVIEW_OPEN, Rect, SPRING_RESPONSE, Spring, StripInput,
     WindowInput, hit_test, layout_display, middle_row, reanchor, release_opens, rubber_band,
     same_geometry,
 };
+use crate::screen_capture;
 
 /// Progress per unit of normalized vertical finger travel: ~55% of the
 /// trackpad's height opens the overview fully.
@@ -70,6 +74,7 @@ enum Phase {
 }
 
 struct DisplayEntry {
+    display_id: u32,
     cg_bounds: Rect,
     layout: DisplayLayout<Entity>,
     /// Strip entities, parallel to `layout.strips`.
@@ -395,6 +400,11 @@ fn finish_close(state: &mut OverviewState, manager: &mut OverviewManager) {
         debug!("overview: closed {:?} after letting go", start.elapsed());
     }
     manager.teardown();
+    // Ask for screen recording once the overlay is gone (it would cover the
+    // system prompt), and only once per run.
+    if !manager.previews() {
+        screen_capture::request_once();
+    }
     OVERVIEW_OPEN.store(false, Ordering::Relaxed);
     *state = OverviewState {
         generation: state.generation,
@@ -914,11 +924,13 @@ fn overview_follow_layout(
         let scenes: Vec<_> = entries
             .iter()
             .map(|entry| DisplayScene {
+                display_id: entry.display_id,
                 cg_bounds: entry.cg_bounds,
                 layout: &entry.layout,
             })
             .collect();
-        manager.build(&scenes, &info, 1.0);
+        let labels = card_labels(&scene, manager.previews());
+        manager.build(&scenes, &info, &labels, 1.0);
     }
     state.displays = entries;
 }
@@ -934,6 +946,7 @@ fn open(state: &mut OverviewState, manager: &mut OverviewManager, scene: &Scene)
     let scenes: Vec<_> = entries
         .iter()
         .map(|entry| DisplayScene {
+            display_id: entry.display_id,
             cg_bounds: entry.cg_bounds,
             layout: &entry.layout,
         })
@@ -942,7 +955,11 @@ fn open(state: &mut OverviewState, manager: &mut OverviewManager, scene: &Scene)
         scene.config.overview_live_previews(),
         scene.config.overview_live_margin(),
     );
-    manager.build(&scenes, &info, 0.0);
+    // Checked on every open: permission can be granted (or revoked) while
+    // paneru runs. Without it, cards show the app icon and title instead.
+    manager.set_previews(screen_capture::allowed());
+    let labels = card_labels(scene, manager.previews());
+    manager.build(&scenes, &info, &labels, 0.0);
     OVERVIEW_OPEN.store(true, Ordering::Relaxed);
     state.displays = entries;
     state.progress = 0.0;
@@ -1062,6 +1079,7 @@ fn gather(scene: &Scene, info: Option<&WindowServerInfo>) -> Vec<DisplayEntry> {
             f64::from(viewport.max.x) - origin.0,
         );
         entries.push(DisplayEntry {
+            display_id,
             cg_bounds: display_rect,
             layout,
             strips: strip_entities,
@@ -1099,6 +1117,25 @@ fn origin_from_windows(scene: &Scene, strip: &LayoutStrip) -> Option<bevy::math:
         let (_, _, layout, _, unmanaged, _, position) = scene.windows.get(entity).ok()?;
         (!matches!(unmanaged, Some(Unmanaged::Floating))).then(|| position.0 - layout.0)
     })
+}
+
+/// Title and owning app of every window, for the cards drawn without
+/// previews (no screen recording permission). Empty when previews are on.
+fn card_labels(scene: &Scene, previews: bool) -> HashMap<i32, CardLabel> {
+    if previews {
+        return HashMap::new();
+    }
+    scene
+        .windows
+        .iter()
+        .map(|(_, window, ..)| {
+            let label = CardLabel {
+                title: window.title().unwrap_or_default(),
+                pid: window.pid().ok(),
+            };
+            (window.id(), label)
+        })
+        .collect()
 }
 
 /// The row a display has on screen: the one carrying the global

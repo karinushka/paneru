@@ -108,6 +108,7 @@ fn parse_operation(argv: &[&str]) -> Result<Operation> {
         "displaysend" => Operation::ToDisplay(parse_display_id(argument()?)?, MoveFocus::Stay),
         "snap" => Operation::Snap,
         "copyrule" => Operation::CopyRule,
+        "pin" => Operation::Pin,
         // The `virtual*` verbs take either a direction or a workspace number,
         // and `num` variants that only take a number.
         "virtual" => virtual_target(argument()?, Operation::Virtual, Operation::VirtualNumber)?,
@@ -379,6 +380,7 @@ impl Operation {
             Operation::RaiseFloating => owned(&["raise", "floating"]),
             Operation::ToggleFloatingLayer => owned(&["togglefloatlayer"]),
             Operation::CopyRule => owned(&["copyrule"]),
+            Operation::Pin => owned(&["pin"]),
         }
     }
 }
@@ -523,6 +525,7 @@ mod tests {
             Operation::RaiseFloating,
             Operation::ToggleFloatingLayer,
             Operation::CopyRule,
+            Operation::Pin,
         ];
 
         for operation in operations {

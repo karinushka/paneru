@@ -302,6 +302,9 @@ pub enum Operation {
     /// Copies a `[windows]` configuration rule for the focused window to the
     /// clipboard.
     CopyRule,
+    /// Toggles pinning the focused window above all others (floats it first
+    /// if it is tiled). Needs Screen Recording permission.
+    Pin,
 }
 
 /// Identifies a native macOS Desktop or managed Space target.

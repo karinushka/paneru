@@ -261,6 +261,14 @@ pub enum Event {
     /// `Command`, like `MenuOpened`/`MenuClosed`.
     TabIndicatorClicked { window_id: WinID },
 
+    /// A pinned window's mirror panel was clicked; focus the real window.
+    PinMirrorClicked { window_id: WinID },
+    /// A pinned window's mirror received its first frame and can be shown.
+    PinMirrorReady { window_id: WinID },
+    /// A pinned window's capture could not start or stopped (window closed,
+    /// permission revoked); the pin is dropped.
+    PinMirrorStopped { window_id: WinID },
+
     /// A structured state query has been issued by a client.
     StateQuery {
         kind: StateQueryKind,

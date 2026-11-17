@@ -777,7 +777,9 @@ fn handle_tab_indicator_click(
     mut commands: Commands,
 ) {
     for event in messages.read() {
-        let Event::TabIndicatorClicked { window_id } = &event else {
+        let (Event::TabIndicatorClicked { window_id } | Event::PinMirrorClicked { window_id }) =
+            &event
+        else {
             continue;
         };
         let Some((_, entity)) = windows.find(*window_id) else {

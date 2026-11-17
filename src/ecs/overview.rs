@@ -43,9 +43,9 @@ use crate::overview::view::{
     CardLabel, DisplayScene, OverviewManager, WindowServerInfo, window_server_info,
 };
 use crate::overview::{
-    DisplayLayout, Hit, Metrics, OVERVIEW_OPEN, Rect, SPRING_RESPONSE, Spring, StripInput,
-    WindowInput, hit_test, layout_display, middle_row, reanchor, release_opens, rubber_band,
-    same_geometry,
+    DisplayLayout, Hit, Metrics, OVERVIEW_ACCEPTS_KEYS, OVERVIEW_OPEN, Rect, SPRING_RESPONSE,
+    Spring, StripInput, WindowInput, hit_test, layout_display, middle_row, reanchor, release_opens,
+    rubber_band, same_geometry,
 };
 use crate::screen_capture;
 
@@ -158,9 +158,26 @@ impl ActiveSession {
     }
 }
 
+/// Synchronizes the lock-free event-tap flags ([`OVERVIEW_OPEN`] for trackpad
+/// scroll capture and [`OVERVIEW_ACCEPTS_KEYS`] for bare `Escape` / `Return`
+/// interception) with the current [`OverviewPhase`] and session motion.
+fn sync_tap_flags(phase: OverviewPhase, session: Option<&ActiveSession>) {
+    let open = phase.is_active();
+    let accepts_keys = match phase {
+        OverviewPhase::Opening | OverviewPhase::Open => true,
+        OverviewPhase::Scrubbing => session.is_some_and(|active| {
+            !matches!(&active.motion, Motion::Scrub(scrub) if scrub.prebuilt_down_travel.is_some())
+        }),
+        OverviewPhase::Closed | OverviewPhase::Closing => false,
+    };
+    OVERVIEW_OPEN.store(open, Ordering::Relaxed);
+    OVERVIEW_ACCEPTS_KEYS.store(accepts_keys, Ordering::Relaxed);
+}
+
 /// Session state for an active overview, kept separate from [`OverviewPhase`]
 /// so pointer/gesture run conditions only inspect the 1-byte phase resource
-/// while `activate` / `close` / `Drop` own [`OVERVIEW_OPEN`] synchronization.
+/// while `activate` / `close` / `Drop` own [`OVERVIEW_OPEN`] and
+/// [`OVERVIEW_ACCEPTS_KEYS`] synchronization.
 #[derive(Resource, Default)]
 struct OverviewSession(Option<ActiveSession>);
 
@@ -174,17 +191,18 @@ impl OverviewSession {
     ) -> &mut ActiveSession {
         debug_assert!(next_phase.is_active());
         *phase = next_phase;
-        OVERVIEW_OPEN.store(true, Ordering::Relaxed);
-        self.0.insert(ActiveSession {
+        let active = self.0.insert(ActiveSession {
             displays,
             motion,
             committed: false,
-        })
+        });
+        sync_tap_flags(*phase, Some(active));
+        active
     }
 
     fn close(&mut self, phase: &mut OverviewPhase) -> Option<ActiveSession> {
         *phase = OverviewPhase::Closed;
-        OVERVIEW_OPEN.store(false, Ordering::Relaxed);
+        sync_tap_flags(*phase, None);
         self.0.take()
     }
 }
@@ -192,6 +210,7 @@ impl OverviewSession {
 impl Drop for OverviewSession {
     fn drop(&mut self) {
         OVERVIEW_OPEN.store(false, Ordering::Relaxed);
+        OVERVIEW_ACCEPTS_KEYS.store(false, Ordering::Relaxed);
     }
 }
 
@@ -495,7 +514,12 @@ fn overview_handler(
                 }
             }
 
-            Event::OverviewDismiss if phase.is_active() => {
+            Event::OverviewDismiss
+                if matches!(
+                    *phase,
+                    OverviewPhase::Open | OverviewPhase::Opening | OverviewPhase::Scrubbing
+                ) =>
+            {
                 // The panel took key focus; hand it back.
                 if let Some((_, entity)) = windows.focused() {
                     commands.focus_entity(entity, true);
@@ -506,7 +530,12 @@ fn overview_handler(
                 }
             }
 
-            Event::OverviewAccept if phase.is_active() => {
+            Event::OverviewAccept
+                if matches!(
+                    *phase,
+                    OverviewPhase::Open | OverviewPhase::Opening | OverviewPhase::Scrubbing
+                ) =>
+            {
                 if let Some(active) = session.0.as_mut()
                     && !active.committed
                 {
@@ -546,6 +575,7 @@ fn overview_handler(
 
             _ => {}
         }
+        sync_tap_flags(*phase, session.0.as_ref());
     }
 }
 
@@ -943,6 +973,7 @@ fn settle(
     } else {
         OverviewPhase::Closing
     };
+    sync_tap_flags(*phase, Some(active));
 }
 
 /// Trackpad scroll inside the open overview: mostly-horizontal motion pans

@@ -84,6 +84,16 @@ impl Rect {
 /// its post-swipe suppression, or the window underneath.
 pub static OVERVIEW_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Whether the event tap should intercept bare `Escape` and `Return` for the
+/// overview. `true` while opening, open, or actively scrubbed past zero — even
+/// after a focus keybind hands `AppKit` key-window status to another app — and
+/// `false` during touch-down prebuilds and the closing animation.
+pub static OVERVIEW_ACCEPTS_KEYS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+pub(crate) static OVERVIEW_OPEN_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 // ── Inputs ──────────────────────────────────────────────────────────────
 
 /// One window as the ECS sees it.

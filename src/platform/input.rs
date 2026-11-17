@@ -920,7 +920,23 @@ impl InputHandler {
         // that paneru can actively switch back to the previous workspace.
         // Non-paneru keys pass through naturally (find_keybind returns None).
 
-        let keycode = keycode.try_into().ok();
+        let keycode: Option<u8> = keycode.try_into().ok();
+        if mask.is_empty()
+            && crate::overview::OVERVIEW_ACCEPTS_KEYS.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            let overview_event = match keycode {
+                Some(53) => Some(Event::OverviewDismiss),
+                Some(36) => Some(Event::OverviewAccept),
+                _ => None,
+            };
+            if let Some(event) = overview_event {
+                return events
+                    .send(event)
+                    .inspect_err(|err| error!("Error sending overview key event: {err}"))
+                    .is_ok();
+            }
+        }
+
         keycode
             .and_then(|keycode| {
                 let passthrough = FOCUSED_PASSTHROUGH.load();
@@ -1608,5 +1624,65 @@ mod tests {
             receiver.try_recv(),
             Ok(Event::Swipe { delta, .. }) if (delta - 0.02).abs() < 1e-12
         ));
+    }
+
+    #[test]
+    fn overview_intercepts_escape_and_return_even_without_key_window_focus() {
+        use std::sync::atomic::Ordering;
+
+        let _guard = crate::overview::OVERVIEW_OPEN_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _reset = scopeguard::guard((), |()| {
+            crate::overview::OVERVIEW_OPEN.store(false, Ordering::Relaxed);
+            crate::overview::OVERVIEW_ACCEPTS_KEYS.store(false, Ordering::Relaxed);
+        });
+
+        let (sender, receiver) = EventSender::new();
+        let config =
+            Config::try_from("[bindings]\nwindow_focus_west = \"cmd - h\"\n").expect("config");
+        let handler = InputHandler::new(sender, config);
+
+        // When closed, bare Escape (53) and Return (36) pass through untouched.
+        crate::overview::OVERVIEW_OPEN.store(false, Ordering::Relaxed);
+        crate::overview::OVERVIEW_ACCEPTS_KEYS.store(false, Ordering::Relaxed);
+        assert!(!handler.handle_keypress(53, CGEventFlags(0)));
+        assert!(!handler.handle_keypress(36, CGEventFlags(0)));
+        assert!(receiver.try_recv().is_err());
+
+        // While open (including after `cmd - h` / `cmd - l` moves key-window focus
+        // to another app), focus chords still dispatch and bare Escape / Return
+        // are intercepted globally by the event tap.
+        crate::overview::OVERVIEW_OPEN.store(true, Ordering::Relaxed);
+        crate::overview::OVERVIEW_ACCEPTS_KEYS.store(true, Ordering::Relaxed);
+
+        // `cmd - h` (keycode 4, LCMD = 0x08) dispatches Focus(West).
+        assert!(handler.handle_keypress(4, CGEventFlags(0x0000_0008)));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(Event::Command {
+                command: Command::Window(Operation::Focus(Direction::West)),
+            })
+        ));
+
+        // Bare Escape -> OverviewDismiss, bare Return -> OverviewAccept.
+        assert!(handler.handle_keypress(53, CGEventFlags(0)));
+        assert!(matches!(receiver.try_recv(), Ok(Event::OverviewDismiss)));
+
+        assert!(handler.handle_keypress(36, CGEventFlags(0)));
+        assert!(matches!(receiver.try_recv(), Ok(Event::OverviewAccept)));
+
+        // Modified Escape / Return (e.g. Cmd+Escape) must NOT trigger dismiss/accept.
+        assert!(!handler.handle_keypress(53, CGEventFlags(0x0000_0008)));
+        assert!(!handler.handle_keypress(36, CGEventFlags(0x0000_0008)));
+        assert!(receiver.try_recv().is_err());
+
+        // During touch-down prebuild or closing (`OVERVIEW_OPEN == true`,
+        // `OVERVIEW_ACCEPTS_KEYS == false`), bare Escape / Return pass through
+        // to the focused app instead of being swallowed.
+        crate::overview::OVERVIEW_ACCEPTS_KEYS.store(false, Ordering::Relaxed);
+        assert!(!handler.handle_keypress(53, CGEventFlags(0)));
+        assert!(!handler.handle_keypress(36, CGEventFlags(0)));
+        assert!(receiver.try_recv().is_err());
     }
 }

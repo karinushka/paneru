@@ -607,17 +607,62 @@ fn tick_condition_stays_idle_during_gpu_springs_and_settled_open() {
 
 #[test]
 fn session_lifecycle_and_drop_own_overview_open_flag() {
+    let _guard = crate::overview::OVERVIEW_OPEN_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut phase = OverviewPhase::default();
     {
         let mut session = OverviewSession::default();
         assert!(!OVERVIEW_OPEN.load(Ordering::Relaxed));
+        assert!(!crate::overview::OVERVIEW_ACCEPTS_KEYS.load(Ordering::Relaxed));
+
+        // Opening / Open accepts Escape and Return in the event tap.
         session.activate(&mut phase, OverviewPhase::Open, Vec::new(), Motion::Settled);
         assert_eq!(phase, OverviewPhase::Open);
         assert!(OVERVIEW_OPEN.load(Ordering::Relaxed));
+        assert!(crate::overview::OVERVIEW_ACCEPTS_KEYS.load(Ordering::Relaxed));
 
-        // Dropping `OverviewSession` without `close` still clears `OVERVIEW_OPEN`.
+        // Touch-down prebuild at progress 0 owns scroll (`OVERVIEW_OPEN`), but
+        // must NOT hijack Escape / Return until swiped up.
+        session.activate(
+            &mut phase,
+            OverviewPhase::Scrubbing,
+            Vec::new(),
+            Motion::Scrub(prebuilt()),
+        );
+        assert!(OVERVIEW_OPEN.load(Ordering::Relaxed));
+        assert!(!crate::overview::OVERVIEW_ACCEPTS_KEYS.load(Ordering::Relaxed));
+
+        // Active scrub past touch-down accepts Escape / Return.
+        session.activate(
+            &mut phase,
+            OverviewPhase::Scrubbing,
+            Vec::new(),
+            Motion::Scrub(scrubbing(Some(Instant::now()))),
+        );
+        assert!(OVERVIEW_OPEN.load(Ordering::Relaxed));
+        assert!(crate::overview::OVERVIEW_ACCEPTS_KEYS.load(Ordering::Relaxed));
+
+        // While closing, scroll stays captured (`OVERVIEW_OPEN`), while Escape
+        // and Return pass straight through to the newly focused app.
+        phase = OverviewPhase::Closing;
+        sync_tap_flags(phase, session.0.as_ref());
+        assert!(OVERVIEW_OPEN.load(Ordering::Relaxed));
+        assert!(!crate::overview::OVERVIEW_ACCEPTS_KEYS.load(Ordering::Relaxed));
+
+        // Reopening sets `OVERVIEW_ACCEPTS_KEYS` again, and dropping
+        // `OverviewSession` without `close` clears both tap flags.
+        session.activate(
+            &mut phase,
+            OverviewPhase::Opening,
+            Vec::new(),
+            Motion::Settled,
+        );
+        assert!(OVERVIEW_OPEN.load(Ordering::Relaxed));
+        assert!(crate::overview::OVERVIEW_ACCEPTS_KEYS.load(Ordering::Relaxed));
     }
     assert!(!OVERVIEW_OPEN.load(Ordering::Relaxed));
+    assert!(!crate::overview::OVERVIEW_ACCEPTS_KEYS.load(Ordering::Relaxed));
 }
 
 #[test]

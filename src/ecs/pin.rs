@@ -6,12 +6,13 @@
 //! itself. Clicking the copy focuses the real window, which hides the copy.
 
 use bevy::app::{App, Plugin, PostUpdate, PreUpdate};
+use bevy::ecs::change_detection::Ref;
 use bevy::ecs::change_detection::{DetectChanges, DetectChangesMut};
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::lifecycle::RemovedComponents;
 use bevy::ecs::message::MessageReader;
-use bevy::ecs::query::{Added, Changed, Has, With};
+use bevy::ecs::query::{Added, Changed, Has, Or, With, Without};
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::schedule::common_conditions::on_message;
 use bevy::ecs::system::{Commands, NonSendMut, Query, Res};
@@ -23,6 +24,7 @@ use super::{
     FocusedMarker, MissionControlActive, PostUpdateSet, PreUpdateSet, SpawnCommandsExt, Unmanaged,
 };
 use crate::commands::filter_window_operations;
+use crate::config::Config;
 use crate::events::Event;
 use crate::manager::{Origin, Window};
 use crate::pin_mirror::{PinMirrorManager, PinTarget};
@@ -31,6 +33,16 @@ use crate::types::commands::Operation;
 /// Marks a window the user pinned above all others.
 #[derive(Component, Debug, Default)]
 pub struct Pinned;
+
+/// A pin added by the `pin_floating` option rather than by `window_pin`, so
+/// turning the option off removes only these.
+#[derive(Component, Debug, Default)]
+pub struct AutoPinned;
+
+/// Keeps `pin_floating` from re-pinning a window the user unpinned, or whose
+/// mirror failed. Cleared when the window is tiled again.
+#[derive(Component, Debug, Default)]
+pub struct PinOptOut;
 
 pub struct PinPlugin;
 
@@ -44,9 +56,12 @@ impl Plugin for PinPlugin {
         );
         app.add_systems(
             PostUpdate,
-            sync_pin_mirrors
-                .in_set(PostUpdateSet::Ui)
-                .run_if(pin_mirrors_dirty),
+            (
+                (unpin_retiled_windows, auto_pin_floating).run_if(pin_membership_dirty),
+                sync_pin_mirrors.run_if(pin_mirrors_dirty),
+            )
+                .chain()
+                .in_set(PostUpdateSet::Ui),
         );
     }
 }
@@ -77,13 +92,77 @@ fn pin_command_handler(
     };
     if pinned.contains(entity) {
         debug!(window_id, "unpinning window");
-        entity_commands.try_remove::<Pinned>();
+        entity_commands.try_remove::<(Pinned, AutoPinned)>();
+        entity_commands.try_insert(PinOptOut);
     } else {
         debug!(window_id, "pinning window");
         if unmanaged.is_none() {
             entity_commands.try_insert(Unmanaged::Floating);
         }
+        entity_commands.try_remove::<PinOptOut>();
         entity_commands.try_insert(Pinned);
+    }
+}
+
+/// Whether floating/tiled membership or the `pin_floating` option changed.
+fn pin_membership_dirty(
+    config: Option<Res<Config>>,
+    unmanaged_changed: Query<(), Changed<Unmanaged>>,
+    mut unmanaged_removed: RemovedComponents<Unmanaged>,
+) -> bool {
+    let removed = unmanaged_removed.read().count() > 0;
+    removed || !unmanaged_changed.is_empty() || config.is_some_and(|config| config.is_changed())
+}
+
+type RetiledPins<'w, 's> =
+    Query<'w, 's, Entity, (Without<Unmanaged>, Or<(With<Pinned>, With<PinOptOut>)>)>;
+type UnmanagedPinState<'w, 's> =
+    Query<'w, 's, (Entity, Ref<'static, Unmanaged>, Has<Pinned>, Has<PinOptOut>)>;
+
+/// A pinned window that is tiled again (e.g. `manage`) loses its pin: pinning
+/// only makes sense for windows the layout does not place.
+fn unpin_retiled_windows(retiled: RetiledPins, mut commands: Commands) {
+    for entity in &retiled {
+        if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            entity_commands.try_remove::<(Pinned, AutoPinned, PinOptOut)>();
+        }
+    }
+}
+
+/// `pin_floating`: pins windows as they become floating, pins every floating
+/// window when the option is turned on, and drops the auto pins when it is
+/// turned off. Manual pins (`window_pin`) are left alone either way.
+fn auto_pin_floating(
+    config: Option<Res<Config>>,
+    floating: UnmanagedPinState,
+    auto_pinned: Query<Entity, With<AutoPinned>>,
+    mut commands: Commands,
+) {
+    let Some(config) = config else {
+        return;
+    };
+    if !config.pin_floating() {
+        if config.is_changed() {
+            for entity in &auto_pinned {
+                if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                    entity_commands.try_remove::<(Pinned, AutoPinned)>();
+                }
+            }
+        }
+        return;
+    }
+    for (entity, unmanaged, pinned, opted_out) in &floating {
+        if pinned
+            || opted_out
+            || !matches!(*unmanaged, Unmanaged::Floating)
+            || !(config.is_changed() || unmanaged.is_changed())
+        {
+            continue;
+        }
+        if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            debug!(?entity, "pin_floating: pinning floating window");
+            entity_commands.try_insert((Pinned, AutoPinned));
+        }
     }
 }
 
@@ -111,7 +190,8 @@ fn pin_mirror_event_handler(
                     && let Ok(mut entity_commands) = commands.get_entity(entity)
                 {
                     warn!(window_id, "pin mirror stopped; unpinning");
-                    entity_commands.try_remove::<Pinned>();
+                    entity_commands.try_remove::<(Pinned, AutoPinned)>();
+                    entity_commands.try_insert(PinOptOut);
                 }
             }
             _ => {}
@@ -193,7 +273,8 @@ fn sync_pin_mirrors(
             .find(|(window, _, _, _)| window.id() == window_id)
             && let Ok(mut entity_commands) = commands.get_entity(entity)
         {
-            entity_commands.try_remove::<Pinned>();
+            entity_commands.try_remove::<(Pinned, AutoPinned)>();
+            entity_commands.try_insert(PinOptOut);
         }
     }
 }

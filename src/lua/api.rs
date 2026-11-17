@@ -650,6 +650,7 @@ fn config_to_lua_table(lua: &Lua, config: &Config) -> mlua::Result<Table> {
         preset_stack_heights: _,
         animation_speed,
         auto_center: _,
+        pin_floating: _,
         sliver_height: _,
         sliver_width: _,
         padding_top: _,
@@ -696,6 +697,7 @@ fn config_to_lua_table(lua: &Lua, config: &Config) -> mlua::Result<Table> {
     options.set("preset_stack_heights", config.preset_stack_heights())?;
     options.set("animation_speed", *animation_speed)?;
     options.set("auto_center", config.auto_center())?;
+    options.set("pin_floating", config.pin_floating())?;
     options.set("sliver_height", config.sliver_height())?;
     options.set("sliver_width", config.sliver_width())?;
     options.set(

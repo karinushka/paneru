@@ -984,6 +984,11 @@ impl Config {
         self.options().auto_center.is_some_and(|center| center)
     }
 
+    /// Experimental: pin every floating window above all others by default.
+    pub fn pin_floating(&self) -> bool {
+        self.options().pin_floating.is_some_and(|pin| pin)
+    }
+
     pub fn horizontal_mouse_warp(&self) -> Option<i16> {
         self.options().horizontal_mouse_warp
     }
@@ -1442,6 +1447,9 @@ pub struct MainOptions {
     pub animation_speed: Option<f64>,
     /// Automatically center the window when switching focus with keyboard.
     pub auto_center: Option<bool>,
+    /// (Experimental) Pin every floating window above all others by default.
+    /// Needs Screen Recording permission. Default: false.
+    pub pin_floating: Option<bool>,
     /// Height of off-screen window slivers as a ratio (0.0–1.0) of the display height.
     /// Lower values hide the window's corner radius at screen edges.
     /// Default: 1.0 (full height).

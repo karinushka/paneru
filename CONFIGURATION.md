@@ -34,6 +34,7 @@ General behavior settings for the window manager.
 | `preset_stack_heights` | Array (Float) | `[0.25, 0.33, 0.5, 0.66, 0.75]` | Ratios of the viewport height used by the `window_vertical_resize` command. Only applies to windows inside a stack; every window in the column is kept at least 200px tall, so a ratio that would starve a neighbour is clamped. |
 | `animation_speed` | Float | *None* | Speed of window animations. Comfortable range is from 8 to 20. Unset or set to a very high value to effectively disable animations. |
 | `auto_center` | Boolean | `false` | Automatically center the focused window on the screen when switching focus. |
+| `pin_floating` | Boolean | `false` | (Experimental) Pin every floating window above all others, as if `window_pin` were run on it. Needs Screen Recording permission. `window_pin` still unpins one. |
 | `sliver_height` | Float (0.1–1.0) | `1.0` | Vertical ratio of off-screen windows kept visible to prevent macOS from relocating them. |
 | `sliver_width` | Integer (px) | `5` | Horizontal width of off-screen windows kept visible. |
 | `menubar_height` | Integer (px) | *Auto* | Manually override the detected macOS menubar height. |

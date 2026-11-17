@@ -103,3 +103,104 @@ fn test_pin_mirror_click_focuses_window() {
         })
         .run(commands);
 }
+
+fn manage_command() -> Event {
+    Event::Command {
+        command: Command::Window(Operation::Manage),
+    }
+}
+
+fn pin_floating_config(enabled: bool) -> crate::config::Config {
+    (
+        crate::config::MainOptions {
+            pin_floating: Some(enabled),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into()
+}
+
+/// With `pin_floating`, floating a window pins it, re-tiling unpins it, and a
+/// manual `window_pin` still unpins one (and it stays unpinned).
+#[test]
+fn test_pin_floating_option_pins_floated_windows() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 }, // 0: warm-up
+        manage_command(),                   // 1: float -> auto-pinned
+        pin_command(),                      // 2: manual unpin
+        manage_command(),                   // 3: re-tile
+        manage_command(),                   // 4: float again -> auto-pinned
+    ];
+
+    TestHarness::new()
+        .with_windows(2)
+        .with_config(pin_floating_config(true))
+        .on_iteration(0, |world, _state| {
+            let id = focused_id(world);
+            assert!(!is_pinned(world, id), "tiled windows are not auto-pinned");
+        })
+        .on_iteration(1, |world, _state| {
+            let id = focused_id(world);
+            assert!(is_floating(world, id));
+            assert!(
+                is_pinned(world, id),
+                "floating window should be auto-pinned"
+            );
+        })
+        .on_iteration(2, |world, _state| {
+            let id = focused_id(world);
+            assert!(!is_pinned(world, id), "manual pin toggle unpins");
+        })
+        .on_iteration(3, |world, _state| {
+            let id = focused_id(world);
+            assert!(!is_floating(world, id));
+            assert!(!is_pinned(world, id));
+        })
+        .on_iteration(4, |world, _state| {
+            let id = focused_id(world);
+            assert!(
+                is_pinned(world, id),
+                "re-floating re-pins after opt-out reset"
+            );
+        })
+        .run(commands);
+}
+
+/// Default off: floating a window does not pin it.
+#[test]
+fn test_pin_floating_option_defaults_off() {
+    let commands = vec![Event::MenuOpened { window_id: 0 }, manage_command()];
+
+    TestHarness::new()
+        .with_windows(2)
+        .on_iteration(1, |world, _state| {
+            let id = focused_id(world);
+            assert!(is_floating(world, id));
+            assert!(!is_pinned(world, id));
+        })
+        .run(commands);
+}
+
+/// `manage` on a manually pinned window re-tiles it and drops the pin.
+#[test]
+fn test_retiling_a_pinned_window_unpins_it() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 }, // 0
+        pin_command(),                      // 1: pin (floats it)
+        manage_command(),                   // 2: re-tile
+    ];
+
+    TestHarness::new()
+        .with_windows(2)
+        .on_iteration(1, |world, _state| {
+            let id = focused_id(world);
+            assert!(is_pinned(world, id));
+        })
+        .on_iteration(2, |world, _state| {
+            let id = focused_id(world);
+            assert!(!is_floating(world, id));
+            assert!(!is_pinned(world, id), "re-tiled window should be unpinned");
+        })
+        .run(commands);
+}

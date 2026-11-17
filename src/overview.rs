@@ -9,6 +9,8 @@
 //! Every rect here is display-local and Y-down (origin at the display's
 //! top-left corner), matching CG screen coordinates minus the display origin.
 
+mod capture;
+mod layers;
 mod live;
 pub mod view;
 

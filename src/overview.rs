@@ -380,6 +380,22 @@ pub fn layout_display<K: Clone>(
     }
 }
 
+impl<K: PartialEq> StripPlacement<K> {
+    /// Shift, in points, that brings tiled window `focus` fully inside
+    /// `work_area` from where the user panned the strip, the way paneru
+    /// scrolls a strip to expose a newly focused window. 0 when it is in
+    /// view already or not a tiled window of this strip.
+    fn exposing_points(&self, focus: &K, scale: f64, work_area: (f64, f64)) -> f64 {
+        let pan = self.pan / scale;
+        self.windows
+            .iter()
+            .find(|w| &w.key == focus)
+            .map_or(0.0, |w| {
+                exposing_shift(&w.layout.offset(pan, 0.0), work_area)
+            })
+    }
+}
+
 impl<K> DisplayLayout<K> {
     /// Row index whose band contains the display-local point.
     pub fn strip_at(&self, x: f64, y: f64) -> Option<usize> {
@@ -457,6 +473,17 @@ impl<K> DisplayLayout<K> {
             pinned_left
         };
         (lo.min(0.0) * self.scale, pinned_left.max(0.0) * self.scale)
+    }
+
+    /// How far, in points, closing into `row` scrolls it past its pan so
+    /// that `focus` is fully in view: see [`reanchor`].
+    pub fn exposing_points(&self, row: usize, focus: &K) -> f64
+    where
+        K: PartialEq,
+    {
+        self.strips.get(row).map_or(0.0, |strip| {
+            strip.exposing_points(focus, self.scale.max(f64::EPSILON), self.work_area)
+        })
     }
 
     /// A row's pan in display points: how far committing it moves the strip.
@@ -732,11 +759,7 @@ pub fn reanchor<K: Clone + PartialEq>(
         // What the user panned to is where the strip is left.
         let pan = strip.pan / scale;
         let shift = if strip.active {
-            focus
-                .and_then(|key| strip.windows.iter().find(|w| &w.key == key))
-                .map_or(0.0, |w| {
-                    exposing_shift(&w.layout.offset(pan, 0.0), work_area)
-                })
+            focus.map_or(0.0, |key| strip.exposing_points(key, scale, work_area))
         } else {
             0.0
         };

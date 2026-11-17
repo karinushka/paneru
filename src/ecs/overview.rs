@@ -882,7 +882,13 @@ fn write_back_display(
 ) -> (Option<Anchor>, bool) {
     let picked = pick.filter(|pick| pick.display == index);
     let (shown, target) = close_rows(&entry.layout, picked);
-    let panned = keep_pans(entry, index, strips, windows, commands);
+    // A picked window out of view: the strip goes straight to where it is
+    // exposed (where the cards land), rather than paneru scrolling it there
+    // with an animation once the focus arrives.
+    let expose = picked
+        .and_then(|pick| Some((target?, pick.focus?)))
+        .map(|(row, key)| (row, entry.layout.exposing_points(row, &key)));
+    let panned = keep_pans(entry, index, strips, windows, commands, expose);
     let Some(target) = target else {
         return (None, panned);
     };
@@ -1018,13 +1024,15 @@ fn restore_rests(displays: &[DisplayEntry], manager: &mut OverviewManager) {
 }
 
 /// Writes each panned row of a display back: the shown row's strip moves,
-/// a hidden row's remembered origin does. Returns whether any row was.
+/// a hidden row's remembered origin does. `expose` adds a further shift, in
+/// points, to one row. Returns whether any row was written.
 fn keep_pans(
     entry: &DisplayEntry,
     index: usize,
     strips: &StripQuery,
     windows: &Windows,
     commands: &mut Commands,
+    expose: Option<(usize, f64)>,
 ) -> bool {
     entry
         .layout
@@ -1032,8 +1040,11 @@ fn keep_pans(
         .iter()
         .enumerate()
         .filter_map(|(row, strip)| {
+            let extra = expose
+                .filter(|(at, _)| *at == row)
+                .map_or(0.0, |(_, dx)| dx);
             #[allow(clippy::cast_possible_truncation, reason = "on-screen points")]
-            let dx = entry.layout.pan_points(row).round() as i32;
+            let dx = (entry.layout.pan_points(row) + extra).round() as i32;
             (dx != 0)
                 .then(|| Some((strip, *entry.strips.get(row)?, *entry.origins.get(row)?, dx)))
                 .flatten()
@@ -1725,6 +1736,11 @@ fn open_displays(manager: &mut OverviewManager, scene: &Scene) -> Option<Vec<Dis
     manager.set_live_limits(
         scene.config.overview_live_previews(),
         scene.config.overview_live_margin(),
+    );
+    manager.set_ring_style(
+        scene.config.overview_ring_color(),
+        scene.config.overview_ring_width(),
+        scene.config.overview_ring_gap(),
     );
     // Checked on every open: permission can be granted (or revoked) while
     // paneru runs. Without it, cards show the app icon and title instead.

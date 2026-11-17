@@ -864,10 +864,16 @@ fn config_to_lua_table(lua: &Lua, config: &Config) -> mlua::Result<Table> {
     let OverviewOptions {
         live_previews: _,
         live_margin: _,
+        ring_color: _,
+        ring_width: _,
+        ring_gap: _,
     } = OverviewOptions::default();
     let overview = lua.create_table()?;
     overview.set("live_previews", config.overview_live_previews())?;
     overview.set("live_margin", config.overview_live_margin())?;
+    overview.set("ring_color", "#73a6ff")?;
+    overview.set("ring_width", config.overview_ring_width())?;
+    overview.set("ring_gap", config.overview_ring_gap())?;
     root.set("overview", overview)?;
 
     let windows = lua.create_table()?;

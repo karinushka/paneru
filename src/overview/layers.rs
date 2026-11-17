@@ -17,9 +17,8 @@ use objc2_quartz_core::{
 use super::view::CardMatch;
 use super::{Rect, Spring};
 
-/// Corner radius and focus ring width of a card when fully open, in points.
+/// Corner radius of a card when fully open, in points.
 pub(super) const CARD_RADIUS: f64 = 10.0;
-const RING_WIDTH: f64 = 2.5;
 
 /// Without previews: a card's app icon size and title font size when fully
 /// open, in points.
@@ -239,7 +238,9 @@ impl SearchLabel {
     const APP_FONT: f64 = 14.0;
     const TITLE_FONT: f64 = 12.5;
 
-    pub(super) fn new(card: &Animated, scale: f64) -> Self {
+    /// A label strip along the bottom of `card`, added to `parent` (a
+    /// layer covering the card).
+    pub(super) fn new(card: &Animated, parent: &CALayer, scale: f64) -> Self {
         let unit = card.open_points(1.0);
         let (w, h) = card.base;
         let bar_h = (unit * 48.0).min(h);
@@ -265,7 +266,7 @@ impl SearchLabel {
         };
         let app = line(unit * 5.0, Self::APP_FONT);
         let title = line(unit * 25.0, Self::TITLE_FONT);
-        card.layer.addSublayer(&bar);
+        parent.addSublayer(&bar);
         Self {
             bar,
             app,
@@ -467,6 +468,13 @@ pub(super) struct Animated {
     /// Corner radius in bounds space when fully open; grows in like `ring`
     /// so the full-size frame at progress 0 has square corners.
     pub(super) corner: f64,
+    /// Rounded and clipped with `layer` (a card's content, which does the
+    /// clipping so the outline can sit outside the card).
+    clip: Option<Retained<CALayer>>,
+    /// Draws the ring outside the layer, `gap` (bounds space, when fully
+    /// open) away from its edge, instead of as `layer`'s own inward border.
+    outline: Option<Retained<CALayer>>,
+    gap: f64,
     /// Monotonic counter giving each additive morph animation a unique key on
     /// `layer` so rapid consecutive morphs compose rather than overwrite.
     morph_seq: u64,
@@ -496,23 +504,78 @@ impl Animated {
             base,
             ring: 0.0,
             corner: 0.0,
+            clip: None,
+            outline: None,
+            gap: 0.0,
             morph_seq: 0,
         }
     }
 
-    pub(super) fn set_ring(&mut self, on: bool) {
-        self.ring = if on {
-            self.open_points(RING_WIDTH)
-        } else {
-            0.0
-        };
+    /// Clips to `clip` instead of the layer's own bounds and draws the ring
+    /// on an outline around the layer, `gap` points out when fully open, so
+    /// it doesn't cover the edge of what the layer shows.
+    pub(super) fn ring_outside(&mut self, clip: Retained<CALayer>, color: &CGColor, gap: f64) {
+        self.layer.setMasksToBounds(false);
+        clip.setMasksToBounds(true);
+        let outline = CALayer::new();
+        outline.setPosition(CGPoint::new(self.base.0 / 2.0, self.base.1 / 2.0));
+        outline.setBorderColor(Some(color));
+        self.layer.addSublayer(&outline);
+        self.gap = self.open_points(gap);
+        self.clip = Some(clip);
+        self.outline = Some(outline);
     }
 
-    /// Turns the ring on or off at its full open width, at once (the
-    /// search moves it between cards while the overview is open).
-    pub(super) fn show_ring(&mut self, on: bool) {
-        self.set_ring(on);
-        self.layer.setBorderWidth(self.ring);
+    /// Layer properties that grow in with progress: the layer, the key
+    /// path, its value at progress 0 and how much it grows by progress 1
+    /// (the outline's size starts from the layer's).
+    fn decorations(&self) -> Vec<(&CALayer, &'static NSString, f64, f64)> {
+        let corner = ns_string!("cornerRadius");
+        let border = ns_string!("borderWidth");
+        let mut values = vec![(&*self.layer, corner, 0.0, self.corner)];
+        if let Some(clip) = &self.clip {
+            values.push((clip, corner, 0.0, self.corner));
+        }
+        match &self.outline {
+            Some(outline) => {
+                let out = if self.ring > 0.0 {
+                    self.gap + self.ring
+                } else {
+                    0.0
+                };
+                values.extend([
+                    (&**outline, border, 0.0, self.ring),
+                    (outline, corner, 0.0, self.corner + out),
+                    (
+                        outline,
+                        ns_string!("bounds.size.width"),
+                        self.base.0,
+                        2.0 * out,
+                    ),
+                    (
+                        outline,
+                        ns_string!("bounds.size.height"),
+                        self.base.1,
+                        2.0 * out,
+                    ),
+                ]);
+            }
+            None => values.push((&*self.layer, border, 0.0, self.ring)),
+        }
+        values
+    }
+
+    /// Sets the decorations for progress `p`, without animating.
+    pub(super) fn decorate(&self, p: f64) {
+        let p = p.clamp(0.0, 1.0);
+        for (layer, key, start, grow) in self.decorations() {
+            set_key_path(layer, key, start + grow * p);
+        }
+    }
+
+    /// Shows the ring `width` points wide when fully open, or hides it.
+    pub(super) fn set_ring(&mut self, on: bool, width: f64) {
+        self.ring = if on { self.open_points(width) } else { 0.0 };
     }
 
     /// Bounds-space length that renders as `points` when fully open.
@@ -546,9 +609,7 @@ impl Animated {
 
     pub(super) fn set(&self, p: f64) {
         self.apply(&self.frame(p), self.opacity_at(p));
-        let p = p.clamp(0.0, 1.0);
-        self.layer.setBorderWidth(self.ring * p);
-        self.layer.setCornerRadius(self.corner * p);
+        self.decorate(p);
     }
 
     fn spring_between(
@@ -606,15 +667,18 @@ impl Animated {
         let (a, b) = (self.frame(spring.from), self.frame(spring.to));
         let opacity = (self.opacity_at(spring.from), self.opacity_at(spring.to));
         self.spring_between(&a, &b, opacity, spring, duration);
-        for (key, full) in [
-            (ns_string!("borderWidth"), self.ring),
-            (ns_string!("cornerRadius"), self.corner),
-        ] {
+        if let Some(outline) = &self.outline {
+            outline.removeAllAnimations();
+        }
+        if let Some(clip) = &self.clip {
+            clip.removeAllAnimations();
+        }
+        for (layer, key, start, full) in self.decorations() {
             if full <= 0.0 {
                 continue;
             }
-            let at = |p: f64| full * p.clamp(0.0, 1.0);
-            set_key_path(&self.layer, key, at(spring.to));
+            let at = |p: f64| start + full * p.clamp(0.0, 1.0);
+            set_key_path(layer, key, at(spring.to));
             let grow = spring_anim(
                 key,
                 &ns_number(at(spring.from)),
@@ -622,7 +686,7 @@ impl Animated {
                 spring,
                 duration,
             );
-            self.layer.addAnimation_forKey(&grow, Some(key));
+            layer.addAnimation_forKey(&grow, Some(key));
         }
     }
 
@@ -681,8 +745,7 @@ impl Animated {
                 }
             }
         }
-        self.layer.setBorderWidth(self.ring);
-        self.layer.setCornerRadius(self.corner);
+        self.decorate(1.0);
     }
 }
 

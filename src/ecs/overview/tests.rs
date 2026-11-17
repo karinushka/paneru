@@ -1108,3 +1108,86 @@ fn overview_focus_falls_back_from_lone_floating_window_to_active_strip() {
         })
         .run(commands);
 }
+
+#[test]
+fn a_picked_window_out_of_view_snaps_into_view() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use bevy::ecs::lifecycle::Add;
+    use bevy::ecs::observer::On;
+
+    let harness = TestHarness::new();
+    let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+    // Five 400pt columns on a 1024pt display: the last is out of view.
+    for i in 0..5 {
+        let origin = Origin::new(i * TEST_WINDOW_WIDTH, TEST_MENUBAR_HEIGHT);
+        harness.mock_state.spawn_window(
+            TEST_PROCESS_ID,
+            TEST_WORKSPACE_ID,
+            100 + i,
+            IRect::from_corners(origin, origin + size),
+        );
+    }
+    let x_of = |world: &mut World, id: i32| window_origin(world, id).expect("the window").x;
+    // Any window or strip starting an animation after the pick.
+    let animated = Arc::new(AtomicBool::new(false));
+    let spy = animated.clone();
+    let commands = vec![tick(); 2];
+    harness
+        .on_iteration(0, move |world, _| {
+            let x = x_of(world, 104);
+            assert!(
+                x + TEST_WINDOW_WIDTH > TEST_DISPLAY_WIDTH,
+                "out of view: {x}"
+            );
+            let spy = spy.clone();
+            world.add_observer(move |_: On<Add<RepositionMarker>>| {
+                spy.store(true, Ordering::Relaxed);
+            });
+            world
+                .run_system_once(|scene: Scene, windows: Windows, mut commands: Commands| {
+                    let entries = gather(&scene, None);
+                    let entry = &entries[0];
+                    let row = entry
+                        .layout
+                        .strips
+                        .iter()
+                        .position(|strip| strip.active)
+                        .expect("a shown row");
+                    let key = entry.layout.strips[row]
+                        .windows
+                        .iter()
+                        .find(|w| w.window_id == 104)
+                        .map(|w| w.key)
+                        .expect("window 104 has a card");
+                    let pick = Pick {
+                        display: 0,
+                        virtual_index: Some(entry.layout.strips[row].virtual_index),
+                        focus: Some(key),
+                    };
+                    // As `select_hit` does it.
+                    write_back(
+                        &entries,
+                        &scene.strips,
+                        &windows,
+                        &mut commands,
+                        Some(&pick),
+                    );
+                    commands.focus_entity(key, true);
+                })
+                .expect("commit runs");
+        })
+        .on_iteration(1, move |world, _| {
+            let x = x_of(world, 104);
+            assert!(
+                (0..=TEST_DISPLAY_WIDTH - TEST_WINDOW_WIDTH).contains(&x),
+                "in view: {x}"
+            );
+            assert!(
+                !animated.load(Ordering::Relaxed),
+                "got there at once, not by an animation"
+            );
+        })
+        .run(commands);
+}

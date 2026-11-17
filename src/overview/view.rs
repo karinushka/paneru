@@ -317,6 +317,11 @@ pub struct OverviewManager {
     /// fraction of a display height of it; streams start and stop as cards
     /// scroll in and out. Config `overview.live_margin`.
     live_margin: f64,
+    /// The focus/selection ring: colour and width when fully open.
+    ring_color: (f64, f64, f64),
+    ring_width: f64,
+    /// Space between a card and its ring, in points when fully open.
+    ring_gap: f64,
     /// When to bring the live streams in line with what's visible, once a
     /// scroll has rested; see [`LIVE_SETTLE`].
     live_due: Option<Instant>,
@@ -473,6 +478,9 @@ impl OverviewManager {
             visible: Vec::new(),
             max_live: 4,
             live_margin: 0.0,
+            ring_color: (0.45, 0.65, 1.0),
+            ring_width: 2.5,
+            ring_gap: 2.0,
             live_due: None,
             live_synced: false,
             previews: true,
@@ -541,7 +549,8 @@ impl OverviewManager {
                     .selected
                     .map_or(card.focused, |id| id == card.window_id);
                 card.content.setOpacity(if dim { 0.25 } else { 1.0 });
-                card.animated.show_ring(ring);
+                card.animated.set_ring(ring, self.ring_width);
+                card.animated.decorate(1.0);
                 let label = self
                     .search
                     .as_ref()
@@ -549,7 +558,7 @@ impl OverviewManager {
                 match (label, &card.search_label) {
                     (Some(label), Some(layers)) => layers.show(label),
                     (Some(label), None) => {
-                        let layers = SearchLabel::new(&card.animated, panel.scale);
+                        let layers = SearchLabel::new(&card.animated, &card.content, panel.scale);
                         layers.show(label);
                         card.search_label = Some(layers);
                     }
@@ -974,11 +983,8 @@ impl OverviewManager {
             |window: &super::WindowPlacement<K>, floating: bool, best: bool, rank: Rank| -> Card {
                 let mut card =
                     Animated::new(CALayer::new(), window.rest, window.overview, (1.0, 1.0));
-                card.layer.setMasksToBounds(true);
                 card.corner = card.open_points(CARD_RADIUS);
-                card.layer
-                    .setBorderColor(Some(&color(0.45, 0.65, 1.0, 1.0)));
-                card.set_ring(window.focused);
+                card.set_ring(window.focused, self.ring_width);
                 let content = CALayer::new();
                 content.setFrame(CGRect::new(
                     CGPoint::new(0.0, 0.0),
@@ -1007,6 +1013,8 @@ impl OverviewManager {
                     content.setBackgroundColor(Some(&color(0.3, 0.32, 0.36, 1.0)));
                 }
                 card.layer.addSublayer(&content);
+                let (r, g, b) = self.ring_color;
+                card.ring_outside(content.clone(), &color(r, g, b, 1.0), self.ring_gap);
                 Card {
                     animated: card,
                     focused: window.focused,
@@ -1054,7 +1062,7 @@ impl OverviewManager {
                 .setBorderColor(Some(&color(0.45, 0.65, 1.0, 0.9)));
             // The focused card carries the ring; outlining the row's "screen"
             // as well read as a second, misplaced focus border.
-            viewport.set_ring(false);
+            viewport.set_ring(false, 0.0);
             container.layer.addSublayer(&viewport.layer);
             viewport.set(0.0);
 
@@ -1166,6 +1174,13 @@ impl OverviewManager {
     }
 
     /// Live preview limits, see the fields.
+    /// The ring around the focused or selected card, for the next build.
+    pub fn set_ring_style(&mut self, color: (f64, f64, f64), width: f64, gap: f64) {
+        self.ring_color = color;
+        self.ring_width = width;
+        self.ring_gap = gap;
+    }
+
     pub fn set_live_limits(&mut self, max: usize, margin: f64) {
         self.max_live = max;
         self.live_margin = margin;
@@ -1266,7 +1281,7 @@ impl OverviewManager {
             let (rest, open) = container_frames(layout);
             panel.container.morph(rest, open, spring, duration);
             for (row, strip) in panel.rows.iter_mut().zip(&layout.strips) {
-                row.viewport.set_ring(false);
+                row.viewport.set_ring(false, 0.0);
                 row.viewport.morph(
                     strip.viewport_rest,
                     strip.viewport_overview,
@@ -1280,7 +1295,7 @@ impl OverviewManager {
             for (card, (window, _, best, rank)) in panel.cards.iter_mut().zip(cards_of(layout)) {
                 card.best = best;
                 card.rank = rank;
-                card.animated.set_ring(window.focused);
+                card.animated.set_ring(window.focused, self.ring_width);
                 card.animated
                     .morph(window.rest, window.overview, spring, duration);
             }

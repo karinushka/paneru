@@ -7,13 +7,14 @@ use objc2::{class, msg_send};
 use objc2_app_kit::NSFont;
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGColor, CGImage};
-use objc2_foundation::{NSString, ns_string};
+use objc2_foundation::{NSRange, NSString, ns_string};
 use objc2_quartz_core::{
     CABasicAnimation, CACurrentMediaTime, CALayer, CAMediaTiming as _, CASpringAnimation,
-    CATextLayer, kCAAlignmentCenter, kCAAlignmentLeft, kCAFillModeForwards, kCAGravityResizeAspect,
-    kCATruncationEnd,
+    CATextLayer, kCAAlignmentCenter, kCAAlignmentLeft, kCAAlignmentRight, kCAFillModeForwards,
+    kCAGravityResizeAspect, kCATruncationEnd,
 };
 
+use super::view::CardMatch;
 use super::{Rect, Spring};
 
 /// Corner radius and focus ring width of a card when fully open, in points.
@@ -74,6 +75,189 @@ pub(super) fn row_label(virtual_index: u32, rect: &Rect, scale: f64) -> Animated
     let h = (LABEL_FONT_SIZE * 1.3).min(rect.h);
     let rect = Rect::new(rect.x + 4.0, rect.y + rect.h - h - 2.0, rect.w - 8.0, h);
     Animated::new(Retained::into_super(text), rect, rect, (0.0, 1.0))
+}
+
+/// Size of the search field's text, in points.
+const SEARCH_FONT_SIZE: f64 = 20.0;
+const SEARCH_COUNT_FONT_SIZE: f64 = 13.0;
+
+/// The search field's layers.
+pub(super) struct SearchBar {
+    pub(super) bar: Retained<CALayer>,
+    pub(super) text: Retained<CATextLayer>,
+    /// "3 matches", on the right.
+    pub(super) count: Retained<CATextLayer>,
+}
+
+/// The search field: a rounded bar centred near the top of a panel `width`
+/// points wide, `top` points down (below a notch), above the rows (it
+/// doesn't scroll with them).
+pub(super) fn search_bar(width: f64, top: f64, scale: f64) -> SearchBar {
+    let (w, h) = (560.0_f64.min(width - 32.0), 46.0);
+    let bar = CALayer::new();
+    bar.setFrame(CGRect::new(
+        CGPoint::new((width - w) / 2.0, top + 12.0),
+        CGSize::new(w, h),
+    ));
+    bar.setBackgroundColor(Some(&color(0.09, 0.10, 0.12, 0.94)));
+    bar.setBorderColor(Some(&match_color()));
+    bar.setBorderWidth(1.5);
+    bar.setCornerRadius(h / 2.0);
+    bar.setShadowColor(Some(&color(0.0, 0.0, 0.0, 1.0)));
+    bar.setShadowOpacity(0.5);
+    bar.setShadowRadius(12.0);
+    bar.setShadowOffset(CGSize::new(0.0, 4.0));
+    bar.setHidden(true);
+
+    let count_w = 110.0;
+    let text = text_layer(
+        "",
+        &NSFont::boldSystemFontOfSize(SEARCH_FONT_SIZE),
+        SEARCH_FONT_SIZE,
+        unsafe { kCAAlignmentLeft },
+        scale,
+    );
+    let text_h = SEARCH_FONT_SIZE * 1.3;
+    text.setFrame(CGRect::new(
+        CGPoint::new(22.0, (h - text_h) / 2.0),
+        CGSize::new(w - 44.0 - count_w, text_h),
+    ));
+    bar.addSublayer(&text);
+
+    let count = text_layer(
+        "",
+        &NSFont::systemFontOfSize(SEARCH_COUNT_FONT_SIZE),
+        SEARCH_COUNT_FONT_SIZE,
+        unsafe { kCAAlignmentRight },
+        scale,
+    );
+    count.setForegroundColor(Some(&color(1.0, 1.0, 1.0, 0.6)));
+    let count_h = SEARCH_COUNT_FONT_SIZE * 1.3;
+    count.setFrame(CGRect::new(
+        CGPoint::new(w - 22.0 - count_w, (h - count_h) / 2.0),
+        CGSize::new(count_w, count_h),
+    ));
+    bar.addSublayer(&count);
+    SearchBar { bar, text, count }
+}
+
+/// Colour of the characters a search matched.
+pub(super) fn match_color() -> CFRetained<CGColor> {
+    color(0.55, 0.75, 1.0, 1.0)
+}
+
+/// A strip along the bottom of a card naming its app and title, with the
+/// characters the search matched highlighted. Laid out in the card's bounds
+/// space (see [`add_tile`]).
+pub(super) struct SearchLabel {
+    pub(super) bar: Retained<CALayer>,
+    app: Retained<CATextLayer>,
+    title: Retained<CATextLayer>,
+    /// Bounds-space length of one point once open.
+    unit: f64,
+}
+
+impl SearchLabel {
+    const APP_FONT: f64 = 14.0;
+    const TITLE_FONT: f64 = 12.5;
+
+    pub(super) fn new(card: &Animated, scale: f64) -> Self {
+        let unit = card.open_points(1.0);
+        let (w, h) = card.base;
+        let bar_h = (unit * 48.0).min(h);
+        let bar = CALayer::new();
+        bar.setFrame(CGRect::new(
+            CGPoint::new(0.0, h - bar_h),
+            CGSize::new(w, bar_h),
+        ));
+        bar.setBackgroundColor(Some(&color(0.05, 0.06, 0.08, 0.88)));
+        let line = |y: f64, size: f64| {
+            let text = CATextLayer::new();
+            text.setTruncationMode(unsafe { kCATruncationEnd });
+            text.setAlignmentMode(unsafe { kCAAlignmentLeft });
+            // Rendered at its size on screen, not at the window's: the card
+            // scales it down, and big windows would make huge textures.
+            text.setContentsScale(scale / unit.max(f64::EPSILON));
+            text.setFrame(CGRect::new(
+                CGPoint::new(unit * 8.0, y),
+                CGSize::new((w - unit * 16.0).max(1.0), unit * size * 1.3),
+            ));
+            bar.addSublayer(&text);
+            text
+        };
+        let app = line(unit * 5.0, Self::APP_FONT);
+        let title = line(unit * 25.0, Self::TITLE_FONT);
+        card.layer.addSublayer(&bar);
+        Self {
+            bar,
+            app,
+            title,
+            unit,
+        }
+    }
+
+    pub(super) fn show(&self, label: &CardMatch) {
+        let text = |layer: &CATextLayer, string: &str, hits: &[usize], size: f64, bold: bool| {
+            let string = highlighted(string, hits, self.unit * size, bold);
+            unsafe { layer.setString(Some(&string)) };
+        };
+        text(&self.app, &label.app, &label.app_hits, Self::APP_FONT, true);
+        text(
+            &self.title,
+            &label.title,
+            &label.title_hits,
+            Self::TITLE_FONT,
+            false,
+        );
+        self.bar.setHidden(false);
+    }
+}
+
+/// `text` at `size` points, with the characters at `hits` (char indices)
+/// bold and in [`match_color`].
+fn highlighted(text: &str, hits: &[usize], size: f64, bold: bool) -> Retained<AnyObject> {
+    let string = NSString::from_str(text);
+    let attributed: Retained<AnyObject> = unsafe {
+        msg_send![
+            msg_send![class!(NSMutableAttributedString), alloc],
+            initWithString: &*string
+        ]
+    };
+    // CoreText's keys: what CATextLayer draws with.
+    let font_key = ns_string!("NSFont");
+    let color_key = ns_string!("CTForegroundColor");
+    let cf = |object: &objc2_core_foundation::CFType| -> *const AnyObject {
+        std::ptr::from_ref(object).cast()
+    };
+    let add = |key: &NSString, value: *const AnyObject, range: NSRange| {
+        let _: () =
+            unsafe { msg_send![&*attributed, addAttribute: key, value: value, range: range] };
+    };
+    let regular = if bold {
+        NSFont::boldSystemFontOfSize(size)
+    } else {
+        NSFont::systemFontOfSize(size)
+    };
+    let hit_font = NSFont::boldSystemFontOfSize(size);
+    let plain = color(1.0, 1.0, 1.0, if bold { 1.0 } else { 0.88 });
+    let accent = match_color();
+    let all = NSRange::new(0, string.length());
+    add(font_key, Retained::as_ptr(&regular).cast(), all);
+    add(color_key, cf(&plain), all);
+    // Char indices to UTF-16 ranges.
+    let mut offset = 0;
+    let mut hits = hits.iter().peekable();
+    for (i, c) in text.chars().enumerate() {
+        let len = c.len_utf16();
+        if hits.peek() == Some(&&i) {
+            hits.next();
+            let range = NSRange::new(offset, len);
+            add(font_key, Retained::as_ptr(&hit_font).cast(), range);
+            add(color_key, cf(&accent), range);
+        }
+        offset += len;
+    }
+    attributed
 }
 
 /// A card without a preview: a plain tile with the app icon and the window
@@ -244,6 +428,13 @@ impl Animated {
         } else {
             0.0
         };
+    }
+
+    /// Turns the ring on or off at its full open width, at once (the
+    /// search moves it between cards while the overview is open).
+    pub(super) fn show_ring(&mut self, on: bool) {
+        self.set_ring(on);
+        self.layer.setBorderWidth(self.ring);
     }
 
     /// Bounds-space length that renders as `points` when fully open.

@@ -99,11 +99,10 @@ fn cg_image(image: &NSImage) -> Option<CFRetained<CGImage>> {
     std::ptr::NonNull::new(raw).map(|ptr| unsafe { CFRetained::retain(ptr) })
 }
 
-/// The desktop picture file of display `display_id`, if it has one (a
-/// solid colour or a dynamic wallpaper may not).
-pub(super) fn desktop_picture(mtm: MainThreadMarker, display_id: u32) -> Option<String> {
+/// The `NSScreen` of display `display_id` (a `CGDirectDisplayID`).
+pub(super) fn ns_screen(mtm: MainThreadMarker, display_id: u32) -> Option<Retained<NSScreen>> {
     let key = ns_string!("NSScreenNumber");
-    let screen = NSScreen::screens(mtm).into_iter().find(|screen| {
+    NSScreen::screens(mtm).into_iter().find(|screen| {
         let description = screen.deviceDescription();
         let number: Option<Retained<AnyObject>> =
             unsafe { msg_send![&*description, objectForKey: key] };
@@ -111,7 +110,13 @@ pub(super) fn desktop_picture(mtm: MainThreadMarker, display_id: u32) -> Option<
             let id: u32 = unsafe { msg_send![&*n, unsignedIntValue] };
             id == display_id
         })
-    })?;
+    })
+}
+
+/// The desktop picture file of display `display_id`, if it has one (a
+/// solid colour or a dynamic wallpaper may not).
+pub(super) fn desktop_picture(mtm: MainThreadMarker, display_id: u32) -> Option<String> {
+    let screen = ns_screen(mtm, display_id)?;
     let workspace: Retained<AnyObject> = unsafe { msg_send![class!(NSWorkspace), sharedWorkspace] };
     let url: Option<Retained<AnyObject>> =
         unsafe { msg_send![&*workspace, desktopImageURLForScreen: &*screen] };

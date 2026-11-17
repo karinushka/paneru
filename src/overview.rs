@@ -12,6 +12,7 @@
 mod capture;
 mod layers;
 mod live;
+pub mod search;
 pub mod view;
 
 /// Display-local, Y-down rectangle in points.

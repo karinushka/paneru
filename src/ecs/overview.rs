@@ -37,16 +37,18 @@ use crate::ecs::{
     MissionControlActive, Position, PreUpdateSet, RepositionMarker, Scrolling,
     SelectedVirtualMarker, SpawnCommandsExt as _, Unmanaged,
 };
-use crate::events::{Event, OverviewEvent};
+use crate::events::{Event, KeyModifiers, OverviewEvent};
 use crate::manager::WindowManager;
-use crate::manager::{Display, Window};
+use crate::manager::{Application, Display, Window};
+use crate::overview::search;
 use crate::overview::view::{
-    CardLabel, DisplayScene, OverviewManager, WindowServerInfo, window_server_info,
+    CardLabel, CardMatch, DisplayScene, OverviewManager, SearchView, WindowServerInfo,
+    window_server_info,
 };
 use crate::overview::{
     DisplayLayout, FloatingInput, Hit, Metrics, OVERVIEW_ACCEPTS_KEYS, OVERVIEW_OPEN, Rect,
-    SPRING_RESPONSE, Spring, StripInput, WindowInput, hit_test, layout_display, middle_row,
-    reanchor, release_opens, rubber_band, same_geometry,
+    SPRING_RESPONSE, Spring, StripInput, WindowInput, exposing_shift, hit_test, layout_display,
+    middle_row, reanchor, release_opens, rubber_band, same_geometry,
 };
 use crate::screen_capture;
 
@@ -147,6 +149,52 @@ struct ActiveSession {
     /// The close has written what the overview showed back to the ECS: no
     /// reopening into the stale layout, the next open builds afresh.
     committed: bool,
+    /// The window search (`/`), while it is on.
+    search: Option<Search>,
+}
+
+/// The window search: typed with the overview open, it dims every window
+/// that doesn't match and rings the selected match, which Return focuses.
+#[derive(Default)]
+struct Search {
+    query: String,
+    /// Best first; ties keep the overview's order (display, row, column).
+    matches: Vec<Match>,
+    selected: usize,
+    /// Where the selection goes on the next refresh.
+    pick: SearchPick,
+    /// The match last scrolled into view: the overview only scrolls when
+    /// the selection moves to another window.
+    revealed: Option<Entity>,
+}
+
+/// Where a refresh puts the selection.
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum SearchPick {
+    /// The focused window (search just started, or the query is empty):
+    /// already in view, so nothing scrolls.
+    #[default]
+    Focused,
+    /// The best match (the query changed).
+    Best,
+    /// The same window as before, if it still matches (stepping through
+    /// matches, or the layout changed).
+    Keep,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Match {
+    display: usize,
+    key: Entity,
+    window_id: i32,
+    /// The window's row; `None` on the floating shelf.
+    virtual_index: Option<u32>,
+}
+
+impl Search {
+    fn current(&self) -> Option<Match> {
+        self.matches.get(self.selected).copied()
+    }
 }
 
 impl ActiveSession {
@@ -201,6 +249,7 @@ impl OverviewSession {
             displays,
             motion,
             committed: false,
+            search: None,
         });
         sync_tap_flags(*phase, Some(active));
         active
@@ -320,6 +369,9 @@ struct Scene<'w, 's> {
     displays: Query<'w, 's, (Entity, &'static Display, Option<&'static DockPosition>)>,
     strips: StripQuery<'w, 's>,
     windows: WindowQuery<'w, 's>,
+    /// A window's app (its parent entity), for the search.
+    owners: Query<'w, 's, &'static ChildOf, With<Window>>,
+    apps: Query<'w, 's, &'static Application>,
     config: Res<'w, Config>,
     window_manager: Res<'w, WindowManager>,
     mission_control: Option<Res<'w, MissionControlActive>>,
@@ -518,6 +570,66 @@ fn overview_handler(
             {
                 if let Some(active) = session.0.as_mut() {
                     scroll(active, &mut manager, *point, *dx, *dy);
+                }
+            }
+
+            Event::OverviewDismiss
+                if session
+                    .0
+                    .as_ref()
+                    .is_some_and(|active| active.search.is_some()) =>
+            {
+                if let Some(active) = session.0.as_mut() {
+                    active.search = None;
+                }
+                manager.set_search(None);
+            }
+
+            Event::OverviewAccept
+                if session
+                    .0
+                    .as_ref()
+                    .is_some_and(|active| active.search.is_some()) =>
+            {
+                let Some(active) = session.0.as_mut() else {
+                    continue;
+                };
+                let Some(pick) = active.search.as_ref().and_then(Search::current) else {
+                    continue;
+                };
+                if active.committed
+                    || !matches!(*phase, OverviewPhase::Open | OverviewPhase::Opening)
+                {
+                    continue;
+                }
+                let hit = match pick.virtual_index {
+                    Some(virtual_index) => Hit::Window {
+                        key: pick.key,
+                        virtual_index,
+                    },
+                    None => Hit::Floating { key: pick.key },
+                };
+                select_hit(
+                    &mut phase,
+                    active,
+                    &mut manager,
+                    Some((pick.display, hit)),
+                    &scene.strips,
+                    &windows,
+                    &mut commands,
+                );
+            }
+
+            Event::OverviewKey {
+                code,
+                text,
+                modifiers,
+            } if matches!(*phase, OverviewPhase::Open | OverviewPhase::Opening) => {
+                if let Some(active) = session.0.as_mut()
+                    && !active.committed
+                    && search_key(&mut active.search, *code, text, *modifiers)
+                {
+                    refresh_search(active, &mut manager, &scene, true);
                 }
             }
 
@@ -1053,6 +1165,19 @@ fn select(
             let (x, y) = (point.x - entry.cg_bounds.x, point.y - entry.cg_bounds.y);
             (index, hit_test(&entry.layout, x, y))
         });
+    select_hit(phase, active, manager, hit, strips, windows, commands);
+}
+
+/// Closes into `hit`: focuses the window, or shows the row.
+fn select_hit(
+    phase: &mut OverviewPhase,
+    active: &mut ActiveSession,
+    manager: &mut OverviewManager,
+    hit: Option<(usize, Hit<Entity>)>,
+    strips: &StripQuery,
+    windows: &Windows,
+    commands: &mut Commands,
+) {
     let pick = match &hit {
         Some((display, Hit::Window { key, virtual_index })) => Some(Pick {
             display: *display,
@@ -1188,6 +1313,248 @@ fn overview_follow_layout(
         build_scenes(&mut manager, &scene, &entries, &info, 1.0);
     }
     active.displays = entries;
+    // Windows may have come, gone or moved: match again.
+    refresh_search(active, &mut manager, &scene, false);
+}
+
+/// Applies one key to the search. Returns whether it changed anything.
+///
+/// Editing follows macOS text fields: Backspace deletes a character,
+/// Option- or Control-Backspace (and Control-W) the word before it,
+/// Command-Backspace everything.
+fn search_key(search: &mut Option<Search>, code: u16, text: &str, keys: KeyModifiers) -> bool {
+    const TAB: u16 = 48;
+    const BACKSPACE: u16 = 51;
+    const W: u16 = 13;
+    const LEFT: u16 = 123;
+    const RIGHT: u16 = 124;
+    const DOWN: u16 = 125;
+    const UP: u16 = 126;
+    let Some(search) = search.as_mut() else {
+        if !keys.command && !keys.control && text == "/" {
+            *search = Some(Search::default());
+            return true;
+        }
+        return false;
+    };
+    let step = |search: &mut Search, forward: bool| {
+        let n = search.matches.len();
+        if n > 0 {
+            search.selected = if forward {
+                (search.selected + 1) % n
+            } else {
+                (search.selected + n - 1) % n
+            };
+        }
+    };
+    match code {
+        TAB => step(search, !keys.shift),
+        RIGHT | DOWN => step(search, true),
+        LEFT | UP => step(search, false),
+        BACKSPACE if keys.command => {
+            search.query.clear();
+            search.pick = SearchPick::Best;
+        }
+        BACKSPACE if keys.option || keys.control => {
+            delete_word(&mut search.query);
+            search.pick = SearchPick::Best;
+        }
+        W if keys.control && !keys.command => {
+            delete_word(&mut search.query);
+            search.pick = SearchPick::Best;
+        }
+        BACKSPACE => {
+            search.query.pop();
+            search.pick = SearchPick::Best;
+        }
+        _ if keys.command || keys.control => return false,
+        _ => {
+            // Arrow and function keys come as private-use characters, Tab and
+            // the like as control characters: only real text goes in.
+            let typed = !text.is_empty()
+                && text
+                    .chars()
+                    .all(|c| !c.is_control() && !('\u{F700}'..='\u{F8FF}').contains(&c));
+            if !typed {
+                return false;
+            }
+            search.query.push_str(text);
+            search.pick = SearchPick::Best;
+        }
+    }
+    true
+}
+
+/// Deletes the word before the end of `query`, and the spaces after it:
+/// a run of letters and digits, or else a run of other symbols.
+fn delete_word(query: &mut String) {
+    let trimmed = query.trim_end().len();
+    query.truncate(trimmed);
+    let alphanumeric = query.chars().next_back().is_some_and(char::is_alphanumeric);
+    while let Some(c) = query.chars().next_back() {
+        if c.is_whitespace() || c.is_alphanumeric() != alphanumeric {
+            break;
+        }
+        query.pop();
+    }
+}
+
+/// Name of the app that owns `window`; empty when it has none.
+fn app_name(scene: &Scene, window: Entity) -> String {
+    scene
+        .owners
+        .get(window)
+        .ok()
+        .and_then(|owner| scene.apps.get(owner.parent()).ok())
+        .map(|app| app.name().to_owned())
+        .unwrap_or_default()
+}
+
+/// Matches the query against every window the overview shows, keeps the
+/// selection on the same window if it still matches, shows the result and,
+/// with `reveal`, scrolls the selected window into view.
+fn refresh_search(
+    active: &mut ActiveSession,
+    manager: &mut OverviewManager,
+    scene: &Scene,
+    reveal: bool,
+) {
+    let Some(search) = active.search.as_mut() else {
+        return;
+    };
+    let previous = search.current().map(|m| m.key);
+    let mut focused = None;
+    let mut scored = Vec::new();
+    for (display, entry) in active.displays.iter().enumerate() {
+        let rows = entry
+            .layout
+            .strips
+            .iter()
+            .map(|strip| (Some(strip.virtual_index), &strip.windows));
+        // The floating shelf belongs to no workspace.
+        let shelf = std::iter::once((None, &entry.layout.floating));
+        for (virtual_index, placements) in rows.chain(shelf) {
+            let workspace = virtual_index
+                .map(|index| {
+                    format!(
+                        "Workspace {}",
+                        crate::menubar::virtual_workspace_label(index)
+                    )
+                })
+                .unwrap_or_default();
+            for window in placements {
+                let Ok((_, win, _, _, _, is_focused, _)) = scene.windows.get(window.key) else {
+                    continue;
+                };
+                if is_focused {
+                    focused = Some(window.key);
+                }
+                let title = win.title().unwrap_or_default();
+                let app = app_name(scene, window.key);
+                let fields = [title.as_str(), app.as_str(), workspace.as_str()];
+                if let Some(found) = search::find(&search.query, &fields) {
+                    let at = Match {
+                        display,
+                        key: window.key,
+                        window_id: window.window_id,
+                        virtual_index,
+                    };
+                    let mut hits = found.hits.into_iter();
+                    let label = CardMatch {
+                        title_hits: hits.next().unwrap_or_default(),
+                        app_hits: hits.next().unwrap_or_default(),
+                        title,
+                        app,
+                    };
+                    scored.push((found.score, at, label));
+                }
+            }
+        }
+    }
+    // Stable: equal scores keep the overview's order.
+    scored.sort_by_key(|(score, ..)| std::cmp::Reverse(*score));
+    let mut labels = HashMap::new();
+    search.matches = scored
+        .into_iter()
+        .map(|(_, at, label)| {
+            labels.insert(at.window_id, label);
+            at
+        })
+        .collect();
+    let position =
+        |key: Option<Entity>| key.and_then(|key| search.matches.iter().position(|m| m.key == key));
+    let pick = if search.query.is_empty() && search.pick == SearchPick::Best {
+        SearchPick::Focused
+    } else {
+        search.pick
+    };
+    search.selected = match pick {
+        SearchPick::Focused => position(focused),
+        SearchPick::Best => None,
+        SearchPick::Keep => position(previous),
+    }
+    .unwrap_or(0)
+    .min(search.matches.len().saturating_sub(1));
+    let selected = search.current();
+    if pick == SearchPick::Focused {
+        // In view already: don't move the overview to it.
+        search.revealed = selected.map(|m| m.key);
+    }
+    search.pick = SearchPick::Keep;
+    let moved = selected.is_some_and(|m| search.revealed != Some(m.key));
+    if moved {
+        search.revealed = selected.map(|m| m.key);
+    }
+    manager.set_search(Some(SearchView {
+        query: search.query.clone(),
+        selected: selected.map(|m| m.window_id),
+        // Every card names its app and title as soon as the search starts,
+        // with the matched characters highlighted once something is typed.
+        labels,
+        matched: search.matches.iter().map(|m| m.window_id).collect(),
+    }));
+    if reveal
+        && moved
+        && let Some(selected) = selected
+    {
+        reveal_window(&mut active.displays, manager, selected);
+    }
+}
+
+/// Scrolls the overview (and pans the row) so `target`'s card is in view.
+///
+/// The floating shelf is pinned in view, so a window on it needs neither.
+fn reveal_window(displays: &mut [DisplayEntry], manager: &mut OverviewManager, target: Match) {
+    let Some(entry) = displays.get_mut(target.display) else {
+        return;
+    };
+    let layout = &mut entry.layout;
+    let Some((row, window)) = layout.strips.iter().enumerate().find_map(|(row, strip)| {
+        let window = strip.windows.iter().find(|w| w.key == target.key)?;
+        Some((row, window.clone()))
+    }) else {
+        return;
+    };
+    let strip = &layout.strips[row];
+    // The whole row, label included, between the margins.
+    let (top, bottom) = layout.margins;
+    let band_top = strip.label.y - layout.scroll;
+    let band_bottom = strip.ribbon.y + strip.ribbon.h - layout.scroll;
+    let dy = if band_top < top {
+        band_top - top
+    } else if band_bottom > layout.size.1 - bottom {
+        (band_bottom - (layout.size.1 - bottom)).min(band_top - top)
+    } else {
+        0.0
+    };
+    let shown = window.overview.offset(strip.pan, 0.0);
+    let ribbon = &strip.ribbon;
+    let dx = exposing_shift(&shown, (ribbon.x, ribbon.x + ribbon.w));
+    let scrolled = layout.scroll_by(dy);
+    let panned = layout.pan_by(row, dx);
+    if scrolled || panned {
+        manager.apply_offsets(target.display, layout);
+    }
 }
 
 /// Snapshots the ECS into per-display layouts and builds the panels at

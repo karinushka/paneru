@@ -104,6 +104,79 @@ fn assert_laptop_switched_to_second_row(world: &mut World) {
 }
 
 #[test]
+fn search_keys_type_edit_and_step_through_matches() {
+    const NONE: KeyModifiers = KeyModifiers {
+        shift: false,
+        command: false,
+        control: false,
+        option: false,
+    };
+    const SHIFT: KeyModifiers = KeyModifiers {
+        shift: true,
+        ..NONE
+    };
+    const CMD: KeyModifiers = KeyModifiers {
+        command: true,
+        ..NONE
+    };
+    const CTRL: KeyModifiers = KeyModifiers {
+        control: true,
+        ..NONE
+    };
+    const OPT: KeyModifiers = KeyModifiers {
+        option: true,
+        ..NONE
+    };
+    let mut state: Option<Search> = None;
+    // Only `/` starts a search; other keys do nothing until then.
+    assert!(!search_key(&mut state, 0, "a", NONE));
+    assert!(!search_key(&mut state, 44, "/", CMD));
+    assert!(search_key(&mut state, 44, "/", NONE));
+    // Once searching, `/` is text (URLs have it).
+    for text in ["g", "h", "/"] {
+        assert!(search_key(&mut state, 0, text, NONE));
+    }
+    assert_eq!(state.as_ref().unwrap().query, "gh/");
+    // Arrow keys arrive as private-use characters and aren't typed.
+    assert!(!search_key(&mut state, 99, "\u{F704}", NONE));
+    assert!(!search_key(&mut state, 0, "a", CMD), "Cmd-A isn't text");
+    assert!(search_key(&mut state, 51, "\u{7f}", NONE));
+    assert_eq!(state.as_ref().unwrap().query, "gh");
+
+    let window = |n: u32| Match {
+        display: 0,
+        key: Entity::from_raw_u32(n).unwrap(),
+        window_id: n.cast_signed(),
+        virtual_index: Some(0),
+    };
+    let search = state.as_mut().unwrap();
+    search.matches = vec![window(1), window(2), window(3)];
+    search_key(&mut state, 48, "\t", NONE);
+    search_key(&mut state, 124, "\u{F703}", NONE);
+    assert_eq!(state.as_ref().unwrap().selected, 2);
+    search_key(&mut state, 48, "\t", NONE);
+    assert_eq!(state.as_ref().unwrap().selected, 0, "wraps around");
+    search_key(&mut state, 48, "\t", SHIFT);
+    assert_eq!(state.as_ref().unwrap().selected, 2, "Shift-Tab goes back");
+
+    assert!(search_key(&mut state, 51, "\u{7f}", CMD));
+    assert_eq!(state.as_ref().unwrap().query, "", "Cmd-Backspace clears");
+
+    let query = |state: &Option<Search>| state.as_ref().unwrap().query.clone();
+    for text in ["brave", " ", "git", "-", "hub"] {
+        search_key(&mut state, 0, text, NONE);
+    }
+    assert!(search_key(&mut state, 51, "\u{7f}", CTRL));
+    assert_eq!(query(&state), "brave git-", "Control-Backspace: a word");
+    search_key(&mut state, 51, "\u{7f}", OPT);
+    assert_eq!(query(&state), "brave git", "Option-Backspace: the symbols");
+    assert!(search_key(&mut state, 13, "\u{17}", CTRL));
+    assert_eq!(query(&state), "brave ", "Control-W: a word");
+    search_key(&mut state, 13, "\u{17}", CTRL);
+    assert_eq!(query(&state), "", "and the space before the next one");
+}
+
+#[test]
 fn a_pan_on_a_display_without_focus_is_kept_after_closing() {
     let mut harness = TestHarness::new();
     harness.mock_state.add_display(

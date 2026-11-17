@@ -35,25 +35,26 @@ use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSEvent, NSPanel, NSScreen, NSScreenSaverWindowLevel, NSView,
-    NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSBackingStoreType, NSColor, NSEvent, NSEventModifierFlags, NSPanel, NSScreen,
+    NSScreenSaverWindowLevel, NSView, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGImage;
-use objc2_foundation::{NSPoint, NSRect, NSSize};
+use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use objc2_quartz_core::{CALayer, CATransaction, kCAGravityResize, kCAGravityResizeAspectFill};
 use tracing::{debug, warn};
 
 use super::capture::{
-    BACKDROP_BLUR, Landed, SendImage, Shot, app_icon, desktop_picture, spawn_shots,
+    BACKDROP_BLUR, Landed, SendImage, Shot, app_icon, desktop_picture, ns_screen, spawn_shots,
 };
 pub use super::capture::{WindowServerInfo, window_server_info};
 use super::layers::{
-    Animated, CARD_RADIUS, add_tile, color, fade_key, fade_out_at_end, row_label, set_contents,
+    Animated, CARD_RADIUS, SearchBar, SearchLabel, add_tile, color, fade_key, fade_out_at_end,
+    match_color, row_label, search_bar, set_contents,
 };
 use super::live::{Live, Wanted};
 use super::{DisplayLayout, Rect, Spring};
-use crate::events::{Event, EventSender};
+use crate::events::{Event, EventSender, KeyModifiers};
 use crate::platform::Pid;
 
 /// Where a capture's image goes once it lands.
@@ -71,6 +72,9 @@ struct Target {
     /// live stream is running.
     window_id: Option<i32>,
 }
+
+/// Virtual keycode of the keypad's Enter, accepted like Return.
+const KEYPAD_ENTER: u16 = 0x4C;
 
 /// How long the panels wait for gating captures before showing anyway.
 const REVEAL_TIMEOUT: Duration = Duration::from_millis(250);
@@ -109,8 +113,28 @@ define_class!(
 
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
-            if let Some(overview_event) = Event::from_overview_keycode(event.keyCode()) {
-                _ = self.ivars().sender.send(overview_event);
+            let sender = &self.ivars().sender;
+            let code = event.keyCode();
+            if let Some(overview_event) = Event::from_overview_keycode(code) {
+                _ = sender.send(overview_event);
+            } else if code == KEYPAD_ENTER {
+                _ = sender.send(Event::OverviewAccept);
+            } else {
+                let flags = event.modifierFlags();
+                let text = event
+                    .characters()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                _ = sender.send(Event::OverviewKey {
+                    code,
+                    text,
+                    modifiers: KeyModifiers {
+                        shift: flags.contains(NSEventModifierFlags::Shift),
+                        command: flags.contains(NSEventModifierFlags::Command),
+                        control: flags.contains(NSEventModifierFlags::Control),
+                        option: flags.contains(NSEventModifierFlags::Option),
+                    },
+                });
             }
         }
     }
@@ -153,6 +177,10 @@ define_class!(
 
 struct Card {
     animated: Animated,
+    /// Carries the focus ring when no search selection does.
+    focused: bool,
+    /// App name and title with the search's matches, made on first use.
+    search_label: Option<SearchLabel>,
     /// The window's snapshot.
     content: Retained<CALayer>,
     window_id: i32,
@@ -225,6 +253,8 @@ struct Panel {
     container: Animated,
     rows: Vec<RowLayers>,
     cards: Vec<Card>,
+    /// The search field (`/`), hidden unless searching.
+    search: SearchBar,
     /// The display's backing scale (pixels per point).
     scale: f64,
 }
@@ -301,6 +331,27 @@ pub struct OverviewManager {
     previews: bool,
     /// App icons by process id, for the tiles.
     icons: HashMap<Pid, Option<CFRetained<CGImage>>>,
+    /// The search being shown, re-applied to every build.
+    search: Option<SearchView>,
+}
+
+/// What the window search shows: the query in the search field, matching
+/// cards at full strength (the others dimmed) and the selected one ringed.
+pub struct SearchView {
+    pub query: String,
+    pub matched: HashSet<i32>,
+    pub selected: Option<i32>,
+    /// What each matching card spells out, by window id.
+    pub labels: HashMap<i32, CardMatch>,
+}
+
+/// A matching window's app name and title, and the characters of each the
+/// query matched (highlighted on its card).
+pub struct CardMatch {
+    pub app: String,
+    pub title: String,
+    pub app_hits: Vec<usize>,
+    pub title_hits: Vec<usize>,
 }
 
 /// How long scrolling has to rest before the live streams follow it: while
@@ -425,7 +476,78 @@ impl OverviewManager {
             live_synced: false,
             previews: true,
             icons: HashMap::new(),
+            search: None,
         }
+    }
+
+    /// Shows `view` (or ends the search with `None`).
+    pub fn set_search(&mut self, view: Option<SearchView>) {
+        self.search = view;
+        self.apply_search();
+    }
+
+    fn apply_search(&mut self) {
+        CATransaction::begin();
+        CATransaction::setAnimationDuration(0.12);
+        for panel in &mut self.panels {
+            match &self.search {
+                Some(view) => {
+                    let bar = &panel.search;
+                    let (text, alpha) = if view.query.is_empty() {
+                        ("Search windows by title or app".to_owned(), 0.55)
+                    } else {
+                        (view.query.clone(), 1.0)
+                    };
+                    let count = match (view.query.is_empty(), view.matched.len()) {
+                        (true, _) => String::new(),
+                        (false, 0) => "No matches".to_owned(),
+                        (false, 1) => "1 match".to_owned(),
+                        (false, n) => format!("{n} matches"),
+                    };
+                    unsafe {
+                        bar.text.setString(Some(&NSString::from_str(&text)));
+                        bar.count.setString(Some(&NSString::from_str(&count)));
+                    }
+                    bar.text
+                        .setForegroundColor(Some(&color(1.0, 1.0, 1.0, alpha)));
+                    // Red edge when nothing matches, blue otherwise.
+                    let edge = if !view.query.is_empty() && view.matched.is_empty() {
+                        color(1.0, 0.45, 0.45, 1.0)
+                    } else {
+                        match_color()
+                    };
+                    bar.bar.setBorderColor(Some(&edge));
+                    bar.bar.setHidden(false);
+                }
+                None => panel.search.bar.setHidden(true),
+            }
+            for card in &mut panel.cards {
+                let (dim, ring) = match &self.search {
+                    Some(view) => (
+                        !view.matched.contains(&card.window_id),
+                        view.selected == Some(card.window_id),
+                    ),
+                    None => (false, card.focused),
+                };
+                card.content.setOpacity(if dim { 0.25 } else { 1.0 });
+                card.animated.show_ring(ring);
+                let label = self
+                    .search
+                    .as_ref()
+                    .and_then(|view| view.labels.get(&card.window_id));
+                match (label, &card.search_label) {
+                    (Some(label), Some(layers)) => layers.show(label),
+                    (Some(label), None) => {
+                        let layers = SearchLabel::new(&card.animated, panel.scale);
+                        layers.show(label);
+                        card.search_label = Some(layers);
+                    }
+                    (None, Some(layers)) => layers.bar.setHidden(true),
+                    (None, None) => {}
+                }
+            }
+        }
+        CATransaction::commit();
     }
 
     /// Turns window capture on or off (see [`Self::previews`]); applies from
@@ -616,6 +738,9 @@ impl OverviewManager {
         self.live_due = None;
         self.live_synced = false;
         self.live.invalidate_lookup();
+        if self.search.is_some() {
+            self.apply_search();
+        }
         let built = started.elapsed();
         if progress > 0.0 {
             self.ensure_live_synced();
@@ -873,6 +998,8 @@ impl OverviewManager {
                 card.layer.addSublayer(&content);
                 Card {
                     animated: card,
+                    focused: window.focused,
+                    search_label: None,
                     content,
                     window_id: window.window_id,
                     floating,
@@ -951,9 +1078,15 @@ impl OverviewManager {
             cards.push(entry);
         }
 
+        // Below the camera housing on displays with a notch.
+        let notch = ns_screen(mtm, scene.display_id).map_or(0.0, |s| s.safeAreaInsets().top);
+        let search = search_bar(b.w, notch, scale);
+        flipped.addSublayer(&search.bar);
+
         Some(Panel {
             window,
             window_number,
+            search,
             root: flipped,
             backdrop,
             tint,
@@ -1188,6 +1321,7 @@ impl OverviewManager {
         self.outstanding = 0;
         self.gates = 0;
         self.reveal_since = None;
+        self.search = None;
         debug!(
             "overview: teardown took {:?} (hidden after {hidden:?})",
             started.elapsed()
@@ -1331,6 +1465,8 @@ mod tests {
                         window.overview,
                         (1.0, 1.0),
                     ),
+                    focused: window.focused,
+                    search_label: None,
                     content: CALayer::new(),
                     window_id: window.window_id,
                     floating,

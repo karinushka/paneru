@@ -1278,6 +1278,7 @@ struct InnerConfig {
 
 /// `[overview]`: the niri-style overview.
 #[derive(Deserialize, Debug, Default, Clone)]
+#[cfg_attr(test, derive(serde::Serialize))]
 pub struct OverviewOptions {
     /// How many windows show live (streamed) previews at once; the others
     /// show snapshots. 0 turns live previews off. Default: 4.

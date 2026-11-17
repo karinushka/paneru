@@ -88,6 +88,7 @@ pub fn install(lua: &Lua, paneru: &Table, dispatch: &Dispatch) -> Result<()> {
 
     paneru.set("showmenu", verb(lua, dispatch, Command::MenuBar(true))?)?;
     paneru.set("hidemenu", verb(lua, dispatch, Command::MenuBar(false))?)?;
+    paneru.set("overview", verb(lua, dispatch, Command::Overview)?)?;
 
     paneru.set("quit", verb(lua, dispatch, Command::Quit)?)?;
     paneru.set("restart", verb(lua, dispatch, Command::Restart)?)?;
@@ -481,6 +482,7 @@ mod tests {
             paneru.window.balance()
             paneru.showmenu()
             paneru.hidemenu()
+            paneru.overview()
             paneru.workspace.move_window({ number = 2, follow = false })
         "#)
         .unwrap();
@@ -493,6 +495,7 @@ mod tests {
                 Command::Window(Operation::Balance),
                 Command::MenuBar(true),
                 Command::MenuBar(false),
+                Command::Overview,
                 Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Stay)),
             ])
         );

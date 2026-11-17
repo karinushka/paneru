@@ -82,13 +82,6 @@ impl OverviewPhase {
     pub fn is_active(self) -> bool {
         self != Self::Closed
     }
-
-    /// Whether the overview handles `op` instead of its usual handler: the
-    /// focus commands (see [`overview_move`]) while it is up, so they move
-    /// its selection rather than the real focus behind it.
-    pub fn takes_command(self, op: &crate::commands::Operation) -> bool {
-        self.is_active() && overview_move(op).is_some()
-    }
 }
 
 struct DisplayEntry {
@@ -642,8 +635,9 @@ fn overview_handler(
             } if matches!(*phase, OverviewPhase::Open | OverviewPhase::Opening)
                 && overview_move(op).is_some() =>
             {
-                // The focus commands move the selection while open; their
-                // usual handlers leave them alone (see `takes_command`).
+                // The focus commands move the selection while open; the
+                // usual handlers drop every window command meanwhile (see
+                // `commands::WindowCommands`).
                 if let Some(active) = session.0.as_mut()
                     && !active.committed
                     && let Some(direction) = overview_move(op)

@@ -1043,7 +1043,7 @@ floating = true
 }
 
 #[test]
-fn overview_focus_falls_back_from_lone_floating_window_to_active_strip() {
+fn overview_focus_commands_leave_a_lone_floating_window_focused() {
     use crate::commands::Direction;
 
     let mut harness = TestHarness::new()
@@ -1063,7 +1063,7 @@ fn overview_focus_falls_back_from_lone_floating_window_to_active_strip() {
         Event::Command {
             command: Command::Window(Operation::Focus(Direction::East)),
         },
-        // Iteration 3: `focus last` still acts on the real layout.
+        // Iteration 3: so is every other window command, `focus last` included.
         Event::Command {
             command: Command::Window(Operation::Focus(Direction::Last)),
         },
@@ -1100,10 +1100,10 @@ fn overview_focus_falls_back_from_lone_floating_window_to_active_strip() {
             );
         })
         .on_iteration(3, |world, _| {
-            let focused = focused_ids(world);
-            assert!(
-                focused == [100] || focused == [101],
-                "focus last in overview must fall back from lone floater 200 to tiled strip, got {focused:?}"
+            assert_eq!(
+                focused_ids(world),
+                [200],
+                "window commands are dropped while the overview is open"
             );
         })
         .run(commands);
@@ -1188,6 +1188,65 @@ fn a_picked_window_out_of_view_snaps_into_view() {
                 !animated.load(Ordering::Relaxed),
                 "got there at once, not by an animation"
             );
+        })
+        .run(commands);
+}
+
+#[test]
+fn window_commands_do_nothing_while_the_overview_is_open() {
+    use std::sync::{Arc, Mutex};
+
+    use crate::commands::{Direction as Compass, ResizeDirection};
+
+    type Frames = Vec<(i32, bevy::math::IVec2, bevy::math::IVec2)>;
+    let frames = |world: &mut World| -> Frames {
+        let mut windows = world.query::<(&Window, &Position, &Bounds)>();
+        let mut frames: Frames = windows
+            .iter(world)
+            .map(|(window, position, bounds)| (window.id(), position.0, bounds.0))
+            .collect();
+        frames.sort_unstable_by_key(|frame| frame.0);
+        frames
+    };
+    let window = |op| Event::Command {
+        command: Command::Window(op),
+    };
+    let commands = vec![
+        tick(),
+        window(Operation::Center),
+        window(Operation::Resize(ResizeDirection::Grow)),
+        window(Operation::Swap(Compass::West)),
+        window(Operation::Focus(Compass::West)),
+        tick(),
+        window(Operation::Resize(ResizeDirection::Grow)),
+    ];
+    let before = Arc::new(Mutex::new(None));
+    let (record, check) = (before.clone(), before);
+    let closed = Arc::new(Mutex::new(Vec::new()));
+    let (record_closed, check_closed) = (closed.clone(), closed);
+    TestHarness::new()
+        .with_windows(3)
+        .on_iteration(0, move |world, _| {
+            *record.lock().unwrap() = Some((frames(world), focused_ids(world)));
+            // Open as far as the command handlers can tell (the harness
+            // has no overview panel to show).
+            world.insert_resource(OverviewPhase::Open);
+        })
+        .on_iteration(4, move |world, _| {
+            let before = check.lock().unwrap().clone().expect("recorded");
+            assert_eq!(
+                (frames(world), focused_ids(world)),
+                before,
+                "nothing behind the open overview moved"
+            );
+            world.insert_resource(OverviewPhase::Closed);
+        })
+        .on_iteration(5, move |world, _| {
+            *record_closed.lock().unwrap() = frames(world);
+        })
+        .on_iteration(6, move |world, _| {
+            let closed = check_closed.lock().unwrap().clone();
+            assert_ne!(frames(world), closed, "once closed, a resize works again");
         })
         .run(commands);
 }

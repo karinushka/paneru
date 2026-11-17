@@ -72,9 +72,9 @@ struct Touch<I> {
 }
 
 /// Whether a sample at `timestamp` is too soon after a finger landed to
-/// tell a 3-finger swipe from the overview's fingers still arriving.
+/// tell a strip swipe from a higher-finger overview gesture still arriving.
 fn within_landing_grace(landed: Option<f64>, timestamp: f64) -> bool {
-    landed.is_some_and(|landed| timestamp - landed < LANDING_GRACE_SECS)
+    landed.is_some_and(|landed| (0.0..LANDING_GRACE_SECS).contains(&(timestamp - landed)))
 }
 
 /// Whether any finger in `fingers` is one of `claimed`.
@@ -643,9 +643,14 @@ impl InputHandler {
     }
 
     /// Sends a strip/row swipe, or holds it back while a finger has only
-    /// just landed (see [`LANDING_GRACE_SECS`]).
-    fn send_swipe(&mut self, event: Event, timestamp: f64) {
-        if within_landing_grace(self.finger_landed_at, timestamp) {
+    /// just landed and an overview gesture with more fingers may still be
+    /// arriving (see [`LANDING_GRACE_SECS`]).
+    fn send_swipe(&mut self, event: Event, configured_fingers: usize, timestamp: f64) {
+        let may_escalate_to_overview = self
+            .config
+            .overview_gesture_fingers()
+            .is_some_and(|overview| overview > configured_fingers);
+        if may_escalate_to_overview && within_landing_grace(self.finger_landed_at, timestamp) {
             self.held_swipes.push(event);
             return;
         }
@@ -869,6 +874,7 @@ impl InputHandler {
                         distance_cm: distance_cm.unwrap_or(0.0),
                         elapsed_secs,
                     },
+                    configured_fingers,
                     timestamp,
                 );
             }
@@ -879,6 +885,7 @@ impl InputHandler {
                             delta,
                             fingers: configured_fingers,
                         },
+                        configured_fingers,
                         timestamp,
                     );
                 } else {
@@ -1528,5 +1535,78 @@ mod tests {
             handler.last_swipe_time.is_some(),
             "vertical = false must still arm scroll suppression for the configured gesture"
         );
+    }
+
+    #[test]
+    fn swipes_are_not_held_back_without_higher_finger_overview_gesture() {
+        for toml in [
+            "[swipe.gesture]\nfingers_count = 3\n",
+            "[swipe.gesture]\nfingers_count = 4\noverview_fingers = 3\n",
+        ] {
+            let (sender, receiver) = EventSender::new();
+            let config = Config::try_from(toml).unwrap();
+            let fingers = config.swipe_gesture_fingers().unwrap();
+            let mut handler = InputHandler::new(sender, config);
+            handler.finger_landed_at = Some(10.0);
+
+            handler.dispatch_swipe_movement(
+                Some(SwipeMovement::Horizontal {
+                    delta: 0.02,
+                    distance_cm: Some(0.5),
+                }),
+                fingers,
+                Some(0.008),
+                10.01,
+            );
+
+            assert!(
+                handler.held_swipes.is_empty(),
+                "swipe should not be buffered for config:\n{toml}"
+            );
+            assert!(
+                matches!(receiver.try_recv(), Ok(Event::Swipe { .. })),
+                "swipe must dispatch immediately without landing grace delay"
+            );
+        }
+    }
+
+    #[test]
+    fn swipes_wait_out_landing_grace_when_higher_finger_overview_is_configured() {
+        let (sender, receiver) = EventSender::new();
+        let config =
+            Config::try_from("[swipe.gesture]\nfingers_count = 3\noverview_fingers = 4\n").unwrap();
+        let mut handler = InputHandler::new(sender, config);
+        handler.finger_landed_at = Some(10.0);
+
+        handler.dispatch_swipe_movement(
+            Some(SwipeMovement::Horizontal {
+                delta: 0.01,
+                distance_cm: Some(0.25),
+            }),
+            3,
+            Some(0.008),
+            10.02,
+        );
+        assert_eq!(handler.held_swipes.len(), 1);
+        assert!(receiver.try_recv().is_err());
+
+        handler.dispatch_swipe_movement(
+            Some(SwipeMovement::Horizontal {
+                delta: 0.02,
+                distance_cm: Some(0.5),
+            }),
+            3,
+            Some(0.008),
+            10.0 + LANDING_GRACE_SECS,
+        );
+        assert!(handler.held_swipes.is_empty());
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(Event::Swipe { delta, .. }) if (delta - 0.01).abs() < 1e-12
+        ));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(Event::Swipe { delta, .. }) if (delta - 0.02).abs() < 1e-12
+        ));
     }
 }

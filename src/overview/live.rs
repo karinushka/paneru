@@ -215,15 +215,25 @@ impl Live {
         self.showing.borrow().contains(&window_id)
     }
 
+    /// Whether stopped streams are still inside [`STOP_GRACE`] waiting to drop.
+    pub fn has_stopping(&self) -> bool {
+        !self.stopping.is_empty()
+    }
+
+    fn prune_stopped(&mut self) {
+        let now = Instant::now();
+        self.stopping
+            .retain(|(since, _)| now.saturating_duration_since(*since) < STOP_GRACE);
+    }
+
     /// Streams exactly `wanted`: running streams move to their new layer,
     /// the rest stop, and new ones start once `ScreenCaptureKit` has
     /// listed the windows (asynchronously; see [`Live::poll`]).
     pub fn set(&mut self, wanted: Vec<Wanted>) {
         let keep: HashMap<i32, Option<Rect>> =
             wanted.iter().map(|w| (w.window_id, w.region)).collect();
+        self.prune_stopped();
         let now = Instant::now();
-        self.stopping
-            .retain(|(since, _)| now.duration_since(*since) < STOP_GRACE);
         for (id, stream) in std::mem::take(&mut self.streams) {
             if keep.get(&id) == Some(&stream.region) {
                 self.streams.insert(id, stream);
@@ -276,13 +286,10 @@ impl Live {
         }
     }
 
-    /// Whether a window listing is still in flight.
-    pub fn is_pending(&self) -> bool {
-        !self.pending.is_empty()
-    }
-
-    /// Starts the streams of a window listing that came back.
+    /// Prunes expired stopped streams and starts the streams of a window
+    /// listing that came back.
     pub fn poll(&mut self) {
+        self.prune_stopped();
         while let Ok((request, addr)) = self.rx.try_recv() {
             let content = release(addr);
             if request != self.request {

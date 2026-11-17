@@ -934,8 +934,6 @@ pub struct OverviewManager {
     /// When to bring the live streams in line with what's visible, once a
     /// scroll has rested; see [`LIVE_SETTLE`].
     live_due: Option<Instant>,
-    /// A wake-up for `live_due` is on its way.
-    live_wake: Arc<std::sync::atomic::AtomicBool>,
     /// Whether windows are captured at all (screen recording permission).
     /// Without it nothing is captured or streamed: cards are tiles with the
     /// app icon and title, the wallpaper comes from the desktop picture
@@ -1048,7 +1046,6 @@ impl OverviewManager {
             max_live: 4,
             live_margin: 0.0,
             live_due: None,
-            live_wake: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             previews: true,
             icons: HashMap::new(),
         }
@@ -1281,22 +1278,29 @@ impl OverviewManager {
         self.targets.len() - 1
     }
 
-    /// Whether captures are still in flight or the panels wait to show, so
-    /// the main loop has to keep ticking.
-    pub fn has_pending_captures(&self) -> bool {
-        self.outstanding > 0 || self.reveal_since.is_some() || self.live.is_pending()
+    /// Whether a sub-frame deadline (`REVEAL_TIMEOUT` or `LIVE_SETTLE`) needs
+    /// `pump_events` to poll on a short timeout. Background captures, live
+    /// content queries, and Core Animation springs all wake the event loop
+    /// directly via `EventSender`, so they do not need 60 Hz polling.
+    pub fn has_pending_deadline(&self) -> bool {
+        self.reveal_since.is_some() || self.live_due.is_some()
+    }
+
+    /// Whether `overview_tick` still has periodic maintenance to run
+    /// (deadlines, freeing torn-down panels, or dropping stopped `SCStream`s
+    /// after [`STOP_GRACE`](super::live)).
+    pub fn has_pending_tick(&self) -> bool {
+        !self.discarded.is_empty() || self.has_pending_deadline() || self.live.has_stopping()
     }
 
     /// Applies the captures that landed, and shows the panels once they are
     /// ready. Never blocks.
     pub fn poll_captures(&mut self) {
         self.free_discarded();
-        if let Some(due) = self.live_due {
-            if Instant::now() >= due {
-                self.sync_live();
-            } else {
-                self.wake_for_live();
-            }
+        if let Some(due) = self.live_due
+            && Instant::now() >= due
+        {
+            self.sync_live();
         }
         self.live.poll();
         let mut landed = false;
@@ -1725,7 +1729,6 @@ impl OverviewManager {
         {
             *old = visible;
             self.live_due = Some(Instant::now() + LIVE_SETTLE);
-            self.wake_for_live();
         }
         let Some(panel) = self.panels.get_mut(index) else {
             return;
@@ -1826,21 +1829,6 @@ impl OverviewManager {
             "overview: teardown took {:?} (hidden after {hidden:?})",
             started.elapsed()
         );
-    }
-
-    /// Wakes the main loop once [`LIVE_SETTLE`] has passed (it otherwise
-    /// sleeps while the overview sits open), on a short-lived thread: one at
-    /// a time, the next poll asks again if scrolling went on.
-    fn wake_for_live(&self) {
-        if self.live_wake.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        let (flag, wake) = (self.live_wake.clone(), self.sender.clone());
-        std::thread::spawn(move || {
-            std::thread::sleep(LIVE_SETTLE);
-            flag.store(false, Ordering::Release);
-            _ = wake.send(Event::OverviewCaptureLanded);
-        });
     }
 
     /// Frees the panels [`Self::teardown`] took off the screen.

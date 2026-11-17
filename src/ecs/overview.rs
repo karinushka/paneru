@@ -20,8 +20,8 @@ use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::{Added, Changed, Has, Or, With, Without};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
-use bevy::ecs::schedule::common_conditions::{not, on_message, resource_equals};
-use bevy::ecs::system::{Commands, NonSendMut, Query, Res, ResMut, SystemParam};
+use bevy::ecs::schedule::common_conditions::{on_message, resource_equals};
+use bevy::ecs::system::{Commands, NonSend, NonSendMut, Query, Res, ResMut, SystemParam};
 use objc2_core_foundation::CGPoint;
 use tracing::debug;
 
@@ -77,12 +77,6 @@ pub enum OverviewPhase {
 impl OverviewPhase {
     pub fn is_active(self) -> bool {
         self != Self::Closed
-    }
-
-    /// The main loop must keep ticking: a spring runs, or a scrub is in
-    /// progress and its watchdog has to be able to fire.
-    pub fn needs_frames(self) -> bool {
-        matches!(self, Self::Opening | Self::Closing | Self::Scrubbing)
     }
 }
 
@@ -217,10 +211,7 @@ pub fn register_overview(app: &mut App) {
                 .in_set(PreUpdateSet::Dispatch)
                 .run_if(on_message::<OverviewEvent>),
         )
-        .add_systems(
-            Update,
-            overview_tick.run_if(not(resource_equals(OverviewPhase::Closed))),
-        )
+        .add_systems(Update, overview_tick.run_if(overview_tick_needed))
         // After every layout system has written this frame's targets.
         .add_systems(
             Last,
@@ -228,6 +219,13 @@ pub fn register_overview(app: &mut App) {
                 .run_if(resource_equals(OverviewPhase::Open))
                 .run_if(overview_layout_dirty),
         );
+}
+
+fn overview_tick_needed(
+    phase: Res<OverviewPhase>,
+    manager: Option<NonSend<OverviewManager>>,
+) -> bool {
+    *phase == OverviewPhase::Scrubbing || manager.is_some_and(|manager| manager.has_pending_tick())
 }
 
 /// Per-frame work while the overview is up: release a scrub that went quiet,
@@ -2237,9 +2235,26 @@ mod tests {
     }
 
     #[test]
-    fn scrubbing_keeps_the_loop_awake() {
-        assert!(OverviewPhase::Scrubbing.needs_frames());
-        assert!(!OverviewPhase::default().needs_frames());
+    fn tick_condition_stays_idle_during_gpu_springs_and_settled_open() {
+        use bevy::ecs::system::RunSystemOnce as _;
+
+        let mut world = bevy::ecs::world::World::new();
+        for (phase, expected) in [
+            (OverviewPhase::Closed, false),
+            (OverviewPhase::Opening, false),
+            (OverviewPhase::Open, false),
+            (OverviewPhase::Closing, false),
+            (OverviewPhase::Scrubbing, true),
+        ] {
+            world.insert_resource(phase);
+            assert_eq!(
+                world
+                    .run_system_once(overview_tick_needed)
+                    .expect("run condition evaluates"),
+                expected,
+                "phase: {phase:?}"
+            );
+        }
     }
 
     #[test]

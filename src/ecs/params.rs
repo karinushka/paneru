@@ -213,7 +213,6 @@ pub struct FrameActivity<'w, 's> {
     scrolling: Query<'w, 's, (), With<Scrolling>>,
     flash_messages: Query<'w, 's, (), With<FlashMessage>>,
     overview: Option<bevy::ecs::system::NonSend<'w, crate::overview::view::OverviewManager>>,
-    overview_phase: Option<Res<'w, crate::ecs::overview::OverviewPhase>>,
 }
 
 impl FrameActivity<'_, '_> {
@@ -227,12 +226,7 @@ impl FrameActivity<'_, '_> {
             || self
                 .overview
                 .as_ref()
-                .is_some_and(|overview| overview.has_pending_captures())
-            // A spring runs, or a scrub's watchdog has to be able to fire.
-            || self
-                .overview_phase
-                .as_ref()
-                .is_some_and(|phase| phase.needs_frames())
+                .is_some_and(|overview| overview.has_pending_deadline())
     }
 }
 

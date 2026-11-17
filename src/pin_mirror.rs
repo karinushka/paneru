@@ -14,7 +14,8 @@
 use std::collections::HashMap;
 use std::ptr::NonNull;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 use bevy::math::IRect;
 use block2::RcBlock;
@@ -73,6 +74,30 @@ struct PinStreamIvars {
     /// Set by `stop` so a start still in flight never leaves a stream running.
     cancelled: AtomicBool,
     has_frame: AtomicBool,
+    /// Spike diagnostics: frames since the last rate log.
+    frames: AtomicU32,
+    last_rate_log: Mutex<Instant>,
+}
+
+impl PinStreamIvars {
+    /// Logs the delivered frame rate about once a second, to tell "no frames
+    /// while the pump idles" apart from "frames but the panel is hidden".
+    fn log_frame_rate(&self) {
+        let frames = self.frames.fetch_add(1, Ordering::Relaxed) + 1;
+        let Ok(mut last) = self.last_rate_log.lock() else {
+            return;
+        };
+        let elapsed = last.elapsed();
+        if elapsed >= Duration::from_secs(1) {
+            debug!(
+                window_id = self.window_id,
+                fps = f64::from(frames) / elapsed.as_secs_f64(),
+                "pin mirror frames"
+            );
+            self.frames.store(0, Ordering::Relaxed);
+            *last = Instant::now();
+        }
+    }
 }
 
 define_class!(
@@ -107,6 +132,7 @@ define_class!(
                 objc2_core_foundation::CFRetained::as_ptr(&surface).cast();
             let ivars = self.ivars();
             unsafe { ivars.layer.setContents(Some(surface_ptr.as_ref())) };
+            ivars.log_frame_rate();
 
             if !ivars.has_frame.swap(true, Ordering::AcqRel)
                 && let Err(error) = ivars.events.send(Event::PinMirrorReady {
@@ -146,6 +172,8 @@ impl PinStreamOutput {
             stream: Mutex::new(None),
             cancelled: AtomicBool::new(false),
             has_frame: AtomicBool::new(false),
+            frames: AtomicU32::new(0),
+            last_rate_log: Mutex::new(Instant::now()),
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -542,6 +570,17 @@ mod tests {
         assert_eq!(cocoa.origin.y, 1000.0 - 50.0 - 300.0);
         assert_eq!(cocoa.size.width, 400.0);
         assert_eq!(cocoa.size.height, 300.0);
+    }
+
+    /// objc2 checks method type encodings when a class registers (debug
+    /// builds); a mismatch would otherwise panic the daemon on first pin.
+    #[test]
+    fn mirror_classes_register_with_valid_encodings() {
+        let (events, _receiver) = EventSender::new();
+        let output = PinStreamOutput::new(0, events, CALayer::new());
+        assert!(!output.has_frame());
+        output.stop();
+        let _ = <MirrorView as objc2::ClassType>::class();
     }
 
     #[test]

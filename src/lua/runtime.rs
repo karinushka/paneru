@@ -529,6 +529,21 @@ mod tests {
     }
 
     #[test]
+    fn setup_binding_toggles_overview() {
+        let world = TestWorld::default();
+        let runtime = world
+            .runtime(r#"paneru.setup{ bindings = { ["overview"] = "alt - o" } }"#)
+            .unwrap();
+        assert_eq!(runtime.published_keybinds().len(), 1);
+        let extract = || Ok(Arc::new(test_state()));
+        world.drive(&extract, runtime.dispatch_bind(1));
+        assert!(matches!(
+            drained_commands(&runtime).as_slice(),
+            [Command::Overview]
+        ));
+    }
+
+    #[test]
     fn require_paneru_uses_embedded_api_without_a_native_module() {
         let world = TestWorld::default();
         let runtime = world
@@ -602,6 +617,25 @@ mod tests {
         let extract = || Ok(Arc::new(test_state()));
         world.drive(&extract, runtime.dispatch_bind(1));
         assert_eq!(drained_commands(&runtime).len(), 1);
+    }
+
+    #[test]
+    fn scripts_can_run_overview() {
+        let world = TestWorld::default();
+        let runtime = world
+            .runtime(
+                r#"paneru.bind("alt - o", function(state)
+                    paneru.run("overview")
+                    paneru.run({ "overview" })
+                end)"#,
+            )
+            .unwrap();
+        let extract = || Ok(Arc::new(test_state()));
+        world.drive(&extract, runtime.dispatch_bind(1));
+        assert!(matches!(
+            drained_commands(&runtime).as_slice(),
+            [Command::Overview, Command::Overview]
+        ));
     }
 
     #[test]

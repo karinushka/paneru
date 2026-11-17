@@ -78,7 +78,7 @@ Configure trackpad gestures and scroll-wheel window sliding.
 | `paging` | Boolean | `false` | Focus one adjacent window for each horizontal gesture threshold instead of sliding the strip freely. |
 | `page_distance_cm` | Positive float | `2.0` | Approximate horizontal finger travel in centimeters required for each page when `paging = true`. |
 | `haptics` | Boolean | `true` | Emit a haptic pulse after each confirmed paging focus change. Set to `false` to disable pulses. |
-| `overview_fingers` | Integer | *None* | Number of fingers for the overview gesture: swipe up to open it, down to close. Must be 3 or more and differ from `fingers_count`; unset disables the gesture (the `overview` command still works). |
+| `overview_fingers` | Integer | *None* | Number of fingers for the overview gesture: swipe up to open it, down to close. Must be 3 or more and differ from `fingers_count`; unset disables the gesture (the `overview` command and keybinding still work). |
 
 When `fingers_count` is omitted or set below 3, Paneru does not intercept native macOS gestures. If macOS uses three-finger horizontal swipes for Spaces, prefer `[swipe.scroll]` with a modifier or configure a different finger count.
 
@@ -287,6 +287,7 @@ https://github.com/karinushka/paneru/blob/3790b01f8d65df5d9000142db7cf25f9270dcc
 | `window_raise_floating` | Make the floating windows layer visible on the current workspace. |
 | `window_togglefloatlayer` | Selectively move the floating windows in front or behind of the workspace windows. |
 | `window_copyrule` | Copy a window rule template for the focused window to the clipboard. |
+| `overview` | Toggle the overview of every virtual workspace, as an alternative to the `overview_fingers` swipe (e.g. when docked without a trackpad). |
 | `showmenu` | Show the Paneru menu bar item and remember the choice across restarts. |
 | `hidemenu` | Hide the entire Paneru menu bar item and remember the choice across restarts. |
 | `quit` | Exit Paneru. |
@@ -297,6 +298,7 @@ https://github.com/karinushka/paneru/blob/3790b01f8d65df5d9000142db7cf25f9270dcc
 [bindings]
 window_focus_west = "cmd - h"
 window_resize = ["alt - r", "ctrl - r"]
+overview = "alt - o"
 ```
 
 ### Virtual workspaces (Experimental)

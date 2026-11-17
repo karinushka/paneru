@@ -178,6 +178,12 @@ impl Stream {
 /// the main thread never reach a freed output.
 const STOP_GRACE: Duration = Duration::from_secs(2);
 
+struct SendShareableContent(Retained<SCShareableContent>);
+
+// SAFETY: `SCShareableContent` is an immutable snapshot produced on a
+// ScreenCaptureKit callback queue and safe to transfer to the main thread.
+unsafe impl Send for SendShareableContent {}
+
 /// The overview's live streams, keyed by window id.
 pub struct Live {
     mtm: MainThreadMarker,
@@ -189,8 +195,8 @@ pub struct Live {
     pending: HashMap<i32, Wanted>,
     /// Identifies the current lookup; older ones are ignored.
     request: u64,
-    tx: Sender<(u64, usize)>,
-    rx: Receiver<(u64, usize)>,
+    tx: Sender<(u64, Option<SendShareableContent>)>,
+    rx: Receiver<(u64, Option<SendShareableContent>)>,
     showing: Rc<RefCell<HashSet<i32>>>,
 }
 
@@ -264,16 +270,11 @@ impl Live {
                 if let Some(error) = unsafe { error.as_ref() } {
                     warn!("overview: listing windows for live previews: {error}");
                 }
-                // Retained here, released on the main thread in `poll`.
-                let addr = if content.is_null() {
-                    0
-                } else {
-                    let content: Option<Retained<SCShareableContent>> =
-                        unsafe { Retained::retain(content) };
-                    content.map_or(0, |c| Retained::into_raw(c) as usize)
-                };
-                if let Err(err) = tx.send((request, addr)) {
-                    release(err.0.1);
+                let content = (!content.is_null())
+                    .then(|| unsafe { Retained::retain(content) })
+                    .flatten()
+                    .map(SendShareableContent);
+                if tx.send((request, content)).is_err() {
                     return;
                 }
                 _ = wake.send(Event::OverviewCaptureLanded);
@@ -290,13 +291,12 @@ impl Live {
     /// listing that came back.
     pub fn poll(&mut self) {
         self.prune_stopped();
-        while let Ok((request, addr)) = self.rx.try_recv() {
-            let content = release(addr);
+        while let Ok((request, content)) = self.rx.try_recv() {
             if request != self.request {
                 continue;
             }
             let pending = std::mem::take(&mut self.pending);
-            let Some(content) = content else {
+            let Some(SendShareableContent(content)) = content else {
                 continue;
             };
             // Region streams leave out paneru's own windows: the overview
@@ -432,8 +432,4 @@ impl Live {
         self.showing.borrow_mut().clear();
         self.request += 1;
     }
-}
-
-fn release(addr: usize) -> Option<Retained<SCShareableContent>> {
-    unsafe { Retained::from_raw(addr as *mut SCShareableContent) }
 }

@@ -1111,7 +1111,7 @@ fn overview_follow_layout(
                 layout: &entry.layout,
             })
             .collect();
-        let labels = card_labels(&scene, manager.previews());
+        let labels = card_labels(&scene, &entries, manager.previews());
         manager.build(&scenes, &info, &labels, 1.0);
     }
     active.displays = entries;
@@ -1148,7 +1148,7 @@ fn open_displays(manager: &mut OverviewManager, scene: &Scene) -> Option<Vec<Dis
     // Checked on every open: permission can be granted (or revoked) while
     // paneru runs. Without it, cards show the app icon and title instead.
     manager.set_previews(screen_capture::allowed());
-    let labels = card_labels(scene, manager.previews());
+    let labels = card_labels(scene, &entries, manager.previews());
     manager.build(&scenes, &info, &labels, 0.0);
     Some(entries)
 }
@@ -1305,21 +1305,24 @@ fn origin_from_windows(scene: &Scene, strip: &LayoutStrip) -> Option<bevy::math:
     })
 }
 
-/// Title and owning app of every window, for the cards drawn without
-/// previews (no screen recording permission). Empty when previews are on.
-fn card_labels(scene: &Scene, previews: bool) -> HashMap<i32, CardLabel> {
+/// Title and owning app of each window placed in `entries`, for the cards
+/// drawn without previews (no screen recording permission). Empty when
+/// previews are on.
+fn card_labels(scene: &Scene, entries: &[DisplayEntry], previews: bool) -> HashMap<i32, CardLabel> {
     if previews {
         return HashMap::new();
     }
-    scene
-        .windows
+    entries
         .iter()
-        .map(|(_, window, ..)| {
+        .flat_map(|entry| &entry.layout.strips)
+        .flat_map(|strip| &strip.windows)
+        .filter_map(|placement| {
+            let (_, window, ..) = scene.windows.get(placement.key).ok()?;
             let label = CardLabel {
                 title: window.title().unwrap_or_default(),
                 pid: window.pid().ok(),
             };
-            (window.id(), label)
+            Some((placement.window_id, label))
         })
         .collect()
 }

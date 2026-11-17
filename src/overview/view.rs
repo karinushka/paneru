@@ -236,19 +236,23 @@ struct Target {
 /// How long the panels wait for gating captures before showing anyway.
 const REVEAL_TIMEOUT: Duration = Duration::from_millis(250);
 
-/// A capture result: (batch, target index, retained `CGImage` address or 0).
-/// The image travels as an address: a `CGImage` is immutable and safe to
-/// share between threads, the wrapper type just doesn't say so.
-type Landed = (u64, usize, usize);
+struct SendImage(CFRetained<CGImage>);
+
+// SAFETY: `CGImage` is immutable and safe to send across threads.
+unsafe impl Send for SendImage {}
+
+/// A capture result: (batch, target index, captured `CGImage`).
+type Landed = (u64, usize, Option<SendImage>);
 
 /// How many captures run at once. Each is a `WindowServer` round trip; a
 /// few in parallel overlap well, dozens just queue up inside it and land
 /// all together.
 const CAPTURE_WORKERS: usize = 4;
 
-/// Runs `shots` in order on a small pool of threads. Each result is sent
-/// back on `tx`, and `wake` gets an event so the main loop picks it up
-/// right away. Workers stop early once `current` moves past `batch`.
+/// Runs `shots` in order on [`AsyncComputeTaskPool`](bevy::tasks::AsyncComputeTaskPool)
+/// with at most [`CAPTURE_WORKERS`] concurrent workers. Each result is sent
+/// back on `tx`, and `wake` gets an event so the main loop picks it up right
+/// away. Workers stop early once `current` moves past `batch`.
 fn spawn_shots(
     tx: &Sender<Landed>,
     wake: &EventSender,
@@ -256,36 +260,34 @@ fn spawn_shots(
     batch: u64,
     shots: Vec<(usize, Shot)>,
 ) {
+    let workers = shots.len().min(CAPTURE_WORKERS);
+    if workers == 0 {
+        return;
+    }
+    let pool = bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
     let queue = Arc::new(Mutex::new(VecDeque::from(shots)));
-    for _ in 0..CAPTURE_WORKERS {
+    for _ in 0..workers {
         let (tx, wake, current, queue) = (tx.clone(), wake.clone(), current.clone(), queue.clone());
-        std::thread::spawn(move || {
+        pool.spawn(async move {
             loop {
                 if current.load(Ordering::Relaxed) != batch {
                     return;
                 }
-                let job = match queue.lock() {
-                    Ok(mut queue) => queue.pop_front(),
-                    Err(_) => None,
-                };
+                let job = queue.lock().ok().and_then(|mut queue| queue.pop_front());
                 let Some((index, shot)) = job else {
                     return;
                 };
-                let addr = shot
-                    .take()
-                    .map_or(0, |image| CFRetained::into_raw(image).as_ptr() as usize);
-                if let Err(err) = tx.send((batch, index, addr)) {
-                    release_landed(err.0.2);
+                // Task-pool threads have no CFRunLoop to drain autoreleased
+                // CoreImage/AppKit temporaries (`CIImage`, `CIFilter`, `NSImage`).
+                let image = objc2::rc::autoreleasepool(|_| shot.take()).map(SendImage);
+                if tx.send((batch, index, image)).is_err() {
                     return;
                 }
                 _ = wake.send(Event::OverviewCaptureLanded);
             }
-        });
+        })
+        .detach();
     }
-}
-
-fn release_landed(addr: usize) -> Option<CFRetained<CGImage>> {
-    std::ptr::NonNull::new(addr as *mut CGImage).map(|ptr| unsafe { CFRetained::from_raw(ptr) })
 }
 
 /// Everything on screen inside `rect` (absolute CG), composited — e.g. the
@@ -382,46 +384,64 @@ fn ci_filter(name: &str, inputs: &[(&str, &AnyObject)]) -> Option<Retained<AnyOb
     Some(filter)
 }
 
+struct SendCiContext(Retained<AnyObject>);
+
+// SAFETY: Apple documents `CIContext` as immutable and thread-safe across
+// concurrent `createCGImage:fromRect:` evaluations.
+unsafe impl Send for SendCiContext {}
+unsafe impl Sync for SendCiContext {}
+
+fn shared_ci_context() -> Option<&'static AnyObject> {
+    static CONTEXT: std::sync::LazyLock<Option<SendCiContext>> = std::sync::LazyLock::new(|| {
+        objc2::rc::autoreleasepool(|_| {
+            let ci_context = AnyClass::get(c"CIContext")?;
+            let context: Option<Retained<AnyObject>> =
+                unsafe { msg_send![ci_context, contextWithOptions: std::ptr::null::<AnyObject>()] };
+            context.map(SendCiContext)
+        })
+    });
+    CONTEXT.as_ref().map(|c| &*c.0)
+}
+
 /// Blurs `image` (a display-wide capture, `width` points across) by
 /// `radius` points, for the backdrop. Rendered once on the CPU side at a quarter of the
 /// size: a blurred image has no detail to lose, and the result is cheap to
 /// show in many layers. Edges are clamped so they don't darken.
 fn blurred(image: &CGImage, width: f64, radius: f64) -> Option<CFRetained<CGImage>> {
     const SCALE: f64 = 0.25;
-    #[allow(clippy::cast_precision_loss)]
-    let pixels_per_point = CGImage::width(Some(image)) as f64 / width.max(1.0);
-    let ci_image = AnyClass::get(c"CIImage")?;
-    let input: Option<Retained<AnyObject>> =
-        unsafe { msg_send![ci_image, imageWithCGImage: image] };
-    let input = input?;
-    let scale = ns_number(SCALE);
-    let aspect = ns_number(1.0);
-    let small = ci_filter(
-        "CILanczosScaleTransform",
-        &[
-            ("inputImage", &input),
-            ("inputScale", &scale),
-            ("inputAspectRatio", &aspect),
-        ],
-    )?;
-    let small: Option<Retained<AnyObject>> = unsafe { msg_send![&*small, outputImage] };
-    let small = small?;
-    let extent: CGRect = unsafe { msg_send![&*small, extent] };
-    let clamped: Retained<AnyObject> = unsafe { msg_send![&*small, imageByClampingToExtent] };
-    let radius = ns_number(radius * pixels_per_point * SCALE);
-    let blur = ci_filter(
-        "CIGaussianBlur",
-        &[("inputImage", &clamped), ("inputRadius", &radius)],
-    )?;
-    let output: Option<Retained<AnyObject>> = unsafe { msg_send![&*blur, outputImage] };
-    let output = output?;
-    let ci_context = AnyClass::get(c"CIContext")?;
-    let context: Option<Retained<AnyObject>> =
-        unsafe { msg_send![ci_context, contextWithOptions: std::ptr::null::<AnyObject>()] };
-    let context = context?;
-    let raw: *mut CGImage =
-        unsafe { msg_send![&*context, createCGImage: &*output, fromRect: extent] };
-    std::ptr::NonNull::new(raw).map(|ptr| unsafe { CFRetained::from_raw(ptr) })
+    objc2::rc::autoreleasepool(|_| {
+        #[allow(clippy::cast_precision_loss)]
+        let pixels_per_point = CGImage::width(Some(image)) as f64 / width.max(1.0);
+        let ci_image = AnyClass::get(c"CIImage")?;
+        let input: Option<Retained<AnyObject>> =
+            unsafe { msg_send![ci_image, imageWithCGImage: image] };
+        let input = input?;
+        let scale = ns_number(SCALE);
+        let aspect = ns_number(1.0);
+        let small = ci_filter(
+            "CILanczosScaleTransform",
+            &[
+                ("inputImage", &input),
+                ("inputScale", &scale),
+                ("inputAspectRatio", &aspect),
+            ],
+        )?;
+        let small: Option<Retained<AnyObject>> = unsafe { msg_send![&*small, outputImage] };
+        let small = small?;
+        let extent: CGRect = unsafe { msg_send![&*small, extent] };
+        let clamped: Retained<AnyObject> = unsafe { msg_send![&*small, imageByClampingToExtent] };
+        let radius = ns_number(radius * pixels_per_point * SCALE);
+        let blur = ci_filter(
+            "CIGaussianBlur",
+            &[("inputImage", &clamped), ("inputRadius", &radius)],
+        )?;
+        let output: Option<Retained<AnyObject>> = unsafe { msg_send![&*blur, outputImage] };
+        let output = output?;
+        let context = shared_ci_context()?;
+        let raw: *mut CGImage =
+            unsafe { msg_send![context, createCGImage: &*output, fromRect: extent] };
+        std::ptr::NonNull::new(raw).map(|ptr| unsafe { CFRetained::from_raw(ptr) })
+    })
 }
 
 /// Size of a row's label text, in points.
@@ -1101,8 +1121,12 @@ impl OverviewManager {
         let primary_h = primary_screen_height(self.mtm);
         let mut jobs: Vec<(Rank, usize, Shot)> = Vec::new();
         self.visible.clear();
-        for pid in labels.values().filter_map(|label| label.pid) {
-            self.icons.entry(pid).or_insert_with(|| app_icon(pid));
+        if !self.previews {
+            let live_pids: HashSet<Pid> = labels.values().filter_map(|label| label.pid).collect();
+            self.icons.retain(|pid, _| live_pids.contains(pid));
+            for pid in live_pids {
+                self.icons.entry(pid).or_insert_with(|| app_icon(pid));
+            }
         }
 
         CATransaction::begin();
@@ -1309,8 +1333,7 @@ impl OverviewManager {
         CATransaction::begin();
         CATransaction::setDisableActions(!visible);
         CATransaction::setAnimationDuration(0.2);
-        while let Ok((batch, index, addr)) = self.rx.try_recv() {
-            let image = release_landed(addr);
+        while let Ok((batch, index, image)) = self.rx.try_recv() {
             if batch != self.batch {
                 continue;
             }
@@ -1327,7 +1350,7 @@ impl OverviewManager {
                 target.key,
                 self.batch_started.elapsed()
             );
-            let Some(image) = image else {
+            let Some(SendImage(image)) = image else {
                 warn!("overview: no snapshot for {}", target.key);
                 continue;
             };

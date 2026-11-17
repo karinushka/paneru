@@ -104,7 +104,7 @@ fn assert_laptop_switched_to_second_row(world: &mut World) {
 }
 
 #[test]
-fn search_keys_type_edit_and_step_through_matches() {
+fn overview_keys_search_edit_and_move() {
     const NONE: KeyModifiers = KeyModifiers {
         shift: false,
         command: false,
@@ -128,52 +128,92 @@ fn search_keys_type_edit_and_step_through_matches() {
         ..NONE
     };
     let mut state: Option<Search> = None;
-    // Only `/` starts a search; other keys do nothing until then.
-    assert!(!search_key(&mut state, 0, "a", NONE));
-    assert!(!search_key(&mut state, 44, "/", CMD));
-    assert!(search_key(&mut state, 44, "/", NONE));
+    let key = |state: &mut Option<Search>, code, text, keys| overview_key(state, code, text, keys);
+    // Arrows move the selection, searching or not.
+    assert_eq!(
+        key(&mut state, 124, "\u{F703}", NONE),
+        KeyAction::Move(Direction::Right)
+    );
+    assert_eq!(
+        key(&mut state, 126, "\u{F700}", NONE),
+        KeyAction::Move(Direction::Up)
+    );
+    // Only `/` starts a search; Tab and text do nothing until then.
+    assert_eq!(key(&mut state, 0, "a", NONE), KeyAction::None);
+    assert_eq!(key(&mut state, 48, "\t", NONE), KeyAction::None);
+    assert_eq!(key(&mut state, 44, "/", CMD), KeyAction::None);
+    assert_eq!(key(&mut state, 44, "/", NONE), KeyAction::Query);
     // Once searching, `/` is text (URLs have it).
     for text in ["g", "h", "/"] {
-        assert!(search_key(&mut state, 0, text, NONE));
+        assert_eq!(key(&mut state, 0, text, NONE), KeyAction::Query);
     }
-    assert_eq!(state.as_ref().unwrap().query, "gh/");
-    // Arrow keys arrive as private-use characters and aren't typed.
-    assert!(!search_key(&mut state, 99, "\u{F704}", NONE));
-    assert!(!search_key(&mut state, 0, "a", CMD), "Cmd-A isn't text");
-    assert!(search_key(&mut state, 51, "\u{7f}", NONE));
-    assert_eq!(state.as_ref().unwrap().query, "gh");
+    let query = |state: &Option<Search>| state.as_ref().unwrap().query.clone();
+    assert_eq!(query(&state), "gh/");
+    assert_eq!(
+        key(&mut state, 125, "\u{F701}", NONE),
+        KeyAction::Move(Direction::Down)
+    );
+    assert_eq!(
+        key(&mut state, 99, "\u{F704}", NONE),
+        KeyAction::None,
+        "F5 isn't text"
+    );
+    assert_eq!(
+        key(&mut state, 0, "a", CMD),
+        KeyAction::None,
+        "Cmd-A isn't text"
+    );
+    assert_eq!(
+        key(&mut state, 48, "\t", NONE),
+        KeyAction::Step { forward: true }
+    );
+    assert_eq!(
+        key(&mut state, 48, "\t", SHIFT),
+        KeyAction::Step { forward: false }
+    );
+    key(&mut state, 51, "\u{7f}", NONE);
+    assert_eq!(query(&state), "gh");
+    key(&mut state, 51, "\u{7f}", CMD);
+    assert_eq!(query(&state), "", "Cmd-Backspace clears");
 
+    for text in ["brave", " ", "git", "-", "hub"] {
+        key(&mut state, 0, text, NONE);
+    }
+    key(&mut state, 51, "\u{7f}", CTRL);
+    assert_eq!(query(&state), "brave git-", "Control-Backspace: a word");
+    key(&mut state, 51, "\u{7f}", OPT);
+    assert_eq!(query(&state), "brave git", "Option-Backspace: the symbols");
+    key(&mut state, 13, "\u{17}", CTRL);
+    assert_eq!(query(&state), "brave ", "Control-W: a word");
+    key(&mut state, 13, "\u{17}", CTRL);
+    assert_eq!(query(&state), "", "and the space before the next one");
+}
+
+#[test]
+fn tab_steps_through_matches_and_wraps() {
     let window = |n: u32| Match {
         display: 0,
         key: Entity::from_raw_u32(n).unwrap(),
         window_id: n.cast_signed(),
         virtual_index: Some(0),
     };
-    let search = state.as_mut().unwrap();
-    search.matches = vec![window(1), window(2), window(3)];
-    search_key(&mut state, 48, "\t", NONE);
-    search_key(&mut state, 124, "\u{F703}", NONE);
-    assert_eq!(state.as_ref().unwrap().selected, 2);
-    search_key(&mut state, 48, "\t", NONE);
-    assert_eq!(state.as_ref().unwrap().selected, 0, "wraps around");
-    search_key(&mut state, 48, "\t", SHIFT);
-    assert_eq!(state.as_ref().unwrap().selected, 2, "Shift-Tab goes back");
-
-    assert!(search_key(&mut state, 51, "\u{7f}", CMD));
-    assert_eq!(state.as_ref().unwrap().query, "", "Cmd-Backspace clears");
-
-    let query = |state: &Option<Search>| state.as_ref().unwrap().query.clone();
-    for text in ["brave", " ", "git", "-", "hub"] {
-        search_key(&mut state, 0, text, NONE);
-    }
-    assert!(search_key(&mut state, 51, "\u{7f}", CTRL));
-    assert_eq!(query(&state), "brave git-", "Control-Backspace: a word");
-    search_key(&mut state, 51, "\u{7f}", OPT);
-    assert_eq!(query(&state), "brave git", "Option-Backspace: the symbols");
-    assert!(search_key(&mut state, 13, "\u{17}", CTRL));
-    assert_eq!(query(&state), "brave ", "Control-W: a word");
-    search_key(&mut state, 13, "\u{17}", CTRL);
-    assert_eq!(query(&state), "", "and the space before the next one");
+    let matches = [window(1), window(2), window(3)];
+    let key = |n: u32| Some(window(n).key);
+    assert_eq!(stepped(&matches, None, true), Some(window(1)));
+    assert_eq!(stepped(&matches, None, false), Some(window(3)));
+    assert_eq!(stepped(&matches, key(2), true), Some(window(3)));
+    assert_eq!(stepped(&matches, key(3), true), Some(window(1)), "wraps");
+    assert_eq!(
+        stepped(&matches, key(1), false),
+        Some(window(3)),
+        "wraps back"
+    );
+    assert_eq!(
+        stepped(&matches, key(9), true),
+        Some(window(1)),
+        "not a match"
+    );
+    assert_eq!(stepped(&[], key(1), true), None);
 }
 
 #[test]

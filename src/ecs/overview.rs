@@ -46,9 +46,9 @@ use crate::overview::view::{
     window_server_info,
 };
 use crate::overview::{
-    DisplayLayout, FloatingInput, Hit, Metrics, OVERVIEW_ACCEPTS_KEYS, OVERVIEW_OPEN, Rect,
-    SPRING_RESPONSE, Spring, StripInput, WindowInput, exposing_shift, hit_test, layout_display,
-    middle_row, reanchor, release_opens, rubber_band, same_geometry,
+    Direction, DisplayLayout, FloatingInput, Hit, Metrics, OVERVIEW_ACCEPTS_KEYS, OVERVIEW_OPEN,
+    Rect, SPRING_RESPONSE, Spring, StripInput, WindowInput, exposing_shift, hit_test,
+    layout_display, middle_row, neighbour, reanchor, release_opens, rubber_band, same_geometry,
 };
 use crate::screen_capture;
 
@@ -151,24 +151,24 @@ struct ActiveSession {
     committed: bool,
     /// The window search (`/`), while it is on.
     search: Option<Search>,
+    /// The window the keyboard selection is on (ringed; Return focuses it).
+    /// `None` until an arrow key, Tab or the search moves it: then the
+    /// focused window carries the ring.
+    selection: Option<Match>,
 }
 
 /// The window search: typed with the overview open, it dims every window
-/// that doesn't match and rings the selected match, which Return focuses.
+/// that doesn't match; Tab steps through the matches best first.
 #[derive(Default)]
 struct Search {
     query: String,
     /// Best first; ties keep the overview's order (display, row, column).
     matches: Vec<Match>,
-    selected: usize,
     /// Where the selection goes on the next refresh.
     pick: SearchPick,
-    /// The match last scrolled into view: the overview only scrolls when
-    /// the selection moves to another window.
-    revealed: Option<Entity>,
 }
 
-/// Where a refresh puts the selection.
+/// Where a search refresh puts the selection.
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 enum SearchPick {
     /// The focused window (search just started, or the query is empty):
@@ -177,12 +177,12 @@ enum SearchPick {
     Focused,
     /// The best match (the query changed).
     Best,
-    /// The same window as before, if it still matches (stepping through
-    /// matches, or the layout changed).
+    /// Where it is, if that still matches (the layout changed).
     Keep,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// A window in the overview.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Match {
     display: usize,
     key: Entity,
@@ -191,10 +191,18 @@ struct Match {
     virtual_index: Option<u32>,
 }
 
-impl Search {
-    fn current(&self) -> Option<Match> {
-        self.matches.get(self.selected).copied()
-    }
+/// What a key press in the overview does; see [`overview_key`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyAction {
+    None,
+    /// The query changed (or the search started).
+    Query,
+    /// Tab: the next (or previous) match by score.
+    Step {
+        forward: bool,
+    },
+    /// An arrow: the window that way on screen.
+    Move(Direction),
 }
 
 impl ActiveSession {
@@ -250,6 +258,7 @@ impl OverviewSession {
             motion,
             committed: false,
             search: None,
+            selection: None,
         });
         sync_tap_flags(*phase, Some(active));
         active
@@ -586,15 +595,15 @@ fn overview_handler(
             }
 
             Event::OverviewAccept
-                if session
-                    .0
-                    .as_ref()
-                    .is_some_and(|active| active.search.is_some()) =>
+                if session.0.as_ref().is_some_and(|active| {
+                    active.selection.is_some() || active.search.is_some()
+                }) =>
             {
                 let Some(active) = session.0.as_mut() else {
                     continue;
                 };
-                let Some(pick) = active.search.as_ref().and_then(Search::current) else {
+                // Searching with nothing matching: nothing to go to.
+                let Some(pick) = active.selection else {
                     continue;
                 };
                 if active.committed
@@ -620,16 +629,42 @@ fn overview_handler(
                 );
             }
 
+            Event::OverviewMove { direction }
+                if matches!(*phase, OverviewPhase::Open | OverviewPhase::Opening) =>
+            {
+                if let Some(active) = session.0.as_mut()
+                    && !active.committed
+                {
+                    let focused = windows.focused().map(|(_, entity)| entity);
+                    let from = active.selection.map(|m| m.key).or(focused);
+                    move_selection(active, &mut manager, from, *direction);
+                }
+            }
+
             Event::OverviewKey {
                 code,
                 text,
                 modifiers,
             } if matches!(*phase, OverviewPhase::Open | OverviewPhase::Opening) => {
-                if let Some(active) = session.0.as_mut()
-                    && !active.committed
-                    && search_key(&mut active.search, *code, text, *modifiers)
-                {
-                    refresh_search(active, &mut manager, &scene, true);
+                let Some(active) = session.0.as_mut().filter(|active| !active.committed) else {
+                    continue;
+                };
+                match overview_key(&mut active.search, *code, text, *modifiers) {
+                    KeyAction::None => {}
+                    KeyAction::Query => refresh_search(active, &mut manager, &scene),
+                    KeyAction::Step { forward } => {
+                        let next = active.search.as_ref().and_then(|search| {
+                            stepped(&search.matches, active.selection.map(|m| m.key), forward)
+                        });
+                        if next.is_some() {
+                            set_selection(active, &mut manager, next, true);
+                        }
+                    }
+                    KeyAction::Move(direction) => {
+                        let focused = windows.focused().map(|(_, entity)| entity);
+                        let from = active.selection.map(|m| m.key).or(focused);
+                        move_selection(active, &mut manager, from, direction);
+                    }
                 }
             }
 
@@ -1313,16 +1348,30 @@ fn overview_follow_layout(
         build_scenes(&mut manager, &scene, &entries, &info, 1.0);
     }
     active.displays = entries;
-    // Windows may have come, gone or moved: match again.
-    refresh_search(active, &mut manager, &scene, false);
+    // Windows may have come, gone or moved: find the selection again (or
+    // drop it), and match again.
+    if let Some(selection) = active.selection {
+        let found = locate(&active.displays, selection.key);
+        if found != Some(selection) {
+            set_selection(active, &mut manager, found, false);
+        }
+    }
+    refresh_search(active, &mut manager, &scene);
 }
 
-/// Applies one key to the search. Returns whether it changed anything.
+/// What a key does, editing the query in place.
 ///
-/// Editing follows macOS text fields: Backspace deletes a character,
-/// Option- or Control-Backspace (and Control-W) the word before it,
-/// Command-Backspace everything.
-fn search_key(search: &mut Option<Search>, code: u16, text: &str, keys: KeyModifiers) -> bool {
+/// The arrow keys move the selection to the window that way on screen,
+/// searching or not. With the search on (`/`), Tab and Shift-Tab step
+/// through the matches by score, and editing follows macOS text fields:
+/// Backspace deletes a character, Option- or Control-Backspace (and
+/// Control-W) the word before it, Command-Backspace everything.
+fn overview_key(
+    search: &mut Option<Search>,
+    code: u16,
+    text: &str,
+    keys: KeyModifiers,
+) -> KeyAction {
     const TAB: u16 = 48;
     const BACKSPACE: u16 = 51;
     const W: u16 = 13;
@@ -1330,59 +1379,170 @@ fn search_key(search: &mut Option<Search>, code: u16, text: &str, keys: KeyModif
     const RIGHT: u16 = 124;
     const DOWN: u16 = 125;
     const UP: u16 = 126;
+    let arrow = match code {
+        LEFT => Some(Direction::Left),
+        RIGHT => Some(Direction::Right),
+        DOWN => Some(Direction::Down),
+        UP => Some(Direction::Up),
+        _ => None,
+    };
+    if let Some(direction) = arrow {
+        return KeyAction::Move(direction);
+    }
     let Some(search) = search.as_mut() else {
         if !keys.command && !keys.control && text == "/" {
             *search = Some(Search::default());
-            return true;
+            return KeyAction::Query;
         }
-        return false;
-    };
-    let step = |search: &mut Search, forward: bool| {
-        let n = search.matches.len();
-        if n > 0 {
-            search.selected = if forward {
-                (search.selected + 1) % n
-            } else {
-                (search.selected + n - 1) % n
-            };
-        }
+        return KeyAction::None;
     };
     match code {
-        TAB => step(search, !keys.shift),
-        RIGHT | DOWN => step(search, true),
-        LEFT | UP => step(search, false),
-        BACKSPACE if keys.command => {
-            search.query.clear();
-            search.pick = SearchPick::Best;
+        TAB => {
+            return KeyAction::Step {
+                forward: !keys.shift,
+            };
         }
-        BACKSPACE if keys.option || keys.control => {
-            delete_word(&mut search.query);
-            search.pick = SearchPick::Best;
-        }
-        W if keys.control && !keys.command => {
-            delete_word(&mut search.query);
-            search.pick = SearchPick::Best;
-        }
-        BACKSPACE => {
-            search.query.pop();
-            search.pick = SearchPick::Best;
-        }
-        _ if keys.command || keys.control => return false,
+        BACKSPACE if keys.command => search.query.clear(),
+        BACKSPACE if keys.option || keys.control => delete_word(&mut search.query),
+        W if keys.control && !keys.command => delete_word(&mut search.query),
+        BACKSPACE => _ = search.query.pop(),
+        _ if keys.command || keys.control => return KeyAction::None,
         _ => {
-            // Arrow and function keys come as private-use characters, Tab and
-            // the like as control characters: only real text goes in.
+            // Function keys come as private-use characters, Escape and the
+            // like as control characters: only real text goes in.
             let typed = !text.is_empty()
                 && text
                     .chars()
                     .all(|c| !c.is_control() && !('\u{F700}'..='\u{F8FF}').contains(&c));
             if !typed {
-                return false;
+                return KeyAction::None;
             }
             search.query.push_str(text);
-            search.pick = SearchPick::Best;
         }
     }
-    true
+    search.pick = SearchPick::Best;
+    KeyAction::Query
+}
+
+/// The match after (or before) `current` in `matches`, wrapping around;
+/// the first (or last) when `current` isn't one.
+fn stepped(matches: &[Match], current: Option<Entity>, forward: bool) -> Option<Match> {
+    let n = matches.len();
+    if n == 0 {
+        return None;
+    }
+    let at = current.and_then(|key| matches.iter().position(|m| m.key == key));
+    let next = match (at, forward) {
+        (Some(i), true) => (i + 1) % n,
+        (Some(i), false) => (i + n - 1) % n,
+        (None, true) => 0,
+        (None, false) => n - 1,
+    };
+    matches.get(next).copied()
+}
+
+/// Where `key`'s card is in the overview (a row, or the floating shelf).
+fn locate(displays: &[DisplayEntry], key: Entity) -> Option<Match> {
+    displays.iter().enumerate().find_map(|(display, entry)| {
+        let rows = entry
+            .layout
+            .strips
+            .iter()
+            .map(|strip| (Some(strip.virtual_index), &strip.windows));
+        let shelf = std::iter::once((None, &entry.layout.floating));
+        rows.chain(shelf).find_map(|(virtual_index, placements)| {
+            let window = placements.iter().find(|w| w.key == key)?;
+            Some(Match {
+                display,
+                key,
+                window_id: window.window_id,
+                virtual_index,
+            })
+        })
+    })
+}
+
+/// Puts the keyboard selection on `selection` (`None`: back to the focused
+/// window's ring) and, with `reveal`, scrolls it into view if it moved.
+fn set_selection(
+    active: &mut ActiveSession,
+    manager: &mut OverviewManager,
+    selection: Option<Match>,
+    reveal: bool,
+) {
+    let moved = selection.map(|m| m.key) != active.selection.map(|m| m.key);
+    active.selection = selection;
+    manager.set_selection(selection.map(|m| m.window_id));
+    if reveal
+        && moved
+        && let Some(selection) = selection
+    {
+        reveal_window(&mut active.displays, manager, selection);
+    }
+}
+
+/// An arrow key: the selection goes to the window that way on screen from
+/// `from` (the selection, else the focused window), skipping windows the
+/// search doesn't match.
+///
+/// The arrows walk the rows: a window on the floating shelf is no place to
+/// start from, and none of them lands there.
+fn move_selection(
+    active: &mut ActiveSession,
+    manager: &mut OverviewManager,
+    from: Option<Entity>,
+    direction: Direction,
+) {
+    let matched: Option<HashSet<Entity>> = active
+        .search
+        .as_ref()
+        .filter(|search| !search.query.is_empty())
+        .map(|search| search.matches.iter().map(|m| m.key).collect());
+    let allowed = |key: &Entity| matched.as_ref().is_none_or(|set| set.contains(key));
+    let from = from
+        .and_then(|key| locate(&active.displays, key))
+        .filter(|from| from.virtual_index.is_some());
+    let Some(from) = from else {
+        // Nothing to start from (no focused window shows in a row): the
+        // first window.
+        let first = active
+            .displays
+            .iter()
+            .enumerate()
+            .find_map(|(display, entry)| {
+                entry.layout.strips.iter().find_map(|strip| {
+                    let window = strip.windows.iter().find(|w| allowed(&w.key))?;
+                    Some(Match {
+                        display,
+                        key: window.key,
+                        window_id: window.window_id,
+                        virtual_index: Some(strip.virtual_index),
+                    })
+                })
+            });
+        set_selection(active, manager, first, true);
+        return;
+    };
+    let layout = &active.displays[from.display].layout;
+    let Some((row, key)) = neighbour(layout, &from.key, direction, allowed) else {
+        // At an edge: the selection stays, but shows (it may have been the
+        // focused window's ring until now).
+        set_selection(active, manager, Some(from), false);
+        return;
+    };
+    let strip = &layout.strips[row];
+    let window_id = strip
+        .windows
+        .iter()
+        .find(|w| w.key == key)
+        .map_or(0, |w| w.window_id);
+    let next = Match {
+        display: from.display,
+        key,
+        window_id,
+        virtual_index: Some(strip.virtual_index),
+    };
+    set_selection(active, manager, Some(next), true);
 }
 
 /// Deletes the word before the end of `query`, and the spaces after it:
@@ -1410,19 +1570,13 @@ fn app_name(scene: &Scene, window: Entity) -> String {
         .unwrap_or_default()
 }
 
-/// Matches the query against every window the overview shows, keeps the
-/// selection on the same window if it still matches, shows the result and,
-/// with `reveal`, scrolls the selected window into view.
-fn refresh_search(
-    active: &mut ActiveSession,
-    manager: &mut OverviewManager,
-    scene: &Scene,
-    reveal: bool,
-) {
+/// Matches the query against every window the overview shows, shows the
+/// result, and moves the selection as [`Search::pick`] says.
+fn refresh_search(active: &mut ActiveSession, manager: &mut OverviewManager, scene: &Scene) {
+    let previous = active.selection.map(|m| m.key);
     let Some(search) = active.search.as_mut() else {
         return;
     };
-    let previous = search.current().map(|m| m.key);
     let mut focused = None;
     let mut scored = Vec::new();
     for (display, entry) in active.displays.iter().enumerate() {
@@ -1481,47 +1635,33 @@ fn refresh_search(
             at
         })
         .collect();
-    let position =
-        |key: Option<Entity>| key.and_then(|key| search.matches.iter().position(|m| m.key == key));
+    let find = |key: Option<Entity>| {
+        key.and_then(|key| search.matches.iter().find(|m| m.key == key).copied())
+    };
     let pick = if search.query.is_empty() && search.pick == SearchPick::Best {
         SearchPick::Focused
     } else {
         search.pick
     };
-    search.selected = match pick {
-        SearchPick::Focused => position(focused),
-        SearchPick::Best => None,
-        SearchPick::Keep => position(previous),
-    }
-    .unwrap_or(0)
-    .min(search.matches.len().saturating_sub(1));
-    let selected = search.current();
-    if pick == SearchPick::Focused {
-        // In view already: don't move the overview to it.
-        search.revealed = selected.map(|m| m.key);
-    }
     search.pick = SearchPick::Keep;
-    let moved = selected.is_some_and(|m| search.revealed != Some(m.key));
-    if moved {
-        search.revealed = selected.map(|m| m.key);
-    }
+    let (selection, reveal) = match pick {
+        // Already in view (or wherever the selection was): no scrolling.
+        SearchPick::Focused => (find(previous).or(find(focused)), false),
+        SearchPick::Best => (search.matches.first().copied(), true),
+        SearchPick::Keep => (find(previous).or(search.matches.first().copied()), false),
+    };
     manager.set_search(Some(SearchView {
         query: search.query.clone(),
-        selected: selected.map(|m| m.window_id),
         // Every card names its app and title as soon as the search starts,
         // with the matched characters highlighted once something is typed.
         labels,
         matched: search.matches.iter().map(|m| m.window_id).collect(),
     }));
-    if reveal
-        && moved
-        && let Some(selected) = selected
-    {
-        reveal_window(&mut active.displays, manager, selected);
-    }
+    set_selection(active, manager, selection, reveal);
 }
 
-/// Scrolls the overview (and pans the row) so `target`'s card is in view.
+/// Scrolls the overview so `target`'s row sits in the middle of the screen,
+/// and pans the row so its card is in view.
 ///
 /// The floating shelf is pinned in view, so a window on it needs neither.
 fn reveal_window(displays: &mut [DisplayEntry], manager: &mut OverviewManager, target: Match) {
@@ -1536,17 +1676,13 @@ fn reveal_window(displays: &mut [DisplayEntry], manager: &mut OverviewManager, t
         return;
     };
     let strip = &layout.strips[row];
-    // The whole row, label included, between the margins.
+    // The row's screen centred between the margins, as far as the stack
+    // scrolls (the same middle `scroll_range` brings the first and last row
+    // to). Steps within a row don't move it.
     let (top, bottom) = layout.margins;
-    let band_top = strip.label.y - layout.scroll;
-    let band_bottom = strip.ribbon.y + strip.ribbon.h - layout.scroll;
-    let dy = if band_top < top {
-        band_top - top
-    } else if band_bottom > layout.size.1 - bottom {
-        (band_bottom - (layout.size.1 - bottom)).min(band_top - top)
-    } else {
-        0.0
-    };
+    let middle = top + (layout.size.1 - top - bottom) / 2.0;
+    let viewport = &strip.viewport_overview;
+    let dy = viewport.y + viewport.h / 2.0 - layout.scroll - middle;
     let shown = window.overview.offset(strip.pan, 0.0);
     let ribbon = &strip.ribbon;
     let dx = exposing_shift(&shown, (ribbon.x, ribbon.x + ribbon.w));

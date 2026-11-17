@@ -7,7 +7,7 @@ use objc2::{class, msg_send};
 use objc2_app_kit::NSFont;
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGColor, CGImage};
-use objc2_foundation::{NSRange, NSString, ns_string};
+use objc2_foundation::{NSArray, NSRange, NSSize, NSString, ns_string};
 use objc2_quartz_core::{
     CABasicAnimation, CACurrentMediaTime, CALayer, CAMediaTiming as _, CASpringAnimation,
     CATextLayer, kCAAlignmentCenter, kCAAlignmentLeft, kCAAlignmentRight, kCAFillModeForwards,
@@ -87,6 +87,66 @@ pub(super) struct SearchBar {
     pub(super) text: Retained<CATextLayer>,
     /// "3 matches", on the right.
     pub(super) count: Retained<CATextLayer>,
+    /// The blinking insertion point, after the typed text.
+    caret: Retained<CALayer>,
+    /// Where the text starts, and how wide it may get, in bar points.
+    text_x: f64,
+    text_w: f64,
+}
+
+impl SearchBar {
+    /// Moves the caret to the end of `query`.
+    pub(super) fn place_caret(&self, query: &str) {
+        // Before the placeholder when empty, as in a text field.
+        let x = if query.is_empty() {
+            self.text_x - 4.0
+        } else {
+            self.text_x + text_width(query, SEARCH_FONT_SIZE, true).min(self.text_w) + 1.0
+        };
+        let mut frame = self.caret.frame();
+        frame.origin.x = x;
+        self.caret.setFrame(frame);
+    }
+}
+
+/// Width of `text` set in the system font at `size` points.
+fn text_width(text: &str, size: f64, bold: bool) -> f64 {
+    if text.is_empty() {
+        return 0.0;
+    }
+    let font = if bold {
+        NSFont::boldSystemFontOfSize(size)
+    } else {
+        NSFont::systemFontOfSize(size)
+    };
+    let string = NSString::from_str(text);
+    let size: NSSize = unsafe {
+        let attributes: Retained<AnyObject> = msg_send![
+            class!(NSDictionary),
+            dictionaryWithObject: &*font,
+            forKey: ns_string!("NSFont")
+        ];
+        msg_send![&*string, sizeWithAttributes: &*attributes]
+    };
+    size.width
+}
+
+/// Blinks `layer` on and off like a text caret, until it is removed.
+fn blink(layer: &CALayer) {
+    let values = NSArray::from_retained_slice(&[ns_number(1.0), ns_number(0.0)]);
+    let times = NSArray::from_retained_slice(&[ns_number(0.0), ns_number(0.5)]);
+    unsafe {
+        let animation: Retained<AnyObject> = msg_send![
+            class!(CAKeyframeAnimation),
+            animationWithKeyPath: ns_string!("opacity")
+        ];
+        let _: () = msg_send![&*animation, setValues: &*values];
+        let _: () = msg_send![&*animation, setKeyTimes: &*times];
+        let _: () = msg_send![&*animation, setCalculationMode: ns_string!("discrete")];
+        let _: () = msg_send![&*animation, setDuration: 1.06_f64];
+        let _: () = msg_send![&*animation, setRepeatCount: f32::INFINITY];
+        let _: () = msg_send![layer, addAnimation: &*animation, forKey: ns_string!("blink")];
+    }
 }
 
 /// The search field: a rounded bar centred near the top of a panel `width`
@@ -119,8 +179,8 @@ pub(super) fn search_bar(width: f64, top: f64, scale: f64) -> SearchBar {
     );
     let text_h = SEARCH_FONT_SIZE * 1.3;
     text.setFrame(CGRect::new(
-        CGPoint::new(22.0, (h - text_h) / 2.0),
-        CGSize::new(w - 44.0 - count_w, text_h),
+        CGPoint::new(26.0, (h - text_h) / 2.0),
+        CGSize::new(w - 48.0 - count_w, text_h),
     ));
     bar.addSublayer(&text);
 
@@ -138,7 +198,25 @@ pub(super) fn search_bar(width: f64, top: f64, scale: f64) -> SearchBar {
         CGSize::new(count_w, count_h),
     ));
     bar.addSublayer(&count);
-    SearchBar { bar, text, count }
+
+    let caret = CALayer::new();
+    let caret_h = SEARCH_FONT_SIZE * 1.2;
+    caret.setFrame(CGRect::new(
+        CGPoint::new(22.0, (h - caret_h) / 2.0),
+        CGSize::new(2.0, caret_h),
+    ));
+    caret.setBackgroundColor(Some(&match_color()));
+    caret.setCornerRadius(1.0);
+    bar.addSublayer(&caret);
+    blink(&caret);
+    SearchBar {
+        bar,
+        text,
+        count,
+        caret,
+        text_x: 26.0,
+        text_w: w - 48.0 - count_w,
+    }
 }
 
 /// Colour of the characters a search matched.

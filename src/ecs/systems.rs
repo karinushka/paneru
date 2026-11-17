@@ -968,6 +968,13 @@ pub(crate) fn pump_events(
     };
 
     received_events.extend(pending_mouse.take());
+    // The open overview takes the focus hotkeys for its own selection.
+    if crate::overview::OVERVIEW_OPEN.load(std::sync::atomic::Ordering::Relaxed) {
+        received_events = received_events
+            .into_iter()
+            .map(crate::overview::redirect_command)
+            .collect();
+    }
     messages.write_batch(received_events);
 
     if drained {

@@ -333,14 +333,15 @@ pub struct OverviewManager {
     icons: HashMap<Pid, Option<CFRetained<CGImage>>>,
     /// The search being shown, re-applied to every build.
     search: Option<SearchView>,
+    /// The window the keyboard selection rings, instead of the focused one.
+    selected: Option<i32>,
 }
 
-/// What the window search shows: the query in the search field, matching
-/// cards at full strength (the others dimmed) and the selected one ringed.
+/// What the window search shows: the query in the search field, and the
+/// matching cards at full strength (the others dimmed).
 pub struct SearchView {
     pub query: String,
     pub matched: HashSet<i32>,
-    pub selected: Option<i32>,
     /// What each matching card spells out, by window id.
     pub labels: HashMap<i32, CardMatch>,
 }
@@ -477,6 +478,15 @@ impl OverviewManager {
             previews: true,
             icons: HashMap::new(),
             search: None,
+            selected: None,
+        }
+    }
+
+    /// Rings `window_id`'s card (`None`: the focused window's again).
+    pub fn set_selection(&mut self, window_id: Option<i32>) {
+        if self.selected != window_id {
+            self.selected = window_id;
+            self.apply_search();
         }
     }
 
@@ -510,6 +520,7 @@ impl OverviewManager {
                     }
                     bar.text
                         .setForegroundColor(Some(&color(1.0, 1.0, 1.0, alpha)));
+                    bar.place_caret(&view.query);
                     // Red edge when nothing matches, blue otherwise.
                     let edge = if !view.query.is_empty() && view.matched.is_empty() {
                         color(1.0, 0.45, 0.45, 1.0)
@@ -522,13 +533,13 @@ impl OverviewManager {
                 None => panel.search.bar.setHidden(true),
             }
             for card in &mut panel.cards {
-                let (dim, ring) = match &self.search {
-                    Some(view) => (
-                        !view.matched.contains(&card.window_id),
-                        view.selected == Some(card.window_id),
-                    ),
-                    None => (false, card.focused),
-                };
+                let dim = self
+                    .search
+                    .as_ref()
+                    .is_some_and(|view| !view.matched.contains(&card.window_id));
+                let ring = self
+                    .selected
+                    .map_or(card.focused, |id| id == card.window_id);
                 card.content.setOpacity(if dim { 0.25 } else { 1.0 });
                 card.animated.show_ring(ring);
                 let label = self
@@ -738,7 +749,7 @@ impl OverviewManager {
         self.live_due = None;
         self.live_synced = false;
         self.live.invalidate_lookup();
-        if self.search.is_some() {
+        if self.search.is_some() || self.selected.is_some() {
             self.apply_search();
         }
         let built = started.elapsed();
@@ -1322,6 +1333,7 @@ impl OverviewManager {
         self.gates = 0;
         self.reveal_since = None;
         self.search = None;
+        self.selected = None;
         debug!(
             "overview: teardown took {:?} (hidden after {hidden:?})",
             started.elapsed()
